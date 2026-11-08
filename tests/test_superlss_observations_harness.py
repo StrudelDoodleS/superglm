@@ -232,6 +232,132 @@ def test_reference_dirichlet_joint_density_and_frequency_are_independent(harness
     )
 
 
+def _stub_runner(harness, monkeypatch, tmp_path, make_result):
+    monkeypatch.setattr(harness, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        harness,
+        "source_identity",
+        lambda *a, **k: {"path": str(tmp_path / "src"), "sha": "candidate-head"},
+    )
+    monkeypatch.setattr(
+        harness,
+        "run_process",
+        lambda *a, context, **k: {**context, **make_result(context)},
+    )
+    return tmp_path / "runner.json"
+
+
+@pytest.mark.parametrize("public_status", ["missing_stage", "failed", "completed"])
+def test_reference_only_runner_checks_nested_public_status(
+    harness, monkeypatch, tmp_path, public_status
+):
+    result = {
+        "status": "completed",
+        "observations": [],
+        "reference": {
+            "status": "matched",
+            "production": {"public_status": public_status, "converged": True},
+        },
+    }
+    output = _stub_runner(harness, monkeypatch, tmp_path, lambda context: result)
+    code = harness.main(
+        ["--case", "dirichlet-k3-intercept", "--phases", "reference", "--output", str(output)]
+    )
+    receipt = json.loads(output.read_text())
+    assert (code != 0) == (public_status != "completed")
+    assert receipt["runner_status"] == (
+        "executed" if public_status == "completed" else "attention_required"
+    )
+    assert receipt["runs"][0]["reference"]["production"]["public_status"] == public_status
+
+
+@pytest.mark.parametrize(
+    "backend", ["distributional-dense-v1", "distributional-chunked-v1", "correct"]
+)
+def test_equivalence_runner_requires_both_observed_backends(
+    harness, monkeypatch, tmp_path, backend
+):
+    def make_result(context):
+        result = record(harness, tmp_path, context["id"])
+        observed = (
+            backend
+            if backend != "correct"
+            else (
+                "distributional-chunked-v1"
+                if context["config"]["discrete"]
+                else "distributional-dense-v1"
+            )
+        )
+        result["observations"][0].update(kind="validation", backend=observed)
+        return result
+
+    output = _stub_runner(harness, monkeypatch, tmp_path, make_result)
+    code = harness.main(
+        [
+            "--case",
+            "gaussian-offset-arrays",
+            "--phases",
+            "reference",
+            "--equivalence",
+            "--output",
+            str(output),
+        ]
+    )
+    receipt = json.loads(output.read_text())
+    assert (code != 0) == (backend != "correct")
+    assert receipt["runner_status"] == (
+        "executed" if backend == "correct" else "attention_required"
+    )
+    assert all(c["numerical_match"] for c in receipt["comparisons"])
+    assert all(
+        c["backend_coverage"]["match"] == (backend == "correct") for c in receipt["comparisons"]
+    )
+    assert all(c["time_ratio"] is None for c in receipt["comparisons"])
+
+
+def _dirichlet_public_stub(prediction):
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    frame = pd.DataFrame({"x": [0.0]}, index=[17])
+    alpha = pd.DataFrame(
+        [[1.0, 2.0, 3.0]], columns=["alpha_0", "alpha_1", "alpha_2"], index=frame.index
+    )
+    model = SimpleNamespace(
+        family=SimpleNamespace(response_covariance=lambda a: np.zeros((1, 3, 3))),
+        predict_parameters=lambda *a, **k: alpha,
+        predict_link=lambda *a, **k: (np.log(alpha), alpha * 0),
+        predict=lambda *a, **k: pd.DataFrame(
+            [prediction], columns=["a", "b", "c"], index=frame.index
+        ),
+        scores=lambda *a, **k: pd.DataFrame({"log": [0.0]}, index=frame.index),
+    )
+    data = {"columns": ["a", "b", "c"], "y": np.array([[0.2, 0.3, 0.5]]), "weights": np.ones(1)}
+    return model, frame, data
+
+
+def test_dirichlet_public_prediction_must_equal_normalized_alpha(harness):
+    model, frame, data = _dirichlet_public_stub([1 / 3, 1 / 3, 1 / 3])
+    with pytest.raises(ValueError, match="Dirichlet.*mean") as caught:
+        harness.public_outputs(
+            model, frame, harness.Case("dirichlet", components=3), data, "candidate"
+        )
+    assert (
+        caught.value.checks["dirichlet_mean_delta"]
+        > caught.value.checks["dirichlet_mean_tolerance"]
+    )
+
+
+def test_dirichlet_public_normalized_alpha_mean_passes(harness):
+    model, frame, data = _dirichlet_public_stub([1 / 6, 1 / 3, 1 / 2])
+    _, checks = harness.public_outputs(
+        model, frame, harness.Case("dirichlet", components=3), data, "candidate"
+    )
+    assert checks["simplex_error"] == 0.0
+    assert checks["dirichlet_mean_delta"] == 0.0
+
+
 def test_candidate_offset_missing_stage_never_falls_back_to_fit_mapping(harness, monkeypatch):
     import superglm
 

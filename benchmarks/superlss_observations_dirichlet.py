@@ -115,6 +115,14 @@ class MissingStageError(RuntimeError):
     """A required public interface is not integrated in the selected source."""
 
 
+class PublicOutputError(ValueError):
+    """A failed public-value check whose measured deltas remain in the receipt."""
+
+    def __init__(self, message, checks):
+        super().__init__(message)
+        self.checks = checks
+
+
 def jsonable(value):
     if isinstance(value, Mapping):
         return {str(k): jsonable(v) for k, v in value.items()}
@@ -261,7 +269,15 @@ def run_process(command, output, *, timeout, env, context):
     return result
 
 
-def compare_records(candidate, control, *, kind="warm", control_kind=None, execution_check=True):
+def compare_records(
+    candidate,
+    control,
+    *,
+    kind="warm",
+    control_kind=None,
+    execution_check=True,
+    expected_backends=None,
+):
     """A mismatch retains deltas but cannot silently become an accepted time ratio."""
     import numpy as np
 
@@ -285,6 +301,7 @@ def compare_records(candidate, control, *, kind="warm", control_kind=None, execu
         time_ratio=None,
         numerical_match=False,
         backend_match=False,
+        backend_coverage=None,
         convergence_match=False,
     )
     a = next((o for o in candidate.get("observations", []) if o["kind"] == kind), None)
@@ -294,6 +311,13 @@ def compare_records(candidate, control, *, kind="warm", control_kind=None, execu
     if a is None or b is None:
         return dict(out, error="missing fit observation; failed/timed-out workers remain in runs")
     out["backend_match"] = bool(a.get("backend")) and a.get("backend") == b.get("backend")
+    if expected_backends is not None:
+        observed = (a.get("backend"), b.get("backend"))
+        out["backend_coverage"] = dict(
+            expected=list(expected_backends),
+            observed=list(observed),
+            match=observed == tuple(expected_backends),
+        )
     out["convergence_match"] = all(
         o.get("converged") is True and o.get("smoothing_converged") is not False for o in (a, b)
     )
@@ -335,6 +359,7 @@ def compare_records(candidate, control, *, kind="warm", control_kind=None, execu
         not mismatches
         and numerical_match
         and (out["backend_match"] or not execution_check)
+        and (out["backend_coverage"] is None or out["backend_coverage"]["match"])
         and out["convergence_match"]
         and out["public_match"]
         and out["conditioning_supported"]
@@ -721,6 +746,22 @@ def public_outputs(model, frame, case, data, role):
         checks["simplex_error"] = float(np.max(np.abs(output["prediction"].sum(axis=1) - 1)))
         if np.any(output["prediction"] <= 0) or checks["simplex_error"] > 1e-12:
             raise ValueError("public Dirichlet predictions violate the positive simplex")
+        alpha = output["parameters"]
+        if (
+            alpha.shape != output["prediction"].shape
+            or not np.isfinite(alpha).all()
+            or np.any(alpha <= 0)
+        ):
+            raise ValueError("public Dirichlet alpha parameters must be finite and positive")
+        scaled = alpha / alpha.max(axis=1, keepdims=True)
+        expected_mean = scaled / scaled.sum(axis=1, keepdims=True)
+        checks["dirichlet_mean_delta"] = float(np.max(np.abs(output["prediction"] - expected_mean)))
+        checks["dirichlet_mean_tolerance"] = 64 * np.finfo(np.float64).eps / 2
+        if (
+            not math.isfinite(checks["dirichlet_mean_delta"])
+            or checks["dirichlet_mean_delta"] > checks["dirichlet_mean_tolerance"]
+        ):
+            raise PublicOutputError("public Dirichlet mean disagrees with normalized alpha", checks)
         # Response covariance is distinct from coefficient/posterior covariance.
         output["response_covariance"] = model.family.response_covariance(output["parameters"])
     else:
@@ -842,6 +883,8 @@ def collect_fit(model, frame, case, data, role, artifact, *, memory=False):
             public_status="missing_stage" if isinstance(exc, MissingStageError) else "failed",
             public_error=f"{type(exc).__name__}: {exc}",
         )
+        if isinstance(exc, PublicOutputError):
+            record["public_checks"] = exc.checks
     forbidden = ("fit_dense_distributional", "fit_dense_fixed_lambda", "fit_distributional_efs")
     record["prediction_optimizer_calls"] = sum(
         values[1]
@@ -1199,7 +1242,8 @@ def small_reference(case, config, output):
         and covariance_delta <= 3e-3 * max(1, float(np.max(np.abs(ref_cov))))
     )
     return dict(
-        status="matched" if match else "unresolved",
+        status="matched" if match and fitted["public_status"] == "completed" else "unresolved",
+        mathematical_match=bool(match),
         scope="independent 64-row intercept law fit, not representative timing",
         case=asdict(small),
         identity=data["identity"],
@@ -1509,9 +1553,23 @@ def run_harness(args):
         print(f"{identifier}: {result['status']}", flush=True)
         return result
 
-    def comparison(a, b, label, *, kind="warm", control_kind=None, execution_check=True):
+    def comparison(
+        a,
+        b,
+        label,
+        *,
+        kind="warm",
+        control_kind=None,
+        execution_check=True,
+        expected_backends=None,
+    ):
         result = compare_records(
-            a, b, kind=kind, control_kind=control_kind, execution_check=execution_check
+            a,
+            b,
+            kind=kind,
+            control_kind=control_kind,
+            execution_check=execution_check,
+            expected_backends=expected_backends,
         )
         receipt["comparisons"].append(
             dict(
@@ -1602,6 +1660,7 @@ def run_harness(args):
                     else "continuous-grid approximation sensitivity",
                     kind="validation",
                     execution_check=False,
+                    expected_backends=("distributional-chunked-v1", "distributional-dense-v1"),
                 )
         if args.multiple_starts and case.fit == "smooth":
             starts = []
@@ -1638,16 +1697,23 @@ def run_harness(args):
             for o in r.get("observations", [])
         )
         or r.get("reference", {}).get("status") == "unresolved"
+        or (
+            r.get("reference", {}).get("status") == "matched"
+            and r["reference"].get("production", {}).get("public_status") != "completed"
+        )
         for r in receipt["runs"]
     )
     bad_comparisons = any(
-        not c["comparable"]
-        for c in receipt["comparisons"]
-        if c["comparison"]
-        not in (
-            "continuous-grid approximation sensitivity",
-            "smoothing start sensitivity (all endpoints retained)",
+        (c["backend_coverage"] is not None and not c["backend_coverage"]["match"])
+        or (
+            not c["comparable"]
+            and c["comparison"]
+            not in (
+                "continuous-grid approximation sensitivity",
+                "smoothing start sensitivity (all endpoints retained)",
+            )
         )
+        for c in receipt["comparisons"]
     )
     receipt["runner_status"] = "attention_required" if bad_runs or bad_comparisons else "executed"
     checkpoint()
