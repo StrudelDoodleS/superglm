@@ -18,11 +18,19 @@ from superglm.distributional.families._base import (
     link_inner_derivatives,
     natural_curvature_direction,
     readonly,
+    scalar_response_row_count,
     second_direction_arrays,
     typed_plan,
     validated_float_response,
+    validated_observation_response,
 )
 from superglm.distributional.families._predictors import TweediePredictors
+from superglm.distributional.families._response_bounds import (
+    bind_observation,
+    bounded_channels,
+    log_window_values,
+    refuse_bounded,
+)
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
     FamilyCapabilities,
@@ -37,6 +45,11 @@ from superglm.distributional.family import (
     _validated_parameter_matrix,
 )
 from superglm.distributional.kernels._common import _NumericalEvaluationError
+from superglm.distributional.kernels._tweedie_windows import (
+    TweedieWindowWorkspace,
+    _density_anchor,
+    tweedie_window_jets,
+)
 from superglm.distributional.kernels.tweedie import (
     TweedieNumericalRefusal,
     evaluate_tweedie_rows,
@@ -543,6 +556,7 @@ _CAPABILITIES = FamilyCapabilities(
     quantile=True,
     random=False,
     response_mean=True,
+    censored_response=True,
 )
 
 
@@ -551,19 +565,34 @@ class TweedieLikelihoodPlan:
     """The resolved positional weights bound to a Tweedie fit."""
 
     weights: ResolvedLikelihoodWeights
+    observation: ObservationContract = COMPLETE_OBSERVATION
 
     def __post_init__(self) -> None:
         if not isinstance(self.weights, ResolvedLikelihoodWeights):
             raise UnsupportedLikelihoodContractError(
                 "Tweedie likelihood plan requires resolved likelihood weights"
             )
+        if not isinstance(self.observation, ObservationContract) or (
+            not self.observation.is_complete
+            and (
+                self.observation.bounds is None
+                or self.observation.bounds.n_rows != len(self.weights.values)
+            )
+        ):
+            raise UnsupportedLikelihoodContractError(
+                "Tweedie likelihood plan has invalid observation rows"
+            )
 
     @property
     def plan_identifier(self) -> str:
+        if not self.observation.is_complete:
+            return f"TweedieLSS/v2:{self.weights.digest}:{self.observation.bounds.digest}"
         return f"TweedieLSS/v1:{self.weights.digest}"
 
     def take(self, indices: NDArray[np.integer]) -> TweedieLikelihoodPlan:
-        return type(self)(weights=self.weights.take(indices))
+        return type(self)(
+            weights=self.weights.take(indices), observation=self.observation.take(indices)
+        )
 
 
 def _validated_response(y: NDArray) -> NDArray[np.float64]:
@@ -574,6 +603,16 @@ def _validated_response(y: NDArray) -> NDArray[np.float64]:
 
 def _validated_plan(plan: FamilyLikelihoodPlan, *, n_observations: int) -> TweedieLikelihoodPlan:
     return typed_plan(plan, TweedieLikelihoodPlan, n_observations, family_name="TweedieLSS")
+
+
+def _observation_response(y, observation, weights):
+    bounds = getattr(observation, "bounds", None)
+    return validated_observation_response(
+        y,
+        censored=None if bounds is None else bounds.side != 0,
+        exact_validator=_validated_response,
+        input_positions=weights.input_positions,
+    )
 
 
 @dataclass(frozen=True)
@@ -677,24 +716,45 @@ class TweedieLSS(TweediePredictors):
         weights: ResolvedLikelihoodWeights,
         observation: ObservationContract,
     ) -> TweedieLikelihoodPlan:
-        response = _validated_response(y)
-        if observation != COMPLETE_OBSERVATION:
-            raise UnsupportedLikelihoodContractError(
-                "TweedieLSS supports only the complete-observation contract"
-            )
         if not isinstance(weights, ResolvedLikelihoodWeights):
             raise UnsupportedLikelihoodContractError(
                 "TweedieLSS requires resolved likelihood weights"
             )
-        if len(weights.values) != len(response):
+        if len(weights.values) != scalar_response_row_count(y):
             raise UnsupportedLikelihoodContractError(
                 "Tweedie response rows do not match resolved likelihood-weight rows"
             )
-        return TweedieLikelihoodPlan(weights=weights)
+        response = _observation_response(y, observation, weights)
+        observation = bind_observation(
+            observation,
+            response,
+            weights,
+            support_lower=0.0,
+            atom_at_lower=True,
+            family_name="TweedieLSS",
+        )
+        return TweedieLikelihoodPlan(weights=weights, observation=observation)
 
     def initialize(self, y: NDArray, plan: FamilyLikelihoodPlan) -> InitialParameterState:
-        response = _validated_response(y)
-        tweedie_plan = _validated_plan(plan, n_observations=len(response))
+        tweedie_plan = _validated_plan(plan, n_observations=scalar_response_row_count(y))
+        response = _observation_response(y, tweedie_plan.observation, tweedie_plan.weights)
+        if not tweedie_plan.observation.is_complete:
+            bounds = tweedie_plan.observation.bounds
+            response = response.copy()
+            rows = bounds.censored_rows()
+            low, high = bounds.observed_window(response, rows)
+            low = np.maximum(low, 0.0)
+            # A finite admissible representative affects ONLY initialization.
+            # Preserve atom-only rows; right zero gets a positive representative.
+            representative = np.where(
+                np.isfinite(high), low / 2 + high / 2, low + np.maximum(1.0, np.abs(low))
+            )
+            representative = np.where(high == 0, 0.0, representative)
+            response[rows] = representative
+            if not np.any(response > 0):
+                # A boundary optimum is disclosed by the ordinary fit controller.
+                # The density initializer needs a finite positive starting mean.
+                response = np.ones_like(response)
         theta = initialize_tweedie(
             response,
             tweedie_plan.weights.values,
@@ -713,14 +773,16 @@ class TweedieLSS(TweediePredictors):
         derivative_order: int = 2,
     ) -> NaturalLikelihoodEvaluation:
         order = _validated_derivative_order(derivative_order)
-        response = _validated_response(y)
+        tweedie_plan = _validated_plan(plan, n_observations=scalar_response_row_count(y))
+        response = _observation_response(y, tweedie_plan.observation, tweedie_plan.weights)
         parameters = _validated_parameter_matrix(
             theta,
             n_observations=len(response),
             parameters=self.parameters,
             family_name="TweedieLSS",
         )
-        tweedie_plan = _validated_plan(plan, n_observations=len(response))
+        if not tweedie_plan.observation.is_complete:
+            return self._evaluate_bounded(response, parameters, tweedie_plan, order)
         try:
             evaluated = evaluate_tweedie_rows(
                 response,
@@ -741,6 +803,137 @@ class TweedieLSS(TweediePredictors):
             valid=evaluated.valid,
         )
 
+    def _evaluate_bounded(self, response, parameters, plan, order):
+        bounds = plan.observation.bounds
+        n = len(response)
+        weights = plan.weights.values
+        semantics = plan.weights.provenance.contract.semantics
+        prior = weights if semantics == "prior" else np.ones(n)
+        mass = weights if semantics == "frequency" else np.ones(n)
+        value = np.zeros(n)
+        score = None if order == 0 else np.zeros((n, 3))
+        hessian = None if order < 2 else np.zeros((n, 6))
+        valid = np.ones(n, dtype=bool)
+        exact = np.flatnonzero(bounds.side == 0)
+        if len(exact):
+            try:
+                density = evaluate_tweedie_rows(
+                    response[exact],
+                    *parameters[exact].T,
+                    weights[exact],
+                    semantics,
+                    derivative_order=order,
+                )
+            except TweedieNumericalRefusal as exc:
+                raise _NumericalEvaluationError(
+                    f"Tweedie numerical evaluation refused: {exc}"
+                ) from exc
+            value[exact], valid[exact] = density.log_likelihood, density.valid
+            if order:
+                score[exact] = density.score
+            if order == 2:
+                hessian[exact] = density.hessian_packed
+        workspace = TweedieWindowWorkspace()
+
+        def window(lower, upper, rows):
+            jet = tweedie_window_jets(
+                lower, upper, parameters[rows], prior[rows], order=order, _workspace=workspace
+            )
+            return jet[0], jet[1] if order else None, jet[2] if order == 2 else None
+
+        # Identical events and a conditional zero-only law are algebraic zero.
+        override = (response == 0) & (bounds.upper == 0)
+        observed = bounds.censored_rows()
+        low, high = bounds.observed_window(response, observed)
+        override[observed] |= (
+            (np.maximum(low, 0) == np.maximum(bounds.lower[observed], 0))
+            & (high == bounds.upper[observed])
+            & ((low < 0) == (bounds.lower[observed] < 0))
+        )
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            narrow = (
+                (bounds.lower > 0)
+                & np.isfinite(bounds.upper)
+                & ((bounds.upper - bounds.lower) / bounds.lower < 0.01)
+                & ~override
+            )
+        override |= narrow
+
+        def normalized(rows, requested_order):
+            output = (np.zeros(len(rows)), np.zeros((len(rows), 3)), np.zeros((len(rows), 6)))
+            selected = np.flatnonzero(narrow[rows])
+            if len(selected):
+                original = rows[selected]
+                try:
+                    anchor, natural_anchor = _density_anchor(
+                        response[original], parameters[original], prior[original], order
+                    )
+                    denominator = tweedie_window_jets(
+                        bounds.lower[original],
+                        bounds.upper[original],
+                        parameters[original],
+                        prior[original],
+                        order=order,
+                        _workspace=workspace,
+                        _anchor=anchor,
+                    )
+                    numerator = tuple(np.zeros_like(c) for c in denominator)
+                    exact = bounds.side[original] == 0
+                    for target, density_channel, shift in zip(
+                        numerator, (value, score, hessian), natural_anchor, strict=False
+                    ):
+                        target[exact] = (
+                            density_channel[original[exact]]
+                            / (
+                                mass[original[exact]]
+                                if target.ndim == 1
+                                else mass[original[exact], None]
+                            )
+                            - shift[exact]
+                        )
+                    censored = np.flatnonzero(~exact)
+                    if len(censored):
+                        ll, hh = bounds.observed_window(response, original[censored])
+                        partial = tweedie_window_jets(
+                            ll,
+                            hh,
+                            parameters[original[censored]],
+                            prior[original[censored]],
+                            order=order,
+                            _workspace=workspace,
+                            _anchor=tuple(c[censored] for c in anchor),
+                        )
+                        for target, source in zip(numerator, partial, strict=True):
+                            target[censored] = source
+                    for target, num, den in zip(output, numerator, denominator, strict=False):
+                        target[selected] = num - den
+                except (OverflowError, FloatingPointError, ValueError):
+                    for target in output:
+                        target[selected] = np.nan
+            return output[0], output[1] if order else None, output[2] if order == 2 else None
+
+        value, score, hessian, valid = bounded_channels(
+            value,
+            score,
+            hessian,
+            valid,
+            response=response,
+            bounds=bounds,
+            multiplier=mass,
+            window=window,
+            derivative_order=order,
+            normalized_rows=override,
+            normalized=normalized,
+            carrier=np.zeros(n),
+        )
+        return NaturalLikelihoodEvaluation(
+            optimizing_log_likelihood=value,
+            parameter_independent_carrier=np.zeros(n),
+            score=score,
+            hessian_packed=hessian,
+            valid=valid,
+        )
+
     def predictor_rows(
         self, y: NDArray, plan: FamilyLikelihoodPlan, links: Sequence[Link], shared_last: bool
     ):
@@ -750,6 +943,9 @@ class TweedieLSS(TweediePredictors):
         The rows decline a power at the link's walls and the family refuses one at its
         own, so a link whose walls lie outside the family's keeps the natural route.
         """
+        tweedie_plan = _validated_plan(plan, n_observations=scalar_response_row_count(y))
+        if not tweedie_plan.observation.is_complete:
+            return None
         if (
             len(links) != 3
             or type(links[0]) is not LogLink
@@ -777,8 +973,9 @@ class TweedieLSS(TweediePredictors):
     ) -> NDArray[np.float64]:
         """Differentiate observed predictor curvature along one predictor path."""
 
+        tweedie_plan = _validated_plan(plan, n_observations=scalar_response_row_count(y))
+        refuse_bounded(tweedie_plan.observation, "TweedieLSS curvature directions")
         response = _validated_response(y)
-        tweedie_plan = _validated_plan(plan, n_observations=len(response))
 
         def hessian_direction(theta: NDArray, natural: NDArray) -> NDArray[np.float64]:
             try:
@@ -814,8 +1011,9 @@ class TweedieLSS(TweediePredictors):
         round trip cancels. A refused row sends the caller to differences.
         """
 
+        tweedie_plan = _validated_plan(plan, n_observations=scalar_response_row_count(y))
+        refuse_bounded(tweedie_plan.observation, "TweedieLSS second curvature directions")
         response = _validated_response(y)
-        tweedie_plan = _validated_plan(plan, n_observations=len(response))
         single = np.ndim(direction_a) == 2
         predictors, first, second = second_direction_arrays(
             response, eta, direction_a, direction_b, 3
@@ -872,6 +1070,34 @@ class TweedieLSS(TweediePredictors):
         """``P(Y <= y)`` per row at unit prior weight."""
         values = self._distribution_parameters(theta)
         return readonly(self._distribution_function(y, values, np.ones(len(values))))
+
+    def log_window_probability(self, lower, upper, theta, weights=None):
+        """log P(lower < Y <= upper), including the atom iff lower < 0 <= upper.
+
+        Optional weights define the reproductive prior law, never replication.
+        Numerical/work refusal is explicit; empty events return -inf.
+        """
+        values = self._distribution_parameters(theta)
+        prior = (
+            np.ones(len(values)) if weights is None else _prior_weight_vector(weights, len(values))
+        )
+        workspace = TweedieWindowWorkspace()
+
+        def window(lo, hi, rows):
+            jet = tweedie_window_jets(
+                lo, hi, values[rows], prior[rows], order=0, _workspace=workspace
+            )
+            if np.any(~np.isfinite(jet[0])):
+                raise ValueError(
+                    f"Tweedie window numerical evaluation refused: {workspace.refusal_reason or workspace.gamma.refusal_reason or 'range/convergence'}"
+                )
+            return jet[0], None, None
+
+        return readonly(
+            log_window_values(
+                lower, upper, len(values), window, support_lower=0.0, atom_at_lower=True
+            )
+        )
 
     def quantile(self, p: NDArray, theta: NDArray) -> NDArray[np.float64]:
         """The ``p``-quantile per row at unit prior weight, ``p`` inside ``(0, 1)``."""
