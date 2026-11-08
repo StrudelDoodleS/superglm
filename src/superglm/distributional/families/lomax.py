@@ -40,6 +40,7 @@ _SPEC = DeclaredScalarSpec(
     default_prediction_name="conditional_mean",
     carrier_rounding_parameters=(0, 0.0),  # identically zero, no transcendental error
     supported_operations=(
+        "censored_recession",
         "log_window_probability",
         "predictor_curvature_directional_derivative",
         "predictor_curvature_second_directional_derivative",
@@ -76,6 +77,19 @@ class LomaxLSS(
     def initialize(self, y, plan):
         response = self.validate_likelihood_plan(y, plan)
         return initialize_parameters(response, plan)
+
+    def censored_recession(self, bounds):
+        """One-sided censored levels escape in scale, including after truncation.
+
+        At fixed shape a, d² log f/(dy ds) = (a+1)/(s+y)² > 0.
+        Thus the conditional law on any fixed truncation interval has a
+        strict monotone likelihood ratio in s: right-tail probabilities rise
+        and left-tail probabilities fall. Their suprema occur only at a scale
+        endpoint. The existing scan owns link-endpoint and warn/error policy.
+        Shape flags are not asserted: their direction is opposite to the
+        built-in scan's convention for partially open links.
+        """
+        return np.column_stack((bounds.side != 0, np.zeros(bounds.n_rows, dtype=bool)))
 
 
 _register_likelihood_reuse_contract(

@@ -50,6 +50,21 @@ def objective(name, y, mass, design, offset, penalty):
         )
         return value, gradient
 
+    def score_error(beta):
+        eta = np.column_stack((design @ beta[:split], design @ beta[split:])) + offset
+        _, score = independent_rows(name, y, eta)
+        # Outcome rounding model for these ordinary, conditioned fixtures:
+        # O(n) dot-product accumulation and O(10) elementary row operations.
+        # Include unit terms so cancellation of a row score is not its own
+        # zero error estimate. No solver result enters this independent bound.
+        magnitude = np.concatenate(
+            [abs(design).T @ (mass * (1 + abs(score[:, j]))) for j in (0, 1)]
+        ) + abs(penalty) @ abs(beta)
+        u = 2.0**-53
+        gamma = (len(y) + len(beta) + 32) * u / (1 - (len(y) + len(beta) + 32) * u)
+        return 64 * gamma * magnitude
+
+    evaluate.score_error = score_error
     return evaluate
 
 
@@ -83,24 +98,76 @@ def independent_covariance(evaluate, beta, actual):
     return expected, bound
 
 
-def assert_same_optimum(evaluate, candidate, reference):
-    # Locally strongly convex cases: parameter error is controlled by score
-    # residual / smallest curvature. A central Jacobian of the independent
-    # analytic gradient diagnoses conditioning, rather than fixing a blanket
-    # coefficient tolerance. Objective comparisons use that same evaluator.
-    h = independent_curvature(evaluate, reference)
-    eigen = np.linalg.eigvalsh((h + h.T) / 2)
-    assert eigen[0] > eigen[-1] * 1e-5
-    vc, gc = evaluate(candidate)
-    vr, gr = evaluate(reference)
-    bound = 4 * (np.linalg.norm(gc) + np.linalg.norm(gr)) / eigen[0] + 1024 * np.finfo(
-        float
-    ).eps * (1 + np.linalg.norm(reference))
+def assert_same_optimum(evaluate, candidate, reference, *, tolerance=1e-10):
+    """Stationarity first, then forward comparisons on conditioned fixtures.
+
+    The requested fit tolerance allows a relative score or squared Newton
+    decrement <= tolerance*(1+|objective|). Both endpoints must independently
+    meet that condition; a large residual cannot enlarge its acceptance limit.
+    This is a local optimum comparison, not a global uniqueness claim, and
+    must not be used for rank-deficient or weakly identified coefficient tests.
+    """
+    endpoints = []
+    for beta in (candidate, reference):
+        value, gradient = evaluate(beta)
+        h = independent_curvature(evaluate, beta)
+        h = (h + h.T) / 2
+        eigen = np.linalg.eigvalsh(h)
+        # Central differences incur O(u^(2/3)) relative curvature error.
+        error_h = 128 * len(beta) * np.finfo(float).eps ** (2 / 3) * np.linalg.norm(h, 2)
+        lower = eigen[0] - error_h
+        assert lower > eigen[-1] * 1e-5, "fixture is not locally strongly convex"
+        error_g = evaluate.score_error(beta)
+        step = np.linalg.solve(h, gradient)
+        # ||H^-1/2 e|| <= ||e||/sqrt(lambda_min); the curvature
+        # perturbation inflates the squared norm by 1/(1-||E||/lambda_min).
+        decrement = max(0.0, float(gradient @ step))
+        decrement_upper = (np.sqrt(decrement) + np.linalg.norm(error_g) / np.sqrt(lower)) ** 2 / (
+            1 - error_h / eigen[0]
+        )
+        limit = tolerance * (1 + abs(value))
+        score_small = np.linalg.norm(gradient, np.inf) <= limit + np.linalg.norm(error_g, np.inf)
+        assert score_small or decrement_upper <= limit, (
+            f"nonstationary endpoint: score={np.linalg.norm(gradient):.6g}, "
+            f"decrement={decrement_upper:.6g}, allowed={limit:.6g}"
+        )
+        endpoints.append((value, gradient, error_g, lower, eigen[-1] + error_h))
+    (vc, gc, ec, lc, uc), (vr, gr, er, lr, ur) = endpoints
+    residual = np.linalg.norm(gc) + np.linalg.norm(gr) + np.linalg.norm(ec) + np.linalg.norm(er)
+    # These endpoints must lie in the same local strongly convex region.
+    # The factor four allows its curvature variation around the endpoints.
+    bound = 4 * residual / min(lc, lr) + 1024 * np.finfo(float).eps * (
+        1 + np.linalg.norm(reference)
+    )
     assert np.linalg.norm(candidate - reference) <= bound
-    distance = np.linalg.norm(candidate - reference)
-    value_bound = (np.linalg.norm(gc) + np.linalg.norm(gr)) * distance + eigen[-1] * distance**2
+    value_bound = residual * bound + max(uc, ur) * bound**2
     value_bound += 2048 * np.finfo(float).eps * (1 + abs(vc) + abs(vr))
     assert abs(vc - vr) <= value_bound
+
+
+@pytest.mark.parametrize("cls,name", [(LomaxLSS, "lomax"), (LogLogisticLSS, "log_logistic")])
+@pytest.mark.parametrize("mutation", ["unchanged_start", "displaced", "bad_reference"])
+def test_optimum_oracle_rejects_nonstationary_endpoints(cls, name, mutation):
+    family = cls()
+    rng = np.random.default_rng(6201)
+    y = family.quantile(rng.uniform(0.002, 0.998, 400), np.tile([2.0, 2.5], (400, 1)))
+    evaluate = objective(
+        name, y, np.ones(len(y)), np.ones((len(y), 1)), np.zeros((len(y), 2)), np.zeros((2, 2))
+    )
+    start = np.log([2.0, 2.0])
+    reference = minimize(
+        lambda b: evaluate(b)[0],
+        start,
+        jac=lambda b: evaluate(b)[1],
+        method="BFGS",
+        options={"gtol": 1e-10},
+    ).x
+    candidate = start if mutation == "unchanged_start" else reference + np.array([0.5, -0.5])
+    if mutation == "bad_reference":
+        # Even comparing an endpoint with itself must not establish an optimum.
+        reference = candidate
+    with pytest.raises(AssertionError):
+        assert_same_optimum(evaluate, candidate, reference)
 
 
 @pytest.mark.parametrize(

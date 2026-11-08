@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import ClassVar
 
+import numpy as np
+
 from superglm.distributional.families._declared import (
     DeclaredDirectionsMixin,
     DeclaredDistributionMixin,
@@ -37,6 +39,7 @@ _SPEC = DeclaredScalarSpec(
     default_prediction_name="conditional_mean",
     carrier_rounding_parameters=(LOG_ERROR_UNITS, 0.0),  # -mass*log(y), no constant term
     supported_operations=(
+        "censored_recession",
         "cdf",
         "quantile",
         "default_prediction",
@@ -72,6 +75,17 @@ class LogLogisticLSS(
 
     def initialize(self, y, plan):
         return initialize_parameters(self.validate_likelihood_plan(y, plan), plan)
+
+    def censored_recession(self, bounds):
+        """Censored probabilities are strictly monotone in the scale.
+
+        With F(y)=expit(a log(y/s)), d² log f/(dy ds) =
+        2 a² F(y)(1-F(y))/(s y) > 0. This monotone likelihood ratio
+        survives conditioning on any fixed truncation interval, so a level
+        censored on one side has no finite scale optimum. Shape's direction
+        depends on y/s, so it is not declared. The scan checks the actual link.
+        """
+        return np.column_stack((bounds.side != 0, np.zeros(bounds.n_rows, dtype=bool)))
 
 
 _register_likelihood_reuse_contract(

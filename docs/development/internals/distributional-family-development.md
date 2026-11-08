@@ -59,16 +59,39 @@ not a fitted shape wall. Range-invalid evaluations remain distinguishable from
 mathematically divergent moments. Ordinary positive-response jets use generated
 Numba kernels; no unimplemented array fallback is advertised.
 
-Window probabilities reuse log-tail differences and the existing narrow-window
-quadrature. Lomax additionally integrates small windows in the original response
-coordinate to retain its finite zero limit and avoid the known extreme fourth
-log-CDF instability. These paths have independent numerical tests. Higher
-directional methods decline quadrature windows with
-`UnsupportedLikelihoodContractError`, leaving the existing finite-difference
-route and its evidence authoritative; they do not supply a zero-error analytic
-certificate for quadrature. Ordinary closed-form directions compose through
-the existing link helpers. Convergence and derivative authority disclosures are
-unchanged.
+Lomax windows reuse log-tail differences and narrow-window quadrature. Its
+response-coordinate integration retains the finite zero limit and avoids the
+known extreme fourth log-CDF instability. Its higher directional methods decline
+quadrature windows with `UnsupportedLikelihoodContractError`; a real-arithmetic
+density remainder is not a certificate for rounded nodes or mixed derivatives.
+Independent adjacent-response tests check its core channels at rounding scale.
+
+Log-logistic finite positive windows use the exact identity
+`log P = -softplus(-z_hi) - softplus(z_lo) + log(-expm1(-d))`, where
+`z_i = shape*log(endpoint_i/scale)` and `d = shape*log(hi/lo)` are formed
+from centered log ratios. The first four derivatives are evaluated from
+endpoint logistic derivatives, with a centered tanh expression for the scale
+score. This avoids both rounded tail differences and unrepresentable interior
+quadrature nodes. All mixed natural and log-coordinate channels have independent
+high-precision checks.
+
+There is a separate small-shape restriction for finite positive log-logistic
+windows. Set `r = shape*max(1, abs(log(lo/scale)), abs(log(hi/scale)))`.
+Core window derivatives are declined when `r < 2^-8`; analytic third/fourth
+directions require `r >= 1/8`. Density and window pure shape derivatives share
+terms of order `shape^-j`; subtracting them for a truncated likelihood can lose
+the conditional remainder, with rounding amplification of order `u/r^j`.
+The restriction prevents finite but wrong normalized derivatives, while order-zero
+probabilities and likelihoods remain available. It does not clip the shape or
+require finite moments. Ordinary closed-form directions compose through the
+existing link helpers; unavailable higher directions retain the existing
+finite-difference route and its evidence.
+
+Both named families declare scale recession through `CensoredSeparationFamily`.
+Their strict monotone likelihood ratios in scale survive fixed truncation, so
+one-sided censored intercepts and categorical levels use the existing
+`separation="warn"`, `"error"`, or `"ignore"` policy. The scan owns actual-link
+admission. No general shape-recession or arbitrary custom-link claim is made.
 
 The laws follow the [SciPy Lomax definition](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.lomax.html)
 and [Fisk definition](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.fisk.html),
