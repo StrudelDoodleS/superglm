@@ -1,0 +1,1619 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-08",
+  "tested_source_sha": "6e5639a115e0def2f8b1d213fed3b96eed8eb738",
+  "baseline_sha": "6643ed9c94497eba0efb8869b945a17c5d380caf",
+  "branch": "t3/fix-superlss-review",
+  "scope": "Local implementation and verification complete; native platform and remaining version matrix acceptance open.",
+  "artifact_commit_policy": "These evidence and archived planning files are committed after the tested SHA. Implementation files have not changed.",
+  "environment": {
+    "python": "3.13.14 (main, Jul 23 2026, 14:44:45) [Clang 22.1.3 ]",
+    "platform": "Linux-6.12.107+deb13-amd64-x86_64-with-glibc2.41",
+    "numpy": "2.5.2",
+    "scipy": "1.18.0",
+    "threads": 1
+  },
+  "numba": "0.68.0",
+  "benchmark_driver_sha256": "e46dfaca484bea9abd784f94cbbd97a9e6fdf4402b6a5e89360abc73a597a5bf",
+  "tests": {
+    "main": {
+      "passed": 22820,
+      "skipped": 114,
+      "xfailed": 43,
+      "failed": 0
+    },
+    "thread_sensitive": {
+      "passed": 56,
+      "skipped": 3,
+      "xpassed_non_strict": 1,
+      "failed": 0
+    },
+    "total_passed": 22876,
+    "real_data_modules_passed": {
+      "test_realdata_parity": 38,
+      "test_screening_guide_numbers": 7,
+      "test_mixed_interaction_screening": 44,
+      "test_fremtpl2_data": 4,
+      "test_distributional_fremtpl_convergence": 7
+    },
+    "real_data_total": 100,
+    "real_data_skipped": 0,
+    "full_runner_environment": {
+      "SUPERGLM_REQUIRE_DATA": "1"
+    },
+    "cold_cache_warmup_census": "included in full runner",
+    "scipy_floor_slice": {
+      "numpy": "2.3.5",
+      "scipy": "1.15.3",
+      "python": "3.13.14",
+      "isolated": true,
+      "passed": 126,
+      "deselected": 3,
+      "scope": "Focused family/kernel/observation tests; smooth_reml and benchmark cases excluded."
+    }
+  },
+  "raw_data_pins": {
+    "dataset_41214.pq": "aead80a9ac68baf2c78fc1beaa287441d88d06cc11be60a1f226784d164c6dd7",
+    "dataset_41215.pq": "c721d570c42eeaf4a70cc12f4c1e04095a6046f6cdbc01fad919274879783e60"
+  },
+  "validation_stages": [
+    {
+      "name": "fetch-data",
+      "command": [
+        "uv",
+        "run",
+        "python",
+        "scripts/fetch_fremtpl.py",
+        "--raw-dir",
+        "/home/max/projects/superglm/.fremtpl-raw",
+        "--dest",
+        "data/"
+      ],
+      "status": "passed",
+      "log": "/home/max/.t3/worktrees/superglm/t3-3a3ab26c/.superpowers/sdd/2026-11-08-superlss-family-framework/fetch-data.log",
+      "returncode": 0,
+      "seconds": 0.742550351889804
+    },
+    {
+      "name": "scipy-floor",
+      "command": [
+        "uv",
+        "run",
+        "--isolated",
+        "--extra",
+        "dev",
+        "--with",
+        "numpy==2.3.5",
+        "--with",
+        "scipy==1.15.3",
+        "python",
+        "-m",
+        "pytest",
+        "tests/test_declared_family_separation.py",
+        "tests/test_log_logistic_window_stability.py",
+        "tests/test_lomax_lss_kernel.py",
+        "tests/test_log_logistic_lss_kernel.py",
+        "tests/test_lomax_lss_family.py",
+        "tests/test_log_logistic_lss_family.py",
+        "tests/test_declared_scalar_adapter.py",
+        "tests/test_declared_scalar_vertical_slice.py",
+        "-q",
+        "-k",
+        "not smooth_reml and not benchmark"
+      ],
+      "status": "passed",
+      "log": "/home/max/.t3/worktrees/superglm/t3-3a3ab26c/.superpowers/sdd/2026-11-08-superlss-family-framework/scipy-floor.log",
+      "returncode": 0,
+      "seconds": 63.0393464199733
+    },
+    {
+      "name": "full-suite",
+      "command": [
+        "uv",
+        "run",
+        "python",
+        "scripts/run_test_suite.py",
+        "-n",
+        "4",
+        "--junitxml=/home/max/.t3/worktrees/superglm/t3-3a3ab26c/.superpowers/sdd/2026-11-08-superlss-family-framework/full-suite.xml"
+      ],
+      "status": "passed",
+      "log": "/home/max/.t3/worktrees/superglm/t3-3a3ab26c/.superpowers/sdd/2026-11-08-superlss-family-framework/full-suite.log",
+      "returncode": 0,
+      "seconds": 877.6766036909539
+    },
+    {
+      "name": "complete-fit-dense",
+      "command": [
+        "uv",
+        "run",
+        "python",
+        "benchmarks/declared_scalar_families.py",
+        "--baseline-source",
+        "/home/max/projects/superglm/.worktrees/lss-families-baseline-6643ed9c9/src",
+        "--output",
+        "/home/max/.t3/worktrees/superglm/t3-3a3ab26c/.superpowers/sdd/2026-11-08-superlss-family-framework/complete-fit-dense.json"
+      ],
+      "status": "passed",
+      "log": "/home/max/.t3/worktrees/superglm/t3-3a3ab26c/.superpowers/sdd/2026-11-08-superlss-family-framework/complete-fit-dense.log",
+      "returncode": 0,
+      "seconds": 175.32770404196344
+    },
+    {
+      "name": "complete-fit-discrete-compact",
+      "command": [
+        "uv",
+        "run",
+        "python",
+        "benchmarks/declared_scalar_families.py",
+        "--case",
+        "lomax-smooth-20k",
+        "--case",
+        "log-logistic-smooth-20k",
+        "--case",
+        "lomax-smooth-100k",
+        "--case",
+        "log-logistic-smooth-100k",
+        "--case",
+        "lomax-bounded",
+        "--case",
+        "log-logistic-bounded",
+        "--discrete",
+        "--compact",
+        "--output",
+        "/home/max/.t3/worktrees/superglm/t3-3a3ab26c/.superpowers/sdd/2026-11-08-superlss-family-framework/complete-fit-discrete-compact.json"
+      ],
+      "status": "passed",
+      "log": "/home/max/.t3/worktrees/superglm/t3-3a3ab26c/.superpowers/sdd/2026-11-08-superlss-family-framework/complete-fit-discrete-compact.log",
+      "returncode": 0,
+      "seconds": 109.6722547810059
+    },
+    {
+      "name": "ruff-check",
+      "command": [
+        "uv",
+        "run",
+        "ruff",
+        "check",
+        "src/",
+        "tests/",
+        "benchmarks/declared_scalar_families.py",
+        "tools/generate_severity_families.py"
+      ],
+      "status": "passed",
+      "log": "/home/max/.t3/worktrees/superglm/t3-3a3ab26c/.superpowers/sdd/2026-11-08-superlss-family-framework/ruff-check.log",
+      "returncode": 0,
+      "seconds": 0.08020710595883429
+    },
+    {
+      "name": "ruff-format",
+      "command": [
+        "uv",
+        "run",
+        "ruff",
+        "format",
+        "--check",
+        "src/",
+        "tests/",
+        "benchmarks/declared_scalar_families.py",
+        "tools/generate_severity_families.py"
+      ],
+      "status": "passed",
+      "log": "/home/max/.t3/worktrees/superglm/t3-3a3ab26c/.superpowers/sdd/2026-11-08-superlss-family-framework/ruff-format.log",
+      "returncode": 0,
+      "seconds": 0.07533956505358219
+    },
+    {
+      "name": "generator-check",
+      "command": [
+        "uv",
+        "run",
+        "python",
+        "tools/generate_severity_families.py",
+        "--check"
+      ],
+      "status": "passed",
+      "log": "/home/max/.t3/worktrees/superglm/t3-3a3ab26c/.superpowers/sdd/2026-11-08-superlss-family-framework/generator-check.log",
+      "returncode": 0,
+      "seconds": 3.8550862660631537
+    },
+    {
+      "name": "lock-check",
+      "command": [
+        "uv",
+        "lock",
+        "--check"
+      ],
+      "status": "passed",
+      "log": "/home/max/.t3/worktrees/superglm/t3-3a3ab26c/.superpowers/sdd/2026-11-08-superlss-family-framework/lock-check.log",
+      "returncode": 0,
+      "seconds": 0.03672510595060885
+    },
+    {
+      "name": "pip-check",
+      "command": [
+        "uv",
+        "pip",
+        "check"
+      ],
+      "status": "passed",
+      "log": "/home/max/.t3/worktrees/superglm/t3-3a3ab26c/.superpowers/sdd/2026-11-08-superlss-family-framework/pip-check.log",
+      "returncode": 0,
+      "seconds": 0.04329235409386456
+    },
+    {
+      "name": "run-test",
+      "command": [
+        "uv",
+        "run",
+        "python",
+        "run_test.py"
+      ],
+      "status": "passed",
+      "log": "/home/max/.t3/worktrees/superglm/t3-3a3ab26c/.superpowers/sdd/2026-11-08-superlss-family-framework/run-test.log",
+      "returncode": 0,
+      "seconds": 1.7466700819786638
+    }
+  ],
+  "benchmarks": {
+    "dense": {
+      "case_columns": [
+        "case",
+        "variant",
+        "baseline_control",
+        "rows",
+        "actual_backend",
+        "fit_status",
+        "warm_fit_seconds",
+        "peak_rss_bytes",
+        "retained_array_bytes",
+        "retained_cache_array_bytes",
+        "objective",
+        "log_likelihood"
+      ],
+      "cases": [
+        [
+          "lomax-intercept",
+          "shared",
+          false,
+          2000,
+          "distributional-dense-v1",
+          "converged",
+          [
+            0.026282951002940536,
+            0.022379226982593536,
+            0.02380407601594925
+          ],
+          295112704,
+          336354,
+          0,
+          -2353.367998903809,
+          -2353.367998903809
+        ],
+        [
+          "lomax-intercept",
+          "direct",
+          false,
+          2000,
+          "distributional-dense-v1",
+          "converged",
+          [
+            0.02270952402614057,
+            0.021838070824742317,
+            0.022087302058935165
+          ],
+          295149568,
+          336354,
+          0,
+          -2353.367998903809,
+          -2353.367998903809
+        ],
+        [
+          "log-logistic-intercept",
+          "shared",
+          false,
+          2000,
+          "distributional-dense-v1",
+          "converged",
+          [
+            0.02418494992889464,
+            0.024875120958313346,
+            0.023129650857299566
+          ],
+          295014400,
+          336354,
+          0,
+          -3555.1365209396663,
+          -3555.1365209396663
+        ],
+        [
+          "log-logistic-intercept",
+          "direct",
+          false,
+          2000,
+          "distributional-dense-v1",
+          "converged",
+          [
+            0.02315083402208984,
+            0.025241181952878833,
+            0.023011656012386084
+          ],
+          295354368,
+          336354,
+          0,
+          -3555.1365209396663,
+          -3555.1365209396663
+        ],
+        [
+          "lomax-smooth-20k",
+          "shared",
+          false,
+          20000,
+          "distributional-dense-v1",
+          "smoothing_certified",
+          [
+            0.312937794951722,
+            0.3562777629122138,
+            0.30569435213692486
+          ],
+          325758976,
+          5371636,
+          0,
+          -17969.23174041971,
+          -17967.736599010543
+        ],
+        [
+          "lomax-smooth-20k",
+          "direct",
+          false,
+          20000,
+          "distributional-dense-v1",
+          "smoothing_certified",
+          [
+            0.33199289604090154,
+            0.3433254330884665,
+            0.3235506070777774
+          ],
+          325283840,
+          5371636,
+          0,
+          -17969.23174041971,
+          -17967.736599010543
+        ],
+        [
+          "log-logistic-smooth-20k",
+          "shared",
+          false,
+          20000,
+          "distributional-dense-v1",
+          "smoothing_certified",
+          [
+            0.2607873040251434,
+            0.28420126903802156,
+            0.2783293288666755
+          ],
+          321454080,
+          5365799,
+          0,
+          -29783.066106072976,
+          -29780.91818972911
+        ],
+        [
+          "log-logistic-smooth-20k",
+          "direct",
+          false,
+          20000,
+          "distributional-dense-v1",
+          "smoothing_certified",
+          [
+            0.2523034301120788,
+            0.2562931270804256,
+            0.2676394758746028
+          ],
+          321859584,
+          5365799,
+          0,
+          -29783.066106072976,
+          -29780.91818972911
+        ],
+        [
+          "lomax-smooth-100k",
+          "shared",
+          false,
+          100000,
+          "distributional-dense-v1",
+          "smoothing_certified",
+          [
+            1.2481509249191731,
+            1.2716512440238148,
+            1.3730330739635974
+          ],
+          391028736,
+          26491636,
+          0,
+          -89007.37420982444,
+          -89005.05207078328
+        ],
+        [
+          "lomax-smooth-100k",
+          "direct",
+          false,
+          100000,
+          "distributional-dense-v1",
+          "smoothing_certified",
+          [
+            1.3365888779517263,
+            1.3422468428034335,
+            1.564731644000858
+          ],
+          392839168,
+          26491636,
+          0,
+          -89007.37420982444,
+          -89005.05207078328
+        ],
+        [
+          "log-logistic-smooth-100k",
+          "shared",
+          false,
+          100000,
+          "distributional-dense-v1",
+          "smoothing_certified",
+          [
+            2.0005737689789385,
+            1.8909700459335,
+            1.7324985021259636
+          ],
+          390172672,
+          26538332,
+          0,
+          -148738.98484586342,
+          -148736.26623014265
+        ],
+        [
+          "log-logistic-smooth-100k",
+          "direct",
+          false,
+          100000,
+          "distributional-dense-v1",
+          "smoothing_certified",
+          [
+            1.740765105932951,
+            1.5905102889519185,
+            1.6549867200665176
+          ],
+          391872512,
+          26538332,
+          0,
+          -148738.98484586342,
+          -148736.26623014265
+        ],
+        [
+          "lomax-constant-tail",
+          "shared",
+          false,
+          20000,
+          "distributional-dense-v1",
+          "smoothing_certified",
+          [
+            0.1400874829851091,
+            0.16008697915822268,
+            0.13839356414973736
+          ],
+          317702144,
+          5305972,
+          0,
+          -17977.601656292394,
+          -17975.98171250362
+        ],
+        [
+          "lomax-constant-tail",
+          "direct",
+          false,
+          20000,
+          "distributional-dense-v1",
+          "smoothing_certified",
+          [
+            0.12625159206800163,
+            0.12629188504070044,
+            0.11448584799654782
+          ],
+          317988864,
+          5305972,
+          0,
+          -17977.601656292394,
+          -17975.98171250362
+        ],
+        [
+          "log-logistic-constant-tail",
+          "shared",
+          false,
+          20000,
+          "distributional-dense-v1",
+          "smoothing_certified",
+          [
+            0.15887857996858656,
+            0.1557403749320656,
+            0.1549763900693506
+          ],
+          320159744,
+          5311750,
+          0,
+          -29887.139566428224,
+          -29884.991941728993
+        ],
+        [
+          "log-logistic-constant-tail",
+          "direct",
+          false,
+          20000,
+          "distributional-dense-v1",
+          "smoothing_certified",
+          [
+            0.15710625890642405,
+            0.1682121509220451,
+            0.1770673361606896
+          ],
+          319500288,
+          5311750,
+          0,
+          -29887.139566428224,
+          -29884.991941728993
+        ],
+        [
+          "lomax-bounded",
+          "shared",
+          false,
+          20000,
+          "distributional-dense-v1",
+          "smoothing_certified",
+          [
+            1.1604879330843687,
+            1.1893476208206266,
+            1.198207993991673
+          ],
+          348467200,
+          5863310,
+          0,
+          -16518.73465096023,
+          -16517.17617175053
+        ],
+        [
+          "lomax-bounded",
+          "direct",
+          false,
+          20000,
+          "distributional-dense-v1",
+          "smoothing_certified",
+          [
+            1.1985288551077247,
+            1.2053670259192586,
+            1.2153887450695038
+          ],
+          347230208,
+          5863310,
+          0,
+          -16518.73465096023,
+          -16517.17617175053
+        ],
+        [
+          "log-logistic-bounded",
+          "shared",
+          false,
+          20000,
+          "distributional-dense-v1",
+          "smoothing_certified",
+          [
+            0.8187376118730754,
+            0.8061132549773902,
+            0.7850162331014872
+          ],
+          339005440,
+          5863310,
+          0,
+          -23681.889608468933,
+          -23679.644691499794
+        ],
+        [
+          "log-logistic-bounded",
+          "direct",
+          false,
+          20000,
+          "distributional-dense-v1",
+          "smoothing_certified",
+          [
+            0.8102372721768916,
+            0.8761764110531658,
+            0.8825157741084695
+          ],
+          339181568,
+          5863310,
+          0,
+          -23681.889608468933,
+          -23679.644691499794
+        ],
+        [
+          "lomax-infinite-mean",
+          "shared",
+          false,
+          2000,
+          "distributional-dense-v1",
+          "converged",
+          [
+            0.04350856109522283,
+            0.04301456897519529,
+            0.026602089870721102
+          ],
+          295182336,
+          336354,
+          0,
+          -6627.744238225558,
+          -6627.744238225558
+        ],
+        [
+          "lomax-infinite-mean",
+          "direct",
+          false,
+          2000,
+          "distributional-dense-v1",
+          "converged",
+          [
+            0.02605037810280919,
+            0.02645533997565508,
+            0.02702978695742786
+          ],
+          295251968,
+          336354,
+          0,
+          -6627.744238225558,
+          -6627.744238225558
+        ],
+        [
+          "lomax-infinite-variance",
+          "shared",
+          false,
+          2000,
+          "distributional-dense-v1",
+          "converged",
+          [
+            0.024478629929944873,
+            0.03219045512378216,
+            0.031210002955049276
+          ],
+          295305216,
+          336354,
+          0,
+          -3908.278966065478,
+          -3908.278966065478
+        ],
+        [
+          "lomax-infinite-variance",
+          "direct",
+          false,
+          2000,
+          "distributional-dense-v1",
+          "converged",
+          [
+            0.02579875406809151,
+            0.021465338999405503,
+            0.02073230198584497
+          ],
+          295223296,
+          336354,
+          0,
+          -3908.278966065478,
+          -3908.278966065478
+        ],
+        [
+          "log-logistic-infinite-mean",
+          "shared",
+          false,
+          2000,
+          "distributional-dense-v1",
+          "converged",
+          [
+            0.030342987971380353,
+            0.026933027897030115,
+            0.024899477837607265
+          ],
+          295325696,
+          336354,
+          0,
+          -5960.233121964517,
+          -5960.233121964517
+        ],
+        [
+          "log-logistic-infinite-mean",
+          "direct",
+          false,
+          2000,
+          "distributional-dense-v1",
+          "converged",
+          [
+            0.026689906837418675,
+            0.02660487382672727,
+            0.024023698875680566
+          ],
+          295055360,
+          336354,
+          0,
+          -5960.233121964517,
+          -5960.233121964517
+        ],
+        [
+          "log-logistic-infinite-variance",
+          "shared",
+          false,
+          2000,
+          "distributional-dense-v1",
+          "converged",
+          [
+            0.026042365934699774,
+            0.025029540993273258,
+            0.024500643834471703
+          ],
+          294989824,
+          336354,
+          0,
+          -4575.973766292498,
+          -4575.973766292498
+        ],
+        [
+          "log-logistic-infinite-variance",
+          "direct",
+          false,
+          2000,
+          "distributional-dense-v1",
+          "converged",
+          [
+            0.02371413493528962,
+            0.027024921029806137,
+            0.02494456898421049
+          ],
+          295215104,
+          336354,
+          0,
+          -4575.973766292498,
+          -4575.973766292498
+        ],
+        [
+          "lomax-misspecified",
+          "shared",
+          false,
+          2000,
+          "distributional-dense-v1",
+          "smoothing_certified",
+          [
+            0.1266879120375961,
+            0.11974161514081061,
+            0.13654277985915542
+          ],
+          302796800,
+          591529,
+          0,
+          -3868.3400448497323,
+          -3867.551632190737
+        ],
+        [
+          "lomax-misspecified",
+          "direct",
+          false,
+          2000,
+          "distributional-dense-v1",
+          "smoothing_certified",
+          [
+            0.11854611593298614,
+            0.1364161039236933,
+            0.14811594411730766
+          ],
+          303095808,
+          591529,
+          0,
+          -3868.3400448497323,
+          -3867.551632190737
+        ],
+        [
+          "log-logistic-misspecified",
+          "shared",
+          false,
+          2000,
+          "distributional-dense-v1",
+          "smoothing_certified",
+          [
+            0.08427718793973327,
+            0.08013451215811074,
+            0.09518796694464982
+          ],
+          302915584,
+          568417,
+          0,
+          -3425.8385990860243,
+          -3424.3007092844614
+        ],
+        [
+          "log-logistic-misspecified",
+          "direct",
+          false,
+          2000,
+          "distributional-dense-v1",
+          "smoothing_certified",
+          [
+            0.08341117482632399,
+            0.08036955003626645,
+            0.07398538780398667
+          ],
+          303083520,
+          568417,
+          0,
+          -3425.8385990860243,
+          -3424.3007092844614
+        ],
+        [
+          "gpd-overlap",
+          "shared",
+          false,
+          2000,
+          "distributional-dense-v1",
+          "converged",
+          [
+            0.0188117700163275,
+            0.017753635998815298,
+            0.01637769304215908
+          ],
+          295055360,
+          336354,
+          0,
+          -2353.367998903819,
+          -2353.367998903819
+        ],
+        [
+          "gamma-control",
+          "shared",
+          false,
+          2000,
+          "distributional-dense-v1",
+          "smoothing_certified",
+          [
+            0.09452525014057755,
+            0.08966216910630465,
+            0.09100079000927508
+          ],
+          302940160,
+          568417,
+          0,
+          -2086.4311502094192,
+          -2084.9727757478927
+        ],
+        [
+          "log-normal-control",
+          "shared",
+          false,
+          2000,
+          "distributional-dense-v1",
+          "smoothing_certified",
+          [
+            0.0638980979565531,
+            0.061531489016488194,
+            0.057214157888665795
+          ],
+          302141440,
+          568417,
+          0,
+          -2010.6653292930928,
+          -2009.1126933845624
+        ],
+        [
+          "gamma-control",
+          "shared",
+          true,
+          2000,
+          "distributional-dense-v1",
+          "smoothing_certified",
+          [
+            0.10465351492166519,
+            0.0904920429456979,
+            0.08960553910583258
+          ],
+          344109056,
+          568417,
+          0,
+          -2086.4311502094192,
+          -2084.9727757478927
+        ],
+        [
+          "log-normal-control",
+          "shared",
+          true,
+          2000,
+          "distributional-dense-v1",
+          "smoothing_certified",
+          [
+            0.07013851404190063,
+            0.08585374313406646,
+            0.08071512007154524
+          ],
+          311943168,
+          568417,
+          0,
+          -2010.6653292930928,
+          -2009.1126933845624
+        ]
+      ],
+      "comparison_columns": [
+        "case",
+        "comparison",
+        "warm_time_ratio",
+        "peak_rss_ratio"
+      ],
+      "comparisons": [
+        [
+          "lomax-intercept",
+          "shared/direct",
+          1.0777267387584615,
+          0.9998751006133948
+        ],
+        [
+          "log-logistic-intercept",
+          "shared/direct",
+          1.0446686242844676,
+          0.9988489487990236
+        ],
+        [
+          "lomax-smooth-20k",
+          "shared/direct",
+          0.9426038890698676,
+          1.0014606812315054
+        ],
+        [
+          "log-logistic-smooth-20k",
+          "shared/direct",
+          1.0859804632191126,
+          0.9987401214064826
+        ],
+        [
+          "lomax-smooth-100k",
+          "shared/direct",
+          0.9474049060661809,
+          0.9953914167744088
+        ],
+        [
+          "log-logistic-smooth-100k",
+          "shared/direct",
+          1.1425892564609206,
+          0.9956622627309976
+        ],
+        [
+          "lomax-constant-tail",
+          "shared/direct",
+          1.1095898332090353,
+          0.9990983332045238
+        ],
+        [
+          "log-logistic-constant-tail",
+          "shared/direct",
+          0.92585686633447,
+          1.0020640231785958
+        ],
+        [
+          "lomax-bounded",
+          "shared/direct",
+          0.9867099358501076,
+          1.0035624550269544
+        ],
+        [
+          "log-logistic-bounded",
+          "shared/direct",
+          0.9200353317072762,
+          0.9994807264998551
+        ],
+        [
+          "lomax-infinite-mean",
+          "shared/direct",
+          1.62593143821922,
+          0.9997641607591249
+        ],
+        [
+          "lomax-infinite-variance",
+          "shared/direct",
+          1.4539720502859823,
+          1.0002774848770741
+        ],
+        [
+          "log-logistic-infinite-mean",
+          "shared/direct",
+          1.0123343592020038,
+          1.0009162212813216
+        ],
+        [
+          "log-logistic-infinite-variance",
+          "shared/direct",
+          1.0034064332447097,
+          0.9992368954130477
+        ],
+        [
+          "lomax-misspecified",
+          "shared/direct",
+          0.928687364568491,
+          0.999013486850996
+        ],
+        [
+          "log-logistic-misspecified",
+          "shared/direct",
+          1.0486208757135447,
+          0.9994459085073316
+        ],
+        [
+          "gamma-control",
+          "candidate/baseline",
+          1.005622008819963,
+          0.8803609051195677
+        ],
+        [
+          "log-normal-control",
+          "candidate/baseline",
+          0.7623291517369629,
+          0.9685784815777725
+        ]
+      ],
+      "all_paired_numeric_differences": 0,
+      "all_paired_retained_array_and_cache_differences": 0,
+      "all_paired_input_backend_and_generated_work_equal": true,
+      "numeric_difference_fields": [
+        "retained_bytes_difference",
+        "retained_cache_bytes_difference",
+        "objective_difference",
+        "log_likelihood_difference",
+        "maximum_parameter_difference",
+        "maximum_coefficient_difference",
+        "maximum_covariance_difference",
+        "maximum_standard_error_difference",
+        "maximum_quantile_difference",
+        "edf_difference",
+        "rank_difference",
+        "iterations_difference"
+      ],
+      "baseline_controls": "same-session baseline",
+      "source_digests": {
+        "6e5639a115e0def2f8b1d213fed3b96eed8eb738": "3b92c394c5b083293cefe547243d6a77e7b52969ca3e5582a061eaf5ffadedb4",
+        "6643ed9c94497eba0efb8869b945a17c5d380caf": "d6a3f3ca2210b438a64d3a1c926aec942262113d3c3e753d8ce8665786408b41"
+      },
+      "heldout_metrics_location": "complete-fit-dense.json cases[].validation (synthetic only)"
+    },
+    "discrete_compact": {
+      "case_columns": [
+        "case",
+        "variant",
+        "baseline_control",
+        "rows",
+        "actual_backend",
+        "fit_status",
+        "warm_fit_seconds",
+        "peak_rss_bytes",
+        "retained_array_bytes",
+        "retained_cache_array_bytes",
+        "objective",
+        "log_likelihood"
+      ],
+      "cases": [
+        [
+          "lomax-smooth-20k",
+          "shared",
+          false,
+          20000,
+          "distributional-chunked-v1",
+          "smoothing_certified",
+          [
+            0.6078469872009009,
+            0.7557413729373366,
+            0.7033155830577016
+          ],
+          325062656,
+          2971636,
+          0,
+          -17969.21124650477,
+          -17967.71998423314
+        ],
+        [
+          "lomax-smooth-20k",
+          "direct",
+          false,
+          20000,
+          "distributional-chunked-v1",
+          "smoothing_certified",
+          [
+            0.6669862249400467,
+            0.6377362939529121,
+            0.6586172410752624
+          ],
+          324608000,
+          2971636,
+          0,
+          -17969.21124650477,
+          -17967.71998423314
+        ],
+        [
+          "log-logistic-smooth-20k",
+          "shared",
+          false,
+          20000,
+          "distributional-chunked-v1",
+          "smoothing_certified",
+          [
+            0.47301344806328416,
+            0.4306217539124191,
+            0.4382209840696305
+          ],
+          320782336,
+          2965799,
+          0,
+          -29783.04472165222,
+          -29780.897010614717
+        ],
+        [
+          "log-logistic-smooth-20k",
+          "direct",
+          false,
+          20000,
+          "distributional-chunked-v1",
+          "smoothing_certified",
+          [
+            0.42426813999190927,
+            0.4005409649107605,
+            0.3752055959776044
+          ],
+          320782336,
+          2965799,
+          0,
+          -29783.04472165222,
+          -29780.897010614717
+        ],
+        [
+          "lomax-smooth-100k",
+          "shared",
+          false,
+          100000,
+          "distributional-chunked-v1",
+          "smoothing_certified",
+          [
+            1.578021686989814,
+            1.638664934085682,
+            1.5339327659457922
+          ],
+          356696064,
+          14491636,
+          0,
+          -89007.20825824373,
+          -89004.88587716845
+        ],
+        [
+          "lomax-smooth-100k",
+          "direct",
+          false,
+          100000,
+          "distributional-chunked-v1",
+          "smoothing_certified",
+          [
+            1.8451740201562643,
+            1.8614377081394196,
+            1.9119618569966406
+          ],
+          356446208,
+          14491636,
+          0,
+          -89007.20825824373,
+          -89004.88587716845
+        ],
+        [
+          "log-logistic-smooth-100k",
+          "shared",
+          false,
+          100000,
+          "distributional-chunked-v1",
+          "smoothing_certified",
+          [
+            2.146106868982315,
+            2.1446578740142286,
+            2.2079468599986285
+          ],
+          355856384,
+          14532495,
+          0,
+          -148738.72521445164,
+          -148736.00632806544
+        ],
+        [
+          "log-logistic-smooth-100k",
+          "direct",
+          false,
+          100000,
+          "distributional-chunked-v1",
+          "smoothing_certified",
+          [
+            2.0127208118792623,
+            2.117887942120433,
+            2.3989215190522373
+          ],
+          356261888,
+          14532495,
+          0,
+          -148738.72521445164,
+          -148736.00632806544
+        ],
+        [
+          "lomax-bounded",
+          "shared",
+          false,
+          20000,
+          "distributional-chunked-v1",
+          "smoothing_certified",
+          [
+            1.5174533338285983,
+            1.478829188970849,
+            1.5528913589660078
+          ],
+          347131904,
+          2983310,
+          0,
+          -16518.730926449975,
+          -16517.172822942324
+        ],
+        [
+          "lomax-bounded",
+          "direct",
+          false,
+          20000,
+          "distributional-chunked-v1",
+          "smoothing_certified",
+          [
+            1.6065257389564067,
+            1.646637859987095,
+            1.543054579058662
+          ],
+          347336704,
+          2983310,
+          0,
+          -16518.730926449975,
+          -16517.172822942324
+        ],
+        [
+          "log-logistic-bounded",
+          "shared",
+          false,
+          20000,
+          "distributional-chunked-v1",
+          "smoothing_certified",
+          [
+            1.1157917468808591,
+            1.0911389449611306,
+            1.1839266000315547
+          ],
+          338509824,
+          2983310,
+          0,
+          -23681.954772301833,
+          -23679.71018170035
+        ],
+        [
+          "log-logistic-bounded",
+          "direct",
+          false,
+          20000,
+          "distributional-chunked-v1",
+          "smoothing_certified",
+          [
+            1.091371638001874,
+            1.0876101879402995,
+            1.1139456799719483
+          ],
+          338112512,
+          2983310,
+          0,
+          -23681.954772301833,
+          -23679.71018170035
+        ]
+      ],
+      "comparison_columns": [
+        "case",
+        "comparison",
+        "warm_time_ratio",
+        "peak_rss_ratio"
+      ],
+      "comparisons": [
+        [
+          "lomax-smooth-20k",
+          "shared/direct",
+          1.067866947894447,
+          1.0014006309148265
+        ],
+        [
+          "log-logistic-smooth-20k",
+          "shared/direct",
+          1.094072822656891,
+          1.0
+        ],
+        [
+          "lomax-smooth-100k",
+          "shared/direct",
+          0.8477434834857348,
+          1.0007009641129356
+        ],
+        [
+          "log-logistic-smooth-100k",
+          "shared/direct",
+          1.013324088730412,
+          0.9988617811400584
+        ],
+        [
+          "lomax-bounded",
+          "shared/direct",
+          0.944555880451894,
+          0.9994103704053113
+        ],
+        [
+          "log-logistic-bounded",
+          "shared/direct",
+          1.0223756125124293,
+          1.00117508813161
+        ]
+      ],
+      "all_paired_numeric_differences": 0,
+      "all_paired_retained_array_and_cache_differences": 0,
+      "all_paired_input_backend_and_generated_work_equal": true,
+      "numeric_difference_fields": [
+        "retained_bytes_difference",
+        "retained_cache_bytes_difference",
+        "objective_difference",
+        "log_likelihood_difference",
+        "maximum_parameter_difference",
+        "maximum_coefficient_difference",
+        "maximum_covariance_difference",
+        "maximum_standard_error_difference",
+        "maximum_quantile_difference",
+        "edf_difference",
+        "rank_difference",
+        "iterations_difference"
+      ],
+      "baseline_controls": "not run: supply --baseline-source; candidate Gamma/log-normal are drift controls only",
+      "source_digests": {
+        "6e5639a115e0def2f8b1d213fed3b96eed8eb738": "3b92c394c5b083293cefe547243d6a77e7b52969ca3e5582a061eaf5ffadedb4"
+      },
+      "heldout_metrics_location": "complete-fit-discrete-compact.json cases[].validation (synthetic only)"
+    }
+  },
+  "supplemental_dispatch_and_timing": {
+    "source_sha": "6e5639a115e0def2f8b1d213fed3b96eed8eb738",
+    "threads": 1,
+    "dispatch_witnesses": [
+      {
+        "case": "lomax-smooth-100k",
+        "discrete": false,
+        "output_and_work_exact": true
+      },
+      {
+        "case": "log-logistic-smooth-100k",
+        "discrete": false,
+        "output_and_work_exact": true
+      },
+      {
+        "case": "lomax-bounded",
+        "discrete": false,
+        "output_and_work_exact": true
+      },
+      {
+        "case": "log-logistic-bounded",
+        "discrete": false,
+        "output_and_work_exact": true
+      },
+      {
+        "case": "gpd-overlap",
+        "discrete": false,
+        "output_and_work_exact": true
+      },
+      {
+        "case": "gamma-control",
+        "discrete": false,
+        "output_and_work_exact": true
+      },
+      {
+        "case": "log-normal-control",
+        "discrete": false,
+        "output_and_work_exact": true
+      },
+      {
+        "case": "lomax-smooth-100k",
+        "discrete": true,
+        "output_and_work_exact": true
+      },
+      {
+        "case": "log-logistic-smooth-100k",
+        "discrete": true,
+        "output_and_work_exact": true
+      },
+      {
+        "case": "lomax-bounded",
+        "discrete": true,
+        "output_and_work_exact": true
+      },
+      {
+        "case": "log-logistic-bounded",
+        "discrete": true,
+        "output_and_work_exact": true
+      }
+    ],
+    "abba": [
+      {
+        "case": "lomax-infinite-mean",
+        "complete_fit_seconds": {
+          "shared": [
+            0.02756581618450582,
+            0.03773031709715724,
+            0.027119279140606523,
+            0.02421621000394225,
+            0.0246775911655277,
+            0.02818021713756025
+          ],
+          "direct": [
+            0.02408874104730785,
+            0.02664437610656023,
+            0.025546378921717405,
+            0.034685526974499226,
+            0.03610996506176889,
+            0.024230270879343152
+          ]
+        },
+        "median_ratio": 1.04779276129428,
+        "scope": "within-process same-law control; not a new universal speed claim"
+      },
+      {
+        "case": "lomax-infinite-variance",
+        "complete_fit_seconds": {
+          "shared": [
+            0.024231433868408203,
+            0.022071517072618008,
+            0.024857252836227417,
+            0.02571971993893385,
+            0.02276836591772735,
+            0.02245353301987052
+          ],
+          "direct": [
+            0.02713916916400194,
+            0.02873088698834181,
+            0.024941053008660674,
+            0.02477414207533002,
+            0.03165826294571161,
+            0.026274857111275196
+          ]
+        },
+        "median_ratio": 0.8799149411413977,
+        "scope": "within-process same-law control; not a new universal speed claim"
+      },
+      {
+        "case": "log-logistic-smooth-100k",
+        "complete_fit_seconds": {
+          "shared": [
+            1.7322252811864018,
+            1.7739233309403062,
+            1.7802982691209763,
+            1.597502465127036,
+            1.7621295738499612,
+            1.8309635191690177
+          ],
+          "direct": [
+            1.7263687760569155,
+            1.6173132068943232,
+            1.5734192330855876,
+            1.7074438789859414,
+            1.772447454975918,
+            1.763165894895792
+          ]
+        },
+        "median_ratio": 1.0297745567444576,
+        "scope": "within-process same-law control; not a new universal speed claim"
+      }
+    ]
+  },
+  "interpretation": [
+    "All 49 fresh-process fits converged at coefficient level; all 36 smooth fits were additionally smoothing-certified. No benchmark warnings.",
+    "All 24 paired comparisons have exact recorded numeric outputs, equal input, identical work and backend, and no retained-array/cache growth.",
+    "Shared/direct pilots use the same generated law: an abstraction control, not an independent numerical oracle.",
+    "Existing-family baseline/current controls were timed in the same session.",
+    "11 untimed instrumentation witnesses reproduced the timed fits and generated dispatch exactly.",
+    "Supplemental within-process ABBA samples investigate initial timing gaps without establishing a universal speed change.",
+    "Retained memory counts recognized unique NumPy buffers, excluding Python object headers and process-wide native/JIT state; peak RSS is complementary.",
+    "Synthetic held-out scores and tail/layer metrics are engineering checks, not real-book usefulness evidence."
+  ],
+  "remaining_limits": [
+    "Native Windows/macOS/Linux ARM64 and the full supported Python/NumPy/SciPy matrix were not run.",
+    "Positive finite log-logistic windows require reach>=2^-8 for core derivatives and reach>=1/8 for analytic third/fourth derivatives; reach=shape*max(1,abs(log(lo/scale)),abs(log(hi/scale))). Order-zero values remain available.",
+    "Derivative parameter envelope [2^-200,2^200] is numerical; mathematical shape domain remains positive.",
+    "Two known raw fourth-log-CDF xfails and guarded optional higher-direction routes remain disclosed.",
+    "Separate focused REML stress fits retained four uncertified Lomax and four uncertified log-logistic endpoints; their stop reasons are not promoted to certification.",
+    "No public arbitrary factory, general interval censoring, vector-response Dirichlet, Burr/GB2 or scalar SuperGLM expansion in this stage."
+  ],
+  "raw_evidence": {
+    "policy": "Machine-local ignored files retained in the implementation worktree; committed harness reproduces primary benchmarks.",
+    "worktree": "/home/max/.t3/worktrees/superglm/t3-3a3ab26c",
+    "files": [
+      {
+        "path": ".superpowers/sdd/2026-11-08-superlss-family-framework/validation-summary.json",
+        "bytes": 6107,
+        "sha256": "ff9f8cdbf7db5ffd84b551b5b1918a66361362bf485aaa43c8283f506b5c8d86"
+      },
+      {
+        "path": ".superpowers/sdd/2026-11-08-superlss-family-framework/validate_stage.py",
+        "bytes": 3792,
+        "sha256": "27d62efa261202d23e410417e774ca8213f05405746670900eeb619d375cb75d"
+      },
+      {
+        "path": ".superpowers/sdd/2026-11-08-superlss-family-framework/full-suite.log",
+        "bytes": 269946,
+        "sha256": "c9b38e21b79a712285a8068e3ba9281c9beb5979153ad2019a59b1a4ad5e29b8"
+      },
+      {
+        "path": ".superpowers/sdd/2026-11-08-superlss-family-framework/full-suite.xml",
+        "bytes": 3449495,
+        "sha256": "25ce75a08071a5cf7a8a73d0f8779d3f7332b873274dc36a1ed1d2fb59d5c55c"
+      },
+      {
+        "path": ".superpowers/sdd/2026-11-08-superlss-family-framework/full-suite-threads.xml",
+        "bytes": 8899,
+        "sha256": "9597c51f63dd593281f26b8d6fb7551e6ad7c179b8b90da2e7b0496fbbcc3fe0"
+      },
+      {
+        "path": ".superpowers/sdd/2026-11-08-superlss-family-framework/scipy-floor.log",
+        "bytes": 3027,
+        "sha256": "f59b41bbf021f2fb89169f86225069d34263b9aeea8eaac2ec1ee15a01caa96c"
+      },
+      {
+        "path": ".superpowers/sdd/2026-11-08-superlss-family-framework/complete-fit-dense.json",
+        "bytes": 549476,
+        "sha256": "e91b604c02e314c4e2f4036a2cc41ec702a841aae9a8f691e4edf54ace684855"
+      },
+      {
+        "path": ".superpowers/sdd/2026-11-08-superlss-family-framework/complete-fit-discrete-compact.json",
+        "bytes": 232053,
+        "sha256": "19a74909ec03236c294d73fe31f6303682c6cb0f758e94e25c8a31ffc53e0ccc"
+      },
+      {
+        "path": ".superpowers/sdd/2026-11-08-superlss-family-framework/final-probe.json",
+        "bytes": 3261,
+        "sha256": "6046b55491d528ead09604dd43714a01341e488a9340d10461f704049969c331"
+      },
+      {
+        "path": ".superpowers/sdd/2026-11-08-superlss-family-framework/final_probe.py",
+        "bytes": 5272,
+        "sha256": "126c98de9a4728601176463a60dd8fd66779d57b82cd218c82c61cfefa376f0c"
+      },
+      {
+        "path": ".superpowers/sdd/2026-11-08-superlss-family-framework/review-red.log",
+        "bytes": 21568,
+        "sha256": "22f845da1300f109e02090fa7011c0c11e7a6fbf4d17ed41852109070b76903a"
+      },
+      {
+        "path": ".superpowers/sdd/2026-11-08-superlss-family-framework/r5-green.log",
+        "bytes": 494,
+        "sha256": "477c9870f982a4619f094858ddf7516492b096f6542c9bfa8ee893c1f7622dfd"
+      },
+      {
+        "path": ".superpowers/sdd/2026-11-08-superlss-family-framework/normalized-admission.log",
+        "bytes": 545,
+        "sha256": "246053632057b4302656618d5849433b0633cf818eb6b14200e72fc625353f9c"
+      },
+      {
+        "path": ".superpowers/sdd/2026-11-08-superlss-family-framework/numerical-receipt.json",
+        "bytes": 3846,
+        "sha256": "0f9a2cfd8ea3a76e3e3dff4ca7a996f41c7fa48cc5c8442ef7c25fa1720929e9"
+      },
+      {
+        "path": ".superpowers/sdd/2026-11-08-superlss-family-framework/focused-final.log",
+        "bytes": 4714,
+        "sha256": "48b799ca209b12443f4dab6fdd87529e80787fcba7b83b2e6f72fa450d9d94a4"
+      },
+      {
+        "path": ".superpowers/sdd/2026-11-08-superlss-family-framework/compatibility.log",
+        "bytes": 734,
+        "sha256": "95343ddbbe7b2f1f04a7a24c526c5a4744c3bbe1da4b161fe3404494f085e2ec"
+      }
+    ]
+  }
+}
