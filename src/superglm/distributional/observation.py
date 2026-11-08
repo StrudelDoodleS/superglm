@@ -265,18 +265,14 @@ def _refuse_rows(mask: NDArray[np.bool_], positions: NDArray, message: str) -> N
         raise ValueError(f"{count} row(s) {message} (first at input row {first})")
 
 
-def validate_response_bounds(
-    response: NDArray, bounds: ResponseBounds, positions: NDArray, *, exact_only: bool = False
-) -> None:
+def validate_response_bounds(response: NDArray, bounds: ResponseBounds, positions: NDArray) -> None:
     """Check exact values and censoring limits against the *original* windows.
 
     Call before support clipping: exact values satisfy ``lower < y <= upper``;
     right limits may equal the lower bound and left limits the upper bound.
     ``positions`` names the original input rows, not the selected row numbers.
     This does not replace family support validation of exact realizations.
-    ``exact_only`` preserves existing continuous binders' threshold handling:
-    their limits are checked in public resolution, not rechecked in direct
-    binding. Atomic binders and public resolution check all rows.
+    Direct family binding and public resolution check every row.
     """
     values = np.asarray(response, dtype=np.float64)
     positions = np.asarray(positions)
@@ -287,13 +283,11 @@ def validate_response_bounds(
     t_lower, t_upper, side = bounds.lower, bounds.upper, bounds.side
     outside = (values < t_lower) | (values > t_upper) | ((side == 0) & (values == t_lower))
     _refuse_rows(
-        outside & (side == 0) if exact_only else outside,
+        outside,
         positions,
         "have a response outside the truncation bounds; an exact response must satisfy "
         "lower < y <= upper",
     )
-    if exact_only:
-        return
     _refuse_rows(
         (side != 0) & ~np.isfinite(values),
         positions,

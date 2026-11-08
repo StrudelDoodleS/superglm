@@ -5,6 +5,7 @@ import itertools
 import numpy as np
 import pytest
 
+from superglm.distributional import GammaLS, GaussianLS
 from superglm.distributional.families import _base
 from superglm.distributional.families import _response_bounds as bounded
 from superglm.distributional.family import bounded_observation
@@ -78,6 +79,40 @@ def test_direct_bind_checks_exact_endpoint_before_continuous_clipping():
             support_lower=0.0,
             family_name="toy",
         )
+
+
+@pytest.mark.parametrize("family_type", [GaussianLS, GammaLS])
+@pytest.mark.parametrize(
+    "side,response",
+    [
+        (RIGHT_CENSORED, 2.0),
+        (RIGHT_CENSORED, 0.5),
+        (LEFT_CENSORED, 1.0),
+        (LEFT_CENSORED, 3.0),
+    ],
+)
+def test_direct_continuous_binding_rejects_invalid_censor_windows(family_type, side, response):
+    observation = bounded_observation(_bounds([1.0], [2.0], [side]))
+    with pytest.raises(ValueError, match="input row 2"):
+        family_type().bind_likelihood(np.array([response]), _weights([0, 0, 1]), observation)
+
+
+@pytest.mark.parametrize("family_type", [GaussianLS, GammaLS])
+@pytest.mark.parametrize("side,response", [(RIGHT_CENSORED, 1.0), (LEFT_CENSORED, 2.0)])
+def test_direct_continuous_binding_accepts_certain_event_at_valid_boundary(
+    family_type, side, response
+):
+    family = family_type()
+    y = np.array([response])
+    observation = bounded_observation(_bounds([1.0], [2.0], [side]))
+    plan = family.bind_likelihood(y, _weights([1]), observation)
+    evaluated = family.evaluate_natural(y, np.array([[1.5, 1.0]]), plan)
+
+    assert evaluated.valid[0]
+    np.testing.assert_array_equal(evaluated.optimizing_log_likelihood, [0.0])
+    np.testing.assert_array_equal(evaluated.parameter_independent_carrier, [0.0])
+    np.testing.assert_array_equal(evaluated.score, np.zeros((1, 2)))
+    np.testing.assert_array_equal(evaluated.hessian_packed, np.zeros((1, 3)))
 
 
 @pytest.mark.parametrize("atomic", [False, True])

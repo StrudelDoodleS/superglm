@@ -184,3 +184,82 @@ def test_python_sequences_and_mixed_columns_keep_individual_value_types():
     frame = pd.DataFrame({"claim type": [2**53 + 1], "expense": [0.5]})
     raw = api.unvalidated_response(frame, family=family, n_rows=1)
     assert int(raw[0, 0]) == 2**53 + 1
+
+
+@pytest.mark.parametrize("dtype", ["Int64", "UInt64"])
+@pytest.mark.parametrize("container", [pd.Series, pd.Index, lambda values: values])
+def test_nullable_scalar_values_reach_family_unchanged(dtype, container):
+    original = 2**53 + 1
+    source = container(pd.array([original, pd.NA], dtype=dtype))
+    raw = _api().unvalidated_response(source, family=NegativeBinomialLS(), n_rows=2)
+    weights = resolve_likelihood_weights(
+        np.array([0.5, 0.0]), n_observations=2, contract=WeightContract("prior")
+    )
+    retained = raw[weights.input_positions]
+
+    assert isinstance(retained[0], int | np.integer)
+    assert int(retained[0]) == original
+    assert pd.isna(raw[1])
+
+
+def test_nullable_nb_prior_rates_are_checked_before_float_conversion():
+    family = NegativeBinomialLS()
+    source = pd.Series([2**53 + 1, pd.NA], dtype="Int64")
+    weights = resolve_likelihood_weights(
+        np.array([0.5, 0.0]), n_observations=2, contract=WeightContract("prior")
+    )
+    with pytest.raises(ValueError, match="lossless|exact float64"):
+        family.bind_likelihood(np.array([2**53 + 1], dtype=object), weights, COMPLETE_OBSERVATION)
+
+    raw = _api().unvalidated_response(source, family=family, n_rows=2)
+    with pytest.raises(ValueError, match="lossless|exact float64"):
+        family.bind_likelihood(raw[weights.input_positions], weights, COMPLETE_OBSERVATION)
+
+
+@pytest.mark.parametrize("dtype", ["Int64", "UInt64"])
+def test_nullable_vector_columns_preserve_retained_integers(dtype):
+    frame = pd.DataFrame(
+        {
+            "expense": pd.array([0.75, pd.NA], dtype="Float64"),
+            "claim type": pd.array([2**53 + 1, pd.NA], dtype=dtype),
+        },
+        index=[7, 3],
+    )
+    raw = _api().unvalidated_response(frame, family=_vector(), n_rows=2, input_index=frame.index)
+
+    assert isinstance(raw[0, 0], int | np.integer)
+    assert int(raw[0, 0]) == 2**53 + 1
+    assert raw[0, 1] == 0.75
+    assert pd.isna(raw[1, 0]) and pd.isna(raw[1, 1])
+
+
+def test_nullable_composition_values_are_coerced_only_after_zero_drop():
+    api, family = _api(), _vector()
+    source = pd.DataFrame(
+        {
+            "expense": pd.array([0.75, pd.NA], dtype="Float64"),
+            "claim type": pd.array([0.25, pd.NA], dtype="Float64"),
+        }
+    )
+    raw = api.unvalidated_response(source, family=family, n_rows=2)
+    weights = resolve_likelihood_weights(
+        np.array([1, 0]), n_observations=2, contract=WeightContract("frequency")
+    )
+
+    np.testing.assert_array_equal(
+        api.validated_response_array(raw[weights.input_positions], family=family, n_rows=1),
+        [[0.25, 0.75]],
+    )
+
+
+def test_nullable_bool_component_still_fails_real_value_validation():
+    frame = pd.DataFrame(
+        {
+            "expense": pd.array([0.75, pd.NA], dtype="Float64"),
+            "claim type": pd.array([True, pd.NA], dtype="boolean"),
+        }
+    )
+    raw = _api().unvalidated_response(frame, family=_vector(), n_rows=2)
+    assert isinstance(raw[0, 0], bool | np.bool_)
+    with pytest.raises(ValueError):
+        _api().validated_response_array(raw[:1], family=_vector(), n_rows=1)
