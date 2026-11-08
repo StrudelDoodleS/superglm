@@ -6,6 +6,24 @@ from superglm import SuperGLM
 from superglm.features.spline import CubicRegressionSpline, NaturalSpline, PSpline, Spline
 
 
+@pytest.mark.parametrize("size", [1, 65, 8192], ids=["scalar", "scipy", "compiled"])
+@pytest.mark.parametrize("upper", [False, True], ids=["lower", "upper"])
+def test_cr_error_policy_prices_tolerated_points_at_the_endpoint(size, upper):
+    spec = CubicRegressionSpline(n_knots=6, extrapolation="error")
+    spec.build(np.linspace(0.0, 1.0, 100))
+    endpoint, direction = (1.0, 1.0) if upper else (0.0, -1.0)
+    admitted = np.full(size, endpoint + direction * 5e-13)
+    boundary = np.full(size, endpoint)
+
+    expected = spec.transform(boundary)
+    np.testing.assert_array_equal(spec.transform(admitted), expected)
+    beta = np.linspace(-0.5, 0.5, expected.shape[1])
+    np.testing.assert_array_equal(spec.score(admitted, beta), spec.score(boundary, beta))
+
+    with pytest.raises(ValueError, match="outside training range"):
+        spec.transform(np.full(size, endpoint + direction * 2e-12))
+
+
 @pytest.mark.parametrize(
     "spec_cls",
     [NaturalSpline, CubicRegressionSpline],

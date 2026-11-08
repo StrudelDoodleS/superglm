@@ -31,7 +31,11 @@ def _validate_observed_categorical_levels(
     context: str = "",
 ) -> None:
     """Raise for observed levels outside a fitted categorical domain."""
-    unseen = observed - known_levels
+    _refuse_unseen_categorical_levels(observed - known_levels, known_levels, context=context)
+
+
+def _refuse_unseen_categorical_levels(unseen: set, known_levels: set, *, context: str = "") -> None:
+    """Name rejected labels without equating them with known labels again."""
     if unseen:
         # Sort by str: a domain may mix types (numeric bands beside a labelled
         # special), and a bare sorted() would raise TypeError from the error path itself.
@@ -751,6 +755,8 @@ class Categorical:
     def _predict_codes(self, x: NDArray) -> NDArray:
         """Codes against the fitted universe; -1 for levels the policy admits."""
         codes = _codes_against(x, self._levels)
+        if self.unseen == "error":
+            _refuse_unseen_categorical_levels(set(x[codes < 0].tolist()), set(self._levels))
         if self.unseen == "base" and self._grouping is None:
             # A group policy, or base under a grouping, has already routed and
             # reported its rows by their raw labels.
@@ -760,11 +766,10 @@ class Categorical:
     def transform(self, x: NDArray) -> NDArray:
         """One-hot encode using levels learned during build()."""
         x = self._resolve_predict_labels(x)
-        if self.unseen == "base" and self._grouping is None:
-            # Equality masks already give a novel level an all-zero row, which
-            # IS base routing; the codes are computed only to report it.
-            self._predict_codes(x)
-        return np.column_stack([(x == lev).astype(np.float64) for lev in self._non_base])
+        codes = self._predict_codes(x)
+        return np.column_stack(
+            [(codes == self._levels.index(lev)).astype(np.float64) for lev in self._non_base]
+        )
 
     def score(self, x: NDArray, beta: NDArray[np.floating]) -> NDArray[np.floating]:
         """Score the fitted categorical contribution directly on new data."""

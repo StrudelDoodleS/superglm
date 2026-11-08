@@ -221,10 +221,9 @@ def _evaluates_by_scipy(spec: Any, spline_base: type, *overrides: type) -> bool:
 def _refused_by_scipy(spec: Any, points: NDArray) -> bool:
     """Whether ``BSpline.design_matrix``, which does not extrapolate for ``error``, refuses ``points``.
 
-    It refuses a point outside the base interval ``[t_k, t_n]``. ``prepare_eval_points`` lets
-    ``error`` rows a rounding past the training range through, and a knot vector with no padding
-    (a ``CubicRegressionSpline``'s) ends at that range, so such a row is an error there on every
-    route: the kernels clamp it to the end span instead, and would give it a price.
+    It refuses a point outside the base interval ``[t_k, t_n]``. Prepared ``error`` points
+    lie within the training range; a custom knot vector can still have a narrower base interval.
+    The kernels clamp to the end span there, so retain SciPy's refusal instead.
     """
     if spec.extrapolation != "error" or not points.size:
         return False

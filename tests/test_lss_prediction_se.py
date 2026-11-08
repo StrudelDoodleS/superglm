@@ -1216,23 +1216,18 @@ def test_a_non_finite_covariate_is_refused_by_every_route_as_scipy_refuses_it(
 
 @pytest.mark.parametrize("rows", [1, 5, 17, 100, 8192, 9000])
 def test_error_extrapolation_gives_one_answer_at_every_call_size(rows):
-    """A row a rounding past the end knots is an error on every route for a spline with no padding.
-
-    ``prepare_eval_points`` admits ``error`` rows within ``1e-12`` of the range and a
-    ``CubicRegressionSpline``'s knots end exactly there, so SciPy refuses such a row: master did,
-    at every call size. The Python rows and the kernel clamped it into the end span and priced
-    it (up to 16 distinct values, and from 8,192) while 17 to 8,191 raised. Splines padded past the
-    range and the cardinal basis, whose evaluation never refused, price it the same at every
-    size. Mutation check: ``_refused_by_scipy`` always false fails the first assertion.
-    """
+    """A point admitted by the error policy prices at its endpoint on every prediction route."""
     regression = _one_spline_model(CubicRegressionSpline(n_knots=6, extrapolation="error"))
     spec = regression._require_fitted().compiled_predictors[0].compiled.specs["x"]
     inside = np.linspace(spec._lo, spec._hi, rows)
     for index, value in ((0, spec._hi + 5e-13), (-1, spec._lo - 5e-13)):
         points = inside.copy()
         points[index] = value
-        with pytest.raises(ValueError, match="Out of bounds"):
-            regression.predict_link(pd.DataFrame({"x": points}))
+        priced = regression.predict_link(pd.DataFrame({"x": points})).to_numpy()
+        reference = regression.predict_link(
+            pd.DataFrame({"x": np.clip(points, spec._lo, spec._hi)})
+        ).to_numpy()
+        np.testing.assert_array_equal(priced, reference)
     for spec_kind in (
         PSpline(n_knots=6, extrapolation="error"),
         Spline("cr_cardinal", k=6, extrapolation="error"),
