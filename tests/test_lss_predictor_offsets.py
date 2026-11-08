@@ -502,6 +502,46 @@ def test_editor_final_fit_refuses_bool_offsets_beside_numeric_split():
         run_final_fit(capture_final_fit(session), context)
 
 
+@pytest.mark.parametrize("dtype", ["datetime64[ns]", "timedelta64[ns]"])
+def test_editor_final_fit_refuses_datelike_offsets_beside_numeric_split(dtype):
+    from types import SimpleNamespace
+
+    from superglm import GammaLS
+    from superglm.editor import edit
+    from superglm.editor.cv import capture_final_fit, run_final_fit
+    from superglm.editor.lss.validation import lss_dataset_metrics
+
+    X, y = _data(24)
+    y = np.abs(y) + 0.5
+    family = GammaLS()
+    values = X.a.to_numpy()
+    model = SuperLSS(family, family.mean("x", offset=values), family.scale()).fit(X, y)
+    raw = (np.arange(len(X)) % 2).astype(dtype)
+    session = edit(
+        model,
+        train_data=(X, y, None, {"mean": values}),
+        validation_data=(X, y, None, {"mean": raw}),
+    )
+    with pytest.raises(ValueError, match="finite real numeric"):
+        lss_dataset_metrics(model, session._evaluation_data["validation"])
+    context = SimpleNamespace(check=lambda: None, progress=lambda *args, **kwargs: None)
+    with pytest.raises(ValueError):
+        run_final_fit(capture_final_fit(session), context)
+
+
+def test_timedelta_scalar_offset_is_refused_only_when_retained():
+    X, y = _data()
+    model = _model(X.a.to_numpy(), scale=None).fit(X, y)
+    values = X.a.to_numpy().astype(object)
+    values[2] = np.timedelta64(1, "ns")
+    with pytest.raises(ValueError, match=r"original rows \[2\]"):
+        model.scores(X, y, which=("log",), offsets={"location": values})
+    weights = np.ones(len(X))
+    weights[2] = 0
+    result = model.scores(X, y, which=("log",), offsets={"location": values}, sample_weight=weights)
+    assert np.isfinite(result["log"].iloc[weights > 0]).all()
+
+
 @pytest.mark.parametrize("kind", ["spread", "portfolio", "qq"])
 def test_retained_surfaces_and_qq_preserve_raw_replacement_values_and_labels(kind):
     X, y = _data()

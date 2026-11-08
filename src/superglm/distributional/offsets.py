@@ -125,7 +125,10 @@ def _numeric(values: NDArray, name: str, positions: NDArray) -> NDArray[np.float
         valid = np.isfinite(retained)
     elif retained.dtype.kind == "O":
         valid = np.array(
-            [isinstance(v, Real) and not isinstance(v, (bool, np.bool_)) for v in retained]
+            [
+                isinstance(v, Real) and not isinstance(v, (bool, np.bool_, np.timedelta64))
+                for v in retained
+            ]
         )
     else:
         valid = np.zeros(len(retained), dtype=bool)

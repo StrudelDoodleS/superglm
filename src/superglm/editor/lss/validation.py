@@ -139,6 +139,9 @@ def stack_offsets(datasets: Sequence[Any]) -> dict[str, NDArray] | None:
         ]
         # Keep ordinary numeric splits fast. Any other raw type must survive
         # concatenation: bool beside float must not become accepted 0/1.
-        dtype = None if all(part.dtype.kind in "iuf" for part in parts) else object
-        stacked[key] = np.concatenate(parts, dtype=dtype)
+        if any(part.dtype.kind not in "iuf" for part in parts):
+            # A NumPy object cast can turn datetime64[ns] into Python ints.
+            # Iteration owns the actual scalar objects without that cast.
+            parts = [np.fromiter(part, dtype=object, count=len(part)) for part in parts]
+        stacked[key] = np.concatenate(parts)
     return stacked
