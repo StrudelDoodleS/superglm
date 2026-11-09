@@ -319,6 +319,7 @@ def _dirichlet_public_stub(prediction):
     from types import SimpleNamespace
 
     import pandas as pd
+    from scipy.stats import dirichlet
 
     frame = pd.DataFrame({"x": [0.0]}, index=[17])
     alpha = pd.DataFrame(
@@ -331,7 +332,13 @@ def _dirichlet_public_stub(prediction):
         predict=lambda *a, **k: pd.DataFrame(
             [prediction], columns=["a", "b", "c"], index=frame.index
         ),
-        scores=lambda *a, **k: pd.DataFrame({"log": [0.0]}, index=frame.index),
+        scores=lambda *a, **k: pd.DataFrame(
+            {
+                "log": -dirichlet.logpdf([0.2, 0.3, 0.5], [1.0, 2.0, 3.0])
+                * np.asarray(k["sample_weight"])
+            },
+            index=frame.index,
+        ),
     )
     data = {"columns": ["a", "b", "c"], "y": np.array([[0.2, 0.3, 0.5]]), "weights": np.ones(1)}
     return model, frame, data
@@ -356,6 +363,54 @@ def test_dirichlet_public_normalized_alpha_mean_passes(harness):
     )
     assert checks["simplex_error"] == 0.0
     assert checks["dirichlet_mean_delta"] == 0.0
+
+
+@pytest.mark.parametrize("discrete", [False, True])
+@pytest.mark.parametrize("corruption", ["sign", "shift"])
+def test_dirichlet_public_scores_have_an_independent_density_guard(harness, discrete, corruption):
+    model, frame, data = _dirichlet_public_stub([1 / 6, 1 / 3, 1 / 2])
+    model.discrete = discrete
+    original = model.scores
+
+    def wrong(*args, **kwargs):
+        scores = original(*args, **kwargs)
+        return -scores if corruption == "sign" else scores + 0.5
+
+    model.scores = wrong
+    with pytest.raises(harness.PublicOutputError, match="Dirichlet log scores"):
+        harness.public_outputs(
+            model, frame, harness.Case("dirichlet", components=3), data, "candidate"
+        )
+
+
+def test_frequency_weighted_public_scores_pass_the_independent_guard(harness):
+    model, frame, data = _dirichlet_public_stub([1 / 6, 1 / 3, 1 / 2])
+    data["weights"] *= 3
+    _, checks = harness.public_outputs(
+        model,
+        frame,
+        harness.Case("dirichlet", weights="frequency", components=3),
+        data,
+        "candidate",
+    )
+    assert (
+        checks["dirichlet_log_score_reference_max_delta"]
+        <= checks["dirichlet_log_score_reference_tolerance"]
+    )
+
+
+def test_binned_training_and_continuous_score_identity_is_not_asserted(harness):
+    checks = {"log_score_sum": -2.0}
+    harness.check_score_identity(checks, 3.0, discrete=True)
+    assert checks["log_score_likelihood_delta"] == 1.0
+    assert checks["log_score_likelihood_identity_applicable"] is False
+
+
+def test_exact_training_score_identity_still_rejects_wrong_values(harness):
+    checks = {"log_score_sum": -2.0}
+    with pytest.raises(harness.PublicOutputError, match="fitted normalized likelihood"):
+        harness.check_score_identity(checks, 3.0, discrete=False)
+    assert checks["log_score_likelihood_identity_applicable"] is True
 
 
 def test_candidate_offset_missing_stage_never_falls_back_to_fit_mapping(harness, monkeypatch):

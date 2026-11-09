@@ -1418,9 +1418,11 @@ def _warmup_group_matrix_kernels() -> None:
     _level_tensor_channels(frozen_codes, codes, codes, codes, values, matrix, 2, 2)
     _level_disc_disc_hist(frozen_codes, codes, codes, values, 2, 2)
     _csr_weighted_gram(values, csr_indices, csr_indptr, frozen_values, 2, False)
-    _csr_weighted_cross(
-        values, csr_indices, csr_indptr, values, csr_indices, csr_indptr, values, 2, 2
-    )
+    # Joint curvature also reads a readonly, strided packed-Hessian column.
+    for weights in (values, frozen_matrix[:, 0]):
+        _csr_weighted_cross(
+            values, csr_indices, csr_indptr, values, csr_indices, csr_indptr, weights, 2, 2
+        )
     # Batched W-derivative moments pass an (n, m) C-order block of directions.
     for absolute in (False, True):
         _csr_weighted_gram_channels(values, csr_indices, csr_indptr, matrix, 0, 2, 2, absolute)
