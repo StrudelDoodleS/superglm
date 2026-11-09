@@ -555,10 +555,13 @@ import superglm
 
 superglm._warmup_scalar_observations()
 modules = [importlib.import_module("superglm.distributional.kernels." + name)
-           for name in ("_incomplete_beta", "_negative_binomial_windows", "_incomplete_gamma")]
+           for name in ("_incomplete_beta", "_negative_binomial_windows", "_incomplete_gamma",
+                        "_gamma_windows", "_tweedie_windows")]
 dispatchers = {f"{m.__name__}.{name}": obj for m in modules
                for name, obj in vars(m).items() if isinstance(obj, Dispatcher)}
-for m in modules[:2]:
+# The gamma operand module also has uncommon fallbacks owned by the full
+# census. Here require every dispatcher defined by the bounded core modules.
+for m in (modules[0], modules[1], modules[3], modules[4]):
     for name, obj in vars(m).items():
         if isinstance(obj, Dispatcher) and obj.py_func.__module__ == m.__name__:
             assert obj.signatures, (m.__name__, name)
@@ -590,6 +593,81 @@ print("ok")
         text=True,
         timeout=210,
         env={**os.environ, "NUMBA_CACHE_DIR": str(tmp_path / "scalar-core-cache")},
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "ok"
+
+    # The first process filled this private cache. A fresh process must load
+    # the same core code without recompiling an imported-callee composition.
+    reload_code = r"""
+import json
+from numba.core import event
+import superglm
+
+compiles = []
+class Listener(event.Listener):
+    def on_start(self, ev):
+        function = getattr(ev.data.get("dispatcher"), "py_func", None)
+        module = getattr(function, "__module__", "") or ""
+        if module.startswith("superglm."):
+            compiles.append(module + "." + function.__name__)
+    def on_end(self, ev):
+        pass
+
+with event.install_listener("numba:compile", Listener()):
+    superglm._warmup_scalar_observations()
+print(json.dumps(compiles))
+"""
+    loaded = subprocess.run(
+        [sys.executable, "-c", reload_code],
+        capture_output=True,
+        text=True,
+        timeout=210,
+        env={**os.environ, "NUMBA_CACHE_DIR": str(tmp_path / "scalar-core-cache")},
+    )
+    assert loaded.returncode == 0, loaded.stderr
+    assert json.loads(loaded.stdout) == [], loaded.stdout
+
+
+def test_dirichlet_warmup_covers_compiled_rows_and_directions(tmp_path):
+    code = r"""
+import numpy as np
+import superglm
+from superglm.distributional.kernels import _dirichlet_numba as compiled
+from superglm.distributional.family import COMPLETE_OBSERVATION
+from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
+from superglm.links import LogLink
+
+superglm._warmup_dirichlet()
+names = ("_fsum", "_evaluate_batch", "_curvature_batch")
+before = {name: tuple(getattr(compiled, name).nopython_signatures) for name in names}
+assert all(before.values()), before
+superglm._warmup_dirichlet()
+for k in (2, 5):
+    family = superglm.DirichletLSS(tuple(f"c{j}" for j in range(k)))
+    response = np.full((2, k), 1. / k)
+    weights = resolve_likelihood_weights(np.ones(2), n_observations=2,
+                                        contract=WeightContract(semantics="frequency"))
+    plan = family.bind_likelihood(response, weights, COMPLETE_OBSERVATION)
+    for readonly in (False, True):
+        theta = np.full((2, k), 2.)
+        theta.setflags(write=not readonly)
+        for order in (0, 1, 2):
+            assert family.evaluate_natural(response, theta, plan, derivative_order=order).valid.all()
+    eta, direction = np.log(theta), np.full_like(theta, .2)
+    links = [LogLink()] * k
+    family.predictor_curvature_directional_derivative(response, eta, direction, links, plan)
+    family.predictor_curvature_second_directional_derivative(response, eta, direction, direction, links, plan)
+after = {name: tuple(getattr(compiled, name).nopython_signatures) for name in names}
+assert before == after, {name: after[name] for name in names if before[name] != after[name]}
+print("ok")
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=210,
+        env={**os.environ, "NUMBA_CACHE_DIR": str(tmp_path / "dirichlet-core-cache")},
     )
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == "ok"
@@ -737,6 +815,7 @@ warmed = signatures(dispatchers)
 # These core observation routes have Python callers with scalar/readonly
 # operands distinct from the complete-row kernels. Census them after warmup.
 superglm._warmup_scalar_observations()
+superglm._warmup_dirichlet()
 
 
 def readonly(*arrays):
@@ -868,6 +947,17 @@ model = superglm.SuperLSS(
     negative_binomial, negative_binomial.mean(*terms), negative_binomial.theta(), discrete=True
 )
 model.fit_reml(frame, counts)
+
+# Complete compositions use the warmed row and both directional kernels.
+dirichlet = superglm.DirichletLSS(("a", "b", "c"))
+composition = np.array([rng.dirichlet([2., 3., 4.]) for _ in range(120)])
+for discrete in (False, True):
+    model = superglm.SuperLSS(
+        dirichlet,
+        *(dirichlet.alpha(c, s("x", kind="cr", k=5)) for c in dirichlet.components),
+        discrete=discrete,
+    )
+    model.fit_reml(frame.iloc[:120], composition)
 
 # Both declared pilots reuse the warmed generated rows, including their
 # carriers on immutable prepared responses and their bounded windows.

@@ -348,8 +348,8 @@ __getattr__, __dir__ = _attach(__name__, __path__, _LAZY_EXPORTS)
 def _warmup_scalar_observations() -> None:
     """Warm bounded NB/beta and compound-gamma core operands (orders 0–2).
 
-    The window modules for gamma and Tweedie are Python compositions; their
-    compiled incomplete-gamma operand route is reached here. NB's normalized
+    Warm the compiled gamma-window compositions and Tweedie remainder
+    admission as well as their incomplete-gamma operands. NB's normalized
     recurrence and beta fraction are separate from its complete-density route.
     Optional third/fourth derivatives and endpoint fallbacks remain first-use.
     """
@@ -385,6 +385,38 @@ def _warmup_scalar_observations() -> None:
         )
 
 
+def _warmup_dirichlet() -> None:
+    """Warm the complete-composition row and contracted curvature routes."""
+    import numpy as np
+
+    from superglm.distributional.families.dirichlet import DirichletLSS
+    from superglm.distributional.family import COMPLETE_OBSERVATION
+    from superglm.distributional.kernels._dirichlet_numba import _fsum
+    from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
+    from superglm.links import LogLink
+
+    family = DirichletLSS(("a", "b", "c"))
+    response = np.array([[0.2, 0.3, 0.5], [0.6, 0.1, 0.3]])
+    weights = resolve_likelihood_weights(
+        np.ones(2), n_observations=2, contract=WeightContract(semantics="frequency")
+    )
+    plan = family.bind_likelihood(response, weights, COMPLETE_OBSERVATION)
+    alpha = np.array([[0.2, 2.0, 4.0], [20.0, 1.0, 0.7]])
+    for readonly in (False, True):
+        alpha.setflags(write=not readonly)
+        for order in (0, 1, 2):
+            family.evaluate_natural(response, alpha, plan, derivative_order=order)
+    eta, direction = np.log(alpha), np.full_like(alpha, 0.2)
+    links = [LogLink()] * 3
+    family.predictor_curvature_directional_derivative(response, eta, direction, links, plan)
+    family.predictor_curvature_second_directional_derivative(
+        response, eta, direction, direction, links, plan
+    )
+    # Cached batches need no recompilation, but their Python callee dispatcher
+    # can remain empty. Warm the standalone reduction for the import census.
+    _fsum(np.array([1.0, 2.0**-53, 2.0**-100]))
+
+
 def warmup() -> None:
     """Compile superglm's model-fitting kernels ahead of the first fit.
 
@@ -396,9 +428,9 @@ def warmup() -> None:
 
     It compiles the kernels of every family and route, ``RandomEffect`` and
     ``FactorSmooth`` terms included, and the two basis kernels a prediction of
-    8,192 rows or more reads: about a minute on an empty cache, under a second
-    against a filled one. A smaller prediction compiles nothing, so a service
-    of quotes does not need it. Kernels few fits reach compile on first use
+    8,192 rows or more reads. Cost depends on the platform and cache contents.
+    A smaller prediction compiles nothing, so a service of quotes does not need
+    it. Kernels few fits reach compile on first use
     instead and then join the cache: the third and fourth derivatives a
     ``SuperLSS`` fit needs only at a smoothing-parameter endpoint, a fit's
     diagnostics, and a few rarely run fallbacks. Numba keys its cache to the
@@ -444,6 +476,7 @@ def warmup() -> None:
     _warmup_declared_rows()
     _warmup_negative_binomial()
     _warmup_scalar_observations()
+    _warmup_dirichlet()
     _warmup_generalized_gamma()
     _warmup_leaf_kernels()
     _warmup_factor_smooth()

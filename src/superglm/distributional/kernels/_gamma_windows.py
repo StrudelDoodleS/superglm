@@ -42,6 +42,7 @@ from superglm.distributional.kernels._severity_primitives import (
 
 _NODES, _WEIGHTS = np.polynomial.legendre.leggauss(5)
 _U = 2.0**-53
+_CALLEE_DIGEST = "e5808dafa97122ff434d474bac404b304b59fe0ad6b27a3f62cfa1080e2d8d2c"
 
 
 @dataclass
@@ -192,10 +193,9 @@ def _quadrature_mix_add(state, term, order):
             )
 
 
-# This entry calls shared compiled primitives. Do not disk-cache its machine
-# code: Numba does not invalidate a cached caller when an imported callee
-# changes. The small local arithmetic helpers above can be cached safely.
-@njit(error_model="numpy")
+# The generated callee digest invalidates this module's code cache when a
+# shared primitive changes; Numba alone does not track imported callees.
+@njit(cache=True, error_model="numpy")
 def _quadrature_core(lower, upper, shape, log_scale, order):
     width = math.log1p((upper - lower) / lower)
     log_left = math.log(lower) - log_scale

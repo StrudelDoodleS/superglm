@@ -5,8 +5,10 @@ uses them, and Numba keeps the compiled code in an on-disk cache. On a laptop
 that compile happens once. On a cluster that starts from a clean disk every
 time, such as a Databricks job cluster, every new cluster compiles again.
 
-Measured on one machine (AMD EPYC 9645, Python 3.13, Numba 0.68), with a
-first Tweedie `fit_reml` and `summary` on 20,000 rows:
+The following historical measurements predate the bounded-response and
+Dirichlet kernels. They describe one machine (AMD EPYC 9645, Python 3.13,
+Numba 0.68), with a first Tweedie `fit_reml` and `summary` on 20,000 rows;
+they do not measure the current all-family warmup:
 
 | | Empty cache | Cache from an earlier cluster |
 |---|---|---|
@@ -103,10 +105,11 @@ find "$SUPERGLM_DIR" -name '*.py' -exec touch -d '2000-01-01 00:00:00' {} +
 Set the same `NUMBA_CACHE_DIR` in the cluster's environment variables, so
 notebooks and jobs read the cache the script filled.
 
-`warmup()` compiles the kernels of every family and route: about
-52 seconds on an empty cache, once per superglm version and node type, and
-about 0.6 seconds against a filled cache. Numba keys its cache
-to the CPU model, so a cache built on one node type compiles again on
+`warmup()` covers every family's core fitting route, including bounded scalar
+responses and complete Dirichlet compositions. Startup cost depends on the
+platform and cache contents. The generated primitive digests invalidate cached
+Dirichlet and gamma-window code when an imported numerical primitive changes.
+Numba keys its cache to the CPU model, so a cache built on one node type compiles again on
 another; the entries for both are kept side by side. After `warmup()`, the
 first fits we measured compiled nothing: every family and link, `SuperGLM`
 and `SuperLSS`, exact and binned, and with `RandomEffect` and `FactorSmooth`
