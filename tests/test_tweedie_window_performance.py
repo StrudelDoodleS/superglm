@@ -4,8 +4,31 @@ import sys
 from collections import Counter
 
 import numpy as np
+import pytest
 
 from superglm.distributional.kernels._tweedie_windows import tweedie_window_jets
+
+
+def _python_work(path, name):
+    path = path.replace("\\", "/")
+    if path.endswith("/_tweedie_windows.py") and name in ("_up", "_add", "_mul"):
+        return "bound"
+    if path.endswith("/_response_tails.py") and name in ("log_window_jets", "log_mixture_jets"):
+        return "gamma_composition"
+    return None
+
+
+@pytest.mark.parametrize("root", ["/tmp/superglm/", "C:\\superglm\\"])
+@pytest.mark.parametrize(
+    "filename,name,want",
+    [
+        ("_tweedie_windows.py", "_up", "bound"),
+        ("_response_tails.py", "log_window_jets", "gamma_composition"),
+        ("unrelated.py", "_up", None),
+    ],
+)
+def test_work_guard_recognizes_native_profile_paths(root, filename, name, want):
+    assert _python_work(root + filename, name) == want
 
 
 def test_window_bounds_and_gamma_composition_avoid_scalar_python_arithmetic():
@@ -21,13 +44,9 @@ def test_window_bounds_and_gamma_composition_avoid_scalar_python_arithmetic():
     def observe(frame, event, arg):
         if event == "call":
             path, name = frame.f_code.co_filename, frame.f_code.co_name
-            if path.endswith("/_tweedie_windows.py") and name in ("_up", "_add", "_mul"):
-                calls["bound"] += 1
-            if path.endswith("/_response_tails.py") and name in (
-                "log_window_jets",
-                "log_mixture_jets",
-            ):
-                calls["gamma_composition"] += 1
+            kind = _python_work(path, name)
+            if kind is not None:
+                calls[kind] += 1
 
     previous = sys.getprofile()
     try:

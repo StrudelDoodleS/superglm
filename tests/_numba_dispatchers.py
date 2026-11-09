@@ -18,8 +18,9 @@ import pkgutil
 from pathlib import Path
 
 # numba's public ways to make compiled code.  Only ``njit`` and ``jit`` make the
-# dispatchers this census classifies; a superglm module using any other fails it
-# until the census learns to classify that kind.
+# dispatchers this census classifies. Typed helper registrations are checked at
+# their definition site but have no dispatcher of their own. Other kinds fail
+# until the census learns to classify them.
 ENTRY_POINTS = frozenset(
     {
         "njit",
@@ -37,6 +38,7 @@ ENTRY_POINTS = frozenset(
     }
 )
 DISPATCHER_ENTRY_POINTS = frozenset({"njit", "jit"})
+TYPED_HELPER_ENTRY_POINTS = frozenset({"overload", "register_jitable"})
 
 
 def _numba_bindings(tree: ast.Module) -> tuple[dict[str, str], set[str]]:
@@ -84,7 +86,8 @@ def entry_point_sites(package_dir: Path, package: str = "superglm"):
     """``(sites, problems)`` read from the package's source.
 
     ``sites`` maps ``(module, attribute)`` to the entry point that binds a
-    dispatcher there.  ``problems`` names every other use of an entry point.
+    dispatcher there. Module-level typed helper registrations are recognized
+    separately. ``problems`` names every unsupported or nested use.
     """
     sites: dict[tuple[str, str], str] = {}
     problems: list[str] = []
@@ -101,7 +104,8 @@ def entry_point_sites(package_dir: Path, package: str = "superglm"):
             kind = _reference(reference, entry_points, modules)
             if kind is None:
                 return False
-            sites[(module, name)] = kind
+            if kind not in TYPED_HELPER_ENTRY_POINTS:
+                sites[(module, name)] = kind
             claimed.add(id(reference))
             return True
 

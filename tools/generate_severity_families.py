@@ -926,6 +926,8 @@ _CALLEE_LINE = re.compile(r'^_CALLEE_DIGEST = "[^"]*"$', re.MULTILINE)
 # Kernel modules outside ``_declared`` that call compiled functions of another
 # file: each carries the digest of those it imports, so editing one recompiles it.
 PRIMITIVE_CALLERS = (
+    "_dirichlet_numba",
+    "_gamma_windows",
     "_incomplete_gamma",
     "_incomplete_beta",
     "_negative_binomial_windows",
