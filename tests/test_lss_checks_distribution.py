@@ -244,6 +244,9 @@ def test_atom_distribution_checks_use_aligned_occurrences(frequency_case, monkey
         layout=fitted.layout,
         predict_eta=fitted.predict_eta,
         predict_parameters=fitted.predict_parameters,
+        prediction_coefficients=fitted.prediction_coefficients,
+        _predict_eta_resolved=fitted._predict_eta_resolved,
+        parameters_from_eta=fitted.parameters_from_eta,
     )
     X = X.iloc[:2]
     offsets = {"location": np.array([0.1, 0.2])}

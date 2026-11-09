@@ -44,7 +44,8 @@ LSS_FIELDS = {
 def _parameter_at(case, session, term, parameter):
     frame = pd.concat([session.model.reference_row()] * len(term["x"]), ignore_index=True)
     frame["age"] = term["x"]
-    return case.model.predict_parameters(frame)[parameter].to_numpy()
+    offsets = None if case.offsets is None else dict.fromkeys(case.offsets, np.zeros(len(frame)))
+    return case.model.predict_parameters(frame, offsets=offsets)[parameter].to_numpy()
 
 
 def test_spread_curve_is_shown_as_coefficient_of_variation():

@@ -11,6 +11,7 @@ from unittest.mock import create_autospec
 
 import numpy as np
 import pandas as pd
+import pytest
 from sklearn.compose import ColumnTransformer
 from sklearn.model_selection import KFold
 
@@ -58,10 +59,19 @@ class _PythonBlock:
 # the editor tutorial. A MyST notebook page in those directories keeps its code
 # in ``{code-cell}`` fences, which this harness does not see; those pages are
 # executed by ``tests/docs/test_notebooks.py`` instead. A page whose Python
-# blocks cannot run as published is listed in ``_EXEMPT_PAGES`` with the reason,
+# blocks need another execution context is listed in ``_EXEMPT_PAGES`` with the reason,
 # so each gap is one visible line here rather than a silent omission when a new
 # page lands.
 _EXEMPT_PAGES: dict[str, str] = {
+    "docs/how-to/specify-distributional-offsets.md": (
+        "requires fitted LSS predictors and supplied exposure data; executed with real APIs "
+        "in test_distributional_offset_guide_executes_with_supplied_rows"
+    ),
+    "docs/how-to/fit-a-dirichlet-distributional-model.md": (
+        "ordered vector-response workflow executed with real fitting/scoring/posterior APIs "
+        "in test_dirichlet_guide_executes_as_an_actual_ordered_workflow; generic doubles "
+        "only support independent scalar blocks"
+    ),
     "docs/how-to/fit-a-distributional-model.md": (
         "documents SuperLSS; this harness doubles SuperGLM fitting only, so blocks "
         "that call SuperLSS methods cannot execute here"
@@ -540,6 +550,75 @@ def test_all_published_guide_python_blocks_execute(
         exercised.append(block.filename)
 
     assert exercised == [block.filename for block in published]
+
+
+@pytest.mark.slow
+def test_dirichlet_guide_executes_as_an_actual_ordered_workflow():
+    from scipy.stats import dirichlet
+
+    path = _ROOT / "docs/how-to/fit-a-dirichlet-distributional-model.md"
+    blocks = _python_blocks(path)
+    assert len(blocks) >= 7
+    namespace = {"__name__": "__main__"}
+    for index, block in enumerate(blocks, 1):
+        exec(compile(block, f"{path}#python-{index}", "exec"), namespace)
+    mean = namespace["mean_shares"].to_numpy()
+    alpha = namespace["parameters"].to_numpy()
+    np.testing.assert_allclose(mean, alpha / alpha.sum(axis=1, keepdims=True), rtol=2e-14)
+    model, X, shares = (namespace[key] for key in ("model", "X", "shares"))
+    current_alpha = model.predict_parameters(X).to_numpy()
+    expected_log = -np.array(
+        [dirichlet.logpdf(y, a) for y, a in zip(shares.to_numpy(), current_alpha, strict=True)]
+    )
+    np.testing.assert_allclose(namespace["scores"].log, expected_log, rtol=2e-11, atol=2e-11)
+    pd.testing.assert_frame_equal(
+        namespace["predicted"],
+        namespace["offset_model"].predict(
+            namespace["new_X"],
+            offsets={
+                "alpha_1": namespace["new_a"] + namespace["new_b"],
+                "alpha_2": namespace["new_c"],
+            },
+        ),
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.pins_behaviour
+def test_distributional_offset_guide_executes_with_supplied_rows():
+    """Keep actual guide coverage when excluding it from the scalar fit doubles."""
+    rng = np.random.default_rng(129)
+    age = np.linspace(18, 80, 100)
+    exposure = rng.uniform(0.25, 1.0, len(age))
+    adjustment = 0.1 * np.sin(age / 10)
+    mean = exposure * np.exp(1.2 + 0.01 * age + adjustment)
+    claim_count = rng.negative_binomial(3.0, 3.0 / (3.0 + mean))
+    train = pd.DataFrame({"age": age, "log_exposure": np.log(exposure), "adjustment": adjustment})
+    new_rows = train.iloc[::7].copy()
+    new_exposure = np.linspace(0.3, 0.9, len(new_rows))
+    new_adjustment = 0.05 * np.cos(new_rows.age.to_numpy())
+    new_rows["log_exposure"] = np.log(new_exposure)
+    new_rows["adjustment"] = new_adjustment
+    namespace = dict(
+        train=train,
+        claim_count=claim_count,
+        exposure=exposure,
+        adjustment=adjustment,
+        new_rows=new_rows,
+        new_exposure=new_exposure,
+        new_adjustment=new_adjustment,
+    )
+    path = _ROOT / "docs/how-to/specify-distributional-offsets.md"
+    for index, block in enumerate(_python_blocks(path), 1):
+        exec(compile(block, f"{path}#python-{index}", "exec"), namespace)
+    coef = namespace["model"].coef_
+    expected = np.exp(
+        coef["mean:(intercept)"]
+        + coef["mean:age"] * new_rows.age.to_numpy()
+        + np.log(new_exposure)
+        + new_adjustment
+    )
+    np.testing.assert_allclose(namespace["prediction"], expected, rtol=2e-13)
 
 
 def test_native_fit_and_profile_examples_configure_features_explicitly() -> None:

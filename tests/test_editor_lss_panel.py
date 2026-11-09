@@ -306,16 +306,45 @@ def test_counts_use_one_year_and_are_empty_until_pr3():
     assert np.max(np.abs(fitted[:, 0] - half_year.to_numpy()[:, 0])) > 0.5
 
 
-def _count_predict_link(monkeypatch):
-    """The row count of each ``SuperLSS.predict_link`` call made from now on."""
+@pytest.mark.parametrize("source", ["columns", "arrays"])
+def test_panel_neutral_offsets_preserve_swept_feature_values(source):
+    from types import SimpleNamespace
+
+    from superglm.editor.lss.panel import _eta
+
+    rng = np.random.default_rng(91)
+    X = pd.DataFrame({"x": np.linspace(-1, 1, 80)})
+    mean = np.exp(2 + 0.3 * X.x)
+    scale = 0.4 * np.exp(X.x)
+    y = rng.gamma(shape=1 / scale**2, scale=mean * scale**2)
+    family = GammaLS()
+    offset = "x" if source == "columns" else X.x.to_numpy()
+    model = SuperLSS(family, family.mean("x", offset=offset), family.scale(offset=offset)).fit(X, y)
+    view = SimpleNamespace(reference_row=lambda: pd.DataFrame({"x": [0.4]}))
+    values = [-0.9, 0.2, 0.8]
+    actual = _eta(model, view, "x", values)
+    coef = model.coef_
+    expected = np.column_stack(
+        [
+            coef["mean:(intercept)"] + coef["mean:x"] * np.array(values),
+            np.full(len(values), coef["scale:(intercept)"]),
+        ]
+    )
+    np.testing.assert_allclose(actual, expected, rtol=2e-13, atol=2e-13)
+
+
+def _count_link_predictions(monkeypatch):
+    """Count actual link-design evaluations, including the neutral panel route."""
+    from superglm.distributional.model import DenseDistributionalModel
+
     calls = []
-    predict_link = SuperLSS.predict_link
+    predict_link = DenseDistributionalModel._predict_eta_resolved
 
-    def spy(self, X, **kwargs):
+    def spy(self, coefficients, X, offsets):
         calls.append(len(X))
-        return predict_link(self, X, **kwargs)
+        return predict_link(self, coefficients, X, offsets)
 
-    monkeypatch.setattr(SuperLSS, "predict_link", spy)
+    monkeypatch.setattr(DenseDistributionalModel, "_predict_eta_resolved", spy)
     return calls
 
 
@@ -323,7 +352,7 @@ def test_panel_makes_two_prediction_calls(monkeypatch):
     session = open_case(lognormal_case())
     _shift(session, "scale:age", 0.3)
     edited = _edited(session)
-    calls = _count_predict_link(monkeypatch)
+    calls = _count_link_predictions(monkeypatch)
 
     distribution_panel_payload(session, "age", edited=edited)
     assert calls == [8 + 96, 8 + 96]
@@ -334,7 +363,7 @@ def test_panel_makes_two_prediction_calls(monkeypatch):
 
 def test_panel_predicts_once_when_nothing_is_edited(monkeypatch):
     session = open_case(lognormal_case())
-    calls = _count_predict_link(monkeypatch)
+    calls = _count_link_predictions(monkeypatch)
     distribution_panel_payload(session, "age", edited=session.model.lss)
     assert calls == [8 + 96]
 
