@@ -251,7 +251,7 @@ def evaluate_dirichlet_rows(response, theta, multiplier, *, derivative_order=2, 
                 value *= mass[i]
                 if not math.isfinite(value):
                     raise ValueError("nonrepresentable normalized log likelihood")
-                if order:
+                if score is not None:
                     natural_s = (scaled_s / a) * mass[i]
                     target = scaled_s * mass[i]
                     reconstructed = natural_s * a
@@ -259,7 +259,7 @@ def evaluate_dirichlet_rows(response, theta, multiplier, *, derivative_order=2, 
                         np.abs(reconstructed - target) > 128 * _U * np.abs(target)
                     ):
                         raise ValueError("nonrepresentable natural score / scaled log-link score")
-                if order == 2:
+                if hessian is not None:
                     natural_h = np.array(
                         [
                             _scaled_product(scaled_h[j, column], mass[i], 1 / a[j], 1 / a[column])
@@ -280,9 +280,9 @@ def evaluate_dirichlet_rows(response, theta, multiplier, *, derivative_order=2, 
                             "nonrepresentable natural Hessian / scaled log-link curvature"
                         )
                 values[i] = value
-                if order:
+                if score is not None:
                     score[i] = natural_s
-                if order == 2:
+                if hessian is not None:
                     hessian[i] = natural_h
             valid[i] = True
             failures.append(None)

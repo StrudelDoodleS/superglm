@@ -140,6 +140,14 @@ nitpick_ignore_regex = [
     ("py:class", r"_(CoefRow|BasisDetailRow)"),
     # Display helper for summary levels; not exported, so no page.
     ("py:class", r"SummaryLevelDisplay"),
+    # Private declared-family bases shown by inheritance on LomaxLSS and
+    # LogLogisticLSS. These implementation classes have no reference pages.
+    (
+        "py:class",
+        r"superglm\.distributional\.families\._declared\.Declared"
+        r"(ScalarFamily|DistributionMixin|PredictionMixin|InformationMixin"
+        r"|ShortfallMixin|WindowMixin|DirectionsMixin)",
+    ),
     # NumPy scalar types and the private array-like alias: numpy's inventory
     # carries no page for them, so an annotation can never bind.
     ("py:class", r"numpy\.(float64|int64)"),
