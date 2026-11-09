@@ -20,6 +20,7 @@ import math
 from dataclasses import dataclass, field
 
 import numpy as np
+from numba import njit
 from scipy import special
 
 from superglm.distributional.kernels._gamma_windows import (
@@ -43,6 +44,8 @@ _PAIRS = ((0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2))
 _MAX_POISSON_INDEX = 20_000
 _PROBABILITY_TARGET = 1e-12
 _DERIVATIVE_TARGET = 1e-10
+_ZERO_SCORE = np.zeros(3)
+_ZERO_HESSIAN = np.zeros(6)
 
 
 @dataclass
@@ -74,18 +77,22 @@ def _initial_range(rate):
     return first, last
 
 
+@njit(cache=True, error_model="numpy")
 def _up(x):
     return np.nextafter(x, np.inf)
 
 
+@njit(cache=True, error_model="numpy")
 def _add(x, y):
     return _up(x + y)
 
 
+@njit(cache=True, error_model="numpy")
 def _mul(x, y):
     return _up(x * y)
 
 
+@njit(cache=True, error_model="numpy")
 def _log_tail(rate, k, upper):
     """Chernoff upper bound on P(N>=k) or P(N<=k), including rounding.
 
@@ -107,6 +114,7 @@ def _log_tail(rate, k, upper):
     return min(0.0, _up(value + _up(allowance)))
 
 
+@njit(cache=True, error_model="numpy")
 def _log_omitted_moments(rate, first, last):
     logs = []
     for degree in range(3):
@@ -118,13 +126,13 @@ def _log_omitted_moments(rate, first, last):
     return np.asarray(logs)
 
 
+@njit(cache=True, error_model="numpy")
 def _relative_remainder(rate, a, first, last, log_probability):
     """M0, |D P|, |D2 P| divided by the retained probability, in (L,a,B)."""
     moments = _log_omitted_moments(rate, first, last)
     # All further sums/products are positive and rounded outward, one
     # nextafter per operation. Underflows round UP to a positive subnormal.
-    with np.errstate(over="ignore", under="ignore"):
-        m0, m1, m2 = _up(np.exp(_up(moments - log_probability)))
+    m0, m1, m2 = _up(np.exp(_up(moments - log_probability)))
     vl = _add(_add(m2, _mul(2 * rate, m1)), _mul(_mul(rate, rate), m0))
     va = _add(_up(m1 / a), _up(_up(m0 / a) / a))
     vb = _mul(a, m1)
@@ -132,12 +140,9 @@ def _relative_remainder(rate, a, first, last, log_probability):
     # sqrt(m0)*sqrt(V), instead of sqrt(m0*V), avoids premature underflow.
     first_bound = _mul(_up(np.sqrt(m0)), _up(np.sqrt(variance)))
     h = np.array([_mul(rate, m0), 0, 0, va, m1, vb])
-    second = np.array(
-        [
-            _add(h[c], _mul(_up(np.sqrt(variance[i])), _up(np.sqrt(variance[j]))))
-            for c, (i, j) in enumerate(_PAIRS)
-        ]
-    )
+    second = np.empty(6)
+    for c, (i, j) in enumerate(_PAIRS):
+        second[c] = _add(h[c], _mul(_up(np.sqrt(variance[i])), _up(np.sqrt(variance[j]))))
     return m0, first_bound, second
 
 
@@ -181,8 +186,33 @@ def _compose(jet, theta, order):
 
 
 def _admitted(jet, row, rate, a, first, last, jac, second, order):
-    value = jet[0][row]
-    if not np.isfinite(value) or any(not np.isfinite(c[row]).all() for c in jet[1:]):
+    return _admitted_core(
+        jet[0][row],
+        jet[1][row] if order else _ZERO_SCORE,
+        jet[2][row] if order == 2 else _ZERO_HESSIAN,
+        rate,
+        a,
+        first,
+        last,
+        jac,
+        second,
+        order,
+    )
+
+
+@njit(cache=True, error_model="numpy")
+def _admitted_core(value, g, h, rate, a, first, last, jac, second, order):
+    """The same outward-rounded bound, without per-operation Python dispatch.
+
+    Strict IEEE arithmetic (no fastmath) retains every nextafter, including
+    the positive subnormal on underflow. Only constant-sized row work lives
+    here; the enclosing tile still owns expansion and the aggregate budget.
+    """
+    if not np.isfinite(value):
+        return False
+    if order and not np.isfinite(g).all():
+        return False
+    if order == 2 and not np.isfinite(h).all():
         return False
     mass, d1, d2 = _relative_remainder(rate, a, first, last, value)
     # Reserve most of the derivative budget for the measured gamma/composition
@@ -191,7 +221,6 @@ def _admitted(jet, row, rate, a, first, last, jac, second, order):
         return False
     if order == 0:
         return True
-    g = jet[1][row]
     eg = _add(d1, _mul(mass, np.abs(g)))
     mapped_g = np.abs(jac).T @ eg
     scale_g = np.maximum(1.0, np.abs(g @ jac))
@@ -199,7 +228,6 @@ def _admitted(jet, row, rate, a, first, last, jac, second, order):
         return False
     if order == 1:
         return True
-    h = jet[2][row]
     eh = np.empty((3, 3))
     hh = np.empty((3, 3))
     for c, (i, j) in enumerate(_PAIRS):
@@ -209,14 +237,18 @@ def _admitted(jet, row, rate, a, first, last, jac, second, order):
         bound = _add(bound, _mul(eg[i], eg[j]))
         eh[i, j] = eh[j, i] = bound
         hh[i, j] = hh[j, i] = h[c]
-    # Three terms in each dot: gamma_16 inflation covers both products,
+    # Three terms in each dot: gamma_32 inflation covers both products,
     # reductions and the following additions. Inputs are nonnegative.
     inflation = 1 / (1 - 32 * _U)
     mapped_h = np.abs(jac).T @ eh @ np.abs(jac)
     reference_h = jac.T @ hh @ jac
     for c, (i, j) in enumerate(_PAIRS):
-        error = (mapped_h[i, j] + eg @ np.abs(second[:, c])) * inflation
-        scale = max(1.0, abs(reference_h[i, j] + g @ second[:, c]))
+        error_second, reference_second = 0.0, 0.0
+        for k in range(3):
+            error_second += eg[k] * abs(second[k, c])
+            reference_second += g[k] * second[k, c]
+        error = (mapped_h[i, j] + error_second) * inflation
+        scale = max(1.0, abs(reference_h[i, j] + reference_second))
         if not error <= _DERIVATIVE_TARGET / 8 * scale:
             return False
     return True

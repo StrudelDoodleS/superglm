@@ -137,6 +137,8 @@ def test_gamma_engine_scaled_partials_and_fixed_ratio_composition(shape, x, uppe
         (1.0, 1.0 + 1e-7, 2.3, -0.4),
         (0.0, 12.0, 10.0, 0.0),
         (80.0, 90.0, 80.0, 0.0),
+        (1e-5, 1e-4, 0.001, 0.0),  # close tails: subdivided positive quadrature
+        (0.1, 0.10000001, 0.003, -0.2),
     ],
 )
 def test_gamma_shape_scale_windows_match_independent_jet(lower, upper, shape, log_scale):
@@ -150,14 +152,74 @@ def test_gamma_shape_scale_windows_match_independent_jet(lower, upper, shape, lo
 
 def test_rare_window_grows_past_absolute_cdf_cutoff():
     """Kills reuse of the absolute 1e-12 CDF stopping rule for log windows."""
-    from superglm.distributional.kernels._tweedie_windows import tweedie_window_jets
+    from superglm.distributional.kernels._tweedie_windows import (
+        TweedieWindowWorkspace,
+        tweedie_window_jets,
+    )
 
     theta = (1.0, 2.0, 1.5)  # rate=1, gamma shape=j and scale=1
     expected = log_jet(lambda *t: window(120.0, 120.1, *t), theta)
-    assert expected[0][0] < np.log(1e-30)
-    got = tweedie_window_jets([120.0], [120.1], [theta], [1.0], order=2)
+    np.testing.assert_allclose(expected[0][0], -106.3127334849093833, rtol=0, atol=2e-13)
+    work = TweedieWindowWorkspace()
+    got = tweedie_window_jets([120.0], [120.1], [theta], [1.0], order=2, _workspace=work)
+    assert work.largest_index > work.initial_largest_index
     for actual, reference in zip(got, expected, strict=True):
         np.testing.assert_allclose(actual, reference, rtol=3e-10, atol=3e-10)
+
+
+def test_rare_row_admission_is_independent_of_other_rows_and_tiles(monkeypatch):
+    from superglm.distributional.kernels import _tweedie_windows as engine
+
+    theta = np.tile([1.0, 2.0, 1.5], (129, 1))
+    lo, hi = np.zeros(129), np.ones(129)
+    lo[127:], hi[127:] = 120.0, 120.1
+    expected = log_jet(lambda *t: window(120.0, 120.1, *t), theta[-1])
+    work = engine.TweedieWindowWorkspace()
+    got = engine.tweedie_window_jets(lo, hi, theta, np.ones(129), order=2, _workspace=work)
+    for actual, reference in zip(got, expected, strict=True):
+        np.testing.assert_allclose(
+            actual[127:], np.repeat(reference, 2, axis=0), rtol=3e-10, atol=3e-10
+        )
+    ordinary = engine.tweedie_window_jets([0.0], [1.0], theta[:1], [1.0], order=2)
+    for actual, reference in zip(got, ordinary, strict=True):
+        np.testing.assert_allclose(
+            actual[:127], np.repeat(reference, 127, axis=0), rtol=2e-13, atol=2e-13
+        )
+    # Force the rare row to exhaust its index cap, independent of optimizer
+    # trajectories. Other rows must keep their own admitted finite answers.
+    monkeypatch.setattr(engine, "_MAX_POISSON_INDEX", 32)
+    limited = engine.TweedieWindowWorkspace()
+    refused = engine.tweedie_window_jets(lo, hi, theta, np.ones(129), order=2, _workspace=limited)
+    for actual, reference in zip(refused, got, strict=True):
+        assert np.isnan(actual[127:]).all()
+        np.testing.assert_allclose(actual[:127], reference[:127], rtol=2e-13, atol=2e-13)
+    assert "budget" in limited.refusal_reason
+
+
+def test_outward_remainders_stay_positive_after_exponential_underflow():
+    from superglm.distributional.kernels._tweedie_windows import _relative_remainder
+
+    # The Poisson tail is positive but much smaller than binary64's range.
+    # A native arithmetic port must not turn this into a zero remainder.
+    mass, first, second = _relative_remainder(1.0, 1.0, 1, 500, -100.0)
+    assert 0.0 < mass < np.finfo(float).tiny
+    assert np.all(first > 0.0) and np.all(np.isfinite(first))
+    assert np.all(second > 0.0) and np.all(np.isfinite(second))
+
+
+def test_gamma_quadrature_keeps_aggregate_budget_on_subdivided_windows():
+    from superglm.distributional.kernels._gamma_windows import (
+        GammaWindowWorkspace,
+        gamma_shape_scale_window_jets,
+    )
+
+    # Small shape makes both lower tails close to one. The retained fallback
+    # needs many panels; this budget permits only two five-node panels.
+    work = GammaWindowWorkspace(max_evaluations=2)
+    got = gamma_shape_scale_window_jets([1e-5], [1e-4], [0.001], [0.0], order=2, _workspace=work)
+    assert all(np.isnan(channel).all() for channel in got)
+    assert work.evaluations == 2 and work.quadrature_nodes == 10
+    assert work.refusal_reason == "aggregate gamma quadrature work budget"
 
 
 @pytest.mark.parametrize("semantics", ["prior", "frequency"])
