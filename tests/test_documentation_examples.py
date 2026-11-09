@@ -420,6 +420,8 @@ def _install_execution_doubles(monkeypatch) -> dict[str, object]:
         superglm.validation.double_lift_chart,
         return_value=results["double_lift"],
     )
+    monkeypatch.setattr(superglm, "lorenz_curve", lorenz_curve)
+    monkeypatch.setattr(superglm, "double_lift_chart", double_lift_chart)
     monkeypatch.setattr(superglm.validation, "lorenz_curve", lorenz_curve)
     monkeypatch.setattr(superglm.validation, "double_lift_chart", double_lift_chart)
 

@@ -762,13 +762,28 @@ class Categorical:
             _warn_unseen_routed(x, codes)
         return codes
 
+    def _non_base_indices(self) -> NDArray[np.intp]:
+        """The emitted columns' universe indices, without repeated level scans."""
+        position = {level: code for code, level in enumerate(self._levels)}
+        return np.fromiter(
+            (position[level] for level in self._non_base),
+            dtype=np.intp,
+            count=len(self._non_base),
+        )
+
     def transform(self, x: NDArray) -> NDArray:
         """One-hot encode using levels learned during build()."""
         x = self._resolve_predict_labels(x)
         codes = self._predict_codes(x)
-        return np.column_stack(
-            [(codes == self._levels.index(lev)).astype(np.float64) for lev in self._non_base]
-        )
+        # Base, pinned and unseen levels have no column. The trailing slot
+        # maps the unseen code -1 to the same sink without wrapping onto a level.
+        slot = np.full(len(self._levels) + 1, -1, dtype=np.intp)
+        slot[self._non_base_indices()] = np.arange(len(self._non_base))
+        columns = slot[codes]
+        hit = np.flatnonzero(columns >= 0)
+        out = np.zeros((len(codes), len(self._non_base)), dtype=np.float64)
+        out[hit, columns[hit]] = 1.0
+        return out
 
     def score(self, x: NDArray, beta: NDArray[np.floating]) -> NDArray[np.floating]:
         """Score the fitted categorical contribution directly on new data."""
@@ -779,8 +794,7 @@ class Categorical:
         # there: a bare `level_effects[codes]` would wrap -1 onto the LAST
         # level's effect, which is a wrong prediction rather than a base one.
         level_effects = np.zeros(len(self._levels) + 1, dtype=np.float64)
-        for i, lev in enumerate(self._non_base):
-            level_effects[self._levels.index(lev)] = float(beta[i])
+        level_effects[self._non_base_indices()] = np.asarray(beta)[np.arange(len(self._non_base))]
         return level_effects[np.where(codes >= 0, codes, len(self._levels))]
 
     def reconstruct(self, beta: NDArray[np.floating]) -> dict[str, Any]:

@@ -104,6 +104,13 @@ def _categorical_predict_labels(
         _warn_unseen_routed(x, codes)
     # Equality-mask consumers need the fitted label objects, including when
     # the lookup accepts another spelling (for example a datetime string).
+    # Keep numeric masks vectorized when conversion preserves every level.
+    # Mixed string/numeric universes must not be coerced to strings, and a
+    # mixed numeric universe may contain an integer a float cannot represent.
+    levels = np.asarray(universe)
+    if levels.dtype.kind in "biuf" and np.all(codes >= 0):
+        if all(level == converted for level, converted in zip(universe, levels.tolist())):
+            return levels[codes]
     # The final NaN slot is the unmatched marker for code -1 on the base route.
     return np.asarray([*universe, np.nan], dtype=object)[codes]
 

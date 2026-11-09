@@ -15,6 +15,47 @@ def _build(spec, x, w=None):
     return spec.build(np.asarray(x, dtype=object), sample_weight=w)
 
 
+@pytest.mark.parametrize("operation", ["score", "transform"])
+@pytest.mark.parametrize("n_levels", [64, 256])
+def test_categorical_prediction_level_comparisons_grow_linearly(operation, n_levels):
+    """Repeated linear searches of the universe make a one-row quote quadratic."""
+
+    class Level:
+        comparisons = 0
+
+        def __init__(self, value):
+            self.value = value
+
+        def __hash__(self):
+            return hash(self.value)
+
+        def __eq__(self, other):
+            Level.comparisons += 1
+            return isinstance(other, Level) and self.value == other.value
+
+        def __lt__(self, other):
+            return self.value < other.value
+
+    levels = [Level(i) for i in range(n_levels)]
+    spec = Categorical(base="first", levels=levels)
+    spec.build(np.asarray(levels, dtype=object))
+    quote = np.asarray([levels[-1]], dtype=object)
+
+    Level.comparisons = 0
+    if operation == "score":
+        actual = spec.score(quote, np.full(n_levels - 1, 0.75))
+        np.testing.assert_array_equal(actual, [0.75])
+    else:
+        actual = spec.transform(quote)
+        expected = np.zeros((1, n_levels - 1))
+        expected[0, -1] = 1.0
+        np.testing.assert_array_equal(actual, expected)
+
+    # Hashing and one Index lookup may compare a level a few times, but no
+    # prediction should rescan the entire universe for every coefficient.
+    assert Level.comparisons <= 8 * n_levels
+
+
 @pytest.mark.parametrize("boolean_levels", [False, True])
 @pytest.mark.parametrize("operation", ["score", "transform"])
 def test_bool_numeric_lookalikes_are_refused_by_the_error_policy(boolean_levels, operation):
