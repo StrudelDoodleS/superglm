@@ -62,6 +62,12 @@ one-sided or two-sided truncation, and their combination. Each evaluates the
 normalized likelihood, score and every Hessian cross term (orders 0–2).
 This does not add general interval censoring.
 
+Scalar responses are paired with input rows by position, including pandas
+Series with different index labels. Supply real numeric responses; boolean
+and complex values are refused. Encode indicators explicitly as numeric
+zero/one values when that is their intended meaning. Labeled Dirichlet
+responses additionally require matching row indices and component identities.
+
 | Scalar family | Nonunit prior row law | CDF and quantile | Bounded analytic curvature directions |
 | --- | --- | --- | --- |
 | `GaussianLS` | Variance divided by weight | yes | built-in links |
@@ -103,6 +109,10 @@ unresolved public window query raises a numerical-range/convergence error.
 Neither substitutes a tiny probability or interprets work exhaustion as a
 zero-probability event. Two-piece curvature remains non-smooth at the join;
 censoring does not grant unrestricted third/fourth derivatives.
+
+Public log scoring requires a resolved likelihood evaluation. Numerical
+failures raise with original input-row positions. Binding rejects structurally
+impossible observed or conditioning windows.
 
 See [observation guidance](../../how-to/fit-a-distributional-model.md#truncated-and-censored-rows)
 and [diagnostic limits](../../how-to/check-a-distributional-fit.md#truncated-and-censored-rows).

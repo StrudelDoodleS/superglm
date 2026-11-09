@@ -78,9 +78,10 @@ def unvalidated_response(
 ) -> NDArray:
     """Check original row-first shape/labels without coercing response values.
 
-    Labeled vector columns are reordered by identity. Pandas row indices must
-    match the input index positionally, including duplicate labels. Index-less
-    frames and arrays remain positional. Mixed columns and Python sequences
+    Labeled vector columns are reordered by identity, and their pandas row
+    indices must match the input index positionally, including duplicate
+    labels. Scalar responses, index-less frames and arrays remain positional.
+    Mixed columns and Python sequences
     retain individual value types so selection cannot hide a bool, complex
     number, string, or inexact integer behind an earlier numeric promotion.
     """
@@ -88,7 +89,7 @@ def unvalidated_response(
     if isinstance(n_rows, bool) or not isinstance(n_rows, int | np.integer) or n_rows < 1:
         raise ValueError("response shape requires a positive row count")
     index = getattr(y, "index", None)
-    if input_index is not None and isinstance(index, pd.Index):
+    if spec.shape and input_index is not None and isinstance(index, pd.Index):
         if not index.equals(pd.Index(input_index)):
             raise ValueError("response index must match the input index positionally")
     columns = getattr(y, "columns", None)

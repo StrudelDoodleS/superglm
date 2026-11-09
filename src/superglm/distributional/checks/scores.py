@@ -685,17 +685,13 @@ def _retained_log_score(fitted: Any, rows: _ScoringRows) -> NDArray[np.float64]:
     )
     evaluation = fitted.family.evaluate_natural(rows.response, theta, plan, derivative_order=0)
     scores = -np.asarray(evaluation.reported_log_likelihood, dtype=np.float64)
-    if rows.bounds is None and evaluation.valid is not None:
+    if evaluation.valid is not None:
         invalid = ~np.asarray(evaluation.valid, dtype=bool)
         if np.any(invalid):
             raise ValueError(
                 "log score needs a finite and representable likelihood evaluation; "
                 f"invalid original rows {rows.positions[invalid].tolist()}"
             )
-    if rows.bounds is not None and evaluation.valid is not None:
-        # A bounded row whose observed window has no mass under the fitted
-        # law is impossible there, not certain: its negative log score is inf.
-        scores = np.where(evaluation.valid, scores, np.inf)
     return scores
 
 

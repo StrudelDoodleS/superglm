@@ -1488,9 +1488,10 @@ def test_zero_probability_rows_are_refused_by_input_row_on_either_branch():
             model.scores(_intercepts(1), np.array([0.0]), which=("log",), **bounds)
 
 
-def test_a_bounded_row_whose_window_has_no_mass_scores_inf(monkeypatch):
+def test_an_unresolved_bounded_window_refuses_its_original_score_row(monkeypatch):
     # No float64 input reaches a massless window here: the row's own density
-    # overflows first.  The event is forced on the window kernel instead.
+    # overflows first. A forced nonfinite window is numerical failure, not
+    # evidence of an impossible observed event.
     from superglm.distributional.families import gaussian as gaussian_family
 
     real = gaussian_family.normal_window_jets
@@ -1501,11 +1502,8 @@ def test_a_bounded_row_whose_window_has_no_mass_scores_inf(monkeypatch):
 
     model, _, _ = _intercept_gaussian()
     monkeypatch.setattr(gaussian_family, "normal_window_jets", massless)
-    table = model.scores(
-        _intercepts(2), np.array([0.0, 3.0]), censored=[False, True], which=("log",)
-    )
-    assert np.isfinite(table["log"].iloc[0])
-    assert table["log"].iloc[1] == np.inf
+    with pytest.raises(ValueError, match=r"invalid original rows \[1\]"):
+        model.scores(_intercepts(2), np.array([0.0, 3.0]), censored=[False, True], which=("log",))
 
 
 def _all_censored_level(n=1_500, seed=567, keep_one=False):
