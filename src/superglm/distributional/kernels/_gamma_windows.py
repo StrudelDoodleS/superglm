@@ -22,6 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
+from numba import njit
 
 from superglm.distributional.kernels._incomplete_gamma import (
     MAX_TERMS,
@@ -31,8 +32,6 @@ from superglm.distributional.kernels._incomplete_gamma import (
 from superglm.distributional.kernels._response_tails import (
     Jet,
     _checked_core_order,
-    log_mixture_jets,
-    log_window_jets,
 )
 from superglm.distributional.kernels._severity_primitives import (
     gdev,
@@ -117,25 +116,125 @@ def _as_jet(flat, order):
     return (flat[:, 0], flat[:, 1:3], flat[:, 3:6])[: order + 1]
 
 
+@njit(cache=True, error_model="numpy")
+def _log_window_core(near, far, order):
+    """Packed two-parameter specialization of the log-tail difference.
+
+    The Python caller retains the same cancellation admission and quadrature
+    fallback. In particular a failed far tail stays NaN, never an absent end.
+    """
+    result = near.copy()
+    delta = far[0] - near[0]
+    kappa = 1.0 / np.expm1(-delta)
+    if far[0] == -np.inf or abs(kappa) == 0.0:
+        return result
+    result[0] += np.log(-np.expm1(delta))
+    if order:
+        d0, d1 = far[1] - near[1], far[2] - near[2]
+        result[1] += -kappa * d0
+        result[2] += -kappa * d1
+        if order == 2:
+            outer = -kappa * (1.0 + kappa)
+            result[3] += -kappa * (far[3] - near[3]) + outer * d0 * d0
+            result[4] += -kappa * (far[4] - near[4]) + outer * d0 * d1
+            result[5] += -kappa * (far[5] - near[5]) + outer * d1 * d1
+    return result
+
+
+@njit(cache=True, error_model="numpy")
+def _quadrature_mix_add(state, term, order):
+    """Two-score centered positive mixture, with the shared accumulator's scaling.
+
+    Ten scalars hold top, mass, anchor, centered mean, packed Hessian and
+    invalidity. Root scaling and promotion retain small weighted derivatives
+    even when a component's mass underflows; no raw score squares are formed.
+    """
+    if term[0] == -np.inf or state[9]:
+        return
+    size = 1 if order == 0 else (3 if order == 1 else 6)
+    for c in range(size):
+        if not np.isfinite(term[c]):
+            state[9] = 1.0
+            return
+    if state[1] == 0.0:
+        state[0], state[1] = term[0], 1.0
+        if order:
+            state[2:4] = term[1:3]
+        if order == 2:
+            state[6:9] = term[3:6]
+        return
+    top = max(state[0], term[0])
+    log_left = np.log(state[1]) + (state[0] - top)
+    log_right = term[0] - top
+    mass = state[1] * np.exp(state[0] - top) + np.exp(log_right)
+    state[0], state[1] = top, mass
+    if order == 0:
+        return
+    log_p, log_q = log_left - np.log(mass), log_right - np.log(mass)
+    root_p, root_q = np.exp(0.5 * log_p), np.exp(0.5 * log_q)
+    delta = np.empty(2)
+    for i in range(2):
+        centered = term[1 + i] - state[2 + i]
+        delta[i] = centered - state[4 + i]
+        left_centered = state[4 + i]
+        if log_right > log_left:
+            left_centered, centered = -delta[i], 0.0
+            state[2 + i] = term[1 + i]
+        state[4 + i] = (left_centered * root_p) * root_p + (centered * root_q) * root_q
+    if order == 2:
+        fourth_root = np.exp(0.25 * log_p + 0.25 * log_q)
+        scaled = (delta * fourth_root) * fourth_root
+        for c, (i, j) in enumerate(((0, 0), (0, 1), (1, 1))):
+            state[6 + c] = (
+                (state[6 + c] * root_p) * root_p
+                + (term[3 + c] * root_q) * root_q
+                + scaled[i] * scaled[j]
+            )
+
+
+# This entry calls shared compiled primitives. Do not disk-cache its machine
+# code: Numba does not invalidate a cached caller when an imported callee
+# changes. The small local arithmetic helpers above can be cached safely.
+@njit(error_model="numpy")
+def _quadrature_core(lower, upper, shape, log_scale, order):
+    width = math.log1p((upper - lower) / lower)
+    log_left = math.log(lower) - log_scale
+    state = np.zeros(10)
+    state[0] = -np.inf
+    term = np.empty(6)
+    psi = psires_0123(shape)[0] if order else 0.0
+    trigamma = polygamma_0123(shape)[1] if order == 2 else 0.0
+    norm = gnorm(shape)
+    for i in range(5):
+        log_x = log_left + 0.5 * (_NODES[i] + 1) * width
+        x = math.exp(log_x)
+        term[0] = norm - shape * gdev(x, shape) + math.log(_WEIGHTS[i] * width / 2)
+        if order:
+            term[1], term[2] = log_x - math.log(shape) - psi, x - shape
+        if order == 2:
+            term[3], term[4], term[5] = -trigamma, -1.0, -x
+        _quadrature_mix_add(state, term, order)
+    result = np.full(6, np.nan)
+    if state[9]:
+        return result
+    result[0] = state[0] + np.log(state[1])
+    if order and state[1] != 0.0:
+        result[1:3] = state[2:4] + state[4:6]
+    if order == 2 and state[1] != 0.0:
+        result[3:6] = state[6:9]
+    size = 1 if order == 0 else (3 if order == 1 else 6)
+    if state[1] != 0.0 and not np.isfinite(result[:size]).all():
+        result[:] = np.nan
+    return result
+
+
 def _quadrature(lower, upper, shape, log_scale, order, workspace):
     if workspace.quadrature_nodes + 5 > 5 * workspace.max_evaluations:
         workspace.refusal_reason = "aggregate gamma quadrature work budget"
         return _as_jet(np.full((1, 6), np.nan), order)
-    width = math.log1p((upper - lower) / lower)
-    log_left = math.log(lower) - log_scale
-    logs = np.empty((1, 5))
-    scores = np.empty((1, 5, 2))
-    hessians = np.empty((1, 5, 3))
-    psi = psires_0123(shape)[0]
-    trigamma = polygamma_0123(shape)[1]
-    for i, (node, weight) in enumerate(zip(_NODES, _WEIGHTS, strict=True)):
-        log_x = log_left + 0.5 * (node + 1) * width
-        x = math.exp(log_x)
-        logs[0, i] = gnorm(shape) - shape * gdev(x, shape) + math.log(weight * width / 2)
-        scores[0, i] = (log_x - math.log(shape) - psi, x - shape)
-        hessians[0, i] = (-trigamma, -1.0, -x)
+    flat = _quadrature_core(lower, upper, shape, log_scale, order)
     workspace.quadrature_nodes += 5
-    return log_mixture_jets(logs, scores, hessians, order=order)
+    return _as_jet(flat[None], order)
 
 
 def gamma_shape_scale_window_jets(lower, upper, shape, log_scale, *, order, _workspace=None) -> Jet:
@@ -206,9 +305,7 @@ def gamma_shape_scale_window_jets(lower, upper, shape, log_scale, *, order, _wor
                     accumulator.add(_quadrature(ll, hh, a, b, order, work))
                 jet = accumulator.finish()
             else:
-                jet = log_window_jets(
-                    _as_jet(near[None], order), _as_jet(far[None], order), order=order
-                )
+                jet = _as_jet(_log_window_core(near, far, order)[None], order)
         for degree, values in enumerate(jet):
             start, end = ((0, 1), (1, 3), (3, 6))[degree]
             result[row, start:end] = values.reshape(-1)
