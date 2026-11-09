@@ -100,15 +100,26 @@ Declare offsets on each component helper. Column lists and array lists add
 their contributions with coefficient one on the link scale:
 
 ```python
-family.alpha("red", "x", offset=["known_log_factor", "adjustment"])
-family.alpha("green", "x", offset=[array_a, array_b])
-family.alpha("blue", offset=["known_log_factor", array_c])
+X["known_log_factor"] = np.log1p(0.2 * (X.x + 1))
+X["adjustment"] = 0.03
+array_a = 0.1 * np.sin(X.x.to_numpy())
+array_b = np.full(len(X), 0.02)
+array_c = 0.05 * X.x.to_numpy()
+offset_model = SuperLSS(
+    family,
+    family.alpha("red", "x", offset=["known_log_factor", "adjustment"]),
+    family.alpha("green", "x", offset=[array_a, array_b]),
+    family.alpha("blue", offset=["known_log_factor", array_c]),
+).fit(X, shares)
 ```
 
 `fit` and `fit_reml` have no offset argument. For predictions, array declarations
 require replacements on **every** call, including a call on the training frame:
 
 ```python
+new_X = X.iloc[:5].copy()
+new_a, new_b = array_a[:5] + 0.01, array_b[:5]
+new_c = array_c[:5] - 0.01
 predicted = offset_model.predict(
     new_X,
     offsets={"alpha_1": new_a + new_b, "alpha_2": new_c},

@@ -166,7 +166,11 @@ def _eta(model: SuperLSS, view: LSSModelView, column: str, values: list[Any]) ->
     """``model``'s link-scale predictors at the reference row with ``column`` set to ``values``."""
     frame = view.reference_row().loc[np.zeros(len(values), dtype=np.intp)].reset_index(drop=True)
     frame[column] = values
-    return model.predict_link(frame).to_numpy(dtype=np.float64)
+    fitted = model._require_fitted()
+    # The panel's reference neutralizes every offset, including columns also
+    # used as features. Keep the frame intact and supply complete zero sums.
+    offsets = {name: np.zeros(len(frame)) for name in fitted.parameter_names}
+    return fitted._predict_eta_resolved(fitted.prediction_coefficients, frame, offsets)
 
 
 def _amount_axis(view: LSSModelView, rows: NDArray) -> dict[str, Any]:

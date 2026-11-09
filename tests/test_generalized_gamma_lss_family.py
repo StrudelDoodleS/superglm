@@ -357,7 +357,7 @@ def test_infinite_mean_hint_is_disclosed_only_where_the_fit_used_to_refuse(
         matrix_kind="penalized",
     )
     messages = _curvature_disclosures(
-        family, SimpleNamespace(terminal_curvature=telemetry), response, plan
+        family, SimpleNamespace(terminal_curvature=telemetry, converged=True), response, plan
     )
     assert any("infinite-mean" in message for message in messages) is hinted
 
