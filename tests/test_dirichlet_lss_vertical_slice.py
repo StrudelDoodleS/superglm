@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from scipy import stats
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, RepeatedKFold
 
 from superglm import DirichletLSS, SuperLSS, cross_validate
 from superglm.distributional.checks.scores import log_score, threshold_weighted_crps
@@ -162,19 +162,20 @@ def test_custom_scalar_score_named_like_builtin_keeps_its_own_meaning(name):
     assert result.pooled_scores == {}
 
 
-def test_cv_drops_raw_invalid_zero_rows_and_counts_unpriced_rows():
+@pytest.mark.parametrize("repeats", [1, 2])
+def test_cv_drops_raw_invalid_zero_rows_and_counts_unpriced_rows(repeats):
     X, y = book()
     weight = np.ones(len(X))
     weight[3] = 0
     X.loc[X.index[3], "x"] = np.nan
     y = y.astype(object)
     y.iloc[3] = [None, "drop", True]
-    with pytest.warns(UserWarning, match="1 held-out rows of weight zero"):
+    with pytest.warns(UserWarning, match="1 held-out rows of weight zero") as caught:
         cv = cross_validate(
             estimator(),
             X,
             y,
-            cv=KFold(3),
+            cv=RepeatedKFold(n_splits=3, n_repeats=repeats, random_state=31),
             sample_weight=weight,
             fit_mode="fit",
             return_oof=True,
@@ -182,6 +183,8 @@ def test_cv_drops_raw_invalid_zero_rows_and_counts_unpriced_rows():
         )
     assert np.isnan(cv.oof_predictions[3]).all()
     assert np.isfinite(cv.oof_predictions[weight > 0]).all()
+    reports = [item for item in caught if "could not be priced" in str(item.message)]
+    assert len(reports) == 1
 
 
 def test_paired_named_log_comparison_and_positional_order_refusal(fitted):
