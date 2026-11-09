@@ -688,7 +688,8 @@ def _held_out_predictions(
             predictions[local] = folds.predict(
                 est, frame.take_rows(row), _take_offset(offset, row)
             )[0]
-    unpriced = np.flatnonzero(~kept & np.isnan(predictions))
+    missing_rows = np.isnan(predictions).reshape(len(rows), -1).any(axis=1)
+    unpriced = np.flatnonzero(~kept & missing_rows)
     return predictions, unpriced
 
 
@@ -1072,7 +1073,7 @@ def cross_validate(
         fold_records.append(record)
 
     unpriced_count = (
-        int(np.count_nonzero(unpriced_oof & np.isnan(oof)))
+        int(np.count_nonzero(unpriced_oof & np.isnan(oof).reshape(n, -1).any(axis=1)))
         if unpriced_oof is not None and oof is not None
         else 0
     )
