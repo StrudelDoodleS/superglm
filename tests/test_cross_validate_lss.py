@@ -8,7 +8,7 @@ import warnings
 import numpy as np
 import pandas as pd
 import pytest
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, RepeatedKFold
 
 from superglm import (
     Categorical,
@@ -62,7 +62,7 @@ def _fixed_cv(X, y, **kw):
         kw.pop("model", _gamma()),
         X,
         y,
-        cv=FOLDS,
+        cv=kw.pop("cv", FOLDS),
         fit_kwargs={"lambdas": LAMBDAS},
         error_score="raise",
         **kw,
@@ -259,7 +259,8 @@ def test_a_label_on_a_dropped_row_cannot_fail_its_fold(label):
         )
 
 
-def test_a_dropped_row_that_cannot_be_priced_leaves_a_priceable_one_in_its_fold_alone():
+@pytest.mark.parametrize("repeats", [1, 2])
+def test_a_dropped_row_that_cannot_be_priced_leaves_a_priceable_one_in_its_fold_alone(repeats):
     # Mutation check: leaving every dropped row of a failing fold NaN fails this.
     X, y = _rows()
     weights = np.random.default_rng(6).uniform(0.5, 2.0, N)
@@ -274,19 +275,27 @@ def test_a_dropped_row_that_cannot_be_priced_leaves_a_priceable_one_in_its_fold_
             sample_weight=np.r_[weights, np.zeros(8)],
             return_oof=True,
             return_estimators=True,
+            cv=RepeatedKFold(n_splits=3, n_repeats=repeats, random_state=2),
         )
     reports = [str(item.message) for item in caught if "could not be priced" in str(item.message)]
     assert len(reports) == 1
     assert reports[0].startswith("4 held-out rows of weight zero could not be priced")
     known, unseen = np.arange(N, N + 8, 2), np.arange(N + 1, N + 8, 2)
     assert np.isnan(result.oof_predictions[unseen]).all()
+    last_fold = np.full(len(frame), -1)
+    for index, (_train, test) in enumerate(result.fold_indices):
+        last_fold[test] = index
     shared = 0
-    for fold, (_train, test) in zip(result.estimators, result.fold_indices, strict=True):
+    for index, (fold, (_train, test)) in enumerate(
+        zip(result.estimators, result.fold_indices, strict=True)
+    ):
         priced = np.intersect1d(test, known)
         shared += priced.size > 0 and np.intersect1d(test, unseen).size > 0
-        np.testing.assert_allclose(
-            result.oof_predictions[priced], fold.predict(frame.iloc[priced]), rtol=1e-12
-        )
+        priced = priced[last_fold[priced] == index]
+        if priced.size:
+            np.testing.assert_allclose(
+                result.oof_predictions[priced], fold.predict(frame.iloc[priced]), rtol=1e-12
+            )
     assert shared  # some fold holds both, or the fallback was not reached
 
 

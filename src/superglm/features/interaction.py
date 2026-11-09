@@ -102,13 +102,10 @@ def _categorical_predict_labels(
         # column and still says so.
         _validate_missing_only(x, context=context)
         _warn_unseen_routed(x, codes)
-        if np.any(codes < 0):
-            # As on the grouped base route, use an unmatched marker after
-            # validating the raw labels. Equality masks must not find a bool
-            # or numeric look-alike the typed lookup rejected.
-            x = np.array(x, dtype=object, copy=True)
-            x[codes < 0] = np.nan
-    return x
+    # Equality-mask consumers need the fitted label objects, including when
+    # the lookup accepts another spelling (for example a datetime string).
+    # The final NaN slot is the unmatched marker for code -1 on the base route.
+    return np.asarray([*universe, np.nan], dtype=object)[codes]
 
 
 def _restore_parent_policy(state: dict, prefix: str, non_base: str, base: str) -> None:

@@ -364,10 +364,9 @@ class Piecewise:
     def _policy_x(self, x: NDArray[np.float64], lo: float, hi: float) -> NDArray[np.float64]:
         """Apply the extrapolation policy against a resolved ``[lo, hi]`` range.
 
-        Mirrors ``_spline_runtime.prepare_eval_points``: ``clip`` clamps,
-        ``extend`` passes through, ``error`` raises with a scale-aware
-        tolerance so a boundary value reconstructed in floating point does not
-        refuse its own rated range.
+        ``clip`` clamps and ``extend`` passes through. ``error`` raises beyond
+        a scale-aware tolerance; admitted points retain their coordinates
+        and evaluate on the outer segment's line.
         """
         if self.extrapolation == "clip":
             return np.clip(x, lo, hi)
