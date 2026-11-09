@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from math import comb
 from operator import index
 from types import ModuleType
+from typing import Protocol, SupportsIndex, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -24,12 +25,19 @@ class ScalarJetResult:
     valid: NDArray[np.bool_]
 
 
+class _DensityFunction(Protocol):
+    def __call__(
+        self, y: NDArray, theta: NDArray, multiplier: NDArray, *, order: int
+    ) -> ScalarJetResult: ...
+
+
 def jet_order(value: object) -> int:
     message = "jet order must be an integer from zero through four"
     if isinstance(value, bool | np.bool_):
         raise ValueError(message)
     try:
-        order = index(value)
+        # operator.index performs the runtime protocol check (and rejects floats).
+        order = index(cast(SupportsIndex, value))
     except TypeError as exc:
         raise ValueError(message) from exc
     if not 0 <= order <= 4:
@@ -71,7 +79,15 @@ def narrow_windows(lower, upper, rate):
 
 
 def positive_window_jets(
-    module, lower, upper, theta, *, order, rate, linear_narrow=None, density=None
+    module,
+    lower,
+    upper,
+    theta,
+    *,
+    order,
+    rate,
+    linear_narrow=None,
+    density: _DensityFunction | None = None,
 ):
     """Shared support endpoints and unit-mass declared-window composition.
 
@@ -108,6 +124,7 @@ def positive_window_jets(
             target[rows] = source
     rows = np.flatnonzero(linear)
     if len(rows):
+        assert density is not None  # linear quadrature is paired with a density callback
         span = hi[rows] - lo[rows]
 
         def nodes(fraction):

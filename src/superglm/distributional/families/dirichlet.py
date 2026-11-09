@@ -8,7 +8,7 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -164,7 +164,19 @@ class DirichletLSS:
         *terms: TermInput,
         intercept: bool = True,
         offset: Any = None,
-        link: str | Link | None = None,
+        link: Literal[
+            "log",
+            "identity",
+            "logit",
+            "probit",
+            "cloglog",
+            "cauchit",
+            "inverse",
+            "inverse_squared",
+            "sqrt",
+        ]
+        | Link
+        | None = None,
     ) -> BoundPredictor:
         """Declare a component's concentration, including fixed link-scale offsets.
 
@@ -265,6 +277,8 @@ class DirichletLSS:
 
     def initialize(self, y: NDArray, plan: FamilyLikelihoodPlan) -> InitialParameterState:
         response = self.validate_likelihood_plan(y, plan)
+        # Validation above checks the concrete plan and its response identity.
+        plan = cast(DirichletLikelihoodPlan, plan)
         composition = np.exp(plan.log_shares)
         weight = plan.weights.values / math.fsum(plan.weights.values)
         mean = np.array(
@@ -297,6 +311,7 @@ class DirichletLSS:
         self, y: NDArray, theta: NDArray, plan: FamilyLikelihoodPlan, *, derivative_order: int = 2
     ) -> NaturalLikelihoodEvaluation:
         response = self.validate_likelihood_plan(y, plan)
+        plan = cast(DirichletLikelihoodPlan, plan)
         parameters = np.asarray(theta, dtype=np.float64)
         result = evaluate_dirichlet_rows(
             response,

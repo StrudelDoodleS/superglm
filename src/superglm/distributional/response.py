@@ -10,10 +10,15 @@ exact count representability, or a composition's normalization.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol, cast
 
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
+
+
+class _ColumnResponse(Protocol):
+    def __getitem__(self, name: str, /) -> object: ...
 
 
 @dataclass(frozen=True)
@@ -96,7 +101,8 @@ def unvalidated_response(
             or set(labels) != set(spec.component_names)
         ):
             raise ValueError("response columns must contain each declared component exactly once")
-        parts = [_uncoerced_values(y[name]) for name in spec.component_names]
+        labeled = cast(_ColumnResponse, y)
+        parts = [_uncoerced_values(labeled[name]) for name in spec.component_names]
         if all(part.dtype == parts[0].dtype for part in parts):
             array = np.column_stack(parts)
         else:

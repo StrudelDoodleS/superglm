@@ -450,20 +450,25 @@ def _bounded_evaluation(response, theta, plan, order, transform, parametrisation
             evaluated = location_rows(
                 np.log(y),
                 np.log(t[:, 0]) - loading[0],
-                *t[:, 1:].T,
+                t[:, 1],
+                t[:, 2],
                 np.ones(len(exact)),
                 derivative_order=order,
             )
             jet = (evaluated.optimizing_log_likelihood,)
             if order >= 1:
+                assert evaluated.score is not None
                 jet += (evaluated.score,)
             if order == 2:
+                assert evaluated.hessian_packed is not None
                 jet += (evaluated.hessian_packed,)
             with np.errstate(over="ignore", invalid="ignore", divide="ignore", under="ignore"):
                 jet = mean_coordinate_jets(jet, t, loading)
         else:
             variate = np.log(y) if transform == "log" else y
-            evaluated = location_rows(variate, *t.T, np.ones(len(exact)), derivative_order=order)
+            evaluated = location_rows(
+                variate, t[:, 0], t[:, 1], t[:, 2], np.ones(len(exact)), derivative_order=order
+            )
             jet = (evaluated.optimizing_log_likelihood, evaluated.score, evaluated.hessian_packed)
         full = jet[0] - _HALF_LOG_TWO_PI
         if transform == "log":

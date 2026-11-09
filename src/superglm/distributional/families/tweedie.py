@@ -605,7 +605,9 @@ class TweedieLikelihoodPlan:
     @property
     def plan_identifier(self) -> str:
         if not self.observation.is_complete:
-            return f"TweedieLSS/v2:{self.weights.digest}:{self.observation.bounds.digest}:{self._response_digest}"
+            bounds = self.observation.bounds
+            assert bounds is not None  # checked when constructing a bounded plan
+            return f"TweedieLSS/v2:{self.weights.digest}:{bounds.digest}:{self._response_digest}"
         return f"TweedieLSS/v1:{self.weights.digest}"
 
     def take(self, indices: NDArray[np.integer]) -> TweedieLikelihoodPlan:
@@ -771,6 +773,7 @@ class TweedieLSS(TweediePredictors):
             )
         if not tweedie_plan.observation.is_complete:
             bounds = tweedie_plan.observation.bounds
+            assert bounds is not None
             response = response.copy()
             rows = bounds.censored_rows()
             low, high = bounds.observed_window(response, rows)
@@ -864,9 +867,12 @@ class TweedieLSS(TweediePredictors):
         exact = np.flatnonzero(bounds.side == 0)
         if len(exact):
             try:
+                selected_parameters = parameters[exact]
                 density = evaluate_tweedie_rows(
                     response[exact],
-                    *parameters[exact].T,
+                    selected_parameters[:, 0],
+                    selected_parameters[:, 1],
+                    selected_parameters[:, 2],
                     weights[exact],
                     semantics,
                     derivative_order=order,
@@ -876,9 +882,9 @@ class TweedieLSS(TweediePredictors):
                     f"Tweedie numerical evaluation refused: {exc}"
                 ) from exc
             value[exact], valid[exact] = density.log_likelihood, density.valid
-            if order:
+            if score is not None:
                 score[exact] = density.score
-            if order == 2:
+            if hessian is not None:
                 hessian[exact] = density.hessian_packed
         workspace = TweedieWindowWorkspace()
 
@@ -929,6 +935,8 @@ class TweedieLSS(TweediePredictors):
                     for target, density_channel, shift in zip(
                         numerator, (value, score, hessian), natural_anchor, strict=False
                     ):
+                        # The window jet has only the requested derivative channels.
+                        assert density_channel is not None
                         target[exact] = (
                             density_channel[original[exact]]
                             / (

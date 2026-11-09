@@ -12,9 +12,10 @@ import warnings
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from importlib import import_module
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
+from numpy.typing import NDArray
 
 from superglm.distributional.families._base import (
     array_digest,
@@ -50,6 +51,35 @@ from superglm.distributional.weights import (
     UnsupportedLikelihoodContractError,
     _readonly_array,
 )
+
+if TYPE_CHECKING:
+    from types import ModuleType
+    from typing import Protocol
+
+    from superglm.distributional.family import FamilyLikelihoodPlan
+
+    class _DeclaredScalarHost(Protocol):
+        """Core supplied by the family that selects each optional mixin."""
+
+        spec: ClassVar[DeclaredScalarSpec]
+
+        @property
+        def _kernel(self) -> ModuleType: ...
+
+        def _theta(self, theta: NDArray, n_observations: int | None = None) -> NDArray: ...
+
+        def _plan(self, plan: FamilyLikelihoodPlan, n_observations: int) -> DeclaredScalarPlan: ...
+
+        def validate_likelihood_plan(self, y: NDArray, plan: FamilyLikelihoodPlan) -> NDArray: ...
+
+        def _density_response(
+            self, response: NDArray, observation: ObservationContract
+        ) -> NDArray: ...
+
+    class _DeclaredDirectionsHost(_DeclaredScalarHost, Protocol):
+        def _higher(
+            self, y: NDArray, theta: NDArray, plan: DeclaredScalarPlan, order: int
+        ) -> tuple[NDArray, NDArray | None]: ...
 
 
 @dataclass(frozen=True)
@@ -167,6 +197,7 @@ class DeclaredScalarPlan:
         return None if self.carrier_rounding_parameters is None else self._carrier_rounding
 
     def _carrier_rounding(self):
+        assert self.carrier_rounding_parameters is not None
         units, beta = self.carrier_rounding_parameters
         carrier = self.parameter_independent_carrier
         scale = carrier_rounding_scale(carrier, self.multiplier, beta)
@@ -227,6 +258,7 @@ def _restore_plan(state):
 
 class DeclaredScalarFamily:
     spec: ClassVar[DeclaredScalarSpec]
+    _parameters: tuple[ParameterSpec, ...]
 
     def __post_init__(self):
         # Binding snapshots require independently owned default links; the
@@ -434,7 +466,9 @@ class DeclaredScalarFamily:
             bound.multiplier,
             order=order,
         )
-        channels = [*result.jets, None, None][:3]
+        optimizing = result.jets[0]
+        score = result.jets[1] if order >= 1 else None
+        hessian = result.jets[2] if order == 2 else None
         valid = result.valid
         if bound.observation.bounds is not None:
 
@@ -447,10 +481,12 @@ class DeclaredScalarFamily:
                     np.where(accepted if j == 0 else accepted[:, None], x, np.nan)
                     for j, x in enumerate(jets)
                 )
-                return (*jets, None, None)[:3]
+                return jets[0], jets[1] if order >= 1 else None, jets[2] if order == 2 else None
 
-            *channels, valid = bounded_channels(
-                *channels,
+            optimizing, score, hessian, valid = bounded_channels(
+                optimizing,
+                score,
+                hessian,
                 valid,
                 response=response,
                 bounds=bound.observation.bounds,
@@ -459,16 +495,18 @@ class DeclaredScalarFamily:
                 derivative_order=order,
             )
         # Finite placeholders preserve the shared invalid-row convention.
-        for j, channel in enumerate(channels):
-            if channel is not None:
-                channels[j] = np.where(valid if j == 0 else valid[:, None], channel, 0.0)
+        optimizing = np.where(valid, optimizing, 0.0)
+        if score is not None:
+            score = np.where(valid[:, None], score, 0.0)
+        if hessian is not None:
+            hessian = np.where(valid[:, None], hessian, 0.0)
         return NaturalLikelihoodEvaluation(
-            *channels[:1], bound.parameter_independent_carrier, *channels[1:], valid=valid
+            optimizing, bound.parameter_independent_carrier, score, hessian, valid=valid
         )
 
 
 class DeclaredWindowMixin:
-    def log_window_probability(self, lower, upper, theta, weights=None):
+    def log_window_probability(self: _DeclaredScalarHost, lower, upper, theta, weights=None):
         if weights is not None and not np.all(np.asarray(weights) == 1.0):
             raise UnsupportedLikelihoodContractError("no non-unit prior weighted window law")
         values = self._theta(theta)
@@ -487,27 +525,27 @@ class DeclaredWindowMixin:
 
 
 class DeclaredDistributionMixin:
-    def cdf(self, y, theta):
+    def cdf(self: _DeclaredScalarHost, y, theta):
         return self._kernel.cdf(y, self._theta(theta))
 
-    def quantile(self, p, theta):
+    def quantile(self: _DeclaredScalarHost, p, theta):
         return self._kernel.quantile(p, self._theta(theta))
 
 
 class DeclaredPredictionMixin:
     @property
-    def default_prediction_name(self):
+    def default_prediction_name(self: _DeclaredScalarHost):
         return self.spec.default_prediction_name
 
-    def default_prediction(self, theta):
+    def default_prediction(self: _DeclaredScalarHost, theta):
         return self._kernel.mean(self._theta(theta))
 
-    def variance(self, theta):
+    def variance(self: _DeclaredScalarHost, theta):
         return self._kernel.variance(self._theta(theta))
 
 
 class DeclaredInformationMixin:
-    def expected_information_natural(self, theta, plan):
+    def expected_information_natural(self: _DeclaredScalarHost, theta, plan):
         values = self._theta(theta)
         bound = self._plan(plan, len(values))
         refuse_bounded(bound.observation, "declared complete-row expected information")
@@ -515,14 +553,14 @@ class DeclaredInformationMixin:
 
 
 class DeclaredShortfallMixin:
-    def expected_shortfall(self, p, theta):
+    def expected_shortfall(self: _DeclaredScalarHost, p, theta):
         return self._kernel.expected_shortfall(p, self._theta(theta))
 
 
 class DeclaredDirectionsMixin:
     stacked_curvature_directions: ClassVar[bool] = True
 
-    def _higher(self, y, theta, plan, order):
+    def _higher(self: _DeclaredScalarHost, y, theta, plan, order):
         response = self.validate_likelihood_plan(y, plan)
         result = self._kernel.density_jets(
             self._density_response(response, plan.observation), theta, plan.multiplier, order=order
@@ -560,7 +598,9 @@ class DeclaredDirectionsMixin:
             )
         return third, fourth
 
-    def predictor_curvature_directional_derivative(self, y, eta, eta_direction, links, plan):
+    def predictor_curvature_directional_derivative(
+        self: _DeclaredDirectionsHost, y, eta, eta_direction, links, plan
+    ):
         def direction(theta, natural):
             third, _ = self._higher(y, theta, plan, 3)
             return contract_third(third, natural)
@@ -568,7 +608,7 @@ class DeclaredDirectionsMixin:
         return natural_curvature_direction(self, y, eta, eta_direction, links, plan, direction)
 
     def predictor_curvature_second_directional_derivative(
-        self, y, eta, direction_a, direction_b, links, plan
+        self: _DeclaredDirectionsHost, y, eta, direction_a, direction_b, links, plan
     ):
         def directions(theta, natural_a, natural_b):
             return self._higher(y, theta, plan, 4)
