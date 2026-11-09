@@ -15,6 +15,7 @@ from superglm.features.interaction import (
     NumericCategorical,
     PolynomialCategorical,
     SplineCategorical,
+    _categorical_predict_labels,
 )
 from superglm.features.numeric import Numeric
 from superglm.features.polynomial import Polynomial
@@ -24,6 +25,35 @@ _KINDS = ("spline", "polynomial", "numeric", "categorical")
 _RAW = np.tile(np.array(["a", "b", "c", "d"], dtype=object), 6)
 _OTHER = np.repeat(np.array(["u", "v", "w"], dtype=object), 8)
 _X = np.linspace(-0.9, 1.1, _RAW.size)
+
+
+@pytest.mark.parametrize("unseen", ["error", "base"])
+@pytest.mark.parametrize(
+    "levels",
+    [
+        np.array([False, True]),
+        np.array([-2, 0, 3]),
+        np.array([2**63 + 2, 2**63 + 9], dtype=np.uint64),
+        np.array([0.25, 0.5, 1.5]),
+    ],
+    ids=["bool", "int", "uint", "float"],
+)
+def test_numeric_interaction_masks_keep_vectorized_labels(levels, unseen):
+    """Object canonicalization must not send numeric masks through Python comparisons."""
+    labels = _categorical_predict_labels(
+        levels[::-1], grouping=None, universe=levels.tolist(), unseen=unseen, context="x:g"
+    )
+    np.testing.assert_array_equal(labels, levels[::-1])
+    assert labels.dtype.kind in "biuf"
+
+
+def test_canonical_interaction_labels_preserve_mixed_numeric_and_string_levels():
+    levels = np.array([1, "special"], dtype=object)
+    labels = _categorical_predict_labels(
+        levels, grouping=None, universe=levels.tolist(), unseen="error", context="x:g"
+    )
+    np.testing.assert_array_equal(labels == 1, [True, False])
+    np.testing.assert_array_equal(labels == "special", [False, True])
 
 
 @pytest.mark.parametrize("kind", _KINDS)
