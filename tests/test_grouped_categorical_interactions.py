@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -110,6 +112,69 @@ def test_unseen_bool_numeric_rows_keep_the_base_price_with_a_numeric_interaction
 
 def _grouping():
     return collapse_levels(_RAW, groups={"AB": ["a", "b"]})
+
+
+@pytest.mark.parametrize("kind", ["spline", "polynomial", "numeric"])
+def test_datetime_string_labels_read_the_fitted_interaction_level(kind):
+    levels = pd.to_datetime(["2020-01-01", "2021-01-01"]).to_numpy(dtype=object)
+    labels = np.tile(levels, 16)
+    x = np.linspace(-0.9, 1.1, len(labels))
+    categorical = Categorical(base="first", unseen="base")
+    categorical.build(labels)
+    parent = (
+        Spline(n_knots=5)
+        if kind == "spline"
+        else Polynomial(degree=2)
+        if kind == "polynomial"
+        else Numeric()
+    )
+    parent.build(x)
+    term = _new_interaction(kind)
+    built = term.build(x, labels, {"x": parent, "g": categorical})
+    beta = np.arange(1, _width(built) + 1, dtype=np.float64)
+    points = np.array([0.4, 0.9])
+    strings = np.array(["2020-01-01", "2021-01-01"], dtype=object)
+    expected = term.transform(points, levels)
+    assert np.any(expected[1])
+    np.testing.assert_array_equal(term.transform(points, strings), expected)
+    np.testing.assert_array_equal(
+        term.score(points, strings, beta), term.score(points, levels, beta)
+    )
+
+
+@pytest.mark.parametrize("kind", ["glm", "lss"])
+def test_public_datetime_string_quotes_keep_the_numeric_interaction(kind):
+    from superglm import GaussianLS
+    from superglm.distributional import Predictor
+    from tests.bound_predictor_fixtures import model_from_templates
+
+    levels = pd.to_datetime(["2020-01-01", "2021-01-01"])
+    labels = np.tile(levels.to_numpy(), 40)
+    x = np.linspace(-1.0, 1.0, len(labels))
+    late = (labels == levels[1].to_datetime64()).astype(float)
+    y = 2.0 + 0.3 * x + 0.6 * late + 0.9 * x * late + 0.03 * np.sin(7.0 * x)
+    frame = pd.DataFrame({"x": x, "g": labels})
+    features = {"x": Numeric(), "g": Categorical(base="first", unseen="base")}
+    if kind == "glm":
+        model = SuperGLM(
+            family="gaussian", selection_penalty=0, features=features, interactions=[("x", "g")]
+        )
+    else:
+        model = model_from_templates(
+            family=GaussianLS(),
+            predictors=(
+                Predictor(
+                    "location", features, interaction_specs={"x:g": NumericCategorical("x", "g")}
+                ),
+                Predictor("scale", {}),
+            ),
+        )
+    model.fit(frame, y)
+    expected = model.predict(pd.DataFrame({"x": [1.0], "g": [levels[1]]}))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        actual = model.predict(pd.DataFrame({"x": [1.0], "g": ["2021-01-01"]}))
+    np.testing.assert_array_equal(actual, expected)
 
 
 def _mapped(values, grouping):

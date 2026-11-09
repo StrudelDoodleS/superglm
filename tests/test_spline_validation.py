@@ -12,8 +12,9 @@ def test_cr_error_policy_prices_tolerated_points_at_the_endpoint(size, upper):
     spec = CubicRegressionSpline(n_knots=6, extrapolation="error")
     spec.build(np.linspace(0.0, 1.0, 100))
     endpoint, direction = (1.0, 1.0) if upper else (0.0, -1.0)
-    admitted = np.full(size, endpoint + direction * 5e-13)
-    boundary = np.full(size, endpoint)
+    admitted = np.linspace(0.0, 1.0, size)
+    admitted[-1 if upper else 0] = endpoint + direction * 5e-13
+    boundary = np.clip(admitted, 0.0, 1.0)
 
     expected = spec.transform(boundary)
     np.testing.assert_array_equal(spec.transform(admitted), expected)

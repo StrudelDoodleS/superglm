@@ -68,6 +68,30 @@ def test_public_prediction_refuses_bool_numeric_lookalikes(boolean_levels, kind)
         model.predict(pd.DataFrame({"g": lookalikes}))
 
 
+def test_a_rejected_bool_lookalike_does_not_warn_about_a_separated_level():
+    rng = np.random.default_rng(0)
+    labels = np.r_[np.zeros(60, dtype=bool), np.ones(60, dtype=bool)]
+    y = np.r_[rng.binomial(1, 0.4, 60), np.ones(60)]
+    model = SuperGLM(
+        family="binomial",
+        selection_penalty=0,
+        features={"g": Categorical(base="first", unseen="base")},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        model.fit(pd.DataFrame({"g": labels}), y)
+    with pytest.warns(UserWarning, match="response boundary"):
+        model.predict(pd.DataFrame({"g": [True]}))
+    expected = model.predict(pd.DataFrame({"g": [False]}))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", UserWarning)
+        actual = model.predict(pd.DataFrame({"g": [1]}))
+    np.testing.assert_array_equal(actual, expected)
+    messages = [str(item.message) for item in caught]
+    assert any("unseen at fit" in message for message in messages)
+    assert not any("response boundary" in message for message in messages)
+
+
 class TestDeclaredUniverse:
     def test_declared_unobserved_level_is_known_and_pinned(self):
         spec = Categorical(base="first", levels=["a", "b", "c"])

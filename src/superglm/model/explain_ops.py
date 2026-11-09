@@ -78,8 +78,10 @@ def metrics(model, X, y, sample_weight=None, offset=None):
     and on whether the model had been saved (#441).  What the fit's own
     objects still keep, when the fit's data guard confirms they are unchanged,
     is the cached result object and the fit geometry that leverage reads.
-    Reports already given by the fit are not repeated: the weight-contract
-    check, the custom-family prior-weight report and ``predict``'s warnings.
+    The weight-contract check and custom-family prior-weight report already
+    given by the fit are not repeated for those guarded objects. Prediction
+    disclosures about separated or partly identified levels are suppressed
+    on every dataset, including holdout rows.
     """
     from superglm.inference.metrics import ModelMetrics
 
