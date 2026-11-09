@@ -652,6 +652,8 @@ for k in (2, 5):
     for readonly in (False, True):
         theta = np.full((2, k), 2.)
         theta.setflags(write=not readonly)
+        if not readonly:
+            family.expected_information_natural(theta, plan)
         for order in (0, 1, 2):
             assert family.evaluate_natural(response, theta, plan, derivative_order=order).valid.all()
     eta, direction = np.log(theta), np.full_like(theta, .2)

@@ -402,6 +402,9 @@ def _warmup_dirichlet() -> None:
     )
     plan = family.bind_likelihood(response, weights, COMPLETE_OBSERVATION)
     alpha = np.array([[0.2, 2.0, 4.0], [20.0, 1.0, 0.7]])
+    # Fisher initialization computes writable log shares at the mean rather
+    # than reading the immutable response logs in the bound plan.
+    family.expected_information_natural(alpha, plan)
     for readonly in (False, True):
         alpha.setflags(write=not readonly)
         for order in (0, 1, 2):

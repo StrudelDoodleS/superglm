@@ -780,7 +780,44 @@ def public_outputs(model, frame, case, data, role):
         )
     output["log_score"] = scores.to_numpy().ravel()
     checks["log_score_sum"] = float(output["log_score"].sum())
+    if case.law == "dirichlet":
+        from scipy.stats import dirichlet
+
+        # Independent density at the published alpha, including frequency
+        # mass. Training bins and continuous prediction may have different
+        # alpha rows, so their summed likelihoods need not be identical.
+        reference = (
+            -np.array(
+                [
+                    dirichlet.logpdf(y, a)
+                    for y, a in zip(data["y"], output["parameters"], strict=True)
+                ]
+            )
+            * data["weights"]
+        )
+        delta = float(np.max(np.abs(output["log_score"] - reference), initial=0.0))
+        tolerance = 2e-11 * max(1.0, float(np.max(np.abs(reference), initial=0.0)))
+        checks["dirichlet_log_score_reference_max_delta"] = delta
+        checks["dirichlet_log_score_reference_tolerance"] = tolerance
+        if not math.isfinite(delta) or delta > tolerance:
+            raise PublicOutputError(
+                "public Dirichlet log scores disagree with SciPy density", checks
+            )
     return output, checks
+
+
+def check_score_identity(checks, log_likelihood, *, discrete):
+    """Compare like predictor evaluations; retain the raw difference always."""
+    delta = checks["log_score_sum"] + log_likelihood
+    checks["log_score_likelihood_delta"] = delta
+    checks["log_score_likelihood_identity_applicable"] = not discrete
+    checks["log_score_likelihood_basis"] = (
+        "binned training versus continuous-input prediction" if discrete else "exact prediction"
+    )
+    if not discrete and abs(delta) > 2e-8 * (1 + abs(log_likelihood)):
+        raise PublicOutputError(
+            "public log scores do not sum to the fitted normalized likelihood", checks
+        )
 
 
 def collect_fit(model, frame, case, data, role, artifact, *, memory=False):
@@ -867,13 +904,7 @@ def collect_fit(model, frame, case, data, role, artifact, *, memory=False):
             public, checks = public_outputs(model, frame, case, data, role)
         arrays.update(public)
         record["public_checks"] = checks
-        record["public_checks"]["log_score_likelihood_delta"] = (
-            checks["log_score_sum"] + record["log_likelihood"]
-        )
-        if abs(record["public_checks"]["log_score_likelihood_delta"]) > 2e-8 * (
-            1 + abs(record["log_likelihood"])
-        ):
-            raise ValueError("public log scores do not sum to the fitted normalized likelihood")
+        check_score_identity(checks, record["log_likelihood"], discrete=model.discrete)
         if any(not np.isfinite(value).all() for value in public.values()):
             raise ValueError(
                 "public output contains a nonfinite value; inspect moment/range disclosures"

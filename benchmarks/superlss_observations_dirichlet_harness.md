@@ -104,6 +104,58 @@ error without erasing the completed fitting-core evidence. Internal means
 are never substituted. This harness's prediction/scoring/covariance checks do
 not replace Task6's required CV, posterior, serialization and refusal tests.
 
+Every Dirichlet public score is checked independently against SciPy's joint
+density at the published alpha, including frequency mass. Public score sums
+must equal the fitted likelihood for exact predictor evaluation. With discrete
+fitting, training uses binned predictor values and prediction evaluates the
+original inputs continuously, so that equality is inapplicable. The raw
+difference, applicability flag and evaluation basis are retained; the exact
+guard and independent public-density check remain enforced.
+
+### Source-bound performance evidence
+
+Synthetic fixtures use seed 62118. These measurements used Python 3.13.14,
+NumPy 2.5.2, SciPy 1.18.0 and Numba 0.68.0 on Linux x86-64 / EPYC 9645,
+with one thread. Each timing worker used a fresh interpreter and empty private
+code cache, followed by a fresh-model warm fit. Separate before/after controls
+imported c23b3569d1c758343dc5f214eabce394a6a7d4d2. Numerical outputs, covariance,
+SE, EDF, convergence, null fits, work and actual backend agreed. All reported
+cases dispatched `distributional-dense-v1`.
+
+| Case | Candidate source | First seconds: control / candidate / control | Warm seconds: control / candidate / control |
+| --- | --- | --- | --- |
+| Dirichlet K3 smoothing, 20k rows | `1c9764a6a61aba75e43437ee73f45dcfa774ebcf` | 104.92 / 29.06 / 108.26 | 101.75 / 5.69 / 102.82 |
+| Dirichlet K5 fixed, 100k rows | `1c9764a6a61aba75e43437ee73f45dcfa774ebcf` | 141.45 / 22.49 / 123.01 | 130.38 / 8.51 / 135.72 |
+| Tweedie combined censoring/truncation fixed, 20k rows | `fc20c2b3b41d53dfb9d823591d61e07bd8bd03ee` | 214.21 / 76.81 / 214.51 | 203.10 / 46.59 / 198.61 |
+
+Warm control drift was +1.05%, +4.10% and -2.21%, respectively. Single-core
+review probes overlapped the Tweedie after-control period on the shared host.
+That Tweedie candidate preceded the quadrature disk-cache repair; its first
+fit includes the then-recurring compile. These figures are not measurements
+of later integration commits. Separate short profiles confirmed the compiled
+Dirichlet row/directional route and remaining Python gamma/mixture overhead.
+
+At 150abfd345ed4abace97f4575bd9dac7892428ed, the candidate-only 20k combined
+Tweedie smoothing witness took 155.58 seconds first and 127.56 seconds warm.
+Both main/null fits converged, smoothing stopped stationary, and first/warm
+outputs, inference, work and backend agreed. There is no same-session control
+ratio for this cell. Bounded Tweedie remains an expensive numerical route.
+
+Separate 20k Dirichlet K3 discrete/compact frequency memory fits at c23b3569d
+and 1c9764a6a retained the same 1,943,976 NumPy backing bytes, with no retained
+cache buffers, on `distributional-chunked-v1`. Whole-process cold peak RSS
+was 388.80 / 447.28 MiB, including imports/JIT/native state. The increased JIT
+footprint is material. Saved public scores match independent SciPy densities
+within 1.34e-14. The original receipts retain the erroneous training-bin versus
+continuous-score identity failure; separate corrected-contract adjudication
+validates their unchanged outputs without refitting.
+
+These cases do not certify every tail, platform or smoothing endpoint.
+K2 Dirichlet smoothing retains an existing nonconvergence in the short stress
+fixture. Other numerical admission and optional-derivative limitations remain
+in the family reference. Failed, timed-out and unresolved historical cells are
+retained and are not counted as successful timings.
+
 New bounded laws and Dirichlet have no matching old-source control. They get
 absolute costs and a separate deterministic 64-row intercept fit, compared to
 an independent SciPy BFGS objective with three named starts. The reference
