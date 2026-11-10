@@ -129,6 +129,11 @@ def shape_term_sentence(term: ShapeTermRecord, shape: ShapeFit) -> str:
     rules = f"The rule {term.rules!r} on {term.term}"
     if not shape.applied:
         return f"{rules} did not bind: the fitted curve already obeyed it, so the fit is unchanged."
+    if shape.unruled:
+        return (
+            f"{rules} could not be applied: the refit found no start that meets it, so the curve is "
+            f"the fit without it, which misses it by up to {shape.max_violation:.1e} of a row's scale."
+        )
     if term.n_binding == 0:
         return (
             f"{rules} held the fit in place nowhere: no row of it binds at the fitted curve, "

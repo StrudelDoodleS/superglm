@@ -564,3 +564,31 @@ def test_an_interaction_level_named_as_its_row_column_is_left_out_by_name():
     payload = model.rating_table_payload(X)
     assert [table.parameter for table in payload.parameters] == ["scale"]
     assert "level named 'region'" in payload.omitted["mean"]
+
+
+def test_a_frequency_weighted_tweedie_gives_the_chance_of_no_claim_without_the_weight(tmp_path):
+    """A frequency weight counts repeated rows, so each row keeps the plain law's point mass."""
+    X, rng = _book(seed=12), np.random.default_rng(12)
+    mu = np.exp(3 + 0.3 * np.sin(X.age / 12) + 0.4 * (X.region == "B"))
+    claims = rng.poisson(0.8, len(X))
+    y = np.array([rng.gamma(2.0, m / 1.6, k).sum() for m, k in zip(mu, claims, strict=True)])
+    w = rng.integers(1, 4, len(X)).astype(float)
+    fam = TweedieLSS()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        tweedie = SuperLSS(
+            fam,
+            fam.mu(s("age", k=5), cat("region")),
+            fam.phi(cat("seg")),
+            fam.p(),
+            weight_semantics="frequency",
+        ).fit_reml(X, y, sample_weight=w)
+    _, _, notes = _summary_sheet(tweedie.export_rating_tables(tmp_path / "tw.xlsx", X, w))
+    sentence = next(text for text in notes if "exp(-lambda)" in text)
+    assert "lambda = mean^(2 - p) / (dispersion * (2 - p))" in sentence and "w *" not in sentence
+    row = X.iloc[:5]
+    par = tweedie.predict_parameters(row)
+    p = par["power"].to_numpy()
+    lam = par["mean"].to_numpy() ** (2 - p) / (par["dispersion"].to_numpy() * (2 - p))
+    atom = tweedie.family.cdf(np.zeros(len(row)), par[["mean", "dispersion", "power"]].to_numpy())
+    np.testing.assert_allclose(np.exp(-lam), atom, rtol=1e-9)

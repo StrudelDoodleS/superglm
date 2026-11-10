@@ -349,6 +349,9 @@ def test_a_refit_with_no_feasible_start_is_disclosed_as_the_fit_without_the_rule
     assert np.min(np.diff(_curve(held, "mean"))) < 0.0
     said = " ".join(str(w.message) for w in caught)
     assert "the fit without the rules" in said and "the last the refit reached" not in said
+    diagnosed = held.diagnose().render(detail="full")
+    assert "could not be applied" in diagnosed
+    assert "held the fit in place nowhere" not in diagnosed and "refitted under it" not in diagnosed
 
 
 def test_a_refinement_that_crosses_a_rule_steps_back_and_holds_it(monkeypatch):

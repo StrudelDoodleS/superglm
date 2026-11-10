@@ -78,15 +78,31 @@ _WEIGHT_NOTE = (
     "Weight is the sum of the sample weights of the rows in a bin or level, or the number of rows "
     "when no sample weights were given."
 )
-# What a user pricing from the sheets needs beyond the tables, keyed by family.
-_FAMILY_NOTES = {
-    "TweedieLSS": (
-        "Chance of no claim: exp(-lambda), with lambda = w * mean^(2 - p) / (dispersion * (2 - p)), "
-        "where mean and dispersion are the row's values from the Mean and Dispersion tables, p is "
-        "the model's power and w is the row's weight (1 for a model fitted without weights, which "
-        "enter as the dispersion over w). It is a Tweedie's point mass at zero."
-    ),
-}
+
+
+def _family_notes(family: str, model: object) -> tuple[str, ...]:
+    """What a family's tables need besides the product: a Tweedie's chance of no claim.
+
+    A prior weight enters as the dispersion over ``w``, so it scales the claim rate; a frequency
+    weight counts repeated rows, each of which keeps the plain law.
+    """
+    if family != "TweedieLSS":
+        return ()
+    if getattr(model, "weight_semantics", "prior") == "frequency":
+        rate, weight = (
+            "mean^(2 - p) / (dispersion * (2 - p))",
+            (" A frequency weight counts repeated rows and leaves each row's chance as it is."),
+        )
+    else:
+        rate, weight = (
+            "w * mean^(2 - p) / (dispersion * (2 - p))",
+            (" w is the row's prior weight, 1 for a model fitted without weights."),
+        )
+    return (
+        f"Chance of no claim: exp(-lambda), with lambda = {rate}, where mean and dispersion are "
+        "the row's values from the Mean and Dispersion tables and p is the model's power."
+        f"{weight} It is a Tweedie's point mass at zero.",
+    )
 
 
 def parameter_label(parameter: str) -> str:
@@ -425,7 +441,7 @@ def build_lss_rating_table_payload(
             )
     if not tables:
         raise ValueError(" ".join(omitted.values()))
-    notes = (_WEIGHT_NOTE, *([_FAMILY_NOTES[family]] if family in _FAMILY_NOTES else []))
+    notes = (_WEIGHT_NOTE, *_family_notes(family, model))
     return LSSRatingTablePayload(parameters=tuple(tables), omitted=omitted, notes=notes)
 
 

@@ -1740,7 +1740,10 @@ def _analyze_shape_rules(context: _LSSDiagnosticContext) -> tuple[DiagnosticFind
                     f"{term.largest_change:.3g} on the linear-predictor scale."
                 ),
                 interpretation=(
-                    "The smoothing was chosen without the rule and the coefficients were then "
+                    "The coefficients are the fit without the rule, so the curve may break it; "
+                    "refit with a larger max_inner_iter, or relax the rule."
+                    if shape.unruled
+                    else "The smoothing was chosen without the rule and the coefficients were then "
                     "refitted under it, so a binding rule costs likelihood and fixes the curve "
                     "at the rows that bind."
                     if shape.applied
