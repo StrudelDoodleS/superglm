@@ -116,7 +116,10 @@ def test_duration_manifest_covers_the_non_browser_suite() -> None:
     covered = collected.intersection(recorded)
 
     assert collected
-    assert len(covered) / len(collected) >= 0.95
+    # pytest-split gives an unrecorded test the mean recorded time, about 50 ms,
+    # whatever it really takes. At 95% the 1,132 tests added by #611 and #612
+    # went unrecorded, 4-12% of a CI shard's measured time.
+    assert len(covered) / len(collected) >= 0.99
 
 
 _PYTHON_FLOOR_CHECK = "Python 3.12 · non-browser suite · version floor"
@@ -189,7 +192,8 @@ def test_compatibility_shards_do_not_queue_platforms_behind_each_other() -> None
 def test_compatibility_shards_collect_all_failures_with_a_hang_limit() -> None:
     workflow = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     job = yaml.safe_load(workflow)["jobs"]["test-compatibility"]
-    assert 0 < job.get("timeout-minutes", 0) <= 15
+    plain, covered = _shard_hang_limits(job)
+    assert 0 < plain <= 15
     assert job["strategy"].get("fail-fast", True) is False
     suite_commands = [
         shlex.split(step["run"])
@@ -205,6 +209,28 @@ def test_compatibility_shards_collect_all_failures_with_a_hang_limit() -> None:
     assert report_step["if"] == "${{ always() }}"
     # The threads stage writes pytest-results-threads.xml beside the parallel report.
     assert report_step["with"]["path"] == "pytest-results*.xml"
+
+
+def _shard_hang_limits(job: dict) -> tuple[int, int]:
+    """The compatibility shards' limits in minutes: uninstrumented, then under coverage."""
+    (coverage_if,) = {step["if"] for step in job["steps"] if "--cov=" in step.get("run", "")}
+    match = re.fullmatch(
+        rf"\$\{{\{{ {re.escape(coverage_if)} && (\d+) \|\| (\d+) \}}\}}",
+        str(job["timeout-minutes"]),
+    )
+    assert match, "the coverage shards' limit must key on the coverage step's own condition"
+    return int(match.group(2)), int(match.group(1))
+
+
+def test_coverage_shards_get_a_longer_limit_than_the_uninstrumented_ones() -> None:
+    """Branch coverage on Python 3.12 makes a shard 1.5-2x slower, so its limit
+    is longer, and only the shards that run under coverage get it."""
+    job = yaml.safe_load((_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"][
+        "test-compatibility"
+    ]
+    plain, covered = _shard_hang_limits(job)
+    # A coverage shard measured 869 s in pytest alone and was cancelled at 15 minutes.
+    assert plain <= 15 < covered <= 2 * plain
 
 
 @pytest.mark.parametrize("stage", [0, 1], ids=["parallel", "threads"])

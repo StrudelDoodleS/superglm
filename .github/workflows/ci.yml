@@ -31,7 +31,12 @@ jobs:
     # Keep the 3.14 names listed in the Protect master ruleset.
     name: Python ${{ matrix.runtime.python-version }} · non-browser regression suite · balanced ${{ matrix.label }}${{ matrix.runtime.suffix }}
     runs-on: ${{ matrix.runtime.os }}
-    timeout-minutes: 15
+    # A hang limit, not a budget: a balanced uninstrumented shard takes 5-12
+    # minutes. The push run's Python 3.12 shards run under branch coverage,
+    # which on 3.12 only coverage.py's trace-function core can measure
+    # (sys.monitoring measures branches from 3.14). The same tests take 1.5-2x
+    # as long there, 10-15 minutes a shard, so those four get a longer limit.
+    timeout-minutes: ${{ github.event_name == 'push' && matrix.runtime.python-version == '3.12' && 20 || 15 }}
     strategy:
       fail-fast: false
       max-parallel: 20
