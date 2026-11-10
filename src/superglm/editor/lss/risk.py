@@ -170,7 +170,7 @@ def risk_payload(session: Any, risks: list[Mapping], *, edited: Any) -> dict[str
     own = slice(1, 1 + n)
 
     def effects(eta: np.ndarray) -> np.ndarray:
-        return (eta[1 + n :] - eta[0]).reshape(n, len(columns), -1)
+        return (eta[1 + n :] - eta[0]).reshape(n, len(columns), eta.shape[1])
 
     counts = _family_name(view.family) == "negative_binomial"
     return {
@@ -207,7 +207,12 @@ def risk_row(session: Any, index: int | None = None) -> dict[str, Any]:
     frame = as_eager_frame(view.X_train)
     columns = _required_columns(view._fitted.compiled_predictors)
     arrays = {column: frame.column_array(column) for column in columns}
-    complete = np.logical_and.reduce([pd.notna(array) for array in arrays.values()])
+    # A model that reads no column has every row complete.
+    complete = (
+        np.logical_and.reduce([pd.notna(array) for array in arrays.values()])
+        if arrays
+        else np.ones(len(frame), dtype=bool)
+    )
     if index is None:
         index = int(np.random.default_rng().choice(np.flatnonzero(complete)))
     elif isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(complete):

@@ -364,3 +364,23 @@ def test_the_routes_are_read_routes_and_the_widget_serves_them():
         assert _post(widget, "/risk_row", {"index": 10**6})[0] == 400
     finally:
         widget.close()
+
+
+def test_a_model_that_reads_no_column_explains_its_one_risk():
+    """An intercept-only fit opens in the editor; its Explain tab has risks and no features."""
+    from superglm import GammaLS, SuperLSS
+    from superglm.editor import edit
+    from superglm.editor.lss.risk import risk_payload, risk_row
+
+    X = pd.DataFrame({"unused": np.arange(50.0)})
+    y = np.random.default_rng(3).gamma(4.0, 10.0, 50)
+    family = GammaLS()
+    model = SuperLSS(family, family.mean(), family.scale()).fit(X, y)
+    session = edit(model, train_data=(X, y))
+    reply = risk_payload(session, [{}], edited=session.model)
+    assert reply["features"] == []
+    [only] = reply["risks"]
+    np.testing.assert_allclose(
+        only["eta"]["fitted"], model.predict_link(X.iloc[:1]).to_numpy()[0], rtol=1e-12
+    )
+    assert risk_row(session, 0)["values"] == {}

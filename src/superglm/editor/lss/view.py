@@ -256,11 +256,13 @@ class LSSModelView:
         """
         if self._reference_row is None:
             frame = as_eager_frame(self.X_train)
+            # One row, even for a model that reads no column.
             self._reference_row = pd.DataFrame(
                 {
                     name: [_reference_value(self._fitted, frame, name)]
                     for name in self.data_columns()
-                }
+                },
+                index=[0],
             )
         return self._reference_row.copy()
 

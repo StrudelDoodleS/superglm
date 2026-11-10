@@ -345,13 +345,19 @@ def refit_with_shape_rules(
         if proposal is None:
             break
         step, direction = proposal
-        capped, _ = _solver._cap_predictor_step(
-            context, state, direction, solver_config.max_predictor_step
-        )
-        moved = _solver._evaluate_state(context, beta + capped, phase_recorder=phase_recorder)
+        # The projection lands on the rows whatever the response's units; only a move the link
+        # cannot evaluate is taken in the solver's capped steps instead.
+        candidate = beta + direction
+        moved = _solver._evaluate_state(context, candidate, phase_recorder=phase_recorder)
+        if moved is None:
+            capped, _ = _solver._cap_predictor_step(
+                context, state, direction, solver_config.max_predictor_step
+            )
+            candidate = beta + capped
+            moved = _solver._evaluate_state(context, candidate, phase_recorder=phase_recorder)
         if moved is None:
             break
-        beta, state = beta + capped, moved
+        beta, state = candidate, moved
         geometry = measure(state)
         active = step.active_set
     if not _is_feasible(A, beta, b, _QP_FEASIBILITY_TOL, abs_A=structure.abs_entries):
@@ -408,26 +414,49 @@ def refit_with_shape_rules(
         beta, state = accepted
         geometry = measure(state)
 
-    held = np.empty((0, A.shape[1]))
-    slack = _feasibility_slack(A, beta, b, abs_A=structure.abs_entries)
-    binding = slack <= _QP_FEASIBILITY_TOL + gamma(A.shape[1] + 2)
-    if last_active:
-        scale = np.sqrt(np.maximum(np.diag(np.asarray(geometry.data_curvature)), 0.0))
-        rows_active = np.asarray(last_active, dtype=np.intp)
-        held = _binding_rows(A[rows_active], b[rows_active], beta, scale)
-    face = _face_of(held, beta, base, layout.coefficient_names) if held.shape[0] else None
-    polished = _solver.fit_dense_fixed_lambda(
-        family,
-        layout,
-        y,
-        likelihood_plan,
-        penalty,
-        initial=beta,
-        config=solver_config,
-        chunk_size=chunk_size,
-        phase_recorder=phase_recorder,
-        coefficient_face=face if face is not None else base,
-        _reuse_session=session,
+    # The fit is refined on the face of the rows that bind, where the standard errors hold them.
+    # The other rows must still hold there: a refinement that crosses one steps back to where it
+    # meets that row, which is then held too, and refines again (a primal active-set step).
+    scale = np.sqrt(np.maximum(np.diag(np.asarray(geometry.data_curvature)), 0.0))
+    bar = _QP_FEASIBILITY_TOL + gamma(A.shape[1] + 2)
+    held_rows = list(last_active)
+    anchor = beta
+    for _ in range(A.shape[0] + 1):
+        rows_held = np.asarray(held_rows, dtype=np.intp)
+        held = (
+            _binding_rows(A[rows_held], b[rows_held], anchor, scale)
+            if rows_held.size
+            else np.empty((0, A.shape[1]))
+        )
+        face = _face_of(held, anchor, base, layout.coefficient_names) if held.shape[0] else None
+        polished = _solver.fit_dense_fixed_lambda(
+            family,
+            layout,
+            y,
+            likelihood_plan,
+            penalty,
+            initial=anchor,
+            config=solver_config,
+            chunk_size=chunk_size,
+            phase_recorder=phase_recorder,
+            coefficient_face=face if face is not None else base,
+            _reuse_session=session,
+        )
+        moved = np.asarray(polished.coefficients, dtype=np.float64)
+        crossed = np.flatnonzero(
+            _feasibility_slack(A, moved, b, abs_A=structure.abs_entries) < -bar
+        )
+        if not crossed.size:
+            break
+        before, after = A[crossed] @ anchor - b[crossed], A[crossed] @ moved - b[crossed]
+        reach = np.clip(before / (before - after), 0.0, 1.0)
+        anchor = anchor + float(np.min(reach)) * (moved - anchor)
+        held_rows.append(int(crossed[np.argmin(reach)]))
+    else:
+        converged, reason = False, "line_search_failed"
+    binding = (
+        _feasibility_slack(A, np.asarray(polished.coefficients), b, abs_A=structure.abs_entries)
+        <= bar
     )
     if not converged:
         polished = replace(polished, converged=False, convergence_reason=reason)

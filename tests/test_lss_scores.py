@@ -1651,3 +1651,15 @@ def test_tweedie_crps_prior_weights_select_the_prior_weighted_law(tweedie_weight
         assert closed[row] == pytest.approx(
             _tweedie_cdf_integral(cdf, float(response[row]), float(top[row])), rel=1.0e-9
         )
+
+
+def test_tweedie_crps_at_zero_does_not_cancel_when_a_claim_is_rare():
+    """A claim rate of 1e-18 rounds the chance of no claim to one; the score must not cancel.
+
+    With power 1.5 the jumps are exponential of scale 1e38, so the score at zero is
+    E[min(Y, Y')] = p_1^2 * 1e38 / 2 = 50 up to terms of order rate^3.
+    """
+    from superglm.distributional.checks.scores import crps_closed_form
+
+    value = crps_closed_form(TweedieLSS(), np.array([0.0]), np.array([[1e20, 2e28, 1.5]]))
+    assert value[0] == pytest.approx(50.0, rel=1e-9)

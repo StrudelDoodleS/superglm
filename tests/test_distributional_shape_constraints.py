@@ -349,3 +349,81 @@ def test_a_refit_with_no_feasible_start_is_disclosed_as_the_fit_without_the_rule
     assert np.min(np.diff(_curve(held, "mean"))) < 0.0
     said = " ".join(str(w.message) for w in caught)
     assert "the fit without the rules" in said and "the last the refit reached" not in said
+
+
+def test_a_refinement_that_crosses_a_rule_steps_back_and_holds_it(monkeypatch):
+    """Refining on the binding face must keep the rows that do not bind: one it crosses is held
+    from where the move meets it, and the refinement runs again."""
+    from superglm.distributional.solver import shape
+
+    class FirstRefinementHoldsNoRow:
+        # The first refinement runs off the face, as one that crosses a row would.
+        def __init__(self, solver):
+            self.solver, self.calls = solver, 0
+
+        def __getattr__(self, name):
+            return getattr(self.solver, name)
+
+        def fit_dense_fixed_lambda(self, *args, coefficient_face=None, **kwargs):
+            self.calls += 1
+            face = None if self.calls == 1 else coefficient_face
+            return self.solver.fit_dense_fixed_lambda(*args, coefficient_face=face, **kwargs)
+
+    proxy = FirstRefinementHoldsNoRow(shape._solver)
+    monkeypatch.setattr(shape, "_solver", proxy)
+    X, y = _data("gamma")
+    held = _model("gamma", INCREASING).fit_reml(X, y)
+    record = _state(held).shape_fit
+    assert proxy.calls >= 2
+    assert record.applied and record.converged
+    assert record.max_violation <= 1e-9
+    assert np.min(np.diff(_curve(held, "mean"))) >= -1e-9
+
+
+def test_the_feasible_start_reaches_the_rules_whatever_the_response_units():
+    """An identity-link curve far from increasing is projected onto the rules in one move; the
+    solver's cap on a predictor step (a few units) must not leave it unconstrained."""
+    from superglm import GaussianLS, LambdaPolicy
+
+    x = np.linspace(0.0, 1.0, 100)
+    y = 100.0 * (2.0 - 4.0 * x + 0.1 * np.sin(np.arange(100)))
+    family = GaussianLS()
+    model = SuperLSS(
+        family,
+        family.location(
+            s("x", kind="cr", k=6, constraint=INCREASING, lambda_policy=LambdaPolicy.fixed(0.1))
+        ),
+        family.scale(),
+    ).fit(pd.DataFrame({"x": x}), y)
+    record = _state(model).shape_fit
+    assert record.applied and record.converged and not record.unruled
+    assert model.result_.converged
+    location = model.predict_parameters(pd.DataFrame({"x": np.linspace(0, 1, 200)}))["location"]
+    assert np.min(np.diff(location.to_numpy())) >= -1e-9 * np.abs(location).max()
+
+
+def test_a_cap_on_a_link_that_adds_is_disclosed_and_dropped_keeping_the_shape():
+    """A cap bounds a relativity; on an identity link a term adds, so the cap would bind a sum."""
+    from superglm import GaussianLS, LambdaPolicy
+
+    x = np.linspace(0.0, 1.0, 100)
+    y = 2.0 + 4.0 * x + 0.1 * np.sin(np.arange(100))
+    family = GaussianLS()
+    with pytest.warns(ShapeConstraintIgnoredWarning, match=r"cap\(0\.9, 1\.1\) on location:x"):
+        model = SuperLSS(
+            family,
+            family.location(
+                s(
+                    "x",
+                    kind="cr",
+                    k=6,
+                    constraint=INCREASING & Constraint.fit.cap(0.9, 1.1),
+                    lambda_policy=LambdaPolicy.fixed(0.1),
+                )
+            ),
+            family.scale(),
+        ).fit(pd.DataFrame({"x": x}), y)
+    location = model.predict_parameters(pd.DataFrame({"x": x}))["location"].to_numpy()
+    # The cap is gone (log(1.1) - log(0.9) is 0.2), the increasing rule kept.
+    assert np.ptp(location) > 3.0
+    assert np.min(np.diff(location)) >= -1e-9 * np.abs(location).max()

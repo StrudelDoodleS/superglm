@@ -18,7 +18,7 @@ from superglm._predictor_compiler import CompiledPredictorDesign, compile_predic
 from superglm.distributional.family import ParameterSpec
 from superglm.distributional.offsets import normalize_offset, shape_fit_offsets, sum_offset_sources
 from superglm.distributional.weights import ResolvedLikelihoodWeights
-from superglm.features._spline_config import clear_shape_rules
+from superglm.features._spline_config import clear_shape_rules, set_shape_rules
 from superglm.features.categorical import Categorical
 from superglm.features.constraint import ConstraintRules, rules_of
 from superglm.features.factor_smooth import FactorSmooth
@@ -80,6 +80,51 @@ def _without_rules(predictor: Predictor, drop: Callable[[str, str], bool]) -> Pr
                     clear_shape_rules(basis)
                 elif isinstance(basis, Categorical):
                     basis._constraint_rules = ConstraintRules(())
+        features[name] = spec
+    return replace(predictor, features=features)
+
+
+# Rules that bound a printed relativity: the multiplier a term gives only on a link whose inverse
+# is ``c + exp(eta)``.
+_RELATIVITY_RULES = ("cap", "max_step")
+
+
+def _relativity_rules_on_log_links_only(
+    predictor: Predictor, parameter: ParameterSpec | None
+) -> Predictor:
+    """``predictor`` without the caps and step limits it cannot hold on its link, said once each.
+
+    On another link a term adds to the parameter instead of multiplying it, so a cap's bounds
+    would bind a sum read as if it were a product; the feature keeps its other rules.
+    """
+    from superglm.distributional.terms import _is_shifted_log_link
+
+    if parameter is None or _is_shifted_log_link(resolve_predictor_link(parameter, predictor)):
+        return predictor
+    features = {}
+    for name, spec in predictor.features.items():
+        rules = rules_of(spec)
+        dropped = tuple(r for r in rules if r.mode == "fit" and r.kind in _RELATIVITY_RULES)
+        if dropped:
+            warnings.warn(
+                f"SuperLSS ignores {ConstraintRules(dropped).describe()} on "
+                f"{predictor.name}:{name}: a cap or a step limit bounds a relativity, which a term "
+                f"on this link adds to rather than multiplies; the term keeps its other rules",
+                ShapeConstraintIgnoredWarning,
+                stacklevel=4,
+            )
+            kept = ConstraintRules(tuple(r for r in rules if r not in dropped))
+            spec = copy.deepcopy(spec)
+            bases = (
+                (spec._spline_obj, spec._spline)
+                if isinstance(spec, OrderedCategorical)
+                else (spec,)
+            )
+            for basis in bases:
+                if isinstance(basis, _SplineBase):
+                    set_shape_rules(basis, kept if kept.rules else None)
+                elif isinstance(basis, Categorical):
+                    basis._constraint_rules = kept
         features[name] = spec
     return replace(predictor, features=features)
 
@@ -626,6 +671,11 @@ def compile_predictors(
                 stacklevel=3,
             )
     predictor_tuple = tuple(_without_postfit_rules(predictor) for predictor in predictor_tuple)
+    by_name = {parameter.name: parameter for parameter in parameter_tuple}
+    predictor_tuple = tuple(
+        _relativity_rules_on_log_links_only(predictor, by_name.get(predictor.name))
+        for predictor in predictor_tuple
+    )
     _validate_predictor_order(parameter_tuple, predictor_tuple)
     boundary_tuple = (
         tuple(() for _ in predictor_tuple)

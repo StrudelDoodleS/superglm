@@ -221,7 +221,10 @@ def _tweedie_block_crps(
         pairs[rows] = np.einsum(
             "ik,ik->k", table[start : start + width, start : start + width] @ masses, masses
         )
-    return distance - block.atom * mean - 0.5 * block.scale * pairs
+    # ``distance - p_0 mean`` is ``(1 - p_0) mean - y + ...``; with ``1 - p_0`` read from the rate
+    # it does not cancel where a claim is so rare that ``p_0`` rounds to one.
+    survive = -np.expm1(-block.rate)
+    return distance - mean + survive * mean - 0.5 * block.scale * pairs
 
 
 def _tweedie_crps(family: Any, y: NDArray, theta: NDArray) -> NDArray[np.float64]:
