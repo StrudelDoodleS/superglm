@@ -9,6 +9,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._frame import FrameLike, as_eager_frame
+from superglm.features.interaction import interaction_cells
 from superglm.plotting.common import (
     _LINE_WIDTH,
     _NEUTRAL_FILL,
@@ -360,8 +361,8 @@ def _plot_categorical_heatmap_mpl(raw, name, parent_names, figsize, colormap):
     import matplotlib.pyplot as plt
 
     pairs = raw["pairs"]
-    log_rels = raw["log_relativities"]
-    rels = raw["relativities"]
+    log_rels = interaction_cells(raw, "log_relativities")
+    rels = interaction_cells(raw)
 
     # Full level lists including base (base pairs have relativity=1.0)
     levels1 = raw.get("levels1") or list(dict.fromkeys(p[0] for p in pairs))
@@ -369,10 +370,10 @@ def _plot_categorical_heatmap_mpl(raw, name, parent_names, figsize, colormap):
 
     grid = np.zeros((len(levels1), len(levels2)))
     text_grid = np.full_like(grid, "1.00", dtype=object)
-    for (l1, l2), key in zip(pairs, log_rels):
-        i = levels1.index(l1)
-        j = levels2.index(l2)
-        grid[i, j] = log_rels[key]
+    for key, log_rel in log_rels.items():
+        i = levels1.index(key[0])
+        j = levels2.index(key[1])
+        grid[i, j] = log_rel
         text_grid[i, j] = f"{rels[key]:.2f}"
 
     if figsize is None:
@@ -577,8 +578,8 @@ def _plot_categorical_heatmap_plotly(raw, name, parent_names, colormap):
     import plotly.graph_objects as go
 
     pairs = raw["pairs"]
-    log_rels = raw["log_relativities"]
-    rels = raw["relativities"]
+    log_rels = interaction_cells(raw, "log_relativities")
+    rels = interaction_cells(raw)
 
     # Full level lists including base (base pairs have relativity=1.0)
     levels1 = raw.get("levels1") or list(dict.fromkeys(p[0] for p in pairs))
@@ -586,10 +587,10 @@ def _plot_categorical_heatmap_plotly(raw, name, parent_names, colormap):
 
     z = np.zeros((len(levels1), len(levels2)))
     text = np.full_like(z, "1.000", dtype=object)
-    for (l1, l2), key in zip(pairs, log_rels):
-        i = levels1.index(l1)
-        j = levels2.index(l2)
-        z[i, j] = log_rels[key]
+    for key, log_rel in log_rels.items():
+        i = levels1.index(key[0])
+        j = levels2.index(key[1])
+        z[i, j] = log_rel
         text[i, j] = f"{rels[key]:.3f}"
 
     fig = go.Figure(

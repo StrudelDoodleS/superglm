@@ -1350,6 +1350,22 @@ def _pair_codes(
     return np.where(on_grid, idx1 * len(non_base2) + idx2, -1).astype(np.intp, copy=False)
 
 
+def interaction_cells(raw: dict[str, Any], values: str = "relativities") -> dict[tuple, float]:
+    """A categorical interaction's non-base cells, ``raw[values]`` keyed by ``(level1, level2)``.
+
+    The ``"level1:level2"`` labels of ``raw[values]`` are not unique once a level holds a
+    colon (``("a", "b:c")`` and ``("a:b", "c")``), so the cells are read from the per-pair
+    list aligned with ``raw["pairs"]``. A spec that returns only the labelled dict is read
+    through its labels. A base cell is absent, and its value is 1 (0 on the log scale).
+    """
+    pairs = [tuple(pair) for pair in raw["pairs"]]
+    per_pair = raw.get(f"pair_{values}")
+    if per_pair is None:
+        labelled = raw[values]
+        per_pair = [labelled[f"{level1}:{level2}"] for level1, level2 in pairs]
+    return dict(zip(pairs, map(float, per_pair), strict=True))
+
+
 class CategoricalInteraction:
     """Cross-product interaction between two categorical features.
 
@@ -1582,16 +1598,22 @@ class CategoricalInteraction:
         grid_to_col = getattr(self, "_grid_to_col", None)
         log_rels = {}
         rels = {}
+        pair_log_rels = []
         for g, (lev1, lev2) in enumerate(all_pairs):
             col = g if grid_to_col is None else int(grid_to_col[g])
             value = float(beta[col]) if col >= 0 else 0.0
             label = f"{lev1}:{lev2}"
             log_rels[label] = value
             rels[label] = float(np.exp(value))
+            pair_log_rels.append(value)
         return {
             "pairs": list(all_pairs),
+            # Keyed "level1:level2", which two cells share when a level holds a colon;
+            # ``interaction_cells`` reads the per-pair lists below instead.
             "log_relativities": log_rels,
             "relativities": rels,
+            "pair_log_relativities": pair_log_rels,
+            "pair_relativities": [float(np.exp(value)) for value in pair_log_rels],
             "levels1": [self._base1] + self._non_base1,
             "levels2": [self._base2] + self._non_base2,
             "base_level1": self._base1,

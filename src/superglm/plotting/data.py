@@ -9,6 +9,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame
+from superglm.features.interaction import interaction_cells
 from superglm.inference._term_types import SmoothCurve, TermInference
 from superglm.plotting.common import (
     _exposure_kde,
@@ -359,19 +360,18 @@ def _categorical_heatmap_dataframe(
 ) -> pd.DataFrame:
     levels1 = raw.get("levels1") or list(dict.fromkeys(p[0] for p in raw["pairs"]))
     levels2 = raw.get("levels2") or list(dict.fromkeys(p[1] for p in raw["pairs"]))
-    log_rels = raw["log_relativities"]
-    rels = raw["relativities"]
+    log_rels = interaction_cells(raw, "log_relativities")
+    rels = interaction_cells(raw)
 
     rows = []
     for level1 in levels1:
         for level2 in levels2:
-            key = f"{level1}:{level2}"
             rows.append(
                 {
                     parent_names[0]: level1,
                     parent_names[1]: level2,
-                    "log_relativity": float(log_rels.get(key, 0.0)),
-                    "relativity": float(rels.get(key, 1.0)),
+                    "log_relativity": log_rels.get((level1, level2), 0.0),
+                    "relativity": rels.get((level1, level2), 1.0),
                 }
             )
     return pd.DataFrame(rows)
