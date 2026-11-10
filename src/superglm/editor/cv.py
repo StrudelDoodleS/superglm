@@ -277,6 +277,20 @@ class StoredFolds:
             yield train, test
 
 
+def _edited_values(term) -> tuple[tuple[Any, float], ...]:
+    """A term's edited values by level or point, in a fixed order: putting the levels in another
+    order on screen changes no value, so it changes nothing a result describes."""
+    values = np.asarray(term.edited_log_effect, dtype=np.float64).tolist()
+    keys = (
+        term.levels
+        if term.levels is not None
+        else range(len(values))
+        if term.x is None
+        else np.asarray(term.x, dtype=np.float64).tolist()
+    )
+    return tuple(sorted(zip(keys, values, strict=True), key=lambda pair: str(pair[0])))
+
+
 @dataclass(frozen=True)
 class InForce:
     """What a result was computed for: the fitted model in force and the hand edits on it.
@@ -286,13 +300,12 @@ class InForce:
     """
 
     model: Any
-    edits: tuple[tuple[str, bytes], ...]
+    edits: tuple[tuple[str, tuple[tuple[Any, float], ...]], ...]
 
     @classmethod
     def of(cls, session) -> InForce:
         edits = tuple(
-            (name, np.asarray(session.terms[name].edited_log_effect, dtype=np.float64).tobytes())
-            for name in sorted(session.edited_terms())
+            (name, _edited_values(session.terms[name])) for name in sorted(session.edited_terms())
         )
         return cls(session.model, edits)
 

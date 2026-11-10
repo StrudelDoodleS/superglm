@@ -518,14 +518,17 @@ def test_the_notes_define_weight_and_a_tweedie_gives_the_chance_of_no_claim(tmp_
         ).fit_reml(X, y)
     _, _, notes = _summary_sheet(tweedie.export_rating_tables(tmp_path / "tw.xlsx", X))
     sentence = next(text for text in notes if "exp(-lambda)" in text)
-    assert "lambda = mean^(2 - p) / (dispersion * (2 - p))" in sentence
-    # The sentence is the Tweedie's point mass: check it against the model's own P(Y = 0).
+    assert "lambda = w * mean^(2 - p) / (dispersion * (2 - p))" in sentence
+    # The sentence is the Tweedie's point mass: check it against the model's own P(Y = 0), for a
+    # row of weight 1 and for weighted rows, whose weight enters as the dispersion over w.
     row = X.iloc[:5]
     par = tweedie.predict_parameters(row)
     p = par["power"].to_numpy()
-    lam = par["mean"].to_numpy() ** (2 - p) / (par["dispersion"].to_numpy() * (2 - p))
-    atom = tweedie.family.cdf(np.zeros(len(row)), par[["mean", "dispersion", "power"]].to_numpy())
-    np.testing.assert_allclose(np.exp(-lam), atom, rtol=1e-9)
+    theta = par[["mean", "dispersion", "power"]].to_numpy()
+    for w in (np.ones(len(row)), np.array([0.5, 2.0, 1.0, 0.25, 3.0])):
+        lam = w * par["mean"].to_numpy() ** (2 - p) / (par["dispersion"].to_numpy() * (2 - p))
+        atom = tweedie.family.cdf_prior_weighted(np.zeros(len(row)), theta, w)
+        np.testing.assert_allclose(np.exp(-lam), atom, rtol=1e-9)
 
 
 def test_an_interaction_whose_level_names_collide_on_a_colon_is_left_out_by_name():

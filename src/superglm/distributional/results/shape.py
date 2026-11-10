@@ -85,7 +85,8 @@ class ShapeFit:
     chose; ``converged`` and ``reason`` say how that refit stopped, ``n_binding`` is the number of
     rows that bind at the reported coefficients, and ``max_violation`` the largest scaled amount
     by which any row misses its bound there. ``unconstrained_coefficients`` are the coefficients
-    the same smoothing gives without the rules.
+    the same smoothing gives without the rules; ``unruled`` is True when the refit could not start
+    and those are the coefficients reported.
     """
 
     terms: tuple[ShapeTermRecord, ...]
@@ -101,6 +102,7 @@ class ShapeFit:
     unconstrained_penalized_log_likelihood: float
     penalized_log_likelihood: float
     seconds: float = 0.0
+    unruled: bool = False
 
     def __post_init__(self) -> None:
         values = np.array(self.unconstrained_coefficients, dtype=np.float64, copy=True)
@@ -118,6 +120,7 @@ _REASONS = {
     "max_iterations": "it ran out of iterations",
     "line_search_failed": "no step improved the likelihood while keeping the rules",
     "no_ascent_direction": "the fit's curvature gave no usable direction",
+    "no_feasible_start": "it found no starting point that meets the rules",
 }
 
 
@@ -151,6 +154,14 @@ def shape_disclosures(shape: ShapeFit | None) -> tuple[str, ...]:
         return ()
     terms = ", ".join(term.term for term in shape.terms)
     why = _REASONS.get(shape.reason, shape.reason)
+    if shape.unruled:
+        return (
+            f"SuperLSS could not apply the shape rules on {terms}: {why}. The coefficients "
+            f"returned are the fit without the rules, which misses them by up to "
+            f"{shape.max_violation:.1e} of a row's scale, and no rule is held in the standard "
+            "errors. Refit with a larger max_inner_iter, or relax the rules, before reading the "
+            "summary.",
+        )
     return (
         f"SuperLSS could not certify the fit under the shape rules on {terms}: {why}. The "
         "coefficients returned are the last the refit reached; they meet the rules to within "

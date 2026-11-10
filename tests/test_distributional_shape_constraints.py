@@ -331,3 +331,21 @@ def test_a_damped_qp_step_is_the_damped_newton_step_from_the_current_point(monke
     damped = systems[1]
     assert not np.allclose(damped, curvature)
     np.testing.assert_allclose(damped @ (found.beta - anchor), score, rtol=0.0, atol=1e-10)
+
+
+def test_a_refit_with_no_feasible_start_is_disclosed_as_the_fit_without_the_rules(monkeypatch):
+    """The fit keeps no rule then: it must not report converged, nor call its curve the refit's."""
+    from superglm.distributional.solver import shape
+
+    monkeypatch.setattr(shape, "_MAX_PROJECTIONS", 0)  # no projection: the start stays infeasible
+    X, y = _data("gamma")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        held = _model("gamma", INCREASING).fit_reml(X, y)
+    record = _state(held).shape_fit
+    assert record.applied and not record.converged and record.unruled
+    assert record.reason == "no_feasible_start"
+    assert not held.result_.converged
+    assert np.min(np.diff(_curve(held, "mean"))) < 0.0
+    said = " ".join(str(w.message) for w in caught)
+    assert "the fit without the rules" in said and "the last the refit reached" not in said

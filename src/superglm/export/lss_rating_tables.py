@@ -82,9 +82,10 @@ _WEIGHT_NOTE = (
 # What a user pricing from the sheets needs beyond the tables, keyed by family.
 _FAMILY_NOTES = {
     "TweedieLSS": (
-        "Chance of no claim: exp(-lambda), with lambda = mean^(2 - p) / (dispersion * (2 - p)), "
-        "where mean and dispersion are the row's values from the Mean and Dispersion tables and p "
-        "is the model's power. It is a Tweedie's point mass at zero."
+        "Chance of no claim: exp(-lambda), with lambda = w * mean^(2 - p) / (dispersion * (2 - p)), "
+        "where mean and dispersion are the row's values from the Mean and Dispersion tables, p is "
+        "the model's power and w is the row's weight (1 for a model fitted without weights, which "
+        "enter as the dispersion over w). It is a Tweedie's point mass at zero."
     ),
 }
 

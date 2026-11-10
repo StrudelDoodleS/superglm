@@ -255,7 +255,14 @@ def refit_with_shape_rules(
         beta = np.asarray(result.coefficients, dtype=np.float64)
         flags = np.zeros(A.shape[0], dtype=bool) if binding is None else binding
         slack = _feasibility_slack(A, beta, b, abs_A=structure.abs_entries)
+        unruled = applied and result is unconstrained
+        # A refit that stopped short is a fit that did not converge, whatever the solver said
+        # of the fit it started from.
+        if applied and not converged:
+            solver_reason = "line_search_failed" if reason == "no_feasible_start" else reason
+            result = replace(result, converged=False, convergence_reason=solver_reason)
         return result, ShapeFit(
+            unruled=unruled,
             terms=_term_changes(layout, rows, weights, beta0, beta, flags),
             applied=applied,
             converged=converged,
@@ -348,7 +355,7 @@ def refit_with_shape_rules(
         geometry = measure(state)
         active = step.active_set
     if not _is_feasible(A, beta, b, _QP_FEASIBILITY_TOL, abs_A=structure.abs_entries):
-        return record(unconstrained, applied=True, converged=False, reason="line_search_failed")
+        return record(unconstrained, applied=True, converged=False, reason="no_feasible_start")
 
     iterations = backtracks = 0
     converged, reason = False, "max_iterations"

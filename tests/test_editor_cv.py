@@ -1390,6 +1390,31 @@ def test_results_describe_the_model_again_once_an_edit_is_undone(cv_frame, cv_fi
     assert exported.filename == "superglm_final_model.joblib"
 
 
+def test_putting_an_edited_terms_levels_in_another_order_changes_no_result(cv_frame, cv_fit):
+    """Display order is not part of the model: a reorder leaves Run CV and Final fit current."""
+    model, supplied = cv_fit
+    session = EditorSession.from_model(model, cv=supplied, **_splits(cv_frame))
+    session.select_levels("region", ["C"])
+    session.shift("region", 0.1)
+    widget = session.widget()
+    try:
+        for kind in ("cv", "final_fit"):
+            started = _post_json(f"{widget.url}/job_start", {"kind": kind})
+            _post_json(f"{widget.url}/job_status", {"job_id": started["job_id"], "wait": True})
+        before = list(session.terms["region"].levels)
+        session.select_levels("region", [before[-1]])
+        session.reorder_levels("region", target_index=0)
+        assert session.terms["region"].levels != before
+        report = widget._report("cv")
+        exported = widget._export_bytes("final")
+    finally:
+        widget.close()
+
+    assert [r["stale"] for r in report["results"] if r["origin"] == "run"] == [False]
+    assert report["final_fit"]["stale"] is False
+    assert exported.filename == "superglm_final_model.joblib"
+
+
 def test_final_fit_refits_train_and_validation_and_export_offers_it(cv_frame, cv_fit, fit_rows):
     from superglm.editor.cv import FINAL_NOT_RUN, FINAL_STALE
     from superglm.editor.errors import EditorValueError
