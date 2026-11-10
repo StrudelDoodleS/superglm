@@ -1715,8 +1715,8 @@ What a distributional model does not do yet, and what it refuses, in the
 order you are likely to meet them.
 
 - **Shape rules hold from `Constraint.fit` only.** A fit-time rule
-  (`Constraint.fit.*`) is enforced: the smoothing is chosen without the rules
-  and the model is then refit with them; see
+  (`Constraint.fit.*`) is enforced: the model is refit with the rules and the
+  smoothing of each ruled term is chosen with them held; see
   [Rules On A Distributional Model](constrain-a-smooth.md#rules-on-a-distributional-model).
   A post-fit rule (`Constraint.postfit.*`) is not applied, and
   `ShapeConstraintIgnoredWarning` says so when the model is compiled.

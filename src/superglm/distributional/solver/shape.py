@@ -225,14 +225,21 @@ def refit_with_shape_rules(
     config: DenseSolverConfig | None = None,
     chunk_size: chunking.ChunkSize | None = None,
     phase_recorder: FitPhaseRecorder | None = None,
+    start: DenseSolverResult | None = None,
+    session: _solver._DenseObservedReuseSession | None = None,
 ) -> tuple[DenseSolverResult, ShapeFit]:
-    """Refit ``unconstrained``'s coefficients at its smoothing under ``rows``.
+    """Refit ``unconstrained``'s coefficients at the smoothing ``penalty`` gives under ``rows``.
 
     Returns ``unconstrained`` itself, with a record that nothing was applied, when it already
     meets every row. Otherwise returns the fit on the face of the rows that bind, certified by
     the solver's face fit, so its covariance and degrees of freedom treat those rows as fixed.
     A refit that does not converge, or finds no feasible point, is returned and disclosed
     (``converged`` False with the reason), never refused.
+
+    ``start``, a fit that meets the rows (a rule fit at another smoothing), starts the sequential
+    QP in place of ``unconstrained``, which stays the fit the record compares against.
+    ``session`` shares the design and likelihood preparation between refits of one fit; none of
+    it depends on the smoothing or the coefficients.
     """
     started = time.perf_counter()
     solver_config = DenseSolverConfig() if config is None else config
@@ -240,6 +247,7 @@ def refit_with_shape_rules(
     structure = _constraint_structure(A)
     base = unconstrained.coefficient_face
     beta0 = np.asarray(unconstrained.coefficients, dtype=np.float64)
+    origin = beta0 if start is None else np.asarray(start.coefficients, dtype=np.float64)
     weights = np.asarray(likelihood_plan.weights.values, dtype=np.float64)
 
     def record(
@@ -278,10 +286,12 @@ def refit_with_shape_rules(
             seconds=time.perf_counter() - started,
         )
 
-    if _is_feasible(A, beta0, b, _QP_FEASIBILITY_TOL, abs_A=structure.abs_entries):
+    if start is None and _is_feasible(
+        A, beta0, b, _QP_FEASIBILITY_TOL, abs_A=structure.abs_entries
+    ):
         return record(unconstrained, applied=False, converged=True, reason="not_violated")
 
-    session = _solver._DenseObservedReuseSession()
+    session = _solver._DenseObservedReuseSession() if session is None else session
     memoised = (
         session.dense_matrices(layout, phase_recorder=phase_recorder)
         if chunk_size is None
@@ -317,11 +327,11 @@ def refit_with_shape_rules(
         matrix = np.asarray(geometry.penalized_curvature, dtype=np.float64)
         return matrix if inside is None else inside.T @ matrix @ inside
 
-    state = _solver._evaluate_state(context, beta0, phase_recorder=phase_recorder)
+    state = _solver._evaluate_state(context, origin, phase_recorder=phase_recorder)
     if state is None:
         return record(unconstrained, applied=True, converged=False, reason="no_ascent_direction")
     geometry = measure(state)
-    beta = beta0
+    beta = origin
     active: list[int] | None = None
 
     inner = structure if inside is None else _constraint_structure(A_inside)

@@ -26,7 +26,11 @@ from superglm.distributional.layout import StackedLayout
 from superglm.distributional.model import DenseDistributionalModel
 from superglm.distributional.results.fit import DistributionalFitResult
 from superglm.distributional.results.iteration import DistributionalEFSIteration
-from superglm.distributional.results.shape import ShapeFit, shape_term_sentence
+from superglm.distributional.results.shape import (
+    ShapeFit,
+    shape_smoothing_sentence,
+    shape_term_sentence,
+)
 from superglm.distributional.results.smoothing import DistributionalEFSResult
 from superglm.distributional.results.solver import DenseSolverResult
 from superglm.distributional.timing import FitPhaseSnapshot
@@ -1728,13 +1732,17 @@ def _analyze_shape_rules(context: _LSSDiagnosticContext) -> tuple[DiagnosticFind
             term=name,
         )
         sentence = shape_term_sentence(term, shape)
+        smoothing_sentence = shape_smoothing_sentence(shape)
+        settled = shape.converged and (shape.smoothing is None or shape.smoothing.converged)
         findings.append(
             _finding(
                 "shape.rule",
                 subject,
                 priority=3,
-                severity="info" if shape.converged else "warning",
-                headline=sentence,
+                severity="info" if settled else "warning",
+                headline=sentence
+                if smoothing_sentence is None
+                else f"{sentence} {smoothing_sentence}",
                 observed=(
                     f"{term.n_binding} of {term.n_rows} rows bind; the curve moved by at most "
                     f"{term.largest_change:.3g} on the linear-predictor scale."
@@ -1743,9 +1751,13 @@ def _analyze_shape_rules(context: _LSSDiagnosticContext) -> tuple[DiagnosticFind
                     "The coefficients are the fit without the rule, so the curve may break it; "
                     "refit with a larger max_inner_iter, or relax the rule."
                     if shape.unruled
-                    else "The smoothing was chosen without the rule and the coefficients were then "
-                    "refitted under it, so a binding rule costs likelihood and fixes the curve "
-                    "at the rows that bind."
+                    else "The smoothing was chosen with the rule held at the rows that bind, so a "
+                    "binding rule costs likelihood, fixes the curve at those rows and moves the "
+                    "smoothing to suit the curve it allows."
+                    if shape.smoothing is not None
+                    else "The smoothing the search chose without the rule was kept and the "
+                    "coefficients were refitted under it, so a binding rule costs likelihood and "
+                    "fixes the curve at the rows that bind."
                     if shape.applied
                     else "The fit without the rule already obeyed it, so it is the fit."
                 ),
@@ -1755,6 +1767,10 @@ def _analyze_shape_rules(context: _LSSDiagnosticContext) -> tuple[DiagnosticFind
                     ("rule_rows_binding", term.n_binding),
                     ("largest_change_in_effect", term.largest_change),
                     ("refit_converged", shape.converged),
+                    (
+                        "smoothing_converged",
+                        True if shape.smoothing is None else shape.smoothing.converged,
+                    ),
                 ),
                 action_kind="compare_unconstrained_fit",
                 action_question=(

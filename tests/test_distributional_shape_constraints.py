@@ -1,17 +1,20 @@
 """Fit-time shape rules on SuperLSS terms (``solver/shape.py``).
 
-Smoothing is chosen without the rules and the coefficients are refitted under them at that
-smoothing, by sequential QP. Each fit is checked against an independent optimizer on the same
-penalized likelihood and rows, and its covariance against the null-space formula.
+The coefficients are refitted under the rules by sequential QP, and the smoothing is re-chosen
+with the rows that bind held (``smoothing/shape_efs.py``). Each fit is checked against an
+independent optimizer on the same penalized likelihood and rows, its smoothing against the
+Laplace marginal likelihood on the rules' face, and its covariance against the null-space formula.
 """
 
 from __future__ import annotations
 
 import warnings
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
 import pytest
+import scipy.linalg
 from scipy import optimize
 
 from superglm import Constraint, GammaLS, NegativeBinomialLS, SuperLSS, TweedieLSS, s
@@ -137,8 +140,10 @@ def test_a_rule_fit_matches_an_independent_optimizer_and_is_monotone(kind, param
     assert shape.applied and shape.converged and shape.n_binding > 0
     assert held.result_.converged
 
-    # the same smoothing, chosen without the rules
-    assert held.smoothing_parameters_ == pytest.approx(free.smoothing_parameters_, rel=0, abs=0)
+    # the smoothing was re-chosen with the rules held, starting from the one chosen without them
+    assert shape.smoothing is not None and shape.smoothing.converged
+    assert dict(shape.smoothing.lambdas_without_rules) == _state(free).lambdas
+    assert held.smoothing_parameters_ != pytest.approx(free.smoothing_parameters_, rel=0.05)
     # monotone to rounding on a dense grid
     assert np.min(np.diff(_curve(held, parameter))) >= -1e-9
 
@@ -171,11 +176,11 @@ def test_the_kkt_conditions_hold_at_the_constrained_fit(kind):
     # the penalized score is a nonnegative combination of the binding rows
     multipliers = optimize.nnls(rows.A[binding].T, -score)[0]
     residual = score + rows.A[binding].T @ multipliers
-    assert np.linalg.norm(residual) <= 1e-6 * (1.0 + np.linalg.norm(score)) + 1e-6 * np.linalg.norm(
-        rows.A[binding].T @ multipliers
-    )
+    # the solver's stationarity test reads the score against the objective's scale
+    scale = 1.0 + abs(float(state.solver_result.penalized_optimizing_log_likelihood))
+    assert np.linalg.norm(residual) <= 1e-7 * scale
     free_direction = np.linalg.svd(rows.A[binding])[2][binding.size :].T
-    assert np.max(np.abs(free_direction.T @ score)) <= 1e-5 * (1.0 + np.abs(score).max())
+    assert np.max(np.abs(free_direction.T @ score)) <= 1e-7 * scale
 
 
 def test_an_already_monotone_fit_is_the_unconstrained_fit():
@@ -190,6 +195,7 @@ def test_an_already_monotone_fit_is_the_unconstrained_fit():
     assert np.array_equal(held.result_.coefficients, free.result_.coefficients)
     assert np.array_equal(held.result_.covariance, free.result_.covariance)
     assert held.result_.total_effective_df == free.result_.total_effective_df
+    assert shape.smoothing is None and held.smoothing_parameters_ == free.smoothing_parameters_
     # no row binds, so there is nothing for the sentence to say but that
     assert "did not bind" in held.diagnose().render(detail="full")
 
@@ -451,3 +457,185 @@ def test_the_rows_reported_as_binding_are_the_rows_the_standard_errors_hold():
     assert record.applied and record.converged
     assert record.n_binding > 0 and record.binds
     assert "did not bind" not in model.diagnose().render(detail="full")
+
+
+def _face_laplace(model: SuperLSS, y: np.ndarray, log_lambda: float) -> float:
+    """The Laplace marginal likelihood on the face of the binding rows at one smoothing, formed
+    here: the constrained optimum by trust-constr, the rows its multipliers hold as equalities,
+    a finite-difference Hessian, and the penalty projected onto the face.
+
+    ``-f(b) + log|Z' S Z|_+ / 2 - log|Z' H Z| / 2 + (m - r) log(2 pi) / 2`` for ``f`` the
+    penalized negative log-likelihood, ``Z`` (``m`` columns) the binding rows' null space and
+    ``r`` the rank of ``Z' S Z``. The model must carry one smoothing parameter.
+    """
+    state = _state(model)
+    layout, family = state.layout, model.family
+    ((_, fitted),) = state.lambdas.items()
+    unit = np.asarray(state.solver_result.penalty) / fitted
+    rows = shape_rows(layout, state.compiled_predictors)
+    matrices = dense_predictor_matrices(layout)
+    weights = resolve_likelihood_weights(
+        None, n_observations=len(y), contract=WeightContract("prior")
+    )
+    plan = family.bind_likelihood(y, weights, COMPLETE_OBSERVATION)
+    links = [predictor.link for predictor in layout.predictors]
+    penalty = np.exp(log_lambda) * unit
+
+    def objective(beta: np.ndarray) -> float:
+        eta = _evaluate_predictors_from_matrices(layout, beta, matrices)
+        theta = np.column_stack([link.inverse(eta[:, j]) for j, link in enumerate(links)])
+        natural = family.evaluate_natural(y, theta, plan, derivative_order=0)
+        return -float(np.sum(natural.optimizing_log_likelihood)) + 0.5 * beta @ penalty @ beta
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        found = optimize.minimize(
+            objective,
+            np.asarray(state.solver_result.coefficients),
+            method="trust-constr",
+            constraints=[optimize.LinearConstraint(rows.A, rows.b, np.inf)],
+            options={"maxiter": 3000, "gtol": 1e-11, "xtol": 1e-13},
+        )
+    beta = found.x
+    # trust-constr is an interior method, so its active rows sit just inside; its multipliers say
+    # which rows hold the optimum
+    multipliers = np.abs(np.asarray(found.v[0]))
+    held = rows.A[multipliers > 1e-4 * (1.0 + multipliers.max())]
+    basis = np.eye(beta.size)
+    if held.shape[0]:
+        _, singular, vt = np.linalg.svd(held)
+        basis = vt[int(np.sum(singular > 1e-10 * singular[0])) :].T
+    step = 1e-4
+    width = beta.size
+    hessian = np.empty((width, width))
+    for i in range(width):
+        for j in range(i, width):
+            di, dj = np.eye(width)[i] * step, np.eye(width)[j] * step
+            hessian[i, j] = hessian[j, i] = (
+                objective(beta + di + dj)
+                - objective(beta + di - dj)
+                - objective(beta - di + dj)
+                + objective(beta - di - dj)
+            ) / (4.0 * step * step)
+    projected = np.linalg.eigvalsh(basis.T @ penalty @ basis)
+    positive = projected[projected > 1e-9 * projected.max()]
+    return float(
+        -found.fun
+        + 0.5 * np.sum(np.log(positive))
+        - 0.5 * np.linalg.slogdet(basis.T @ hessian @ basis)[1]
+        + 0.5 * (basis.shape[1] - positive.size) * np.log(2.0 * np.pi)
+    )
+
+
+def test_the_smoothing_chosen_with_the_rules_held_beats_the_one_chosen_without():
+    """The rules' smoothing is the face's Laplace optimum, by an independent evaluation of it.
+
+    Fellner--Schall neglects the curvature's change with the smoothing, so its fixed point is
+    the optimum to that approximation: higher than the smoothing chosen without the rules and
+    higher than a step either side of it. The same rows bind across this range; where the
+    rows that bind change with the smoothing, the face's likelihood jumps there, and the update
+    is stationary on the face it ends on.
+    """
+    X, y = _data("gamma")
+    free = _model("gamma").fit_reml(X, y)
+    held = _model("gamma", INCREASING).fit_reml(X, y)
+    smoothing = _state(held).shape_fit.smoothing
+    assert smoothing is not None and smoothing.converged and smoothing.reason == "stationary"
+    assert smoothing.residual <= _state(free).smoothing.config.tolerance
+    ((_, without),) = _state(free).lambdas.items()
+    ((_, chosen),) = _state(held).lambdas.items()
+    rho = np.log(chosen)
+    at = _face_laplace(held, y, rho)
+    assert at > _face_laplace(held, y, np.log(without)) + 0.1
+    # a quarter of a log unit either side costs about 0.05 here; the evaluation is good to ~1e-4
+    for side in (rho - 0.25, rho + 0.25):
+        assert at >= _face_laplace(held, y, side) + 0.01
+
+
+def test_only_the_ruled_terms_smoothing_moves():
+    """A rule changes the model only in its own term's block; every other penalty keeps the
+    smoothing the search chose, to the bit."""
+    X, y = _data("gamma")
+    z = np.random.default_rng(11).uniform(0.0, 1.0, len(y))
+    X = X.assign(z=z)
+    y = y * np.exp(0.3 * np.sin(6.0 * z))
+    family = GammaLS()
+
+    def model(rule):
+        extra = {} if rule is None else {"constraint": rule}
+        return SuperLSS(
+            family, family.mean(s("x", k=8, **extra), s("z", k=6)), family.scale(s("z", k=5))
+        )
+
+    free = model(None).fit_reml(X, y)
+    held = model(INCREASING).fit_reml(X, y)
+    smoothing = _state(held).shape_fit.smoothing
+    assert smoothing is not None and smoothing.converged
+    assert smoothing.estimated == ("mean:x#wiggle",)
+    for name, value in _state(free).lambdas.items():
+        if name == "mean:x#wiggle":
+            assert _state(held).lambdas[name] != pytest.approx(value, rel=0.05)
+        else:
+            assert _state(held).lambdas[name] == value
+
+
+def test_a_cut_block_has_the_rank_of_its_penalty_on_the_face():
+    """On the face, a single-penalty block's effective rank is the rank of the penalty there:
+    the face's width in the block less the penalty-free directions the face keeps."""
+    from superglm.distributional.smoothing.shape_efs import face_component_states
+
+    X, y = _data("gamma")
+    held = _model("gamma", INCREASING).fit_reml(X, y)
+    state = _state(held)
+    face = state.solver_result.coefficient_face
+    (component,) = state.layout.penalties
+    block = component.group_sl
+    (cut,) = face_component_states(state.layout, state.lambdas, face, None)
+    local = face.null_basis[block]
+    left, singular, _ = np.linalg.svd(local, full_matrices=False)
+    within = left[:, singular > 0.5]
+    penalty = np.asarray(cut.penalty)
+    expected = np.linalg.matrix_rank(within.T @ penalty @ within)
+    assert cut.rank == pytest.approx(expected, abs=1e-9)
+    # the penalty-free directions the face keeps: the null space of the penalty within it
+    null = scipy.linalg.null_space(penalty)
+    kept = within.shape[1] + null.shape[1] - np.linalg.matrix_rank(np.column_stack((within, null)))
+    assert expected == within.shape[1] - kept < np.linalg.matrix_rank(penalty)
+
+
+def test_a_fixed_smoothing_fit_keeps_its_smoothing():
+    X, y = _data("gamma")
+    free = _model("gamma").fit_reml(X, y)
+    given = dict(_state(free).lambdas)
+    held = _model("gamma", INCREASING).fit(X, y, lambdas=given)
+    shape = _state(held).shape_fit
+    assert shape.applied and shape.converged and shape.binds and shape.smoothing is None
+    assert dict(_state(held).lambdas) == given
+
+
+def test_a_smoothing_search_under_the_rules_that_stops_short_is_disclosed(monkeypatch):
+    """The fit is returned, meets its rules, and says the smoothing did not settle."""
+    from superglm.distributional.smoothing import shape_efs
+
+    calls = []
+    refit = shape_efs.refit_with_shape_rules
+
+    def stalls_after_the_first(*args, **kwargs):
+        result, record = refit(*args, **kwargs)
+        calls.append(1)
+        if len(calls) > 1:
+            record = replace(record, converged=False, reason="max_iterations")
+        return result, record
+
+    monkeypatch.setattr(shape_efs, "refit_with_shape_rules", stalls_after_the_first)
+    X, y = _data("gamma")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        held = _model("gamma", INCREASING).fit_reml(X, y)
+    smoothing = _state(held).shape_fit.smoothing
+    assert smoothing is not None and not smoothing.converged
+    assert smoothing.reason == "refit_not_converged" and smoothing.iterations >= 2
+    assert np.min(np.diff(_curve(held, "mean"))) >= -1e-9
+    said = " ".join(str(w.message) for w in caught)
+    assert "did not settle the smoothing with the shape rules held" in said
+    assert "did not settle" in held.diagnose().render(detail="full")

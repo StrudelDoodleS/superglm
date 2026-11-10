@@ -268,8 +268,10 @@ model.fit(df, y)
 
 - Rules bind the main-effect curve only. In an interaction, the main effect
   times the interaction effect can go past a cap.
-- Smoothing is chosen without the rules, then the model is refit with them.
-  See [REML Semantics](#reml-semantics).
+- On `SuperGLM`, smoothing is chosen without the rules, then the model is refit
+  with them. See [REML Semantics](#reml-semantics). `SuperLSS` chooses it with
+  the rules held; see
+  [Rules On A Distributional Model](#rules-on-a-distributional-model).
 - Intervals treat a rule that binds as fixed. See
   [QP-Backed Shape Fits](#qp-backed-shape-fits).
 - `Constraint.postfit` takes only a single shape over the whole range.
@@ -303,13 +305,21 @@ model = SuperLSS(
 model.fit_reml(X, y)
 ```
 
-The fit works in two steps, as `SuperGLM` does:
+The fit works in three steps:
 
 1. The smoothing search runs without the rules.
 2. The coefficients are refitted at that smoothing with the rules, together
    across every parameter, from a start that meets them. If the fit without
    the rules already obeys every rule, nothing is refitted and the fit is that
    fit.
+3. The smoothing of each term that carries a rule is chosen again with the
+   rules held. A rule that binds holds the curve at some checkpoints, so the
+   term has fewer free directions, and the smoothing is chosen for that curve:
+   by the same Fellner-Schall update as the search, on the coefficients the
+   binding checkpoints leave free, with a coefficient refit under the rules at
+   each step. Every other term keeps the smoothing the search chose. A fit
+   with fixed smoothing (`fit()` with `lambdas`) keeps the smoothing it was
+   given.
 
 What you can rely on:
 
@@ -320,17 +330,18 @@ What you can rely on:
   needs a fit free of its rules, so on a fit with a binding rule it returns the
   fixed covariance and says so.
 - `diagnose()` says what each rule did, one sentence per constrained term: how
-  many checkpoints along the curve bind, and the largest change from the fit
-  without the rule.
-- A refit that does not converge is returned and disclosed, never refused.
+  many checkpoints along the curve bind, the largest change from the fit
+  without the rule, and how many steps re-chose the smoothing.
+- A refit, or a re-choice of the smoothing, that does not converge is returned
+  and disclosed, never refused. The fit then meets its rules at the last
+  smoothing reached, and `max_reml_iter` raises the step limit.
 - A rule the term cannot state as rows, or one that cannot be applied as
   written, warns with `ShapeConstraintIgnoredWarning` and the term is fitted
   unconstrained.
 
-What it does not do yet: choose the smoothing under the rules. The smoothing
-is the unconstrained one, so a rule that binds hard leaves a curve a little
-smoother or rougher than the best one under that rule. The editor does not
-show which rules bind.
+A rule that binds usually makes its term smoother than the fit without it:
+the checkpoints it holds take directions out of the curve, and the smoothing
+chosen for what is left is larger. The editor does not show which rules bind.
 
 ## Linear Predictor Semantics
 

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import ClassVar
 
 import numpy as np
@@ -77,6 +79,46 @@ class ShapeTermRecord:
 
 
 @dataclass(frozen=True)
+class ShapeSmoothing:
+    """How the smoothing was re-chosen with the rules active (``smoothing/shape_efs.py``).
+
+    ``lambdas_without_rules`` is the smoothing the search chose without them, which the rule
+    fit started from; ``estimated`` names the components re-chosen. ``iterations`` counts the
+    Fellner--Schall steps on the rules' face, each a rule refit; ``residual`` is the largest
+    fixed-point residual (log scale) at the reported smoothing, ``converged`` whether it met
+    the search's tolerance, and ``reason`` how it stopped.
+    """
+
+    lambdas_without_rules: Mapping[str, float]
+    estimated: tuple[str, ...]
+    iterations: int
+    converged: bool
+    reason: str
+    residual: float
+    seconds: float = 0.0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "lambdas_without_rules", MappingProxyType(dict(self.lambdas_without_rules))
+        )
+        object.__setattr__(self, "estimated", tuple(self.estimated))
+
+    def __reduce__(self):
+        return (
+            type(self),
+            (
+                dict(self.lambdas_without_rules),
+                self.estimated,
+                self.iterations,
+                self.converged,
+                self.reason,
+                self.residual,
+                self.seconds,
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class ShapeFit:
     """What a fit's shape rules did.
 
@@ -85,8 +127,10 @@ class ShapeFit:
     chose; ``converged`` and ``reason`` say how that refit stopped, ``n_binding`` is the number of
     rows that bind at the reported coefficients, and ``max_violation`` the largest scaled amount
     by which any row misses its bound there. ``unconstrained_coefficients`` are the coefficients
-    the same smoothing gives without the rules; ``unruled`` is True when the refit could not start
-    and those are the coefficients reported.
+    the smoothing search gives without the rules; ``unruled`` is True when the refit could not
+    start and those are the coefficients reported. ``smoothing`` records how the smoothing was
+    re-chosen with the rules active, and is None when it was not (a fixed-smoothing fit, or a
+    rule that leaves the smoothing where the search without it put it).
     """
 
     terms: tuple[ShapeTermRecord, ...]
@@ -103,6 +147,7 @@ class ShapeFit:
     penalized_log_likelihood: float
     seconds: float = 0.0
     unruled: bool = False
+    smoothing: ShapeSmoothing | None = None
 
     def __post_init__(self) -> None:
         values = np.array(self.unconstrained_coefficients, dtype=np.float64, copy=True)
@@ -153,9 +198,46 @@ def _change(term: ShapeTermRecord) -> str:
     return f"{term.largest_change:.3g} on the predictor's scale"
 
 
+_SMOOTHING_REASONS = {
+    "max_iterations": "it ran out of iterations",
+    "refit_not_converged": "a refit under the rules at the next smoothing did not converge",
+    "no_update": "its update could no longer move the smoothing",
+}
+
+
+def shape_smoothing_sentence(shape: ShapeFit) -> str | None:
+    """One plain sentence on how the rules moved the smoothing, or None if they did not."""
+    smoothing = shape.smoothing
+    if smoothing is None:
+        return None
+    if smoothing.converged:
+        return (
+            "The smoothing was chosen with the rules held, in "
+            f"{smoothing.iterations} Fellner-Schall steps from the smoothing chosen without them."
+        )
+    why = _SMOOTHING_REASONS.get(smoothing.reason, smoothing.reason)
+    return (
+        "The smoothing was re-chosen with the rules held but did not settle: "
+        f"{why} after {smoothing.iterations} steps, {smoothing.residual:.2g} on the log scale "
+        "from its fixed point."
+    )
+
+
 def shape_disclosures(shape: ShapeFit | None) -> tuple[str, ...]:
     """The message a fit whose shape-rule refit did not converge publishes, else nothing."""
-    if shape is None or not shape.applied or shape.converged:
+    if shape is None or not shape.applied:
+        return ()
+    smoothing = shape.smoothing
+    if shape.converged and smoothing is not None and not smoothing.converged:
+        why = _SMOOTHING_REASONS.get(smoothing.reason, smoothing.reason)
+        return (
+            "SuperLSS did not settle the smoothing with the shape rules held: "
+            f"{why} after {smoothing.iterations} steps, {smoothing.residual:.2g} on the log scale "
+            "from its fixed point. The fit returned meets the rules at the last smoothing "
+            "reached, which may not be the best smoothing under them. Refit with a larger "
+            "max_reml_iter before reading the smoothing parameters.",
+        )
+    if shape.converged:
         return ()
     terms = ", ".join(term.term for term in shape.terms)
     why = _REASONS.get(shape.reason, shape.reason)

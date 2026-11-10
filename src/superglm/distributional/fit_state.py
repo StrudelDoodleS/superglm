@@ -404,7 +404,15 @@ class DistributionalFitState:
                     )
             elif self.smoothing.terminal_fit is not self.solver_result:
                 raise ValueError("solver result must be the accepted terminal EFS fit")
-            if dict(self.smoothing.lambdas) != dict(lambdas):
+            rechosen = None if self.shape_fit is None else self.shape_fit.smoothing
+            searched = (
+                dict(self.smoothing.lambdas)
+                if rechosen is None
+                else dict(rechosen.lambdas_without_rules)
+            )
+            if searched != dict(self.smoothing.lambdas):
+                raise ValueError("the rules' smoothing must start from the accepted search")
+            if rechosen is None and searched != dict(lambdas):
                 raise ValueError("smoothing and fitted lambdas must agree")
             if any(
                 fit.family_likelihood_plan_identifier != self.family_likelihood_plan_identifier
