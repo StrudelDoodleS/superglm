@@ -71,10 +71,11 @@ def _scan(view: LSSModelView, column: str) -> tuple:
 def _describe(session: Any, view: LSSModelView, column: str) -> tuple[dict, dict[str, Any]]:
     """The column's entry of ``features`` and, for levels, each label's training value."""
     reference = view.reference_row()[column].iloc[0]
+    # Every fitted term on the column moves the risk, whether or not it was opened for editing.
     terms = {
-        parameter: lss_key(parameter, column)
-        for parameter in view.lss.parameter_names_
-        if lss_key(parameter, column) in session.terms
+        predictor.name: lss_key(predictor.name, column)
+        for predictor in view._fitted.compiled_predictors
+        if column in predictor.compiled.feature_order
     }
     head = {"column": column, "terms": terms}
     first, second = _scan(view, column)
@@ -93,7 +94,12 @@ def _describe(session: Any, view: LSSModelView, column: str) -> tuple[dict, dict
         **first,
     }
     opened = next(
-        (session.terms[key].levels for key in terms.values() if session.terms[key].levels), None
+        (
+            session.terms[key].levels
+            for key in terms.values()
+            if key in session.terms and session.terms[key].levels
+        ),
+        None,
     )
     return {
         **head,

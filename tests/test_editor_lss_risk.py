@@ -182,6 +182,15 @@ def _grade_session(categorical):
     return model, X, edit(model, train_data=(X, case.y))
 
 
+def test_a_feature_names_every_fitted_term_it_moves_when_only_some_are_editable():
+    """A term not opened for editing still moves the risk, so the walk keeps its parameter."""
+    case = lognormal_case()
+    session = open_case(case, terms=["mean:age"])
+    assert "scale:age" not in session.terms
+    features = {f["column"]: f for f in _risks(session, [{}])["features"]}
+    assert features["age"]["terms"] == {"mean": "mean:age", "scale": "scale:age"}
+
+
 def test_a_numeric_column_read_as_levels_takes_its_declared_level_as_a_number():
     model, X, session = _grade_session(False)
     feature = _risks(session, [{}])["features"][-1]

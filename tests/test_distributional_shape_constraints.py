@@ -295,3 +295,39 @@ def test_the_face_of_binding_rows_sits_inside_an_exact_penalty_face():
     assert face.reduced_width < base.reduced_width
     # a step off the face is projected back through the anchor, not through the origin
     np.testing.assert_allclose(face.project(anchor), anchor, atol=1e-12)
+
+
+def test_a_damped_qp_step_is_the_damped_newton_step_from_the_current_point(monkeypatch):
+    """Damping shifts the QP target with the curvature, so the step is not pulled toward zero."""
+    from superglm.distributional.results.solver import DenseSolverConfig
+    from superglm.distributional.solver import shape
+    from superglm.solvers.constrained_qp import _constraint_structure
+
+    curvature = np.array([[2.0, 0.3], [0.3, 1.0]])
+    anchor = np.array([1.5, -2.0])
+    score = np.array([0.4, -0.1])
+    rows, bound = np.array([[1.0, 0.0]]), np.array([-1.0e6])  # never binds
+    solve = shape._solve_constrained_qp_with_cold_retry
+    systems = []
+
+    def damped_only(system, target, *args, **kwargs):
+        # The undamped solve is refused, as an indefinite curvature's is, to force the damping.
+        systems.append(system)
+        if len(systems) == 1:
+            raise np.linalg.LinAlgError("indefinite")
+        return solve(system, target, *args, **kwargs)
+
+    monkeypatch.setattr(shape, "_solve_constrained_qp_with_cold_retry", damped_only)
+    found = shape._qp_step(
+        curvature,
+        curvature @ anchor + score,
+        anchor,
+        rows,
+        bound,
+        None,
+        _constraint_structure(rows),
+        DenseSolverConfig(initial_levenberg_shift=0.5),
+    )
+    damped = systems[1]
+    assert not np.allclose(damped, curvature)
+    np.testing.assert_allclose(damped @ (found.beta - anchor), score, rtol=0.0, atol=1e-10)

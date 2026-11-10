@@ -679,8 +679,19 @@ test("theta is read as the overdispersion 1/theta, and a log-normal's scale as i
       { name: "scale", label: "CV", role: "spread", link: floored }
     ]
   });
-  const sigma = 0.01 + Math.exp(-0.5);
-  assert.equal(parameterValue(lognormal, 1, -0.5), Math.sqrt(Math.expm1(sigma * sigma)));
+  // A log-normal's walk is in sigma, the quantity its steps multiply above the floor, not in the
+  // CV the table shows: a x2 step must read as x2 on the column it sits in.
+  assert.equal(parameterValue(lognormal, 1, -0.5), 0.01 + Math.exp(-0.5));
+  const moved = driversModel({
+    ...lognormal,
+    features: [{ ...reply().features[0], terms: { mean: "mean:age", scale: "scale:age" } }, reply().features[1]],
+    risks: [{ ...lognormal.risks[0], eta: { fitted: [0, LN(2)], edited: [0, LN(2)] },
+      effects: { fitted: [[0, LN(2)], [0, 0]], edited: [[0, LN(2)], [0, 0]] } }],
+    reference: { fitted: [0, 0], edited: [0, 0] },
+  });
+  assert.deepEqual(moved.columns, ["Mean", "σ"]);
+  const [start, end] = [moved.start.values[1].text, moved.end.values[1].text];
+  assert.deepEqual([moved.rows[0].steps[1].text, start, end], ["×2.00", "1.01", "2.01"]);
 });
 
 // ---------------------------------------------------------------------------------------------

@@ -57,20 +57,27 @@ const times = (move) => `×${fmtSignificant(Math.exp(move), 3)}`;
 const UNMOVED = times(0);
 
 /**
- * The quantity the view shows for a parameter at a link value: the mean; the coefficient of
- * variation of a gamma or a log-normal; a negative binomial's overdispersion 1/theta; a
- * Tweedie's dispersion, or its power between the link's walls.
+ * The quantity the walk shows for a parameter at a link value, the one its steps multiply: the
+ * mean; a gamma's coefficient of variation; a log-normal's sigma, whose steps multiply it above
+ * its floor; a negative binomial's overdispersion 1/theta; a Tweedie's dispersion, or its power
+ * between the link's walls.
  * @param {RiskResponse} reply @param {number} index the parameter's place in `parameters`
  * @param {number} eta
  */
 export function parameterValue(reply, index, eta) {
-  const { name, role, link } = reply.parameters[index];
+  const { name, link } = reply.parameters[index];
   if (link.kind === "bounded_logit") return link.lower + (link.upper - link.lower) / (1 + Math.exp(-eta));
   if (name === "theta") return Math.exp(-eta);
-  if (role === "average" || reply.family !== "lognormal_mean") return Math.exp(eta);
-  const sigma = (link.kind === "floored_log" ? link.floor : 0) + Math.exp(eta);
-  return Math.sqrt(Math.expm1(sigma * sigma));
+  return (link.kind === "floored_log" ? link.floor : 0) + Math.exp(eta);
 }
+
+/**
+ * A walk column's heading: the parameter's label, except a log-normal's CV, whose steps multiply
+ * sigma, the standard deviation of the log amount, so the column is sigma.
+ * @param {RiskResponse} reply @param {RiskResponse["parameters"][number]} parameter
+ */
+const columnLabel = (reply, parameter) =>
+  reply.family === "lognormal_mean" && parameter.role === "spread" ? "σ" : parameter.label;
 
 /**
  * What the walk says where no feature differs from its start.
@@ -160,7 +167,7 @@ export function driversModel(reply, selected) {
   return {
     title: `${base ? letter(base) : "Reference"} → ${letter(last)}`,
     id,
-    columns: parameters.map((parameter) => parameter.label),
+    columns: parameters.map((parameter) => columnLabel(reply, parameter)),
     start,
     rows,
     together,

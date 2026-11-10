@@ -201,6 +201,14 @@ def _categorical_block(prepared, name, frame, column, sample_weight, sign) -> Ra
 
 def _cell_block(name, ispec, beta, sign) -> InteractionTableBlock:
     raw = ispec.reconstruct(beta)
+    # The fitted cells are keyed "level1:level2", so levels holding a colon can give two cells,
+    # or a cell and a base cell, one key and one cell's factor would be read for both.
+    keys = [f"{level1}:{level2}" for level1 in raw["levels1"] for level2 in raw["levels2"]]
+    if len(set(keys)) != len(keys):
+        raise ValueError(
+            f"its interaction {name!r} has levels whose names contain ':', so two of its cells "
+            "share a name and cannot both be read back; rename those levels to export."
+        )
     rows = [
         {
             ispec.parent_names[0]: level1,

@@ -526,3 +526,21 @@ def test_the_notes_define_weight_and_a_tweedie_gives_the_chance_of_no_claim(tmp_
     lam = par["mean"].to_numpy() ** (2 - p) / (par["dispersion"].to_numpy() * (2 - p))
     atom = tweedie.family.cdf(np.zeros(len(row)), par[["mean", "dispersion", "power"]].to_numpy())
     np.testing.assert_allclose(np.exp(-lam), atom, rtol=1e-9)
+
+
+def test_an_interaction_whose_level_names_collide_on_a_colon_is_left_out_by_name():
+    """("a", "b:c") and ("a:b", "c") share the key "a:b:c"; one factor would be read for both."""
+    X, rng = _book(seed=3), np.random.default_rng(4)
+    X["region"] = X["region"].map({"A": "a", "B": "a:b", "C": "z"})
+    X["seg"] = X["seg"].map({"p": "b:c", "q": "c"})
+    y = rng.gamma(4.0, np.exp(1 + 0.3 * (X.region == "a:b") + 0.4 * (X.seg == "c")) / 4.0)
+    model = _fit(
+        GammaLS(),
+        (cat("region"), cat("seg"), interaction(CategoricalInteraction("region", "seg"))),
+        (s("age", k=5),),
+        y,
+        X,
+    )
+    payload = model.rating_table_payload(X)
+    assert [table.parameter for table in payload.parameters] == ["scale"]
+    assert "contain ':'" in payload.omitted["mean"] and "region:seg" in payload.omitted["mean"]

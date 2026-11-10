@@ -302,7 +302,7 @@ export const HELP_SECTIONS = Object.freeze([
       "After an edit, a single risk is read beside the original model's distribution for it, drawn in grey, and a row of the walk that the edit moved says what it was.",
       "The line is the distribution panel's: a press or a drag on the plots moves it, as its box does, and the box takes a number alone. Every offset is at zero.",
       "A Tweedie model has a chance of no claim. The table gives it for each risk. The upper plot is the density of the amount given a claim, so every curve has an area of one and its dot and diamond are the median and mean claim; the lower plot is the chance for the whole policy, so it starts at the chance of a claim. Its walk covers the mean and the dispersion; the power is one constant for the model.",
-      "A model of counts (a negative binomial) draws its distribution as a bar per number of claims for each risk, for one unit of exposure, on a scale that keeps the rare counts in view, and its table reads the mean, the chance of no claim and of one, two and three or more, and the overdispersion 1/θ. For a log-normal, the CV's multipliers in the walk act on σ, the standard deviation of the log amount.",
+      "A model of counts (a negative binomial) draws its distribution as a bar per number of claims for each risk, for one unit of exposure, on a scale that keeps the rare counts in view, and its table reads the mean, the chance of no claim and of one, two and three or more, and the overdispersion 1/θ. For a log-normal, the walk's σ column is the standard deviation of the log amount, which its multipliers act on above its floor; the table above gives the CV.",
     ]),
   }),
   Object.freeze({

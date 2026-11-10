@@ -102,14 +102,22 @@ def shape_rows(layout: StackedLayout, compiled: Sequence[CompiledPredictor]) -> 
 
 def _qp_step(
     curvature: NDArray,
-    score: NDArray,
+    target: NDArray,
+    anchor: NDArray,
     A: NDArray,
     rhs: NDArray,
     active: list[int] | None,
     structure: _ConstraintStructure,
     config: DenseSolverConfig,
 ) -> QPResult | None:
-    """The QP step ``d``, damping the curvature as ``_solve_direction`` does if it is indefinite."""
+    """The QP's new point ``x`` for ``curvature @ x = target`` under the rows, damping as
+    ``_solve_direction`` does if the curvature is indefinite.
+
+    ``target`` is ``curvature @ anchor + score``, so the unconstrained point is the Newton step
+    from ``anchor``. A damped curvature ``curvature + shift * D`` takes ``shift * D @ anchor`` into
+    its target too: the step from ``anchor`` is then the damped Newton step, not one pulled toward
+    zero.
+    """
     diagonal = np.maximum(np.abs(np.diag(curvature)), np.finfo(np.float64).tiny)
     shifts = [0.0]
     shifts.extend(
@@ -118,9 +126,10 @@ def _qp_step(
     )
     for shift in shifts:
         system = curvature if shift == 0.0 else curvature + shift * np.diag(diagonal)
+        shifted = target if shift == 0.0 else target + shift * diagonal * anchor
         try:
             result = _solve_constrained_qp_with_cold_retry(
-                system, score, A, rhs, active, structure=structure
+                system, shifted, A, rhs, active, structure=structure
             )
         except (ValueError, np.linalg.LinAlgError):
             continue
@@ -317,7 +326,7 @@ def refit_with_shape_rules(
         here = reduce(beta)
         score = reduce(np.asarray(geometry.score_penalized, dtype=np.float64))
         target = matrix @ here + (score if with_score else 0.0)
-        found = _qp_step(matrix, target, A_inside, b, active, inner, solver_config)
+        found = _qp_step(matrix, target, here, A_inside, b, active, inner, solver_config)
         return None if found is None else (found, lift(found.beta) - beta)
 
     # A feasible start: the unconstrained fit projected onto the rows in the curvature's metric,
