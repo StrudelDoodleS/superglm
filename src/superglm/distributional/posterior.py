@@ -586,11 +586,12 @@ def _resolved_posterior_covariance(
     if smoothing is None or smoothing.convergence_reason == "fixed_only":
         return covariance, "corrected"
     shape = getattr(fitted.fit_state, "shape_fit", None)
-    if shape is not None and shape.binds:
+    if shape is not None and (shape.binds or getattr(shape, "smoothing", None) is not None):
         return _conditional_covariance(
             covariance,
-            "a shape rule binds in this fit, which holds it on the rule's face, and the "
-            "smoothing correction is formed only about a fit that is free of its rules",
+            "a shape rule binds in this fit, or chose its smoothing, which holds it on the "
+            "rule's face, and the smoothing correction is formed only about a fit that is free "
+            "of its rules",
         )
     terminal = fitted.result
     if not terminal.converged:

@@ -86,7 +86,10 @@ class ShapeSmoothing:
     fit started from; ``estimated`` names the components re-chosen. ``iterations`` counts the
     Fellner--Schall steps on the rules' face, each a rule refit; ``residual`` is the largest
     fixed-point residual (log scale) at the reported smoothing, ``converged`` whether it met
-    the search's tolerance, and ``reason`` how it stopped.
+    the search's tolerance, and ``reason`` how it stopped: ``"stationary"`` at a fixed point,
+    ``"face_boundary"`` bracketed to the search's parameter tolerance at the smoothing where a
+    row starts to bind, where the update with the row held and the update with it free point
+    at each other.
     """
 
     lambdas_without_rules: Mapping[str, float]
@@ -210,6 +213,13 @@ def shape_smoothing_sentence(shape: ShapeFit) -> str | None:
     smoothing = shape.smoothing
     if smoothing is None:
         return None
+    if smoothing.converged and smoothing.reason == "face_boundary":
+        return (
+            "The smoothing was chosen with the rules held, in "
+            f"{smoothing.iterations} Fellner-Schall steps from the smoothing chosen without them; "
+            "it sits where a checkpoint starts to bind, which pulls it up when held and down "
+            "when free."
+        )
     if smoothing.converged:
         return (
             "The smoothing was chosen with the rules held, in "

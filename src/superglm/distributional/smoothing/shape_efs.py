@@ -218,29 +218,49 @@ def choose_smoothing_with_shape_rules(
             session=session,
         )
 
+    def face_of(record: ShapeFit) -> tuple[int, ...]:
+        return tuple(term.n_binding for term in record.terms)
+
     current = dict(lambdas)
     record = shape_fit
     converged, reason = False, "max_iterations"
     refits = 0
     step = step_at(fit, current)
+    # A penalty whose step reverses moves at most half its last move next, so steps that cross
+    # the smoothing at which a row starts to bind bisect onto it: below it the row binds and the face's update
+    # rises, above it the row is free and the search's update falls. A fixed point of the
+    # update on either side, if there is one, is reached inside the bracket.
+    reach = np.full(len(names), float(efs_config.max_log_step))
+    crossed = False
+    held = (fit, record, current, step)  # the last iterate whose rows bind
     while True:
         residual = float(np.max(np.abs(step), initial=0.0))
         if residual <= efs_config.tolerance:
             converged, reason = True, "stationary"
             break
+        moving = np.abs(step) > efs_config.tolerance
+        if crossed and np.all(reach[moving] <= efs_config.practical_parameter_tolerance):
+            converged, reason = True, "face_boundary"
+            # at the boundary the side where the row binds is reported, so the record, the
+            # standard errors and Diagnose name the row the smoothing sits on
+            fit, record, current, step = held
+            residual = float(np.max(np.abs(step), initial=0.0))
+            break
         if refits >= efs_config.max_iterations:
             break
         here = np.log([current[name] for name in names])
-        accelerator.record_accepted(
-            log_lambdas=here, raw_residual=step, provenance=(names, record.n_binding)
-        )
-        decision = accelerator.propose(
-            max_log_step=efs_config.max_log_step,
-            minimum_log_lambda=lower,
-            maximum_log_lambda=upper,
-        )
-        plain = here + np.clip(step, -efs_config.max_log_step, efs_config.max_log_step)
-        proposals = [plain] if decision.proposal is None else [decision.proposal.log_lambdas, plain]
+        plain = here + np.clip(step, -reach, reach)
+        decision = None
+        if not crossed:
+            accelerator.record_accepted(
+                log_lambdas=here, raw_residual=step, provenance=(names, face_of(record))
+            )
+            decision = accelerator.propose(
+                max_log_step=efs_config.max_log_step,
+                minimum_log_lambda=lower,
+                maximum_log_lambda=upper,
+            ).proposal
+        proposals = [plain] if decision is None else [decision.log_lambdas, plain]
         accepted = None
         for proposal in proposals:
             trial = {**current, **dict(zip(names, np.exp(proposal).tolist(), strict=True))}
@@ -257,7 +277,14 @@ def choose_smoothing_with_shape_rules(
         if accepted is None:
             converged, reason = False, "refit_not_converged"
             break
+        face = face_of(record)
         fit, record, current, step = accepted
+        move = np.log([current[name] for name in names]) - here
+        reversed_ = np.sign(step) * np.sign(move) < 0
+        reach = np.where(reversed_, 0.5 * np.abs(move), reach)
+        crossed = crossed or (bool(np.any(reversed_)) and face != face_of(record))
+        if record.binds:
+            held = (fit, record, current, step)
     if refits == 0:
         return fit, shape_fit, dict(lambdas)
     smoothing = ShapeSmoothing(

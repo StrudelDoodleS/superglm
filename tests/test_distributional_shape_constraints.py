@@ -639,3 +639,30 @@ def test_a_smoothing_search_under_the_rules_that_stops_short_is_disclosed(monkey
     said = " ".join(str(w.message) for w in caught)
     assert "did not settle the smoothing with the shape rules held" in said
     assert "did not settle" in held.diagnose().render(detail="full")
+
+
+def test_a_smoothing_where_a_rule_starts_to_bind_is_bracketed_not_cycled():
+    """Held, the row pulls the smoothing up; free, the search's update pulls it down. The
+    smoothing is the boundary between them, reported on the side where the row binds."""
+    from superglm import LomaxLSS
+
+    rng = np.random.default_rng(6)
+    x = rng.uniform(0.0, 10.0, 400)
+    y = np.exp(_dip(x)) * rng.pareto(4.0, 400) * 3.0 + 1e-6
+    X = pd.DataFrame({"x": x})
+    family = LomaxLSS()
+
+    def model():
+        return SuperLSS(family, family.scale(s("x", k=8, constraint=INCREASING)), family.shape())
+
+    held = model().fit_reml(X, y)
+    shape = _state(held).shape_fit
+    smoothing = shape.smoothing
+    assert smoothing.converged and smoothing.reason == "face_boundary"
+    assert smoothing.iterations < _state(held).smoothing.config.max_iterations
+    assert shape.binds and held.result_.converged
+    assert "where a checkpoint starts to bind" in held.diagnose().render(detail="full")
+    # a little more smoothing and the rule is met without holding any row
+    ((name, chosen),) = _state(held).lambdas.items()
+    above = model().fit(X, y, lambdas={name: chosen * 1.02})
+    assert not _state(above).shape_fit.binds
