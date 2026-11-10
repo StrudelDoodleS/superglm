@@ -693,6 +693,39 @@ def test_shared_varying_scale_objective_preserves_positive_penalty_support(monke
             assert abs(mutated - expected) <= error
 
 
+def test_objective_admits_the_penalty_logdet_bound_by_its_comparison_slack(monkeypatch):
+    """The certified log|S| bound decides admission against what the objective reads.
+
+    The smoothing loops compare objectives to ``objective_tolerance (1 + |V|)``;
+    a bound inside it is admitted with the value unchanged, one past it refuses
+    the evaluation instead of returning a number the comparisons cannot trust.
+    """
+    from superglm.distributional.results.iteration import DistributionalEFSConfig
+    from superglm.distributional.smoothing import objective as objective_module
+    from superglm.reml.penalty_support import PenaltyNumericalError
+
+    model = _shared_case()[0]
+    layout = model._require_fitted().layout
+    fit = model._require_fitted().fit_state.solver_result
+    lambdas = dict(model.result_.smoothing_parameters)
+    objective = joint_laplace_objective(fit, layout=layout, lambdas=lambdas)
+    slack = DistributionalEFSConfig().objective_tolerance * (1.0 + abs(objective))
+    original = objective_module._compute_penalty_logdet_evaluation
+
+    for bound, admitted in ((0.5 * slack, True), (2.0 * slack, False)):
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                objective_module,
+                "_compute_penalty_logdet_evaluation",
+                lambda *args, bound=bound: replace(original(*args), logdet_error=bound),
+            )
+            if admitted:
+                assert joint_laplace_objective(fit, layout=layout, lambdas=lambdas) == objective
+            else:
+                with pytest.raises(PenaltyNumericalError, match="comparison slack"):
+                    joint_laplace_objective(fit, layout=layout, lambdas=lambdas)
+
+
 def _ladder(values, errors):
     coarse = abs(values[1] - values[0])
     fine = abs(values[2] - values[1])

@@ -33,6 +33,7 @@ from superglm.distributional.smoothing.endpoint_direction import (
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
 from superglm.distributional.smoothing.penalty_geometry import (
     EndpointLaplaceError,
+    _admit_penalty_logdet,
     _finite_penalty_evaluation_from_components,
     _PenaltyEvaluationMemo,
 )
@@ -595,6 +596,7 @@ def evaluate_endpoint_laplace(
     penalized_optimizing = result.penalized_optimizing_log_likelihood
     assert penalized_optimizing is not None
     objective = -float(penalized_optimizing) + 0.5 * (hessian_log_pdet - projected_penalty.log_pdet)
+    _admit_penalty_logdet(penalty_evaluation, objective)
     evaluation = EndpointLaplaceEvaluation(
         objective=objective,
         face_component_names=face.component_names,

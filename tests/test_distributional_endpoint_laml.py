@@ -3133,6 +3133,32 @@ def test_scalar_endpoint_matches_closed_form_without_deciding_the_boundary(
     )
 
 
+def test_endpoint_objective_admits_the_penalty_logdet_bound_by_its_comparison_slack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An endpoint objective refuses a log|S| bound its comparisons could see."""
+    layout, face, lambdas, result = _scalar_endpoint_fit(3.0)
+    objective = evaluate_endpoint_laplace(result, layout=layout, lambdas=lambdas, face=face)
+    slack = DistributionalEFSConfig().objective_tolerance * (1.0 + abs(objective.objective))
+    original = endpoint_laml_module._projected_finite_penalty_evaluation
+
+    for bound, admitted in ((0.5 * slack, True), (2.0 * slack, False)):
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                endpoint_laml_module,
+                "_projected_finite_penalty_evaluation",
+                lambda bound=bound, **kwargs: replace(original(**kwargs), logdet_error=bound),
+            )
+            if admitted:
+                evaluated = evaluate_endpoint_laplace(
+                    result, layout=layout, lambdas=lambdas, face=face
+                )
+                assert evaluated.objective == objective.objective
+            else:
+                with pytest.raises(penalty_support.PenaltyNumericalError, match="comparison"):
+                    evaluate_endpoint_laplace(result, layout=layout, lambdas=lambdas, face=face)
+
+
 def test_endpoint_objective_uses_the_validated_likelihood_field() -> None:
     """An overridden convenience property cannot change endpoint authority."""
 

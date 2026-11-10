@@ -16,7 +16,10 @@ from superglm.distributional.results.iteration import DistributionalEFSConfig
 from superglm.distributional.results.solver import DenseSolverResult
 from superglm.distributional.smoothing.endpoint_laml import evaluate_endpoint_laplace
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
-from superglm.distributional.smoothing.penalty_geometry import _PenaltyEvaluationMemo
+from superglm.distributional.smoothing.penalty_geometry import (
+    _admit_penalty_logdet,
+    _PenaltyEvaluationMemo,
+)
 from superglm.distributional.smoothing.proposals import _scaled_proposal
 from superglm.reml.efs_update import EFSComponentState, EFSUpdateResult
 from superglm.reml.penalty_algebra import (
@@ -60,6 +63,7 @@ def joint_laplace_objective(
     )
     if not math.isfinite(objective):
         raise ValueError("joint Laplace objective is non-finite")
+    _admit_penalty_logdet(penalty_evaluation, objective)
     return float(objective)
 
 

@@ -14,6 +14,33 @@ from superglm.reml.penalty_algebra import _PenaltyLogdetEvaluation, penalty_comp
 from superglm.types import PenaltyComponent
 
 
+def _admit_penalty_logdet(evaluation: _PenaltyLogdetEvaluation, objective: float) -> None:
+    """Refuse a penalty log-determinant whose error bound the objective's comparisons can see.
+
+    The smoothing loops accept a trial when its objective is within
+    ``objective_tolerance * (1 + |V|)`` of the current one (``_within_ceiling``,
+    the Newton ceiling). A relaxed comparison of that kind terminates, and
+    accepts no trial worse than its slack, while the error in each compared
+    value is below half the slack (Lou, Sun and Nocedal, *Design guidelines for
+    noise-tolerant optimization*, 2024, eq. 4.1 and Theorem 6.7). The
+    determinant enters ``V`` halved, so its bound must stay under the default
+    tolerance times ``1 + |V|``. That is the accuracy the objective reads, and
+    it, rather than the geometry's gamma_k goal, decides admission. On the GammaLS
+    fit of #604 the bound is 8.7e-11 against a slack of 3.8e-6, so the
+    decision sits far from rounding noise.
+    """
+    from superglm.distributional.results.iteration import DistributionalEFSConfig
+    from superglm.reml.penalty_support import PenaltyNumericalError
+
+    if not math.isfinite(objective):
+        return  # the caller's own finiteness check decides
+    slack = DistributionalEFSConfig.objective_tolerance * (1.0 + abs(objective))
+    if not evaluation.logdet_error <= slack:
+        raise PenaltyNumericalError(
+            "penalty log-determinant error exceeds the objective's comparison slack"
+        )
+
+
 class EndpointLaplaceError(ValueError):
     """Raised when a fit cannot prove the supplied endpoint provenance."""
 

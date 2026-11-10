@@ -1128,6 +1128,52 @@ def test_summary_propagates_failure_before_admission(monkeypatch):
     assert len(calls) == 3
 
 
+@pytest.mark.parametrize("ledger", ["gradient", "logdet"])
+def test_certified_geometry_short_of_its_goal_is_returned_with_its_bound(monkeypatch, ledger):
+    """A bound past the gamma_k goal, but inside admission, is returned rather than refused.
+
+    The release differential's GammaLS rich fit (#604) stopped on a log|S|
+    bound of 8.7e-11 against a goal of 7.9e-11. Here every attempt is forced
+    1e-12 past its goal (about 2e-14 at this size; admission is sqrt(u)).
+    """
+    from superglm.reml import multi_penalty as module
+    from superglm.reml.penalty_support import _penalty_support
+
+    # Overlapping ranges (4 rows on rank 2): no direct-sum identity applies.
+    components = [np.eye(2), np.diag([1.0, 2.0])]
+    weights = np.array([3.0, 5.0])
+    support = _penalty_support(components)
+    loose = 1e-12
+    if ledger == "gradient":
+        original = module._derivative_values
+
+        def short_of_goal(*args):
+            gradient, hessian, gradient_error, hessian_error = original(*args)
+            return gradient, hessian, gradient_error + loose, hessian_error
+
+        monkeypatch.setattr(module, "_derivative_values", short_of_goal)
+    else:
+        original = module._logdet_defect_bound
+        monkeypatch.setattr(module, "_logdet_defect_bound", lambda *a: original(*a) + loose)
+
+    summary = module._evaluate_penalty_summary(support, weights)
+    full = module.similarity_transform_logdet(components, weights)
+    with pytest.raises(module._AccuracyGoalMissedError, match="accuracy contract"):
+        module._evaluate_penalty_geometry(support, weights, None, summary_only=True)
+
+    # S = diag(8, 13): log|S| = log 104, d log|S| / d log lambda_j = lambda_j tr(S^-1 S_j).
+    exact_gradient = np.array([3 / 8 + 3 / 13, 5 / 8 + 10 / 13])
+    eps = np.finfo(float).eps
+    for result in (summary, full):
+        certificate = result._certificate
+        error = certificate.gradient_error if ledger == "gradient" else certificate.logdet_error
+        assert np.all(error >= loose)
+        assert abs(result.logdet_s_plus - np.log(104.0)) <= certificate.logdet_error + 8 * eps
+    assert np.all(
+        np.abs(summary.gradient - exact_gradient) <= summary._certificate.gradient_error + 8 * eps
+    )
+
+
 def test_materialization_reuses_the_existing_native_product_and_magnitude(monkeypatch):
     from superglm.reml import multi_penalty as module
 
