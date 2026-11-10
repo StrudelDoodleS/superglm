@@ -310,24 +310,25 @@ def refit_with_shape_rules(
 
     inner = structure if inside is None else _constraint_structure(A_inside)
 
-    def propose(geometry, beta: NDArray, *, with_score: bool) -> tuple[QPResult | None, NDArray]:
-        """The QP's new point for the model at ``beta`` and its step; the model's pure projection
-        without the score."""
+    def propose(geometry, beta: NDArray, *, with_score: bool) -> tuple[QPResult, NDArray] | None:
+        """The QP's new point for the model at ``beta`` and its step, or None when the QP finds
+        none; the model's pure projection without the score."""
         matrix = reduced_curvature(geometry)
         here = reduce(beta)
         score = reduce(np.asarray(geometry.score_penalized, dtype=np.float64))
         target = matrix @ here + (score if with_score else 0.0)
         found = _qp_step(matrix, target, A_inside, b, active, inner, solver_config)
-        return found, (None if found is None else lift(found.beta) - beta)
+        return None if found is None else (found, lift(found.beta) - beta)
 
     # A feasible start: the unconstrained fit projected onto the rows in the curvature's metric,
     # which is the first QP, since the score vanishes there.
     for _ in range(_MAX_PROJECTIONS):
         if _is_feasible(A, beta, b, _QP_FEASIBILITY_TOL, abs_A=structure.abs_entries):
             break
-        step, direction = propose(geometry, beta, with_score=False)
-        if step is None:
+        proposal = propose(geometry, beta, with_score=False)
+        if proposal is None:
             break
+        step, direction = proposal
         capped, _ = _solver._cap_predictor_step(
             context, state, direction, solver_config.max_predictor_step
         )
@@ -345,10 +346,11 @@ def refit_with_shape_rules(
     last_active: list[int] = [] if active is None else list(active)
     tolerance = solver_config.tolerance
     for iterations in range(1, solver_config.max_iterations + 1):
-        step, direction = propose(geometry, beta, with_score=True)
-        if step is None:
+        proposal = propose(geometry, beta, with_score=True)
+        if proposal is None:
             converged, reason = False, "no_ascent_direction"
             break
+        step, direction = proposal
         active = step.active_set
         last_active = list(active)
         step_relative = float(

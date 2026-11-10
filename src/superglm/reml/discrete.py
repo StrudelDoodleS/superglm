@@ -1881,7 +1881,9 @@ def optimize_discrete_reml_cached_w(
     best_lambdas = final_lambdas.copy()
     best_pirls = final_result
     lambda_history.append(final_lambdas.copy())
-    objective_history.append(float(final_obj))
+    objective_history.append(
+        float(final_obj.value if isinstance(final_obj, REMLObjectiveEvaluation) else final_obj)
+    )
 
     if profile is not None:
         if _bootstrap_component_stats:

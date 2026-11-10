@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from superglm._frame import FrameLike, as_eager_frame
+from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.distributional.offsets import prediction_offsets, sources_of
 from superglm.distributional.terms import (
     _LOG_LINK_PROBE,
@@ -267,7 +267,9 @@ def _parameter_table(
                 fitted, frame, parameter, name, n_points=2, simultaneous=False
             )
             slope = float(beta[qualified][0])
-            log_base += float(prepared.effect[0] - slope * prepared.x[0])
+            log_base += float(
+                prepared.effect[0] - slope * np.asarray(prepared.x, dtype=np.float64)[0]
+            )
             table = pd.DataFrame(
                 {name: ["per_unit"], "Relativity": [np.exp(sign * slope)], "Weight": [0.0]}
             )
@@ -296,17 +298,17 @@ def _parameter_table(
         )
 
     if offset is not None:
-        main_effects.append(
-            _offset_multiplier_block(
-                sign * offset,
-                len(frame),
-                sample_weight,
-                n_bins=1,  # only the binned kind reads it, and that kind is not offered
-                bin_strategy="exposure_quantile",
-                offset_kind=offset_kind,
-                offset_max_exact_levels=max_levels,
-            )
+        block = _offset_multiplier_block(
+            sign * np.asarray(offset, dtype=np.float64),
+            len(frame),
+            sample_weight,
+            n_bins=1,  # only the binned kind reads it, and that kind is not offered
+            bin_strategy="exposure_quantile",
+            offset_kind=offset_kind,
+            offset_max_exact_levels=max_levels,
         )
+        if block is not None:
+            main_effects.append(block)
     _require_usable_relativities_export(main_effects, interactions)
 
     note = {
@@ -344,7 +346,7 @@ def _constant_sentence(fitted, parameter: str) -> str:
 
 def build_lss_rating_table_payload(
     model,
-    X: FrameLike,
+    X: FrameLike | EagerFrame,
     sample_weight: NDArray | None = None,
     *,
     offsets: Mapping[str, NDArray] | None = None,
@@ -414,7 +416,7 @@ def build_lss_rating_table_payload(
 def export_lss_rating_tables(
     model,
     file_path: str | Path,
-    X: FrameLike,
+    X: FrameLike | EagerFrame,
     sample_weight: NDArray | None = None,
     *,
     format: str | None = None,

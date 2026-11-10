@@ -5,7 +5,7 @@ from __future__ import annotations
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -336,13 +336,16 @@ _PPFORM_TAIL_COEFFICIENTS = (0.0, 0.0, 0.0)
 
 
 def _continuous_ppform_block(
-    model: SuperGLM,
+    model: Any,
     name: str,
     centering: str,
     weights: NDArray,
     values: NDArray,
 ) -> RatingTableBlock:
     """A continuous term as its exact polynomial pieces, plus a lookup fallback.
+
+    ``model`` is a SuperGLM, or any object with its ``term_inference`` and ``predict`` (a
+    SuperLSS parameter's curves).
 
     Seven columns, in two halves.  The first three are the ordinary
     binned-block columns -- an interval key, a relativity, an exposure weight --
