@@ -547,3 +547,20 @@ def test_an_interaction_whose_level_names_collide_on_a_colon_is_left_out_by_name
     payload = model.rating_table_payload(X)
     assert [table.parameter for table in payload.parameters] == ["scale"]
     assert "contain ':'" in payload.omitted["mean"] and "region:seg" in payload.omitted["mean"]
+
+
+def test_an_interaction_level_named_as_its_row_column_is_left_out_by_name():
+    """A "seg" level called "region" would overwrite the region label of every interaction row."""
+    X, rng = _book(seed=8), np.random.default_rng(9)
+    X["seg"] = X["seg"].map({"p": "region", "q": "other"})
+    y = rng.gamma(4.0, np.exp(1 + 0.3 * (X.region == "B") + 0.4 * (X.seg == "other")) / 4.0)
+    model = _fit(
+        GammaLS(),
+        (cat("region"), cat("seg"), interaction(CategoricalInteraction("region", "seg"))),
+        (s("age", k=5),),
+        y,
+        X,
+    )
+    payload = model.rating_table_payload(X)
+    assert [table.parameter for table in payload.parameters] == ["scale"]
+    assert "level named 'region'" in payload.omitted["mean"]

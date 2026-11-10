@@ -209,6 +209,14 @@ def _cell_block(name, ispec, beta, sign) -> InteractionTableBlock:
             f"its interaction {name!r} has levels whose names contain ':', so two of its cells "
             "share a name and cannot both be read back; rename those levels to export."
         )
+    # A row is keyed by the first parent's column, which a second-parent level of that name
+    # would overwrite.
+    first, second = ispec.parent_names
+    if any(str(level) == str(first) for level in raw["levels2"]):
+        raise ValueError(
+            f"its interaction {name!r} has a {second!r} level named {first!r}, the column its "
+            f"rows are keyed by; rename that level to export."
+        )
     rows = [
         {
             ispec.parent_names[0]: level1,
