@@ -337,6 +337,22 @@ is the unconstrained one, so a rule that binds hard leaves a curve a little
 smoother or rougher than the best one under that rule. The editor does not
 show which rules bind.
 
+### Editing a constrained SuperLSS term
+
+The model editor names each term's rules in the term bar, such as
+**rule increasing**, on every parameter. Every edit of a SuperLSS term with
+`Constraint.fit` rules keeps to them: after a drag, a handle move, a menu
+action or a reset of part of the curve, the whole curve moves to the nearest
+curve the rules allow. Nearest is measured in the exposure-weighted least
+squares the editor writes every edit with, among the curves the term's basis
+draws with coefficients that meet the fit's own rows. That curve is the one
+the exported model takes, and Undo puts back the curve from before the edit.
+An edit the rules already allow, such as raising the whole curve, is kept as
+drawn. A term with a rule takes no shaped range.
+
+A `SuperGLM` term names its rules the same way, but its hand edits are not
+held to them, so check the curve after an edit.
+
 ## Linear Predictor Semantics
 
 Solver-backed shape constraints are enforced on the spline term's contribution

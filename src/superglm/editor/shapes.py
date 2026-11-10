@@ -13,10 +13,12 @@ from superglm._frame import as_eager_frame
 from superglm.dm_builder import resolve_discrete_n_bins, should_discretize
 from superglm.editor.errors import EditorValueError
 from superglm.editor.knots import placed_geometry
+from superglm.editor.lss.view import column_of, interaction_users
 from superglm.features._spline_ranges import NARROWEST_GAP, SHAPE_NAMES, PolynomialRange
 from superglm.features._spline_runtime import fit_support
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.rebuild import (
+    RESHAPE_USED_BY_INTERACTION,
     TOO_FEW_POINTS,
     RangePlacementError,
     band_edges,
@@ -66,6 +68,9 @@ def shape_refusal(model, name: str, draft=None) -> str | None:
         return _NO_RANGE
     waiting = None if draft is None else source_spline(draft)
     reason = shape_unavailable_reason(model, name, waiting)
+    if reason is None and interaction_users(model, name):
+        # The library's own check reads a SuperGLM's names; a SuperLSS key looks in its predictor.
+        reason = RESHAPE_USED_BY_INTERACTION
     shrinking = waiting is not None and waiting.select
     if reason is not None and shrinking and not source_spline(spec).select:
         return _SELECT_WAITING.format(term=name)
@@ -215,7 +220,7 @@ def shaped_feature_spec(
     if any(pieces for _, pieces in cut):
         _require_pieces_hold(cut, *_piece_support(model, name, spec, basis, X, sample_weight))
     setattr(basis, EDITOR_CHOSEN_SHAPE_ATTRIBUTE, True)
-    replacement = _hosted(spec, basis, name, X) if ordered else basis
+    replacement = _hosted(spec, basis, column_of(model, name), X) if ordered else basis
     span = _span_text(new)
     cuts = ", ".join(_cut_text(old, pieces, new, position) for old, pieces in cut)
     return replacement, {
@@ -237,7 +242,7 @@ def _refit_support(model, name: str, spec, X, sample_weight) -> NDArray:
     The distinct positive-weight values, or the occupied bin centres when the
     refit bins: the support the library certifies a range against.
     """
-    x = np.asarray(as_eager_frame(X).column_array(name), dtype=np.float64)
+    x = np.asarray(as_eager_frame(X).column_array(column_of(model, name)), dtype=np.float64)
     if sample_weight is not None:
         x = x[np.asarray(sample_weight, dtype=np.float64) > 0.0]
     binned = should_discretize(spec, model._discrete)

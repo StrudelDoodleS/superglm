@@ -245,3 +245,29 @@ test("a SuperLSS term shows its own title and no average-edit relativity", () =>
   assert.equal(nodes.nameNode.textContent, "Overdispersion: age");
   assert.equal(nodes.statusNode.textContent, "2 of 10 selected · selected exposure 25%");
 });
+
+test("the rule chip names a term's rules and says whether edits keep to them", () => {
+  const chip = new FakeNode();
+  const nodes = {
+    kindNode: new FakeNode(),
+    edfNode: new FakeNode(),
+    referenceNode: new FakeNode(),
+    statusNode: new FakeNode(),
+    ruleNode: chip,
+  };
+  const ruled = { ...TERM, rules: { text: "increasing", fit: true, kept: true } };
+  renderContextBar(nodes, { name: "mean:power", term: ruled, selectionSize: 0 });
+  assert.equal(chip.hidden, false);
+  assert.equal(chip.textContent, "rule increasing");
+  assert.equal(chip.dataset.popoverTitle, STRUCTURE_HELP.rule_kept.title);
+  assert.equal(chip.dataset.popoverBody, STRUCTURE_HELP.rule_kept.body);
+
+  const glm = { ...TERM, rules: { text: "decreasing", fit: false, kept: false } };
+  renderContextBar(nodes, { name: "z", term: glm, selectionSize: 0 });
+  assert.equal(chip.textContent, "rule decreasing");
+  assert.equal(chip.dataset.popoverBody, STRUCTURE_HELP.rule_postfit.body);
+
+  renderContextBar(nodes, { name: "territory", term: { ...TERM, rules: null }, selectionSize: 0 });
+  assert.equal(chip.hidden, true);
+  assert.equal(chip.textContent, "");
+});

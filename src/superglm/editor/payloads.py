@@ -22,7 +22,7 @@ from superglm.editor.knots import knots_payload, pending_knots
 from superglm.editor.lss import DisplayTransform, display_for, is_lss, lss_term_fields
 from superglm.editor.lss.availability import lss_availability
 from superglm.editor.lss.display import lss_history_fields
-from superglm.editor.lss.tool_payloads import lss_shape_payload
+from superglm.editor.lss.rules import rule_payload
 from superglm.editor.shapes import shape_payload, waiting_ranges
 from superglm.editor.terms import term_from_inference
 from superglm.editor.unseen import unseen_payload
@@ -82,13 +82,10 @@ def session_payload(
             "level_groups": _level_groups(session, name, term),
             "level_order_changed": _level_order_changed(session, name),
             "reference": _reference_payload(session, name),
-            "shape": (
-                lss_shape_payload()
-                if lss
-                else shape_payload(
-                    session.model, name, term.metadata.get("shape_support"), _draft(session, name)
-                )
+            "shape": shape_payload(
+                session.model, name, term.metadata.get("shape_support"), _draft(session, name)
             ),
+            "rules": rule_payload(session.model, name),
             "knots": {**knots_payload(session, name, term), **basis_payload(session, name)},
             "pending": _pending_term_payload(session, name),
             "unseen": None if lss else unseen_payload(session, name),

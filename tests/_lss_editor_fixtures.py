@@ -17,7 +17,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import GammaLS, LogNormalLS, NegativeBinomialLS, SuperLSS, TweedieLSS, cat, s
+from superglm import (
+    Constraint,
+    GammaLS,
+    LogNormalLS,
+    NegativeBinomialLS,
+    SuperLSS,
+    TweedieLSS,
+    cat,
+    s,
+)
 from superglm.editor import EditorSession, edit
 from superglm.editor.evaluation import EvaluationDataset
 
@@ -107,6 +116,31 @@ def gamma_case() -> FitCase:
         family,
         family.mean(s("age", k=8), cat("region"), s("power", k=6)),
         family.scale(s("age", k=6), cat("region")),
+    ).fit_reml(X, y, outer="efs+newton")
+    return FitCase(model, X, y, None, None)
+
+
+@functools.cache
+def ruled_case() -> FitCase:
+    """The gamma case with fit-time shape rules on a term of each parameter.
+
+    The mean rises in ``power`` and the CV is convex in ``age``, as the rows are
+    drawn, so the rules bind only where the data wanders; the CV's region
+    relativities are capped to 0.8-1.25.
+    """
+    X, y, _ = _gamma_rows(_SEEDS[GammaLS], N_ROWS)
+    family = GammaLS()
+    model = SuperLSS(
+        family,
+        family.mean(
+            s("age", k=8),
+            cat("region"),
+            s("power", kind="cr", k=6, constraint=Constraint.fit.increasing),
+        ),
+        family.scale(
+            s("age", kind="cr", k=6, constraint=Constraint.fit.convex),
+            cat("region", constraint=Constraint.fit.cap(0.8, 1.25)),
+        ),
     ).fit_reml(X, y, outer="efs+newton")
     return FitCase(model, X, y, None, None)
 

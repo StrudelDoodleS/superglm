@@ -3,8 +3,8 @@
 Each tool refuses with its own sentence (``require_available``) and its payload
 lists the same sentence beside it, so a hover text and the error a direct call
 raises never differ. The structural tools (collapse, ungroup, reference, knots
-and basis) work on a SuperLSS term as they do on a SuperGLM one and are absent
-here.
+basis and shaped ranges) work on a SuperLSS term as they do on a SuperGLM one
+and are absent here.
 """
 
 from __future__ import annotations
@@ -23,8 +23,6 @@ from superglm.editor.lss.view import LSSModelView, is_lss
 
 LSS_UNAVAILABLE: Mapping[str, str] = MappingProxyType(
     {
-        "shape": "Shaped ranges are not available for SuperLSS terms in the editor yet. A rule "
-        "declared on the model with constraint= is enforced when it is fitted.",
         "special": "Special levels are not available for SuperLSS terms.",
         "free_levels": "The free-level comparison is not available for SuperLSS terms.",
         "unsmoothed": "The unsmoothed line is not available for SuperLSS terms.",
@@ -43,7 +41,7 @@ LSS_UNAVAILABLE: Mapping[str, str] = MappingProxyType(
 )
 
 # The tools tied to one term, listed on that term's payload.
-TERM_TOOLS = ("shape", "special", "free_levels", "unsmoothed", "unseen")
+TERM_TOOLS = ("special", "free_levels", "unsmoothed", "unseen")
 # The tools of the whole session, listed on the editor state.
 SESSION_TOOLS = (
     "refit_offset",
@@ -73,14 +71,9 @@ def unavailable_evidence(model: object, tool: str, **fields: Any) -> dict[str, A
 
 
 def lss_availability(term_payload: dict[str, Any]) -> dict[str, Any]:
-    """``term_payload`` with the shape tool's reason, and each term tool's reason listed."""
+    """``term_payload`` with each term tool's reason listed."""
     return {
         **term_payload,
-        "shape": {
-            **term_payload["shape"],
-            "available": False,
-            "reason": LSS_UNAVAILABLE["shape"],
-        },
         "unavailable": {tool: LSS_UNAVAILABLE[tool] for tool in TERM_TOOLS},
     }
 

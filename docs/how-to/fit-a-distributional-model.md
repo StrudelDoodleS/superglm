@@ -188,6 +188,9 @@ The axis says what the relativity is of:
 | `dispersion` | relativity of the dispersion | φ, which is in units of the amount to the power 2 − p |
 
 The power is one constant for the model and has no curves.
+A term with a `Constraint.fit` rule names it in the term bar, and every edit
+keeps to it; see
+[Editing a constrained SuperLSS term](constrain-a-smooth.md#editing-a-constrained-superlss-term).
 "Average" in the editor names the Average tool and observed averages, never
 the model's mean.
 

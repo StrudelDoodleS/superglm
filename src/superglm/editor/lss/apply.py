@@ -8,6 +8,16 @@ comes from the compiled spec at the reference row, so a select-centred basis is
 projected through the columns the model predicts with. What a curve cannot
 carry, its level, moves the intercept of its parameter.
 
+A term with fit-time shape rules is projected under its rows ``A b >= c``
+(``lss.rules``): onto the nearest curve, in the same weighted least squares,
+that the term's basis draws with coefficients meeting them. With the intercept
+free that is the convex QP ``min x' H x / 2 - g' x`` subject to ``[0 A] x >= c``,
+``H = D' W D`` and ``g = D' W t`` for ``D`` the design beside a column of ones,
+solved by the repository's active-set QP (``solvers/constrained_qp.py``). A
+categorical term with a cap is projected the same way, through its level design.
+The session keeps every edit of such a term on that curve
+(``kept_inside_rules``), so the curve it shows is the curve the model takes.
+
 Only terms whose curve differs from the fitted one are touched; every other
 coefficient keeps its fitted value exactly.
 """
@@ -25,9 +35,15 @@ from superglm.distributional.terms import _level_domain, _resolve_term, _term_de
 from superglm.editor import apply as editor_apply
 from superglm.editor._types import EditableTerm
 from superglm.editor.errors import EditorValueError
+from superglm.editor.lss.rules import TermRows, term_rows
 from superglm.editor.lss.view import LSSModelView, split_key
 from superglm.editor.terms import native_log_effect_values
 from superglm.features.categorical import Categorical
+from superglm.solvers.constrained_qp import _is_feasible
+from superglm.solvers.irls_direct._qp import (
+    _QP_FEASIBILITY_TOL,
+    _solve_constrained_qp_with_cold_retry,
+)
 
 _SPECIAL_SUFFIX = ":special"
 
@@ -76,6 +92,29 @@ def _term_block(
     view: LSSModelView, term: EditableTerm, *, keep_pinned: bool
 ) -> tuple[Any, slice, NDArray[np.float64], float]:
     """The term's state and slice, its edited coefficients and the level it puts on the intercept."""
+    label, state, term_slice = _editable_slice(view, term)
+    spec = view._specs[term.name]
+    rows = term_rows(view, term.name)
+    if isinstance(spec, Categorical):
+        _require_unpinned(term, spec, keep_pinned=keep_pinned)
+    if isinstance(spec, Categorical) and rows is None:
+        block, shift = _level_block(term, spec)
+    else:
+        design, centre = _grid_design(view, term, label, state, term_slice)
+        target = native_log_effect_values(term) + centre
+        shift, block = _projection(
+            design, target, editor_apply._term_weights(term), rows, term.name
+        )
+    if block.size != term_slice.stop - term_slice.start:
+        raise EditorValueError(
+            f"The edit to {term.name!r} has {block.size} coefficients, but the term holds "
+            f"{term_slice.stop - term_slice.start}. Reopen the editor on this model."
+        )
+    return state, term_slice, block, shift
+
+
+def _editable_slice(view: LSSModelView, term: EditableTerm) -> tuple[str, Any, slice]:
+    """The term's column, predictor state and coefficient slice, refusing a term none is written to."""
     parameter, label = split_key(term.name)
     fitted = view._fitted
     qualified, state, term_slice = _resolve_term(fitted, parameter, label)
@@ -89,27 +128,11 @@ def _term_block(
             f"The {parameter!r} parameter is fitted without an intercept, so an edit to "
             f"{term.name!r} has nowhere to put its level. Refit with an intercept to edit it."
         )
-    spec = view._specs[term.name]
-    if isinstance(spec, Categorical):
-        block, shift = _level_block(term, spec, keep_pinned=keep_pinned)
-    else:
-        block, shift = _curve_block(view, term, label, state, term_slice)
-    if block.size != term_slice.stop - term_slice.start:
-        raise EditorValueError(
-            f"The edit to {term.name!r} has {block.size} coefficients, but the term holds "
-            f"{term_slice.stop - term_slice.start}. Reopen the editor on this model."
-        )
-    return state, term_slice, block, shift
+    return label, state, term_slice
 
 
-def _level_block(
-    term: EditableTerm, spec: Categorical, *, keep_pinned: bool
-) -> tuple[NDArray[np.float64], float]:
-    """Each non-base level's coefficient, and the base level's edit for the intercept.
-
-    The reference level owns no design column, so its fitted effect is exactly
-    zero and its edit is the whole shift of the intercept.
-    """
+def _require_unpinned(term: EditableTerm, spec: Categorical, *, keep_pinned: bool) -> None:
+    """Refuse an edit of a categorical term with pinned levels, unless they keep their pin."""
     pinned = sorted(getattr(spec, "_pinned_levels", ()), key=str)
     if pinned and not keep_pinned:
         raise EditorValueError(
@@ -118,20 +141,29 @@ def _level_block(
             "coefficient to edit. Refit on data carrying those level(s) with weight, or remove "
             "them from the term's level universe (levels=)."
         )
+
+
+def _level_block(term: EditableTerm, spec: Categorical) -> tuple[NDArray[np.float64], float]:
+    """Each non-base level's coefficient, and the base level's edit for the intercept.
+
+    The reference level owns no design column, so its fitted effect is exactly
+    zero and its edit is the whole shift of the intercept.
+    """
     target = editor_apply._level_target_map(term, spec)
     base = target[str(spec._base_level)]
     block = np.array([target[str(level)] - base for level in spec._non_base], dtype=np.float64)
     return block, base
 
 
-def _curve_block(
+def _grid_design(
     view: LSSModelView, term: EditableTerm, label: str, state: Any, term_slice: slice
 ) -> tuple[NDArray[np.float64], float]:
-    """The weighted least-squares fit of the edited curve by the term's basis.
+    """The term's design on the editor's grid, and the shown curve's distance from its own.
 
     The curve is read at ``term.x``, or at the levels of a term with levels, each
-    read from the value the term was fitted on. The constant the basis cannot
-    carry is returned for the intercept.
+    read from the value the term was fitted on. The shown curve is measured from
+    the reference level, so the term's own effect is the shown curve plus the
+    returned constant.
     """
     if term.x is not None:
         grid: Any = np.asarray(term.x)
@@ -145,9 +177,35 @@ def _curve_block(
     rows[label] = grid
     design = _term_design(view._fitted, rows, state, term_slice)
     fitted = np.asarray(view._fitted.coefficients, dtype=np.float64)[term_slice]
-    target = native_log_effect_values(term) + float(view.reference_design(term.name) @ fitted)
-    shift, block = _projection(design, target, editor_apply._term_weights(term))
-    return block, shift
+    return design, float(view.reference_design(term.name) @ fitted)
+
+
+_OUTSIDE_RULES = (
+    "The edit to {term!r} could not be kept inside its rules ({rules}). Undo it, or make a "
+    "smaller edit."
+)
+
+
+def kept_inside_rules(
+    model: Any, term: EditableTerm, curve: NDArray[np.float64]
+) -> NDArray[np.float64] | None:
+    """``curve``, edited on ``term``'s grid, as the nearest curve inside the term's rules.
+
+    None when ``model`` is not a SuperLSS view or the term has no fit-time rule.
+    The returned curve is the one the model takes when the edit is written into
+    its coefficients, so it is drawn and recorded in place of ``curve``.
+    """
+    if not isinstance(model, LSSModelView):
+        return None
+    rows = term_rows(model, term.name)
+    if rows is None:
+        return None
+    label, state, term_slice = _editable_slice(model, term)
+    design, centre = _grid_design(model, term, label, state, term_slice)
+    # A SuperLSS term opens on its native scale (``NATIVE_ONLY``), so the curve is the effect.
+    target = np.asarray(curve, dtype=np.float64) + centre
+    shift, block = _projection(design, target, editor_apply._term_weights(term), rows, term.name)
+    return design @ block + (shift - centre)
 
 
 def _native_levels(spec: Any) -> dict[str, Any]:
@@ -158,22 +216,50 @@ def _native_levels(spec: Any) -> dict[str, Any]:
 
 
 def _projection(
-    design: NDArray[np.float64], target: NDArray[np.float64], weights: NDArray[np.float64]
+    design: NDArray[np.float64],
+    target: NDArray[np.float64],
+    weights: NDArray[np.float64],
+    rows: TermRows | None = None,
+    name: str = "",
 ) -> tuple[float, NDArray[np.float64]]:
-    """The weighted least-squares fit of ``target`` by an intercept and ``design``.
+    """The weighted least-squares fit of ``target`` by an intercept and ``design``, under ``rows``.
 
     The rank is decided on columns scaled to unit weighted norm and centred, under
     weights that sum to one, so neither a covariate's units and origin nor the
     weights' scale decide which directions are kept; the intercept takes the
-    centring back.
+    centring back. Rows on the coefficients are rescaled with their columns.
     """
     weights = weights / weights.sum()
     norm = np.sqrt(weights @ np.square(design))
     norm[norm == 0.0] = 1.0
     scaled = design / norm
     centre = weights @ scaled
-    shift, coefficients = editor_apply._solve_with_intercept(scaled - centre, target, weights)
+    if rows is None or rows.A.shape[0] == 0:
+        shift, coefficients = editor_apply._solve_with_intercept(scaled - centre, target, weights)
+    else:
+        shift, coefficients = _constrained_fit(scaled - centre, target, weights, rows, norm, name)
     return shift - float(centre @ coefficients), coefficients / norm
+
+
+def _constrained_fit(
+    centred: NDArray[np.float64],
+    target: NDArray[np.float64],
+    weights: NDArray[np.float64],
+    rows: TermRows,
+    norm: NDArray[np.float64],
+    name: str,
+) -> tuple[float, NDArray[np.float64]]:
+    """The intercept and scaled coefficients of the QP fit of ``target`` under ``rows``."""
+    with_intercept = np.column_stack([np.ones(centred.shape[0]), centred])
+    H = with_intercept.T @ (weights[:, None] * with_intercept)
+    g = with_intercept.T @ (weights * target)
+    A = np.column_stack([np.zeros(rows.A.shape[0]), rows.A / norm])
+    result = _solve_constrained_qp_with_cold_retry(H, g, A, rows.c, None)
+    # An uncertified point that meets the rows is kept: the edit is inside them,
+    # only its nearness is unproven.
+    if not result.converged and not _is_feasible(A, result.beta, rows.c, _QP_FEASIBILITY_TOL):
+        raise EditorValueError(_OUTSIDE_RULES.format(term=name, rules=rows.text))
+    return float(result.beta[0]), np.asarray(result.beta[1:], dtype=np.float64)
 
 
 __all__ = ["lss_model_with_edits"]

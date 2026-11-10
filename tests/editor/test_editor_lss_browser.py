@@ -8,9 +8,10 @@ import re
 from urllib.parse import urlsplit
 
 import joblib
+import numpy as np
 import pytest
 from sklearn.model_selection import KFold
-from tests._lss_editor_fixtures import lognormal_case
+from tests._lss_editor_fixtures import lognormal_case, ruled_case
 from tests.editor._chart_layout import wait_for_chart_to_fit
 from tests.editor.test_editor_workspace_browser import select_chart_tool
 
@@ -352,3 +353,28 @@ def test_tools_the_session_does_not_offer_are_neither_requested_nor_offered(open
         assert refit_offset.get_attribute("title") == state["refit_offset"]
         assert not {"/summary", "/metrics"} & set(requested)
         assert "/op" in requested
+
+
+def test_a_ruled_term_names_its_rule_and_an_edit_keeps_to_it(open_lss_editor_page):
+    with open_lss_editor_page(case=ruled_case(), selected_term="mean:power") as (page, session):
+        chip = page.locator("#termRule")
+        assert chip.inner_text() == "rule increasing"
+        assert "edits keep to it" in chip.get_attribute("data-popover-body")
+
+        select_chart_tool(page, "Select")
+        points = page.locator("#chart .point")
+        with page.expect_response(_posted("/select")):
+            points.nth(points.count() - 1).click()
+        page.locator("#selectionMenu").wait_for(state="visible")
+        for _ in range(4):
+            with page.expect_response(_posted("/op")):
+                page.get_by_role("button", name="Decrease selection", exact=True).click()
+            page.wait_for_function("() => window.__superglmTest.mutationStatus() !== 'running'")
+
+        curve = session.terms["mean:power"].edited_log_effect
+        assert (curve != session.terms["mean:power"].original_log_effect).any()
+        assert np.diff(curve).min() >= -1e-9
+        # The chart draws the kept curve: no point sits below the one before it.
+        heights = points.evaluate_all("els => els.map(e => Number(e.getAttribute('cy')))")
+        assert len(heights) == curve.size
+        assert np.diff(heights).max() <= 1e-6

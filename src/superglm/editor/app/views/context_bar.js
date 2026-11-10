@@ -63,13 +63,28 @@ export function waitingLabel(count) {
 }
 
 /**
- * @param {{nameNode?:HTMLElement|null, kindNode:HTMLElement, edfNode:HTMLElement, referenceNode:HTMLElement, statusNode:HTMLElement}} nodes
+ * The term's shape-rule chip, "rule increasing"; hidden when the term has none.
+ * Its hover popover says whether edits keep to the rule.
+ * @param {HTMLElement} node @param {TermPayload} term
+ */
+export function renderRuleChip(node, term) {
+  const rules = term.rules ?? null;
+  node.hidden = rules === null;
+  node.textContent = rules ? `rule ${rules.text}` : "";
+  if (!rules) return;
+  const help = STRUCTURE_HELP[rules.kept ? "rule_kept" : rules.fit ? "rule_fit" : "rule_postfit"];
+  node.dataset.popoverTitle = help.title;
+  node.dataset.popoverBody = help.body;
+}
+
+/**
+ * @param {{nameNode?:HTMLElement|null, kindNode:HTMLElement, edfNode:HTMLElement, referenceNode:HTMLElement, statusNode:HTMLElement, ruleNode?:HTMLElement|null}} nodes
  * @param {{name:string, term:TermPayload, selectionSize:number, note?:string, pendingCount?:number,
  *   range?:{lo:string, hi:string}|null}} context `range` names the ends of a Shift-click
  *   span, as the axis reads them, while the selection is that span
  */
 export function renderContextBar(
-  { nameNode = null, kindNode, edfNode, referenceNode, statusNode },
+  { nameNode = null, kindNode, edfNode, referenceNode, statusNode, ruleNode = null },
   { name, term, selectionSize, note = "", pendingCount = 0, range = null },
 ) {
   const kind = term.term_type || term.kind || "term";
@@ -87,6 +102,7 @@ export function renderContextBar(
       ? `reference ${reference.level} · ${REFERENCE_POLICY[reference.policy]}`
       : "";
   referenceNode.dataset.waiting = waitingReference ? "true" : "false";
+  if (ruleNode) renderRuleChip(ruleNode, term);
   const impact = term.impact || {};
   const suffix = note ? ` · ${note}` : "";
   const exposure = `selected exposure ${fmtPercent(impact.selected_weight_share || 0)}${suffix}`;
