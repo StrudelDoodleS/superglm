@@ -1328,6 +1328,49 @@ def test_run_cv_result_is_dropped_when_the_model_changes_mid_run(cv_frame, cv_fi
     assert [result["origin"] for result in report["results"]] == ["supplied"]
 
 
+@pytest.mark.parametrize(("kind", "phase"), [("cv", "fold"), ("final_fit", "fitting")])
+def test_a_job_finishing_after_an_edit_and_its_undo_is_kept(
+    cv_frame, cv_fit, monkeypatch, kind, phase
+):
+    """A job is kept when the model it ran on is in force again, whatever the revision says.
+
+    An edit and its undo while Run CV or Final fit runs put back the very model the job read,
+    so the result describes the model in force and is published as current.
+    """
+    from superglm.editor.jobs import JobContext
+
+    model, supplied = cv_fit
+    session = EditorSession.from_model(model, cv=supplied, **_splits(cv_frame))
+    widget = session.widget()
+    progress = JobContext.progress
+    revisions = []
+
+    def edit_and_undo_mid_run(self, step, **details):
+        progress(self, step, **details)
+        if step == phase and details.get("fold", 1) == 1 and not revisions:
+            widget._drag("region", [1], delta=0.1)
+            widget._operate("undo", "region")
+            revisions.append(session.model_revision)
+
+    monkeypatch.setattr(JobContext, "progress", edit_and_undo_mid_run)
+    try:
+        started = _post_json(f"{widget.url}/job_start", {"kind": kind})
+        finished = _post_json(
+            f"{widget.url}/job_status", {"job_id": started["job_id"], "wait": True}
+        )
+        report = widget._report("cv")
+    finally:
+        widget.close()
+
+    assert revisions == [2]
+    assert (finished["status"], finished["error"]) == ("done", None)
+    if kind == "cv":
+        run = [result for result in report["results"] if result["origin"] == "run"]
+        assert [result["stale"] for result in run] == [False]
+    else:
+        assert (report["final_fit"]["done"], report["final_fit"]["stale"]) == (True, False)
+
+
 def test_the_final_fit_report_counts_the_changes_waiting_now(cv_frame, cv_fit):
     """One change waits when Final fit runs; it is undone, then another is staged.
 

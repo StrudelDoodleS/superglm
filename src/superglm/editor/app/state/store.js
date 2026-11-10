@@ -329,6 +329,7 @@ export function commitStructuralTransition(state, envelope) {
           ...summary,
           status: /** @type {const} */ ("current"),
           revision: envelope.state.model_revision,
+          inForce: envelope.state.in_force ?? null,
           payload: envelope.summary,
           error: null,
           retry: null
@@ -354,18 +355,36 @@ function replaceEvidence(state, panel, evidence) {
 }
 
 /**
+ * Whether evidence asked for at `revision`, about the model `inForce` names, describes the
+ * snapshot the page holds now. Where the server names the model, the model decides: an undo
+ * gives back the token its edit replaced, so evidence asked for before the edit describes the
+ * snapshot again. A snapshot without a token is matched by its revision.
+ *
+ * @param {EditorState} state @param {number} revision @param {string|null} inForce
+ */
+function describesSnapshot(state, revision, inForce) {
+  const snapshot = state.remote.snapshot;
+  if (inForce !== null && typeof snapshot?.in_force === "string") {
+    return inForce === snapshot.in_force;
+  }
+  return revision === snapshot?.model_revision;
+}
+
+/**
  * @param {EditorState} state
  * @param {EvidencePanel} panel
  * @param {number} revision
  * @param {number} sequence
  * @param {{path:string, payload:Record<string, unknown>}} retry
+ * @param {string|null} [inForce] the snapshot's `in_force` when the request was made
  */
-export function beginEvidence(state, panel, revision, sequence, retry) {
+export function beginEvidence(state, panel, revision, sequence, retry, inForce = null) {
   const previous = state.request.evidence[panel];
   return replaceEvidence(state, panel, {
     ...previous,
     status: "updating",
     revision,
+    inForce,
     sequence,
     error: null,
     retry
@@ -381,11 +400,14 @@ export function beginEvidence(state, panel, revision, sequence, retry) {
  */
 export function completeEvidence(state, panel, revision, sequence, payload) {
   const current = state.request.evidence[panel];
-  if (revision !== state.remote.snapshot?.model_revision || sequence !== current.sequence) {
+  // Only the newest request's answer lands, and only while it describes the snapshot.
+  if (sequence !== current.sequence || !describesSnapshot(state, revision, current.inForce)) {
     return state;
   }
   return replaceEvidence(state, panel, {
     ...current,
+    // An answer asked for before an edit and its undo is current for the revision now held.
+    revision: state.remote.snapshot?.model_revision ?? revision,
     status: "current",
     payload,
     error: null,
@@ -402,7 +424,7 @@ export function completeEvidence(state, panel, revision, sequence, payload) {
  */
 export function failEvidence(state, panel, revision, sequence, error) {
   const current = state.request.evidence[panel];
-  if (revision !== state.remote.snapshot?.model_revision || sequence !== current.sequence) {
+  if (sequence !== current.sequence || !describesSnapshot(state, revision, current.inForce)) {
     return state;
   }
   return replaceEvidence(state, panel, {

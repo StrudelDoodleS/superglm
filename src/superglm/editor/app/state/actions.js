@@ -658,16 +658,20 @@ export function createEditorActions({
   async function refreshEvidence(panel, path, payload) {
     const requestPayload = snapshotPayload(payload);
     let revision = -1;
+    /** @type {string|null} */
+    let inForce = null;
     let sequence = 0;
     store.update((state) => {
       revision = selectModelRevision(state);
+      inForce = state.remote.snapshot?.in_force ?? null;
       sequence = state.request.nextSequence;
       const begun = beginEvidence(
         state,
         panel,
         revision,
         sequence,
-        { path, payload: requestPayload }
+        { path, payload: requestPayload },
+        inForce
       );
       return {
         ...begun,
@@ -680,15 +684,22 @@ export function createEditorActions({
     const requestBody = {
       ...requestPayload,
       model_revision: revision,
+      ...(inForce === null ? {} : { in_force: inForce }),
       request_sequence: sequence
     };
 
     try {
       const response = await client.postJSON(path, requestBody);
+      // The answer names the model it describes; without a token, its revision.
+      const forAnotherModel = !isRecord(response) || (
+        inForce === null
+          ? Number(response.model_revision) !== revision
+          : response.in_force !== inForce
+      );
       if (
         !isRecord(response) ||
         response.status === "superseded" ||
-        Number(response.model_revision) !== revision ||
+        forAnotherModel ||
         Number(response.request_sequence) !== sequence
       ) {
         const message = isRecord(response) && response.status === "superseded"

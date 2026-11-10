@@ -221,7 +221,8 @@ def test_report_is_superseded_when_revision_changes_during_summary(
     monkeypatch,
 ):
     widget = evidence_widget
-    model, revision = widget._current_model_for_evidence()
+    model, source = widget._current_model_for_evidence()
+    revision = widget.session.model_revision
     assert model is not None
     started = threading.Event()
     release = threading.Event()
@@ -263,8 +264,72 @@ def test_report_is_superseded_when_revision_changes_during_summary(
             "status": "superseded",
             "model_revision": revision,
             "request_sequence": 17,
+            "in_force": source.token,
         }
     ]
+
+
+def test_a_report_asked_for_before_an_edit_and_its_undo_is_answered(evidence_widget, monkeypatch):
+    """An answer describes the model it was asked about, whatever the revision says.
+
+    The page names that model by its ``in_force`` token. An edit and its undo while the report is
+    built, or before the request reaches the server, put the very model back, so the report is
+    answered and names the same model; a request about a model no longer in force is superseded.
+    """
+    widget = evidence_widget
+    model, source = widget._current_model_for_evidence()
+    asked = widget._state()
+    started, release = threading.Event(), threading.Event()
+    payloads, errors = [], []
+    original = model.summary
+
+    def blocked(*args, **kwargs):
+        started.set()
+        release.wait(timeout=5)
+        return original(*args, **kwargs)
+
+    def edit_and_undo():
+        widget._operate("shift_up", "x_spline")
+        widget._operate("undo", "x_spline")
+
+    def request_report():
+        try:
+            payloads.append(
+                widget._report(
+                    "final",
+                    model_revision=asked["model_revision"],
+                    request_sequence=17,
+                    in_force=asked["in_force"],
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    monkeypatch.setattr(model, "summary", blocked)
+    evidence_thread = threading.Thread(target=request_report)
+    evidence_thread.start()
+    try:
+        assert started.wait(timeout=5)
+        edit_and_undo()
+    finally:
+        release.set()
+        evidence_thread.join(timeout=5)
+    monkeypatch.undo()
+    late = widget._report(
+        "validation", model_revision=asked["model_revision"], in_force=asked["in_force"]
+    )
+    widget._operate("shift_up", "x_spline")
+    edited = widget._report(
+        "validation", model_revision=asked["model_revision"], in_force=asked["in_force"]
+    )
+
+    assert errors == []
+    assert asked["in_force"] == source.token
+    assert widget.session.model_revision == asked["model_revision"] + 3
+    assert [payload.get("status") for payload in payloads] == [None]
+    assert (payloads[0]["in_force"], payloads[0]["request_sequence"]) == (source.token, 17)
+    assert (late.get("status"), late["in_force"]) == (None, source.token)
+    assert (edited["status"], edited["in_force"]) == ("superseded", source.token)
 
 
 def test_evidence_records_are_immutable():

@@ -58,6 +58,7 @@ def _complete_metric_payload(request, *, edited_deviance: float) -> str:
         "status": "complete",
         "available": True,
         "model_revision": request_payload["model_revision"],
+        "in_force": request_payload.get("in_force"),
         "request_sequence": request_payload["request_sequence"],
         "metric": "deviance",
         "label": "Deviance",

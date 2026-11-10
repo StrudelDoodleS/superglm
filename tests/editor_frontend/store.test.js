@@ -163,6 +163,7 @@ test("structural summary becomes the confirmed payload retained by a later faile
   assert.deepEqual(state.request.evidence.summary, {
     status: "current",
     revision: 7,
+    inForce: null,
     sequence: 1,
     payload: envelope.summary,
     error: null,

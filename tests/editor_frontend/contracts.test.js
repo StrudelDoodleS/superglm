@@ -19,6 +19,7 @@ test("foundation contracts define all evidence panels", () => {
   assert.deepEqual(createEmptyEvidenceState(), {
     status: "idle",
     revision: null,
+    inForce: null,
     sequence: 0,
     payload: null,
     error: null,

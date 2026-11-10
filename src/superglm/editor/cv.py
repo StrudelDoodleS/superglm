@@ -15,11 +15,15 @@ Every refusal is a fixed sentence (``editor/errors.py``).
 
 from __future__ import annotations
 
+import hashlib
+import itertools
 import logging
+import threading
 import time
+import weakref
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
-from functools import partial
+from functools import cached_property, partial
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -312,6 +316,40 @@ class InForce:
     def describes(self, session) -> bool:
         """Whether ``session`` holds the model this was computed for; call it under the widget lock."""
         return _same_fit(self.model, session.model) and self.edits == InForce.of(session).edits
+
+    @cached_property
+    def token(self) -> str:
+        """This as text the page compares: equal exactly when ``describes`` would hold.
+
+        It names the fit by a serial number given once per fitted model, never reused, and the
+        edits by a digest of their values.
+        """
+        digest = hashlib.blake2b(repr(self.edits).encode(), digest_size=12).hexdigest()
+        return f"{_fit_serial(self.model)}-{digest}"
+
+
+_FIT_SERIALS: dict[int, tuple[weakref.ref, int]] = {}
+_FIT_SERIAL_LOCK = threading.Lock()
+_NEXT_FIT_SERIAL = itertools.count(1)
+
+
+def _fit_serial(model) -> int:
+    """A number for the fit ``model`` holds, the same while that fit lives (see ``_same_fit``)."""
+    fit = model.lss if is_lss(model) else model
+    key = id(fit)
+    with _FIT_SERIAL_LOCK:
+        found = _FIT_SERIALS.get(key)
+        if found is not None and found[0]() is fit:
+            return found[1]
+        serial = next(_NEXT_FIT_SERIAL)
+
+        def forget(ref, key=key) -> None:
+            with _FIT_SERIAL_LOCK:
+                if _FIT_SERIALS.get(key, (None,))[0] is ref:
+                    del _FIT_SERIALS[key]
+
+        _FIT_SERIALS[key] = (weakref.ref(fit, forget), serial)
+        return serial
 
 
 @dataclass(frozen=True)
@@ -813,8 +851,11 @@ def cv_report_payload(widget, *, request_sequence: int | None = None) -> dict[st
     """The ``cv`` report: captured under the widget lock, built outside it."""
     with widget._lock:
         view = capture_cv_view(widget.session, run=widget._cv_run, final_fit=widget._final_fit)
+        source = InForce.of(widget.session)
     jobs = {kind: widget._jobs.latest(kind) for kind in JOB_KINDS}
-    return cv_tab_payload(view, jobs=jobs, request_sequence=request_sequence)
+    payload = cv_tab_payload(view, jobs=jobs, request_sequence=request_sequence)
+    payload["in_force"] = source.token
+    return payload
 
 
 def _untraced_note(expected: Sequence[int], folds: Sequence[dict[str, Any]]) -> str:
@@ -842,6 +883,7 @@ def diagnose_report_payload(widget, *, request_sequence: int | None = None) -> d
         kept_rows = widget._diagnose_all_rows
         same_fit = _same_fit(model, session.reference_model)
         run_current = run is not None and run.source.describes(session)
+        in_force = InForce.of(session).token
     if run is not None:
         folds = list(run.fold_fits)
         source = (
@@ -881,15 +923,18 @@ def diagnose_report_payload(widget, *, request_sequence: int | None = None) -> d
         kept_rows = (model, all_rows_worst_rows(model, train))
         with widget._lock:
             widget._diagnose_all_rows = kept_rows
-    return diagnose_tab_payload(
-        model,
-        folds=folds,
-        model_rows=kept_rows[1],
-        source=source,
-        display=_term_display(model),
-        model_revision=revision,
-        request_sequence=request_sequence,
-    )
+    return {
+        **diagnose_tab_payload(
+            model,
+            folds=folds,
+            model_rows=kept_rows[1],
+            source=source,
+            display=_term_display(model),
+            model_revision=revision,
+            request_sequence=request_sequence,
+        ),
+        "in_force": in_force,
+    }
 
 
 def cv_tab_payload(
@@ -1067,9 +1112,6 @@ class _Plan:
     template: Any
     model_revision: int
     source: InForce
-
-    def is_current(self, session) -> bool:
-        return session.model_revision == self.model_revision and session.model is self.model
 
 
 @dataclass(frozen=True)

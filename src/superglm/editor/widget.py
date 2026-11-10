@@ -31,6 +31,7 @@ from superglm.editor.cv import (
     SUPERSEDED,
     CVRun,
     FinalFit,
+    InForce,
     capture_cv_run,
     capture_final_fit,
     headline_score,
@@ -261,6 +262,9 @@ class EditorWidget:
             self.terms = session_payload(self.session, self.control_counts)
             state = {
                 "model_revision": self.session.model_revision,
+                # Equal on two snapshots exactly when they hold one model: an undo gives back the
+                # token the edit replaced, so evidence asked for before the edit is current again.
+                "in_force": InForce.of(self.session).token,
                 "fit_token": self._current_fit_token(),
                 "selected_term": self.selected_term,
                 "terms": self.terms,
@@ -432,41 +436,60 @@ class EditorWidget:
         )
         self.session.set_values(term, idx, np.full(idx.size, shown.from_display(value)))
 
-    def _current_model_for_evidence(self):
-        """Resolve one current model without materializing under the widget lock."""
+    def _asked_is_in_force(self, model_revision: int | None, in_force: str | None) -> bool:
+        """Whether a request names the model in force; the caller holds the lock.
+
+        The page names it by its ``in_force`` token, which an undo gives back, so a request
+        made before an edit and its undo still asks for the model in force. A caller that
+        names only a revision is answered while that revision stands.
+        """
+        if in_force is not None:
+            return in_force == InForce.of(self.session).token
+        return model_revision is None or int(model_revision) == self.session.model_revision
+
+    def _current_model_for_evidence(self) -> tuple[Any, InForce]:
+        """The model in force with its edits applied, and what it was made for.
+
+        Materialized off the widget lock; ``(None, source)`` once ``source`` is no longer in
+        force, or when newer work replaced it in the queue.
+        """
         with self._lock:
-            revision = self.session.model_revision
+            source = InForce.of(self.session)
             if not self.session.edited_terms():
-                return self.session.model, revision
-            epoch = self.session.edit_epoch
-            base_model = self.session.model
+                return self.session.model, source
             cached = self.session.cached_materialized_model(
-                epoch,
-                model_revision=revision,
-                base_model=base_model,
+                self.session.edit_epoch,
+                model_revision=self.session.model_revision,
+                base_model=self.session.model,
             )
             if cached is not None:
-                return cached, revision
+                return cached, source
             request = self.session.capture_materialization_request()
             assert request is not None
 
-        key = EvidenceKey(request.model_revision, "materialize", "current")
+        # One model in force is one calculation: a request made after an edit and its undo
+        # shares the one still running for it.
+        key = EvidenceKey(source.token, "materialize", "current")
         outcome = self._evidence.submit(
             key,
             lambda request=request: {"model": materialize_edit_request(request)},
         ).result()
         if outcome.status == "superseded" or outcome.payload is None:
-            return None, request.model_revision
+            return None, source
         model = outcome.payload["model"]
 
         with self._lock:
-            if not self.session.publish_materialized_model(request, model):
-                return None, request.model_revision
-            return model, request.model_revision
+            # Kept for reuse only while the revision stands; returned while its model is in force.
+            if self.session.publish_materialized_model(request, model) or source.describes(
+                self.session
+            ):
+                return model, source
+            return None, source
 
-    def _model_materialized_for_dataset(self, dataset):
-        """Materialize a revision against one purpose-specific dataset without caching it."""
+    def _model_materialized_for_dataset(self, dataset) -> tuple[Any, InForce]:
+        """Materialize the model in force against one purpose-specific dataset without caching it."""
         with self._lock:
+            source = InForce.of(self.session)
             request = self.session.capture_materialization_request(
                 dataset=dataset,
                 include_unchanged=True,
@@ -476,9 +499,7 @@ class EditorWidget:
         model = materialize_edit_request(request)
 
         with self._lock:
-            if not self.session.materialization_request_is_current(request):
-                return None, request.model_revision
-            return model, request.model_revision
+            return (model if source.describes(self.session) else None), source
 
     def _metrics(
         self,
@@ -488,6 +509,7 @@ class EditorWidget:
         dataset: str | None = None,
         model_revision: int | None = None,
         request_sequence: int | None = None,
+        in_force: str | None = None,
     ) -> dict[str, Any]:
         selected_source = "in_force" if source is None or source == "selected" else source
         calm = unavailable_evidence(
@@ -501,48 +523,51 @@ class EditorWidget:
         if calm is not None:
             return calm
         with self._lock:
-            current_revision = self.session.model_revision
-            if model_revision is not None and int(model_revision) != current_revision:
-                return _superseded_payload(int(model_revision), request_sequence)
+            revision = self.session.model_revision
+            if not self._asked_is_in_force(model_revision, in_force):
+                return _superseded_payload(model_revision, request_sequence, in_force)
             reference_model = getattr(self.session, "reference_model", self.session.model)
+            model_source = InForce.of(self.session)
 
         if selected_source == "original":
             selected_model = reference_model
-            revision = current_revision
         else:
-            selected_model, revision = self._current_model_for_evidence()
+            selected_model, model_source = self._current_model_for_evidence()
         if selected_model is None:
-            return _superseded_payload(revision, request_sequence)
+            return _superseded_payload(revision, request_sequence, model_source.token)
 
         with self._lock:
-            if revision != self.session.model_revision:
-                return _superseded_payload(revision, request_sequence)
+            if not model_source.describes(self.session):
+                return _superseded_payload(revision, request_sequence, model_source.token)
             reference_model = getattr(self.session, "reference_model", self.session.model)
             eval_dataset = named_metrics_dataset(self.session, dataset)
             if reference_model is None or eval_dataset is None:
-                return metrics_payload(
-                    self.session,
-                    metric,
-                    source=selected_source,
-                    dataset=dataset,
-                    model_revision=revision,
-                    request_sequence=request_sequence,
-                )
+                return {
+                    **metrics_payload(
+                        self.session,
+                        metric,
+                        source=selected_source,
+                        dataset=dataset,
+                        model_revision=revision,
+                        request_sequence=request_sequence,
+                    ),
+                    "in_force": model_source.token,
+                }
 
         original_metrics = self._dataset_metrics_for_evidence(
-            "original", reference_model, eval_dataset, revision
+            "original", reference_model, eval_dataset, model_source
         )
         if original_metrics is None:
-            return _superseded_payload(revision, request_sequence)
+            return _superseded_payload(revision, request_sequence, model_source.token)
         edited_metrics: dict[str, float]
         if selected_source == "original":
             edited_metrics = original_metrics
         else:
             current_metrics = self._dataset_metrics_for_evidence(
-                "current", selected_model, eval_dataset, revision
+                "current", selected_model, eval_dataset, model_source
             )
             if current_metrics is None:
-                return _superseded_payload(revision, request_sequence)
+                return _superseded_payload(revision, request_sequence, model_source.token)
             edited_metrics = current_metrics
         payload = metric_comparison_payload(
             metric,
@@ -553,8 +578,9 @@ class EditorWidget:
             request_sequence=request_sequence,
         )
         with self._lock:
-            if revision != self.session.model_revision:
-                return _superseded_payload(revision, request_sequence)
+            if not model_source.describes(self.session):
+                return _superseded_payload(revision, request_sequence, model_source.token)
+        payload["in_force"] = model_source.token
         return payload
 
     def _dataset_metrics_for_evidence(
@@ -562,11 +588,17 @@ class EditorWidget:
         role: Literal["original", "current"],
         model,
         dataset,
-        revision: int,
+        source: InForce,
     ) -> dict[str, float] | None:
+        """``model``'s scores on ``dataset``, or None once ``source`` is no longer in force.
+
+        The scores are cached for the revision they were asked at, and returned while their
+        model is in force even after the revision moved on.
+        """
         with self._lock:
-            if revision != self.session.model_revision:
+            if not source.describes(self.session):
                 return None
+            revision = self.session.model_revision
             self._evaluation_cache.advance_current_revision(revision)
             key = EvaluationKey(
                 role=role,
@@ -581,7 +613,7 @@ class EditorWidget:
             request = DatasetMetricRequest(key=key, model=model, dataset=dataset)
 
         evidence_key = EvidenceKey(
-            revision,
+            source.token,
             "score",
             f"{role}:{dataset.name}:{request.key.metric_signature!r}",
         )
@@ -599,10 +631,10 @@ class EditorWidget:
             return None
         values = outcome.payload["metrics"]
         with self._lock:
-            if revision != self.session.model_revision:
+            if not source.describes(self.session):
                 return None
-            self._evaluation_cache.advance_current_revision(revision)
-            self._evaluation_cache.put(request.key, values)
+            if revision == self.session.model_revision:
+                self._evaluation_cache.put(request.key, values)
             return dict(values)
 
     def _summary(
@@ -612,6 +644,7 @@ class EditorWidget:
         level_display: str = "expanded",
         model_revision: int | None = None,
         request_sequence: int | None = None,
+        in_force: str | None = None,
     ) -> dict[str, Any]:
         if source == "selected":
             source = "in_force"
@@ -631,8 +664,8 @@ class EditorWidget:
 
         with self._lock:
             current_revision = self.session.model_revision
-            if model_revision is not None and int(model_revision) != current_revision:
-                return _superseded_payload(int(model_revision), request_sequence)
+            if not self._asked_is_in_force(model_revision, in_force):
+                return _superseded_payload(model_revision, request_sequence, in_force)
             # A notebook-side edit advances the revision without passing through
             # this widget, so a stored fixed-offset refit can outlive its edits.
             if self._offset_refit_revision != current_revision:
@@ -640,16 +673,14 @@ class EditorWidget:
 
         offset_terms_override: list[str] | None = None
         offset_labels_override: list[dict[str, Any]] | None = None
+        revision = current_revision
         if source == "in_force":
-            model, revision = self._current_model_for_evidence()
+            model, in_force_source = self._current_model_for_evidence()
             if model is None:
-                return _superseded_payload(revision, request_sequence)
-            with self._lock:
-                if revision != self.session.model_revision:
-                    return _superseded_payload(revision, request_sequence)
+                return _superseded_payload(revision, request_sequence, in_force_source.token)
         else:
             with self._lock:
-                revision = self.session.model_revision
+                in_force_source = InForce.of(self.session)
                 if source == "original":
                     model = self.session.reference_model
                 else:
@@ -666,10 +697,11 @@ class EditorWidget:
             level_display=level_display,
         )
         with self._lock:
-            if revision != self.session.model_revision:
-                return _superseded_payload(revision, request_sequence)
+            if not in_force_source.describes(self.session):
+                return _superseded_payload(revision, request_sequence, in_force_source.token)
         payload["model_revision"] = revision
         payload["request_sequence"] = request_sequence
+        payload["in_force"] = in_force_source.token
         return payload
 
     def _report(
@@ -678,34 +710,42 @@ class EditorWidget:
         *,
         model_revision: int | None = None,
         request_sequence: int | None = None,
+        in_force: str | None = None,
     ) -> dict[str, Any]:
         with self._lock:
-            current_revision = self.session.model_revision
-            if model_revision is not None and int(model_revision) != current_revision:
-                return _superseded_payload(int(model_revision), request_sequence)
+            revision = self.session.model_revision
+            if not self._asked_is_in_force(model_revision, in_force):
+                return _superseded_payload(model_revision, request_sequence, in_force)
         if report in ("cv", "diagnose"):
+            # Each captures what it reads, and the model in force with it, under one hold of
+            # the lock; the payload names that model.
             payload = report_payload(self, report, request_sequence=request_sequence)
             with self._lock:
-                if payload["model_revision"] != self.session.model_revision:
-                    return _superseded_payload(payload["model_revision"], request_sequence)
+                if payload["in_force"] != InForce.of(self.session).token:
+                    return _superseded_payload(
+                        payload["model_revision"], request_sequence, payload["in_force"]
+                    )
             return payload
-        edited_model, revision = self._current_model_for_evidence()
+        edited_model, source = self._current_model_for_evidence()
         if edited_model is None:
-            return _superseded_payload(revision, request_sequence)
+            return _superseded_payload(revision, request_sequence, source.token)
 
         with self._lock:
-            if revision != self.session.model_revision:
-                return _superseded_payload(revision, request_sequence)
+            if not source.describes(self.session):
+                return _superseded_payload(revision, request_sequence, source.token)
             datasets = tuple(evaluation_datasets(self.session))
             final_fit = self._final_fit
             reference_model = getattr(self.session, "reference_model", self.session.model)
             if reference_model is None:
-                return report_payload(
-                    self,
-                    report,
-                    model_revision=revision,
-                    request_sequence=request_sequence,
-                )
+                return {
+                    **report_payload(
+                        self,
+                        report,
+                        model_revision=revision,
+                        request_sequence=request_sequence,
+                    ),
+                    "in_force": source.token,
+                }
 
         summary_model = edited_model
         if report == "final" and self.session.edited_terms() and not is_lss(reference_model):
@@ -714,27 +754,27 @@ class EditorWidget:
             if fit_dataset is not None and (
                 metrics_dataset is None or fit_dataset.name != metrics_dataset.name
             ):
-                summary_model, summary_revision = self._model_materialized_for_dataset(fit_dataset)
-                if summary_model is None or summary_revision != revision:
-                    return _superseded_payload(summary_revision, request_sequence)
+                summary_model, summary_source = self._model_materialized_for_dataset(fit_dataset)
+                if summary_model is None or summary_source.token != source.token:
+                    return _superseded_payload(revision, request_sequence, source.token)
 
         metric_pairs: dict[str, tuple[dict[str, float], dict[str, float]]] = {}
         for eval_dataset in datasets:
             original = self._dataset_metrics_for_evidence(
-                "original", reference_model, eval_dataset, revision
+                "original", reference_model, eval_dataset, source
             )
             if original is None:
-                return _superseded_payload(revision, request_sequence)
+                return _superseded_payload(revision, request_sequence, source.token)
             # The model in force is the reference itself until something changes it: score it once.
             edited = (
                 original
                 if edited_model is reference_model
                 else self._dataset_metrics_for_evidence(
-                    "current", edited_model, eval_dataset, revision
+                    "current", edited_model, eval_dataset, source
                 )
             )
             if edited is None:
-                return _superseded_payload(revision, request_sequence)
+                return _superseded_payload(revision, request_sequence, source.token)
             metric_pairs[eval_dataset.name] = (original, edited)
         splits = split_metrics_payload(
             datasets, metric_pairs, report_metrics(reference_model), reference_model
@@ -749,8 +789,9 @@ class EditorWidget:
             final_fit=final_fit,
         )
         with self._lock:
-            if revision != self.session.model_revision:
-                return _superseded_payload(revision, request_sequence)
+            if not source.describes(self.session):
+                return _superseded_payload(revision, request_sequence, source.token)
+        payload["in_force"] = source.token
         return payload
 
     def _export_bytes(self, format: str, filename: str | None = None) -> ExportResult:
@@ -761,13 +802,17 @@ class EditorWidget:
         safe_name = _safe_export_filename(canonical_format, filename)
 
         validation_scope: str | None = None
+        # An export is pinned to one revision, not only to the model in force: the file
+        # carries the edit history, which an edit and its undo change.
+        with self._lock:
+            revision = self.session.model_revision
         if canonical_format == "structure":
             # No fit and no rows to score: built under the lock, on one revision.
             with self._lock:
                 revision = self.session.model_revision
                 data = self.session.export_structure().encode("utf-8")
         elif canonical_format in {"joblib", "final"}:
-            model, revision = (
+            model, _source = (
                 self._final_fit_for_export()
                 if canonical_format == "final"
                 else self._current_model_for_evidence()
@@ -782,7 +827,7 @@ class EditorWidget:
             )
             validation_scope = validation.scope
         else:
-            tables, revision = self._rating_table_payload()
+            tables, _source = self._rating_table_payload()
             if tables is None:
                 raise RuntimeError("Export request was superseded.")
             buffer = io.BytesIO()
@@ -807,15 +852,15 @@ class EditorWidget:
         model materialised on it, and the builder's defaults, except the
         ``impact_bins`` the preview passes (a SuperGLM's). A SuperLSS builds
         one table set per parameter and is the only branch on the session's
-        kind. ``(None, revision)`` when the revision moved while the model was
+        kind. ``(None, source)`` once the model in force is no longer the one
         materialised.
         """
         dataset = training_export_dataset(self.session)
         if dataset is None:
             raise EditorValueError(_EXCEL_NEEDS_TRAINING_DATA)
-        model, revision = self._model_materialized_for_dataset(dataset)
+        model, source = self._model_materialized_for_dataset(dataset)
         if model is None:
-            return None, revision
+            return None, source
         if is_lss(self.session.model):
             from superglm.export.lss_rating_tables import build_lss_rating_table_payload
 
@@ -827,7 +872,7 @@ class EditorWidget:
                 raise EditorValueError(str(error)) from error
             with self._lock:
                 term_keys = list(self.session.terms)
-            return rating_preview.lss_rating_tables(payload, term_keys), revision
+            return rating_preview.lss_rating_tables(payload, term_keys), source
         from superglm.export.rating_tables import build_rating_table_payload
 
         options: dict[str, Any] = {} if impact_bins is None else {"impact_bins": impact_bins}
@@ -839,7 +884,7 @@ class EditorWidget:
             offset=dataset.offset,
             **options,
         )
-        return rating_preview.glm_rating_tables(payload), revision
+        return rating_preview.glm_rating_tables(payload), source
 
     def _current_fit_token(self) -> int:
         """A token that changes only when the fitted model in force is replaced."""
@@ -894,24 +939,20 @@ class EditorWidget:
         """The distribution panel's data for ``feature``, the model in force beside the fitted one."""
         if not is_lss(self.session.model):
             raise EditorValueError(NOT_SUPERLSS)
-        model, revision = self._current_model_for_evidence()
-        if model is None:
-            return _superseded_payload(revision, None)
+        model, source = self._current_model_for_evidence()
         with self._lock:
-            if revision != self.session.model_revision:
-                return _superseded_payload(revision, None)
+            if model is None or not source.describes(self.session):
+                return _superseded_payload(self.session.model_revision, None, source.token)
             return distribution_panel_payload(self.session, feature, edited=model)
 
     def _risk(self, risks: list[Any]) -> dict[str, Any]:
         """The one-risk view's data for ``risks``, the model in force beside the fitted one."""
         if not is_lss(self.session.model):
             raise EditorValueError(NOT_SUPERLSS)
-        model, revision = self._current_model_for_evidence()
-        if model is None:
-            return _superseded_payload(revision, None)
+        model, source = self._current_model_for_evidence()
         with self._lock:
-            if revision != self.session.model_revision:
-                return _superseded_payload(revision, None)
+            if model is None or not source.describes(self.session):
+                return _superseded_payload(self.session.model_revision, None, source.token)
             return risk_payload(self.session, risks, edited=model)
 
     def _risk_row(self, index: int | None = None) -> dict[str, Any]:
@@ -939,7 +980,7 @@ class EditorWidget:
 
     def _build_rating_preview(self, revision: int) -> RatingPreview:
         try:
-            payload, revision = self._rating_table_payload(impact_bins=PREVIEW_IMPACT_BINS)
+            payload, _source = self._rating_table_payload(impact_bins=PREVIEW_IMPACT_BINS)
         except EditorClientError as exc:
             return RatingPreview(revision, None, exc.public_message)
         except (NotImplementedError, OverflowError, ValueError):
@@ -951,17 +992,17 @@ class EditorWidget:
             return RatingPreview(revision, None, rating_preview.SUPERSEDED)
         return RatingPreview(revision, payload, None)
 
-    def _final_fit_for_export(self):
-        """The Final fit model and the revision it was confirmed current at; refused before a run
-        or once the model in force is another one. The export checks that revision again before
-        it writes, so a change made while it serialises supersedes it."""
+    def _final_fit_for_export(self) -> tuple[Any, InForce]:
+        """The Final fit model and what it was fitted for; refused before a run or once the model
+        in force is another one. The export checks its revision again before it writes, so a
+        change made while it serialises supersedes it."""
         with self._lock:
             final = self._final_fit
             if final is None:
                 raise EditorValueError(FINAL_NOT_RUN)
             if not final.source.describes(self.session):
                 raise EditorValueError(FINAL_STALE)
-            return final.model, self.session.model_revision
+            return final.model, final.source
 
     def _export_file(
         self,
@@ -1221,7 +1262,8 @@ class EditorWidget:
 
         def publish(run: CVRun) -> dict[str, Any]:
             with self._lock:
-                if not plan.is_current(self.session):
+                # Kept while the model it ran on is in force, as an undo puts it back.
+                if not plan.source.describes(self.session):
                     raise EditorValueError(SUPERSEDED)
                 self._cv_run = run
             self._notify_changed()
@@ -1239,7 +1281,7 @@ class EditorWidget:
 
         def publish(final: FinalFit) -> dict[str, Any]:
             with self._lock:
-                if not plan.is_current(self.session):
+                if not plan.source.describes(self.session):
                     raise EditorValueError(SUPERSEDED)
                 self._final_fit = final
             self._notify_changed()
@@ -1445,13 +1487,16 @@ class EditorWidget:
 
 
 def _superseded_payload(
-    model_revision: int,
+    model_revision: int | None,
     request_sequence: int | None,
+    in_force: str | None = None,
 ) -> dict[str, Any]:
+    """The answer to a request whose model is no longer in force, naming the model it asked for."""
     return {
         "status": "superseded",
-        "model_revision": int(model_revision),
+        "model_revision": None if model_revision is None else int(model_revision),
         "request_sequence": request_sequence,
+        "in_force": in_force,
     }
 
 

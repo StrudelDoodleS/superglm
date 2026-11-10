@@ -5208,6 +5208,7 @@ def test_http_evidence_echoes_revision_sequence_and_supersedes_stale_requests(ed
             "status": "superseded",
             "model_revision": revision,
             "request_sequence": 99,
+            "in_force": None,
         }
     finally:
         widget.close()

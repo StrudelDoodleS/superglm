@@ -138,6 +138,7 @@ def create_editor_app(widget: Any) -> FastAPI:
                 dataset=None if "dataset" not in payload else str(payload["dataset"]),
                 model_revision=_optional_int(payload.get("model_revision"), "model_revision"),
                 request_sequence=_optional_int(payload.get("request_sequence"), "request_sequence"),
+                in_force=_optional_text(payload.get("in_force"), "in_force"),
             ),
             response_metadata=_evidence_metadata(payload),
         )
@@ -150,6 +151,7 @@ def create_editor_app(widget: Any) -> FastAPI:
                 level_display=_level_display(payload),
                 model_revision=_optional_int(payload.get("model_revision"), "model_revision"),
                 request_sequence=_optional_int(payload.get("request_sequence"), "request_sequence"),
+                in_force=_optional_text(payload.get("in_force"), "in_force"),
             ),
             response_metadata=_evidence_metadata(payload),
         )
@@ -161,6 +163,7 @@ def create_editor_app(widget: Any) -> FastAPI:
                 str(payload.get("report", "validation")),
                 model_revision=_optional_int(payload.get("model_revision"), "model_revision"),
                 request_sequence=_optional_int(payload.get("request_sequence"), "request_sequence"),
+                in_force=_optional_text(payload.get("in_force"), "in_force"),
             ),
             response_metadata=_evidence_metadata(payload),
         )
@@ -504,6 +507,14 @@ def _float(value: Any, name: str) -> float:
 
 def _optional_int(value: Any, name: str) -> int | None:
     return None if value is None else _int(value, name)
+
+
+def _optional_text(value: Any, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise EditorValueError(f"{name} must be text.")
+    return value
 
 
 def _range_edge(value: Any) -> str | float:
