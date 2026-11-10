@@ -51,8 +51,8 @@ function lognormalPanel(overrides = {}) {
     ],
     columns: [{ x: 18, level: null }, { x: 39, level: null }, { x: 60, level: null }],
     parameters: [
-      { name: "mean", label: "Average", role: "average", link: LOG },
-      { name: "scale", label: "Spread", role: "spread", link: FLOORED },
+      { name: "mean", label: "Mean", role: "average", link: LOG },
+      { name: "scale", label: "CV", role: "spread", link: FLOORED },
     ],
     term_keys: { mean: "mean:age", scale: "scale:age" },
     eta: { fitted: { rows: fitted, columns: fitted }, edited: { rows: edited, columns: edited } },
@@ -152,7 +152,9 @@ test("an amount outside the axis keeps its readouts and pins the line", () => {
     });
     assert.match(model.line.hint, /axis/);
     // The text box keeps the typed amount, not the axis edge.
-    assert.equal(model.line.text, formatAmount(value, "€"));
+    // The box holds the number alone; the unit is in the line's label.
+    assert.equal(model.line.text, formatAmount(value, null));
+    assert.equal(model.line.label, formatAmount(value, "€"));
   }
 });
 
@@ -183,8 +185,8 @@ test("a gamma CV above GAMMA_CV_MAX is drawn at GAMMA_CV_MAX and shown pinned", 
     rows: [{ label: "a", x: null, level: "a" }, { label: "b", x: null, level: "b" }],
     columns: [{ x: null, level: "a" }, { x: null, level: "b" }],
     parameters: [
-      { name: "mean", label: "Average", role: "average", link: LOG },
-      { name: "scale", label: "Spread", role: "spread", link: LOG },
+      { name: "mean", label: "Mean", role: "average", link: LOG },
+      { name: "scale", label: "CV", role: "spread", link: LOG },
     ],
     kind: "levels",
     eta: { fitted: { rows, columns: rows }, edited: { rows, columns: rows } },
@@ -198,13 +200,13 @@ test("a gamma CV above GAMMA_CV_MAX is drawn at GAMMA_CV_MAX and shown pinned", 
   assert.equal(model.rows[1].beyond, capped.sf(AMOUNT.value));
   assert.ok(
     model.rows[1].title.endsWith(
-      `The spread is drawn at a CV of ${GAMMA_CV_MAX}, the largest the panel computes.`
+      `The CV is drawn at ${GAMMA_CV_MAX}, the largest the panel computes.`
     )
   );
-  assert.ok(!model.rows[0].title.includes("The spread is drawn"));
+  assert.ok(!model.rows[0].title.includes("The CV is drawn"));
   assert.equal(
     model.spreadNote,
-    `Where the spread's CV exceeds ${GAMMA_CV_MAX}, the panel draws it at ${GAMMA_CV_MAX}, the largest it computes: age b.`
+    `Where the CV exceeds ${GAMMA_CV_MAX}, the panel draws it at ${GAMMA_CV_MAX}, the largest it computes: age b.`
   );
   assert.ok(model.fan.columns[1].spreadPinned);
   // Level rows are labelled by their level.
@@ -286,9 +288,12 @@ test("the fan carries one column per payload column, each cut at the line", () =
   const panel = lognormalPanel();
   const model = panelModel(panel, AMOUNT, "edited");
   assert.equal(model.fan.columns.length, 3);
+  // A law with no chance of zero is drawn whole, and its marks are its own median and mean.
+  assert.equal(model.aboveZero, false);
   model.fan.columns.forEach((column, i) => {
     const law = lawAt(panel.eta.edited.columns[i]);
     assert.equal(column.median, law.median);
+    assert.equal(column.mean, law.mean);
     assert.equal(column.cut, Math.log10(AMOUNT.value));
   });
   const pct = panelModel(panel, { mode: "percentile", value: 0.9, style: "percent" }, "edited");

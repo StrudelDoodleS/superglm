@@ -14,6 +14,7 @@ constrain-a-smooth
 compare-models-on-holdout
 read-a-summary-and-plot-effects
 deploy-a-fitted-model
+export-distributional-rating-tables
 screen-interactions
 fit-a-distributional-model
 fit-a-dirichlet-distributional-model

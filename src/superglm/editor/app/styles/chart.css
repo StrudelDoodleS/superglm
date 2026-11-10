@@ -555,12 +555,433 @@
   stroke-width: 1.3;
 }
 
-.fan-mode {
-  stroke-width: 1.5;
-  stroke-dasharray: 2 3;
-}
-
 .fan-cut {
   stroke-width: 1.8;
   stroke-dasharray: 5 3;
+}
+
+/* The Explain view (SuperLSS sessions): one risk's whole predicted
+   distribution, or two risks side by side, on a page of its own. */
+.risk-view {
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 16px 12px;
+}
+
+.risk-view[hidden] {
+  display: none;
+}
+
+/* The Explain tab fills its view: the risks' rows, then the plots beside the table and the walk. */
+.risk-panel {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  min-height: 100%;
+  gap: 8px;
+}
+
+.distribution-line-unit {
+  color: var(--muted);
+}
+
+/* A risk's colour follows its letter: every mark of a risk reads --risk. */
+[data-risk="a"] { --risk: var(--risk-a); }
+[data-risk="b"] { --risk: var(--risk-b); }
+[data-risk="c"] { --risk: var(--risk-c); }
+[data-risk="d"] { --risk: var(--risk-d); }
+[data-risk="e"] { --risk: var(--risk-e); }
+[data-risk="f"] { --risk: var(--risk-f); }
+[data-risk="g"] { --risk: var(--risk-g); }
+[data-risk="h"] { --risk: var(--risk-h); }
+[data-risk="original"] { --risk: var(--grey); }
+
+.risk-rows-host {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  overflow-x: auto;
+}
+
+.risk-rows-host[hidden],
+.risk-main[hidden] {
+  display: none;
+}
+
+.risk-rows {
+  border-collapse: collapse;
+  font-size: var(--font-size-md);
+}
+
+.risk-rows th,
+.risk-rows td {
+  padding: 2px 3px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.risk-rows thead th {
+  padding-left: 9px;
+  color: var(--muted);
+  font-size: var(--font-size-sm);
+  font-weight: 400;
+}
+
+.risk-rows tr.is-selected {
+  background: var(--surface-subtle);
+}
+
+.risk-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--control-height);
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.risk-pick[aria-pressed="true"] {
+  border-color: var(--risk);
+}
+
+.risk-input,
+.risk-select {
+  height: var(--control-height);
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.risk-input {
+  width: 76px;
+}
+
+.risk-select {
+  max-width: 132px;
+}
+
+.risk-input:focus-visible,
+.risk-select:focus-visible {
+  border-color: var(--focus);
+  outline: 2px solid var(--blue-band);
+}
+
+.risk-input[aria-invalid="true"] {
+  border-color: var(--danger);
+  box-shadow: inset 0 0 0 1px var(--danger);
+}
+
+/* A value outside the training rows: accepted, and flagged as an extrapolation. */
+.risk-input[data-outside] {
+  border-color: var(--orange);
+  background: var(--orange-soft);
+  color: var(--orange-text);
+}
+
+.risk-icon-button {
+  display: inline-grid;
+  place-items: center;
+  width: var(--control-height);
+  height: var(--control-height);
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.risk-icon-button:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.risk-icon-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.risk-icon {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.risk-add {
+  flex: none;
+  margin-bottom: 2px;
+  border-color: var(--border);
+  color: var(--text);
+}
+
+/* A row's actions show on the selected row, and on the one under the pointer or the focus. */
+.risk-rows tr:not(.is-selected):not(:hover):not(:focus-within) .risk-actions {
+  visibility: hidden;
+}
+
+.risk-swatch {
+  display: inline-block;
+  box-sizing: border-box;
+  width: 12px;
+  height: 10px;
+  border: 1.5px solid var(--risk);
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--risk) 28%, transparent);
+}
+
+.risk-main {
+  display: flex;
+  flex: 1 1 0;
+  gap: 22px;
+  min-height: 430px;
+}
+
+.risk-plots-pane {
+  display: flex;
+  flex: 1.7 1 0;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.risk-linebar {
+  justify-content: flex-end;
+  padding: 0 0 4px;
+  border-bottom: 0;
+}
+
+.risk-plots-host {
+  flex: 1 1 0;
+  min-height: 340px;
+  overflow: hidden;
+}
+
+.risk-side {
+  flex: 1 1 0;
+  min-width: 452px;
+  max-width: 600px;
+  overflow: auto;
+}
+
+@media (max-width: 980px) {
+  .risk-main {
+    flex: none;
+    flex-direction: column;
+  }
+
+  .risk-plots-host {
+    flex: none;
+    height: 400px;
+  }
+
+  .risk-side {
+    min-width: 0;
+    max-width: none;
+  }
+}
+
+.risk-plots {
+  display: block;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: crosshair;
+}
+
+.risk-plots.is-amount {
+  cursor: ew-resize;
+}
+
+.risk-grid {
+  stroke: var(--grid);
+  stroke-width: 1;
+}
+
+.risk-axis {
+  stroke: var(--border-strong);
+  stroke-width: 1;
+}
+
+.risk-line {
+  fill: none;
+  stroke: var(--risk);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+}
+
+.risk-line.is-selected {
+  stroke-width: 2.5;
+}
+
+.risk-line-original {
+  stroke: var(--grey);
+  stroke-width: 1.5;
+}
+
+.risk-fill {
+  fill: var(--risk);
+  fill-opacity: 0.16;
+}
+
+.risk-count-bar {
+  fill: var(--risk);
+  fill-opacity: 0.22;
+  stroke: var(--risk);
+  stroke-width: 1.5;
+}
+
+.risk-count-bar.is-selected {
+  fill-opacity: 0.6;
+}
+
+.risk-point {
+  fill: var(--risk);
+  stroke: var(--surface);
+  stroke-width: 2;
+}
+
+.risk-rule {
+  stroke: var(--text);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.risk-drop {
+  stroke: var(--risk);
+  stroke-width: 1;
+}
+
+.risk-table,
+.risk-drivers-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-md);
+  font-variant-numeric: tabular-nums;
+}
+
+.risk-table th,
+.risk-table td,
+.risk-drivers-table th,
+.risk-drivers-table td {
+  padding: 5px 6px;
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.risk-table thead th,
+.risk-drivers-table thead th {
+  color: var(--muted);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.risk-table tbody th,
+.risk-drivers-table tbody th {
+  padding-left: 2px;
+  font-weight: 400;
+  text-align: left;
+}
+
+.risk-table .risk-unit {
+  font-weight: 400;
+  text-align: left;
+}
+
+.risk-table tbody .risk-swatch,
+.risk-drivers-end .risk-swatch {
+  margin-right: 6px;
+}
+
+.risk-table tr.is-selected td,
+.risk-table tr.is-selected th,
+.risk-drivers-end th,
+.risk-drivers-end td {
+  font-weight: 600;
+}
+
+.risk-table .risk-ratio th,
+.risk-table .risk-ratio td {
+  color: var(--muted);
+}
+
+.risk-drivers {
+  margin-top: 18px;
+}
+
+.risk-drivers-title {
+  margin: 0 2px 2px;
+  font-size: var(--font-size-md);
+  font-weight: 600;
+}
+
+.risk-drivers-empty {
+  margin: 6px 2px;
+  color: var(--muted);
+  font-size: var(--font-size-sm);
+}
+
+.risk-drivers-detail,
+.risk-drivers-was {
+  margin-left: 8px;
+  color: var(--muted);
+  font-size: var(--font-size-sm);
+  font-weight: 400;
+}
+
+.risk-bar-cell {
+  width: 24%;
+  min-width: 70px;
+  padding-right: 0;
+}
+
+.risk-bar-track {
+  position: relative;
+  display: block;
+  height: 14px;
+}
+
+/* The rule every bar starts from: a multiplier of one. */
+.risk-bar-track::before {
+  position: absolute;
+  top: -5px;
+  bottom: -5px;
+  left: 50%;
+  border-left: 1px solid var(--border-strong);
+  content: "";
+}
+
+.risk-bar {
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  box-sizing: border-box;
+  min-width: 1px;
+  border: 1px solid var(--risk);
+  background: color-mix(in srgb, var(--risk) 34%, transparent);
+}
+
+.risk-bar.is-up {
+  border-top-right-radius: var(--radius-sm);
+  border-bottom-right-radius: var(--radius-sm);
+}
+
+.risk-bar.is-down {
+  border-top-left-radius: var(--radius-sm);
+  border-bottom-left-radius: var(--radius-sm);
 }

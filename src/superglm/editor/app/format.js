@@ -14,6 +14,17 @@ export function fmt(value) {
   return plainFormatter(digits).format(value);
 }
 
+/**
+ * An exposure or a count: thousands separators and no decimals once it is a
+ * hundred or more (126,037, not 126036.5), `fmt` below that.
+ * @param {number} value
+ */
+export function fmtCount(value) {
+  if (!Number.isFinite(value)) return "";
+  if (Math.abs(value) < 100) return fmt(value);
+  return value.toLocaleString("en-US", { maximumFractionDigits: 0 });
+}
+
 /** @type {Map<number, Intl.NumberFormat>} */
 const PLAIN_FORMATTERS = new Map();
 

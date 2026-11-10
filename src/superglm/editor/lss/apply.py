@@ -14,7 +14,6 @@ coefficient keeps its fitted value exactly.
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -59,39 +58,6 @@ def lss_model_with_edits(
 
 def _is_edited(term: EditableTerm) -> bool:
     return not np.allclose(term.edited_log_effect, term.original_log_effect, rtol=0.0, atol=1e-14)
-
-
-def reference_shift(view: LSSModelView, terms: Mapping[str, EditableTerm], key: str) -> float:
-    """How far the other edits of ``key``'s parameter move its link predictor at the reference row.
-
-    The sum, over every edited term of the same parameter but ``key``, of that
-    edit's change to the predictor there: its coefficient change read at the
-    reference row plus the level its projection puts on the intercept. Each
-    term's change is computed once per edited curve.
-    """
-    parameter = view.parameter_of(key)
-    return math.fsum(
-        _edit_at_reference(view, term)
-        for name, term in terms.items()
-        if name != key and view.parameter_of(name) == parameter and _is_edited(term)
-    )
-
-
-def _edit_at_reference(view: LSSModelView, term: EditableTerm) -> float:
-    stamp = (term.edited_log_effect.tobytes(), term.original_log_effect.tobytes())
-    cached = view._reference_edits.get(term.name)
-    if cached is not None and cached[0] == stamp:
-        return cached[1]
-    try:
-        state, term_slice, block, shift = _term_block(view, term, keep_pinned=False)
-    except EditorValueError:
-        # An edit the model cannot take moves no other curve; writing it refuses with its reason.
-        return 0.0
-    fitted = np.asarray(view._fitted.coefficients, dtype=np.float64)[term_slice]
-    design = _term_design(view._fitted, view.reference_row(), state, term_slice)
-    moved = float(np.asarray(design @ (block - fitted)).ravel()[0]) + shift
-    view._reference_edits[term.name] = (stamp, moved)
-    return moved
 
 
 def _write_term(
@@ -210,4 +176,4 @@ def _projection(
     return shift - float(centre @ coefficients), coefficients / norm
 
 
-__all__ = ["lss_model_with_edits", "reference_shift"]
+__all__ = ["lss_model_with_edits"]

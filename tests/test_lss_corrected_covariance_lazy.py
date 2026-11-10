@@ -223,7 +223,7 @@ def _assert_open_stop_disclosure(
 
     The parent refused every such stop (``"stationary smoothing result"``).
     """
-    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point") as record:
+    with pytest.warns(ConvergenceWarning, match="before reaching an optimum") as record:
         covariance = posterior_covariance(fitted, kind="corrected")
     assert any(f"reason {reason!r}" in str(item.message) for item in record)
     assert not any("unavailable" in str(item.message) for item in record)
@@ -327,7 +327,7 @@ def test_nonstationary_or_failed_stop_is_corrected_about_its_own_point(
     expected = posterior_covariance(fitted, kind="corrected")
 
     _assert_open_stop_disclosure(altered, reason, expected)
-    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point"):
+    with pytest.warns(ConvergenceWarning, match="before reaching an optimum"):
         draws = posterior_draws(altered, 8, covariance="corrected")
     assert draws.covariance_kind == "corrected"
 
@@ -860,7 +860,7 @@ def test_a_fellner_schall_stop_of_an_endgame_fit_is_not_told_to_run_the_endgame(
     fitted, _ = stationary_case
     assert fitted.smoothing is not None and fitted.smoothing.config.outer == "efs+newton"
     altered = _with_smoothing_stop(fitted, reason="practical_plateau", converged=True)
-    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point") as record:
+    with pytest.warns(ConvergenceWarning, match="before reaching an optimum") as record:
         posterior_covariance(altered, kind="corrected")
     assert not any("outer='efs+newton'" in str(item.message) for item in record)
 
@@ -881,7 +881,7 @@ def test_a_two_piece_fit_is_not_told_to_run_the_endgame() -> None:
     fitted = model.fit_reml(frame, response)._require_fitted()
     assert fitted.smoothing is not None and fitted.smoothing.config.outer == "efs"
     altered = _with_smoothing_stop(fitted, reason="practical_plateau", converged=True)
-    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point") as record:
+    with pytest.warns(ConvergenceWarning, match="before reaching an optimum") as record:
         posterior_covariance(altered, kind="corrected")
     assert not any("outer='efs+newton'" in str(item.message) for item in record)
 
@@ -1428,7 +1428,7 @@ def test_a_plain_efs_fit_is_corrected_about_its_own_stop() -> None:
     reason = fitted.smoothing.convergence_reason
     fixed = posterior_covariance(fitted, kind="fixed")
 
-    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point") as record:
+    with pytest.warns(ConvergenceWarning, match="before reaching an optimum") as record:
         corrected = posterior_covariance(fitted, kind="corrected")
     assert [f"reason {reason!r}" in str(item.message) for item in record] == [True]
     # A plain Fellner--Schall stop on a smooth family is offered the endgame.
@@ -1440,10 +1440,10 @@ def test_a_plain_efs_fit_is_corrected_about_its_own_stop() -> None:
     assert np.all(np.diag(corrected) >= np.diag(fixed))
     assert np.any(np.diag(corrected) > np.diag(fixed))
 
-    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point"):
+    with pytest.warns(ConvergenceWarning, match="before reaching an optimum"):
         effect = model.term_inference("location", "x", covariance="corrected", n_points=5)
     assert effect.covariance_kind == "corrected"
-    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point"):
+    with pytest.warns(ConvergenceWarning, match="before reaching an optimum"):
         model.summary(covariance="corrected", X_train=frame)
 
 
@@ -1487,13 +1487,13 @@ def test_an_efs_fit_without_retained_rows_discloses_fixed_inference() -> None:
 def test_a_corrected_covariance_that_is_formed_carries_no_unavailable_note() -> None:
     """The note and the resolved kind appear only on a fallback."""
     model, frame = _efs_fit(retain_rows=True)
-    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point"):
+    with pytest.warns(ConvergenceWarning, match="before reaching an optimum"):
         curves = model.risk_curves({}, "x", n_draws=8, covariance="corrected")
     assert curves.covariance == "corrected"
-    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point"):
+    with pytest.warns(ConvergenceWarning, match="before reaching an optimum"):
         table = model.summary(covariance="corrected", X_train=frame)
     assert not any("unavailable" in text for text in table["note"])
-    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point"):
+    with pytest.warns(ConvergenceWarning, match="before reaching an optimum"):
         outcome = model.term_test("location", "x", covariance="corrected", X_train=frame)
     assert outcome.note == ""
 

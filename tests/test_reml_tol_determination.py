@@ -1869,4 +1869,6 @@ class TestNewtonStepStop:
         from superglm.editor.diagnose import _stop_text
 
         assert "newton_step_tolerance" in _REML_CONVERGED_REASONS
-        assert _stop_text("newton_step_tolerance") == "the REML Newton step reached its tolerance"
+        assert _stop_text("newton_step_tolerance") == (
+            "the next step would change the smoothing parameters by less than the set tolerance"
+        )

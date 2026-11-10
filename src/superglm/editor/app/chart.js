@@ -1,5 +1,5 @@
-import { formatDisplay, showsRelativity } from "./chart/display.js";
-import { fmt } from "./format.js";
+import { showsRelativity } from "./chart/display.js";
+import { fmt, fmtCount } from "./format.js";
 import {
   anchorMarks,
   anchorMarksIn,
@@ -21,7 +21,9 @@ import {
 import {
   chartSize,
   categoricalTickIndices,
+  paddedYRange,
   planCategoricalAxis,
+  roundTicks,
   splitLabelGraphemes
 } from "./chart/geometry.js";
 import { contributionX, levelPolyline, splineCurves } from "./chart/ordered_spline.js";
@@ -187,9 +189,7 @@ export function drawChart(term, selection, context) {
   const [yMinRaw, yMaxRaw] = unsmoothed
     ? unsmoothedRange(curveMin, curveMax, unsmoothed.y)
     : [curveMin, curveMax];
-  const yPad = Math.max((yMaxRaw - yMinRaw) * 0.12, 0.05);
-  const baseYMin = yMinRaw - yPad;
-  const baseYMax = yMaxRaw + yPad;
+  const [baseYMin, baseYMax] = paddedYRange(yMinRaw, yMaxRaw);
   const yMin = zoom ? zoom.yMin : baseYMin;
   const yMax = zoom ? zoom.yMax : baseYMax;
   const sx = (v) => margin.left + ((v - xMin) / Math.max(xMax - xMin, 1e-12)) * innerW;
@@ -199,9 +199,12 @@ export function drawChart(term, selection, context) {
   // Draw back-to-front: exposure context, axes/grid, reference intervals, then
   // curves and interactive handles/points.
   exposureLayer(scene, view, sx, margin, innerW, innerH, exposure, waitingSlots(waitingBrackets), scaleKey);
-  for (const tick of ticks(yMin, yMax, tickCount(innerH, 70))) {
-    line(scene, margin.left, sy(tick), margin.left + innerW, sy(tick), "grid");
-    text(scene, margin.left - 8, sy(tick) + 4, formatDisplay(term, tick), "tick-label", "end");
+  // Round ticks vary in number with the range, and the live chart is patched child by child, so
+  // they sit in a group of their own: a drag that changes their count leaves the curves in place.
+  const yTicks = scene.appendChild(el("g", { class: "y-ticks" }));
+  for (const tick of roundTicks(yMin, yMax, tickCount(innerH, 70))) {
+    line(yTicks, margin.left, sy(tick), margin.left + innerW, sy(tick), "grid");
+    text(yTicks, margin.left - 8, sy(tick) + 4, fmt(tick), "tick-label", "end");
   }
   if (categoricalLayout) {
     for (const tick of categoricalLayout.ticks) {
@@ -226,16 +229,17 @@ export function drawChart(term, selection, context) {
       }
     }
   } else {
+    const xTicks = scene.appendChild(el("g", { class: "x-ticks" }));
     for (const tick of continuousXTicks(xMin, xMax, innerW)) {
       const tickX = sx(tick.value);
       const tickY = margin.top + innerH + 20;
-      line(scene, tickX, margin.top + innerH, tickX, margin.top + innerH + 5, "tick");
-      text(scene, tickX, tickY, tick.label, "tick-label", "middle");
+      line(xTicks, tickX, margin.top + innerH, tickX, margin.top + innerH + 5, "tick");
+      text(xTicks, tickX, tickY, tick.label, "tick-label", "middle");
     }
   }
-  // The baseline, where the term's own effect is zero (relativity one for a
-  // SuperGLM term): the level an edit is judged against.
-  const baseline = Math.min(Math.max(term.baseline ?? 1, yMin), yMax);
+  // The baseline, where the term's own effect is zero (relativity one): the level
+  // an edit is judged against.
+  const baseline = Math.min(Math.max(1, yMin), yMax);
   line(scene, margin.left, sy(baseline), margin.left + innerW, sy(baseline), "zero");
   line(scene, margin.left, margin.top + innerH, margin.left + innerW, margin.top + innerH, "axis");
 
@@ -690,8 +694,8 @@ function pointTooltipLines(term, i) {
     label,
     showsRelativity(term)
       ? `Relativity: ${fmt(term.y[i])}`
-      : `${yTooltipLabel(term)}: ${formatDisplay(term, term.y[i])}`,
-    `Exposure: ${fmt(exposure)}`
+      : `${yTooltipLabel(term)}: ${fmt(term.y[i])}`,
+    `Exposure: ${fmtCount(exposure)}`
   ];
 }
 
@@ -1365,7 +1369,7 @@ function measureText(probe, value) {
 }
 
 function continuousXTicks(xMin, xMax, innerW) {
-  return ticks(xMin, xMax, tickCount(innerW, 130)).map((value) => ({ value, label: fmt(value) }));
+  return roundTicks(xMin, xMax, tickCount(innerW, 130)).map((value) => ({ value, label: fmt(value) }));
 }
 
 // One tick per `spacing` px and at least three: the 940x520 fallback keeps its
@@ -1373,12 +1377,6 @@ function continuousXTicks(xMin, xMax, innerW) {
 // spread out.
 function tickCount(extent, spacing) {
   return Math.max(3, Math.round(extent / spacing));
-}
-
-function ticks(min, max, n) {
-  if (!Number.isFinite(min) || !Number.isFinite(max) || min === max) return [min || 0];
-  const step = (max - min) / Math.max(n - 1, 1);
-  return Array.from({ length: n }, (_, i) => min + i * step);
 }
 
 function exposureLayer(svg, term, sx, margin, innerW, innerH, exposure, waiting, scaleKey) {
@@ -1440,7 +1438,7 @@ function exposureAxis(svg, x, yBase, maxH, maxWeight) {
   for (const value of [0, maxWeight]) {
     const y = yBase - maxH * value / maxWeight;
     line(svg, x, y, x + 4, y, "exposure-axis");
-    text(svg, x + 7, y + 3.5, fmt(value), "tick-label", "start");
+    text(svg, x + 7, y + 3.5, fmtCount(value), "tick-label", "start");
   }
 }
 

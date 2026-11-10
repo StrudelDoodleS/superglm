@@ -15,6 +15,7 @@ from superglm import (
     OrderedCategorical,
     Spline,
     SuperLSS,
+    TweedieLSS,
     cat,
     cross_validate,
     s,
@@ -30,13 +31,20 @@ from superglm.editor.cv import (
     fold_term_items,
     run_cv,
     run_cv_reason,
-    weighted_mean,
 )
 from superglm.editor.errors import EditorValueError
-from superglm.editor.lss.display import fold_chart_display
+from superglm.editor.lss.display import RELATIVITY, fold_chart_display
 from superglm.editor.lss.view import LSSModelView
 from superglm.model_selection import _take_offset
-from tests._lss_editor_fixtures import REGIONS, gamma_case, lognormal_case, nb_case, open_case
+from tests._lss_editor_fixtures import (
+    REGIONS,
+    assert_cv_tab_draws_the_editor_curves,
+    gamma_case,
+    lognormal_case,
+    nb_case,
+    open_case,
+    tweedie_case,
+)
 
 FOLDS = KFold(3, shuffle=True, random_state=4)
 SCORES = ("nll", "crps", "gini", "actual_expected")
@@ -74,6 +82,49 @@ def nb_cv():
     return _supplied(nb_case())
 
 
+@pytest.fixture(scope="module")
+def tweedie_cv():
+    # The CRPS of a law with a point mass at zero is not integrated, so this result has no CRPS.
+    return _supplied(tweedie_case(), scoring=("nll", "actual_expected"))
+
+
+def test_a_tweedie_cv_tab_names_the_dispersion_curves_and_run_cv_repeats_the_scores(tweedie_cv):
+    case = tweedie_case()
+    widget = open_case(case, cv=tweedie_cv).widget()
+    try:
+        items = {item["name"]: item for item in widget._report("cv")["relativities"]["terms"]}
+    finally:
+        widget.close()
+    assert set(items) == {
+        "mean:age",
+        "mean:region",
+        "mean:power",
+        "dispersion:age",
+        "dispersion:region",
+    }
+    assert items["dispersion:age"]["label"] == "age · Dispersion"
+    assert [item["group"] for item in items.values()] == ["Mean"] * 3 + ["Dispersion"] * 2
+    assert items["dispersion:age"]["role"] == "spread"
+
+    session = open_case(case, cv=tweedie_cv)
+    assert run_cv_reason(session) is None
+    run = run_cv(capture_cv_run(session), _Context())
+    for name in tweedie_cv.builtin_scores:
+        assert run.result.mean_scores[name] == pytest.approx(tweedie_cv.mean_scores[name], rel=1e-9)
+    assert not run.carried
+
+
+def test_a_tweedie_dispersion_curve_is_drawn_as_a_relativity():
+    shown = fold_chart_display("dispersion:age", TweedieLSS())
+    assert (shown.label, shown.group, shown.role, shown.transform) == (
+        "age · Dispersion",
+        "Dispersion",
+        "spread",
+        RELATIVITY,
+    )
+    assert shown.value == "relativity of the dispersion"
+
+
 def test_the_tab_reports_a_supplied_result_in_the_validation_tab_labels(lognormal_cv):
     widget = open_case(lognormal_case(), cv=lognormal_cv).widget()
     try:
@@ -106,13 +157,13 @@ def test_the_tab_reports_a_supplied_result_in_the_validation_tab_labels(lognorma
         "scale:region",
     }
     labels = {item["name"]: item["label"] for item in items}
-    assert labels["mean:age"] == "age · Average"
-    assert labels["scale:region"] == "region · Spread"
-    # The average terms come first; each group runs least stable first.
-    assert [item["group"] for item in items] == ["Average"] * 3 + ["Spread"] * 2
-    assert all(item["role"] == item["group"].lower() for item in items)
+    assert labels["mean:age"] == "age · Mean"
+    assert labels["scale:region"] == "region · CV"
+    # The mean terms come first; each group runs least stable first.
+    assert [item["group"] for item in items] == ["Mean"] * 3 + ["CV"] * 2
+    assert all(item["role"] == {"Mean": "average", "CV": "spread"}[item["group"]] for item in items)
     assert {item["short"] for item in items} == {"age", "region", "power"}
-    for group in ("Average", "Spread"):
+    for group in ("Mean", "CV"):
         spreads = [item["fold_gap"] for item in items if item["group"] == group]
         assert spreads == sorted(spreads, reverse=True)
     assert all(len(item["folds"]) == 3 for item in items)
@@ -150,7 +201,7 @@ def test_fold_curves_are_each_fold_models_own_term_effects(case, fixture, reques
                         assert values[index] == pytest.approx(by_level[label], abs=1e-9)
 
 
-def test_average_terms_stay_first_even_when_a_spread_term_moves_most(nb_cv):
+def test_mean_terms_stay_first_even_when_a_theta_term_moves_most(nb_cv):
     # Fold curves that barely move in the mean and move a lot in theta.
     session = open_case(nb_case())
     terms = {key: session.terms[key] for key in ("mean:age", "theta:age")}
@@ -172,24 +223,68 @@ def test_average_terms_stay_first_even_when_a_spread_term_moves_most(nb_cv):
     assert {item["group"] for item in plain} == {None}
 
 
-def test_a_theta_curve_is_drawn_as_the_spread_the_editor_shows(nb_cv):
+@pytest.mark.parametrize(
+    ("case", "fixture"),
+    [(lognormal_case, "lognormal_cv"), (nb_case, "nb_cv"), (tweedie_case, "tweedie_cv")],
+)
+@pytest.mark.parametrize("edited", [False, True])
+def test_the_cv_tab_draws_each_term_as_the_editor_tab_does(case, fixture, edited, request):
+    cv = request.getfixturevalue(fixture)
+    session = open_case(case(), cv=cv)
+    spread = next(
+        key for key in session.terms if not key.startswith("mean:") and key.endswith(":age")
+    )
+    if edited:
+        session.select_indices(spread, [4, 5])
+        session.shift(spread, 0.3)
+    widget = session.widget()
+    try:
+        items = widget._report("cv")["relativities"]["terms"]
+    finally:
+        widget.close()
+    assert {item["name"] for item in items} >= {"mean:age", spread}
+    assert_cv_tab_draws_the_editor_curves(session, items)
+
+
+def test_the_stability_measures_do_not_move_with_the_level_the_curves_are_drawn_at():
+    # Moving the in-force curve by a constant factor moves where the folds are drawn, by the same
+    # factor; a fold's gap (a root-mean-square distance) and correlation read the shape alone.
+    session = open_case(nb_case())
+    key = "mean:age"
+    term = session.terms[key]
+    curves = {
+        fold: {key: term.original_log_effect + 0.05 * fold * np.sin(np.arange(term.size))}
+        for fold in range(3)
+    }
+    level = term.copy()
+    level.original_log_effect = term.original_log_effect + 0.7
+    level.edited_log_effect = term.edited_log_effect + 0.7
+    (base,) = fold_term_items({key: term}, curves)
+    (moved,) = fold_term_items({key: level}, curves)
+    assert (
+        moved["fold_gap"] == base["fold_gap"]
+        and moved["min_correlation"] == base["min_correlation"]
+    )
+    np.testing.assert_allclose(moved["fit"], np.exp(0.7) * np.asarray(base["fit"]), rtol=1e-12)
+    for after, before in zip(moved["folds"], base["folds"], strict=True):
+        np.testing.assert_allclose(
+            after["values"], np.exp(0.7) * np.asarray(before["values"]), rtol=1e-12
+        )
+
+
+def test_a_theta_curve_is_drawn_as_the_overdispersion_relativity_the_editor_shows(nb_cv):
     widget = open_case(nb_case(), cv=nb_cv).widget()
     try:
         items = {item["name"]: item for item in widget._report("cv")["relativities"]["terms"]}
     finally:
         widget.close()
     session = open_case(nb_case())
-    theta = "theta:age"
-    term = session.terms[theta]
-    weights = np.asarray(term.weights, dtype=np.float64)
-    log = term.original_log_effect
-    expected = np.exp(-(log - weighted_mean(log, weights)))
-    assert items[theta]["fit"] == pytest.approx(expected, rel=1e-12)
-    assert items[theta]["label"] == "age · Spread"
+    term = session.terms["theta:age"]
+    assert items["theta:age"]["fit"] == pytest.approx(np.exp(-term.original_log_effect), rel=1e-12)
+    assert items["theta:age"]["label"] == "age · Overdispersion"
+    assert items["theta:age"]["value_label"] == "relativity of the overdispersion"
     mean = session.terms["mean:age"]
-    log = mean.original_log_effect
-    expected = np.exp(log - weighted_mean(log, np.asarray(mean.weights, dtype=np.float64)))
-    assert items["mean:age"]["fit"] == pytest.approx(expected, rel=1e-12)
+    assert items["mean:age"]["fit"] == pytest.approx(np.exp(mean.original_log_effect), rel=1e-12)
 
 
 @pytest.mark.parametrize(
@@ -283,7 +378,7 @@ def test_an_ordered_term_is_folded_scored_and_drawn_like_any_level_term():
         widget.close()
     assert items["scale:region"]["kind"] == "levels"
     assert items["scale:region"]["levels"] == list(REGIONS)
-    assert items["scale:region"]["group"] == "Spread"
+    assert items["scale:region"]["group"] == "CV"
     run = run_cv(capture_cv_run(session), _Context())
     assert run.result.mean_scores["nll"] == pytest.approx(cv.mean_scores["nll"], rel=1e-9)
 
@@ -428,10 +523,11 @@ def test_offsets_are_taken_by_rows_whatever_their_shape():
     ("family", "key", "value"),
     [
         (GammaLS(), "mean:age", "relativity"),
-        (GammaLS(), "scale:age", "relativity of the coefficient of variation"),
+        (GammaLS(), "scale:age", "relativity of the CV"),
         (LogNormalLS(), "scale:age", "relativity of σ"),
-        (NegativeBinomialLS(), "theta:age", "relativity of overdispersion (1/θ)"),
-        (None, "scale:age", "relativity of the spread"),
+        (NegativeBinomialLS(), "theta:age", "relativity of the overdispersion"),
+        (TweedieLSS(), "dispersion:age", "relativity of the dispersion"),
+        (None, "scale:age", "relativity of the CV"),
     ],
 )
 def test_a_fold_curve_says_what_it_is_a_relativity_of(family, key, value):

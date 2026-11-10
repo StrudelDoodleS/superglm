@@ -460,6 +460,44 @@ def _widen_block_key_columns(ws, main_effects) -> None:
         )
 
 
+def _write_rating_blocks(ws, main_effects, interactions) -> None:
+    """Lay the main-effect blocks side by side from row 5, then the interaction blocks below."""
+    from openpyxl.styles import Font
+
+    max_main_row = 8
+    for block, start_col in zip(
+        main_effects,
+        _main_effect_start_columns(main_effects),
+        strict=True,
+    ):
+        title_cell = ws.cell(row=_MAIN_EFFECT_TITLE_ROW, column=start_col, value=block.name)
+        title_cell.font = Font(bold=True)
+        end_row, _ = _write_dataframe(ws, block.table, _MAIN_EFFECT_HEADER_ROW, start_col)
+        max_main_row = max(max_main_row, end_row)
+
+    _format_main_effect_blocks(ws, main_effects)
+
+    ws[_BASE_RELATIVITY_CELL].number_format = _BASE_RELATIVITY_NUMBER_FORMAT
+    _annotate_piecewise_blocks(ws, main_effects)
+    _annotate_per_unit_offset_blocks(ws, main_effects)
+    _annotate_ppform_blocks(ws, main_effects)
+
+    interaction_row = max_main_row + 3
+    for block in interactions:
+        title_cell = ws.cell(row=interaction_row, column=1, value=block.name)
+        title_cell.font = Font(bold=True)
+        end_row, _ = _write_dataframe(ws, block.table, interaction_row + 2, 1)
+        for row in ws.iter_rows(
+            min_row=interaction_row + 3,
+            max_row=end_row,
+            min_col=2,
+            max_col=block.table.shape[1],
+        ):
+            for cell in row:
+                cell.number_format = "0.000000"
+        interaction_row = end_row + 3
+
+
 def write_rating_table_workbook(
     payload,
     target: str | PathLike[str] | BinaryIO,
@@ -483,38 +521,7 @@ def write_rating_table_workbook(
     ws["A2"].font = Font(bold=True)
     ws[_BASE_RELATIVITY_CELL] = float(payload.base_relativity)
 
-    max_main_row = 8
-    for block, start_col in zip(
-        payload.main_effects,
-        _main_effect_start_columns(payload.main_effects),
-        strict=True,
-    ):
-        title_cell = ws.cell(row=_MAIN_EFFECT_TITLE_ROW, column=start_col, value=block.name)
-        title_cell.font = Font(bold=True)
-        end_row, _ = _write_dataframe(ws, block.table, _MAIN_EFFECT_HEADER_ROW, start_col)
-        max_main_row = max(max_main_row, end_row)
-
-    _format_main_effect_blocks(ws, payload.main_effects)
-
-    ws[_BASE_RELATIVITY_CELL].number_format = _BASE_RELATIVITY_NUMBER_FORMAT
-    _annotate_piecewise_blocks(ws, payload.main_effects)
-    _annotate_per_unit_offset_blocks(ws, payload.main_effects)
-    _annotate_ppform_blocks(ws, payload.main_effects)
-
-    interaction_row = max_main_row + 3
-    for block in payload.interactions:
-        title_cell = ws.cell(row=interaction_row, column=1, value=block.name)
-        title_cell.font = Font(bold=True)
-        end_row, _ = _write_dataframe(ws, block.table, interaction_row + 2, 1)
-        for row in ws.iter_rows(
-            min_row=interaction_row + 3,
-            max_row=end_row,
-            min_col=2,
-            max_col=block.table.shape[1],
-        ):
-            for cell in row:
-                cell.number_format = "0.000000"
-        interaction_row = end_row + 3
+    _write_rating_blocks(ws, payload.main_effects, payload.interactions)
 
     impact_ws = wb.create_sheet(impact_sheet_name)
     _write_dataframe(impact_ws, payload.discretization_impact, 1, 1)
@@ -541,4 +548,76 @@ def write_rating_table_workbook(
             max(summary_ws.column_dimensions[column].width, 14),
             18,
         )
+    wb.save(out)
+
+
+def write_lss_rating_table_workbook(
+    payload,
+    target: str | PathLike[str] | BinaryIO,
+    *,
+    summary_sheet_name: str = "Summary",
+) -> None:
+    """Write a SuperLSS rating-table payload: one sheet per parameter, then a summary.
+
+    A parameter's sheet holds its base in ``C2``, its floor in ``C3`` where the parameter is a
+    floor plus the product, and the sentence saying how the parameter follows from the product in
+    ``A4``; the blocks follow, laid out as on a SuperGLM sheet.
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    from superglm.export.lss_rating_tables import parameter_label
+
+    out = _resolve_workbook_target(target)
+    wb = Workbook()
+    wb.remove(wb.active)
+    for table in payload.parameters:
+        ws = wb.create_sheet(table.quantity)
+        ws.freeze_panes = "A8"
+        ws["A1"] = f"{table.quantity} ({table.parameter} parameter)"
+        ws["A1"].font = Font(bold=True)
+        ws["A2"] = "Base"
+        ws["A2"].font = Font(bold=True)
+        ws[_BASE_RELATIVITY_CELL] = float(table.base_relativity)
+        if table.rule == "floor_plus_product":
+            ws["A3"] = "Floor"
+            ws["A3"].font = Font(bold=True)
+            ws["C3"] = float(table.floor)
+        ws["A4"] = table.note
+        _write_rating_blocks(ws, table.main_effects, table.interactions)
+        _autosize(ws)
+        ws.column_dimensions["A"].width = 32
+        ws.column_dimensions[
+            ws[_BASE_RELATIVITY_CELL].column_letter
+        ].width = _BASE_RELATIVITY_MIN_WIDTH
+        _widen_block_key_columns(ws, table.main_effects)
+
+    # Only a floored log link has a floor to read: the column is left out when no parameter has one.
+    has_floor = any(t.floor for t in payload.parameters)
+    summary = pd.DataFrame(
+        [
+            {
+                "Parameter": parameter_label(t.parameter),
+                "Name in code": t.parameter,
+                "Table": t.quantity,
+                "Link": t.link,
+                "Parameter follows from the product by": t.rule,
+                **({"Floor": t.floor} if has_floor else {}),
+                "Base": t.base_relativity,
+                "How to read it": t.note,
+            }
+            for t in payload.parameters
+        ]
+    )
+    ws = wb.create_sheet(summary_sheet_name)
+    end_row, _ = _write_dataframe(ws, summary, 1, 1)
+    row = end_row + 2
+    for sentence in payload.omitted.values():
+        ws.cell(row=row, column=1, value=sentence)
+        row += 1
+    if payload.notes:
+        ws.cell(row=row + 1, column=1, value="Notes").font = Font(bold=True)
+        for row, sentence in enumerate(payload.notes, start=row + 2):
+            ws.cell(row=row, column=1, value=sentence)
+    _autosize(ws)
     wb.save(out)

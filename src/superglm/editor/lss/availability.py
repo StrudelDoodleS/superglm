@@ -23,8 +23,8 @@ from superglm.editor.lss.view import LSSModelView, is_lss
 
 LSS_UNAVAILABLE: Mapping[str, str] = MappingProxyType(
     {
-        "shape": "SuperLSS fits ignore shape constraints, so a shaped range would not hold "
-        "after Refit.",
+        "shape": "Shaped ranges are not available for SuperLSS terms in the editor yet. A rule "
+        "declared on the model with constraint= is enforced when it is fitted.",
         "special": "Special levels are not available for SuperLSS terms.",
         "free_levels": "The free-level comparison is not available for SuperLSS terms.",
         "unsmoothed": "The unsmoothed line is not available for SuperLSS terms.",
@@ -32,13 +32,11 @@ LSS_UNAVAILABLE: Mapping[str, str] = MappingProxyType(
         "refit_offset": "Refitting with an edited offset is not available for SuperLSS models.",
         "profile_distribution": "SuperLSS models estimate their distribution parameters in the "
         "fit itself.",
-        "rating_table": "Rating tables are not available for SuperLSS models.",
         "summary": "The coefficient summary is not available here for SuperLSS models; call "
         "model.summary() in Python.",
         "metrics": "Compare SuperLSS fits in the Validation tab.",
         "export_structure": "This export is for SuperGLM models; export a SuperLSS model as "
         "joblib.",
-        "export_xlsx": "This export is for SuperGLM models; export a SuperLSS model as joblib.",
         "save_session": "Session files hold SuperGLM models. Export the edited SuperLSS model as "
         "joblib; it keeps its history.",
     }
@@ -50,11 +48,9 @@ TERM_TOOLS = ("shape", "special", "free_levels", "unsmoothed", "unseen")
 SESSION_TOOLS = (
     "refit_offset",
     "profile_distribution",
-    "rating_table",
     "summary",
     "metrics",
     "export_structure",
-    "export_xlsx",
     "save_session",
 )
 

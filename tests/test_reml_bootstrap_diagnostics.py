@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from superglm import SuperGLM
 from superglm.features.spline import Spline
@@ -63,6 +64,33 @@ def test_discrete_reml_records_bootstrap_lambda_diagnostics() -> None:
         "block_dim",
     }
     assert required.issubset(components[0])
+
+
+def test_discrete_reml_records_its_objective_each_round() -> None:
+    """The discrete route keeps the REML objective it scored, as the direct route does.
+
+    The editor's Diagnose tab draws a fit's search path from this history.
+    """
+    rng = np.random.default_rng(7)
+    n = 400
+    x = rng.uniform(0.0, 1.0, n)
+    y = rng.poisson(np.exp(0.2 + np.sin(2 * np.pi * x))).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        discrete=True,
+        n_bins=64,
+        features={"x": Spline(kind="cr", k=8, discrete=True)},
+    )
+    model.fit_reml(pd.DataFrame({"x": x}), y, max_reml_iter=20)
+
+    reml = model._reml_result
+    history = reml.objective_history
+    assert history is not None and len(history) >= 2
+    assert np.all(np.isfinite(history))
+    # The last entry is the final refit, the objective the result reports up to its own
+    # re-evaluation's rounding.
+    assert history[-1] == pytest.approx(reml.objective, rel=1024 * np.finfo(np.float64).eps / 2)
 
 
 def test_projected_tensor_penalty_ranks_use_solver_space() -> None:

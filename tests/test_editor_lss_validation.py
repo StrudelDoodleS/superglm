@@ -41,6 +41,7 @@ from tests._lss_editor_fixtures import (
     lognormal_case,
     nb_case,
     open_case,
+    tweedie_case,
 )
 from tests.test_editor import editor_frame, editor_model  # noqa: F401
 
@@ -226,6 +227,80 @@ def test_final_fit_refits_on_all_rows_and_carries_edits(monkeypatch):
     inside = (kept.x > drawn[40]) & (kept.x < drawn[100])
     assert inside.sum() > 40 and gap[inside].min() > 0.0 and gap[inside].mean() > 0.1
     assert gap[inside].mean() > gap[kept.x > drawn[170]].mean() + 0.1
+
+
+def test_a_tweedie_split_is_scored_by_log_score_crps_and_a_over_e():
+    case = tweedie_case()
+    split = holdout_rows(case, 150)
+    assert (split.y == 0.0).any() and (split.y > 0.0).any()
+    got = lss_dataset_metrics(case.model, split)
+
+    par = case.model.predict_parameters(split.X)
+    w, y, mean = split.sample_weight, split.y, par["mean"].to_numpy()
+    assert got["actual_expected"] == pytest.approx(np.sum(w * y) / np.sum(w * mean), rel=64 * EPS)
+    # No claim has probability exp(-rate); the rate of a prior weight w is w mu^(2-p) / (phi (2-p)).
+    zero = split.y == 0.0
+    rate = (
+        w
+        * mean ** (2.0 - par["power"].to_numpy())
+        / (par["dispersion"].to_numpy() * (2.0 - par["power"].to_numpy()))
+    )
+    scores = case.model.scores(split.X, split.y, sample_weight=w, which=("log",))["log"]
+    np.testing.assert_allclose(scores[zero], rate[zero], rtol=1e-9)
+    assert got["log_score"] == pytest.approx(np.mean(scores), rel=64 * EPS)
+    # The compound Poisson-gamma CRPS has a closed form, so the tab reads it like any family's.
+    crps_scores = case.model.scores(split.X, split.y, sample_weight=w, which=("crps",))["crps"]
+    assert np.all(crps_scores > 0.0)
+    assert got["crps"] == pytest.approx(np.mean(crps_scores), rel=64 * EPS)
+
+
+def test_a_tweedie_validation_report_lists_the_split_with_its_scores():
+    case = tweedie_case()
+    split = holdout_rows(case, 100)
+    session = open_case(case, validation_data=(split.X, split.y, split.sample_weight))
+    widget = session.widget()
+    try:
+        rows = {row["name"]: row for row in widget._report("validation")["splits"]}
+    finally:
+        widget.close()
+    original = rows["validation"]["metrics"]["original"]
+    assert original == pytest.approx(lss_dataset_metrics(case.model, split), nan_ok=True)
+    assert np.isfinite(original["log_score"]) and np.isfinite(original["crps"])
+
+
+def test_an_unedited_model_is_scored_once_per_split(monkeypatch):
+    from superglm.editor import metrics as metrics_module
+
+    case = tweedie_case()
+    split = holdout_rows(case, 100)
+    session = open_case(case, validation_data=(split.X, split.y, split.sample_weight))
+    scored = []
+    compute = metrics_module.compute_dataset_metrics
+
+    def counted(model, dataset, *args, **kwargs):
+        scored.append(dataset.name)
+        return compute(model, dataset, *args, **kwargs)
+
+    monkeypatch.setattr(metrics_module, "compute_dataset_metrics", counted)
+    widget = session.widget()
+    try:
+        rows = widget._report("validation")["splits"]
+    finally:
+        widget.close()
+    # The model in force is the opened model, so its scores are the original's.
+    assert sorted(scored) == sorted(row["name"] for row in rows)
+    for row in rows:
+        assert row["metrics"]["edited"] == row["metrics"]["original"]
+
+
+def test_a_tweedie_final_fit_refits_on_train_and_validation_rows():
+    case = tweedie_case()
+    split = dataclasses.replace(holdout_rows(case, 100), sample_weight=None)
+    session = open_case(case, validation_data=(split.X, split.y))
+    assert final_fit_reason(session) is None
+    final = run_final_fit(capture_final_fit(session), _Context())
+    assert final.n_rows == len(case.y) + 100
+    assert final.model.parameter_names_ == ("mean", "dispersion", "power")
 
 
 def _stack(case, split):
@@ -476,7 +551,7 @@ def test_the_widget_runs_final_fit_and_exports_it():
         report = widget._report("final")
         assert report["final_fit"]["available"] is True
         assert report["final_fit"]["n_rows"] == 750
-        assert report["final_fit"]["carried"] == ["age · Spread"]
+        assert report["final_fit"]["carried"] == ["age · CV"]
         assert "summary" not in report
         assert list(report["metric_labels"]) == list(LSS_METRIC_LABELS)
         result = widget._export_bytes("final")
@@ -544,3 +619,50 @@ def test_a_split_whose_weights_the_family_refuses_is_shown_unavailable(make, rep
         assert again["validation"] == refused
     finally:
         widget.close()
+
+
+def test_the_crps_is_labelled_with_the_sessions_amount_unit():
+    case = gamma_case()
+    with_unit = open_case(case, amount_unit="EUR")
+    plain = open_case(case)
+    assert validation_report_payload(with_unit)["metric_labels"]["crps"] == "CRPS (EUR)"
+    assert validation_report_payload(plain)["metric_labels"]["crps"] == "CRPS"
+    # The log score is per row, not in the amount's unit, and keeps its name.
+    assert validation_report_payload(with_unit)["metric_labels"]["log_score"] == "Log score"
+
+
+@pytest.mark.parametrize("report", ["validation", "final"])
+def test_a_report_compares_with_an_edit_only_once_there_is_one(report):
+    session = open_case(lognormal_case())
+    widget = session.widget()
+    try:
+        assert widget._report(report)["compares_edit"] is False
+        _shift(session, "scale:age", 0.3, range(20, 120))
+        assert widget._report(report)["compares_edit"] is True
+    finally:
+        widget.close()
+
+
+def test_the_final_fit_says_whether_a_test_split_stayed_held_out_and_how_it_converged():
+    from superglm.editor.diagnose import fit_trace
+
+    case = lognormal_case()
+    validation = dataclasses.replace(holdout_rows(case, 150), sample_weight=None)
+    test = dataclasses.replace(holdout_rows(case, 100), sample_weight=None)
+    without = open_case(case).widget()
+    with_test = open_case(
+        case, validation_data=(validation.X, validation.y), test_data=(test.X, test.y)
+    ).widget()
+    try:
+        _job(without, "final_fit")
+        _job(with_test, "final_fit")
+        plain = without._report("final")["final_fit"]
+        held = with_test._report("final")["final_fit"]
+        assert plain["has_test_split"] is False and held["has_test_split"] is True
+        # The refit's status is the sentence the Diagnose tab gives for the same fit.
+        trace = fit_trace(without._final_fit.model, fit_id="final", label="Final fit")
+        assert (plain["fit_status"], plain["fit_verdict"]) == (trace["status"], trace["verdict"])
+        assert plain["fit_verdict"]
+    finally:
+        without.close()
+        with_test.close()

@@ -44,6 +44,7 @@ from superglm.distributional.predictor import (
 from superglm.distributional.response import ResponseSpec, response_spec
 from superglm.distributional.results.endpoint_evidence import ConvergenceReason
 from superglm.distributional.results.fit import DistributionalFitResult
+from superglm.distributional.results.shape import ShapeFit, shape_disclosures
 from superglm.distributional.results.smoothing import DistributionalEFSResult
 from superglm.distributional.results.solver import DenseSolverConfig, DenseSolverResult
 from superglm.distributional.revision import HandEdit, check_hand_edit
@@ -288,6 +289,11 @@ class DistributionalFitState:
     # solver result, inference and covariance keep describing the fit. The class
     # default reads older pickles as unedited.
     hand_edit: HandEdit | None = None
+    # What the fit's ``Constraint.fit`` rules did: the smoothing was chosen without them and
+    # the coefficients refitted under them (``solver/shape.py``); the class default reads older
+    # pickles, and a fit with no rule, as having none. A refit that binds replaces the smoothing
+    # search's terminal fit as ``solver_result``.
+    shape_fit: ShapeFit | None = None
 
     @property
     def reported_coefficients(self) -> NDArray[np.float64]:
@@ -388,7 +394,15 @@ class DistributionalFitState:
         if self.smoothing is not None:
             if not isinstance(self.smoothing, DistributionalEFSResult):
                 raise TypeError("smoothing must be DistributionalEFSResult")
-            if self.smoothing.terminal_fit is not self.solver_result:
+            if self.shape_fit is not None and self.shape_fit.applied:
+                if not np.array_equal(
+                    self.shape_fit.unconstrained_coefficients,
+                    self.smoothing.terminal_fit.coefficients,
+                ):
+                    raise ValueError(
+                        "a shape-constrained fit must refit the accepted terminal EFS fit"
+                    )
+            elif self.smoothing.terminal_fit is not self.solver_result:
                 raise ValueError("solver result must be the accepted terminal EFS fit")
             if dict(self.smoothing.lambdas) != dict(lambdas):
                 raise ValueError("smoothing and fitted lambdas must agree")
@@ -739,6 +753,7 @@ def prepare_distributional_fit_state(
     requested_discrete: bool,
     requested_n_bins: int | Mapping[str, int],
     requested_chunk_size: ChunkSize | None,
+    shape_fit: ShapeFit | None = None,
 ) -> DistributionalFitState:
     """Finish every terminal calculation before returning a publishable candidate."""
     if not isinstance(retain_rows, bool):
@@ -813,6 +828,7 @@ def prepare_distributional_fit_state(
                 if solver_result.convergence_reason == "no_ascent_direction"
                 else ()
             ),
+            *shape_disclosures(shape_fit),
             *_curvature_disclosures(family, solver_result, response, likelihood_plan, layout),
             *(
                 ()
@@ -864,6 +880,7 @@ def prepare_distributional_fit_state(
         exact_face_components=exact_face_components,
         truncated_row_count=0 if bounds is None else len(bounds.truncated_rows()),
         censored_row_count=0 if bounds is None else len(bounds.censored_rows()),
+        shape_fit=shape_fit,
     )
 
 

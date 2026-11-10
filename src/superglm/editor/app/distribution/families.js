@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * Predicted laws of the two continuous severity families, rebuilt in the browser from link-scale
+ * Predicted laws of the continuous severity families, rebuilt in the browser from link-scale
  * predictors so that the distribution panel can redraw while a curve is dragged.
  *
  *  - lognormal_mean: log Y ~ N(mu, s^2), the mean E[Y] under a log link and the scale s under
@@ -8,6 +8,8 @@
  *    mode exp(mu - s^2).
  *  - gamma: mean and coefficient of variation CV under log links. The shape is k = 1 / CV^2, the
  *    scale theta = mean CV^2, and the mode (k - 1) theta for k >= 1, else 0.
+ *  - tweedie: a power between one and two, a compound Poisson sum of gamma claims with a chance of
+ *    exactly zero; its method, sources and domain are in tweedie.js.
  *
  * Sources
  *  - Wilson, E. B. & Hilferty, M. M. (1931), "The distribution of chi-square", PNAS 17(12):
@@ -53,6 +55,7 @@
  * only where the quantile is a normal positive number.
  */
 
+import { tweedieLaw } from "./tweedie.js";
 import {
   LN_SQRT_2PI,
   STIRLING_MIN,
@@ -68,16 +71,20 @@ import {
 } from "./math.js";
 
 /**
- * A link's inverse: exp(eta) for "log", floor + exp(eta) for "floored_log".
- * @typedef {{kind: "log"} | {kind: "floored_log", floor: number}} LinkSpec
+ * A link's inverse: exp(eta) for "log", floor + exp(eta) for "floored_log", and for
+ * "bounded_logit" lower + (upper - lower) / (1 + exp(-eta)).
+ * @typedef {{kind: "log"} | {kind: "floored_log", floor: number} |
+ *   {kind: "bounded_logit", lower: number, upper: number}} LinkSpec
  */
 
 /**
  * @typedef {object} Law
- * @property {number} mean
- * @property {number} median
- * @property {number} mode
- * @property {(y: number) => number} cdf P(Y <= y)
+ * @property {number} mean the mean of the whole law, the chance of exactly zero included
+ * @property {number} zero the chance of exactly zero: 0 for the continuous families
+ * @property {number} median the 0.5 quantile; 0 where `zero` is at least a half
+ * @property {number} mode the most common amount: the peak of the density, or 0 where the density
+ *   falls from zero or `zero` is at least a half
+ * @property {(y: number) => number} cdf P(Y <= y), which is `zero` at y = 0
  * @property {(y: number) => number} sf P(Y > y), accurate in the upper tail
  * @property {(p: number) => number} quantile the y with P(Y <= y) = p, p in [PROBABILITY_MIN, 1 - PROBABILITY_MIN]
  * @property {(l: number) => number} log10Density the density of log10 Y at l, on a log10 scale
@@ -85,10 +92,20 @@ import {
 
 /** Above this gamma shape (CV below 0.01) the cdf, sf and quantile use Wilson-Hilferty. */
 export const WILSON_HILFERTY_SHAPE = 1e4;
-/** The largest gamma CV a law is built for; the dragged spread is clamped to it. */
+/** The largest gamma CV a law is built for; the dragged CV is clamped to it. */
 export const GAMMA_CV_MAX = 20;
 /** `quantile` takes p from this to 1 minus this. */
 export const PROBABILITY_MIN = 1e-12;
+
+/**
+ * The median and the mean of a law's amounts above zero: the part its density draws, and so the
+ * marks a drawn curve carries. A law with no chance of exactly zero gives its own.
+ * @param {Law} law
+ */
+export const medianAboveZero = (law) =>
+  law.zero > 0 ? law.quantile(law.zero + 0.5 * (1 - law.zero)) : law.median;
+/** @param {Law} law */
+export const meanAboveZero = (law) => law.mean / (1 - law.zero);
 
 const ETA_CV_MAX = Math.log(GAMMA_CV_MAX);
 const LN_LN10 = Math.log(Math.LN10);
@@ -146,10 +163,12 @@ function linkFloor(links, index, allowed, what) {
     refuse(what, link, `a link of kind ${allowed.map((a) => `"${a}"`).join(" or ")}`);
   }
   if (link.kind === "log") return 0;
-  if (!(Number.isFinite(link.floor) && link.floor >= 0)) {
-    refuse(`${what} floor`, link.floor, "a finite number of zero or more");
+  // The allowed kinds above leave only floored_log, the one link here that has a floor.
+  const { floor } = /** @type {{kind: "floored_log", floor: number}} */ (link);
+  if (!(Number.isFinite(floor) && floor >= 0)) {
+    refuse(`${what} floor`, floor, "a finite number of zero or more");
   }
-  return link.floor;
+  return floor;
 }
 
 /**
@@ -159,13 +178,13 @@ function linkFloor(links, index, allowed, what) {
  */
 function readInputs(eta, links, spreadKinds) {
   if (!Array.isArray(eta) || eta.length !== 2 || !eta.every(Number.isFinite)) {
-    refuse("eta", eta, "two finite link-scale numbers [mean, spread]");
+    refuse("eta", eta, "two finite link-scale numbers [mean, CV]");
   }
   if (!Array.isArray(links) || links.length !== 2) {
-    refuse("links", links, "two link specs [mean, spread]");
+    refuse("links", links, "two link specs [mean, CV]");
   }
   linkFloor(links, 0, ["log"], "the mean link");
-  const floor = linkFloor(links, 1, spreadKinds, "the spread link");
+  const floor = linkFloor(links, 1, spreadKinds, "the CV link");
   return { eta0: eta[0], eta1: eta[1], floor };
 }
 
@@ -187,6 +206,7 @@ function logNormalLaw(eta0, eta1, floor) {
   const quantile = (p) => Math.exp(mu + scale * normQuantile(requireQuantileLevel(p)));
   return {
     mean,
+    zero: 0,
     median: quantile(0.5),
     mode: Math.exp(mu - scale * scale),
     cdf(y) {
@@ -261,6 +281,7 @@ function gammaLaw(eta0, eta1) {
 
   return {
     mean,
+    zero: 0,
     median: quantile(0.5),
     mode: shape >= 1 ? (mean * (shape - 1)) / shape : 0,
     cdf(y) {
@@ -284,10 +305,11 @@ function gammaLaw(eta0, eta1) {
 
 /**
  * The predicted distribution of one row.
- * @param {"lognormal_mean" | "gamma"} family
- * @param {readonly number[]} eta link-scale predictors [mean, spread]; the spread is the
- *   log-normal scale s or the gamma coefficient of variation
- * @param {readonly LinkSpec[]} links the families' links for [mean, spread]
+ * @param {"lognormal_mean" | "gamma" | "tweedie"} family
+ * @param {readonly number[]} eta link-scale predictors [mean, CV]; the CV is the
+ *   log-normal scale s or the gamma coefficient of variation; for "tweedie" three, [mean,
+ *   dispersion, power]
+ * @param {readonly LinkSpec[]} links the families' links for the predictors
  * @returns {Law}
  */
 export function lawOf(family, eta, links) {
@@ -299,5 +321,8 @@ export function lawOf(family, eta, links) {
     const { eta0, eta1 } = readInputs(eta, links, ["log"]);
     return gammaLaw(eta0, eta1);
   }
-  return refuse("family", family, '"lognormal_mean" or "gamma"');
+  if (family === "tweedie") {
+    return tweedieLaw(eta, links, { refuse, requireNumber, requireQuantileLevel });
+  }
+  return refuse("family", family, '"lognormal_mean", "gamma" or "tweedie"');
 }

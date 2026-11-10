@@ -103,6 +103,7 @@ from superglm.distributional.prediction_design import (
     _required_columns,
     build_joint_prediction_design,
 )
+from superglm.links import _is_shifted_log_link
 from superglm.stats.wood_pvalue import wood_test_smooth
 from superglm.terms import resolve_label
 
@@ -112,8 +113,6 @@ TermKind = Literal["spline", "categorical", "numeric", "other"]
 _SCHEMA_VERSION = 1
 #: ``wood_test_smooth`` reads a non-positive residual df as "scale known".
 _SCALE_MODELLED_RESIDUAL_DF = -1.0
-#: Probe used to recognise an inverse link of the form ``c + exp(eta)``.
-_LOG_LINK_PROBE = np.linspace(-1.5, 1.5, 7)
 #: Column order of :func:`summary_table`.
 _SUMMARY_COLUMNS = (
     "parameter",
@@ -313,25 +312,6 @@ def _term_kind(spec: Any) -> TermKind:
     if isinstance(spec, Numeric):
         return "numeric"
     return "other"
-
-
-def _is_shifted_log_link(link: Any) -> bool:
-    """True when the inverse link is ``c + exp(eta)`` for some constant ``c``.
-
-    That is the whole family for which adding an effect on the link scale
-    multiplies the natural parameter (above its floor) by ``exp(effect)``, so
-    it is the exact condition under which a ``multiplier`` view means anything.
-    Probing ``deriv_inverse`` -- a required method of the ``Link`` protocol --
-    tests the property itself rather than a list of class names that a new
-    family would have to remember to join.
-    """
-    try:
-        derivative = np.asarray(link.deriv_inverse(_LOG_LINK_PROBE), dtype=np.float64)
-    except (AttributeError, TypeError, ValueError, FloatingPointError):
-        return False
-    if derivative.shape != _LOG_LINK_PROBE.shape:
-        return False
-    return bool(np.allclose(derivative, np.exp(_LOG_LINK_PROBE), rtol=1.0e-10, atol=0.0))
 
 
 def _resolve_term(fitted: Any, parameter: str, term: str) -> tuple[str, Any, slice]:

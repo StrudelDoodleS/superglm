@@ -57,6 +57,9 @@ without refitting.
 
 ## Rating Table Export With Term Offsets
 
+For a fitted `SuperLSS`, see [Export rating tables for a distributional
+model](export-distributional-rating-tables.md).
+
 For rating-table deployment, offsets are exported as an applied multiplier
 when the model was fitted with an offset. This is useful for policy-term
 adjustments such as a 36-month policy costing three times a 12-month policy.

@@ -36,17 +36,37 @@ export function renderReport(payload, { reportTitle, reportStatus, reportFrame }
 }
 
 // A SuperGLM report shows the fixed metric columns; a model whose report
-// names other metrics (a SuperLSS scores by log score and CRPS) shows those.
-function metricColumns(labels) {
+// names other metrics (a SuperLSS scores by log score and CRPS) shows those,
+// less any a family cannot compute for any of its splits (the negative
+// binomial has no CRPS), as the Cross-validation tab leaves it out.
+function metricColumns(labels, splits = []) {
   const named = Object.keys(labels);
-  return named.length && !named.some((metric) => reportMetricKeys.includes(metric))
-    ? named
-    : reportMetricKeys;
+  if (!named.length || named.some((metric) => reportMetricKeys.includes(metric))) return reportMetricKeys;
+  const scored = splits.filter((split) => split.available !== false && split.metrics);
+  if (!scored.length) return named;
+  return named.filter((metric) => scored.some((split) => Number.isFinite(split.metrics.edited?.[metric])));
+}
+
+// An actual over expected is read to the fourth decimal, as on the Cross-validation tab.
+function metricText(metric, value) {
+  if (!Number.isFinite(value)) return "--";
+  return metric === "actual_expected" ? value.toFixed(4) : fmt(value);
+}
+
+function deltaText(metric, delta) {
+  if (!Number.isFinite(delta)) return "--";
+  if (metric !== "actual_expected") return fmtSigned(delta);
+  return Math.abs(delta) < 1e-15 ? "0" : `${delta > 0 ? "+" : ""}${delta.toFixed(4)}`;
+}
+
+function countText(value) {
+  return Number.isFinite(Number(value)) ? Number(value).toLocaleString("en-US") : "--";
 }
 
 function renderSplitSection(payload) {
   const labels = payload.metric_labels || {};
-  const columns = metricColumns(labels);
+  const columns = metricColumns(labels, payload.splits || []);
+  const showDelta = Boolean(payload.compares_edit);
   return `
     <section class="report-section">
       <h3>Split Metrics</h3>
@@ -58,7 +78,7 @@ function renderSplitSection(payload) {
           </tr>
         </thead>
         <tbody>
-          ${(payload.splits || []).map((split) => renderSplitRow(split, columns)).join("")}
+          ${(payload.splits || []).map((split) => renderSplitRow(split, columns, showDelta)).join("")}
         </tbody>
       </table>
     </section>
@@ -66,32 +86,33 @@ function renderSplitSection(payload) {
 }
 
 // A split the model cannot score carries its reason instead of metrics.
-function renderSplitRow(split, columns) {
+function renderSplitRow(split, columns, showDelta) {
   const metrics = split.metrics || {};
   const edited = metrics.edited || {};
   const delta = metrics.delta || {};
   const cells = split.available === false
     ? `<td class="report-note" colspan="${columns.length}">${escapeHTML(split.error || "")}</td>`
-    : columns.map((metric) => renderMetricCell(metric, edited[metric], delta[metric])).join("");
+    : columns.map((metric) => renderMetricCell(metric, edited[metric], delta[metric], showDelta)).join("");
   return `
     <tr>
       <td>
         <strong>${escapeHTML(split.label || split.name || "")}</strong>
-        <span class="report-delta">${escapeHTML(String(split.n_obs || 0))} rows</span>
+        <span class="report-delta">${escapeHTML(countText(split.n_obs || 0))} rows</span>
       </td>
       ${cells}
     </tr>
   `;
 }
 
-function renderMetricCell(metric, value, delta) {
-  const direction = metricDirection(metric, Number(delta));
-  // A score the model cannot compute (CRPS of a count model) arrives as null.
-  const shownDelta = Number.isFinite(delta) ? fmtSigned(delta) : "--";
+// A change is shown only where the report compares an edited model with the one the editor opened.
+function renderMetricCell(metric, value, delta, showDelta) {
+  // A score the model cannot compute arrives as null.
+  const change = showDelta
+    ? ` <span class="report-delta" data-direction="${metricDirection(metric, Number(delta))}">Δ ${escapeHTML(deltaText(metric, delta))}</span>`
+    : "";
   return `
     <td>
-      ${escapeHTML(Number.isFinite(value) ? fmt(value) : "--")}
-      <span class="report-delta" data-direction="${direction}">Δ ${escapeHTML(shownDelta)}</span>
+      ${escapeHTML(metricText(metric, value))}${change}
     </td>
   `;
 }
@@ -195,7 +216,7 @@ function renderFinalFit(finalFit, labels = {}) {
   }
   const model = finalFit.summary?.model || {};
   const notes = [
-    `Refitted on ${Number(finalFit.n_rows).toLocaleString("en-US")} ${finalFit.splits.join(" and ")} rows; the test split stays held out.`,
+    `Refitted on ${countText(finalFit.n_rows)} ${finalFit.splits.join(" and ")} rows${finalFit.has_test_split ? "; the test split stays held out" : ""}.`,
     finalFit.carried.length ? `Hand edits put back: ${finalFit.carried.join(", ")}.` : "",
     finalFit.pending ? waitingNotIncluded(finalFit.pending) : "",
     finalFit.stale ? "The model has changed since; run Final fit again before exporting." : ""
@@ -206,7 +227,8 @@ function renderFinalFit(finalFit, labels = {}) {
       ${notes.map((note) => `<div class="report-note">${escapeHTML(note)}</div>`).join("")}
       <table class="report-table" aria-label="Final fit">
         <tbody>
-          <tr><th>Rows</th><td>${escapeHTML(formatValue(finalFit.n_rows))}</td></tr>
+          <tr><th>Rows</th><td>${escapeHTML(countText(finalFit.n_rows))}</td></tr>
+          ${finalFit.fit_verdict ? `<tr><th>Fit</th><td data-fit-status="${escapeHTML(finalFit.fit_status || "")}">${escapeHTML(finalFit.fit_verdict)}</td></tr>` : ""}
           ${finalFit.summary ? summaryRows(model) : ""}
           ${testScoreRows(finalFit.test_scores, labels)}
         </tbody>
@@ -220,7 +242,7 @@ function testScoreRows(scores, labels) {
   return Object.entries(scores || {})
     .filter(([, value]) => Number.isFinite(value))
     .map(([metric, value]) => `
-          <tr><th>Test ${escapeHTML(labels[metric] || metric)}</th><td>${escapeHTML(fmt(value))}</td></tr>`)
+          <tr><th>Test ${escapeHTML(labels[metric] || metric)}</th><td>${escapeHTML(metricText(metric, value))}</td></tr>`)
     .join("");
 }
 

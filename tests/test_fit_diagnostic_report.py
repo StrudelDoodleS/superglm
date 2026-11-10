@@ -504,12 +504,12 @@ def test_compact_and_full_rendering_expose_semantic_sections():
     assert "Limitations" in compact
     assert str(report) == compact
 
-    assert "What we observed" in full
+    assert "What we saw" in full
     assert "It led 18 of 30 ordinary accepted smoothing updates." in full
-    assert "What this may mean" in full
-    assert "What this does not establish" in full
+    assert "What it may mean" in full
+    assert "What this does not show" in full
     assert "This does not establish that the predictor should be removed." in full
-    assert "Suggested experiment" in full
+    assert "Suggested check" in full
     assert "Would a linear representation retain predictive quality?" in full
     assert "Technical evidence" in full
     assert "dominant_update_share" in full
@@ -530,7 +530,7 @@ def test_empty_report_states_the_bounded_claim_and_still_renders_limitations():
     compact = report.render()
     full = report.render(detail="full")
 
-    message = "No solver pathology was detected in the available evidence"
+    message = "No problems were found in what the fit recorded"
     assert message in compact
     assert message in full
     assert "Limitations" in compact

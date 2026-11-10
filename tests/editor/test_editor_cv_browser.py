@@ -62,7 +62,7 @@ def test_cv_tab_renders_a_supplied_result(cv_widget, chromium_browser):
     try:
         assert page.locator("#reportTitle").text_content() == "Cross-validation"
         assert page.locator("#reportStatus").text_content() == (
-            "3 folds · KFold · 300 rows · supplied with edit(model, cv=result)"
+            "3 folds · KFold · 300 rows · from the result you supplied"
         )
         assert page.locator("#reportFrame .cv-card").count() == 3
         assert page.locator("#reportFrame .cv-fold-table tbody tr").count() == 4

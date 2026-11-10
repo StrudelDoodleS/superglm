@@ -1,5 +1,6 @@
 // @ts-check
 import { createEmptyEvidenceState } from "../api/contracts.js";
+import { createRiskProfiles } from "./risk.js";
 import { selectActiveTermName } from "./selectors.js";
 
 /** @typedef {import('../api/contracts.js').EditorSnapshot} EditorSnapshot */
@@ -22,6 +23,7 @@ export function createInitialEditorState(snapshot = null) {
       freeLevels: null,
       showFreeLevels: false,
       showUnsmoothed: false,
+      risks: createRiskProfiles(),
       unsmoothed: {},
       summaryLevelDisplay: "expanded",
       zoomByTerm: {},

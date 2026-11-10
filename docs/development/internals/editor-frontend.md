@@ -76,7 +76,7 @@ Its durable top-level fields are:
 ```text
 remote   latest Python-confirmed snapshot plus structural summary
 view     active term/view/mode, zoom, grouping display, inspector, and preview
-request  blocking mutation, per-panel evidence freshness, and recovery state
+request  the editor's hold (idle, running or error), per-panel evidence freshness, and the alert
 ```
 
 `selectors.js` derives the active term, selection, renderable preview, and model revision.
@@ -84,6 +84,18 @@ request  blocking mutation, per-panel evidence freshness, and recovery state
 actions, validates structural envelopes, commits confirmed state, reconciles uncertain failures,
 debounces evidence per panel, and rejects stale responses.
 `timing.js` keeps structural request, DOM commit, paint, and per-panel evidence durations separate.
+
+`machine.js` declares a lifecycle as a table: each state, the events it takes, and the state each
+leads to. It refuses a table with a move to an undefined state, a state nothing reaches, or a state
+nothing leaves. `mutation.js` holds the table for the editor's hold and `moveMutation`, the one
+function that changes `request.mutation` and `request.recovery`; `actions.js` makes every move
+through it. Work that must hold the editor without committing a state, such as Free levels, runs
+through `actions.holdEditor`, so the busy overlay has one owner and no other change starts under
+it.
+
+A new lifecycle takes the same shape: one tagged value, one table, one function that moves it, and
+a test that walks the table, as `tests/editor_frontend/mutation.test.js` does. Several flags whose
+combinations stand for states are the same lifecycle with its wrong combinations left possible.
 
 Do not add a second state store in DOM classes, select values, or module globals. A DOM attribute may
 expose state for accessibility or testing, but the store or Python session remains authoritative.
@@ -311,6 +323,14 @@ one of the fixed sentences in `rating_preview.py`, never builder text.
   mode or a knot change waits, in a band along the bottom of the plot beneath the curve.
 - `views/knot_bar.js` renders and binds the count stepper, Placed by, alpha, Reset knots, Kind
   and Shrink, the knots chip in the term line, and the status line's sentence in Knots mode.
+- The Explain tab of a SuperLSS session (`POST /risk`, `POST /risk_row`; Python in
+  `editor/lss/risk.py`): `state/risk.js` holds the request's lifecycle table and the risks, up to eight, each under a
+  letter it keeps, with the one selected;
+  `views/risk_controller.js` asks once per model, chart revision and set of risks, and drops a late
+  answer; `views/risk_panel.js` builds every figure in `riskModel` and draws the plots and the
+  table; `views/risk_drivers.js` is the walk from the reference risk, or from risk A, a feature at
+  a time; `views/risk_counts.js` is the count plot and table rows of a negative binomial. Each has
+  a pure model function that `tests/editor_frontend/risk.test.js` reads without a DOM.
 - `views/summary_view.js` decides which summary rows a search and the All / Edited / Waiting filter
   keep and which term sections are open as Summary follows the chart; `summary.js` turns the
   result into markup and reapplies it after every render.

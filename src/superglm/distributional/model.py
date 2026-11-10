@@ -84,6 +84,7 @@ from superglm.distributional.separation import (
 )
 from superglm.distributional.smoothing.loop import fit_distributional_efs
 from superglm.distributional.solver.chunks import ChunkSize
+from superglm.distributional.solver.shape import refit_with_shape_rules, shape_rows
 from superglm.distributional.solver.solver import fit_dense_fixed_lambda
 from superglm.distributional.timing import FitPhaseRecorder, measure_phase
 from superglm.distributional.weights import (
@@ -992,6 +993,22 @@ def _fit_candidate(
         )
         ordered_lambdas = dict(smoothing.lambdas)
         result = smoothing.terminal_fit
+    shape_fit = None
+    shape = shape_rows(layout, compiled)
+    if shape is not None:
+        # Smoothing was chosen without the rules; refit the coefficients under them.
+        result, shape_fit = refit_with_shape_rules(
+            family,
+            layout,
+            retained_y,
+            likelihood_plan,
+            result.penalty,
+            result,
+            shape,
+            config=config,
+            chunk_size=chunk_size,
+            phase_recorder=phase_recorder,
+        )
     with measure_phase(phase_recorder, "inference_edf"):
         return prepare_distributional_fit_state(
             family,
@@ -1008,6 +1025,7 @@ def _fit_candidate(
             requested_discrete=discrete,
             requested_n_bins=n_bins,
             requested_chunk_size=chunk_size,
+            shape_fit=shape_fit,
         )
 
 

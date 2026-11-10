@@ -559,9 +559,9 @@ def test_certified_reml_fit_reports_bounded_no_finding_result(certified_model) -
     assert report.fit_status == "converged_certified"
     assert report.findings == ()
     rendered = report.render(detail="full")
-    assert "No solver pathology was detected in the available evidence" in rendered
-    assert "No row, response, weight, exposure, influence, or per-level evidence" in rendered
-    assert "No fit timing snapshot was retained" in rendered
+    assert "No problems were found in what the fit recorded" in rendered
+    assert "did not look at your rows, responses, weights, exposures or levels" in rendered
+    assert "No timing was recorded for this fit" in rendered
 
 
 @pytest.mark.parametrize(
@@ -639,9 +639,9 @@ def test_material_negative_reports_requested_data_curvature_on_retained_face(fac
     wording = " ".join(
         (finding.headline, finding.observed, finding.interpretation, *finding.caveats)
     ).lower()
-    assert "requested observed data curvature" in wording
-    assert "materially indefinite" in wording
-    assert "accepting fisher curvature" in wording
+    assert "observed curvature of the likelihood" in wording
+    assert "curved the wrong way" in wording
+    assert "switched to the expected (fisher) curvature" in wording
     assert "penalized curvature" not in wording
     assert "likelihood is still increasing" not in wording
     assert "separation" not in wording
@@ -678,7 +678,7 @@ def test_nonobserved_negative_curvature_does_not_claim_local_nonconcavity(
             *finding.caveats,
         )
     ).lower()
-    assert "matrix has a resolved negative direction" in wording
+    assert "has a negative value in at least one direction" in wording
     assert "nonconcav" not in wording
 
 
@@ -716,9 +716,9 @@ def test_material_fallback_is_authoritative_when_raw_minimum_is_nonnegative(face
     assert evidence["curvature_policy_reason"].value == "material_indefiniteness_after_retry"
     assert evidence["coordinate_space"].value == "reduced_exact_face"
     wording = " ".join((finding.headline, finding.observed, *finding.caveats)).lower()
-    assert "materially indefinite" in wording
-    assert "minimum eigenvalue 0.000e+00" in wording
-    assert "resolved negative eigenvalue" not in wording
+    assert "curved the wrong way" in wording
+    assert "lowest curvature value was 0.000e+00" in wording
+    assert "clearly negative" not in wording
 
 
 def test_non_expected_information_family_reports_penalized_curvature_provenance() -> None:
@@ -776,9 +776,9 @@ def test_non_expected_information_family_reports_penalized_curvature_provenance(
     curvature_wording = " ".join(
         (curvature.headline, curvature.observed, curvature.interpretation)
     ).lower()
-    assert "requested observed penalized curvature" in curvature_wording
-    assert "penalized objective geometry" in curvature_wording
-    assert "unpenalized likelihood geometry" not in curvature_wording
+    assert "observed curvature of the penalised likelihood" in curvature_wording
+    assert "penalised likelihood curves downward" in curvature_wording
+    assert "curvature of the likelihood" not in curvature_wording
 
     conditioning = next(
         item for item in _analyze_numerics(context) if item.code == "numerics.conditioning_warning"
@@ -786,12 +786,12 @@ def test_non_expected_information_family_reports_penalized_curvature_provenance(
     conditioning_evidence = {item.metric: item for item in conditioning.evidence}
     assert conditioning_evidence["accepted_source"].value == "observed"
     assert conditioning_evidence["curvature_matrix"].value == "penalized"
-    assert "accepted observed penalized curvature" in conditioning.headline.lower()
+    assert "observed curvature of the penalised likelihood" in conditioning.headline.lower()
 
 
 @pytest.mark.parametrize(
     ("counts", "expected_count", "fallback_word"),
-    [({-1: 1}, 1, "fallback"), ({0: 1, -1: 2}, 3, "fallbacks")],
+    [({-1: 1}, 1, "time"), ({0: 1, -1: 2}, 3, "times")],
 )
 def test_curvature_fallbacks_make_converged_result_uncertified_and_report_sources(
     score_certified_model,
@@ -823,7 +823,7 @@ def test_curvature_fallbacks_make_converged_result_uncertified_and_report_source
     assert evidence["fallback_count"] == expected_count
     assert evidence["requested_sources"] == ("observed",)
     assert evidence["actual_sources"] == ("fisher",)
-    assert f"{expected_count} curvature {fallback_word}" in fallback.observed
+    assert f"used {expected_count} {fallback_word}" in fallback.observed
 
 
 def test_lambda_cap_unresolved_is_per_qualified_component_with_refusal_evidence(
@@ -876,7 +876,7 @@ def test_upper_boundary_without_exact_face_stays_a_boundary_and_trajectory_claim
         "penalty:location:z#wiggle",
         "penalty:scale:z#wiggle",
     }
-    assert all("endpoint" in " ".join(finding.caveats).lower() for finding in boundary)
+    assert all("smoothed away" in " ".join(finding.caveats).lower() for finding in boundary)
     assert all(
         finding.code != "smoothing.penalized_subspace_suppressed" for finding in report.findings
     )
@@ -897,6 +897,7 @@ def test_exhausted_outer_backtracking_reports_work_counts_not_wall_time(
         for finding in report.findings
         if finding.code == "optimization.repeated_step_rejection"
     )
+    assert finding.severity == "info"
     evidence = {item.metric: item.value for item in finding.evidence}
     assert evidence == {
         "outer_iterations": 3,
@@ -912,8 +913,8 @@ def test_exhausted_outer_backtracking_reports_work_counts_not_wall_time(
     )
     assert stationarity.comparator == "<="
     assert stationarity.threshold == smoothing.config.tolerance
-    assert "coefficient refits" in finding.observed
-    assert "wall-time" in " ".join(finding.caveats)
+    assert "extra coefficient fits" in finding.observed
+    assert "No timing was recorded" in " ".join(finding.caveats)
 
 
 def test_zero_backtrack_refused_face_is_not_an_ordinary_step_rejection(
@@ -960,6 +961,8 @@ def test_update_dominance_divides_exact_ties_and_reports_eligible_denominator(
 
     finding = next(item for item in report.findings if item.code == "smoothing.update_dominance")
     evidence = {item.metric: item.value for item in finding.evidence}
+    assert finding.severity == "info"
+    assert "'location:z'" in finding.headline and "#wiggle" not in finding.headline
     assert finding.subject.identifier == "penalty:location:z#wiggle"
     assert evidence["equivalent_wins"] == 4.0
     assert evidence["work_share"] == pytest.approx(2.0 / 3.0)
@@ -989,6 +992,7 @@ def test_upward_drift_requires_four_nonzero_moves_and_never_claims_endpoint(
     finding = next(
         item for item in report.findings if item.code == "smoothing.persistent_upward_drift"
     )
+    assert finding.severity == "info"
     evidence = {item.metric: item.value for item in finding.evidence}
     assert evidence["positive_accepted_moves"] == 4
     assert evidence["negative_accepted_moves"] == 0
@@ -1002,7 +1006,7 @@ def test_upward_drift_requires_four_nonzero_moves_and_never_claims_endpoint(
     assert stationarity.comparator == "<="
     assert stationarity.threshold == smoothing.config.tolerance
     assert stationarity.value <= stationarity.threshold
-    assert "does not establish an endpoint" in " ".join(finding.caveats).lower()
+    assert "does not show that the term was smoothed away" in " ".join(finding.caveats).lower()
 
 
 def test_estimable_rank_below_active_full_coordinate_dimension_reports_rank_loss(
@@ -1033,7 +1037,7 @@ def test_conditioning_warning_uses_exact_pre_truncation_threshold(
     assert evidence["condition_estimate"].provenance == "curvature_telemetry"
     wording = f"{finding.headline} {finding.observed} {finding.interpretation}".lower()
     assert "certified condition estimate" not in wording
-    assert "pre-truncation condition estimate" in wording
+    assert "close to singular (condition estimate 6.7e+07)" in wording
     assert "retained condition estimate" not in wording
 
 
@@ -1078,15 +1082,14 @@ def test_conditioning_warning_names_accepted_pre_truncation_curvature_on_face(
     wording = " ".join(
         (finding.headline, finding.observed, finding.interpretation, *finding.caveats)
     ).lower()
-    assert "accepted fisher data curvature" in wording
-    assert "pre-truncation condition estimate" in wording
-    assert "factor-scale conditioning estimate" in wording
-    assert "diagonally equilibrated" in wording
-    assert "decomposition path" in wording
+    assert "expected (fisher) curvature of the likelihood" in wording
+    assert "before its smallest directions are dropped" in wording
+    assert "after rescaling the matrix" in wording
+    assert "how the matrix was decomposed" in wording
     assert "retained condition estimate" not in wording
     assert "small perturbations may be amplified in retained fitted directions" not in wording
-    assert "does not establish amplification among retained fitted directions" in wording
-    assert "post-truncation condition estimate is not retained" in wording
+    assert "does not show that they amplify error" in wording
+    assert "no estimate was kept for the directions that remain" in wording
 
 
 def test_exact_faced_spline_reports_suppressed_penalized_subspace_and_retained_null_space(
@@ -1107,12 +1110,13 @@ def test_exact_faced_spline_reports_suppressed_penalized_subspace_and_retained_n
     assert evidence["block_width"] == width
     assert evidence["retained_null_space_dimension"] == 1
     face_claim = f"{finding.headline} {finding.observed}".lower()
-    assert "penalized subspace" in face_claim
+    assert "curved part of" in face_claim
+    assert "part the penalty cannot touch is left" in face_claim
     assert "removed penalty component" not in face_claim
     assert "removed component" not in face_claim
     assert "removed feature" not in face_claim
     caveat = " ".join(finding.caveats).lower()
-    assert "retained null-space" in caveat
+    assert "cannot touch remains" in caveat
     assert "feature" in caveat and "useless" in caveat
 
 
@@ -1124,7 +1128,7 @@ def test_fully_penalized_exact_face_omits_retained_null_space_caveat(face_model)
     )
     evidence = {item.metric: item.value for item in finding.evidence}
     assert evidence["retained_null_space_dimension"] == 0
-    assert "retained null-space" not in " ".join(finding.caveats).lower()
+    assert "cannot touch remains" not in " ".join(finding.caveats).lower()
 
 
 @pytest.mark.parametrize("rank", [np.nan, 0.25, "unknown"])
@@ -1141,7 +1145,7 @@ def test_unresolved_component_rank_omits_null_space_claim(certified_model, rank)
 
     assert finding.confidence == "unresolved"
     assert all(item.metric != "retained_null_space_dimension" for item in finding.evidence)
-    assert "retained null-space" not in " ".join(finding.caveats).lower()
+    assert "cannot touch remains" not in " ".join(finding.caveats).lower()
 
 
 def test_face_assessments_are_not_ordinary_updates_or_false_rank_loss(face_model) -> None:
@@ -1265,9 +1269,10 @@ def test_report_identifies_family_revision_and_examined_evidence_classes() -> No
     assert report.fit_revision == 1
     assert not hasattr(_LSSDiagnosticContext.from_model(model), "inference")
     assert report.coverage == (
-        "Accepted compact fit status and revision metadata were examined.",
-        "Terminal coefficient-solver convergence, rank, and curvature telemetry were examined.",
-        "No smoothing result or smoothing history exists for this fixed fit.",
+        "Checked: whether the fit converged, and which revision it is.",
+        "Checked: whether the final coefficient fit converged, how many coefficient "
+        "combinations the data pins down, and the curvature.",
+        "Smoothing was fixed, so there was no search to check.",
     )
 
 
@@ -1299,7 +1304,7 @@ def _stationary_model():
 def test_stationary_stop_is_described_as_the_reml_optimum() -> None:
     report = diagnose_distributional_fit(_stationary_model())
     text = report.render(detail="full")
-    assert "REML optimum" in text and "projected gradient" in text
+    assert "no longer improves in any direction" in text and "largest remaining slope" in text
     assert not [f for f in report.findings if f.code == "smoothing.persistent_upward_drift"]
 
 
@@ -1314,5 +1319,5 @@ def test_rank_reduced_stop_finding_names_the_stop_and_an_action() -> None:
     )
 
     assert "'rank_reduced_at_stop'" in finding.observed
-    assert "rank certificate" in finding.interpretation
+    assert "disagreed" in finding.interpretation
     assert "aliased" in finding.actions[0].question

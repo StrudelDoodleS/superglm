@@ -7,32 +7,39 @@ import test from "node:test";
 import {
   canShowContributions,
   fromDisplay,
-  formatDisplay,
   showsRelativity,
   reachableDisplay,
   shiftDisplay,
   toDisplay,
 } from "../../src/superglm/editor/app/chart/display.js";
 import { shiftedCurve } from "../../src/superglm/editor/app/chart/ordered_spline.js";
-import { fmt } from "../../src/superglm/editor/app/format.js";
+import { fmt, fmtCount } from "../../src/superglm/editor/app/format.js";
 
 const FIXTURE = JSON.parse(
   readFileSync(new URL("./fixtures/display_transforms.json", import.meta.url), "utf8")
 );
 const EPS = Number.EPSILON;
 
+const THETA = { kind: "inverse_theta" };
+
 test("relativity is exp/log with the 1e-12 floor, bit for bit", () => {
   for (const e of [-3, -0.2, 0, 0.7, 4]) assert.equal(toDisplay(undefined, e), Math.exp(e));
   assert.equal(fromDisplay(undefined, 0), Math.log(1e-12));
   for (const v of [0.4, 1, 2.5]) assert.equal(fromDisplay(undefined, v), Math.log(v));
-  const spec = { kind: "relativity", reference_eta: 0, floor: 0 };
+  const spec = { kind: "relativity" };
   assert.equal(toDisplay(spec, 0.7), Math.exp(0.7));
   assert.equal(fromDisplay(spec, -1), Math.log(1e-12));
 });
 
+test("an overdispersion term is the relativity of 1/theta, exp(-effect), bit for bit", () => {
+  for (const e of [-3, -0.2, 0, 0.7, 4]) assert.equal(toDisplay(THETA, e), Math.exp(-e));
+  for (const v of [0.4, 1, 2.5]) assert.equal(fromDisplay(THETA, v), -Math.log(v));
+  assert.equal(fromDisplay(THETA, 0), -Math.log(1e-12));
+});
+
 test("every transform matches the Python fixture", () => {
   for (const [kind, row] of Object.entries(FIXTURE)) {
-    const spec = { kind, reference_eta: row.reference_eta, floor: row.floor };
+    const spec = { kind };
     row.effects.forEach((e, i) => {
       const py = row.display[i];
       assert.ok(Math.abs(toDisplay(spec, e) - py) <= 64 * EPS * Math.max(1, Math.abs(py)),
@@ -46,51 +53,27 @@ test("every transform matches the Python fixture", () => {
   }
 });
 
-test("out-of-range spreads clamp to finite effects", () => {
-  const lognormal = { kind: "lognormal_cv", reference_eta: -0.7, floor: 0.05 };
-  const theta = { kind: "inverse_theta", reference_eta: 1, floor: 0 };
-  assert.ok(Number.isFinite(fromDisplay(lognormal, 0)));
-  assert.ok(Number.isFinite(fromDisplay(theta, -1)));
-  assert.ok(Number.isFinite(fromDisplay(theta, 0)));
-  assert.ok(toDisplay(theta, fromDisplay(theta, -1)) > 0);
-  assert.ok(toDisplay(lognormal, fromDisplay(lognormal, 0)) >= 0);
-});
-
-test("a spread at or below zero clamps to the floor, never to its mirror", () => {
-  const specs = [
-    { kind: "lognormal_cv", reference_eta: -0.7, floor: 0.05 },
-    { kind: "gamma_cv", reference_eta: -0.6, floor: 0 },
-    { kind: "inverse_theta", reference_eta: 1, floor: 0 },
-  ];
-  const probes = [-3, -1, -0.3, -1e-9, 0, 1e-9, 0.01, 0.3, 1, 3];
-  for (const spec of specs) {
+test("a value at or below zero clamps to the smallest relativity, never to its mirror", () => {
+  for (const spec of [{ kind: "relativity" }, THETA]) {
     const floor = fromDisplay(spec, 0);
+    assert.ok(Number.isFinite(floor), spec.kind);
     for (const v of [-3, -1, -0.3, -1e-9]) assert.equal(fromDisplay(spec, v), floor, `${spec.kind} ${v}`);
-    for (const v of [-3, -1, -0.3]) {
-      assert.equal(reachableDisplay(spec, v), reachableDisplay(spec, 0), `${spec.kind} ${v}`);
-    }
-    const sign = spec.kind === "inverse_theta" ? -1 : 1;
-    const effects = probes.map((v) => sign * fromDisplay(spec, v));
-    effects.slice(1).forEach((e, i) => assert.ok(e >= effects[i], `${spec.kind} monotone at ${probes[i + 1]}`));
+    for (const v of [-3, -1, -0.3]) assert.equal(reachableDisplay(spec, v), 1e-12, `${spec.kind} ${v}`);
+    assert.ok(toDisplay(spec, fromDisplay(spec, -1)) > 0);
   }
 });
 
 test("a reachable value is one the transform can return", () => {
   assert.equal(reachableDisplay(undefined, -2), 1e-12);
   assert.equal(reachableDisplay(undefined, 0.3), 0.3);
-  const theta = { kind: "inverse_theta", reference_eta: 1, floor: 0 };
-  assert.ok(reachableDisplay(theta, -1) > 0);
-  const lognormal = { kind: "lognormal_cv", reference_eta: -0.7, floor: 0.05 };
-  const lowest = reachableDisplay(lognormal, 0);
-  assert.ok(lowest > 0);
-  assert.ok(lowest <= reachableDisplay(lognormal, 0.5));
-  assert.ok(Math.abs(reachableDisplay(lognormal, 0.5) - 0.5) <= 64 * EPS);
+  assert.equal(reachableDisplay(THETA, 0.3), 0.3);
 });
 
 test("shifting a display value moves its effect by the weighted delta", () => {
   assert.equal(shiftDisplay(undefined, 2, 0.5, 0.3), 2 * Math.exp(0.5 * 0.3));
+  assert.equal(shiftDisplay(THETA, 2, 0.5, 0.3), 2 * Math.exp(-0.5 * 0.3));
   for (const [kind, row] of Object.entries(FIXTURE)) {
-    const spec = { kind, reference_eta: row.reference_eta, floor: row.floor };
+    const spec = { kind };
     const zero = row.effects.indexOf(0);
     assert.ok(zero >= 0, `${kind} fixture has a zero effect`);
     const base = row.display[zero];
@@ -100,37 +83,23 @@ test("shifting a display value moves its effect by the weighted delta", () => {
   }
 });
 
-test("formatDisplay renders relativity as the chart does today", () => {
-  for (const v of [0.0004, 0.05, 0.5, 1, 2.2, 13.7, 120]) {
-    assert.equal(formatDisplay({}, v), fmt(v));
-    assert.equal(formatDisplay({ y_format: "relativity" }, v), fmt(v));
-  }
-  assert.equal(formatDisplay({ y_format: "times" }, 2.2), "2.2×");
-  assert.equal(formatDisplay({ y_format: "plain" }, 0.456), fmt(0.456));
-  assert.equal(formatDisplay({ y_format: "plain" }, Number.NaN), "");
-});
-
-test("a spread term has no Contrib or Build overlay", () => {
+test("an overdispersion term has no Contrib or Build overlay", () => {
   const controls = { basis: [[1, 0]], build_basis: [[1, 0]] };
   const glm = { controls };
   assert.equal(canShowContributions(glm), true);
-  assert.equal(canShowContributions({ ...glm, display: { kind: "relativity", reference_eta: 0, floor: 0 } }), true);
-  assert.equal(
-    canShowContributions({ ...glm, display: { kind: "gamma_cv", reference_eta: -0.6, floor: 0 } }),
-    false
-  );
+  assert.equal(canShowContributions({ ...glm, display: { kind: "relativity" } }), true);
+  assert.equal(canShowContributions({ ...glm, display: THETA }), false);
   assert.equal(canShowContributions({ controls: { basis: [] , build_basis: [] } }), false);
   assert.equal(canShowContributions(null), false);
 });
 
-test("a handle drag shifts a spread curve on the effect scale", () => {
-  const spec = { kind: "gamma_cv", reference_eta: -0.6, floor: 0 };
+test("a handle drag shifts an overdispersion curve on the effect scale", () => {
   const base = [0.4, 0.55, 0.9];
   const row = [0, 0.5, 1];
   const delta = 0.3;
-  const moved = shiftedCurve(base, row, delta, spec);
+  const moved = shiftedCurve(base, row, delta, THETA);
   base.forEach((b, i) => {
-    const expected = toDisplay(spec, fromDisplay(spec, b) + row[i] * delta);
+    const expected = toDisplay(THETA, fromDisplay(THETA, b) + row[i] * delta);
     assert.ok(Math.abs(moved[i] - expected) <= 64 * EPS * Math.max(1, expected), `index ${i}`);
   });
 });
@@ -138,8 +107,17 @@ test("a handle drag shifts a spread curve on the effect scale", () => {
 test("only a relativity curve gets the overlays that exponentiate basis terms", () => {
   assert.equal(showsRelativity(undefined), true);
   assert.equal(showsRelativity({}), true);
-  assert.equal(showsRelativity({ display: { kind: "relativity", reference_eta: 0, floor: 0 } }), true);
-  for (const kind of ["lognormal_cv", "gamma_cv", "inverse_theta"]) {
-    assert.equal(showsRelativity({ display: { kind, reference_eta: 0, floor: 0 } }), false, kind);
-  }
+  assert.equal(showsRelativity({ display: { kind: "relativity" } }), true);
+  assert.equal(showsRelativity({ display: THETA }), false);
+});
+
+test("fmtCount groups thousands and drops stray decimals, and reads small numbers as fmt does", () => {
+  assert.equal(fmtCount(126036.5), "126,037");
+  assert.equal(fmtCount(3386), "3,386");
+  assert.equal(fmtCount(104402.5), "104,403");
+  assert.equal(fmtCount(0), "0");
+  assert.equal(fmtCount(255.6), "256");
+  assert.equal(fmtCount(42.5), fmt(42.5));
+  assert.equal(fmtCount(0.25), fmt(0.25));
+  assert.equal(fmtCount(Number.NaN), "");
 });

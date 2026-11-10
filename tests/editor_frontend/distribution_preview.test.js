@@ -11,7 +11,7 @@ const EPS = Number.EPSILON;
 const LOG = { kind: "log" };
 const FLOORED = { kind: "floored_log", floor: 0.05 };
 const P99 = { mode: "percentile", value: 0.99, style: "percent" };
-const SPREAD = { kind: "lognormal_cv", reference_eta: -0.5, floor: 0.05 };
+const SPREAD = { kind: "relativity" };
 const GRID = [18, 30, 45, 60, 85];
 const BASE_EFFECT = [-0.1, 0, 0.05, 0.1, 0.2];
 // The drag's change on the link scale at each grid point.

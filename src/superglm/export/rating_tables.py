@@ -5,7 +5,7 @@ from __future__ import annotations
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -336,7 +336,7 @@ _PPFORM_TAIL_COEFFICIENTS = (0.0, 0.0, 0.0)
 
 
 def _continuous_ppform_block(
-    model: SuperGLM,
+    model: Any,  # a SuperGLM, or any object with its term_inference and predict
     name: str,
     centering: str,
     weights: NDArray,

@@ -115,7 +115,7 @@ model.summary().round(3)
 One row per intercept and per term of each parameter. The age smooth in
 `location` spends 6.3 effective degrees of freedom of the eight basis
 functions it was given; the age smooth in `scale` spends 2.1 of six, so the
-spread moves with age far more gently than the location does. Every term's
+standard deviation moves with age far more gently than the location does. Every term's
 Wood statistic is large enough that its p-value rounds to zero at three
 decimal places.
 

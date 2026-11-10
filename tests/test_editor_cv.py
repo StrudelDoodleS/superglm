@@ -542,15 +542,20 @@ def test_cv_report_shows_a_supplied_result_least_stable_first(cv_frame, cv_fit):
     assert region["levels"] == ["A", "B", "C"]
     weights = np.asarray(region["weights"])
     curves = {fold["label"]: np.asarray(fold["values"]) for fold in region["folds"]}
-    for values in curves.values():
+    level = np.average(np.log(region["fit"]), weights=weights)
+    centred = {}
+    for label, values in curves.items():
         log_values = np.log(values)
-        # The tab's centring (a 3-level weighted mean of logs no larger than 2|c|,
-        # gamma_6, and a subtraction), its exp (2u, absolute in log), this log
-        # (2u|c|) and this mean (gamma_6): about 21u|c| + 2u <= 23u max(1, |c|).
+        # Each fold sits at the fit's exposure-weighted mean log; the tab's alignment (a
+        # 3-level weighted mean of logs no larger than 2|c|, gamma_6, and a subtraction), its
+        # exp (2u, absolute in log), this log (2u|c|) and this mean (gamma_6): about
+        # 21u|c| + 2u <= 23u max(1, |c|).
         tol = 64 * _U * max(1.0, np.max(np.abs(log_values)))
-        assert abs(np.average(log_values, weights=weights)) <= tol
-    assert (
-        region["fold_gap"] == _summarize_against_fold_mean(curves, weights)["rmse_to_mean"].mean()
+        assert abs(np.average(log_values, weights=weights) - level) <= tol
+        centred[label] = np.exp(log_values - np.average(log_values, weights=weights))
+    # The stability measure reads the shape alone, so it does not move with the level drawn.
+    assert region["fold_gap"] == pytest.approx(
+        _summarize_against_fold_mean(centred, weights)["rmse_to_mean"].mean(), rel=1e-12
     )
 
 
@@ -596,11 +601,37 @@ def test_cv_report_reads_integer_coded_fold_models_after_a_collapse(unseen):
     after_levels, after = cls_folds()
 
     # The supplied folds are the same models, read on the same levels and
-    # centred with the same weights (row counts, exact in float64), so the
-    # curves are equal bit for bit.
+    # aligned with the same weights (row counts, exact in float64), so the
+    # curves differ only by the one constant the collapse moves the fit's level by.
     assert after_levels == levels == ["1", "2", "3", "10"]
     assert np.ptp(after[:, 2]) > 0.0
-    assert np.array_equal(after, before)
+    assert np.ptp(np.log(after) - np.log(before), axis=1).max() < 1e-12
+
+
+@pytest.mark.parametrize("edited", [False, True])
+def test_the_cv_tab_draws_each_term_as_the_editor_tab_does(cv_frame, cv_fit, edited):
+    from tests._lss_editor_fixtures import assert_cv_tab_draws_the_editor_curves
+
+    model, supplied = cv_fit
+    session = EditorSession.from_model(model, cv=supplied, **_splits(cv_frame))
+    if edited:
+        session.select_indices("age", [3, 4])
+        session.shift("age", 0.2)
+        session.select_indices("region", [1])
+        session.shift("region", -0.3)
+    widget = session.widget()
+    try:
+        items = widget._report("cv")["relativities"]["terms"]
+    finally:
+        widget.close()
+    assert {item["name"] for item in items} == {"age", "region"}
+    assert_cv_tab_draws_the_editor_curves(session, items)
+    # A term's curve is anchored as the Editor tab anchors it, not re-centred on its mean:
+    # its fit is the relativity of the term's own effect.
+    age = next(item for item in items if item["name"] == "age")
+    np.testing.assert_allclose(
+        age["fit"], np.exp(session.terms["age"].original_log_effect), rtol=1e-12, atol=0.0
+    )
 
 
 def test_cv_report_says_how_to_get_what_is_missing(cv_frame, cv_fit):
@@ -721,17 +752,20 @@ def test_cv_report_gives_a_fold_that_never_saw_a_level_a_gap_there(rare_level, h
     assert all(value is not None for label in ("Fold 2", "Fold 3") for value in folds[label])
     weights = np.asarray(region["weights"])
     shared = slice(0, 3)
-    curves = {}
+    level = np.average(np.log(region["fit"])[shared], weights=weights[shared])
+    centred = {}
     for label, values in folds.items():
-        curves[label] = np.asarray(values, dtype=np.float64)
-        log_values = np.log(curves[label])
+        log_values = np.log(np.asarray(values, dtype=np.float64))
         centre = np.average(log_values[shared], weights=weights[shared])
-        # As in the supplied-result test: about 21u|c| + 2u <= 23u max(1, |c|).
-        assert abs(centre) <= 64 * _U * max(1.0, np.max(np.abs(log_values[shared])))
-    # The spread is the summary of the curves as reported, so it is equal bit for bit.
+        # Each fold sits at the fit's mean log over the shared levels; as in the
+        # supplied-result test: about 21u|c| + 2u <= 23u max(1, |c|).
+        assert abs(centre - level) <= 64 * _U * max(1.0, np.max(np.abs(log_values[shared])))
+        centred[label] = np.exp(log_values - centre)
+    # The spread is the summary of the curves on the shape alone, so it does not move with the
+    # level the curves are drawn at.
     assert np.isfinite(region["fold_gap"])
-    assert (
-        region["fold_gap"] == _summarize_against_fold_mean(curves, weights)["rmse_to_mean"].mean()
+    assert region["fold_gap"] == pytest.approx(
+        _summarize_against_fold_mean(centred, weights)["rmse_to_mean"].mean(), rel=1e-12
     )
 
 
@@ -1320,6 +1354,65 @@ def test_the_final_fit_report_counts_the_changes_waiting_now(cv_frame, cv_fit):
 
     assert [at_fit["pending"], after_undo["pending"], after_staging["pending"]] == [1, 0, 2]
     assert not (at_fit["stale"] or after_undo["stale"] or after_staging["stale"])
+
+
+def test_results_describe_the_model_again_once_an_edit_is_undone(cv_frame, cv_fit):
+    """A result describes the model it was made on, whatever the revision says.
+
+    Run CV and Final fit on an edited model, edit again, then undo: the undo puts back the very
+    model both results were made on, so neither is out of date and the Final fit exports.
+    """
+    model, supplied = cv_fit
+    session = EditorSession.from_model(model, cv=supplied, **_splits(cv_frame))
+    session.select_levels("region", ["C"])
+    session.shift("region", 0.1)
+    widget = session.widget()
+    try:
+        for kind in ("cv", "final_fit"):
+            started = _post_json(f"{widget.url}/job_start", {"kind": kind})
+            _post_json(f"{widget.url}/job_status", {"job_id": started["job_id"], "wait": True})
+        widget._drag("region", [0], delta=0.05)
+        edited = widget._report("cv")
+        session.undo()
+        undone = widget._report("cv")
+        state = _get_json(f"{widget.url}/state")
+        exported = widget._export_bytes("final")
+    finally:
+        widget.close()
+
+    def current(report):
+        return [result["stale"] for result in report["results"] if result["origin"] == "run"]
+
+    assert (current(edited), edited["final_fit"]["stale"]) == ([True], True)
+    assert (current(undone), undone["final_fit"]["stale"]) == ([False], False)
+    assert undone["relativities"]["stale"] is False
+    assert state["final_fit"] == {"available": True, "stale": False}
+    assert exported.filename == "superglm_final_model.joblib"
+
+
+def test_putting_an_edited_terms_levels_in_another_order_changes_no_result(cv_frame, cv_fit):
+    """Display order is not part of the model: a reorder leaves Run CV and Final fit current."""
+    model, supplied = cv_fit
+    session = EditorSession.from_model(model, cv=supplied, **_splits(cv_frame))
+    session.select_levels("region", ["C"])
+    session.shift("region", 0.1)
+    widget = session.widget()
+    try:
+        for kind in ("cv", "final_fit"):
+            started = _post_json(f"{widget.url}/job_start", {"kind": kind})
+            _post_json(f"{widget.url}/job_status", {"job_id": started["job_id"], "wait": True})
+        before = list(session.terms["region"].levels)
+        session.select_levels("region", [before[-1]])
+        session.reorder_levels("region", target_index=0)
+        assert session.terms["region"].levels != before
+        report = widget._report("cv")
+        exported = widget._export_bytes("final")
+    finally:
+        widget.close()
+
+    assert [r["stale"] for r in report["results"] if r["origin"] == "run"] == [False]
+    assert report["final_fit"]["stale"] is False
+    assert exported.filename == "superglm_final_model.joblib"
 
 
 def test_final_fit_refits_train_and_validation_and_export_offers_it(cv_frame, cv_fit, fit_rows):

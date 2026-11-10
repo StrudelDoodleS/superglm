@@ -77,6 +77,8 @@ READ_ROUTES = frozenset(
         "/job_status",
         "/job_cancel",
         "/distribution",
+        "/risk",
+        "/risk_row",
     }
 )
 MODULE_PREFIX = "superglm-module:"

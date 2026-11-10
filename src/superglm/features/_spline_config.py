@@ -171,7 +171,12 @@ def _normalize_constraint(
 
 def clear_shape_rules(spec: Any) -> None:
     """Remove every shape rule from a spline spec, as if it were built without ``constraint``."""
-    rules, kind, mode = _normalize_constraint(None)
+    set_shape_rules(spec, None)
+
+
+def set_shape_rules(spec: Any, constraint: ConstraintSpec | ConstraintRules | None) -> None:
+    """Give a built spline spec ``constraint``'s rules in place of its own."""
+    rules, kind, mode = _normalize_constraint(constraint)
     spec.constraint_rules = rules
     spec.constraint_kind = spec.monotone = kind
     spec.constraint_mode = spec.monotone_mode = mode

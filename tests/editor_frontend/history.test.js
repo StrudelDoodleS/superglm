@@ -277,41 +277,55 @@ test("an LSS entry carries its parameter as a chip before the bare term name; a 
   const lss = {
     kind: "edit", status: "edit", id: "4e5f607", time: at(15, 0), note: null,
     label: "Shift 3 – 5", term: "scale:age", term_label: "age", operation: "shift",
-    predictor: "scale", predictor_label: "Spread", redo: false,
+    predictor: "scale", predictor_label: "CV", predictor_role: "spread", redo: false,
   };
-  const average = { ...lss, id: "5f60718", predictor: "mean", predictor_label: "Average" };
-  renderHistory([lss, average, TIMELINE[0], { kind: "marker" }], node);
+  const mean = { ...lss, id: "5f60718", predictor: "mean", predictor_label: "Mean", predictor_role: "average" };
+  const theta = { ...lss, id: "6071829", predictor: "theta", predictor_label: "1/θ", predictor_role: "spread" };
+  renderHistory([lss, mean, theta, TIMELINE[0], { kind: "marker" }], node);
 
-  const spread = row(node, "4e5f607");
+  const cv = row(node, "4e5f607");
   assert.match(
-    spread,
-    /<div class="history-meta"><span class="parameter-chip" data-role="spread">Spread<\/span> age · edit<\/div>/,
+    cv,
+    /<div class="history-meta"><span class="parameter-chip" data-role="spread">CV<\/span> age · edit<\/div>/,
   );
-  assert.match(row(node, "5f60718"), /<span class="parameter-chip" data-role="average">Average<\/span> age · edit/);
-  assert.doesNotMatch(spread, /scale:age/);
+  assert.match(row(node, "5f60718"), /<span class="parameter-chip" data-role="average">Mean<\/span> age · edit/);
+  assert.match(row(node, "6071829"), /<span class="parameter-chip" data-role="spread">1\/θ<\/span> age · edit/);
+  assert.doesNotMatch(cv, /scale:age/);
 
   const glm = row(node, "0a1b2c3");
   assert.doesNotMatch(glm, /parameter-chip/);
   assert.match(glm, /<div class="history-meta">curve · edit<\/div>/);
 });
 
+test("an entry written before predictor_role existed keeps its chip colour from the old chip text", () => {
+  const node = { innerHTML: "" };
+  const old = {
+    kind: "edit", status: "edit", id: "4e5f607", time: at(15, 0), note: null,
+    label: "Shift 3 – 5", term: "scale:age", term_label: "age", operation: "shift",
+    predictor: "scale", predictor_label: "Spread", redo: false,
+  };
+  renderHistory([old, { ...old, id: "5f60718", predictor: "mean", predictor_label: "Average" }], node);
+  assert.match(row(node, "4e5f607"), /<span class="parameter-chip" data-role="spread">Spread<\/span>/);
+  assert.match(row(node, "5f60718"), /<span class="parameter-chip" data-role="average">Average<\/span>/);
+});
+
 test("a chip's text is escaped, and a marker-like entry with a chip but no term still shows it", () => {
   const node = { innerHTML: "" };
   renderHistory([
     { kind: "pending", status: "waiting", id: "6071829", time: at(15, 1), note: null,
-      label: "Refit", operation: "refit", predictor: "scale", predictor_label: "<b>Spread</b>", redo: false },
+      label: "Refit", operation: "refit", predictor: "scale", predictor_label: "<b>CV</b>", redo: false },
     { kind: "marker" },
   ], node);
   const html = row(node, "6071829");
-  assert.match(html, /&lt;b&gt;Spread&lt;\/b&gt;/);
-  assert.doesNotMatch(html, /<b>Spread/);
+  assert.match(html, /&lt;b&gt;CV&lt;\/b&gt;/);
+  assert.doesNotMatch(html, /<b>CV/);
 });
 
 test("an edit on a curve shown falling in its effect is named by the shown direction", () => {
   const node = { innerHTML: "" };
   const base = {
     kind: "edit", status: "edit", time: at(15, 2), note: null, term: "theta:age",
-    term_label: "age", predictor: "theta", predictor_label: "Spread", redo: false,
+    term_label: "age", predictor: "theta", predictor_label: "1/θ", predictor_role: "spread", redo: false,
   };
   renderHistory([
     { ...base, id: "7182930", label: "shift theta:age", operation: "shift",

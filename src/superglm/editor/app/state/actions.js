@@ -11,6 +11,7 @@ import {
   patchView as patchViewState,
   waitingListChanged
 } from "./store.js";
+import { isHeld, moveMutation } from "./mutation.js";
 import { selectModelRevision } from "./selectors.js";
 
 /** @typedef {import('../api/contracts.js').ActionResult} ActionResult */
@@ -18,7 +19,7 @@ import { selectModelRevision } from "./selectors.js";
 /** @typedef {import('../api/contracts.js').EditorState} EditorState */
 /** @typedef {import('../api/contracts.js').EvidencePanel} EvidencePanel */
 /** @typedef {import('../api/contracts.js').MutationDescriptor} MutationDescriptor */
-/** @typedef {import('../api/contracts.js').RecoveryRequestState} RecoveryRequestState */
+/** @typedef {import('./mutation.js').MutationEvent} MutationEvent */
 /** @typedef {import('../api/contracts.js').SummaryPayload} SummaryPayload */
 /** @typedef {import('../api/contracts.js').StructuralActionResult} StructuralActionResult */
 /** @typedef {import('../api/contracts.js').StructuralMutationDescriptor} StructuralMutationDescriptor */
@@ -154,6 +155,7 @@ function stateOf(response) {
   return /** @type {EditorSnapshot} */ (response);
 }
 
+const ALREADY_RUNNING = "An editor mutation is already running.";
 const STRUCTURAL_OUTCOME_UNCERTAIN =
   "The model change outcome is uncertain. The operation was not retried.";
 const STRUCTURAL_REFRESH_INCOMPLETE =
@@ -193,6 +195,18 @@ export function createEditorActions({
   clearTimer = globalThis.clearTimeout.bind(globalThis)
 }) {
   const evidenceTimers = new Map();
+
+  /** @returns {boolean} whether a change is running and the next must wait for it */
+  const held = () => isHeld(store.getState().request);
+
+  /**
+   * One move of the editor's hold and its alert (state/mutation.js).
+   * @param {EditorState} state @param {MutationEvent} event @returns {EditorState}
+   */
+  function moved(state, event) {
+    const request = moveMutation(state.request, event);
+    return request === state.request ? state : { ...state, request };
+  }
   // A History note changes no model, so saving one does not hold the editor.
   // Leaving the note's field saves it, so the click that took the focus, on
   // Undo, Refit or any other action, lands while the note saves: that action
@@ -343,17 +357,12 @@ export function createEditorActions({
     setSelection(term, store.getState().remote.snapshot?.selection[term] ?? []);
   }
 
-  /** @param {RecoveryRequestState|null} recovery */
-  function finishStructuralMutation(recovery) {
+  /** @param {string|null} notice what the alert says of a change that settled, if anything */
+  function finishStructuralMutation(notice) {
     try {
-      store.update((state) => ({
-        ...state,
-        request: {
-          ...state.request,
-          mutation: { status: "idle", operation: null, error: null },
-          recovery
-        }
-      }));
+      store.update((state) => moved(
+        state, notice === null ? { type: "settle" } : { type: "settle", notice }
+      ));
     } catch {
       // The store installs the final request state before reporting listener failures.
     }
@@ -411,21 +420,13 @@ export function createEditorActions({
           view: { ...state.view, preview: null }
         };
       }
-      return {
-        ...restored,
-        request: {
-          ...restored.request,
-          mutation: {
-            status: "error",
-            operation,
-            error: normalizedError.message
-          },
-          recovery: {
-            message: retry || refused ? normalizedError.message : STRUCTURAL_OUTCOME_UNCERTAIN,
-            retry
-          }
-        }
-      };
+      return moved(restored, {
+        type: "fail",
+        operation,
+        error: normalizedError.message,
+        message: retry || refused ? normalizedError.message : STRUCTURAL_OUTCOME_UNCERTAIN,
+        retry
+      });
     });
     return { ok: false, error: normalizedError };
   }
@@ -439,9 +440,7 @@ export function createEditorActions({
    */
   async function refreshFromPython() {
     if (noteSave && !(await afterNoteSave())) return skippedMutation(NOTE_NOT_SAVED);
-    if (store.getState().request.mutation.status === "running") {
-      return skippedMutation("An editor mutation is already running.");
-    }
+    if (held()) return skippedMutation(ALREADY_RUNNING);
     const made = viewsMade;
     await sendUnsentView();
     let candidate;
@@ -469,7 +468,7 @@ export function createEditorActions({
    * @returns {Promise<ActionResult>}
    */
   async function refreshFromPythonWhenIdle() {
-    if (store.getState().request.mutation.status === "running") {
+    if (held()) {
       await new Promise((resolve) => {
         const unsubscribe = store.subscribe(
           (state) => state.request.mutation.status,
@@ -505,23 +504,14 @@ export function createEditorActions({
    * @returns {Promise<ActionResult>}
    */
   async function runStateMutation({ name, path, payload }, holdsEditor) {
-    if (store.getState().request.mutation.status === "running") {
-      return skippedMutation("An editor mutation is already running.");
-    }
+    if (held()) return skippedMutation(ALREADY_RUNNING);
 
     const previousSnapshot = store.getState().remote.snapshot;
     const previousRevision = previousSnapshot?.model_revision ?? -1;
     const descriptor = { name, path, payload: snapshotPayload(payload) };
-    store.update((state) => ({
-      ...state,
-      request: {
-        ...state.request,
-        mutation: holdsEditor
-          ? { status: "running", operation: name, error: null, blocking: false }
-          : { status: "idle", operation: null, error: null },
-        recovery: null
-      }
-    }));
+    store.update((state) => moved(
+      state, holdsEditor ? { type: "hold", operation: name, blocking: false } : { type: "pass" }
+    ));
 
     const made = viewsMade;
     if (holdsEditor && !(await sendUnsentView())) {
@@ -536,17 +526,9 @@ export function createEditorActions({
       return recoverMutation(value, name, descriptor);
     }
 
-    store.update((state) => {
-      const committed = withLatestView(commitRemote(state, snapshot), made);
-      return {
-        ...committed,
-        request: {
-          ...committed.request,
-          mutation: { status: "idle", operation: null, error: null },
-          recovery: null
-        }
-      };
-    });
+    store.update(
+      (state) => moved(withLatestView(commitRemote(state, snapshot), made), { type: "settle" })
+    );
     try {
       if (snapshot.model_revision !== previousRevision) {
         void Promise.resolve(scheduleVisibleEvidence(snapshot.model_revision)).catch(() => {});
@@ -564,6 +546,33 @@ export function createEditorActions({
   }
 
   /**
+   * Hold the editor, under the busy overlay, for work that fits and commits nothing here, such
+   * as Free levels: no other change starts until it is answered.
+   * @template T
+   * @param {{name:string, detail?:string}} what the overlay's title and the line beneath it
+   * @param {()=>Promise<T>} work
+   * @returns {Promise<{ok:true, value:T}|{ok:false, skipped?:boolean, error:Error}>}
+   */
+  async function holdEditor({ name, detail }, work) {
+    if (noteSave && !(await afterNoteSave())) return skippedMutation(NOTE_NOT_SAVED);
+    if (held()) return skippedMutation(ALREADY_RUNNING);
+    /** @type {{ok:true, value:T}|{ok:false, error:Error}} */
+    let result;
+    try {
+      store.update((state) => moved(state, { type: "hold", operation: name, blocking: true, detail }));
+      result = { ok: true, value: await work() };
+    } catch (value) {
+      result = { ok: false, error: normalizeError(value) };
+    }
+    try {
+      store.update((state) => moved(state, { type: "settle" }));
+    } catch {
+      // The store installs the settled state before reporting listener failures.
+    }
+    return result;
+  }
+
+  /**
    * @param {StructuralMutationDescriptor} descriptor
    * @returns {Promise<StructuralActionResult>}
    */
@@ -577,20 +586,11 @@ export function createEditorActions({
     onPaintSettled = () => {}
   }) {
     if (noteSave && !(await afterNoteSave())) return skippedMutation(NOTE_NOT_SAVED);
-    if (store.getState().request.mutation.status === "running") {
-      return skippedMutation("An editor mutation is already running.");
-    }
+    if (held()) return skippedMutation(ALREADY_RUNNING);
 
     const previousRevision = store.getState().remote.snapshot?.model_revision ?? -1;
     const requestPayload = snapshotPayload(payload);
-    store.update((state) => ({
-      ...state,
-      request: {
-        ...state.request,
-        mutation: { status: "running", operation: name, error: null, blocking },
-        recovery: null
-      }
-    }));
+    store.update((state) => moved(state, { type: "hold", operation: name, blocking }));
 
     const made = viewsMade;
     if (!(await sendUnsentView())) {
@@ -620,14 +620,14 @@ export function createEditorActions({
       store.update((state) => withLatestView(commitStructuralTransition(state, envelope), made));
     } catch (value) {
       if (store.getState() === stateBeforeCommit) return recoverMutation(value, name, null);
-      finishStructuralMutation({ message: STRUCTURAL_REFRESH_INCOMPLETE, retry: null });
+      finishStructuralMutation(STRUCTURAL_REFRESH_INCOMPLETE);
       return { ok: true, envelope };
     }
     await notifyTimingHook(onPrimaryCommitted);
     try {
       await waitForPaint();
     } catch {
-      finishStructuralMutation({ message: STRUCTURAL_REFRESH_INCOMPLETE, retry: null });
+      finishStructuralMutation(STRUCTURAL_REFRESH_INCOMPLETE);
       return { ok: true, envelope };
     }
     await notifyTimingHook(onPaintSettled);
@@ -753,16 +753,7 @@ export function createEditorActions({
 
   /** @returns {void} */
   function dismissRecovery() {
-    store.update((state) => {
-      const mutation = state.request.mutation.status === "error"
-        ? { status: /** @type {const} */ ("idle"), operation: null, error: null }
-        : state.request.mutation;
-      if (state.request.recovery === null && mutation === state.request.mutation) return state;
-      return {
-        ...state,
-        request: { ...state.request, mutation, recovery: null }
-      };
-    });
+    store.update((state) => moved(state, { type: "dismiss" }));
   }
 
   /**
@@ -770,10 +761,7 @@ export function createEditorActions({
    * @param {string} message @returns {void}
    */
   function showNotice(message) {
-    store.update((state) => ({
-      ...state,
-      request: { ...state.request, recovery: { message, retry: null } }
-    }));
+    store.update((state) => moved(state, { type: "notice", message }));
   }
 
   /** @param {Partial<EditorState['view']>} patch @returns {void} */
@@ -789,6 +777,7 @@ export function createEditorActions({
     setActiveTerm,
     executeStateMutation,
     executeStructuralMutation,
+    holdEditor,
     refreshEvidence,
     schedulePanelEvidence,
     retryMutation,

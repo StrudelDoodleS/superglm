@@ -13,12 +13,19 @@ import pytest
 from superglm import GammaLS, Numeric, OrderedCategorical, Spline, SuperLSS, term
 from superglm.distributional.terms import _resolve_term, _term_design
 from superglm.editor import EditorSession, edit
-from superglm.editor.lss import RELATIVITY, DisplayTransform, display_for
+from superglm.editor.lss import INVERSE_THETA, RELATIVITY, display_for
 from superglm.editor.lss.apply import lss_model_with_edits
 from superglm.editor.lss.availability import LSS_UNAVAILABLE
 from superglm.editor.operations import running_extreme_values
 from superglm.editor.payloads import session_payload
-from tests._lss_editor_fixtures import EPS, gamma_case, lognormal_case, nb_case, open_case
+from tests._lss_editor_fixtures import (
+    EPS,
+    gamma_case,
+    lognormal_case,
+    nb_case,
+    open_case,
+    tweedie_case,
+)
 from tests.test_editor import editor_frame, editor_model  # noqa: F401
 
 FIXTURE = Path(__file__).parent / "editor_frontend" / "fixtures" / "display_transforms.json"
@@ -37,7 +44,6 @@ LSS_FIELDS = {
     "parameter_role",
     "term_label",
     "display",
-    "baseline",
 }
 
 
@@ -48,29 +54,58 @@ def _parameter_at(case, session, term, parameter):
     return case.model.predict_parameters(frame, offsets=offsets)[parameter].to_numpy()
 
 
-def test_spread_curve_is_shown_as_coefficient_of_variation():
+def _ratios(values):
+    """Each value over the first: the relativity of a parameter between two points."""
+    values = np.asarray(values, dtype=np.float64)
+    return values / values[0]
+
+
+def test_lognormal_scale_is_the_relativity_of_sigma_above_its_floor():
     case = lognormal_case()
     session = open_case(case)
     term = session_payload(session)["scale:age"]
-    s = _parameter_at(case, session, term, "scale")
-    np.testing.assert_allclose(term["y"], np.sqrt(np.expm1(s**2)), rtol=TOLERANCE)
-    assert (term["y_label"], term["y_format"]) == ("coefficient of variation", "times")
+    floor = case.model.family.scale_floor
+    sigma = _parameter_at(case, session, term, "scale")
+    np.testing.assert_allclose(_ratios(term["y"]), _ratios(sigma - floor), rtol=64 * TOLERANCE)
+    np.testing.assert_array_equal(term["y"], np.exp(session.terms["scale:age"].edited_log_effect))
+    assert term["y_label"] == "relativity of σ"
+    assert term["display"] == {"kind": "relativity"}
 
 
-def test_gamma_scale_is_its_cv():
+def test_gamma_scale_is_the_relativity_of_its_cv():
     case = gamma_case()
     session = open_case(case)
     term = session_payload(session)["scale:age"]
     scale = _parameter_at(case, session, term, "scale")
-    np.testing.assert_allclose(term["y"], scale, rtol=TOLERANCE)
-    assert (term["y_label"], term["y_format"]) == ("coefficient of variation", "times")
+    np.testing.assert_allclose(_ratios(term["y"]), _ratios(scale), rtol=64 * TOLERANCE)
+    np.testing.assert_array_equal(term["y"], np.exp(session.terms["scale:age"].edited_log_effect))
+    assert term["y_label"] == "relativity of the CV"
+
+
+def test_tweedie_dispersion_is_shown_as_relativities():
+    case = tweedie_case()
+    session = open_case(case)
+    payload = session_payload(session)
+    term = payload["dispersion:age"]
+    # φ carries the amount's units, so the curve is its relativity.
+    phi = _parameter_at(case, session, term, "dispersion")
+    np.testing.assert_allclose(_ratios(term["y"]), _ratios(phi), rtol=64 * TOLERANCE)
+    assert term["y_label"] == "relativity of the dispersion"
+    assert (term["parameter"], term["parameter_label"], term["parameter_role"]) == (
+        "dispersion",
+        "Dispersion",
+        "spread",
+    )
+    assert term["display"]["kind"] == "relativity"
+    # Power has no curves: it is never a term of the payload.
+    assert not any(key.startswith("power:") for key in payload if isinstance(key, str))
 
 
 def test_a_spread_band_far_from_the_link_origin_brackets_its_curve():
-    # Each band end lies about 2000 from zero on the link scale, past where exp clips it.
+    # Each band end lies about 70 from zero on the link scale: a relativity of 1e30 and more.
     rng = np.random.default_rng(578)
     t = np.linspace(0.0, 1.0, 360)
-    X = pd.DataFrame({"x": 1000.0 + t})
+    X = pd.DataFrame({"x": 100.0 + t})
     y = rng.gamma(np.exp(2.0 - 2.0 * t), np.exp(1.0) * np.exp(-2.0 + 2.0 * t))
     family = GammaLS()
     model = SuperLSS(family, family.mean(), family.scale(term("x", Numeric()))).fit_reml(X, y)
@@ -83,19 +118,20 @@ def test_a_spread_band_far_from_the_link_origin_brackets_its_curve():
     assert np.all(upper > lower)
 
 
-def test_nb_theta_is_shown_inverted():
+def test_nb_theta_is_the_relativity_of_the_overdispersion():
     case = nb_case()
     session = open_case(case)
     term = session_payload(session)["theta:age"]
     theta = _parameter_at(case, session, term, "theta")
-    np.testing.assert_allclose(term["y"], 1.0 / theta, rtol=TOLERANCE)
-    assert (term["y_label"], term["y_format"]) == ("overdispersion (1/θ)", "plain")
+    np.testing.assert_allclose(_ratios(term["y"]), _ratios(1.0 / theta), rtol=64 * TOLERANCE)
+    np.testing.assert_array_equal(term["y"], np.exp(-session.terms["theta:age"].edited_log_effect))
+    assert term["y_label"] == "relativity of the overdispersion"
     # 1/theta falls as the effect rises, so the interval's ends are the other way round.
     assert np.all(np.asarray(term["ci_lower_y"]) <= np.asarray(term["y"]) + TOLERANCE)
     assert np.all(np.asarray(term["ci_upper_y"]) >= np.asarray(term["y"]) - TOLERANCE)
 
 
-@pytest.mark.parametrize("case", [lognormal_case, gamma_case, nb_case])
+@pytest.mark.parametrize("case", [lognormal_case, gamma_case, nb_case, tweedie_case])
 def test_mean_terms_stay_relativities(case):
     session = open_case(case())
     session.select_indices("mean:age", [4, 5])
@@ -106,8 +142,7 @@ def test_mean_terms_stay_relativities(case):
     np.testing.assert_array_equal(
         term["original_y"], np.exp(session.terms["mean:age"].original_log_effect)
     )
-    assert term["y_label"] == "relativity" and term["y_format"] == "relativity"
-    assert term["baseline"] == 1.0
+    assert term["y_label"] == "relativity" and "y_format" not in term and "baseline" not in term
     assert term["parameter"] == "mean"
 
 
@@ -119,16 +154,10 @@ def test_lss_terms_carry_their_fields():
     assert term["term_label"] == term["x_label"] == term["title"] == "region"
     display = display_for(open_case(case).model, "scale:region")
     assert term["display"] == display.to_payload()
-    assert term["baseline"] == float(display.to_display(0.0))
 
 
 def _transforms():
-    return [
-        RELATIVITY,
-        DisplayTransform("lognormal_cv", -0.7, 0.05),
-        DisplayTransform("gamma_cv", -0.6),
-        DisplayTransform("inverse_theta", 1.0),
-    ]
+    return [RELATIVITY, INVERSE_THETA]
 
 
 @pytest.mark.parametrize("transform", _transforms(), ids=lambda t: t.kind)
@@ -138,31 +167,21 @@ def test_display_round_trips(transform):
     np.testing.assert_allclose(back, effects, rtol=1e3 * EPS, atol=1e3 * EPS)
 
 
-def test_out_of_range_spread_clamps():
-    lognormal = DisplayTransform("lognormal_cv", -0.7, 0.05)
-    below = lognormal.from_display([0.0, 1e-9, np.sqrt(np.expm1(0.05**2)) * 0.5])
-    assert np.all(np.isfinite(below))
-    # The nearest reachable curve sits at the floor's own coefficient of variation.
-    np.testing.assert_allclose(lognormal.to_display(below), np.sqrt(np.expm1(0.05**2)), rtol=1e-6)
-    for transform in (DisplayTransform("inverse_theta", 1.0), DisplayTransform("gamma_cv", -0.6)):
-        effects = transform.from_display([0.0, -3.0])
-        assert np.all(np.isfinite(effects))
-        assert np.all(np.isfinite(transform.to_display(effects)))
-
-
-@pytest.mark.parametrize("transform", _transforms()[1:], ids=lambda t: t.kind)
-def test_spread_at_or_below_zero_clamps_to_the_floor(transform):
-    # A display value at or below zero is past every spread's range: it takes the effect of
-    # zero, never that of its absolute value, and larger values never take smaller effects.
+@pytest.mark.parametrize("transform", _transforms(), ids=lambda t: t.kind)
+def test_a_value_at_or_below_zero_clamps_to_the_smallest_relativity(transform):
+    # A display value at or below zero is past every relativity's range: it takes the effect of
+    # the smallest one, never that of its absolute value, and larger values never take smaller
+    # shown effects.
     floor = transform.from_display(0.0)
+    assert np.isfinite(floor)
     np.testing.assert_array_equal(transform.from_display([-3.0, -1.0, -0.3, -1e-9]), floor)
     probes = np.array([-3.0, -1.0, 0.0, 1e-9, 0.01, 0.3, 1.0, 3.0])
-    effects = transform.from_display(probes)
-    direction = 1.0 if transform.kind != "inverse_theta" else -1.0
-    assert np.all(np.diff(direction * effects) >= 0.0)
+    direction = 1.0 if transform.increasing else -1.0
+    assert np.all(np.diff(direction * transform.from_display(probes)) >= 0.0)
+    assert np.all(np.isfinite(transform.to_display(transform.from_display([0.0, -3.0]))))
 
 
-def test_dragged_cv_converts_back_to_the_link_scale():
+def test_a_dragged_relativity_converts_back_to_the_link_scale():
     session = open_case(lognormal_case())
     widget = session.widget()
     try:
@@ -225,40 +244,29 @@ def test_lss_tool_payloads_follow_the_tools_a_superlss_offers():
 def test_glm_payload_has_no_parameter_fields(editor_model):  # noqa: F811
     session = EditorSession.from_model(editor_model, terms=["x_spline"])
     term = session_payload(session)["x_spline"]
-    assert not (LSS_FIELDS | {"y_format"}) & set(term)
+    assert not (LSS_FIELDS | {"y_format", "baseline"}) & set(term)
     assert set(term) == GLM_TERM_KEYS
     np.testing.assert_array_equal(term["y"], np.exp(session.terms["x_spline"].edited_log_effect))
     assert term["y_label"] == "relativity" and term["title"] == "x_spline"
 
 
-#: Effects each transform is pinned at. The log-normal CV multiplies a relative
-#: error in its scale s by about s**2, so its row stops where s**2 stays small
-#: enough for a 64-eps comparison across exp implementations.
+#: Effects each transform is pinned at.
 _EFFECTS = [-6.0, -1.5, -0.25, 0.0, 0.25, 1.5, 3.0]
-_LOGNORMAL_EFFECTS = _EFFECTS[:-1]
 
 
 def _fixture_content() -> dict:
     out = {}
     for transform in _transforms():
-        effects = _LOGNORMAL_EFFECTS if transform.kind == "lognormal_cv" else _EFFECTS
-        values = transform.to_display(effects)
-        entry = {
+        values = transform.to_display(_EFFECTS)
+        # Values at and past what a relativity can take convert to a finite effect.
+        probes = [-3.0, -1.0, -0.3, 0.0, 1e-9, 0.01, 0.5, 1.0, 2.0]
+        out[transform.kind] = {
             **transform.to_payload(),
-            "effects": effects,
+            "effects": _EFFECTS,
             "display": [float(v) for v in values],
+            "probes": probes,
+            "effects_from_probes": [float(v) for v in transform.from_display(probes)],
         }
-        if transform.kind != "relativity":
-            # Values at and past what the parameter can take convert to a finite effect.
-            probes = [-3.0, -1.0, -0.3, 0.0, 1e-9, 0.01, 0.5, 2.0]
-            entry["probes"] = probes
-            entry["effects_from_probes"] = [float(v) for v in transform.from_display(probes)]
-        else:
-            entry["probes"] = [-1.0, 0.0, 0.5, 1.0, 2.0]
-            entry["effects_from_probes"] = [
-                float(v) for v in transform.from_display(entry["probes"])
-            ]
-        out[transform.kind] = entry
     return out
 
 
@@ -286,17 +294,18 @@ def test_an_ordered_term_reads_no_effect_at_its_reference_level(key):
     session, _ = _ordered_gamma_session()
     term_payload = session_payload(session)[key]
     base = term_payload["levels"].index(term_payload["reference"]["level"])
-    np.testing.assert_allclose(
-        term_payload["y"][base], term_payload["baseline"], rtol=TOLERANCE, atol=0.0
-    )
+    np.testing.assert_allclose(term_payload["y"][base], 1.0, rtol=TOLERANCE, atol=0.0)
 
 
-def test_an_ordered_spread_curve_reads_the_model_at_each_level():
+def test_an_ordered_spread_curve_is_the_models_relativity_at_each_level():
     session, order = _ordered_gamma_session()
     term_payload = session_payload(session)["scale:band"]
     rows = pd.DataFrame({"band": order})
     predicted = np.exp(session.model.lss.predict_link(rows)["scale"].to_numpy())
-    np.testing.assert_allclose(term_payload["y"], predicted, rtol=64 * TOLERANCE, atol=0.0)
+    index = term_payload["levels"].index(term_payload["reference"]["level"])
+    np.testing.assert_allclose(
+        term_payload["y"], predicted / predicted[index], rtol=64 * TOLERANCE, atol=0.0
+    )
 
 
 @pytest.mark.parametrize("key", ["mean:band", "scale:band"])
@@ -439,58 +448,32 @@ def test_history_names_a_falling_display_by_its_shown_direction():
         widget.close()
 
 
-def _cv_at(model, session, term, column, parameter="scale"):
-    frame = pd.concat([session.model.reference_row()] * len(term["x"]), ignore_index=True)
-    frame[column] = term["x"]
-    s = model.predict_parameters(frame)[parameter].to_numpy()
-    return np.sqrt(np.expm1(s**2))
-
-
-@pytest.mark.parametrize("level_edit", ["reference", "other"])
-def test_spread_curve_follows_an_edit_to_another_term_of_its_parameter(level_edit):
-    case = lognormal_case()
-    session = open_case(case)
+def test_editing_one_curve_of_a_parameter_leaves_the_others_as_they_were():
+    session = open_case(lognormal_case())
     widget = session.widget()
     try:
         before = session_payload(session)["scale:age"]
         region = session_payload(session)["scale:region"]
         reference = session.model.reference_row()["region"].iloc[0]
-        index = region["levels"].index(reference) if level_edit == "reference" else 3
-        assert (region["levels"][index] == reference) == (level_edit == "reference")
+        index = region["levels"].index(reference)
         widget._drag("scale:region", [index], values=[region["y"][index] * 1.3])
-        edited = lss_model_with_edits(session.model, session.terms)
         after = session_payload(session)["scale:age"]
-        shown = _cv_at(edited, session, after, "age")
-        np.testing.assert_allclose(after["y"], shown, rtol=1e3 * EPS, atol=0.0)
-        # The fit's curve stays where the fit put it.
-        np.testing.assert_allclose(after["original_y"], before["original_y"], rtol=0, atol=0)
-        if level_edit == "reference":
-            # An edit at the reference level moves the whole spread at the reference row.
-            assert np.min(np.abs(np.asarray(after["y"]) / np.asarray(before["y"]) - 1.0)) > 0.1
-            assert after["display"]["reference_eta"] != before["display"]["reference_eta"]
-        else:
-            np.testing.assert_allclose(after["y"], before["y"], rtol=1e3 * EPS, atol=0.0)
+        assert after["y"] == before["y"]
+        assert after["original_y"] == before["original_y"]
     finally:
         widget.close()
 
 
-def test_a_drag_converts_with_the_reference_in_force():
-    case = lognormal_case()
-    session = open_case(case)
+def test_a_drag_converts_with_the_same_relativity_it_shows():
+    session = open_case(lognormal_case())
     widget = session.widget()
     try:
         region = session_payload(session)["scale:region"]
-        reference = session.model.reference_row()["region"].iloc[0]
-        index = region["levels"].index(reference)
-        widget._drag("scale:region", [index], values=[region["y"][index] * 1.3])
-        moved = session_payload(session)["scale:age"]
-        target = float(moved["y"][5]) * 1.2
+        widget._drag("scale:region", [0], values=[region["y"][0] * 1.3])
+        target = float(session_payload(session)["scale:age"]["y"][5]) * 1.2
         widget._drag("scale:age", [5], values=[target])
-        transform = DisplayTransform(**moved["display"])
         edited = session.terms["scale:age"].edited_log_effect[5]
-        np.testing.assert_allclose(transform.to_display(edited), target, rtol=1e3 * EPS)
-        fitted = display_for(session.model, "scale:age")
-        assert abs(float(fitted.to_display(edited)) / target - 1.0) > 0.1
+        np.testing.assert_allclose(np.exp(edited), target, rtol=1e3 * EPS)
         np.testing.assert_allclose(
             session_payload(session)["scale:age"]["y"][5], target, rtol=1e3 * EPS
         )

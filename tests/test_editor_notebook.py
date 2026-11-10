@@ -377,6 +377,8 @@ def test_the_route_classes_are_pinned():
         "/job_status",
         "/job_cancel",
         "/distribution",
+        "/risk",
+        "/risk_row",
     }
 
 

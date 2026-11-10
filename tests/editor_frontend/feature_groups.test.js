@@ -18,10 +18,10 @@ const term = (parameter, label, role, bare) => ({
 });
 
 const LSS_TERMS = {
-  "mean:age": term("mean", "Average", "average", "age"),
-  "scale:age": term("scale", "Spread", "spread", "age"),
-  "mean:region": term("mean", "Average", "average", "region"),
-  "scale:region": term("scale", "Spread", "spread", "region"),
+  "mean:age": term("mean", "Mean", "average", "age"),
+  "scale:age": term("scale", "CV", "spread", "age"),
+  "mean:region": term("mean", "Mean", "average", "region"),
+  "scale:region": term("scale", "CV", "spread", "region"),
 };
 
 test("a payload with parameter roles has parameters; a SuperGLM payload has none", () => {
@@ -32,15 +32,15 @@ test("a payload with parameter roles has parameters; a SuperGLM payload has none
 
 test("groups follow the payload, each parameter first where it first appears", () => {
   assert.deepEqual(parameterGroups(LSS_TERMS), [
-    { key: "mean", label: "Average", role: "average", terms: ["mean:age", "mean:region"] },
+    { key: "mean", label: "Mean", role: "average", terms: ["mean:age", "mean:region"] },
     {
-      key: "scale", label: "Spread", role: "spread",
+      key: "scale", label: "CV", role: "spread",
       terms: ["scale:age", "scale:region"],
     },
   ]);
 });
 
-test("a spread that is listed first stays first", () => {
+test("a CV group that is listed first stays first", () => {
   const terms = {
     "scale:age": LSS_TERMS["scale:age"],
     "mean:age": LSS_TERMS["mean:age"],
@@ -50,17 +50,17 @@ test("a spread that is listed first stays first", () => {
 
 test("generic wording and a frequency model name their own parameters", () => {
   const generic = {
-    "mean:x": term("mean", "Average", "average", "x"),
-    "scale:x": term("scale", "Spread", "spread", "x"),
+    "mean:x": term("mean", "Mean", "average", "x"),
+    "scale:x": term("scale", "CV", "spread", "x"),
   };
-  assert.deepEqual(parameterGroups(generic).map((group) => group.label), ["Average", "Spread"]);
+  assert.deepEqual(parameterGroups(generic).map((group) => group.label), ["Mean", "CV"]);
   const counts = {
-    "mean:x": term("mean", "Average", "average", "x"),
-    "theta:x": term("theta", "Spread", "spread", "x"),
+    "mean:x": term("mean", "Mean", "average", "x"),
+    "theta:x": term("theta", "Overdispersion", "spread", "x"),
   };
   assert.deepEqual(
     parameterGroups(counts).map((group) => [group.label, group.role]),
-    [["Average", "average"], ["Spread", "spread"]],
+    [["Mean", "average"], ["Overdispersion", "spread"]],
   );
 });
 

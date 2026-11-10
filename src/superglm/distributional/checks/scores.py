@@ -4,8 +4,9 @@ The **log score** ``-log f(y | theta_hat)`` is the local proper score the fit
 optimises; the **CRPS** (Gneiting and Raftery 2007, *JASA* 102(477)) is the
 global one, in response units. Closed forms follow Jordan, Krueger and Lerch
 (2019), *J. Stat. Softw.* 90(12) (Gaussian: Gneiting and Raftery 2007; gamma:
-Scheuerer and Moeller 2015; log-normal: Baran and Lerch 2015); the general
-route is the quantile-score integral of Laio and Tamea (2007),
+Scheuerer and Moeller 2015; log-normal: Baran and Lerch 2015; Tweedie: the
+kernel form of Gneiting and Raftery 2007, eq. 21, on the compound Poisson-gamma
+series); the general route is the quantile-score integral of Laio and Tamea (2007),
 
     CRPS = 2 * integral_0^1 (1{y < Q(p)} - p) (Q(p) - y) dp,
 
@@ -30,6 +31,13 @@ from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.distributional._common import row_index
 from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
 from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
+from superglm.distributional.families.tweedie import (
+    TweedieLSS,
+    _compound_poisson_parameters,
+    _poisson_terms,
+    _series_blocks,
+    _SeriesBlock,
+)
 from superglm.distributional.family import (
     DistributionFunctionFamily,
     PriorWeightedDistributionFunctionFamily,
@@ -77,6 +85,7 @@ _NUMERIC_RTOL = float(np.sqrt(np.finfo(np.float64).eps))
 _PROBABILITY_MARGIN = 1.0e-15
 _INVERSE_SQRT_PI = float(1.0 / np.sqrt(np.pi))
 _SQRT_TWO_PI = float(np.sqrt(2.0 * np.pi))
+_LOG_TWO = float(np.log(2.0))
 
 
 def _standard_normal_pdf(values: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -156,12 +165,104 @@ def _log_normal_crps(family: Any, y: NDArray, theta: NDArray) -> NDArray[np.floa
     ) * (special.ndtr(z - sigma) + special.ndtr(sigma / np.sqrt(2.0)) - 1.0)
 
 
+def _rows_sharing_value(values: NDArray[np.float64]) -> list[NDArray[np.intp]]:
+    """Index arrays of the rows holding each distinct value of ``values``."""
+    order = np.argsort(values, kind="stable")
+    return np.split(order, np.flatnonzero(np.diff(values[order])) + 1)
+
+
+def _gamma_pair_distance(alpha: float, first: int, count: int) -> NDArray[np.float64]:
+    """``E|U - V| / scale`` for independent gamma jumps of shapes ``alpha * (first + i)``.
+
+    For ``U ~ Gamma(a, s)`` and ``V ~ Gamma(b, s)`` the sum ``U + V`` is independent
+    of ``U / (U + V) ~ Beta(a, b)`` (Lukacs 1955), so ``E|U - V| = s (a + b) E|2B - 1|``
+    gives ``D(a, b) = (a - b)(1 - 2 I_{1/2}(a, b)) + 4 2^{-(a+b)} / B(a, b)``, with
+    ``I`` the regularised incomplete beta function; the second term comes from
+    ``I_x(a + 1, b) = I_x(a, b) - x^a (1 - x)^b / (a B(a, b))`` (DLMF §8.17(iv)).
+    """
+    shape = alpha * (first + np.arange(count, dtype=np.float64))
+    a, b = shape[:, None], shape[None, :]
+    return (a - b) * (1.0 - 2.0 * special.betainc(a, b, 0.5)) + 4.0 * np.exp(
+        -(a + b) * _LOG_TWO - special.betaln(a, b)
+    )
+
+
+def _tweedie_block_crps(
+    block: _SeriesBlock, response: NDArray, mean: NDArray, alpha: float
+) -> NDArray[np.float64]:
+    """CRPS of the rows of one series block, all with jump shape ``alpha``.
+
+    The kernel form ``E|Y - y| - E|Y - Y'| / 2`` (Gneiting and Raftery 2007, eq. 21)
+    on ``Y = 0`` with probability ``p_0`` and ``Y | N = n ~ Gamma(n alpha, scale)``
+    otherwise, with ``p_n`` the block's Poisson masses:
+
+    * ``E|Y - y| = mean - y + 2 y F(y) - 2 E[Y 1{Y <= y}]`` for ``y > 0`` and
+      ``mean - y`` otherwise, where ``F(y) = p_0 + sum p_n P(n alpha, y / scale)``
+      and ``E[Y 1{Y <= y}] = scale sum p_n n alpha P(n alpha + 1, y / scale)``;
+    * ``E|Y - Y'| = 2 p_0 mean + scale sum_{n,m} p_n p_m D(n alpha, m alpha)``.
+    """
+    width = block.shape.shape[0]
+    ratio = np.maximum(response, 0.0) / block.scale
+    cdf = block.atom + np.einsum("ij,ij->j", block.mass, special.gammainc(block.shape, ratio))
+    partial = block.scale * np.einsum(
+        "ij,ij->j", block.mass * block.shape, special.gammainc(block.shape + 1.0, ratio)
+    )
+    # E|Y - y| less the mean: the mean enters once, below, as (1 - p_0) mean, so a mean far larger
+    # than y never swallows y.
+    residual = np.where(response > 0.0, 2.0 * (response * cdf - partial), 0.0) - response
+
+    # A row's window opens at its own first order, so rows sharing one first
+    # order share a slice of the distance table.
+    first = np.rint(block.shape[0] / alpha)
+    base = int(np.min(first))
+    table = _gamma_pair_distance(alpha, base, int(np.max(first)) - base + width)
+    pairs = np.empty(len(response))
+    for rows in _rows_sharing_value(first):
+        start = int(first[rows[0]]) - base
+        masses = block.mass[:, rows]
+        pairs[rows] = np.einsum(
+            "ik,ik->k", table[start : start + width, start : start + width] @ masses, masses
+        )
+    # E|Y - y| - p_0 mean is (1 - p_0) mean plus the residual; 1 - p_0 is read from the rate, so it
+    # does not cancel where a claim is so rare that p_0 rounds to one.
+    survive = -np.expm1(-block.rate)
+    return survive * mean + residual - 0.5 * block.scale * pairs
+
+
+def _tweedie_crps(family: Any, y: NDArray, theta: NDArray) -> NDArray[np.float64]:
+    """CRPS of the compound Poisson-gamma law in ``(mean, dispersion, power)``.
+
+    Rows with one power share one table of gamma-pair distances, built per series
+    block over the block's Poisson orders; the series window, its tolerance and
+    the block width budget are the distribution function's own.  A prior weight
+    enters through the dispersion ``phi / w``, as in the family's prior-weighted law.
+    """
+    response, parameters = _validated_scoring_inputs(y, theta)
+    with np.errstate(all="ignore"):
+        rate, jump_shape, jump_scale = _compound_poisson_parameters(
+            parameters, np.ones(len(parameters))
+        )
+    if not all(np.all(np.isfinite(v) & (v > 0.0)) for v in (rate, jump_shape, jump_scale)):
+        raise ValueError(
+            "TweedieLSS CRPS needs a finite compound Poisson-gamma law with 1 < power < 2"
+        )
+    scores = np.empty(len(parameters))
+    terms = _poisson_terms(float(np.max(rate)))
+    for rows in _rows_sharing_value(jump_shape):
+        for chunk, block in _series_blocks(rate, jump_shape, jump_scale, rows, terms):
+            scores[chunk] = _tweedie_block_crps(
+                block, response[chunk], parameters[chunk, 0], float(jump_shape[chunk[0]])
+            )
+    return scores
+
+
 #: Closed-form CRPS by family class name.  A family absent from the catalogue is
 #: scored numerically when an established tail bound or correction is available.
 _CLOSED_FORMS: Mapping[str, Callable[[Any, NDArray, NDArray], NDArray[np.float64]]] = {
     "GaussianLS": _gaussian_crps,
     "GammaLS": _gamma_crps,
     "LogNormalLS": _log_normal_crps,
+    "TweedieLSS": _tweedie_crps,
 }
 
 
@@ -443,6 +544,14 @@ def _finite_crps_numeric(
         raise ValueError("numeric CRPS quantiles are not ordered; numerical evaluation unresolved")
     response_scale = q75 - q25
     interior = [_panel_boundary(cdf_y, upper)]
+    law = family._family if isinstance(family, _PriorWeightedRowLaw) else family
+    if type(law) is TweedieLSS:
+        # The quantile is zero up to the zero mass and bends there, so that
+        # probability (of the unit or prior-weighted law, as the quantile) is a panel edge.
+        # Below power 1.5 it also rises like (u - zero mass)^(1/alpha), alpha > 1, which
+        # fixed-order panels may leave unresolved: that refusal stands, the closed form scores them.
+        zero_mass = _score_values(family.cdf(np.zeros(n), parameters), n, "CDF")
+        interior.append(_panel_boundary(zero_mass, upper))
     lower_cdf_bound = np.zeros(n)
     upper_cdf_bound = np.zeros(n)
     ordinary = ~corrected
@@ -669,10 +778,12 @@ def _closed_form_parameters(
     """Return natural parameters for the same prior-weighted reproductive law."""
     if prior_law is None:
         return theta
-    if type(family).__name__ not in {"GaussianLS", "GammaLS"}:
+    name = type(family).__name__
+    if name not in {"GaussianLS", "GammaLS", "TweedieLSS"}:
         return None
     parameters = np.array(theta, dtype=np.float64, copy=True)
-    parameters[:, 1] /= np.sqrt(prior_law)
+    # A Tweedie prior weight is the dispersion phi / w, the others scale by 1 / sqrt(w).
+    parameters[:, 1] /= prior_law if name == "TweedieLSS" else np.sqrt(prior_law)
     return parameters
 
 

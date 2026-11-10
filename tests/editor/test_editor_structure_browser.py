@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from collections import Counter
 from urllib.parse import urlsplit
 
@@ -189,6 +190,40 @@ def test_line_icon_pins_a_run_of_points_and_undo_and_redo_step_across_it(open_ed
         page.locator("#chart .shape-range").wait_for()
         assert session.model is shaped
         assert _drawn_y(page) == drawn["y"]
+
+
+def test_refit_turns_its_arrow_while_the_fit_runs(open_editor_page, monkeypatch):
+    with open_editor_page() as (page, session):
+        release = threading.Event()
+        refit = session.refit_pending
+
+        def held_refit(*args, **kwargs):
+            release.wait(timeout=60)
+            return refit(*args, **kwargs)
+
+        monkeypatch.setattr(session, "refit_pending", held_refit)
+        _box_select_x(page, 3.0, 5.0)
+        line = page.locator("#shapeLine")
+        line.wait_for(state="visible")
+        with page.expect_response(_posted("/stage")):
+            line.click()
+        refit_button = page.locator("#refitPendingAction")
+        page.wait_for_function("() => !document.querySelector('#refitPendingAction').disabled")
+        try:
+            refit_button.click()
+            page.wait_for_function(
+                "() => document.querySelector('#refitPendingAction').classList.contains('is-refitting')"
+            )
+            turning = refit_button.locator(".toolbar-icon").evaluate(
+                "icon => getComputedStyle(icon).animationName"
+            )
+            assert turning == "refit-turn"
+            assert refit_button.get_attribute("aria-busy") == "true"
+        finally:
+            release.set()
+        _settled_after_refit(page)
+        assert "is-refitting" not in (refit_button.get_attribute("class") or "")
+        assert refit_button.get_attribute("aria-busy") == "false"
 
 
 def test_a_numeric_run_holding_too_few_values_disables_the_higher_shapes(open_editor_page):

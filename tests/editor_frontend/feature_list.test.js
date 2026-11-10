@@ -392,23 +392,21 @@ test("the waiting dot sits right after the term's name, ahead of its kind and ED
 const LSS_TERMS = {
   "mean:age": {
     kind: "spline", term_type: "spline", effective_df: 4, x: [0, 1, 2], y: [1, 2, 1.5], levels: null,
-    parameter: "mean", parameter_label: "Average", parameter_role: "average", term_label: "age",
+    parameter: "mean", parameter_label: "Mean", parameter_role: "average", term_label: "age",
   },
   "scale:age": {
     kind: "spline", term_type: "spline", effective_df: 3, x: [0, 1, 2], y: [0.5, 0.4, 0.6], levels: null,
-    parameter: "scale", parameter_label: "Spread", parameter_role: "spread", term_label: "age",
-    baseline: 0.5,
+    parameter: "scale", parameter_label: "CV", parameter_role: "spread", term_label: "age",
   },
   "scale:region": {
     kind: "categorical", term_type: "categorical", effective_df: 2, x: [0, 1], y: [0.5, 0.7],
     levels: ["N", "S"],
-    parameter: "scale", parameter_label: "Spread", parameter_role: "spread", term_label: "region",
-    baseline: 0.5,
+    parameter: "scale", parameter_label: "CV", parameter_role: "spread", term_label: "region",
   },
 };
 const LSS_GROUPS = [
-  ["Average", ["mean:age"], "average"],
-  ["Spread", ["scale:age", "scale:region"], "spread"],
+  ["Mean", ["mean:age"], "average"],
+  ["CV", ["scale:age", "scale:region"], "spread"],
 ];
 
 test("parameter groups head their rows with their label and role; rows show the bare feature name and a mini curve", () => {
@@ -418,7 +416,7 @@ test("parameter groups head their rows with their label and role; rows show the 
   const [average, spread] = nodes.rows.children;
   assert.deepEqual(
     [average, spread].map((section) => [section.children[0].textContent, section.dataset.role]),
-    [["Average", "average"], ["Spread", "spread"]],
+    [["Mean", "average"], ["CV", "spread"]],
   );
   assert.equal(spread.children[0].dataset.role, "spread");
   assert.deepEqual(rows().map((row) => row.dataset.term), ["mean:age", "scale:age", "scale:region"]);

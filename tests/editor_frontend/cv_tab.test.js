@@ -10,9 +10,11 @@ import {
   cvTabMarkup,
   exposureProfile,
   filterTerms,
+  finalFitHelp,
   foldProgress,
   foldTableMarkup,
   liveRun,
+  meanSpreadText,
   performanceMarkup,
   foldEnvelope,
   highlightFold,
@@ -21,6 +23,7 @@ import {
   newerJob,
   niceTicks,
   foldStrip,
+  relativitiesMarkup,
   termListMarkup
 } from "../../src/superglm/editor/app/views/cv_tab.js";
 
@@ -78,7 +81,7 @@ function cvPayload(overrides = {}) {
     header: { supplied: true, n_folds: 2, splitter: "KFold", n_rows: 45000 },
     pending: 0,
     run_cv: { available: true, reason: null, note: null },
-    final_fit: { available: true, reason: null, note: null, done: false, stale: false, n_rows: null },
+    final_fit: { available: true, reason: null, note: null, done: false, stale: false, n_rows: null, has_test_split: false },
     metrics: [
       { name: "deviance", label: "Mean deviance", short: "Deviance", lower_is_better: true },
       { name: "gini", label: "Gini", short: "Gini", lower_is_better: false }
@@ -110,11 +113,12 @@ function count(markup, pattern) {
   return (markup.match(pattern) ?? []).length;
 }
 
-test("the source line names the folds, splitter, rows and edit() call", () => {
+test("the source line names the folds, splitter and rows, and says in words where the result came from", () => {
   assert.equal(
     cvSourceLine(cvPayload()),
-    "2 folds · KFold · 45,000 rows · supplied with edit(model, cv=result)"
+    "2 folds · KFold · 45,000 rows · from the result you supplied"
   );
+  assert.doesNotMatch(cvSourceLine(cvPayload()), /edit\(|cv=/);
   assert.equal(
     cvSourceLine(cvPayload({ header: { supplied: false, n_folds: 0, splitter: null, n_rows: null } })),
     "No cross-validation result supplied"
@@ -141,6 +145,21 @@ test("performance cards show mean ± sd, pooled, and one dot per fold for each r
   assert.match(deviance, /<strong>0\.3050<\/strong>\s*<span class="cv-card-spread">± 0\.0050 · pooled 0\.3049<\/span>/);
   assert.equal(count(deviance, /<circle /g), 4);
   assert.equal(count(deviance, /class="cv-card-row"/g), 2);
+});
+
+test("the tab warns of a changed model only when no result describes the model in force", () => {
+  const supplied = { ...cvPayload().results[0], stale: true };
+  const current = { ...cvPayload().results[0], label: "Current model", origin: "run", stale: false };
+  const warning = /The model has changed since these folds were fitted/;
+
+  // Folds run on the current model answer for it; the older row says it is older.
+  const rerun = cvTabMarkup(cvPayload({ results: [supplied, current] }), idle());
+  assert.doesNotMatch(rerun, warning);
+  assert.match(rerun, /<span class="cv-card-label">As supplied, earlier model<\/span>/);
+  assert.match(rerun, /<span class="cv-card-label">Current model<\/span>/);
+
+  const onlyOlder = cvTabMarkup(cvPayload({ results: [supplied] }), idle());
+  assert.match(onlyOlder, warning);
 });
 
 test("far-off folds are pinned at the strip's ends, and the rest spread across it", () => {
@@ -686,7 +705,7 @@ test("a score in the hundreds drops to two decimals so its row stays on one line
   const payload = cvPayload();
   payload.results[0].mean.gini = 1007.6765;
   payload.results[0].std.gini = 56.7853;
-  assert.match(foldTableMarkup(payload), /1007\.68 ± 56\.7853/);
+  assert.match(foldTableMarkup(payload), /1007\.68 ± 56\.79/);
   payload.results[0].std.gini = 156.7853;
   assert.match(foldTableMarkup(payload), /1007\.68 ± 156\.79/);
 });
@@ -841,4 +860,38 @@ test("a poll that changes nothing leaves the toolbar's buttons in place", async 
   assert.ok(drawn.length > 0);
   tab.render(cvPayload());
   assert.equal(frame.innerHTML, drawn);
+});
+
+test("a mean and its spread share one precision, set by the mean, so the cell does not wrap", () => {
+  assert.equal(meanSpreadText(1011.9345, 54.91712), "1011.93 ± 54.92");
+  assert.equal(meanSpreadText(0.3051, 0.0052), "0.3051 ± 0.0052");
+  assert.equal(meanSpreadText(null, null), "-- ± --");
+  // The cards give the spread the same precision as the mean beside it.
+  const payload = cvPayload();
+  payload.results[0].mean.gini = 1011.9345;
+  payload.results[0].std.gini = 54.91712;
+  assert.match(performanceMarkup(payload), /<strong>1011\.93<\/strong>\s*<span class="cv-card-spread">± 54\.92/);
+});
+
+test("the legend says fold range on a categorical chart and on a continuous one", () => {
+  const folds = (term) => ({ ...term, folds: term.folds.map((fold, index) => ({ ...fold, fold: index })) });
+  for (const markup of [levelChartMarkup(folds(brand)), curveChartMarkup(folds(age))]) {
+    assert.match(markup, /<\/span>fold range<\/span>/);
+    assert.doesNotMatch(markup, /min–max/);
+  }
+});
+
+test("a supplied result's relativities are introduced in words, with no Python in the sentence", () => {
+  const supplied = relativitiesMarkup(cvPayload(), { query: "", term: "" });
+  assert.match(supplied, /From the fold models of the result you supplied\./);
+  assert.doesNotMatch(supplied, /edit\(|cv=|supplied result's/);
+});
+
+test("the Final fit button mentions the held-out test split only where the session has one", () => {
+  assert.doesNotMatch(finalFitHelp({ has_test_split: false }), /test split/);
+  assert.match(finalFitHelp({ has_test_split: true }), /The test split stays held out\./);
+  const markup = cvTabMarkup(cvPayload(), idle());
+  assert.doesNotMatch(markup, /test split/);
+  const held = cvTabMarkup(cvPayload({ final_fit: { ...cvPayload().final_fit, has_test_split: true } }), idle());
+  assert.match(held, /test split stays held out/);
 });

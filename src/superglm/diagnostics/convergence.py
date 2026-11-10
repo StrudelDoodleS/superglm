@@ -41,8 +41,8 @@ class ConvergenceWarning(UserWarning):
 # termination reason that means it did.
 _REML_REASON_TEXT = {
     "max_reml_iter": "it reached the max_reml_iter limit",
-    "line_search_failed": "no smoothing step improved the REML objective",
-    "line_search_stalled": "no smoothing step improved the REML objective",
+    "line_search_failed": "no smoothing step improved the REML score",
+    "line_search_stalled": "no smoothing step improved the REML score",
 }
 
 # Termination reasons of a smoothing search that met its convergence test. A
@@ -60,6 +60,10 @@ _REML_CONVERGED_REASONS = frozenset(
         "fixed_lambdas",
     }
 )
+
+
+def _iterations(count: int) -> str:
+    return f"{count} iteration{'' if count == 1 else 's'}"
 
 
 def reml_nonconvergence_message(reml_result: Any) -> str | None:
@@ -88,9 +92,9 @@ def reml_nonconvergence_message(reml_result: Any) -> str | None:
     if refit_reason == "constraint_kkt_incomplete":
         refit = (
             "the final coefficient fit at the selected smoothing parameters keeps every "
-            "shape constraint, yet could not certify that its coefficients are the "
-            "constrained optimum: the inner quadratic program did not complete its KKT "
-            f"certificate (termination_reason={refit_reason!r})"
+            "shape constraint, yet could not confirm that its coefficients are the "
+            "constrained optimum: the inner quadratic program did not finish its optimality "
+            f"(KKT) check (termination_reason={refit_reason!r})"
         )
     # The penalized maximum on the mean-space boundary at the published
     # smoothing parameters: the model has no interior optimum there, which
@@ -108,9 +112,9 @@ def reml_nonconvergence_message(reml_result: Any) -> str | None:
     if reason in _REML_CONVERGED_REASONS:
         message = (
             f"fit_reml did not converge: smoothing-parameter selection stopped after "
-            f"{n_iter} iterations (termination_reason={reason!r}), but {refit}. The model "
+            f"{_iterations(n_iter)} (termination_reason={reason!r}), but {refit}. The model "
             "is returned with the coefficients, effective degrees of freedom and standard "
-            "errors of that fit's last iterate."
+            "errors of that fit's last step."
         )
     else:
         why = _REML_REASON_TEXT.get(str(reason), f"termination_reason={reason!r}")
@@ -118,11 +122,11 @@ def reml_nonconvergence_message(reml_result: Any) -> str | None:
             why = _bootstrap_reason(reml_result)
         message = (
             f"fit_reml did not converge: smoothing-parameter selection stopped after "
-            f"{n_iter} iterations because {why}"
+            f"{_iterations(n_iter)} because {why}"
             + (f", and {refit}" if refit_reason is not None else "")
             + ". The model is returned, but its smoothing parameters, effective degrees of "
-            "freedom and standard errors are those of the last iterate, not of a REML "
-            "optimum."
+            "freedom (how flexible each term is) and standard errors are those of the last "
+            "step it reached, not of a REML optimum."
         )
     if getattr(reml_result, "scop_newton_fallback", None) == "line_search_at_cap":
         message += (
@@ -184,11 +188,11 @@ def _bootstrap_reason(reml_result: Any) -> str:
         return (
             "no coefficient fit at its starting smoothing parameters, nor at the starting "
             "values scaled to the data's curvature that it retried at, reached a mode that "
-            "passes the convergence certificate"
+            "passes the convergence check"
         )
     return (
         "no coefficient fit at its starting smoothing parameters reached a mode that passes "
-        "the convergence certificate (no retry ran: the starting values scaled to the data's "
+        "the convergence check (no retry ran: the starting values scaled to the data's "
         "curvature were the same)"
     )
 
@@ -225,9 +229,10 @@ def lss_nonconvergence_message(
     )
     return (
         f"SuperLSS fit did not converge: {why}. The model is returned, but its "
-        "coefficients, smoothing parameters, effective degrees of freedom and standard "
-        "errors are those of the last accepted iterate; an effective degree of freedom "
-        "can then be negative. model.diagnose() explains the stop. Refit with "
+        "coefficients, smoothing parameters, effective degrees of freedom (how flexible "
+        "each term is) and standard errors are those of the last step it reached; the "
+        "effective degrees of freedom of a term can then be negative. model.diagnose() "
+        "explains the stop. Refit with "
         + (f"a larger {budget}, or with " if budget else "")
         + "other starting smoothing parameters (initial_lambda or lambdas), or simplify the "
         "terms it names, before reading the summary." + lss_ill_conditioned_note(fitted_result)
@@ -250,7 +255,8 @@ def lss_ill_conditioned_note(fitted_result: Any) -> str:
     if factor is None or not factor**2 > 2.0**26.5:
         return ""
     return (
-        f" The coefficient curvature's condition number is about {factor**2:.0e}. The usual "
+        f" The coefficient curvature's condition number is about {factor**2:.0e} (a measure "
+        "of how close to singular it is). The usual "
         "causes are a numeric column far from zero relative to its spread, beside an intercept "
         "(subtract its mean before fitting), and columns that are nearly linear combinations "
         "of one another (drop or combine them)."
@@ -260,11 +266,12 @@ def lss_ill_conditioned_note(fitted_result: Any) -> str:
 def lss_semidefinite_curvature_message(family_name: str) -> str:
     """The disclosure a SuperLSS fit makes when its final curvature had to be projected."""
     return (
-        f"SuperLSS {family_name} fit: the observed curvature at the final coefficients stayed "
-        "indefinite after a tighter retry, and no usable expected information was available, "
+        f"SuperLSS {family_name} fit: the observed curvature at the final coefficients still "
+        "curved the wrong way in at least one direction (it was indefinite) after a tighter "
+        "retry, and no usable expected information was available, "
         "so the standard errors, effective degrees of freedom and smoothing updates use the "
-        "nearest positive semidefinite approximation of the observed curvature. Indefinite "
-        "curvature usually means the coefficient fit stopped short of a maximum; "
+        "nearest positive semidefinite approximation of the observed curvature. This "
+        "usually means the coefficient fit stopped short of a maximum; "
         "model.diagnose() explains the stop. Refit with a larger max_inner_iter, larger "
         "starting smoothing parameters (initial_lambda), or simpler terms before reading the "
         "summary."
@@ -274,10 +281,11 @@ def lss_semidefinite_curvature_message(family_name: str) -> str:
 def lss_fisher_curvature_message(family_name: str) -> str:
     """The disclosure a SuperLSS fit makes when its final curvature fell back to Fisher information."""
     return (
-        f"SuperLSS {family_name} fit: the observed curvature at the final coefficients stayed "
-        "indefinite after a tighter retry, so the standard errors, effective degrees of freedom "
-        "and smoothing updates use the expected (Fisher) information instead. Indefinite "
-        "observed curvature means the fit is not at a proper maximum of the observed "
+        f"SuperLSS {family_name} fit: the observed curvature at the final coefficients still "
+        "curved the wrong way in at least one direction (it was indefinite) after a tighter "
+        "retry, so the standard errors, effective degrees of freedom "
+        "and smoothing updates use the expected (Fisher) information instead. Curvature like "
+        "that means the fit is not at a proper maximum of the observed "
         "likelihood: it stopped short of one, or the maximum lies on a boundary such as a "
         "size at its Poisson limit; model.diagnose() explains the stop. Refit with a larger "
         "max_inner_iter, larger starting smoothing parameters (initial_lambda), or simpler "
@@ -288,9 +296,9 @@ def lss_fisher_curvature_message(family_name: str) -> str:
 def lss_no_ascent_direction_message(family_name: str) -> str:
     """The disclosure a SuperLSS fit makes when its coefficient solver found no ascent direction."""
     return (
-        f"SuperLSS {family_name} fit: the coefficient solver found no ascent direction (no "
-        "damping of the curvature gave a step certified to increase the penalized likelihood), "
-        "so it stopped unconverged at its last accepted coefficients with reason "
+        f"SuperLSS {family_name} fit: the coefficient solver found no ascent direction (no step "
+        "it tried, at any damping of the curvature, improved the penalized likelihood), "
+        "so it stopped unconverged at the last coefficients it reached, with reason "
         "'no_ascent_direction'. model.diagnose() reports the stop. Refit with "
         "coefficient_curvature='fisher' where the family supplies expected information, larger "
         "starting smoothing parameters (initial_lambda), or simpler terms."
@@ -303,7 +311,7 @@ def lss_null_model_nonconvergence_message(family_name: str, reason: str) -> str:
         f"SuperLSS {family_name} fit: the intercept-only null model did not converge "
         f"(reason {reason!r}). The fitted model is unaffected, but result_.null_objective, "
         "the null model kept with the fit and anything compared with it are based on the "
-        "unconverged null's last accepted iterate. Refit with a larger max_inner_iter to let "
+        "last step the unconverged null fit reached. Refit with a larger max_inner_iter to let "
         "the null fit converge; model.diagnose() reports the stop."
     )
 
@@ -316,13 +324,12 @@ def lss_corrected_covariance_substitute_message(source: str) -> str:
         else "nearest positive semidefinite approximation of the observed curvature"
     )
     return (
-        "SuperLSS corrected covariance: the observed curvature at the final coefficients was "
-        f"materially indefinite, so the fit used the {curvature} instead, and the correction "
-        "uses it too. V is that curvature's inverse, J = d beta / d rho is the implicit "
-        "derivative of the coefficients under it rather than under the observed Hessian, and "
-        "V_rho inverts the Hessian in log smoothing parameters of the Laplace objective formed "
-        "with it. V + J V_rho J' is a first-order correction "
-        "for the substitute curvature; model.diagnose() explains the fallback."
+        "SuperLSS corrected covariance: the standard errors include extra uncertainty from "
+        "having chosen the smoothing parameters. The observed curvature at the final "
+        f"coefficients was materially indefinite, so the fit used the {curvature} instead, and "
+        "the correction was worked out from it too, as a first-order correction for the "
+        "substitute curvature. It is therefore approximate; model.diagnose() explains the "
+        "fallback."
     )
 
 
@@ -331,13 +338,12 @@ def lss_corrected_covariance_substitute_message(source: str) -> str:
 _NONSTATIONARY_DEFAULT = "model.diagnose() explains the stop."
 _NONSTATIONARY_REMEDY = dict.fromkeys(
     ("lambda_change", "objective_plateau", "practical_plateau"),
-    "Refit with outer='efs+newton' to stop at a certified stationary point; "
-    "model.diagnose() explains the stop.",
+    "Refit with outer='efs+newton' to stop at an optimum; model.diagnose() explains the stop.",
 )
 
 
 def lss_corrected_covariance_nonstationary_message(reason: str, *, newton_can_help: bool) -> str:
-    """What a corrected covariance means when smoothing did not stop at a certified stationary point.
+    """What a corrected covariance means when smoothing did not stop at an optimum.
 
     ``newton_can_help`` says whether refitting with the Newton endgame is advice
     worth giving: the fit stopped on Fellner-Schall on a family whose curvature is
@@ -345,11 +351,11 @@ def lss_corrected_covariance_nonstationary_message(reason: str, *, newton_can_he
     """
     remedy = _NONSTATIONARY_REMEDY.get(reason) if newton_can_help else None
     return (
-        f"SuperLSS corrected covariance: smoothing stopped with reason {reason!r}, not at a "
-        "certified stationary point of the Laplace objective, so V_rho inverts the Hessian in "
-        "log smoothing parameters at the fitted smoothing parameters rather than at the maximum "
-        "Wood, Pya and Saefken (2016, section 4) expand about. V + J V_rho J' is a first-order "
-        f"correction about this point. {remedy or _NONSTATIONARY_DEFAULT}"
+        f"SuperLSS corrected covariance: smoothing stopped with reason {reason!r}, before "
+        "reaching an optimum, so the correction for smoothing-parameter uncertainty is "
+        "approximate. The correction of Wood, Pya and Saefken (2016, section 4) is derived at "
+        "an optimum; here it is a first-order correction about the fitted smoothing "
+        f"parameters. {remedy or _NONSTATIONARY_DEFAULT}"
     )
 
 
@@ -358,8 +364,8 @@ def lss_corrected_covariance_unavailable_message(cause: str) -> str:
     return (
         f"SuperLSS corrected covariance is unavailable for this fit: {cause}. Returned the "
         "conditional covariance at the fitted smoothing parameters, as covariance='fixed' "
-        "gives, so it omits smoothing-parameter uncertainty and intervals built on it are no "
-        "wider than corrected ones would be."
+        "gives, so it omits smoothing-parameter uncertainty and intervals built on it may be "
+        "narrower than corrected ones would be."
     )
 
 
@@ -382,7 +388,7 @@ def coefficient_nonconvergence_message(fit_result: Any) -> str | None:
     n_iter = getattr(fit_result, "n_iter", None)
     return (
         "SuperGLM coefficient fit did not converge"
-        + (f" after {n_iter} iterations" if n_iter is not None else "")
+        + (f" after {_iterations(n_iter)}" if n_iter is not None else "")
         + (f" (termination_reason={reason!r})" if reason else "")
         + ". The model is returned, but its coefficients and standard errors may be "
         "inaccurate. "

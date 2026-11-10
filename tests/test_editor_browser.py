@@ -449,6 +449,39 @@ def test_editor_browser_zoom_preserves_handle_visuals(browser_editor_widget):
 
 
 @pytest.mark.browser
+def test_editor_browser_first_report_says_loading_once(browser_editor_widget, monkeypatch):
+    original_report = browser_editor_widget._report
+    release = threading.Event()
+
+    def held_validation_report(report="validation", **kwargs):
+        if report == "validation":
+            release.wait(timeout=60)
+        return original_report(report, **kwargs)
+
+    monkeypatch.setattr(browser_editor_widget, "_report", held_validation_report)
+
+    with sync_playwright() as runtime:
+        browser = runtime.chromium.launch(headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 1180, "height": 720})
+            page.goto(browser_editor_widget.app_url)
+            page.locator("#chart .edited").first.wait_for()
+
+            page.locator('.app-tab[data-view="validation"]').click()
+            page.wait_for_function(
+                "document.querySelector('#reportFrame')?.getAttribute('aria-busy') === 'true'"
+            )
+            # One line says the report is coming; "Updating" belongs to a report on screen.
+            assert page.locator("#reportStatus").inner_text() == "Loading report..."
+            assert page.locator("#reportFreshness").inner_text() == ""
+            release.set()
+            page.get_by_role("table", name="Split metrics").wait_for()
+        finally:
+            release.set()
+            browser.close()
+
+
+@pytest.mark.browser
 def test_editor_browser_report_error_clears_mismatched_report(browser_editor_widget, monkeypatch):
     original_report = browser_editor_widget._report
 

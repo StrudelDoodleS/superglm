@@ -615,6 +615,8 @@ def optimize_discrete_reml_cached_w(
     record_auto_backend_decision(profile, direct_solve, structured_decision)
 
     lambda_history: list[dict[str, float]] = [lambdas.copy()]
+    # The REML objective at each candidate the loop scores, then at the final refit.
+    objective_history: list[float] = []
     warm_beta: NDArray | None = None
     warm_intercept: float | None = None
     # the warm state's centred predictor (alpha, c), carried with warm_beta and
@@ -1057,6 +1059,7 @@ def optimize_discrete_reml_cached_w(
                 )
                 inverse_phi = 1.0 / max(phi_hat, 1e-10)
         _t_objective += _time.perf_counter() - _t0
+        objective_history.append(float(obj))
         if trace_run is not None and trace_run.enabled:
             if pirls_result.state_id is None:  # pragma: no cover - trace contract
                 raise RuntimeError("traced discrete REML candidate is missing its state ID")
@@ -1748,6 +1751,7 @@ def optimize_discrete_reml_cached_w(
             n_reml_iter=poi_iter + 1,
             converged=converged,
             lambda_history=lambda_history,
+            objective_history=objective_history,
             objective=float(obj),
             curvature_source=reml_curvature,
             termination_reason=termination_reason,
@@ -1877,6 +1881,9 @@ def optimize_discrete_reml_cached_w(
     best_lambdas = final_lambdas.copy()
     best_pirls = final_result
     lambda_history.append(final_lambdas.copy())
+    objective_history.append(
+        float(final_obj.value if isinstance(final_obj, REMLObjectiveEvaluation) else final_obj)
+    )
 
     if profile is not None:
         if _bootstrap_component_stats:
@@ -1944,6 +1951,7 @@ def optimize_discrete_reml_cached_w(
         n_reml_iter=poi_iter + 1,
         converged=converged,
         lambda_history=lambda_history,
+        objective_history=objective_history,
         objective=float(best_obj),
         curvature_source=reml_curvature,
         termination_reason=termination_reason,

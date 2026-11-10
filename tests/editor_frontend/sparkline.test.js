@@ -38,7 +38,7 @@ test("a flat spline is a level line inside the box", () => {
 
 test("categorical terms give bars measured from the baseline, signed by their side of it", () => {
   const curve = sparkline(
-    { kind: "categorical", term_type: "categorical", x: [0, 1, 2], y: [1.5, 1, 0.5], levels: ["a", "b", "c"], baseline: 1 },
+    { kind: "categorical", term_type: "categorical", x: [0, 1, 2], y: [1.5, 1, 0.5], levels: ["a", "b", "c"] },
     SIZE,
   );
   assert.equal(curve.kind, "bars");
@@ -63,7 +63,6 @@ test("every level shows, however close to no effect, and the reference level is 
     x: [0, 1, 2, 3],
     y: [1, 1.0001, 3, 0.9999],
     levels: ["base", "near", "far", "under"],
-    baseline: 1,
     reference: { level: "base", policy: "most_exposed" },
   };
   const bars = sparkline(term, SIZE).bars;
@@ -85,7 +84,6 @@ test("a level with a real effect keeps its true height, a reference moved by an 
     x: [0, 1],
     y: [2, 1],
     levels: ["base", "other"],
-    baseline: 1,
     reference: { level: "base", policy: "pinned" },
   };
   const [moved] = sparkline(term, SIZE).bars;
@@ -103,8 +101,7 @@ test("a grouped reference flags every member of its group", () => {
       x: [0, 1, 2],
       y: [1, 1.4, 1],
       levels: ["a", "b", "c"],
-      baseline: 1,
-      reference: { level: "a+c", policy: "kept" },
+        reference: { level: "a+c", policy: "kept" },
       level_groups: [{ label: "a+c", indices: [0, 2] }],
     },
     SIZE,
@@ -112,13 +109,10 @@ test("a grouped reference flags every member of its group", () => {
   assert.deepEqual(bars.map((bar) => bar.reference), [true, false, true]);
 });
 
-test("bars default to a baseline of 1, and a zero baseline measures coefficient-like values from 0", () => {
+test("bars are measured from a relativity of 1", () => {
   const terms = { kind: "categorical", term_type: "categorical", x: [0, 1], levels: ["a", "b"] };
   const relativity = sparkline({ ...terms, y: [2, 0.5] }, SIZE).bars;
   assert.ok(Math.abs(relativity[0].y + relativity[0].h - relativity[1].y) < 1e-9);
-  const shifted = sparkline({ ...terms, y: [2, -1], baseline: 0 }, SIZE).bars;
-  assert.ok(Math.abs(shifted[0].y + shifted[0].h - shifted[1].y) < 1e-9);
-  assert.ok(shifted[0].h > shifted[1].h);
 });
 
 test("an ordered categorical drawn as a curve stays a line", () => {

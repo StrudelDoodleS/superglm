@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import io
+import re
 from urllib.parse import urlsplit
 
 import joblib
@@ -32,8 +33,8 @@ def test_feature_list_groups_by_parameter(open_lss_editor_page):
     with open_lss_editor_page() as (page, session):
         assert list(session.terms) == _LOG_NORMAL_TERMS
         titles = page.locator("#featureList .feature-group-title")
-        assert titles.get_by_text("Average", exact=True).count() == 1
-        assert titles.get_by_text("Spread", exact=True).count() == 1
+        assert titles.get_by_text("Mean", exact=True).count() == 1
+        assert titles.get_by_text("CV", exact=True).count() == 1
 
         rows = page.locator("#featureList [data-term]")
         assert rows.evaluate_all("els => els.map(e => e.dataset.term)") == _LOG_NORMAL_TERMS
@@ -44,12 +45,12 @@ def test_feature_list_groups_by_parameter(open_lss_editor_page):
             assert page.locator(f'#featureList [data-term="{term}"] svg.mini-curve').count() == 1
 
 
-def test_spread_curve_axis_and_drag(open_lss_editor_page):
+def test_cv_curve_axis_and_drag(open_lss_editor_page):
     with open_lss_editor_page(selected_term="scale:age") as (page, session):
         axis_titles = page.locator("#chart text.label").evaluate_all(
             "els => els.map(e => e.textContent)"
         )
-        assert "coefficient of variation" in axis_titles
+        assert "relativity of σ" in axis_titles
 
         term = session.terms["scale:age"]
         before = term.edited_log_effect.copy()
@@ -84,7 +85,7 @@ def test_spread_curve_axis_and_drag(open_lss_editor_page):
         first_row = page.locator("#historyFrame .history-list li").first
         first_row.wait_for()
         chip = first_row.locator(".parameter-chip")
-        assert chip.inner_text() == "Spread"
+        assert chip.inner_text() == "CV"
         assert chip.get_attribute("data-role") == "spread"
 
 
@@ -114,13 +115,24 @@ def test_cv_tab_draws_folds_and_runs_cv_and_final_fit(open_lss_editor_page):
         assert frame.locator(".cv-fold-table tbody tr").count() == 4
         assert "A/E" in frame.locator(".cv-fold-table thead").inner_text()
         terms = frame.locator(".cv-term-list")
-        assert terms.locator(".feature-group-title").all_inner_texts() == ["Average", "Spread"]
+        assert terms.locator(".feature-group-title").all_inner_texts() == ["Mean", "CV"]
         listed = terms.locator(".cv-term").evaluate_all("els => els.map(e => e.dataset.cvTerm)")
         assert [key.split(":")[0] for key in listed] == ["mean"] * 3 + ["scale"] * 2
         assert (
             "age" in frame.locator('.cv-term[data-cv-term="scale:age"] .cv-term-name').inner_text()
         )
         assert page.locator("#finalFitRun").count() == 0
+
+        # A chart's heading names its parameter once and says what the curve is a relativity of;
+        # the log-normal's second parameter is a relativity of σ, not of the CV shown elsewhere.
+        for term, heading in (
+            ("scale:age", "age · CV · relativity of σ"),
+            ("mean:age", "age · Mean · relativity"),
+        ):
+            frame.locator(f'.cv-term[data-cv-term="{term}"]').click()
+            assert frame.locator(".cv-axis-title").first.text_content() == heading
+            assert "fold range" in frame.locator(".cv-legend").inner_text()
+        assert "supplied with edit(" not in page.locator("#reportStatus").inner_text()
 
         # The table draws the folds: each holds out its own piece of the book.
         assert frame.locator(".cv-held").count() == 3
@@ -152,6 +164,16 @@ def test_cv_tab_draws_folds_and_runs_cv_and_final_fit(open_lss_editor_page):
         )
         page.locator("#finalTab").click()
         frame.get_by_text("Refitted on", exact=False).first.wait_for()
+        final = frame.locator(".final-fit").inner_text()
+        # The session has no test split, so none is said to stay held out; the refit's status
+        # is the Diagnose tab's sentence.
+        assert "test split" not in final
+        assert "Converged" in final
+        # Nothing was edited, so there is no change to compare with; A/E reads to four decimals.
+        split_table = frame.locator('table[aria-label="Split metrics"]').inner_text()
+        assert "Δ" not in split_table
+        last_cell = frame.locator('table[aria-label="Split metrics"] tbody tr td').last
+        assert re.fullmatch(r"\d\.\d{4}", last_cell.inner_text().strip())
 
 
 def test_diagnose_tab_lists_the_fits_and_switches_between_them(open_lss_editor_page):
@@ -172,13 +194,19 @@ def test_diagnose_tab_lists_the_fits_and_switches_between_them(open_lss_editor_p
         frame = page.locator("#reportFrame")
         frame.locator(".diagnose-table").first.wait_for()
         assert page.locator("#diagnoseTab").get_attribute("aria-selected") == "true"
-        fits = frame.locator("[data-diagnose-fit]")
-        assert fits.all_inner_texts() == ["This model", "Fold 1", "Fold 2", "Fold 3"]
+        fits = frame.locator(".diagnose-fits [data-diagnose-fit]")
+        assert fits.all_inner_texts() == ["All rows", "Fold 1", "Fold 2", "Fold 3"]
+        # What the converged fits share is said once, not on every row, and no code shows.
+        assert frame.inner_text().count("passed its own check") == 1
+        assert "outer=" not in frame.inner_text()
         assert frame.locator(".diagnose-matrix .diagnose-group th").all_inner_texts() == [
-            "Average",
-            "Spread",
+            "Mean",
+            "CV",
         ]
         assert frame.locator(".diagnose-line").count() == 4
+        # The timings are folded until asked for.
+        assert frame.locator(".diagnose-phase").count() == 0
+        frame.locator('[data-diagnose-fold="phases"]').click()
         assert frame.locator(".diagnose-phase").count() > 0
 
         fits.nth(2).click()
@@ -319,11 +347,8 @@ def test_tools_the_session_does_not_offer_are_neither_requested_nor_offered(open
         page.locator("#summaryTab").click()
 
         assert page.locator(".evidence-retry:visible").count() == 0
-        table = page.locator('#termViewToggle [data-term-view="table"]')
-        assert table.is_disabled()
-        assert table.get_attribute("data-popover-body") == state["rating_table"]
         refit_offset = page.locator("#refitOffset")
         assert refit_offset.is_disabled()
         assert refit_offset.get_attribute("title") == state["refit_offset"]
-        assert not {"/summary", "/metrics", "/rating_table"} & set(requested)
+        assert not {"/summary", "/metrics"} & set(requested)
         assert "/op" in requested

@@ -74,6 +74,19 @@ exported through `src/superglm/__init__.py`. Follow the existing Ruff
 configuration, and keep mathematical names where they make the numerical
 implementation easier to read against the method it implements.
 
+A lifecycle, meaning anything with a small set of named states such as a
+request, a background job, a dialog or a fitted model, is one tagged value with
+one declared table of moves, in the module that owns it. That module's function
+is the only writer, and a test walks the table. Status strings compared in
+several files, or flags and None-able attributes whose combinations stand for
+states, are a lifecycle written implicitly. Make one explicit when a change adds
+a state to it or fixes a wrong state in it, keeping every value a user or a
+saved model already holds, and leave it alone otherwise. A numeric iteration is
+not a lifecycle. `src/superglm/editor/app/state/machine.js` and `mutation.js`
+are the pattern;
+[notes/audit/2026-11-09-implicit-state-machines](notes/audit/2026-11-09-implicit-state-machines/README.md)
+lists the lifecycles found and what each needs.
+
 New solver, REML, family, input-boundary or feature behaviour needs a focused
 regression test. An adversarial regression includes a mutation check or a
 demonstration against the unfixed implementation; a test that also passes

@@ -26,6 +26,7 @@ from superglm.distributional.layout import StackedLayout
 from superglm.distributional.model import DenseDistributionalModel
 from superglm.distributional.results.fit import DistributionalFitResult
 from superglm.distributional.results.iteration import DistributionalEFSIteration
+from superglm.distributional.results.shape import ShapeFit, shape_term_sentence
 from superglm.distributional.results.smoothing import DistributionalEFSResult
 from superglm.distributional.results.solver import DenseSolverResult
 from superglm.distributional.timing import FitPhaseSnapshot
@@ -41,7 +42,7 @@ _CONDITION_WARNING_THRESHOLD = 1.0 / np.sqrt(EPS)
 _SMOOTHING_HISTORY = "smoothing_history"
 _CURVATURE_TELEMETRY = "curvature_telemetry"
 _ALL_FITTED_PARAMETERS = "all fitted distributional parameters"
-_STATIONARITY_METRIC = "terminal stationarity evidence"
+_STATIONARITY_METRIC = "how settled the smoothing is"
 type _EvidenceProvenance = Literal[
     "fit_result",
     "solver_history",
@@ -83,6 +84,7 @@ class _LSSDiagnosticContext:
     terminal_fit: DenseSolverResult
     smoothing: DistributionalEFSResult | None
     exact_face_components: tuple[str, ...]
+    shape_fit: ShapeFit | None
     null_converged: bool
     null_convergence_reason: str
 
@@ -110,6 +112,7 @@ class _LSSDiagnosticContext:
             terminal_fit=state.solver_result,
             smoothing=state.smoothing,
             exact_face_components=state.exact_face_components,
+            shape_fit=state.shape_fit,
             null_converged=state.null_model.converged,
             null_convergence_reason=str(state.null_model.convergence_reason),
         )
@@ -134,6 +137,21 @@ _WHOLE_FIT_SUBJECT = DiagnosticSubject(
 )
 
 
+def _part_phrase(component_name: str, *, sentence_start: bool = False) -> str:
+    """A penalty component named the way the user wrote its term, and the part of it meant.
+
+    The exact component identifier stays in the structured fields.
+    """
+    term, marker, suffix = component_name.rpartition("#")
+    if not marker:
+        phrase = f"the penalty {component_name!r}"
+    elif suffix == "wiggle":
+        phrase = f"the curved part of {term!r}"
+    else:
+        phrase = f"the {suffix!r} part of {term!r}"
+    return phrase[0].upper() + phrase[1:] if sentence_start else phrase
+
+
 def _penalty_subject(layout: StackedLayout, component: PenaltyComponent) -> DiagnosticSubject:
     predictor, separator, term = component.group_name.partition(":")
     component_term, marker, suffix = component.name.rpartition("#")
@@ -149,7 +167,7 @@ def _penalty_subject(layout: StackedLayout, component: PenaltyComponent) -> Diag
         raise ValueError(f"penalty component {component.name!r} has inconsistent qualified names")
     return DiagnosticSubject(
         identifier=f"penalty:{component.name}",
-        display_name=(f"{predictor} predictor term {term!r}, penalty component {component.name!r}"),
+        display_name=_part_phrase(component.name),
         scope="penalized_subspace",
         predictor=predictor,
         term=term,
@@ -199,10 +217,9 @@ def _stationary_statement(smoothing: DistributionalEFSResult) -> str:
     """The Newton endgame's stop in one sentence, with its numbers."""
     norm = smoothing.terminal_projected_gradient_norm
     return (
-        "The smoothing search ended at the REML optimum, a stationary point of the LAML "
-        "criterion in log lambda: the largest projected gradient component is "
-        f"{0.0 if norm is None else norm:.3g} against a tolerance of "
-        f"{smoothing.stationarity_bar:.3g}."
+        "The smoothing search ended at an optimum: the REML score no longer improves in any "
+        f"direction. The largest remaining slope is {0.0 if norm is None else norm:.3g}, against "
+        f"an allowed {smoothing.stationarity_bar:.3g}."
     )
 
 
@@ -314,6 +331,15 @@ def _finding(
     )
 
 
+_LOOP_NAMES = {"smoothing": "smoothing search", "coefficient": "coefficient fit"}
+_LOOP_UNITS = {"smoothing": "smoothing round", "coefficient": "iteration"}
+_LOOP_BUDGETS = {"smoothing": "max_reml_iter", "coefficient": "max_inner_iter"}
+
+
+def _plural(count: int, unit: str) -> str:
+    return f"{count} {unit}{'' if count == 1 else 's'}"
+
+
 def _not_converged_finding(
     *,
     loop: str,
@@ -321,25 +347,34 @@ def _not_converged_finding(
     iterations: int,
     provenance: _EvidenceProvenance,
 ) -> DiagnosticFinding:
+    name = _LOOP_NAMES.get(loop, f"{loop} loop")
+    budget = _LOOP_BUDGETS.get(loop) if reason == "max_iterations" else None
+    stopped = f"It stopped after {_plural(iterations, _LOOP_UNITS.get(loop, 'iteration'))}"
     return _finding(
         "fit.not_converged",
         priority=1,
         identifier=f"fit.not_converged:{loop}",
         severity="error",
         impacts=("fit_validity",),
-        headline=f"The accepted {loop} loop did not converge.",
-        observed=f"The authoritative {loop} result stopped with reason {reason!r}.",
-        interpretation=(
-            "No damping of the coefficient curvature gave a certified ascent direction, so the "
-            "solver stopped at its last accepted coefficients."
-            if reason == "no_ascent_direction"
-            else "The rank certificate removed a direction the solver's stop kept, or kept one "
-            "the reduced fit dropped, so that stop could not be validated on the coefficients "
-            "the certificate keeps. The fitted values are the last accepted iterate."
-            if reason == "rank_reduced_at_stop"
-            else "The reported parameter state did not satisfy its governing fit contract."
+        headline=f"The {name} did not converge.",
+        observed=(
+            f"{stopped} because it reached its limit ({budget}; reason {reason!r})."
+            if budget
+            else f"{stopped} with reason {reason!r}."
         ),
-        caveats=("This evidence does not identify a statistical cause for the failure.",),
+        interpretation=(
+            "The solver could not find any step that improved the fit, so it stopped at the last "
+            "coefficients it reached. The fitted numbers are not at a maximum."
+            if reason == "no_ascent_direction"
+            else "Two checks disagreed about which combinations of coefficients the data can pin "
+            "down, so the stop could not be confirmed. The fitted values are from the last step "
+            "the solver took."
+            if reason == "rank_reduced_at_stop"
+            else f"The fitted numbers are from the last step the {name} took, not from a "
+            "finished fit, so do not rely on the standard errors or the effective degrees of "
+            "freedom."
+        ),
+        caveats=("This does not say why the fit failed.",),
         evidence=_evidence_set(
             provenance,
             ("loop", loop),
@@ -348,16 +383,16 @@ def _not_converged_finding(
         ),
         action_kind="inspect_fit_configuration",
         action_question=(
-            "Do larger starting smoothing parameters (initial_lambda), simpler terms or, "
-            "where the family supplies expected information, coefficient_curvature='fisher' "
-            "give the solver an ascent direction?"
+            "Try larger starting smoothing values (initial_lambda), simpler terms or, where the "
+            "family supplies expected information, coefficient_curvature='fisher'."
             if reason == "no_ascent_direction"
-            else "Are two or more coefficients aliased (one a linear combination of others)? "
-            "Would dropping or merging the terms involved, or adding a penalty on them, let the "
-            "stop be validated?"
+            else "Check whether two or more coefficients are aliased (one is a combination of "
+            "others). Dropping or merging those terms, or adding a penalty on them, may let the "
+            "stop be confirmed."
             if reason == "rank_reduced_at_stop"
-            else f"Which data or configuration change lets the {loop} loop satisfy its declared "
-            "convergence contract?"
+            else "Try "
+            + (f"a larger {budget}, " if budget else "")
+            + "other starting smoothing values (initial_lambda), or simpler terms."
         ),
         action_metrics=("convergence reason", "iterations", "fit objective"),
     )
@@ -369,11 +404,13 @@ def _null_model_not_converged_finding(reason: str) -> DiagnosticFinding:
         priority=2,
         severity="warning",
         impacts=("null_comparison",),
-        headline="The intercept-only null model did not converge.",
-        observed=f"The null coefficient fit stopped with reason {reason!r}.",
+        headline=(
+            "The comparison model with no terms (the intercept-only null model) did not converge."
+        ),
+        observed=f"Its coefficient fit stopped with reason {reason!r}.",
         interpretation=(
-            "The fitted model is unaffected. The null objective and every comparison with the "
-            "null model are based on the unconverged null's last accepted iterate."
+            "Your fitted model is unaffected. The null objective and every comparison with the "
+            "null model use the last step the null fit reached."
         ),
         evidence=_evidence_set(
             "fit_result",
@@ -381,7 +418,7 @@ def _null_model_not_converged_finding(reason: str) -> DiagnosticFinding:
             ("terminal_reason", reason),
         ),
         action_kind="inspect_fit_configuration",
-        action_question="Does a larger max_inner_iter let the null fit converge?",
+        action_question="Try a larger max_inner_iter.",
         action_metrics=("null convergence reason", "null objective"),
     )
 
@@ -395,10 +432,13 @@ def _compact_not_converged_finding(
         identifier="fit.not_converged:compact_result",
         severity="error",
         impacts=("fit_validity",),
-        headline="The accepted compact fit result reports nonconvergence.",
-        observed="Its retained overall convergence flag is false.",
-        interpretation="The accepted complete-fit summary did not satisfy its fit contract.",
-        caveats=("The compact result does not retain a terminal convergence reason.",),
+        headline="The fit's summary says it did not converge, but it did not record why.",
+        observed="Its overall 'converged' flag is false.",
+        interpretation=(
+            "The fitted numbers may not be at an optimum, so do not rely on the standard errors "
+            "or the effective degrees of freedom."
+        ),
+        caveats=("The summary does not record why the fit stopped.",),
         evidence=_evidence_set(
             "fit_result",
             ("source", "compact_result"),
@@ -407,7 +447,7 @@ def _compact_not_converged_finding(
             ("smoothing_converged", fitted_result.smoothing_converged),
         ),
         action_kind="inspect_fit_configuration",
-        action_question="Which controlled change makes the complete-fit summary converge?",
+        action_question="Try a larger max_reml_iter or max_inner_iter, or simpler terms.",
         action_metrics=("compact convergence flags", "fit objective"),
     )
 
@@ -441,8 +481,17 @@ def _negative_eigenvalue_resolution(matrix: np.ndarray) -> float:
 
 
 def _accepted_source_label(source: str) -> str:
-    """Name an accepted curvature source in prose."""
-    return "nearest positive semidefinite observed" if source == "nearest_semidefinite" else source
+    """Name a curvature source in prose."""
+    return {
+        "nearest_semidefinite": "adjusted observed (nearest positive semidefinite)",
+        "fisher": "expected (Fisher)",
+    }.get(source, source)
+
+
+def _curvature_phrase(source: str, matrix_kind: str) -> str:
+    """A curvature matrix in prose: where it comes from and what it is the curvature of."""
+    target = "likelihood" if matrix_kind == "data" else "penalised likelihood"
+    return f"{_accepted_source_label(source)} curvature of the {target}"
 
 
 def _curvature_indefinite_finding(
@@ -471,18 +520,20 @@ def _curvature_indefinite_finding(
 
     matrix_kind = context.terminal_policy_matrix_kind
     coordinate_phrase = (
-        "full coefficient coordinates"
+        "all the coefficients"
         if coordinate_space == "full"
-        else "retained exact-face coordinates"
+        else "the coefficients left after smoothed-away directions were removed"
     )
-    source_label = f"requested {telemetry.requested_source} {matrix_kind} curvature"
+    source_label = _curvature_phrase(telemetry.requested_source, matrix_kind)
     if resolution is None:
-        headline = f"The terminal policy found the {source_label} materially indefinite."
+        accepted = _accepted_source_label(telemetry.actual_source)
+        headline = (
+            f"At the final coefficients the {source_label} curved the wrong way in at least "
+            "one direction."
+        )
         observed = (
-            f"The {source_label} in {coordinate_phrase} recorded raw minimum eigenvalue "
-            f"{minimum:.3e}; the terminal policy's diagonally equilibrated analysis classified "
-            f"the requested matrix as materially indefinite before accepting "
-            f"{_accepted_source_label(telemetry.actual_source)} curvature."
+            f"Its lowest curvature value was {minimum:.3e}, over {coordinate_phrase}. The solver "
+            f"judged that large enough to matter and switched to the {accepted} curvature."
         )
         minimum_evidence = DiagnosticEvidence(
             metric="minimum_eigenvalue",
@@ -491,18 +542,18 @@ def _curvature_indefinite_finding(
             window="requested terminal coefficient curvature",
             provenance=_CURVATURE_TELEMETRY,
         )
-        resolution_caveat = (
-            "The raw minimum eigenvalue and the policy's diagonally equilibrated rank analysis "
-            "are different diagnostics. The requested matrix norm and numerical threshold are "
-            "not retained after fallback; materiality comes from the terminal curvature-policy "
-            "decision, not from the accepted "
-            f"{_accepted_source_label(telemetry.actual_source)} rank or condition estimate."
+        resolution_caveats = (
+            "The lowest curvature value and the solver's own check measure this on different "
+            "scales, so they can disagree.",
+            "The size of the original matrix and the cutoff were not kept after the switch.",
+            f"The switch rests on the solver's decision, not on the rank or condition of the "
+            f"{accepted} curvature.",
         )
     else:
-        headline = f"The {source_label} has a resolved negative eigenvalue."
+        headline = f"The {source_label} has a clearly negative value."
         observed = (
-            f"The {source_label} in {coordinate_phrase} has minimum eigenvalue {minimum:.3e}, "
-            f"below the sign-resolution boundary {-resolution:.3e}."
+            f"Its lowest curvature value, over {coordinate_phrase}, is {minimum:.3e}, below the "
+            f"cutoff of {-resolution:.3e} that separates a real negative from rounding error."
         )
         minimum_evidence = DiagnosticEvidence(
             metric="minimum_eigenvalue",
@@ -513,33 +564,26 @@ def _curvature_indefinite_finding(
             comparator="<",
             threshold=-resolution,
         )
-        resolution_caveat = (
-            "The sign boundary uses the shared Gram-rank policy, retained coordinate dimension, "
-            "floating-point epsilon, and the retained matrix spectral norm."
+        resolution_caveats = (
+            "The cutoff comes from the shared rank rule, the number of coefficients assessed, "
+            "floating-point precision and the size of the curvature matrix.",
         )
 
     if telemetry.requested_source == "observed":
         interpretation = (
-            "This is resolved local nonconcavity of the unpenalized likelihood geometry in a "
-            "active coefficient direction."
-            if matrix_kind == "data"
-            else (
-                "This is resolved local nonconcavity of the penalized objective geometry in a "
-                "active coefficient direction."
-            )
-        )
-        action_question = (
-            "Does comparing requested and accepted curvature, terminal score, and held-out "
-            "objective isolate a consequential nonconcave direction?"
+            "In at least one direction the "
+            + ("likelihood" if matrix_kind == "data" else "penalised likelihood")
+            + " curves downward near the final coefficients, so the point may not be a maximum."
         )
     else:
         interpretation = (
-            f"The {source_label} matrix has a resolved negative direction in the assessed "
-            "coefficient coordinates."
+            f"The {source_label} has a negative value in at least one direction of the "
+            "coefficients assessed. That alone does not show that the fit is not at a maximum."
         )
-        action_question = (
-            "Does comparing requested and accepted curvature, terminal score, and held-out "
-            "objective isolate a consequential indefinite curvature direction?"
+    if used_fallback:
+        interpretation += (
+            " The standard errors, effective degrees of freedom and smoothing updates use the "
+            "substitute curvature."
         )
     return _finding(
         "fit.curvature_indefinite",
@@ -551,10 +595,10 @@ def _curvature_indefinite_finding(
         observed=observed,
         interpretation=interpretation,
         caveats=(
-            "Curvature alone does not show that the likelihood is increasing in this direction, "
-            "identify its statistical cause, or establish that a different accepted curvature "
-            "matrix is indefinite.",
-            resolution_caveat,
+            "Curvature alone does not show that the likelihood is increasing in this direction.",
+            "It does not identify the statistical cause.",
+            "It does not show that a different curvature matrix also curves the wrong way.",
+            *resolution_caveats,
         ),
         evidence=(
             minimum_evidence,
@@ -572,8 +616,11 @@ def _curvature_indefinite_finding(
             ),
         ),
         action_kind="compare_curvature_policy",
-        action_question=action_question,
-        action_metrics=("minimum_eigenvalue", "terminal score", "holdout log-likelihood"),
+        action_question=(
+            "Compare fits with each curvature choice (coefficient_curvature): do the "
+            "coefficients, standard errors or held-out score differ?"
+        ),
+        action_metrics=("minimum_eigenvalue", "final score", "holdout log-likelihood"),
     )
 
 
@@ -633,20 +680,21 @@ def _gradient_unresolved_findings(
                 severity="error",
                 impacts=("fit_validity", "smoothing_selection"),
                 headline=(
-                    f"The LAML gradient of {name!r} could not be certified at its finite-difference "
-                    "step."
+                    f"The search could not confirm that the smoothing of {_part_phrase(name)} is "
+                    "at its optimum."
                 ),
                 observed=(
-                    f"Its gradient {gradient.get(name, 0.0):.3g} carries a certificate of "
-                    f"{value:.3g} against a stationarity bar of {bar:.3g}."
+                    f"The slope of the REML score is {gradient.get(name, 0.0):.3g}, but it is only "
+                    f"measured to within {value:.3g}, and the limit is {bar:.3g}."
                 ),
                 interpretation=(
-                    "The Newton endgame cannot tell this component's gradient from zero, so the "
-                    "REML optimum is not certified along it."
+                    "The slope cannot be told from zero, so this term's smoothing is not confirmed "
+                    "as the best choice. That can affect its effective degrees of freedom and "
+                    "standard errors."
                 ),
                 caveats=(
-                    "The certificate bounds finite-difference error; it does not locate the "
-                    "optimum.",
+                    "The accuracy bound is for the slope measurement. It does not say where the "
+                    "optimum is.",
                 ),
                 evidence=(
                     *_evidence_set(
@@ -660,8 +708,8 @@ def _gradient_unresolved_findings(
                 ),
                 action_kind="investigate_smoothing_convergence",
                 action_question=(
-                    "Does a larger finite-difference step or an analytic third derivative "
-                    "certify this component's gradient?"
+                    "Try a larger finite-difference step, or an analytic third derivative where "
+                    "the family offers one."
                 ),
                 action_metrics=(_STATIONARITY_METRIC, _ALL_FITTED_PARAMETERS),
             )
@@ -697,10 +745,7 @@ def _analyze_authority(context: _LSSDiagnosticContext) -> tuple[DiagnosticFindin
             headline=wording["termination.headline"],
             observed=wording["termination.observed"],
             interpretation=wording["termination.interpretation"],
-            caveats=(
-                "This finding does not change or reinterpret either authoritative convergence "
-                "flag.",
-            ),
+            caveats=("This finding does not change the fit's converged flags.",),
             evidence=(
                 *_evidence_set(_SMOOTHING_HISTORY, ("matched_certified", False)),
                 *_evidence_set(
@@ -729,67 +774,94 @@ _TERMINATION_ACTION_METRICS = {
 }
 
 
+_EXTRA_CHECK_CAUSES = (
+    "the solver fell back to another curvature, a term's edge-of-range check was refused, a "
+    "smoothed-away term could not be checked analytically, or a slope could not be measured "
+    "accurately"
+)
+_SETTLE_OBSERVED = (
+    "At the end, the largest change to a smoothing parameter was {residual} on the log scale "
+    "({change}), above the set limit of {tolerance}."
+)
+_LOOSE_SMOOTHING = (
+    "so the chosen smoothing parameters, and the effective degrees of freedom and standard "
+    "errors that follow from them, are not settled."
+)
+
+
+def _relative_change(log_residual: float) -> str:
+    """A log-scale change of a smoothing parameter as a share of its value."""
+    if log_residual >= 4.6:
+        return "more than 100 times its value"
+    return f"about {100.0 * np.expm1(log_residual):.2g}% of its value"
+
+
 def _stop_wording(kind: StopKind) -> dict[str, str]:
-    """The practical-plateau, stationary or strict wording of every stop-related finding.
+    """The quick-rule, optimum or strict wording of every stop-related finding.
 
     One table, so no finding phrases a stop two ways. ``lambda_cap_unresolved``
-    has no practical variant (a plateau is an interior stop); a stationary
-    stop's authority is the projected exact LAML gradient.
+    has no quick-rule variant (a plateau is an interior stop); a stop at an
+    optimum is judged by the exact slope of the REML score. The
+    ``trajectory.observed`` entry reads ``residual``, ``change`` and ``tolerance``.
     """
     if kind == "practical":
         return {
             "termination.severity": "info",
             "termination.headline": (
-                "The fit used practical REML convergence, not strict stationarity."
+                "The search stopped under the quick stopping rule, not the strict one."
             ),
             "termination.observed": (
-                "The accepted objective and fitted parameters met the configured practical "
-                "plateau, while strict matched certification remains false."
+                "The REML score and the smoothing parameters stopped changing by more than the "
+                "quick rule's threshold. The strict check was not passed."
             ),
             "termination.interpretation": (
-                "This is the requested fast stopping policy, not a fit failure. Use strict REML "
-                "when matched stationarity evidence is required."
+                "This is the fast rule you asked for, not a failure, and the fitted numbers are "
+                "usable. Refit with practical_reml=False if you need the stronger check."
             ),
             "termination.action_kind": "compare_strict_reml",
             "termination.action_question": (
-                "Does strict REML materially change fitted parameters or uncertainty?"
+                "Do the fitted numbers or their uncertainty change materially under strict REML "
+                "(practical_reml=False)?"
             ),
-            "trajectory.headline": "Practical REML stopped before strict smoothing stationarity.",
-            "trajectory.observed": (
-                "The practical plateau passed, but the retained strict stationarity residual "
-                "still exceeds its tolerance."
+            "trajectory.headline": (
+                "The smoothing parameters were still changing when the quick rule stopped the "
+                "search."
             ),
+            "trajectory.observed": _SETTLE_OBSERVED,
             "trajectory.interpretation_info": (
-                "This is expected under practical convergence and does not mean the fit failed."
+                "This is expected under the quick rule and does not mean the fit failed. The "
+                "fitted numbers are usable."
             ),
             "trajectory.interpretation": (
-                "The practical plateau accepted the stop while the strict stationarity "
-                "residual was still material, so the smoothing selection is loose."
+                "The quick rule stopped the search while the smoothing was still moving, "
+                + _LOOSE_SMOOTHING
             ),
             "trajectory.caveat": (
-                "Compare with strict REML when small smoothing or uncertainty differences matter."
+                "This is one overall figure. It does not say which term caused it."
+            ),
+            "trajectory.action_question": (
+                "Try practical_reml=False, a larger max_reml_iter or other starting smoothing "
+                "values (initial_lambda) to bring the change within the limit."
             ),
         }
     if kind == "stationary":
         return {
             "termination.severity": "warning",
             "termination.headline": (
-                "The stationary smoothing result lacks matched certification."
+                "The search reached an optimum, but one extra check was not passed."
             ),
             "termination.observed": (
-                "The smoothing search ended at the REML optimum (a stationary point of the LAML "
-                "criterion under its projected gradient), but the retained algorithm-matched "
-                "certification predicate is false."
+                "The smoothing search ended at an optimum: the REML score no longer improves in "
+                "any direction. The extra check that confirms this at every term did not pass."
             ),
             "termination.interpretation": (
-                "The optimum was located, but a curvature fallback, a refused endpoint "
-                "assessment, a non-analytic exact face or an uncertified gradient component "
-                "keeps the stronger certification contract unsatisfied."
+                "The optimum was found, and the fitted values are usable. One of these stopped "
+                f"the stronger check from passing: {_EXTRA_CHECK_CAUSES}."
             ),
             "termination.action_kind": "compare_certified_configuration",
             "termination.action_question": (
-                "Does a configuration that preserves the requested curvature authority "
-                "produce materially different fitted parameters or uncertainty?"
+                "Do the fitted numbers or their standard errors change materially in a fit that "
+                "keeps the curvature you asked for?"
             ),
             "trajectory.headline": (
                 "The Fellner--Schall residual is not the authority at a stationary stop."
@@ -805,33 +877,41 @@ def _stop_wording(kind: StopKind) -> dict[str, str]:
                 "This is expected at a stationary stop and does not mean the fit failed."
             ),
             "trajectory.caveat": "The projected exact gradient is the stop's certificate.",
+            "trajectory.action_question": (
+                "Which controlled change brings the outer residual within tolerance?"
+            ),
         }
     return {
         "termination.severity": "warning",
-        "termination.headline": "The converged smoothing result lacks matched certification.",
+        "termination.headline": "The search converged, but one extra check was not passed.",
         "termination.observed": (
-            "The accepted inner and outer results report convergence, but the retained "
-            "algorithm-matched certification predicate is false."
+            "Both the coefficient fit and the smoothing search report convergence, but the extra "
+            "check that the stop was at a true optimum failed."
         ),
         "termination.interpretation": (
-            "The fitted values exist, but the stronger accepted certification contract "
-            "was not satisfied."
+            "The fitted values are usable, but the stronger guarantee is not available. "
+            f"Possible causes: {_EXTRA_CHECK_CAUSES}."
         ),
         "termination.action_kind": "compare_certified_configuration",
         "termination.action_question": (
-            "Does a configuration that preserves the requested curvature authority "
-            "produce materially different fitted parameters or uncertainty?"
+            "Do the fitted numbers or their standard errors change materially in a fit that "
+            "keeps the curvature you asked for?"
         ),
-        "trajectory.headline": "The terminal smoothing evidence remains outside its tolerance.",
-        "trajectory.observed": (
-            "The retained raw terminal stationarity evidence exceeds the configured "
-            "outer tolerance."
+        "trajectory.headline": (
+            "The smoothing parameters were still changing when the search stopped."
         ),
+        "trajectory.observed": _SETTLE_OBSERVED,
         "trajectory.interpretation_info": (
-            "The accepted smoothing trajectory did not settle under its rule."
+            "The smoothing was not fully settled, but the change is small."
         ),
-        "trajectory.interpretation": "The accepted smoothing trajectory did not settle under its rule.",
-        "trajectory.caveat": "This aggregate terminal residual does not identify a causal component.",
+        "trajectory.interpretation": (
+            "The smoothing was still moving when the search stopped, " + _LOOSE_SMOOTHING
+        ),
+        "trajectory.caveat": "This is one overall figure. It does not say which term caused it.",
+        "trajectory.action_question": (
+            "Try a larger max_reml_iter or other starting smoothing values (initial_lambda) to "
+            "bring the change within the limit."
+        ),
     }
 
 
@@ -872,24 +952,29 @@ def _analyze_lambda_caps(context: _LSSDiagnosticContext) -> tuple[DiagnosticFind
                 identifier=f"fit.lambda_cap_unresolved:{name}",
                 severity="error",
                 impacts=("fit_validity", "smoothing_selection"),
-                headline=f"Penalty component {name!r} has unresolved pressure at its upper cap.",
+                headline=(
+                    f"The smoothing of {_part_phrase(name)} ran into the largest value allowed, "
+                    "and the search could not settle whether to go higher."
+                ),
                 observed=(
-                    "The accepted smoothing result retained this component in its unresolved "
-                    "upper-bound set."
+                    f"Its smoothing parameter is {smoothing.lambdas[name]:.3g}, the maximum "
+                    f"(max_lambda) is {smoothing.config.maximum_lambda:.3g}, and the fit lists "
+                    "this term as unresolved at the maximum."
                 ),
                 interpretation=(
-                    "The finite configured cap did not supply accepted convergence or "
-                    "exact-face authority for this component."
+                    "Hitting the limit gave neither a converged answer nor a reason to remove the "
+                    "term. Its fitted shape, effective degrees of freedom and standard errors "
+                    "rest on a smoothing value that was not settled."
                 ),
                 caveats=(
-                    "Reaching the cap is not convergence and does not establish an "
-                    "infinite optimum.",
+                    "Reaching the limit is not convergence, and it does not show that the best "
+                    "smoothing is infinite.",
                 ),
                 evidence=tuple(evidence),
                 action_kind="investigate_lambda_boundary",
                 action_question=(
-                    "Does a wider certified boundary or an alternative term representation "
-                    "resolve the terminal smoothing evidence?"
+                    "Try a larger max_lambda, or a simpler version of this term, and check "
+                    "whether the fitted numbers change."
                 ),
                 action_metrics=(_STATIONARITY_METRIC, _ALL_FITTED_PARAMETERS, "predictions"),
             )
@@ -913,18 +998,23 @@ def _analyze_smoothing_state(context: _LSSDiagnosticContext) -> tuple[Diagnostic
                 identifier=f"smoothing.penalty_at_upper_boundary:{name}",
                 severity="info",
                 impacts=("smoothing_selection",),
-                headline=f"Penalty component {name!r} ended at its configured upper bound.",
-                observed="Its accepted terminal lambda equals the configured finite maximum.",
-                interpretation="The smoothing trajectory reached the boundary of its search box.",
+                headline=(
+                    f"{_part_phrase(name, sentence_start=True)} ended at the largest smoothing "
+                    "the search allows."
+                ),
+                observed=(
+                    f"Its final smoothing parameter, {smoothing.lambdas[name]:.3g}, equals the "
+                    "maximum (max_lambda)."
+                ),
+                interpretation="The search ran into the edge of the range it may try.",
                 caveats=(
-                    "A finite upper-bound lambda alone does not establish an endpoint, exact "
-                    "suppression, or an infinite optimum.",
+                    "Reaching the maximum alone does not show that the term was smoothed away "
+                    "completely or that the best smoothing is infinite.",
                 ),
                 evidence=_terminal_lambda_evidence(smoothing, name),
                 action_kind="inspect_smoothing_boundary",
                 action_question=(
-                    "Does changing the finite search boundary alter the accepted stationarity "
-                    "evidence or fitted parameters?"
+                    "Try a larger max_lambda and check whether the fitted numbers change."
                 ),
                 action_metrics=(_STATIONARITY_METRIC, _ALL_FITTED_PARAMETERS),
             )
@@ -935,6 +1025,11 @@ def _analyze_smoothing_state(context: _LSSDiagnosticContext) -> tuple[Diagnostic
     if residual > smoothing.config.tolerance and _stop_kind(smoothing) != "stationary":
         wording = _stop_wording(_stop_kind(smoothing))
         severity = _residual_severity(residual, smoothing.config.tolerance)
+        observed = wording["trajectory.observed"].format(
+            residual=f"{residual:.2g}",
+            change=_relative_change(residual),
+            tolerance=f"{smoothing.config.tolerance:.2g}",
+        )
         findings.append(
             _finding(
                 "smoothing.trajectory_unsettled",
@@ -946,7 +1041,7 @@ def _analyze_smoothing_state(context: _LSSDiagnosticContext) -> tuple[Diagnostic
                     else ("fit_validity", "smoothing_selection")
                 ),
                 headline=wording["trajectory.headline"],
-                observed=wording["trajectory.observed"],
+                observed=observed,
                 interpretation=wording[
                     "trajectory.interpretation_info"
                     if severity == "info"
@@ -961,8 +1056,8 @@ def _analyze_smoothing_state(context: _LSSDiagnosticContext) -> tuple[Diagnostic
                     ),
                 ),
                 action_kind="investigate_smoothing_convergence",
-                action_question="Which controlled change brings the outer residual within tolerance?",
-                action_metrics=(_STATIONARITY_METRIC, "outer iterations", _ALL_FITTED_PARAMETERS),
+                action_question=wording["trajectory.action_question"],
+                action_metrics=(_STATIONARITY_METRIC, "smoothing rounds", _ALL_FITTED_PARAMETERS),
             )
         )
     return tuple(findings)
@@ -1034,6 +1129,14 @@ def _analyze_exact_faces(context: _LSSDiagnosticContext) -> tuple[DiagnosticFind
         if rank is not None:
             evidence.extend(_evidence_set("fit_result", ("component_rank", rank)))
         caveats: tuple[str, ...] = ()
+        if null_dimension is None:
+            remaining = "What is left of it could not be worked out."
+        elif null_dimension == 0:
+            remaining = "Nothing of it is left: it was smoothed away completely."
+        else:
+            remaining = (
+                "Only the part the penalty cannot touch is left, for example a straight line."
+            )
         if null_dimension is not None:
             evidence.extend(
                 _evidence_set(
@@ -1043,12 +1146,12 @@ def _analyze_exact_faces(context: _LSSDiagnosticContext) -> tuple[DiagnosticFind
             )
             if null_dimension > 0:
                 caveats = (
-                    "A retained null-space effect remains; this evidence does not show that the "
-                    "feature is useless or should be removed.",
+                    "A part the penalty cannot touch remains. This does not show that the feature "
+                    "is useless or should be removed.",
                 )
         else:
             caveats = (
-                "The component rank metadata is unresolved, so no null-space dimension is claimed.",
+                "The penalty's rank was not recorded, so no claim is made about what remains.",
             )
         findings.append(
             _finding(
@@ -1058,18 +1161,18 @@ def _analyze_exact_faces(context: _LSSDiagnosticContext) -> tuple[DiagnosticFind
                 severity="info",
                 confidence=("certified" if null_dimension is not None else "unresolved"),
                 impacts=("model_complexity", "smoothing_selection"),
-                headline=f"The exact face suppressed the penalized subspace governed by {name!r}.",
-                observed=(
-                    "Accepted exact-face evidence removed only the penalized coefficient subspace "
-                    "governed by this component."
+                headline=f"{_part_phrase(name, sentence_start=True)} was smoothed away.",
+                observed=remaining,
+                interpretation=(
+                    "The fitted model has no flexibility left in the directions this penalty "
+                    "controls."
                 ),
-                interpretation="The fitted model retained no flexibility in those penalized directions.",
                 caveats=caveats,
                 evidence=tuple(evidence),
                 action_kind="compare_simplified_representation",
                 action_question=(
-                    "Does a representation matching the surviving subspace preserve fitted "
-                    "outputs and held-out behavior?"
+                    "Try a simpler version of this term that matches what is left, and check "
+                    "whether the fitted numbers and held-out performance change."
                 ),
                 action_metrics=(
                     _ALL_FITTED_PARAMETERS,
@@ -1308,16 +1411,25 @@ def _analyze_accepted_trajectory(
                     "smoothing.update_dominance",
                     _component_subject(context, name),
                     priority=5,
+                    severity="info",
                     confidence="strong",
-                    headline=f"Penalty component {name!r} dominated accepted smoothing movement.",
+                    headline=(
+                        f"The smoothing of {_part_phrase(name)} moved the most in most rounds."
+                    ),
                     observed=(
-                        f"It accumulated {wins[name]:g} equivalent wins across {denominator} "
-                        "eligible ordinary updates."
+                        f"In {wins[name]:g} of the {denominator} smoothing rounds that changed "
+                        "anything, it moved the most"
+                        + (
+                            " (a round where several terms tied counts as shared)."
+                            if tie_updates[name]
+                            else "."
+                        )
                     ),
-                    interpretation="This component accounted for a substantial share of movement.",
-                    caveats=(
-                        "Accepted movement is not wall-time attribution or evidence of causality.",
+                    interpretation=(
+                        "Most of the search effort went into this one term. This describes how "
+                        "the search went. It does not mean the numbers are wrong."
                     ),
+                    caveats=("Which term moved the most is not a measure of fit time or a cause.",),
                     evidence=(
                         *_evidence_set(
                             _SMOOTHING_HISTORY,
@@ -1331,10 +1443,10 @@ def _analyze_accepted_trajectory(
                     ),
                     action_kind="compare_smoothing_representation",
                     action_question=(
-                        "Does an alternative representation reduce accepted smoothing movement "
-                        "without degrading fitted outputs?"
+                        "Try a simpler or smaller basis for this term, and check whether it "
+                        "settles faster without changing the fitted numbers."
                     ),
-                    action_metrics=("ordinary updates", _ALL_FITTED_PARAMETERS, "predictions"),
+                    action_metrics=("smoothing rounds", _ALL_FITTED_PARAMETERS, "predictions"),
                 )
             )
 
@@ -1350,13 +1462,17 @@ def _analyze_accepted_trajectory(
                 "smoothing.persistent_upward_drift",
                 _component_subject(context, name),
                 priority=3,
+                severity="info",
                 confidence="strong",
-                headline=f"Penalty component {name!r} moved upward without an accepted reversal.",
-                observed=f"It had {positive} positive nonzero moves and no negative moves.",
-                interpretation="The accepted ordinary trajectory continued toward stronger penalty.",
+                headline=(
+                    f"The smoothing of {_part_phrase(name)} was raised every round and never "
+                    "lowered."
+                ),
+                observed=f"It went up in all {positive} of the rounds in which it changed.",
+                interpretation="The search kept pushing this term toward a flatter curve.",
                 caveats=(
-                    "Upward drift does not establish an endpoint, exact suppression, or an "
-                    "infinite optimum.",
+                    "Rising every round does not show that the term was smoothed away or that "
+                    "the best smoothing is infinite.",
                 ),
                 evidence=(
                     *_evidence_set(
@@ -1373,9 +1489,12 @@ def _analyze_accepted_trajectory(
                     _stationarity_evidence(smoothing),
                 ),
                 action_kind="inspect_upward_trajectory",
-                action_question="Does a controlled alternative settle this upward trajectory?",
+                action_question=(
+                    "Try a simpler basis for this term, or a larger starting smoothing value "
+                    "(initial_lambda), and check whether the search settles."
+                ),
                 action_metrics=(
-                    "accepted smoothing moves",
+                    "smoothing moves",
                     _STATIONARITY_METRIC,
                     _ALL_FITTED_PARAMETERS,
                 ),
@@ -1414,18 +1533,24 @@ def _analyze_work_pattern(context: _LSSDiagnosticContext) -> tuple[DiagnosticFin
         _finding(
             "optimization.repeated_step_rejection",
             priority=5,
+            severity="info",
             confidence="strong",
-            headline="Outer smoothing proposals repeatedly required rejection safeguards.",
+            headline="Several smoothing steps had to be shortened or rejected before one was accepted.",
             observed=(
-                f"Backtracking and rejection added coefficient refits across "
-                f"{smoothing.iterations} outer iterations."
+                f"{_plural(backtracked, 'smoothing step')} "
+                f"{'was' if backtracked == 1 else 'were'} shortened and retried, and {rejected} "
+                f"{'was' if rejected == 1 else 'were'} rejected. That added extra coefficient "
+                f"fits over {_plural(smoothing.iterations, 'smoothing round')}."
             ),
-            interpretation="The retained work counts show extra proposal-assessment work.",
-            caveats=("No wall-time attribution was retained for those coefficient refits.",),
+            interpretation=("This cost fit time. It does not by itself mean the result is wrong."),
+            caveats=("No timing was recorded for those extra coefficient fits.",),
             evidence=evidence,
             action_kind="compare_smoothing_initialization",
-            action_question="Does a controlled initialization change reduce rejected proposals?",
-            action_metrics=("coefficient refits", "outer iterations", _ALL_FITTED_PARAMETERS),
+            action_question=(
+                "Try other starting smoothing values (initial_lambda) and check whether fewer "
+                "steps are rejected."
+            ),
+            action_metrics=("coefficient fits", "smoothing rounds", _ALL_FITTED_PARAMETERS),
         ),
     )
 
@@ -1444,26 +1569,22 @@ def _analyze_curvature(context: _LSSDiagnosticContext) -> tuple[DiagnosticFindin
         if fit.terminal_curvature.fallback_count > 0
     )
     fallback_count = smoothing.fallback_count
-    noun = "fallback" if fallback_count == 1 else "fallbacks"
     return (
         _finding(
             "optimization.curvature_fallback_repeated",
             priority=2,
             confidence="strong",
             impacts=("fit_reliability", "inference_reliability"),
-            headline="Coefficient fitting used curvature fallback authority.",
+            headline="The coefficient solver had to use a backup way of measuring curvature.",
             observed=(
-                f"The retained coefficient-fit chronology recorded {fallback_count} curvature "
-                f"{noun} across {len(fallback_telemetry)} coefficient fits."
+                f"The backup was used {_plural(fallback_count, 'time')}, in "
+                f"{len(fallback_telemetry)} of the coefficient fits."
             ),
             interpretation=(
-                "One or more requested curvature sources could not be used for their accepted "
-                "coefficient fit."
+                "The curvature you asked for could not be used in those fits, so the results "
+                "that depend on them rest on the backup curvature."
             ),
-            caveats=(
-                "Fallback counts are numerical work and authority evidence, not wall-time "
-                "attribution.",
-            ),
+            caveats=("The counts describe the numerical work, not the time it took.",),
             evidence=_evidence_set(
                 _CURVATURE_TELEMETRY,
                 ("fallback_count", fallback_count),
@@ -1479,8 +1600,8 @@ def _analyze_curvature(context: _LSSDiagnosticContext) -> tuple[DiagnosticFindin
             ),
             action_kind="compare_curvature_policy",
             action_question=(
-                "Does a fit that retains its requested curvature source change the parameters, "
-                "uncertainty, or convergence evidence?"
+                "Check whether a fit that keeps the curvature you asked for changes the "
+                "parameters, standard errors or convergence."
             ),
             action_metrics=(_ALL_FITTED_PARAMETERS, "standard errors", "convergence evidence"),
         ),
@@ -1507,12 +1628,13 @@ def _analyze_numerics(context: _LSSDiagnosticContext) -> tuple[DiagnosticFinding
             _finding(
                 "numerics.rank_loss",
                 priority=2,
-                headline="The estimable rank is below the active coordinate dimension.",
-                observed=f"The retained rank is {rank} in an active width of {width}.",
-                interpretation="At least one active fitted direction is not numerically estimable.",
-                caveats=(
-                    "An intentionally removed exact-face direction is not counted as rank loss.",
+                headline="The data cannot pin down every coefficient.",
+                observed=f"Only {rank} of {width} coefficient combinations are determined.",
+                interpretation=(
+                    "At least one combination is not determined by the data, so the standard "
+                    "errors cover only the combinations that are."
                 ),
+                caveats=("A direction removed on purpose (a term smoothed away) is not counted.",),
                 evidence=_evidence_set(
                     "fit_result",
                     ("estimable_rank", rank),
@@ -1520,7 +1642,10 @@ def _analyze_numerics(context: _LSSDiagnosticContext) -> tuple[DiagnosticFinding
                     ("coordinate_space", coordinate_space),
                 ),
                 action_kind="investigate_rank_loss",
-                action_question="Which representation restores estimability of the active fit?",
+                action_question=(
+                    "Check which terms overlap. Dropping or merging them, or using a smaller "
+                    "basis (k), may restore the missing combinations."
+                ),
                 action_metrics=("estimable rank", "predictions", _ALL_FITTED_PARAMETERS),
             )
         )
@@ -1529,23 +1654,30 @@ def _analyze_numerics(context: _LSSDiagnosticContext) -> tuple[DiagnosticFinding
     if condition is not None and condition >= _CONDITION_WARNING_THRESHOLD:
         accepted_source = fit.terminal_curvature.actual_source
         matrix_kind = context.terminal_policy_matrix_kind
-        source_label = f"accepted {_accepted_source_label(accepted_source)} {matrix_kind} curvature"
         findings.append(
             _finding(
                 "numerics.conditioning_warning",
                 priority=2,
                 confidence="strong",
-                headline=f"The {source_label} has a large pre-truncation condition estimate.",
-                observed="Its pre-truncation condition estimate meets the warning threshold.",
+                headline=(
+                    f"The {_curvature_phrase(accepted_source, matrix_kind)} is close to singular "
+                    f"(condition estimate {condition:.1e})."
+                ),
+                observed=(
+                    f"The condition estimate, {condition:.1e}, is at or above the warning level of "
+                    f"{_CONDITION_WARNING_THRESHOLD:.1e}."
+                ),
                 interpretation=(
-                    "This is a factor-scale conditioning estimate for the diagonally equilibrated "
-                    "policy matrix before numerical rank truncation."
+                    "Some coefficients may be poorly determined. This is a warning, not proof "
+                    "that they are."
                 ),
                 caveats=(
-                    "The estimator and its norm depend on the accepted decomposition path; it is "
-                    "not the condition number of the unscaled curvature matrix.",
-                    "A post-truncation condition estimate is not retained, so this does not "
-                    "establish amplification among retained fitted directions.",
+                    "The estimate is made after rescaling the matrix and before its smallest "
+                    "directions are dropped.",
+                    "How it is estimated depends on how the matrix was decomposed, and it is not "
+                    "the condition number of the unscaled matrix.",
+                    "No estimate was kept for the directions that remain after dropping, so this "
+                    "does not show that they amplify error.",
                 ),
                 evidence=(
                     DiagnosticEvidence(
@@ -1570,8 +1702,66 @@ def _analyze_numerics(context: _LSSDiagnosticContext) -> tuple[DiagnosticFinding
                     ),
                 ),
                 action_kind="compare_conditioning",
-                action_question="Does a better-conditioned representation preserve fitted outputs?",
+                action_question=(
+                    "Centre numeric columns that sit far from zero, or drop columns that nearly "
+                    "duplicate one another, and check whether the fitted numbers stay the same."
+                ),
                 action_metrics=("condition estimate", "estimable rank", _ALL_FITTED_PARAMETERS),
+            )
+        )
+    return tuple(findings)
+
+
+def _analyze_shape_rules(context: _LSSDiagnosticContext) -> tuple[DiagnosticFinding, ...]:
+    """One plain sentence per term that carried a ``Constraint.fit`` rule: what the rule did."""
+    shape = context.shape_fit
+    if shape is None:
+        return ()
+    findings = []
+    for term in shape.terms:
+        predictor, _, name = term.term.partition(":")
+        subject = DiagnosticSubject(
+            identifier=f"term:{term.term}",
+            display_name=f"the term {term.term!r}",
+            scope="term",
+            predictor=predictor,
+            term=name,
+        )
+        sentence = shape_term_sentence(term, shape)
+        findings.append(
+            _finding(
+                "shape.rule",
+                subject,
+                priority=3,
+                severity="info" if shape.converged else "warning",
+                headline=sentence,
+                observed=(
+                    f"{term.n_binding} of {term.n_rows} rows bind; the curve moved by at most "
+                    f"{term.largest_change:.3g} on the linear-predictor scale."
+                ),
+                interpretation=(
+                    "The coefficients are the fit without the rule, so the curve may break it; "
+                    "refit with a larger max_inner_iter, or relax the rule."
+                    if shape.unruled
+                    else "The smoothing was chosen without the rule and the coefficients were then "
+                    "refitted under it, so a binding rule costs likelihood and fixes the curve "
+                    "at the rows that bind."
+                    if shape.applied
+                    else "The fit without the rule already obeyed it, so it is the fit."
+                ),
+                evidence=_evidence_set(
+                    "fit_result",
+                    ("rule_rows", term.n_rows),
+                    ("rule_rows_binding", term.n_binding),
+                    ("largest_change_in_effect", term.largest_change),
+                    ("refit_converged", shape.converged),
+                ),
+                action_kind="compare_unconstrained_fit",
+                action_question=(
+                    "Refit without the rule and compare the curve, the standard errors and "
+                    "held-out accuracy."
+                ),
+                action_metrics=("fitted curve", "standard errors", "held-out score"),
             )
         )
     return tuple(findings)
@@ -1587,6 +1777,7 @@ _ANALYZERS = (
     _analyze_work_pattern,
     _analyze_curvature,
     _analyze_numerics,
+    _analyze_shape_rules,
 )
 
 
@@ -1657,12 +1848,9 @@ def diagnose_distributional_fit(
         raise TypeError("phase_snapshot must be a FitPhaseSnapshot or None")
     context = _LSSDiagnosticContext.from_model(model)
     smoothing_coverage = (
-        "No smoothing result or smoothing history exists for this fixed fit."
+        "Smoothing was fixed, so there was no search to check."
         if context.smoothing is None
-        else (
-            "Smoothing convergence, trajectory, coefficient-fit summaries, and exact-face "
-            "evidence were examined."
-        )
+        else "Checked: how the smoothing search went, and which terms were smoothed away."
     )
     stationary_coverage = (
         (_stationary_statement(context.smoothing),)
@@ -1681,23 +1869,22 @@ def diagnose_distributional_fit(
             tuple(finding for analyzer in _ANALYZERS for finding in analyzer(context))
         ),
         coverage=(
-            "Accepted compact fit status and revision metadata were examined.",
-            "Terminal coefficient-solver convergence, rank, and curvature telemetry were examined.",
+            "Checked: whether the fit converged, and which revision it is.",
+            "Checked: whether the final coefficient fit converged, how many coefficient "
+            "combinations the data pins down, and the curvature.",
             smoothing_coverage,
             *stationary_coverage,
         ),
         limitations=(
-            "No row, response, weight, exposure, influence, or per-level evidence was examined.",
+            "This check did not look at your rows, responses, weights, exposures or levels.",
             (
-                "No fit timing snapshot was retained; wall-time attribution is unavailable."
+                "No timing was recorded for this fit, so its time cannot be split by phase."
                 if phase_snapshot is None
-                else (
-                    "Phase timings are measurements of this fit on this machine, not portable "
-                    "benchmark claims or per-feature runtime attribution."
-                )
+                else "Timings are for this fit on this machine. They are not benchmarks and are "
+                "not split by term."
             ),
-            "No counterfactual refit recipe or training data was examined; this report cannot "
-            "establish feature usefulness or causal effects.",
+            "It did not refit your model, so it cannot say whether a term is useful or what "
+            "causes an effect.",
         ),
         profile=_build_profile(context, phase_snapshot),
     )

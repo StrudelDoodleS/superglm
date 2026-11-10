@@ -238,10 +238,10 @@ test("a SuperLSS term shows its own title and no average-edit relativity", () =>
   };
   const term = {
     ...TERM,
-    title: "Spread: age",
-    display: { kind: "gamma_cv", reference_eta: -0.6, floor: 0 },
+    title: "Overdispersion: age",
+    display: { kind: "inverse_theta" },
   };
   renderContextBar(nodes, { name: "age", term, selectionSize: 2 });
-  assert.equal(nodes.nameNode.textContent, "Spread: age");
+  assert.equal(nodes.nameNode.textContent, "Overdispersion: age");
   assert.equal(nodes.statusNode.textContent, "2 of 10 selected · selected exposure 25%");
 });

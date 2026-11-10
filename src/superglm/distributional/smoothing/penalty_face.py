@@ -9,6 +9,7 @@ only coefficient updates are represented in the face's reduced coordinates.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 import numpy as np
 import scipy.linalg
@@ -151,6 +152,8 @@ def _expanded_components(
 class PenaltyFace:
     """Immutable certified null space of disjoint penalty components."""
 
+    # A face of another kind (``results.shape.ShapeFace``) may name no penalty component.
+    unnamed_ok: ClassVar[bool] = False
     component_names: tuple[str, ...]
     coefficient_names: tuple[str, ...]
     constraint_matrix: NDArray[np.float64]
@@ -168,7 +171,9 @@ class PenaltyFace:
         basis = _readonly(self.null_basis)
         constraint_basis = _readonly(self.constraint_basis)
         width = len(coefficient_names)
-        if not component_names or len(set(component_names)) != len(component_names):
+        if (not component_names and not self.unnamed_ok) or len(set(component_names)) != len(
+            component_names
+        ):
             raise PenaltyFaceError("a penalty face requires unique component names")
         if constraint.shape != (width, width):
             raise PenaltyFaceError("penalty face constraint shape does not match its layout")

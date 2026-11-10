@@ -1,6 +1,6 @@
 // @ts-check
 
-/** @typedef {'editor'|'validation'|'cv'|'final'} AppView */
+/** @typedef {'editor'|'validation'|'cv'|'final'|'diagnose'|'risk'} AppView */
 /** @typedef {'select'|'move'|'zoom'|'handles'|'knots'} EditorMode */
 /** @typedef {'chart'|'table'} TermView */
 /** @typedef {'idle'|'running'|'error'} MutationStatus */
@@ -38,7 +38,8 @@
  * @property {string|null} [note] the analyst's note, saved with the exported model
  * @property {"applied"|"waiting"|"edit"} [status]
  * @property {string|null} [predictor] SuperLSS only: the family parameter the step acted in
- * @property {string} [predictor_label] SuperLSS only: the history chip, "Average" or "Spread"
+ * @property {string} [predictor_label] SuperLSS only: the history chip: "Mean", "CV" or "1/θ"
+ * @property {"average"|"spread"} [predictor_role] SuperLSS only: the chip's colour group; an entry without one is read from the chip text
  * @property {string} [term_label] SuperLSS only: the bare feature name, without its parameter prefix
  * @property {boolean} [display_decreasing] SuperLSS only: the shown curve falls as the recorded effect rises
  */
@@ -222,7 +223,7 @@
  * @property {string|null} note
  * @property {number} time Unix seconds
  * @property {string|null} [predictor] SuperLSS only: the family parameter the step acts in
- * @property {string} [predictor_label] SuperLSS only: "Average" or "Spread"
+ * @property {string} [predictor_label] SuperLSS only: "Mean", "CV" or "1/θ"
  * @property {string} [term_label] SuperLSS only: the bare feature name
  */
 /**
@@ -278,13 +279,11 @@
  * @property {boolean} fits_levels
  */
 /**
- * How a SuperLSS term's effect on the linear predictor is shown and edited:
- * `reference_eta` is the parameter's link value at the reference point and
- * `floor` the scale floor of a log-normal spread.
+ * How a SuperLSS term's effect on the linear predictor is shown and edited: a
+ * relativity, `exp(effect)`, or for an overdispersion term the relativity of
+ * 1/theta, `exp(-effect)`.
  * @typedef {Object} DisplaySpec
- * @property {'relativity'|'lognormal_cv'|'gamma_cv'|'inverse_theta'} kind
- * @property {number} reference_eta
- * @property {number} floor
+ * @property {'relativity'|'inverse_theta'} kind
  */
 /**
  * @typedef {Object} TermPayload
@@ -313,9 +312,7 @@
  * @property {boolean} [unsmoothed] whether the term has smoothing the Unsmoothed
  *   toggle can switch off: a spline
  * @property {DisplaySpec} [display] SuperLSS terms only: the unit of `y`; absent means relativity
- * @property {number} [baseline] SuperLSS terms only: the display value where the term's effect is zero
  * @property {string} [y_label]
- * @property {'relativity'|'times'|'plain'} [y_format]
  * @property {string} [x_label]
  * @property {string} [title]
  * @property {string} [parameter]
@@ -378,14 +375,16 @@
  * @property {number} model_revision
  */
 /**
- * A parameter's link as the browser inverts it: exp(eta), or floor + exp(eta).
- * @typedef {{kind:"log"} | {kind:"floored_log", floor:number}} DistributionLink
+ * A parameter's link as the browser inverts it: exp(eta), floor + exp(eta), or for a power bounded
+ * between two walls lower + (upper - lower) / (1 + exp(-eta)).
+ * @typedef {{kind:"log"} | {kind:"floored_log", floor:number} |
+ *   {kind:"bounded_logit", lower:number, upper:number}} DistributionLink
  */
 /**
  * @typedef {Object} DistributionParameter
  * @property {string} name the model's parameter name
  * @property {string} label
- * @property {"average"|"spread"} role
+ * @property {"average"|"spread"|"shape"} role
  * @property {DistributionLink} link
  */
 /**
@@ -400,7 +399,7 @@
  * model revision is `{status:"superseded", model_revision}` instead.
  * @typedef {Object} DistributionPanelResponse
  * @property {string} feature
- * @property {"lognormal_mean"|"gamma"|"negative_binomial"} family
+ * @property {"lognormal_mean"|"gamma"|"tweedie"|"negative_binomial"} family
  * @property {"numeric"|"levels"|"empty"} kind
  * @property {string|null} empty_reason
  * @property {Array<{label:string, x:number|null, level:string|null}>} rows
@@ -412,6 +411,49 @@
  * @property {string|null} amount_unit
  * @property {Array<{column:string, value:unknown}>} reference the other features' values
  * @property {string|null} cap_note
+ */
+/**
+ * One feature a risk takes a value of (/risk): a numeric column with its training range, or a
+ * column of levels. `reference` is the reference row's value, and `terms` names, per family
+ * parameter, the term that reads the column.
+ * @typedef {Object} RiskFeature
+ * @property {string} column
+ * @property {"numeric"|"levels"} kind
+ * @property {number|null} min
+ * @property {number|null} max
+ * @property {number|string} reference
+ * @property {string[]|null} levels
+ * @property {Record<string, string>} terms
+ */
+/**
+ * A risk: a value for each feature it names, a number or a level's label. A feature it leaves
+ * out sits at the reference row's value.
+ * @typedef {Record<string, number|string>} RiskValues
+ */
+/** @typedef {"a"|"b"|"c"|"d"|"e"|"f"|"g"|"h"} RiskId a risk's letter, which it keeps while it is held */
+/**
+ * The Explain tab's risks, in the order they were added, and the one its controls and walk are for.
+ * @typedef {{risks:Array<{id:RiskId, values:RiskValues}>, selected:RiskId}} RiskProfiles
+ */
+/**
+ * The /risk response (SuperLSS sessions only): each risk asked for, completed with the reference
+ * row's values, and its link-scale predictors under the fitted and the edited model, in
+ * `parameters` order and with every offset at zero. `kind` is "counts" for a negative binomial,
+ * which has no amount axis.
+ * `reference` is the reference risk's predictors, and a risk's `effects` how far each feature,
+ * in `features` order, moves them when it alone takes the risk's value.
+ * A reply overtaken by a newer model revision is `{status:"superseded", model_revision}` instead.
+ * @typedef {Object} RiskResponse
+ * @property {"lognormal_mean"|"gamma"|"tweedie"|"negative_binomial"} family
+ * @property {DistributionParameter[]} parameters
+ * @property {string|null} amount_unit
+ * @property {"risk"|"counts"} kind
+ * @property {RiskFeature[]} features
+ * @property {{fitted:number[], edited:number[]}} reference
+ * @property {Array<{id?:RiskId, values:RiskValues, eta:{fitted:number[], edited:number[]},
+ *   effects:{fitted:number[][], edited:number[][]}}>} risks `id` is the letter the browser asked
+ *   under, which it puts on the reply
+ * @property {{min_log10:number, max_log10:number, clipped_below:boolean}|null} amount_axis
  */
 /**
  * What Undo and Redo would take next, edits and structural steps alike; null
@@ -491,6 +533,7 @@
  * @property {boolean} showFreeLevels Free levels is on; turned off, the comparison
  *   is kept, so turning it on again for the same term and fit draws it at once
  * @property {boolean} showUnsmoothed the Unsmoothed toggle, off until turned on
+ * @property {RiskProfiles} risks the Explain tab's risks (SuperLSS sessions)
  * @property {Record<string, UnsmoothedEntry>} unsmoothed each term's latest line
  *   or refusal, drawn while its fit is the one in force
  * @property {SummaryLevelDisplay} summaryLevelDisplay
@@ -507,11 +550,13 @@
  *   while the anchor is still `from` and the selection is still `indices`.
  */
 /**
- * @typedef {Object} MutationRequestState
- * @property {MutationStatus} status
- * @property {string|null} operation
- * @property {string|null} error
- * @property {boolean} [blocking]
+ * The editor's hold, moved only by state/mutation.js: nothing running; a change that holds the
+ * editor until it is answered, under the busy overlay (titled `operation`, with `detail`
+ * beneath) when `blocking`; or a change that failed.
+ * @typedef {{status:'idle', operation:null, error:null, blocking?:undefined, detail?:undefined}
+ *   |{status:'running', operation:string, error:null, blocking?:boolean, detail?:string}
+ *   |{status:'error', operation:string, error:string, blocking?:undefined, detail?:undefined}
+ * } MutationRequestState
  */
 /**
  * @typedef {Object} RecoveryRequestState
@@ -609,7 +654,7 @@
  * @property {{supplied:boolean, n_folds:number, splitter:string|null, n_rows:number|null}} header
  * @property {number} pending
  * @property {{available:boolean, reason:string|null, note:string|null}} run_cv
- * @property {{available:boolean, reason:string|null, note:string|null, done:boolean, stale:boolean, n_rows:number|null}} final_fit
+ * @property {{available:boolean, reason:string|null, note:string|null, done:boolean, stale:boolean, n_rows:number|null, has_test_split:boolean}} final_fit
  * @property {Array<{name:string, label:string, short:string, lower_is_better:boolean|null}>} metrics a null direction means closer to 1 is better
  * @property {CVResultPayload[]} results
  * @property {{available:boolean, origin:string|null, stale:boolean, note:string|null, terms:CVTermItem[]}} relativities

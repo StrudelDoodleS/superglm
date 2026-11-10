@@ -254,7 +254,7 @@ default="uniform"
     knot_alpha : float, default=0.2
         Tempering control for ``"quantile_tempered"`` knot placement.
     constraint : ConstraintSpec or ConstraintRules, optional
-        Requested shape constraint, or rules joined with ``&``. See the SuperLSS limitation below.
+        Requested shape constraint, or rules joined with ``&``. See the SuperLSS note below.
     m : int or tuple of int, default=2
         Penalty order: a difference order for P-splines or a derivative order
         for derivative-penalty bases. Multiple orders require a basis that
@@ -270,8 +270,13 @@ default="uniform"
 
     Notes
     -----
-    ``SuperLSS`` currently warns and fits unconstrained when a term requests
-    shape constraints. A ``constraint`` argument does not enforce them there.
+    ``SuperLSS`` enforces ``Constraint.fit`` rules on a term of any parameter: the
+    smoothing is chosen without them and the coefficients are refitted under them
+    at that smoothing, so standard errors treat the rules that bind as fixed
+    (see "Rules On A Distributional Model" in the shape-constraints guide).
+    ``Constraint.postfit`` rules, which repair a curve after the fit, are not
+    applied there: ``SuperLSS`` warns with ``ShapeConstraintIgnoredWarning`` and
+    fits the term unconstrained.
 
     See Also
     --------

@@ -14,8 +14,8 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributional.checks.scores import _scoring_rows
-from superglm.distributional.family import COMPLETE_OBSERVATION
+from superglm.distributional.checks.scores import _scoring_rows, has_closed_form_crps
+from superglm.distributional.family import COMPLETE_OBSERVATION, DistributionFunctionFamily
 from superglm.distributional.weights import (
     LikelihoodWeightError,
     UnsupportedLikelihoodContractError,
@@ -79,7 +79,8 @@ def lss_dataset_metrics(model: Any, dataset) -> dict[str, float]:
     prior weights, whose rows already score their own weighted law.
     ``actual_expected`` is ``sum(w * y) / sum(w * mean)``. Every metric reads
     the rows scoring retains, so a zero-weight row is never predicted. A family
-    without a distribution function has no CRPS, which is then NaN. A split
+    without a distribution function, or whose CRPS has no closed form and cannot
+    be integrated, has no CRPS, which is then NaN. A split
     ``lss_split_reason`` refuses scores NaN throughout.
     """
     lss = _fitted(model)
@@ -91,12 +92,18 @@ def lss_dataset_metrics(model: Any, dataset) -> dict[str, float]:
     kwargs = {"sample_weight": weights, "offsets": dataset.offset}
     rows = _scoring_rows(lss._require_fitted(), dataset.X, y, **kwargs)
     mass = float(rows.aggregation_mass.sum())
-    try:
-        scores = lss.scores(dataset.X, y, which=("log", "crps"), **kwargs)
-        crps_score = float(np.nansum(scores["crps"]) / mass)
-    except NotImplementedError:
+    family = lss._require_fitted().family
+    scores = None
+    # A family with neither a closed form nor a distribution function has no CRPS to try.
+    if has_closed_form_crps(family) or isinstance(family, DistributionFunctionFamily):
+        try:
+            scores = lss.scores(dataset.X, y, which=("log", "crps"), **kwargs)
+        except (NotImplementedError, ValueError):
+            # A bad row raises again from the log score alone, so only the CRPS is dropped here.
+            scores = None
+    crps_score = float("nan") if scores is None else float(np.nansum(scores["crps"]) / mass)
+    if scores is None:
         scores = lss.scores(dataset.X, y, which=("log",), **kwargs)
-        crps_score = float("nan")
     log = scores["log"]
     mean = np.asarray(
         lss._require_fitted().family.default_prediction(

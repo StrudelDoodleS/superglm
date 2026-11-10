@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from tests.editor._editor_waits import wait_for_interception
+from tests.editor._editor_waits import hold_requests, wait_for_interception
 
 pytest.importorskip("playwright.sync_api")
 pytestmark = pytest.mark.browser
@@ -160,3 +160,38 @@ def test_an_error_banner_does_not_hold_the_editor(open_editor_page):
         page.locator("#freeLevelsToggle").click()
         page.locator("#chart .free-levels .free-level").first.wait_for(state="attached")
         assert alert.is_hidden()
+
+
+def test_undo_during_a_free_levels_fit_leaves_the_editor_held(open_editor_page):
+    """Undo's shortcut reaches the page past the busy overlay; the fit holds the editor until it answers."""
+    with open_editor_page(selected_term="age_band") as (page, session):
+        session.select_levels("age_band", ["25-34"])
+        session.shift("age_band", 0.05)
+        page.locator("#refreshAction").click()
+        page.wait_for_function("() => !document.querySelector('#undoAction').disabled")
+        operations: list[str] = []
+        page.on(
+            "request",
+            lambda request: (
+                request.url.split("?", maxsplit=1)[0].endswith("/op")
+                and operations.append(request.url)
+            ),
+        )
+        held = hold_requests(page, "**/free_levels*")
+        overlay = page.locator("#appBusyOverlay")
+
+        page.locator("#freeLevelsToggle").click()
+        held.wait()
+        assert overlay.is_visible()
+        page.keyboard.press("Control+z")
+        page.evaluate(
+            "() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))"
+        )
+        assert overlay.is_visible()
+        assert operations == []
+
+        held[0].continue_()
+        page.locator("#chart .free-levels .free-level").first.wait_for(state="attached")
+        overlay.wait_for(state="hidden")
+        # The edit Undo would have taken is still in force.
+        assert page.locator("#undoAction").is_enabled()

@@ -14,11 +14,10 @@
  * @property {number | null} x  the feature's value, for a numeric fan
  * @property {string | null} level  the level, for a fan of levels
  * @property {Law} law
- * @property {number} mode
- * @property {number} median
- * @property {number} mean
+ * @property {number} median  the median of the amounts above zero, which the shading draws
+ * @property {number} mean  the mean of the amounts above zero
  * @property {number} cut  the log10 amount where the part beyond the line starts
- * @property {boolean} spreadPinned  the spread was clamped to the largest the panel computes
+ * @property {boolean} spreadPinned  the CV was clamped to the largest the panel computes
  */
 
 /** @typedef {{kind: "numeric" | "levels", columns: FanColumn[]}} FanModel */

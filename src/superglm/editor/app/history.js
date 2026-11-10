@@ -404,13 +404,27 @@ function entryMeta(entry, status) {
 }
 
 /**
+ * The colour group of a step's chip: the role the server sent, else, for an entry
+ * from a server that sent none, the chip text it used to carry ("Spread" or
+ * anything else, which was "Average").
+ * @param {TimelineEntry} entry
+ * @returns {"average"|"spread"}
+ */
+export function chipRole(entry) {
+  if (entry.predictor_role === "average" || entry.predictor_role === "spread") {
+    return entry.predictor_role;
+  }
+  return entry.predictor_label === "Spread" ? "spread" : "average";
+}
+
+/**
  * The parameter a distributional model's step acted in, as a chip before the
  * term name; a SuperGLM step has none.
  * @param {TimelineEntry} entry
  */
 function parameterChip(entry) {
   if (typeof entry.predictor_label !== "string" || !entry.predictor_label) return "";
-  const role = entry.predictor_label === "Spread" ? "spread" : "average";
+  const role = chipRole(entry);
   return `<span class="parameter-chip" data-role="${role}">${escapeHTML(entry.predictor_label)}</span> `;
 }
 

@@ -7,7 +7,7 @@ mean (mu), plus the derivative needed by the PIRLS working weights.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import numpy as np
 from numpy.typing import NDArray
@@ -711,3 +711,26 @@ def resolve_link(link: str | Link | None, family: Distribution) -> Link:
             )
         return _LINK_SHORTCUTS[link]()
     raise TypeError(f"Expected str, Link, or None, got {type(link)}")
+
+
+#: Probe used to recognise an inverse link of the form ``c + exp(eta)``.
+_LOG_LINK_PROBE = np.linspace(-1.5, 1.5, 7)
+
+
+def _is_shifted_log_link(link: Any) -> bool:
+    """True when the inverse link is ``c + exp(eta)`` for some constant ``c``.
+
+    That is the whole family for which adding an effect on the link scale
+    multiplies the natural parameter (above its floor) by ``exp(effect)``, so
+    it is the exact condition under which a ``multiplier`` view means anything.
+    Probing ``deriv_inverse`` -- a required method of the ``Link`` protocol --
+    tests the property itself rather than a list of class names that a new
+    family would have to remember to join.
+    """
+    try:
+        derivative = np.asarray(link.deriv_inverse(_LOG_LINK_PROBE), dtype=np.float64)
+    except (AttributeError, TypeError, ValueError, FloatingPointError):
+        return False
+    if derivative.shape != _LOG_LINK_PROBE.shape:
+        return False
+    return bool(np.allclose(derivative, np.exp(_LOG_LINK_PROBE), rtol=1.0e-10, atol=0.0))

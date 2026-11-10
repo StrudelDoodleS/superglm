@@ -14,7 +14,7 @@ from superglm.editor import edit
 from superglm.editor.apply import _term_weights, materialize_edit_request
 from superglm.editor.errors import EditorValueError
 from superglm.editor.lss import split_key
-from superglm.editor.lss.apply import lss_model_with_edits, reference_shift
+from superglm.editor.lss.apply import lss_model_with_edits
 from superglm.features.ordered_categorical import OrderedCategorical
 from tests._lss_editor_fixtures import (
     EPS,
@@ -24,6 +24,7 @@ from tests._lss_editor_fixtures import (
     lognormal_case,
     nb_case,
     open_case,
+    tweedie_case,
 )
 
 
@@ -92,6 +93,8 @@ def test_no_edits_returns_the_fitted_model():
         (lognormal_case, "scale:age"),
         (lognormal_case, "mean:power"),
         (gamma_case, "mean:age"),
+        (tweedie_case, "dispersion:age"),
+        (tweedie_case, "mean:region"),
         (select_case, "mean:age"),
         (ordered_case, "scale:region"),
     ],
@@ -372,7 +375,6 @@ def test_an_edit_the_session_refuses_moves_no_other_spread_curve():
 
     with pytest.raises(EditorValueError, match=r"R9"):
         lss_model_with_edits(session.model, session.terms)
-    assert reference_shift(session.model, session.terms, "scale:age") == 0.0
 
 
 def test_a_parameter_without_an_intercept_refuses_its_edits():

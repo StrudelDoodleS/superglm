@@ -1,99 +1,171 @@
 """How the editor names and shows each SuperLSS parameter.
 
-A mean with a log link is shown as relativities, as the editor shows a SuperGLM
-term. A spread parameter is shown as the readable quantity it controls, at the
-reference row: the coefficient of variation for the log-normal and
-gamma scales, and ``1 / theta`` for the negative binomial. An edit made in those
-units converts back to the term's link-scale effect, clamped to the nearest
-value the parameter can take.
+Every term curve in the editor is a relativity: the factor the term multiplies
+its parameter by, ``exp(effect)`` on the link scale. A negative binomial
+``theta`` term is the relativity of the overdispersion ``1 / theta``,
+``exp(-effect)``, so it rises with overdispersion. A log-normal ``scale`` term
+is the relativity of σ above its floor. No curve is read at a reference row, so
+editing one curve of a parameter never moves another's display, and the
+Cross-validation tab draws the same values (``cv.py``). A Tweedie ``power`` has
+no curves, so it is named here and drawn nowhere else.
+
+The names follow the parameter alone: ``mean`` is "Mean", ``scale`` is "CV" and
+``theta`` is "Overdispersion" (a history chip reads "1/θ"), ``dispersion`` is
+"Dispersion" and ``power`` is "Power". The ``role`` and the colour group the mean
+apart from the other parameters and are not read as words.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from superglm.distributional.families import GammaLS, LogNormalLS, NegativeBinomialLS
-from superglm.editor._types import EditableTerm
+from superglm.distributional.families import (
+    GammaLS,
+    LogNormalLS,
+    NegativeBinomialLS,
+    TweedieLSS,
+)
 from superglm.editor.errors import EditorValueError
 from superglm.editor.lss.view import LSSModelView, split_key
 
-Role = Literal["average", "spread"]
+Role = Literal["average", "spread", "shape"]
 Colour = Literal["blue", "orange"]
-Kind = Literal["relativity", "lognormal_cv", "gamma_cv", "inverse_theta"]
+Kind = Literal["relativity", "inverse_theta"]
 
-# The smallest positive value an edit is converted from: the link of a value at or
+# The smallest positive value an edit is converted from: the log of a value at or
 # below zero does not exist, so it is held here.
 _SMALLEST = 1.0e-12
 
-_ROLES: dict[str, Role] = {"mean": "average", "scale": "spread", "theta": "spread"}
-_COLOURS: dict[Role, Colour] = {"average": "blue", "spread": "orange"}
-_CHIPS: dict[Role, str] = {"average": "Average", "spread": "Spread"}
-_GENERIC_LABELS: dict[Role, str] = {"average": "Average", "spread": "Spread"}
-# The families the editor opens, with how each shows its spread parameter.
-SPREAD_KINDS: dict[type, Kind] = {
-    LogNormalLS: "lognormal_cv",
-    GammaLS: "gamma_cv",
-    NegativeBinomialLS: "inverse_theta",
+_ROLES: dict[str, Role] = {
+    "mean": "average",
+    "scale": "spread",
+    "theta": "spread",
+    "dispersion": "spread",
+    "power": "shape",
 }
-_Y_LABELS: dict[Kind, str] = {
-    "relativity": "relativity",
-    "lognormal_cv": "coefficient of variation",
-    "gamma_cv": "coefficient of variation",
-    "inverse_theta": "overdispersion (1/θ)",
+_COLOURS: dict[Role, Colour] = {"average": "blue", "spread": "orange", "shape": "orange"}
+_CHIPS: dict[str, str] = {
+    "mean": "Mean",
+    "scale": "CV",
+    "theta": "1/θ",
+    "dispersion": "Dispersion",
+    "power": "Power",
 }
-# What a spread parameter's fold curve is a relativity of: its own log-link value.
-_FOLD_VALUES: dict[Kind, str] = {
-    "lognormal_cv": "relativity of σ",
-    "gamma_cv": "relativity of the coefficient of variation",
-    "inverse_theta": "relativity of overdispersion (1/θ)",
+_LABELS: dict[str, str] = {
+    "mean": "Mean",
+    "scale": "CV",
+    "theta": "Overdispersion",
+    "dispersion": "Dispersion",
+    "power": "Power",
 }
-_Y_FORMATS: dict[Kind, str] = {
-    "relativity": "relativity",
-    "lognormal_cv": "times",
-    "gamma_cv": "times",
-    "inverse_theta": "plain",
+_FULL_NAMES: dict[str, str] = {
+    "mean": "the mean: the expected value of the response",
+    "scale": "coefficient of variation (CV): standard deviation ÷ mean",
+    "theta": "overdispersion (1/θ): variance = mean + mean²/θ",
+    "dispersion": "dispersion (φ): the variance is φ times the mean to the power p",
+    "power": "power (p): the variance is the dispersion times the mean to the power p",
 }
+# The families the editor opens.
+SPREAD_FAMILIES: tuple[type, ...] = (LogNormalLS, GammaLS, NegativeBinomialLS, TweedieLSS)
+_Y_LABELS: dict[str, str] = {
+    "mean": "relativity",
+    "scale": "relativity of the CV",
+    "theta": "relativity of the overdispersion",
+    "dispersion": "relativity of the dispersion",
+}
+# The log-normal's scale term multiplies σ above its floor, not the CV the group is named for.
+_LOGNORMAL_Y_LABEL = "relativity of σ"
+
+
+def y_label_for(parameter: str, family: object = None) -> str:
+    """What a term's relativity is a relativity of, as the chart's axis says it."""
+    if parameter == "scale" and isinstance(family, LogNormalLS):
+        return _LOGNORMAL_Y_LABEL
+    return _Y_LABELS.get(parameter, "relativity")
 
 
 @dataclass(frozen=True)
 class ParameterDisplay:
-    """A parameter's plain name, history chip and identity colour."""
+    """A parameter's label, history chip, full name and identity colour."""
 
     name: str
     label: str
     chip: str
     role: Role
     colour: Colour
+    full_name: str
 
 
 def parameter_display(parameter: str) -> ParameterDisplay:
-    """The plain-language name of ``parameter``, by its role: average or spread."""
+    """The label, chip and full name of ``parameter``: Mean, CV or Overdispersion."""
     role = _ROLES.get(parameter)
     if role is None:
         raise EditorValueError(
-            f"The editor has no display for parameter {parameter!r}; it shows 'mean', 'scale' "
-            "and 'theta'."
+            f"The editor has no display for parameter {parameter!r}; it shows "
+            f"{', '.join(map(repr, _ROLES))}."
         )
-    return ParameterDisplay(parameter, _GENERIC_LABELS[role], _CHIPS[role], role, _COLOURS[role])
+    return ParameterDisplay(
+        parameter,
+        _LABELS[parameter],
+        _CHIPS[parameter],
+        role,
+        _COLOURS[role],
+        _FULL_NAMES[parameter],
+    )
+
+
+@dataclass(frozen=True)
+class DisplayTransform:
+    """Between a term's link-scale effect and the relativity the editor shows for it.
+
+    ``relativity`` shows ``exp(effect)``; ``inverse_theta`` shows ``exp(-effect)``,
+    the relativity of the overdispersion ``1 / theta``, which falls as the
+    recorded effect rises.
+    """
+
+    kind: Kind = "relativity"
+
+    @property
+    def _direction(self) -> float:
+        return 1.0 if self.kind == "relativity" else -1.0
+
+    def to_display(self, effect: ArrayLike) -> NDArray[np.float64]:
+        return np.exp(self._direction * np.asarray(effect, dtype=np.float64))
+
+    def from_display(self, values: ArrayLike) -> NDArray[np.float64]:
+        v = np.asarray(values, dtype=np.float64)
+        return self._direction * np.log(np.maximum(v, _SMALLEST))
+
+    def to_payload(self) -> dict[str, str]:
+        return {"kind": self.kind}
+
+    @property
+    def increasing(self) -> bool:
+        """Whether the shown value rises with the effect; the overdispersion's falls."""
+        return self.kind == "relativity"
+
+
+RELATIVITY = DisplayTransform("relativity")
+INVERSE_THETA = DisplayTransform("inverse_theta")
 
 
 @dataclass(frozen=True)
 class FoldTermDisplay:
     """How the Cross-validation tab shows a term.
 
-    ``label`` names it anywhere and ``short`` within its ``group``'s list; ``sign``
-    is the way up its log curve is drawn, and ``value`` what the curve shows. A term
-    of a SuperGLM has no group.
+    ``label`` names it anywhere and ``short`` within its ``group``'s list;
+    ``transform`` turns its link-scale effect into the curve drawn, as the Editor
+    tab draws it, and ``value`` says what the curve is a relativity of. A term of
+    a SuperGLM has no group.
     """
 
     label: str
     short: str
-    sign: float = 1.0
+    transform: DisplayTransform = RELATIVITY
     group: str | None = None
     role: Role | None = None
     value: str = "relativity"
@@ -102,106 +174,30 @@ class FoldTermDisplay:
 def fold_chart_display(key: str, family: object = None) -> FoldTermDisplay:
     """How the Cross-validation tab shows the SuperLSS term ``key`` of a ``family`` model.
 
-    A theta curve is drawn as the 1/theta the editor shows, so higher means more
-    spread on every spread curve.
+    The curve is the one the Editor tab draws for the term, so a theta curve is
+    the relativity of the overdispersion and rises with it.
     """
     parameter, column = split_key(key)
     shown = parameter_display(parameter)
-    value = "relativity"
-    if shown.role == "spread":
-        kind = next((kind for cls, kind in SPREAD_KINDS.items() if isinstance(family, cls)), None)
-        value = "relativity of the spread" if kind is None else _FOLD_VALUES[kind]
     return FoldTermDisplay(
         label=f"{column} · {shown.label}",
         short=column,
-        sign=-1.0 if parameter == "theta" else 1.0,
+        transform=_transform_of(parameter),
         group=shown.label,
         role=shown.role,
-        value=value,
+        value=y_label_for(parameter, family),
     )
 
 
-@dataclass(frozen=True)
-class DisplayTransform:
-    """Between a term's link-scale effect and the number the editor shows for it.
-
-    ``reference_eta`` is the parameter's link predictor at the reference row
-    less the term's own part there, so ``reference_eta + effect`` is the link
-    predictor with only this term's column moved. ``floor`` is the log-normal
-    scale's lower bound.
-    """
-
-    kind: Kind
-    reference_eta: float = 0.0
-    floor: float = 0.0
-
-    def to_display(self, effect: ArrayLike) -> NDArray[np.float64]:
-        e = np.asarray(effect, dtype=np.float64)
-        if self.kind == "relativity":
-            return np.exp(e)
-        eta = self.reference_eta + e
-        if self.kind == "lognormal_cv":
-            sigma = self.floor + np.exp(eta)
-            return np.sqrt(np.expm1(sigma**2))
-        if self.kind == "gamma_cv":
-            return np.exp(eta)
-        return np.exp(-eta)
-
-    def from_display(self, values: ArrayLike) -> NDArray[np.float64]:
-        v = np.asarray(values, dtype=np.float64)
-        if self.kind == "relativity":
-            return np.log(np.maximum(v, _SMALLEST))
-        if self.kind == "lognormal_cv":
-            sigma = np.sqrt(np.log1p(np.maximum(v, 0.0) ** 2))
-            return np.log(np.maximum(sigma - self.floor, _SMALLEST)) - self.reference_eta
-        if self.kind == "gamma_cv":
-            return np.log(np.maximum(v, _SMALLEST)) - self.reference_eta
-        return -np.log(np.maximum(v, _SMALLEST)) - self.reference_eta
-
-    def to_payload(self) -> dict[str, float | str]:
-        return {
-            "kind": self.kind,
-            "reference_eta": float(self.reference_eta),
-            "floor": float(self.floor),
-        }
-
-    @property
-    def increasing(self) -> bool:
-        """Whether the shown value rises with the effect; ``1 / theta`` falls."""
-        return self.kind != "inverse_theta"
-
-    @property
-    def y_label(self) -> str:
-        return _Y_LABELS[self.kind]
-
-    @property
-    def y_format(self) -> str:
-        return _Y_FORMATS[self.kind]
+def _transform_of(parameter: str) -> DisplayTransform:
+    return INVERSE_THETA if parameter == "theta" else RELATIVITY
 
 
-RELATIVITY = DisplayTransform("relativity")
-
-
-def display_for(
-    model: object, key: str, terms: Mapping[str, EditableTerm] | None = None
-) -> DisplayTransform:
-    """How the term ``key`` of ``model`` is shown; relativities for anything but a SuperLSS spread.
-
-    A spread is shown at the reference row under the model in force: with
-    ``terms``, the editor's terms, the other edited terms of the parameter move
-    the reference; without them it is the fit's.
-    """
-    if not isinstance(model, LSSModelView) or model.parameter_of(key) == "mean":
+def display_for(model: object, key: str) -> DisplayTransform:
+    """How the term ``key`` of ``model`` is shown: a relativity, of 1/θ for a theta term."""
+    if not isinstance(model, LSSModelView):
         return RELATIVITY
-    family = model.family
-    kind = next(kind for cls, kind in SPREAD_KINDS.items() if isinstance(family, cls))
-    floor = family.scale_floor if isinstance(family, LogNormalLS) else 0.0
-    reference = model.reference_eta(key)
-    if terms is not None:
-        from superglm.editor.lss.apply import reference_shift
-
-        reference += reference_shift(model, terms, key)
-    return DisplayTransform(kind, reference, floor)
+    return _transform_of(model.parameter_of(key))
 
 
 _MIRRORED_OPERATIONS = {
@@ -227,7 +223,9 @@ def directed_operation(model: object, key: str | None, operation: str) -> tuple[
 
 
 def lss_history_fields(view: LSSModelView, key: str | None) -> dict[str, str | bool]:
-    """The parameter, its chip and the term a history entry names; empty for no term.
+    """The parameter, its chip, its role and the term a history entry names; empty for no term.
+
+    ``predictor_role`` is the chip's colour group, so the browser need not read the chip text.
 
     ``display_decreasing`` says the shown curve falls as the recorded effect rises,
     so History names a recorded shift, monotone fit or snap by the shown direction.
@@ -235,35 +233,27 @@ def lss_history_fields(view: LSSModelView, key: str | None) -> dict[str, str | b
     if key is None:
         return {}
     parameter, label = split_key(key)
-    chip = parameter_display(parameter).chip
+    shown = parameter_display(parameter)
     return {
         "predictor": parameter,
-        "predictor_label": chip,
+        "predictor_label": shown.chip,
+        "predictor_role": shown.role,
         "term_label": label,
         "display_decreasing": not display_for(view, key).increasing,
     }
 
 
-def lss_term_fields(
-    view: LSSModelView, key: str, terms: Mapping[str, EditableTerm]
-) -> dict[str, object]:
-    """The payload fields a SuperLSS term carries beyond a SuperGLM term's.
-
-    ``baseline`` is the display value when the term's own effect is zero, the
-    line the chart measures the curve from; ``terms`` are the editor's terms.
-    """
+def lss_term_fields(view: LSSModelView, key: str) -> dict[str, object]:
+    """The payload fields a SuperLSS term carries beyond a SuperGLM term's."""
     parameter, label = split_key(key)
     shown = parameter_display(parameter)
-    transform = display_for(view, key, terms)
     return {
         "parameter": parameter,
         "parameter_label": shown.label,
         "parameter_role": shown.role,
         "term_label": label,
-        "display": transform.to_payload(),
-        "baseline": float(transform.to_display(0.0)),
-        "y_label": transform.y_label,
-        "y_format": transform.y_format,
+        "display": display_for(view, key).to_payload(),
+        "y_label": y_label_for(parameter, view.family),
         "x_label": label,
         "title": label,
     }

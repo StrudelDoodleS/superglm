@@ -135,13 +135,14 @@ export function formatOneInN(p) {
 
 /**
  * A chance as a percentage or as "1 in N". Small chances keep their significant figures instead of
- * rounding to zero.
+ * rounding to zero; a chance of one half or more is always a percentage, since "1 in 1.0" says
+ * nothing.
  * @param {number} p
  * @param {"percent" | "one_in"} style
  * @returns {string}
  */
 export function formatChance(p, style) {
-  if (style === "one_in") return `1 in ${formatOneInN(p)}`;
+  if (style === "one_in" && p < 0.5) return `1 in ${formatOneInN(p)}`;
   if (p >= 0.01) return `${(100 * p).toFixed(1)}%`;
   return p >= CHANCE_MIN ? `${(100 * p).toPrecision(2)}%` : CHANCE_FLOOR_TEXT;
 }
@@ -187,6 +188,21 @@ export function ordinal(p) {
   const teen = n % 100 >= 11 && n % 100 <= 13;
   const suffix = v !== n || teen ? "th" : (ORDINAL_SUFFIX[n % 10] ?? "th");
   return `${digits}${suffix}`;
+}
+
+/**
+ * A starting amount that lies inside the axis, so some of the tail past it is drawn and the slider
+ * can move right: a value on or past the axis's top becomes the largest 1, 2 or 5 times a power of
+ * ten just below the top.
+ * @param {number} value
+ * @param {AmountAxis} axis
+ * @returns {number}
+ */
+export function amountInsideAxis(value, axis) {
+  const room = axis.max_log10 - 0.05;
+  if (Math.log10(value) < room) return value;
+  const decade = Math.floor(room);
+  return [5, 2, 1].map((m) => m * 10 ** decade).find((v) => Math.log10(v) <= room) ?? 10 ** decade;
 }
 
 /**

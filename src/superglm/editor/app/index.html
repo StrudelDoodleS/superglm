@@ -63,6 +63,8 @@
           role="tab" aria-selected="false" aria-controls="reportPanel" tabindex="-1">Final Fit</button>
         <button id="diagnoseTab" class="app-tab" type="button" data-view="diagnose"
           role="tab" aria-selected="false" aria-controls="reportPanel" tabindex="-1">Diagnose</button>
+        <button id="explainTab" class="app-tab" type="button" data-view="risk"
+          role="tab" aria-selected="false" aria-controls="riskView" tabindex="-1" hidden>Explain</button>
       </div>
       <button id="jobPill" class="job-pill" type="button" hidden aria-live="polite"
         data-popover-title="Background job"
@@ -719,6 +721,9 @@
       aria-label="Close inspector" hidden></button>
   </div>
   </div>
+  <section id="riskView" class="risk-view app-view" aria-label="One risk, explained" hidden>
+    <div id="riskPanel" class="distribution-panel risk-panel"></div>
+  </section>
   <section id="reportPanel" class="report-panel app-view" hidden>
     <div class="report-header">
       <div>

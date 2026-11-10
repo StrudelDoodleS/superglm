@@ -160,6 +160,37 @@ the constructor options and each helper. Mean and location are distinct
 parameters where a family offers both forms; choosing a form changes what the
 first additive predictor describes.
 
+## What the editor calls each parameter
+
+The model editor opens `GammaLS`, `LogNormalLS`, `NegativeBinomialLS` and
+`TweedieLSS`, and labels each parameter by its name alone:
+
+| Parameter | Families | Editor label | What it is |
+| --- | --- | --- | --- |
+| `mean` | all four | **Mean** | the mean: the expected value of the response |
+| `scale` | `GammaLS`, `LogNormalLS` | **CV** | coefficient of variation (CV): standard deviation ÷ mean |
+| `theta` | `NegativeBinomialLS` | **Overdispersion** (**1/θ** in History) | overdispersion (1/θ): variance = mean + mean²/θ |
+| `dispersion` | `TweedieLSS` | **Dispersion** | dispersion (φ): the variance is φ times the mean to the power p |
+| `power` | `TweedieLSS` | **Power** | power (p): the variance is the dispersion times the mean to the power p |
+
+Every term curve in the editor is a relativity: the factor the term multiplies
+its parameter by, `exp(effect)` on the link scale, with 1.00 for no effect. No
+curve is read at a reference row, so editing one curve never moves another, and
+the Cross-validation tab draws each term's curve exactly as the Editor tab does.
+The axis says what the relativity is of:
+
+| Parameter | Axis label | The curve multiplies |
+| --- | --- | --- |
+| `mean` | relativity | the mean |
+| `scale`, `GammaLS` | relativity of the CV | the CV |
+| `scale`, `LogNormalLS` | relativity of σ | σ above its floor (σ = floor + exp(η), σ is the standard deviation of the log response) |
+| `theta` | relativity of the overdispersion | 1/θ, so the curve rises where overdispersion rises (θ is the NB2 size) |
+| `dispersion` | relativity of the dispersion | φ, which is in units of the amount to the power 2 − p |
+
+The power is one constant for the model and has no curves.
+"Average" in the editor names the Average tool and observed averages, never
+the model's mean.
+
 ## Gamma mean–CV model
 
 Gamma results are ordered `mean`, then `scale`, and `fit_reml()` estimates
@@ -1644,20 +1675,34 @@ payload = report.to_dict()  # plain JSON containers; report schema_version 2
 The report leads with the fit's work profile (`report.profile`):
 
 - rows, coefficients, and the wall time of the fit this object ran;
-- the work done: outer EFS iterations, coefficient fits, inner iterations,
-  and how many outer proposals were rejected or backtracked;
-- the time distribution over the recorded phases (likelihood evaluation,
-  curvature and gradient assembly, decomposition solves, EFS updates and
-  backtracking, terminal inference, ...) with each phase's share of the fit
-  and its call count; time the phases do not cover is reported as
-  orchestration and unmeasured. A phase's time leaves out any phase that runs
-  inside it, so the shares add up to the whole fit;
-- one row per smoothing component: initial and final lambda, accepted moves,
-  how often it led the largest accepted move, iterations spent at the cap, the
-  term's terminal EDF, and its outcome: `finite`, `fixed` by the caller,
-  `upper_bound`, `unresolved_cap`, or `exact_face` with the iteration that
-  activated the face and what the face left (`linear_only` for a plain cubic
-  regression spline, `null_space_only`, `fully_suppressed`, or `unresolved`).
+- the work done: smoothing rounds (iterations of the smoothing search),
+  coefficient fits, coefficient-solver steps, and how many smoothing steps
+  were rejected or shortened and retried;
+- the time distribution over the recorded phases (setting up the terms,
+  building the penalties, evaluating the likelihood, computing slopes and
+  curvature, solving for coefficients, trying smaller smoothing steps, final
+  standard errors and the comparison model, ...) with each phase's share of
+  the fit and its call count; time the phases do not cover is reported as
+  "Other (not timed separately)". A phase's time leaves out any phase that
+  runs inside it, so the shares add up to the whole fit. The phase names in
+  `report.profile.phases` are unchanged;
+- one row per smoothing component: initial and final lambda, the rounds in
+  which it moved, the share of rounds in which it moved the most, the rounds
+  spent at the largest lambda allowed, the term's flexibility (its effective
+  degrees of freedom), and its result: `finite` (settled), `fixed` (set by
+  you), `upper_bound` (at the largest smoothing allowed), `unresolved_cap`
+  (at the largest allowed, not resolved), or `exact_face` with the round that
+  smoothed it to its limit and what was left (`linear_only`, a straight line
+  for a plain cubic regression spline; `null_space_only`, the simplest shape
+  its penalty allows; `fully_suppressed`, smoothed away completely; or
+  `unresolved`).
+
+The text report opens with one plain sentence on the result and the status
+code beside it. Findings name a term as you wrote it, say what happened and
+what it means for the numbers you read, and name the argument to change.
+How the search went (one term moving most, a smoothing value rising every
+round, shortened steps) is `info`; only findings that change a number you
+read are `warning` or `error`.
 
 Findings follow the profile, ranked as before. Phase timings are measurements
 of this fit on this machine, not benchmark claims or per-feature attribution.
@@ -1669,11 +1714,12 @@ metrics and says that timing is unavailable.
 What a distributional model does not do yet, and what it refuses, in the
 order you are likely to meet them.
 
-- **Shape constraints are ignored.** A monotone or other shape constraint on
-  a feature (`Constraint.fit.*`, `Constraint.postfit.*`) is not applied on
-  this path: the smooth is fitted unconstrained and
+- **Shape rules hold from `Constraint.fit` only.** A fit-time rule
+  (`Constraint.fit.*`) is enforced: the smoothing is chosen without the rules
+  and the model is then refit with them; see
+  [Rules On A Distributional Model](constrain-a-smooth.md#rules-on-a-distributional-model).
+  A post-fit rule (`Constraint.postfit.*`) is not applied, and
   `ShapeConstraintIgnoredWarning` says so when the model is compiled.
-  Constrained smooths here are planned, with their own design.
 - **Each predictor is penalised on its own.** A penalty cannot tie a term in
   the mean predictor to a term in the scale predictor.
 - **Offsets belong to predictors.** Use `offset=` on a family helper or

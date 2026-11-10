@@ -20,7 +20,15 @@ from superglm.editor.lss.panel import distribution_panel_payload, link_spec
 from superglm.editor.payloads import session_payload
 from superglm.editor.server import create_editor_app
 from superglm.links import IdentityLink
-from tests._lss_editor_fixtures import EPS, FitCase, gamma_case, lognormal_case, nb_case, open_case
+from tests._lss_editor_fixtures import (
+    EPS,
+    FitCase,
+    gamma_case,
+    lognormal_case,
+    nb_case,
+    open_case,
+    tweedie_case,
+)
 from tests.test_editor import editor_frame, editor_model  # noqa: F401
 
 COUNTS_REASON = "Count distributions are not drawn in this panel."
@@ -110,13 +118,13 @@ def test_parameters_carry_their_labels_roles_and_links():
     assert lognormal == [
         {
             "name": "mean",
-            "label": "Average",
+            "label": "Mean",
             "role": "average",
             "link": {"kind": "log"},
         },
         {
             "name": "scale",
-            "label": "Spread",
+            "label": "CV",
             "role": "spread",
             "link": {"kind": "floored_log", "floor": LogNormalLS().scale_floor},
         },
@@ -124,6 +132,33 @@ def test_parameters_carry_their_labels_roles_and_links():
     gamma = _panel(open_case(gamma_case()), "age")
     assert gamma["family"] == "gamma"
     assert [parameter["link"] for parameter in gamma["parameters"]] == [{"kind": "log"}] * 2
+
+
+def test_a_tweedie_panel_names_three_parameters_and_draws_no_power_curve():
+    case = tweedie_case()
+    panel = _panel(open_case(case), "age")
+    low, high = case.model.family.power_lower, case.model.family.power_upper
+    assert panel["family"] == "tweedie"
+    assert panel["parameters"] == [
+        {"name": "mean", "label": "Mean", "role": "average", "link": {"kind": "log"}},
+        {"name": "dispersion", "label": "Dispersion", "role": "spread", "link": {"kind": "log"}},
+        {
+            "name": "power",
+            "label": "Power",
+            "role": "shape",
+            "link": {"kind": "bounded_logit", "lower": low, "upper": high},
+        },
+    ]
+    assert panel["term_keys"] == {"mean": "mean:age", "dispersion": "dispersion:age"}
+    assert np.shape(panel["eta"]["fitted"]["rows"]) == (8, 3)
+    # The link the browser reads is the model's own: lower + (upper - lower) / (1 + exp(-eta)).
+    eta = np.asarray(panel["eta"]["fitted"]["columns"])
+    natural = case.model.predict_parameters(
+        _frame(open_case(case), "age", [c["x"] for c in panel["columns"]])
+    )
+    np.testing.assert_allclose(
+        low + (high - low) / (1.0 + np.exp(-eta[:, 2])), natural["power"], rtol=0, atol=8 * EPS
+    )
 
 
 def test_a_link_the_browser_cannot_draw_is_refused():
@@ -165,7 +200,13 @@ def test_levels_within_the_cap_come_without_a_note():
 
 @pytest.mark.parametrize(
     ("case", "feature"),
-    [(lognormal_case, "age"), (gamma_case, "age"), (lognormal_case, "region")],
+    [
+        (lognormal_case, "age"),
+        (gamma_case, "age"),
+        (lognormal_case, "region"),
+        (tweedie_case, "age"),
+        (tweedie_case, "region"),
+    ],
 )
 def test_fitted_eta_matches_predict_link_at_the_reference_row(case, feature):
     fit = case()
@@ -277,6 +318,58 @@ def test_an_underflowing_lower_quantile_gives_a_capped_axis():
     assert panel["amount_axis"] == {"min_log10": top - 10, "max_log10": top, "clipped_below": True}
 
 
+def _tweedie_zero_mass(model, frame):
+    """P(Y = 0) per row from the compound Poisson-gamma rate mu^(2-p) / (phi (2-p))."""
+    natural = model.predict_parameters(frame)
+    power = natural["power"].to_numpy()
+    rate = natural["mean"].to_numpy() ** (2.0 - power) / (
+        natural["dispersion"].to_numpy() * (2.0 - power)
+    )
+    return np.exp(-rate)
+
+
+def _tweedie_axis(session, panel, models):
+    """The axis the rule gives: whole decades from the positive part's 0.001 quantile up to the
+    law's 0.999 quantile (the positive part's, where the law's zero mass reaches it)."""
+    frame = _frame(session, "age", [row["x"] for row in panel["rows"]])
+    low, high = [], []
+    for model in models:
+        zero = _tweedie_zero_mass(model, frame)
+        low.append(model.predict_quantile(frame, zero + 0.001 * (1.0 - zero)))
+        level = np.where(zero < 0.999, 0.999, zero + 0.999 * (1.0 - zero))
+        high.append(model.predict_quantile(frame, level))
+    q_low, q_high = float(np.min(low)), float(np.max(high))
+    assert q_low > 0.0
+    return {
+        "min_log10": math.floor(math.log10(q_low)),
+        "max_log10": math.ceil(math.log10(q_high)),
+        "clipped_below": False,
+    }
+
+
+def test_a_tweedie_amount_axis_starts_from_the_positive_part_of_the_law():
+    case = tweedie_case()
+    session = open_case(case)
+    _shift(session, "dispersion:age", 1.0)
+    panel = _panel(session, "age")
+    edited = _edited(session)
+    frame = _frame(session, "age", [row["x"] for row in panel["rows"]])
+    assert np.all(_tweedie_zero_mass(edited, frame) > 0.5), "no claim must be the likelier outcome"
+    assert float(np.max(edited.predict_quantile(frame, 0.001))) == 0.0
+    assert panel["amount_axis"] == _tweedie_axis(session, panel, [case.model, edited])
+
+
+def test_a_tweedie_risk_that_almost_never_claims_still_gets_a_positive_axis():
+    case = tweedie_case()
+    session = open_case(case)
+    _shift(session, "dispersion:age", 8.0)
+    panel = _panel(session, "age")
+    edited = _edited(session)
+    frame = _frame(session, "age", [row["x"] for row in panel["rows"]])
+    assert float(np.min(_tweedie_zero_mass(edited, frame))) > 0.999
+    assert panel["amount_axis"] == _tweedie_axis(session, panel, [case.model, edited])
+
+
 def test_amount_unit_is_the_one_the_editor_was_opened_with():
     assert _panel(open_case(lognormal_case(), amount_unit="€"), "age")["amount_unit"] == "€"
 
@@ -291,8 +384,8 @@ def test_counts_use_one_year_and_are_empty_until_pr3():
     assert panel["amount_axis"] is None
     assert [parameter["name"] for parameter in panel["parameters"]] == ["mean", "theta"]
     assert [parameter["label"] for parameter in panel["parameters"]] == [
-        "Average",
-        "Spread",
+        "Mean",
+        "Overdispersion",
     ]
     assert panel["parameters"][0]["link"] == {"kind": "log"}
 
@@ -454,18 +547,23 @@ def test_the_widget_serves_the_model_in_force():
         widget.close()
 
 
-def test_a_spread_curve_and_its_ridges_agree_after_another_term_is_edited():
-    # Shifting scale:age moves the spread at the reference row, so the region curve and the
-    # region ridges must both show the edited model there.
+def test_a_spread_curve_is_unmoved_by_an_edit_to_another_term_and_the_ridges_follow_it():
+    # Shifting scale:age moves the spread at the reference row. The region curve is a relativity,
+    # so it stays where it was; the region ridges show the edited model, and still differ
+    # between levels by the curve's own factors.
     session = open_case(gamma_case())
+    before = session_payload(session)["scale:region"]
     _shift(session, "scale:age", 0.3)
     panel = _panel(session, "region")
     curve = session_payload(session)["scale:region"]
+    assert curve["y"] == before["y"]
     scale = panel["parameters"].index(next(p for p in panel["parameters"] if p["name"] == "scale"))
     edited = np.asarray(panel["eta"]["edited"]["rows"])[:, scale]
     fitted = np.asarray(panel["eta"]["fitted"]["rows"])[:, scale]
     shown = np.log([curve["y"][curve["levels"].index(row["level"])] for row in panel["rows"]])
-    np.testing.assert_allclose(shown, edited, rtol=0, atol=_tolerance(session, edited))
+    np.testing.assert_allclose(
+        shown - shown[0], edited - edited[0], rtol=0, atol=_tolerance(session, edited)
+    )
     np.testing.assert_allclose(edited - fitted, 0.3, rtol=0, atol=_tolerance(session, edited))
 
 

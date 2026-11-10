@@ -181,5 +181,5 @@ pd.Series(model.compare(flat_scale, book, amount, which="log").overall).round(4)
 
 The mean log-score
 difference is -0.029 in favour of the varying-scale model, with a t statistic
-of -6.7 on 3,000 rows: the age effect on the spread is not a rounding artefact,
+of -6.7 on 3,000 rows: the age effect on the scale is not a rounding artefact,
 and the check above is what it looks like when it is modelled.
