@@ -268,6 +268,60 @@ def test_solved_row_pass_is_bitwise_at_every_worker_count(monkeypatch):
         assert results[workers][2].tobytes() == results[1][2].tobytes()
 
 
+def test_a_pooled_block_forms_its_solved_rows_a_piece_at_a_time(monkeypatch):
+    """A support-route job holds one piece of solved rows, never its whole block.
+
+    The pool runs as many jobs as ``max_memory`` admits and each holds what it
+    forms, so a whole ``rows x p`` block of solved rows per job multiplied the
+    REML stop confirmation's peak memory by the worker count.  Each row is
+    formed once, in pieces of at most ``_support_piece_rows`` rows, and the
+    pool is charged one piece's copies, not the block's.  The terms keep the
+    Gram route's rounding bound (``_rounding_bounds``) and the same bits at
+    every worker count.  Mutation: one kernel call per block (the unpieced
+    pass) fails the shape count and the charge.
+    """
+    import superglm.reml._leverage_rows as leverage_rows
+    from superglm._parallel import parallel_config
+
+    _solved_rows_only(monkeypatch)
+    model = _poisson_model(1.0e3)
+    args, kwargs = _correction_inputs(model)
+    n, p = model._dm.n, model._dm.p
+    monkeypatch.setattr(leverage_rows, "_BLOCK_BYTES", 1)  # 256-row blocks
+    formed: list[int] = []
+    kernel = leverage_rows._solved_rows_and_leverages
+
+    def counted(solved, *rest):
+        formed.append(solved.shape[0])
+        return kernel(solved, *rest)
+
+    monkeypatch.setattr(leverage_rows, "_solved_rows_and_leverages", counted)
+    charged: list[int] = []
+    pooled_map = w_derivatives.pooled_map
+
+    def charged_map(fn, items, item_bytes):
+        charged.append(item_bytes)
+        return pooled_map(fn, items, item_bytes)
+
+    monkeypatch.setattr(w_derivatives, "pooled_map", charged_map)
+    monkeypatch.setattr(leverage_rows, "_PIECE_BYTES", 1, raising=False)  # 64-row pieces
+    results = {}
+    for workers in (1, 4):
+        formed.clear()
+        with parallel_config(n_jobs=workers):
+            results[workers] = w_derivatives.reml_w_correction(
+                *args, leverage_hessian=True, **kwargs
+            )
+        assert sum(formed) == n  # every row once (Poisson log: every row has a weight derivative)
+        assert max(formed) == 64 and len(formed) == 6 * 4  # six blocks of four pieces
+    assert charged and charged[-1] < 4 * 8 * 256 * p  # a block's copies were the charge
+    assert results[4][0].tobytes() == results[1][0].tobytes()
+    assert results[4][2].tobytes() == results[1][2].tobytes()
+    gradient, reference_cross, gradient_bound, cross_bound = _rounding_bounds(model)
+    assert np.all(np.abs(results[4][0] - gradient) <= gradient_bound)
+    assert np.all(np.abs(results[4][2] - reference_cross) <= cross_bound)
+
+
 def _outlier_case() -> dict:
     """A dense column with a ``1e200`` row that carries no weight, beside a categorical."""
     rng = np.random.default_rng(9411)
