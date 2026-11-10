@@ -336,16 +336,13 @@ _PPFORM_TAIL_COEFFICIENTS = (0.0, 0.0, 0.0)
 
 
 def _continuous_ppform_block(
-    model: Any,
+    model: Any,  # a SuperGLM, or any object with its term_inference and predict
     name: str,
     centering: str,
     weights: NDArray,
     values: NDArray,
 ) -> RatingTableBlock:
     """A continuous term as its exact polynomial pieces, plus a lookup fallback.
-
-    ``model`` is a SuperGLM, or any object with its ``term_inference`` and ``predict`` (a
-    SuperLSS parameter's curves).
 
     Seven columns, in two halves.  The first three are the ordinary
     binned-block columns -- an interval key, a relativity, an exposure weight --

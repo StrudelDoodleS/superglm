@@ -31,11 +31,9 @@ from numpy.typing import NDArray
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.distributional.offsets import prediction_offsets, sources_of
 from superglm.distributional.terms import (
-    _LOG_LINK_PROBE,
     _coefficient_columns,
     _compiled_predictor,
     _feature_label,
-    _is_shifted_log_link,
     _prepare_term_effect,
     _reference_design,
     _term_kind,
@@ -54,6 +52,7 @@ from superglm.export.rating_tables import (
 from superglm.features.interaction import CategoricalInteraction
 from superglm.features.spline import _SplineBase
 from superglm.inference._term_helpers import _build_spline_metadata
+from superglm.links import _LOG_LINK_PROBE, _is_shifted_log_link
 
 _OFFSET_KINDS = ("auto", "discrete", "per_unit")
 

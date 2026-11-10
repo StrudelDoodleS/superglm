@@ -32,7 +32,7 @@ from superglm.group_matrix import (
     SparseSSPGroupMatrix,
     SupportCompressedSSPGroupMatrix,
 )
-from superglm.links import Link, resolve_link
+from superglm.links import Link, _is_shifted_log_link, resolve_link
 from superglm.reml.penalty_algebra import build_penalty_components
 from superglm.terms import check_column_label, check_column_texts
 from superglm.types import FeatureSpec, PenaltyComponent
@@ -97,8 +97,6 @@ def _relativity_rules_on_log_links_only(
     On another link a term adds to the parameter instead of multiplying it, so a cap's bounds
     would bind a sum read as if it were a product; the feature keeps its other rules.
     """
-    from superglm.distributional.terms import _is_shifted_log_link
-
     if parameter is None or _is_shifted_log_link(resolve_predictor_link(parameter, predictor)):
         return predictor
     features = {}
