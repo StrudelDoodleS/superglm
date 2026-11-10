@@ -140,6 +140,38 @@ class TestNB2DevianceUnit:
         assert np.isfinite(result.deviance)
         assert result.intercept < 60.0
 
+    @pytest.mark.parametrize("theta", [1.7, 1e4, 1e8, 1e12])
+    def test_poisson_limit_keeps_the_deviance_to_a_few_u_of_its_terms(self, theta):
+        """#604: at theta = 1e8 the quotient form lost about ``theta u`` per row.
+
+        ``(y + theta) log((y + theta) / (mu + theta))`` takes the log of a quotient
+        within 1e-8 of one, so a rounding of ``u`` in the quotient became an error of
+        about ``theta u = 1e-8`` on a unit deviance of order one. The inner solve's line
+        search then could not resolve its own steps, and an NB2 REML fit with theta
+        on its upper bound stopped ``line_search_failed``. The reference is the same
+        formula at 80 digits.
+
+        Bound: the deviance subtracts two terms, ``y log(y / mu)`` and the theta term;
+        each is formed by at most ten roundings and one ``log`` or ``log1p`` (at most
+        4 ulp = 8 u each in NumPy's builds), so 32 u of their summed magnitude covers
+        it with room. Unfixed, theta = 1e8 misses that bound by about seven decades.
+        """
+        mp = pytest.importorskip("mpmath")
+        y = np.array([0.0, 0.0, 1.0, 1.0, 3.0, 12.0, 12.0, 30.0])
+        mu = np.array([0.4, 30.0, 0.4, 2.5, 2.5, 7.0, 30.0, 12.0])
+        actual = NegativeBinomial(theta=theta).deviance_unit(y, mu)
+        expected, magnitude = [], []
+        with mp.workdps(80):
+            size = mp.mpf(theta)
+            for count, mean in zip(y, mu, strict=True):
+                count, mean = mp.mpf(count), mp.mpf(mean)
+                theta_term = (count + size) * mp.log((count + size) / (mean + size))
+                count_term = count * mp.log(count / mean) if count > 0 else mp.mpf(0)
+                expected.append(float(2 * (count_term - theta_term)))
+                magnitude.append(float(2 * (abs(count_term) + abs(theta_term))))
+        u = 2.0**-53
+        assert np.all(np.abs(actual - np.array(expected)) <= 32 * u * np.array(magnitude))
+
     def test_values_are_the_both_branch_formula_to_the_log_ulps(self):
         theta = 1.7
         y = np.array([0.0, 0.0, 0.0, 0.0, 3.0, 3.0, 1.0, 2.0, 0.0, 5.0])
@@ -149,7 +181,7 @@ class TestNB2DevianceUnit:
                 y * np.log(np.maximum(y, 1e-300) / mu),
                 (y + theta) * np.log((y + theta) / (mu + theta)),
             ]
-            zero_branch = theta * np.log((mu + theta) / theta)
+            zero_branch = theta * np.log1p(mu / theta)
             expected = np.where(
                 y > 0, 2 * (positive_branch[0] - positive_branch[1]), 2 * zero_branch
             )
@@ -170,10 +202,16 @@ class TestNB2DevianceUnit:
         # product and subtraction around it are correctly rounded and may be ordered either
         # way by the two evaluations, 4 u more. A branch that took the wrong formula, or
         # dropped a term, is out by O(1) of ``scale``.
+        # Where mu / theta underflows (mu = 5e-324), the division and the product by
+        # theta each add an absolute error of at most 2**-1075, the second doubled; the
+        # sum is written in 2**-1074, since 2**-1075 itself rounds to zero.
         u = 2.0**-53
+        underflow = (theta + 1) * 2.0**-1074
         finite = np.isfinite(expected)
         np.testing.assert_array_equal(actual[~finite], expected[~finite])
-        assert np.all(np.abs(actual[finite] - expected[finite]) <= (16 + 4) * u * scale[finite])
+        assert np.all(
+            np.abs(actual[finite] - expected[finite]) <= (16 + 4) * u * scale[finite] + underflow
+        )
 
 
 class TestNB2LogLikelihood:

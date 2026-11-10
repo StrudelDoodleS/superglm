@@ -433,21 +433,34 @@ class NegativeBinomial:
         return (2.0 / self.theta) * np.ones_like(mu)
 
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
-        """NB2 unit deviance."""
-        theta = self.theta
-        # np.where evaluates both branches on every row; errstate silences
-        # warnings from the unselected branch (log(0) at y = 0 with a large
-        # trial mu) and changes no value.
+        """NB2 unit deviance.
+
+        Toward the Poisson limit both logarithms take an argument within about
+        ``|y - mu| / theta`` of one. ``log`` of a rounded quotient there carries
+        an absolute error of order ``u``, which the factor ``y + theta`` turns
+        into ``theta u`` on a deviance of order one, so the inner solve's line
+        search cannot resolve its own steps. ``log1p`` of the difference keeps
+        each term's error at a few ``u`` of its own size (Goldberg 1991,
+        Theorem 4). Off the window ``(1/2, 2)`` the logarithm is at least ``log 2``
+        in size and the quotient form is as accurate; the window selects the
+        algorithm, not the value.
+        """
+        theta = float(self.theta)
+        y, mu = np.broadcast_arrays(
+            np.asarray(y, dtype=np.float64), np.asarray(mu, dtype=np.float64)
+        )
+        d = np.empty(y.shape, dtype=np.float64)
+        positive = y > 0
+        count, mean = y[positive], mu[positive]
+        # errstate keeps a trial mu of 0 or inf at its infinite or NaN deviance
+        # without a warning.
         with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-            d = np.where(
-                y > 0,
-                2
-                * (
-                    y * np.log(np.maximum(y, 1e-300) / mu)
-                    - (y + theta) * np.log((y + theta) / (mu + theta))
-                ),
-                2 * theta * np.log((mu + theta) / theta),
-            )
+            d[~positive] = 2 * theta * _log1p_ratio(mu[~positive], np.asarray(theta))
+            quotient = (count + theta) / (mean + theta)
+            log_quotient = np.log(quotient)
+            near = (quotient > 0.5) & (quotient < 2.0)
+            log_quotient[near] = np.log1p((count[near] - mean[near]) / (mean[near] + theta))
+            d[positive] = 2 * (count * np.log(count / mean) - (count + theta) * log_quotient)
         return d
 
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
