@@ -292,7 +292,8 @@ def test_single_column_numeric_term_is_reported_as_a_line(fit_case) -> None:
 
     assert effect.kind == "numeric"
     slope = float(np.asarray(fitted.coefficients)[fitted.layout.term_slices["location:w"]][0])
-    assert effect.effect == pytest.approx(slope * effect.x)
+    # Read against the column's training median, as every other column is held there.
+    assert effect.effect == pytest.approx(slope * (effect.x - np.median(frame["w"])))
 
 
 def test_effect_serialises_to_plain_json(fit_case) -> None:

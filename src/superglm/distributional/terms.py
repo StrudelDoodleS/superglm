@@ -606,6 +606,34 @@ def _reference_row(
     return design[levels.index(str(base))]
 
 
+def _anchor_row(
+    fitted: Any,
+    frame: EagerFrame,
+    evaluation: pd.DataFrame,
+    parameter: str,
+    term: str,
+    state: Any,
+    spec: Any,
+    levels: tuple[str, ...] | None,
+    design: NDArray[np.float64],
+    *term_slices: slice,
+) -> NDArray[np.float64]:
+    """The term's own columns at its reference, which its effect is read against.
+
+    A term with levels is read against its reference level (:func:`_reference_row`)
+    and a ``Numeric`` term against its column's training centre
+    (:func:`_reference_value`), the value a sweep holds that column at for every
+    other term, so its effect is ``beta (x - x_ref)``.  A spline's columns are
+    centred on fitting and are read as they are.
+    """
+    if _term_kind(spec) != "numeric":
+        return _reference_row(spec, levels, design)
+    column = _feature_label(fitted, parameter, term)
+    row = evaluation.iloc[[0]].reset_index(drop=True)
+    row[column] = _reference_value(fitted, frame, column)
+    return _term_design(fitted, row, state, *term_slices)[0]
+
+
 def _reference_design(
     fitted: Any,
     frame: EagerFrame,
@@ -614,12 +642,15 @@ def _reference_design(
     state: Any,
     *term_slices: slice,
 ) -> NDArray[np.float64]:
-    """The term's own columns at its reference level, or zeros for a term with none."""
+    """The term's own columns at its reference (:func:`_anchor_row`), or zeros for a term with none."""
     spec = _compiled_spec(fitted, parameter, term)
-    if spec is None or _level_domain(spec) is None:
+    if spec is None or (_level_domain(spec) is None and _term_kind(spec) != "numeric"):
         return np.zeros(sum(block.stop - block.start for block in term_slices), dtype=np.float64)
     evaluation, _, levels = _sweep(fitted, frame, parameter, term, 2)
-    return _reference_row(spec, levels, _term_design(fitted, evaluation, state, *term_slices))
+    design = _term_design(fitted, evaluation, state, *term_slices)
+    return _anchor_row(
+        fitted, frame, evaluation, parameter, term, state, spec, levels, design, *term_slices
+    )
 
 
 def _term_design(
@@ -727,7 +758,8 @@ def term_effect(
     (:func:`_reference_value`: missing values ignored, a tied mode going to the
     level first in the fitted level order); a term with levels reports one row per
     fitted level, the reference level (and any level pinned to it) reading back as
-    an exact zero.  Bands are the
+    an exact zero.  A ``Numeric`` term is read against its column's training
+    centre, so its effect is ``beta (x - x_ref)`` and is zero there.  Bands are the
     Bayesian pointwise interval and, unless ``simultaneous=False``, the
     max-deviation simultaneous band of Ruppert, Wand and Carroll (2003),
     section 6.5, over ``n_sim`` posterior draws.  ``multiplier`` is
@@ -790,7 +822,9 @@ def _prepare_term_effect(
     names = (qualified,) if special_slice is None else (qualified, special_name)
     spec = _compiled_spec(fitted, parameter, term)
     design = _term_design(fitted, evaluation, state, *blocks)
-    design = design - _reference_row(spec, levels, design)
+    design = design - _anchor_row(
+        fitted, frame, evaluation, parameter, term, state, spec, levels, design, *blocks
+    )
     columns = _coefficient_columns(*blocks)
     beta = np.asarray(fitted.coefficients, dtype=np.float64)
     effect = design @ beta[columns]

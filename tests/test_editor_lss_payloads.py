@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -13,9 +14,12 @@ import pytest
 from superglm import GammaLS, Numeric, OrderedCategorical, Spline, SuperLSS, term
 from superglm.distributional.terms import _resolve_term, _term_design
 from superglm.editor import EditorSession, edit
+from superglm.editor.cv import fold_log_curves, fold_term_items
 from superglm.editor.lss import INVERSE_THETA, RELATIVITY, display_for
 from superglm.editor.lss.apply import lss_model_with_edits
 from superglm.editor.lss.availability import LSS_UNAVAILABLE
+from superglm.editor.lss.display import fold_chart_display
+from superglm.editor.lss.risk import risk_payload
 from superglm.editor.operations import running_extreme_values
 from superglm.editor.payloads import session_payload
 from tests._lss_editor_fixtures import (
@@ -101,21 +105,59 @@ def test_tweedie_dispersion_is_shown_as_relativities():
     assert not any(key.startswith("power:") for key in payload if isinstance(key, str))
 
 
-def test_a_spread_band_far_from_the_link_origin_brackets_its_curve():
-    # Each band end lies about 70 from zero on the link scale: a relativity of 1e30 and more.
+def _far_from_origin_fit():
+    """A CV slope on a covariate near 1000: ``beta x`` is about 710, past where ``exp`` overflows."""
     rng = np.random.default_rng(578)
     t = np.linspace(0.0, 1.0, 360)
-    X = pd.DataFrame({"x": 100.0 + t})
+    X = pd.DataFrame({"x": 1000.0 + t})
     y = rng.gamma(np.exp(2.0 - 2.0 * t), np.exp(1.0) * np.exp(-2.0 + 2.0 * t))
     family = GammaLS()
     model = SuperLSS(family, family.mean(), family.scale(term("x", Numeric()))).fit_reml(X, y)
+    return model, X, y
+
+
+def test_a_spread_band_far_from_the_link_origin_brackets_its_curve():
+    model, X, y = _far_from_origin_fit()
     term_payload = session_payload(edit(model, train_data=(X, y)))["scale:x"]
-    curve = np.asarray(term_payload["y"])
-    lower = np.asarray(term_payload["ci_lower_y"])
-    upper = np.asarray(term_payload["ci_upper_y"])
+    curve = np.asarray(term_payload["y"], dtype=np.float64)
+    lower = np.asarray(term_payload["ci_lower_y"], dtype=np.float64)
+    upper = np.asarray(term_payload["ci_upper_y"], dtype=np.float64)
+    # Read against the training median, the curve is a relativity of 1 there.
+    x = np.asarray(term_payload["x"], dtype=np.float64)
+    slope = model.coef_["scale:x"]
+    np.testing.assert_allclose(curve, np.exp(slope * (x - np.median(X["x"]))), rtol=TOLERANCE)
     assert np.all(np.isfinite(lower)) and np.all(np.isfinite(upper))
     assert np.all(lower <= curve) and np.all(curve <= upper)
     assert np.all(upper > lower)
+
+
+def test_a_linear_term_reads_the_same_on_the_editor_cv_and_explain_tabs():
+    model, X, y = _far_from_origin_fit()
+    session = edit(model, train_data=(X, y))
+    shown = session_payload(session)["scale:x"]
+    curve = np.asarray(shown["y"], dtype=np.float64)
+    assert np.all(np.isfinite(curve))
+
+    # The Cross-validation tab draws the in-force curve, and a fold sits at its level.
+    curves = {0: fold_log_curves(model, session.terms)}
+    (item,) = fold_term_items(
+        {"scale:x": session.terms["scale:x"]},
+        curves,
+        display=partial(fold_chart_display, family=model.family),
+    )
+    np.testing.assert_allclose(item["fit"], curve, rtol=1e-12, atol=0.0)
+    np.testing.assert_allclose(item["folds"][0]["values"], curve, rtol=1e-9, atol=0.0)
+
+    # The Explain tab's walk moves x alone from the reference risk, the training median.
+    picked = [0, 120, 199]
+    reply = risk_payload(session, [{"x": float(shown["x"][i])} for i in picked], edited=model)
+    (feature,) = [f for f in reply["features"] if f["column"] == "x"]
+    assert feature["reference"] == np.median(X["x"])
+    column = [f["column"] for f in reply["features"]].index("x")
+    parameter = [p["name"] for p in reply["parameters"]].index("scale")
+    moves = np.array([risk["effects"]["fitted"][column][parameter] for risk in reply["risks"]])
+    # Each move is a difference of two linear predictors built from terms near 710.
+    np.testing.assert_allclose(np.log(curve[picked]), moves, rtol=0.0, atol=1e3 * 710 * EPS)
 
 
 def test_nb_theta_is_the_relativity_of_the_overdispersion():
