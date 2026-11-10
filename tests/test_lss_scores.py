@@ -1661,5 +1661,7 @@ def test_tweedie_crps_at_zero_does_not_cancel_when_a_claim_is_rare():
     """
     from superglm.distributional.checks.scores import crps_closed_form
 
-    value = crps_closed_form(TweedieLSS(), np.array([0.0]), np.array([[1e20, 2e28, 1.5]]))
-    assert value[0] == pytest.approx(50.0, rel=1e-9)
+    law = np.array([[1e20, 2e28, 1.5]] * 3)
+    value = crps_closed_form(TweedieLSS(), np.array([0.0, 50.0, 100.0]), law)
+    # Below every likely claim F is one to 1e-18, so the score grows by y from its value at zero.
+    np.testing.assert_allclose(value, [50.0, 100.0, 150.0], rtol=1e-9)

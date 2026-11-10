@@ -454,9 +454,12 @@ def refit_with_shape_rules(
         held_rows.append(int(crossed[np.argmin(reach)]))
     else:
         converged, reason = False, "line_search_failed"
-    binding = (
-        _feasibility_slack(A, np.asarray(polished.coefficients), b, abs_A=structure.abs_entries)
-        <= bar
+    # A row binds by the reading that built the face, so the rows Diagnose names are the rows
+    # the standard errors hold.
+    final = np.asarray(polished.coefficients, dtype=np.float64)
+    binding = np.array(
+        [_binding_rows(A[[i]], b[[i]], final, scale).shape[0] == 1 for i in range(A.shape[0])],
+        dtype=bool,
     )
     if not converged:
         polished = replace(polished, converged=False, convergence_reason=reason)

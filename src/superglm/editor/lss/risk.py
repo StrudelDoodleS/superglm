@@ -68,14 +68,30 @@ def _scan(view: LSSModelView, column: str) -> tuple:
     return view._column_scans[column]
 
 
+def _term_reading(predictor: Any, column: str) -> str | None:
+    """The key of ``predictor``'s main effect on ``column``, else of an interaction reading it."""
+    compiled = predictor.compiled
+    if column in compiled.feature_order:
+        return lss_key(predictor.name, column)
+    return next(
+        (
+            lss_key(predictor.name, name)
+            for name in compiled.interaction_order
+            if column in compiled.interaction_specs[name].parent_names
+        ),
+        None,
+    )
+
+
 def _describe(session: Any, view: LSSModelView, column: str) -> tuple[dict, dict[str, Any]]:
     """The column's entry of ``features`` and, for levels, each label's training value."""
     reference = view.reference_row()[column].iloc[0]
-    # Every fitted term on the column moves the risk, whether or not it was opened for editing.
+    # Every fitted term that reads the column moves the risk, main effect or interaction, whether or
+    # not it was opened for editing.
     terms = {
-        predictor.name: lss_key(predictor.name, column)
+        predictor.name: key
         for predictor in view._fitted.compiled_predictors
-        if column in predictor.compiled.feature_order
+        if (key := _term_reading(predictor, column)) is not None
     }
     head = {"column": column, "terms": terms}
     first, second = _scan(view, column)
@@ -90,7 +106,12 @@ def _describe(session: Any, view: LSSModelView, column: str) -> tuple[dict, dict
         }, {}
     # A label is the text of a training value, or of a level a term declares that no row holds.
     native = {
-        **{k: v for key in terms.values() for k, v in _native_levels(view._specs[key]).items()},
+        **{
+            k: v
+            for key in terms.values()
+            if key in view._specs
+            for k, v in _native_levels(view._specs[key]).items()
+        },
         **first,
     }
     opened = next(

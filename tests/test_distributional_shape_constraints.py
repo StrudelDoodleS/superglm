@@ -427,3 +427,24 @@ def test_a_cap_on_a_link_that_adds_is_disclosed_and_dropped_keeping_the_shape():
     # The cap is gone (log(1.1) - log(0.9) is 0.2), the increasing rule kept.
     assert np.ptp(location) > 3.0
     assert np.min(np.diff(location)) >= -1e-9 * np.abs(location).max()
+
+
+def test_the_rows_reported_as_binding_are_the_rows_the_standard_errors_hold():
+    """Far from zero a row's own slack reads nothing as binding; the face's reading of the whole
+    fit holds the flattened spline, and the record and Diagnose must say so."""
+    from superglm import GaussianLS, LambdaPolicy
+
+    x = np.linspace(0.0, 1.0, 100)
+    y = 1e6 * (1000.0 + 2.0 - 4.0 * x + 0.1 * np.sin(np.arange(100)))
+    family = GaussianLS()
+    model = SuperLSS(
+        family,
+        family.location(
+            s("x", kind="cr", k=6, constraint=INCREASING, lambda_policy=LambdaPolicy.fixed(0.1))
+        ),
+        family.scale(),
+    ).fit(pd.DataFrame({"x": x}), y)
+    record = _state(model).shape_fit
+    assert record.applied and record.converged
+    assert record.n_binding > 0 and record.binds
+    assert "did not bind" not in model.diagnose().render(detail="full")

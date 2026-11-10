@@ -207,7 +207,9 @@ def _tweedie_block_crps(
     partial = block.scale * np.einsum(
         "ij,ij->j", block.mass * block.shape, special.gammainc(block.shape + 1.0, ratio)
     )
-    distance = mean - response + np.where(response > 0.0, 2.0 * (response * cdf - partial), 0.0)
+    # E|Y - y| less the mean: the mean enters once, below, as (1 - p_0) mean, so a mean far larger
+    # than y never swallows y.
+    residual = np.where(response > 0.0, 2.0 * (response * cdf - partial), 0.0) - response
 
     # A row's window opens at its own first order, so rows sharing one first
     # order share a slice of the distance table.
@@ -221,10 +223,10 @@ def _tweedie_block_crps(
         pairs[rows] = np.einsum(
             "ik,ik->k", table[start : start + width, start : start + width] @ masses, masses
         )
-    # ``distance - p_0 mean`` is ``(1 - p_0) mean - y + ...``; with ``1 - p_0`` read from the rate
-    # it does not cancel where a claim is so rare that ``p_0`` rounds to one.
+    # E|Y - y| - p_0 mean is (1 - p_0) mean plus the residual; 1 - p_0 is read from the rate, so it
+    # does not cancel where a claim is so rare that p_0 rounds to one.
     survive = -np.expm1(-block.rate)
-    return distance - mean + survive * mean - 0.5 * block.scale * pairs
+    return survive * mean + residual - 0.5 * block.scale * pairs
 
 
 def _tweedie_crps(family: Any, y: NDArray, theta: NDArray) -> NDArray[np.float64]:

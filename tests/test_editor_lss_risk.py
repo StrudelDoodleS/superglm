@@ -384,3 +384,22 @@ def test_a_model_that_reads_no_column_explains_its_one_risk():
         only["eta"]["fitted"], model.predict_link(X.iloc[:1]).to_numpy()[0], rtol=1e-12
     )
     assert risk_row(session, 0)["values"] == {}
+
+
+def test_a_column_read_only_by_an_interaction_keeps_its_parameter_in_the_walk():
+    """A mean holding only a factor smooth reads x and g through the interaction alone."""
+    from superglm import FactorSmooth, interaction
+    from superglm.editor import edit
+
+    rng = np.random.default_rng(5)
+    X = pd.DataFrame({"x": rng.uniform(0.0, 1.0, 120), "g": rng.choice(["a", "b"], 120)})
+    y = rng.gamma(4.0, np.exp(2.0 + X.x + 0.8 * (X.g == "b")) / 4.0)
+    family = GammaLS()
+    model = SuperLSS(
+        family, family.mean(interaction(FactorSmooth("x", group="g", k=5))), family.scale()
+    ).fit_reml(X, y)
+    session = edit(model, train_data=(X, y))
+    features = {f["column"]: f for f in _risks(session, [{}])["features"]}
+    assert set(features) == {"x", "g"}
+    for column in ("x", "g"):
+        assert list(features[column]["terms"]) == ["mean"]
