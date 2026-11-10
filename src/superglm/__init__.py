@@ -626,4 +626,4 @@ __all__ = [
     "dispersion_test",
     "vuong_test",
 ]
-__version__ = "0.42.0"
+__version__ = "0.43.0"
