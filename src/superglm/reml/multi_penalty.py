@@ -102,6 +102,24 @@ class _AccuracyGoalMissedError(PenaltyNumericalError):
 
 
 @dataclass(frozen=True)
+class _GeometryAttempt:
+    """A certified attempt kept in case none reaches the gamma_k goal."""
+
+    excess: float
+    E: NDArray
+    J: NDArray
+    logdet: float
+    eta: float
+    duality: float
+    action: tuple[NDArray, ...]
+    gradient: NDArray
+    hessian: NDArray
+    gradient_error: NDArray
+    hessian_error: NDArray
+    log_error: float
+
+
+@dataclass(frozen=True)
 class _ProductEvidence:
     operands: tuple[NDArray, NDArray]
     product: NDArray
@@ -1426,7 +1444,7 @@ def _evaluate_penalty_geometry(
     target = _gamma(8 * (rows + width + rank + count + 1))
     correction_count = 0
     # The attempt nearest the goal among those meeting admission, and its excess.
-    best = None
+    best: _GeometryAttempt | None = None
     excess = 0.0
     for correction_index in range(2):
         evidence = []
@@ -1530,16 +1548,30 @@ def _evaluate_penalty_geometry(
                     h_max / (target * rank**2),
                     log_error / (target * volume_scale),
                 )
-                if best is None or ratio < best[0]:
-                    best = (ratio, E, J, logdet, eta, duality, action, gradient, hessian)
-                    best += (g_error, h_error, log_error)
+                if best is None or ratio < best.excess:
+                    best = _GeometryAttempt(
+                        float(ratio),
+                        E,
+                        J,
+                        float(logdet),
+                        eta,
+                        duality,
+                        action,
+                        gradient,
+                        hessian,
+                        g_error,
+                        h_error,
+                        float(log_error),
+                    )
         if accepted:
             break
     else:
         if best is None:
             raise PenaltyNumericalError("reference root geometry cannot meet the accuracy contract")
-        (excess, E, J, logdet, eta, duality, action, gradient, hessian) = best[:9]
-        g_error, h_error, log_error = best[9:]
+        excess, E, J, logdet = best.excess, best.E, best.J, best.logdet
+        eta, duality, action = best.eta, best.duality, best.action
+        gradient, hessian, log_error = best.gradient, best.hessian, best.log_error
+        g_error, h_error = best.gradient_error, best.hessian_error
     if summary_only:
         summary = _PenaltySummary(
             float(logdet),
