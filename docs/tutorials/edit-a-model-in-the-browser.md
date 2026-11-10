@@ -847,8 +847,8 @@ Folds come from Run CV, or from a supplied result with `return_estimators=True`.
 
 A SuperLSS model works the same way: pass `cross_validate(model, X_train, y_train, cv=folds,
 fit_mode="fit_reml", return_estimators=True)` as `cv=`, with no `scoring=` argument. Its folds are
-scored by log score, CRPS, Gini and actual over expected; a family with no distribution function,
-such as the negative binomial, has no CRPS, and its Validation and Final Fit tabs leave that column
+scored by log score, CRPS, Gini and actual over expected; a family with neither a closed-form CRPS
+nor a distribution function has no CRPS, and its Validation and Final Fit tabs leave that column
 out. Its `offset` is a dict by parameter, and its fold curves are listed under **Mean** and then
 **CV** (**Overdispersion** for a negative binomial, **Dispersion** for a Tweedie), the least stable
 first in each. Every curve, on this tab and on the Editor tab, is a relativity of its parameter and the two tabs

@@ -789,8 +789,8 @@ def cross_validate(
         Metrics to evaluate. Built-in for a SuperGLM: ``"deviance"``, ``"nll"``,
         ``"gini"``; ``"deviance"`` by default. Built-in for a SuperLSS:
         ``"nll"``, ``"crps"``, ``"gini"``, ``"actual_expected"``, all of them by
-        default. A family with no distribution function has no ``"crps"``, so it
-        is left out by default and NaN if asked for. Vector families default
+        default. A family with neither a closed-form CRPS nor a distribution
+        function has no ``"crps"``, so it is left out by default and NaN if asked for. Vector families default
         to joint ``"nll"`` only and explicitly refuse scalar built-in scores;
         custom scalar callables receive the response in canonical component order.
         A SuperLSS has no single

@@ -79,8 +79,8 @@ def lss_dataset_metrics(model: Any, dataset) -> dict[str, float]:
     prior weights, whose rows already score their own weighted law.
     ``actual_expected`` is ``sum(w * y) / sum(w * mean)``. Every metric reads
     the rows scoring retains, so a zero-weight row is never predicted. A family
-    without a distribution function, or whose CRPS has no closed form and cannot
-    be integrated, has no CRPS, which is then NaN. A split
+    whose CRPS has no closed form and either no distribution function or an
+    integral that cannot be resolved has no CRPS, which is then NaN. A split
     ``lss_split_reason`` refuses scores NaN throughout.
     """
     lss = _fitted(model)

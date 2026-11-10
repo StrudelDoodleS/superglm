@@ -481,14 +481,14 @@ def _finished(widget, kind: str) -> dict:
     return status
 
 
-def test_a_count_family_has_no_crps_on_the_tab(nb_cv):
-    assert "crps" not in nb_cv.fold_scores.columns
+def test_a_count_family_shows_its_crps_on_the_tab(nb_cv):
+    assert np.all(np.isfinite(nb_cv.fold_scores["crps"]))
     widget = open_case(nb_case(), cv=nb_cv).widget()
     try:
         names = [metric["name"] for metric in widget._report("cv")["metrics"]]
     finally:
         widget.close()
-    assert names == ["nll", "gini", "actual_expected"]
+    assert names == ["nll", "crps", "gini", "actual_expected"]
 
 
 def test_the_widget_runs_cv_and_final_fit_as_background_jobs(nb_cv):

@@ -354,6 +354,26 @@ def test_offsets_by_parameter_are_sliced_for_fits_and_scores():
     assert result.mean_scores["actual_expected"] == pytest.approx(1.0, abs=0.1)
 
 
+def test_a_negative_binomial_is_scored_by_its_closed_form_crps():
+    rng = np.random.default_rng(4)
+    X, _ = _rows()
+    mean = np.exp(1.0 + 0.01 * (X["age"].to_numpy() - 50.0))
+    y = rng.negative_binomial(2.0, 2.0 / (2.0 + mean)).astype(np.float64)
+    family = NegativeBinomialLS()
+    model = SuperLSS(family, family.mean(s("age", kind="cr", k=5)), family.theta())
+    lambdas = {"mean:age#wiggle": 1.0}
+    result = cross_validate(
+        model, X, y, cv=FOLDS, fit_kwargs={"lambdas": lambdas}, error_score="raise"
+    )
+    assert result.builtin_scores == ("nll", "crps", "gini", "actual_expected")
+    train, test = result.fold_indices[0]
+    by_hand = SuperLSS(family, family.mean(s("age", kind="cr", k=5)), family.theta()).fit(
+        X.iloc[train], y[train], lambdas=lambdas
+    )
+    crps = by_hand.scores(X.iloc[test], y[test], which=("crps",))["crps"]
+    assert result.fold_scores.loc[0, "crps"] == pytest.approx(crps.mean(), rel=1e-9)
+
+
 def test_the_fingerprint_reads_the_model_columns_and_the_offsets():
     X, y = _rows()
     result = _fixed_cv(X, y)

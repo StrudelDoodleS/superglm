@@ -6,7 +6,8 @@ global one, in response units. Closed forms follow Jordan, Krueger and Lerch
 (2019), *J. Stat. Softw.* 90(12) (Gaussian: Gneiting and Raftery 2007; gamma:
 Scheuerer and Moeller 2015; log-normal: Baran and Lerch 2015; Tweedie: the
 kernel form of Gneiting and Raftery 2007, eq. 21, on the compound Poisson-gamma
-series); the general route is the quantile-score integral of Laio and Tamea (2007),
+series; negative binomial: Wei and Held 2014, with its mean absolute difference
+by quadrature); the general route is the quantile-score integral of Laio and Tamea (2007),
 
     CRPS = 2 * integral_0^1 (1{y < Q(p)} - p) (Q(p) - y) dp,
 
@@ -47,6 +48,7 @@ from superglm.distributional.family import (
     plan_observation,
     validated_parameter_matrix,
 )
+from superglm.distributional.kernels._negative_binomial_crps import negative_binomial_crps_parts
 from superglm.distributional.kernels.generalized_gamma import (
     location_of_mean as generalized_gamma_location_of_mean,
 )
@@ -256,6 +258,35 @@ def _tweedie_crps(family: Any, y: NDArray, theta: NDArray) -> NDArray[np.float64
     return scores
 
 
+def _negative_binomial_crps(family: Any, y: NDArray, theta: NDArray) -> NDArray[np.float64]:
+    """CRPS of the NB2 law in ``(mean, size)``: Wei and Held (2014), at a stable split.
+
+    For any real ``y``, with ``k = floor(y)``,
+    ``CRPS(y) = CRPS(0) - y + 2 E[(y - Y)^+]``. The shortfall is the pmf sum
+    ``sum_{j <= k} (y - j) f(j)`` for a small count and otherwise
+    ``y F(k) - mean G(k - 1)``, where ``F`` is the NB2 CDF and ``G`` that of
+    size ``size + 1`` (``k f(k) = mean g(k - 1)``); scipy's incomplete beta
+    loses about five digits at a size near ``1e9``, which the sum does not.
+    ``CRPS(0) = sum_k P(Y > k)^2`` is the integral of a nonnegative quantity
+    (``kernels._negative_binomial_crps``), so a rare claim's score at zero, of
+    order ``mean^2``, does not cancel. A prior weight
+    ``w`` is not a reparametrisation of this law; ``_closed_form_scores`` scales
+    the count instead.
+    """
+    response, parameters = _validated_scoring_inputs(y, theta)
+    mean, size = parameters[:, 0], parameters[:, 1]
+    zero, below = negative_binomial_crps_parts(mean, size, response)
+    # Past the kernel's pmf sum, F(k) = I_p(size, k + 1) = 1 - I_r(k + 1, size):
+    # r = mean / (mean + size) keeps its digits where p rounds to one.
+    far = np.isnan(below)
+    y_far, m_far, s_far = response[far], mean[far], size[far]
+    count, rate = np.floor(y_far), m_far / (m_far + s_far)
+    below[far] = y_far * special.betaincc(count + 1.0, s_far, rate) - m_far * special.betaincc(
+        count, s_far + 1.0, rate
+    )
+    return zero - response + 2.0 * below
+
+
 #: Closed-form CRPS by family class name.  A family absent from the catalogue is
 #: scored numerically when an established tail bound or correction is available.
 _CLOSED_FORMS: Mapping[str, Callable[[Any, NDArray, NDArray], NDArray[np.float64]]] = {
@@ -263,6 +294,7 @@ _CLOSED_FORMS: Mapping[str, Callable[[Any, NDArray, NDArray], NDArray[np.float64
     "GammaLS": _gamma_crps,
     "LogNormalLS": _log_normal_crps,
     "TweedieLSS": _tweedie_crps,
+    "NegativeBinomialLS": _negative_binomial_crps,
 }
 
 
@@ -770,21 +802,34 @@ def _row_law(fitted: Any, rows: _ScoringRows) -> DistributionFunctionFamily:
     return _PriorWeightedRowLaw(family, rows.prior_law)
 
 
-def _closed_form_parameters(
+def _closed_form_scores(
     family: Any,
+    response: NDArray[np.float64],
     theta: NDArray[np.float64],
     prior_law: NDArray[np.float64] | None,
 ) -> NDArray[np.float64] | None:
-    """Return natural parameters for the same prior-weighted reproductive law."""
-    if prior_law is None:
-        return theta
+    """The catalogued closed-form CRPS of the rows' unit or prior-weighted law, if any.
+
+    Prediction validated the raw parameters; prior-law scales may legitimately
+    fall below the fitted family's raw parameter floor, so they are not revalidated.
+    """
     name = type(family).__name__
+    formula = _CLOSED_FORMS.get(name)
+    if formula is None:
+        return None
+    if prior_law is None:
+        return formula(family, response, theta)
+    parameters = np.array(theta, dtype=np.float64, copy=True)
+    if name == "NegativeBinomialLS":
+        # The prior law is that of C / w with the count C ~ NB2(w mean, w size), and a
+        # CRPS scales with its variable: CRPS(C / w, y) = CRPS(C, w y) / w.
+        parameters *= prior_law[:, None]
+        return formula(family, prior_law * response, parameters) / prior_law
     if name not in {"GaussianLS", "GammaLS", "TweedieLSS"}:
         return None
-    parameters = np.array(theta, dtype=np.float64, copy=True)
     # A Tweedie prior weight is the dispersion phi / w, the others scale by 1 / sqrt(w).
     parameters[:, 1] /= prior_law if name == "TweedieLSS" else np.sqrt(prior_law)
-    return parameters
+    return formula(family, response, parameters)
 
 
 def _retained_log_score(fitted: Any, rows: _ScoringRows) -> NDArray[np.float64]:
@@ -829,6 +874,10 @@ def _retained_crps(
         theta = np.asarray(
             fitted._predict_parameters_resolved(rows.frame, rows.offsets), dtype=np.float64
         )
+    if threshold is None and method != "numeric":
+        closed = _closed_form_scores(fitted.family, rows.response, theta, rows.prior_law)
+        if closed is not None:
+            return closed
     row_law = _row_law(fitted, rows)
     if threshold is not None:
         return crps_numeric(
@@ -838,23 +887,9 @@ def _retained_crps(
             n_nodes=n_nodes,
             threshold=threshold,
         )
-    if method == "numeric":
-        return crps_numeric(row_law, rows.response, theta, n_nodes=n_nodes)
-
-    closed_theta = _closed_form_parameters(fitted.family, theta, rows.prior_law)
     if method == "closed":
-        if closed_theta is None or not has_closed_form_crps(fitted.family):
-            raise NotImplementedError(
-                f"{type(fitted.family).__name__} has no catalogued prior-weighted closed-form CRPS"
-            )
-        # Prediction validated raw parameters; prior-law scales may legitimately
-        # fall below the fitted family's raw parameter floor.
-        return _CLOSED_FORMS[type(fitted.family).__name__](
-            fitted.family, rows.response, closed_theta
-        )
-    if has_closed_form_crps(fitted.family) and closed_theta is not None:
-        return _CLOSED_FORMS[type(fitted.family).__name__](
-            fitted.family, rows.response, closed_theta
+        raise NotImplementedError(
+            f"{type(fitted.family).__name__} has no catalogued prior-weighted closed-form CRPS"
         )
     return crps_numeric(row_law, rows.response, theta, n_nodes=n_nodes)
 
