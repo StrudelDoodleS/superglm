@@ -37,7 +37,9 @@ rating tables for the fitted model;
 {py:meth}`~superglm.SuperGLM.rating_table_payload` builds the
 renderer-independent payload behind them, for when you need the tables as
 objects rather than files. The [how-to on deploying a fitted
-model](../../how-to/deploy-a-fitted-model.md) shows the export end to end.
+model](../../how-to/deploy-a-fitted-model.md) shows the export end to end. A fitted
+{py:class}`~superglm.SuperLSS` has its own, described in the [how-to on its rating
+tables](../../how-to/export-distributional-rating-tables.md).
 
 ```{eval-rst}
 .. autosummary::

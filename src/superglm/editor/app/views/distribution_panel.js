@@ -9,15 +9,20 @@
  * and reports line changes through `handlers.onChange`; the caller owns the line state.
  *
  * Two inputs are clamped into the laws' domain before they are used, and the panel says so:
- *  - a gamma spread whose coefficient of variation exceeds GAMMA_CV_MAX is drawn at GAMMA_CV_MAX
+ *  - a gamma CV that exceeds GAMMA_CV_MAX is drawn at GAMMA_CV_MAX
  *    (under the log link its predictor is ln CV, so the predictor is capped at ln GAMMA_CV_MAX);
  *  - a percentile outside [PROBABILITY_MIN, 1 - PROBABILITY_MIN] is computed at the nearer end.
  * An amount off the axis keeps its readouts and pins only the drawn line to the axis edge. The
  * text box always shows the value as typed.
+ *
+ * A Tweedie law has an atom: a chance of exactly zero. The ridges and the shading draw only the
+ * amounts above zero, each row writes its chance of exactly zero under its readout, and a
+ * percentile inside the atom reads 0, drawn as a 0 in the dot column with one note.
  */
 
-import { GAMMA_CV_MAX, PROBABILITY_MIN, lawOf } from "../distribution/families.js";
+import { GAMMA_CV_MAX, PROBABILITY_MIN, lawOf, meanAboveZero, medianAboveZero } from "../distribution/families.js";
 import {
+  amountInsideAxis,
   formatAmount,
   formatChance,
   formatOneInN,
@@ -28,6 +33,7 @@ import {
 } from "../distribution/line.js";
 import { normCdf, normQuantile } from "../distribution/math.js";
 import { fmt } from "../format.js";
+import { CHANCE_TICKS } from "./risk_counts.js";
 import { el, patchChildren, setAttributes, text } from "../chart/svg.js";
 import {
   amountScale,
@@ -55,6 +61,12 @@ import {
 /** @typedef {import('../chart/fan.js').FanColumn} FanColumn */
 /** @typedef {import('../chart/fan.js').RGB} RGB */
 /** @typedef {{min_log10: number, max_log10: number, clipped_below: boolean}} PanelAxis */
+/**
+ * What a law is built from, and what the line is drawn on: the panel's payload, or the One risk
+ * view's, which shares these fields.
+ * @typedef {Pick<DistributionPanel, "family" | "parameters">} LawSource
+ * @typedef {Pick<DistributionPanel, "amount_unit" | "amount_axis">} LineSource
+ */
 
 /**
  * The line: an amount, or a percentile p in (0, 1); chances written as % or "1 in N".
@@ -68,13 +80,15 @@ import {
  * @typedef {object} RowModel
  * @property {string} label
  * @property {Law} law
- * @property {number} median
- * @property {number} mean
+ * @property {number} median  the median of the amounts above zero, which the ridge draws and marks
+ * @property {number} mean  the mean of the amounts above zero
  * @property {number} beyond  the chance above the line (amount mode) or the amount at it
  * @property {string} readout
  * @property {string} [ghost]  the fitted row's readout, where the drawn predictors differ from it
  * @property {number} [ghostBeyond]  the fitted row's `beyond`
  * @property {number} cut  the log10 amount where the part beyond the line starts
+ * @property {number} zero  the chance of exactly zero; 0 for a continuous family
+ * @property {boolean} readsZero  the line is a percentile inside the atom: the amount at it is 0
  * @property {boolean} spreadPinned
  * @property {string} title  the row's hover text
  */
@@ -98,13 +112,18 @@ import {
  * @property {LineModel} line
  * @property {PanelAxis | null} axis
  * @property {string | null} axisNote  hover text when the axis cuts the lower tail
- * @property {string | null} spreadNote  hover text and hint when a spread is drawn capped
+ * @property {string | null} spreadNote  hover text and hint when a CV is drawn capped
+ * @property {string | null} zeroNote  the hint when a percentile falls inside a row's atom at zero
+ * @property {boolean} aboveZero  a law has a chance of exactly zero, so the plots draw the amounts
+ *   given a claim: the amounts above zero
  * @property {string | null} unit
  * @property {string} caption
  */
 /** @typedef {{onChange: (next: LineState) => void}} PanelHandlers */
 
 export const AXIS_NOTE = "Part of the lower tail lies below the axis.";
+export const ZERO_NOTE =
+  "Where the chance of exactly zero covers the line's percentile, the amount at the line is exactly 0. The ridges and the shading draw only the amounts above zero.";
 export const DISTRIBUTION_LOADING = "Loading the distributions...";
 export const DISTRIBUTION_FAILED =
   "The distribution panel could not be loaded: the editor's server did not answer. Retry to load it again.";
@@ -128,32 +147,30 @@ const CHANCE_DOMAIN = /** @type {[number, number]} */ ([-4, 0]);
 const DEFAULT_PERCENTILE = 0.99;
 
 /**
- * The positions of the mean and the spread parameter in the payload's parameter order.
- * @param {DistributionPanel} panel
- * @returns {{order: [number, number], links: DistributionLink[]}}
+ * The positions of the mean, the CV or dispersion or overdispersion, and for a Tweedie the power
+ * (the parameter with the role "shape") in the payload's parameter order.
+ * @param {LawSource} panel
+ * @returns {{order: number[], links: DistributionLink[]}}
  */
-function lawInputs(panel) {
-  const average = panel.parameters.findIndex((p) => p.role === "average");
-  const spread = panel.parameters.findIndex((p) => p.role === "spread");
-  return {
-    order: [average, spread],
-    links: [panel.parameters[average].link, panel.parameters[spread].link],
-  };
+export function lawInputs(panel) {
+  const roles = ["average", "spread", "shape"];
+  const order = roles.map((role) => panel.parameters.findIndex((p) => p.role === role));
+  const used = order.filter((at, i) => i < 2 || at >= 0);
+  return { order: used, links: used.map((at) => panel.parameters[at].link) };
 }
 
 /**
  * A law of the family at one row of predictors, the gamma CV capped at GAMMA_CV_MAX.
- * @param {DistributionPanel} panel @param {{order: [number, number], links: DistributionLink[]}} inputs
+ * @param {LawSource} panel @param {{order: number[], links: DistributionLink[]}} inputs
  * @param {readonly number[]} eta
  * @returns {{law: Law, spreadPinned: boolean}}
  */
-function clampedLaw(panel, inputs, eta) {
-  const mean = eta[inputs.order[0]];
-  let spread = eta[inputs.order[1]];
-  const spreadPinned = panel.family === "gamma" && spread > ETA_CV_MAX;
-  if (spreadPinned) spread = ETA_CV_MAX;
-  const family = /** @type {"lognormal_mean" | "gamma"} */ (panel.family);
-  return { law: lawOf(family, [mean, spread], inputs.links), spreadPinned };
+export function clampedLaw(panel, inputs, eta) {
+  const picked = inputs.order.map((at) => eta[at]);
+  const spreadPinned = panel.family === "gamma" && picked[1] > ETA_CV_MAX;
+  if (spreadPinned) picked[1] = ETA_CV_MAX;
+  const family = /** @type {"lognormal_mean" | "gamma" | "tweedie"} */ (panel.family);
+  return { law: lawOf(family, picked, inputs.links), spreadPinned };
 }
 
 /**
@@ -194,7 +211,7 @@ const sameEta =(a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
 
 /**
  * The line as drawn and read.
- * @param {DistributionPanel} panel @param {LineState} state
+ * @param {LineSource} panel @param {LineState} state
  * @returns {LineModel}
  */
 export function lineModel(panel, state) {
@@ -203,6 +220,7 @@ export function lineModel(panel, state) {
   if (state.mode === "amount") {
     const shown = formatAmount(state.value, unit);
     const pin = axis ? pinToAxis(Math.log10(state.value), axis) : { log10: Number.NaN, pinned: false };
+    // The box holds the number alone; the unit stands beside it and in every label.
     const edge = axis && pin.log10 === axis.max_log10 ? "upper" : "lower";
     return {
       mode: "amount",
@@ -210,7 +228,7 @@ export function lineModel(panel, state) {
       p: Number.NaN,
       log10: pin.log10,
       pinned: pin.pinned,
-      text: shown,
+      text: formatAmount(state.value, null),
       label: shown,
       hint: pin.pinned
         ? `${shown} lies off the amount axis, so the line is drawn at its ${edge} edge; the readouts use ${shown}.`
@@ -247,6 +265,12 @@ function readLaw(law, line, state, unit) {
   const beyond = law.quantile(line.p);
   return { beyond, readout: formatAmount(beyond, unit), cut: Math.log10(beyond) };
 }
+
+/**
+ * The line is a percentile that falls inside the law's atom at zero.
+ * @param {Law} law @param {LineModel} line
+ */
+const readsZero = (law, line) => line.mode === "percentile" && line.p <= law.zero;
 
 /** @param {unknown} value */
 const referenceValue = (value) => (typeof value === "number" ? fmt(value) : String(value));
@@ -286,6 +310,8 @@ export function panelModel(panel, state, etaSet) {
       axis: null,
       axisNote: null,
       spreadNote: null,
+      zeroNote: null,
+      aboveZero: false,
     };
   }
   const inputs = lawInputs(panel);
@@ -293,7 +319,7 @@ export function panelModel(panel, state, etaSet) {
   const drawnLaws = lawsOf(panel, inputs, drawn);
   const fittedLaws = lawsOf(panel, inputs, panel.eta.fitted);
   const lineName = line.mode === "amount" ? `chance above ${line.label}` : `at the ${line.label}`;
-  const pinnedNote = `The spread is drawn at a CV of ${GAMMA_CV_MAX}, the largest the panel computes.`;
+  const pinnedNote = `The CV is drawn at ${GAMMA_CV_MAX}, the largest the panel computes.`;
 
   const rows = panel.rows.map((row, i) => {
     const label = row.level ?? fmt(Number(row.x));
@@ -303,9 +329,11 @@ export function panelModel(panel, state, etaSet) {
     const model = {
       label,
       law,
-      median: law.median,
-      mean: law.mean,
+      median: medianAboveZero(law),
+      mean: meanAboveZero(law),
       ...reading,
+      zero: law.zero,
+      readsZero: readsZero(law, line),
       spreadPinned,
       title: "",
     };
@@ -315,8 +343,12 @@ export function panelModel(panel, state, etaSet) {
       model.ghost = fitted.readout;
       model.ghostBeyond = fitted.beyond;
     }
+    const claim = law.zero > 0 ? " claim" : "";
     model.title = [
-      `${panel.feature} ${label}: median ${formatAmount(law.median, unit)}, average ${formatAmount(law.mean, unit)}; ${lineName}: ${reading.readout}`,
+      `${panel.feature} ${label}: median${claim} ${formatAmount(model.median, unit)}, mean${claim} ${formatAmount(model.mean, unit)}; ${lineName}: ${reading.readout}`,
+      law.zero > 0
+        ? `chance of exactly zero ${formatChance(law.zero, state.style)}, so the mean of every amount is ${formatAmount(law.mean, unit)}`
+        : null,
       model.ghost === undefined ? null : `before the edit: ${model.ghost}`,
       spreadPinned ? pinnedNote : null,
     ].filter(Boolean).join(". ");
@@ -330,9 +362,8 @@ export function panelModel(panel, state, etaSet) {
       x: column.x,
       level: column.level,
       law,
-      mode: law.mode,
-      median: law.median,
-      mean: law.mean,
+      median: medianAboveZero(law),
+      mean: meanAboveZero(law),
       cut: readLaw(law, line, state, unit).cut,
       spreadPinned,
     };
@@ -341,6 +372,7 @@ export function panelModel(panel, state, etaSet) {
 
   const pinnedLabels = rows.filter((row) => row.spreadPinned).map((row) => row.label);
   const anyPinned = pinnedLabels.length > 0 || columns.some((column) => column.spreadPinned);
+  const anyZero = rows.some((row) => row.readsZero) || columns.some((column) => readsZero(column.law, line));
   return {
     ...base,
     empty: null,
@@ -349,8 +381,10 @@ export function panelModel(panel, state, etaSet) {
     axis: panel.amount_axis,
     axisNote: panel.amount_axis.clipped_below ? AXIS_NOTE : null,
     spreadNote: anyPinned
-      ? `Where the spread's CV exceeds ${GAMMA_CV_MAX}, the panel draws it at ${GAMMA_CV_MAX}, the largest it computes${pinnedLabels.length ? `: ${panel.feature} ${pinnedLabels.join(", ")}` : ""}.`
+      ? `Where the CV exceeds ${GAMMA_CV_MAX}, the panel draws it at ${GAMMA_CV_MAX}, the largest it computes${pinnedLabels.length ? `: ${panel.feature} ${pinnedLabels.join(", ")}` : ""}.`
       : null,
+    zeroNote: anyZero ? ZERO_NOTE : null,
+    aboveZero: rows.some((row) => row.zero > 0) || columns.some((column) => column.law.zero > 0),
   };
 }
 
@@ -388,7 +422,8 @@ export function distributionFailure(error) {
 }
 
 /**
- * A line to start from: the decade nearest the middle row's 95th percentile.
+ * A line to start from: the decade nearest the middle row's 95th percentile, moved inside the
+ * amount axis where the decade sits on its top edge, so some of the tail past the line is drawn.
  * @param {DistributionPanel} panel
  * @returns {LineState}
  */
@@ -399,12 +434,14 @@ export function defaultLineState(panel) {
   const middle = panel.eta.edited.rows[Math.floor(panel.rows.length / 2)];
   let q = Number.NaN;
   try {
-    q = clampedLaw(panel, inputs, middle).law.quantile(0.95);
+    const { zero, quantile } = clampedLaw(panel, inputs, middle).law;
+    // A row that is zero at the 95th percentile starts from the 95th percentile of its amounts above zero.
+    q = quantile(zero < 0.95 ? 0.95 : Math.min(P_MAX, zero + 0.95 * (1 - zero)));
   } catch (error) {
     if (!(error instanceof RangeError)) throw error;
   }
   const value = q > 0 && Number.isFinite(q) ? 10 ** Math.round(Math.log10(q)) : fallback.value;
-  return { ...fallback, value };
+  return { ...fallback, value: amountInsideAxis(value, panel.amount_axis) };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -417,6 +454,7 @@ export function defaultLineState(panel) {
  * @property {HTMLButtonElement[]} styleButtons
  * @property {HTMLInputElement} box
  * @property {HTMLElement} boxPrefix  the fixed "1 in" before a box that takes only N
+ * @property {HTMLElement} boxUnit  the amount's unit, after a box that holds the number alone
  * @property {HTMLInputElement} slider
  * @property {HTMLElement} hint
  * @property {SVGSVGElement} ridges
@@ -458,7 +496,7 @@ function html(tag, attrs, content) {
  * @param {string} label @param {Array<[string, string]>} options [value, text]
  * @param {string} key the data attribute naming the value
  */
-function segmented(label, options, key) {
+export function segmented(label, options, key) {
   const group = html("div", { class: "distribution-segments", role: "group", "aria-label": label });
   const buttons = options.map(([value, content]) => {
     const button = html("button", { type: "button", [`data-${key}`]: value, "aria-pressed": "false" }, content);
@@ -488,7 +526,8 @@ function mount(root) {
     "aria-describedby": hintId,
   });
   const boxPrefix = html("span", { class: "distribution-line-prefix", hidden: "" }, "1 in");
-  boxLabel.append(boxPrefix, box);
+  const boxUnit = html("span", { class: "distribution-line-unit", hidden: "" });
+  boxLabel.append(boxPrefix, box, boxUnit);
   const slider = html("input", {
     type: "range",
     class: "distribution-slider",
@@ -519,6 +558,7 @@ function mount(root) {
     styleButtons: style.buttons,
     box,
     boxPrefix,
+    boxUnit,
     slider,
     hint,
     ridges,
@@ -668,6 +708,8 @@ function syncControls(nodes, model, state) {
   const box = nodes.box;
   const oneInN = typesOneInN(state);
   nodes.boxPrefix.hidden = !oneInN;
+  nodes.boxUnit.textContent = model.unit ?? "";
+  nodes.boxUnit.hidden = state.mode !== "amount" || !model.unit;
   box.classList.toggle("is-one-in-n", oneInN);
   box.setAttribute("aria-label", oneInN ? LINE_LABEL_ONE_IN_N : LINE_LABEL);
   if (nodes.invalid !== null) {
@@ -679,7 +721,7 @@ function syncControls(nodes, model, state) {
     box.title = model.line.hint ?? "";
   }
   box.toggleAttribute("data-pinned", model.line.pinned);
-  const hint = [nodes.invalid ?? model.line.hint, model.spreadNote].filter(Boolean).join(" ");
+  const hint = [nodes.invalid ?? model.line.hint, model.spreadNote, model.zeroNote].filter(Boolean).join(" ");
   nodes.hint.textContent = hint;
   nodes.hint.hidden = hint === "";
   nodes.hint.classList.toggle("is-invalid", nodes.invalid !== null);
@@ -751,6 +793,13 @@ const DIAMOND = "M0,-5 L5,0 L0,5 L-5,0 Z";
 const LABEL_CHARS = 18;
 const AXIS_END_ROOM = 24;
 const CHAR_WIDTH = 6.2;
+const HEADING_GAP = 16;
+
+/**
+ * Whether a heading right-aligned at `right` would come within a gap of what ends at `leftEnd`.
+ * @param {number} leftEnd @param {number} right @param {string} heading
+ */
+const runsInto = (leftEnd, right, heading) => right - CHAR_WIDTH * heading.length < leftEnd + HEADING_GAP;
 
 /** @param {RidgePointList} points @param {(l: number) => number} x */
 const polyline = (points, x) =>
@@ -793,13 +842,12 @@ function dotScale(model, state) {
     return { domain: [lo, hi], ticks: [] };
   }
   const oneIn = state.style === "one_in";
+  // The decades the chance charts label, written as they write them. Three labels like "1 in 100"
+  // are wider than the column's quarter, so written so only its two ends are labelled.
+  const ticks = CHANCE_TICKS.filter(([exponent]) => exponent === -4 || exponent === 0 || (!oneIn && exponent === -2));
   return {
     domain: CHANCE_DOMAIN,
-    ticks: [
-      [1e-4, oneIn ? "1:10k" : "0.01%"],
-      [1e-2, oneIn ? "1:100" : "1%"],
-      [1, oneIn ? "1:1" : "100%"],
-    ],
+    ticks: ticks.map(([exponent, percent, one]) => /** @type {[number, string]} */ ([10 ** exponent, oneIn ? one : percent])),
   };
 }
 
@@ -842,14 +890,18 @@ function drawRidges(target, model, state, width) {
     class: `distribution-ridges ${state.mode === "amount" ? "is-amount" : "is-percentile"}`,
   });
 
-  text(svg, 14, 22, `Distribution at each ${model.feature}`, "dist-title", "start");
-  const legendX = 14 + CHAR_WIDTH * 1.15 * (`Distribution at each ${model.feature}`.length) + 18;
+  const title = `Distribution at each ${model.feature}${model.aboveZero ? ", given a claim" : ""}`;
+  text(svg, 14, 22, title, "dist-title", "start");
+  const legendX = 14 + CHAR_WIDTH * 1.15 * title.length + 18;
   add(svg, "circle", { cx: legendX, cy: 18, r: 4, class: "ridge-median" });
   text(svg, legendX + 8, 22, "median", "dist-muted dist-small", "start");
   add(svg, "path", { d: DIAMOND, transform: `translate(${legendX + 64},18)`, class: "ridge-mean" });
-  text(svg, legendX + 73, 22, "average", "dist-muted dist-small", "start");
+  text(svg, legendX + 73, 22, "mean", "dist-muted dist-small", "start");
   const header = state.mode === "amount" ? "chance above the line" : `value at the line: ${model.line.label}`;
-  text(svg, layout.readoutRight, 22, header, "dist-muted dist-small", "end");
+  // The legend ends with "mean"; a heading that would run into it is left out.
+  if (!runsInto(legendX + 73 + CHAR_WIDTH * 4, layout.readoutRight, header)) {
+    text(svg, layout.readoutRight, 22, header, "dist-muted dist-small", "end");
+  }
 
   const dots = dotScale(model, state);
   const first = layout.baseOf(0) - 22;
@@ -922,8 +974,13 @@ function drawRidges(target, model, state, width) {
       add(group, "line", { x1: gx, x2: cx, y1: dotY, y2: dotY, class: "ridge-dot-move" });
       add(group, "circle", { cx: gx, cy: dotY, r: 4, class: "ridge-ghost" });
     }
-    add(group, "circle", { cx, cy: dotY, r: 4.5, class: "ridge-dot" });
+    // A percentile inside the atom is exactly 0, which no dot on the amount scale can say.
+    if (row.readsZero) text(group, cx, dotY + 4, "0", "dist-readout ridge-zero", "middle");
+    else add(group, "circle", { cx, cy: dotY, r: 4.5, class: "ridge-dot" });
     text(group, layout.readoutRight, base - 4, row.readout, "dist-readout", "end");
+    if (row.zero > 0) {
+      text(group, layout.readoutRight, base + 7, `zero ${formatChance(row.zero, state.style)}`, "dist-muted dist-small ridge-zero-chance", "end");
+    }
   });
 
   const ticks = add(svg, "g", { class: "ridge-axis" });
@@ -1066,8 +1123,12 @@ function drawFan(nodes, model, state, width, colours, dragging) {
   });
   if (model.spreadNote) hover(svg, model.spreadNote);
 
-  text(svg, 14, 22, `Distribution across ${model.feature}`, "dist-title", "start");
-  text(svg, width - 14, 22, `shade: how likely, within each ${model.feature}; orange: past the line`, "dist-muted dist-small", "end");
+  const title = `Distribution across ${model.feature}${model.aboveZero ? ", given a claim" : ""}`;
+  const caption = `shade: how likely, within each ${model.feature}; orange: past the line`;
+  text(svg, 14, 22, title, "dist-title", "start");
+  if (!runsInto(14 + CHAR_WIDTH * 1.15 * title.length, width - 14, caption)) {
+    text(svg, width - 14, 22, caption, "dist-muted dist-small", "end");
+  }
 
   // The canvas is shaded at device pixels and drawn at the plot's CSS size, stopping at twice that
   // size. The shading depends on the laws and not on the line, which only clips one colour over the
@@ -1116,9 +1177,8 @@ function drawFan(nodes, model, state, width, colours, dragging) {
     ).join(" ");
   };
   const lines = [
-    { value: (/** @type {FanColumn} */ c) => Math.log10(c.mean), cls: "fan-average", label: "average" },
+    { value: (/** @type {FanColumn} */ c) => Math.log10(c.mean), cls: "fan-average", label: "mean" },
     { value: (/** @type {FanColumn} */ c) => Math.log10(c.median), cls: "fan-median", label: "median" },
-    { value: (/** @type {FanColumn} */ c) => Math.log10(c.mode), cls: "fan-mode", label: "most common" },
     { value: (/** @type {FanColumn} */ c) => c.cut, cls: "fan-cut", label: model.line.label },
   ];
   for (const line of lines) {

@@ -1,14 +1,22 @@
 // @ts-check
 
-import { fmt } from "../format.js";
-
 /** @typedef {import('../api/contracts.js').DisplaySpec} DisplaySpec */
 /** @typedef {import('../api/contracts.js').TermPayload} TermPayload */
 
-// Curves are drawn and edited in display units; the server converts a posted
-// display value back with the same maps. With no spec the unit is the
-// relativity exp(effect), which is what a SuperGLM term shows.
+// Every curve is drawn and edited as a relativity, exp(effect); the server converts a
+// posted value back with the same maps. An overdispersion (1/theta) term is the
+// relativity of 1/theta, exp(-effect), which falls as the recorded effect rises.
+// With no spec the unit is exp(effect), which is what a SuperGLM term shows.
 const FLOOR = 1e-12;
+
+/**
+ * The way up the shown curve runs against the effect: -1 for a 1/theta term.
+ * @param {DisplaySpec|undefined|null} spec
+ * @returns {number}
+ */
+function direction(spec) {
+  return spec && spec.kind === "inverse_theta" ? -1 : 1;
+}
 
 /**
  * The display value of an effect on the linear predictor.
@@ -17,56 +25,28 @@ const FLOOR = 1e-12;
  * @returns {number}
  */
 export function toDisplay(spec, effect) {
-  if (!spec) return Math.exp(effect);
-  const c = spec.reference_eta;
-  switch (spec.kind) {
-    case "lognormal_cv": {
-      const s = spec.floor + Math.exp(c + effect);
-      return Math.sqrt(Math.expm1(s * s));
-    }
-    case "gamma_cv":
-      return Math.exp(c + effect);
-    case "inverse_theta":
-      return Math.exp(-(c + effect));
-    default:
-      return Math.exp(effect);
-  }
+  return Math.exp(direction(spec) * effect);
 }
 
 /**
- * The effect a display value stands for. Values outside the transform's range
- * clamp to the nearest effect it can reach, so the result is always finite.
+ * The effect a display value stands for. A value at or below zero clamps to the
+ * smallest positive one, so the result is always finite.
  * @param {DisplaySpec|undefined|null} spec
  * @param {number} value
  * @returns {number}
  */
 export function fromDisplay(spec, value) {
-  if (!spec) return Math.log(Math.max(value, FLOOR));
-  const c = spec.reference_eta;
-  switch (spec.kind) {
-    case "lognormal_cv": {
-      const cv = Math.max(value, 0);
-      const s = Math.sqrt(Math.log1p(cv * cv));
-      return Math.log(Math.max(s - spec.floor, FLOOR)) - c;
-    }
-    case "gamma_cv":
-      return Math.log(Math.max(value, FLOOR)) - c;
-    case "inverse_theta":
-      return -Math.log(Math.max(value, FLOOR)) - c;
-    default:
-      return Math.log(Math.max(value, FLOOR));
-  }
+  return direction(spec) * Math.log(Math.max(value, FLOOR));
 }
 
 /**
  * The display value nearest `value` that an effect can produce.
- * @param {DisplaySpec|undefined|null} spec
+ * @param {DisplaySpec|undefined|null} _spec
  * @param {number} value
  * @returns {number}
  */
-export function reachableDisplay(spec, value) {
-  if (!spec || spec.kind === "relativity") return Math.max(value, FLOOR);
-  return toDisplay(spec, fromDisplay(spec, value));
+export function reachableDisplay(_spec, value) {
+  return Math.max(value, FLOOR);
 }
 
 /**
@@ -78,19 +58,7 @@ export function reachableDisplay(spec, value) {
  * @returns {number}
  */
 export function shiftDisplay(spec, base, weight, deltaEffect) {
-  if (!spec || spec.kind === "relativity") return base * Math.exp(weight * deltaEffect);
-  return toDisplay(spec, fromDisplay(spec, base) + weight * deltaEffect);
-}
-
-/**
- * A value as the term's axis and tooltip show it.
- * @param {Pick<TermPayload, 'y_format'>|Record<string, never>} term
- * @param {number} value
- * @returns {string}
- */
-export function formatDisplay(term, value) {
-  const text = fmt(value);
-  return text && term.y_format === "times" ? `${text}×` : text;
+  return base * Math.exp(direction(spec) * weight * deltaEffect);
 }
 
 /**

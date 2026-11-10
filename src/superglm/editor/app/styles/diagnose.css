@@ -4,13 +4,141 @@
 .diagnose-scroll {
   overflow-x: auto;
 }
-.diagnose-table td,
-.diagnose-table th {
+.diagnose-table td {
   white-space: nowrap;
 }
-.diagnose-table .diagnose-text {
+.diagnose-table th {
+  white-space: normal;
+  vertical-align: bottom;
+}
+.diagnose-table .diagnose-text,
+.diagnose-table .diagnose-result {
   white-space: normal;
   text-align: left;
+}
+.diagnose-fits td,
+.diagnose-fits th {
+  padding: 5px 8px;
+}
+.diagnose-fits td {
+  vertical-align: top;
+}
+.diagnose-fits[data-plain="true"] {
+  max-width: 560px;
+}
+/* The verdict takes what the numbers leave. */
+.diagnose-fits th:first-child {
+  width: 112px;
+}
+.diagnose-fits th.diagnose-search {
+  width: 20%;
+}
+.diagnose-fits th:not(:first-child, .diagnose-text) {
+  width: 96px;
+}
+/* The header carries a title and a note; the page below starts under them. */
+.report-panel[data-report="diagnose"] .evidence-status-row {
+  min-height: 0;
+}
+.report-panel[data-report="diagnose"] .report-header {
+  margin-bottom: 6px;
+}
+.report-panel[data-report="diagnose"] .report-frame {
+  gap: 12px;
+}
+.diagnose-head {
+  flex-wrap: wrap;
+}
+/* The verdict leads its row. A fit that did not converge also carries the word and the
+   cross, so colour is never the only sign. */
+.diagnose-icon {
+  display: inline-block;
+  min-width: 1.2em;
+  font-weight: 600;
+}
+.diagnose-fits tr[data-status="converged"] .diagnose-icon,
+.diagnose-fits tr[data-status="loose"] .diagnose-icon {
+  color: var(--sig-strong-fg);
+}
+.diagnose-fits tr[data-status="loose"] .diagnose-icon {
+  color: var(--sig-weak-fg);
+}
+.diagnose-fits tr[data-status="not_converged"] td {
+  background: var(--danger-surface);
+}
+.diagnose-fits tr[data-status="not_converged"] .diagnose-icon,
+.diagnose-fits tr[data-status="not_converged"] .diagnose-result strong {
+  color: var(--danger-text);
+}
+.diagnose-fits tr[data-status="not_converged"] td:first-child {
+  box-shadow: inset 3px 0 0 var(--danger);
+}
+.diagnose-reason {
+  display: block;
+  margin-left: 1.2em;
+  color: var(--muted);
+}
+.diagnose-explain {
+  margin: 8px 0 0;
+  max-width: 120ch;
+  color: var(--muted);
+  font-size: var(--font-size-sm);
+}
+.diagnose-explain strong {
+  color: var(--text);
+  font-weight: 600;
+}
+.diagnose-link {
+  border: 0;
+  border-radius: var(--radius-sm);
+  padding: 0;
+  background: none;
+  color: var(--blue);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+  height: auto;
+  min-height: 0;
+  min-width: 0;
+}
+.diagnose-link:hover {
+  background: var(--surface-hover);
+}
+.diagnose-fold {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  padding: 2px 6px 2px 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  height: auto;
+  min-height: 0;
+  min-width: 0;
+}
+.diagnose-fold::before {
+  content: "▸";
+  display: inline-block;
+  width: 1em;
+  transition: transform 0.1s;
+}
+.diagnose-fold[aria-expanded="true"]::before {
+  transform: rotate(90deg);
+}
+.diagnose-fold-row {
+  margin-top: 8px;
+}
+.diagnose-subhead {
+  margin: 8px 0 6px;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+.diagnose-keyline {
+  margin-top: 6px;
 }
 .diagnose-table tr[data-selected="true"] td,
 .diagnose-matrix th[data-selected="true"] {
@@ -22,7 +150,7 @@
   gap: 6px;
   border: 0;
   border-radius: var(--radius-sm);
-  padding: 2px 6px;
+  padding: 0 6px;
   background: none;
   color: var(--text);
   font: inherit;
@@ -70,8 +198,7 @@
 .diagnose-cell[data-shape="straight"],
 .diagnose-cell[data-shape="simplest"],
 .diagnose-cell[data-shape="flat"] {
-  background: var(--sig-weak-bg);
-  color: var(--sig-weak-fg);
+  background: var(--surface-hover);
 }
 .diagnose-cell[data-shape="unsmoothed"] {
   color: var(--muted);
@@ -85,22 +212,9 @@
   background: currentColor;
   vertical-align: middle;
 }
-.diagnose-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 14px;
-  color: var(--muted);
-  font-size: var(--font-size-sm);
-}
-.diagnose-key {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
 .diagnose-chart {
   display: block;
-  width: 100%;
-  max-width: 1100px;
+  max-width: 100%;
   height: auto;
 }
 .diagnose-grid {
@@ -114,6 +228,15 @@
   stroke-linejoin: round;
 }
 .diagnose-line[data-selected="true"] {
+  stroke-width: 2.25;
+  stroke-opacity: 1;
+}
+.diagnose-end {
+  fill: none;
+  stroke-width: 1.5;
+  stroke-opacity: 0.55;
+}
+.diagnose-end[data-selected="true"] {
   stroke-width: 2.25;
   stroke-opacity: 1;
 }

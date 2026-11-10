@@ -252,6 +252,7 @@ export const HELP_SECTIONS = Object.freeze([
     items: Object.freeze([
       "The Chart / Table switch above the chart shows the current term's block of the Excel rating table instead of its curve, with the workbook's number formats and note. It is built by the same code as the export, on the training data, and follows every edit.",
       "Interactions are not shown. A model the export refuses shows the reason instead of a table.",
+      "In a SuperLSS session the table is the term's block for its own parameter, and the note says what its factors multiply: the Mean, the CV, σ above its floor (log-normal) or overdispersion (1/θ). A parameter the export leaves out shows its reason; the other parameters keep their tables.",
     ]),
   }),
   Object.freeze({
@@ -264,15 +265,14 @@ export const HELP_SECTIONS = Object.freeze([
   Object.freeze({
     title: "SuperLSS models",
     items: Object.freeze([
-      "A SuperLSS model has more than one curve per feature. The feature list groups them by what they describe: the average (blue) and the spread (orange). A feature that acts in both appears in both groups, with a small curve of its effect on each row.",
-      "Edit an average curve as a relativity, as in any other model. A spread curve is shown in the units of that spread: the coefficient of variation for the log-normal and gamma families, or overdispersion (1/θ) for the negative binomial. Moving a spread point sets the spread to the value you drag to; a value the model cannot reach settles on the nearest one it can.",
-      "On a spread curve, Increase and Decrease move the selected points by about 5% of the value shown, and Make increasing, Make decreasing and the snaps act on the curve as drawn: on an overdispersion curve, Increase raises overdispersion.",
-      "A spread curve reads the spread at the reference row under the model as edited. Editing another spread curve of the same parameter can therefore move it away from its original line, though its own points are unchanged.",
+      "A SuperLSS model has more than one curve per feature. The feature list groups them by the parameter they describe: the mean (blue), and the CV or overdispersion (orange). The CV is the coefficient of variation, standard deviation ÷ mean; overdispersion is 1/θ, where variance = mean + mean²/θ. A feature that acts in both appears in both groups, with a small curve of its effect on each row.",
+      "Every curve is a relativity: the factor the feature multiplies its parameter by, read as in any other model, and 1.00 is no effect. A mean curve is the relativity of the mean; a CV curve (gamma) is the relativity of the CV; a log-normal scale curve is the relativity of σ above its floor; an overdispersion curve (negative binomial) is the relativity of the overdispersion 1/θ, so it rises where overdispersion rises; a Tweedie dispersion curve is the relativity of the dispersion. Moving a point sets the relativity to the value you drag to. No curve is read at a reference row, so editing one curve never moves another, and the Cross-validation tab draws these same values.",
+      "On a CV or overdispersion curve, Increase and Decrease move the selected points by about 5% of the value shown, and Make increasing, Make decreasing and the snaps act on the curve as drawn: on an overdispersion curve, Increase raises overdispersion.",
       "Refit keeps the hand edits made in this session. A model exported with hand edits and opened again holds those edits in its coefficients, and Refit estimates those terms again from the data.",
       "History marks each step with the parameter it acted in. Undo, Redo, Revert and Refit cover both parameters in one history.",
-      "The Validation tab scores each split by log score, CRPS and actual over expected. Pass a cross_validate() result to edit(model, cv=result) to score the same model across folds on the Cross-validation tab, where every average and spread curve has its relativities by fold, listed under those two headings with the average curves first. A spread curve is a relativity of what the family models: the coefficient of variation for the gamma, σ for the log-normal, and overdispersion (1/θ) for the negative binomial, so higher means more spread on every one. Final fit runs from that tab as well.",
-      "Shaped ranges are off: a SuperLSS fit ignores shape constraints, so a shaped range would not hold after Refit. The same goes for special levels, the Unsmoothed line, free levels and new-level choices.",
-      "The rating table, coefficient summary and the SuperGLM export formats are off too. Their hover text says why. Export an edited SuperLSS model as joblib, which keeps its history.",
+      "The Validation tab scores each split by log score, CRPS and actual over expected. Pass a cross_validate() result to edit(model, cv=result) to score the same model across folds on the Cross-validation tab, where every mean, CV and overdispersion curve has its relativities by fold, listed under its parameter's heading with the mean curves first. Each chart's heading names its parameter and what the curve is a relativity of, for example 'Area · CV · relativity of the CV'; higher means more variation on every CV and overdispersion curve. The in-force curve is the one the Editor tab draws, value for value. The Validation tab shows a change (Δ) only once you have edited the model, and leaves out the CRPS for a family with none. Final fit runs from that tab as well.",
+      "Shaped ranges are off for SuperLSS terms in the editor; a shape rule declared on the model with constraint= is enforced when it is fitted. Also off are special levels, the Unsmoothed line, free levels and new-level choices.",
+      "The coefficient summary and the Structure export are off too. Their hover text says why. Export an edited SuperLSS model as joblib, which keeps its history.",
     ]),
   }),
   Object.freeze({
@@ -282,8 +282,27 @@ export const HELP_SECTIONS = Object.freeze([
       "A count model draws no distribution in this panel yet; the panel says so in place of the chart.",
       "The line marks an amount or a percentile. Drag it, use the slider, or type in its box: an amount such as 25k, €25,000 or 1.5m, or a percentile such as 99.5th or 1 in 200. Each row then reads the chance of a value above the amount, or the amount at the percentile.",
       "A comma is always a thousands separator, so 1,5m reads as 15,000,000. Write a decimal with a point, as in 1.5m.",
-      "When the line cannot be drawn where you asked, a note under it says why. An amount off the amount axis is drawn at the axis edge and the readouts keep your amount; a gamma spread above a coefficient of variation of 20 is drawn at 20, the largest the panel computes.",
+      "When the line cannot be drawn where you asked, a note under it says why. An amount off the amount axis is drawn at the axis edge and the readouts keep your amount; a gamma CV above 20 is drawn at 20, the largest the panel computes.",
+      "Under the ridges, a density fan shows the same distributions across the feature: the shading is how likely each amount is within each value or level, blue below the line and orange beyond it, with a line for the mean and one for the median.",
+      "A chance of one half or more is always written as a percentage, even with 1 in N chosen, since 1 in 1.0 says nothing. Where the room for a heading beside a plot is too narrow, the heading is left out.",
+      "A Tweedie row has a chance of exactly zero, written under each row's readout. The ridges and the shading draw only the amounts above zero, and a percentile inside that chance reads 0.",
       "While you drag a curve, the panel previews the new distributions in the browser; when you let go, it redraws from the edited model.",
+    ]),
+  }),
+  Object.freeze({
+    title: "Explain tab",
+    items: Object.freeze([
+      "A SuperLSS session has an Explain tab. Each row at the top is a risk: a value for every feature, starting at the reference risk, which has every number at its training median and every level at its most frequent. The plus button adds a risk, a training row drawn at random, up to eight; each keeps its letter and colour until it is removed.",
+      "Click a risk's letter, or work in its row, to select it. On the selected row, the icons take the values of another training row drawn at random, put the risk back at the reference risk, add a copy of it to change one value and compare, or remove it. At eight risks the plus button and the copy icon are off.",
+      "A number outside the range of the training rows is accepted, and its box turns orange: the model has no data there and extrapolates. The box's hover text gives the range.",
+      "The upper plot shows how likely each amount is, as a density over the amount axis, and the lower one the chance of an amount above each value, down to 1 in 10,000. The selected risk is filled and marked at its median, a dot, and its mean, a diamond.",
+      "The table has a row per risk: its mean, median, 90th, 99th and 99.5th percentiles, the chance above the line, and the coefficient of variation (CV). A line at one of those percentiles adds no second column; written as 1 in N, the line's column is headed 1 in N. Two risks are followed by the ratio of the second to the first, so two risks with close means and different CVs show where they part: in the tail.",
+      "The walk under the table explains the selected risk. It starts at risk A, or at the reference risk when risk A is selected, and has a row per feature that differs: the multiplier that feature alone puts on the mean and on the CV. The start times every row is the end. Where the model has interactions, what the features add only together is a row of its own. A risk that differs from its start in nothing gets one line saying so in place of the rows.",
+      "The tab fits one screen with a few risks. With more, the page scrolls, and the plots keep a height that stays readable.",
+      "After an edit, a single risk is read beside the original model's distribution for it, drawn in grey, and a row of the walk that the edit moved says what it was.",
+      "The line is the distribution panel's: a press or a drag on the plots moves it, as its box does, and the box takes a number alone. Every offset is at zero.",
+      "A Tweedie model has a chance of no claim. The table gives it for each risk. The upper plot is the density of the amount given a claim, so every curve has an area of one and its dot and diamond are the median and mean claim; the lower plot is the chance for the whole policy, so it starts at the chance of a claim. Its walk covers the mean and the dispersion; the power is one constant for the model.",
+      "A model of counts (a negative binomial) draws its distribution as a bar per number of claims for each risk, for one unit of exposure, on a scale that keeps the rare counts in view, and its table reads the mean, the chance of no claim and of one, two and three or more, and the overdispersion 1/θ. For a log-normal, the CV's multipliers in the walk act on σ, the standard deviation of the log amount.",
     ]),
   }),
   Object.freeze({
@@ -337,18 +356,20 @@ export const HELP_SECTIONS = Object.freeze([
   Object.freeze({
     title: "Diagnose",
     items: Object.freeze([
-      "The Diagnose tab shows how each fit's smoothing search went, from what the fits recorded, so opening it refits nothing. It lists this model and, when folds are available, each fold.",
-      "Smoothing by term puts every fit's effective degrees of freedom side by side, so a fold that left a term straight when the others curve it stands out. Search path shows how much REML each fit still had to gain at each round: a long tail near the bottom is rounds that bought almost nothing.",
-      "A slow or unusual fold is often not a fault in the fit. A term's best smoothing can be effectively infinite, and one fold can differ because of a few large rows it held out, which Rows that cost the most lists. Compare the folds' scores before reading much into one curve.",
+      "The Diagnose tab says whether each fit converged, whether its numbers can be used, and what to try if not. It reads what the fits recorded, so opening it refits nothing. It lists All rows, the model you are editing fitted on every training row, and, when folds are available, each fold, and opens on the first fit that did not converge.",
+      "Each fit's row leads with its verdict: converged; converged with a looser stop, where the numbers are usable but the smoothing was not checked to the strictest standard; did not converge, where the fit's numbers are those of the last step it reached; or no smoothing search, because you set the smoothing. The tab also says which smoothing search made the fit, in a column when fits differ and above the chart when they share it. For a SuperLSS fit it reads 'Quick smoothing updates only', 'Quick smoothing updates, then Newton steps to an optimum' or 'A few quick smoothing updates, then Newton steps'; the quick updates are Fellner–Schall steps. When several converged fits share one explanation, the line above the table gives it once.",
+      "Search path plots the REML score each fit gained in each smoothing round. A line that settles ends at the bottom; a crossed end is a search that stopped before it converged. What the fit reports lists the findings that bear on your numbers first, and folds those about how the search went. Smoothing by term puts every fit's EDF (effective degrees of freedom, how flexible a term is) side by side, so a fold that left a term straight when the others curve it stands out.",
+      "A slow or unusual fold is often not a fault in the fit. A term's best smoothing can be effectively infinite, and one fold can differ because of a few large rows it held out, which Rows that cost the most lists. For All rows it lists the training rows the fit predicted worst; the fit saw those, so a fold's held-out rows are the fairer test. Compare the folds' scores before reading much into one curve.",
     ]),
   }),
   Object.freeze({
     title: "Cross-validation",
     items: Object.freeze([
       "Pass a cross_validate() result to edit(model, cv=result). The tab shows each fold's scores and, when the result kept its fold models (return_estimators=True), every term's relativities by fold, least stable first.",
+      "The fit curve (and the edited curve, once you edit) is drawn exactly as the Editor tab draws the term, so a term reads the same on both tabs. Each fold's curve is moved by a constant factor so its exposure-weighted mean log matches the fit's: folds compare on shape, and a fold's gap and correlation do not depend on that level.",
       "Each fold keeps its colour and its place within a level, fold 1 leftmost. Hover or focus a fold in a chart's legend to pick it out; a fold with no value at a level, one it never saw, leaves a gap there.",
       "Run CV on current model refits the current structure on the same folds and puts your hand edits back on each fold before scoring. It waits while changes wait for Refit, and needs the rows the folds were drawn on: cv_data=, or train data with the same row count.",
-      "Final fit on all rows refits the current structure on train and validation rows and puts your hand edits back; the test split stays held out. Export then offers it as Final fit model.",
+      "Final fit on all rows refits the current structure on train and validation rows and puts your hand edits back; a test split, if you supplied one, stays held out. The Final Fit tab then says whether the refit converged. Export then offers it as Final fit model.",
       "Both run in the background with a Cancel button, so you can keep working. A pill beside the tabs shows how far a job has got on every tab, and how it ended; click it to open the job's tab. While Run CV runs, each fold's scores land on the cards and in the table as it finishes. A job whose model changed while it ran is not kept.",
     ]),
   }),
@@ -356,7 +377,7 @@ export const HELP_SECTIONS = Object.freeze([
     title: "Exporting",
     items: Object.freeze([
       "Python model exports are round-trip validated and prediction-checked when evaluation rows are available.",
-      "Excel rating workbooks require training or retained fit data and include structured summary tables.",
+      "Excel rating workbooks require training or retained fit data and include structured summary tables. A SuperLSS workbook has one sheet per parameter that has a table, then a summary; if none has one, the export says why.",
       "Final fit model is the latest Final fit on all rows, offered while the model has not changed since.",
       "Structure (JSON) holds each term's groupings, reference, shaped ranges and where new levels go, without coefficients or hand edits. In Python, superglm.read_structure(path).apply(model) builds them into another model, ready to fit on new data.",
     ]),

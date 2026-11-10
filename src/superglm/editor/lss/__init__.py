@@ -1,6 +1,7 @@
 """Editing a fitted SuperLSS: its terms keyed ``parameter:term``, shown in readable units."""
 
 from superglm.editor.lss.display import (
+    INVERSE_THETA,
     RELATIVITY,
     DisplayTransform,
     ParameterDisplay,
@@ -20,6 +21,7 @@ from superglm.editor.lss.view import (
 )
 
 __all__ = [
+    "INVERSE_THETA",
     "RELATIVITY",
     "DisplayTransform",
     "LSSModelView",

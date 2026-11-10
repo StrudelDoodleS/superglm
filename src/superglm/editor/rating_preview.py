@@ -8,12 +8,14 @@ workbook gives that block.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 import pandas as pd
 
 from superglm.editor.io import jsonable
+from superglm.editor.lss.view import split_key
 
 # The preview asks for no discretisation-impact sweep: it fills only the
 # workbook's impact sheet and is built after every block, so the blocks match.
@@ -29,8 +31,60 @@ SUPERSEDED = "The model changed while the table was built. Showing the new one n
 
 
 @dataclass(frozen=True)
+class RatingTables:
+    """One revision's rating tables as the editor reads them, whichever model built them.
+
+    ``blocks`` holds each table by its term key; ``write`` writes the workbook
+    to a path or buffer. For a SuperLSS, ``lines`` says which quantity a term's
+    factors multiply and ``reasons`` gives the library's sentence for each term
+    of a parameter it left out.
+    """
+
+    blocks: Mapping[str, Any]
+    write: Callable[[Any], None]
+    lines: Mapping[str, str] = field(default_factory=dict)
+    reasons: Mapping[str, str] = field(default_factory=dict)
+
+
+def glm_rating_tables(payload) -> RatingTables:
+    """A SuperGLM payload's main effects, written to the workbook the export names."""
+    from superglm.export.excel import write_rating_table_workbook
+
+    return RatingTables(
+        {block.name: block for block in payload.main_effects},
+        lambda target: write_rating_table_workbook(
+            payload,
+            target,
+            sheet_name="Rating Tables",
+            summary_sheet_name="Model Summary",
+            impact_sheet_name="Discretization Impact",
+        ),
+    )
+
+
+def lss_rating_tables(payload, term_keys) -> RatingTables:
+    """A SuperLSS payload: a sheet per parameter, and the library's sentence for each left out."""
+    from superglm.export.excel import write_lss_rating_table_workbook
+
+    return RatingTables(
+        payload.blocks(),
+        lambda target: write_lss_rating_table_workbook(payload, target),
+        lines={
+            f"{table.parameter}:{block.name}": table.note
+            for table in payload.parameters
+            for block in table.main_effects
+        },
+        reasons={
+            key: payload.omitted[split_key(key)[0]]
+            for key in term_keys
+            if split_key(key)[0] in payload.omitted
+        },
+    )
+
+
+@dataclass(frozen=True)
 class RatingPreview:
-    """One model revision's rating-table payload, or why it has none.
+    """One model revision's rating tables, or why it has none.
 
     Owned by the widget and kept until the session's ``model_revision``
     moves, which every edit, undo, redo and structural step does; switching
@@ -38,7 +92,7 @@ class RatingPreview:
     """
 
     model_revision: int
-    payload: Any | None
+    payload: RatingTables | None
     reason: str | None
 
 
@@ -53,9 +107,10 @@ def term_rating_table(preview: RatingPreview, term: str) -> dict[str, Any]:
     """``term``'s main-effect block as ``{term, available, reason, columns, rows, ...}``."""
     if preview.payload is None:
         return _unavailable(term, preview.reason or EXPORT_REFUSED, preview.model_revision)
-    block = next((item for item in preview.payload.main_effects if item.name == term), None)
+    tables = preview.payload
+    block = tables.blocks.get(term)
     if block is None:
-        return _unavailable(term, NO_BLOCK, preview.model_revision)
+        return _unavailable(term, tables.reasons.get(term, NO_BLOCK), preview.model_revision)
     table = block.table
     return {
         "term": term,
@@ -64,7 +119,7 @@ def term_rating_table(preview: RatingPreview, term: str) -> dict[str, Any]:
         "columns": [str(column) for column in table.columns],
         "rows": [[_cell(value) for value in row] for row in table.itertuples(index=False)],
         "formats": _block_formats(block),
-        "note": _block_note(block),
+        "note": " ".join(filter(None, (tables.lines.get(term), _block_note(block)))) or None,
         "model_revision": preview.model_revision,
     }
 

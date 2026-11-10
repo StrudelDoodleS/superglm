@@ -19,7 +19,10 @@ from superglm.editor.diagnose import (
     SETTLED_REML,
     _glm_cell,
     _lss_cell,
+    _name_terms,
+    _stop_text,
     _term_cell,
+    diagnose_tab_payload,
     fit_trace,
     supplied_fold_traces,
     worst_rows,
@@ -101,7 +104,7 @@ def test_a_quadratic_null_space_at_a_fixed_large_smoothing_is_not_called_straigh
     family = GammaLS()
     model = SuperLSS(family, family.mean(s("age", kind="bs", k=6, m=3)), family.scale())
     model.fit(X, y, lambdas={"mean:age#wiggle": 1e10})
-    cell = fit_trace(model, fit_id="model", label="This model")["terms"]["mean:age"]
+    cell = fit_trace(model, fit_id="model", label="All rows")["terms"]["mean:age"]
     assert cell["shape"] == "simplest"
     assert cell["at_limit"] is False
 
@@ -139,7 +142,7 @@ def _with_terms():
 def test_a_superglm_term_reads_only_the_smoothing_it_owns():
     model = _with_terms()
     lambdas = model._reml_result.lambdas
-    terms = fit_trace(model, fit_id="model", label="This model")["terms"]
+    terms = fit_trace(model, fit_id="model", label="All rows")["terms"]
     assert set(terms) == {"age", "size", "age:size", "region", "group"}
     assert terms["age"]["lambda"] == lambdas["age"]
     assert terms["size"]["lambda"] == lambdas["size"]
@@ -157,7 +160,7 @@ def test_a_group_wide_fixed_smoothing_reaches_each_of_its_penalties():
     X, y = _rows()
     model = SuperGLM(family="gamma", terms=[s("age", k=6), s("size", k=5), ti("age", "size")])
     model.lambda2 = {"age": 1.0, "size": 1.0, "age:size": 5.0}
-    terms = fit_trace(model.fit(X, y), fit_id="model", label="This model")["terms"]
+    terms = fit_trace(model.fit(X, y), fit_id="model", label="All rows")["terms"]
     assert terms["age:size"]["lambda"] == 5.0
     assert terms["age"]["lambda"] == 1.0
 
@@ -167,14 +170,14 @@ def test_a_fit_that_released_its_design_says_its_smoothing_was_not_kept():
     fixed = SuperGLM(
         family="gamma", terms=[s("age", k=6)], spline_penalty=1000.0, retain_fit_state=False
     ).fit(X, y)
-    cell = fit_trace(fixed, fit_id="model", label="This model")["terms"]["age"]
+    cell = fit_trace(fixed, fit_id="model", label="All rows")["terms"]["age"]
     assert cell["shape"] == "unrecorded"
     assert cell["lambda"] is None
     assert cell["edf"] == pytest.approx(fixed.term_inference("age", with_se=False).edf)
     searched = SuperGLM(family="gamma", terms=[s("age", k=6)], retain_fit_state=False).fit_reml(
         X, y
     )
-    terms = fit_trace(searched, fit_id="model", label="This model")["terms"]
+    terms = fit_trace(searched, fit_id="model", label="All rows")["terms"]
     assert terms["age"]["lambda"] == searched._reml_result.lambdas["age"]
 
 
@@ -182,7 +185,7 @@ def test_a_searched_term_s_shape_reads_its_own_penalty_s_null_space(monkeypatch)
     model = _with_terms()
     forced = {**model._group_edf, "age": 1.0, "group": 1.0}
     monkeypatch.setitem(model.__dict__, "_group_edf", forced)
-    terms = fit_trace(model, fit_id="model", label="This model")["terms"]
+    terms = fit_trace(model, fit_id="model", label="All rows")["terms"]
     assert terms["age"]["shape"] == "straight"
     assert terms["group"]["shape"] == "curve"
 
@@ -192,7 +195,7 @@ def test_a_superglm_limit_is_the_search_s_own_ceiling(monkeypatch):
     reml = model._reml_result
     capped = {**reml.lambdas, "age": LAMBDA_CEILING, "size": 1e6}
     monkeypatch.setattr(model, "_reml_result", dataclasses.replace(reml, lambdas=capped))
-    terms = fit_trace(model, fit_id="model", label="This model")["terms"]
+    terms = fit_trace(model, fit_id="model", label="All rows")["terms"]
     assert terms["age"]["at_limit"] is True
     assert terms["size"]["at_limit"] is False
 
@@ -200,19 +203,23 @@ def test_a_superglm_limit_is_the_search_s_own_ceiling(monkeypatch):
 def test_a_finding_of_a_new_severity_does_not_stop_the_trace(monkeypatch):
     model, _, _ = _lss()
     report = model.diagnose()
-    finding = SimpleNamespace(severity="notice", headline="h", observed="o", actions=())
+    finding = SimpleNamespace(
+        severity="notice", headline="h", observed="o", actions=(), impacts=("smoothing_selection",)
+    )
     monkeypatch.setattr(
-        model, "diagnose", lambda: SimpleNamespace(profile=report.profile, findings=[finding])
+        model,
+        "diagnose",
+        lambda: SimpleNamespace(
+            profile=report.profile, findings=[finding], fit_status=report.fit_status
+        ),
     )
-    assert (
-        fit_trace(model, fit_id="model", label="This model")["findings"][0]["severity"] == "notice"
-    )
+    assert fit_trace(model, fit_id="model", label="All rows")["findings"][0]["severity"] == "notice"
 
 
 @pytest.mark.parametrize("make", [_lss, _glm], ids=["SuperLSS", "SuperGLM"])
 def test_a_trace_reads_the_fit_s_own_search(make):
     model, _, _ = make()
-    trace = fit_trace(model, fit_id="model", label="This model")
+    trace = fit_trace(model, fit_id="model", label="All rows")
     if isinstance(model, SuperLSS):
         fitted = model._require_fitted()
         assert trace["rounds"] == fitted.fitted_result.n_smoothing_iter
@@ -239,25 +246,52 @@ def test_a_trace_reads_the_fit_s_own_search(make):
 def test_a_fit_with_no_search_says_so():
     X, y = _rows()
     model = SuperGLM(family="gamma", terms=[s("age", k=6), cat("region")], spline_penalty=1.0)
-    trace = fit_trace(model.fit(X, y), fit_id="model", label="This model")
+    trace = fit_trace(model.fit(X, y), fit_id="model", label="All rows")
     assert trace["rounds"] == 0
     assert trace["path"] == []
     assert trace["late_gain"] is None and trace["settled_round"] is None
     assert trace["stop_text"] == "no smoothing search ran"
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "line_search_failed",
+        "line_search_stalled",
+        "lambda_tolerance",
+        "bootstrap_uncertified",
+        "coefficients_revised",
+        "objective_rejected",
+    ],
+)
+def test_every_stop_reason_is_worded_not_respelled(reason):
+    assert _stop_text(reason) != reason.replace("_", " ")
+
+
+def test_a_budget_stop_names_the_rounds_and_the_argument():
+    assert _stop_text("max_iterations", 2) == (
+        "it reached its limit of 2 smoothing rounds (max_reml_iter) before settling"
+    )
+    assert "1 smoothing round (" in _stop_text("max_reml_iter", 1)
+
+
+def test_a_phase_is_shown_by_its_label_not_its_key():
+    from superglm.diagnostics.fit_report import phase_label
+
+    assert phase_label("efs_update_backtracking") == "Trying smaller smoothing steps"
+    assert phase_label("something_new") == "Something new"
+
+
 def test_a_fixed_smoothing_is_read_without_a_search():
     X, y = _rows()
     model = SuperGLM(family="gamma", terms=[s("age", k=6), cat("region")], spline_penalty=1000.0)
-    terms = fit_trace(model.fit(X, y), fit_id="model", label="This model")["terms"]
+    terms = fit_trace(model.fit(X, y), fit_id="model", label="All rows")["terms"]
     assert terms["age"]["lambda"] == 1000.0
     assert terms["age"]["shape"] != "unsmoothed"
     assert terms["age"]["at_limit"] is False
     assert terms["region"]["shape"] == "unsmoothed"
     heavy = SuperGLM(family="gamma", terms=[s("age", k=6)], spline_penalty=1e9).fit(X, y)
-    assert (
-        fit_trace(heavy, fit_id="model", label="This model")["terms"]["age"]["shape"] == "straight"
-    )
+    assert fit_trace(heavy, fit_id="model", label="All rows")["terms"]["age"]["shape"] == "straight"
 
 
 @pytest.mark.parametrize("make", [_lss, _glm], ids=["SuperLSS", "SuperGLM"])
@@ -387,7 +421,8 @@ def test_fold_models_with_no_fold_indices_are_traced_without_rows():
     bare = dataclasses.replace(cv, fold_indices=None)
     traces = supplied_fold_traces(bare, session.cv_check.rows)
     assert [trace["id"] for trace in traces] == ["fold-1", "fold-2", "fold-3"]
-    assert traces[0]["rows"] is None
+    # With no fold indices the fold's size is read from the fold's own fit.
+    assert traces[0]["rows"] == cv.estimators[0]._fit_stats.n_obs
     assert "worst_rows" not in traces[0]
 
 
@@ -468,6 +503,27 @@ def test_run_cv_keeps_each_fold_s_trace_and_worst_rows(make):
     assert payload["note"] == "Folds from Run CV on the current model."
 
 
+def test_the_fit_on_all_rows_lists_the_training_rows_it_predicted_worst():
+    model, X, y = _glm()
+    session = edit(model, train_data=(X, y))
+    widget = session.widget()
+    try:
+        payload = widget._report("diagnose")
+    finally:
+        widget.close()
+    [whole] = payload["fits"]
+    assert whole["label"] == "All rows"
+    listed = whole["worst_rows"]["rows"]
+    assert listed
+    # Costliest first, over every training row, each row read back from the data.
+    costs = [row["cost"] for row in listed]
+    assert costs == sorted(costs, reverse=True)
+    for row in listed:
+        assert row["response"] == y[row["row"]]
+    unit = 2.0 * (-np.log(y / model.predict(X)) + (y - model.predict(X)) / model.predict(X))
+    assert costs[0] == pytest.approx(unit.max(), rel=1e-9)
+
+
 def test_folds_from_an_older_model_say_so(monkeypatch):
     model, X, y = _glm()
     cv = cross_validate(
@@ -483,13 +539,17 @@ def test_folds_from_an_older_model_say_so(monkeypatch):
     widget = session.widget()
     try:
         assert (
-            widget._report("diagnose")["note"] == "Folds as supplied with edit(model, cv=result)."
+            widget._report("diagnose")["note"]
+            == "Folds from the cross-validation result you supplied."
         )
         session.reference_model = object()
-        assert "from the model as first opened" in widget._report("diagnose")["note"]
+        assert "on the model as first opened" in widget._report("diagnose")["note"]
         widget._cv_run = run
         assert widget._report("diagnose")["note"] == "Folds from Run CV on the current model."
-        widget._cv_run = dataclasses.replace(run, model_revision=run.model_revision - 1)
+        # A run made on another model than the one in force.
+        widget._cv_run = dataclasses.replace(
+            run, source=dataclasses.replace(run.source, model=object())
+        )
         note = widget._report("diagnose")["note"]
     finally:
         widget.close()
@@ -524,4 +584,152 @@ def test_a_fold_that_cannot_be_traced_keeps_its_scores(monkeypatch, target):
     assert [fit["id"] for fit in payload["fits"]] == ["model"]
     assert payload["note"] == (
         "Folds from Run CV on the current model. No trace for Fold 1, Fold 2, Fold 3: see the log."
+    )
+
+
+def _not_converged_lss() -> SuperLSS:
+    X, y = _rows()
+    family = GammaLS()
+    model = SuperLSS(
+        family, family.mean(s("age", k=6), s("size", k=5), cat("region")), family.scale()
+    )
+    return model.fit_reml(X, y, max_reml_iter=2, outer="efs")
+
+
+_SEARCH_SENTENCES_BY_OUTER = {
+    "efs": "Quick smoothing updates only",
+    "efs+finish": "Quick smoothing updates, then Newton steps to an optimum",
+    "efs+newton": "A few quick smoothing updates, then Newton steps",
+}
+_SEARCH_SENTENCES = set(_SEARCH_SENTENCES_BY_OUTER.values())
+
+
+def test_a_converged_superlss_fit_says_so_and_which_search_made_it():
+    model, _, _ = _lss()
+    trace = fit_trace(model, fit_id="model", label="All rows")
+    assert trace["status"] in {"converged", "loose"}
+    assert trace["verdict"].startswith("Converged")
+    assert trace["explanation"] is None
+    assert trace["converged"] is True
+    assert trace["search"] in _SEARCH_SENTENCES
+
+
+@pytest.mark.parametrize(
+    ("outer", "words"),
+    [
+        ("efs", "Quick smoothing updates only"),
+        ("efs+finish", "Quick smoothing updates, then Newton steps to an optimum"),
+        ("efs+newton", "A few quick smoothing updates, then Newton steps"),
+    ],
+)
+def test_the_search_is_named_from_the_option_the_fit_ran_with(outer, words):
+    X, y = _rows()
+    family = GammaLS()
+    model = SuperLSS(family, family.mean(s("age", k=6), cat("region")), family.scale())
+    model.fit_reml(X, y, outer=outer)
+    assert fit_trace(model, fit_id="model", label="All rows")["search"] == words
+
+
+def test_the_default_search_is_named_as_the_family_runs_it():
+    X, y = _rows()
+    family = GammaLS()
+    model = SuperLSS(family, family.mean(s("age", k=6), cat("region")), family.scale())
+    model.fit_reml(X, y)
+    ran = model._require_fitted().smoothing.config.outer
+    search = fit_trace(model, fit_id="model", label="All rows")["search"]
+    assert search == _SEARCH_SENTENCES_BY_OUTER[ran]
+    # The sentence is words for a reader: no option name, no code, no solver acronym.
+    assert "outer" not in search and "=" not in search and "EFS" not in search
+
+
+def test_a_superlss_fit_stopped_at_its_round_limit_says_it_did_not_converge():
+    model = _not_converged_lss()
+    trace = fit_trace(model, fit_id="model", label="All rows")
+    assert trace["status"] == "not_converged"
+    assert trace["verdict"].startswith("Did not converge.")
+    assert "max_reml_iter" in trace["stop_text"] and "2 smoothing rounds" in trace["stop_text"]
+    assert "Refit with a larger max_reml_iter" in trace["explanation"]
+    assert trace["converged"] is False
+    assert trace["search"] == "Quick smoothing updates only"
+    # What stopped it early does bear on the numbers; the findings are told apart.
+    numbers = [item for item in trace["findings"] if item["affects_numbers"]]
+    assert numbers and numbers[0]["severity"] == "error"
+
+
+def test_a_superlss_fit_with_fixed_smoothing_has_no_search_to_name():
+    X, y = _rows()
+    family = GammaLS()
+    model = SuperLSS(family, family.mean(s("age", k=6), cat("region")), family.scale())
+    model.fit(X, y, lambdas={"mean:age#wiggle": 10.0})
+    trace = fit_trace(model, fit_id="model", label="All rows")
+    assert trace["status"] == "fixed"
+    assert trace["verdict"] == "No smoothing search. You set the smoothing."
+    assert trace["search"] is None
+
+
+def test_a_fixed_smoothing_superglm_fit_says_so_and_a_searched_one_converged():
+    X, y = _rows()
+    fixed = SuperGLM(family="gamma", terms=[s("age", k=6), cat("region")], spline_penalty=1.0)
+    trace = fit_trace(fixed.fit(X, y), fit_id="model", label="All rows")
+    assert trace["status"] == "fixed"
+    assert trace["verdict"] == "No smoothing search. You set the smoothing."
+    assert trace["rows"] == len(X)
+    assert trace["search"] is None and trace["explanation"] is None
+    searched = fit_trace(_glm()[0], fit_id="model", label="All rows")
+    assert searched["status"] == "converged"
+    assert searched["verdict"].startswith("Converged.")
+    # SuperGLM's REML does not record which search ran, so the tab says nothing about one.
+    assert searched["search"] is None
+    assert searched["rows"] == len(X)
+
+
+def test_a_superglm_fit_that_did_not_converge_gives_the_statement_to_act_on():
+    X, y = _rows()
+    model = SuperGLM(family="gamma", terms=[s("age", k=6), s("size", k=5), cat("region")])
+    model.fit_reml(X, y, max_reml_iter=1)
+    trace = fit_trace(model, fit_id="model", label="All rows")
+    assert trace["status"] == "not_converged"
+    assert trace["verdict"].startswith("Did not converge.")
+    assert trace["explanation"].startswith("fit_reml did not converge")
+    assert "larger max_reml_iter" in trace["explanation"]
+    assert trace["converged"] is False
+
+
+def test_a_finding_names_its_term_as_the_editor_labels_it():
+    labels = {"mean:power": "power · Mean", "scale:age": "age · CV"}
+    said = _name_terms(
+        "The smoothing of 'mean:power#wiggle' went up, and 'scale:age' did not; 'other:x' is unknown.",
+        labels,
+    )
+    assert said == (
+        "The smoothing of 'power · Mean' went up, and 'age · CV' did not; 'other:x' is unknown."
+    )
+    assert _name_terms(None, labels) is None
+    assert _name_terms("It stopped with reason 'max_iterations'.", labels) == (
+        "It stopped with reason 'max_iterations'."
+    )
+
+
+def test_the_payload_words_every_finding_with_labels(monkeypatch):
+    model = _not_converged_lss()
+    report = model.diagnose()
+    finding = dataclasses.replace(
+        report.findings[0], headline="Smoothing of 'mean:age#wiggle' moved most."
+    )
+    monkeypatch.setattr(
+        model,
+        "diagnose",
+        lambda: SimpleNamespace(
+            profile=report.profile, findings=[finding], fit_status=report.fit_status
+        ),
+    )
+    payload = diagnose_tab_payload(
+        model,
+        folds=[],
+        source="",
+        display=lambda key: SimpleNamespace(label=f"{key} shown", short=key, group=None, role=None),
+        model_revision=1,
+    )
+    assert payload["fits"][0]["findings"][0]["headline"] == (
+        "Smoothing of 'mean:age shown' moved most."
     )

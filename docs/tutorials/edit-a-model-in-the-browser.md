@@ -509,6 +509,10 @@ the same data, so it shows what the workbook will hold: the same rows, number fo
   so.
 - Interaction terms are not shown.
 - When the export refuses the model, the table shows the reason instead.
+- In a SuperLSS session the table is the block for the term's own parameter. The note above it
+  says what the factors multiply: the Mean, the CV, σ above its floor (log-normal) or
+  overdispersion (1/θ). A parameter the export leaves out shows its reason; the others keep their
+  tables.
 
 ## Undo, Redo and Revert
 
@@ -632,7 +636,8 @@ Choose **Export** in the application bar, then one of four formats:
 - **Excel rating workbook** writes deployment-oriented rating tables. This export needs
   `train_data` or fit data retained by the model. Its Model Summary sheet contains typed
   `ModelOverview` and `TermInference` tables, so numbers remain numeric Excel cells rather than one
-  large formatted text block.
+  large formatted text block. For a SuperLSS model it holds one sheet per parameter that has a
+  table, then a summary; if no parameter has one, the export says why.
 - **Final fit model** is the latest Final fit on all rows, from the Cross-validation tab. It is
   offered while the model has not changed since that fit.
 - **Structure (JSON)** writes each term's groupings, reference, shaped ranges and where new levels
@@ -772,8 +777,11 @@ The tab shows:
   the mean distance of a fold's curve from the fold average, and *min r* the lowest correlation of
   a fold with it.
 
-Each relativity chart draws the levels in the model's order, with every curve re-centred on its
-exposure-weighted mean. Hover over or focus a fold in the chart's legend to pick it out.
+Each relativity chart draws the levels in the model's order. The fit curve (and the edited curve,
+once you edit) is exactly the curve the Editor tab draws for the term, value for value. Each fold's
+curve is moved by a constant factor so its exposure-weighted mean log matches the fit's, so folds
+compare on shape; *fold gap* and *min r* do not depend on that level. Hover over or focus a fold in
+the chart's legend to pick it out.
 
 Two buttons run jobs in the background, each with a **Cancel** button while it runs:
 
@@ -781,9 +789,9 @@ Two buttons run jobs in the background, each with a **Cancel** button while it r
   back as you set them, and it waits while changes are waiting for Refit. Its scores are shown
   beside the supplied ones, and its fold curves replace the supplied curves. A hand-edited term is
   marked **held**: it is the same curve on every fold.
-- **Final fit on all rows** uses the train and validation rows and leaves the test rows out. It
-  puts your hand edits back too. Its result appears on the **Final Fit** tab, and Export offers it
-  as **Final fit model**.
+- **Final fit on all rows** uses the train and validation rows and leaves the test rows out, when
+  there are any. It puts your hand edits back too. Its result appears on the **Final Fit** tab, with
+  a line saying whether the refit converged, and Export offers it as **Final fit model**.
 
 Run CV scores the folds with whichever of deviance, Gini and NLL the supplied result scored, or
 with all three when it scored none of them. It fits each fold with the method the result records:
@@ -801,29 +809,51 @@ scores land on the cards and in the fold table as it finishes. When the folds sp
 K-fold does, the **Held out** column shows the piece of the book each fold scored, and **Rounds**
 shows how much smoothing search a `fit_reml` fold took, which is usually why one fold is slower.
 
-The **Diagnose** tab shows how each fit's smoothing search went, read from what the fits recorded,
-so opening it refits nothing:
+The **Diagnose** tab answers whether each fit converged, whether its numbers can be used and what to
+try if not, from what the fits recorded, so opening it refits nothing. It opens on the first fit
+that did not converge, and one line above the table names every such fit; each name selects it.
 
-- **Fits**: rounds, the round the search settled by, fit time, why it stopped and how much REML the
-  last half of its rounds gained. A fold that took at least twice the middle fold's rounds, and at
-  least ten, is marked *slow*, here and in the fold table, whose mark opens that fold in this tab.
-- **Smoothing by term**: every fit's effective degrees of freedom side by side. A tint means the fit
-  left the term at the simplest shape its penalty allows, a straight line for most splines, or
-  smoothed it away. A dot means the fit records that it reached the smoothing limit.
-- **Search path**: how much REML each fit still had to gain at each round.
-- **What the fit reports** and **Time by phase**: a SuperLSS's `diagnose()` findings and work profile.
-  A SuperGLM has neither.
-- **Rows that cost the most**: the held-out rows the fold's own fit predicted worst.
+- **Fits**: one row per fit, led by its verdict. **All rows** is the model you are editing, fitted
+  on every training row; each fold is fitted on its training part. A row's verdict is one of: converged; converged with a looser stop (the numbers
+  are usable, the smoothing was not checked to the strictest standard); did not converge, with the
+  reason it stopped; or no smoothing search, because you set the smoothing. A fit that did not
+  converge carries a cross and the words, not only a colour, and its fitted numbers, standard errors
+  and degrees of freedom should not be relied on until it is refitted as the tab's **What to try**
+  says. A SuperLSS fit also names the smoothing search that made it, for example *Quick smoothing
+  updates, then Newton steps to an optimum*. A fold that took at least twice the middle fold's rounds, and
+  at least ten, is marked *slow*, here and in the fold table, whose mark opens that fold in this tab.
+- **Search path**: how much REML score the fit in view gained in each smoothing round, beside the
+  other fits. A search that settled ends at the bottom; one that stopped while still gaining ends
+  higher, and its last point is crossed.
+- **What the fit reports**: a SuperLSS's `diagnose()` findings. Those that bear on the numbers show
+  first; those about how the search went are folded under **About the search**. A SuperGLM has none.
+- **Smoothing by term**: every fit's effective degrees of freedom (EDF, how flexible a term is) side
+  by side. A shaded cell means the fit left the term at the simplest shape its penalty allows, a
+  straight line for most splines, or smoothed it away; a dot means the fit records that it reached
+  the largest smoothing allowed.
+- **Rows that cost the most**: for a fold, the held-out rows its own fit predicted worst; for
+  **All rows**, the training rows the fit predicted worst, which it was fitted on, so a fold's
+  held-out rows are the fairer test.
+- **Where the time went**: a SuperLSS's work profile, folded until opened, without the phases that
+  took under five milliseconds.
+
+When every fit had its smoothing set, the tab says so once and shows only each term's flexibility.
 
 Folds come from Run CV, or from a supplied result with `return_estimators=True`.
 
 A SuperLSS model works the same way: pass `cross_validate(model, X_train, y_train, cv=folds,
 fit_mode="fit_reml", return_estimators=True)` as `cv=`, with no `scoring=` argument. Its folds are
 scored by log score, CRPS, Gini and actual over expected; a family with no distribution function,
-such as the negative binomial, has no CRPS. Its `offset` is a dict by parameter, and its fold curves
-are listed under **Average** and then **Spread**, the least stable first in each. A spread curve is a
-relativity of what the family models: the coefficient of variation for the gamma, σ for the
-log-normal, and overdispersion (1/θ) for the negative binomial, so higher always means more spread. See
+such as the negative binomial, has no CRPS, and its Validation and Final Fit tabs leave that column
+out. Its `offset` is a dict by parameter, and its fold curves are listed under **Mean** and then
+**CV** (**Overdispersion** for a negative binomial, **Dispersion** for a Tweedie), the least stable
+first in each. Every curve, on this tab and on the Editor tab, is a relativity of its parameter and the two tabs
+agree: the heading names the parameter and what the curve is a relativity of, for example
+*Area · CV · relativity of the CV* (*relativity of σ* for a log-normal, *relativity of the
+overdispersion* for a negative binomial, *relativity of the dispersion* for a Tweedie), and higher
+always means more variation. The parameters and their labels are in
+[What the editor calls each parameter](../how-to/fit-a-distributional-model.md#what-the-editor-calls-each-parameter).
+See also
 [Check a distributional fit](../how-to/check-a-distributional-fit.md#5-how-do-candidates-compare).
 
 Run CV is disabled, with the reason on hover, when it cannot use the rows:
@@ -845,6 +875,49 @@ is checked. An older result records no fit method either, so Run CV fits each fo
 model was fitted. The tab says so in both cases. A result from before `cross_validate` took
 `warm_start` and `fit_kwargs` was fitted without them, and Run CV replays it the same way. The older `cv_report=` argument of `EditorSession.from_model`
 still works: its report is shown on the Validation tab.
+
+## Explain Risks (SuperLSS)
+
+A SuperLSS session has an **Explain** tab. It reads the model for single risks. Each row at the top
+is a risk: a value for every feature, starting at the reference risk, which has every number at its
+training median and every level at its most frequent. Every offset is at zero.
+
+- **The plus button** adds a risk, a training row drawn at random, up to eight. A risk keeps its
+  letter and colour until it is removed.
+- **Select a risk** by its letter, or by working in its row. On the selected row, the icons take
+  the values of another training row drawn at random, put the risk back at the reference risk, add
+  a copy of it to change one value and compare, or remove it.
+- **The plots** show each risk's whole predicted distribution: how likely each amount is, and the
+  chance of an amount above each value, down to 1 in 10,000. The selected risk is filled. The line
+  is the one the distribution panel uses: its box takes a number alone, and a press or a drag on
+  the plots moves it.
+- **The table** has a row per risk: mean, median, the 90th, 99th and 99.5th percentiles, the chance
+  above the line, and the CV. A line at one of those percentiles adds no second column, and a line
+  written as 1 in N heads its column 1 in N. Two risks are followed by the ratio of the second to
+  the first.
+- **The walk** explains the selected risk. It starts at risk A, or at the reference risk when risk
+  A is selected, and has a row per feature that differs: the multiplier that feature alone puts on
+  the mean and on the CV. The start times every row is the end. Where the model has interactions,
+  what the features add only together is a row of its own. A risk that differs from its start in
+  nothing gets one line saying so in place of the rows.
+- **After an edit**, one risk is read beside the original model's distribution for it, and a row
+  of the walk that the edit moved says what it was.
+
+The tab fits one screen on a 16:9 window and in a notebook cell with a few risks. Each risk adds a
+row, so with more the page scrolls, and the plots keep a height that stays readable. At eight risks
+the plus button and the copy icon are off. A number outside the range of the training rows is
+accepted and its box turns orange: the model has no data there and extrapolates.
+
+A Tweedie model has a chance of no claim. The table gives it for each risk; the upper plot covers
+the amounts above zero as a density given a claim, so every curve has an area of one, and the
+lower plot is the chance for the whole policy, so it starts at the chance of a claim. Its walk covers the mean and the dispersion, because the power is one constant for
+the model.
+
+A negative binomial model has counts, not amounts: the plot is a bar per number of claims for each
+risk, for one unit of exposure, on a scale that keeps the rare counts in view, and the table reads the mean, the chance of no claim and of one,
+two and three or more, and the overdispersion. For a log-normal, the CV's multipliers in the walk
+act on σ, the standard deviation of the log amount. The labels are in
+[What the editor calls each parameter](../how-to/fit-a-distributional-model.md#what-the-editor-calls-each-parameter).
 
 ## Keyboard Shortcuts
 

@@ -35,7 +35,8 @@ const BELOW_AXIS = 32;
 const DOT_WIDTH = 64;
 const DOTS_FROM_RIGHT = 132;
 const READOUT_INSET = 8;
-const PLOT_TO_DOTS = 34;
+// Room for the amount axis's last label and the dot column's first, "1 in 10k" centred on its left end.
+const PLOT_TO_DOTS = 48;
 export const RIDGE_SAMPLES = 180;
 
 /**

@@ -40,6 +40,16 @@
   --ridge-tail-line: var(--param-spread);
   --ridge-fill: #6b93d9;
   --ridge-tail-fill: #dd6a12;
+  /* The same hues stepped for the dark ground: worst pair 7.1 under a colour-vision deficiency,
+     15.0 in full colour, with each curve's letter beside it. */
+  --risk-a: var(--param-average);
+  --risk-b: #dc5f52;
+  --risk-c: #0759d2;
+  --risk-d: #834b85;
+  --risk-e: #666901;
+  --risk-f: #9c4ef9;
+  --risk-g: #249778;
+  --risk-h: #f03bb0;
   --fan-blue-1: #3f5f9e;
   --fan-blue-2: #5578bd;
   --fan-blue-3: #6b93d9;

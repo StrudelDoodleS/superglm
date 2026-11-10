@@ -34,6 +34,7 @@ from superglm.distributional.rebuild import bind_replay_offsets
 from superglm.distributions import NegativeBinomial
 from superglm.editor.carry import model_with_edited_curves, weighted_mean
 from superglm.editor.diagnose import (
+    all_rows_worst_rows,
     diagnose_tab_payload,
     fit_trace,
     supplied_fold_traces,
@@ -277,22 +278,48 @@ class StoredFolds:
 
 
 @dataclass(frozen=True)
+class InForce:
+    """What a result was computed for: the fitted model in force and the hand edits on it.
+
+    Undo brings back the same model object and the same edited values, so a result made before an
+    edit describes the model again once the edit is undone; the revision number only ever rises.
+    """
+
+    model: Any
+    edits: tuple[tuple[str, bytes], ...]
+
+    @classmethod
+    def of(cls, session) -> InForce:
+        edits = tuple(
+            (name, np.asarray(session.terms[name].edited_log_effect, dtype=np.float64).tobytes())
+            for name in sorted(session.edited_terms())
+        )
+        return cls(session.model, edits)
+
+    def describes(self, session) -> bool:
+        """Whether ``session`` holds the model this was computed for; call it under the widget lock."""
+        return _same_fit(self.model, session.model) and self.edits == InForce.of(session).edits
+
+
+@dataclass(frozen=True)
 class CVRun:
-    """A finished Run CV, kept on the widget with the revision it ran on."""
+    """A finished Run CV, kept on the widget with the model it ran on."""
 
     result: CrossValidationResult
     terms: list[dict[str, Any]]
     model_revision: int
     carried: tuple[str, ...]
+    source: InForce
     fold_fits: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
 class FinalFit:
-    """A finished Final fit, kept on the widget with the revision it ran on."""
+    """A finished Final fit, kept on the widget with the model it ran on."""
 
     model: Any
     model_revision: int
+    source: InForce
     n_rows: int
     splits: tuple[str, ...]
     carried: tuple[str, ...]
@@ -481,7 +508,7 @@ def _term_grid(term: EditableTerm) -> _TermGrid | None:
             labels=labels,
         )
     if term.x is None or term.size < 2:
-        # A linear term is one slope; its fold spread is a coefficient's.
+        # A linear term is one slope; its fold variation is a coefficient's.
         return None
     return _TermGrid(
         kind="continuous",
@@ -555,12 +582,15 @@ def fold_term_items(
     held: Collection[str] = (),
     display: Callable[[str], FoldTermDisplay] = _plain_display,
 ) -> list[dict[str, Any]]:
-    """One chart entry per term: the average terms before the spread terms, and
+    """One chart entry per term: the mean terms before the CV and overdispersion terms, and
     within those the least stable first, then the terms ``held``.
 
-    Every curve is re-centred on its exposure-weighted mean log and shown as
-    a relativity. A term's ``fold_gap`` is the mean over folds of
-    ``rmse_to_mean`` on that scale, and ``min_correlation`` the lowest
+    The in-force curve ("fit", and "edited" when edited) is drawn exactly as the
+    Editor tab draws the term, a relativity (``display``'s transform), and each
+    fold's curve is moved by a constant factor so its exposure-weighted mean log
+    matches the in-force curve's. A term's ``fold_gap`` is the mean over folds of
+    ``rmse_to_mean`` with every curve centred on its own mean log (the shape
+    alone, whatever level it is drawn at), and ``min_correlation`` the lowest
     ``correlation_to_mean`` (``plotting.curve_similarity``), or NaN when a
     fold has none (a fold that dropped the term has a flat curve). A level a
     fold never saw is a gap (NaN) that distances skip. Each curve keeps its
@@ -586,7 +616,7 @@ def fold_term_items(
 
 
 def _least_stable_first(item: dict[str, Any]) -> tuple[bool, int, float, str]:
-    """Spread terms after the rest; then measured terms by falling fold gap, those
+    """CV and overdispersion terms after the rest; then measured terms by falling fold gap, those
     without one, and the held terms.
 
     By name within each. A fold gap is unavailable (NaN) where no fold shares
@@ -618,20 +648,49 @@ def _term_item(
     )
     if not float(np.sum(weights)) > 0.0:
         weights = np.ones(grid.order.size, dtype=np.float64)
-    # Every curve is centred on the same points, the ones every fold has a
-    # value at, so a fold's gap does not shift it against the others.
-    shared = np.logical_and.reduce([~np.isnan(values) for values in curves.values()])
-
-    def centred(log_values) -> NDArray[np.float64]:
-        values = np.asarray(log_values, dtype=np.float64)
-        points = shared if shared.any() else ~np.isnan(values)
-        return np.exp(shown.sign * (values - weighted_mean(values[points], weights[points])))
-
-    folds = {f"Fold {index + 1}": centred(values) for index, values in curves.items()}
-    vs_mean = None if held else _summarize_against_fold_mean(folds, weights)
     fit = term.original_log_effect[grid.order]
     edited = term.edited_log_effect[grid.order]
     changed = not np.allclose(edited, fit, rtol=0.0, atol=1e-14)
+    # The in-force curve is drawn as the Editor tab draws the term. A held term's
+    # folds carry its edit, so they follow the edited curve; every other fold
+    # follows the fit.
+    anchor = edited if held else fit
+    # Every curve is read on the same points, the ones every fold has a
+    # value at, so a fold's gap does not shift it against the others.
+    shared = np.logical_and.reduce([~np.isnan(values) for values in curves.values()])
+
+    def log_mean(log_values: NDArray[np.float64]) -> float:
+        points = shared if shared.any() else ~np.isnan(log_values)
+        return weighted_mean(log_values[points], weights[points])
+
+    def centred(log_values) -> NDArray[np.float64]:
+        values = np.asarray(log_values, dtype=np.float64)
+        return shown.transform.to_display(values - log_mean(values))
+
+    def aligned(log_values) -> NDArray[np.float64]:
+        # A fold's curve moved by a constant factor so its exposure-weighted mean
+        # log is the in-force curve's over the same points: folds compare on shape,
+        # and sit at the level the Editor tab draws.
+        values = np.asarray(log_values, dtype=np.float64)
+        points = shared if shared.any() else ~np.isnan(values)
+        level = (
+            weighted_mean(anchor[points], weights[points])
+            if np.isfinite(anchor[points]).all()
+            else 0.0
+        )
+        return shown.transform.to_display(values - log_mean(values) + level)
+
+    # The measures read the curves on the mean-one scale, so a term's gap does
+    # not depend on the level the curves are drawn at; correlation is unaffected
+    # by a common factor, a root-mean-square distance would scale with it.
+    vs_mean = (
+        None
+        if held
+        else _summarize_against_fold_mean(
+            {f"Fold {index + 1}": centred(values) for index, values in curves.items()}, weights
+        )
+    )
+    folds = {f"Fold {index + 1}": aligned(values) for index, values in curves.items()}
     return {
         "name": name,
         "label": shown.label,
@@ -647,8 +706,8 @@ def _term_item(
             {"fold": index, "label": label, "values": values}
             for index, (label, values) in zip(curves, folds.items(), strict=True)
         ],
-        "fit": centred(fit),
-        "edited": centred(edited) if changed else None,
+        "fit": shown.transform.to_display(fit),
+        "edited": shown.transform.to_display(edited) if changed else None,
         "held": held,
         "fold_gap": None if vs_mean is None else float(vs_mean["rmse_to_mean"].mean()),
         "min_correlation": (
@@ -671,10 +730,13 @@ class CVTabView:
     final_fit: FinalFit | None
     model_revision: int
     model_changed: bool
+    run_stale: bool
+    final_stale: bool
     pending: int
     run_reason: str | None
     final_reason: str | None
     has_validation: bool
+    has_test: bool
     replay_note: str | None = None
     metrics: tuple[tuple[str, str, str, bool | None], ...] = _METRICS
     display: Callable[[str], FoldTermDisplay] = _plain_display
@@ -698,11 +760,14 @@ def capture_cv_view(session, *, run: CVRun | None, final_fit: FinalFit | None) -
         model_revision=session.model_revision,
         model_changed=not _same_fit(session.model, session.reference_model)
         or bool(session.edited_terms()),
+        run_stale=run is not None and not run.source.describes(session),
+        final_stale=final_fit is not None and not final_fit.source.describes(session),
         pending=len(session.pending),
         run_reason=run_cv_reason(session),
         replay_note=_replay_note(session),
         final_reason=final_fit_reason(session),
         has_validation="validation" in session._evaluation_data,
+        has_test="test" in session._evaluation_data,
         metrics=_metrics_of(session.model),
         display=_term_display(session.model),
     )
@@ -759,22 +824,29 @@ def diagnose_report_payload(widget, *, request_sequence: int | None = None) -> d
         run = widget._cv_run
         supplied = session.cv
         rows = session.cv_check.rows
+        train = training_export_dataset(session)
         kept = widget._diagnose_folds
+        kept_rows = widget._diagnose_all_rows
         same_fit = _same_fit(model, session.reference_model)
+        run_current = run is not None and run.source.describes(session)
     if run is not None:
         folds = list(run.fold_fits)
         source = (
             "Folds from Run CV on the current model."
-            if run.model_revision == revision
+            if run_current
             else "Folds from Run CV on an earlier version of this model. "
             "Press Run CV to see the current one."
         ) + _untraced_note(range(1, len(run.result.fold_scores) + 1), folds)
     elif supplied is None:
-        folds, source = [], "This model only: pass a cross_validate() result to see its folds."
+        folds, source = (
+            [],
+            "The fit on all rows only. Open the editor with cv=<a cross_validate() result> to see "
+            "each fold.",
+        )
     elif supplied.estimators is None:
         folds = []
         source = (
-            "This model only: the supplied folds kept no models. Pass return_estimators=True to "
+            "The fit on all rows only: the supplied folds kept no models. Pass return_estimators=True to "
             "cross_validate(), or press Run CV, to see them."
         )
     else:
@@ -784,16 +856,22 @@ def diagnose_report_payload(widget, *, request_sequence: int | None = None) -> d
                 widget._diagnose_folds = kept
         folds = kept[1]
         source = (
-            "Folds as supplied with edit(model, cv=result)."
+            "Folds from the cross-validation result you supplied."
             if same_fit
-            else "Folds as supplied with edit(model, cv=result), from the model as first opened. "
+            else "Folds from the cross-validation result you supplied, fitted on the model as first opened. "
             "Press Run CV to see the current one."
         ) + _untraced_note(
             [i + 1 for i, fold in enumerate(supplied.estimators) if fold is not None], folds
         )
+    # The fit on all rows ranks its training rows once per fitted model, as the folds' are kept.
+    if kept_rows is None or kept_rows[0] is not model:
+        kept_rows = (model, all_rows_worst_rows(model, train))
+        with widget._lock:
+            widget._diagnose_all_rows = kept_rows
     return diagnose_tab_payload(
         model,
         folds=folds,
+        model_rows=kept_rows[1],
         source=source,
         display=_term_display(model),
         model_revision=revision,
@@ -823,7 +901,7 @@ def cv_tab_payload(
                 "Current model",
                 "run",
                 run.model_revision,
-                run.model_revision != view.model_revision,
+                view.run_stale,
                 view.metrics,
             )
         )
@@ -851,8 +929,9 @@ def cv_tab_payload(
             "reason": view.final_reason,
             "note": " ".join(note for note in final_notes if note) or None,
             "done": final is not None,
-            "stale": final is not None and final.model_revision != view.model_revision,
+            "stale": view.final_stale,
             "n_rows": None if final is None else final.n_rows,
+            "has_test_split": view.has_test,
         },
         "metrics": [
             {"name": name, "label": label, "short": short, "lower_is_better": lower}
@@ -934,7 +1013,7 @@ def _relativities(view: CVTabView) -> dict[str, Any]:
         return {
             "available": True,
             "origin": "run",
-            "stale": run.model_revision != view.model_revision,
+            "stale": view.run_stale,
             "note": None,
             "terms": run.terms,
         }
@@ -974,6 +1053,7 @@ class _Plan:
     model: Any
     template: Any
     model_revision: int
+    source: InForce
 
     def is_current(self, session) -> bool:
         return session.model_revision == self.model_revision and session.model is self.model
@@ -1007,6 +1087,7 @@ def capture_cv_run(session) -> CVRunPlan:
         model=session.model,
         template=_declared_template(session),
         model_revision=session.model_revision,
+        source=InForce.of(session),
         rows=session.cv_check.rows,
         folds=tuple(
             (np.asarray(train, dtype=np.intp), np.asarray(test, dtype=np.intp))
@@ -1261,6 +1342,7 @@ def run_cv(plan: CVRunPlan, context) -> CVRun:
         ),
         model_revision=plan.model_revision,
         carried=tuple(sorted(plan.edited)),
+        source=plan.source,
         fold_fits=tuple(recorder.fold_fits),
     )
 
@@ -1414,6 +1496,7 @@ def capture_final_fit(session) -> FinalFitPlan:
         model=session.model,
         template=_declared_template(session),
         model_revision=session.model_revision,
+        source=InForce.of(session),
         datasets=datasets,
         test=session._evaluation_data.get("test"),
         edited={name: session.terms[name].copy() for name in session.edited_terms()},
@@ -1471,6 +1554,7 @@ def run_final_fit(plan: FinalFitPlan, context) -> FinalFit:
     return FinalFit(
         model=model,
         model_revision=plan.model_revision,
+        source=plan.source,
         n_rows=int(y.size),
         splits=tuple(dataset.name for dataset in plan.datasets),
         carried=tuple(sorted(plan.edited)),

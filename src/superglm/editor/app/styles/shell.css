@@ -383,6 +383,17 @@ body {
   color: var(--surface);
 }
 
+/* While a fit runs, Refit's arrow turns. */
+.app-actions .refit-action.is-refitting .toolbar-icon {
+  animation: refit-turn 0.9s linear infinite;
+}
+
+@keyframes refit-turn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .refit-action-count {
   min-width: 18px;
   height: 18px;

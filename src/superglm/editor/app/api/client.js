@@ -184,6 +184,23 @@ export function createEditorClient({
     return postJSON("/distribution", { feature });
   }
 
+  /**
+   * The predictors of one or two risks of a SuperLSS session.
+   * @param {import('./contracts.js').RiskValues[]} risks
+   * @returns {Promise<unknown>} a RiskResponse, or a superseded reply
+   */
+  function risk(risks) {
+    return postJSON("/risk", { risks });
+  }
+
+  /**
+   * One training row's feature values, drawn at random.
+   * @returns {Promise<unknown>} `{values, index}`
+   */
+  function riskRow() {
+    return postJSON("/risk_row", {});
+  }
+
   /** @param {string} kind "cv" or "final_fit" */
   function jobStart(kind) {
     return postJSON("/job_start", { kind });
@@ -201,7 +218,7 @@ export function createEditorClient({
 
   return {
     requestJSON, postJSON, requestBlob, getState, ratingTable, freeLevels, unsmoothed,
-    distribution, jobStart, jobStatus, jobCancel
+    distribution, risk, riskRow, jobStart, jobStatus, jobCancel
   };
 }
 

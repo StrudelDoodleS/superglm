@@ -48,11 +48,12 @@ def test_history_rows_carry_their_parameter():
     # The timeline is oldest first: the mean edit, then the scale edit, then the waiting change.
     rows = [entry for entry in timeline_payload(session) if entry.get("kind") != "marker"]
     assert [row["predictor"] for row in rows] == ["mean", "scale", "mean"]
-    assert [row["predictor_label"] for row in rows] == ["Average", "Spread", "Average"]
+    assert [row["predictor_label"] for row in rows] == ["Mean", "CV", "Mean"]
+    assert [row["predictor_role"] for row in rows] == ["average", "spread", "average"]
     assert [row["term_label"] for row in rows] == ["age", "age", "power"]
     waiting = pending_payload(session)
     assert [(row["predictor"], row["predictor_label"], row["term_label"]) for row in waiting] == [
-        ("mean", "Average", "power")
+        ("mean", "Mean", "power")
     ]
     records = session.editor_history_records()
     assert [record["predictor"] for record in records] == ["mean", "scale", "mean"]
@@ -65,7 +66,7 @@ def test_the_refit_step_carries_its_parameter():
 
     assert session.editor_history_records()[-1]["predictor"] == "scale"
     row = [e for e in timeline_payload(session) if e.get("kind") == "structural"][-1]
-    assert (row["predictor"], row["predictor_label"]) == ("scale", "Spread")
+    assert (row["predictor"], row["predictor_label"]) == ("scale", "CV")
 
 
 def test_undo_redo_across_parameters():

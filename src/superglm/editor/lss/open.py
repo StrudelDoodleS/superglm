@@ -1,8 +1,8 @@
 """Open a fitted SuperLSS in the editor.
 
 The refusals are checked in a fixed order, so a model that breaks several rules
-is told about the first: the family, the log-normal's form, a model never
-fitted, truncated or censored rows, a parameter on a link other than its
+is told about the first: the family, the log-normal's form, terms in a Tweedie
+power, a model never fitted, truncated or censored rows, a parameter on a link other than its
 default, a column named by something other than a string, missing training
 rows, a centering other than native, the offsets, then training rows that are
 not the fit's.
@@ -17,17 +17,19 @@ from typing import Any
 import numpy as np
 
 from superglm._frame import as_eager_frame
-from superglm.distributional.families import LogNormalLS
+from superglm.distributional.families import LogNormalLS, TweedieLSS
 from superglm.distributional.prediction_design import _required_columns
 from superglm.distributional.predictor import resolve_predictor_link
 from superglm.distributional.weights import LikelihoodWeightError, resolve_likelihood_weights
 from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.editor.evaluation import coerce_dataset, coerce_evaluation_data
-from superglm.editor.lss.display import SPREAD_KINDS
+from superglm.editor.lss.display import SPREAD_FAMILIES
 from superglm.editor.lss.terms import lss_editable_terms
 from superglm.editor.lss.view import NATIVE_ONLY, LSSModelView
 
-_OPENS = "The editor opens LogNormalLS (mean form), GammaLS and NegativeBinomialLS models"
+_OPENS = (
+    "The editor opens LogNormalLS (mean form), GammaLS, NegativeBinomialLS and TweedieLSS models"
+)
 _NEEDS_ROWS = (
     "Opening a SuperLSS model needs its training rows: pass "
     "train_data=(X, y, sample_weight, offsets), with offsets a dict keyed by parameter name, "
@@ -104,13 +106,22 @@ def _kept_rows(lss, train) -> Any:
 
 def _refuse_unopenable(lss, train_data, centering: str) -> None:
     family = lss.family
-    if not isinstance(family, tuple(SPREAD_KINDS)):
+    if not isinstance(family, SPREAD_FAMILIES):
         raise EditorValueError(f"{_OPENS}; this model is {type(family).__name__}.")
     if isinstance(family, LogNormalLS) and family.parametrisation != "mean":
         raise EditorValueError(
             "The editor opens LogNormalLS models in mean form; this one uses "
             f"parametrisation={family.parametrisation!r}."
         )
+    if isinstance(family, TweedieLSS):
+        power = next(p for p in lss._predictors if p.name == "power")
+        terms = [str(name) for name in (*power.features, *power.interaction_order)]
+        if terms:
+            raise EditorValueError(
+                "The editor shows a Tweedie model whose power is a constant; this model's power "
+                f"has terms ({', '.join(terms)}). Refit it with the power as an intercept only, "
+                "family.p(), to open it in the editor."
+            )
     if lss._model is None:
         raise RuntimeError("Model must be fitted before creating an editor session.")
     state = lss._model.fit_state

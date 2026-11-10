@@ -12,11 +12,12 @@ import pytest
 
 import superglm
 from superglm import GammaLS, LogNormalLS, Numeric, SuperLSS, TweedieLSS, s, ti
+from superglm.distributional.families import LomaxLSS
 from superglm.editor import edit
 from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.editor.lss import (
+    INVERSE_THETA,
     RELATIVITY,
-    DisplayTransform,
     LSSModelView,
     column_of,
     display_for,
@@ -26,10 +27,19 @@ from superglm.editor.lss import (
     predictor_of,
     split_key,
 )
-from tests._lss_editor_fixtures import EPS, gamma_case, lognormal_case, nb_case, open_case
+from superglm.editor.lss.apply import lss_model_with_edits
+from superglm.editor.lss.display import y_label_for
+from tests._lss_editor_fixtures import (
+    EPS,
+    gamma_case,
+    lognormal_case,
+    nb_case,
+    open_case,
+    tweedie_case,
+)
 from tests.test_editor import editor_frame, editor_model  # noqa: F401
 
-CASES = [lognormal_case, gamma_case, nb_case]
+CASES = [lognormal_case, gamma_case, nb_case, tweedie_case]
 
 
 @functools.cache
@@ -81,9 +91,14 @@ def _unnamed_column_model(label):
     return model.fit_reml(X, y), X, y
 
 
-def _unfitted_tweedie():
+def _unfitted_other_family():
+    family = LomaxLSS()
+    return SuperLSS(family, family.scale(), family.shape())
+
+
+def _unfitted_tweedie_with_power_terms():
     family = TweedieLSS()
-    return SuperLSS(family, family.mu(), family.phi(), family.p())
+    return SuperLSS(family, family.mu(), family.phi(), family.p(s("age"), s("power")))
 
 
 def _unfitted_location_form():
@@ -208,10 +223,17 @@ def _refusal(case_id):
     rows = (case.X, case.y, None, None)
     if case_id == "family":
         message = (
-            "The editor opens LogNormalLS (mean form), GammaLS and NegativeBinomialLS models; "
-            "this model is TweedieLSS."
+            "The editor opens LogNormalLS (mean form), GammaLS, NegativeBinomialLS and "
+            "TweedieLSS models; this model is LomaxLSS."
         )
-        return _unfitted_tweedie(), {}, EditorValueError, message
+        return _unfitted_other_family(), {}, EditorValueError, message
+    if case_id == "tweedie-power-terms":
+        message = (
+            "The editor shows a Tweedie model whose power is a constant; this model's power has "
+            "terms (age, power). Refit it with the power as an intercept only, family.p(), to "
+            "open it in the editor."
+        )
+        return _unfitted_tweedie_with_power_terms(), {}, EditorValueError, message
     if case_id == "location-form":
         message = (
             "The editor opens LogNormalLS models in mean form; this one uses "
@@ -280,6 +302,7 @@ def _refusal(case_id):
     "case_id",
     [
         "family",
+        "tweedie-power-terms",
         "location-form",
         "unfitted",
         "truncated",
@@ -320,8 +343,11 @@ def test_refusals_follow_the_documented_order():
     with pytest.raises(EditorValueError, match="native scale"):
         edit(case.model, centering="mean", train_data=(case.X, case.y, None, np.zeros(len(case.y))))
     # An unsupported family is named before the model is found unfitted.
-    with pytest.raises(EditorValueError, match="this model is TweedieLSS"):
-        edit(_unfitted_tweedie(), centering="mean")
+    with pytest.raises(EditorValueError, match="this model is LomaxLSS"):
+        edit(_unfitted_other_family(), centering="mean")
+    # Terms in the Tweedie power are named before the model is found unfitted.
+    with pytest.raises(EditorValueError, match="whose power is a constant"):
+        edit(_unfitted_tweedie_with_power_terms(), centering="mean")
 
 
 def test_offsets_are_stored_by_parameter_name():
@@ -428,49 +454,76 @@ def test_reference_row_is_the_training_centre_and_survives_mutation():
 
 
 @pytest.mark.parametrize(
-    ("parameter", "label", "role", "colour"),
+    ("parameter", "label", "chip", "role", "colour", "full_name"),
     [
-        ("mean", "Average", "average", "blue"),
-        ("scale", "Spread", "spread", "orange"),
-        ("theta", "Spread", "spread", "orange"),
+        ("mean", "Mean", "Mean", "average", "blue", "the mean: the expected value of the response"),
+        (
+            "scale",
+            "CV",
+            "CV",
+            "spread",
+            "orange",
+            "coefficient of variation (CV): standard deviation ÷ mean",
+        ),
+        (
+            "theta",
+            "Overdispersion",
+            "1/θ",
+            "spread",
+            "orange",
+            "overdispersion (1/θ): variance = mean + mean²/θ",
+        ),
+        (
+            "dispersion",
+            "Dispersion",
+            "Dispersion",
+            "spread",
+            "orange",
+            "dispersion (φ): the variance is φ times the mean to the power p",
+        ),
+        (
+            "power",
+            "Power",
+            "Power",
+            "shape",
+            "orange",
+            "power (p): the variance is the dispersion times the mean to the power p",
+        ),
     ],
 )
-def test_parameter_display_names_a_parameter_by_its_role(parameter, label, role, colour):
+def test_parameter_display_names_a_parameter_by_its_name(
+    parameter, label, chip, role, colour, full_name
+):
     display = parameter_display(parameter)
-    assert (display.name, display.label, display.role, display.colour) == (
+    assert (display.name, display.label, display.chip, display.role, display.colour) == (
         parameter,
         label,
+        chip,
         role,
         colour,
     )
-    assert display.chip == label
+    assert display.full_name == full_name
 
 
 def test_parameter_display_refuses_what_it_does_not_name():
-    with pytest.raises(EditorValueError, match="'power'"):
-        parameter_display("power")
-
-
-def _spread(kind, parameter_values):
-    """The displayed spread a family's natural parameter stands for."""
-    if kind == "lognormal_cv":
-        return np.sqrt(np.expm1(parameter_values**2))
-    if kind == "gamma_cv":
-        return parameter_values
-    return 1.0 / parameter_values
+    with pytest.raises(EditorValueError, match="'location'"):
+        parameter_display("location")
 
 
 @pytest.mark.parametrize(
-    ("make", "kind"),
-    [(lognormal_case, "lognormal_cv"), (gamma_case, "gamma_cv"), (nb_case, "inverse_theta")],
+    ("make", "transform"),
+    [
+        (lognormal_case, RELATIVITY),
+        (gamma_case, RELATIVITY),
+        (nb_case, INVERSE_THETA),
+    ],
 )
-def test_display_transform_reads_the_spread_at_the_reference_row(make, kind):
+def test_a_term_is_the_relativity_its_parameter_moves_by(make, transform):
     case = make()
     session = open_case(case)
     second = case.model.parameter_names_[1]
     key = f"{second}:age"
-    transform = display_for(session.model, key)
-    assert transform.kind == kind
+    assert display_for(session.model, key) is transform
     assert display_for(session.model, "mean:age") is RELATIVITY
     term = session.terms[key]
     picks = np.arange(0, term.x.size, 40)
@@ -480,30 +533,27 @@ def test_display_transform_reads_the_spread_at_the_reference_row(make, kind):
     # replacements explicitly, even when only its spread is read here.
     offsets = None if case.offsets is None else dict.fromkeys(case.offsets, np.zeros(len(frame)))
     natural = case.model.predict_parameters(frame, offsets=offsets)[second].to_numpy()
+    if isinstance(case.model.family, LogNormalLS):
+        natural = natural - case.model.family.scale_floor
+    # A relativity of the parameter between two points of the curve (the overdispersion's
+    # is of 1/theta): the curve's own value, whatever the other terms hold the parameter at.
     shown = transform.to_display(term.original_log_effect[picks])
-    # eta is a sum of a handful of terms of size up to ~10; exp keeps that relative error.
-    np.testing.assert_allclose(shown, _spread(kind, natural), rtol=64 * EPS, atol=0)
+    expected = natural if transform.increasing else 1.0 / natural
+    np.testing.assert_allclose(shown / shown[0], expected / expected[0], rtol=64 * EPS, atol=0)
 
 
-def test_lognormal_transform_carries_the_family_floor():
-    case = lognormal_case()
-    transform = display_for(open_case(case).model, "scale:age")
-    assert transform.floor == LogNormalLS().scale_floor
-    assert transform.to_payload() == {
-        "kind": "lognormal_cv",
-        "reference_eta": transform.reference_eta,
-        "floor": transform.floor,
-    }
-    assert (transform.y_label, transform.y_format) == ("coefficient of variation", "times")
-    assert (RELATIVITY.y_label, RELATIVITY.y_format) == ("relativity", "relativity")
-    assert RELATIVITY.floor == 0.0 and RELATIVITY.reference_eta == 0.0
-    inverse = DisplayTransform("inverse_theta")
-    assert (inverse.y_label, inverse.y_format) == ("overdispersion (1/θ)", "plain")
+def test_the_display_transforms_name_their_direction_and_payload():
+    assert RELATIVITY.to_payload() == {"kind": "relativity"} and RELATIVITY.increasing
+    assert INVERSE_THETA.to_payload() == {"kind": "inverse_theta"} and not INVERSE_THETA.increasing
+    assert y_label_for("mean") == "relativity"
+    assert y_label_for("scale", GammaLS()) == "relativity of the CV"
+    assert y_label_for("scale", LogNormalLS()) == "relativity of σ"
+    assert y_label_for("theta") == "relativity of the overdispersion"
+    assert y_label_for("dispersion") == "relativity of the dispersion"
 
 
-@pytest.mark.parametrize("kind", ["relativity", "lognormal_cv", "gamma_cv", "inverse_theta"])
-def test_display_round_trips_and_clamps(kind):
-    transform = DisplayTransform(kind, reference_eta=-0.7, floor=0.01)
+@pytest.mark.parametrize("transform", [RELATIVITY, INVERSE_THETA], ids=lambda t: t.kind)
+def test_display_round_trips_and_clamps(transform):
     effect = np.linspace(-1.5, 1.5, 31)
     back = transform.from_display(transform.to_display(effect))
     np.testing.assert_allclose(back, effect, rtol=0, atol=64 * EPS * (1.0 + np.max(np.abs(effect))))
@@ -517,18 +567,29 @@ def test_display_round_trips_and_clamps(kind):
 
 def test_display_matches_the_documented_formulas():
     e = np.array([-0.4, 0.0, 0.9])
-    c, floor = -0.7, 0.01
-    np.testing.assert_array_equal(DisplayTransform("relativity").to_display(e), np.exp(e))
-    s = floor + np.exp(c + e)
-    np.testing.assert_array_equal(
-        DisplayTransform("lognormal_cv", c, floor).to_display(e), np.sqrt(np.expm1(s**2))
-    )
-    np.testing.assert_array_equal(DisplayTransform("gamma_cv", c).to_display(e), np.exp(c + e))
-    np.testing.assert_array_equal(
-        DisplayTransform("inverse_theta", c).to_display(e), np.exp(-(c + e))
-    )
+    np.testing.assert_array_equal(RELATIVITY.to_display(e), np.exp(e))
+    np.testing.assert_array_equal(INVERSE_THETA.to_display(e), np.exp(-e))
     v = np.array([0.5, 2.2, 7.0])
-    np.testing.assert_array_equal(
-        DisplayTransform("lognormal_cv", c, floor).from_display(v),
-        np.log(np.sqrt(np.log1p(v**2)) - floor) - c,
-    )
+    np.testing.assert_array_equal(RELATIVITY.from_display(v), np.log(v))
+    np.testing.assert_array_equal(INVERSE_THETA.from_display(v), -np.log(v))
+
+
+def test_a_tweedie_dispersion_edit_in_display_units_moves_the_model_as_it_says():
+    case = tweedie_case()
+    session = open_case(case)
+    key = "dispersion:age"
+    transform = display_for(session.model, key)
+    # φ carries the amount's units, so it is shown as relativities, as the mean is.
+    assert transform is RELATIVITY
+    term = session.terms[key]
+    shown = transform.to_display(term.original_log_effect)
+    # Dragging every point to twice its shown relativity doubles the model's dispersion.
+    session.set_values(key, range(term.size), transform.from_display(2.0 * shown))
+    revised = lss_model_with_edits(session.model, session.terms)
+    for age in (25.0, 54.0, 80.0):
+        frame = session.model.reference_row()
+        frame["age"] = age
+        before, after = (m.predict_parameters(frame).iloc[0] for m in (case.model, revised))
+        np.testing.assert_allclose(after["dispersion"], 2.0 * before["dispersion"], rtol=1e-8)
+        np.testing.assert_allclose(after["mean"], before["mean"], rtol=1e-8)
+        assert after["power"] == before["power"]

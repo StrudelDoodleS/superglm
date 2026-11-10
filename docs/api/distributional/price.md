@@ -43,6 +43,9 @@ parameters spread across rows and, among identically priced rows, how far the
 tail probability does. {py:meth}`~superglm.SuperLSS.portfolio` simulates the
 total over a book of rows, optionally by segment, carrying the dependence the
 shared coefficient draws induce.
+{py:meth}`~superglm.SuperLSS.rating_table_payload` and
+{py:meth}`~superglm.SuperLSS.export_rating_tables` write one multiplicative rating table per
+parameter that has one, as objects or as a workbook; see the [how-to on exporting them](../../how-to/export-distributional-rating-tables.md).
 
 ```{eval-rst}
 .. autosummary::
@@ -53,6 +56,8 @@ shared coefficient draws induce.
    ~superglm.SuperLSS.density_fan
    ~superglm.SuperLSS.parameter_spread
    ~superglm.SuperLSS.portfolio
+   ~superglm.SuperLSS.rating_table_payload
+   ~superglm.SuperLSS.export_rating_tables
 ```
 
 ## Example

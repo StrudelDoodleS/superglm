@@ -45,6 +45,7 @@ from tests._lss_editor_fixtures import (
     lognormal_case,
     nb_case,
     open_case,
+    tweedie_case,
 )
 from tests.test_editor import editor_frame, editor_model  # noqa: F401
 from tests.test_editor_lss_apply import ordered_case
@@ -115,6 +116,24 @@ def test_refit_applies_steps_in_both_parameters_in_one_fit(replays):
     assert case.model._require_fitted() is before._fitted
 
 
+def test_a_tweedie_refit_replays_the_fit_and_keeps_the_power_constant(replays):
+    case = tweedie_case()
+    session = open_case(case)
+    session.stage_structural("knots", "dispersion:age", KNOTS)
+
+    session.refit_pending()
+
+    (refit, _rows) = replays[0]
+    view = session.model
+    assert view.lss is refit and view.lss is not case.model
+    assert _knot_count(view, "dispersion:age") == KNOTS["count"]
+    assert list(session.terms) == list(open_case(case).terms)
+    # The refit's power is still an intercept alone: one coefficient, and no term opened for it.
+    assert not any(key.startswith("power:") for key in session.terms)
+    assert view._fitted.layout.predictors[2].name == "power"
+    assert np.unique(refit.predict_parameters(case.X)["power"]).size == 1
+
+
 def test_hand_edits_carry_as_absolute_curves():
     session = open_case(lognormal_case())
     edited = {}
@@ -159,6 +178,7 @@ def test_refit_replays_the_fit_settings():
         (lognormal_case, "mean:region", "mean"),
         (gamma_case, "scale:region", "scale"),
         (nb_case, "theta:age", "theta"),
+        (tweedie_case, "dispersion:age", "dispersion"),
     ],
 )
 def test_pending_step_records_its_parameter(make, key, predictor):
@@ -383,9 +403,7 @@ def _routes():
         "unseen": lambda s, w: w._set_unseen("mean:region", "base"),
         "refit_offset": lambda s, w: w._refit_offset(),
         "profile_distribution": lambda s, w: w._start_profile_distribution_job("scale"),
-        "rating_table": lambda s, w: w._rating_table("mean:age"),
         "export_structure": lambda s, w: w._export_bytes("structure"),
-        "export_xlsx": lambda s, w: w._export_bytes("xlsx"),
     }
 
 
@@ -419,9 +437,7 @@ def test_unavailable_tools_refuse_with_their_reason(tool):
         widget.close()
 
 
-@pytest.mark.parametrize(
-    "tool", ["profile_distribution", "rating_table", "export_structure", "export_xlsx"]
-)
+@pytest.mark.parametrize("tool", ["profile_distribution", "export_structure"])
 def test_the_other_session_tools_refuse_with_their_reason(tool):
     session = open_case(lognormal_case())
     widget = session.widget()
@@ -630,16 +646,12 @@ def test_a_model_fitted_with_weights_cannot_refit_without_them(replays):
         weighted.close()
 
 
-def test_the_opened_spread_curve_keeps_the_opened_models_level_after_a_refit():
+def test_the_opened_spread_curve_keeps_the_opened_models_curve_after_a_refit():
     session = open_case(lognormal_case())
-    opened = session.model
     before = session_payload(session)["scale:age"]["original_y"]
     session.stage_structural("collapse", "scale:region", {"levels": ["R5", "R6"]})
     session.refit_pending()
-    # The refit moves the spread's level at the reference row ...
-    moved = session.model.reference_eta("scale:age") - opened.reference_eta("scale:age")
-    assert abs(moved) > 1e-6
-    # ... and the opened curve is still the CV the opened model gives.
+    # The opened curve is still the effect the opened model gives.
     payload = session_payload(session)["scale:age"]
     np.testing.assert_allclose(payload["original_y"], before, rtol=64 * EPS, atol=0.0)
     # The impact reads the curve in force against the opened one.

@@ -274,14 +274,63 @@ model.fit(df, y)
   [QP-Backed Shape Fits](#qp-backed-shape-fits).
 - `Constraint.postfit` takes only a single shape over the whole range.
   Combinations, stretches and caps are fit-time only.
-- `SuperLSS` does not enforce these rules. It warns and fits the term
-  unconstrained.
+- `Constraint.postfit` is not applied by `SuperLSS`, which has no post-fit
+  repair: it warns and fits the term unconstrained. `Constraint.fit` rules are
+  enforced there; see [Rules On A Distributional Model](#rules-on-a-distributional-model).
 - `fit_path()` does not enforce shapes, caps or step limits either. It warns
   once, naming every term whose rules it ignores, and fits those terms
   unconstrained; refit with `fit()` or `fit_reml()` to enforce the rules. The
   summary and `term_inference()` mark those rule lines `not enforced: fit_path`.
   A flat stretch is part of the term's basis, so it still holds on the path and
   is not named.
+
+## Rules On A Distributional Model
+
+`SuperLSS` enforces `Constraint.fit` rules on a term of any parameter, so a
+monotone rating factor can sit in the mean of a Tweedie, negative binomial or
+gamma model:
+
+```python
+from superglm import Constraint, TweedieLSS, SuperLSS, s
+
+family = TweedieLSS()
+model = SuperLSS(
+    family,
+    family.mu(s("BonusMalus", kind="cr", k=8, constraint=Constraint.fit.increasing)),
+    family.phi(),
+    family.p(),
+)
+model.fit_reml(X, y)
+```
+
+The fit works in two steps, as `SuperGLM` does:
+
+1. The smoothing search runs without the rules.
+2. The coefficients are refitted at that smoothing with the rules, together
+   across every parameter, from a start that meets them. If the fit without
+   the rules already obeys every rule, nothing is refitted and the fit is that
+   fit.
+
+What you can rely on:
+
+- The curve meets every rule at every point, not only at the rows of the data.
+- Standard errors and effective degrees of freedom treat the rules that bind
+  as fixed. A binding rule has no variance of its own, so the standard error of
+  a constrained term is not the unconstrained one. `covariance="corrected"`
+  needs a fit free of its rules, so on a fit with a binding rule it returns the
+  fixed covariance and says so.
+- `diagnose()` says what each rule did, one sentence per constrained term: how
+  many checkpoints along the curve bind, and the largest change from the fit
+  without the rule.
+- A refit that does not converge is returned and disclosed, never refused.
+- A rule the term cannot state as rows, or one that cannot be applied as
+  written, warns with `ShapeConstraintIgnoredWarning` and the term is fitted
+  unconstrained.
+
+What it does not do yet: choose the smoothing under the rules. The smoothing
+is the unconstrained one, so a rule that binds hard leaves a curve a little
+smoother or rougher than the best one under that rule. The editor does not
+show which rules bind.
 
 ## Linear Predictor Semantics
 

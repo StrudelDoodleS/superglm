@@ -6,7 +6,9 @@ import {
   categoricalTickIndices,
   chartSize,
   fitMeasuredLabel,
+  paddedYRange,
   planCategoricalAxis,
+  roundTicks,
   rotatedExtent,
   splitLabelGraphemes,
   strideIndices,
@@ -374,4 +376,33 @@ test("a taller title row grows the bottom gutter and leaves the labels where the
   assert.equal(roomy.bottom - plain.bottom, 20);
   assert.equal(roomy.labelsBottom - roomy.axisY, plain.labelsBottom - plain.axisY);
   assert.equal(roomy.titleY - roomy.labelsBottom, plain.titleY - plain.labelsBottom);
+});
+
+test("a curve that stays at zero or above is never padded below zero", () => {
+  // A relativity running from 1.0 to 12 has a pad larger than its smallest value.
+  const [low, high] = paddedYRange(1, 12);
+  assert.equal(low, 0);
+  assert.ok(high > 12);
+  assert.equal(paddedYRange(0, 3)[0], 0);
+  // Room below the curve is kept where it fits above zero.
+  const [lo] = paddedYRange(5, 6);
+  assert.ok(lo > 0 && lo < 5);
+  // A curve that does go negative is padded as before, and a flat one gets the minimum pad.
+  assert.ok(paddedYRange(-2, 1)[0] < -2);
+  assert.deepEqual(paddedYRange(1, 1), [0.95, 1.05]);
+});
+
+test("ticks sit at 1, 2 or 5 times a power of ten, inside the range", () => {
+  for (const [min, max, n] of [[0, 12.5, 5], [0.83, 1.21, 5], [18, 90, 6], [0, 126036.5, 4], [-0.2, 3.1, 5]]) {
+    const ticks = roundTicks(min, max, n);
+    assert.ok(ticks.length >= 2, `${min}..${max}`);
+    for (const tick of ticks) assert.ok(tick >= min && tick <= max, `${tick} inside ${min}..${max}`);
+    const steps = ticks.slice(1).map((tick, i) => Number((tick - ticks[i]).toPrecision(8)));
+    assert.ok(steps.every((step) => step === steps[0]), `${min}..${max} steps equal`);
+    const power = 10 ** Math.floor(Math.log10(steps[0]));
+    assert.ok([1, 2, 5].includes(Number((steps[0] / power).toPrecision(6))), `${min}..${max} step ${steps[0]}`);
+  }
+  assert.deepEqual(roundTicks(0, 12.5, 8), [0, 2, 4, 6, 8, 10, 12]);
+  assert.deepEqual(roundTicks(1, 1, 5), [1]);
+  assert.deepEqual(roundTicks(Number.NaN, 2, 5), [0]);
 });

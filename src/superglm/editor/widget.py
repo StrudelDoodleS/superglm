@@ -61,6 +61,7 @@ from superglm.editor.lss.availability import (
 )
 from superglm.editor.lss.display import directed_operation
 from superglm.editor.lss.panel import NOT_SUPERLSS, distribution_panel_payload
+from superglm.editor.lss.risk import risk_payload, risk_row
 from superglm.editor.metrics import metric_comparison_payload, metrics_payload
 from superglm.editor.native_dialogs import open_directory_path
 from superglm.editor.notebook import NotebookTransport, notebook_view_class
@@ -176,6 +177,7 @@ class EditorWidget:
         # ran on: a newer revision marks them stale rather than dropping them.
         self._cv_run: CVRun | None = None
         self._diagnose_folds: tuple[Any, list[dict[str, Any]]] | None = None
+        self._diagnose_all_rows: tuple[Any, dict[str, Any] | None] | None = None
         self._final_fit: FinalFit | None = None
         # Run CV and Final fit: one background job of each kind at a time.
         # A starter captures a job's inputs under the widget lock and returns
@@ -278,7 +280,7 @@ class EditorWidget:
                 "final_fit": {
                     "available": self._final_fit is not None,
                     "stale": self._final_fit is not None
-                    and self._final_fit.model_revision != self.session.model_revision,
+                    and not self._final_fit.source.describes(self.session),
                 },
             }
             if is_lss(self.session.model):
@@ -375,7 +377,7 @@ class EditorWidget:
             if values is None:
                 self.session.shift(term, float(delta))
             else:
-                shown = display_for(self.session.model, term, self.session.terms)
+                shown = display_for(self.session.model, term)
                 self.session.set_values(term, indices, shown.from_display(values))
             self._invalidate_refit()
             self._chart_generation += 1
@@ -396,9 +398,7 @@ class EditorWidget:
             self.session.move_control_point(
                 term,
                 int(handle_index),
-                float(
-                    display_for(self.session.model, term, self.session.terms).from_display(value)
-                ),
+                float(display_for(self.session.model, term).from_display(value)),
                 n_handles=self.control_counts.get(term),
             )
             self._invalidate_refit()
@@ -426,7 +426,7 @@ class EditorWidget:
             weights = np.asarray(editable.weights[idx], dtype=np.float64)
         if float(np.sum(weights)) <= 0.0:
             weights = None
-        shown = display_for(self.session.model, term, self.session.terms)
+        shown = display_for(self.session.model, term)
         value = float(
             np.average(shown.to_display(editable.edited_log_effect[idx]), weights=weights)
         )
@@ -725,8 +725,13 @@ class EditorWidget:
             )
             if original is None:
                 return _superseded_payload(revision, request_sequence)
-            edited = self._dataset_metrics_for_evidence(
-                "current", edited_model, eval_dataset, revision
+            # The model in force is the reference itself until something changes it: score it once.
+            edited = (
+                original
+                if edited_model is reference_model
+                else self._dataset_metrics_for_evidence(
+                    "current", edited_model, eval_dataset, revision
+                )
             )
             if edited is None:
                 return _superseded_payload(revision, request_sequence)
@@ -751,8 +756,8 @@ class EditorWidget:
     def _export_bytes(self, format: str, filename: str | None = None) -> ExportResult:
         """Build one validated export from one captured model revision."""
         canonical_format = _normalise_export_format(format)
-        if canonical_format in {"structure", "xlsx"}:
-            require_available(self.session.model, f"export_{canonical_format}")
+        if canonical_format == "structure":
+            require_available(self.session.model, "export_structure")
         safe_name = _safe_export_filename(canonical_format, filename)
 
         validation_scope: str | None = None
@@ -777,19 +782,11 @@ class EditorWidget:
             )
             validation_scope = validation.scope
         else:
-            payload, revision = self._rating_table_payload()
-            if payload is None:
+            tables, revision = self._rating_table_payload()
+            if tables is None:
                 raise RuntimeError("Export request was superseded.")
-            from superglm.export.excel import write_rating_table_workbook
-
             buffer = io.BytesIO()
-            write_rating_table_workbook(
-                payload,
-                buffer,
-                sheet_name="Rating Tables",
-                summary_sheet_name="Model Summary",
-                impact_sheet_name="Discretization Impact",
-            )
+            tables.write(buffer)
             data = buffer.getvalue()
 
         with self._lock:
@@ -804,12 +801,14 @@ class EditorWidget:
         )
 
     def _rating_table_payload(self, *, impact_bins: tuple[int, ...] | None = None):
-        """The Excel export's rating-table payload for the current revision.
+        """The Excel export's rating tables for the current revision, as ``RatingTables``.
 
         One path for the workbook and its preview: the training split, the
         model materialised on it, and the builder's defaults, except the
-        ``impact_bins`` the preview passes. ``(None, revision)`` when the
-        revision moved while the model was materialised.
+        ``impact_bins`` the preview passes (a SuperGLM's). A SuperLSS builds
+        one table set per parameter and is the only branch on the session's
+        kind. ``(None, revision)`` when the revision moved while the model was
+        materialised.
         """
         dataset = training_export_dataset(self.session)
         if dataset is None:
@@ -817,6 +816,18 @@ class EditorWidget:
         model, revision = self._model_materialized_for_dataset(dataset)
         if model is None:
             return None, revision
+        if is_lss(self.session.model):
+            from superglm.export.lss_rating_tables import build_lss_rating_table_payload
+
+            try:
+                payload = build_lss_rating_table_payload(
+                    model, dataset.X, dataset.sample_weight, offsets=dataset.offset
+                )
+            except ValueError as error:  # the library's sentences, one per parameter left out
+                raise EditorValueError(str(error)) from error
+            with self._lock:
+                term_keys = list(self.session.terms)
+            return rating_preview.lss_rating_tables(payload, term_keys), revision
         from superglm.export.rating_tables import build_rating_table_payload
 
         options: dict[str, Any] = {} if impact_bins is None else {"impact_bins": impact_bins}
@@ -828,7 +839,7 @@ class EditorWidget:
             offset=dataset.offset,
             **options,
         )
-        return payload, revision
+        return rating_preview.glm_rating_tables(payload), revision
 
     def _current_fit_token(self) -> int:
         """A token that changes only when the fitted model in force is replaced."""
@@ -891,13 +902,29 @@ class EditorWidget:
                 return _superseded_payload(revision, None)
             return distribution_panel_payload(self.session, feature, edited=model)
 
+    def _risk(self, risks: list[Any]) -> dict[str, Any]:
+        """The one-risk view's data for ``risks``, the model in force beside the fitted one."""
+        if not is_lss(self.session.model):
+            raise EditorValueError(NOT_SUPERLSS)
+        model, revision = self._current_model_for_evidence()
+        if model is None:
+            return _superseded_payload(revision, None)
+        with self._lock:
+            if revision != self.session.model_revision:
+                return _superseded_payload(revision, None)
+            return risk_payload(self.session, risks, edited=model)
+
+    def _risk_row(self, index: int | None = None) -> dict[str, Any]:
+        """One training row's feature values, drawn at random when ``index`` is ``None``."""
+        with self._lock:
+            return risk_row(self.session, index)
+
     def _rating_table(self, term: str) -> dict[str, Any]:
         """``term``'s block of the Excel rating table, for the Table view.
 
         Built once per model revision, outside the lock like the export, and
         reused while the revision stands.
         """
-        require_available(self.session.model, "rating_table")
         with self._lock:
             if term not in self.session.terms:
                 raise EditorKeyError(f"Unknown editable term: {term!r}")
@@ -925,14 +952,16 @@ class EditorWidget:
         return RatingPreview(revision, payload, None)
 
     def _final_fit_for_export(self):
-        """The Final fit model and its revision; refused before a run or once stale."""
+        """The Final fit model and the revision it was confirmed current at; refused before a run
+        or once the model in force is another one. The export checks that revision again before
+        it writes, so a change made while it serialises supersedes it."""
         with self._lock:
             final = self._final_fit
             if final is None:
                 raise EditorValueError(FINAL_NOT_RUN)
-            if final.model_revision != self.session.model_revision:
+            if not final.source.describes(self.session):
                 raise EditorValueError(FINAL_STALE)
-            return final.model, final.model_revision
+            return final.model, self.session.model_revision
 
     def _export_file(
         self,

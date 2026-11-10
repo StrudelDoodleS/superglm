@@ -21,7 +21,7 @@ from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, as_eager_frame
 from superglm.distributional.api import SuperLSS
-from superglm.distributional.offsets import offset_columns, sources_of
+from superglm.distributional.offsets import offset_columns
 from superglm.distributional.prediction_design import _required_columns
 from superglm.distributional.response import require_scalar_response
 from superglm.distributional.terms import (
@@ -30,7 +30,6 @@ from superglm.distributional.terms import (
     _reference_design,
     _reference_value,
     _resolve_term,
-    _term_design,
 )
 from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.editor.lss.terms import LSSTermInference, lss_term_inference
@@ -167,18 +166,17 @@ class LSSModelView:
             )
         )
         self._reference_row: pd.DataFrame | None = None
+        # What the one-risk view read from each training column, kept as the reference row is.
+        self._column_scans: dict[str, tuple] = {}
         self._reference_designs: dict[str, NDArray[np.float64]] = {}
         # Why Refit cannot run on the session's training rows, and why Final fit cannot fit
         # its splits, each with the splits it was read for. Owned by this view: one fitted
         # model, over splits a session never changes; a Refit makes a new view.
         self._refit_reason: tuple[Any, str | None] | None = None
         self._final_split_reason: tuple[tuple[Any, ...], str | None] | None = None
-        self._reference_etas: dict[str, float] = {}
         # Each term's sweep, by its arguments. Owned by this view for the same reason:
         # no entry goes stale, and a caller gets its own copy.
         self._term_inferences: dict[tuple[str, bool, int, str], Any] = {}
-        # Each edited term's change to its predictor at the reference row, by its curve.
-        self._reference_edits: dict[str, tuple[tuple[bytes, bytes], float]] = {}
 
     @property
     def _result(self):
@@ -265,34 +263,6 @@ class LSSModelView:
                 }
             )
         return self._reference_row.copy()
-
-    def reference_eta(self, key: str) -> float:
-        """The fitted link predictor of ``key``'s parameter at the reference row, less the term's part.
-
-        What the parameter would read at the reference row if this term's effect
-        were zero there: adding the term's effect at any value of its column
-        gives the parameter at the reference row with that column changed. The
-        other edits of the parameter add ``lss.apply.reference_shift``.
-        Array offsets are zero at this reference; offset columns are held at
-        their training centre, like the other named columns.
-        """
-        if key not in self._reference_etas:
-            parameter, term = split_key(key)
-            qualified, state, term_slice = _resolve_term(self._fitted, parameter, term)
-            special = self._fitted.layout.term_slices.get(f"{qualified}{_SPECIAL_SUFFIX}")
-            blocks = (term_slice,) if special is None else (term_slice, special)
-            row = self.reference_row()
-            design = _term_design(self._fitted, row, state, *blocks) - self.reference_design(key)
-            beta = np.asarray(self._fitted.coefficients, dtype=np.float64)
-            own = float((design @ beta[_coefficient_columns(*blocks)])[0])
-            offsets = {
-                p.name: np.zeros(1)
-                for p in self._fitted.fit_state.predictor_templates
-                if any(not isinstance(s, str) for s in sources_of(p))
-            }
-            eta = float(self.lss.predict_link(row, offsets=offsets)[parameter].iloc[0])
-            self._reference_etas[key] = eta - own
-        return self._reference_etas[key]
 
     def reference_design(self, key: str) -> NDArray[np.float64]:
         """The term's own columns at its reference level, which its shown effect is measured from."""

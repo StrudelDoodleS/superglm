@@ -234,7 +234,7 @@ def test_a_finish_that_stalled_leaves_the_fit_at_its_plateau(monkeypatch, kind):
     fitted = model._require_fitted()
     assert len(calls) == 1
     _assert_the_plateau_stood(fitted.smoothing, plain_model._require_fitted().smoothing)
-    with pytest.warns(ConvergenceWarning, match="not at a certified stationary point"):
+    with pytest.warns(ConvergenceWarning, match="before reaching an optimum"):
         corrected = posterior_covariance(fitted, kind="corrected")
     assert np.all(np.isfinite(corrected))
 

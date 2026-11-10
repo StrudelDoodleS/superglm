@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any, cast
@@ -41,8 +41,9 @@ from superglm.types import FeatureSpec, PenaltyComponent
 class ShapeConstraintIgnoredWarning(UserWarning):
     """A feature asked for a shape constraint the fit cannot apply.
 
-    SuperLSS has no constraint machinery yet, and ``fit_path`` takes no constraint rows;
-    both fit the term unconstrained and say so.
+    SuperLSS enforces ``Constraint.fit`` rules (``distributional/shape.py``) and
+    has no post-fit repair; ``fit_path`` takes no constraint rows. Each fits the
+    term unconstrained, for the rules it cannot apply, and says so.
     """
 
 
@@ -56,17 +57,19 @@ def _constrained_features(predictor: Predictor) -> list[tuple[str, str, str]]:
     return found
 
 
-def _without_shape_rules(predictor: Predictor) -> Predictor:
-    """``predictor`` with every shape rule removed from copies of the features that carry one.
+def _without_rules(predictor: Predictor, drop: Callable[[str, str], bool]) -> Predictor:
+    """``predictor`` with the shape rules of every feature ``drop(name, mode)`` picks removed.
 
-    SuperLSS applies no shape rule. A flat stretch is absorbed into the basis at every
-    spline build, so a feature must be built without its rules to be fitted without them.
+    Rules come off copies of the features, as if built without ``constraint``. A flat
+    stretch is absorbed into the basis at every spline build, so a feature must be built
+    without its rules to be fitted without them.
     """
-    if not _constrained_features(predictor):
+    modes = {name: mode for name, _, mode in _constrained_features(predictor)}
+    if not any(drop(name, mode) for name, mode in modes.items()):
         return predictor
     features = {}
     for name, spec in predictor.features.items():
-        if rules_of(spec):
+        if name in modes and drop(name, modes[name]):
             spec = copy.deepcopy(spec)
             if isinstance(spec, OrderedCategorical):
                 bases = (spec._spline_obj, spec._spline)
@@ -79,6 +82,39 @@ def _without_shape_rules(predictor: Predictor) -> Predictor:
                     basis._constraint_rules = ConstraintRules(())
         features[name] = spec
     return replace(predictor, features=features)
+
+
+def _without_postfit_rules(predictor: Predictor) -> Predictor:
+    """``predictor`` without its ``Constraint.postfit`` rules, which SuperLSS cannot repair with.
+
+    ``Constraint.fit`` rules stay: the compiled design carries their rows
+    (``GroupSlice.constraints``, ``solver/shape.py``).
+    """
+    return _without_rules(predictor, lambda _, mode: mode != "fit")
+
+
+def _warn_unapplied_fit_rules(
+    predictor: Predictor, compiled: CompiledPredictorDesign, *, stacklevel: int
+) -> None:
+    """Warn for each ``Constraint.fit`` feature whose basis stated no row and held no rule itself.
+
+    A rule reaches the fit as rows on its group (``GroupSlice.constraints``), or, for a
+    flat stretch, inside the basis. A feature with neither is fitted unconstrained.
+    """
+    with_rows = {group.feature_name for group in compiled.groups if group.constraints is not None}
+    for feature, rules, mode in _constrained_features(predictor):
+        spec_rules = rules_of(predictor.features[feature])
+        if mode != "fit" or feature in with_rows:
+            continue
+        if all(rule.kind == "flat" for rule in spec_rules):
+            continue
+        warnings.warn(
+            f"SuperLSS ignores shape constraints: {predictor.name}:{feature} asked for "
+            f"{rules} (fit), but this kind of term states no rows for it, so the smooth is "
+            "fitted unconstrained",
+            ShapeConstraintIgnoredWarning,
+            stacklevel=stacklevel,
+        )
 
 
 @dataclass(frozen=True)
@@ -579,14 +615,17 @@ def compile_predictors(
         raise TypeError("predictors must contain only Predictor values")
     for predictor in predictor_tuple:
         for feature, rules, mode in _constrained_features(predictor):
+            if mode == "fit":
+                continue
             warnings.warn(
                 f"SuperLSS ignores shape constraints: {predictor.name}:{feature} asked for "
-                f"{rules} ({mode}); the distributional path has no constraint machinery yet, "
-                "so the smooth is fitted unconstrained",
+                f"{rules} ({mode}); SuperLSS enforces Constraint.fit rules at fit time and has "
+                f"no post-fit repair, so the smooth is fitted unconstrained. Use "
+                f"Constraint.fit.{rules} to enforce it",
                 ShapeConstraintIgnoredWarning,
                 stacklevel=3,
             )
-    predictor_tuple = tuple(_without_shape_rules(predictor) for predictor in predictor_tuple)
+    predictor_tuple = tuple(_without_postfit_rules(predictor) for predictor in predictor_tuple)
     _validate_predictor_order(parameter_tuple, predictor_tuple)
     boundary_tuple = (
         tuple(() for _ in predictor_tuple)
@@ -620,29 +659,55 @@ def compile_predictors(
         # RandomEffect(nested_in=) is a statement about the training rows,
         # checked where they are first bound.
         validate_declared_nesting(predictor.features, X.column_array)
-        compiled = compile_predictor_design(
-            X,
-            weights,
-            geometry_weight=geometry_weight,
-            polynomial_weight=geometry_weight,
-            categorical_reporting_weight=geometry_weight,
-            ordered_reporting_weight=geometry_weight,
-            physical_rows=physical_rows,
-            specs=predictor.features,
-            feature_order=tuple(predictor.features),
-            interaction_specs=predictor.interaction_specs,
-            interaction_order=predictor.interaction_order,
-            pending_interactions=predictor.interactions,
-            model_discrete=model_discrete,
-            n_bins_config=n_bins_config,
-            lambda2=lambda2,
-            separation_boundaries=boundary_tuple[parameter_index],
-            separation_response=separation_response,
-            first_tensor_id=first_tensor_id,
-            # SuperLSS fitted an interaction on a ranged parent before declared
-            # interactions met the pair refusals, and keeps fitting it.
-            ranged_margins=True,
-        )
+        while True:
+            try:
+                compiled = compile_predictor_design(
+                    X,
+                    weights,
+                    geometry_weight=geometry_weight,
+                    polynomial_weight=geometry_weight,
+                    categorical_reporting_weight=geometry_weight,
+                    ordered_reporting_weight=geometry_weight,
+                    physical_rows=physical_rows,
+                    specs=predictor.features,
+                    feature_order=tuple(predictor.features),
+                    interaction_specs=predictor.interaction_specs,
+                    interaction_order=predictor.interaction_order,
+                    pending_interactions=predictor.interactions,
+                    model_discrete=model_discrete,
+                    n_bins_config=n_bins_config,
+                    lambda2=lambda2,
+                    separation_boundaries=boundary_tuple[parameter_index],
+                    separation_response=separation_response,
+                    first_tensor_id=first_tensor_id,
+                    # SuperLSS fitted an interaction on a ranged parent before declared
+                    # interactions met the pair refusals, and keeps fitting it.
+                    ranged_margins=True,
+                )
+                break
+            except ValueError as exc:
+                # SuperLSS accepted every shape rule before it enforced any (it fitted the
+                # term unconstrained), so a rule the rule validation refuses is disclosed and
+                # dropped, never refused: that fit worked on every earlier release.
+                refused = next(
+                    (
+                        (name, rules)
+                        for name, rules, mode in _constrained_features(predictor)
+                        if mode == "fit" and str(exc).startswith(f"Feature {name!r}: ")
+                    ),
+                    None,
+                )
+                if refused is None:
+                    raise
+                warnings.warn(
+                    f"SuperLSS ignores shape constraints: {predictor.name}:{refused[0]} asked "
+                    f"for {refused[1]} (fit), which cannot be applied as written ({exc}), so "
+                    "the smooth is fitted unconstrained",
+                    ShapeConstraintIgnoredWarning,
+                    stacklevel=3,
+                )
+                predictor = _without_rules(predictor, lambda name, _, f=refused[0]: name == f)
+        _warn_unapplied_fit_rules(predictor, compiled, stacklevel=3)
         tensor_ids = [getattr(matrix, "tensor_id", -1) for matrix in compiled.design.group_matrices]
         first_tensor_id = max(first_tensor_id, 1 + max(tensor_ids, default=-1))
         compiled = _center_selected_smooths(

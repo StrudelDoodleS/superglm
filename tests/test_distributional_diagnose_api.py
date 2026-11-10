@@ -182,7 +182,7 @@ def test_profile_accepts_signed_term_edf_and_renders_shared_scope_once() -> None
 
     rendered = profiled.render()
     assert rendered.count("-0.125") == 1
-    assert "Term EDF is shared" in rendered
+    assert "flexibility is shared by all of its penalties" in rendered
     with pytest.raises(ValueError, match="schema_version=1"):
         replace(profiled, schema_version=1)
 
@@ -229,7 +229,7 @@ def test_profile_does_not_call_a_fixed_lambda_a_search_boundary() -> None:
     assert fixed.accepted_moves == 0
     assert fixed.upper_bound_iterations == 0
     rendered = report.render()
-    assert "fixed by caller" in rendered
+    assert "set by you" in rendered
     assert "at upper bound" not in rendered
 
 
@@ -277,10 +277,12 @@ def test_diagnose_leads_with_work_timing_and_smoothing_metrics(
     assert rendered.startswith("SuperLSS fit diagnosis")
     assert "Fit time:" in rendered
     assert "Work" in rendered
-    assert "Outer EFS iterations" in rendered
+    assert "Smoothing rounds" in rendered
     assert "Coefficient fits" in rendered
     assert "Time distribution" in rendered
     assert "Smoothing parameters" in rendered
+    assert f"(status code: {report.fit_status})" in rendered
+    assert "Setting up the terms" in rendered and "predictor_compilation" not in rendered
 
 
 def _smooth_lss_fit_inputs() -> tuple[SuperLSS, pd.DataFrame, np.ndarray]:
@@ -521,9 +523,9 @@ def test_exact_face_profile_names_the_driving_terms_without_contradicting_itself
     codes = {finding.code for finding in report.findings}
     assert "smoothing.penalized_subspace_suppressed" in codes
     rendered = report.render()
-    assert "linear only" in rendered
-    assert "Lead share" in rendered
-    assert "Cap iters" in rendered
+    assert "reduced to a straight line" in rendered
+    assert "Moved most" in rendered
+    assert "At largest" in rendered
     assert "Subject:" not in rendered
     assert "Code:" not in rendered
 
@@ -556,8 +558,8 @@ def test_exact_face_profile_distinguishes_fully_penalized_random_effects() -> No
 
     assert component.null_space_dimension == 0
     assert component.exact_face_effect == "fully_suppressed"
-    assert "fully suppressed" in report.render()
-    assert "linear only" not in report.render()
+    assert "smoothed away completely" in report.render()
+    assert "straight line" not in report.render()
     assert all("loaded artifact" not in limitation for limitation in report.limitations)
 
 

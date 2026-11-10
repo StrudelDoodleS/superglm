@@ -1365,6 +1365,7 @@ test("action module exposes only the controller factory, paint helper, and exact
     "dismissRecovery",
     "executeStateMutation",
     "executeStructuralMutation",
+    "holdEditor",
     "initialize",
     "patchView",
     "refreshEvidence",
@@ -2035,4 +2036,104 @@ test("a new selection takes back the Retry offered for an edit on the old one", 
 
   assert.equal(store.getState().request.recovery, null);
   assert.equal(store.getState().request.mutation.status, "idle");
+});
+
+test("work that holds the editor runs under the busy overlay and lets no other change start", async () => {
+  const store = createEditorStore(createInitialEditorState(snapshot(4)));
+  /** @type {string[]} */
+  const posted = [];
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async (path) => {
+        posted.push(path);
+        return snapshot(5);
+      },
+      getState: async () => snapshot(4)
+    }
+  });
+  /** @type {ReturnType<typeof deferred<string>>} */
+  const work = deferred();
+
+  actions.showNotice("an earlier refusal");
+  const holding = actions.holdEditor(
+    { name: "Fitting free levels", detail: "Refitting the model with age's levels free" },
+    () => work.promise
+  );
+  await Promise.resolve();
+  assert.deepEqual(store.getState().request.mutation, {
+    status: "running",
+    operation: "Fitting free levels",
+    error: null,
+    blocking: true,
+    detail: "Refitting the model with age's levels free"
+  });
+  assert.equal(store.getState().request.recovery, null);
+
+  // Undo's shortcut, a History note and a second fit all reach the controller past the overlay.
+  const undo = await actions.executeStateMutation({
+    name: "undo", path: "/op", payload: { operation: "undo" }
+  });
+  const note = await actions.executeStateMutation({
+    name: "note", path: "/note", payload: { id: "abc1234", note: "why" }
+  });
+  const second = await actions.holdEditor({ name: "again" }, async () => "unused");
+  for (const result of [undo, note, second]) {
+    assert.equal(result.ok, false);
+    assert.equal(result.ok === false && result.skipped, true);
+  }
+  assert.deepEqual(posted, []);
+  assert.equal(store.getState().request.mutation.status, "running");
+  assert.equal(store.getState().request.mutation.blocking, true);
+
+  work.resolve("fitted");
+  assert.deepEqual(await holding, { ok: true, value: "fitted" });
+  assert.deepEqual(store.getState().request.mutation, {
+    status: "idle", operation: null, error: null
+  });
+  assert.equal(store.getState().remote.snapshot?.model_revision, 4);
+});
+
+test("work that fails while it holds the editor releases it and reports the failure", async () => {
+  const store = createEditorStore(createInitialEditorState(snapshot(4)));
+  const actions = createEditorActions({
+    store,
+    client: { postJSON: async () => snapshot(4), getState: async () => snapshot(4) }
+  });
+
+  const result = await actions.holdEditor({ name: "Fitting free levels" }, async () => {
+    throw new Error("The term has too few levels to fit free.");
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.ok === false && result.skipped, undefined);
+  assert.equal(result.ok === false && result.error.message, "The term has too few levels to fit free.");
+  // The caller words the alert; the hold itself leaves no failed change behind.
+  assert.deepEqual(store.getState().request.mutation, {
+    status: "idle", operation: null, error: null
+  });
+  assert.equal(store.getState().request.recovery, null);
+});
+
+test("work that would hold the editor waits for a change already running", async () => {
+  const store = createEditorStore(createInitialEditorState(snapshot(4)));
+  /** @type {ReturnType<typeof deferred<unknown>>} */
+  const post = deferred();
+  const actions = createEditorActions({
+    store,
+    client: { postJSON: () => post.promise, getState: async () => snapshot(4) }
+  });
+  let worked = false;
+
+  const running = actions.executeStateMutation({ name: "shift", path: "/op", payload: {} });
+  await Promise.resolve();
+  const result = await actions.holdEditor({ name: "Fitting free levels" }, async () => {
+    worked = true;
+  });
+
+  assert.equal(result.ok === false && result.skipped, true);
+  assert.equal(worked, false);
+  assert.equal(store.getState().request.mutation.operation, "shift");
+  post.resolve(snapshot(5));
+  await running;
 });

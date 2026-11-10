@@ -1,5 +1,7 @@
 // @ts-check
 
+import { niceTicks } from "./fan.js";
+
 const MAX_TICKS = 30;
 const MAX_LABEL_WIDTH = 160;
 const MIN_ANGLED_SLOT = 56;
@@ -357,4 +359,27 @@ function assertPositiveFinite(name, value) {
 function assertNonnegativeInteger(name, value) {
   assertNonnegativeFinite(name, value);
   if (!Number.isInteger(value)) throw new RangeError(`${name} must be an integer`);
+}
+
+/**
+ * The y range a curve is drawn in: its own range with 12% padding each side. A
+ * curve that stays at zero or above (every relativity, CV and overdispersion
+ * does) is never padded below zero, which no such value can reach.
+ * @param {number} min @param {number} max
+ * @returns {[number, number]}
+ */
+export function paddedYRange(min, max) {
+  const pad = Math.max((max - min) * 0.12, 0.05);
+  return [min >= 0 ? Math.max(min - pad, 0) : min - pad, max + pad];
+}
+
+/**
+ * Ticks at round values (steps of 1, 2 or 5 times a power of ten) inside
+ * [min, max], about `n` of them. A degenerate range has its one value.
+ * @param {number} min @param {number} max @param {number} n
+ * @returns {number[]}
+ */
+export function roundTicks(min, max, n) {
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min === max) return [min || 0];
+  return niceTicks(min, max, Math.max(n - 1, 1));
 }

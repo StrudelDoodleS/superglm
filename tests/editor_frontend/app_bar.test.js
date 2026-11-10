@@ -288,6 +288,20 @@ test("Refit shows the waiting count, and only a count enables it", () => {
   assert.equal(refitButton.getAttribute("aria-label"), "Refit, 1 change waiting");
   render(1, true);
   assert.equal(refitButton.disabled, true);
+  // A running fit turns Refit's arrow and marks the button busy until it ends.
+  renderAppBar({
+    root, activeView: "editor", ...buttons, undoLabel: null, redoLabel: null,
+    canRevert: false, busy: true, refitting: true, pendingCount: 1,
+  });
+  assert.deepEqual(
+    [refitButton.classList.contains("is-refitting"), refitButton.getAttribute("aria-busy")],
+    [true, "true"],
+  );
+  render(0);
+  assert.deepEqual(
+    [refitButton.classList.contains("is-refitting"), refitButton.getAttribute("aria-busy")],
+    [false, "false"],
+  );
 });
 
 test("R refits what is waiting, except while typing, with a modifier, in a dialog, or with nothing waiting", (t) => {

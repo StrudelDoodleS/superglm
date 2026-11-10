@@ -7,6 +7,7 @@ nothing. Only a fold's held-out rows need one prediction each.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable, Hashable, Mapping, Sequence
 from typing import Any
 
@@ -15,6 +16,12 @@ from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
 from superglm._lambda_box import LAMBDA_CEILING
+from superglm.diagnostics.convergence import (
+    coefficient_nonconvergence_message,
+    lss_nonconvergence_message,
+    reml_nonconvergence_message,
+)
+from superglm.diagnostics.fit_report import phase_label, status_sentence
 from superglm.editor.lss.view import is_lss
 from superglm.model.fit_state import fitted_lambda2
 from superglm.model.reml_setup import collect_reml_groups
@@ -31,33 +38,76 @@ WORST_ROWS = 10
 _LIMIT_OUTCOMES = frozenset({"upper_bound", "unresolved_cap", "exact_face"})
 _SEVERITY_ORDER = {"error": 0, "warning": 1, "info": 2}
 _FIXED_STOPS = frozenset({"fixed_only", "fixed_lambdas"})
+# A finding about these affects the numbers a user reads; the rest are about how the search went.
+_NUMBER_IMPACTS = frozenset({"fit_validity", "fit_reliability", "inference_reliability"})
+# The tab's status of a fit, from a SuperLSS report's status code.
+_LSS_STATUS = {
+    "converged_certified": "converged",
+    "converged_exact_face": "converged",
+    "converged_uncertified": "loose",
+    "not_converged": "not_converged",
+    "fixed_fit": "fixed",
+}
+_SEARCH_WORDS = {
+    "efs": "Quick smoothing updates only",
+    "efs+finish": "Quick smoothing updates, then Newton steps to an optimum",
+    "efs+newton": "A few quick smoothing updates, then Newton steps",
+}
+_GLM_CONVERGED = "Converged. The smoothing search met its stopping test."
+_GLM_EDITED = "The coefficients were edited by hand after fitting, so they are not the fit's own."
+# A quoted term of a finding: ``'mean:power'``, or one of its penalties, ``'mean:power#wiggle'``.
+_QUOTED_TERM = re.compile(r"'([^':#]+:[^'#]+)(?:#[^']*)?'")
 _NO_SEARCH = "no smoothing search ran"
 _STOP_TEXT = {
     **dict.fromkeys(_FIXED_STOPS, _NO_SEARCH),
-    "lambda_change": "the smoothing stopped moving",
-    "objective_plateau": "REML stopped improving",
-    "practical_plateau": "REML stopped improving",
-    "lambda_cap_unresolved": "a term reached the smoothing limit unresolved",
-    "endpoint_revalidation_failed": "a term at the limit failed its recheck",
-    "max_iterations": "it ran out of rounds",
-    "max_reml_iter": "it ran out of rounds",
-    "objective_rejected": "REML would not improve further",
-    "coefficient_not_converged": "the coefficients did not converge",
-    "stationary": "the REML gradient reached zero",
-    "active_set_stationary": "the REML gradient reached zero",
-    "gradient_unresolved": "the REML gradient could not be resolved",
-    "derivative_unavailable": "a derivative was unavailable",
-    "score_objective_tolerance": "the REML gradient reached its tolerance",
-    "newton_step_tolerance": "the REML Newton step reached its tolerance",
-    "start_objective_tolerance": "the start was already optimal",
-    "converged_at_precision": "REML reached working precision",
+    "lambda_change": "the smoothing parameters stopped changing",
+    "lambda_tolerance": "the smoothing parameters changed by less than the set tolerance",
+    "objective_plateau": "the REML score stopped improving by more than the stopping rule's threshold",
+    "practical_plateau": "the REML score stopped improving by more than the quick stopping rule's "
+    "threshold",
+    "lambda_cap_unresolved": "a term reached the largest smoothing allowed and the search could "
+    "not tell whether it should go higher",
+    "endpoint_revalidation_failed": "a term at the largest smoothing allowed did not pass the "
+    "check that it belongs there",
+    "objective_rejected": "no smoothing step improved the REML score, so the search stopped "
+    "before it passed its stopping test",
+    "line_search_failed": "no smoothing step improved the REML score",
+    "line_search_stalled": "no smoothing step improved the REML score",
+    "coefficient_not_converged": "the coefficients did not settle",
+    "stationary": "the search reached an optimum: the REML score no longer improves in any "
+    "direction",
+    "active_set_stationary": "the search reached an optimum: the REML score no longer improves "
+    "in any direction",
+    "gradient_unresolved": "the search could not tell the slope of the REML score from zero",
+    "derivative_unavailable": "a slope the search needs could not be computed",
+    "score_objective_tolerance": "the REML score is flat to within the set tolerance",
+    "newton_step_tolerance": "the next step would change the smoothing parameters by less than "
+    "the set tolerance",
+    "start_objective_tolerance": "the starting smoothing parameters were already at the optimum",
+    "converged_at_precision": "the REML score cannot be improved at the computer's numerical "
+    "precision",
+    "bootstrap_uncertified": "no coefficient fit at the starting smoothing parameters settled",
+    "coefficients_revised": "the coefficients were edited after fitting",
 }
 
 
-def _stop_text(reason: str | None) -> str:
+def _stop_text(reason: str | None, rounds: int | None = None) -> str:
+    """The stop in words after "Stopped because"; ``rounds`` names the budget a cap ran out of."""
     if reason is None:
         return _NO_SEARCH
+    if reason in {"max_iterations", "max_reml_iter"}:
+        count = (
+            "its smoothing rounds"
+            if rounds is None
+            else f"{rounds} smoothing round{'' if rounds == 1 else 's'}"
+        )
+        return f"it reached its limit of {count} (max_reml_iter) before settling"
     return _STOP_TEXT.get(reason, reason.replace("_", " "))
+
+
+def _search_text(outer: str) -> str | None:
+    """Which smoothing search ran, in words; None if unknown."""
+    return _SEARCH_WORDS.get(outer)
 
 
 def _term_cell(
@@ -117,7 +167,19 @@ def _lss_trace(lss) -> dict[str, Any]:
         report.findings,
         key=lambda found: _SEVERITY_ORDER.get(found.severity, len(_SEVERITY_ORDER)),
     )
+    status = _LSS_STATUS[report.fit_status]
+    outer = None if smoothing is None else getattr(smoothing.config, "outer", None)
     return {
+        "status": status,
+        "verdict": status_sentence(report.fit_status),
+        "explanation": lss_nonconvergence_message(
+            fitted.fitted_result,
+            None if smoothing is None else smoothing.convergence_reason,
+            getattr(fitted.result, "convergence_reason", None),
+        )
+        if status == "not_converged"
+        else None,
+        "search": None if outer is None else _search_text(outer),
         "rows": profile.n_observations,
         "rounds": fitted.fitted_result.n_smoothing_iter,
         "stop": None if smoothing is None else smoothing.convergence_reason,
@@ -129,7 +191,7 @@ def _lss_trace(lss) -> dict[str, Any]:
         "terms": terms,
         "phases": [
             {
-                "name": phase.name.replace("_", " ").capitalize(),
+                "name": phase_label(phase.name),
                 "seconds": phase.seconds,
                 "share": phase.fit_share,
             }
@@ -142,6 +204,7 @@ def _lss_trace(lss) -> dict[str, Any]:
                 "headline": found.headline,
                 "observed": found.observed,
                 "question": found.actions[0].question if found.actions else None,
+                "affects_numbers": bool(_NUMBER_IMPACTS.intersection(found.impacts)),
             }
             for found in findings
         ],
@@ -221,13 +284,38 @@ def _glm_terms(model, *, searched: bool) -> dict[Hashable, dict[str, Any]]:
     }
 
 
+def _glm_verdict(model, reml) -> dict[str, Any]:
+    """A SuperGLM fit's status, its sentence and, when it did not converge, the full statement."""
+    if reml is not None and reml.termination_reason == "coefficients_revised":
+        return {"status": "edited", "verdict": _GLM_EDITED, "explanation": None}
+    message = (
+        coefficient_nonconvergence_message(model._result)
+        if reml is None
+        else reml_nonconvergence_message(reml)
+    )
+    searched = reml is not None and reml.termination_reason not in _FIXED_STOPS
+    if message is not None or not (
+        bool(model._result.converged) and (reml is None or bool(reml.converged))
+    ):
+        return {
+            "status": "not_converged",
+            "verdict": status_sentence("not_converged"),
+            "explanation": message,
+        }
+    if searched:
+        return {"status": "converged", "verdict": _GLM_CONVERGED, "explanation": None}
+    return {"status": "fixed", "verdict": status_sentence("fixed_fit"), "explanation": None}
+
+
 def _glm_trace(model) -> dict[str, Any]:
     reml = getattr(model, "_reml_result", None)
     terms = _glm_terms(
         model, searched=reml is not None and reml.termination_reason not in _FIXED_STOPS
     )
     return {
-        "rows": None,
+        **_glm_verdict(model, reml),
+        "search": None,
+        "rows": getattr(getattr(model, "_fit_stats", None), "n_obs", None),
         "rounds": 0 if reml is None else int(reml.n_reml_iter),
         "stop": None if reml is None else reml.termination_reason,
         "converged": bool(model._result.converged) and (reml is None or bool(reml.converged)),
@@ -254,7 +342,7 @@ def fit_trace(
     trace.update(
         id=fit_id,
         label=label,
-        stop_text=_stop_text(trace["stop"]),
+        stop_text=_stop_text(trace["stop"], trace["rounds"]),
         rows=trace["rows"] if n_rows is None else n_rows,
         seconds=trace["seconds"] if seconds is None else seconds,
         late_gain=path[len(path) // 2] - final if len(path) >= 2 else None,
@@ -363,19 +451,49 @@ def held_out_worst_rows(model, rows, test: NDArray[np.intp]) -> dict[str, Any]:
     )
 
 
+def _name_terms(text: str | None, label_of: Mapping[str, str]) -> str | None:
+    """``text`` with each quoted term key said as the editor labels it."""
+    if text is None:
+        return None
+    return _QUOTED_TERM.sub(
+        lambda match: f"'{label_of[match.group(1)]}'" if match.group(1) in label_of else match[0],
+        text,
+    )
+
+
+def all_rows_worst_rows(model, rows) -> dict[str, Any] | None:
+    """The training rows that cost the fit on every row the most; None without the rows."""
+    if rows is None:
+        return None
+    try:
+        return held_out_worst_rows(getattr(model, "lss", model), rows, np.arange(rows.n_obs))
+    except Exception:
+        _LOGGER.warning("The fit on all rows has no costly rows to list.", exc_info=True)
+        return None
+
+
 def diagnose_tab_payload(
     model,
     *,
     folds: Sequence[dict[str, Any]],
+    model_rows: dict[str, Any] | None = None,
     source: str,
     display: Callable[[str], Any],
     model_revision: int,
     request_sequence: int | None = None,
 ) -> dict[str, Any]:
     """The tab: this model's fit, then its folds, and every term they share."""
-    fits = [fit_trace(model, fit_id="model", label="This model"), *folds]
+    whole = fit_trace(model, fit_id="model", label="All rows")
+    if model_rows is not None:
+        whole["worst_rows"] = model_rows
+    fits = [whole, *folds]
     keys = dict.fromkeys(key for fit in fits for key in fit["terms"])
     shown = {key: display(key) for key in keys}
+    label_of = {key: item.label for key, item in shown.items()}
+    for fit in fits:
+        for found in fit["findings"]:
+            for field in ("headline", "observed", "question"):
+                found[field] = _name_terms(found[field], label_of)
     terms = [
         {
             "name": key,

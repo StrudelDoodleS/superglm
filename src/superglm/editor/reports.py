@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from typing import Any
 
 from superglm.editor.cv import FINAL_NOT_RUN, cv_report_payload, diagnose_report_payload
+from superglm.editor.diagnose import fit_trace
 from superglm.editor.evaluation import evaluation_datasets
 from superglm.editor.lss.display import fold_chart_display
 from superglm.editor.lss.validation import LSS_METRIC_LABELS, lss_split_reason
 from superglm.editor.lss.view import is_lss
 from superglm.editor.metrics import METRIC_LABELS, compute_dataset_metrics
 from superglm.editor.summaries import summary_payload
+
+_LOGGER = logging.getLogger(__name__)
 
 _REPORT_METRICS = (
     "deviance",
@@ -25,9 +29,17 @@ _REPORT_METRICS = (
 
 
 def report_metrics(model) -> dict[str, str]:
-    """The metrics a report shows for ``model``, with their labels."""
+    """The metrics a report shows for ``model``, with their labels.
+
+    A SuperLSS's CRPS is in the units of the response, so its label carries the
+    session's amount unit where it has one.
+    """
     if is_lss(model):
-        return dict(LSS_METRIC_LABELS)
+        labels = dict(LSS_METRIC_LABELS)
+        unit = getattr(model, "amount_unit", None)
+        if unit:
+            labels["crps"] = f"{labels['crps']} ({unit})"
+        return labels
     return {metric: METRIC_LABELS[metric] for metric in _REPORT_METRICS}
 
 
@@ -50,6 +62,7 @@ def validation_report_payload(
         "title": "Validation Report",
         "note": _validation_note(session, splits),
         "metric_labels": report_metrics(session.model),
+        "compares_edit": _compares_edit(session),
         "splits": splits,
         "cv_report": getattr(session, "cv_report", None),
         "can_run_cv": False,
@@ -81,18 +94,44 @@ def final_fit_report_payload(
         "report": "final",
         "title": "Final Fit Report",
         "note": (
-            "Current in-force model report. Structural edits are reflected in the "
-            "feature definition; manual coefficient edits keep inference stale."
+            "The model as it stands now. Where you moved a curve by hand, standard errors "
+            "and fit statistics still describe the fit before the move."
         ),
         "metric_labels": report_metrics(widget.session.model),
+        "compares_edit": _compares_edit(widget.session),
         "splits": splits,
         **summary,
         "can_run_cv": False,
-        "final_fit": _final_fit_section(widget, final_fit, model_revision=revision),
+        "final_fit": _final_fit_section(widget, final_fit),
     }
 
 
-def _final_fit_section(widget, final_fit, *, model_revision: int) -> dict[str, Any]:
+def _compares_edit(session) -> bool:
+    """Whether the model in force differs from the one the editor opened: only then is a change to show."""
+    reference_model = getattr(session, "reference_model", session.model)
+    return reference_model is not session.model or bool(session.edited_terms())
+
+
+def _final_fit_status(final_model) -> dict[str, Any]:
+    """How the refit's smoothing search ended, in the Diagnose tab's words, read from what it recorded.
+
+    Nothing is recomputed. A refit whose record cannot be read says nothing about it.
+    """
+    try:
+        trace = fit_trace(final_model, fit_id="final", label="Final fit")
+    except Exception:
+        _LOGGER.warning("The Final fit has no convergence status.", exc_info=True)
+        return {"fit_status": None, "fit_verdict": None}
+    return {"fit_status": trace["status"], "fit_verdict": trace["verdict"]}
+
+
+def _final_fit_stale(widget, final_fit) -> bool:
+    """Whether the model in force is no longer the one the Final fit was run on."""
+    with widget._lock:
+        return not final_fit.source.describes(widget.session)
+
+
+def _final_fit_section(widget, final_fit) -> dict[str, Any]:
     """The Final fit on train and validation rows, once one has run."""
     if final_fit is None:
         return {"available": False, "note": FINAL_NOT_RUN}
@@ -102,7 +141,7 @@ def _final_fit_section(widget, final_fit, *, model_revision: int) -> dict[str, A
         compact = summary_payload(widget, "in_force", model_override=final_fit.model).get("compact")
     return {
         "available": True,
-        "stale": final_fit.model_revision != model_revision,
+        "stale": _final_fit_stale(widget, final_fit),
         "n_rows": final_fit.n_rows,
         "splits": list(final_fit.splits),
         "carried": [
@@ -114,6 +153,8 @@ def _final_fit_section(widget, final_fit, *, model_revision: int) -> dict[str, A
         "pending": len(widget.session.pending),
         "summary": compact,
         "test_scores": final_fit.test_scores,
+        "has_test_split": widget.session._evaluation_data.get("test") is not None,
+        **_final_fit_status(final_fit.model),
     }
 
 

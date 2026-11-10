@@ -120,6 +120,9 @@ def _open_session_page(
     resources.callback(widget.close)
     page = chromium_browser.new_page(viewport=viewport or {"width": 1180, "height": 720})
     resources.callback(page.close)
+    # A route handler still fetching when the page closes would raise on the next page opened;
+    # the handlers go first, and their in-flight requests are dropped.
+    resources.callback(page.unroute_all, behavior="ignoreErrors")
     if prepare is not None:
         prepare(page)
     page.goto(f"{widget.app_url}&test=1", wait_until="domcontentloaded")

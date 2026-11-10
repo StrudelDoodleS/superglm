@@ -98,6 +98,8 @@ export function selectEvidenceNeedsRefresh(state, panel) {
  * @returns {EvidencePanel[]}
  */
 export function selectVisibleEvidencePanels(state, { summaryCommitted = false } = {}) {
+  // The Explain tab asks for its own risks and shows no evidence panel.
+  if (state.view.activeView === "risk") return [];
   if (state.view.activeView !== "editor") return ["report"];
   // A panel whose tool the session does not offer is never requested.
   const off = state.remote.snapshot?.unavailable ?? {};

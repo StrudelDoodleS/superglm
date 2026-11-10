@@ -639,8 +639,8 @@ def test_public_tweedie_reml_uses_an_honest_practical_plateau_by_default() -> No
     unsettled = next(
         finding for finding in report.findings if finding.code == "smoothing.trajectory_unsettled"
     )
-    assert "practical" in uncertified.headline.lower()
-    assert "practical" in unsettled.headline.lower()
+    assert "quick stopping rule" in uncertified.headline.lower()
+    assert "quick rule" in unsettled.headline.lower()
     assert "did not settle" not in unsettled.interpretation.lower()
     assert unsettled.impacts == ("smoothing_selection",)
     _assert_public_tweedie_round_trip(model, frame)
@@ -1497,7 +1497,7 @@ def test_repeated_indefiniteness_without_fisher_finishes_and_discloses(discrete)
     assert np.min(np.linalg.eigvalsh(curvature / np.outer(scale, scale))) > -1.0e-12
     assert np.all(np.isfinite(model.covariance_))
     findings = [f for f in model.diagnose().findings if f.code == "fit.curvature_indefinite"]
-    assert findings and "nearest positive semidefinite observed" in findings[0].observed
+    assert findings and "nearest positive semidefinite" in findings[0].observed
 
 
 def test_unconverged_null_model_finishes_and_discloses(monkeypatch) -> None:
@@ -1591,7 +1591,9 @@ def test_no_ascent_direction_stops_at_the_accepted_iterate_and_discloses(
     assert not model.result_.converged
     assert any("no_ascent_direction" in message for message in model.result_.warnings)
     findings = [f for f in model.diagnose().findings if f.code == "fit.not_converged"]
-    assert findings and "ascent direction" in findings[0].interpretation
+    assert (
+        findings and "could not find any step that improved the fit" in findings[0].interpretation
+    )
     assert "coefficient_curvature='fisher'" in findings[0].actions[0].question
 
 

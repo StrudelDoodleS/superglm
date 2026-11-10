@@ -4772,7 +4772,7 @@ def test_widget_http_collapse_levels_refit_updates_summary_source(editor_model):
         assert grouping.original_to_group["C"] == "B+C"
         assert "model_source" not in payload["state"]
         assert "model_sources" not in payload["state"]
-        assert "Current editable model" in payload["summary"]["note"]
+        assert "The model as it stands now" in payload["summary"]["note"]
     finally:
         widget.close()
 
@@ -6619,7 +6619,7 @@ def test_editor_chart_points_have_relativity_exposure_tooltips():
 
     assert "pointTooltipLines(term, i)" in chart_js
     assert "Relativity: ${fmt(term.y[i])}" in chart_js
-    assert "Exposure: ${fmt(exposure)}" in chart_js
+    assert "Exposure: ${fmtCount(exposure)}" in chart_js
     assert (
         "showPointTooltip(svg, point, pointTooltipLines(view, Number(point.dataset.index)))"
         in chart_js
@@ -6850,6 +6850,8 @@ def test_widget_serves_editor_app_assets(editor_model):
             "state/store.js",
             "state/selectors.js",
             "state/actions.js",
+            "state/machine.js",
+            "state/mutation.js",
             "state/timing.js",
             "format.js",
             "chart.js",

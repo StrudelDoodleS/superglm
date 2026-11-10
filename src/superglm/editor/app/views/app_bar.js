@@ -116,12 +116,13 @@ export function bindAppBar({
  * @param {string|null} options.redoLabel what Redo would put back; null disables it
  * @param {boolean} options.canRevert
  * @param {boolean} options.busy
+ * @param {boolean} [options.refitting] a fit is running: Refit's arrow turns until it ends
  * @param {number} options.pendingCount how many structural changes wait for Refit
  * @param {string|null} [options.refitReason] why the model cannot be refitted here; null when it can
  */
 export function renderAppBar({
   root, activeView, undoButton, redoButton, revertButton, refreshButton, refitButton, refitCount,
-  undoLabel, redoLabel, canRevert, busy, pendingCount, refitReason = null,
+  undoLabel, redoLabel, canRevert, busy, refitting = false, pendingCount, refitReason = null,
 }) {
   for (const element of root.querySelectorAll('[role="tab"]')) {
     if (!(element instanceof HTMLButtonElement)) continue;
@@ -137,6 +138,8 @@ export function renderAppBar({
   revertButton.disabled = !canRevert;
   refreshButton.disabled = busy;
   renderRefit(refitButton, refitCount, pendingCount, busy, refitReason);
+  refitButton.classList.toggle("is-refitting", refitting);
+  refitButton.setAttribute("aria-busy", String(refitting));
 }
 
 /**

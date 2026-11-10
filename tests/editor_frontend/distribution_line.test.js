@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  amountInsideAxis,
   formatAmount,
   formatChance,
   ordinal,
@@ -255,8 +256,7 @@ test("formatChance, percent style: below 1e-6 it says so rather than printing ze
 
 test("formatChance, one_in style: 1 in N with two significant figures and en-GB grouping", () => {
   const rows = [
-    [1, "1 in 1.0"],
-    [0.5, "1 in 2.0"],
+    [0.49, "1 in 2.0"],
     [0.11, "1 in 9.1"],
     [0.1, "1 in 10"],
     [0.01, "1 in 100"],
@@ -268,6 +268,14 @@ test("formatChance, one_in style: 1 in N with two significant figures and en-GB 
     [1e-6, "1 in 1,000,000"],
   ];
   for (const [p, want] of rows) assert.equal(formatChance(p, "one_in"), want, `p = ${p}`);
+});
+
+test("formatChance, one_in style: a chance of one half or more is a percentage, not 1 in 1.0", () => {
+  const rows = [[1, "100.0%"], [0.954, "95.4%"], [0.8, "80.0%"], [0.5, "50.0%"]];
+  for (const [p, want] of rows) assert.equal(formatChance(p, "one_in"), want, `p = ${p}`);
+  // The percent style is unchanged, and so is the first chance below a half.
+  assert.equal(formatChance(0.954, "percent"), "95.4%");
+  assert.equal(formatChance(0.4999, "one_in"), "1 in 2.0");
 });
 
 test("formatChance, one_in style: below 1e-6 it says 1 in >1,000,000", () => {
@@ -384,6 +392,23 @@ test("ordinal text parses back to the percentile it names", () => {
   }
 });
 
+test("a starting amount on the axis's top edge moves to the round amount just inside it", () => {
+  const axis = { min_log10: -1, max_log10: 4 };
+  assert.equal(amountInsideAxis(1e4, axis), 5e3);
+  assert.equal(amountInsideAxis(1e5, axis), 5e3);
+  assert.equal(amountInsideAxis(1e3, axis), 1e3);
+  assert.equal(amountInsideAxis(5e3, axis), 5e3);
+  // The result is a 1, 2 or 5 times a power of ten, whatever the top is.
+  assert.equal(amountInsideAxis(1e5, { min_log10: 0, max_log10: 5 }), 5e4);
+  assert.equal(amountInsideAxis(1e3, { min_log10: -1, max_log10: 3.3 }), 1e3);
+  assert.equal(amountInsideAxis(2e3, { min_log10: -1, max_log10: 3.3 }), 1e3);
+  for (const top of [1, 2, 2.3, 3.7, 4, 5.25]) {
+    const value = amountInsideAxis(10 ** Math.ceil(top), { min_log10: -1, max_log10: top });
+    assert.ok(Math.log10(value) < top, `top ${top}`);
+    assert.match(String(value), /^[125]0*$|^0\.[125]$|^[125]e/, `top ${top}: ${value}`);
+  }
+});
+
 test("pinToAxis leaves a value on the axis alone and reports pinned: false", () => {
   const axis = { min_log10: 2, max_log10: 5, clipped_below: false };
   assert.deepEqual(pinToAxis(3.5, axis), { log10: 3.5, pinned: false });
@@ -425,7 +450,7 @@ test("Help states the panel's typing rules and limits as the panel applies them"
   }
   assert.ok(text.includes("1,5m reads as 15,000,000"));
   assert.deepEqual(parseLine("1,5m", "amount", null), amount(15000000));
-  assert.ok(text.includes(`coefficient of variation of ${GAMMA_CV_MAX} is drawn at ${GAMMA_CV_MAX}`));
+  assert.ok(text.includes(`gamma CV above ${GAMMA_CV_MAX} is drawn at ${GAMMA_CV_MAX}`));
 });
 
 test("the box beside a fixed 1 in reads only N", () => {
@@ -446,7 +471,7 @@ test("the box beside a fixed 1 in refuses what is not an N above 1", () => {
 });
 
 test("the N of a chance is what formatChance writes after 1 in", () => {
-  for (const p of [0.5, 0.05, 0.005, 1e-5, 1e-7]) {
+  for (const p of [0.4, 0.05, 0.005, 1e-5, 1e-7]) {
     assert.equal(`1 in ${formatOneInN(p)}`, formatChance(p, "one_in"));
   }
   assert.equal(formatOneInN(0.005), "200");

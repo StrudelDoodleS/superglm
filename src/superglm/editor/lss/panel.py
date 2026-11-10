@@ -35,7 +35,9 @@ from superglm.distributional.families import (
     LogNormalLS,
     LowerBoundedLogLink,
     NegativeBinomialLS,
+    TweedieLSS,
 )
+from superglm.distributional.families.tweedie import BoundedPowerLink
 from superglm.editor._types import EditableTerm
 from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.editor.lss.apply import _native_levels
@@ -48,7 +50,7 @@ N_COLUMNS = 96
 MAX_LEVELS = 12
 # The amount axis spans these quantiles of the panel's rows, widened to whole decades.
 AXIS_QUANTILES = (0.001, 0.999)
-# A spread edit can put the lower quantile many decades below the rest, so the axis stops here.
+# A CV or overdispersion edit can put the lower quantile many decades below the rest, so the axis stops here.
 MAX_AXIS_DECADES = 10
 
 NOT_SUPERLSS = (
@@ -65,17 +67,24 @@ _FAMILIES = {
     LogNormalLS: "lognormal_mean",
     GammaLS: "gamma",
     NegativeBinomialLS: "negative_binomial",
+    TweedieLSS: "tweedie",
 }
 
 
 def link_spec(parameter: str, link: Link) -> dict[str, Any]:
-    """``link`` as the browser reads it: ``log``, or ``floored_log`` with its floor."""
+    """``link`` as the browser reads it: ``log``, ``floored_log`` with its floor, or ``bounded_logit``.
+
+    A ``bounded_logit`` maps ``eta`` to ``lower + (upper - lower) / (1 + exp(-eta))``.
+    """
     if type(link) is LogLink:
         return {"kind": "log"}
     if type(link) is LowerBoundedLogLink:
         return {"kind": "floored_log", "floor": float(link.floor)}
+    if type(link) is BoundedPowerLink:
+        return {"kind": "bounded_logit", "lower": float(link.lower), "upper": float(link.upper)}
     raise EditorValueError(
-        f"The distribution panel draws parameters with a log link or a shifted log link; the "
+        f"The distribution panel draws parameters with a log link, a shifted log link or a bounded "
+        f"logit; the "
         f"{parameter!r} parameter uses {type(link).__name__}. Refit it with a log link to see "
         "its distribution here."
     )
@@ -166,6 +175,11 @@ def _eta(model: SuperLSS, view: LSSModelView, column: str, values: list[Any]) ->
     """``model``'s link-scale predictors at the reference row with ``column`` set to ``values``."""
     frame = view.reference_row().loc[np.zeros(len(values), dtype=np.intp)].reset_index(drop=True)
     frame[column] = values
+    return _eta_of_frame(model, frame)
+
+
+def _eta_of_frame(model: SuperLSS, frame: pd.DataFrame) -> NDArray:
+    """``model``'s link-scale predictors at the rows of ``frame``, every offset at zero."""
     fitted = model._require_fitted()
     # The panel's reference neutralizes every offset, including columns also
     # used as features. Keep the frame intact and supply complete zero sums.
@@ -174,16 +188,34 @@ def _eta(model: SuperLSS, view: LSSModelView, column: str, values: list[Any]) ->
 
 
 def _amount_axis(view: LSSModelView, rows: NDArray) -> dict[str, Any]:
-    """Whole decades around the rows' quantiles, at most ``MAX_AXIS_DECADES`` wide."""
+    """Whole decades around the rows' quantiles, at most ``MAX_AXIS_DECADES`` wide.
+
+    A law with a point mass at zero (the Tweedie) draws its positive part on this axis,
+    so a row's levels are quantiles of the amount given that it is above zero: the lower
+    end is the 0.001 quantile of that part, and the upper end is the 0.999 quantile of
+    the law unless the law's mass at zero reaches it, when it is the positive part's.
+    """
     theta = view._fitted.parameters_from_eta(rows)
+    zero = np.zeros(len(theta))
+    if isinstance(view.family, TweedieLSS):
+        zero = view.family.cdf(zero, theta)
+    levels = (
+        zero + AXIS_QUANTILES[0] * (1.0 - zero),
+        np.where(
+            zero < AXIS_QUANTILES[1],
+            AXIS_QUANTILES[1],
+            zero + AXIS_QUANTILES[1] * (1.0 - zero),
+        ),
+    )
+    below_one = np.nextafter(1.0, 0.0)
     low, high = (
-        np.asarray(view.family.quantile(np.full(len(theta), p), theta), dtype=np.float64)
-        for p in AXIS_QUANTILES
+        np.asarray(view.family.quantile(np.minimum(p, below_one), theta), dtype=np.float64)
+        for p in levels
     )
     if not (np.all(np.isfinite(low)) and np.all(np.isfinite(high))):
         raise EditorValueError(
             "The distribution panel cannot draw this feature: a row's amounts leave the "
-            "range of float64. Check the edited curves of its spread."
+            "range of float64. Check the edited curves of its CV or overdispersion."
         )
     top = math.ceil(math.log10(float(high.max())))
     lowest = float(low.min())

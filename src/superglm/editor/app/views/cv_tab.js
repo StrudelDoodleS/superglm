@@ -31,7 +31,16 @@ const JOB_NAMES = Object.freeze({ cv: "Run CV", final_fit: "Final fit" });
 const RUN_CV_HELP = "Refit the current structure on each stored fold, put your hand edits back "
   + "exactly as set, and score the held-out rows.";
 const FINAL_FIT_HELP = "Refit the current structure on train and validation rows and put your "
-  + "hand edits back. The test split stays held out. Export offers the result as Final fit model.";
+  + "hand edits back.";
+const FINAL_FIT_EXPORT = " Export offers the result as Final fit model.";
+
+/**
+ * The Final fit button's tooltip: the test split is mentioned only where there is one.
+ * @param {{has_test_split?: boolean}} finalFit
+ */
+export function finalFitHelp(finalFit) {
+  return FINAL_FIT_HELP + (finalFit.has_test_split ? " The test split stays held out." : "") + FINAL_FIT_EXPORT;
+}
 const ICONS = Object.freeze({
   cv: '<svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">'
     + '<path d="m12 3 9 5-9 5-9-5z"></path><path d="m3 13 9 5 9-5"></path></svg>',
@@ -49,6 +58,20 @@ function isNumber(value) {
 function metricText(value) {
   if (!isNumber(value)) return "--";
   return value.toFixed(Math.abs(value) >= 100 ? 2 : 4);
+}
+
+/**
+ * A spread at the precision of the mean beside it, so the pair reads alike and is
+ * as wide as its mean: 1011.93 ± 54.92, not 1011.93 ± 54.9171.
+ * @param {unknown} mean @param {unknown} spread
+ */
+function spreadText(mean, spread) {
+  return isNumber(spread) ? spread.toFixed(isNumber(mean) && Math.abs(mean) >= 100 ? 2 : 4) : "--";
+}
+
+/** @param {unknown} mean @param {unknown} spread */
+export function meanSpreadText(mean, spread) {
+  return `${metricText(mean)} ± ${spreadText(mean, spread)}`;
 }
 
 /** @param {unknown} value */
@@ -187,7 +210,7 @@ export function cvSourceLine(payload) {
   const parts = [`${header.n_folds} folds`];
   if (header.splitter) parts.push(header.splitter);
   if (header.n_rows !== null) parts.push(`${countText(header.n_rows)} rows`);
-  parts.push("supplied with edit(model, cv=result)");
+  parts.push("from the result you supplied");
   return parts.join(" · ");
 }
 
@@ -313,7 +336,8 @@ export function toolbarMarkup(payload, state) {
   if (payload.pending) {
     chips.push(chip(`${payload.pending} ${payload.pending === 1 ? "change" : "changes"} waiting for refit`, "waiting"));
   }
-  if (payload.results.some((result) => result.stale)) {
+  // Folds that describe the model in force answer for it: only when none do is the tab out of date.
+  if (payload.results.length > 0 && payload.results.every((result) => result.stale)) {
     chips.push(chip("The model has changed since these folds were fitted", "stale"));
   }
   if (payload.final_fit.done && payload.final_fit.stale) {
@@ -331,7 +355,7 @@ export function toolbarMarkup(payload, state) {
     <section class="cv-toolbar" data-cv-toolbar>
       <div class="cv-chips">${chips.join("")}</div>
       <div class="cv-actions">
-        ${actionButton("final_fit", "Final fit on all rows", finalEnabled, payload.final_fit.reason || FINAL_FIT_HELP, false)}
+        ${actionButton("final_fit", "Final fit on all rows", finalEnabled, payload.final_fit.reason || finalFitHelp(payload.final_fit), false)}
         ${actionButton("cv", "Run CV on current model", runEnabled, payload.run_cv.reason || RUN_CV_HELP, true)}
       </div>
       ${reasons.map((reason) => `<p class="cv-reason">${escapeHTML(reason)}</p>`).join("")}
@@ -510,11 +534,12 @@ function metricCard(metric, results) {
         + `<title>Mean: ${metricText(mean)}${meanOff ? ", off the strip" : ""}</title></path>`
       : "";
     const pooledText = isNumber(pooled) ? ` · pooled ${metricText(pooled)}` : "";
-    const label = result.live ? `${result.label}, ${result.folds.length} of ${result.n_folds}` : result.label;
+    const named = result.stale ? `${result.label}, earlier model` : result.label;
+    const label = result.live ? `${named}, ${result.folds.length} of ${result.n_folds}` : named;
     return `<div class="cv-card-row" data-origin="${result.origin}"${result.live ? " data-live" : ""}>
       <div class="cv-card-value"><span class="cv-card-label">${escapeHTML(label)}</span>
         <strong>${metricText(mean)}</strong>
-        <span class="cv-card-spread">± ${metricText(result.std[metric.name])}${pooledText}</span></div>
+        <span class="cv-card-spread">± ${spreadText(mean, result.std[metric.name])}${pooledText}</span></div>
       <svg class="cv-strip" viewBox="0 0 220 24" role="img"
         aria-label="${escapeHTML(`${metric.label} by fold, ${result.label}`)}">
         <path class="cv-strip-axis" d="M10,12 H210"></path>${meanTick}${dots}</svg>
@@ -602,7 +627,7 @@ export function foldTableMarkup(payload, job = null) {
     : [];
   const rows = [...finished, ...pending].join("");
   const summary = names.map((name) =>
-    `<td>${metricText(result.mean[name])} ± ${metricText(result.std[name])}</td>`).join("");
+    `<td>${meanSpreadText(result.mean[name], result.std[name])}</td>`).join("");
   const hint = picture ? `${result.label}. Each fold fits on the grey pieces and scores its coloured one.` : result.label;
   return `<section class="report-section" data-cv-folds>
     ${sectionHead("Folds", hint)}
@@ -680,7 +705,7 @@ function legendMarkup(term) {
   const kinds = [
     ["cv-legend-fit", "all-rows fit"],
     ...(term.edited ? [["cv-legend-edited", "edited"]] : []),
-    ["cv-legend-range", term.kind === "levels" ? "fold range" : "fold min–max"],
+    ["cv-legend-range", "fold range"],
     ["cv-legend-exposure", "exposure"]
   ].map(([kind, text]) => `<span class="cv-key"><span class="cv-key-swatch ${kind}"></span>${escapeHTML(text)}</span>`)
     .join("");
@@ -907,7 +932,7 @@ export function relativitiesMarkup(payload, state) {
   const current = currentTerm(shown, state.term);
   const origin = relativities.origin === "run"
     ? "From Run CV on the current model, with the hand edits put back on every fold."
-    : "From the supplied result's fold models.";
+    : "From the fold models of the result you supplied.";
   return `<section class="report-section cv-relativities">${head}
     <p class="cv-hint">${escapeHTML(origin)}${relativities.stale ? " The model has changed since." : ""}</p>
     <div class="cv-rel-layout">

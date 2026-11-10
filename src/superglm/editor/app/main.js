@@ -64,6 +64,11 @@ import { freeLevelsShown, specialActions } from "./specials.js";
 import { unsmoothedEntry, unsmoothedToggle, withUnsmoothed } from "./unsmoothed.js";
 import { CLICK_SLOP, bindInteractions } from "./interactions.js";
 import { previewEta } from "./distribution/preview.js";
+import {
+  withRiskAdded, withRiskRemoved, withRiskSelected, withRiskValue, withRiskValues
+} from "./state/risk.js";
+import { createRiskController } from "./views/risk_controller.js";
+import { defaultRiskLine, renderRiskPanel, riskPlotsHost } from "./views/risk_panel.js";
 import { bindAppBar, renderAppBar, revertAvailable } from "./views/app_bar.js";
 import {
   placeTermViewToggle,
@@ -164,6 +169,9 @@ const plotColumn = document.querySelector(".plot-column");
 const termViewToggle = document.getElementById("termViewToggle");
 const ratingTableFrame = document.getElementById("ratingTableFrame");
 const distributionPanel = document.getElementById("distributionPanel");
+const riskView = document.getElementById("riskView");
+const riskPanel = document.getElementById("riskPanel");
+const explainTab = document.getElementById("explainTab");
 const featureListNodes = Object.freeze({
   root: document.getElementById("featureList"),
   search: document.getElementById("featureSearch"),
@@ -932,7 +940,8 @@ async function refreshSummaryView() {
 
 async function refreshActiveReport() {
   const activeView = store.getState().view.activeView;
-  if (activeView === "editor") return;
+  // The Explain tab is drawn in the browser from its own request, not from a report.
+  if (activeView === "editor" || activeView === "risk") return;
   await actions.refreshEvidence("report", "/report", { report: activeView });
 }
 
@@ -1071,7 +1080,7 @@ function setAppBusy(active, title = "Working...", detail = "") {
     clearInterval(appBusyTimer);
     appBusyTimer = null;
   }
-  for (const region of [appBar, contextBar, editorView, reportPanel]) {
+  for (const region of [appBar, contextBar, editorView, riskView, reportPanel]) {
     if (region) region.toggleAttribute("inert", active);
   }
   appBusyActive = active;
@@ -1179,7 +1188,7 @@ function formatMilliseconds(value) {
 }
 
 async function showView(view) {
-  const activeView = ["validation", "cv", "final", "diagnose"].includes(view) ? view : "editor";
+  const activeView = ["validation", "cv", "final", "diagnose", "risk"].includes(view) ? view : "editor";
   actions.patchView({ activeView });
   if (activeView === "editor") {
     scheduleVisibleEvidenceCatchUp();
@@ -1190,7 +1199,8 @@ async function showView(view) {
 
 function renderAppView(activeView) {
   editorView.hidden = activeView !== "editor";
-  reportPanel.hidden = activeView === "editor";
+  riskView.hidden = activeView !== "risk";
+  reportPanel.hidden = activeView === "editor" || activeView === "risk";
   // The Cross-validation tab lays the panel out its own way (cv.css).
   reportPanel.dataset.report = activeView;
 }
@@ -1382,6 +1392,8 @@ let distributionFrame = 0;
 let distributionPayloadRequest = null;
 let distributionPreview = null;
 let distributionDrawn = null;
+// Whether the panel still shows that drawing: a request's message, put over it, is not it.
+let distributionShown = false;
 let distributionStale = false;
 let distributionInView = false;
 // Each feature's reply for the model and chart in force, so going back to a feature
@@ -1435,7 +1447,7 @@ async function refreshDistribution(request) {
   let response = distributionReplies.get(term) ?? null;
   let failure = null;
   if (!response) {
-    if (!distributionPayload) renderDistributionMessage(distributionPanel, DISTRIBUTION_LOADING);
+    if (!distributionPayload) showDistributionMessage(DISTRIBUTION_LOADING);
     try {
       response = await editorClient.distribution(term);
     } catch (error) {
@@ -1451,17 +1463,19 @@ async function refreshDistribution(request) {
   if (!failure && !response) failure = { message: DISTRIBUTION_FAILED, retry: true };
   if (failure) {
     distributionPayload = null;
-    renderDistributionMessage(
-      distributionPanel,
-      failure.message,
-      failure.retry ? retryDistribution : null
-    );
+    showDistributionMessage(failure.message, failure.retry ? retryDistribution : null);
     return;
   }
   distributionPayload = response;
   distributionPayloadRequest = request;
   distributionLine ??= defaultLineState(response);
   renderDistribution();
+}
+
+// A request's message takes the drawing's place, so the same inputs draw again after it.
+function showDistributionMessage(message, onRetry = null) {
+  distributionShown = false;
+  renderDistributionMessage(distributionPanel, message, onRetry);
 }
 
 function retryDistribution() {
@@ -1481,16 +1495,117 @@ const distributionHandlers = {
   onChange(next) {
     distributionLine = next;
     scheduleDistributionRender();
+    scheduleRiskRender();
   }
 };
 
+// The Explain tab, SuperLSS sessions only: the whole distribution of each risk held. The store
+// holds the risks; the controller asks for them and holds what is drawn; the tab and the
+// distribution panel read one line.
+const riskController = createRiskController({ client: editorClient, draw: scheduleRiskRender });
+let riskFrame = 0;
+let riskSize = { width: 0, height: 0 };
+
+function selectRiskWant(state) {
+  const snapshot = state.remote.snapshot;
+  return {
+    active: isLssSession(snapshot) && state.view.activeView === "risk",
+    generation: snapshot?.chart_generation ?? 0,
+    revision: selectModelRevision(state),
+    profiles: state.view.risks
+  };
+}
+
+function sameRiskWant(next, previous) {
+  return next.active === previous.active &&
+    next.generation === previous.generation &&
+    next.revision === previous.revision &&
+    next.profiles === previous.profiles;
+}
+
+// One draw per animation frame, however many changes arrive in it.
+function scheduleRiskRender() {
+  if (riskFrame) return;
+  riskFrame = requestAnimationFrame(() => {
+    riskFrame = 0;
+    renderRisk();
+  });
+}
+
+function patchRisks(risks) {
+  actions.patchView({ risks });
+}
+
+const riskHandlers = {
+  onValue(id, column, value) {
+    patchRisks(withRiskValue(store.getState().view.risks, id, column, value));
+  },
+  // A new risk is a training row drawn at random, so its curve is its own; where the server
+  // does not answer, it is a copy of the selected risk.
+  async onAdd() {
+    const values = await riskController.bookRow();
+    patchRisks(withRiskAdded(store.getState().view.risks, values ?? undefined));
+  },
+  onCopy(id) {
+    patchRisks(withRiskAdded(withRiskSelected(store.getState().view.risks, id)));
+  },
+  onRemove(id) {
+    patchRisks(withRiskRemoved(store.getState().view.risks, id));
+  },
+  onSelect(id) {
+    const risks = store.getState().view.risks;
+    const next = withRiskSelected(risks, id);
+    if (next !== risks) patchRisks(next);
+  },
+  onReset(id) {
+    patchRisks(withRiskValues(store.getState().view.risks, id, {}));
+  },
+  async onBookRow(id) {
+    const values = await riskController.bookRow();
+    if (values) patchRisks(withRiskValues(store.getState().view.risks, id, values));
+    else actions.showNotice("A row could not be read from the book: the editor's server did not answer. Try again.");
+  },
+  onLine: (next) => distributionHandlers.onChange(next),
+  onRetry: () => riskController.retry()
+};
+
+// The view draws inside an animation frame, so nothing it throws may escape.
+function renderRisk() {
+  const want = selectRiskWant(store.getState());
+  if (!want.active) return;
+  const view = riskController.view();
+  if (view.reply) distributionLine ??= defaultRiskLine(view.reply);
+  try {
+    renderRiskPanel(
+      riskPanel,
+      {
+        ...view,
+        profiles: want.profiles,
+        line: distributionLine ?? { mode: "amount", value: 1e4, style: "percent" },
+        ...riskSize
+      },
+      riskHandlers
+    );
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+new ResizeObserver(([entry]) => {
+  const width = Math.round(entry.contentRect.width);
+  const height = Math.round(entry.contentRect.height);
+  if (width === riskSize.width && height === riskSize.height) return;
+  riskSize = { width, height };
+  scheduleRiskRender();
+}).observe(riskPlotsHost(riskPanel));
+
 // A drag frame of term `key`: the panel draws `dragged` against the term the store confirmed.
 function previewDistribution(key, dragged) {
-  if (distributionPanel.hidden || !distributionPayload || !distributionInView) return;
   const state = store.getState();
-  if (!sameDistributionRequest(selectDistributionRequest(state), distributionPayloadRequest)) return;
   const committed = state.remote.snapshot?.terms?.[key];
   if (!committed) return;
+  if (distributionPanel.hidden || !distributionPayload || !distributionInView) return;
+  if (!sameDistributionRequest(selectDistributionRequest(state), distributionPayloadRequest)) return;
   distributionPreview = previewEta(distributionPayload, key, committed, dragged);
   scheduleDistributionRender();
 }
@@ -1515,13 +1630,19 @@ function renderDistribution() {
     document.documentElement.getAttribute("data-theme")
   ];
   // The same inputs draw the same panel, whatever else made the workspace render.
-  if (distributionDrawn && inputs.every((input, i) => input === distributionDrawn[i])) return;
+  if (
+    distributionShown && distributionDrawn &&
+    inputs.every((input, i) => input === distributionDrawn[i])
+  ) {
+    return;
+  }
   // Below the fold it waits until it is scrolled to. The first draw gives the column its height.
   if (distributionDrawn && !distributionInView) {
     distributionStale = true;
     return;
   }
   distributionDrawn = inputs;
+  distributionShown = true;
   distributionStale = false;
   try {
     renderDistributionPanel(
@@ -1656,6 +1777,8 @@ function selectAppBarRenderState(state) {
     redoLabel: snapshot?.undo_redo.redo ?? null,
     canRevert: Boolean(snapshot && revertAvailable(snapshot)),
     busy: state.request.mutation.status === "running",
+    // A blocking mutation is a fit: Refit, a structural step or a re-profile.
+    refitting: state.request.mutation.status === "running" && state.request.mutation.blocking === true,
     pendingCount: selectPendingSteps(state).length,
     refitReason: snapshot?.unavailable?.refit ?? null
   };
@@ -1668,6 +1791,7 @@ function sameAppBarRenderState(next, previous) {
     next.redoLabel === previous.redoLabel &&
     next.canRevert === previous.canRevert &&
     next.busy === previous.busy &&
+    next.refitting === previous.refitting &&
     next.pendingCount === previous.pendingCount &&
     next.refitReason === previous.refitReason;
 }
@@ -1685,6 +1809,7 @@ function renderAppBarState(state) {
     redoLabel: state.redoLabel,
     canRevert: state.canRevert,
     busy: state.busy,
+    refitting: state.refitting,
     refitButton: refitPendingAction,
     refitCount: refitPendingCount,
     pendingCount: state.pendingCount,
@@ -1782,7 +1907,7 @@ function sameSelectionState(next, previous) {
 
 function renderMutationBusy(mutation) {
   const active = mutation.status === "running" && mutation.blocking === true;
-  setAppBusy(active, mutation.operation || "Working...", "Starting...");
+  setAppBusy(active, mutation.operation || "Working...", mutation.detail || "Starting...");
 }
 
 function renderInteractionPreview(preview) {
@@ -1875,7 +2000,7 @@ function renderReportEvidence(evidence, activeView) {
   const busy = evidence.status === "updating";
   reportFrame.setAttribute("aria-busy", busy ? "true" : "false");
   reportFrame.dataset.freshness = evidence.status;
-  if (activeView === "editor") return;
+  if (activeView === "editor" || activeView === "risk") return;
   const payloadMatchesView = evidence.payload !== null && evidence.payload.report === activeView;
   if (payloadMatchesView) {
     renderReport(evidence.payload, { reportTitle, reportStatus, reportFrame }, cvTab, diagnoseTab);
@@ -1894,6 +2019,11 @@ function renderReportEvidence(evidence, activeView) {
     stale: "Report may be stale.",
     error: "Report unavailable."
   });
+  // Before this tab's first report arrives, "Loading report..." above says it once; "Updating"
+  // belongs to a report on screen.
+  if (reportFreshness && !payloadMatchesView && (evidence.status === "updating" || evidence.status === "idle")) {
+    reportFreshness.textContent = "";
+  }
 }
 
 function renderSummaryEvidence(evidence, previous = null) {
@@ -2040,19 +2170,19 @@ async function toggleFreeLevels() {
     return;
   }
   if (editorOccupied()) return;
-  // A new action takes the place of an old error: its banner goes.
-  actions.dismissRecovery();
   const term = selectedTerm();
   stopContributionBuild();
-  setAppBusy(true, "Fitting free levels", `Refitting the model with ${term}'s levels free`);
-  try {
-    const free = await editorClient.freeLevels(term);
-    actions.patchView({ freeLevels: free, showFreeLevels: true });
-    if (free.notice) actions.showNotice(free.notice);
-  } catch (error) {
-    actions.showNotice(error instanceof Error ? error.message : String(error));
-  } finally {
-    setAppBusy(false);
+  // The fit holds the editor as a refit does, so no other change starts under its overlay,
+  // and like any new action it takes the place of an old error's banner.
+  const result = await actions.holdEditor(
+    { name: "Fitting free levels", detail: `Refitting the model with ${term}'s levels free` },
+    () => editorClient.freeLevels(term)
+  );
+  if (result.ok) {
+    actions.patchView({ freeLevels: result.value, showFreeLevels: true });
+    if (result.value.notice) actions.showNotice(result.value.notice);
+  } else if (!result.skipped) {
+    actions.showNotice(result.error.message);
   }
 }
 
@@ -2627,6 +2757,22 @@ store.subscribe((state) => state.view.zoomByTerm[selectActiveTermName(state)] ||
 store.subscribe(selectUnsmoothedNeed, requestUnsmoothed, sameUnsmoothedNeed);
 store.subscribe(selectRatingTableRequest, refreshRatingTable, sameRatingTableRequest);
 store.subscribe(selectDistributionRequest, refreshDistribution, sameDistributionRequest);
+store.subscribe(
+  selectRiskWant,
+  (want) => {
+    riskController.sync(want);
+    scheduleRiskRender();
+  },
+  sameRiskWant
+);
+// The Explain tab is offered to a SuperLSS session alone; another session shown it goes back.
+store.subscribe(
+  (state) => isLssSession(state.remote.snapshot),
+  (lss) => {
+    explainTab.hidden = !lss;
+    if (!lss && store.getState().view.activeView === "risk") void showView("editor");
+  }
+);
 store.subscribe((state) => state.view.preview === null, endDistributionPreview);
 store.subscribe(
   selectFeatureListRenderState,

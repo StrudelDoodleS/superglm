@@ -191,6 +191,14 @@ def create_editor_app(widget: Any) -> FastAPI:
     def distribution(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(lambda: widget._distribution(str(_required(payload, "feature"))))
 
+    @app.post("/risk")
+    def risk(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(lambda: widget._risk(_required(payload, "risks")))
+
+    @app.post("/risk_row")
+    def risk_row(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(lambda: widget._risk_row(payload.get("index")))
+
     @app.get("/download_export")
     def download_export(format: str = "joblib", filename: str | None = None) -> Response:
         return _guarded_export_download(

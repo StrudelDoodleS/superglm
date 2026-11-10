@@ -337,11 +337,11 @@ def _summary_sig_class(p_value: float | None) -> str:
 def _summary_note(source: str) -> str:
     if source == "in_force":
         return (
-            "Current editable model. Manual coefficient edits make inference stale; "
-            "structural refits refresh inference for the edited feature definition."
+            "The model as it stands now. Where you moved a curve by hand, standard errors "
+            "still describe the fit before the move; a refit brings them up to date."
         )
     if source == "edited":
-        return "Edited-copy inference is stale for manually edited coefficients."
+        return "Where you moved a curve by hand, standard errors still describe the fit before the move."
     if source == "refit":
         return (
             "Edited terms are fixed as offset factors on the link scale; "

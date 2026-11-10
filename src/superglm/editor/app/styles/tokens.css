@@ -36,6 +36,17 @@
   --ridge-tail-line: var(--param-spread);
   --ridge-fill: #86a9f0;
   --ridge-tail-fill: #f59a5f;
+  /* The Explain tab's risks, A to H. Every pair stays apart for a reader with a colour-vision
+     deficiency (worst pair 8.7 on white, OKLab delta E x 100 under the Machado simulation) and in
+     full colour (16.2); each curve also carries its letter. */
+  --risk-a: var(--param-average);
+  --risk-b: #dc5f52;
+  --risk-c: #2bbdf5;
+  --risk-d: #8a2b60;
+  --risk-e: #c3af32;
+  --risk-f: #a46bf5;
+  --risk-g: #1f6708;
+  --risk-h: #dd92c4;
   --fan-blue-1: #8fb0ec;
   --fan-blue-2: #6b93e0;
   --fan-blue-3: #4a75d4;

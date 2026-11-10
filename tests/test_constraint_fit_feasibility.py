@@ -1042,7 +1042,7 @@ def test_qp_reml_discloses_a_feasible_terminal_state_without_a_kkt_certificate(
     model = _increasing_model()
     _force_terminal_qp_refit(monkeypatch, "constraint_kkt_incomplete")
 
-    with pytest.warns(ConvergenceWarning, match="could not certify that its coefficients"):
+    with pytest.warns(ConvergenceWarning, match="could not confirm that its coefficients"):
         model.fit_reml(frame, y, max_reml_iter=8)
 
     assert model._reml_result is not None and not model._reml_result.converged

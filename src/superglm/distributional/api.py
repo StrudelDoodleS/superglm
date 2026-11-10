@@ -10,8 +10,9 @@ import pickle
 import warnings
 from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -114,6 +115,9 @@ from superglm.distributional.weights import (
 )
 from superglm.links import Link, resolve_link
 from superglm.terms import check_column_texts, resolve_label
+
+if TYPE_CHECKING:
+    from superglm.export.lss_rating_tables import LSSRatingTablePayload
 
 
 @dataclass(frozen=True)
@@ -1638,6 +1642,52 @@ class SuperLSS:
         )
 
     # -- per-parameter term inference ------------------------------------ #
+
+    def rating_table_payload(
+        self,
+        X: FrameLike | EagerFrame,
+        sample_weight: NDArray | None = None,
+        *,
+        offsets: Mapping[str, NDArray] | None = None,
+        offset_kind: str = "auto",
+        offset_max_exact_levels: int = 20,
+    ) -> LSSRatingTablePayload:
+        """Build one multiplicative rating table per parameter on a log or floored log link.
+
+        Each parameter's table is a base and one block per term, interaction and offset, and its
+        product is the quantity the editor shows: the mean, a Gamma CV, a log-normal sigma
+        (``floor + base x product``) or a negative-binomial overdispersion ``1 / theta``.
+        ``rule`` on each table says how the parameter follows from the product. A parameter on
+        any other link, or holding a term with no exact table, is left out with a sentence in
+        ``omitted``. ``X`` supplies each level's exposure and column offsets; ``offsets`` is
+        what ``predict_parameters`` takes. See
+        :func:`superglm.export.lss_rating_tables.build_lss_rating_table_payload`.
+        """
+        from superglm.export.lss_rating_tables import build_lss_rating_table_payload
+
+        return build_lss_rating_table_payload(
+            self,
+            X,
+            sample_weight,
+            offsets=offsets,
+            offset_kind=offset_kind,
+            offset_max_exact_levels=offset_max_exact_levels,
+        )
+
+    def export_rating_tables(
+        self,
+        file_path: str | Path,
+        X: FrameLike | EagerFrame,
+        sample_weight: NDArray | None = None,
+        **kwargs: Any,
+    ) -> Path:
+        """Write :meth:`rating_table_payload` as a workbook: a sheet per parameter, then a summary.
+
+        ``kwargs`` are those of :meth:`rating_table_payload`, plus ``format``. Returns the path.
+        """
+        from superglm.export.lss_rating_tables import export_lss_rating_tables
+
+        return export_lss_rating_tables(self, file_path, X, sample_weight, **kwargs)
 
     def term_inference(
         self,

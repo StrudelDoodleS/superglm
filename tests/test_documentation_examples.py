@@ -80,6 +80,11 @@ _EXEMPT_PAGES: dict[str, str] = {
         "documents SuperLSS; its second block calls residuals(), which the SuperGLM "
         "doubles do not provide"
     ),
+    "docs/how-to/export-distributional-rating-tables.md": (
+        "documents SuperLSS; its block calls rating_table_payload() and export_rating_tables() "
+        "on a SuperLSS, which the SuperGLM doubles do not provide; "
+        "tests/test_lss_rating_tables.py runs both"
+    ),
 }
 
 

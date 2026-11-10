@@ -139,7 +139,7 @@ the conditional mean. An age effect in `scale` changes the spread. The Gaussian
 scale link is `log(scale - scale_floor)`, so its coefficients act on that
 linked quantity.
 
-## Predict the mean, spread and a quantile
+## Predict the mean, scale and a quantile
 
 ```{code-cell} ipython3
 parameters = model.predict_parameters(X_test)
@@ -162,7 +162,7 @@ the linear predictors before applying the inverse links.
 The 95th percentile describes the upper part of each row's predictive
 distribution. It is not a confidence bound on the estimated mean.
 
-## Compare against constant spread
+## Compare against a constant scale
 
 Keep the same mean terms and estimate one standard deviation for all rows:
 

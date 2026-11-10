@@ -46,6 +46,7 @@ _FIT_STATUSES = frozenset(
     }
 )
 _DETAIL_LEVELS = frozenset({"compact", "full"})
+_NO_FINDINGS = "No problems were found in what the fit recorded."
 _SMOOTHING_OUTCOMES = frozenset({"fixed", "finite", "upper_bound", "unresolved_cap", "exact_face"})
 _EXACT_FACE_EFFECTS = frozenset(
     {"fully_suppressed", "linear_only", "null_space_only", "unresolved"}
@@ -53,6 +54,60 @@ _EXACT_FACE_EFFECTS = frozenset(
 _MAX_JSON_CONTAINER_ITEMS = 64
 _MAX_JSON_CONTAINER_LEVELS = 8
 _MAX_JSON_NODES = 256
+
+# One sentence per fit status; the status code stays beside it for code that compares it.
+_STATUS_SENTENCES = {
+    "converged_certified": (
+        "Converged. The smoothing search reached an optimum and passed its own check."
+    ),
+    "converged_exact_face": (
+        "Converged. At least one term was smoothed as far as its penalty allows."
+    ),
+    "converged_uncertified": (
+        "Converged, with a looser stop. The numbers are usable. The smoothing was not checked "
+        "to the strictest standard."
+    ),
+    "not_converged": (
+        "Did not converge. The numbers are from the last step reached, so do not rely on "
+        "standard errors or effective degrees of freedom."
+    ),
+    "fixed_fit": "No smoothing search. You set the smoothing.",
+}
+# Display labels of the profile's phases. The phase names stay the public keys.
+_PHASE_LABELS = {
+    "frame_normalization": "Preparing the data",
+    "predictor_compilation": "Setting up the terms",
+    "layout_penalty_assembly": "Building the penalties",
+    "dense_predictor_matrices": "Building the design matrices",
+    "likelihood_evaluation": "Evaluating the likelihood",
+    "curvature_gradient_assembly": "Computing slopes and curvature",
+    "coefficient_decomposition_solve": "Solving for coefficients",
+    "efs_update_backtracking": "Trying smaller smoothing steps",
+    "terminal_inference_and_null_fit": "Final standard errors and comparison model",
+    "orchestration_and_unmeasured": "Other (not timed separately)",
+}
+_EXACT_FACE_RESULTS = {
+    "fully_suppressed": "smoothed away completely",
+    "linear_only": "reduced to a straight line",
+    "null_space_only": "reduced to the simplest shape its penalty allows",
+    "unresolved": "smoothed to its limit; what remains is unknown",
+}
+_SMOOTHING_RESULTS = {
+    "fixed": "set by you",
+    "finite": "settled",
+    "upper_bound": "at the largest smoothing allowed",
+    "unresolved_cap": "at the largest allowed, not resolved",
+}
+
+
+def status_sentence(status: str) -> str:
+    """The sentence a reader sees for a fit status, from its public code ``status``."""
+    return _STATUS_SENTENCES[status]
+
+
+def phase_label(name: str) -> str:
+    """The words a reader sees for a profile phase, from its public key ``name``."""
+    return _PHASE_LABELS.get(name, name.replace("_", " ").capitalize())
 
 
 @dataclass(slots=True)
@@ -608,22 +663,17 @@ class FitDiagnosticReport:
                     if finding.actions:
                         lines.append(f"  Next: {finding.actions[0].question}")
             else:
-                lines.extend(["", "No solver pathology was detected in the available evidence."])
+                lines.extend(["", _NO_FINDINGS])
             lines.extend(
                 [
                     "",
-                    "Scope: retained fit telemetry only; use detail='full' for evidence, "
-                    "caveats and limitations.",
+                    "This check reads only what the fit recorded. It did not look at your data "
+                    "rows. Use detail='full' for the evidence behind each finding.",
                 ]
             )
             return "\n".join(lines)
         if not self.findings:
-            lines.extend(
-                [
-                    "",
-                    "No solver pathology was detected in the available evidence.",
-                ]
-            )
+            lines.extend(["", _NO_FINDINGS])
         for index, finding in enumerate(self.findings, start=1):
             lines.extend(
                 [
@@ -641,12 +691,7 @@ class FitDiagnosticReport:
     def _render_full(self) -> str:
         lines = self._render_profile() if self.profile is not None else [self._render_header()]
         if not self.findings:
-            lines.extend(
-                [
-                    "",
-                    "No solver pathology was detected in the available evidence.",
-                ]
-            )
+            lines.extend(["", _NO_FINDINGS])
         for index, finding in enumerate(self.findings, start=1):
             lines.extend(
                 [
@@ -654,75 +699,73 @@ class FitDiagnosticReport:
                     f"{index}. {finding.headline}",
                     _subject_line(finding.subject),
                     f"   Code: {finding.code}",
-                    f"   Severity: {finding.severity}; confidence: {finding.confidence}",
+                    f"   Importance: {finding.severity}",
                     "",
-                    f"What we observed: {finding.observed}",
+                    f"What we saw: {finding.observed}",
                     "",
-                    f"What this may mean: {finding.interpretation}",
+                    f"What it may mean: {finding.interpretation}",
                 ]
             )
             if finding.caveats:
-                lines.extend(["", "What this does not establish:"])
+                lines.extend(["", "What this does not show:"])
                 lines.extend(f"- {caveat}" for caveat in finding.caveats)
             for action_index, action in enumerate(finding.actions):
-                heading = (
-                    "Suggested experiment"
-                    if action_index == 0
-                    else "Additional suggested experiment"
-                )
+                heading = "Suggested check" if action_index == 0 else "Another suggested check"
                 lines.extend(["", f"{heading}: {action.question}"])
                 if action.comparison_metrics:
                     lines.append(f"Compare: {', '.join(action.comparison_metrics)}")
-                lines.append(f"Requires data: {'yes' if action.requires_data else 'no'}")
+                lines.append(f"Needs your data: {'yes' if action.requires_data else 'no'}")
             lines.extend(["", "Technical evidence:"])
             if finding.evidence:
                 lines.extend(f"- {_render_evidence(evidence)}" for evidence in finding.evidence)
             else:
-                lines.append("- No additional technical evidence was retained.")
+                lines.append("- No further technical detail was recorded.")
         _append_coverage(lines, self.coverage, self.limitations)
         return "\n".join(lines)
 
     def _render_header(self) -> str:
         return (
-            f"Fit diagnostic report — model: {self.model_type}; family: {self.family}; "
-            f"status: {self.fit_status}; revision: {self.fit_revision}"
+            f"Fit diagnostic report — {self.model_type}, {self.family} (revision "
+            f"{self.fit_revision})\n{self._render_result()}"
         )
+
+    def _render_result(self) -> str:
+        sentence = _STATUS_SENTENCES[self.fit_status]
+        return f"Result: {sentence} (status code: {self.fit_status})"
 
     def _render_profile(self) -> list[str]:
         assert self.profile is not None
         profile = self.profile
         lines = [
-            f"{self.model_type} fit diagnosis — family: {self.family}; "
-            f"status: {self.fit_status}; revision: {self.fit_revision}",
+            f"{self.model_type} fit diagnosis — {self.family} (revision {self.fit_revision})",
+            self._render_result(),
             "",
         ]
         if profile.fit_seconds is None:
-            timing = "Timing unavailable (no fit timing snapshot was retained)."
+            timing = "Timing unavailable (it was not recorded for this fit)."
         else:
             timing = f"Fit time: {_format_seconds(profile.fit_seconds)}"
         lines.append(
             f"Rows: {profile.n_observations:,}    "
             f"Coefficients: {profile.n_coefficients:,}    {timing}"
         )
-        lines.extend(
-            [
-                "",
-                "Work",
-                f"Outer EFS iterations       {profile.outer_iterations}",
-                f"Coefficient fits           {profile.coefficient_fits}",
-                f"Total inner iterations     {profile.inner_iterations}",
-                f"Ordinary outer proposals rejected   {profile.rejected_proposals}",
-                f"Ordinary outer proposals backtracked {profile.backtracked_proposals}",
-            ]
+        work = (
+            ("Smoothing rounds (iterations of the smoothing search)", profile.outer_iterations),
+            ("Coefficient fits", profile.coefficient_fits),
+            ("Coefficient-solver steps in all", profile.inner_iterations),
+            ("Smoothing steps rejected", profile.rejected_proposals),
+            ("Smoothing steps shortened and retried", profile.backtracked_proposals),
         )
+        lines.extend(["", "Work", *(f"{label:<55} {count}" for label, count in work)])
         if profile.phases:
+            ordered = sorted(profile.phases, key=lambda item: (-item.seconds, item.name))
+            width = max(len(phase_label(item.name)) for item in ordered)
             lines.extend(
-                ["", "Time distribution", "Phase                         Time    Share   Calls"]
+                ["", "Time distribution", f"{'Phase':<{width}}      Time    Share   Calls"]
             )
-            for phase in sorted(profile.phases, key=lambda item: (-item.seconds, item.name)):
-                label = phase.name.replace("_", " ")
+            for phase in ordered:
                 lines.append(
-                    f"{label:<29} {_format_seconds(phase.seconds):>8} "
+                    f"{phase_label(phase.name):<{width}} {_format_seconds(phase.seconds):>9} "
                     f"{phase.fit_share:>7.1%} {phase.calls:>7}"
                 )
         if profile.smoothing_components:
@@ -730,8 +773,8 @@ class FitDiagnosticReport:
                 [
                     "",
                     "Smoothing parameters",
-                    "Component                         Initial λ    Final λ  Moves  "
-                    "Lead share  Cap iters  Term EDF  Result",
+                    f"{'Component':<33} {'Initial λ':>10} {'Final λ':>10} {'Rounds moved':>13} "
+                    f"{'Moved most':>11} {'At largest':>11} {'Flexibility':>12}  Result",
                 ]
             )
             rendered_term_edf: set[tuple[str, str]] = set()
@@ -753,31 +796,31 @@ class FitDiagnosticReport:
                     rendered_term_edf.add(term_key)
                 if component.outcome == "exact_face":
                     assert component.exact_face_effect is not None
-                    outcome = {
-                        "fully_suppressed": "fully suppressed",
-                        "linear_only": "linear only",
-                        "null_space_only": "null-space only",
-                        "unresolved": "exact face; retained effect unresolved",
-                    }[component.exact_face_effect]
+                    outcome = _EXACT_FACE_RESULTS[component.exact_face_effect]
                 else:
-                    outcome = {
-                        "fixed": "fixed by caller",
-                        "finite": "finite",
-                        "upper_bound": "at upper bound",
-                        "unresolved_cap": "cap unresolved",
-                    }[component.outcome]
+                    outcome = _SMOOTHING_RESULTS[component.outcome]
                 if component.exact_face_iteration is not None:
-                    outcome += f" @ iter {component.exact_face_iteration}"
+                    outcome += f" (from round {component.exact_face_iteration})"
                 lines.append(
                     f"{component.name:<33} {_format_number(component.initial_lambda):>10} "
-                    f"{final_lambda:>10} {component.accepted_moves:>6} "
-                    f"{component.dominant_update_share:>10.1%} "
-                    f"{component.upper_bound_iterations:>9} {edf:>8}  {outcome}"
+                    f"{final_lambda:>10} {component.accepted_moves:>13} "
+                    f"{component.dominant_update_share:>11.1%} "
+                    f"{component.upper_bound_iterations:>11} {edf:>12}  {outcome}"
                 )
+            lines.extend(
+                [
+                    "λ is the smoothing parameter: the larger it is, the smoother the term.",
+                    "Moved most is the share of smoothing rounds in which this penalty's λ "
+                    "changed by the most. At largest is the number of rounds it sat at the "
+                    "largest λ the search allows (max_lambda).",
+                    "Flexibility is the term's EDF, its effective degrees of freedom: how "
+                    "flexible the term is.",
+                ]
+            )
             if shared_term_edf:
                 lines.append(
-                    "Term EDF is shared by penalty components of the same predictor term; "
-                    "do not add repeated component rows."
+                    "A term's flexibility is shared by all of its penalties, so do not add up "
+                    "repeated rows."
                 )
         return lines
 
@@ -790,7 +833,7 @@ def _exact_version(name: str, value: object) -> None:
 
 
 def _subject_line(subject: DiagnosticSubject) -> str:
-    return f"   Subject: {subject.display_name} [{subject.scope}; identifier: {subject.identifier}]"
+    return f"   Subject: {subject.display_name}"
 
 
 def _render_evidence(evidence: DiagnosticEvidence) -> str:
@@ -845,12 +888,12 @@ def _append_coverage(
     if coverage:
         lines.extend(f"- {item}" for item in coverage)
     else:
-        lines.append("- No evidence classes were declared.")
+        lines.append("- Nothing listed.")
     lines.extend(["", "Limitations:"])
     if limitations:
         lines.extend(f"- {item}" for item in limitations)
     else:
-        lines.append("- No additional limitations were declared.")
+        lines.append("- Nothing further listed.")
 
 
 def _subject_dict(subject: DiagnosticSubject) -> dict[str, _MutableJsonValue]:

@@ -373,6 +373,93 @@ def test_the_labels_on_the_amount_axis_row_do_not_touch(open_lss_editor_page):
             assert left - right >= 4
 
 
+_ROW_BOXES = """row => {
+    const svg = document.querySelector(row.svg);
+    const y = row.y ?? svg.querySelector(row.anchor).getAttribute('y');
+    return [...svg.querySelectorAll('text')]
+        .filter(node => node.getAttribute('y') === y)
+        .map(node => { const box = node.getBBox(); return [box.x, box.x + box.width, node.textContent]; })
+        .sort((a, b) => a[0] - b[0]);
+}"""
+
+
+@pytest.mark.parametrize("width", [700, 1100])
+def test_the_headings_over_the_ridges_and_the_fan_keep_clear_of_each_other(
+    open_lss_editor_page, width
+):
+    def with_a_long_feature_name(route) -> None:
+        response = route.fetch()
+        panel = response.json()
+        panel["feature"] = "Age of the driver at the start of the policy"
+        route.fulfill(response=response, json=panel)
+
+    def prepare(page) -> None:
+        page.route("**/distribution", with_a_long_feature_name)
+
+    with open_lss_editor_page(
+        selected_term="scale:age", viewport={"width": width, "height": 720}, prepare=prepare
+    ) as (page, _session):
+        page.locator(_READOUTS).first.wait_for()
+        _bring_panel_into_view(page)
+        for svg in ("svg.distribution-ridges", "svg.distribution-fan"):
+            boxes = page.evaluate(_ROW_BOXES, {"svg": f"#distributionPanel {svg}", "y": "22"})
+            assert boxes, svg
+            # Two headings closer than a word space read as one; a heading with no room is left out.
+            for (_, right, _), (left, _, text) in zip(boxes, boxes[1:]):
+                assert left - right >= 8, (svg, text)
+
+
+def test_the_amount_axis_keeps_clear_of_the_dot_column_and_both_write_chances_alike(
+    open_lss_editor_page,
+):
+    def end_on_a_long_decade_label(route) -> None:
+        response = route.fetch()
+        panel = response.json()
+        panel["amount_axis"]["max_log10"] = 4
+        panel["amount_unit"] = "EUR"
+        route.fulfill(response=response, json=panel)
+
+    def prepare(page) -> None:
+        page.route("**/distribution", end_on_a_long_decade_label)
+
+    with open_lss_editor_page(selected_term="scale:age", prepare=prepare) as (page, _session):
+        page.locator(_READOUTS).first.wait_for()
+        _bring_panel_into_view(page)
+        page.get_by_role("button", name="1 in N", exact=True).click()
+        page.evaluate(_TWO_FRAMES)
+        boxes = page.evaluate(
+            _ROW_BOXES,
+            {"svg": "#distributionPanel svg.distribution-ridges", "anchor": ".ridge-axis text"},
+        )
+        labels = [text for _, _, text in boxes]
+        # The dot column's axis reads as the readouts do: 1 in 10k, not 1:10k.
+        assert labels[-2:] == ["1 in 10k", "1 in 1"]
+        assert ":" not in "".join(labels)
+        for (_, right, _), (left, _, text) in zip(boxes, boxes[1:]):
+            assert left - right >= 24, text
+        page.get_by_role("button", name="%", exact=True).click()
+        page.evaluate(_TWO_FRAMES)
+        boxes = page.evaluate(
+            _ROW_BOXES,
+            {"svg": "#distributionPanel svg.distribution-ridges", "anchor": ".ridge-axis text"},
+        )
+        assert [text for _, _, text in boxes][-3:] == ["0.01%", "1%", "100%"]
+
+
+def test_the_fan_draws_the_mean_and_the_median_and_no_most_common_line(open_lss_editor_page):
+    with open_lss_editor_page(selected_term="scale:age") as (page, _session):
+        page.locator(_READOUTS).first.wait_for()
+        _bring_panel_into_view(page)
+        fan = page.locator("#distributionPanel svg.distribution-fan")
+        fan.locator("text.dist-readout").first.wait_for()
+        labels = fan.locator("text.dist-readout").evaluate_all(
+            "nodes => nodes.map(n => n.textContent)"
+        )
+        assert {"mean", "median"} <= set(labels)
+        assert not any("common" in label for label in labels)
+        assert fan.locator("path.fan-mode").count() == 0
+
+
 _WHEEL_OVER_CHART = """([ctrlKey, metaKey]) => {
     const chart = document.querySelector('#chart');
     const box = chart.getBoundingClientRect();
@@ -421,7 +508,7 @@ def test_a_plain_wheel_zooms_in_the_zoom_tool_where_the_column_scrolls(open_lss_
 def test_a_percentile_shown_as_one_in_n_takes_only_n(open_lss_editor_page):
     with _spread_page(open_lss_editor_page) as (page, requests):
         box = page.get_by_role("textbox", name="Line value", exact=False)
-        prefix = page.locator(".distribution-line-prefix")
+        prefix = page.locator("#distributionPanel .distribution-line-prefix")
         assert prefix.is_hidden()
 
         page.get_by_role("button", name="At a percentile", exact=True).click()
@@ -440,7 +527,7 @@ def test_a_percentile_shown_as_one_in_n_takes_only_n(open_lss_editor_page):
         box.fill("99.5th")
         box.press("Enter")
         assert box.get_attribute("aria-invalid") == "true"
-        assert "Type N" in page.locator(".distribution-hint").inner_text()
+        assert "Type N" in page.locator("#distributionPanel .distribution-hint").inner_text()
 
         box.fill("200")
         box.press("Enter")
@@ -449,3 +536,28 @@ def test_a_percentile_shown_as_one_in_n_takes_only_n(open_lss_editor_page):
         assert prefix.is_hidden()
         assert box.input_value() == "99.5th"
         _settle(page, requests)
+
+
+def test_a_feature_drawn_before_another_failed_is_drawn_again(open_lss_editor_page, choose_feature):
+    """A failed request's message gives way to a feature whose reply the page still holds.
+
+    The window is wide enough that the feature list stays open, so choosing a feature leaves the
+    panel's width as it was and nothing but the reply itself can ask for the redraw.
+    """
+    viewport = {"width": 1400, "height": 800}
+    with open_lss_editor_page(viewport=viewport, selected_term="scale:age") as (page, _session):
+        page.locator(_READOUTS).first.wait_for()
+        _bring_panel_into_view(page)
+        _panel_is_about(page, "age")
+        message = page.locator("#distributionPanel .distribution-message")
+        wait_for_interception(page)
+        page.route("**/distribution", lambda route: route.abort())
+        choose_feature(page, "scale:region")
+        _bring_panel_into_view(page)
+        message.wait_for(state="visible")
+        page.unroute("**/distribution")
+
+        choose_feature(page, "scale:age")
+        _bring_panel_into_view(page)
+        message.wait_for(state="hidden", timeout=5000)
+        assert page.locator(_READOUTS).first.is_visible()

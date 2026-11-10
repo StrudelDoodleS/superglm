@@ -41,6 +41,7 @@ from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
 from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
 from superglm.distributional.families.log_normal import LogNormalLS
+from superglm.distributional.families.tweedie import TweedieLSS
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.model import DenseDistributionalModel
 from superglm.distributional.weights import (
@@ -1529,3 +1530,124 @@ def test_log_normal_crps_below_support_matches_cdf_integral(parametrisation, res
         rtol=0,
         atol=8 * (error + np.finfo(float).eps * abs(integral - response)),
     )
+
+
+# --------------------------------------------------------------------------
+# Tweedie: the compound Poisson-gamma CRPS
+# --------------------------------------------------------------------------
+
+
+def _tweedie_law(power: float, rate: float) -> tuple[np.ndarray, float]:
+    """``theta`` with mean 100 and Poisson rate ``rate``, and the mean claim size."""
+    dispersion = 100.0 ** (2.0 - power) / (rate * (2.0 - power))
+    return np.array([[100.0, dispersion, power]]), 100.0 / rate
+
+
+def _tweedie_cdf_integral(cdf, y: float, top: float) -> float:
+    """``int_0^inf (F(z) - 1{y <= z})^2 dz`` with the tail cut where ``F`` is within 1e-11 of one."""
+    settings = {"limit": 400, "epsabs": 0.0, "epsrel": 1.0e-10}
+    left = integrate.quad(lambda z: cdf(z) ** 2, 0.0, y, **settings)[0] if y > 0.0 else 0.0
+    right = integrate.quad(lambda z: (1.0 - cdf(z)) ** 2, y, top, **settings)[0] if top > y else 0.0
+    return left + right
+
+
+@pytest.mark.parametrize(
+    "power,rate",
+    [(p, r) for p in (1.1, 1.3, 1.5, 1.7, 1.9) for r in (0.05, 5.0)] + [(1.2, 300.0), (1.8, 300.0)],
+)
+def test_tweedie_closed_form_crps_matches_the_cdf_integral(power, rate) -> None:
+    family = TweedieLSS()
+    theta, claim = _tweedie_law(power, rate)
+
+    def cdf(z: float) -> float:
+        return float(family.cdf(np.array([z]), theta)[0])
+
+    top = float(family.quantile(np.array([1.0 - 1.0e-11]), theta)[0])
+    for response in (0.0, 0.1 * claim, claim, 5.0 * claim):
+        closed = float(crps_closed_form(family, np.array([response]), theta)[0])
+        # The oracle is quad to 1e-10 on a tail cut at 1e-11; it is the kernel
+        # form's independent check, and agrees with it to about 4e-11.
+        assert closed == pytest.approx(_tweedie_cdf_integral(cdf, response, top), rel=1.0e-9)
+
+
+def test_tweedie_closed_form_crps_is_one_value_per_row_whatever_the_batch() -> None:
+    """Rows with distinct powers and rates, and responses on and below the atom."""
+    family = TweedieLSS()
+    laws = [(1.3, 0.05), (1.3, 40.0), (1.6, 2.0), (1.9, 300.0), (1.6, 2.0), (1.45, 0.4)]
+    theta = np.vstack([_tweedie_law(power, rate)[0] for power, rate in laws])
+    response = np.array([0.0, 30.0, -2.0, 0.3, 450.0, 12.0])
+
+    batch = crps_closed_form(family, response, theta)
+    rowwise = [crps_closed_form(family, response[[i]], theta[[i]])[0] for i in range(len(laws))]
+    # The series is cut at 1e-12 of Poisson mass and its term cap follows the batch's
+    # largest rate, so batches agree to the truncation tolerance times the scale ratio.
+    np.testing.assert_allclose(batch, rowwise, rtol=1.0e-9, atol=0.0)
+    # Below the support the CDF integral adds exactly -y to the response-at-zero score.
+    below = crps_closed_form(family, np.array([-2.0]), theta[[2]])[0]
+    assert below == pytest.approx(crps_closed_form(family, np.array([0.0]), theta[[2]])[0] + 2.0)
+
+
+def test_tweedie_numeric_crps_matches_the_closed_form_across_the_zero_mass() -> None:
+    """The quantile bends at ``P(Y = 0)``: that probability must be a panel edge."""
+    family = TweedieLSS()
+    theta, response = [], []
+    for power in (1.5, 1.7, 1.9):
+        for rate in (0.05, 5.0):
+            law, claim = _tweedie_law(power, rate)
+            theta.extend(law for _ in range(4))
+            response.extend((0.0, 0.1 * claim, claim, 5.0 * claim))
+    theta, response = np.vstack(theta), np.array(response)
+
+    closed = crps_closed_form(family, response, theta)
+    assert _relative(crps_numeric(family, response, theta), closed) < 1e-6
+
+
+@pytest.fixture(scope="module")
+def tweedie_weighted_case():
+    rng = np.random.default_rng(20261110)
+    x = rng.uniform(-1.0, 1.0, 400)
+    weight = rng.uniform(0.3, 2.5, 400)
+    mean, power, dispersion = np.exp(1.0 + 0.4 * np.sin(2.0 * x)), 1.7, 2.0
+    counts = rng.poisson(weight * mean ** (2 - power) / (dispersion * (2 - power)))
+    shape = np.maximum(counts, 1) * (2 - power) / (power - 1)
+    y = np.where(
+        counts > 0, rng.gamma(shape, dispersion * (power - 1) * mean ** (power - 1) / weight), 0.0
+    )
+    X = pd.DataFrame({"x": x})
+    model = model_from_templates(
+        family=TweedieLSS(),
+        weight_semantics="prior",
+        predictors=[
+            Predictor("mean", {"x": Spline("cr", k=6)}),
+            Predictor("dispersion", {}),
+            Predictor("power", {}),
+        ],
+    ).fit_reml(X, y, sample_weight=weight)
+    return model._require_fitted(), X, y, weight
+
+
+def test_tweedie_crps_prior_weights_select_the_prior_weighted_law(tweedie_weighted_case) -> None:
+    fitted, X, y, weight = tweedie_weighted_case
+    frame, response, prior = X.iloc[:12], y[:12], weight[:12]
+    closed = crps(fitted, frame, response, method="closed", sample_weight=prior)
+
+    assert np.array_equal(closed, crps(fitted, frame, response, sample_weight=prior))
+    assert (
+        _relative(crps(fitted, frame, response, method="numeric", sample_weight=prior), closed)
+        < 1e-6
+    )
+    unit = crps(fitted, frame, response, method="closed")
+    assert np.max(np.abs(closed - unit) / unit) > 0.05  # the weights are not ignored
+
+    theta = np.asarray(fitted.predict_parameters(frame), dtype=np.float64)
+    top = fitted.family.quantile_prior_weighted(np.full(3, 1.0 - 1.0e-11), theta[:3], prior[:3])
+    for row in range(3):
+
+        def cdf(z: float, row: int = row) -> float:
+            return float(
+                fitted.family.cdf_prior_weighted(np.array([z]), theta[[row]], prior[[row]])[0]
+            )
+
+        assert closed[row] == pytest.approx(
+            _tweedie_cdf_integral(cdf, float(response[row]), float(top[row])), rel=1.0e-9
+        )
