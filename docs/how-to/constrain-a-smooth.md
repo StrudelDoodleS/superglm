@@ -390,10 +390,12 @@ term's own basis, on its parameter's link scale, weighted by where the
 training rows sit along the axis. The basis keeps the fit's centring, so the
 term's mean over the training rows does not move. The parameter's intercept
 is then re-estimated on the joint likelihood, with every term and every other
-parameter held. Two repairs are refused, and nothing changes: one whose
+parameter held. Three repairs are refused, and nothing changes: one whose
 penalized objective (the negative log-likelihood plus the fit's smoothing
 penalty, at the fit's smoothing parameters) is worse than with the term
-dropped, and one that leaves a training row without valid parameters. A
+dropped, one that leaves a training row without valid parameters even after
+the intercept is re-estimated, and one whose curve the repairer cannot
+certify to obey the rule. A
 repaired curve can fit the data better than no term and still lose on the
 penalty, when it needs large coefficients; then fit the rule instead
 (`Constraint.fit`), which chooses the smoothing under the rule.
@@ -407,8 +409,9 @@ What you get afterwards:
   `ShapeRepairedWarning`. `summary()` shows NaN for them and a note, and so
   does the intercept row of the term's parameter, which the repair
   re-estimated. In the editor the term has no band. An editor session open
-  on the model sees the repair: its cross-validation and final-fit results
-  are marked as made on an earlier version.
+  on the model sees the repair: it shows the repaired curve, edits already
+  made carry over onto it as the same changes, and its cross-validation and
+  final-fit results are marked as made on an earlier version.
 - Standard errors that read the whole covariance (`predict_link(se_fit=True)`,
   posterior draws and bounds) warn that the covariance is the fit's from before
   the repair.

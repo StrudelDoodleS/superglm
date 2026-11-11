@@ -183,7 +183,8 @@ def _moved_curve(stale: EditableTerm, fresh: EditableTerm) -> tuple[EditableTerm
         return None
     if stale.levels is None:
         same_grid = fresh.levels is None and (
-            stale.x is None if fresh.x is None else np.array_equal(stale.x, fresh.x)
+            (stale.x is None and fresh.x is None)
+            or (stale.x is not None and fresh.x is not None and np.array_equal(stale.x, fresh.x))
         )
         if not same_grid:
             return None
@@ -396,9 +397,10 @@ class EditorSession:
             with_se=self.with_se,
             train_data=self._evaluation_data.get("train"),
         )
-        moved = {name: _moved_curve(stale[name], fresh[name]) for name in stale}
+        moves = {name: _moved_curve(stale[name], fresh[name]) for name in stale}
+        moved = {name: move for name, move in moves.items() if move is not None}
         self._terms_fit = fit
-        if any(move is None for move in moved.values()):
+        if len(moved) < len(moves):
             self.replace_in_force_model(self.model, with_se=self.with_se)
             return
         self._terms = {name: term for name, (term, _) in moved.items()}

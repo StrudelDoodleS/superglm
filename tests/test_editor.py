@@ -7107,3 +7107,32 @@ def _editor_token_header(url: str) -> dict[str, str]:
         if getattr(widget, "url", "") == origin:
             return {"X-SuperGLM-Editor-Token": widget._token}
     return {}
+
+
+def test_a_session_follows_a_refit_of_its_model_in_place_that_moves_the_grid():
+    # A refit in place replaces the model's fit behind the session. The term's grid moved
+    # with the new data, so its edits cannot carry over: the session starts again on the
+    # refitted model, as a new model in force does. At b7cc25f0c it kept the old curve.
+    from superglm import PSpline, SuperGLM
+    from superglm.editor import edit
+
+    rng = np.random.default_rng(0)
+    x = np.linspace(0.0, 1.0, 200)
+    df = pd.DataFrame({"x": x})
+    y = np.sin(3.0 * x) + 0.05 * rng.normal(size=len(x))
+    model = SuperGLM(family="gaussian", features={"x": PSpline(n_knots=8)}).fit(df, y)
+    session = edit(model, train_data=(df, y))
+    session.select_x("x", 0.2, 0.4)
+    session.shift("x", 0.3)
+    revision = session.model_revision
+    wider = pd.DataFrame({"x": 2.0 * x})
+    model.fit(wider, np.cos(3.0 * x) + 0.05 * rng.normal(size=len(x)))
+
+    refitted = model.term_inference(
+        "x", with_se=False, n_points=session.n_points, centering=session.centering
+    )
+    term = session.terms["x"]
+    np.testing.assert_allclose(term.x, refitted.x)
+    np.testing.assert_allclose(term.original_log_effect, refitted.log_relativity, atol=1e-12)
+    assert not session.edited_terms() and not session.history
+    assert session.model_revision > revision
