@@ -729,6 +729,38 @@ def test_a_projection_that_breaks_its_rule_at_its_own_scale_is_refused(monkeypat
     assert model._model is before
 
 
+def test_a_projection_off_its_rule_by_its_certified_rounding_is_published_inside_it(
+    monkeypatch,
+):
+    # The projection certifies its result at the fitted curve's scale; the rule's state is
+    # read at the result's own. Forced: 1e-8 times the projection, pushed off the rule by
+    # 1e-14 of the fitted coefficients' size, far inside the first rounding and far outside
+    # the second. It is moved inside the rule by a rounding and published; at 611d27ad0 it was
+    # refused, as six of 204 sweep repairs were, mostly near the cone's apex.
+    from superglm.constraints import shape_constraint_is_roundoff_feasible
+
+    model = _fit("mean", Constraint.postfit.increasing, kind="bs", k=8)
+    spec, columns = _term(model, "mean")
+    fitted = np.asarray(model._model.coefficients)[columns]
+    grid = np.linspace(spec._lo, spec._hi, 200)
+    design = np.column_stack([spec.transform(grid), np.ones(grid.size)])
+    line = np.linalg.lstsq(design, grid, rcond=None)[0][:-1]  # a rising line, in the basis
+    push = 1e-14 * np.linalg.norm(fitted) * line / np.linalg.norm(line)
+    sent = {}
+
+    def block(_, repaired):
+        sent["block"] = 1e-8 * repaired - push
+        return sent["block"]
+
+    _perturbed_repairer(monkeypatch, block)
+    model.apply_shape_postfit()
+    assert not shape_constraint_is_roundoff_feasible(spec, sent["block"], "increasing")
+    (status,) = postfit_status(model._model)
+    assert status.state is PostfitState.REPAIRED
+    published = np.asarray(model._model.coefficients)[columns]
+    assert np.linalg.norm(published - sent["block"]) <= 1e-10 * np.linalg.norm(fitted)
+
+
 def test_a_repair_needs_the_fitted_rows():
     model = _fit("mean", Constraint.postfit.increasing, kind="bs", k=8, retain_rows=False)
     with pytest.raises(RuntimeError, match="retain_rows=True"):

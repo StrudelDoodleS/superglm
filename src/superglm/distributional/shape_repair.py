@@ -465,7 +465,10 @@ def _intercept_scale(eta: NDArray[np.float64], reach: float) -> float:
 
 
 def _settled(
-    term: PostfitTerm, repair: Any, fitted_coefficients: NDArray[np.float64]
+    term: PostfitTerm,
+    repair: Any,
+    fitted_coefficients: NDArray[np.float64],
+    grid_weights: NDArray[np.float64],
 ) -> NDArray[np.float64]:
     """The repaired coefficients, certified as ``postfit_status`` reads them, or a refusal.
 
@@ -473,16 +476,40 @@ def _settled(
     state of the rule is read at the scale of the repaired curve alone. A projection onto the
     cone's apex can come back as coefficients that are zero only to the first scale's rounding,
     and would read as broken; it is the zero curve, which obeys every rule, so it is published
-    as one. Any other result that does not obey its rule at the second scale is refused.
+    as one. A result that breaks its rule at the second scale by no more than the rounding the
+    projection certified it to, at the first, is moved strictly inside the cone along the
+    repairer's own inside ray by twice that violation: the least slack, a unit row times the
+    coefficients minimised over the range, is superadditive in them, so every slack is then
+    at least the violation, and the curve moves by a rounding of the curve it repaired. Any
+    other result that does not obey its rule at the second scale is refused.
     """
-    from superglm.constraints import shape_constraint_is_roundoff_feasible, shape_slack_tolerance
+    from superglm.constraints import (
+        _inside_ray,
+        shape_constraint_certificate,
+        shape_constraint_is_roundoff_feasible,
+        shape_slack_tolerance,
+    )
 
+    spec, kind = term.curve_spec, term.kind
     repaired = np.array(repair.repaired_beta_reparam[term.columns], dtype=np.float64)
     apex = shape_slack_tolerance(repaired, float(np.linalg.norm(fitted_coefficients)))
     if float(np.linalg.norm(repaired)) <= apex:
         repaired = np.zeros_like(repaired)
     # ``postfit_term_feasible``'s own check, on the term's block.
-    if not shape_constraint_is_roundoff_feasible(term.curve_spec, repaired, term.kind):
+    if not shape_constraint_is_roundoff_feasible(spec, repaired, kind):
+        violation = -shape_constraint_certificate(spec, repaired, kind).minimum_scaled_slack
+        # The scale the projection certified at: the weighted RMS of the curve it repaired.
+        grid = np.asarray(repair.grid, dtype=np.float64)
+        share = np.asarray(grid_weights, dtype=np.float64) / float(np.sum(grid_weights))
+        target = np.asarray(repair.original_log_effect, dtype=np.float64)
+        largest = float(np.max(np.abs(target), initial=0.0))
+        scale = largest * float(np.sqrt(share @ (target / largest) ** 2)) if largest else 0.0
+        if violation <= shape_slack_tolerance(repaired, scale):
+            ray = _inside_ray(np.asarray(spec.transform(grid)), grid, share, kind)
+            ray_slack = shape_constraint_certificate(spec, ray, kind).minimum_scaled_slack
+            if ray_slack > 0.0:
+                repaired = repaired + (2.0 * violation / ray_slack) * ray
+    if not shape_constraint_is_roundoff_feasible(spec, repaired, kind):
         raise RuntimeError(
             f"Shape repair of {term.term} rejected before publication: the projection could "
             "not be certified to obey the rule at its own scale. Fit the rule instead "
@@ -558,15 +585,16 @@ def repaired_model(
         x, on_axis = _axis(term, frame)
         width = term.columns.stop - term.columns.start
         block = SimpleNamespace(sl=term.columns, size=width)
+        grid_weights = _grid_weights(term.curve_spec, x, weights[on_axis], n_grid)
         repair = _repairer(term.kind).repair(
             term.curve_spec,
             coefficients,
             [block],
-            weights=_grid_weights(term.curve_spec, x, weights[on_axis], n_grid),
+            weights=grid_weights,
             n_grid=n_grid,
             metric=_term_precision(fitted, term),
         )
-        repaired = _settled(term, repair, coefficients[term.columns])
+        repaired = _settled(term, repair, coefficients[term.columns], grid_weights)
         if np.array_equal(repaired, coefficients[term.columns]):
             continue
         candidate = coefficients.copy()
