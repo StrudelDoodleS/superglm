@@ -16,6 +16,7 @@ from superglm import (
     Constraint,
     GammaLS,
     NegativeBinomialLS,
+    Numeric,
     OrderedCategorical,
     Poisson,
     Spline,
@@ -404,6 +405,26 @@ def test_opening_reads_no_reference_and_a_shown_term_edits_without_reading_rows(
     session.set_values("scale:region", [1], [session.terms["scale:region"].edited_log_effect[1]])
 
     assert len(reads) == built
+
+
+def test_opening_a_model_with_a_linear_term_reads_no_reference(monkeypatch):
+    # A Numeric term's anchor is read at opening; it reads its own column, not the row.
+    X, y, _ = _gamma_rows(_SEEDS[GammaLS], N_ROWS)
+    family = GammaLS()
+    model = SuperLSS(
+        family,
+        family.mean(term("age", Numeric()), s("power", k=6, constraint=Constraint.fit.increasing)),
+        family.scale(cat("region")),
+    ).fit_reml(X, y)
+    reads = []
+    original = lss_view._reference_value
+    monkeypatch.setattr(
+        lss_view, "_reference_value", lambda *a, **k: reads.append(a[-1]) or original(*a, **k)
+    )
+    session = open_case(FitCase(model, X, y, None, None))
+
+    assert reads == []
+    assert np.isfinite(session.terms["mean:age"].edited_log_effect).all()
 
 
 @pytest.mark.parametrize(

@@ -80,7 +80,7 @@ from __future__ import annotations
 
 import math
 import warnings
-from collections.abc import Hashable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Literal
@@ -662,17 +662,17 @@ def _reference_design(
     term: str,
     state: Any,
     *term_slices: slice,
-    reference: pd.DataFrame | None = None,
+    reference: Callable[[], pd.DataFrame] | None = None,
 ) -> NDArray[np.float64]:
     """The term's own columns at its reference, or zeros for a term with none.
 
     A term with levels is read against its reference level and a ``Numeric`` term
     against its column's training centre (:func:`_numeric_anchor`); a spline's
-    columns are centred on fitting and are read as they are.  ``reference`` is a
-    one-row frame of every column the model reads, such as the row a caller holds
-    at the training centre: a level term is then evaluated at its reference level
-    in that row alone, not in a sweep of every level.  The term's own columns read
-    only its own column, so the other values change nothing but the cost.
+    columns are centred on fitting and are read as they are.  ``reference`` returns
+    a one-row frame of every column the model reads, such as the row a caller holds
+    at the training centre; only a level term calls it, and is then evaluated at its
+    reference level in that row alone, not in a sweep of every level.  The term's
+    own columns read only its own column, so the other values change only the cost.
     """
     spec = _compiled_spec(fitted, parameter, term)
     if spec is not None and _term_kind(spec) == "numeric":
@@ -696,7 +696,7 @@ def _reference_design(
     # ``_level_inputs`` reads the column only for a grouped term or a column several terms read.
     plain = getattr(spec, "_grouping", None) is None and len(readers) < 2
     values = None if plain else frame.column_array(column)
-    evaluation = reference.copy()
+    evaluation = reference().copy()
     evaluation[column] = _level_inputs(readers, [domain[names.index(str(base))]], values)
     return _term_design(fitted, evaluation, state, *term_slices)[0]
 

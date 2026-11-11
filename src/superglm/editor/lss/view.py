@@ -287,7 +287,7 @@ class LSSModelView:
                 term,
                 state,
                 *blocks,
-                reference=self.reference_row(),
+                reference=self.reference_row,
             )
         return self._reference_designs[key]
 
