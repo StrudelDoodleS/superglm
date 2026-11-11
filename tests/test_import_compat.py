@@ -916,6 +916,12 @@ for first in (left, readonly(left.copy())[0], np.asfortranarray(left)):
         multi_penalty._compensated_dot(first[0], second[:, 0])
         multi_penalty._compensated_dot(first[0], np.ascontiguousarray(second[:, 1]))
 
+# A negative binomial's CRPS hands its row kernel contiguous rows and int bounds.
+from superglm.distributional import crps_closed_form
+
+law = readonly(np.array([[0.07, 1.1], [2.0, 0.5]]))[0]
+assert np.all(crps_closed_form(superglm.NegativeBinomialLS(), np.array([0.0, 70.0]), law) > 0)
+
 entry_points = signatures(dispatchers)
 superglm.warmup()
 rewarmed = signatures(dispatchers)

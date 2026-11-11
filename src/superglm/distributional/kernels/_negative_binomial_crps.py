@@ -33,6 +33,15 @@ scaled to their spread, spaces its nodes about 0.3 apart in ``x`` across them,
 well inside the integrand's strip of analyticity. It agrees with a direct
 lattice sum to about ``1e-14`` relative from ``mu = 1e-8`` to ``1e3`` and from
 ``theta = 1e-4`` to ``1e12``.
+
+Where ``CRPS(0)`` exceeds ``mu / 2`` it is of order ``mu`` and keeps only
+``mu``'s digits, which a large central count's score, of order its standard
+deviation, cannot spare.  The same nodes then sum ``(1 - R^theta) e^{-x}``,
+whose total is ``E|Y - Y'| / 2`` without the subtraction from ``mu``, and the
+midpoints between them, halving the step.  Its left tail decays like
+``theta w e^x``, so that side runs ``_HALF_LEFT_SPAN`` past the feature instead
+of ``_LEFT_SPAN``.  Rare claims, whose ``CRPS(0)`` is of order ``mu^2``, never
+take this route.
 """
 
 from __future__ import annotations
@@ -48,6 +57,8 @@ _STEP = 0.2
 #: integrand decays like ``e^{3x}`` on the left and ``e^{-x}`` on the right.
 _LEFT_SPAN = 14.0
 _RIGHT_SPAN = 40.0
+#: The left span for ``E|Y - Y'| / 2``, whose integrand decays only like ``e^x``.
+_HALF_LEFT_SPAN = 44.0
 #: Below this many cells the shortfall is the pmf sum, whose terms are all positive.
 SHORTFALL_CELLS = 64
 #: ``1 / n!`` for ``n = 2, ..., 16``: ``e2`` on ``|z| < 1/2`` to within ``1e-17``
@@ -57,6 +68,8 @@ _E2_SERIES = np.array([1.0 / math.factorial(n) for n in range(16, 1, -1)])
 #: sum so far ends its side: the terms there fall double-exponentially.
 _NEGLIGIBLE = 2.0**-60
 _TWO_PI = 2.0 * math.pi
+#: The smallest normal binary64 number: below it ``rho`` has lost its digits.
+_TINY = 2.0**-1022
 
 
 @njit(cache=True)
@@ -71,10 +84,10 @@ def _expm1_less_identity(z: float) -> float:
 
 
 @njit(cache=True)
-def _node_term(
+def _node(
     s: float, centre: float, spread: float, size: float, w: float, rho: float
-) -> tuple[float, float]:
-    """``(x, e2(size log R) e^{-x} dx/ds)`` at the sinh-mapped node ``s``."""
+) -> tuple[float, float, float, float]:
+    """``(x, z = size log R, e^{-x}, dx/ds)`` at the sinh-mapped node ``s``."""
     grow = math.exp(s)
     shrink = 1.0 / grow
     x = centre + spread * 0.5 * (grow - shrink)
@@ -83,18 +96,70 @@ def _node_term(
     cosine = decay / (1.0 + decay)  # 1 / (1 + v^2)
     drop = w / (1.0 + decay)  # 1 - R = w v^2 / (1 + v^2)
     log_ratio = math.log1p(-drop) if drop < 0.5 else math.log(rho + w * cosine)
-    jacobian = spread * 0.5 * (grow + shrink)
-    return x, _expm1_less_identity(size * log_ratio) * inverse_v * jacobian
+    return x, size * log_ratio, inverse_v, spread * 0.5 * (grow + shrink)
 
 
 @njit(cache=True)
-def _zero_score(mean: float, size: float) -> float:
+def _node_term(
+    s: float, centre: float, spread: float, size: float, w: float, rho: float
+) -> tuple[float, float]:
+    """``(x, e2(size log R) e^{-x} dx/ds)`` at the sinh-mapped node ``s``."""
+    x, z, inverse_v, jacobian = _node(s, centre, spread, size, w, rho)
+    return x, _expm1_less_identity(z) * inverse_v * jacobian
+
+
+@njit(cache=True)
+def _half_side(
+    sign: float,
+    offset: float,
+    first: int,
+    last: int,
+    step: float,
+    edge: float,
+    before: float,
+    centre: float,
+    spread: float,
+    size: float,
+    w: float,
+    rho: float,
+) -> float:
+    """``1 - e^z``'s terms at ``s = sign (j + offset) step`` for ``j = first..last``.
+
+    A node past ``edge`` whose term is negligible against the sum plus
+    ``before`` ends the side.
+    """
+    half = 0.0
+    for j in range(first, last + 1):
+        x, z, inverse_v, jacobian = _node(sign * (j + offset) * step, centre, spread, size, w, rho)
+        lost = -math.expm1(z) * inverse_v * jacobian  # 1 - e^z, without cancellation
+        half += lost
+        if (x - edge) * sign > 0.0 and lost <= _NEGLIGIBLE * (half + before):
+            break
+    return half
+
+
+@njit(cache=True)
+def _zero_score(mean: float, size: float) -> tuple[float, float]:
+    """``(CRPS(0), E|Y - Y'| / 2)``; the second is NaN unless it is the smaller.
+
+    Both are NaN where ``rho`` is not a normal number (a size below about
+    ``1e-154`` of the mean): the rule's features then lie past binary64's range.
+
+    Where ``CRPS(0) = mean - E|Y - Y'| / 2`` exceeds ``mean / 2`` it carries the
+    rounding of ``mean`` and loses the score's digits at a large mean, so the
+    caller takes ``E|Y - Y'| / 2`` instead, integrating ``1 - R^size >= 0``.
+    That sum adds the midpoints, halving the step: at a large mean and a large
+    ``size w`` the integrand grows fast off the real axis, and the step that
+    serves ``CRPS(0)`` to ``1e-14`` leaves ``E|Y - Y'| / 2`` about ``1e-10`` off.
+    """
     total = mean + size
     r = mean / total
     q = size / total
     w = 4.0 * r / ((1.0 + r) * (1.0 + r))
     sqrt_rho = q / (1.0 + r)
     rho = sqrt_rho * sqrt_rho
+    if rho < _TINY:
+        return np.nan, np.nan
     left = -0.5 * math.log1p(size * w)
     right = max(math.log1p(r) - math.log(q), 0.0)
     centre = 0.5 * (left + right)
@@ -113,7 +178,19 @@ def _zero_score(mean: float, size: float) -> float:
         acc += term
         if x < left - 1.0 and term <= _NEGLIGIBLE * acc:
             break
-    return acc * step * (1.0 + r) / (_TWO_PI * q)
+    zero = acc * step * (1.0 + r) / (_TWO_PI * q)
+    if not zero > 0.5 * mean:
+        return zero, np.nan
+    # Each side runs until the half mean difference's own tail is negligible;
+    # on the left it decays only like ``size w e^x``.  The left side's ``j``
+    # counts nodes from ``s = -step``.
+    law = (centre, spread, size, w, rho)
+    reach = int(math.ceil(math.asinh((spread + _HALF_LEFT_SPAN) / spread) / step))
+    half = _half_side(1.0, 0.0, 0, last, step, right + 1.0, 0.0, *law)
+    half += _half_side(-1.0, 1.0, 0, reach - 1, step, left - 1.0, half, *law)
+    middle = _half_side(1.0, 0.5, 0, last, step, right + 1.0, half, *law)
+    middle += _half_side(-1.0, 0.5, 0, reach - 1, step, left - 1.0, half + middle, *law)
+    return zero, 0.5 * (half + middle) * step * (1.0 + r) / (_TWO_PI * q)
 
 
 @njit(cache=True)
@@ -129,16 +206,17 @@ def _shortfall(mean: float, size: float, response: float, cells: int) -> float:
 
 
 @njit(cache=True, nogil=True)
-def negative_binomial_crps_rows(mean, size, response, zero, shortfall, start, stop):
-    """Write ``CRPS(NB2(mean, size), 0)`` and ``E[(y - Y)^+]`` for rows ``start:stop``.
+def negative_binomial_crps_rows(mean, size, response, zero, half, shortfall, start, stop):
+    """Write ``CRPS(NB2(mean, size), 0)``, ``E|Y - Y'| / 2`` and ``E[(y - Y)^+]``, rows ``start:stop``.
 
     The caller passes contiguous float64 rows (positive finite ``mean`` and
-    ``size``, finite ``response``) and the two outputs, and runs the row blocks.
+    ``size``, finite ``response``) and the three outputs, and runs the row blocks.
+    ``half`` is NaN where ``CRPS(0)`` is the smaller and the score is taken from it.
     The shortfall is NaN where the response reaches ``SHORTFALL_CELLS``, for the
-    caller to take from the incomplete beta function.  Returns ``(0, -1)``.
+    caller to take from the partial moment's closed form.  Returns ``(0, -1)``.
     """
     for row in range(start, stop):
-        zero[row] = _zero_score(mean[row], size[row])
+        zero[row], half[row] = _zero_score(mean[row], size[row])
         cells = math.floor(response[row]) + 1.0
         if cells <= 0.0:
             shortfall[row] = 0.0
@@ -147,6 +225,12 @@ def negative_binomial_crps_rows(mean, size, response, zero, shortfall, start, st
         else:
             shortfall[row] = np.nan
     return 0, -1
+
+
+def _warmup_negative_binomial_crps() -> None:
+    """Compile the CRPS row kernel with the scorer's operands (no rows)."""
+    rows = np.zeros(0)
+    negative_binomial_crps_rows(rows, rows, rows, rows, rows, rows, 0, 0)
 
 
 # The kernel the worker pool runs (``nogil``, never ``prange``), writing only its

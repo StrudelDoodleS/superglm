@@ -50,6 +50,7 @@ from superglm.distributional.family import (
 )
 from superglm.distributional.kernels._common import pooled_rows
 from superglm.distributional.kernels._negative_binomial_crps import negative_binomial_crps_rows
+from superglm.distributional.kernels._negative_binomial_windows import _pmf_log_jet
 from superglm.distributional.kernels.generalized_gamma import (
     location_of_mean as generalized_gamma_location_of_mean,
 )
@@ -268,30 +269,90 @@ def _negative_binomial_crps(family: Any, y: NDArray, theta: NDArray) -> NDArray[
     A prior weight is not a reparametrisation of this law; ``_closed_form_scores``
     scales the count instead.
     """
-    # CRPS(0) integrates a nonnegative quantity, so a rare claim's score at zero,
-    # of order mean^2, does not cancel.  With k = floor(y), the shortfall is
-    # sum_{j <= k} (y - j) f(j) below SHORTFALL_CELLS, else y F(k) - mean G(k - 1),
-    # where G is the NB2 CDF of size + 1 (k f(k) = mean g(k - 1)); the sum comes
-    # first because scipy's incomplete beta loses about five digits near size 1e9.
+    # CRPS(0) and E|Y - Y'| / 2 integrate nonnegative quantities, so neither a
+    # rare claim's score at zero, of order mean^2, nor a large mean's score, of
+    # order its standard deviation, cancels.  With k = floor(y), the shortfall
+    # is sum_{j <= k} (y - j) f(j) below SHORTFALL_CELLS, else the partial
+    # moment of _negative_binomial_shortfall.
     response, parameters = _validated_scoring_inputs(y, theta)
     response = np.ascontiguousarray(response)
     mean, size = np.ascontiguousarray(parameters[:, 0]), np.ascontiguousarray(parameters[:, 1])
-    zero, below = np.empty(len(response)), np.empty(len(response))
+    zero, half, below = (np.empty(len(response)) for _ in range(3))
     pooled_rows(
         lambda start, stop: negative_binomial_crps_rows(
-            mean, size, response, zero, below, start, stop
+            mean, size, response, zero, half, below, start, stop
         ),
         len(response),
     )
-    # Past the kernel's pmf sum, F(k) = I_p(size, k + 1) = 1 - I_r(k + 1, size):
-    # r = mean / (mean + size) keeps its digits where p rounds to one.
-    far = np.isnan(below)
-    y_far, m_far, s_far = response[far], mean[far], size[far]
-    count, rate = np.floor(y_far), m_far / (m_far + s_far)
-    below[far] = y_far * special.betaincc(count + 1.0, s_far, rate) - m_far * special.betaincc(
-        count, s_far + 1.0, rate
+    far = np.flatnonzero(np.isnan(below))
+    if len(far):
+        below[far] = _negative_binomial_shortfall(response[far], mean[far], size[far])
+    # CRPS(y) = E|Y - y| - E|Y - Y'| / 2, with E|Y - y| = mean - y + 2 E[(y - Y)^+],
+    # from whichever of CRPS(0) and E|Y - Y'| / 2 is the smaller.
+    scores = zero - response + 2.0 * below
+    wide = np.flatnonzero(~np.isnan(half))
+    scores[wide] = (mean[wide] - response[wide]) + 2.0 * below[wide] - half[wide]
+    unresolved = np.flatnonzero(~np.isfinite(scores))
+    if len(unresolved):
+        raise ValueError(
+            f"NegativeBinomialLS CRPS is not finite in binary64 at rows {unresolved[:10].tolist()} "
+            "(a size below about 1e-154 of the mean, for one, is past its range); "
+            "score those rows with the log score instead"
+        )
+    return scores
+
+
+def _negative_binomial_shortfall(
+    response: NDArray, mean: NDArray, size: NDArray
+) -> NDArray[np.float64]:
+    """``E[(y - Y)^+]`` for ``k = floor(y) >= SHORTFALL_CELLS``, in the form that cancels least.
+
+    ``y F(k) - mean G(k - 1)``, ``G`` the NB2 CDF of size ``size + 1``, cancels at
+    a central count, where ``size + 1`` also loses its increment at a large size.
+    DLMF 8.17.18, ``I_x(a, b) = I_x(a + 1, b - 1) + x^a (1 - x)^(b - 1) / (a B(a, b))``
+    at ``a = size``, ``b = k + 1``, ``x = p``, gives ``F(k) - G(k - 1) = (k + size)
+    f(k) / size`` and so ``(y - mean) F(k) + mean (k + size) f(k) / size``.  That
+    cancels instead where ``G << F`` (a small size, ``y`` far below the mean), so
+    each row takes the form with the smaller terms.  ``f`` is the family's
+    saddle-point PMF (Loader 2000), its deviance formed from ``k - mean`` itself.
+    """
+    count = np.floor(response)
+    if np.any(count >= 2.0**53):
+        rows = np.flatnonzero(count >= 2.0**53)[:10].tolist()
+        raise ValueError(
+            f"NegativeBinomialLS CRPS needs responses below 2**53 (rows {rows} are not); "
+            "the family's counts end there"
+        )
+    # F(k) = I_p(size, k + 1) = 1 - I_r(k + 1, size), evaluated on whichever of
+    # p = size / (mean + size) and r = mean / (mean + size) is smaller: the other
+    # rounds to one when the law is far from even odds.
+    total = mean + size
+    p, r = size / total, mean / total
+    with np.errstate(all="ignore"):
+        cdf = np.where(
+            p <= r,
+            special.betainc(size, count + 1.0, p),
+            1.0 - special.betainc(count + 1.0, size, r),
+        )
+        shifted = np.where(
+            p <= r,
+            special.betainc(size + 1.0, count, p),
+            1.0 - special.betainc(count, size + 1.0, r),
+        )
+    if not np.all(np.isfinite(cdf)):
+        rows = np.flatnonzero(~np.isfinite(cdf))[:10].tolist()
+        raise ValueError(
+            "NegativeBinomialLS CRPS cannot evaluate the distribution function at a "
+            f"response of 64 or more (rows {rows}); score those rows with the log score"
+        )
+    log_pmf = np.array(
+        [_pmf_log_jet(k, m, s, 0)[0] for k, m, s in zip(count, mean, size, strict=True)]
     )
-    return zero - response + 2.0 * below
+    partial = mean * np.exp(log_pmf + np.log1p(count / size))
+    direct, recurrent = response * cdf, mean * shifted
+    # A NaN G compares false and leaves the recurrence's form.
+    smaller = direct + recurrent < np.abs(response - mean) * cdf + partial
+    return np.where(smaller, direct - recurrent, (response - mean) * cdf + partial)
 
 
 #: Closed-form CRPS by family class name.  A family absent from the catalogue is

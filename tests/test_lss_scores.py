@@ -49,7 +49,7 @@ from superglm.distributional.weights import (
     UnsupportedLikelihoodContractError,
     resolve_likelihood_weights,
 )
-from tests._negative_binomial_crps_oracle import nb2_crps
+from tests._negative_binomial_crps_oracle import nb2_crps, nb2_crps_by_quadrature
 from tests.bound_predictor_fixtures import model_from_templates
 
 _GRID = 96
@@ -1684,7 +1684,7 @@ _NB_LAWS = [
 
 @pytest.mark.parametrize("mean,size", _NB_LAWS)
 def test_negative_binomial_closed_form_crps_matches_the_lattice_sum(mean, size) -> None:
-    # 70 is past the pmf sum, so the incomplete-beta shortfall is checked as well.
+    # 70 is past the pmf sum, so the partial-moment shortfall is checked as well.
     responses = sorted(
         {0.0, 0.4, 1.0, 2.0, 3.7, 70.0, float(round(mean)), float(round(3 * mean + 5))}
     )
@@ -1708,6 +1708,73 @@ def test_negative_binomial_crps_below_the_support_grows_by_the_distance() -> Non
     family, theta = NegativeBinomialLS(), np.array([[0.7, 2.5]] * 2)
     below, zero = crps_closed_form(family, np.array([-2.0, 0.0]), theta)
     assert below == pytest.approx(zero + 2.0, rel=1e-15)
+
+
+def test_the_quadrature_oracle_agrees_with_the_lattice_sum() -> None:
+    """The oracle for laws too wide to sum, checked where the lattice still runs."""
+    for mean, size, y in ((2.0, 0.5, 70.0), (30.0, 1e9, 70.0), (4.0, 2.5, 3.7)):
+        assert nb2_crps_by_quadrature(mean, size, y) == pytest.approx(
+            nb2_crps(mean, size, y), rel=1e-15
+        )
+
+
+@pytest.mark.parametrize(
+    "mean,size",
+    [(100.0, 1e-15), (1.0, 1e-16), (1.0, 1e-25), (0.07, 1e-18), (1e15, 1e-16), (1e12, 1e-6)],
+)
+def test_negative_binomial_crps_keeps_its_sign_when_the_size_is_tiny(mean, size) -> None:
+    """Past the pmf sum ``mean / (mean + size)`` rounds to one; the score is still about ``y``.
+
+    Almost all the mass is at zero, so ``CRPS(y)`` is close to ``y`` on both
+    sides of the 64 cells the pmf sum covers.  At a mean of ``1e12`` or more
+    the partial moment's recurrent form would cancel terms of order the mean,
+    so these rows take ``y F(k) - mean G(k - 1)``.
+    """
+    responses = np.array([63.0, 64.0, 70.0, 500.0])
+    theta = np.tile([mean, size], (len(responses), 1))
+    closed = crps_closed_form(NegativeBinomialLS(), responses, theta)
+    expected = [nb2_crps_by_quadrature(mean, size, y) for y in responses]
+    np.testing.assert_allclose(closed, expected, rtol=1e-13, atol=0)
+
+
+@pytest.mark.parametrize(
+    "mean,size,y",
+    [
+        (1e15, 1e16, 1e15),
+        (4e15, 4e15, 4e15),
+        (1e6, 1e3, 1e6),
+        (1e9, 1.0, 1.2e9),
+        (1e10, 1e20, 1e10 + 3e5),
+        (3e12, 5e4, 2.5e12),
+    ],
+)
+def test_negative_binomial_crps_is_accurate_at_large_central_counts(mean, size, y) -> None:
+    """A huge count's partial moment, ``E[(y - Y)^+]``, with no difference of probabilities.
+
+    ``y F(k) - mean G(k - 1)`` with separately evaluated incomplete betas lost
+    a third of the score at ``(1e15, 1e16)`` and was NaN at ``(4e15, 4e15)``.
+    The score is of order the standard deviation, so ``E|Y - Y'| / 2`` is
+    integrated directly rather than taken from ``CRPS(0)``, which is of order
+    the mean.
+    """
+    closed = crps_closed_form(NegativeBinomialLS(), np.array([y]), np.array([[mean, size]]))
+    np.testing.assert_allclose(closed, [nb2_crps_by_quadrature(mean, size, y)], rtol=1e-12)
+
+
+def test_negative_binomial_crps_refuses_a_response_past_the_count_range() -> None:
+    with pytest.raises(ValueError, match="below 2\\*\\*53"):
+        crps_closed_form(NegativeBinomialLS(), np.array([2.0**54]), np.array([[3.0, 2.0]]))
+
+
+def test_negative_binomial_crps_refuses_a_law_binary64_cannot_score() -> None:
+    """Mean and size inside the family's range whose quadrature leaves binary64's.
+
+    At ``size / mean = 1e-170`` the score at zero is about ``2 log(2) size mean``,
+    ``1.4e-90``, and the quadrature's ``rho`` has underflowed: unguarded, it
+    returns ``1.45e25``.
+    """
+    with pytest.raises(ValueError, match="not finite in binary64 at rows \\[1\\]"):
+        crps_closed_form(NegativeBinomialLS(), np.zeros(2), np.array([[2.0, 0.5], [1e40, 1e-130]]))
 
 
 def _nb_rows(seed: int, weight_semantics: str):

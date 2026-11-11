@@ -491,7 +491,9 @@ implements explicit tail corrections for `GeneralizedParetoLSS` and negative-Q
 A CDF/quantile-only law without an applicable tail bound raises
 `NotImplementedError`: a finite grid cannot determine the existence or size of
 an unseen tail. A family without a CDF and quantile has no numeric
-CRPS: `NegativeBinomialLS` has its closed form but no threshold-weighted CRPS. Every available score follows the
+CRPS: `NegativeBinomialLS` has its closed form but no threshold-weighted CRPS.
+Its CRPS refuses a response of 2**53 or more, and a law whose size is below
+about 1e-154 of its mean, which binary64 cannot score. Every available score follows the
 fitted weight contract. Under prior semantics the weight changes the row's
 predictive law and comparisons aggregate the retained physical rows. Under
 frequency semantics the predictive law is the unit-weight law and `w` is
