@@ -338,6 +338,10 @@ class EditorSession:
         self.centering = centering
         self.with_se = bool(with_se)
         self._evaluation_data = dict(evaluation_data or {})
+        # Every SuperLSS view reads its training split here, the one store the follow writes.
+        for view in (self.model, self.reference_model):
+            if isinstance(view, LSSModelView):
+                view.share_splits(self._evaluation_data)
         self.cv_report = cv_report
         if cv is not None and not isinstance(cv, CrossValidationResult):
             raise TypeError(
@@ -347,8 +351,9 @@ class EditorSession:
         if cv_data is not None and cv is None:
             raise ValueError("cv_data= holds the rows a cv= result's folds index; pass cv= too.")
         self.cv = cv
-        # Fixed for the session's life: cv, cv_data and the train split are
-        # constructor inputs, so the rows Run CV replays never change.
+        # The rows Run CV replays a supplied result's folds on: cv_data, else the train split,
+        # checked again when a follow onto other data replaces that split.
+        self._cv_data = cv_data
         self.cv_check = check_cv_data(cv, cv_data, training_export_dataset(self))
         self._term_names = list(terms)
         self._selection: dict[str, NDArray[np.intp]] = {
@@ -558,6 +563,8 @@ class EditorSession:
             return None
         self._evaluation_data["train"], notice = follow_training_rows(self.model.lss, train)
         if notice is not None:
+            # Other data: a supplied result's folds are checked against the rows now in force.
+            self.cv_check = check_cv_data(self.cv, self._cv_data, training_export_dataset(self))
             warnings.warn(notice, EditorFitReplacedWarning, stacklevel=5)
         return notice
 
@@ -1886,6 +1893,8 @@ class EditorSession:
         """
         if is_lss(self.model) and not isinstance(model, LSSModelView):
             model = self.model.with_model(model)
+        if isinstance(model, LSSModelView):
+            model.share_splits(self._evaluation_data)
         train_data = self._evaluation_data.get("train")
         new_terms = self._editable_terms_from_model(
             model,

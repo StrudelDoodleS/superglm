@@ -179,7 +179,11 @@ def follow_training_rows(
         (
             lss._term_training_frame(None),
             np.asarray(rows.response),
-            None if weights.provenance.all_unit else np.asarray(weights.values),
+            # No weights only where the fit had none: a fit that dropped zero-weight rows was
+            # given weights, as a session on its rows is (``refit_reason``).
+            None
+            if weights.provenance.all_unit and weights.provenance.dropped_count == 0
+            else np.asarray(weights.values),
             offsets or None,
         ),
         family=lss.family,

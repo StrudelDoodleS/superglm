@@ -1394,19 +1394,28 @@ def test_a_follow_onto_the_same_data_takes_the_fits_rows_quietly(change):
 
 
 _OFFSETS = ("none", "column", "array", "column and array", "several parameters")
-_WEIGHTS = ("none", "prior", "frequency", "exposure")
+_WEIGHTS = ("none", "prior", "zeros and ones", "frequency", "exposure")
+_FOLLOWS = ("same data", "other data", "more rows", "fewer rows", "repair")
+# A refit onto another row count needs new arrays, so a new model: no follow of an array offset.
+_FOLLOW_CASES = [
+    (offsets, weights, follow)
+    for offsets in _OFFSETS
+    for weights in _WEIGHTS
+    for follow in _FOLLOWS
+    if follow not in ("more rows", "fewer rows") or offsets in ("none", "column")
+]
 
 
-def _follow_case(offsets: str, weights: str, seed: int):
-    """A 100-row SuperLSS whose mean term has a dip a post-fit increasing rule repairs, its
+def _follow_case(offsets: str, weights: str, seed: int, n: int = 100):
+    """An ``n``-row SuperLSS whose mean term has a dip a post-fit increasing rule repairs, its
     offsets declared as ``offsets`` names, and its data for ``seed``: ``(model, X, y, w, given)``,
     ``given`` being the offsets a ``train_data`` supplies (its array parts)."""
     from superglm import NegativeBinomialLS
 
     rng = np.random.default_rng(seed)
-    x = np.sort(rng.uniform(0.0, 10.0, 100))
-    X = pd.DataFrame({"x": x, "exposure": rng.uniform(-0.3, 0.3, 100)})
-    array = np.linspace(-0.2, 0.2, 100)  # declared on the model, so the same for every seed
+    x = np.sort(rng.uniform(0.0, 10.0, n))
+    X = pd.DataFrame({"x": x, "exposure": rng.uniform(-0.3, 0.3, n)})
+    array = np.linspace(-0.2, 0.2, n)  # declared on the model, so the same for every seed
     mean_sources = {
         "none": (),
         "column": ("exposure",),
@@ -1431,9 +1440,10 @@ def _follow_case(offsets: str, weights: str, seed: int):
     )
     w = {
         "none": None,
-        "prior": rng.uniform(0.5, 2.0, 100),
-        "frequency": rng.integers(1, 4, 100).astype(float),
-        "exposure": rng.uniform(0.5, 2.0, 100),
+        "prior": rng.uniform(0.5, 2.0, n),
+        "zeros and ones": (rng.uniform(size=n) > 0.2).astype(float),
+        "frequency": rng.integers(1, 4, n).astype(float),
+        "exposure": rng.uniform(0.5, 2.0, n),
     }[weights]
     if weights == "exposure":  # a rate: counts over the exposure
         y = rng.negative_binomial(5.0, 5.0 / (5.0 + 4.0 * w * np.exp(log_mean))) / w
@@ -1447,40 +1457,66 @@ def _follow_case(offsets: str, weights: str, seed: int):
     return model, X, y, w, given or None
 
 
-def _shown(session, X):
-    """Everything a session shows of its training rows, and of one edit and its export."""
+class _NoProgress:
+    def check(self):
+        return None
+
+    def progress(self, *args, **kwargs):
+        return None
+
+
+def _shown(session, data):
+    """Everything a session shows of its training rows at the rows they keep, of one edit and
+    its export, and of an editor Refit and a Final fit then, where each is available."""
+    from superglm.editor.cv import capture_final_fit, final_fit_reason, run_final_fit
+    from superglm.editor.lss.availability import session_refit_reason
     from superglm.editor.lss.validation import lss_dataset_metrics
     from superglm.editor.payloads import session_payload
 
     session_payload(session)  # an action: the session follows its model, as the page's do
     train = session._evaluation_data["train"]
     frame = as_eager_frame(train.X)
+    w = np.ones(train.n_obs) if train.sample_weight is None else train.sample_weight
+    kept = np.asarray(w) > 0.0  # a zero-weight row is neither shown nor scored
     lss = session.model.lss
     shown = {
-        "x": frame.column_array("x"),
-        "exposure": frame.column_array("exposure"),
-        "y": np.asarray(train.y, dtype=np.float64),
-        "w": np.ones(train.n_obs) if train.sample_weight is None else train.sample_weight,
-        "link": lss.predict_link(train.X, offsets=train.offset).to_numpy(),
+        "x": frame.column_array("x")[kept],
+        "exposure": frame.column_array("exposure")[kept],
+        "y": np.asarray(train.y, dtype=np.float64)[kept],
+        "w": np.asarray(w)[kept],
+        "link": lss.predict_link(train.X, offsets=train.offset).to_numpy()[kept],
         "metrics": np.array(list(lss_dataset_metrics(session.model, train).values())),
         "exposure weights": session.terms["mean:x"].weights,
     }
     session.select_x("mean:x", 2.0, 5.0)
     session.shift("mean:x", 0.1)
     shown["payload"] = session_payload(session)
-    shown["edited"] = session.to_model().predict_link(train.X, offsets=train.offset).to_numpy()
+    X, given = data[0], data[3]
+    shown["edited"] = session.to_model().predict_link(X, offsets=given).to_numpy()
+    shown["refit reason"] = session_refit_reason(session)
+    shown["final fit reason"] = final_fit_reason(session)
+    if shown["refit reason"] is None:
+        session.stage_structural("knots", "mean:x", {"count": 5, "strategy": "uniform"})
+        session.refit_pending()
+        shown["refit payload"] = session_payload(session)  # its grids and reference values
+        shown["refit"] = session.model.lss.predict_link(X, offsets=given).to_numpy()
+        shown["refit coefficients"] = np.asarray(session.model.lss._model.coefficients)
+    if shown["final fit reason"] is None:
+        final = run_final_fit(capture_final_fit(session), _NoProgress()).model
+        final = getattr(final, "lss", final)
+        shown["final fit"] = final.predict_link(X, offsets=given).to_numpy()
+        shown["final fit coefficients"] = np.asarray(final._model.coefficients)
     return shown
 
 
-@pytest.mark.parametrize("follow", ["refit on the same data", "refit on other data", "repair"])
-@pytest.mark.parametrize("weights", _WEIGHTS)
-@pytest.mark.parametrize("offsets", _OFFSETS)
+@pytest.mark.parametrize(("offsets", "weights", "follow"), _FOLLOW_CASES)
 def test_a_followed_session_shows_what_a_fresh_one_on_the_refit_shows(offsets, weights, follow):
     # The invariant that closes the follow's family of findings: after any follow, the
     # session's training rows and every number it shows equal those of a session opened fresh
-    # on the refitted model with the refit's own data. Codex's case is a column and an array
-    # offset: at b28e71770 the follow stored the total offset as the split's array part, and
-    # shape_prediction_offsets added the column a second time.
+    # on the refitted model with the refit's own data, and so do its Refit and Final fit. At
+    # b28e71770 a column and an array offset counted the column twice; at 01b61e673 a Refit
+    # after a follow onto another row count read the opening rows, and a follow of a fit that
+    # dropped zero-weight rows left Refit and Final fit refused for want of weights.
     model, X, y, w, given = _follow_case(offsets, weights, 0)
     lambdas = {"mean:x#wiggle": 1.0}
     with warnings.catch_warnings():
@@ -1493,18 +1529,50 @@ def test_a_followed_session_shows_what_a_fresh_one_on_the_refit_shows(offsets, w
             assert model._model.fit_state.hand_edit.repairs  # a repair was made
             data = (X, y, w, given)
         else:
-            _, X2, y2, w2, _ = _follow_case(offsets, weights, 0 if "same" in follow else 1)
+            seed = 0 if follow == "same data" else 1
+            n = {"more rows": 150, "fewer rows": 60}.get(follow, 100)
+            _, X2, y2, w2, _ = _follow_case(offsets, weights, seed, n)
             model.fit(X2, y2, sample_weight=w2, lambdas=lambdas)
             data = (X2, y2, w2, given)
         assert model._model is not opened
-        followed = _shown(session, data[0])
-        fresh = _shown(edit(model, train_data=data), data[0])
+        followed = _shown(session, data)
+        fresh = _shown(edit(model, train_data=data), data)
+    assert fresh["refit reason"] is None and fresh["final fit reason"] is None
     assert followed.keys() == fresh.keys()
     for name in followed:
-        if name == "payload":
+        if name in ("payload", "refit payload", "refit reason", "final fit reason"):
             assert followed[name] == fresh[name], name
         else:
             np.testing.assert_allclose(followed[name], fresh[name], rtol=1e-12, err_msg=name)
+
+
+def test_run_cv_rows_are_checked_again_after_a_follow_onto_other_data():
+    # A supplied result's folds index the rows it was drawn on. At 01b61e673 Run CV kept the
+    # opening split after a refit in place on other data, so it would replay those folds on
+    # rows the session no longer shows; a repair leaves the rows, and Run CV, as they were.
+    from sklearn.model_selection import KFold
+
+    from superglm import cross_validate
+    from superglm.editor.cv import FINGERPRINT_MISMATCH
+    from superglm.editor.payloads import session_payload
+
+    model, X, y, _, _ = _follow_case("none", "none", 0)
+    lambdas = {"mean:x#wiggle": 1.0}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y, lambdas=lambdas)
+        supplied = cross_validate(
+            model, X, y, cv=KFold(2, shuffle=True, random_state=0), error_score="raise"
+        )
+        session = edit(model, train_data=(X, y), cv=supplied)
+        assert session.cv_check.reason is None
+        model.apply_shape_postfit()
+        session_payload(session)
+        assert session.cv_check.reason is None
+        model.fit(X, _follow_case("none", "none", 1)[2], lambdas=lambdas)
+        session_payload(session)
+    assert session.cv_check.rows is None
+    assert session.cv_check.reason == FINGERPRINT_MISMATCH.format(data="train data", rows=100)
 
 
 def test_a_refit_in_place_that_kept_no_rows_says_the_editor_needs_its_rows():

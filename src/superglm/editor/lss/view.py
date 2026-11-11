@@ -266,13 +266,14 @@ class LSSModelView:
         X_train: Any,
         *,
         amount_unit: str | None = None,
-        train: Any = None,
+        splits: Mapping[str, Any] | None = None,
     ) -> None:
         fitted = lss._require_fitted()
         require_scalar_response(lss.family, "editor")
         self.lss = lss
-        # ``train``, the session's training rows, gives each fit's kept rows; else ``X_train``.
-        self._train = train
+        # The session's splits, shared, not copied (``share_splits``): their "train" split gives
+        # each fit's kept rows; without one, ``X_train`` does.
+        self._splits = splits
         self._given_rows = X_train
         self.amount_unit = amount_unit
         self.family = lss.family
@@ -285,6 +286,15 @@ class LSSModelView:
             )
         )
         self._read = self._reading_of(fitted, opening=True)
+
+    @property
+    def _train(self) -> Any:
+        """The session's training split as it is now: one source for every view of the session."""
+        return None if self._splits is None else self._splits.get("train")
+
+    def share_splits(self, splits: Mapping[str, Any]) -> None:
+        """Read the training split from ``splits``, the session's own, from now on."""
+        self._splits = splits
 
     def _reading_of(self, fitted: Any, *, opening: bool = False) -> _FitReading:
         if self._train is None:
@@ -382,7 +392,9 @@ class LSSModelView:
 
     def with_model(self, lss: SuperLSS) -> LSSModelView:
         """A view of ``lss``, another fit of the same model, over the same rows."""
-        return LSSModelView(lss, self._given_rows, amount_unit=self.amount_unit, train=self._train)
+        return LSSModelView(
+            lss, self._given_rows, amount_unit=self.amount_unit, splits=self._splits
+        )
 
     def term_coefficients(self, key: str) -> NDArray[np.float64]:
         """The fitted coefficients of the term ``key`` names, as its spec scores them."""

@@ -181,7 +181,7 @@ def open_lss(
     )
     train = evaluation_data["train"]
     _refuse_other_rows(lss, train.n_obs)
-    view = LSSModelView(lss, None, amount_unit=amount_unit, train=train)
+    view = LSSModelView(lss, None, amount_unit=amount_unit, splits=evaluation_data)
     editable = lss_editable_terms(
         view, _term_keys(view, terms), n_points=n_points, with_se=with_se, train=train
     )
