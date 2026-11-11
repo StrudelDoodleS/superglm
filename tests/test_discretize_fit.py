@@ -8,6 +8,7 @@ import pytest
 
 from superglm import SuperGLM
 from superglm._group_matrix import _group_matrix_algebra as algebra
+from superglm._group_matrix._group_matrix_bins import discretize_column
 from superglm.features import interaction as interaction_module
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
@@ -1720,3 +1721,191 @@ def test_a_loaded_design_rebuilds_its_pattern_plan():
     rebuilt = centered._pattern_plan(loaded)
     np.testing.assert_array_equal(rebuilt.unique_codes, plan.unique_codes)
     np.testing.assert_array_equal(rebuilt.row_patterns, plan.row_patterns)
+
+
+# ── Bins that resolve the knots ────────────────────────────────────────────
+# A spline's binned fit evaluates its basis at the bin midpoints and predict at
+# the rows' own values. A bin wider than a knot span hides the pieces of the
+# curve inside it from the fit, so the bins follow the knots there
+# (``discretize_column``). The noise sd is 0.3 throughout; 0.05 is a sixth of it.
+
+
+def _equal_width_bins(x, n_bins):
+    """``discretize_column`` as it was before it read knots: the reference for bit-identity."""
+    x = np.asarray(x, dtype=np.float64).ravel()
+    unique_vals, inverse = np.unique(x, return_inverse=True)
+    if len(unique_vals) <= n_bins:
+        return unique_vals.astype(np.float64), inverse.astype(np.intp)
+    lo, hi = float(x.min()), float(x.max())
+    if lo == hi:
+        return np.array([lo]), np.zeros(len(x), dtype=np.intp)
+    edges = np.linspace(lo, hi, n_bins + 1)
+    bin_idx = np.clip(np.searchsorted(edges, x, side="right") - 1, 0, n_bins - 1)
+    return 0.5 * (edges[:-1] + edges[1:]), bin_idx
+
+
+def _fit_design_eta(model):
+    """The linear predictor on the fit's own (binned) design."""
+    beta = np.asarray(model.result.beta, dtype=np.float64)
+    return float(model.result.intercept) + np.asarray(model._dm.toarray(), dtype=np.float64) @ beta
+
+
+def _rmse(a, b):
+    return float(np.sqrt(np.mean((np.asarray(a) - np.asarray(b)) ** 2)))
+
+
+def _lognormal_frame(n=10_000, seed=0):
+    """85% of rows in the first of 256 equal-width bins, which holds several quantile knots."""
+    rng = np.random.default_rng(seed)
+    x = rng.lognormal(0.0, 1.5, n)
+    y = np.sin(2.0 * np.log1p(x)) + rng.normal(0.0, 0.3, n)
+    return pd.DataFrame({"x": x}), y
+
+
+def _gaussian_spline_fit(X, y, knot_strategy, **kwargs):
+    model = SuperGLM(
+        family="gaussian",
+        features={"x": Spline(kind="ps", k=12, knot_strategy=knot_strategy)},
+        **kwargs,
+    )
+    model.fit_reml(X, y)
+    return model
+
+
+@pytest.mark.parametrize("knot_strategy", ["quantile", "quantile_tempered"])
+def test_binned_fit_predicts_what_it_fitted_on_a_skewed_column(knot_strategy):
+    X, y = _lognormal_frame()
+    exact = _gaussian_spline_fit(X, y, knot_strategy)
+    binned = _gaussian_spline_fit(X, y, knot_strategy, discrete=True, n_bins=256)
+    prediction = np.asarray(binned.predict(X), dtype=np.float64)
+    assert _rmse(prediction, _fit_design_eta(binned)) < 0.05
+    assert _rmse(prediction, np.asarray(exact.predict(X), dtype=np.float64)) < 0.05
+
+
+def test_binned_fit_predicts_what_it_fitted_beside_piles_of_equal_values():
+    """69% zeros, 2% ones and a tail towards 1 that clusters the tempered knots below 1."""
+    rng = np.random.default_rng(1)
+    n = 10_000
+    u = rng.uniform(size=n)
+    tail = np.clip(1.0 - rng.exponential(0.003, n), 0.0, 1.0)
+    x = np.where(u < 0.69, 0.0, np.where(u < 0.71, 1.0, tail))
+    f = np.where(x == 0.0, 0.0, np.sin(2.0 * np.log1p((1.0 - x) / 0.003)))
+    y = f + rng.normal(0.0, 0.3, n)
+    X = pd.DataFrame({"x": x})
+    model = _gaussian_spline_fit(X, y, "quantile_tempered", discrete=True, n_bins=256)
+    prediction = np.asarray(model.predict(X), dtype=np.float64)
+    eta = _fit_design_eta(model)
+    knotted = x > 0.0
+    # Every knot sits below 1, inside one equal-width bin: the rows there are
+    # the ones a fit on equal-width bins misreads (by about 77 at the pile of ones).
+    assert _rmse(prediction[knotted], eta[knotted]) < 0.1
+    assert np.max(np.abs(prediction[x == 1.0] - eta[x == 1.0])) < 0.05
+    # The pile at 0 sits on its cell's edge, represented by the cell midpoint.
+    assert _rmse(prediction, eta) < 0.3
+
+
+def test_binned_tensor_of_skewed_columns_matches_the_exact_fit():
+    rng = np.random.default_rng(2)
+    n = 10_000
+    a = rng.lognormal(0.0, 1.5, n)
+    b = rng.lognormal(0.0, 1.2, n)
+    f = (
+        np.sin(2.0 * np.log1p(a))
+        + 0.5 * np.cos(2.0 * np.log1p(b))
+        + 0.3 * np.sin(np.log1p(a)) * np.cos(np.log1p(b))
+    )
+    y = f + rng.normal(0.0, 0.3, n)
+    X = pd.DataFrame({"a": a, "b": b})
+    fits = {}
+    for discrete in (False, True):
+        model = SuperGLM(
+            family="gaussian",
+            features={name: Spline(kind="ps", k=10, knot_strategy="quantile") for name in "ab"},
+            interactions=[("a", "b")],
+            discrete=discrete,
+            n_bins=256,
+        )
+        model.fit_reml(X, y)
+        fits[discrete] = model
+    prediction = np.asarray(fits[True].predict(X), dtype=np.float64)
+    assert _rmse(prediction, _fit_design_eta(fits[True])) < 0.05
+    assert _rmse(prediction, np.asarray(fits[False].predict(X), dtype=np.float64)) < 0.05
+
+
+def _assert_bins_unchanged(x, n_bins, knots):
+    support, index = discretize_column(x, n_bins, knots)
+    old_support, old_index = _equal_width_bins(x, n_bins)
+    np.testing.assert_array_equal(support, old_support)
+    np.testing.assert_array_equal(index, old_index)
+
+
+def test_bins_that_already_resolve_the_knots_are_unchanged(poisson_data):
+    rng = np.random.default_rng(5)
+    x = rng.uniform(0.0, 10.0, 5000)
+    _assert_bins_unchanged(x, 256, np.linspace(0.0, 10.0, 12))
+    _assert_bins_unchanged(x, 64, np.linspace(0.0, 10.0, 12))
+    # Uniform knots on the skewed column: wide spans, so equal-width bins resolve them.
+    X, y = _lognormal_frame()
+    model = _gaussian_spline_fit(X, y, "uniform", discrete=True, n_bins=256)
+    _assert_bins_unchanged(X["x"].to_numpy(), 256, model._specs["x"]._knots)
+    # An existing fixture, through the fit's own design.
+    X, y = poisson_data
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0,
+        discrete=True,
+        n_bins=64,
+        features={"x1": Spline(n_knots=10, penalty="ssp"), "x2": Numeric()},
+    )
+    model.fit(X, y)
+    gm = model._dm.group_matrices[0]
+    assert isinstance(gm, DiscretizedSSPGroupMatrix)
+    old_support, old_index = _equal_width_bins(X["x1"].to_numpy(), 64)
+    np.testing.assert_array_equal(gm.bin_idx, old_index)
+    np.testing.assert_array_equal(gm.B_unique, model._specs["x1"]._raw_basis_matrix(old_support))
+
+
+def test_knot_aligned_cells_follow_the_rule():
+    # Knots at 1 and 2 cut [0, 10] into spans of width 1, 1, 8; the narrow ones
+    # get under b_min = 16 // 6 = 2 equal-width bins each, so the grid follows them.
+    x = np.concatenate([np.linspace(0.0, 1.0, 40), [2.0], np.linspace(2.5, 10.0, 40)])
+    support, index = discretize_column(x, 16, np.array([1.0, 2.0]))
+    # Spans [0, 1), [1, 2), [2, 10]: [1, 2) holds only the row at 1 (a row on a
+    # knot belongs to the span on its right). Remaining 16 - 3*2 = 10 cells by
+    # width 1:1:8 -> 1, 1, 8, so 3, 3, 10 cells.
+    expected = np.concatenate(
+        [
+            0.5 * (np.linspace(0, 1, 4)[:-1] + np.linspace(0, 1, 4)[1:]),
+            0.5 * (np.linspace(1, 2, 4)[:-1] + np.linspace(1, 2, 4)[1:]),
+            0.5 * (np.linspace(2, 10, 11)[:-1] + np.linspace(2, 10, 11)[1:]),
+        ]
+    )
+    np.testing.assert_allclose(support, expected, rtol=0, atol=1e-15)
+    assert index[np.flatnonzero(x == 1.0)[0]] == 3
+    assert index[np.flatnonzero(x == 2.0)[0]] == 6
+    assert index[-1] == len(support) - 1
+    # A span with no rows gets no cells.
+    sparse = np.concatenate([np.linspace(0.0, 1.0, 40), np.linspace(5.0, 10.0, 40)])
+    support, _ = discretize_column(sparse, 16, np.array([0.5, 1.5, 4.5]))
+    assert not np.any((support > 1.5) & (support < 4.5))
+
+
+def test_binned_support_never_exceeds_n_bins():
+    rng = np.random.default_rng(11)
+    for trial in range(200):
+        n = int(rng.integers(50, 3000))
+        x = rng.lognormal(0.0, float(rng.uniform(0.1, 3.0)), n)
+        if trial % 3 == 0:
+            x[rng.uniform(size=n) < 0.5] = x.min()
+        lo, hi = float(x.min()), float(x.max())
+        n_knots = int(rng.integers(0, 400))
+        if trial % 2:
+            knots = np.quantile(x, rng.uniform(size=n_knots))
+        else:
+            knots = rng.uniform(lo - 1.0, hi + 1.0, n_knots)
+        n_bins = int(rng.choice([1, 2, 8, 32, 64, 256]))
+        support, index = discretize_column(x, n_bins, knots)
+        assert len(support) <= n_bins
+        assert np.all(np.diff(support) > 0)
+        assert index.shape == x.shape
+        assert index.min() >= 0 and index.max() < len(support)

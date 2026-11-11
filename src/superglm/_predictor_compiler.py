@@ -312,6 +312,7 @@ def compile_predictor_design(
                 x_col,
                 n_bins_feat,
                 feature_build_weight,
+                spec._knots,
             )
             B_unique = spec._raw_basis_matrix(bin_centers)
             exposure_agg = np.bincount(bin_idx, weights=sample_weight, minlength=len(bin_centers))

@@ -733,10 +733,10 @@ class FactorSmooth:
             retain_basis=False,
             geometry_weight=sample_weight,
         )
-        support, bin_idx = _discretize_column(numeric, n_bins)
         spline = self._spline
         if spline is None:  # pragma: no cover - populated by _build_marginal
             raise RuntimeError("FactorSmooth marginal spline was not initialized.")
+        support, bin_idx = _discretize_column(numeric, n_bins, spline._knots)
         basis_unique = spline._raw_basis_matrix(support)
         return self._group_info(
             codes=codes,

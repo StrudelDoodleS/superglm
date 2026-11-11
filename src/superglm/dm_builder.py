@@ -280,23 +280,26 @@ def _discretize_spline_column(
     x: NDArray,
     n_bins: int,
     geometry_weight: NDArray | None,
+    knots: NDArray | None = None,
 ) -> tuple[NDArray, NDArray]:
     """Discretize on the positive-frequency support and map every fit row.
 
-    Zero-frequency rows keep a valid bin index (the design keeps its physical
-    row count) but do not shape the support: they map to the nearest active
-    support point, as clipped spline evaluation would.
+    ``knots`` are the spline's knots, so the bins resolve its pieces
+    (``discretize_column``). Zero-frequency rows keep a valid bin index (the
+    design keeps its physical row count) but do not shape the support: they
+    map to the nearest active support point, as clipped spline evaluation
+    would.
     """
     values = np.asarray(x, dtype=np.float64).ravel()
     if geometry_weight is None:
-        return _discretize_column(values, n_bins)
+        return _discretize_column(values, n_bins, knots)
 
     weights = np.asarray(geometry_weight, dtype=np.float64).ravel()
     active = weights > 0.0
     if np.all(active):
-        return _discretize_column(values, n_bins)
+        return _discretize_column(values, n_bins, knots)
 
-    support, active_index = _discretize_column(values[active], n_bins)
+    support, active_index = _discretize_column(values[active], n_bins, knots)
     if len(support) == 1:
         full_index = np.zeros(len(values), dtype=np.intp)
     else:

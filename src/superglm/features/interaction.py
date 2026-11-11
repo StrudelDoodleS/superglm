@@ -586,7 +586,7 @@ class SplineCategorical:
             x_spline, x_cat, parent_specs, sample_weight
         )
 
-        support, bin_idx = _discretize_column(x_spline, int(n_bins))
+        support, bin_idx = _discretize_column(x_spline, int(n_bins), spline_spec._knots)
         B_unique = np.asarray(spline_spec._raw_basis_matrix(support), dtype=np.float64)
 
         omega = spline_spec._build_penalty()
@@ -2197,6 +2197,26 @@ class TensorInteraction:
         ``interaction_spline_spec``).  The mgcv te()/ti() contract (no select, no
         multi-m) is enforced on the original spec before any cloning.
         """
+        candidate, cardinal = TensorInteraction._marginal_spec(
+            spec, x, n_knots_override, geometry_weight=geometry_weight, keep_ranges=keep_ranges
+        )
+        info = TensorInteraction._marginal_ingredients(
+            candidate, x, support=support, counts=counts, geometry_weight=geometry_weight
+        )
+        if cardinal:
+            info.normalize_penalty = True
+        return info
+
+    @staticmethod
+    def _marginal_spec(
+        spec,
+        x: NDArray,
+        n_knots_override: int | None,
+        *,
+        geometry_weight: NDArray | None = None,
+        keep_ranges: bool = True,
+    ) -> tuple[Any, bool]:
+        """The spec a margin is built from, with its knots placed, and whether it is cardinal."""
         # Reject unsupported parent configs before cloning
         reasons: list[str] = []
         if getattr(spec, "select", False):
@@ -2211,54 +2231,6 @@ class TensorInteraction:
                 "This matches the mgcv te()/ti() marginal-smooth contract."
             )
 
-        def marginal_ingredients(candidate) -> TensorMarginalInfo:
-            method = candidate.tensor_marginal_ingredients
-            if support is None and geometry_weight is None:
-                return method(x)
-
-            effective_support = x if support is None else support
-            effective_counts = geometry_weight if counts is None else counts
-            if effective_counts is None:  # pragma: no cover - guarded by the branch above
-                raise RuntimeError("tensor marginal geometry mass is unavailable")
-
-            def compact_legacy(legacy: TensorMarginalInfo) -> TensorMarginalInfo:
-                support_clipped = np.clip(
-                    np.asarray(effective_support, dtype=np.float64), legacy.lo, legacy.hi
-                )
-                compact_basis = np.asarray(legacy.raw_basis_eval(support_clipped), dtype=np.float64)
-                compact_basis = compact_basis @ legacy.projection
-                return replace(legacy, basis=compact_basis)
-
-            try:
-                parameters = inspect.signature(method).parameters
-            except (TypeError, ValueError):
-                parameters = {}
-            accepts_keywords = any(
-                parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-            )
-            if accepts_keywords or {"support", "counts"} <= parameters.keys():
-                compact = method(
-                    x,
-                    support=effective_support,
-                    counts=effective_counts,
-                )
-                if np.asarray(compact.basis).shape[0] == len(effective_support):
-                    return compact
-                return compact_legacy(compact)
-
-            # Compatibility for custom spline subclasses overriding the old one-argument
-            # method: keep their projection and penalty geometry but only its evaluation on
-            # the discrete support, since it cannot centre in non-unit replication mass.
-            if geometry_weight is not None and not np.all(
-                np.asarray(geometry_weight, dtype=np.float64) == 1.0
-            ):
-                raise NotImplementedError(
-                    "legacy tensor marginal method cannot certify non-unit geometry weights; "
-                    "implement tensor_marginal_ingredients(..., support=..., counts=...) "
-                    "to support frequency geometry"
-                )
-            return compact_legacy(method(x))
-
         # Route cubic regression splines through the cardinal CR implementation; a cr
         # parameterisation it cannot express comes back unchanged and takes the
         # ordinary marginal path below.
@@ -2270,9 +2242,7 @@ class TensorInteraction:
             keep_ranges=keep_ranges,
         )
         if cardinal is not spec:
-            info = marginal_ingredients(cardinal)
-            info.normalize_penalty = True
-            return info
+            return cardinal, True
 
         if n_knots_override is not None and n_knots_override != spec.n_knots:
             kwargs: dict = dict(
@@ -2297,8 +2267,65 @@ class TensorInteraction:
                 warnings.simplefilter("ignore", SplineOptionWarning)
                 clone = type(spec)(**kwargs)
             clone._place_knots(x, geometry_weight)
-            return marginal_ingredients(clone)
-        return marginal_ingredients(spec)
+            return clone, False
+        return spec, False
+
+    @staticmethod
+    def _marginal_ingredients(
+        candidate,
+        x: NDArray,
+        *,
+        support: NDArray | None,
+        counts: NDArray | None,
+        geometry_weight: NDArray | None,
+    ) -> TensorMarginalInfo:
+        """A margin's basis, penalty and projection from its resolved spec (``_marginal_spec``)."""
+        method = candidate.tensor_marginal_ingredients
+        if support is None and geometry_weight is None:
+            return method(x)
+
+        effective_support = x if support is None else support
+        effective_counts = geometry_weight if counts is None else counts
+        if effective_counts is None:  # pragma: no cover - guarded by the branch above
+            raise RuntimeError("tensor marginal geometry mass is unavailable")
+
+        def compact_legacy(legacy: TensorMarginalInfo) -> TensorMarginalInfo:
+            support_clipped = np.clip(
+                np.asarray(effective_support, dtype=np.float64), legacy.lo, legacy.hi
+            )
+            compact_basis = np.asarray(legacy.raw_basis_eval(support_clipped), dtype=np.float64)
+            compact_basis = compact_basis @ legacy.projection
+            return replace(legacy, basis=compact_basis)
+
+        try:
+            parameters = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        accepts_keywords = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+        )
+        if accepts_keywords or {"support", "counts"} <= parameters.keys():
+            compact = method(
+                x,
+                support=effective_support,
+                counts=effective_counts,
+            )
+            if np.asarray(compact.basis).shape[0] == len(effective_support):
+                return compact
+            return compact_legacy(compact)
+
+        # Compatibility for custom spline subclasses overriding the old one-argument
+        # method: keep their projection and penalty geometry but only its evaluation on
+        # the discrete support, since it cannot centre in non-unit replication mass.
+        if geometry_weight is not None and not np.all(
+            np.asarray(geometry_weight, dtype=np.float64) == 1.0
+        ):
+            raise NotImplementedError(
+                "legacy tensor marginal method cannot certify non-unit geometry weights; "
+                "implement tensor_marginal_ingredients(..., support=..., counts=...) "
+                "to support frequency geometry"
+            )
+        return compact_legacy(method(x))
 
     def _centered_marginal_dense(self, x: NDArray, info: TensorMarginalInfo) -> NDArray:
         x = np.asarray(x, dtype=np.float64).ravel()
@@ -2315,12 +2342,13 @@ class TensorInteraction:
         parent_specs: dict,
         *,
         geometry_weight: NDArray | None = None,
-        discrete_supports: tuple[
-            tuple[NDArray, NDArray],
-            tuple[NDArray, NDArray],
-        ]
-        | None = None,
-    ) -> tuple[TensorMarginalInfo, TensorMarginalInfo]:
+        discrete_n_bins: tuple[int, int] | None = None,
+    ) -> tuple[TensorMarginalInfo, TensorMarginalInfo, tuple | None]:
+        """Both margins' ingredients, binned on their own knots when ``discrete_n_bins`` is set.
+
+        The third value is ``((support1, idx1), (support2, idx2))`` for a binned
+        build (``discretize_column`` with each margin's knots), else None.
+        """
         from superglm.features.spline import _SplineBase
 
         spec1 = parent_specs[self.feat1_name]
@@ -2337,30 +2365,26 @@ class TensorInteraction:
         nk2 = self._n_knots[1] if self._n_knots is not None else None
 
         # tensor_marginal_ingredients() raises TypeError for CardinalCRSpline
-        if discrete_supports is None:
-            support1 = counts1 = support2 = counts2 = None
-        else:
-            (support1, counts1), (support2, counts2) = discrete_supports
-        self._marginal1 = self._marginal_from_spec(
-            spec1,
-            x1,
-            nk1,
-            support=support1,
-            counts=counts1,
-            geometry_weight=geometry_weight,
-        )
-        self._marginal2 = self._marginal_from_spec(
-            spec2,
-            x2,
-            nk2,
-            support=support2,
-            counts=counts2,
-            geometry_weight=geometry_weight,
-        )
+        margins = []
+        bins = []
+        for axis, (spec, x, nk) in enumerate(((spec1, x1, nk1), (spec2, x2, nk2))):
+            candidate, cardinal = self._marginal_spec(spec, x, nk, geometry_weight=geometry_weight)
+            support = counts = None
+            if discrete_n_bins is not None:
+                support, idx = _discretize_column(x, int(discrete_n_bins[axis]), candidate._knots)
+                counts = np.bincount(idx, weights=geometry_weight, minlength=len(support))
+                bins.append((support, idx))
+            info = self._marginal_ingredients(
+                candidate, x, support=support, counts=counts, geometry_weight=geometry_weight
+            )
+            if cardinal:
+                info.normalize_penalty = True
+            margins.append(info)
+        self._marginal1, self._marginal2 = margins
 
         self._p1 = self._marginal1.K_eff
         self._p2 = self._marginal2.K_eff
-        return self._marginal1, self._marginal2
+        return self._marginal1, self._marginal2, (tuple(bins) if bins else None)
 
     def _prepare_centered_marginals(
         self,
@@ -2370,7 +2394,7 @@ class TensorInteraction:
         geometry_weight: NDArray | None,
     ) -> tuple[NDArray, NDArray, NDArray, NDArray, Any, Any]:
         """The centred margin bases on the rows, their penalties, and each margin's ``distinct``."""
-        m1, m2 = self._prepare_marginal_infos(
+        m1, m2, _ = self._prepare_marginal_infos(
             x1,
             x2,
             parent_specs,
@@ -2583,25 +2607,16 @@ class TensorInteraction:
         sample_weight: NDArray | None = None,
     ) -> DiscreteTensorBuildResult:
         """Build a discretized tensor basis on observed joint support pairs."""
-        support1, idx1 = _discretize_column(x1, int(n_bins[0]))
-        support2, idx2 = _discretize_column(x2, int(n_bins[1]))
-        counts1 = np.bincount(
-            idx1,
-            weights=sample_weight,
-            minlength=len(support1),
-        )
-        counts2 = np.bincount(
-            idx2,
-            weights=sample_weight,
-            minlength=len(support2),
-        )
-        m1, m2 = self._prepare_marginal_infos(
+        m1, m2, bins = self._prepare_marginal_infos(
             x1,
             x2,
             parent_specs,
             geometry_weight=sample_weight,
-            discrete_supports=((support1, counts1), (support2, counts2)),
+            discrete_n_bins=(int(n_bins[0]), int(n_bins[1])),
         )
+        if bins is None:  # pragma: no cover - set by discrete_n_bins
+            raise RuntimeError("tensor margins were not binned")
+        (support1, idx1), (support2, idx2) = bins
         S1 = _normalize_tensor_penalty(m1.penalty) if m1.normalize_penalty else m1.penalty
         S2 = _normalize_tensor_penalty(m2.penalty) if m2.normalize_penalty else m2.penalty
         B1_unique = np.asarray(m1.basis, dtype=np.float64)

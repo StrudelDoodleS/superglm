@@ -112,11 +112,14 @@ def place_knots(
     x: NDArray,
     sample_weight: NDArray | None = None,
     n_bins: int | None = None,
+    *,
+    certify: bool = True,
 ) -> None:
     """Place interior knots and build the full knot vector.
 
     ``n_bins`` is the bin count of a discretised fit, which sees the feature
-    only at bin centres; polynomial ranges are certified against those.
+    only at bin centres; polynomial ranges are certified against those unless
+    ``certify`` is False (a caller that only needs the knot vector).
     """
     named = getattr(spec, "_named_knots", None)
     if named is not None:
@@ -153,36 +156,45 @@ def place_knots(
         sample_weight=sample_weight,
     )
     spec._base_interior_knots = np.array(interior, dtype=np.float64)
-    if spec._polynomial_ranges:
-        interior = _ranged_interior(spec, x, interior, n_bins)
-    spec._assemble_knot_vector(interior)
+    if not spec._polynomial_ranges:
+        spec._assemble_knot_vector(interior)
+        return
+    # The ranges' edge knots go in first: a binned fit's bins follow the
+    # assembled knots, so the ranges are certified on that support.
+    ranges = validate_ranges(spec._polynomial_ranges, spec.degree, spec._lo, spec._hi)
+    spec._assemble_knot_vector(
+        merged_interior_knots(interior, ranges, spec.degree, spec._lo, spec._hi)
+    )
+    if certify:
+        _certify_ranges(spec, x, ranges, n_bins)
+    else:
+        spec._polynomial_ranges = ranges
 
 
-def fit_support(x: NDArray, n_bins: int | None = None) -> NDArray:
+def fit_support(x: NDArray, n_bins: int | None = None, knots: NDArray | None = None) -> NDArray:
     """The sorted distinct values a fit evaluates the basis at, from positive-weight rows.
 
     An exact fit sees the distinct values themselves; a discretised one sees
-    the centres of the occupied bins of ``discretize_column``, the placement
-    its design is built on.
+    the centres of the occupied bins of ``discretize_column`` on the spline's
+    ``knots``, the placement its design is built on.
     """
     if n_bins is None:
         return np.unique(x)
-    centres, index = discretize_column(x, n_bins)
+    centres, index = discretize_column(x, n_bins, knots)
     return centres[np.unique(index)]
 
 
-def _ranged_interior(spec: Any, x: NDArray, interior: NDArray, n_bins: int | None) -> NDArray:
-    """Certify the spec's ranges against the support the fit sees and insert their edge knots.
+def _certify_ranges(spec: Any, x: NDArray, ranges: Any, n_bins: int | None) -> None:
+    """Certify the spec's ranges against the support the fit sees on its assembled knots.
 
     The highest penalty order is the one certified: REML may take the lower
     orders' smoothing parameters towards zero.
     """
-    ranges = validate_ranges(spec._polynomial_ranges, spec.degree, spec._lo, spec._hi)
-    note = "" if n_bins is None else f" once binned to {n_bins} equal-width bins"
+    note = "" if n_bins is None else f" once binned to {n_bins} bins"
     order = max(spec._m_orders)
-    certify_determined(ranges, fit_support(x, n_bins), spec._lo, spec._hi, order, note)
+    support = fit_support(x, n_bins, spec._knots)
+    certify_determined(ranges, support, spec._lo, spec._hi, order, note)
     spec._polynomial_ranges = ranges
-    return merged_interior_knots(interior, ranges, spec.degree, spec._lo, spec._hi)
 
 
 def assemble_clamped_knot_vector(spec: Any, interior: NDArray) -> None:
