@@ -2760,3 +2760,25 @@ def test_curvature_repair_of_a_noise_free_log_linear_response_is_published():
     model.apply_shape_postfit(X)
 
     assert "x" in model._shape_repairs
+
+
+def test_a_repair_made_under_an_open_editor_session_marks_its_results_stale():
+    # The repair changes the model in place, so the model object alone cannot tell a result
+    # made before it from one made after.
+    from superglm.editor import edit
+    from superglm.editor.cv import InForce
+
+    rng = np.random.default_rng(0)
+    x = np.linspace(0.0, 1.0, 200)
+    y = -((x - 0.35) ** 2) + 0.05 * rng.normal(size=len(x))
+    df = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="gaussian",
+        features={"x": PSpline(n_knots=10, constraint=Constraint.postfit.convex)},
+    ).fit(df, y)
+    session = edit(model, train_data=(df, y))
+    in_force = InForce.of(session)
+    assert in_force.describes(session)
+    model.apply_shape_postfit(df)
+    assert not in_force.describes(session)
+    assert InForce.of(session).describes(session)

@@ -49,8 +49,8 @@ class HandEdit:
     ``coefficients`` is the full vector in the fit's layout, read-only.
     ``edited_terms`` are the qualified term names edited by hand, such as
     ``"scale:age"``; ``repairs`` record the terms a ``Constraint.postfit`` rule
-    repaired after the fit, in the order they were repaired. The class default
-    reads older pickles as unrepaired.
+    repaired after the fit, one current record per term, in the order they were
+    last repaired. The class default reads older pickles as unrepaired.
     """
 
     coefficients: NDArray[np.float64]
@@ -66,6 +66,8 @@ class HandEdit:
             isinstance(repair, ShapeRepairRecord) for repair in repairs
         ):
             raise TypeError("edited_terms must be term names and repairs ShapeRepairRecord values")
+        if len({repair.term for repair in repairs}) != len(repairs):
+            raise ValueError("repairs must hold one record per term; a new repair replaces it")
         if not terms and not repairs:
             raise ValueError("edited_terms must name at least one term, as '<parameter>:<term>'")
         coefficients = readonly_finite(self.coefficients, name="hand-edited coefficients")
@@ -163,8 +165,9 @@ def revised_model(
 ) -> Any:
     """A model predicting with ``coefficients``; ``model`` is left as it was.
 
-    Terms edited or repaired earlier stay so, ``repairs`` add to the earlier
-    repairs, and every difference is judged against the fit's coefficients. The
+    Terms edited or repaired earlier stay so, a term in ``repairs`` replaces its
+    earlier repair record (a term holds one current repair), and every difference
+    is judged against the fit's coefficients. The
     retained fitted rows are recomputed from the revision, which needs the
     training rows.
     """
@@ -172,10 +175,12 @@ def revised_model(
         raise TypeError("edited_terms must be a sequence of term names, not one string")
     state = model.fit_state
     earlier = state.hand_edit
+    repaired_now = {repair.term for repair in repairs}
+    kept = () if earlier is None else earlier.repairs
     edit = HandEdit(
         coefficients,
         (*(() if earlier is None else earlier.edited_terms), *edited_terms),
-        (*(() if earlier is None else earlier.repairs), *repairs),
+        (*(record for record in kept if record.term not in repaired_now), *repairs),
     )
     check_hand_edit(edit, state.layout, state.result.coefficients)
     rows = state.retained_rows

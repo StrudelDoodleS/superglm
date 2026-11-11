@@ -390,8 +390,13 @@ term's own basis, on its parameter's link scale, weighted by where the
 training rows sit along the axis. The basis keeps the fit's centring, so the
 term's mean over the training rows does not move. The parameter's intercept
 is then re-estimated on the joint likelihood, with every term and every other
-parameter held. A repair that fits worse than dropping the term is refused,
-and nothing changes.
+parameter held. Two repairs are refused, and nothing changes: one whose
+penalized objective (the negative log-likelihood plus the fit's smoothing
+penalty, at the fit's smoothing parameters) is worse than with the term
+dropped, and one that leaves a training row without valid parameters. A
+repaired curve can fit the data better than no term and still lose on the
+penalty, when it needs large coefficients; then fit the rule instead
+(`Constraint.fit`), which chooses the smoothing under the rule.
 
 What you get afterwards:
 
@@ -399,23 +404,35 @@ What you get afterwards:
   curve. `result_` and the covariance still describe the fit.
 - A repaired term keeps its effective degrees of freedom. Its standard
   errors, bands and test are withheld, as on `SuperGLM`, and say so with
-  `ShapeRepairedWarning`. `summary()` shows NaN for them and a note. In the
-  editor the term has no band.
+  `ShapeRepairedWarning`. `summary()` shows NaN for them and a note, and so
+  does the intercept row of the term's parameter, which the repair
+  re-estimated. In the editor the term has no band. An editor session open
+  on the model sees the repair: its cross-validation and final-fit results
+  are marked as made on an earlier version.
 - Standard errors that read the whole covariance (`predict_link(se_fit=True)`,
   posterior draws and bounds) warn that the covariance is the fit's from before
   the repair.
 - `diagnose()` reports each repair, its size and the intercept's shift. It also
   names each post-fit rule that is still to apply, or that the fitted curve
-  already obeys. The rating table payload carries the same notes.
+  already obeys, and warns when a repaired curve has been edited so that it
+  breaks its rule again. The rating table payload carries the same notes.
 - A term that already obeys its rule is left as it is, so a second call changes
-  nothing. The repair needs the fit's rows (`retain_rows=True`, the default).
+  nothing. A term edited after its repair so that it breaks the rule again is
+  repaired again, and the new repair replaces the old one. The repair needs the
+  fit's rows (`retain_rows=True`, the default); a restored model takes the
+  frame it was fitted on as `apply_shape_postfit(X)`.
 
 Fit-time and post-fit rules combine on `SuperLSS` as they do on `SuperGLM`.
 On one term they cannot: `Constraint.postfit` refuses a combination. On
 different terms of one model, the fit-time rules are enforced inside the fit
-and the post-fit rules are repaired afterwards. `SuperGLM` does not recompute a
-fit after its repair, and neither does `SuperLSS`, so other terms' standard
-errors and degrees of freedom are those of the fit before the repair.
+and the post-fit rules are repaired afterwards.
+
+The two models differ in what they recompute after a repair. `SuperGLM`
+recomputes its working weights, effective degrees of freedom, covariance and
+scale at the repaired coefficients, so the other terms' standard errors move.
+`SuperLSS` keeps the fit's covariance and degrees of freedom, as it does after
+a hand edit: the other terms' standard errors are those of the fit before the
+repair, and `ShapeRepairedWarning` says so wherever they are quoted.
 
 Monotone repairs can fail to converge on some curves, on both models. When a
 term's derivative has its lowest point inside a knot span, the repair adds

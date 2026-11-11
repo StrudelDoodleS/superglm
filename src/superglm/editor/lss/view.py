@@ -144,11 +144,10 @@ class LSSModelView:
         self.lss = lss
         self.X_train = X_train
         self.amount_unit = amount_unit
-        # Each term's sweep, by its arguments: a view is of one fit, so no entry goes
-        # stale, and a caller gets its own copy.
-        self._term_inferences: dict[tuple[str, bool, int, str], Any] = {}
         self.family = lss.family
-        self._fitted = fitted
+        # The fit the sweeps below were read from: ``_fitted`` follows ``lss``, whose fit a
+        # post-fit repair replaces in place.
+        self._swept_fit = fitted
         specs: dict[str, Any] = {}
         interactions: dict[str, Any] = {}
         for parameter in lss.parameter_names_:
@@ -177,11 +176,21 @@ class LSSModelView:
         # model, over splits a session never changes; a Refit makes a new view.
         self._refit_reason: tuple[Any, str | None] | None = None
         self._final_split_reason: tuple[tuple[Any, ...], str | None] | None = None
-        # Each term's sweep, by its arguments. Owned by this view for the same reason:
-        # no entry goes stale, and a caller gets its own copy.
+        # Each term's sweep, by its arguments, for the fit in ``_swept_fit``: ``_fitted``
+        # empties it when that fit is replaced. A caller gets its own copy.
         self._term_inferences: dict[tuple[str, bool, int, str], Any] = {}
         # Each term's shape-rule rows (``lss.rules.term_rows``), read from this view's fit.
         self._term_rows: dict[str, Any] = {}
+
+    @property
+    def _fitted(self):
+        """The fit ``lss`` predicts with now; a repair in place (``apply_shape_postfit``)
+        replaces it, and the term sweeps read from the earlier one are dropped."""
+        fitted = self.lss._require_fitted()
+        if fitted is not self._swept_fit:
+            self._term_inferences.clear()
+            self._swept_fit = fitted
+        return fitted
 
     @property
     def _result(self):
@@ -235,6 +244,7 @@ class LSSModelView:
         if centering != "native":
             raise EditorValueError(NATIVE_ONLY)
         key = (name, with_se, n_points, centering)
+        fitted = self._fitted
         if key not in self._term_inferences:
             parameter, term = split_key(name)
             with warnings.catch_warnings():
@@ -242,7 +252,7 @@ class LSSModelView:
                 effect = self.lss.term_inference(
                     parameter, term, X_train=self.X_train, n_points=n_points, simultaneous=False
                 )
-            repaired = name in repaired_terms(self._fitted)
+            repaired = name in repaired_terms(fitted)
             self._term_inferences[key] = lss_term_inference(
                 name, effect, self._specs[name], with_se=with_se and not repaired
             )

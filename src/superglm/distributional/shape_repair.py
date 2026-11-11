@@ -22,7 +22,8 @@ from __future__ import annotations
 
 from collections.abc import Hashable
 from dataclasses import dataclass
-from types import SimpleNamespace
+from enum import Enum
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -38,9 +39,48 @@ REPAIR_NEEDS_THE_ROWS = (
     "A post-fit shape repair weights its projection by the training rows and re-estimates the "
     "intercept on them; refit with retain_rows=True before calling apply_shape_postfit()."
 )
-# The search for the re-estimated intercept stays within this many link-scale units of the
-# held one, or within four times the largest change the repairs made, whichever is wider.
+# The search for the re-estimated intercept starts within this many link-scale units of the
+# held one, or within four times the largest change the repairs made, whichever is wider, and
+# widens by ``_INTERCEPT_GROWTH`` until the optimum lies inside it, at most
+# ``_INTERCEPT_WIDENINGS`` times: bracket, then Brent (Brent, *Algorithms for Minimization
+# without Derivatives*, 1973, ch. 5; Press et al., *Numerical Recipes*, 3rd ed., section 10.1).
 _INTERCEPT_SEARCH = 1.0
+_INTERCEPT_GROWTH = 8.0
+_INTERCEPT_WIDENINGS = 6
+# An optimum this close to the edge of the search, relative to its half-width, is on the edge.
+_INTERCEPT_EDGE = 1.0e-3
+
+
+class PostfitState(Enum):
+    """Where one term's ``Constraint.postfit`` rule stands on the model that predicts.
+
+    The stored state is one repair record per term (``HandEdit.repairs``, written only by
+    ``revision.revised_model``); this is that record read against the curve the model predicts
+    with now, by ``postfit_status`` only.
+    """
+
+    OBEYED = "obeyed"  # not repaired, and the fitted curve obeys the rule
+    PENDING = "pending"  # not repaired, and the fitted curve breaks the rule
+    REPAIRED = "repaired"  # repaired, and the curve obeys the rule
+    BROKEN = "broken"  # repaired, then revised so that the curve breaks the rule again
+
+
+_UNREPAIRED = frozenset({PostfitState.OBEYED, PostfitState.PENDING})
+_REPAIRED = frozenset({PostfitState.REPAIRED, PostfitState.BROKEN})
+#: The moves of one term's state, by event. ``repair`` is ``apply_shape_postfit``; ``edit`` is a
+#: coefficient revision (a hand edit, the editor's ``to_model``), which keeps every repair
+#: record; ``refit`` is a fit, which starts from no revision.
+POSTFIT_MOVES = MappingProxyType(
+    {
+        (PostfitState.OBEYED, "repair"): frozenset({PostfitState.OBEYED}),
+        (PostfitState.PENDING, "repair"): frozenset({PostfitState.REPAIRED}),
+        (PostfitState.REPAIRED, "repair"): frozenset({PostfitState.REPAIRED}),
+        (PostfitState.BROKEN, "repair"): frozenset({PostfitState.REPAIRED}),
+        **{(state, "edit"): _UNREPAIRED for state in _UNREPAIRED},
+        **{(state, "edit"): _REPAIRED for state in _REPAIRED},
+        **{(state, "refit"): _UNREPAIRED for state in PostfitState},
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -116,6 +156,32 @@ def postfit_term_feasible(term: PostfitTerm, coefficients: NDArray[np.float64]) 
     )
 
 
+@dataclass(frozen=True)
+class PostfitStatus:
+    """One term's post-fit rule, its state, and its repair record if it has one."""
+
+    term: PostfitTerm
+    state: PostfitState
+    record: ShapeRepairRecord | None
+
+
+def postfit_status(fitted: Any) -> tuple[PostfitStatus, ...]:
+    """The state of every ``Constraint.postfit`` rule of the model, read on its current curve."""
+    edit = fitted.fit_state.hand_edit
+    records = {} if edit is None else {record.term: record for record in edit.repairs}
+    coefficients = np.asarray(fitted.coefficients, dtype=np.float64)
+    found: list[PostfitStatus] = []
+    for term in postfit_terms(fitted):
+        record = records.get(term.term)
+        obeyed = postfit_term_feasible(term, coefficients)
+        if record is None:
+            state = PostfitState.OBEYED if obeyed else PostfitState.PENDING
+        else:
+            state = PostfitState.REPAIRED if obeyed else PostfitState.BROKEN
+        found.append(PostfitStatus(term, state, record))
+    return tuple(found)
+
+
 def _axis(term: PostfitTerm, frame: EagerFrame) -> tuple[NDArray, NDArray[np.bool_]]:
     """The axis the term's shape lives on, and the rows that sit on it (SuperGLM's reading)."""
     from superglm.model.shape_ops import _repair_axis_column
@@ -130,14 +196,19 @@ def _profiled_merit(
     coefficients: NDArray[np.float64],
     parameter: str,
     reach: float,
-) -> tuple[float, float]:
+) -> tuple[float, float, int | None]:
     """The intercept shift that maximizes the joint log-likelihood, and the penalized merit there.
 
     Every term and every other parameter is held at ``coefficients``; the likelihood is the
     fit's own, bound to the retained rows, and the merit is its negative plus half the fit's
     penalty quadratic, the objective the fit minimized. A shift that does not improve on the
     held intercept by more than rounding is not taken, nor is one for a parameter with no
-    intercept.
+    intercept. The merit is infinite where some retained row has no valid parameters; the
+    third value counts those rows at the shift returned, ``None`` where the parameters
+    cannot be formed at all.
+
+    Raises ``RuntimeError`` when the likelihood still improves at the edge of the widest
+    search, so that no intercept could be re-estimated.
     """
     family = fitted.family
     plan = family.bind_likelihood(rows.response, rows.likelihood_weights, rows.observation)
@@ -146,34 +217,58 @@ def _profiled_merit(
     eta = fitted._predict_eta_resolved(coefficients, frame, rows.offsets)
     penalty = 0.5 * float(coefficients @ np.asarray(fitted.result.penalty) @ coefficients)
 
-    def negative_log_likelihood(shift: float) -> float:
+    def rows_at(shift: float) -> NDArray[np.float64] | None:
+        """Each row's log-likelihood, ``-inf`` where its parameters are not valid."""
         shifted = np.array(eta, dtype=np.float64, copy=True)
         shifted[:, column] += shift
         try:
             theta = fitted.parameters_from_eta(shifted)
         except ValueError:
-            return np.inf
+            return None
         evaluation = family.evaluate_natural(rows.response, theta, plan, derivative_order=0)
-        if evaluation.valid is not None and not np.all(evaluation.valid):
+        values = np.array(evaluation.optimizing_log_likelihood, dtype=np.float64, copy=True)
+        if evaluation.valid is not None:
+            values[~np.asarray(evaluation.valid, dtype=np.bool_)] = -np.inf
+        values[~np.isfinite(values)] = -np.inf
+        return values
+
+    def negative_log_likelihood(shift: float) -> float:
+        values = rows_at(shift)
+        if values is None or not np.all(np.isfinite(values)):
             return np.inf
-        value = -float(np.sum(evaluation.optimizing_log_likelihood, dtype=np.float64))
-        return value if np.isfinite(value) else np.inf
+        return -float(np.sum(values, dtype=np.float64))
+
+    def invalid_rows(shift: float) -> int | None:
+        values = rows_at(shift)
+        return None if values is None else int(np.count_nonzero(~np.isfinite(values)))
 
     held = negative_log_likelihood(0.0)
     if state.intercept_index is None:
-        return 0.0, held + penalty
+        return 0.0, held + penalty, invalid_rows(0.0)
     bound = max(_INTERCEPT_SEARCH, 4.0 * reach)
-    search = minimize_scalar(
-        negative_log_likelihood,
-        bounds=(-bound, bound),
-        method="bounded",
-        options={"xatol": 1e-10},
-    )
+    for _ in range(_INTERCEPT_WIDENINGS + 1):
+        search = minimize_scalar(
+            negative_log_likelihood,
+            bounds=(-bound, bound),
+            method="bounded",
+            options={"xatol": 1e-10},
+        )
+        enclosed = abs(float(search.x)) < (1.0 - _INTERCEPT_EDGE) * bound
+        if enclosed or not np.isfinite(search.fun):
+            break
+        searched, bound = bound, bound * _INTERCEPT_GROWTH
+    else:
+        raise RuntimeError(
+            f"Shape repair rejected before publication: the {parameter} intercept could not "
+            f"be re-estimated, since the likelihood still improves at a shift of {searched:.3g} "
+            "on its link scale. Check the model's specification, or fit the rule instead "
+            "(Constraint.fit)."
+        )
     # Two sums of one size: the rounding either can carry (Higham, section 3.1).
     tolerance = 2.0 * len(rows.response) * np.finfo(np.float64).eps * abs(held)
     if not np.isfinite(search.fun) or not search.fun < held - tolerance:
-        return 0.0, held + penalty
-    return float(search.x), float(search.fun) + penalty
+        return 0.0, held + penalty, invalid_rows(0.0)
+    return float(search.x), float(search.fun) + penalty, 0
 
 
 def repaired_model(
@@ -190,7 +285,7 @@ def repaired_model(
     before anything is published.
     """
     from superglm.constraints import shape_sum_tolerance
-    from superglm.distributional.revision import NO_TRAINING_FRAME, revised_model
+    from superglm.distributional.revision import NO_TRAINING_FRAME, _rows_of_the_fit, revised_model
     from superglm.model.shape_ops import _curve_spec, _grid_weights, _repairer
 
     terms = postfit_terms(fitted)
@@ -206,12 +301,8 @@ def repaired_model(
         raise RuntimeError(REPAIR_NEEDS_THE_ROWS)
     if X_train is None:
         raise ValueError(NO_TRAINING_FRAME)
-    frame = as_eager_frame(X_train)
-    if len(frame) != len(rows.response):
-        raise ValueError(
-            f"X_train has {len(frame)} rows, but the fit kept {len(rows.response)}. "
-            "Pass the frame the model was fitted on."
-        )
+    # The frame given to the fit, or the rows it kept: weights and likelihood read the kept rows.
+    frame = _rows_of_the_fit(as_eager_frame(X_train), rows)
     weights = np.asarray(rows.likelihood_weights.values, dtype=np.float64)
 
     records: list[ShapeRepairRecord] = []
@@ -234,13 +325,30 @@ def repaired_model(
         fallback = coefficients.copy()
         fallback[term.columns] = 0.0
         reach = float(repair.projection_residual)
-        shift, merit = _profiled_merit(fitted, rows, frame, candidate, term.parameter, reach)
-        _, fallback_merit = _profiled_merit(fitted, rows, frame, fallback, term.parameter, reach)
+        shift, merit, invalid = _profiled_merit(
+            fitted, rows, frame, candidate, term.parameter, reach
+        )
+        if not np.isfinite(merit):
+            where = (
+                "the model's parameters cannot be formed on the training rows"
+                if invalid is None
+                else f"{invalid} of the {len(rows.response)} training rows have no valid "
+                "parameters there (the family's likelihood is not finite)"
+            )
+            raise RuntimeError(
+                f"Unsafe shape repair of {term.term} rejected before publication: with the "
+                f"repaired curve, {where}. Fit the rule instead (Constraint.fit.{term.kind}), "
+                "which keeps every row valid, or drop the term."
+            )
+        _, fallback_merit, _ = _profiled_merit(fitted, rows, frame, fallback, term.parameter, reach)
         if merit > fallback_merit + shape_sum_tolerance(abs(fallback_merit), len(rows.response)):
             raise RuntimeError(
-                f"Unsafe shape repair of {term.term} rejected before publication: the repaired "
-                "curve fits worse than dropping the term. Fit the rule instead "
-                f"(Constraint.fit.{term.kind}), or drop the term."
+                f"Unsafe shape repair of {term.term} rejected before publication: its penalized "
+                "objective, the negative log-likelihood plus the fit's smoothing penalty at the "
+                f"fit's smoothing parameters, is {merit:.6g} against {fallback_merit:.6g} with "
+                "the term dropped. Fit the rule instead "
+                f"(Constraint.fit.{term.kind}), which chooses the smoothing under the rule, or "
+                "drop the term."
             )
         state = fitted.layout.predictor(term.parameter)
         if state.intercept_index is not None:
@@ -263,8 +371,12 @@ def repaired_model(
 
 
 __all__ = [
+    "POSTFIT_MOVES",
     "REPAIR_NEEDS_THE_ROWS",
+    "PostfitState",
+    "PostfitStatus",
     "PostfitTerm",
+    "postfit_status",
     "postfit_term_feasible",
     "postfit_terms",
     "repaired_model",

@@ -136,6 +136,10 @@ _SPECIAL_SUFFIX = ":special"
 _ABSORBED_EDF = 1.0e-10
 #: What a term repaired after the fit reports in place of its inference.
 REPAIRED_NOTE = "repaired after the fit (Constraint.postfit): inference withheld"
+#: What the intercept of a parameter with a repaired term reports in place of its inference.
+REPAIRED_INTERCEPT_NOTE = (
+    "re-estimated after the post-fit repair of {terms} (Constraint.postfit): inference withheld"
+)
 
 
 def _json_array(values: NDArray | None) -> list[float | None] | None:
@@ -1240,7 +1244,9 @@ def summary_table(
     edit, as its standard errors do. A term repaired after the fit to obey a
     ``Constraint.postfit`` rule reports its EDF and estimate, and NaN for ``se``,
     the statistic, its rank and the p-value, with ``note`` saying so, as
-    ``SuperGLM``'s summary withholds a repaired term's inference.
+    ``SuperGLM``'s summary withholds a repaired term's inference. So does the
+    intercept of its parameter, which the repair re-estimated: the fit's standard
+    error and test do not describe the estimate shown.
     """
     beta = np.asarray(fitted.coefficients, dtype=np.float64)
     fit_beta = np.asarray(fitted.fitted_result.coefficients, dtype=np.float64)
@@ -1278,6 +1284,14 @@ def summary_table(
                 fitted.inference.intercept_edf,
             )
             row["estimate"] = float(beta[state.intercept_index])
+            repaired_here = [
+                name for name in repaired_terms(fitted) if name.partition(":")[0] == state.name
+            ]
+            if repaired_here:
+                row.update(
+                    statistic=float("nan"), rank=float("nan"), p_value=float("nan"), se=float("nan")
+                )
+                row["note"] = REPAIRED_INTERCEPT_NOTE.format(terms=", ".join(repaired_here))
             row["note"] = _join_notes(row["note"], convergence_note, covariance_note)
             rows.append(row)
         for qualified, term_slice in fitted.layout.term_slices.items():

@@ -9,6 +9,7 @@ against an independent projection (a dense-grid QP solved through its NNLS dual)
 
 from __future__ import annotations
 
+import copy
 import pickle
 import warnings
 
@@ -18,8 +19,13 @@ import pytest
 from scipy import optimize, stats
 
 from superglm import Constraint, GammaLS, SuperLSS, s
+from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
+from superglm.distributional.kernels.generalized_gamma import mean_exists
 from superglm.distributional.predictor import ShapeConstraintIgnoredWarning
-from superglm.distributional.revision import ShapeRepairedWarning
+from superglm.distributional.revision import EditedCoefficientsWarning, ShapeRepairedWarning
+from superglm.distributional.shape_repair import POSTFIT_MOVES, PostfitState, postfit_status
+from superglm.editor import edit
+from superglm.editor.cv import InForce
 from superglm.editor.lss.view import LSSModelView
 from tests._shape_violation import curvature_violation, monotonicity_violation
 
@@ -57,6 +63,10 @@ def _fit(parameter: str, rule, *, kind: str, k: int, retain_rows: bool = True) -
 
 def _curve(model: SuperLSS, parameter: str) -> np.ndarray:
     return model.predict_link(_GRID)[parameter].to_numpy()
+
+
+def _term_of(fitted, parameter: str):
+    return next(p for p in fitted.compiled_predictors if p.name == parameter).compiled.specs["x"]
 
 
 def _term(model: SuperLSS, parameter: str):
@@ -102,13 +112,25 @@ def _oracle_projection(model: SuperLSS, parameter: str, kind: str, n_grid: int =
     return grid, w, target, basis @ projected
 
 
-def _gamma_log_likelihood(model: SuperLSS, mean_shift: float) -> float:
+def _gamma_log_likelihood(model: SuperLSS, mean_shift: float, weights=None) -> float:
     """The book's log-likelihood under ``scipy.stats.gamma`` with the mean's intercept moved."""
     X, y = _data("mean")
     link = model.predict_link(X)
     mean = np.exp(link["mean"].to_numpy() + mean_shift)
     cv = np.exp(link["scale"].to_numpy())
-    return float(np.sum(stats.gamma.logpdf(y, a=1.0 / cv**2, scale=mean * cv**2)))
+    rows = stats.gamma.logpdf(y, a=1.0 / cv**2, scale=mean * cv**2)
+    return float(np.sum(rows if weights is None else weights * rows))
+
+
+def _intercept_slopes(model: SuperLSS, shift: float, weights=None) -> tuple[float, float]:
+    """The likelihood's slope in the mean intercept at the model, and at ``shift`` back."""
+    step = 1e-4
+
+    def at(h: float) -> float:
+        upper = _gamma_log_likelihood(model, h + step, weights)
+        return (upper - _gamma_log_likelihood(model, h - step, weights)) / (2 * step)
+
+    return at(0.0), at(-shift)
 
 
 @pytest.mark.parametrize(
@@ -150,13 +172,29 @@ def test_the_repair_re_estimates_the_intercept_on_the_likelihood():
     (record,) = model._model.fit_state.hand_edit.repairs
     assert record.intercept_shift != 0.0
     # the repaired mean's intercept maximizes scipy's gamma likelihood with everything else held
-    step = 1e-4
-    slope = (_gamma_log_likelihood(model, step) - _gamma_log_likelihood(model, -step)) / (2 * step)
-    held = (
-        _gamma_log_likelihood(model, step - record.intercept_shift)
-        - _gamma_log_likelihood(model, -step - record.intercept_shift)
-    ) / (2 * step)
+    slope, held = _intercept_slopes(model, record.intercept_shift)
     assert abs(slope) <= 1e-4 * abs(held)
+
+
+@pytest.mark.parametrize("level", [-5.0, 5.0])
+def test_the_intercept_is_re_estimated_however_far_an_edit_moved_the_level(level):
+    # An editor edit can move the term's level far beyond what the projection moves the curve;
+    # the search widens until it holds the likelihood's optimum.
+    model = _fit("mean", Constraint.postfit.increasing, kind="bs", k=8)
+    X, y = _data("mean")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        session = edit(model, train_data=(X, y))
+        session.select_x("mean:x", 0.0, 10.0)
+        session.shift("mean:x", level)
+        edited = session.to_model()
+    edited.apply_shape_postfit()
+    (record,) = edited._model.fit_state.hand_edit.repairs
+    assert record.intercept_shift == pytest.approx(-level, abs=1.0)
+    slope, held = _intercept_slopes(edited, record.intercept_shift)
+    assert abs(slope) <= 1e-4 * abs(held)
+    mean = edited.predict_parameters(X)["mean"].to_numpy()
+    assert np.sum(y) / np.sum(mean) == pytest.approx(1.0, abs=0.05)
 
 
 def test_a_repaired_term_withholds_its_inference_and_keeps_its_edf():
@@ -180,9 +218,19 @@ def test_a_repaired_term_withholds_its_inference_and_keeps_its_edf():
     assert row["edf"] == pytest.approx(edf)
     assert "inference withheld" in row["note"]
 
-    # an intercept is not a repaired term: its standard error stays
-    intercepts = table[table["term"] == "(Intercept)"]
-    assert np.all(np.isfinite(intercepts["se"].to_numpy()))
+    # the repair re-estimated the mean's intercept, so the fit's inference does not describe it;
+    # the scale's intercept was not moved, and keeps its inference
+    intercepts = table[table["term"] == "(intercept)"].set_index("parameter")
+    assert intercepts.loc["mean", "estimate"] == pytest.approx(
+        model._model.coefficients[model._model.layout.predictor("mean").intercept_index]
+    )
+    assert np.isnan(intercepts.loc["mean", ["se", "statistic", "p_value"]].to_numpy(float)).all()
+    assert "re-estimated after the post-fit repair of mean:x" in intercepts.loc["mean", "note"]
+    assert np.isfinite(
+        intercepts.loc["scale", ["se", "statistic", "p_value"]].to_numpy(float)
+    ).all()
+    with pytest.warns(ShapeRepairedWarning, match="intercept.*other rows.*before the repair"):
+        model.summary()
     with pytest.warns(ShapeRepairedWarning, match="covariance of the fit before"):
         model.predict_link(_GRID, se_fit=True)
 
@@ -270,9 +318,50 @@ def test_a_second_repair_and_an_obeyed_rule_change_nothing():
 def test_a_repair_that_fits_worse_than_no_term_is_refused_and_nothing_is_published():
     model = _fit("mean", Constraint.postfit.increasing, kind="bs", k=10)
     before = model._model
-    with pytest.raises(RuntimeError, match="worse than dropping the term"):
+    # the repaired curve fits the data better than no term; it loses on the penalty, and the
+    # refusal says which objective it compared
+    with pytest.raises(RuntimeError, match="penalized objective.*smoothing penalty") as refused:
         model.apply_shape_postfit()
+    assert "fits worse" not in str(refused.value)
+    assert "Constraint.fit.increasing" in str(refused.value)
     assert model._model is before
+
+
+def test_a_repair_that_leaves_a_row_without_a_finite_mean_is_refused():
+    # Mean-form generalized gamma has a finite mean only where scale * |shape| < 1 for a
+    # negative shape. Every row has one at this revision; the decreasing repair of the shape
+    # flattens it to about -0.6, which leaves the rows of largest scale without one.
+    x = np.linspace(0.0, 1.0, 200)
+    X = pd.DataFrame({"x": x})
+    family = GeneralizedGammaLSS()
+    model = SuperLSS(
+        family,
+        family.mean(),
+        family.scale(s("x", kind="bs", k=6)),
+        family.shape(s("x", kind="bs", k=6, constraint=Constraint.postfit.decreasing)),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(X, np.random.default_rng(0).gamma(4.0, 0.25, 200))
+    fitted = model._model
+    beta = np.array(fitted.coefficients, dtype=np.float64)
+    targets = {"scale": np.log(0.49) + x * np.log(1.99 / 0.49), "shape": -1.0 + 0.8 * x}
+    for parameter, target in targets.items():
+        spec = _term_of(fitted, parameter)
+        design = np.column_stack([np.ones(len(x)), spec.transform(x)])
+        solution = np.linalg.lstsq(design, target, rcond=None)[0]
+        beta[fitted.layout.predictor(parameter).intercept_index] = solution[0]
+        beta[fitted.layout.term_slices[f"{parameter}:x"]] = solution[1:]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", EditedCoefficientsWarning)
+        revised = model._with_revised_coefficients(beta, edited_terms=["scale:x", "shape:x"])
+    theta = revised.predict_parameters(X)
+    assert mean_exists(theta["scale"].to_numpy(), theta["shape"].to_numpy()).all()
+    before = revised._model
+    with pytest.raises(RuntimeError, match="shape:x.*training rows have no valid parameters"):
+        revised.apply_shape_postfit()
+    assert revised._model is before
+    revised.predict_cdf(X, np.ones(len(x)))
 
 
 def test_a_repair_needs_the_fitted_rows():
@@ -319,3 +408,151 @@ def test_a_repaired_model_pickles_with_its_repair():
         restored.predict_link(_GRID)["mean"].to_numpy(), _curve(model, "mean")
     )
     assert restored._model.fit_state.hand_edit.repaired_terms == ("mean:x",)
+
+
+def test_a_restored_model_is_repaired_with_the_frame_it_was_fitted_on():
+    # A pickle carries no training frame, and the fit dropped the zero-weight rows: the frame
+    # the user fitted on is the one they have.
+    family = GammaLS()
+    X, y = _data("mean")
+    weights = np.ones(len(y))
+    weights[:20] = 0.0
+    model = SuperLSS(
+        family,
+        family.mean(s("x", kind="bs", k=8, constraint=Constraint.postfit.increasing)),
+        family.scale(),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(X, y, sample_weight=weights)
+    restored = pickle.loads(pickle.dumps(model))
+    restored.apply_shape_postfit(X)
+    model.apply_shape_postfit()
+    np.testing.assert_allclose(_curve(restored, "mean"), _curve(model, "mean"), rtol=1e-12)
+    assert restored._model.fit_state.hand_edit.repaired_terms == ("mean:x",)
+    # the intercept is re-estimated on the rows the fit kept
+    (record,) = restored._model.fit_state.hand_edit.repairs
+    slope, held = _intercept_slopes(restored, record.intercept_shift, weights)
+    assert abs(slope) <= 1e-4 * abs(held)
+
+
+def _break_in_the_editor(model: SuperLSS) -> SuperLSS:
+    """Lower the 6-7 stretch of the repaired curve in the editor, which breaks increasing."""
+    X, y = _data("mean")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        session = edit(model, train_data=(X, y))
+        session.select_x("mean:x", 6, 7)
+        session.shift("mean:x", -0.4)
+        return session.to_model()
+
+
+def test_a_repaired_curve_edited_to_break_its_rule_is_disclosed_and_repaired_once_more():
+    model = _fit("mean", Constraint.postfit.increasing, kind="bs", k=8)
+    X, _ = _data("mean")
+    model.apply_shape_postfit()
+    broken = _break_in_the_editor(model)
+    assert monotonicity_violation(_curve(broken, "mean"), "increasing") > 1e-5
+
+    (finding,) = [f for f in broken.diagnose().findings if f.code == "shape.repair"]
+    assert finding.severity == "warning" and "breaks it again" in finding.headline
+    notes = [note for note in broken.rating_table_payload(X).notes if "mean:x" in note]
+    assert len(notes) == 1 and "edited since" in notes[0] and "not increasing" in notes[0]
+
+    broken.apply_shape_postfit()
+    assert monotonicity_violation(_curve(broken, "mean"), "increasing") <= 1e-9
+    # one current repair: the new one replaced the first
+    assert [r.term for r in broken._model.fit_state.hand_edit.repairs] == ["mean:x"]
+    (finding,) = [f for f in broken.diagnose().findings if f.code == "shape.repair"]
+    assert finding.severity == "info" and "repaired the fitted curve" in finding.headline
+    notes = [note for note in broken.rating_table_payload(X).notes if "mean:x" in note]
+    assert len(notes) == 1 and "was repaired" in notes[0] and "edited since" not in notes[0]
+
+
+def test_each_move_of_a_postfit_rule_lands_where_its_table_says():
+    X, y = _data("mean")
+    walked: set[tuple[PostfitState, str]] = set()
+
+    def state(model: SuperLSS) -> PostfitState:
+        (status,) = postfit_status(model._model)
+        return status.state
+
+    def move(model: SuperLSS, event: str, data=(X, y)) -> SuperLSS:
+        before = state(model)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            if event == "repair":
+                moved = model.apply_shape_postfit()
+            elif event == "refit":
+                moved = copy.copy(model).fit_reml(*data)
+            else:  # an edit that keeps the curve, or one that puts the fit's curve back
+                beta = np.array(model._model.coefficients, dtype=np.float64)
+                if event == "edit back":
+                    columns = model._model.layout.term_slices["mean:x"]
+                    beta[columns] = model.result_.coefficients[columns]
+                moved = model._with_revised_coefficients(beta, edited_terms=["mean:x"])
+        key = (before, "edit" if event.startswith("edit") else event)
+        assert state(moved) in POSTFIT_MOVES[key], (key, state(moved))
+        walked.add(key)
+        return moved
+
+    obeyed, obeyed_data = _obeyed_fit()
+    assert state(obeyed) is PostfitState.OBEYED
+    for event in ("repair", "edit", "refit"):
+        move(obeyed, event, obeyed_data)
+
+    pending = _fit("mean", Constraint.postfit.increasing, kind="bs", k=8)
+    assert state(pending) is PostfitState.PENDING
+    move(pending, "edit")
+    move(pending, "refit")
+    repaired = move(copy.copy(pending), "repair")
+    assert state(repaired) is PostfitState.REPAIRED
+    move(repaired, "repair")
+    move(repaired, "edit")
+    move(repaired, "refit")
+    broken = move(repaired, "edit back")
+    assert state(broken) is PostfitState.BROKEN
+    move(broken, "edit")
+    move(broken, "refit")
+    assert state(move(broken, "repair")) is PostfitState.REPAIRED
+    assert walked == set(POSTFIT_MOVES)
+
+
+def _obeyed_fit():
+    rng = np.random.default_rng(5)
+    x = rng.uniform(0.0, 10.0, 400)
+    X, y = pd.DataFrame({"x": x}), rng.gamma(6.0, np.exp(0.3 * x) / 6.0)
+    family = GammaLS()
+    obeyed = SuperLSS(
+        family,
+        family.mean(s("x", kind="bs", k=6, constraint=Constraint.postfit.increasing)),
+        family.scale(),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return obeyed.fit_reml(X, y), (X, y)
+
+
+def test_an_open_editor_session_sees_a_repair_made_on_its_model():
+    model = _fit("mean", Constraint.postfit.increasing, kind="bs", k=8)
+    X, y = _data("mean")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        session = edit(model, train_data=(X, y))
+    assert session.model.term_inference("mean:x").ci_lower is not None
+    in_force = InForce.of(session)
+    assert in_force.describes(session)
+
+    model.apply_shape_postfit()
+    # a result made before the repair is not current: predictions moved
+    assert not in_force.describes(session)
+    assert InForce.of(session).describes(session)
+    # the view follows the repair: the repaired curve, with its band withheld rather than NaN
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ShapeRepairedWarning)
+        repaired = session.model.term_inference("mean:x")
+    assert repaired.ci_lower is None and repaired.ci_upper is None
+    spec, columns = _term(model, "mean")
+    np.testing.assert_allclose(
+        session.model.term_coefficients("mean:x"), model._model.coefficients[columns]
+    )

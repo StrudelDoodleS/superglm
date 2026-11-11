@@ -1007,11 +1007,19 @@ class SuperLSS:
         if not repaired:
             return
         names = ", ".join(repaired)
-        if term is not None or withheld:
+        if term is not None:
             message = (
                 f"{names} repaired after the fit to obey a Constraint.postfit rule; the repair is "
                 "a projection with no reference distribution of the fit's, so its standard "
                 "errors, bands and test are withheld."
+            )
+        elif withheld:
+            message = (
+                f"{names} repaired after the fit to obey a Constraint.postfit rule; the repair is "
+                "a projection with no reference distribution of the fit's, so its standard "
+                "errors and test are withheld, and so are those of its parameter's intercept, "
+                "which the repair re-estimated. The other rows' standard errors and tests are "
+                "the fit's, from before the repair."
             )
         else:
             message = (
@@ -1033,8 +1041,10 @@ class SuperLSS:
         parameter on that parameter's link scale: the fitted curve is projected onto the
         monotone or curvature cone in the term's own fitted basis, weighted by where the
         training rows sit along its axis, and the parameter's intercept is then re-estimated
-        on the joint likelihood with everything else held. A repair that fits worse than
-        dropping the term is refused, and nothing is published.
+        on the joint likelihood with everything else held. A repair whose penalized objective
+        (the negative log-likelihood plus the fit's smoothing penalty) is worse than with the
+        term dropped is refused, as is one that leaves a training row without valid
+        parameters, and nothing is published.
 
         Predictions, curves, ``coef_`` and rating tables follow the repair; ``result_`` and
         the covariance keep describing the fit. A repaired term reports its EDF, and its
@@ -1043,8 +1053,10 @@ class SuperLSS:
         each repair, and each post-fit rule still waiting for one.
 
         A term that already obeys its rule is left exactly as it is, so a second call
-        repairs nothing. The projection reads the training rows: the frame attached at
-        ``fit``, else ``X_train``, and the fit must have kept its rows (``retain_rows``).
+        repairs nothing; a term edited after its repair so that it breaks the rule again is
+        repaired again, and its new repair replaces the earlier one. The projection reads the
+        training rows: the frame attached at ``fit``, else ``X_train`` (the frame given to the
+        fit, or the rows it kept), and the fit must have kept its rows (``retain_rows``).
 
         Returns
         -------

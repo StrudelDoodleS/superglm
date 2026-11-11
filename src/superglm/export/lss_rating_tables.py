@@ -355,26 +355,31 @@ def _parameter_table(
 
 
 def _postfit_notes(fitted) -> tuple[str, ...]:
-    """A sentence for each ``Constraint.postfit`` rule: the repair its table shows, or none yet."""
-    from superglm.distributional.shape_repair import postfit_term_feasible, postfit_terms
+    """A sentence for each ``Constraint.postfit`` rule its table does not simply follow: the
+    repair the table shows, a rule not yet applied, or a repaired curve edited to break it."""
+    from superglm.distributional.shape_repair import PostfitState, postfit_status
 
-    edit = fitted.fit_state.hand_edit
-    repairs = () if edit is None else edit.repairs
-    notes = [
-        f"{record.term} was repaired after the fit to be {record.kind} (Constraint.postfit); its "
-        "table is the repaired curve, which moved by at most "
-        f"{record.largest_change:.3g} on its parameter's link scale."
-        for record in repairs
-    ]
-    repaired = {record.term for record in repairs}
-    coefficients = np.asarray(fitted.coefficients, dtype=np.float64)
-    notes.extend(
-        f"{term.term} carries Constraint.postfit.{term.kind}, which has not been applied, and its "
-        "fitted curve breaks it; this table is the unrepaired curve. Call "
-        "apply_shape_postfit() before exporting to tabulate the repaired one."
-        for term in postfit_terms(fitted)
-        if term.term not in repaired and not postfit_term_feasible(term, coefficients)
-    )
+    notes: list[str] = []
+    for status in postfit_status(fitted):
+        term, kind, record = status.term.term, status.term.kind, status.record
+        if status.state is PostfitState.REPAIRED and record is not None:
+            notes.append(
+                f"{term} was repaired after the fit to be {kind} (Constraint.postfit); its "
+                "table is the repaired curve, which moved by at most "
+                f"{record.largest_change:.3g} on its parameter's link scale."
+            )
+        elif status.state is PostfitState.PENDING:
+            notes.append(
+                f"{term} carries Constraint.postfit.{kind}, which has not been applied, and "
+                "its fitted curve breaks it; this table is the unrepaired curve. Call "
+                "apply_shape_postfit() before exporting to tabulate the repaired one."
+            )
+        elif status.state is PostfitState.BROKEN:
+            notes.append(
+                f"{term} was repaired after the fit to be {kind} (Constraint.postfit), but it "
+                f"has been edited since and this table is not {kind}. Call "
+                "apply_shape_postfit() before exporting to tabulate a curve that obeys the rule."
+            )
     return tuple(notes)
 
 

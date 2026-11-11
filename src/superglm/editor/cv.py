@@ -296,27 +296,45 @@ def _edited_values(term) -> tuple[tuple[Any, float], ...]:
     return tuple(sorted(zip(keys, values, strict=True), key=lambda pair: str(pair[0])))
 
 
+def _fit_in_force(model) -> Any:
+    """The object a model's current fit lives in, which a refit or a post-fit repair replaces.
+
+    Both change a model in place, so the model object alone cannot tell a result made before
+    them from one made after: a SuperLSS publishes a new fitted model, a SuperGLM a new result.
+    """
+    if is_lss(model):
+        return model.lss._model
+    return getattr(model, "_result", None)
+
+
 @dataclass(frozen=True)
 class InForce:
     """What a result was computed for: the fitted model in force and the hand edits on it.
 
     Undo brings back the same model object and the same edited values, so a result made before an
     edit describes the model again once the edit is undone; the revision number only ever rises.
+    A refit or a post-fit repair made on that object in place (``apply_shape_postfit``) replaces
+    its fit, so a result made before it no longer describes the model.
     """
 
     model: Any
     edits: tuple[tuple[str, tuple[tuple[Any, float], ...]], ...]
+    fit: Any = None
 
     @classmethod
     def of(cls, session) -> InForce:
         edits = tuple(
             (name, _edited_values(session.terms[name])) for name in sorted(session.edited_terms())
         )
-        return cls(session.model, edits)
+        return cls(session.model, edits, _fit_in_force(session.model))
 
     def describes(self, session) -> bool:
         """Whether ``session`` holds the model this was computed for; call it under the widget lock."""
-        return _same_fit(self.model, session.model) and self.edits == InForce.of(session).edits
+        return (
+            _same_fit(self.model, session.model)
+            and self.fit is _fit_in_force(session.model)
+            and self.edits == InForce.of(session).edits
+        )
 
     @cached_property
     def token(self) -> str:
