@@ -322,6 +322,129 @@ def test_a_pooled_block_forms_its_solved_rows_a_piece_at_a_time(monkeypatch):
     assert np.all(np.abs(results[4][2] - reference_cross) <= cross_bound)
 
 
+def _wide_dense_case(n: int, width: int = 600) -> dict:
+    """A ``width``-column dense group of cosines, three numeric columns and a categorical.
+
+    Four penalties: a second-difference penalty on the wide group (the
+    caller's dense-penalty products) and a ridge on each numeric column.  The
+    inverse is any symmetric positive definite matrix: the test reads memory
+    and bits, not values.
+    """
+    rng = np.random.default_rng(6203)
+    u = rng.uniform(0.0, 1.0, n)
+    wide = np.cos(np.pi * np.outer(u, np.arange(1, width + 1)))
+    numeric = rng.normal(size=(n, 3))
+    codes = rng.integers(0, 4, n)
+    level = CategoricalGroupMatrix(np.where(codes == 3, -1, codes), 3)
+    dense_groups = [DenseGroupMatrix(wide)] + [DenseGroupMatrix(numeric[:, [i]]) for i in range(3)]
+    dm = DesignMatrix([*dense_groups, level], n=n, p=width + 6)
+    p = dm.p
+    design = np.column_stack((wide, numeric, level.toarray()))
+    beta = rng.normal(scale=0.01, size=p)
+    eta = design @ beta - 0.4
+    link = LogLink()
+    weights = link.inverse(eta)
+    sum_w = float(np.sum(weights))
+    mean_x = weights @ design / sum_w
+    root = rng.normal(size=(p, p))
+    inverse = root @ root.T / p + np.eye(p)
+    ends = np.cumsum([0, width, 1, 1, 1, 3])
+    names = ["wide", "x0", "x1", "x2", "lvl"]
+    groups = [GroupSlice(name=name, start=ends[i], end=ends[i + 1]) for i, name in enumerate(names)]
+    difference = np.diff(np.eye(width), n=2, axis=0)
+    penalties = [
+        PenaltyComponent(
+            name=group.name,
+            group_name=group.name,
+            group_index=i,
+            group_sl=group.sl,
+            omega_raw=None,
+            omega_ssp=difference.T @ difference if i == 0 else None,
+            penalty_kind="dense" if i == 0 else "identity",
+        )
+        for i, group in enumerate(groups[:4])
+    ]
+    result = PIRLSResult(
+        beta=beta,
+        intercept=-0.4,
+        n_iter=1,
+        deviance=0.0,
+        converged=True,
+        phi=1.0,
+        effective_df=float(p),
+        reml_geometry=REMLGeometrySummary(mean_x=mean_x, sum_w=sum_w, column_scale=np.ones(p)),
+    )
+    return {
+        "dm": dm,
+        "link": link,
+        "groups": groups,
+        "pirls_result": result,
+        "XtWX_S_inv": inverse,
+        "lambdas": {"wide": 1.0, "x0": 2.0, "x1": 3.0, "x2": 0.5},
+        "sample_weight": np.ones(n),
+        "offset_arr": np.zeros(n),
+        "distribution": Poisson(),
+        "reml_penalties": penalties,
+    }
+
+
+def test_a_pooled_jobs_charge_covers_its_traced_peak(monkeypatch):
+    """The pool charges a job at least the memory it traces, dense centring included.
+
+    The pool runs as many jobs as ``max_memory`` admits at the charge, so a
+    charge below a job's peak lets the pass overrun the budget.  A wide dense
+    group makes a job's dense values the larger part of what it holds: the
+    test traces each job alone (``tracemalloc``, which counts numpy's arrays)
+    and compares its peak with the charge, then checks the pooled pass keeps
+    the serial bits.  Blocks and pieces are scaled down together: three
+    blocks of five pieces.  Mutation: centring a block's dense columns all at
+    once (three block-sized dense arrays per job) exceeds the charge.
+    """
+    import tracemalloc
+
+    import superglm.reml._leverage_rows as leverage_rows
+    from superglm._parallel import parallel_config
+
+    _solved_rows_only(monkeypatch)
+    monkeypatch.setattr(leverage_rows, "_BLOCK_BYTES", 4 * 1024 * 1024)
+    monkeypatch.setattr(leverage_rows, "_PIECE_BYTES", 1024 * 1024)
+    case = _wide_dense_case(2560)
+    p = case["dm"].p
+    block_rows = leverage_rows._support_block_rows(p)
+    assert -(-block_rows // leverage_rows._support_piece_rows(p)) == 5
+    assert 2 * block_rows < case["dm"].n <= 3 * block_rows
+    charged: list[int] = []
+    peaks: list[int] = []
+    pooled_map = w_derivatives.pooled_map
+
+    def traced_map(fn, items, item_bytes):
+        charged.append(item_bytes)
+        for item in items:
+            tracemalloc.reset_peak()
+            held = tracemalloc.get_traced_memory()[0]
+            part = fn(item)
+            peaks.append(tracemalloc.get_traced_memory()[1] - held)
+            yield part
+
+    # The first pass also compiles or loads the kernel; trace a later one.
+    with parallel_config(n_jobs=1):
+        serial = w_derivatives.reml_w_correction(**case, leverage_hessian=True)
+    monkeypatch.setattr(w_derivatives, "pooled_map", traced_map)
+    tracemalloc.start()
+    try:
+        traced = w_derivatives.reml_w_correction(**case, leverage_hessian=True)
+    finally:
+        tracemalloc.stop()
+    assert len(charged) == 1 and len(peaks) == 3
+    assert max(peaks) <= charged[0]
+    monkeypatch.setattr(w_derivatives, "pooled_map", pooled_map)
+    with parallel_config(n_jobs=3):
+        pooled = w_derivatives.reml_w_correction(**case, leverage_hessian=True)
+    for result in (traced, pooled):
+        assert result[0].tobytes() == serial[0].tobytes()
+        assert result[2].tobytes() == serial[2].tobytes()
+
+
 def _outlier_case() -> dict:
     """A dense column with a ``1e200`` row that carries no weight, beside a categorical."""
     rng = np.random.default_rng(9411)

@@ -383,24 +383,27 @@ def _support_block(
         codes[position] = zero
         codes[position, level_rows[first:last] - start] = level_bins[first:last]
     local = np.ascontiguousarray(local, dtype=np.intp)
-    dense_values = np.empty((local.size, plan.dense_columns.size), dtype=np.float64)
-    filled = 0
-    for column, width, matrix in plan.dense:
-        cols = slice(column, column + width)
-        values = np.asarray(matrix[start:stop], dtype=np.float64)[local] - centre_hi[cols]
-        if centre_lo is not None:
-            values -= centre_lo[cols]
-        dense_values[:, filled : filled + width] = values
-        filled += width
     piece_rows = _support_piece_rows(p)
 
     def pieces() -> Iterator[tuple[slice, NDArray, NDArray]]:
         # A row's ``y`` and ``h`` read only that row, so a piece's values are
-        # the block's own, whatever the piece size.
+        # the block's own, whatever the piece size.  The dense columns are
+        # centred a piece at a time too, into one buffer the pieces share.
+        dense_buffer = np.empty((min(piece_rows, local.size), plan.dense_columns.size))
         for first in range(0, local.size, piece_rows):
             span = slice(first, min(first + piece_rows, local.size))
-            solved = np.empty((span.stop - first, p), dtype=np.float64)
-            leverage = np.empty(span.stop - first, dtype=np.float64)
+            rows = start + local[span]
+            dense_values = dense_buffer[: rows.size]
+            filled = 0
+            for column, width, matrix in plan.dense:
+                cols = slice(column, column + width)
+                target = dense_values[:, filled : filled + width]
+                np.subtract(np.asarray(matrix[rows], dtype=np.float64), centre_hi[cols], out=target)
+                if centre_lo is not None:
+                    target -= centre_lo[cols]
+                filled += width
+            solved = np.empty((rows.size, p), dtype=np.float64)
+            leverage = np.empty(rows.size, dtype=np.float64)
             _solved_rows_and_leverages(
                 solved,
                 leverage,
@@ -414,7 +417,7 @@ def _support_block(
                 plan.support_offsets,
                 plan.widths,
                 plan.columns,
-                dense_values[span],
+                dense_values,
                 plan.dense_columns,
                 plan.dense_inverse,
             )
@@ -496,13 +499,15 @@ def solved_row_blocks(
         )
 
     # A job holds one piece of solved rows and the caller's products of it, a
-    # few copies of ``piece x p``, beside its block's codes, dense values and
-    # the caller's per-row terms.
+    # few copies of ``piece x p``, and the piece's centred dense values,
+    # beside its block's codes and row indices and the caller's per-row terms.
+    # A piece's dense columns are gathered (at most two ``piece x width``
+    # copies) before its solved rows are formed, so within those copies.
     piece = min(rows, _support_piece_rows(p))
-    per_row = 8 * (len(plan.offsets) + plan.dense_columns.size + 1) + int(row_bytes)
+    per_row = 8 * (len(plan.offsets) + 2) + int(row_bytes)
     return RowBlocks(
         jobs=[job(start) for start in range(0, n, rows)],
-        block_bytes=4 * 8 * piece * p + per_row * rows,
+        block_bytes=8 * piece * (4 * p + plan.dense_columns.size) + per_row * rows,
     )
 
 
