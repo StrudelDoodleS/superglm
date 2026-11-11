@@ -42,13 +42,14 @@ REPAIR_NEEDS_THE_ROWS = (
 # The search for the re-estimated intercept runs in units of the parameter's own scale on its
 # link (``_intercept_scale``), so that the response's units do not change it: bracket, then
 # Brent (Brent, *Algorithms for Minimization without Derivatives*, 1973, ch. 5; Press et al.,
-# *Numerical Recipes*, 3rd ed., section 10.1). The bracket's first steps are
-# ``_INTERCEPT_SEARCH`` of those units either side of the held intercept; downhill, each next
-# step is ``_INTERCEPT_GROWTH`` times the last, until the objective rises, a row turns invalid,
-# or the shift leaves float64's range. No count limits it, so an optimum any number of units
-# away is bracketed in a number of steps logarithmic in its distance.
+# *Numerical Recipes*, 3rd ed., section 10.1). Brent first runs within ``_INTERCEPT_SEARCH``
+# of those units of the held intercept. Where its result is no lower than an end, the bracket
+# walks downhill from that end, each step growing by ``_INTERCEPT_GROWTH``, until the
+# objective rises, a row turns invalid, or the shift leaves float64's range. No count limits
+# it, so an optimum any number of units away is bracketed in steps logarithmic in its distance.
 _INTERCEPT_SEARCH = 4.0
-_INTERCEPT_GROWTH = 8.0
+# Each downhill step is the golden ratio times the last, ``mnbrak``'s default growth.
+_INTERCEPT_GROWTH = (1.0 + np.sqrt(5.0)) / 2.0
 _UNIT_ROUNDOFF = np.finfo(np.float64).eps / 2.0
 # A smooth minimum is located to about sqrt(u) of its scale, since the objective is flat to
 # rounding within that distance of it (Press et al., section 10.1); Brent stops there.
@@ -264,20 +265,29 @@ def _profiled_merit(
     start = 0.0 if np.isfinite(held) else _finite_start(objective)
     if start is None:
         return 0.0, held + penalty, invalid_rows(0.0)
-    bracket = _bracket(objective, start, unit)
-    if bracket is None:
-        raise RuntimeError(
-            f"Shape repair rejected before publication: the {parameter} intercept could not "
-            "be re-estimated, since the likelihood still improves where the shift leaves "
-            "float64's range on its link scale. Check the model's specification, or fit the "
-            "rule instead (Constraint.fit)."
-        )
-    best = _brent(objective, *bracket, centre=start)
-    if abs(best - start) > _INTERCEPT_SEARCH:
-        # Brent's tolerance is relative to the distance from ``centre`` (scipy's is
-        # sqrt(eps) times it), so an optimum found beyond the first steps is polished in
-        # coordinates centred on it, over a window that holds that tolerance.
-        polish = _INTERCEPT_SEARCH * (abs(best - start) * np.sqrt(np.finfo(float).eps) + 1.0)
+    lower = _finite_reach(objective, start, start - _INTERCEPT_SEARCH)
+    upper = _finite_reach(objective, start, start + _INTERCEPT_SEARCH)
+    best = _brent(objective, lower, upper, centre=start)
+    # Brent's result is bracketed when it is lower than each end that is not a wall of
+    # invalid rows. Otherwise the optimum may lie beyond that end: walk out from it.
+    edges = ((upper, start + _INTERCEPT_SEARCH), (lower, start - _INTERCEPT_SEARCH))
+    open_end = next(
+        (end for end, edge in edges if end == edge and objective(end) <= objective(best)), None
+    )
+    if open_end is not None:
+        bracket = _bracket(objective, start, open_end, unit)
+        if bracket is None:
+            raise RuntimeError(
+                f"Shape repair rejected before publication: the {parameter} intercept could "
+                "not be re-estimated, since the likelihood still improves where the shift "
+                "leaves float64's range on its link scale. Check the model's specification, "
+                "or fit the rule instead (Constraint.fit)."
+            )
+        best = _brent(objective, *bracket, centre=start)
+        # Brent's tolerance grows with the distance from ``centre``, so the optimum is
+        # polished in coordinates centred on it. SciPy's bounded Brent stops with the
+        # minimum within 4 * (sqrt(eps) |d| + xatol / 3) of its result.
+        polish = 4.0 * (np.sqrt(np.finfo(np.float64).eps) * abs(best - start) + _INTERCEPT_XATOL)
         lower = _finite_reach(objective, best, best - polish)
         upper = _finite_reach(objective, best, best + polish)
         best = _brent(objective, lower, upper, centre=best)
@@ -305,19 +315,15 @@ def _finite_start(objective: Callable[[float], float]) -> float | None:
 
 
 def _bracket(
-    objective: Callable[[float], float], start: float, unit: float
+    objective: Callable[[float], float], behind: float, near: float, unit: float
 ) -> tuple[float, float] | None:
-    """An interval of finite values around a minimum of ``objective`` near ``start``, or
-    ``None`` when the objective still falls where ``unit`` times the shift overflows.
+    """An interval of finite values holding a minimum of ``objective``, walked downhill from
+    ``near``, away from ``behind``, or ``None`` when the objective still falls where ``unit``
+    times the shift overflows.
 
-    Downhill steps grow geometrically (Press et al., section 10.1, ``mnbrak``) until the
-    objective rises or a wall of invalid rows is met, where the finite optimum is taken.
+    Each step grows by ``_INTERCEPT_GROWTH`` (Press et al., section 10.1, ``mnbrak``) until the
+    objective rises, or a wall of invalid rows is met, where the finite optimum is taken.
     """
-    up = _finite_reach(objective, start, start + _INTERCEPT_SEARCH)
-    down = _finite_reach(objective, start, start - _INTERCEPT_SEARCH)
-    if min(objective(up), objective(down)) >= objective(start):
-        return down, up
-    behind, near = (start, up) if objective(up) <= objective(down) else (start, down)
     while True:
         far = near + _INTERCEPT_GROWTH * (near - behind)
         if not np.isfinite(unit * far):
