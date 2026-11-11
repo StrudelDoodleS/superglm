@@ -266,14 +266,25 @@ class LSSModelView:
             )
         return self._reference_row.copy()
 
+    def _term_blocks(self, key: str) -> tuple[Any, tuple[slice, ...]]:
+        """The term's predictor state and its coefficient blocks, its free levels' last."""
+        parameter, term = split_key(key)
+        qualified, state, term_slice = _resolve_term(self._fitted, parameter, term)
+        special = self._fitted.layout.term_slices.get(f"{qualified}{_SPECIAL_SUFFIX}")
+        return state, (term_slice,) if special is None else (term_slice, special)
+
     def reference_design(self, key: str) -> NDArray[np.float64]:
-        """The term's own columns at its reference level, which its shown effect is measured from."""
+        """The term's own columns at its reference, which its shown effect is measured from."""
         if key not in self._reference_designs:
             parameter, term = split_key(key)
-            qualified, state, term_slice = _resolve_term(self._fitted, parameter, term)
-            special = self._fitted.layout.term_slices.get(f"{qualified}{_SPECIAL_SUFFIX}")
-            blocks = (term_slice,) if special is None else (term_slice, special)
+            state, blocks = self._term_blocks(key)
             self._reference_designs[key] = _reference_design(
                 self._fitted, as_eager_frame(self.X_train), parameter, term, state, *blocks
             )
         return self._reference_designs[key]
+
+    def reference_log_effect(self, key: str) -> float:
+        """The term's scored contribution at its reference, which its shown effect leaves out."""
+        _, blocks = self._term_blocks(key)
+        beta = np.asarray(self._fitted.coefficients, dtype=np.float64)
+        return float(self.reference_design(key) @ beta[_coefficient_columns(*blocks)])

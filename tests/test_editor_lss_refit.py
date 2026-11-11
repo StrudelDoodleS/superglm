@@ -9,7 +9,7 @@ import pickle
 import numpy as np
 import pytest
 
-from superglm import Categorical, LogNormalLS, SuperLSS, s, ti
+from superglm import Categorical, LogNormalLS, Numeric, SuperLSS, cat, s, term, ti
 from superglm.distributional.revision import EditedCoefficientsWarning
 from superglm.distributional.terms import _resolve_term, _term_design
 from superglm.editor import EditorSession, edit
@@ -38,9 +38,13 @@ from superglm.editor.lss.refit import (
 from superglm.editor.metrics import metrics_payload
 from superglm.editor.payloads import session_payload
 from tests._lss_editor_fixtures import (
+    _SEEDS,
     EPS,
+    N_ROWS,
     REGIONS,
     FitCase,
+    _covariates,
+    _lognormal_rows,
     gamma_case,
     lognormal_case,
     nb_case,
@@ -155,6 +159,54 @@ def test_hand_edits_carry_as_absolute_curves():
         np.testing.assert_array_equal(term.edited_log_effect, curve)
         assert np.abs(term.original_log_effect - curve).max() > 0.1 * 0.2
     assert session.structure_history[-1].operation == "carry_edits"
+
+
+@functools.cache
+def linear_scale_case() -> FitCase:
+    """The log-normal case with a linear scale term on ``age`` (18-90, median near 54)."""
+    X, y, _ = _lognormal_rows(_SEEDS[LogNormalLS], N_ROWS)
+    family = LogNormalLS()
+    model = SuperLSS(
+        family,
+        family.mean(s("age", k=6), cat("region")),
+        family.scale(term("age", Numeric()), cat("region")),
+    ).fit_reml(X, y, outer="efs+newton")
+    return FitCase(model, X, y, None, None)
+
+
+def test_a_carried_edit_on_a_linear_term_scores_as_it_did_before_the_refit():
+    case = linear_scale_case()
+    session = open_case(case)
+    session.select_indices("scale:age", range(40, 60))
+    session.shift("scale:age", 0.1)
+    edited = session.to_model()
+    session.stage_structural("knots", "mean:age", KNOTS)
+    session.refit_pending()
+    assert session.structure_history[-1].operation == "carry_edits"
+    refit = session.model.lss
+    carried = session.to_model()
+
+    # The edit adds the same curve to the term's scored contribution before and after
+    # the Refit: only the term's own slope and the rest of the refit differ. The scale's
+    # linear predictor is read, since the log-normal scale floor bends its log.
+    rows = _covariates(617, 200)[1]
+    eta = {
+        name: model.predict_link(rows)["scale"].to_numpy()
+        for name, model in (
+            ("original", case.model),
+            ("edited", edited),
+            ("refit", refit),
+            ("carried", carried),
+        )
+    }
+    slope_change = refit.coef_["scale:age"] - case.model.coef_["scale:age"]
+    assert abs(slope_change) * float(np.median(case.X["age"])) > 1e-5
+    np.testing.assert_allclose(
+        eta["carried"] - eta["refit"],
+        eta["edited"] - eta["original"] - slope_change * rows["age"].to_numpy(),
+        rtol=0.0,
+        atol=1e3 * EPS,
+    )
 
 
 def test_refit_replays_the_fit_settings():

@@ -31,7 +31,11 @@ def carried_curve(edited: EditableTerm, refitted: EditableTerm) -> NDArray | Non
 
     The curve kept is the one the model scores, the native one. Shown natively
     it is ``edited``'s own values; shown mean-centred it moves by the refit's
-    own centring constant, so that the scored curve does not.
+    own centring constant, so that the scored curve does not. A SuperLSS linear
+    term is shown against its column's training centre, leaving out the
+    constant its metadata holds as ``anchor_log_effect``: the carry puts
+    ``edited``'s back and takes the refit's out, so the scored curve lands as
+    edited and the refit's change of slope does not move the term's level.
     """
     if edited.size != refitted.size or edited.levels != refitted.levels:
         return None
@@ -39,7 +43,13 @@ def carried_curve(edited: EditableTerm, refitted: EditableTerm) -> NDArray | Non
         return None
     if edited.x is not None and refitted.x is not None and not np.array_equal(edited.x, refitted.x):
         return None
-    return native_log_effect_values(edited) - _centring_offset(refitted)
+    anchors = _anchor_log_effect(edited) - _anchor_log_effect(refitted)
+    return native_log_effect_values(edited) + anchors - _centring_offset(refitted)
+
+
+def _anchor_log_effect(term: EditableTerm) -> float:
+    """The scored contribution ``term``'s shown curve leaves out: zero unless it is anchored."""
+    return float(term.metadata.get("anchor_log_effect", 0.0))
 
 
 def _centring_offset(term: EditableTerm) -> NDArray | float:
