@@ -409,33 +409,28 @@ def _log_of_quotient(numerator: NDArray, denominator: NDArray) -> NDArray:
 _NB2_CENTRED_TERMS = 18
 
 
+# The NB2 half deviance for y > 0, by two algorithms chosen by t = (y - mu) / mu.
+# Near y = mu (|t| <= 1/8), with r = y - mu, s = mu / (mu + theta) and
+# 1 - s = theta / (mu + theta), it is the series
+#     (r t) (1 - s) sum_k (-t)^k (1 + s + ... + s^k) / ((k + 1)(k + 2)),
+# from (1 + t) log1p(t) - t = sum_n (-t)^n / (n (n - 1)) at (mu, t) and at
+# (mu + theta, r / (mu + theta)). Its terms fall by a factor of eight, the first
+# is 1/2 and the sum is at least 0.45, so it subtracts nothing. r is exact there
+# (Sterbenz), and s and 1 - s come from min(mu, theta) / max(mu, theta), so
+# neither overflows. Off that window it is
+#     y log(y (mu + theta) / (mu (y + theta))) - theta log((y + theta) / (mu + theta)),
+# which leaves no theta-sized factor on a logarithm near zero: the two terms'
+# summed size is at most 35 times the result (at t = 1/8 in the Poisson limit).
+# Each logarithm takes log1p of its difference where its argument lies in
+# (1/2, 2) (Goldberg 1991, Theorem 4), and a difference of logarithms where the
+# quotient underflows or overflows, so a tiny y keeps a finite deviance. The
+# windows select the algorithm, not the value; a result below zero in the last
+# bits is set to zero.
 def _nb2_positive_half_deviance(count: NDArray, mean: NDArray, theta: float) -> NDArray:
     """Return ``y log(y / mu) - (y + theta) log((y + theta) / (mu + theta))`` for ``y > 0``.
 
-    With ``r = y - mu``, ``t = r / mu``, ``s = mu / (mu + theta)`` and
-    ``1 - s = theta / (mu + theta)``, the half deviance is the series
-
-        (r t) (1 - s) sum_k (-t)^k (1 + s + ... + s^k) / ((k + 1)(k + 2)),
-
-    which follows from ``(1 + t) log1p(t) - t = sum_n (-t)^n / (n (n - 1))``
-    applied at ``(mu, t)`` and ``(mu + theta, r / (mu + theta))``. For
-    ``|t| <= 1/8`` its terms fall by a factor of eight, the first is ``1/2`` and
-    the sum is at least ``0.45``. It subtracts nothing, so each row is within a
-    few ``u`` of its value and is never negative, at every ``theta``. ``r`` is
-    exact there (Sterbenz), and ``s`` and ``1 - s`` are formed from
-    ``min(mu, theta) / max(mu, theta)`` so neither overflows.
-
-    Off that window the half deviance is ``y log(y (mu + theta) / (mu (y + theta)))
-    - theta log((y + theta) / (mu + theta))``. That splitting leaves no
-    ``theta``-sized factor on a logarithm near zero, so the subtraction loses at
-    most a bounded factor whatever ``theta`` is: the two terms' summed size is at
-    most 35 times the result, reached at ``t = 1/8`` in the Poisson limit and
-    falling with ``|t|``. Each logarithm uses ``log1p`` of its difference where
-    its argument lies in ``(1/2, 2)`` (Goldberg 1991, Theorem 4), and a
-    difference of logarithms where the quotient underflows or overflows, so a
-    tiny ``y`` keeps its finite deviance. The windows select the algorithm, not
-    the value. A result below zero in the last bits is set to zero, since the
-    deviance is not negative.
+    Each row is within a few ``u`` of its value and never negative, at every
+    ``theta``; the comment above gives the two algorithms and their bounds.
     """
     result = np.empty_like(count, dtype=np.float64)
     with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
