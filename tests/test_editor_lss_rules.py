@@ -703,17 +703,27 @@ def _banded_case(rules: str) -> FitCase:
     ("rules", "band", "delta"),
     [("decreasing & max_step(0.1)", 9, -0.6), ("increasing & cap & max_step", 0, 0.6)],
 )
-def test_an_ordered_edit_whose_broken_rows_are_dependent_is_kept(rules, band, delta):
+def test_an_ordered_edit_whose_broken_rows_are_dependent_is_kept(monkeypatch, rules, band, delta):
     # An ordered term's cap and step rows are dependent (a cap row less the next is a step
     # row), so seeding the QP with every row the edit breaks can keep one that does not bind.
     case = _banded_case(rules)
     session = open_case(case)
     key = "mean:band"
     before = session.terms[key].edited_log_effect.copy()
+    seeds = []
+    solve = qp_retry.solve_constrained_qp
+
+    def counted(*args, **kwargs):
+        seeds.append(list(kwargs["active_set_init"] or ()))
+        return solve(*args, **kwargs)
+
+    monkeypatch.setattr(qp_retry, "solve_constrained_qp", counted)
 
     session.set_values(key, [band], [before[band] + delta])
 
     assert len(session.history) == 1
+    # Dependent rows are not seeded, so one unseeded solve certifies the answer.
+    assert seeds == [[]]
     curve = session.terms[key].edited_log_effect
     assert np.max(np.abs(curve - before)) > 0.05
     shown = session.to_model().predict_link(pd.DataFrame({"band": _BANDS}))["mean"].to_numpy()
@@ -830,3 +840,29 @@ def test_an_edit_at_values_without_training_rows_says_so_rather_than_blame_the_r
     held = int(np.flatnonzero(weights > 0.0)[5])
     session.set_values("mean:age", [held], [term.edited_log_effect[held] - 0.3])
     assert len(session.history) == 1
+
+
+def test_a_seeded_solve_that_does_not_certify_is_retried_from_the_current_curve(monkeypatch):
+    session = open_case(_many_levels_case())
+    term = session.terms["mean:g"]
+    solve = qp_retry.solve_constrained_qp
+
+    def seeded_stops_short(*args, **kwargs):
+        result = solve(*args, **kwargs)
+        if kwargs["active_set_init"]:
+            return type(result)(**{**vars(result), "converged": False})
+        return result
+
+    monkeypatch.setattr(qp_retry, "solve_constrained_qp", seeded_stops_short)
+    others = np.arange(1, term.size)
+
+    session.set_values("mean:g", others, term.edited_log_effect[others] + 0.3)
+
+    curve = session.terms["mean:g"].edited_log_effect
+    assert len(session.history) == 1
+    np.testing.assert_allclose(
+        curve[others] - curve[0],
+        np.minimum(term.original_log_effect[others] - curve[0] + 0.3, _CAP[1]),
+        rtol=0.0,
+        atol=1e-9,
+    )
