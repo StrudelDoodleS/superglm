@@ -106,9 +106,11 @@ def lss_editable_terms(
 ) -> dict[str, EditableTerm]:
     """The editable terms for ``keys`` of ``view``, weighted by the ``train`` rows' exposure.
 
-    Shape tools stage a shape-constrained refit, which a SuperLSS fit ignores, so
-    no term carries the support those tools read.
+    Each carries the values a shaped range is counted on (``shape_support``).
     """
+    # Imported here: the shape tools read the view, which builds its terms from this module.
+    from superglm.editor.shapes import shape_support
+
     editable: dict[str, EditableTerm] = {}
     for key in keys:
         inference = view.term_inference(key, with_se=with_se, n_points=n_points)
@@ -119,12 +121,14 @@ def lss_editable_terms(
         if term.metadata["term_type"] == "piecewise":
             # A carried edit reads whether the term holds flat or continues its end slopes.
             term.metadata["extrapolation"] = view._specs[key].extrapolation
-        term.metadata["shape_support"] = None
         if term.metadata["term_type"] == "numeric":
             # Shown against its column's training centre; a Refit's carry puts this back.
             term.metadata["anchor_log_effect"] = view.reference_log_effect(key)
         term.weights = term_weights_from_data(
             train.X, train.sample_weight, view.column_of(key), term
+        )
+        term.metadata["shape_support"] = shape_support(
+            view, key, term.x, train.X, train.sample_weight
         )
         editable[key] = term
     return editable

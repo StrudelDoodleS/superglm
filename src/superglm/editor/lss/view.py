@@ -177,6 +177,8 @@ class LSSModelView:
         # Each term's sweep, by its arguments. Owned by this view for the same reason:
         # no entry goes stale, and a caller gets its own copy.
         self._term_inferences: dict[tuple[str, bool, int, str], Any] = {}
+        # Each term's shape-rule rows (``lss.rules.term_rows``), read from this view's fit.
+        self._term_rows: dict[str, Any] = {}
 
     @property
     def _result(self):
@@ -279,7 +281,13 @@ class LSSModelView:
             parameter, term = split_key(key)
             state, blocks = self._term_blocks(key)
             self._reference_designs[key] = _reference_design(
-                self._fitted, as_eager_frame(self.X_train), parameter, term, state, *blocks
+                self._fitted,
+                as_eager_frame(self.X_train),
+                parameter,
+                term,
+                state,
+                *blocks,
+                reference=self.reference_row,
             )
         return self._reference_designs[key]
 

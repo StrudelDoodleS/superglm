@@ -133,7 +133,7 @@ _REFIT_AT_ONCE = {
     "basis": "set_basis",
 }
 # The operations a SuperLSS refuses, by the tool whose sentence says why.
-_LSS_TOOL = {"shape": "shape", "special": "special", "on_curve": "special"}
+_LSS_TOOL = {"special": "special", "on_curve": "special"}
 _CANNOT_FIT = (
     "{change} cannot be fitted on the data the refit reads. Undo the change it builds on, "
     "or choose another."

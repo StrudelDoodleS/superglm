@@ -17,7 +17,6 @@ from superglm.editor import EditorSession, edit
 from superglm.editor.cv import fold_log_curves, fold_term_items
 from superglm.editor.lss import INVERSE_THETA, RELATIVITY, display_for
 from superglm.editor.lss.apply import lss_model_with_edits
-from superglm.editor.lss.availability import LSS_UNAVAILABLE
 from superglm.editor.lss.display import fold_chart_display
 from superglm.editor.lss.risk import risk_payload
 from superglm.editor.operations import running_extreme_values
@@ -39,7 +38,7 @@ TOLERANCE = 64 * EPS
 GLM_TERM_KEYS = {
     "kind", "term_type", "x", "x_domain", "y", "original_y", "previous_y", "controls",
     "spline_view", "ci_lower_y", "ci_upper_y", "weights", "exposure", "handle_indices", "impact",
-    "n_points", "levels", "level_groups", "level_order_changed", "reference", "shape", "knots",
+    "n_points", "levels", "level_groups", "level_order_changed", "reference", "shape", "rules", "knots",
     "pending", "unseen", "unsmoothed", "effective_df", "edited", "x_label", "y_label", "title",
     "group_display",
 }  # fmt: skip
@@ -341,9 +340,10 @@ def test_lss_tool_payloads_follow_the_tools_a_superlss_offers():
     payload = session_payload(open_case(lognormal_case()))
     for key in ("mean:age", "mean:region", "scale:age"):
         term = payload[key]
-        assert term["shape"]["available"] is False
-        assert term["shape"]["reason"] == LSS_UNAVAILABLE["shape"]
+        # Shaped ranges are offered on the spline terms, as on a SuperGLM's.
+        assert term["shape"]["available"] is (key != "mean:region")
         assert term["unsmoothed"] is False and term["unseen"] is None
+        assert term["rules"] is None
     assert payload["mean:region"]["reference"]["level"] == "R0"
     assert payload["mean:age"]["knots"]["available"] is True
     assert payload["scale:age"]["knots"]["available"] is True

@@ -424,6 +424,9 @@ def special_labels(spec: OrderedCategorical) -> set[str]:
 # -- Polynomial ranges -----------------------------------------------------------
 
 
+RESHAPE_USED_BY_INTERACTION = "A term used by an interaction cannot be reshaped."
+
+
 def shape_unavailable_reason(model, name: str, source=None) -> str | None:
     """Why ``name`` cannot take polynomial ranges, as one sentence, or None when it can.
 
@@ -444,7 +447,7 @@ def shape_unavailable_reason(model, name: str, source=None) -> str | None:
         # degree bounds; a difference penalty (ps) is not bounded so.
         return "Shapes need a penalty order no higher than the spline's degree."
     if interaction_users(model, name):
-        return "A term used by an interaction cannot be reshaped."
+        return RESHAPE_USED_BY_INTERACTION
     return None
 
 

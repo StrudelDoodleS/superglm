@@ -448,7 +448,6 @@ def test_a_structural_change_answers_with_the_calm_summary(refit):
 def _routes():
     """Each tool's call through the session or the widget route, on the log-normal case."""
     return {
-        "shape": lambda s, w: w._stage("shape", "mean:age", {"lo": 30.0, "hi": 50.0, "degree": 1}),
         "special": lambda s, w: w._stage("special", "mean:region", {"levels": ["R5"]}),
         "free_levels": lambda s, w: w._free_level_comparison("mean:region"),
         "unsmoothed": lambda s, w: w._unsmoothed_line("mean:age"),
@@ -468,15 +467,11 @@ def _refused(tool, session, widget):
 def _flag(tool, payload, state):
     """The reason a payload gives for ``tool``: on the term for a term tool, else on the state."""
     if tool in TERM_TOOLS:
-        return payload["mean:age" if tool in {"shape", "unsmoothed"} else "mean:region"][
-            "unavailable"
-        ][tool]
+        return payload["mean:age" if tool == "unsmoothed" else "mean:region"]["unavailable"][tool]
     return state["unavailable"][tool]
 
 
-@pytest.mark.parametrize(
-    "tool", ["shape", "special", "free_levels", "unsmoothed", "unseen", "refit_offset"]
-)
+@pytest.mark.parametrize("tool", ["special", "free_levels", "unsmoothed", "unseen", "refit_offset"])
 def test_unavailable_tools_refuse_with_their_reason(tool):
     session = open_case(lognormal_case())
     widget = session.widget()
@@ -508,9 +503,6 @@ def test_the_session_refuses_what_the_widget_refuses():
         "refit_offset": lambda: session.refit_with_edited_offset(),
         "profile_distribution": lambda: session.reprofile_distribution("scale"),
         "unseen": lambda: session.set_unseen("mean:region", "base"),
-        "shape": lambda: session.stage_structural(
-            "shape", "mean:age", {"lo": 30.0, "hi": 50.0, "degree": 1}
-        ),
         "special": lambda: session.stage_structural("on_curve", "mean:region", {"levels": ["R5"]}),
     }
     for tool, call in refused.items():
@@ -530,8 +522,9 @@ def test_lss_availability_turns_the_term_tools_off_and_keeps_the_rest():
     payload = session_payload(open_case(lognormal_case()))
     term = payload["mean:region"]
 
+    # A categorical term takes no shape, for the reason a SuperGLM one gives.
     assert term["shape"]["available"] is False
-    assert term["shape"]["reason"] == LSS_UNAVAILABLE["shape"]
+    assert term["shape"]["reason"] == "Shapes need a spline term."
     assert term["unseen"] is None and term["unsmoothed"] is False
     assert term["unavailable"] == {tool: LSS_UNAVAILABLE[tool] for tool in TERM_TOOLS}
     assert lss_availability(term) == term
@@ -540,6 +533,7 @@ def test_lss_availability_turns_the_term_tools_off_and_keeps_the_rest():
     assert payload["mean:age"]["knots"]["available"] is True
     assert payload["mean:age"]["knots"]["reason"] is None
     assert payload["mean:age"]["knots"]["kind"] is not None
+    assert payload["mean:age"]["shape"]["available"] is True
 
 
 def test_glm_state_has_no_unavailable_keys(editor_model):  # noqa: F811

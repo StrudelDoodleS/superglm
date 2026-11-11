@@ -360,7 +360,8 @@ average.
 ## Shape a Range
 
 A shape pins part of a spline term to a simple polynomial while the rest of the term stays the
-fitted smooth. It works on numeric spline terms and on ordered terms with a spline basis.
+fitted smooth. It works on numeric spline terms and on ordered terms with a spline basis, of a
+SuperGLM or of any parameter of a SuperLSS.
 
 1. In Select mode, select points, or bands on an ordered term. The range runs from the first
    selected point to the last, so a Shift-click span or points picked with Ctrl-click both work.
@@ -416,7 +417,10 @@ they are disabled, with the reason on hover:
 
 - The term is not a spline, such as a linear term or an ordered term without a spline basis.
 - The term is a cardinal cubic regression spline.
-- The term has a shape constraint, such as increasing or convex.
+- The term has a shape constraint, such as increasing or convex. Its rules are named in the term
+  bar, such as **rule increasing**; hover over it to see whether edits keep to them. Edits of a
+  SuperLSS term keep to its rules; see
+  [Editing a constrained SuperLSS term](../how-to/constrain-a-smooth.md#editing-a-constrained-superlss-term).
 - The term uses `select=True`.
 - The term is used by an interaction.
 

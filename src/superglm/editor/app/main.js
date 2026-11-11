@@ -187,6 +187,7 @@ const termNameNode = document.getElementById("termName");
 const termKind = document.getElementById("termKind");
 const termEdf = document.getElementById("termEdf");
 const termReference = document.getElementById("termReference");
+const termRule = document.getElementById("termRule");
 const termKnots = document.getElementById("termKnots");
 const knotBarNodes = Object.freeze({
   root: document.getElementById("knotBar"),
@@ -1250,6 +1251,7 @@ function renderChartWorkspace() {
       kindNode: termKind,
       edfNode: termEdf,
       referenceNode: termReference,
+      ruleNode: termRule,
       statusNode
     },
     {
@@ -1863,6 +1865,7 @@ function renderSelectionState({ termName, indices }) {
       kindNode: termKind,
       edfNode: termEdf,
       referenceNode: termReference,
+      ruleNode: termRule,
       statusNode
     },
     {

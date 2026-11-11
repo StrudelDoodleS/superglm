@@ -61,6 +61,15 @@
  * @property {'most_exposed'|'first'|'pinned'|'kept'} policy
  */
 /**
+ * A term's shape rules as written (``text``, such as "increasing & cap(0.8, 1.25)").
+ * ``fit`` says the fit enforces them rather than repairing the curve after it; ``kept``
+ * that hand edits are kept inside them, which a SuperLSS term's are.
+ * @typedef {Object} TermRules
+ * @property {string} text
+ * @property {boolean} fit
+ * @property {boolean} kept
+ */
+/**
  * A range of a term pinned to a polynomial. Edges are x values on a numeric
  * term and band labels on an ordered one; degree 0-3 is Flat, Line,
  * Quadratic or Cubic, which ``label`` names. ``join`` is how the range meets
@@ -301,6 +310,7 @@
  * @property {ImpactPayload} impact
  * @property {number|null} [effective_df]
  * @property {TermReference|null} [reference]
+ * @property {TermRules|null} [rules] the term's shape rules; null when it has none
  * @property {Array<{label:string, indices:number[]}>} [level_groups]
  * @property {TermShape} shape
  * @property {TermPending|null} [pending]

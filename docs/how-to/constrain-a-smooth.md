@@ -337,6 +337,35 @@ is the unconstrained one, so a rule that binds hard leaves a curve a little
 smoother or rougher than the best one under that rule. The editor does not
 show which rules bind.
 
+### Editing a constrained SuperLSS term
+
+The model editor names each term's rules in the term bar, such as
+**rule increasing**, on every parameter. Every edit of a SuperLSS term with
+`Constraint.fit` rules keeps to them: after a drag, a handle move, a menu
+action or a reset of part of the curve, the whole curve moves to the nearest
+curve the rules allow. Nearest is measured in the exposure-weighted least
+squares the editor writes every edit with, among the curves the term's basis
+draws with coefficients that meet the fit's own rows. That curve is the one
+the exported model takes, and Undo puts back the curve from before the edit.
+An edit the rules already allow, such as raising the whole curve, is kept as
+drawn. An edit the rules take back entirely, such as raising a level that
+already sits at its cap, records nothing and says why. On a term with levels,
+the base stays where it is unless the edit moves it. On a categorical term the
+other levels an edit does not touch stay too, so a level pushed past its cap
+stops at the cap; an edit of the base moves only the levels whose cap it
+pushes them past, as little as the rule needs. An ordered term draws a smooth
+curve through its levels, which cannot move one level alone, so there the
+levels an edit does not touch follow the nearest curve, as they do on an
+ordered term without a rule. A theta term draws the overdispersion 1/θ, so
+its rules are named on 1/θ: `decreasing` on θ reads **rule increasing**, and
+`cap(0.7, 1.5)` reads **rule cap(0.667, 1.43)**. A rule holds on the log
+scale, where log(1/θ) is −log θ, so a curvature swaps as a direction does:
+`concave` on θ reads **rule convex**. A term with a rule
+takes no shaped range.
+
+A `SuperGLM` term names its rules the same way, but its hand edits are not
+held to them, so check the curve after an edit.
+
 ## Linear Predictor Semantics
 
 Solver-backed shape constraints are enforced on the spline term's contribution

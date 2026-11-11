@@ -829,6 +829,7 @@ def solve_constrained_qp(
     max_iter: int = 200,
     tol: float = 1e-12,
     *,
+    beta_start: NDArray | None = None,
     _trace_run: TraceRun | None = None,
     _structure: _ConstraintStructure | None = None,
 ) -> QPResult:
@@ -855,7 +856,11 @@ def solve_constrained_qp(
     fitted in the certificate's own units (_stationarity_certificate).
 
     active_set_init supplies a warm active set; a row dependent on those
-    before it is left out. The optional _trace_run emits blocking decisions
+    before it is left out. beta_start is a point the caller knows meets the
+    rows: the loop starts from it, as the primal active-set method assumes
+    (Nocedal and Wright 2006, Algorithm 16.3), instead of from the repair of
+    the unconstrained optimum (_project_feasible), which need not reach the
+    rows. A beta_start that does not meet them is ignored. The optional _trace_run emits blocking decisions
     only when explicitly enabled. _structure is _constraint_structure(A), for a
     caller that solves on one A repeatedly; without it each solve builds it.
     Result rank metadata describes the shared H decomposition; no ridge is
@@ -971,9 +976,13 @@ def solve_constrained_qp(
     active = basis.start([] if active_set_init is None else list(active_set_init))
 
     # --- Feasible starting point ---
-    # This may still be infeasible; see _project_feasible.  Feasibility is
-    # therefore re-tested on the point actually returned, below.
-    beta = _project_feasible(beta_unc, A, b, tol, structure=structure)
+    # A caller's start that meets the rows is used as it is. The repair of the
+    # unconstrained optimum may still be infeasible (see _project_feasible), so
+    # feasibility is re-tested on the point actually returned, below.
+    if beta_start is not None and _is_feasible(A, beta_start, b, tol, abs_A=abs_A):
+        beta = np.array(beta_start, dtype=float)
+    else:
+        beta = _project_feasible(beta_unc, A, b, tol, structure=structure)
 
     # Resolved once: the hot loop must not pay a per-row or per-iteration
     # attribute lookup for a seam that is off in every production call.

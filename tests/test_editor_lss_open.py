@@ -143,7 +143,8 @@ def test_opens_each_supported_family(make):
         assert term.weights.sum() == len(case.X)
         assert term.metadata["centering_mode"] == "native"
         assert term.metadata["edf"] == reference.edf
-        assert term.metadata["shape_support"] is None
+        # A spline term carries the values a shaped range is counted on.
+        assert (term.metadata["shape_support"] is None) == (term.x is None)
 
 
 def test_a_row_the_fit_left_out_sets_no_grid_or_reference_value():

@@ -156,6 +156,21 @@ export const STRUCTURE_HELP = Object.freeze({
     title: "Refresh from Python",
     body: "Re-read the Python session after changing it in the notebook.",
   }),
+  rule_kept: Object.freeze({
+    title: "Shape rule",
+    body: "The fit enforces this rule, and edits keep to it: after each edit the curve moves to "
+      + "the nearest curve the rule allows, which is the curve the model takes.",
+  }),
+  rule_fit: Object.freeze({
+    title: "Shape rule",
+    body: "The fit enforces this rule. Hand edits are not held to it, so check the curve after "
+      + "an edit.",
+  }),
+  rule_postfit: Object.freeze({
+    title: "Shape rule",
+    body: "The fit repairs the curve to this rule after fitting. Hand edits are not held to it, "
+      + "so check the curve after an edit.",
+  }),
   new_levels: Object.freeze({
     title: "New levels →",
     body: "Where levels the fit never saw go when the model predicts. Refuse stops the "
@@ -271,7 +286,8 @@ export const HELP_SECTIONS = Object.freeze([
       "Refit keeps the hand edits made in this session. A model exported with hand edits and opened again holds those edits in its coefficients, and Refit estimates those terms again from the data.",
       "History marks each step with the parameter it acted in. Undo, Redo, Revert and Refit cover both parameters in one history.",
       "The Validation tab scores each split by log score, CRPS and actual over expected. Pass a cross_validate() result to edit(model, cv=result) to score the same model across folds on the Cross-validation tab, where every mean, CV and overdispersion curve has its relativities by fold, listed under its parameter's heading with the mean curves first. Each chart's heading names its parameter and what the curve is a relativity of, for example 'Area · CV · relativity of the CV'; higher means more variation on every CV and overdispersion curve. The in-force curve is the one the Editor tab draws, value for value. The Validation tab shows a change (Δ) only once you have edited the model, and leaves out the CRPS for a family with none. Final fit runs from that tab as well.",
-      "Shaped ranges are off for SuperLSS terms in the editor; a shape rule declared on the model with constraint= is enforced when it is fitted. Also off are special levels, the Unsmoothed line, free levels and new-level choices.",
+      "A term with a shape rule declared with constraint=Constraint.fit names it in the term bar, such as 'rule increasing'. Edits keep to the rule on every parameter: after each drag, handle move or menu action the curve moves to the nearest curve the rule allows, which is the curve the model takes, and Undo puts back the curve before the edit. An edit the rule takes back entirely records nothing and says why. On a term with levels, the base stays unless the edit moves it, and on a categorical term so do the other levels an edit does not touch; an edit of the base moves only the levels its rule makes give way. On an ordered term the levels an edit does not touch follow the nearest smooth curve. An overdispersion term names its rule on 1/θ, the curve it draws.",
+      "Shaped ranges work on SuperLSS spline terms as on any other, except a term with a shape rule. Special levels, the Unsmoothed line, free levels and new-level choices are off.",
       "The coefficient summary and the Structure export are off too. Their hover text says why. Export an edited SuperLSS model as joblib, which keeps its history.",
     ]),
   }),

@@ -217,11 +217,12 @@ def open_lss_editor_page(chromium_browser, lss_browser_case):
         selected_term: str = "mean:age",
         prepare: Callable[[object], None] | None = None,
         cv=None,
+        case=None,
     ) -> Iterator[tuple[object, EditorSession]]:
         resources = ExitStack()
         opened.append(resources)
         try:
-            session = open_case(lss_browser_case, cv=cv)
+            session = open_case(lss_browser_case if case is None else case, cv=cv)
             page = _open_session_page(
                 resources,
                 chromium_browser,

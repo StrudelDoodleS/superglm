@@ -57,9 +57,17 @@ from superglm.editor.level_order import (
     level_order_for_labels,
     level_order_for_target,
 )
+from superglm.editor.lss.apply import (
+    absorbed_message,
+    kept_inside_rules,
+    leaves_curve,
+    moves_only_empty_values,
+    prepare_ruled_edit,
+)
 from superglm.editor.lss.availability import require_available
 from superglm.editor.lss.open import open_lss
 from superglm.editor.lss.refit import lss_refit_with_drafts
+from superglm.editor.lss.rules import holds_rules
 from superglm.editor.lss.terms import lss_editable_terms
 from superglm.editor.lss.view import LSSModelView, is_lss
 from superglm.editor.operations import (
@@ -472,6 +480,11 @@ class EditorSession:
         idx = np.unique(np.asarray(idx, dtype=np.intp))
         before = editable.edited_log_effect[idx].copy()
         restored = editable.original_log_effect[idx].copy()
+        if idx.size < editable.size and holds_rules(self.model, term):
+            # Part of a ruled curve put back can break the rule beside it, so the
+            # reset is an edit, kept inside the rule like any other.
+            self._commit(term, "reset", idx, before, restored, {})
+            return self
         editable.edited_log_effect[idx] = restored
         if idx.size == editable.size:
             self._clear_term_history(term)
@@ -1973,6 +1986,10 @@ class EditorSession:
                 return True
         return False
 
+    def _prepare_edit(self, term: str) -> None:
+        """Build what the first edit of ``term`` reads, for a term a page has just shown."""
+        prepare_ruled_edit(self.model, term)
+
     def _commit(
         self,
         term: str,
@@ -1989,14 +2006,37 @@ class EditorSession:
         An edit on a selection also records, as ``lo`` and ``hi``, the
         stretch of axis it changed, which History names; ``span=False`` for
         a handle move, which changes the whole curve.
+
+        An edit of a SuperLSS term with shape rules is kept inside them: the
+        whole curve becomes the nearest one the rules allow
+        (``kept_inside_rules``), and the record holds all of it. An edit the
+        rules take back entirely is not recorded and is refused with the reason.
         """
         indices = np.asarray(indices, dtype=np.intp).copy()
         before = np.asarray(before, dtype=np.float64).copy()
         after = np.asarray(after, dtype=np.float64).copy()
-        changed = not np.array_equal(before, after)
         editable = self.terms[term]
-        editable.edited_log_effect[indices] = after
         recorded = {**params, **_edit_span(editable, indices)} if span else dict(params)
+        curve = editable.edited_log_effect.copy()
+        curve[indices] = after
+        kept = kept_inside_rules(self.model, editable, curve)
+        if kept is not None:
+            # The projection floors a value without rows at a tiny weight, so an edit of only
+            # such values can move the curve by a few billionths: that is still none of it.
+            if leaves_curve(kept, editable.edited_log_effect, curve) or moves_only_empty_values(
+                editable, curve
+            ):
+                # The rules took the whole edit back: there is nothing to record or undo,
+                # and an edit that asked for a change a chart shows says why it made none.
+                # A rounding-scale ask, "Make increasing" on a curve its rule already holds
+                # flat in places, is no change at all.
+                if leaves_curve(curve, editable.edited_log_effect, curve):
+                    return
+                raise EditorValueError(absorbed_message(self.model, editable, curve))
+            indices = np.arange(editable.size, dtype=np.intp)
+            before, after = editable.edited_log_effect.copy(), kept
+        changed = not np.array_equal(before, after)
+        editable.edited_log_effect[indices] = after
         self.history.append(
             EditRecord(
                 term=term,
