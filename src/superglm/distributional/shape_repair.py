@@ -199,13 +199,11 @@ def _profiled_merit(
 ) -> tuple[float, float, int | None]:
     """The intercept shift that maximizes the joint log-likelihood, and the penalized merit there.
 
-    Every term and every other parameter is held at ``coefficients``; the likelihood is the
-    fit's own, bound to the retained rows, and the merit is its negative plus half the fit's
-    penalty quadratic, the objective the fit minimized. A shift that does not improve on the
-    held intercept by more than rounding is not taken, nor is one for a parameter with no
-    intercept. The merit is infinite where some retained row has no valid parameters; the
-    third value counts those rows at the shift returned, ``None`` where the parameters
-    cannot be formed at all.
+    Every term and other parameter is held at ``coefficients``; the merit is the fit's own
+    negative log-likelihood on the retained rows plus half its penalty quadratic. A shift no
+    better than rounding, or for a parameter with no intercept, is not taken. The merit is
+    infinite where a retained row has no valid parameters; the third value counts those rows
+    (``None`` where the parameters cannot be formed at all).
 
     Raises ``RuntimeError`` when the likelihood still improves at the edge of the widest
     search, so that no intercept could be re-estimated.
