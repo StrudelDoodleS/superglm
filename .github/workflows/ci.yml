@@ -274,7 +274,10 @@ jobs:
         run: npm run check:frontend
 
       - name: Install Chromium
-        run: uv run playwright install --with-deps chromium
+        # The runner image already carries Chromium's system libraries; --with-deps only
+        # tops them up through apt. If the apt mirror is unreachable, install the browser
+        # alone: a library that is really missing then fails the browser tests loudly.
+        run: uv run playwright install --with-deps chromium || uv run playwright install chromium
 
       - name: Legacy browser tests
         run: uv run pytest tests/test_editor_browser.py -m browser --run-browser -q
