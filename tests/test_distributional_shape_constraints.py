@@ -14,7 +14,15 @@ import pandas as pd
 import pytest
 from scipy import optimize
 
-from superglm import Constraint, GammaLS, NegativeBinomialLS, SuperLSS, TweedieLSS, s
+from superglm import (
+    Constraint,
+    GammaLS,
+    GaussianLS,
+    NegativeBinomialLS,
+    SuperLSS,
+    TweedieLSS,
+    s,
+)
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.predictor import ShapeConstraintIgnoredWarning
 from superglm.distributional.solver.assembly import (
@@ -25,6 +33,8 @@ from superglm.distributional.solver.shape import shape_rows
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
 
 INCREASING = Constraint.fit.increasing
+# Pointwise coverage the seeded test demands of a nominal 95% band where a rule holds a fit flat.
+COVERAGE_FLOOR = 0.92
 _GRID = pd.DataFrame({"x": np.linspace(0.02, 9.98, 500)})
 
 
@@ -222,22 +232,59 @@ def _face_covariance(model: SuperLSS) -> tuple[np.ndarray, np.ndarray, np.ndarra
 
 
 @pytest.mark.parametrize("kind", ["gamma", "tweedie"])
-def test_standard_errors_treat_the_binding_rows_as_fixed(kind):
+def test_a_binding_rule_reports_the_covariance_of_the_fit_without_it(kind):
+    """Which rows bind is estimated, so the covariance is not the one conditional on them."""
     X, y = _data(kind)
+    free = _model(kind).fit_reml(X, y)
     held = _model(kind, INCREASING).fit_reml(X, y)
-    covariance, curvature, binding = _face_covariance(held)
+    assert _state(held).shape_fit.n_binding > 0
     reported = np.asarray(held.result_.covariance)
-    np.testing.assert_allclose(
-        reported, covariance, rtol=1e-6, atol=1e-9 * np.abs(covariance).max()
-    )
-    # a binding row is a fixed combination of coefficients: it has no variance
-    assert np.max(np.abs(binding @ reported @ binding.T)) <= 1e-9 * np.abs(reported).max() * (
-        np.max(np.abs(binding)) ** 2
-    )
-    # and it is not the unconstrained standard error the term would have had
-    free_se = np.sqrt(np.diag(np.linalg.pinv(curvature)))
-    se = np.sqrt(np.maximum(np.diag(reported), 0.0))
-    assert np.max(np.abs(se - free_se) / free_se) > 0.05
+    np.testing.assert_allclose(reported, np.asarray(free.result_.covariance), rtol=1e-10, atol=0.0)
+    # a binding row keeps its variance: the face's covariance gives it none
+    face, _, binding = _face_covariance(held)
+    scale = np.abs(reported).max() * np.max(np.abs(binding)) ** 2
+    assert np.max(np.abs(binding @ face @ binding.T)) <= 1e-9 * scale
+    assert np.min(np.diag(binding @ reported @ binding.T)) > 1e-6 * scale
+    # so some standard error is materially larger than the face's
+    se, face_se = np.sqrt(np.diag(reported)), np.sqrt(np.maximum(np.diag(face), 0.0))
+    assert np.max(se / np.maximum(face_se, 1e-300)) > 1.05
+
+
+@pytest.mark.slow
+def test_bands_cover_a_rising_curve_where_the_rule_holds_the_fit_flat():
+    """Seeded coverage of the pointwise 95% band at the points an increasing rule holds flat.
+
+    The truth rises everywhere, so every flat stretch of a fit is the rule binding by chance.
+    The smoothing is fixed and light, which makes that happen in every fit. A band conditional
+    on the binding rows covers the truth at 80% of those points; the band has to cover it about
+    as often as its level says, and the floor leaves room for a few points either way.
+    """
+    from superglm import LambdaPolicy
+
+    family = GaussianLS()
+    hits = points = binding_fits = 0
+    for replicate in range(40):
+        rng = np.random.default_rng([616, replicate])
+        x = rng.uniform(0.0, 10.0, 200)
+        y = 1.0 + 0.06 * x + 0.3 * rng.standard_normal(200)
+        term = s("x", kind="cr", k=10, constraint=INCREASING, lambda_policy=LambdaPolicy.fixed(1.0))
+        model = SuperLSS(family, family.location(term), family.scale()).fit(
+            pd.DataFrame({"x": x}), y
+        )
+        if _state(model).shape_fit.n_binding == 0:
+            continue
+        binding_fits += 1
+        effect = model.term_inference("location", "x", n_points=200, simultaneous=False)
+        truth = 0.06 * effect.x - float(np.mean(0.06 * x))
+        step = np.abs(np.diff(effect.effect)) <= 1e-9 * np.ptp(effect.effect)
+        held = np.zeros(effect.x.size, dtype=bool)
+        held[:-1] |= step
+        held[1:] |= step
+        hits += int(np.sum(((truth >= effect.lower) & (truth <= effect.upper))[held]))
+        points += int(np.sum(held))
+    assert binding_fits >= 30, "the rule must bind in most fits for this to test anything"
+    assert points >= 150, "the fits must hold enough of the grid flat"
+    assert hits / points >= COVERAGE_FLOOR
 
 
 def test_effective_degrees_of_freedom_are_those_of_the_face():
@@ -260,7 +307,7 @@ def test_diagnose_says_what_a_binding_rule_did_in_one_sentence_per_term():
     held = _model("gamma", INCREASING).fit_reml(X, y)
     text = held.diagnose().render(detail="full")
     assert "The rule 'increasing' on mean:x binds at" in text
-    assert "standard errors treat those checkpoints as fixed" in text
+    assert "bands are those of the fit without the rule" in text
 
 
 def test_a_direction_and_a_curvature_rule_hold_together_and_match_the_optimizer():
@@ -432,7 +479,7 @@ def test_a_cap_on_a_link_that_adds_is_disclosed_and_dropped_keeping_the_shape():
     assert np.min(np.diff(location)) >= -1e-9 * np.abs(location).max()
 
 
-def test_the_rows_reported_as_binding_are_the_rows_the_standard_errors_hold():
+def test_the_rows_reported_as_binding_are_the_rows_the_face_holds():
     """Far from zero a row's own slack reads nothing as binding; the face's reading of the whole
     fit holds the flattened spline, and the record and Diagnose must say so."""
     from superglm import GaussianLS, LambdaPolicy

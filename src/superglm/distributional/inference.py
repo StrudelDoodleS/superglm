@@ -241,8 +241,19 @@ def _influence(result: DenseSolverResult) -> NDArray[np.float64]:
 def compute_joint_inference(
     layout: StackedLayout,
     result: DenseSolverResult,
+    *,
+    rule_free_covariance: NDArray | None = None,
 ) -> JointInference:
-    """Compute stabilized covariance and EDF from one accepted terminal geometry."""
+    """Compute stabilized covariance and EDF from one accepted terminal geometry.
+
+    ``rule_free_covariance`` is the covariance of the fit at the same smoothing without its
+    shape rules. A fit whose rules bind reports it, because the rows that bind are themselves
+    estimated: the covariance on their face ``Z (Z' H Z)^+ Z'`` is conditional on them and
+    its intervals cover too rarely (Wood 2026, "Shape constrained additive smooth models",
+    Statistical Modelling 26(4), section 5.1, p. 397), while the covariance that ignores the
+    rows covers at least as often as the fit without the rules. The degrees of freedom stay
+    those of the fit on the face (Meyer and Woodroofe 2000).
+    """
     if not isinstance(layout, StackedLayout):
         raise TypeError("layout must be a StackedLayout")
     if not isinstance(result, DenseSolverResult):
@@ -254,6 +265,11 @@ def compute_joint_inference(
         raise ValueError("terminal rank decomposition does not match the global layout")
 
     covariance = result.terminal_pseudo_inverse()
+    if rule_free_covariance is not None:
+        covariance = np.array(rule_free_covariance, dtype=np.float64, copy=True)
+        if covariance.shape != (width, width):
+            raise ValueError("rule_free_covariance must match the global layout")
+        covariance = 0.5 * (covariance + covariance.T)
     influence = _influence(result)
     if not np.all(np.isfinite(covariance)) or not np.all(np.isfinite(influence)):
         raise ValueError("terminal rank solve produced non-finite inference state")

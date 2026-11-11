@@ -3603,12 +3603,12 @@ def _face_restricted_leverage(evaluation, model, face):
 
 
 def test_equal_copy_of_shape_constrained_rows_reads_the_fit_geometry():
-    """A QP fit whose shape rows bind keeps its active face's covariance, so an equal
-    copy of the training rows (recognised by content) reads it with the fit design and
-    working weights, as the live frame does.  Zero prior weights centre the fit's
-    columns on the positive-weight rows while the public design centres them on all
-    rows, so the public design would not pair with that covariance.  Other rows
-    re-form the inverse on themselves, restricted to the fit's active face."""
+    """A QP fit whose shape rows bind keeps its active face's leverage and degrees of
+    freedom, so an equal copy of the training rows (recognised by content) reads them
+    with the fit design and working weights, as the live frame does.  Zero prior weights
+    centre the fit's columns on the positive-weight rows while the public design centres
+    them on all rows, so the public design would not pair with the fit's record.  Other
+    rows re-form the inverse on themselves, restricted to the fit's active face."""
     from scipy.linalg import null_space
 
     from superglm import Constraint

@@ -70,6 +70,7 @@ from superglm.distributional.response import (
 )
 from superglm.distributional.results.fit import DistributionalFitResult
 from superglm.distributional.results.iteration import DistributionalEFSConfig
+from superglm.distributional.results.shape import ShapeFace
 from superglm.distributional.results.smoothing import DistributionalEFSResult
 from superglm.distributional.results.solver import DenseSolverConfig, DenseSolverResult
 from superglm.distributional.separation import (
@@ -994,8 +995,10 @@ def _fit_candidate(
         ordered_lambdas = dict(smoothing.lambdas)
         result = smoothing.terminal_fit
     shape_fit = None
+    rule_free_covariance = None
     shape = shape_rows(layout, compiled)
     if shape is not None:
+        rule_free = result
         # Smoothing was chosen without the rules; refit the coefficients under them.
         result, shape_fit = refit_with_shape_rules(
             family,
@@ -1009,6 +1012,10 @@ def _fit_candidate(
             chunk_size=chunk_size,
             phase_recorder=phase_recorder,
         )
+        if result is not rule_free and isinstance(result.coefficient_face, ShapeFace):
+            # The rows that bind are estimated, so the fit reports the covariance it had
+            # before the rules, not the one conditional on those rows.
+            rule_free_covariance = rule_free.terminal_pseudo_inverse()
     with measure_phase(phase_recorder, "inference_edf"):
         return prepare_distributional_fit_state(
             family,
@@ -1026,6 +1033,7 @@ def _fit_candidate(
             requested_n_bins=n_bins,
             requested_chunk_size=chunk_size,
             shape_fit=shape_fit,
+            rule_free_covariance=rule_free_covariance,
         )
 
 

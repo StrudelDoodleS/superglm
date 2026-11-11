@@ -1058,10 +1058,14 @@ def test_a_term_the_constraint_holds_flat_publishes_its_face_statistics(kind):
 
     The fit is then the intercept alone (Meyer and Woodroofe 2000: the degrees
     of freedom of a constrained fit are its face's), so the EDF is 1, the
-    Gaussian scale is ``RSS / (n - 1)``, the AIC charges one parameter, and
-    the term's covariance is zero.  Mutation: the export's face dropped
-    (``_active_face_basis`` returning ``None``) publishes the unconstrained
-    trace, 4.7 for ``ps``, and its scale.
+    Gaussian scale is ``RSS / (n - 1)`` and the AIC charges one parameter.
+    Mutation: the export's face dropped (``_active_face_basis`` returning
+    ``None``) publishes the unconstrained trace, 4.7 for ``ps``, and its scale.
+
+    The term's covariance is not the face's, which is zero: which rows bind is
+    estimated, so the covariance holds none of them (Wood 2026, section 5.1)
+    and is the unconstrained fit's at this fit's scale.  Mutation: the
+    covariance read on the face (``RankInfo.augmented_inverse``) is zero.
     """
     from superglm._roundoff import gamma
     from superglm.model.state_ops import coef_covariance
@@ -1081,7 +1085,17 @@ def test_a_term_the_constraint_holds_flat_publishes_its_face_statistics(kind):
     metrics = model.metrics(pd.DataFrame({"x": x}), y)
     np.testing.assert_allclose(metrics.aic + 2.0 * metrics.log_likelihood, 2.0, rtol=gamma(n))
     covariance, _ = coef_covariance(model)
-    assert np.max(np.abs(covariance)) <= gamma(p) * solver.phi
+    free = _qp_fit(kind, x, y, constrained=False)
+    free_covariance, _ = coef_covariance(free)
+    np.testing.assert_allclose(
+        covariance / solver.phi,
+        free_covariance / free._solver_pirls_result().phi,
+        rtol=1e-9,
+        atol=1e-12 * np.max(np.abs(free_covariance)) / free._solver_pirls_result().phi,
+    )
+    assert np.min(np.diag(covariance)) > 0.0
+    # leverage stays the face fit's: every row weighs 1/n in an intercept-only fit
+    np.testing.assert_allclose(metrics.leverage, 1.0 / n, rtol=1e-9)
 
 
 @pytest.mark.parametrize("kind", sorted(QP_TERMS))
