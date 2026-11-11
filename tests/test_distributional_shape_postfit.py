@@ -753,11 +753,12 @@ def test_with_an_edit_pending_the_evidence_model_follows_an_in_place_repair():
         widget = EditorWidget(session, mode="server")
         session.select_x("mean:z", 0.2, 0.6)
         session.shift("mean:z", 0.2)
-        stale, revision = widget._current_model_for_evidence()
+        stale, _ = widget._current_model_for_evidence()
+        revision = session.model_revision
         model.apply_shape_postfit()
-        current, now = widget._current_model_for_evidence()
+        current, _ = widget._current_model_for_evidence()
         wanted = session.to_model()
-    assert now > revision and current is not stale
+    assert session.model_revision > revision and current is not stale
     assert current._model.fit_state.hand_edit.repaired_terms == ("mean:x",)
     np.testing.assert_allclose(
         current.predict_link(X)["mean"], wanted.predict_link(X)["mean"], atol=1e-12

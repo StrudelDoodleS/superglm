@@ -314,7 +314,8 @@ class InForce:
     Undo brings back the same model object and the same edited values, so a result made before an
     edit describes the model again once the edit is undone; the revision number only ever rises.
     A refit or a post-fit repair made on that object in place (``apply_shape_postfit``) replaces
-    its fit, so a result made before it no longer describes the model.
+    its fit, so a result made before it no longer describes the model. Anything that stands for
+    this as a value, such as a token the page compares, names ``fit`` as well as ``model``.
     """
 
     model: Any
