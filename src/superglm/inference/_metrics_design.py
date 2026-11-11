@@ -288,8 +288,8 @@ class EvaluationDesign:
 class ProjectedDesign:
     """A design's rows projected on a face ``Z``, ``x_i' Z``, one bounded block at a time.
 
-    A constrained fit's covariance on its active face is ``Z (Z' M Z)^+ Z'``.
-    Weights far apart can put curvature off the face that is ``1e15`` or more
+    A constrained fit's leverage and EDF read its active face's inverse
+    ``Z (Z' M Z)^+ Z'``; its published covariance holds no row. Weights far apart can put curvature off the face that is ``1e15`` or more
     times the curvature on it, and a quadratic form of that covariance with
     full rows, or its product with the full data Gram, then cancels at that
     ratio times ``u``.  Rows projected before any product carry only their own
