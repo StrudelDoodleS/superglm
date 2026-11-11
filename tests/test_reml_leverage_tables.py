@@ -590,8 +590,9 @@ def test_a_random_effect_is_a_lookup_on_both_leverage_routes():
     for job in blocks.jobs:
         block = job()
         if block is not None:
-            rows, _, values = block
-            solved[rows] = values
+            rows, pieces = block
+            for span, _, values in pieces:
+                solved[rows[span]] = values
     support_bound = _gamma(2 * dm.p + len(dm.group_matrices) + 2) * eta
     assert np.all(np.abs(solved - reference) <= support_bound)
 

@@ -222,6 +222,7 @@ def _leverage_derivative_terms(
         )
         for batch in batches
     ]
+    batch_ones = {batch.width: np.ones(batch.width, dtype=np.float64) for batch in batches}
     grad = np.zeros(m, dtype=np.float64)
     grad_compensation = np.zeros(m, dtype=np.float64)
     cross = np.zeros((m, m), dtype=np.float64)
@@ -231,39 +232,48 @@ def _leverage_derivative_terms(
         """One block's gradient and cross-trace terms (``None`` for a block with no active row)."""
         if block is None:
             return None
-        rows, solved, leverage = block
+        rows, pieces = block
         quadratic = np.empty((rows.size, m), dtype=np.float64) if cross_terms else None
         directions = np.empty((rows.size, m), dtype=np.float64)
-        for batch, rhs in zip(batches, block_rhs, strict=True):
-            # (blocks, rows, width): a view of each block's solved rows, for matmul
-            n_blocks, width = batch.members.shape[0], batch.width
-            solved_blocks = (
-                solved[:, batch.start : batch.stop]
-                .reshape(rows.size, n_blocks, width)
-                .transpose(1, 0, 2)
-            )
-            directions[:, batch.members] = -np.matmul(solved_blocks, rhs).transpose(1, 0, 2)
-            if quadratic is None:
-                continue
-            # Row sums over a block's width as one matrix-vector product.
-            ones = np.ones(width, dtype=np.float64)
-            if batch.stacked is not None:
-                products = np.matmul(solved_blocks, batch.stacked).reshape(
-                    n_blocks, rows.size, batch.dense, width
-                )
-                products *= solved_blocks[:, :, None, :]
-                quadratic[:, batch.members[:, : batch.dense]] = (
-                    (products.reshape(-1, width) @ ones)
-                    .reshape(n_blocks, rows.size, batch.dense)
+        leverage = np.empty(rows.size, dtype=np.float64)
+        # Each row's terms read only its own solved row, so they are formed
+        # piece by piece; the block's sums below run over all its rows.
+        for span, solved, piece_leverage in pieces:
+            leverage[span] = piece_leverage
+            count = solved.shape[0]
+            for batch, rhs in zip(batches, block_rhs, strict=True):
+                # (blocks, rows, width): a view of each block's solved rows, for matmul
+                n_blocks, width = batch.members.shape[0], batch.width
+                solved_blocks = (
+                    solved[:, batch.start : batch.stop]
+                    .reshape(count, n_blocks, width)
                     .transpose(1, 0, 2)
                 )
-            if batch.members.shape[1] > batch.dense:
-                squares = ((solved_blocks * solved_blocks).reshape(-1, width) @ ones).reshape(
-                    n_blocks, rows.size
-                )
-                quadratic[:, batch.members[:, batch.dense :]] = (
-                    squares.T[:, :, None] * batch.identity_scales[None, :, :]
-                )
+                directions[span, batch.members] = -np.matmul(solved_blocks, rhs).transpose(1, 0, 2)
+                if quadratic is None:
+                    continue
+                # Row sums over a block's width as one matrix-vector product.
+                ones = batch_ones[width]
+                if batch.stacked is not None:
+                    products = np.matmul(solved_blocks, batch.stacked).reshape(
+                        n_blocks, count, batch.dense, width
+                    )
+                    products *= solved_blocks[:, :, None, :]
+                    quadratic[span, batch.members[:, : batch.dense]] = (
+                        (products.reshape(-1, width) @ ones)
+                        .reshape(n_blocks, count, batch.dense)
+                        .transpose(1, 0, 2)
+                    )
+                    products = None  # freed before the next batch's temporaries
+                if batch.members.shape[1] > batch.dense:
+                    squares = ((solved_blocks * solved_blocks).reshape(-1, width) @ ones).reshape(
+                        n_blocks, count
+                    )
+                    quadratic[span, batch.members[:, batch.dense :]] = (
+                        squares.T[:, :, None] * batch.identity_scales[None, :, :]
+                    )
+            # Drop this piece and its products before the next piece is formed.
+            solved = solved_blocks = piece_leverage = products = squares = None
         weighted = row_weights[rows, None] * directions
         gradient = weighted.T @ (0.5 * (leverage + 1.0 / sum_w))
         return (gradient,) if quadratic is None else (gradient, quadratic.T @ weighted)
@@ -272,7 +282,21 @@ def _leverage_derivative_terms(
     # their terms are summed here in row order either way, so the totals are
     # the same at every worker count (``_parallel.pooled_map``).
     sums = [(grad, grad_compensation)] + ([(cross, cross_compensation)] if cross_terms else [])
-    blocks = solved_row_blocks(dm, inverse, mean_x, mean_lo, row_weights != 0.0)
+    # A block's rows keep their leverage and directions, and their quadratic
+    # forms and weighted directions with the cross terms.
+    row_bytes = 8 * (1 + (3 if cross_terms else 2) * m)
+    # A piece's widest products: one batch's dense penalties, side by side.
+    piece_row_bytes = 8 * max(
+        (
+            batch.dense * (batch.stop - batch.start)
+            for batch in batches
+            if cross_terms and batch.stacked is not None
+        ),
+        default=0,
+    )
+    blocks = solved_row_blocks(
+        dm, inverse, mean_x, mean_lo, row_weights != 0.0, row_bytes, piece_row_bytes
+    )
     if blocks.block_bytes is None:
         # The chunked route runs on this thread under the fit's BLAS policy; a
         # generator, so each chunk is reduced before the next is formed.
