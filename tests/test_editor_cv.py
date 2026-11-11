@@ -1371,6 +1371,50 @@ def test_a_job_finishing_after_an_edit_and_its_undo_is_kept(
         assert (report["final_fit"]["done"], report["final_fit"]["stale"]) == (True, False)
 
 
+def test_a_fit_freed_inside_the_serial_registry_is_forgotten_without_a_hang(monkeypatch):
+    """A fit's serial is forgotten wherever the fit dies, the registry's own locked block too.
+
+    A fit held only by a garbage cycle dies at the next collection, and an allocation inside the
+    locked block can start one; the fit's callback then runs on the thread holding the lock.
+    """
+    import gc
+    import itertools
+
+    from superglm.editor import cv as cv_module
+
+    class Fit:
+        pass
+
+    serials = itertools.count(1)
+
+    class CollectingCount:
+        def __next__(self):
+            gc.collect()
+            return next(serials)
+
+    monkeypatch.setattr(cv_module, "_FIT_SERIALS", {})
+    monkeypatch.setattr(cv_module, "_FIT_SERIAL_LOCK", type(cv_module._FIT_SERIAL_LOCK)())
+    monkeypatch.setattr(cv_module, "_NEXT_FIT_SERIAL", CollectingCount())
+    live, given = Fit(), []
+    worker = threading.Thread(target=lambda: given.append(cv_module._fit_serial(live)), daemon=True)
+    automatic = gc.isenabled()
+    gc.disable()
+    try:
+        cyclic = Fit()
+        cyclic.self = cyclic
+        assert cv_module._fit_serial(cyclic) == 1
+        del cyclic
+        worker.start()
+        worker.join(timeout=10)
+    finally:
+        if automatic:
+            gc.enable()
+
+    assert not worker.is_alive(), "the registry waited on its own lock"
+    assert given == [2]
+    assert list(cv_module._FIT_SERIALS) == [id(live)]
+
+
 def test_the_final_fit_report_counts_the_changes_waiting_now(cv_frame, cv_fit):
     """One change waits when Final fit runs; it is undone, then another is staged.
 

@@ -329,7 +329,9 @@ class InForce:
 
 
 _FIT_SERIALS: dict[int, tuple[weakref.ref, int]] = {}
-_FIT_SERIAL_LOCK = threading.Lock()
+# Re-entrant: ``forget`` runs wherever its fit dies, which can be a collection inside the
+# locked block below, on the thread that holds the lock.
+_FIT_SERIAL_LOCK = threading.RLock()
 _NEXT_FIT_SERIAL = itertools.count(1)
 
 
