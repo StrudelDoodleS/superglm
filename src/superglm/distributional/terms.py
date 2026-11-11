@@ -511,9 +511,8 @@ def _read_as_number(fitted: Any, name: Hashable) -> bool:
 def _reference_value(fitted: Any, frame: EagerFrame, name: Hashable) -> Any:
     """Return a column's training centre, missing values ignored.
 
-    A column no term reads with levels is held at its median when it is numeric
-    or a ``Numeric`` term reads it, the values converted as ``Numeric`` converts
-    them, so every storage a ``Numeric`` term accepts gives one centre.  Any other column is
+    A column no term reads with levels, if numeric or read by ``Numeric``, is held
+    at the median of its values as ``Numeric`` converts them.  Any other column is
     held at its most frequent fitted level, counted over the labels the term reads
     at it; a tie goes to the level that comes first in :func:`_column_levels` order.
     A label the term reads at no fitted level is held only if no fitted level is
