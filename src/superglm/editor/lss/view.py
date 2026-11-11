@@ -160,9 +160,10 @@ def fit_keeps_its_rows(lss: SuperLSS) -> bool:
 
 def rows_describe_fit(lss: SuperLSS, train: Any) -> bool:
     """Whether ``train`` holds the rows ``lss`` is fitted on now: as many as the fit was given
-    or kept, as opening checks, and where the fit kept its rows, the same responses, weights,
-    offsets and read columns on them, each resolved as the fit resolves it, so that no weights
-    match unit ones. It decides only what the session says (``follow_training_rows``).
+    or kept, with the same responses, weights, offsets and read columns on the rows it kept,
+    each resolved as the fit resolves it, so that no weights match unit ones. A fit that kept
+    no rows records nothing of its features or offsets, so no split can be shown to describe
+    it. Read after a refit or repair in place (``follow_training_rows``), never at opening.
     """
     state = lss._require_fitted().fit_state
     provenance = state.weight_provenance
@@ -170,7 +171,7 @@ def rows_describe_fit(lss: SuperLSS, train: Any) -> bool:
         return False
     rows = state.retained_rows
     if rows is None:
-        return True
+        return False
     try:
         weights = resolve_likelihood_weights(
             train.sample_weight, n_observations=train.n_obs, contract=state.weight_contract

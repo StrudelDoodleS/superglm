@@ -147,9 +147,10 @@ TRAINING_ROWS_FOLLOWED = (
     "training data: its curves, training scores, Refit and Final fit read them."
 )
 TRAINING_ROWS_LOST = (
-    "The model was refitted in place on other data than the editor's training data, and the "
-    "refit kept none of its rows (retain_rows=False), so the editor has no training rows for "
-    "it. Open the editor again with train_data=(X, y, sample_weight, offsets), the refit's rows."
+    "The model was refitted in place and kept none of its rows (retain_rows=False), so the "
+    "editor cannot check that its training data are the refit's, and has no other rows to "
+    "use. Open the editor again with train_data=(X, y, sample_weight, offsets), the refit's "
+    "rows, or refit with retain_rows=True."
 )
 
 
@@ -160,8 +161,10 @@ def follow_training_rows(
     notice to give, ``None`` when ``train`` already described it (``rows_describe_fit``).
 
     Where the fit keeps its rows, the split is those rows, whatever changed: its frame,
-    responses, weights and offsets. Otherwise ``train`` stays while it describes the fit.
-    Raises ``EditorValueError`` when it does not, since nothing else gives the rows back.
+    responses, weights and offsets. Where it keeps their arrays but no frame (a model restored
+    from a file, then repaired), ``train`` stays while it describes the fit. Raises
+    ``EditorValueError`` otherwise, a refit that kept no rows included: nothing shows that
+    ``train`` is its data, and nothing else gives its rows back.
     """
     described = rows_describe_fit(lss, train)
     notice = None if described else TRAINING_ROWS_FOLLOWED

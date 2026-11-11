@@ -1575,6 +1575,53 @@ def test_run_cv_rows_are_checked_again_after_a_follow_onto_other_data():
     assert session.cv_check.reason == FINGERPRINT_MISMATCH.format(data="train data", rows=100)
 
 
+@pytest.mark.parametrize("follow", ["same data", "other data", "more rows", "fewer rows"])
+@pytest.mark.parametrize("weights", ["none", "prior", "zeros and ones"])
+def test_a_refit_in_place_that_kept_no_rows_is_refused_until_the_editor_is_reopened(
+    weights, follow
+):
+    # Codex's case is "other data": as many rows, other values, retain_rows=False. At 2a81cdefe
+    # the rowless branch took the opening split as the refit's without comparing anything, so
+    # its scores, Refit and Final fit read the earlier data. A fit without its rows records no
+    # digest of its features or offsets, so even identical data cannot be shown to be its own.
+    from superglm.editor.errors import EditorValueError
+    from superglm.editor.lss.availability import TRAINING_ROWS_LOST, session_refit_reason
+    from superglm.editor.payloads import session_payload
+
+    model, X, y, w, given = _follow_case("column", weights, 0)
+    lambdas = {"mean:x#wiggle": 1.0}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y, sample_weight=w, lambdas=lambdas, retain_rows=False)
+        session = edit(model, train_data=(X, y, w, given))
+        seed = 0 if follow == "same data" else 1
+        n = {"more rows": 150, "fewer rows": 60}.get(follow, 100)
+        _, X2, y2, w2, _ = _follow_case("column", weights, seed, n)
+        model.fit(X2, y2, sample_weight=w2, lambdas=lambdas, retain_rows=False)
+        with pytest.raises(EditorValueError) as refused:
+            session_payload(session)
+        # the advice holds: a session opened on the refit's rows scores and refits them
+        reopened = edit(model, train_data=(X2, y2, w2, given))
+        session_payload(reopened)
+        assert session_refit_reason(reopened) is None
+    assert str(refused.value) == TRAINING_ROWS_LOST
+
+
+def test_a_rowless_fit_is_never_repaired_in_place():
+    # So every replacement of a fit without its rows is a refit, which the follow refuses.
+    from superglm.distributional.shape_repair import REPAIR_NEEDS_THE_ROWS
+
+    model, X, y, w, _ = _follow_case("none", "none", 0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y, lambdas={"mean:x#wiggle": 1.0}, retain_rows=False)
+    before = model._model
+    with pytest.raises(RuntimeError, match="retain_rows=True"):
+        model.apply_shape_postfit()
+    assert model._model is before
+    assert "retain_rows=True" in REPAIR_NEEDS_THE_ROWS
+
+
 def test_a_refit_in_place_that_kept_no_rows_says_the_editor_needs_its_rows():
     from superglm.editor.errors import EditorValueError
     from superglm.editor.lss.availability import TRAINING_ROWS_LOST
