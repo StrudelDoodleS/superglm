@@ -766,25 +766,27 @@ def _bracketed_projection(
     return best, upper - lower
 
 
+# The monotone or curvature cone a repair projects onto. A derivative of degree
+# p <= 1 on each span is non-negative exactly when its span-end values are, so one
+# QP is exact. A higher degree makes the cone semi-infinite (Papp & Alizadeh 2014:
+# second-order-cone representable, not polyhedral), solved by exchange (Blankenship
+# & Falk 1976; Arai & Kitahara 2026). Each QP holds the span-end values and a cut at
+# every span's lowest interior minimum, keeps the cuts it holds active and drops the
+# rest, which does not move a strictly convex QP's optimum. A binding cut's minimum
+# moves with the coefficients; adding that curvature, lambda d d' / q'', to the
+# Hessian makes the step a local-reduction SQP one, quadratically convergent
+# (Hettich & Kortanek 1993). The curvature only places the cuts: the answer is the
+# plain relaxation at them, a QP optimum whose own KKT conditions hold, and it is
+# the projection once every span's minimum is feasible to the certificate's
+# rounding. Should that not happen within _PROJECTION_STEPS, the cuts seed a bracket
+# between the Bernstein inner cone and the cutting-plane outer cone
+# (_bracketed_projection), shape-feasible by construction and disclosed if the
+# bracket does not close.
 def _cone_projection(spec: _SplineBase, H: NDArray, g: NDArray, kind: str, label: str) -> NDArray:
     """Minimise ``0.5 b'Hb - g'b`` over coefficients whose curve has ``kind`` everywhere.
 
-    A derivative of degree ``p <= 1`` on each span is non-negative exactly when its
-    span-end values are, so one QP is exact. A higher degree makes the cone a
-    semi-infinite one (Papp & Alizadeh 2014: second-order-cone representable, not
-    polyhedral), solved by exchange (Blankenship & Falk 1976; Arai & Kitahara 2026).
-    Each QP holds the span-end values and a cut at every span's lowest interior
-    minimum, keeps the cuts it holds active and drops the rest, which does not move
-    a strictly convex QP's optimum. A binding cut's minimum moves with the
-    coefficients, and adding that curvature, ``lambda d d' / q''``, to the Hessian
-    makes the step a local-reduction SQP one, quadratically convergent (Hettich &
-    Kortanek 1993). The curvature only places the cuts: the answer is the plain
-    relaxation at them, a QP optimum whose own KKT conditions hold, and it is the
-    projection once every span's minimum is feasible to the certificate's rounding.
-    Should that not happen within ``_PROJECTION_STEPS``, the cuts seed a bracket
-    between the Bernstein inner cone and the cutting-plane outer cone
-    (``_bracketed_projection``), whose result is shape-feasible by construction and
-    is disclosed if the bracket does not close.
+    Exact on spans whose derivative is at most linear; elsewhere a local-reduction SQP
+    places the cuts. The comment above gives the method and its sources.
     """
     if _uses_span_jump_constraints(spec, kind):
         rows, _ = _distinct_unit_rows(_shape_constraint_rows(spec, _shape_breakpoints(spec), kind))
