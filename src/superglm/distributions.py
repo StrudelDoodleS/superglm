@@ -433,22 +433,14 @@ class NegativeBinomial:
         return (2.0 / self.theta) * np.ones_like(mu)
 
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
-        """NB2 unit deviance."""
-        theta = self.theta
-        # np.where evaluates both branches on every row; errstate silences
-        # warnings from the unselected branch (log(0) at y = 0 with a large
-        # trial mu) and changes no value.
-        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-            d = np.where(
-                y > 0,
-                2
-                * (
-                    y * np.log(np.maximum(y, 1e-300) / mu)
-                    - (y + theta) * np.log((y + theta) / (mu + theta))
-                ),
-                2 * theta * np.log((mu + theta) / theta),
-            )
-        return d
+        """NB2 unit deviance, ``2 [y log(y / mu) - (y + theta) log((y + theta) / (mu + theta))]``.
+
+        Each row is within a few ``u`` of its value and never negative, at every
+        ``theta``; ``superglm._nb2_deviance`` gives the algorithms and their bounds.
+        """
+        from superglm._nb2_deviance import unit_deviance
+
+        return unit_deviance(y, mu, float(self.theta))
 
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
         """NB2 log-likelihood: Σ w[log Γ(y+θ) - log Γ(θ) - log Γ(y+1) + θ log(θ/(μ+θ)) + y log(μ/(μ+θ))]."""

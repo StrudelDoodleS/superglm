@@ -140,6 +140,109 @@ class TestNB2DevianceUnit:
         assert np.isfinite(result.deviance)
         assert result.intercept < 60.0
 
+    @pytest.mark.parametrize("theta", [1e-3, 1.7, 1e4, 1e8, 1e12])
+    def test_unit_deviance_is_within_512_u_of_an_80_digit_reference(self, theta):
+        """#604 and the review of #614: every row keeps a few hundred ``u`` of its own value.
+
+        Two cancellations are covered. At theta = 1e8 the quotient form took the log of
+        ``(y + theta) / (mu + theta)``, within 1e-8 of one, and its rounding of ``u``
+        became about ``theta u = 1e-8`` on a deviance of order one, so an NB2 REML fit
+        with theta on its bound stopped ``line_search_failed``. And with ``y`` within
+        1e-8 of ``mu`` the count term ``y log(y / mu)`` carried ``y u`` against a
+        deviance near ``(y - mu)**2 / mu``, which came out negative and gave NaN
+        deviance residuals, at every theta. The fixture holds both, the edges of the
+        centred window (``|t| = 1/8``), and ``theta`` far below ``mu``.
+
+        Bound: inside ``|t| <= 1/8`` the centred series subtracts nothing and is within
+        a few ``u``. Outside it the deviance is a difference of two terms whose summed
+        size is at most 35 times the result; each is a product with one ``log`` or
+        ``log1p`` (at most 4 ulp = 8 u in NumPy's builds) and a few correctly rounded
+        operations, so 12 u of each term and 35 * 12 u < 512 u of the value. The
+        unfixed code misses it by more than six decades on the near-equal rows.
+        """
+        from tests._nb2_oracle import unit_deviance
+
+        y = np.array([0.0, 0.0, 1.0, 1.0, 3.0, 12.0, 12.0, 30.0, 1.0, 3.0, 12.0, 8.0, 8.0])
+        mu = np.array(
+            [
+                0.4,
+                30.0,
+                0.4,
+                2.5,
+                2.5,
+                7.0,
+                30.0,
+                12.0,
+                1.0 + 1e-10,
+                3.0 * (1.0 - 1e-9),
+                12.0 * (1.0 + 1e-14),
+                8.0 / 1.125,
+                8.0 / 0.875,
+            ]
+        )
+        actual = NegativeBinomial(theta=theta).deviance_unit(y, mu)
+        expected = np.array([unit_deviance(a, b, theta) for a, b in zip(y, mu, strict=True)])
+        u = 2.0**-53
+        assert np.all(actual >= 0.0)
+        assert np.all(np.abs(actual - expected) <= 512 * u * expected)
+
+    @pytest.mark.parametrize(("y", "mu"), [(5e-324, 10.0), (1e-320, 1e6), (1e-300, 1e30)], ids=str)
+    def test_a_tiny_positive_response_keeps_its_finite_deviance(self, y, mu):
+        """Review of #614: ``y / mu`` underflows to zero and its log to ``-inf``.
+
+        The deviance there is finite (7.167 at y = 5e-324, mu = 10, theta = 2). The
+        logarithm falls back to ``log(y) - log(mu)`` where the quotient is not
+        normal, as the Poisson deviance does. Unfixed, all three rows were ``-inf``;
+        master's ``max(y, 1e-300)`` floor already gave ``-inf`` on the third.
+        """
+        from tests._nb2_oracle import unit_deviance
+
+        actual = NegativeBinomial(theta=2.0).deviance_unit(np.array([y]), np.array([mu]))
+        expected = unit_deviance(y, mu, 2.0)
+        np.testing.assert_allclose(actual, expected, rtol=512 * 2.0**-53)
+
+    def test_a_tiny_positive_response_fits_as_on_master(self):
+        """Review of #614: one y = 5e-324 row made a fixed-theta fit raise.
+
+        Its unit deviance was ``-inf``, so the fit stopped with ``fit candidate scalar
+        results must be finite``. Master converges with deviance 9.581134238706705.
+        """
+        x = np.random.default_rng(42).normal(size=200)
+        y = np.full(200, 20.0)
+        y[0] = 5e-324
+        model = SuperGLM(
+            family=NegativeBinomial(theta=2.0),
+            features={"x": Numeric()},
+            selection_penalty=0.0,
+        )
+        model.fit(pd.DataFrame({"x": x}), y)
+        assert model.result.converged
+        np.testing.assert_allclose(model.result.deviance, 9.581134238706705, rtol=1e-10)
+
+    @pytest.mark.parametrize("theta", [2.0, 1e8])
+    def test_deviance_residuals_are_finite_where_y_is_almost_mu(self, theta):
+        """Review of #614: a negative unit deviance made ``sqrt`` return NaN.
+
+        Twenty responses are set to ``mu_hat (1 - 1e-10)``. Unfixed, 8 of them were
+        NaN at theta = 2 and 10 at theta = 1e8; Poisson's centred deviance gave none.
+        """
+        rng = np.random.default_rng(3)
+        n = 400
+        x = rng.uniform(0.0, 2.0, n)
+        X = pd.DataFrame({"x": x})
+        y = rng.poisson(np.exp(0.5 + 0.4 * x)).astype(float)
+        model = SuperGLM(
+            family=NegativeBinomial(theta=theta),
+            features={"x": Numeric()},
+            selection_penalty=0.0,
+        )
+        model.fit(X, y)
+        y[:20] = model.predict(X)[:20] * (1.0 - 1e-10)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            residuals = model.metrics(X, y).residuals(kind="deviance")
+        assert np.all(np.isfinite(residuals))
+
     def test_values_are_the_both_branch_formula_to_the_log_ulps(self):
         theta = 1.7
         y = np.array([0.0, 0.0, 0.0, 0.0, 3.0, 3.0, 1.0, 2.0, 0.0, 5.0])
@@ -149,7 +252,7 @@ class TestNB2DevianceUnit:
                 y * np.log(np.maximum(y, 1e-300) / mu),
                 (y + theta) * np.log((y + theta) / (mu + theta)),
             ]
-            zero_branch = theta * np.log((mu + theta) / theta)
+            zero_branch = theta * np.log1p(mu / theta)
             expected = np.where(
                 y > 0, 2 * (positive_branch[0] - positive_branch[1]), 2 * zero_branch
             )
@@ -170,10 +273,73 @@ class TestNB2DevianceUnit:
         # product and subtraction around it are correctly rounded and may be ordered either
         # way by the two evaluations, 4 u more. A branch that took the wrong formula, or
         # dropped a term, is out by O(1) of ``scale``.
+        # Where mu / theta underflows (mu = 5e-324), the division and the product by
+        # theta each add an absolute error of at most 2**-1075, the second doubled; the
+        # sum is written in 2**-1074, since 2**-1075 itself rounds to zero.
         u = 2.0**-53
+        underflow = (theta + 1) * 2.0**-1074
         finite = np.isfinite(expected)
         np.testing.assert_array_equal(actual[~finite], expected[~finite])
-        assert np.all(np.abs(actual[finite] - expected[finite]) <= (16 + 4) * u * scale[finite])
+        assert np.all(
+            np.abs(actual[finite] - expected[finite]) <= (16 + 4) * u * scale[finite] + underflow
+        )
+
+    def test_unit_deviance_allocates_its_output_and_under_half_a_row_more(self):
+        """Review of #614: NB2 fits slowed by 38-59% on masked copies of every positive row.
+
+        The deviance runs in chunks of ``_CHUNK`` rows, two compiled passes around two
+        whole-chunk logarithms, so its only allocations are the output and two
+        buffers of one chunk: 512 KiB, under a sixth of the output at this size. At cfc77fa21
+        the masked-array algorithm peaked at several rows of floats on this count data.
+        """
+        import tracemalloc
+
+        rng = np.random.default_rng(614)
+        n = 400_000
+        mu = 2.0 * np.exp(0.3 * rng.standard_normal(n))
+        y = rng.negative_binomial(2.0, 2.0 / (2.0 + mu)).astype(np.float64)
+        family = NegativeBinomial(theta=2.0)
+        family.deviance_unit(y[:8], mu[:8])
+        tracemalloc.start()
+        try:
+            family.deviance_unit(y, mu)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert peak <= 1.5 * 8 * n
+
+    def test_unit_deviance_takes_two_logs_a_row_and_no_log1p(self, monkeypatch):
+        """Review of #614: NumPy's float64 ``log1p`` is a SIMD loop only with AVX-512.
+
+        Without it ``np.log1p`` costs about 12 ns a row against 3 ns for ``np.log``, and
+        9bd97bff1 ran ``np.log1p`` over every row twice beside two ``np.log``, which
+        made NB2 fits slower than master on AVX2 and ARM64. Each ``log1p`` window is
+        now ``log(1 + x)`` plus its exact rounding error, so NumPy evaluates
+        ``np.log`` over two arguments a row and ``np.log1p`` over none. The count
+        covers two chunks of count data with zero, centred and far rows.
+        """
+        from superglm import _nb2_deviance
+
+        rows = {"log": 0, "log1p": 0}
+
+        def counted(name, ufunc):
+            def call(x, *args, **kwargs):
+                rows[name] += np.size(x)
+                return ufunc(x, *args, **kwargs)
+
+            return call
+
+        rng = np.random.default_rng(614)
+        n = 2 * _nb2_deviance._CHUNK + 5
+        mu = 2.0 * np.exp(0.3 * rng.standard_normal(n))
+        y = rng.negative_binomial(2.0, 2.0 / (2.0 + mu)).astype(np.float64)
+        family = NegativeBinomial(theta=2.0)
+        expected = family.deviance_unit(y, mu)
+        monkeypatch.setattr(_nb2_deviance.np, "log", counted("log", np.log))
+        monkeypatch.setattr(_nb2_deviance.np, "log1p", counted("log1p", np.log1p))
+        actual = family.deviance_unit(y, mu)
+        np.testing.assert_array_equal(actual, expected)
+        assert rows == {"log": 2 * n, "log1p": 0}
 
 
 class TestNB2LogLikelihood:

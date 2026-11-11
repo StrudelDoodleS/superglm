@@ -466,6 +466,50 @@ class TestVuongTestWeighted:
         assert abs(r_w.omega - r_uw.omega) < 1e-10
 
 
+class TestVuongTestNB2PoissonLimit:
+    """Review of #614: the unweighted NB2 rows carried ``theta u`` near the Poisson limit.
+
+    ``gammaln(y + theta) - gammaln(theta)`` subtracts two values of about
+    ``theta log theta`` and ``theta log(theta / (mu + theta))`` takes the log of a
+    quotient near one. On Poisson data, NB2 at theta = 1e8 and Poisson are the same
+    model to about 1e-8 per row, yet the unweighted test said "Poisson preferred"
+    with p = 0 (statistic -31.9), and at theta = 1e12 "NB preferred" (+58.3), while
+    ``sample_weight=np.ones(n)`` gave p = 0.32 through the family's stable density.
+    """
+
+    def test_per_row_log_density_matches_an_80_digit_reference(self):
+        from superglm.stats.model_tests import _per_obs_ll_nb2
+        from tests._nb2_oracle import log_density
+
+        y = np.array([0.0, 1.0, 2.0, 7.0, 30.0, 0.5])
+        mu = np.array([0.3, 1.2, 2.0, 5.5, 25.0, 0.8])
+        for theta in (1.7, 1e8, 1e12):
+            actual = _per_obs_ll_nb2(y, mu, theta)
+            expected = np.array([log_density(a, b, theta) for a, b in zip(y, mu, strict=True)])
+            np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
+
+    @pytest.mark.parametrize("theta", [1e8, 1e12])
+    def test_unweighted_and_unit_weighted_tests_agree(self, theta):
+        rng = np.random.default_rng(42)
+        n = 4000
+        x1 = rng.uniform(0, 2, n)
+        x2 = rng.uniform(0, 2, n)
+        y = rng.poisson(np.exp(-0.5 + 0.3 * x1 + 0.2 * x2)).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+        features = {"x1": Numeric(), "x2": Numeric()}
+        poisson = _fit_poisson_numeric(X, y, features=dict(features))
+        nb = SuperGLM(
+            family=NegativeBinomial(theta=theta), features=dict(features), selection_penalty=0.0
+        )
+        nb.fit(X, y)
+
+        unweighted = vuong_test(nb, poisson, X, y, correction="none")
+        unit = vuong_test(nb, poisson, X, y, sample_weight=np.ones(n), correction="none")
+        assert unweighted.p_value > 0.05
+        assert unweighted.preferred == unit.preferred
+        np.testing.assert_allclose(unweighted.statistic, unit.statistic, rtol=1e-6, atol=1e-6)
+
+
 class TestVuongTestUnits:
     @pytest.mark.parametrize("unit", [1e-12, 1e9])
     def test_statistic_ignores_the_units_of_the_log_likelihood(self, monkeypatch, unit):

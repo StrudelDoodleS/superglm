@@ -123,14 +123,10 @@ def _per_obs_ll_poisson(y: NDArray, mu: NDArray) -> NDArray:
 
 
 def _per_obs_ll_nb2(y: NDArray, mu: NDArray, theta: float) -> NDArray:
-    """Per-observation NB2 log-likelihood."""
-    return (
-        gammaln(y + theta)
-        - gammaln(theta)
-        - gammaln(y + 1)
-        + theta * np.log(theta / (mu + theta))
-        + y * np.log(mu / (mu + theta))
-    )
+    """Per-observation NB2 log-likelihood, the family's own stable density."""
+    from superglm.distributions import _negative_binomial_log_density
+
+    return _negative_binomial_log_density(y, mu, theta)
 
 
 def _per_obs_ll_gaussian(y: NDArray, mu: NDArray, phi: float) -> NDArray:
