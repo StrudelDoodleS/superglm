@@ -335,6 +335,7 @@ def _retained_rank_info(
             None if face is None else _face_decomposition(M_beta, face, raw_factor, dm.n)
         ),
         feature_edf1=feature_edf1,
+        covariance_policy="rule_free",
     )
 
 

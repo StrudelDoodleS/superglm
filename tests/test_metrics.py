@@ -3900,3 +3900,88 @@ def test_face_leverage_keeps_a_penalty_term_dominated_beyond_one_over_eps():
     spline_edf = next(row.edf for row in evaluation.summary()._coef_rows if row.name == "x")
     assert spline_edf == pytest.approx(expected.sum() - 1.0, rel=1e-9)
     assert evaluation._influence_edf[0].sum() == pytest.approx(expected.sum() - 1.0, rel=1e-9)
+
+
+def _exact_augmented_inverse(rows, weights, roots):
+    """``H^-1`` in exact rationals, ``H = sum w a a' + diag(0, sum_k lam_k R_k' R_k)``, ``a = [1, x]``.
+
+    ``roots`` are ``(lam_k, columns_k, R_k)``: each penalty term by its own root, so the
+    oracle never forms the float sum of the terms.
+    """
+    from fractions import Fraction
+
+    def exact(values):
+        return [[Fraction(float(value)) for value in row] for row in np.atleast_2d(values)]
+
+    a = [[Fraction(1)] + row for row in exact(rows)]
+    w = [Fraction(float(value)) for value in weights]
+    size = len(a[0])
+    hessian = [
+        [sum(wi * x[r] * x[c] for wi, x in zip(w, a)) for c in range(size)] for r in range(size)
+    ]
+    for scale, columns, root in roots:
+        R, lam, offset = exact(root), Fraction(float(scale)), columns.start + 1
+        for i in range(len(R[0])):
+            for j in range(len(R[0])):
+                hessian[offset + i][offset + j] += lam * sum(row[i] * row[j] for row in R)
+    system = [row + [Fraction(int(r == c)) for c in range(size)] for r, row in enumerate(hessian)]
+    for col in range(size):
+        pivot = next(r for r in range(col, size) if system[r][col] != 0)
+        system[col], system[pivot] = system[pivot], system[col]
+        system[col] = [value / system[col][col] for value in system[col]]
+        for r in range(size):
+            if r != col and system[r][col] != 0:
+                factor = system[r][col]
+                system[r] = [left - factor * right for left, right in zip(system[r], system[col])]
+    return np.array([[float(value) for value in row[size:]] for row in system])
+
+
+def test_face_fit_covariance_keeps_a_penalty_term_dominated_beyond_one_over_eps():
+    """Re-formed on other weights, the covariance of a fit whose rows bind holds no row and
+    keeps each penalty term at its own scale: ``1e-3 S_d1`` is ``eps`` below ``1e12 S_d2``,
+    and on the line, which ``S_d2`` leaves free, it is all the penalty there is.
+    Against ``d4d43fed5``, which factored the summed ``S``, the variances were 1.52 times
+    the exact ones (standard errors 23% high).
+    """
+    from superglm import Constraint, LambdaPolicy
+    from superglm.features.spline import BSplineSmooth
+    from superglm.inference.covariance import _active_penalty_components
+    from superglm.model.fit_state import fitted_lambda2
+    from superglm.solvers.centered_system import penalty_factor
+
+    x = np.linspace(0.0, 1.0, 100)
+    X = pd.DataFrame({"x": x})
+    y = 2.0 + x - x * x + np.random.default_rng(0).normal(0.0, 0.1, 100)
+    lambdas = {"d1": LambdaPolicy.fixed(1e-3), "d2": LambdaPolicy.fixed(1e12)}
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={
+            "x": BSplineSmooth(
+                n_knots=4, m=(1, 2), constraint=Constraint.fit.convex, lambda_policy=lambdas
+            )
+        },
+    ).fit_reml(X, y)
+    assert model.result.rank_info.face is not None
+
+    evaluation = model.metrics(X.copy(), y, sample_weight=np.full(100, 1e-4))
+    assert not evaluation._fit_geometry_matches
+    X_a, W, _, augmented, active_groups = evaluation._active_info
+    terms = (model._dm.group_matrices, model._groups, active_groups, fitted_lambda2(model))
+    roots = [
+        (lam, columns, penalty_factor(S_k))
+        for columns, lam, S_k in _active_penalty_components(
+            *terms, reml_penalties=model._reml_penalties
+        )
+    ]
+    rows = X_a.toarray()
+    expected = _exact_augmented_inverse(rows, W, roots)
+    # The curve's variance on the training rows, the number bands read. The Hessian spans
+    # weights of 1e-4 and a penalty of 1e12, and float64 meets the exact inverse to about 1e-9.
+    design = np.column_stack((np.ones(len(rows)), rows))
+    np.testing.assert_allclose(
+        np.einsum("ij,jk,ik->i", design, np.asarray(augmented), design),
+        np.einsum("ij,jk,ik->i", design, expected, design),
+        rtol=1e-7,
+    )
+    np.testing.assert_allclose(np.diag(augmented), np.diag(expected), rtol=1e-7)

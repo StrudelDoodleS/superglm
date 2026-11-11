@@ -2049,6 +2049,7 @@ def _fit_pirls_inner(
         feature_edf=feature_edf,
         group_edf=group_edf,
         objective_loss=None,
+        covariance_policy="rule_free",
     )
     p_eff = rank_info.total_edf
 

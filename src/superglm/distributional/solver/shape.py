@@ -279,6 +279,8 @@ def refit_with_shape_rules(
             unconstrained_penalized_log_likelihood=float(unconstrained.penalized_log_likelihood),
             penalized_log_likelihood=float(result.penalized_log_likelihood),
             seconds=time.perf_counter() - started,
+            # The fit publishes the covariance with no shape row held (``_fit_candidate``).
+            covariance="rule_free",
         )
 
     if _is_feasible(A, beta0, b, _QP_FEASIBILITY_TOL, abs_A=structure.abs_entries):

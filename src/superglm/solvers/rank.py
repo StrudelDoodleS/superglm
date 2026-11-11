@@ -1250,6 +1250,10 @@ class RankInfo:
     # ``feature_edf`` (``irls_direct._face_factor_edf``).  ``None`` elsewhere:
     # inference forms it from the data Gram.
     feature_edf1: NDArray | None = field(default=None, repr=False, compare=False)
+    # The covariance a fit publishes on a face: ``"rule_free"``, with no shape row held, which
+    # every fit now records, and ``"face"``, the face fit's, for a record saved before fits did:
+    # it reads this default on unpickling and keeps that covariance in every reader until refit.
+    covariance_policy: Literal["face", "rule_free"] = field(default="face", compare=False)
 
     def take_data_gram(self, W: NDArray) -> NDArray | None:
         """Hand the fit's data Gram to its one reader, leaving none behind.
@@ -1287,8 +1291,11 @@ class RankInfo:
         intervals that cover too rarely (Wood 2026, "Shape constrained additive smooth
         models", Statistical Modelling 26(4), section 5.1, p. 397). The covariance is the
         one the fit would report with no row held; leverage and the degrees of freedom stay
-        the face fit's (``augmented_inverse``).
+        the face fit's (``augmented_inverse``). A record saved before fits held no row
+        keeps the face fit's (``covariance_policy``).
         """
+        if self.covariance_policy == "face":
+            return self.augmented_inverse()
         return self.augmented.pseudo_inverse()
 
     def coefficient_inverse(self) -> NDArray:

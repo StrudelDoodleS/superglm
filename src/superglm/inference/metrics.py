@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from functools import cached_property, partial
+from functools import cache, cached_property, partial
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -151,18 +151,15 @@ def _profiled_augmented_covariance(
     xtw1: NDArray,
     sum_w: float,
     *,
-    profile_rank=None,
+    profiled_inverse: NDArray | None = None,
 ) -> NDArray:
     """Invert after profiling the intercept, then map back to raw coordinates.
 
-    ``profile_rank`` decomposes ``D + S`` with no shape row held, on a constrained fit too
-    (``ModelMetrics._covariance_rank``).
+    ``profiled_inverse`` is the profiled slopes' inverse when the caller has it
+    (``ModelMetrics._covariance_profiled_inverse``); else ``D + S`` is decomposed here.
     """
-    profiled_inverse = (
-        profile_rank.pseudo_inverse()
-        if profile_rank is not None
-        else decompose_gram(data_gram + penalty).pseudo_inverse()
-    )
+    if profiled_inverse is None:
+        profiled_inverse = decompose_gram(data_gram + penalty).pseudo_inverse()
     mean_x = xtw1 / sum_w
     intercept_cross = -(profiled_inverse @ mean_x)
     augmented = np.empty((len(xtw1) + 1, len(xtw1) + 1), dtype=np.float64)
@@ -1009,6 +1006,10 @@ class ModelMetrics:
                 active_groups,
                 len(beta),
             )
+            # one stacked root for the face's decompositions and the covariance's
+            root = cache(
+                partial(_active_penalty_root, *penalty_terms, reml_penalties=reml_penalties)
+            )
             inverse, profile_rank = self._reformed_ranks(
                 X_a,
                 W,
@@ -1018,15 +1019,15 @@ class ModelMetrics:
                 S_active,
                 data_rank,
                 face,
-                partial(_active_penalty_root, *penalty_terms, reml_penalties=reml_penalties),
+                root,
             )
             augmented = _profiled_augmented_covariance(
                 centered_data_gram,
                 S_active,
                 XtW1,
                 float(np.sum(W)),
-                profile_rank=self._covariance_rank(
-                    X_a, W, centered_data_gram, XtW1, S_active, data_rank, profile_rank, face
+                profiled_inverse=self._covariance_profiled_inverse(
+                    X_a, W, centered_data_gram, XtW1, S_active, data_rank, profile_rank, face, root
                 ),
             )
             return X_a, W, inverse, augmented, active_groups
@@ -1057,6 +1058,8 @@ class ModelMetrics:
             active_groups,
             len(beta),
         )
+        # one stacked root for the face's decompositions and the covariance's
+        root = cache(partial(_active_penalty_root, *penalty_terms, reml_penalties=reml_penalties))
         inverse, profile_rank = self._reformed_ranks(
             X_a,
             W,
@@ -1066,31 +1069,50 @@ class ModelMetrics:
             S_active,
             data_rank,
             face,
-            partial(_active_penalty_root, *penalty_terms, reml_penalties=reml_penalties),
+            root,
         )
         augmented = _profiled_augmented_covariance(
             centered_data_gram,
             S_active,
             XtW1,
             float(np.sum(W)),
-            profile_rank=self._covariance_rank(
-                X_a, W, centered_data_gram, XtW1, S_active, data_rank, profile_rank, face
+            profiled_inverse=self._covariance_profiled_inverse(
+                X_a, W, centered_data_gram, XtW1, S_active, data_rank, profile_rank, face, root
             ),
         )
         augmented = _public_augmented_covariance(self._model, augmented, active_groups)
         return X_a, W, inverse, augmented, active_groups
 
-    @staticmethod
-    def _covariance_rank(X_a, W, centered_data_gram, XtW1, S_active, data_rank, profile_rank, face):
-        """The profiled decomposition a re-formed covariance inverts: the one with no row held.
+    def _covariance_profiled_inverse(
+        self,
+        X_a,
+        W,
+        centered_data_gram,
+        XtW1,
+        S_active,
+        data_rank,
+        profile_rank,
+        face,
+        penalty_root,
+    ):
+        """The profiled slopes' inverse a re-formed covariance reads, by the fit's policy.
 
-        ``profile_rank`` is that decomposition off a face. On one it decomposes ``Z'(D + S)Z``,
-        which leverage and the degrees of freedom read; the covariance holds no shape row
-        (``RankInfo.covariance_inverse``), so it takes the decomposition of ``D + S`` itself.
+        ``profile_rank`` decomposes ``D + S`` off a face and ``Z'(D + S)Z`` on one, which
+        leverage and the degrees of freedom read. A fit whose covariance holds no shape row
+        (``RankInfo.covariance_inverse``) inverts ``D + S`` itself, factored from the stacked
+        root ``penalty_root()`` as the face's is (``_face_ranks``); a record saved before
+        keeps the face's, ``Z (Z'(D + S)Z)^+ Z'``.
         """
         if face is None:
-            return profile_rank
-        return _certified_profile_rank(X_a, W, centered_data_gram, XtW1, S_active, data_rank)
+            return profile_rank.pseudo_inverse()
+        rank_info = getattr(self._result, "rank_info", None)
+        if getattr(rank_info, "covariance_policy", "face") == "face":
+            return face_pseudo_inverse(profile_rank, face)
+        # A root of the summed ``S`` cuts a term below ``u`` times another, which can be all
+        # the curvature some direction has; each term's own root keeps it.
+        return _certified_profile_rank(
+            X_a, W, centered_data_gram, XtW1, S_active, data_rank, root=penalty_root()
+        ).pseudo_inverse()
 
     def _reformed_ranks(
         self, X_a, W, XtWX, XtW1, centered_data_gram, S_active, data_rank, face, penalty_root

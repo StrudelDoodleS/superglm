@@ -272,8 +272,11 @@ default="uniform"
     -----
     ``SuperLSS`` enforces ``Constraint.fit`` rules on a term of any parameter: the
     smoothing is chosen without them and the coefficients are refitted under them
-    at that smoothing, so standard errors treat the rules that bind as fixed
-    (see "Rules On A Distributional Model" in the shape-constraints guide).
+    at that smoothing. Effective degrees of freedom treat the rules that bind as
+    fixed; standard errors and bands are those of the fit without the rules,
+    drawn around the ruled curve, because which rules bind is itself estimated
+    (see "What the intervals of a ruled term mean" in the shape-constraints
+    guide).
     ``Constraint.postfit`` rules, which repair a curve after the fit, are not
     applied there: ``SuperLSS`` warns with ``ShapeConstraintIgnoredWarning`` and
     fits the term unconstrained.

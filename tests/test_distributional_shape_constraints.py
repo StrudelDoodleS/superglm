@@ -310,6 +310,28 @@ def test_diagnose_says_what_a_binding_rule_did_in_one_sentence_per_term():
     assert "bands are those of the fit without the rule" in text
 
 
+def test_diagnose_describes_the_covariance_a_saved_model_holds():
+    """A record saved by 0.43.0 has no ``ShapeFit.covariance`` and holds the face's covariance,
+    which it keeps until refit; Diagnose says so, and that a refit gives the new bands. Made
+    here by deleting the stamp before saving. Against ``d4d43fed5`` the legacy record read
+    "bands are those of the fit without the rule", the bands it does not have.
+    """
+    import pickle
+
+    X, y = _data("gamma")
+    for legacy in (False, True):
+        held = _model("gamma", INCREASING).fit_reml(X, y)
+        assert _state(held).shape_fit.binds
+        if legacy:
+            vars(_state(held).shape_fit).pop("covariance", None)
+        text = pickle.loads(pickle.dumps(held)).diagnose().render(detail="full")
+        assert "The rule 'increasing' on mean:x binds at" in text
+        new = "bands are those of the fit without the rule" in text
+        old = "standard errors treat those checkpoints as fixed" in text
+        assert (new, old) == ((False, True) if legacy else (True, False))
+        assert ("refit it to get the bands of the fit without the rule" in text) is legacy
+
+
 def test_a_direction_and_a_curvature_rule_hold_together_and_match_the_optimizer():
     X, y = _data("gamma")
     rules = Constraint.fit.increasing & Constraint.fit.concave

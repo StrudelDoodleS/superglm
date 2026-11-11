@@ -474,10 +474,19 @@ curve. `SuperGLM` and `SuperLSS` do the same.
 - **A rule the data contradict.** The curve is the best one that obeys the
   rule, and the interval is centred on it, so it can miss a true curve that
   breaks the rule.
+- **Term tests are conservative.** The chi-square test of a ruled term in
+  `summary()` (`SuperGLM`) and in `term_test()` and `summary()` (`SuperLSS`)
+  reads this covariance with the reference degrees of freedom of the face, so
+  where a rule binds it rejects a term with no effect less often than its
+  level says. In simulation with a flat true curve, among fits where the rule
+  bound, the 5% test rejected 1.6% of `SuperGLM` Poisson fits and 0.9% of
+  `SuperLSS` Gamma fits, against 2.6% and 2.4% with the face's covariance.
 
 Releases up to 0.43.0 reported the covariance on the active face, with
 zero-width intervals along a term held flat. A model saved by one of them
-keeps the covariance it was saved with.
+keeps that covariance in every standard error, interval, band, prediction
+error and rating table it reports, and a `SuperLSS` model's `diagnose()`
+says so; refit it to get the intervals described here.
 
 ## REML Semantics
 
