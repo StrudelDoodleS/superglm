@@ -465,6 +465,8 @@
 /**
  * @typedef {Object} EditorSnapshot
  * @property {number} model_revision
+ * @property {string} [in_force] names the model in force: two snapshots hold one model exactly
+ *   when their tokens are equal, so an undo gives back the token its edit replaced
  * @property {number} [state_generation]
  * @property {number} [chart_generation]
  * @property {Record<string, string>} [term_versions] each term's version, by which the
@@ -515,6 +517,8 @@
  * @typedef {Object} EvidenceState
  * @property {EvidenceStatus} status
  * @property {number|null} revision
+ * @property {string|null} inForce the model (`in_force`) the newest request asked about, or the
+ *   payload describes once it lands
  * @property {number} sequence
  * @property {unknown} payload
  * @property {string|null} error
@@ -676,6 +680,7 @@ export function createEmptyEvidenceState() {
   return {
     status: "idle",
     revision: null,
+    inForce: null,
     sequence: 0,
     payload: null,
     error: null,

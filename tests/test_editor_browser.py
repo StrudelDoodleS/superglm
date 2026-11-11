@@ -490,6 +490,7 @@ def test_editor_browser_report_error_clears_mismatched_report(browser_editor_wid
         *,
         model_revision=None,
         request_sequence=None,
+        in_force=None,
     ):
         if report == "final":
             raise ValueError("final unavailable")
@@ -497,6 +498,7 @@ def test_editor_browser_report_error_clears_mismatched_report(browser_editor_wid
             report,
             model_revision=model_revision,
             request_sequence=request_sequence,
+            in_force=in_force,
         )
 
     monkeypatch.setattr(browser_editor_widget, "_report", fail_final_report)

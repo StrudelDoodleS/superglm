@@ -1120,6 +1120,123 @@ test("late evidence cannot replace a newer revision", async () => {
   assert.equal(store.getState().request.evidence.metrics.revision, 3);
 });
 
+/** @param {number} revision @param {string} inForce */
+function snapshotOf(revision, inForce) {
+  return { ...snapshot(revision), in_force: inForce };
+}
+
+test("evidence asked for before an edit and its undo lands as current", async () => {
+  const pendingEvidence = deferred();
+  /** @type {Record<string, unknown>[]} */
+  const requests = [];
+  const store = createEditorStore(createInitialEditorState(snapshotOf(3, "fit-a")));
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: (_path, payload) => {
+        requests.push(payload);
+        return pendingEvidence.promise;
+      },
+      getState: async () => snapshotOf(5, "fit-a")
+    }
+  });
+
+  const pending = actions.refreshEvidence("report", "/report", { report: "validation" });
+  store.update((state) => commitRemote(state, snapshotOf(4, "fit-b")));
+  store.update((state) => commitRemote(state, snapshotOf(5, "fit-a")));
+  pendingEvidence.resolve({
+    value: "validation", model_revision: 3, in_force: "fit-a", request_sequence: 1
+  });
+
+  assert.equal(await pending, true);
+  assert.equal(requests[0].in_force, "fit-a");
+  const report = store.getState().request.evidence.report;
+  assert.equal(report.status, "current");
+  assert.equal(report.revision, 5);
+  assert.equal(/** @type {{value:string}} */ (report.payload).value, "validation");
+});
+
+test("evidence for a model no longer in force, or an older request, is still dropped", async () => {
+  const responses = [deferred(), deferred(), deferred()];
+  const queue = [...responses];
+  const store = createEditorStore(createInitialEditorState(snapshotOf(3, "fit-a")));
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: () => {
+        const response = queue.shift();
+        assert.ok(response);
+        return response.promise;
+      },
+      getState: async () => snapshotOf(3, "fit-a")
+    }
+  });
+
+  // Asked about fit-a, answered after an edit to fit-b that was not undone.
+  const edited = actions.refreshEvidence("metrics", "/metrics", {});
+  store.update((state) => commitRemote(state, snapshotOf(4, "fit-b")));
+  responses[0].resolve({ model_revision: 3, in_force: "fit-a", request_sequence: 1 });
+  assert.equal(await edited, false);
+  assert.equal(store.getState().request.evidence.metrics.status, "stale");
+
+  // Back on fit-a: two requests, and the older answer arrives last.
+  store.update((state) => commitRemote(state, snapshotOf(5, "fit-a")));
+  const older = actions.refreshEvidence("metrics", "/metrics", { request: "older" });
+  const newer = actions.refreshEvidence("metrics", "/metrics", { request: "newer" });
+  responses[2].resolve({ value: "newer", model_revision: 5, in_force: "fit-a", request_sequence: 3 });
+  assert.equal(await newer, true);
+  responses[1].resolve({ value: "older", model_revision: 5, in_force: "fit-a", request_sequence: 2 });
+  assert.equal(await older, false);
+  const metrics = store.getState().request.evidence.metrics;
+  assert.equal(/** @type {{value:string}} */ (metrics.payload).value, "newer");
+});
+
+test("an answer about the model a structural change replaced is dropped", async () => {
+  const pendingEvidence = deferred();
+  const store = createEditorStore(createInitialEditorState(snapshotOf(3, "fit-a")));
+  const actions = createEditorActions({
+    store,
+    client: { postJSON: () => pendingEvidence.promise, getState: async () => snapshotOf(4, "fit-b") }
+  });
+
+  // The summary is asked about fit-a; a Refit installs fit-b's summary, then a change that
+  // keeps fit-b moves the revision on, before fit-a's answer arrives.
+  const pending = actions.refreshEvidence("summary", "/summary", { source: "in_force" });
+  const envelope = { ...transitionEnvelope(4), state: snapshotOf(4, "fit-b") };
+  store.update((state) => commitStructuralTransition(state, envelope));
+  assert.equal(store.getState().request.evidence.summary.status, "current");
+  store.update((state) => commitRemote(state, snapshotOf(5, "fit-b")));
+  pendingEvidence.resolve({
+    value: "fit-a's coefficients", model_revision: 3, in_force: "fit-a", request_sequence: 1
+  });
+
+  assert.equal(await pending, false);
+  const summary = store.getState().request.evidence.summary;
+  assert.equal(summary.status, "stale");
+  assert.strictEqual(summary.payload, envelope.summary);
+});
+
+test("a failure about the model an undo put back is dropped, not shown", async () => {
+  const pendingEvidence = deferred();
+  const store = createEditorStore(createInitialEditorState(snapshotOf(3, "fit-a")));
+  const actions = createEditorActions({
+    store,
+    client: { postJSON: () => pendingEvidence.promise, getState: async () => snapshotOf(5, "fit-a") }
+  });
+
+  // The server checked while the edit was in force; the undo commits before its answer.
+  const pending = actions.refreshEvidence("report", "/report", { report: "validation" });
+  store.update((state) => commitRemote(state, snapshotOf(4, "fit-b")));
+  store.update((state) => commitRemote(state, snapshotOf(5, "fit-a")));
+  pendingEvidence.resolve({
+    status: "superseded", model_revision: 3, in_force: "fit-a", request_sequence: 1
+  });
+
+  assert.equal(await pending, false);
+  const report = store.getState().request.evidence.report;
+  assert.deepEqual([report.status, report.error], ["stale", null]);
+});
+
 test("a superseded current evidence request becomes retryable", async () => {
   const store = createEditorStore(createInitialEditorState(snapshot(3)));
   const actions = createEditorActions({

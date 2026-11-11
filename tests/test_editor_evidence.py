@@ -221,7 +221,8 @@ def test_report_is_superseded_when_revision_changes_during_summary(
     monkeypatch,
 ):
     widget = evidence_widget
-    model, revision = widget._current_model_for_evidence()
+    model, source = widget._current_model_for_evidence()
+    revision = widget.session.model_revision
     assert model is not None
     started = threading.Event()
     release = threading.Event()
@@ -263,8 +264,312 @@ def test_report_is_superseded_when_revision_changes_during_summary(
             "status": "superseded",
             "model_revision": revision,
             "request_sequence": 17,
+            "in_force": source.token,
         }
     ]
+
+
+def test_a_report_asked_for_before_an_edit_and_its_undo_is_answered(evidence_widget, monkeypatch):
+    """An answer describes the model it was asked about, whatever the revision says.
+
+    The page names that model by its ``in_force`` token. An edit and its undo while the report is
+    built, or before the request reaches the server, put the very model back, so the report is
+    answered and names the same model; a request about a model no longer in force is superseded.
+    """
+    widget = evidence_widget
+    model, source = widget._current_model_for_evidence()
+    asked = widget._state()
+    started, release = threading.Event(), threading.Event()
+    payloads, errors = [], []
+    original = model.summary
+
+    def blocked(*args, **kwargs):
+        started.set()
+        release.wait(timeout=5)
+        return original(*args, **kwargs)
+
+    def edit_and_undo():
+        widget._operate("shift_up", "x_spline")
+        widget._operate("undo", "x_spline")
+
+    def request_report():
+        try:
+            payloads.append(
+                widget._report(
+                    "final",
+                    model_revision=asked["model_revision"],
+                    request_sequence=17,
+                    in_force=asked["in_force"],
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    monkeypatch.setattr(model, "summary", blocked)
+    evidence_thread = threading.Thread(target=request_report)
+    evidence_thread.start()
+    try:
+        assert started.wait(timeout=5)
+        edit_and_undo()
+    finally:
+        release.set()
+        evidence_thread.join(timeout=5)
+    monkeypatch.undo()
+    late = widget._report(
+        "validation", model_revision=asked["model_revision"], in_force=asked["in_force"]
+    )
+    widget._operate("shift_up", "x_spline")
+    edited = widget._report(
+        "validation", model_revision=asked["model_revision"], in_force=asked["in_force"]
+    )
+
+    assert errors == []
+    assert asked["in_force"] == source.token
+    assert widget.session.model_revision == asked["model_revision"] + 3
+    assert [payload.get("status") for payload in payloads] == [None]
+    assert (payloads[0]["in_force"], payloads[0]["request_sequence"]) == (source.token, 17)
+    assert (late.get("status"), late["in_force"]) == (None, source.token)
+    assert (edited["status"], edited["in_force"]) == ("superseded", source.token)
+
+
+def test_a_final_report_keeps_the_edit_state_of_the_model_it_describes(monkeypatch):
+    """An edited model's Final report shows the summary refitted on the training rows.
+
+    Whether the model is edited is decided with the model the report describes. An edit back to
+    the fitted values and its undo while the report is built put that model back, so they must
+    not give it the unedited model's summary, read on the validation rows.
+    """
+    import superglm.editor.widget as widget_module
+
+    rng = np.random.default_rng(20260805)
+    X = pd.DataFrame({"x_spline": rng.uniform(0.0, 10.0, 240)})
+    y = 0.4 + 0.2 * np.sin(X["x_spline"].to_numpy()) + rng.normal(0.0, 0.03, 240)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.1,
+        features={"x_spline": Spline(n_knots=7)},
+    ).fit(X.iloc[:180], y[:180])
+    session = EditorSession.from_model(
+        model,
+        terms=["x_spline"],
+        train_data=(X.iloc[:180], y[:180], None, None),
+        validation_data=(X.iloc[180:], y[180:], None),
+    )
+    session.select_indices("x_spline", [10, 11, 12])
+    session.shift("x_spline", 0.2)
+    widget = session.widget()
+    datasets = widget_module.evaluation_datasets
+    materialize, score = (
+        widget._model_materialized_for_dataset,
+        widget._dataset_metrics_for_evidence,
+    )
+    moves: list[str] = []
+
+    def edit_back_while_deciding(*args):
+        if not moves:
+            moves.append("back")
+            with widget._lock:
+                session.shift("x_spline", -0.2)
+        return datasets(*args)
+
+    def undo_then(step):
+        def undone(*args):
+            if moves == ["back"]:
+                moves.append("undo")
+                with widget._lock:
+                    session.undo()
+            return step(*args)
+
+        return undone
+
+    try:
+        asked = widget._state()
+        steady = widget._report("final", in_force=asked["in_force"])
+        monkeypatch.setattr(widget_module, "evaluation_datasets", edit_back_while_deciding)
+        monkeypatch.setattr(widget, "_model_materialized_for_dataset", undo_then(materialize))
+        monkeypatch.setattr(widget, "_dataset_metrics_for_evidence", undo_then(score))
+        raced = widget._report("final", in_force=asked["in_force"])
+    finally:
+        monkeypatch.undo()
+        widget.close()
+
+    assert moves == ["back", "undo"]
+    assert steady["summary"]["compact"]["model"]["n_obs"] == 180
+    assert (raced.get("status"), raced["in_force"]) == (None, asked["in_force"])
+    assert raced["summary"]["compact"]["model"] == steady["summary"]["compact"]["model"]
+
+
+class _FinalFitContext:
+    """A job context that never cancels."""
+
+    def check(self):
+        return None
+
+    def progress(self, *args, **kwargs):
+        return None
+
+
+def _split_session():
+    """A Gaussian spline with 180 training and 60 validation rows, nothing edited."""
+    rng = np.random.default_rng(20260805)
+    X = pd.DataFrame({"x_spline": rng.uniform(0.0, 10.0, 240)})
+    y = 0.4 + 0.2 * np.sin(X["x_spline"].to_numpy()) + rng.normal(0.0, 0.03, 240)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.1,
+        features={"x_spline": Spline(n_knots=7)},
+    ).fit(X.iloc[:180], y[:180])
+    session = EditorSession.from_model(
+        model,
+        terms=["x_spline"],
+        train_data=(X.iloc[:180], y[:180], None, None),
+        validation_data=(X.iloc[180:], y[180:], None),
+    )
+    session.select_indices("x_spline", [10, 11, 12])
+    return session
+
+
+def _run_final_fit(widget):
+    from superglm.editor.cv import capture_final_fit, run_final_fit
+
+    with widget._lock:
+        plan = capture_final_fit(widget.session)
+    widget._final_fit = run_final_fit(plan, _FinalFitContext())
+
+
+def _report_with_a_change_put_back(monkeypatch, widget, report, change, put_back):
+    """The steady reply, then the reply when ``change`` lands as the report is built and
+    ``put_back`` restores the model before the final check."""
+    import superglm.editor.widget as widget_module
+
+    build = widget_module.report_payload
+    moves: list[str] = []
+
+    def build_between(*args, **kwargs):
+        with widget._lock:
+            change()
+        moves.append("change")
+        try:
+            return build(*args, **kwargs)
+        finally:
+            with widget._lock:
+                put_back()
+            moves.append("put back")
+
+    asked = widget._state()
+    steady = widget._report(report, in_force=asked["in_force"])
+    monkeypatch.setattr(widget_module, "report_payload", build_between)
+    try:
+        raced = widget._report(report, in_force=asked["in_force"])
+    finally:
+        monkeypatch.undo()
+    assert moves == ["change", "put back"]
+    assert (steady.get("status"), steady["in_force"]) == (None, asked["in_force"])
+    assert (raced.get("status"), raced["in_force"]) == (None, asked["in_force"])
+    return steady, raced
+
+
+def test_a_validation_report_compares_the_edit_of_the_model_it_describes(monkeypatch):
+    """An edit back to the fitted values and its undo while the report is built must not hide the
+    edited model's change column."""
+    session = _split_session()
+    session.shift("x_spline", 0.2)
+    widget = session.widget()
+    try:
+        steady, raced = _report_with_a_change_put_back(
+            monkeypatch,
+            widget,
+            "validation",
+            lambda: session.shift("x_spline", -0.2),
+            session.undo,
+        )
+    finally:
+        widget.close()
+
+    assert steady["compares_edit"] is True
+    assert raced["compares_edit"] is True
+    assert raced["splits"] == steady["splits"]
+
+
+@pytest.mark.parametrize("fitted_edited", [False, True], ids=["fit-then-edit", "fit-on-edit"])
+def test_a_final_report_says_whether_the_final_fit_describes_its_model(monkeypatch, fitted_edited):
+    """A Final fit is stale exactly when it was run on another model than the one the report
+    describes, whatever is in force for a moment while the report is built.
+
+    fit-then-edit: run unedited, then edited; an undo and its redo while the report is built.
+    fit-on-edit: run on the edited model; an edit and its undo while the report is built.
+    """
+    session = _split_session()
+    widget = session.widget()
+    try:
+        if fitted_edited:
+            session.shift("x_spline", 0.2)
+            _run_final_fit(widget)
+            change, put_back = (lambda: session.shift("x_spline", 0.1)), session.undo
+        else:
+            _run_final_fit(widget)
+            session.shift("x_spline", 0.2)
+            change, put_back = session.undo, session.redo
+        steady, raced = _report_with_a_change_put_back(
+            monkeypatch, widget, "final", change, put_back
+        )
+    finally:
+        widget.close()
+
+    assert steady["final_fit"]["stale"] is not fitted_edited
+    assert raced["final_fit"]["stale"] is steady["final_fit"]["stale"]
+
+
+@pytest.mark.parametrize("endpoint", ["metrics", "summary", "report"])
+def test_a_reply_carries_the_revision_of_the_model_it_was_built_for(monkeypatch, endpoint):
+    # A caller that names only a revision is answered while it stands; an edit landing before
+    # the model is captured makes the reply describe the edited model, so it names that revision.
+    session = _split_session()
+    session.shift("x_spline", 0.2)
+    widget = session.widget()
+    capture = widget._current_model_for_evidence
+
+    def edit_then_capture():
+        with widget._lock:
+            session.shift("x_spline", 0.1)
+        return capture()
+
+    asked = session.model_revision
+    monkeypatch.setattr(widget, "_current_model_for_evidence", edit_then_capture)
+    call = {
+        "metrics": lambda: widget._metrics("deviance", model_revision=asked),
+        "summary": lambda: widget._summary("in_force", model_revision=asked),
+        "report": lambda: widget._report("validation", model_revision=asked),
+    }[endpoint]
+    try:
+        reply = call()
+        with widget._lock:
+            token = widget._state()["in_force"]
+    finally:
+        monkeypatch.undo()
+        widget.close()
+
+    assert session.model_revision == asked + 1
+    assert reply.get("status") is None
+    assert (reply["model_revision"], reply["in_force"]) == (session.model_revision, token)
+
+
+def test_a_value_that_turns_to_minus_zero_keeps_the_token():
+    # A drag can write -0.0 where 0.0 stood. The two compare equal, so ``describes`` holds, and
+    # the token the page compares must agree, or answers to the model in force are dropped.
+    from superglm.editor.cv import InForce
+
+    session = _split_session()
+    session.shift("x_spline", 0.2)
+    term = session.terms["x_spline"]
+    term.edited_log_effect[0] = 0.0
+    before = InForce.of(session)
+    term.edited_log_effect[0] = -0.0
+
+    assert before.describes(session)
+    assert InForce.of(session).token == before.token
 
 
 def test_evidence_records_are_immutable():
@@ -272,7 +577,7 @@ def test_evidence_records_are_immutable():
     outcome = EvidenceOutcome("complete", key, {"value": 1})
 
     with pytest.raises(FrozenInstanceError):
-        key.model_revision = 2
+        key.model = 2
     with pytest.raises(FrozenInstanceError):
         outcome.status = "superseded"
 

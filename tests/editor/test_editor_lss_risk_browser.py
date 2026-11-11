@@ -299,9 +299,11 @@ def test_a_row_from_the_book_fills_the_risk_with_a_training_rows_values(open_lss
         with page.expect_response(lambda r: urlsplit(r.url).path == "/risk_row") as drawn:
             page.locator('#riskPanel [data-risk="a"][data-risk-action="book"]').click()
         row = drawn.value.json()
+        # The box shows the row's value to four significant figures. Rounding that again to
+        # fewer would differ from rounding the value itself whenever the shown value ends in 5.
         page.wait_for_function(
             'age => Number(document.querySelector(\'#riskPanel [data-risk="a"][data-column="age"]\')'
-            ".value).toPrecision(3) === Number(age).toPrecision(3)",
+            ".value) === Number(Number(age).toPrecision(4))",
             arg=row["values"]["age"],
         )
 

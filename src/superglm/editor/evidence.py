@@ -11,9 +11,11 @@ from typing import Any, Literal
 
 @dataclass(frozen=True, slots=True)
 class EvidenceKey:
-    """Identify one evidence calculation for a model revision."""
+    """Identify one evidence calculation for the model it is about."""
 
-    model_revision: int
+    # The model in force the work is for (``InForce.token``): an edit and its undo give back
+    # the same model, so the same key.
+    model: int | str
     kind: str
     discriminator: str
 

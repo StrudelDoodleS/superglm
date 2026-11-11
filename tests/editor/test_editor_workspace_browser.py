@@ -1985,6 +1985,7 @@ def test_raw_summary_html_is_isolated_in_a_sandboxed_iframe(open_editor_page):
                 json={
                     **payload,
                     "model_revision": request_payload["model_revision"],
+                    "in_force": request_payload.get("in_force"),
                     "request_sequence": request_payload["request_sequence"],
                 },
             )
