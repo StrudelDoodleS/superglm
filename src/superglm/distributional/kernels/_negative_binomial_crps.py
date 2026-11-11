@@ -128,7 +128,7 @@ def _shortfall(mean: float, size: float, response: float, cells: int) -> float:
     return acc
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def negative_binomial_crps_rows(mean, size, response, zero, shortfall, start, stop):
     """Write ``CRPS(NB2(mean, size), 0)`` and ``E[(y - Y)^+]`` for rows ``start:stop``.
 
@@ -148,5 +148,9 @@ def negative_binomial_crps_rows(mean, size, response, zero, shortfall, start, st
             shortfall[row] = np.nan
     return 0, -1
 
+
+# The kernel the worker pool runs (``nogil``, never ``prange``), writing only its
+# own rows' outputs: the pool's threads need the GIL released to run at once.
+_POOLED_ROW_KERNELS = (negative_binomial_crps_rows,)
 
 __all__ = ["SHORTFALL_CELLS", "negative_binomial_crps_rows"]
