@@ -875,6 +875,7 @@ def test_monotone_repair_is_the_closest_monotone_curve(shape, direction, family,
     grid_repair = MonotoneRepairer(direction).repair(
         spec, model.result.beta, groups, weights=weights, n_grid=500
     )
+    fitted = _term_beta(model.result.beta, groups)
 
     certificate = _certified_repair(model, X, direction)
 
@@ -883,7 +884,7 @@ def test_monotone_repair_is_the_closest_monotone_curve(shape, direction, family,
     # Called without a metric, the public repairer projects the curve on the grid.
     H, g = grid_metric(spec, grid_repair.grid, grid_repair.original_log_effect, weights)
     grid_beta = _term_beta(grid_repair.repaired_beta_reparam, groups)
-    grid_certificate = projection_certificate(spec, direction, grid_beta, H, g)
+    grid_certificate = projection_certificate(spec, direction, grid_beta, H, g, fitted)
     assert grid_certificate.minimum_derivative >= -1e-10
     assert grid_certificate.kkt_residual <= CLOSEST_REPAIR_KKT
 
@@ -924,7 +925,7 @@ def _certified_repair(model, X, kind, **repair):
     H, fitted = _posterior_metric(model)
     model.apply_shape_postfit(X, **repair)
     beta = _term_beta(model._shape_repairs["x"].repaired_beta_reparam, _x_groups(model))
-    return projection_certificate(model._specs["x"], kind, beta, H, H @ fitted)
+    return projection_certificate(model._specs["x"], kind, beta, H, H @ fitted, fitted)
 
 
 @pytest.mark.parametrize("offset", [1e8, 1e12])
@@ -1084,10 +1085,42 @@ def test_repair_under_a_selection_penalty_is_the_projection_in_the_smooth_metric
     model.apply_shape_postfit(X)
 
     beta = _term_beta(model._shape_repairs["x"].repaired_beta_reparam, [group])
-    certificate = projection_certificate(model._specs["x"], "increasing", beta, H, H @ fitted)
+    certificate = projection_certificate(
+        model._specs["x"], "increasing", beta, H, H @ fitted, fitted
+    )
     assert np.any(beta != 0.0)
     assert certificate.minimum_derivative >= -1e-10
     assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
+
+
+def test_repair_metric_reads_the_fits_kept_gram_as_it_would_form_it():
+    """The fit keeps its centred data Gram at its weights; the metric reads it in place.
+
+    Read, it equals the Gram formed over the rows to rounding, and it is still there
+    for the fit's first inference, which takes it.
+    """
+    from superglm.model import state_ops
+
+    model, _ = _sweep_fit("hook", "decreasing", "poisson", "bs", 8)
+    groups = _x_groups(model)
+    W = state_ops._solver_space_working_weights(model)
+    record = model._solver_result.rank_info
+    assert record.data_gram is not None
+
+    kept = shape_ops._term_data_hessian(model, groups, W)
+
+    assert record.data_gram is not None
+    model._fit_inference_info  # noqa: B018 - the first inference takes the Gram
+    assert record.data_gram is None
+    formed = shape_ops._term_data_hessian(model, groups, W)
+    (matrix,) = [
+        gm for gm, g in zip(model._dm.group_matrices, model._groups, strict=True) if g in groups
+    ]
+    columns = np.column_stack([matrix.matvec(unit) for unit in np.eye(formed.shape[0])])
+    magnitude = np.abs(columns).T @ (W[:, None] * np.abs(columns))
+    np.testing.assert_array_less(
+        np.abs(kept - formed), gamma(W.size + 2) * 4.0 * magnitude + 1e-300
+    )
 
 
 def test_two_group_term_metric_holds_its_cross_blocks():
@@ -1143,15 +1176,27 @@ def test_monotone_repair_in_extreme_predictor_units_matches_unit_units(scale):
 
 
 def test_monotone_repair_on_a_grid_coarser_than_the_basis_is_published():
-    """Five grid points cannot pin twelve coefficients: the Hessian is semidefinite."""
+    """Five grid points cannot pin twelve coefficients: the grid metric is semidefinite.
+
+    The repairer called without a metric projects on that grid; the full call
+    projects in the penalized Hessian over the rows, which is definite.
+    """
+    from superglm.constraints import MonotoneRepairer
+
     t = np.linspace(0.0, 1.0, 200)
     model, X = _rise_fit(t, t, n_knots=7, degree=5, m=1, penalty="none")
+    spec, groups = model._specs["x"], _x_groups(model)
+    fit_weights = np.asarray(model._fit_weights, dtype=np.float64)
+    weights = shape_ops._grid_weights(spec, X["x"].to_numpy(), fit_weights, 5)
+    grid_repair = MonotoneRepairer("increasing").repair(
+        spec, model.result.beta, groups, weights=weights, n_grid=5
+    )
 
     model.apply_shape_postfit(X, n_grid=5)
 
-    repair = model._shape_repairs["x"]
-    beta = np.concatenate([repair.repaired_beta_reparam[group.sl] for group in _x_groups(model)])
-    assert shape_constraint_is_roundoff_feasible(model._specs["x"], beta, "increasing")
+    for repair in (grid_repair, model._shape_repairs["x"]):
+        beta = _term_beta(repair.repaired_beta_reparam, groups)
+        assert shape_constraint_is_roundoff_feasible(spec, beta, "increasing")
 
 
 def test_monotone_repair_on_a_wide_piecewise_linear_basis_is_published():
@@ -1250,9 +1295,9 @@ def _qp_iterations(monkeypatch):
 
 
 #: Active-set iterations of a curvature repair on a degree-4 basis, whose curvature
-#: is quadratic on each span, so the exchange runs. Warm starts and one quick
-#: attempt per curvature-corrected solve take it to about 900; it took 2,409.
-CURVATURE_EXCHANGE_ITERATIONS = 1500
+#: is quadratic on each span, so the exchange runs. Warm-started solves in the
+#: penalized Hessian take it to about 300; from the QP's own start it took 2,409.
+CURVATURE_EXCHANGE_ITERATIONS = 900
 
 
 def test_curvature_exchange_on_a_degree_four_basis_takes_few_iterations(monkeypatch):

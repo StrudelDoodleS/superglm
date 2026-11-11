@@ -39,8 +39,8 @@ class ProjectionCertificate:
     """What the oracle read off one repaired term."""
 
     #: Lowest signed derivative over the range, relative to the largest magnitude
-    #: ``|B' R_inv| |beta|`` it is formed from, so cancellation in a nearly flat
-    #: curve reads as the rounding it is.
+    #: ``|B' R_inv| |b|`` it is formed from, ``b`` the repaired or, when larger, the
+    #: fitted coefficients: the scale the repair's rounding is relative to.
     minimum_derivative: float
     #: KKT residual ``||H beta - g - sum mu_i r_i|| / ||g||`` at the best ``mu >= 0``.
     kkt_residual: float
@@ -62,11 +62,12 @@ def grid_metric(spec, x_grid, target, weights):
     return basis.T @ (basis * w[:, None]), basis.T @ (w * np.asarray(target, dtype=np.float64))
 
 
-def projection_certificate(spec, kind, beta, H, g, touch=1e-7):
+def projection_certificate(spec, kind, beta, H, g, fitted, touch=1e-7):
     """Certify ``beta`` as the minimiser of ``beta'H beta / 2 - g'beta`` on the ``kind`` cone.
 
-    ``touch`` is the relative derivative level below which a point counts as one
-    where the constraint holds with equality.
+    ``fitted`` are the coefficients the repair started from. ``touch`` is the relative
+    derivative level below which a point counts as one where the constraint holds
+    with equality.
     """
     order, sign = _order_and_sign(kind)
     beta = np.asarray(beta, dtype=np.float64)
@@ -112,7 +113,8 @@ def projection_certificate(spec, kind, beta, H, g, touch=1e-7):
     rows = rows @ spec._R_inv if spec._R_inv is not None else rows
     formed = np.abs(basis_derivative(np.linspace(lo, hi, 2001)))
     formed = formed @ np.abs(spec._R_inv) if spec._R_inv is not None else formed
-    magnitude = float(np.max(formed @ np.abs(beta))) or 1.0
+    size = np.maximum(np.abs(beta), np.abs(np.asarray(fitted, dtype=np.float64)))
+    magnitude = float(np.max(formed @ size)) or 1.0
     if touching.size:
         _, residual = nnls(rows.T, H @ beta - g, maxiter=100 * touching.size)
     else:

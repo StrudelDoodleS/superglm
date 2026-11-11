@@ -67,18 +67,48 @@ def _term_penalty_block(terms, indices: NDArray, width: int) -> NDArray:
             )
             block[:, column] = product[indices]
         return 0.5 * (block + block.T)
-    full = np.zeros((width, width))
+    block = np.zeros((indices.size, indices.size))
     for group_slice, lam, omega, raw_projection in terms:
+        where = np.flatnonzero((indices >= group_slice.start) & (indices < group_slice.stop))
+        if where.size == 0:
+            continue
         omega_arr = np.asarray(omega, dtype=np.float64)
         if raw_projection is not None:
             R = np.asarray(raw_projection, dtype=np.float64)
             omega_arr = R.T @ omega_arr @ R
-        full[group_slice, group_slice] += lam * omega_arr
-    return full[np.ix_(indices, indices)]
+        local = indices[where] - group_slice.start
+        block[np.ix_(where, where)] += lam * omega_arr[np.ix_(local, local)]
+    return block
+
+
+def _kept_data_gram(model, indices: NDArray, W: NDArray) -> NDArray | None:
+    """The term's block of the centred data Gram the fit kept at ``W``, or ``None``.
+
+    A fit records the Gram it decided its rank from, ``X'WX`` centred at the weighted
+    column means, with a fingerprint of its weights (``RankInfo.data_gram``). It is read
+    in place, so the fit's first inference still takes it.
+    """
+    from superglm.solvers.rank import weights_fingerprint
+
+    record = getattr(getattr(model, "_solver_result", None), "rank_info", None)
+    if record is None or record.data_gram is None:
+        return None
+    if record.data_gram_weights != weights_fingerprint(W):
+        return None
+    gram = record.data_gram
+    selected = np.asarray(record.selected_columns)
+    position = np.minimum(np.searchsorted(selected, indices), max(selected.size - 1, 0))
+    if selected.size == 0 or not np.array_equal(selected[position], indices):
+        return None
+    block = np.asarray(gram, dtype=np.float64)[np.ix_(position, position)]
+    return 0.5 * (block + block.T)
 
 
 def _term_data_hessian(model, groups, W: NDArray) -> NDArray:
     """``X_j' W X_j`` over the fitted rows at the fit's working weights ``W``, intercept profiled."""
+    kept = _kept_data_gram(model, _term_indices(groups), W)
+    if kept is not None:
+        return kept
     by_key = {
         (g.name, g.start, g.end): gm
         for gm, g in zip(model._dm.group_matrices, model._groups, strict=True)
