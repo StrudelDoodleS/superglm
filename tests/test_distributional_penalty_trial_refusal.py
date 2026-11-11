@@ -187,7 +187,11 @@ def test_objective_admission_reads_the_fits_configured_tolerance(monkeypatch, ou
         predictors=predictors,
         lambdas={"location:x#wiggle": 0.3, "scale:z#wiggle": 0.2},
         efs_config=DistributionalEFSConfig(
-            outer=outer, tolerance=1e-12, max_iterations=4, objective_tolerance=1e-7
+            outer=outer,
+            tolerance=1e-12,
+            max_iterations=6,
+            handoff_iterations=1,
+            objective_tolerance=1e-7,
         ),
     )
     assert len(tolerances) > 1

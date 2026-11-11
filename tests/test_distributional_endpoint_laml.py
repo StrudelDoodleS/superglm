@@ -2289,6 +2289,7 @@ def _independent_penalty_efs_fit(
     starting_lambdas: tuple[float, ...] | None = None,
     overlap: bool = False,
     family: object | None = None,
+    objective_tolerance: float = DistributionalEFSConfig.objective_tolerance,
 ):
     family = _UnitGaussian() if family is None else family
     penalty_labels = ("first", "second", "third")[: len(response)]
@@ -2369,9 +2370,36 @@ def _independent_penalty_efs_fit(
             tolerance=1.0e-8,
             initial_lambda=min(0.1, maximum_lambda),
             maximum_lambda=maximum_lambda,
+            objective_tolerance=objective_tolerance,
         ),
     )
     return layout, smoothing, authority_faces
+
+
+def test_face_objectives_judge_log_det_by_the_fits_configured_tolerance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cap, endpoint and joint-face objectives use the fit's objective_tolerance."""
+    from superglm.distributional.smoothing import objective as objective_module
+
+    original = penalty_geometry._admit_penalty_logdet
+    tolerances: dict[str, list[float]] = {"finite": [], "endpoint": []}
+
+    def recorder(kind: str):
+        def record(evaluation, value, objective_tolerance):
+            tolerances[kind].append(objective_tolerance)
+            return original(evaluation, value, objective_tolerance)
+
+        return record
+
+    monkeypatch.setattr(objective_module, "_admit_penalty_logdet", recorder("finite"))
+    monkeypatch.setattr(endpoint_laml_module, "_admit_penalty_logdet", recorder("endpoint"))
+    _, smoothing, _ = _independent_penalty_efs_fit(
+        monkeypatch, (0.5, 0.5), objective_tolerance=1e-7
+    )
+    assert any(item.activated_face_components for item in smoothing.history)
+    assert tolerances["finite"] and tolerances["endpoint"]
+    assert set(tolerances["finite"]) | set(tolerances["endpoint"]) == {1e-7}
 
 
 @pytest.mark.parametrize(
