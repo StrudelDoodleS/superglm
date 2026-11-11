@@ -2927,6 +2927,128 @@ def test_faulty_repair_result_is_refused_and_nothing_is_published(monkeypatch, f
     _assert_nothing_published(model, X, snapshot)
 
 
+def test_continued_repair_is_judged_by_the_same_rule(monkeypatch):
+    """The rule judges a continued repair as it judged the candidate it continues.
+
+    The first projection, scaled by 1e3, stays in the cone and loses to the zero term,
+    so the repair is continued; the continuation's result, scaled by 1e3 too, loses as
+    well, is refused, and nothing is published.
+    """
+    model, X = _fitted_for_publication_refusal()
+    snapshot = _publication_snapshot(model, X)
+    projections, continued = [], []
+
+    def first_scaled(result, spec, groups):
+        if not projections:
+            _fault_worse_than_zero_term(result, spec, groups)
+        projections.append(None)
+
+    _repairer_with_fault(monkeypatch, first_scaled)
+    real_continued = shape_ops._continued_repair
+
+    def scaled_continuation(*args, **kwargs):
+        result = real_continued(*args, **kwargs)
+        continued.append(result)
+        _fault_worse_than_zero_term(result, kwargs["spec"], kwargs["groups"])
+        return result
+
+    monkeypatch.setattr(shape_ops, "_continued_repair", scaled_continuation)
+
+    with pytest.raises(RuntimeError, match="Unsafe shape repair rejected.*worse than the feasible"):
+        model.apply_shape_postfit(X)
+
+    assert len(continued) == 1 and continued[0] is not None
+    _assert_nothing_published(model, X, snapshot)
+
+
+def _sweep_case(n_knots, select, axis, shape, family, kind):
+    """One repair of the post-fit sweep: n = 2500, drawn in the sweep's order."""
+    rng = np.random.default_rng(7)
+    x = rng.uniform(0.0, 1.0, 2500) if axis == "uniform" else rng.exponential(1.0, 2500)
+    if shape == "bump":
+        f = 0.5 * np.exp(-(((x - np.quantile(x, 0.3)) / np.std(x)) ** 2))
+    else:
+        f = 0.5 * np.abs(x - np.median(x)) / np.std(x)
+    rng.normal(size=x.size)
+    counts = rng.poisson(np.exp(f)).astype(np.float64)
+    y = counts if family == "poisson" else rng.gamma(2.0, np.exp(f) / 2.0)
+    X = pd.DataFrame({"x": x})
+    feature = PSpline(n_knots=n_knots, select=select, constraint=getattr(Constraint.postfit, kind))
+    model = SuperGLM(family=family, selection_penalty=0.0, features={"x": feature})
+    return model.fit(X, y), X, y
+
+
+def _log_link_merit(model, X, y):
+    """The rule's merit of a one-term log-link Poisson or Gamma fit, formed without its code.
+
+    ``b'Sb`` takes ``S`` from the fit's posterior precision less its data part, and the
+    deviance the intercept's closed form: ``log(sum y / sum e^eta)`` for Poisson and
+    ``log(mean(y e^-eta))`` for Gamma. Returns ``b -> (merit, gradient, Hessian)``, the
+    last two of half the merit in its Fisher form, all with the intercept profiled.
+    """
+    poisson = model._distribution.__class__.__name__ == "Poisson"
+    basis = np.asarray(model._specs["x"].transform(X["x"].to_numpy()), dtype=np.float64)
+
+    def data_part(weights):
+        cross = basis.T @ weights
+        return basis.T @ (basis * weights[:, None]) - np.outer(cross, cross) / weights.sum()
+
+    precision, _ = _posterior_metric(model)
+    fitted_mean = model.predict(X)
+    S = precision - data_part(fitted_mean if poisson else np.ones_like(y))
+
+    def at(b):
+        eta = basis @ b
+        if poisson:
+            mu = np.exp(eta) * y.sum() / np.exp(eta).sum()
+            units = 2.0 * (np.where(y > 0, y * np.log(np.where(y > 0, y, 1.0) / mu), 0.0) - y + mu)
+            residual, weights = y - mu, mu
+        else:
+            mu = np.exp(eta) * np.mean(y * np.exp(-eta))
+            units = 2.0 * (np.log(mu / y) + (y - mu) / mu)
+            residual, weights = (y - mu) / mu, np.ones_like(y)
+        return units.sum() + b @ S @ b, S @ b - basis.T @ residual, data_part(weights) + S
+
+    return at
+
+
+@pytest.mark.parametrize(
+    ("n_knots", "select", "axis", "shape", "family", "kind"),
+    [
+        (12, False, "uniform", "bump", "poisson", "increasing"),
+        (25, True, "uniform", "bump", "poisson", "increasing"),
+        (25, True, "exponential", "abs", "gamma", "decreasing"),
+    ],
+)
+def test_projection_the_zero_term_beats_is_continued_to_the_constrained_fit(
+    n_knots, select, axis, shape, family, kind
+):
+    """Repairs master publishes, which the one-step projection left worse than the zero term.
+
+    The projection in the penalized Hessian is exact for a quadratic merit only; far from
+    a log-link fit it lost to the zero term in true merit, by 0.0085 to 0.064, and the
+    rule refused it. Continued to the constrained fit, the repair publishes the true
+    merit's minimiser over the cone, no worse than the zero term master published.
+    """
+    from tests._shape_projection_oracle import projection_certificate
+
+    model, X, y = _sweep_case(n_knots, select, axis, shape, family, kind)
+    merit = _log_link_merit(model, X, y)
+    fitted = _term_beta(model.result.beta, _x_groups(model))
+    zero_merit = merit(np.zeros_like(fitted))[0]
+
+    model.apply_shape_postfit(X)
+
+    beta = _term_beta(model.result.beta, _x_groups(model))
+    published, gradient, hessian = merit(beta)
+    assert published <= zero_merit * (1.0 + 1e-12)
+    certificate = projection_certificate(
+        model._specs["x"], kind, beta, hessian, hessian @ beta - gradient, fitted
+    )
+    assert certificate.minimum_derivative >= -1e-10
+    assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
+
+
 def test_non_finite_repair_curve_is_refused_and_nothing_is_published(monkeypatch):
     model, X = _fitted_for_publication_refusal()
     snapshot = _publication_snapshot(model, X)

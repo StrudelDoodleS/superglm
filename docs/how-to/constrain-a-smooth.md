@@ -700,9 +700,16 @@ the other terms held and the intercept free (Mammen, Marron, Turlach and Wand,
 *Statistical Science* 16(3), 2001, section 5; Wood, *Statistical Modelling*
 26(4), 2026, section 4.1). A change the data barely see but the smoothing
 penalty does is costly, so the repair stays smooth where the data are sparse.
-The repaired term keeps its centring. If even that closest curve fits the
-data worse than dropping the term, `apply_shape_postfit` raises
-`RuntimeError` and leaves the model unchanged. If the repair cannot confirm
+The repaired term keeps its centring. The second-order measure is exact only
+for a Gaussian response with the identity link. Under a log link, far from the
+fit, the closest curve can fit worse than dropping the term. The repair then
+goes on to the curve with the shape that minimises the penalized objective
+itself, at the fit's smoothing parameters, by iteratively re-weighted cone
+projection (Liao and Meyer, *Journal of Statistical Software* 89(5), 2019,
+section 1.2). Dropping the term always has the shape, so that curve is never
+worse. Only if this search stops short and its curve still fits worse than
+dropping the term does `apply_shape_postfit` raise `RuntimeError` and leave
+the model unchanged. If the repair cannot confirm
 that its curve is the closest one, it still publishes a curve with the shape
 everywhere, and a `RuntimeWarning` says how much further from the fitted curve
 it may be.
