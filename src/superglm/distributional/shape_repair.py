@@ -472,16 +472,11 @@ def _settled(
 ) -> NDArray[np.float64]:
     """The repaired coefficients, certified as ``postfit_status`` reads them, or a refusal.
 
-    The projection certifies its result at the scale of the curve it repaired, while the
-    state of the rule is read at the scale of the repaired curve alone. A projection onto the
-    cone's apex can come back as coefficients that are zero only to the first scale's rounding,
-    and would read as broken; it is the zero curve, which obeys every rule, so it is published
-    as one. A result that breaks its rule at the second scale by no more than the rounding the
-    projection certified it to, at the first, is moved strictly inside the cone along the
-    repairer's own inside ray by twice that violation: the least slack, a unit row times the
-    coefficients minimised over the range, is superadditive in them, so every slack is then
-    at least the violation, and the curve moves by a rounding of the curve it repaired. Any
-    other result that does not obey its rule at the second scale is refused.
+    The projection certifies its result at the scale of the curve it repaired; the rule's
+    state is read at the repaired curve's own. A result zero to the first scale's rounding is
+    the zero curve, and is published as one. A result that breaks its rule at the second
+    scale by no more than the rounding certified at the first is moved strictly inside the
+    cone by that rounding, and published. Any other result that breaks it is refused.
     """
     from superglm.constraints import (
         _inside_ray,
@@ -505,6 +500,9 @@ def _settled(
         largest = float(np.max(np.abs(target), initial=0.0))
         scale = largest * float(np.sqrt(share @ (target / largest) ** 2)) if largest else 0.0
         if violation <= shape_slack_tolerance(repaired, scale):
+            # Along the repairer's own inside ray, by twice the violation: the least slack,
+            # a unit row times the coefficients minimised over the range, is superadditive
+            # in them, so every slack is then at least the violation.
             ray = _inside_ray(np.asarray(spec.transform(grid)), grid, share, kind)
             ray_slack = shape_constraint_certificate(spec, ray, kind).minimum_scaled_slack
             if ray_slack > 0.0:
@@ -522,17 +520,16 @@ def _term_precision(fitted: Any, term: PostfitTerm) -> NDArray[np.float64]:
     """The metric the term's repair projects in: the fit's penalized curvature on the term's
     coefficients, every other coefficient held and the term's parameter's intercept profiled.
 
-    The merit the publication rule judges is the fit's own penalized negative log-likelihood
-    with those coefficients held and that intercept re-estimated (``_profiled_merit``). Its
-    second-order model at the fit is the curvature the fit accepted (``-H(l) + S``, as its
-    inference reads it): holding coefficients takes the term's block, and minimising over the
-    intercept leaves the block's generalized Schur complement ``H_tt - h h' H_aa^+`` (Boyd and
-    Vandenberghe, *Convex Optimization*, 2004, appendix A.5.5; Gallier, *The Schur complement
-    and symmetric positive semidefinite matrices*, 2019, theorem 4.3, which needs only that
-    the curvature is semidefinite). This is SuperGLM's ``X'WX + S_lambda`` with its intercept
-    profiled (``model.shape_ops``). An intercept curvature at the block's rounding is taken as
-    zero, as a pseudo-inverse takes it.
+    It is the second-order model, at the fit, of the merit the publication rule judges
+    (``_profiled_merit``), as SuperGLM's ``X'WX + S_lambda`` is (``model.shape_ops``): the
+    curvature the fit accepted, ``-H(l) + S``, which its inference reads, never a covariance
+    inverted back.
     """
+    # Minimising a semidefinite quadratic over the intercept leaves the generalized Schur
+    # complement H_tt - h h' H_aa^+ (Boyd and Vandenberghe, Convex Optimization, 2004,
+    # appendix A.5.5; Gallier, The Schur complement and symmetric positive semidefinite
+    # matrices, 2019, theorem 4.3). An intercept curvature at the block's rounding is zero
+    # there, as a pseudo-inverse takes it, and semidefiniteness then makes h zero too.
     curvature = fitted.result.terminal_penalized_curvature
     columns = np.arange(term.columns.start, term.columns.stop)
     block = np.array(curvature[np.ix_(columns, columns)], dtype=np.float64)
