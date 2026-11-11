@@ -43,8 +43,10 @@ from superglm.editor.lss.rules import TermRows, term_rows
 from superglm.editor.lss.view import LSSModelView, split_key
 from superglm.editor.terms import native_log_effect_values
 from superglm.features.categorical import Categorical
-from superglm.solvers.constrained_qp import solve_constrained_qp
-from superglm.solvers.irls_direct._qp import _QP_FEASIBILITY_TOL
+from superglm.solvers.irls_direct._qp import (
+    _QP_FEASIBILITY_TOL,
+    _solve_constrained_qp_with_cold_retry,
+)
 
 _SPECIAL_SUFFIX = ":special"
 
@@ -197,8 +199,23 @@ _ABSORBED = (
 )
 
 
-def absorbed_message(model: Any, term: EditableTerm) -> str:
-    """Why an edit of ``term`` the rules took back entirely changed nothing."""
+_NO_ROWS = (
+    "The edit to {term!r} changed nothing: no training rows sit at the values it moves, so the "
+    "curve there is set by the values around them. Edit values that have training rows, or a "
+    "range that takes some in."
+)
+
+
+def absorbed_message(model: Any, term: EditableTerm, asked: NDArray[np.float64]) -> str:
+    """Why an edit of ``term`` to ``asked`` that the projection took back entirely changed nothing.
+
+    The projection weighs each grid value by its training rows, so an edit of
+    values with none is taken back whatever the rules say; the rules are blamed
+    only for an edit that moves a value with rows.
+    """
+    moved = np.asarray(asked) != term.edited_log_effect
+    if term.weights is not None and not np.any(np.asarray(term.weights)[moved] > 0.0):
+        return _NO_ROWS.format(term=term.name)
     rows = term_rows(model, term.name)
     held = ", with the levels the edit leaves held where they are" if term.levels else ""
     return _ABSORBED.format(term=term.name, rules="" if rows is None else rows.text, held=held)
@@ -289,7 +306,7 @@ def _base_mask(spec: Any, shown: list[str]) -> NDArray[np.bool_] | None:
     A grouped term's base is a group, so each of its members reads it.
     """
     base = getattr(spec, "_base_level", None)
-    if base is None or str(base) == "":
+    if base is None:
         return None
     grouping = getattr(spec, "_grouping", None)
     if grouping is None:
@@ -328,7 +345,8 @@ def _projection(
     """
     weights = weights / weights.sum()
     ruled = rows is not None and rows.A.shape[0] > 0
-    hold = _holds(design, target, held, base) if ruled else None
+    # A rule the basis holds, a flat stretch, has no rows, and the base is held all the same.
+    hold = None if rows is None else _holds(design, target, held, base)
     if rows is not None and hold is not None:
         with_intercept = np.column_stack([np.ones(design.shape[0]), design])
         A = np.column_stack([np.zeros(rows.A.shape[0]), rows.A])
@@ -411,8 +429,11 @@ def _holds(
 # The QP starts from the fit of ``inside``, a curve that meets the rows, when
 # its coefficients do: the active-set method needs a feasible start, and its
 # own repair of the unconstrained fit need not reach one. The rows that fit
-# breaks are its first working rows; on a capped level design they are the
-# rows the answer binds.
+# breaks are its first working rows when they are linearly independent; on a
+# capped level design they are the rows the answer binds. Dependent rows, an
+# ordered term's caps and steps (a cap row less the next is a step row), are
+# not seeded at all: the solver would keep the first independent ones, which
+# need not bind, so the outcome would hang on the order the rules are written.
 def _ruled_fit(
     design: NDArray[np.float64],
     A: NDArray[np.float64],
@@ -451,7 +472,7 @@ def _ruled_fit(
             z0 = np.linalg.lstsq(weighted, (inside - design @ start) * root, rcond=None)[0]
             if not _meets_rows(A, start + free @ z0, rows.c, magnitude):
                 z0 = None
-        broken = np.flatnonzero(moving[moved] @ z < bound)
+        broken = _independent(moving[moved], np.flatnonzero(moving[moved] @ z < bound))
         z = _nearest_inside(H, g, moving[moved], bound, rows, name, start=z0, active=broken)
         x = start + free @ z
     if not _meets_rows(A, x, rows.c, max(magnitude, float(np.max(np.abs(x))))):
@@ -479,6 +500,18 @@ def _meets_rows(
     return bool(np.all(A @ x - c >= -bar))
 
 
+def _independent(A: NDArray[np.float64], seeds: NDArray[np.intp]) -> NDArray[np.intp]:
+    """``seeds`` when those rows of ``A`` are linearly independent, else none of them.
+
+    The rows are read at unit norm, so a row's scale does not decide its rank;
+    the rank is NumPy's, at its SVD tolerance.
+    """
+    if seeds.size < 2:
+        return seeds
+    unit = A[seeds] / np.linalg.norm(A[seeds], axis=1)[:, None]
+    return seeds if np.linalg.matrix_rank(unit) == seeds.size else seeds[:0]
+
+
 def _nearest_inside(
     H: NDArray[np.float64],
     g: NDArray[np.float64],
@@ -494,13 +527,14 @@ def _nearest_inside(
 
     ``start`` meets the rows, or is None; ``active`` are the first working rows.
     An active-set step adds or drops one row, so the solve gets the room to visit
-    every row twice beyond the solver's default; a solve that still stops short of
-    its KKT certificate refuses the edit, rather than keep a curve whose nearness
-    is unproven.
+    every row twice beyond the solver's default. A seeded solve that stops short
+    of its KKT certificate is retried from ``start`` without them, as the fits
+    retry; one that still stops short refuses the edit, rather than keep a curve
+    whose nearness is unproven.
     """
     steps = max(200, 2 * (A.shape[0] + H.shape[0]))
-    result = solve_constrained_qp(
-        H, g, A, c, active_set_init=active.tolist(), max_iter=steps, beta_start=start
+    result = _solve_constrained_qp_with_cold_retry(
+        H, g, A, c, active.tolist(), max_iter=steps, beta_start=start
     )
     if not result.converged:
         raise EditorValueError(_OUTSIDE_RULES.format(term=name, rules=rows.text))

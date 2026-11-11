@@ -2022,10 +2022,12 @@ class EditorSession:
         if kept is not None:
             if leaves_curve(kept, editable.edited_log_effect, curve):
                 # The rules took the whole edit back: there is nothing to record or undo,
-                # and an edit that asked for a change says why it made none.
-                if np.array_equal(curve, editable.edited_log_effect):
+                # and an edit that asked for a change a chart shows says why it made none.
+                # A rounding-scale ask, "Make increasing" on a curve its rule already holds
+                # flat in places, is no change at all.
+                if leaves_curve(curve, editable.edited_log_effect, curve):
                     return
-                raise EditorValueError(absorbed_message(self.model, editable))
+                raise EditorValueError(absorbed_message(self.model, editable, curve))
             indices = np.arange(editable.size, dtype=np.intp)
             before, after = editable.edited_log_effect.copy(), kept
         changed = not np.array_equal(before, after)

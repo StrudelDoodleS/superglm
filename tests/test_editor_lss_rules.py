@@ -10,8 +10,8 @@ import pytest
 from scipy.optimize import minimize_scalar
 
 import superglm.distributional.terms as distributional_terms
-import superglm.editor.lss.apply as lss_apply
 import superglm.editor.lss.view as lss_view
+import superglm.solvers.irls_direct._qp as qp_retry
 from superglm import (
     Constraint,
     GammaLS,
@@ -362,13 +362,13 @@ def test_a_projection_the_qp_does_not_certify_is_refused(monkeypatch):
     session = open_case(ruled_case())
     term = session.terms["mean:power"]
     before = term.edited_log_effect.copy()
-    solve = lss_apply.solve_constrained_qp
+    solve = qp_retry.solve_constrained_qp
 
     def stops_short(*args, **kwargs):
         result = solve(*args, **kwargs)
         return type(result)(**{**vars(result), "converged": False})
 
-    monkeypatch.setattr(lss_apply, "solve_constrained_qp", stops_short)
+    monkeypatch.setattr(qp_retry, "solve_constrained_qp", stops_short)
     tail = np.flatnonzero(term.x > 10.0)
 
     with pytest.raises(EditorValueError, match="could not be confirmed"):
@@ -591,14 +591,14 @@ def test_a_bulk_edit_of_many_capped_levels_takes_a_few_qp_steps(monkeypatch):
     session = open_case(_many_levels_case())
     term = session.terms["mean:g"]
     steps = []
-    solve = lss_apply.solve_constrained_qp
+    solve = qp_retry.solve_constrained_qp
 
     def counted(*args, **kwargs):
         result = solve(*args, **kwargs)
         steps.append(result.n_iter)
         return result
 
-    monkeypatch.setattr(lss_apply, "solve_constrained_qp", counted)
+    monkeypatch.setattr(qp_retry, "solve_constrained_qp", counted)
     others = np.arange(1, term.size)
 
     # Raising every level but the base pushes each past its cap, where it stops.
@@ -655,9 +655,9 @@ def test_lowering_the_tail_of_a_convex_curve_is_kept_inside_the_rule(delta):
 
 def test_the_convex_tail_edit_needs_only_the_feasible_start(monkeypatch):
     # Without its first working rows the QP still reaches the answer from the current curve.
-    solve = lss_apply.solve_constrained_qp
+    solve = qp_retry.solve_constrained_qp
     monkeypatch.setattr(
-        lss_apply,
+        qp_retry,
         "solve_constrained_qp",
         lambda *a, **k: solve(*a, **{**k, "active_set_init": None}),
     )
@@ -669,3 +669,164 @@ def test_the_convex_tail_edit_needs_only_the_feasible_start(monkeypatch):
 
     assert len(session.history) == 1
     assert _convex(session.terms["mean:age"].edited_log_effect, term.x)
+
+
+_BANDS = [f"B{i}" for i in range(10)]
+
+_BAND_RULES = {
+    "decreasing & max_step(0.1)": Constraint.fit.decreasing & Constraint.fit.max_step(0.1),
+    "increasing & cap & max_step": (
+        Constraint.fit.increasing & Constraint.fit.cap(0.8, 1.25) & Constraint.fit.max_step(0.15)
+    ),
+    "max_step & cap": Constraint.fit.max_step(0.15) & Constraint.fit.cap(0.8, 1.25),
+    "cap & max_step": Constraint.fit.cap(0.8, 1.25) & Constraint.fit.max_step(0.15),
+}
+
+
+@functools.cache
+def _banded_case(rules: str) -> FitCase:
+    """A gamma mean over ten ordered bands, 100 rows each, through a cr k=5 basis under ``rules``."""
+    rng = np.random.default_rng(621)
+    X = pd.DataFrame({"band": np.repeat(_BANDS, 100)})
+    y = rng.gamma(4.0, np.exp(1.0 + 0.05 * np.repeat(np.arange(10), 100)) / 4.0)
+    family = GammaLS()
+    basis = Spline(kind="cr", k=5, constraint=_BAND_RULES[rules])
+    model = SuperLSS(
+        family,
+        family.mean(term("band", OrderedCategorical(order=_BANDS, basis=basis))),
+        family.scale(),
+    ).fit_reml(X, y, outer="efs+newton")
+    return FitCase(model, X, y, None, None)
+
+
+@pytest.mark.parametrize(
+    ("rules", "band", "delta"),
+    [("decreasing & max_step(0.1)", 9, -0.6), ("increasing & cap & max_step", 0, 0.6)],
+)
+def test_an_ordered_edit_whose_broken_rows_are_dependent_is_kept(rules, band, delta):
+    # An ordered term's cap and step rows are dependent (a cap row less the next is a step
+    # row), so seeding the QP with every row the edit breaks can keep one that does not bind.
+    case = _banded_case(rules)
+    session = open_case(case)
+    key = "mean:band"
+    before = session.terms[key].edited_log_effect.copy()
+
+    session.set_values(key, [band], [before[band] + delta])
+
+    assert len(session.history) == 1
+    curve = session.terms[key].edited_log_effect
+    assert np.max(np.abs(curve - before)) > 0.05
+    shown = session.to_model().predict_link(pd.DataFrame({"band": _BANDS}))["mean"].to_numpy()
+    np.testing.assert_allclose(shown - shown[0], curve - curve[0], rtol=0.0, atol=1e-9)
+
+
+@pytest.mark.parametrize("rules", ["max_step & cap", "cap & max_step"])
+def test_an_edit_the_rules_absorb_says_so_whatever_order_they_are_written_in(rules):
+    session = open_case(_banded_case(rules))
+    key = "mean:band"
+    before = session.terms[key].edited_log_effect.copy()
+
+    with pytest.raises(EditorValueError, match="changed nothing: its rules"):
+        session.set_values(key, [9], [before[9] + 0.5])
+
+    assert session.history == []
+
+
+def test_a_rule_the_basis_holds_keeps_the_base_where_it_is():
+    # ``flat.above`` is drawn by the basis and gives no rows ``A b >= c``; the base is held anyway.
+    X = pd.DataFrame({"band": np.repeat(_BANDS, 50)})
+    y = np.random.default_rng(5).gamma(4.0, np.exp(np.repeat(np.arange(10), 50) * 0.04) / 4.0)
+    family = GammaLS()
+    basis = Spline(kind="cr", k=6, constraint=Constraint.fit.flat.above("B7"))
+    with pytest.warns(UserWarning, match="put a knot at 'B7'"):
+        model = SuperLSS(
+            family,
+            family.mean(term("band", OrderedCategorical(order=_BANDS, basis=basis))),
+            family.scale(),
+        ).fit_reml(X, y)
+    session = edit(model, train_data=(X, y, None, None))
+    before = session.terms["mean:band"].edited_log_effect.copy()
+
+    session.set_values("mean:band", [1], [before[1] + 0.5])
+
+    assert session.terms["mean:band"].edited_log_effect[1] > before[1] + 0.05
+    fitted = np.asarray(model.predict(X))
+    exported = np.asarray(session.to_model().predict(X))
+    rows = (X["band"] == "B0").to_numpy()
+    np.testing.assert_allclose(exported[rows], fitted[rows], rtol=1e-12, atol=0.0)
+
+
+def test_an_empty_string_base_level_is_held_like_any_other():
+    X = pd.DataFrame({"g": np.repeat(["", "A", "B"], 100)})
+    y = np.random.default_rng(621).gamma(5.0, 0.2, 300)
+    family = GammaLS()
+    model = SuperLSS(
+        family,
+        family.mean(cat("g", base="", constraint=Constraint.fit.cap(0.8, 1.25))),
+        family.scale(),
+    ).fit_reml(X, y)
+    session = edit(model, train_data=(X, y, None, None))
+    term = session.terms["mean:g"]
+    a = term.levels.index("A")
+
+    session.set_values("mean:g", [a], [term.edited_log_effect[a] + 0.5])
+
+    fitted = np.asarray(model.predict(X))
+    exported = np.asarray(session.to_model().predict(X))
+    for level in ("", "B"):
+        rows = (X["g"] == level).to_numpy()
+        np.testing.assert_allclose(exported[rows], fitted[rows], rtol=1e-12, atol=0.0)
+    rows = (X["g"] == "A").to_numpy()
+    assert np.all(exported[rows] > fitted[rows] * 1.05)
+
+
+def test_make_increasing_on_a_curve_its_rule_holds_flat_in_places_changes_nothing_quietly():
+    # Where the rule binds the curve is flat, and its grid values dip by rounding: isotonic
+    # asks for a change of that size, which is no change at all.
+    rng = np.random.default_rng(3)
+    X = pd.DataFrame({"x": rng.uniform(0.0, 10.0, 3000)})
+    y = rng.gamma(4.0, np.exp(0.5 - 0.05 * np.abs(X["x"].to_numpy() - 5.0)) / 4.0)
+    family = GammaLS()
+    model = SuperLSS(
+        family,
+        family.mean(s("x", kind="cr", k=10, constraint=Constraint.fit.increasing)),
+        family.scale(),
+    ).fit_reml(X, y)
+    session = edit(model, train_data=(X, y, None, None))
+    curve = session.terms["mean:x"].edited_log_effect.copy()
+    assert np.min(np.diff(curve)) < 0.0
+    revision = session.model_revision
+
+    session.isotonic("mean:x", "increasing")
+
+    assert session.history == []
+    assert session.model_revision == revision
+    np.testing.assert_array_equal(session.terms["mean:x"].edited_log_effect, curve)
+
+
+def test_an_edit_at_values_without_training_rows_says_so_rather_than_blame_the_rule():
+    rng = np.random.default_rng(8)
+    X = pd.DataFrame({"age": rng.integers(18, 91, 4000)})
+    y = rng.gamma(4.0, np.exp(0.3 + 0.0004 * (X["age"].to_numpy() - 50.0) ** 2) / 4.0)
+    family = GammaLS()
+    model = SuperLSS(
+        family,
+        family.mean(s("age", kind="cr", k=8, constraint=Constraint.fit.convex)),
+        family.scale(),
+    ).fit_reml(X, y)
+    session = edit(model, train_data=(X, y, None, None))
+    term = session.terms["mean:age"]
+    weights = np.asarray(term.weights)
+    empty = int(np.flatnonzero(weights == 0.0)[3])
+
+    with pytest.raises(EditorValueError) as refused:
+        session.set_values("mean:age", [empty], [term.edited_log_effect[empty] - 0.3])
+
+    message = str(refused.value)
+    assert "no training rows sit at the values it moves" in message
+    assert "shape constraint" not in message
+    assert session.history == []
+    # At a value with rows, the same edit is made.
+    held = int(np.flatnonzero(weights > 0.0)[5])
+    session.set_values("mean:age", [held], [term.edited_log_effect[held] - 0.3])
+    assert len(session.history) == 1

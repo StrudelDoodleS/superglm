@@ -48,6 +48,8 @@ def _solve_constrained_qp_with_cold_retry(
     active_set_init: list[int] | None,
     *,
     structure: _ConstraintStructure | None = None,
+    max_iter: int = 200,
+    beta_start: NDArray | None = None,
 ) -> QPResult:
     """Retry a failed warm active set without weakening the KKT contract.
 
@@ -55,7 +57,7 @@ def _solve_constrained_qp_with_cold_retry(
     warm solve withhold its KKT certificate where a cold start certifies.  A
     failed warm solve is retried cold, and the retry replaces the first result
     only when it certifies.  ``structure`` is ``_constraint_structure(A)``,
-    shared by both solves.
+    shared by both solves; ``max_iter`` and ``beta_start`` go to both.
     """
     result = solve_constrained_qp(
         H,
@@ -63,6 +65,8 @@ def _solve_constrained_qp_with_cold_retry(
         A,
         b,
         active_set_init=active_set_init,
+        max_iter=max_iter,
+        beta_start=beta_start,
         _structure=structure,
     )
     if active_set_init and not result.converged:
@@ -72,6 +76,8 @@ def _solve_constrained_qp_with_cold_retry(
             A,
             b,
             active_set_init=None,
+            max_iter=max_iter,
+            beta_start=beta_start,
             _structure=structure,
         )
         if cold_result.converged:
