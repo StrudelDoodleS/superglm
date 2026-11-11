@@ -570,6 +570,48 @@ def _shape_term_eta_delta(model, current_beta, candidate_beta, groups) -> np.nda
     return contribution
 
 
+def _certified_curve_scale(target: NDArray, weights: NDArray) -> float:
+    """The scale a repairer certifies its projection at: the curve it repaired, as a weighted RMS.
+
+    As ``constraints._project_shape_in_fitted_basis`` takes it: in units of a power of two
+    near the curve's largest value, which is exact, and 1 for the zero curve.
+    """
+    target = np.asarray(target, dtype=np.float64)
+    weights = np.asarray(weights, dtype=np.float64)
+    largest = float(np.max(np.abs(target), initial=0.0))
+    unit = float(np.ldexp(1.0, int(np.frexp(largest)[1]))) if largest > 0.0 else 1.0
+    mean_square = float(np.dot(weights, (target / unit) ** 2)) / float(np.sum(weights))
+    return unit * float(np.sqrt(mean_square)) or 1.0
+
+
+def _settled_on_rule(spec, kind, beta, grid, share, certified_scale) -> NDArray | None:
+    """``beta`` as its rule publishes it, or ``None`` when it breaks the rule beyond rounding.
+
+    A repairer certifies its projection at ``certified_scale``, the larger of the result's
+    norm and the curve's (``_certified_curve_scale``); a later reader judges the result at
+    its own norm. A result off its rule there by no more than its certified rounding is moved
+    strictly inside the cone along the repairer's own inside ray by twice the violation: the
+    least slack is superadditive in the coefficients, so every slack is then at least the
+    violation, and the curve moves by a rounding of the curve repaired. Where the basis holds
+    no ray strictly inside (a natural curvature boundary), the result is published as
+    certified. ``share`` is the grid's weights, summing to one.
+    """
+    from superglm.constraints import (
+        _inside_ray,
+        shape_constraint_certificate,
+        shape_slack_tolerance,
+    )
+
+    violation = -shape_constraint_certificate(spec, beta, kind).minimum_scaled_slack
+    if violation <= shape_slack_tolerance(beta):
+        return beta
+    if violation > shape_slack_tolerance(beta, certified_scale):
+        return None
+    ray = _inside_ray(np.asarray(spec.transform(grid), dtype=np.float64), grid, share, kind)
+    ray_slack = shape_constraint_certificate(spec, ray, kind).minimum_scaled_slack
+    return beta + (2.0 * violation / ray_slack) * ray if ray_slack > 0.0 else beta
+
+
 def _validate_repair_for_publication(
     model,
     *,
@@ -577,6 +619,7 @@ def _validate_repair_for_publication(
     kind,
     groups,
     repair_result,
+    grid_weights,
     y,
     scoring_weights,
     smooth_penalty_terms,
@@ -619,15 +662,28 @@ def _validate_repair_for_publication(
     if kind in {"increasing", "decreasing", "convex", "concave"}:
         from superglm.constraints import shape_constraint_certificate
 
-        certificate = shape_constraint_certificate(spec, term_beta, kind)
-        feasibility_tolerance = shape_slack_tolerance(term_beta, fitted_scale)
-        if certificate.minimum_scaled_slack < -feasibility_tolerance:
+        # Judged at the scale the repairer certified at, as SuperLSS's repair judges it.
+        weights = np.asarray(grid_weights, dtype=np.float64)
+        certified_scale = _certified_curve_scale(repair_result.original_log_effect, weights)
+        settled = _settled_on_rule(
+            spec, kind, term_beta, grid, weights / float(np.sum(weights)), certified_scale
+        )
+        if settled is None:
             constraint_name = (
                 "monotonicity" if kind in {"increasing", "decreasing"} else "curvature"
             )
             raise RuntimeError(
                 f"Unsafe shape repair rejected before publication: infeasible {constraint_name}"
             )
+        if settled is not term_beta:
+            candidate_beta = candidate_beta.copy()
+            offset = 0
+            for group in groups:
+                candidate_beta[group.sl] = settled[offset : offset + group.size]
+                offset += group.size
+            term_beta = settled
+            repaired_curve = fitted_basis @ term_beta
+        certificate = shape_constraint_certificate(spec, term_beta, kind)
 
     candidate_eta_delta = _shape_term_eta_delta(
         model,
@@ -1028,6 +1084,7 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
             kind=kind,
             groups=groups,
             repair_result=repair_result,
+            grid_weights=grid_weights,
             y=np.asarray(y_ref, dtype=np.float64),
             scoring_weights=scoring_weights_arr,
             smooth_penalty_terms=smooth_penalty_terms,

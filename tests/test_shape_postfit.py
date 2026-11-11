@@ -19,10 +19,12 @@ from superglm import (
 from superglm._roundoff import gamma
 from superglm.constraints import (
     _ROW_STEPS,
+    _SLACK_STEPS,
     MonotoneRepairResult,
     shape_constraint_certificate,
     shape_constraint_is_roundoff_feasible,
     shape_derivative_matrix,
+    shape_slack_tolerance,
 )
 from superglm.distributions import Gamma, Gaussian, Poisson
 from superglm.links import IdentityLink, LogLink
@@ -1796,6 +1798,91 @@ def test_publication_rejects_sub_grid_scaled_derivative_violation(monkeypatch):
 
     with pytest.raises(RuntimeError, match="infeasible monotonicity"):
         model.apply_shape_postfit(X)
+
+
+def _off_rule_by(monkeypatch, model, allowance):
+    """Repair ``model``, its projection moved off the rule by ``allowance(certified, held)``.
+
+    The stub runs the real repairer and pushes its projection outward along the unit row
+    where it touches zero, so the least slack becomes ``-allowance`` to rounding. A
+    U-shaped curve on an exponential axis is about three times as large in the repairer's
+    scale, the curve's weighted RMS, as in ``held``, the larger of the fitted and repaired
+    coefficients' norms, at which publication judged the rule before.
+    """
+    real = shape_ops._repairer("increasing")
+    spec = model._specs["x"]
+    (group,) = [group for group in model._groups if group.feature_name == "x"]
+    fitted_norm = float(np.linalg.norm(model.result.beta[group.sl]))
+    stub = {}
+
+    class OffRuleRepairer:
+        def repair(self, spec_, beta, groups, *, weights, **options):
+            result = real.repair(spec_, beta, groups, weights=weights, **options)
+            term = result.repaired_beta_reparam[group.sl]
+            target = result.original_log_effect
+            certified = float(np.sqrt(weights @ target**2 / np.sum(weights)))
+            held = max(fitted_norm, float(np.linalg.norm(term)))
+            assert certified > 2.0 * held
+            touch = shape_constraint_certificate(spec_, term, "increasing").worst_x
+            row = shape_derivative_matrix(spec_, np.asarray([touch]), 1)[0]
+            off = term - allowance(certified, held) * row / np.linalg.norm(row)
+            result.repaired_beta_reparam = result.repaired_beta_reparam.copy()
+            result.repaired_beta_reparam[group.sl] = off
+            stub.update(term=off, certified=certified, held=held)
+            return result
+
+    monkeypatch.setattr(shape_ops, "_repairer", lambda _kind: OffRuleRepairer())
+    return spec, group, stub
+
+
+def _u_shape_on_a_skewed_axis():
+    x = np.random.default_rng(1).exponential(1.0, 3000)
+    X = pd.DataFrame({"x": x})
+    y = (x - 1.0) ** 2 + 0.01 * np.random.default_rng(2).normal(size=x.size)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=12, constraint=Constraint.postfit.increasing)},
+    ).fit(X, y)
+    return model, X
+
+
+def test_projection_off_its_rule_by_its_certified_rounding_is_published(monkeypatch):
+    model, X = _u_shape_on_a_skewed_axis()
+    unit = gamma(_SLACK_STEPS * model._specs["x"].transform(np.zeros(1)).shape[1])
+    # Between the rounding at the fitted scale and the rounding the repairer certified.
+    spec, group, stub = _off_rule_by(
+        monkeypatch, model, lambda certified, held: unit * float(np.sqrt(certified * held))
+    )
+
+    model.apply_shape_postfit(X)
+
+    slack = shape_constraint_certificate(spec, stub["term"], "increasing").minimum_scaled_slack
+    # The repairer's own acceptance rule held, and the old reading at ``held`` would not.
+    assert -shape_slack_tolerance(stub["term"], stub["certified"]) <= slack
+    assert slack < -shape_slack_tolerance(stub["term"], stub["held"])
+    published = model.result.beta[group.sl]
+    assert shape_constraint_is_roundoff_feasible(spec, published, "increasing")
+    grid = np.linspace(spec._lo, spec._hi, 400)
+    moved = spec.transform(grid) @ (published - stub["term"])
+    # The curve moves by a rounding over the inside ray's slack: below the fit's own ``tol``.
+    assert np.max(np.abs(moved)) <= 1e-6 * stub["certified"]
+    # Obeying its rule at its own scale, the published term needs no second repair.
+    revised = model.result.beta.copy()
+    model.apply_shape_postfit(X)
+    np.testing.assert_array_equal(model.result.beta, revised)
+
+
+def test_projection_off_its_rule_beyond_its_certified_rounding_is_refused(monkeypatch):
+    model, X = _u_shape_on_a_skewed_axis()
+    unit = gamma(_SLACK_STEPS * model._specs["x"].transform(np.zeros(1)).shape[1])
+    _off_rule_by(monkeypatch, model, lambda certified, held: 4.0 * unit * certified)
+    original_beta = model.result.beta.copy()
+
+    with pytest.raises(RuntimeError, match="infeasible monotonicity"):
+        model.apply_shape_postfit(X)
+
+    np.testing.assert_array_equal(model.result.beta, original_beta)
 
 
 def test_select_spline_curvature_repair_preserves_public_solver_intercept_relation():
