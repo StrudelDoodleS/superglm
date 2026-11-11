@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import numpy as np
 import scipy.linalg
@@ -30,6 +30,10 @@ from superglm.solvers.rank import (
     decompose_factor,
     decompose_gram,
 )
+
+# SciPy's type stubs do not declare its LAPACK wrappers (``dsyequb``, ``dgetrf``,
+# ``dgetrs``); reaching them through ``Any`` keeps the checker off names that exist.
+_LAPACK: Any = scipy.linalg.lapack
 
 # Safety factor on the spectral consistency floor (see ``_consistency_floor``).
 # Kept separate from ``SHARED_RANK_POLICY.certification_band`` and from the
@@ -474,7 +478,7 @@ def _solve_saddle_direct(KKT: NDArray, rhs: NDArray) -> NDArray:
     form (a zero row, or ``|K|`` sums past the binary64 range) leaves the raw
     solve, and a singular one the caller's least-squares fallback.
     """
-    scale, _, _, info = scipy.linalg.lapack.dsyequb(KKT)
+    scale, _, _, info = _LAPACK.dsyequb(KKT)
     if info != 0 or not np.all(np.isfinite(scale) & (scale > 0.0)):
         return np.linalg.solve(KKT, rhs)
     return np.linalg.solve(KKT * scale[:, None] * scale[None, :], rhs * scale) * scale
@@ -523,6 +527,7 @@ class _SaddleUpdates:
     def __init__(self, H: NDArray, rows: NDArray) -> None:
         self.H, self.rows, self.p = H, rows, H.shape[0]
         self.lu: NDArray | None = None
+        self.size = 0
         self.usable = True
 
     def _factor(self, active: list[int]) -> bool:
@@ -531,25 +536,25 @@ class _SaddleUpdates:
         K[:p, :p] = self.H
         K[:p, p:] = -self.rows[active].T
         K[p:, :p] = self.rows[active]
-        scale, _, _, info = scipy.linalg.lapack.dsyequb(K)
+        scale, _, _, info = _LAPACK.dsyequb(K)
         if info != 0 or not np.all(np.isfinite(scale) & (scale > 0.0)):
             scale = np.ones(p + k)
-        lu, pivots, info = scipy.linalg.lapack.dgetrf(K * scale[:, None] * scale[None, :])
+        lu, pivots, info = _LAPACK.dgetrf(K * scale[:, None] * scale[None, :])
         if info != 0:
             self.usable = False
             return False
-        self.lu, self.pivots, self.scale = lu, pivots, scale
+        self.lu, self.pivots, self.scale, self.size = lu, pivots, scale, p + k
         self.base = {row: p + position for position, row in enumerate(active)}
         self.borders: dict[tuple[int, bool], tuple[NDArray, NDArray]] = {}
         return True
 
     def _solve(self, rhs: NDArray) -> NDArray:
-        return scipy.linalg.lapack.dgetrs(self.lu, self.pivots, rhs)[0]
+        return _LAPACK.dgetrs(self.lu, self.pivots, rhs)[0]
 
     def _border(self, row: int, added: bool) -> tuple[NDArray, NDArray]:
         """The scaled border row of ``row``, and ``K0`` solved against its scaled column."""
         if (row, added) not in self.borders:
-            column, border = np.zeros(self.lu.shape[0]), np.zeros(self.lu.shape[0])
+            column, border = np.zeros(self.size), np.zeros(self.size)
             if added:
                 column[: self.p], border[: self.p] = -self.rows[row], self.rows[row]
             else:
@@ -568,7 +573,7 @@ class _SaddleUpdates:
             if not self.usable or not self._factor(active):
                 return None
             added, dropped = [], []
-        base_rhs = np.zeros(self.lu.shape[0])
+        base_rhs = np.zeros(self.size)
         base_rhs[:p] = rhs[:p]
         for j, row in enumerate(active):
             if row in self.base:
