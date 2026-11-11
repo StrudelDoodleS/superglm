@@ -19,8 +19,9 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.distributional.terms import _resolve_term
+from superglm.editor.lss.display import INVERSE_THETA, display_for
 from superglm.editor.lss.view import LSSModelView, split_key
-from superglm.features.constraint import rules_of
+from superglm.features.constraint import ConstraintSpec, rules_of
 
 
 @dataclass(frozen=True)
@@ -80,12 +81,40 @@ def rule_payload(model: Any, name: str) -> dict[str, Any] | None:
 
     ``fit`` says the fit enforces them, rather than repairing the curve after it;
     ``kept`` that hand edits are kept inside them, which a SuperLSS term's are.
+    ``text`` names them on the curve drawn: on a theta term, the overdispersion 1/θ.
     """
     rules = rules_of(model._specs[name])
     if not rules:
         return None
     fit = all(rule.mode == "fit" for rule in rules)
-    return {"text": rules.describe(), "fit": fit, "kept": holds_rules(model, name)}
+    drawn = display_for(model, name) is INVERSE_THETA
+    text = " & ".join(_on_overdispersion(rule) for rule in rules) if drawn else rules.describe()
+    return {"text": text, "fit": fit, "kept": holds_rules(model, name)}
+
+
+_MIRRORED = {"increasing": "decreasing", "decreasing": "increasing"}
+
+
+def _on_overdispersion(rule: ConstraintSpec) -> str:
+    """A rule on θ as it reads on the curve a theta term draws, the overdispersion 1/θ.
+
+    1/θ falls where θ rises, so a direction swaps, a cap's bounds invert and swap,
+    and a step's largest rise and fall trade places, each inverted: adjacent θ
+    ratios in [1 - down, 1 + up] are 1/θ ratios in [1/(1 + up), 1/(1 - down)].
+    Curvature has no image under 1/θ, so a convex or concave rule names θ.
+    """
+    if rule.kind in _MIRRORED:
+        return rule.describe().replace(rule.kind, _MIRRORED[rule.kind], 1)
+    if rule.kind == "cap" and rule.bounds is not None:
+        lo, hi = rule.bounds
+        return f"cap({1.0 / hi:.3g}, {1.0 / lo:.3g})"
+    if rule.kind == "max_step" and rule.bounds is not None:
+        up, down = rule.bounds
+        rise, fall = down / (1.0 - down), up / (1.0 + up)
+        return f"max_step({rise:.3g}, {fall:.3g})"
+    if rule.kind in ("convex", "concave"):
+        return f"{rule.describe()} in θ"
+    return rule.describe()
 
 
 __all__ = ["TermRows", "holds_rules", "rule_payload", "term_rows"]

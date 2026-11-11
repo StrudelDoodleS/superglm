@@ -378,3 +378,27 @@ def test_a_ruled_term_names_its_rule_and_an_edit_keeps_to_it(open_lss_editor_pag
         heights = points.evaluate_all("els => els.map(e => Number(e.getAttribute('cy')))")
         assert len(heights) == curve.size
         assert np.diff(heights).max() <= 1e-6
+
+
+def test_an_edit_the_rule_takes_back_leaves_no_history(open_lss_editor_page):
+    case = ruled_case()
+    with open_lss_editor_page(case=case, selected_term="scale:region") as (page, session):
+        term = session.terms["scale:region"]
+        base = term.levels.index(str(session.model._specs["scale:region"]._base_level))
+        at_cap = int(np.argmax(term.edited_log_effect - term.edited_log_effect[base]))
+
+        select_chart_tool(page, "Select")
+        with page.expect_response(_posted("/select")):
+            page.locator("#chart .point").nth(at_cap).click()
+        page.locator("#selectionMenu").wait_for(state="visible")
+        with page.expect_response(_posted("/op")):
+            page.get_by_role("button", name="Increase selection", exact=True).click()
+        page.wait_for_function("() => window.__superglmTest.mutationStatus() !== 'running'")
+
+        # The level already sits at its cap: the rule puts it back, and nothing is recorded.
+        assert session.history == []
+        np.testing.assert_array_equal(
+            session.terms["scale:region"].edited_log_effect, term.original_log_effect
+        )
+        page.locator("#historyTab").click()
+        assert page.locator("#historyFrame .history-list li").count() == 0

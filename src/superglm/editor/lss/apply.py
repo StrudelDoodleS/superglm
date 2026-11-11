@@ -14,9 +14,11 @@ that the term's basis draws with coefficients meeting them. With the intercept
 free that is the convex QP ``min x' H x / 2 - g' x`` subject to ``[0 A] x >= c``,
 ``H = D' W D`` and ``g = D' W t`` for ``D`` the design beside a column of ones,
 solved by the repository's active-set QP (``solvers/constrained_qp.py``). A
-categorical term with a cap is projected the same way, through its level design.
-The session keeps every edit of such a term on that curve
-(``kept_inside_rules``), so the curve it shows is the curve the model takes.
+categorical term with a cap is projected the same way, through its level design;
+an edit of some of its levels leaves the others, the base among them, where
+they are. The session keeps every edit of such a term on that curve
+(``kept_inside_rules``), so the curve it shows is the curve the model takes, and
+writing that curve into the model returns it unchanged.
 
 Only terms whose curve differs from the fitted one are touched; every other
 coefficient keeps its fitted value exactly.
@@ -30,6 +32,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._roundoff import gamma
 from superglm.distributional.api import SuperLSS
 from superglm.distributional.terms import _level_domain, _resolve_term, _term_design
 from superglm.editor import apply as editor_apply
@@ -39,11 +42,8 @@ from superglm.editor.lss.rules import TermRows, term_rows
 from superglm.editor.lss.view import LSSModelView, split_key
 from superglm.editor.terms import native_log_effect_values
 from superglm.features.categorical import Categorical
-from superglm.solvers.constrained_qp import _is_feasible
-from superglm.solvers.irls_direct._qp import (
-    _QP_FEASIBILITY_TOL,
-    _solve_constrained_qp_with_cold_retry,
-)
+from superglm.solvers.constrained_qp import solve_constrained_qp
+from superglm.solvers.irls_direct._qp import _QP_FEASIBILITY_TOL
 
 _SPECIAL_SUFFIX = ":special"
 
@@ -181,9 +181,14 @@ def _grid_design(
 
 
 _OUTSIDE_RULES = (
-    "The edit to {term!r} could not be kept inside its rules ({rules}). Undo it, or make a "
-    "smaller edit."
+    "The edit to {term!r} could not be kept inside its rules ({rules}): the nearest curve they "
+    "allow could not be confirmed, so the edit was not made. Undo it, or make a smaller edit."
 )
+
+# A kept curve that moves no value by more than this fraction of the change asked for, or of
+# the curve's own size, leaves the curve where it was: a billionth of a log-relativity is
+# nothing a chart or a price shows.
+_NO_MOVE = 1e-9
 
 
 def kept_inside_rules(
@@ -194,6 +199,11 @@ def kept_inside_rules(
     None when ``model`` is not a SuperLSS view or the term has no fit-time rule.
     The returned curve is the one the model takes when the edit is written into
     its coefficients, so it is drawn and recorded in place of ``curve``.
+
+    On a term with levels, the levels the edit leaves where they are stay there:
+    a level pushed past its cap stops at it, and neither the base nor any other
+    level moves. Holding them always admits the current curve, which meets the
+    rules, so the nearest curve is found among the edited levels alone.
     """
     if not isinstance(model, LSSModelView):
         return None
@@ -203,9 +213,19 @@ def kept_inside_rules(
     label, state, term_slice = _editable_slice(model, term)
     design, centre = _grid_design(model, term, label, state, term_slice)
     # A SuperLSS term opens on its native scale (``NATIVE_ONLY``), so the curve is the effect.
-    target = np.asarray(curve, dtype=np.float64) + centre
-    shift, block = _projection(design, target, editor_apply._term_weights(term), rows, term.name)
+    curve = np.asarray(curve, dtype=np.float64)
+    held = curve == term.edited_log_effect if term.x is None else None
+    weights = editor_apply._term_weights(term)
+    shift, block = _projection(design, curve + centre, weights, rows, term.name, held=held)
     return design @ block + (shift - centre)
+
+
+def leaves_curve(
+    kept: NDArray[np.float64], current: NDArray[np.float64], asked: NDArray[np.float64]
+) -> bool:
+    """Whether the rules absorbed the edit ``asked`` entirely, leaving ``current`` as ``kept``."""
+    scale = max(float(np.max(np.abs(asked - current))), float(np.max(np.abs(current))))
+    return bool(np.max(np.abs(kept - current)) <= _NO_MOVE * scale)
 
 
 def _native_levels(spec: Any) -> dict[str, Any]:
@@ -221,6 +241,8 @@ def _projection(
     weights: NDArray[np.float64],
     rows: TermRows | None = None,
     name: str = "",
+    *,
+    held: NDArray[np.bool_] | None = None,
 ) -> tuple[float, NDArray[np.float64]]:
     """The weighted least-squares fit of ``target`` by an intercept and ``design``, under ``rows``.
 
@@ -228,38 +250,154 @@ def _projection(
     weights that sum to one, so neither a covariate's units and origin nor the
     weights' scale decide which directions are kept; the intercept takes the
     centring back. Rows on the coefficients are rescaled with their columns.
+
+    ``held`` marks the levels of a level design that the fit leaves at ``target``;
+    that fit is written on the coefficients themselves, where a level's own
+    coefficient is one column (``_held_levels``).
     """
     weights = weights / weights.sum()
+    ruled = rows is not None and rows.A.shape[0] > 0
+    pinned = _held_levels(design, target, held) if ruled and held is not None else None
+    if rows is not None and pinned is not None:
+        with_intercept = np.column_stack([np.ones(design.shape[0]), design])
+        A = np.column_stack([np.zeros(rows.A.shape[0]), rows.A])
+        x = _ruled_fit(with_intercept, A, target, weights, rows, name, *pinned)
+        return float(x[0]), np.asarray(x[1:], dtype=np.float64)
     norm = np.sqrt(weights @ np.square(design))
     norm[norm == 0.0] = 1.0
     scaled = design / norm
     centre = weights @ scaled
-    if rows is None or rows.A.shape[0] == 0:
+    if rows is None or not ruled:
         shift, coefficients = editor_apply._solve_with_intercept(scaled - centre, target, weights)
     else:
-        shift, coefficients = _constrained_fit(scaled - centre, target, weights, rows, norm, name)
+        with_intercept = np.column_stack([np.ones(design.shape[0]), scaled - centre])
+        A = np.column_stack([np.zeros(rows.A.shape[0]), rows.A / norm])
+        width = with_intercept.shape[1]
+        x = _ruled_fit(
+            with_intercept, A, target, weights, rows, name, np.zeros(width), np.eye(width)
+        )
+        shift, coefficients = float(x[0]), np.asarray(x[1:], dtype=np.float64)
     return shift - float(centre @ coefficients), coefficients / norm
 
 
-def _constrained_fit(
-    centred: NDArray[np.float64],
+def _held_levels(
+    design: NDArray[np.float64], target: NDArray[np.float64], held: NDArray[np.bool_]
+) -> tuple[NDArray[np.float64], NDArray[np.float64]] | None:
+    """The fits of a level design that leave its ``held`` levels at ``target``: ``start + free z``.
+
+    In ``[intercept, coefficients]``, a level reads the intercept plus its own
+    coefficient, the base the intercept alone. A held base fixes the intercept and
+    a held level its coefficient; with the base free, the intercept moves and each
+    held level's coefficient moves against it. The directions are 0 and ±1, so a
+    row on held coefficients alone is exactly zero along them. None when nothing is
+    held or the design is not one indicator per level.
+    """
+    indicator = design == 1.0
+    if not np.any(held) or not np.all(indicator | (design == 0.0)):
+        return None
+    if np.any(indicator.sum(axis=1) > 1):
+        return None
+    level = np.where(indicator.any(axis=1), indicator.argmax(axis=1), -1)
+    width = design.shape[1] + 1
+    start = np.zeros(width)
+    base = held & (level < 0)
+    if np.any(base):
+        start[0] = target[base][0]
+    own = held & (level >= 0)
+    start[1 + level[own]] = target[own] - start[0]
+    pinned = np.zeros(width, dtype=bool)
+    pinned[1 + level[own]] = True
+    free = [np.eye(width)[:, j] for j in np.flatnonzero(~pinned[1:]) + 1]
+    if not np.any(base):
+        intercept = np.zeros(width)
+        intercept[0] = 1.0
+        intercept[pinned] = -1.0
+        free.insert(0, intercept)
+    return start, np.column_stack(free) if free else np.zeros((width, 0))
+
+
+def _ruled_fit(
+    design: NDArray[np.float64],
+    A: NDArray[np.float64],
     target: NDArray[np.float64],
     weights: NDArray[np.float64],
     rows: TermRows,
-    norm: NDArray[np.float64],
     name: str,
-) -> tuple[float, NDArray[np.float64]]:
-    """The intercept and scaled coefficients of the QP fit of ``target`` under ``rows``."""
-    with_intercept = np.column_stack([np.ones(centred.shape[0]), centred])
-    H = with_intercept.T @ (weights[:, None] * with_intercept)
-    g = with_intercept.T @ (weights * target)
-    A = np.column_stack([np.zeros(rows.A.shape[0]), rows.A / norm])
-    result = _solve_constrained_qp_with_cold_retry(H, g, A, rows.c, None)
-    # An uncertified point that meets the rows is kept: the edit is inside them,
-    # only its nearness is unproven.
-    if not result.converged and not _is_feasible(A, result.beta, rows.c, _QP_FEASIBILITY_TOL):
+    start: NDArray[np.float64],
+    free: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """The coefficients ``x`` nearest ``target`` with ``A x >= rows.c``, among ``start + free z``.
+
+    ``design`` and ``A`` carry the intercept as their first column. When the
+    unconstrained nearest fit meets the rows it is the answer, as the QP would
+    return it, so a curve already inside the rules is kept as drawn, and writing
+    it into the model again returns it unchanged. Otherwise the QP finds the
+    nearest fit that meets them, over the rows the free directions move; a row
+    they do not move keeps the slack it has at ``start``, checked with the rest.
+    """
+    reduced = design @ free
+    rest = target - design @ start
+    root = np.sqrt(weights)
+    z = np.zeros(free.shape[1])
+    if free.shape[1]:
+        z = np.linalg.lstsq(reduced * root[:, None], rest * root, rcond=None)[0]
+    x = start + free @ z
+    magnitude = max(float(np.max(np.abs(target))), float(np.max(np.abs(x))))
+    if _meets_rows(A, x, rows.c, magnitude):
+        return x
+    moving = A @ free
+    moved = np.any(moving != 0.0, axis=1)
+    if free.shape[1] and np.any(moved):
+        H = reduced.T @ (weights[:, None] * reduced)
+        g = reduced.T @ (weights * rest)
+        bound = rows.c[moved] - A[moved] @ start
+        z = _nearest_inside(H, g, moving[moved], bound, rows, name)
+        x = start + free @ z
+    if not _meets_rows(A, x, rows.c, max(magnitude, float(np.max(np.abs(x))))):
         raise EditorValueError(_OUTSIDE_RULES.format(term=name, rules=rows.text))
-    return float(result.beta[0]), np.asarray(result.beta[1:], dtype=np.float64)
+    return x
 
 
-__all__ = ["lss_model_with_edits"]
+def _meets_rows(
+    A: NDArray[np.float64], x: NDArray[np.float64], c: NDArray[np.float64], magnitude: float
+) -> bool:
+    """Whether ``A x >= c`` holds to the QP's own feasibility tolerance, on the fit's scale.
+
+    Each row is read against ``max(|c_i|, |A_i| 1 magnitude)``, its action on
+    coefficients the size of the fit (``magnitude``, the largest of the target and
+    the coefficients, in the fit's own columns), not against its own action: on a
+    flat curve every coefficient is rounding of the solve, a row's own action is
+    that same rounding, and reading one by the other turns noise of either sign
+    into a violation. ``_QP_FEASIBILITY_TOL`` is the relative tolerance the QP
+    accepts its own answers at, and ``gamma`` covers the rounding of each row's
+    dot product (Higham 2002, section 3.1). ``irls_direct._qp._binding_rows``
+    reads a term the constraint holds flat on the same kind of scale.
+    """
+    scale = np.maximum(np.abs(c), np.abs(A).sum(axis=1) * magnitude)
+    bar = (_QP_FEASIBILITY_TOL + gamma(A.shape[1] + 2)) * scale
+    return bool(np.all(A @ x - c >= -bar))
+
+
+def _nearest_inside(
+    H: NDArray[np.float64],
+    g: NDArray[np.float64],
+    A: NDArray[np.float64],
+    c: NDArray[np.float64],
+    rows: TermRows,
+    name: str,
+) -> NDArray[np.float64]:
+    """The minimiser of ``z' H z / 2 - g' z`` subject to ``A z >= c``, by the repository's QP.
+
+    An active-set step adds or drops one row, so the solve gets the room to visit
+    every row twice beyond the solver's default; a solve that still stops short of
+    its KKT certificate refuses the edit, rather than keep a curve whose nearness
+    is unproven.
+    """
+    steps = max(200, 2 * (A.shape[0] + H.shape[0]))
+    result = solve_constrained_qp(H, g, A, c, max_iter=steps)
+    if not result.converged:
+        raise EditorValueError(_OUTSIDE_RULES.format(term=name, rules=rows.text))
+    return np.asarray(result.beta, dtype=np.float64)
+
+
+__all__ = ["kept_inside_rules", "leaves_curve", "lss_model_with_edits"]

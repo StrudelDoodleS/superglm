@@ -246,7 +246,9 @@ def _refit_support(model, name: str, spec, X, sample_weight) -> NDArray:
     if sample_weight is not None:
         x = x[np.asarray(sample_weight, dtype=np.float64) > 0.0]
     binned = should_discretize(spec, model._discrete)
-    n_bins = resolve_discrete_n_bins(name, spec, model._n_bins) if binned else None
+    n_bins = (
+        resolve_discrete_n_bins(column_of(model, name), spec, model._n_bins) if binned else None
+    )
     return fit_support(x, n_bins)
 
 

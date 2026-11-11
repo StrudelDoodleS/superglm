@@ -348,7 +348,14 @@ squares the editor writes every edit with, among the curves the term's basis
 draws with coefficients that meet the fit's own rows. That curve is the one
 the exported model takes, and Undo puts back the curve from before the edit.
 An edit the rules already allow, such as raising the whole curve, is kept as
-drawn. A term with a rule takes no shaped range.
+drawn, and an edit the rules take back entirely, such as raising a level that
+already sits at its cap, records nothing. On a term with levels, the levels an
+edit does not touch stay where they are, the base among them: a level pushed
+past its cap stops at the cap. A theta term draws the overdispersion 1/θ, so
+its rules are named on 1/θ: `decreasing` on θ reads **rule increasing**, and
+`cap(0.7, 1.5)` reads **rule cap(0.667, 1.43)**. A convex or concave rule has
+no such reading and names θ, as in **rule convex in θ**. A term with a rule
+takes no shaped range.
 
 A `SuperGLM` term names its rules the same way, but its hand edits are not
 held to them, so check the curve after an edit.

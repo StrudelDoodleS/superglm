@@ -57,7 +57,7 @@ from superglm.editor.level_order import (
     level_order_for_labels,
     level_order_for_target,
 )
-from superglm.editor.lss.apply import kept_inside_rules
+from superglm.editor.lss.apply import kept_inside_rules, leaves_curve
 from superglm.editor.lss.availability import require_available
 from superglm.editor.lss.open import open_lss
 from superglm.editor.lss.refit import lss_refit_with_drafts
@@ -1999,7 +1999,8 @@ class EditorSession:
 
         An edit of a SuperLSS term with shape rules is kept inside them: the
         whole curve becomes the nearest one the rules allow
-        (``kept_inside_rules``), and the record holds all of it.
+        (``kept_inside_rules``), and the record holds all of it. An edit the
+        rules take back entirely is not recorded.
         """
         indices = np.asarray(indices, dtype=np.intp).copy()
         before = np.asarray(before, dtype=np.float64).copy()
@@ -2010,6 +2011,9 @@ class EditorSession:
         curve[indices] = after
         kept = kept_inside_rules(self.model, editable, curve)
         if kept is not None:
+            if leaves_curve(kept, editable.edited_log_effect, curve):
+                # The rules took the whole edit back: there is nothing to record or undo.
+                return
             indices = np.arange(editable.size, dtype=np.intp)
             before, after = editable.edited_log_effect.copy(), kept
         changed = not np.array_equal(before, after)
