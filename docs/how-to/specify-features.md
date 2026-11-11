@@ -238,7 +238,8 @@ Spline(kind="bs", k=12, polynomial_ranges=[
 - A binned fit (`discrete=True`) sees one value for each bin, so a range
   counts those, not the raw values. The bins are equal-width when those
   already follow the pieces of the curve and none is crowded; otherwise they
-  follow the knots and the data, each represented by the average of its rows.
+  follow the knots and the data, each represented by the average of its rows
+  (counted by their frequency weight).
   A range's edges are knots, so a range with rows in it gets bins of its own.
 - The stretches outside the ranges need data too. A fit that would leave one
   of them undetermined is refused by name.

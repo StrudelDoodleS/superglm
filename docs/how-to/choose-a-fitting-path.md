@@ -76,7 +76,10 @@ of the curve that hold rows, the other half cut the rows into groups of equal
 size, and each bin is represented by the average of its rows, so a pile of
 equal values is seen at its own value. Without that, the fit would read many
 rows at one value, and `predict` would read the curve at values the fit did not
-check. A column with at most `n_bins` distinct values is used exactly.
+check. Rows count by their frequency weight, so a weighted fit gets the same
+bins as the replicated rows it stands for; under prior weights each row with a
+positive weight counts once. A column with at most `n_bins` distinct values is
+used exactly.
 
 An exact fit (`discrete=False`, the default) that will be slow says so
 before it starts, with a `SlowFitWarning`. It fires when rows x coefficients

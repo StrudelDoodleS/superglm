@@ -258,12 +258,12 @@ def _refit_support(model, name: str, spec, X, sample_weight) -> NDArray:
     if not should_discretize(spec, model._discrete):
         return fit_support(x)
     n_bins = resolve_discrete_n_bins(column_of(model, name), spec, model._n_bins)
-    if spec.fitted_boundary is not None:
-        return fit_support(x, n_bins, spec._knots)
-    probe = copy.deepcopy(spec)
     geometry = knot_geometry_weight(weights, model._weight_semantics)
+    if spec.fitted_boundary is not None:
+        return fit_support(x, n_bins, spec._knots, geometry)
+    probe = copy.deepcopy(spec)
     place_knots(probe, x, geometry, n_bins, certify=False)
-    return fit_support(x, n_bins, probe._knots)
+    return fit_support(x, n_bins, probe._knots, geometry)
 
 
 def _piece_support(model, name: str, spec, basis, X, sample_weight):

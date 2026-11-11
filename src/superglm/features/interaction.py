@@ -586,7 +586,9 @@ class SplineCategorical:
             x_spline, x_cat, parent_specs, sample_weight
         )
 
-        support, bin_idx = _discretize_column(x_spline, int(n_bins), spline_spec._knots)
+        support, bin_idx = _discretize_column(
+            x_spline, int(n_bins), spline_spec._knots, sample_weight
+        )
         B_unique = np.asarray(spline_spec._raw_basis_matrix(support), dtype=np.float64)
 
         omega = spline_spec._build_penalty()
@@ -2371,7 +2373,9 @@ class TensorInteraction:
             candidate, cardinal = self._marginal_spec(spec, x, nk, geometry_weight=geometry_weight)
             support = counts = None
             if discrete_n_bins is not None:
-                support, idx = _discretize_column(x, int(discrete_n_bins[axis]), candidate._knots)
+                support, idx = _discretize_column(
+                    x, int(discrete_n_bins[axis]), candidate._knots, geometry_weight
+                )
                 counts = np.bincount(idx, weights=geometry_weight, minlength=len(support))
                 bins.append((support, idx))
             info = self._marginal_ingredients(

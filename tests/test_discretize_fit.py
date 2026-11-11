@@ -1949,3 +1949,58 @@ def test_binned_support_never_exceeds_n_bins():
             np.testing.assert_array_equal(
                 np.searchsorted(inner, support[index], side="right"), span
             )
+
+
+# A frequency weight stands for that many literal rows, so the rule counts each
+# row by its weight: the crowding test, the quantile edges and the cell means.
+
+
+def _assert_weighted_bins_match_replication(x, weights, n_bins, knots):
+    replicas = np.repeat(np.arange(x.size), weights.astype(np.intp))
+    support, index = discretize_column(x, n_bins, knots, weights)
+    replicated_support, replicated_index = discretize_column(x[replicas], n_bins, knots)
+    np.testing.assert_array_equal(support, replicated_support)
+    np.testing.assert_array_equal(index[replicas], replicated_index)
+    equal_width = _equal_width_bins(x, n_bins)[0]
+    assert len(support) != len(equal_width) or np.any(support != equal_width)
+    # Counting each row once instead gives other bins.
+    unweighted = discretize_column(x, n_bins, knots)[0]
+    assert len(unweighted) != len(support) or np.any(unweighted != support)
+
+
+def test_integer_weights_bin_like_their_replicated_rows():
+    rng = np.random.default_rng(21)
+    x = rng.lognormal(0.0, 1.5, 4000)
+    weights = rng.integers(1, 7, x.size).astype(np.float64)
+    knots = np.quantile(x, np.linspace(0.0, 1.0, 12))
+    _assert_weighted_bins_match_replication(x, weights, 64, knots)
+    # A pile of zeros that is crowded only once the rows count by weight: the
+    # equal-width bins resolve the uniform knots and each holds about 1/64 of
+    # the rows, until the zeros, a tenth of the rows, weigh 30 each.
+    x = np.where(rng.uniform(size=x.size) < 0.1, 0.0, rng.uniform(0.0, 1.0, x.size))
+    weights = np.where(x == 0.0, 30.0, rng.integers(1, 3, x.size).astype(np.float64))
+    knots = np.linspace(0.0, 1.0, 8)
+    _assert_bins_unchanged(x, 64, knots)
+    _assert_weighted_bins_match_replication(x, weights, 64, knots)
+
+
+def test_fractional_weights_read_each_cell_at_its_weighted_mean():
+    rng = np.random.default_rng(22)
+    x = rng.lognormal(0.0, 1.5, 5000)
+    weights = rng.gamma(0.5, 2.0, x.size) + 1e-3
+    knots = np.quantile(x, np.linspace(0.0, 1.0, 12))
+    support, index = discretize_column(x, 64, knots, weights)
+    assert len(support) <= 64
+    assert np.all(np.diff(support) > 0)
+    for cell in np.unique(index):
+        rows = index == cell
+        expected = np.sum(weights[rows] * x[rows]) / np.sum(weights[rows])
+        np.testing.assert_allclose(support[cell], expected, rtol=1e-12, atol=0.0)
+    # Rows of zero weight still have a support point inside their own range,
+    # and a cell holding only such rows is not read at a 0/0 mean.
+    weights[x > np.quantile(x, 0.995)] = 0.0
+    support, index = discretize_column(x, 64, knots, weights)
+    assert np.all(np.isfinite(support)) and np.all(np.diff(support) > 0)
+    for cell in np.unique(index):
+        rows = x[index == cell]
+        assert rows.min() <= support[cell] <= rows.max()

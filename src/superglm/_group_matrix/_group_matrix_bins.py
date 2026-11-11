@@ -11,7 +11,10 @@ _CROWDED_SHARE = 8
 
 
 def discretize_column(
-    x: NDArray, n_bins: int = 256, knots: NDArray | None = None
+    x: NDArray,
+    n_bins: int = 256,
+    knots: NDArray | None = None,
+    weights: NDArray | None = None,
 ) -> tuple[NDArray, NDArray]:
     """Compress a continuous variable to at most ``n_bins`` support points.
 
@@ -45,6 +48,14 @@ def discretize_column(
     are sorted, and each lies within its own rows' range, so none crosses a
     knot away from its rows.
 
+    ``weights`` are the rows' frequency weights (nonnegative; ``None`` counts
+    every row once). Wherever a rule here counts rows (the crowding test, the
+    quantiles, the means), a row counts by its weight, so a weighted column
+    and its literally replicated twin get the same bins; a cell whose rows all
+    weigh zero is read at its midpoint, clipped into their range. Which spans
+    and cells hold rows depends only on the values present, and the
+    equal-width bins themselves never read the weights.
+
     Returns the support points (sorted) and each row's index into them.
     """
     x = np.asarray(x, dtype=np.float64).ravel()
@@ -59,19 +70,62 @@ def discretize_column(
     if lo == hi:
         return np.array([lo]), np.zeros(len(x), dtype=np.intp)
     edges = np.linspace(lo, hi, n_bins + 1)
-    bin_idx = np.clip(np.searchsorted(edges, x, side="right") - 1, 0, n_bins - 1)
+    bin_of_value = np.clip(np.searchsorted(edges, unique_vals, side="right") - 1, 0, n_bins - 1)
+    bin_idx = bin_of_value[inverse]
     bin_centers = 0.5 * (edges[:-1] + edges[1:])
     if knots is None:
         return bin_centers, bin_idx
 
+    mass = _value_mass(inverse, unique_vals.size, weights, x.size)
+    total = float(mass.sum())
     span_edges, occupied = _row_spans(unique_vals, lo, hi, knots)
     widths = np.diff(span_edges)
     b_min = _min_cells_per_span(n_bins, occupied.size)
     resolves = np.all(n_bins * widths[occupied] / (hi - lo) >= b_min)
-    crowded = np.bincount(bin_idx, minlength=n_bins).max() * n_bins > _CROWDED_SHARE * x.size
+    bin_mass = np.bincount(bin_of_value, weights=mass, minlength=n_bins)
+    crowded = bin_mass.max() * n_bins > _CROWDED_SHARE * total
     if resolves and not crowded:
         return bin_centers, bin_idx
-    return _adaptive_bins(x.size, unique_vals, inverse, span_edges, occupied, n_bins)
+    return _adaptive_bins(mass, total, unique_vals, inverse, span_edges, occupied, n_bins)
+
+
+def _value_mass(inverse: NDArray, n_values: int, weights: NDArray | None, n_rows: int) -> NDArray:
+    """Each distinct value's mass: its row count, or the sum of its rows' weights.
+
+    Formed per distinct value, so a weighted column and its replicated twin
+    carry the same float for every value and every later step agrees.
+    """
+    if weights is None:
+        return np.bincount(inverse, minlength=n_values).astype(np.float64)
+    w = np.asarray(weights, dtype=np.float64).ravel()
+    if w.shape != (n_rows,):
+        raise ValueError(f"weights must have length {n_rows}, got {w.size}")
+    return np.bincount(inverse, weights=w, minlength=n_values)
+
+
+def _lower_quantile_values(mass: NDArray, total: float, unique_vals: NDArray, n_q: int) -> NDArray:
+    """The smallest values whose cumulative mass reaches ``j * total / n_q``, ``j = 1 .. n_q - 1``.
+
+    Integer masses (row counts, integer frequency weights) whose total is
+    below ``2**53`` are compared exactly: the float partial sums are integers
+    below ``2**53`` and so exact, and ``cumulative >= j * total / n_q`` is
+    ``cumulative >= ceil(j * total / n_q)``, formed in int64 as
+    ``j * q + ceil(j * r / n_q)`` with ``total = q * n_q + r`` so nothing
+    overflows. Replicated rows then pick the same values as their weights.
+    Fractional masses compare in float64; a target within rounding of a
+    partial sum may land on either neighbour, which only moves one edge.
+    """
+    j = np.arange(1, n_q, dtype=np.int64)
+    integral = total < 2.0**53 and bool(np.all(mass == np.floor(mass)))
+    if integral:
+        cumulative = np.cumsum(mass.astype(np.int64))
+        q, r = divmod(int(total), n_q)
+        target = j * q + (j * r + n_q - 1) // n_q
+    else:
+        cumulative = np.cumsum(mass)
+        target = j * total / n_q
+    position = np.searchsorted(cumulative, target, side="left")
+    return unique_vals[np.minimum(position, unique_vals.size - 1)]
 
 
 def _min_cells_per_span(n_cells: int, n_spans: int) -> int:
@@ -118,36 +172,41 @@ def _knot_aligned_left_edges(span_edges: NDArray, occupied: NDArray, n_cells: in
 
 
 def _adaptive_bins(
-    n_rows: int,
+    mass: NDArray,
+    total: float,
     unique_vals: NDArray,
     inverse: NDArray,
     span_edges: NDArray,
     occupied: NDArray,
     n_bins: int,
 ) -> tuple[NDArray, NDArray]:
-    """Cells on the knots and the row quantiles, each read at its rows' mean."""
+    """Cells on the knots and the row quantiles, each read at its rows' mean.
+
+    ``mass`` is each distinct value's row mass (``_value_mass``) and ``total``
+    its sum.
+    """
     n_w = n_bins // 2
     n_q = n_bins - n_w
     lo, hi = float(span_edges[0]), float(span_edges[-1])
     width_edges = _knot_aligned_left_edges(span_edges, occupied, max(n_w, 1))
 
-    # Lower (inverted-CDF) quantiles: the smallest value with at least
-    # ceil(j * n / n_q) rows at or below it, so every edge is an observed value.
-    counts = np.bincount(inverse, minlength=unique_vals.size)
-    j = np.arange(1, n_q, dtype=np.int64)
-    rank = (j * n_rows + n_q - 1) // n_q
-    quantile_edges = unique_vals[np.searchsorted(np.cumsum(counts), rank, side="left")]
+    # Lower (inverted-CDF) quantiles of the row mass, so every edge is an observed value.
+    quantile_edges = _lower_quantile_values(mass, total, unique_vals, n_q)
     left = np.unique(np.concatenate([width_edges, quantile_edges[quantile_edges > lo]]))
 
     # A row on an edge belongs to the cell on its right; the maximum to the last.
     cell_of_value = np.searchsorted(left, unique_vals, side="right") - 1
     n_cells = left.size
-    rows = np.bincount(cell_of_value, weights=counts, minlength=n_cells)
-    held = rows > 0
+    held = np.bincount(cell_of_value, minlength=n_cells) > 0
+    cell_mass = np.bincount(cell_of_value, weights=mass, minlength=n_cells)
     # The mean as a convex combination of the cell's values, so no partial sum
     # can exceed the largest value; then clipped into the range of the cell's
-    # values, which rounding could otherwise leave.
-    share_of_cell = counts / rows[cell_of_value]
+    # values, which rounding could otherwise leave. A cell whose rows all have
+    # zero weight is read at its midpoint, clipped the same way.
+    value_cell_mass = cell_mass[cell_of_value]
+    share_of_cell = np.divide(
+        mass, value_cell_mass, out=np.zeros_like(mass), where=value_cell_mass > 0.0
+    )
     mean = np.bincount(cell_of_value, weights=unique_vals * share_of_cell, minlength=n_cells)
     cells = np.arange(n_cells)
     first = unique_vals[
@@ -155,7 +214,9 @@ def _adaptive_bins(
     ]
     last = unique_vals[np.searchsorted(cell_of_value, cells, side="right") - 1]
     right = np.append(left[1:], hi)
-    support = np.where(held, np.clip(mean, first, last), 0.5 * (left + right))
+    midpoint = 0.5 * (left + right)
+    read_at = np.where(cell_mass > 0.0, mean, midpoint)
+    support = np.where(held, np.clip(read_at, first, last), midpoint)
     return support, cell_of_value[inverse].astype(np.intp)
 
 
