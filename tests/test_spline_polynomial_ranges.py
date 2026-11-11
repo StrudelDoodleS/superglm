@@ -362,14 +362,14 @@ def _book(n=6_000, seed=5):
     return pd.DataFrame({"age": age}), y, exposure
 
 
-def _fit(kind, ranges, *, discrete=False, book=None):
+def _fit(kind, ranges, *, discrete=False, book=None, n_bins=512):
     X, y, w = _book() if book is None else book
     model = SuperGLM(
         family="poisson",
         selection_penalty=0.0,
         features={"age": Spline(kind=kind, k=12, polynomial_ranges=ranges)},
         discrete=discrete,
-        n_bins=512,
+        n_bins=n_bins,
     )
     model.fit_reml(X, y, sample_weight=w)
     return model
@@ -661,23 +661,28 @@ def test_too_few_distinct_values_in_a_range_are_refused_by_name(discrete):
 
 
 def test_a_binned_fit_certifies_its_ranges_on_the_bin_centres():
-    # 512 bins of width ~0.121 on the 18-80 axis: [40, 40.2] holds a dozen
-    # distinct ages but at most two bin centres, which cannot fix a quadratic.
+    # [40, 40.2] holds a dozen distinct ages. Its edges are knots, so 512 bins
+    # follow them and give it cells of its own (``discretize_column``); 16 bins
+    # over about 15 knot spans give each span one cell, which cannot fix a quadratic.
     narrow = [PolynomialRange(40.0, 40.2, 2)]
     _fit("bs", narrow)
-    with pytest.raises(ValueError, match=r"needs at least 3 distinct values .* once binned to 512"):
-        _fit("bs", narrow, discrete=True)
+    _fit("bs", narrow, discrete=True)
+    with pytest.raises(ValueError, match=r"needs at least 3 distinct values .* once binned to 16"):
+        _fit("bs", narrow, discrete=True, n_bins=16)
 
 
 def test_a_binned_fit_refuses_an_end_stretch_no_bin_centre_reaches():
-    # The first bin centre sits half a bin (~0.06) above the youngest age, so
-    # the stretch below a range starting 0.03 above it holds none: its slope
-    # would be set by nothing. The exact fit sees the youngest age itself.
+    # The stretch below a range starting 0.03 above the youngest age is a knot
+    # span with rows, so binned fits that can give every span a cell put one in
+    # it. Four bins cannot (the range leaves about six spans, all holding rows),
+    # so they stay equal-width: the first centre sits about 7.75 above the
+    # youngest age and the stretch's slope would be set by nothing.
     book = _book()
     sliver = [PolynomialRange(float(book[0]["age"].min()) + 0.03, 50.0, 1, "kink")]
     _fit("bs", sliver, book=book)
-    with pytest.raises(ValueError, match=r"outside the polynomial ranges.*once binned to 512"):
-        _fit("bs", sliver, discrete=True, book=book)
+    _fit("bs", sliver, discrete=True, book=book)
+    with pytest.raises(ValueError, match=r"outside the polynomial ranges.*once binned to 4"):
+        _fit("bs", sliver, discrete=True, book=book, n_bins=4)
 
 
 @pytest.mark.parametrize("join", ["kink", "tangent"])

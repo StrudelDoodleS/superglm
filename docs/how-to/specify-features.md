@@ -236,7 +236,9 @@ Spline(kind="bs", k=12, polynomial_ranges=[
 - Each range needs at least `degree + 1` distinct values of the feature inside
   it.
 - A binned fit (`discrete=True`) sees only the centres of its bins, so a
-  range counts those, not the raw values.
+  range counts those, not the raw values. The bins follow the knots when
+  equal-width bins would be wider than the pieces of the curve, and a range's
+  edges are knots, so a range with rows in it gets bins of its own.
 - The stretches outside the ranges need data too. A fit that would leave one
   of them undetermined is refused by name.
 - The penalty leaves the pinned ranges alone, so a pinned quadratic is not
