@@ -130,6 +130,9 @@ class SessionState:
     # The fit ``terms`` were read from (``cv._fit_in_force``), which a refit or a post-fit
     # repair of ``model`` in place replaces.
     fit: Any = None
+    # The training split on this side of the step, which a follow onto a refit in place of
+    # ``model`` replaces (``EditorSession._follow_training_rows``); Undo and Redo restore it.
+    train: Any = None
 
 
 @dataclass(frozen=True)

@@ -1413,7 +1413,9 @@ def _follow_case(offsets: str, weights: str, seed: int, n: int = 100):
     from superglm import NegativeBinomialLS
 
     rng = np.random.default_rng(seed)
-    x = np.sort(rng.uniform(0.0, 10.0, n))
+    # x is the same draw for every seed: a refit on other data keeps the grids, and an edit
+    # is carried across it onto a curve that moved
+    x = np.sort(np.random.default_rng(0).uniform(0.0, 10.0, n))
     X = pd.DataFrame({"x": x, "exposure": rng.uniform(-0.3, 0.3, n)})
     array = np.linspace(-0.2, 0.2, n)  # declared on the model, so the same for every seed
     mean_sources = {
@@ -1428,10 +1430,12 @@ def _follow_case(offsets: str, weights: str, seed: int, n: int = 100):
     other = family.theta if weights == "exposure" else family.scale
     rule = Constraint.postfit.increasing
     term = s("x", kind="bs", k=8, constraint=rule)
+    # A fit-time rule on the other parameter: an edit of it is kept inside the rule, carried too.
+    ruled = s("x", kind="bs", k=6, constraint=Constraint.fit.increasing)
     model = SuperLSS(
         family,
         family.mean(term, **({"offset": mean_sources} if mean_sources else {})),
-        other(**({"offset": other_sources} if other_sources else {})),
+        other(ruled, **({"offset": other_sources} if other_sources else {})),
         weight_semantics="frequency" if weights == "frequency" else "prior",
     )
     log_mean = 0.4 + 0.18 * x - 0.8 * np.exp(-(((x - 6.0) / 0.9) ** 2))
@@ -1448,7 +1452,11 @@ def _follow_case(offsets: str, weights: str, seed: int, n: int = 100):
     if weights == "exposure":  # a rate: counts over the exposure
         y = rng.negative_binomial(5.0, 5.0 / (5.0 + 4.0 * w * np.exp(log_mean))) / w
     else:
-        y = rng.gamma(6.0, np.exp(log_mean) / 6.0)
+        # The CV rises steeply on seed 0 and gently on any other: a flattened curve carried
+        # onto the gentler refit decreases unless the carry keeps it inside the rule.
+        rise = (1.0 if seed == 0 else 0.2) * x / 10.0
+        shape = np.exp(-2.0 * (rise - 1.0))
+        y = rng.gamma(shape, np.exp(log_mean) / shape)
     given = {
         name: sum(source for source in sources if not isinstance(source, str))
         for name, sources in (("mean", mean_sources), (other.__name__, other_sources))
@@ -1509,20 +1517,49 @@ def _shown(session, data):
     return shown
 
 
+def _assert_same_shown(got, wanted, where=""):
+    """``got`` and ``wanted``, nested payloads, equal: their numbers to 1e-12 relative, since a
+    carried curve and a fresh edit reach the same values by sums in another order."""
+    if isinstance(wanted, dict):
+        assert isinstance(got, dict) and got.keys() == wanted.keys(), where
+        for key in wanted:
+            _assert_same_shown(got[key], wanted[key], f"{where}/{key}")
+    elif isinstance(wanted, (list, tuple)) and not all(
+        isinstance(v, (int, float)) and not isinstance(v, bool) for v in wanted
+    ):
+        assert isinstance(got, (list, tuple)) and len(got) == len(wanted), where
+        for i, (a, b) in enumerate(zip(got, wanted, strict=True)):
+            _assert_same_shown(a, b, f"{where}/{i}")
+    elif isinstance(wanted, (int, float, list, tuple)) and not isinstance(wanted, bool):
+        np.testing.assert_allclose(got, wanted, rtol=1e-12, atol=1e-12, err_msg=where)
+    else:
+        assert got == wanted, where
+
+
 @pytest.mark.parametrize(("offsets", "weights", "follow"), _FOLLOW_CASES)
 def test_a_followed_session_shows_what_a_fresh_one_on_the_refit_shows(offsets, weights, follow):
     # The invariant that closes the follow's family of findings: after any follow, the
     # session's training rows and every number it shows equal those of a session opened fresh
-    # on the refitted model with the refit's own data, and so do its Refit and Final fit. At
+    # on the refitted model with the refit's own data, and so do its Refit and Final fit; a
+    # ruled edit carried across it is the fresh session's same change, kept inside the rule. At
+    # 3cd512dd5 the carry left the ruled curve outside its rule, unlike a new edit. At
     # b28e71770 a column and an array offset counted the column twice; at 01b61e673 a Refit
     # after a follow onto another row count read the opening rows, and a follow of a fit that
     # dropped zero-weight rows left Refit and Final fit refused for want of weights.
+    from superglm.editor.lss.apply import kept_inside_rules, leaves_curve
+    from superglm.editor.payloads import session_payload
+
     model, X, y, w, given = _follow_case(offsets, weights, 0)
-    lambdas = {"mean:x#wiggle": 1.0}
+    ruled = "theta:x" if weights == "exposure" else "scale:x"
+    lambdas = {"mean:x#wiggle": 1.0, f"{ruled}#wiggle": 1.0}
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         model.fit(X, y, sample_weight=w, lambdas=lambdas)
         session = edit(model, train_data=(X, y, w, given))
+        # flatten the ruled curve on the fit before the follow, an edit carried across it
+        flat = session.terms[ruled].original_log_effect
+        session.set_values(ruled, np.arange(flat.size), np.full(flat.size, float(flat.mean())))
+        stale = session.terms[ruled].copy()
         opened = model._model
         if follow == "repair":
             model.apply_shape_postfit()
@@ -1536,14 +1573,29 @@ def test_a_followed_session_shows_what_a_fresh_one_on_the_refit_shows(offsets, w
             data = (X2, y2, w2, given)
         assert model._model is not opened
         followed = _shown(session, data)
-        fresh = _shown(edit(model, train_data=data), data)
+        # a fresh session on the refit, with the carried change of the ruled curve as one edit
+        reopened = edit(model, train_data=data)
+        term = reopened.terms[ruled]
+        if np.array_equal(term.x, stale.x):
+            asked = term.original_log_effect + stale.edited_log_effect - stale.original_log_effect
+            kept = kept_inside_rules(reopened.model, term, asked)
+            if not leaves_curve(kept, term.original_log_effect, asked):
+                reopened.set_values(ruled, np.arange(term.size), asked)
+        session_payload(reopened)
+        fresh = _shown(reopened, data)
     assert fresh["refit reason"] is None and fresh["final fit reason"] is None
     assert followed.keys() == fresh.keys()
     for name in followed:
-        if name in ("payload", "refit payload", "refit reason", "final fit reason"):
+        if name in ("payload", "refit payload"):
+            _assert_same_shown(followed[name], fresh[name], name)
+        elif name in ("refit reason", "final fit reason"):
             assert followed[name] == fresh[name], name
         else:
-            np.testing.assert_allclose(followed[name], fresh[name], rtol=1e-12, err_msg=name)
+            # a coefficient a rule holds at zero is zero to the rounding of the vector's size
+            scale = float(np.max(np.abs(fresh[name]), initial=0.0))
+            np.testing.assert_allclose(
+                followed[name], fresh[name], rtol=1e-12, atol=1e-12 * scale, err_msg=name
+            )
 
 
 def test_run_cv_rows_are_checked_again_after_a_follow_onto_other_data():
@@ -1557,7 +1609,7 @@ def test_run_cv_rows_are_checked_again_after_a_follow_onto_other_data():
     from superglm.editor.payloads import session_payload
 
     model, X, y, _, _ = _follow_case("none", "none", 0)
-    lambdas = {"mean:x#wiggle": 1.0}
+    lambdas = {"mean:x#wiggle": 1.0, "scale:x#wiggle": 1.0}
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         model.fit(X, y, lambdas=lambdas)
@@ -1589,7 +1641,7 @@ def test_a_refit_in_place_that_kept_no_rows_is_refused_until_the_editor_is_reope
     from superglm.editor.payloads import session_payload
 
     model, X, y, w, given = _follow_case("column", weights, 0)
-    lambdas = {"mean:x#wiggle": 1.0}
+    lambdas = {"mean:x#wiggle": 1.0, "scale:x#wiggle": 1.0}
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         model.fit(X, y, sample_weight=w, lambdas=lambdas, retain_rows=False)
@@ -1614,12 +1666,121 @@ def test_a_rowless_fit_is_never_repaired_in_place():
     model, X, y, w, _ = _follow_case("none", "none", 0)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model.fit(X, y, lambdas={"mean:x#wiggle": 1.0}, retain_rows=False)
+        model.fit(X, y, lambdas={"mean:x#wiggle": 1.0, "scale:x#wiggle": 1.0}, retain_rows=False)
     before = model._model
     with pytest.raises(RuntimeError, match="retain_rows=True"):
         model.apply_shape_postfit()
     assert model._model is before
     assert "retain_rows=True" in REPAIR_NEEDS_THE_ROWS
+
+
+def test_a_carried_edit_on_a_ruled_term_stays_inside_the_rule_and_is_the_exported_curve():
+    # Codex's case: flatten an increasing curve, then refit to a shallower one. At 3cd512dd5
+    # the carry added the flat edit's change to the new curve, which then decreased, and the
+    # editor drew a curve other than the one lss_model_with_edits wrote into the model.
+    from superglm.editor.payloads import session_payload
+
+    family = GammaLS()
+    model = SuperLSS(
+        family,
+        family.mean(s("x", kind="bs", k=8, constraint=Constraint.fit.increasing)),
+        family.scale(),
+    )
+    rng = np.random.default_rng(4)
+    x = np.sort(rng.uniform(0.0, 10.0, 300))
+    X = pd.DataFrame({"x": x})
+    lambdas = {"mean:x#wiggle": 1.0}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, rng.gamma(6.0, np.exp(0.3 * x) / 6.0), lambdas=lambdas)
+        session = edit(model, train_data=(X, rng.gamma(6.0, np.exp(0.3 * x) / 6.0)))
+        term = session.terms["mean:x"]
+        flat = np.full(term.size, float(np.mean(term.original_log_effect)))
+        session.set_values("mean:x", np.arange(term.size), flat)
+        shallower = rng.gamma(6.0, np.exp(0.05 * x) / 6.0)
+        model.fit(X, shallower, lambdas=lambdas)
+        session_payload(session)
+        shown = session.terms["mean:x"].edited_log_effect
+        exported = LSSModelView(session.to_model(), X).term_inference("mean:x")
+    assert monotonicity_violation(shown, "increasing") <= 1e-9
+    # the exported term is centred, its constant in the intercept: the same curve up to it
+    drawn = np.asarray(exported.log_relativity)
+    np.testing.assert_allclose(shown - shown[0], drawn - drawn[0], atol=1e-9)
+
+
+@pytest.mark.parametrize(
+    ("truncated", "censored"), [(True, None), (False, 5), (True, 5), (False, None)]
+)
+def test_a_follow_adopts_a_refit_only_where_opening_would(truncated, censored):
+    # A refit in place on truncated or censored rows: opening refuses such a model, and at
+    # 3cd512dd5 the follow adopted it, scoring thresholds as exact responses. Every other check
+    # opening makes reads the model's declaration, which no refit in place can change.
+    from superglm.editor.errors import EditorValueError
+    from superglm.editor.payloads import session_payload
+
+    model, X, y, w, given = _follow_case("none", "none", 0)
+    lambdas = {"mean:x#wiggle": 1.0, "scale:x#wiggle": 1.0}
+    rows = None if censored is None else np.arange(100) < censored
+    truncation = (0.5 * float(np.min(y)), None) if truncated else None
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y, lambdas=lambdas)
+        session = edit(model, train_data=(X, y))
+        model.fit(X, y, lambdas=lambdas, truncation=truncation, censored=rows)
+        try:
+            edit(model, train_data=(X, y))
+        except EditorValueError as exc:
+            opening = str(exc)
+        else:
+            opening = None
+        if opening is None:
+            session_payload(session)
+            return
+        with pytest.raises(EditorValueError) as refused:
+            session_payload(session)
+    assert str(refused.value) == opening
+
+
+def test_undo_and_redo_across_a_structural_refit_restore_the_training_rows():
+    # A structural Refit, then an in-place refit of its model onto 150 rows. At 3cd512dd5
+    # Undo put back the earlier model but kept the 150 rows, so its training scores read them.
+    from superglm.editor.lss.availability import session_refit_reason
+    from superglm.editor.lss.validation import lss_dataset_metrics
+    from superglm.editor.payloads import session_payload
+
+    model, X, y, _, _ = _follow_case("none", "none", 0)
+    _, X2, y2, _, _ = _follow_case("none", "none", 1, 150)
+    lambdas = {"mean:x#wiggle": 1.0, "scale:x#wiggle": 1.0}
+
+    def scores(session, data):
+        train = session._evaluation_data["train"]
+        fresh = edit(session.model.lss, train_data=data)
+        wanted = fresh._evaluation_data["train"]
+        return (
+            train.n_obs,
+            lss_dataset_metrics(session.model, train),
+            session_refit_reason(session),
+        ), (wanted.n_obs, lss_dataset_metrics(fresh.model, wanted), None)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y, lambdas=lambdas)
+        session = edit(model, train_data=(X, y))
+        session.stage_structural("knots", "mean:x", {"count": 5, "strategy": "uniform"})
+        session.refit_pending()
+        refitted = session.model.lss
+        refitted.fit(X2, y2, lambdas=lambdas)
+        session_payload(session)
+        got, wanted = scores(session, (X2, y2))
+        assert got == wanted
+        session.undo()
+        assert session.model.lss is model
+        got, wanted = scores(session, (X, y))
+        assert got == wanted
+        session.redo()
+        assert session.model.lss is refitted
+        got, wanted = scores(session, (X2, y2))
+        assert got == wanted
 
 
 def test_a_refit_in_place_that_kept_no_rows_says_the_editor_needs_its_rows():

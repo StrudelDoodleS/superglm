@@ -124,6 +124,15 @@ def _refuse_unopenable(lss, train_data, centering: str) -> None:
         raise EditorValueError(NATIVE_ONLY)
 
 
+def refuse_unopenable_fit(lss) -> None:
+    """Refuse a fit the editor would not open, with opening's own sentence: a session that
+    follows a refit in place adopts it only where opening a fresh session on it would.
+
+    Only the checks a fit can change in place apply: rows and centering are the session's.
+    """
+    _refuse_unopenable(lss, (), "native")
+
+
 def _keys_named(view: LSSModelView, name: str) -> list[str]:
     """The keys ``name`` opens: a composite key, or a column's term in every parameter."""
     if name in view._specs:

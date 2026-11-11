@@ -71,7 +71,7 @@ from superglm.editor.lss.availability import (
     follow_training_rows,
     require_available,
 )
-from superglm.editor.lss.open import open_lss
+from superglm.editor.lss.open import open_lss, refuse_unopenable_fit
 from superglm.editor.lss.refit import lss_refit_with_drafts
 from superglm.editor.lss.rules import holds_rules
 from superglm.editor.lss.terms import lss_editable_terms
@@ -250,7 +250,7 @@ FIT_FOLLOW_CHANGES: dict[FitFollow, frozenset[str]] = {
 }
 
 _EDITS_NOT_CARRIED = (
-    "The model was refitted in place and the grid of {terms} changed, so the edits and "
+    "The model was refitted in place and {why}, so the edits and "
     "selection made on the earlier fit could not be moved onto the new curves. The editor has "
     "started again from the refitted model. Undo cannot bring them back: the model no longer "
     "holds the fit they were made on."
@@ -546,6 +546,9 @@ class EditorSession:
             return FitFollow.IN_STEP
         self._acting = True
         try:
+            # A follow adopts only a fit that opening would: the refit may read censored rows.
+            if isinstance(self.model, LSSModelView):
+                refuse_unopenable_fit(self.model.lss)
             self._renew_copies(rebuilt)
             followed = self._follow_training_rows()
             outcome = self._carry_onto_the_fit_in_force()
@@ -580,7 +583,15 @@ class EditorSession:
         )
         moves = {name: _moved_curve(stale[name], fresh[name]) for name in stale}
         moved = {name: move for name, move in moves.items() if move is not None}
-        if len(moved) < len(moves):
+        history = [_moved_record(record, moved) for record in self.history]
+        redo_stack = [_moved_record(record, moved) for record in self.redo_stack]
+        taken_back = [
+            name
+            for name, (term, _) in moved.items()
+            if holds_rules(self.model, name)
+            and not self._carry_inside_rules(term, history, redo_stack)
+        ]
+        if len(moved) < len(moves) or taken_back:
             dropped = bool(
                 self.history
                 or self.redo_stack
@@ -591,15 +602,54 @@ class EditorSession:
             self.replace_in_force_model(self.model, with_se=self.with_se)
             if dropped:
                 regridded = ", ".join(name for name, move in moves.items() if move is None)
-                self._notice = _EDITS_NOT_CARRIED.format(terms=regridded)
+                reasons = [f"the grid of {regridded} changed"] if regridded else []
+                if taken_back:
+                    reasons.append(f"the rules of {', '.join(taken_back)} take back an edit")
+                why = " and ".join(reasons)
+                self._notice = _EDITS_NOT_CARRIED.format(why=why)
                 warnings.warn(self._notice, EditorFitReplacedWarning, stacklevel=4)
             return FitFollow.RESTARTED
         self._terms_fit = self._fit_identity(self.model)
         self._terms = {name: term for name, (term, _) in moved.items()}
-        self.history = [_moved_record(record, moved) for record in self.history]
-        self.redo_stack = [_moved_record(record, moved) for record in self.redo_stack]
+        self.history = history
+        self.redo_stack = redo_stack
         self._advance_model_revision()
         return FitFollow.CARRIED
+
+    def _carry_inside_rules(
+        self, term: EditableTerm, history: list[EditRecord], redo_stack: list[EditRecord]
+    ) -> bool:
+        """Keep the ruled ``term``'s carried edits inside its rules, as each was kept when made.
+
+        Its records, history then redo, are replayed in order from its new fitted curve, each
+        through ``kept_inside_rules`` and recorded whole, in place in ``history`` and
+        ``redo_stack``; the curve the history ends on is the one shown. False when the rules
+        take a carried edit back entirely: then nothing can be carried.
+        """
+        current = term.original_log_effect.copy()
+        shown = current
+        order = [(history, i) for i in range(len(history))]
+        order += [(redo_stack, i) for i in reversed(range(len(redo_stack)))]
+        for records, i in order:
+            record = records[i]
+            if not isinstance(record, EditRecord) or record.term != term.name:
+                continue
+            asked = current.copy()
+            asked[record.indices] = record.after
+            probe = term.copy()
+            probe.edited_log_effect = current
+            kept = kept_inside_rules(self.model, probe, asked)
+            if kept is None:
+                kept = asked
+            elif not np.array_equal(asked, current) and leaves_curve(kept, current, asked):
+                return False
+            whole = np.arange(term.size, dtype=np.intp)
+            records[i] = replace(record, indices=whole, before=current.copy(), after=kept)
+            current = kept
+            if records is history:
+                shown = current
+        term.edited_log_effect = shown.copy()
+        return True
 
     @staticmethod
     def _editable_terms_from_model(
@@ -1861,6 +1911,7 @@ class EditorSession:
             pending=tuple(self.pending),
             pending_redo=tuple(self.pending_redo),
             fit=self._terms_fit,
+            train=self._evaluation_data.get("train"),
         )
 
     def _step_across(self, source: list[StructuralStep], target: list[StructuralStep]) -> None:
@@ -1876,6 +1927,11 @@ class EditorSession:
         self.redo_stack = step.state.redo_stack
         self.pending = list(step.state.pending)
         self.pending_redo = list(step.state.pending_redo)
+        train = step.state.train
+        if train is not None and train is not self._evaluation_data.get("train"):
+            # The rows this side of the step was on; Run CV's rows are checked against them.
+            self._evaluation_data["train"] = train
+            self.cv_check = check_cv_data(self.cv, self._cv_data, training_export_dataset(self))
         self._advance_model_revision()
 
     def replace_in_force_model(
