@@ -151,6 +151,22 @@ def kept_rows(lss: SuperLSS, train: Any) -> Any:
     return as_eager_frame(train.X).take_rows(np.asarray(positions, dtype=np.intp))
 
 
+def rows_describe_fit(lss: SuperLSS, train: Any) -> bool:
+    """Whether ``train`` holds the rows ``lss`` is fitted on now: as many as the fit was given
+    or kept, as opening checks, and where the fit kept its rows, the same responses. A refit
+    in place on other rows leaves ``train`` describing an earlier fit."""
+    state = lss._require_fitted().fit_state
+    provenance = state.weight_provenance
+    if train.n_obs not in (provenance.original_count, provenance.retained_count):
+        return False
+    if state.retained_rows is None:
+        return True
+    given = np.asarray(train.y, dtype=np.float64).reshape(-1)
+    if train.n_obs != provenance.retained_count:
+        given = given[state.retained_rows.likelihood_weights.input_positions]
+    return bool(np.array_equal(given, state.retained_rows.response))
+
+
 @dataclass
 class _FitReading:
     """What an ``LSSModelView`` read from one fit of its model: the compiled terms, keyed by
@@ -221,10 +237,16 @@ class LSSModelView:
                 for term, declared in predictor.features.items()
             )
         )
-        self._read = self._reading_of(fitted)
+        self._read = self._reading_of(fitted, opening=True)
 
-    def _reading_of(self, fitted: Any) -> _FitReading:
-        rows = self._given_rows if self._train is None else kept_rows(self.lss, self._train)
+    def _reading_of(self, fitted: Any, *, opening: bool = False) -> _FitReading:
+        if self._train is None:
+            rows = self._given_rows
+        elif opening or rows_describe_fit(self.lss, self._train):
+            rows = kept_rows(self.lss, self._train)
+        else:
+            # Refitted in place on other rows: the refit's own (``follow_training_rows``).
+            rows = self.lss._term_training_frame(None)
         return _FitReading.of(self.lss, fitted, rows)
 
     @property

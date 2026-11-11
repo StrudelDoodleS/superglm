@@ -1173,6 +1173,74 @@ def test_a_session_follows_a_refit_in_place_that_kept_other_rows():
     np.testing.assert_allclose(followed.original_log_effect, wanted.original_log_effect, atol=1e-12)
 
 
+def _gamma_on(n: int, seed: int):
+    rng = np.random.default_rng(seed)
+    x = np.linspace(0.0, 1.0, n)
+    return pd.DataFrame({"x": x}), rng.gamma(4.0, np.exp(0.3 * x) / 4.0)
+
+
+@pytest.mark.parametrize("n_refit", [150, 60])
+def test_a_session_takes_the_rows_of_a_refit_in_place_on_other_data(n_refit):
+    # Sol's case. At 9f0916e6e the follow applied the refit's kept positions to the session's
+    # 100-row frame: IndexError on 150 rows, and on 60 rows the first 60 of the old rows.
+    from superglm.editor.cv import final_fit_reason
+    from superglm.editor.lss.availability import TRAINING_ROWS_FOLLOWED, session_refit_reason
+    from superglm.editor.payloads import session_payload
+    from superglm.editor.session import EditorFitReplacedWarning
+    from superglm.editor.widget import EditorWidget
+
+    family = GammaLS()
+    model = SuperLSS(family, family.mean(s("x", kind="bs", k=6)), family.scale())
+    lambdas = {"mean:x#wiggle": 1.0}
+    X, y = _gamma_on(100, 0)
+    X2, y2 = _gamma_on(n_refit, 1)
+    weights = np.linspace(1.0, 2.0, n_refit)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y, lambdas=lambdas)
+        session = edit(model, train_data=(X, y))
+        widget = EditorWidget(session, mode="server")
+        model.fit(X2, y2, sample_weight=weights, lambdas=lambdas)
+    with pytest.warns(EditorFitReplacedWarning, match="refitted in place on other rows"):
+        session_payload(session)
+    assert TRAINING_ROWS_FOLLOWED.format(n=n_refit) in widget._state()["notice"]
+    train = session._evaluation_data["train"]
+    np.testing.assert_array_equal(np.asarray(train.y), y2)
+    np.testing.assert_array_equal(train.sample_weight, weights)
+    assert session_refit_reason(session) is None and final_fit_reason(session) is None
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fresh = edit(model, train_data=(X2, y2, weights))
+        for opened in (session, fresh):
+            opened.select_x("mean:x", 0.2, 0.4)
+            opened.shift("mean:x", 0.1)
+        followed, wanted = session.terms["mean:x"], fresh.terms["mean:x"]
+        np.testing.assert_array_equal(followed.x, wanted.x)
+        np.testing.assert_allclose(followed.edited_log_effect, wanted.edited_log_effect, atol=1e-12)
+        np.testing.assert_allclose(
+            session.to_model().predict(X2), fresh.to_model().predict(X2), rtol=1e-12
+        )
+        assert widget._state()["notice"] is None  # said once
+
+
+def test_a_refit_in_place_that_kept_no_rows_says_the_editor_needs_its_rows():
+    from superglm.editor.errors import EditorValueError
+    from superglm.editor.lss.availability import TRAINING_ROWS_LOST
+    from superglm.editor.payloads import session_payload
+
+    family = GammaLS()
+    model = SuperLSS(family, family.mean(s("x", kind="bs", k=6)), family.scale())
+    X, y = _gamma_on(100, 0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y, lambdas={"mean:x#wiggle": 1.0})
+        session = edit(model, train_data=(X, y))
+        model.fit(*_gamma_on(150, 1), lambdas={"mean:x#wiggle": 1.0}, retain_rows=False)
+        with pytest.raises(EditorValueError) as refused:
+            session_payload(session)
+    assert str(refused.value) == TRAINING_ROWS_LOST
+
+
 def test_the_diagnose_rows_follow_an_in_place_repair_made_after_the_report_was_opened():
     # The rows are kept per fit. At f6346704d they were kept per model view, which a repair
     # keeps, so row 303 still read predicted 8.511 and cost 8.674 against 9.381 and 7.590.

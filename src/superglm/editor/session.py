@@ -67,7 +67,11 @@ from superglm.editor.lss.apply import (
     moves_only_empty_values,
     prepare_ruled_edit,
 )
-from superglm.editor.lss.availability import require_available
+from superglm.editor.lss.availability import (
+    TRAINING_ROWS_FOLLOWED,
+    follow_training_rows,
+    require_available,
+)
 from superglm.editor.lss.open import open_lss
 from superglm.editor.lss.refit import lss_refit_with_drafts
 from superglm.editor.lss.rules import holds_rules
@@ -202,7 +206,8 @@ def _moved_curve(stale: EditableTerm, fresh: EditableTerm) -> tuple[EditableTerm
     moved = stale.copy()
     moved.original_log_effect = original
     moved.edited_log_effect = original + (stale.edited_log_effect - stale.original_log_effect)
-    for band in ("ci_lower_log_effect", "ci_upper_log_effect"):
+    # the exposure, as the bands, is the new fit's rows'
+    for band in ("weights", "ci_lower_log_effect", "ci_upper_log_effect"):
         values = getattr(fresh, band)
         setattr(moved, band, None if values is None else np.asarray(values)[order])
     moved.metadata = dict(fresh.metadata)
@@ -234,7 +239,9 @@ class FitFollow(Enum):
 
 
 # The parts of a session each outcome changes. A restart also leaves a notice, which the
-# warning and the page's next state carry, when it dropped edits or a selection.
+# warning and the page's next state carry, when it dropped edits or a selection. Either move
+# also takes the refit's own rows as the training split, and says so, when the model was
+# refitted on other rows than it (``_follow_training_rows``).
 FIT_FOLLOW_CHANGES: dict[FitFollow, frozenset[str]] = {
     FitFollow.IN_STEP: frozenset(),
     FitFollow.CARRIED: frozenset({"terms", "history", "redo_stack", "model_revision"}),
@@ -536,9 +543,27 @@ class EditorSession:
         self._acting = True
         try:
             self._renew_copies(rebuilt)
-            return self._carry_onto_the_fit_in_force()
+            followed = self._follow_training_rows()
+            outcome = self._carry_onto_the_fit_in_force()
+            if followed is not None:
+                self._notice = " ".join(filter(None, (self._notice, followed)))
+            return outcome
         finally:
             self._acting = False
+
+    def _follow_training_rows(self) -> str | None:
+        """Take the refit's own rows as the training split when the model was refitted in place
+        on other rows than it (``follow_training_rows``), and say so; ``None`` otherwise."""
+        train = self._evaluation_data.get("train")
+        if not isinstance(self.model, LSSModelView) or train is None:
+            return None
+        followed = follow_training_rows(self.model.lss, train)
+        if followed is None:
+            return None
+        self._evaluation_data["train"] = followed
+        notice = TRAINING_ROWS_FOLLOWED.format(n=followed.n_obs)
+        warnings.warn(notice, EditorFitReplacedWarning, stacklevel=5)
+        return notice
 
     def _carry_onto_the_fit_in_force(self) -> FitFollow:
         stale = self._terms

@@ -19,7 +19,8 @@ import numpy as np
 from superglm.distributional.offsets import sources_of
 from superglm.distributional.weights import LikelihoodWeightError, resolve_likelihood_weights
 from superglm.editor.errors import EditorValueError
-from superglm.editor.lss.view import LSSModelView, is_lss
+from superglm.editor.evaluation import EvaluationDataset, coerce_dataset
+from superglm.editor.lss.view import LSSModelView, is_lss, rows_describe_fit
 
 LSS_UNAVAILABLE: Mapping[str, str] = MappingProxyType(
     {
@@ -137,6 +138,56 @@ def refit_reason(model: Any, sample_weight: Any, offsets: Any, y: Any = None) ->
     if y is not None and _weights_differ(state, sample_weight, np.asarray(y).size):
         return WEIGHTS_DIFFER
     return None
+
+
+TRAINING_ROWS_FOLLOWED = (
+    "The model was refitted in place on other rows than the editor's training data, which "
+    "describe an earlier fit. The editor now takes the {n} rows the refit kept as its "
+    "training data: its curves, training scores, Refit and Final fit read them."
+)
+TRAINING_ROWS_LOST = (
+    "The model was refitted in place on other rows than the editor's training data, and the "
+    "refit kept none of its rows (retain_rows=False), so the editor has no training rows for "
+    "it. Open the editor again with train_data=(X, y, sample_weight, offsets), the refit's rows."
+)
+
+
+def follow_training_rows(lss: Any, train: EvaluationDataset) -> EvaluationDataset | None:
+    """The training split for a fit refitted in place on other rows than ``train``: the rows
+    the refit kept, with its responses, weights and offsets. ``None`` while ``train`` still
+    describes the fit (``rows_describe_fit``).
+
+    Raises ``EditorValueError`` when the refit kept no rows, which nothing else gives back.
+    """
+    if rows_describe_fit(lss, train):
+        return None
+    state = lss._require_fitted().fit_state
+    rows = state.retained_rows
+    if rows is None:
+        raise EditorValueError(TRAINING_ROWS_LOST)
+    # The offsets a column carries are read from the frame, as the fit read them.
+    offsets = {
+        p.name: np.asarray(rows.offsets[p.name])
+        for p in state.predictor_templates
+        if p.name in rows.offsets
+        and state.null_model.offset_semantics.get(p.name) != "zero_offset"
+        and not (sources_of(p) and all(isinstance(s, str) for s in sources_of(p)))
+    }
+    weights = rows.likelihood_weights
+    followed = coerce_dataset(
+        "train",
+        (
+            lss._term_training_frame(None),
+            np.asarray(rows.response),
+            None if weights.provenance.all_unit else np.asarray(weights.values),
+            offsets or None,
+        ),
+        family=lss.family,
+        weight_semantics=lss.weight_semantics,
+        offset_parameters=lss.parameter_names_,
+    )
+    assert followed is not None
+    return followed
 
 
 def session_refit_reason(session: Any) -> str | None:
