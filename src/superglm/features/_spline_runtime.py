@@ -175,8 +175,8 @@ def fit_support(x: NDArray, n_bins: int | None = None, knots: NDArray | None = N
     """The sorted distinct values a fit evaluates the basis at, from positive-weight rows.
 
     An exact fit sees the distinct values themselves; a discretised one sees
-    the centres of the occupied bins of ``discretize_column`` on the spline's
-    ``knots``, the placement its design is built on.
+    the support points of the occupied bins of ``discretize_column`` on the
+    spline's ``knots``, the placement its design is built on.
     """
     if n_bins is None:
         return np.unique(x)

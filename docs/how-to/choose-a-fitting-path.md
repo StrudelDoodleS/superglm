@@ -66,13 +66,16 @@ This is the preferred production path for large spline-heavy frequency models.
 `RandomEffect` and `FactorSmooth` retain their exact factor levels on this
 path; only the continuous spline support is binned.
 
-A column with more distinct values than `n_bins` is cut into equal-width bins
-between its smallest and largest value, and the fit sees each row at the centre
-of its bin. When equal-width bins would be wider than the pieces of the curve
-between the spline's knots, as with a skewed column and quantile knots, the
-bins follow the knots instead: every piece that holds rows gets bins of its
-own, within the same `n_bins`. Otherwise the fit would never see the curve
-inside those pieces, and `predict` would read it at values the fit did not
+A column with more distinct values than `n_bins` is binned. When equal-width
+bins between its smallest and largest value already follow the pieces of the
+curve between the spline's knots, and no bin holds more than eight times its
+share of the rows, the fit sees each row at the centre of its bin. Otherwise,
+as with a skewed column or a pile of equal values, the bins follow the knots
+and the data instead, within the same `n_bins`: half of them divide the pieces
+of the curve that hold rows, the other half cut the rows into groups of equal
+size, and each bin is represented by the average of its rows, so a pile of
+equal values is seen at its own value. Without that, the fit would read many
+rows at one value, and `predict` would read the curve at values the fit did not
 check. A column with at most `n_bins` distinct values is used exactly.
 
 An exact fit (`discrete=False`, the default) that will be slow says so

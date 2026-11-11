@@ -399,7 +399,7 @@ the shape and its edges.
 - A Line needs at least two distinct values in the range, a Quadratic three and a Cubic four. On
   an ordered term each band is one value, and so is a collapsed group inside the range. When the
   selection holds too few, the icon is disabled and says so on hover.
-- A binned fit (`discrete=True`) sees only the centres of its occupied bins, so those are the
+- A binned fit (`discrete=True`) sees only one value for each occupied bin, so those are the
   values it counts. Values that share a bin count once, so four distinct values may not be enough
   for a Cubic.
 - The curve outside the ranges needs values too. If a range would leave too few between it and

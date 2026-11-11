@@ -235,10 +235,11 @@ Spline(kind="bs", k=12, polynomial_ranges=[
   shapes joined any more smoothly would be forced into one.
 - Each range needs at least `degree + 1` distinct values of the feature inside
   it.
-- A binned fit (`discrete=True`) sees only the centres of its bins, so a
-  range counts those, not the raw values. The bins follow the knots when
-  equal-width bins would be wider than the pieces of the curve, and a range's
-  edges are knots, so a range with rows in it gets bins of its own.
+- A binned fit (`discrete=True`) sees one value for each bin, so a range
+  counts those, not the raw values. The bins are equal-width when those
+  already follow the pieces of the curve and none is crowded; otherwise they
+  follow the knots and the data, each represented by the average of its rows.
+  A range's edges are knots, so a range with rows in it gets bins of its own.
 - The stretches outside the ranges need data too. A fit that would leave one
   of them undetermined is refused by name.
 - The penalty leaves the pinned ranges alone, so a pinned quadratic is not
