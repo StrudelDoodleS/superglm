@@ -1417,16 +1417,19 @@ def test_one_qp_curvature_repair_takes_few_iterations(monkeypatch):
     assert count["iterations"] <= ONE_QP_ITERATIONS, count
 
 
-#: Active-set iterations of the grid repair below. Grid weights 5e-10 of the rest
-#: across the gap give cond(H) = 1e13, and the exchange's curvature then took the
-#: step's Hessian past the rank cut, where every start ran its budget: 6,557
-#: iterations over 20 solves at 756d983c1. Held below that cut, it takes about 400.
-GAPPED_GRID_ITERATIONS = 1500
+#: Active-set iterations of a grid repair at near-zero weights, below. Most spans of
+#: these projections come out flat, and a flat span's lowest point was its rounding:
+#: cuts there made the QPs degenerate, and its curvature took each exchange step past
+#: the rank cut. At ee78e8bb1 the four took 249, 13,977, 2,974 and 468 iterations, the
+#: second ending uncertified; with no minimum on a flat span, 102 to 134.
+NEAR_ZERO_GRID_ITERATIONS = 200
+#: The same at 200 knots, where the grid metric's smallest eigenvalue falls under the
+#: rank cut: 8,697 iterations at ee78e8bb1, 3,030 unfloored, about 700 floored.
+FLOORED_GRID_ITERATIONS = 1500
 
 
-@pytest.mark.slow
-def test_grid_repair_with_near_zero_weights_on_a_large_basis_is_the_closest_curve(monkeypatch):
-    """A 120-knot P-spline on data with a gap, projected on the grid at its raw frequencies."""
+def _near_zero_weight_repair(data, direction, knots, monkeypatch):
+    """A ``ps`` repair on the grid at raw frequencies plus 1e-12: the grid metric and its count."""
     import warnings
 
     from superglm import Spline
@@ -1434,12 +1437,16 @@ def test_grid_repair_with_near_zero_weights_on_a_large_basis_is_the_closest_curv
     from tests._shape_projection_oracle import grid_metric, projection_certificate
 
     rng = np.random.default_rng(0)
-    u = rng.uniform(0.0, 0.6, 3000)
-    x = np.where(u < 0.3, u, u + 0.4)
-    y = 0.9 * x + 0.25 * np.sin(12 * x) + 0.3 * rng.normal(size=x.size)
-    X = pd.DataFrame({"x": x})
-    feature = Spline(kind="ps", n_knots=120, constraint=Constraint.postfit.increasing)
-    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": feature}).fit(X, y)
+    if data == "gapped":
+        u = rng.uniform(0.0, 0.6, 3000)
+        x = np.where(u < 0.3, u, u + 0.4)
+    else:
+        x = rng.beta(0.4, 3.0, 3000)
+    t = x if direction == "increasing" else 1.0 - x
+    y = 0.9 * t + 0.25 * np.sin(12 * t) + 0.3 * rng.normal(size=x.size)
+    feature = Spline(kind="ps", n_knots=knots, constraint=getattr(Constraint.postfit, direction))
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": feature})
+    model.fit(pd.DataFrame({"x": x}), y)
     spec, groups = model._specs["x"], _x_groups(model)
     counts = np.histogram(x, bins=500)[0]
     weights = counts / counts.sum() + 1e-12
@@ -1447,17 +1454,43 @@ def test_grid_repair_with_near_zero_weights_on_a_large_basis_is_the_closest_curv
 
     with warnings.catch_warnings():
         warnings.simplefilter("error", RuntimeWarning)
-        repair = MonotoneRepairer("increasing").repair(
+        repair = MonotoneRepairer(direction).repair(
             spec, model.result.beta, groups, weights=weights
         )
 
     H, g = grid_metric(spec, repair.grid, repair.original_log_effect, weights)
     repaired = _term_beta(repair.repaired_beta_reparam, groups)
     fitted = _term_beta(model.result.beta, groups)
-    certificate = projection_certificate(spec, "increasing", repaired, H, g, fitted)
+    return H, projection_certificate(spec, direction, repaired, H, g, fitted), count
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("direction", ["increasing", "decreasing"])
+@pytest.mark.parametrize("data", ["gapped", "skewed"])
+def test_grid_repair_with_near_zero_weights_on_a_large_basis_is_the_closest_curve(
+    data, direction, monkeypatch
+):
+    """120-knot P-splines on data with a gap or a long tail, at the grid's raw frequencies."""
+    _, certificate, count = _near_zero_weight_repair(data, direction, 120, monkeypatch)
     assert certificate.minimum_derivative >= -1e-10
     assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
-    assert count["iterations"] <= GAPPED_GRID_ITERATIONS, count
+    assert count["iterations"] <= NEAR_ZERO_GRID_ITERATIONS, count
+
+
+@pytest.mark.slow
+def test_grid_repair_on_a_metric_the_qp_would_truncate_is_the_closest_curve(monkeypatch):
+    """A 200-knot P-spline whose grid metric loses a direction to the rank cut, floored."""
+    from superglm.constraints import _jacobi_scale
+    from superglm.solvers.rank import _symmetric_part, decompose_gram
+
+    H, certificate, count = _near_zero_weight_repair("skewed", "increasing", 200, monkeypatch)
+    scale = _jacobi_scale(H)
+    decomposition = decompose_gram(_symmetric_part(H * scale[:, None] * scale[None, :]))
+    assert decomposition.rank < decomposition.width
+    # Measured in the caller's unfloored metric.
+    assert certificate.minimum_derivative >= -1e-10
+    assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
+    assert count["iterations"] <= FLOORED_GRID_ITERATIONS, count
 
 
 # The flat Poisson fixture of the review sweep. Its grid weights fall to 1e-5 of
@@ -3273,9 +3306,9 @@ def test_post_fit_projection_is_equivariant_to_the_response_units(monkeypatch, k
     real_projection = constraints._cone_projection
     problems = []
 
-    def spy(spec, H, g, shape_kind, label, inside=None):
+    def spy(spec, H, g, shape_kind, label, inside=None, **options):
         problems.append((H.copy(), g.copy(), inside.copy()))
-        return real_projection(spec, H, g, shape_kind, label, inside=inside)
+        return real_projection(spec, H, g, shape_kind, label, inside=inside, **options)
 
     monkeypatch.setattr(constraints, "_cone_projection", spy)
 

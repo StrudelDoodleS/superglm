@@ -440,7 +440,8 @@ def _repair_shape(
             log_rels,
             w_grid,
             shape,
-            **({} if metric is None else {"metric": (metric, beta_combined)}),
+            metric=None if metric is None else (metric, beta_combined),
+            fitted=beta_combined,
         )
     )
     beta_out = beta_reparam.copy()
@@ -595,13 +596,25 @@ def _tau_powers(tau: float, p: int, nu: int = 0) -> NDArray:
     return falling * tau ** np.maximum(k - nu, 0)
 
 
-def _piece_minimum(piece: _ShapePiece, p: int, beta: NDArray) -> tuple[float, NDArray] | None:
-    """The piece's lowest interior local minimum: its ``tau`` and the row of its value."""
+def _piece_minimum(
+    piece: _ShapePiece, p: int, beta: NDArray, skip_flat: bool = False
+) -> tuple[float, NDArray] | None:
+    """The piece's lowest interior local minimum: its ``tau`` and the row of its value.
+
+    ``skip_flat``: a piece whose every coefficient is within the certificate's
+    allowance of its own dot product's magnitude is flat. Its derivative cannot be
+    told from zero, so every point of the span touches and none is a minimum: it has
+    none (the exchange comment says where this applies).
+    """
     if p < 2:
         return None
     from numpy.polynomial import polynomial
 
     coefficients = piece.rows @ beta
+    if skip_flat:
+        allowance = float(gamma(_SLACK_STEPS * beta.size)) * (np.abs(piece.rows) @ np.abs(beta))
+        if np.all(np.abs(coefficients) <= allowance):
+            return None
     if p == 2:
         # The vertex, in the float64 operations the general path below performs on a
         # quadratic: its slope's one root, a minimum where the slope rises.
@@ -746,9 +759,9 @@ def _cut_rows(
 
 
 def _lowest_minima(
-    pieces: list[_ShapePiece], p: int, beta: NDArray
+    pieces: list[_ShapePiece], p: int, beta: NDArray, skip_flat: bool = False
 ) -> list[tuple[float, NDArray] | None]:
-    return [_piece_minimum(piece, p, beta) for piece in pieces]
+    return [_piece_minimum(piece, p, beta, skip_flat) for piece in pieces]
 
 
 def _minima_feasible(minima: list[tuple[float, NDArray] | None], beta: NDArray) -> bool:
@@ -793,6 +806,72 @@ def _null_space_ridge(H: NDArray, rank: int) -> NDArray:
     values, vectors = np.linalg.eigh(H)
     null = vectors[:, : H.shape[0] - rank]
     return H + (_NULL_RIDGE * float(values[-1])) * (null @ null.T)
+
+
+# Grid weights that fall to rounding beside the rest, as raw frequencies with empty
+# bins give, can leave B'WB with a smallest eigenvalue inside the rounding of its
+# own formation: a direction float64 does not resolve in the metric. On a grid with
+# at least as many points as coefficients that is numerical, not the grid's, and
+# two things follow there. Flat spans lose their minima (_cone_projection). And
+# where the shared rank authority would truncate the metric, which sends each QP
+# down its least-squares path, the truncated eigenvalues are raised to
+# _NULL_RIDGE ||H|| by a Tikhonov term centred on the fitted coefficients, so along
+# those directions alone the projection moves least from the fit. That is the
+# proximal regularisation qpOASES applies to a semidefinite Hessian (Ferreau et al.,
+# Math. Prog. Comp. 6, 2014, section 3.11), centred on the fit. A grid coarser than
+# the basis has a structural null space, which _null_space_ridge picks from as before.
+#: Bits to which the grid metric must give its smallest eigenvalue to count as
+#: resolved; below them the projection's coefficients along it have no more.
+_METRIC_BITS = 4
+
+
+def _unresolved_grid_metric(basis: NDArray, weights: NDArray, H: NDArray) -> bool:
+    """Whether ``H = basis' diag(weights) basis`` resolves its smallest eigenvalue to < 4 bits.
+
+    Each computed entry is within ``gamma_(n+2) (|B|'W|B|)_ij`` of its exact value
+    (Higham 2002, section 3.1), so each eigenvalue within ``gamma_(n+2)`` times the
+    2-norm of ``|B|'W|B|`` (Weyl), which its infinity norm bounds. Read in the
+    Jacobi-scaled coordinates the QP solves in, by one Cholesky factorization of
+    ``H`` less ``2**_METRIC_BITS`` times that bound, which fails where it is below.
+    """
+    from superglm.solvers.rank import _symmetric_part
+
+    scale = _jacobi_scale(H)
+    scaled_abs = np.abs(basis) * scale[None, :]
+    bound = float(gamma(basis.shape[0] + 2)) * float(
+        np.max(scaled_abs.T @ (weights * np.sum(scaled_abs, axis=1)))
+    )
+    scaled = _symmetric_part(H * scale[:, None] * scale[None, :])
+    try:
+        np.linalg.cholesky(scaled - (2.0**_METRIC_BITS * bound) * np.eye(H.shape[0]))
+    except np.linalg.LinAlgError:
+        return True
+    return False
+
+
+def _resolved_grid_metric(H: NDArray, g: NDArray, fitted: NDArray) -> tuple[NDArray, NDArray]:
+    """``H`` and ``g`` floored where the QP would truncate ``H``; otherwise themselves.
+
+    The decision is the QP's own: the shared rank authority on ``H`` in the
+    Jacobi-scaled coordinates ``_solve_cone_qp`` solves in. ``fitted`` is the floor's
+    centre, in the coefficients of ``g``.
+    """
+    from superglm.solvers.rank import _symmetric_part, decompose_gram
+
+    scale = _jacobi_scale(H)
+    scaled = _symmetric_part(H * scale[:, None] * scale[None, :])
+    try:
+        decomposition = decompose_gram(scaled)
+    except ValueError:
+        return H, g
+    deficit = decomposition.width - decomposition.rank
+    if deficit == 0:
+        return H, g
+    values, vectors = np.linalg.eigh(scaled)
+    lift = np.zeros_like(values)
+    lift[:deficit] = np.maximum(_NULL_RIDGE * values[-1] - values[:deficit], 0.0)
+    floor = _symmetric_part(((vectors * lift) @ vectors.T) / scale[:, None] / scale[None, :])
+    return H + floor, g + floor @ fitted
 
 
 class _ScaledResult:
@@ -986,6 +1065,7 @@ def _bracketed_projection(
     natural: bool,
     point: NDArray,
     inside: NDArray | None,
+    skip_flat: bool = False,
 ) -> tuple[NDArray | None, float]:
     """Exchange between the Bernstein inner cone and the cutting-plane outer cone.
 
@@ -1040,7 +1120,7 @@ def _bracketed_projection(
                 (outer.beta, True),
                 *([] if inner is None else [(inner.beta, False)]),
             ):
-                minimum = _piece_minimum(piece, p, beta)
+                minimum = _piece_minimum(piece, p, beta, skip_flat)
                 if (
                     minimum is not None
                     and (minimum[1] @ beta < 0.0 or not violated_only)
@@ -1068,6 +1148,18 @@ def _bracketed_projection(
 # between the Bernstein inner cone and the cutting-plane outer cone
 # (_bracketed_projection), shape-feasible by construction and disclosed if the
 # bracket does not close.
+#
+# Local reduction assumes each active point is an isolated, nondegenerate minimum of
+# its span (the reduction ansatz; Seidel & Küfer 2019, section 2.1). A span the
+# projection holds flat breaks it: every point touches zero, its "minimum" is
+# rounding, and a cut there repeats the span's end rows while its curvature, over a
+# bend of rounding size, is unbounded. With skip_flat such a span has no minimum and
+# keeps its end rows and the cuts it holds; should it dip, its minimum is a point
+# again. That is Blankenship and Falk's exchange, whose limit is feasible without the
+# ansatz (Seidel & Küfer, Lemma 3.2).
+# The grid metric sets it where float64 does not resolve the metric (see
+# _unresolved_grid_metric): there the degenerate rows make each QP stall, and the
+# curvature takes every step past the rank cut.
 def _cone_projection(
     spec: _SplineBase,
     H: NDArray,
@@ -1075,12 +1167,14 @@ def _cone_projection(
     kind: str,
     label: str,
     inside: NDArray | None = None,
+    skip_flat: bool = False,
 ) -> NDArray:
     """Minimise ``0.5 b'Hb - g'b`` over coefficients whose curve has ``kind`` everywhere.
 
     Exact on spans whose derivative is at most linear; elsewhere a local-reduction SQP
     places the cuts. The comment above gives the method and its sources. ``inside`` is
-    a ray strictly inside the cone, from which each solve's start is found.
+    a ray strictly inside the cone, from which each solve's start is found;
+    ``skip_flat`` gives a flat span no minimum.
     """
     # The unconstrained optimum is the fitted curve itself; the rows it breaks are
     # the first working set, and the first cuts sit where it breaks the rule.
@@ -1104,7 +1198,7 @@ def _cone_projection(
     held: set = set(_broken_rows(end_rows, beta))
     checkpoints = [
         [] if minimum is None or minimum[1] @ beta >= 0.0 else [minimum[0]]
-        for minimum in _lowest_minima(pieces, p, beta)
+        for minimum in _lowest_minima(pieces, p, beta, skip_flat)
     ]
     curvature = np.zeros_like(H)
     # Whether the QP truncates H itself, read off the first step, whose curvature is 0.
@@ -1137,7 +1231,7 @@ def _cone_projection(
         }
         corrected = curvature.any()
         previous, beta = beta, np.asarray(result.beta, dtype=np.float64)
-        minima = _lowest_minima(pieces, p, beta)
+        minima = _lowest_minima(pieces, p, beta, skip_flat)
         if _minima_feasible(minima, beta):
             if not corrected:
                 return beta
@@ -1156,7 +1250,7 @@ def _cone_projection(
                 _shifted_start(certified_rows, beta, inside),
             )
             if certified is not None and _minima_feasible(
-                _lowest_minima(pieces, p, certified.beta), certified.beta
+                _lowest_minima(pieces, p, certified.beta, skip_flat), certified.beta
             ):
                 return np.asarray(certified.beta, dtype=np.float64)
 
@@ -1210,7 +1304,9 @@ def _cone_projection(
                         kept[index] = [tau]
         checkpoints = kept
 
-    best, gap = _bracketed_projection(H, g, pieces, p, end_rows, checkpoints, natural, beta, inside)
+    best, gap = _bracketed_projection(
+        H, g, pieces, p, end_rows, checkpoints, natural, beta, inside, skip_flat
+    )
     if best is None:
         raise RuntimeError(f"{label} projection failed to converge")
     if gap > _OBJECTIVE_GAP:
@@ -1231,6 +1327,7 @@ def _project_shape_in_fitted_basis(
     weights: NDArray,
     kind: str,
     metric: tuple[NDArray, NDArray] | None = None,
+    fitted: NDArray | None = None,
 ) -> tuple[NDArray, NDArray, float, ShapeConstraintCertificate]:
     """Project a curve onto a shape cone in fitted coefficient coordinates.
 
@@ -1239,7 +1336,8 @@ def _project_shape_in_fitted_basis(
     measure and avoids the lossy raw-basis -> fitted-basis round trip.  Zero coefficients
     are a feasible point and provide an objective certificate for the returned solution.
     ``metric``, a pair ``(H, fitted)``, projects ``fitted`` in ``H`` instead of the
-    curve on the grid; ``H`` is the term's penalized Hessian (``shape_ops``). Returns the
+    curve on the grid; ``H`` is the term's penalized Hessian (``shape_ops``). ``fitted``
+    alone centres the grid metric's floor (``_resolved_grid_metric``). Returns the
     coefficients, the repaired curve, its largest change and the coefficients' certificate.
     """
     label = "Curvature" if kind in {"convex", "concave"} else "Monotone"
@@ -1273,9 +1371,17 @@ def _project_shape_in_fitted_basis(
         zero_loss = float(np.dot(w, target * target))
         H_scaled = H / total_weight
         g_scaled = g / (total_weight * curve_scale)
+        unresolved = (
+            fitted is not None
+            and fitted_basis.shape[0] >= fitted_basis.shape[1]
+            and _unresolved_grid_metric(fitted_basis, w / total_weight, H_scaled)
+        )
+        if unresolved:
+            H_scaled, g_scaled = _resolved_grid_metric(H_scaled, g_scaled, fitted / curve_scale)
     else:
         # The fitted coefficients' distance in the penalized Hessian: the second-order
         # model of the penalized objective the publication rule judges.
+        unresolved = False
         H = np.asarray(metric[0], dtype=np.float64)
         fitted = np.asarray(metric[1], dtype=np.float64)
         # The quadratic forms are taken on the coefficients in units of a power of two near
@@ -1294,7 +1400,7 @@ def _project_shape_in_fitted_basis(
 
     inside = _inside_ray(fitted_basis, np.asarray(x_grid, dtype=np.float64), w / total_weight, kind)
     beta_projected = curve_scale * _cone_projection(
-        spec, H_scaled, g_scaled, kind, label, inside=inside
+        spec, H_scaled, g_scaled, kind, label, inside=inside, skip_flat=unresolved
     )
 
     repaired_curve = fitted_basis @ beta_projected
