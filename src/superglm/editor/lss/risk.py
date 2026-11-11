@@ -67,7 +67,7 @@ def _scan(view: LSSModelView, column: str) -> tuple:
         frame = as_eager_frame(view.X_train)
         values = frame.column_array(column)
         if _takes_numbers(view, frame, column):
-            numbers = _numeric_values(values)
+            numbers = _numeric_values(values[~pd.isna(values)])
             view._column_scans[column] = (float(np.nanmin(numbers)), float(np.nanmax(numbers)))
         else:
             seen = {str(v): v for v in pd.unique(values) if pd.notna(v)}

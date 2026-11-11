@@ -541,7 +541,12 @@ def _reference_value(fitted: Any, frame: EagerFrame, name: Hashable) -> Any:
         "pass rows that have values for it, or name its value in a surface's reference"
     )
     if _held_as_number(fitted, frame, name):
-        numeric = _numeric_values(values)
+        # Missing entries are dropped before conversion: ``pd.NA`` in an object or
+        # string column does not convert to a float, and the centre ignores them.
+        present = values[~pd.isna(values)]
+        if present.size == 0:
+            raise ValueError(empty)
+        numeric = _numeric_values(present)
         if np.all(np.isnan(numeric)):
             raise ValueError(empty)
         return float(np.nanmedian(numeric))

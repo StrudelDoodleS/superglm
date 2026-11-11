@@ -457,3 +457,27 @@ def test_a_linear_column_round_trips_through_the_explain_tab_whatever_its_storag
     np.testing.assert_allclose(
         priced["eta"]["fitted"], training, rtol=0.0, atol=_tolerance(session, training)
     )
+
+
+def test_a_text_numeric_column_with_a_missing_zero_weight_row_reads_after_a_reload():
+    # Sol, PR 617 round 3: a missing value in an object or string column read by
+    # ``Numeric`` must be dropped before conversion, as master does.
+    import pickle
+
+    rng = np.random.default_rng(617)
+    n = 240
+    x = np.tile([10.0, 11.0, 12.0], n // 3)
+    g = np.tile(list("abcd"), n // 4)
+    y = rng.gamma(20.0, np.exp(1.0 + 0.1 * (x - 11.0)) / 20.0)
+    weights = np.ones(n)
+    for storage in ("object", "string"):
+        X = pd.DataFrame({"x": pd.Series(x).astype(storage), "g": g})
+        X.loc[0, "x"] = pd.NA
+        weights[0] = 0.0
+        family = GammaLS()
+        model = SuperLSS(
+            family, family.mean(term("x", Numeric()), term("g", Categorical())), family.scale()
+        ).fit(X, y, sample_weight=weights)
+        restored = pickle.loads(pickle.dumps(model))
+        inference = restored.term_inference("mean", "g", X_train=X, simultaneous=False)
+        assert np.all(np.isfinite(inference.multiplier))
