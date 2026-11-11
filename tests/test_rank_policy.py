@@ -2044,7 +2044,10 @@ def test_public_covariance_shift_uses_block_algebra(monkeypatch) -> None:
 
 
 def test_rank_augmented_covariance_uses_profiled_blocks(monkeypatch) -> None:
-    """Rank covariance maps the profiled intercept without cubic transforms."""
+    """Rank covariance maps the profiled intercept without cubic transforms.
+
+    It reads the covariance with no shape row held, never the face fit's inverse.
+    """
     hessian = np.array([[3.0, 0.4], [0.4, 1.8]])
     decomposition = decompose_gram(hessian)
     feature_covariance = decomposition.pseudo_inverse()
@@ -2053,7 +2056,8 @@ def test_rank_augmented_covariance_uses_profiled_blocks(monkeypatch) -> None:
         selected_columns=np.array([0, 1]),
         sum_w=20.0,
         mean_x=mean_x,
-        augmented_inverse=lambda: feature_covariance,
+        covariance_inverse=lambda: feature_covariance,
+        augmented_inverse=lambda: pytest.fail("read the face fit's inverse"),
     )
     transform = np.eye(3)
     transform[0, 1:] = -mean_x

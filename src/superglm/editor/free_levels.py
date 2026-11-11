@@ -723,6 +723,11 @@ def _influence(model, name: str) -> _Influence | str:
         covariance, active = model._coef_covariance
         X, _active, _columns = _grouped_active_state(model, {group.name for group in active})
         scale = float(model.result.phi)
+        if getattr(solver.rank_info, "face", None) is not None:
+            # The response moves the fit along its binding rows' face, so the
+            # influence takes the face fit's inverse (``RankInfo.augmented_inverse``);
+            # the covariance holds no row (``RankInfo.covariance_inverse``).
+            covariance, scale = solver.rank_info.augmented_inverse(), 1.0
 
         def apply(contrast: np.ndarray) -> np.ndarray:
             if hasattr(covariance, "solve"):
@@ -732,7 +737,7 @@ def _influence(model, name: str) -> _Influence | str:
         width = covariance.shape[0]
     if X.p != width:
         return _UNMEASURED
-    # the fit's own covariance is already its face's (``RankInfo.augmented_inverse``)
+    # the face fit's inverse is already restricted (``RankInfo.augmented_inverse``)
     on_face = observed is fisher and getattr(solver.rank_info, "face", None) is not None
     move = apply if on_face else _on_binding_face(model, active, apply, X, curvature, data_gram)
     if move is None:

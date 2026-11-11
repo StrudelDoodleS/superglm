@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from functools import cached_property, partial
+from functools import cache, cached_property, partial
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -151,19 +151,15 @@ def _profiled_augmented_covariance(
     xtw1: NDArray,
     sum_w: float,
     *,
-    profile_rank=None,
-    face: NDArray | None = None,
+    profiled_inverse: NDArray | None = None,
 ) -> NDArray:
     """Invert after profiling the intercept, then map back to raw coordinates.
 
-    On a constrained fit's active face ``Z``, ``profile_rank`` decomposes
-    ``Z'(D + S)Z`` and the slope block is ``Z (Z'(D + S)Z)^+ Z'``.
+    ``profiled_inverse`` is the profiled slopes' inverse when the caller has it
+    (``ModelMetrics._covariance_profiled_inverse``); else ``D + S`` is decomposed here.
     """
-    profiled_inverse = (
-        face_pseudo_inverse(profile_rank, face)
-        if profile_rank is not None
-        else decompose_gram(data_gram + penalty).pseudo_inverse()
-    )
+    if profiled_inverse is None:
+        profiled_inverse = decompose_gram(data_gram + penalty).pseudo_inverse()
     mean_x = xtw1 / sum_w
     intercept_cross = -(profiled_inverse @ mean_x)
     augmented = np.empty((len(xtw1) + 1, len(xtw1) + 1), dtype=np.float64)
@@ -388,13 +384,14 @@ def _requires_wood_inference(model, active_groups: list[GroupSlice]) -> bool:
 
 
 def _keeps_constrained_covariance(result) -> bool:
-    """Whether a fit's covariance is its shape constraints' active face's.
+    """Whether a fit's leverage and degrees of freedom are its shape constraints' active face's.
 
     A QP fit whose shape rows bind records its active face on its rank record
     (``RankInfo.face``, from the rows ``irls_direct._binding_rows`` reads as
-    binding at the fit).  Its covariance is the equality-constrained fit's on
-    that face, so the training rows, recognised by content, read the fit's
-    own record, and other rows re-form it on that face.
+    binding at the fit).  Its leverage and degrees of freedom are the
+    equality-constrained fit's on that face, so the training rows, recognised
+    by content, read the fit's own record, and other rows re-form them on that
+    face.  Its covariance holds no row (``RankInfo.covariance_inverse``).
     """
     if getattr(result, "scop_inference", None) is not None:
         return True
@@ -435,10 +432,13 @@ class ModelMetrics:
     model keeps a structured or shape-constrained covariance.  Otherwise
     leverage is re-formed on the rows passed, which for a discrete fit can
     differ slightly from its binned fit.  For a fit whose shape constraints
-    bind, the re-formed inverse is restricted to the fit's active face:
-    with ``Z`` a basis of the coefficients the binding rows leave free, it
-    is ``Z (Z' (X' W X + S) Z)^+ Z'`` on the rows passed, and with no row
-    binding ``Z = I``, the unconstrained fit's.
+    bind, the inverse re-formed for leverage and the degrees of freedom is
+    restricted to the fit's active face: with ``Z`` a basis of the
+    coefficients the binding rows leave free, it is
+    ``Z (Z' (X' W X + S) Z)^+ Z'`` on the rows passed, and with no row
+    binding ``Z = I``, the unconstrained fit's.  The covariance behind
+    standard errors and intervals holds no row: which rows bind is itself
+    estimated.
     """
 
     def __init__(
@@ -1006,6 +1006,10 @@ class ModelMetrics:
                 active_groups,
                 len(beta),
             )
+            # one stacked root for the face's decompositions and the covariance's
+            root = cache(
+                partial(_active_penalty_root, *penalty_terms, reml_penalties=reml_penalties)
+            )
             inverse, profile_rank = self._reformed_ranks(
                 X_a,
                 W,
@@ -1015,15 +1019,16 @@ class ModelMetrics:
                 S_active,
                 data_rank,
                 face,
-                partial(_active_penalty_root, *penalty_terms, reml_penalties=reml_penalties),
+                root,
             )
             augmented = _profiled_augmented_covariance(
                 centered_data_gram,
                 S_active,
                 XtW1,
                 float(np.sum(W)),
-                profile_rank=profile_rank,
-                face=face,
+                profiled_inverse=self._covariance_profiled_inverse(
+                    X_a, W, centered_data_gram, XtW1, S_active, data_rank, profile_rank, face, root
+                ),
             )
             return X_a, W, inverse, augmented, active_groups
 
@@ -1053,6 +1058,8 @@ class ModelMetrics:
             active_groups,
             len(beta),
         )
+        # one stacked root for the face's decompositions and the covariance's
+        root = cache(partial(_active_penalty_root, *penalty_terms, reml_penalties=reml_penalties))
         inverse, profile_rank = self._reformed_ranks(
             X_a,
             W,
@@ -1062,18 +1069,50 @@ class ModelMetrics:
             S_active,
             data_rank,
             face,
-            partial(_active_penalty_root, *penalty_terms, reml_penalties=reml_penalties),
+            root,
         )
         augmented = _profiled_augmented_covariance(
             centered_data_gram,
             S_active,
             XtW1,
             float(np.sum(W)),
-            profile_rank=profile_rank,
-            face=face,
+            profiled_inverse=self._covariance_profiled_inverse(
+                X_a, W, centered_data_gram, XtW1, S_active, data_rank, profile_rank, face, root
+            ),
         )
         augmented = _public_augmented_covariance(self._model, augmented, active_groups)
         return X_a, W, inverse, augmented, active_groups
+
+    def _covariance_profiled_inverse(
+        self,
+        X_a,
+        W,
+        centered_data_gram,
+        XtW1,
+        S_active,
+        data_rank,
+        profile_rank,
+        face,
+        penalty_root,
+    ):
+        """The profiled slopes' inverse a re-formed covariance reads, by the fit's policy.
+
+        ``profile_rank`` decomposes ``D + S`` off a face and ``Z'(D + S)Z`` on one, which
+        leverage and the degrees of freedom read. A fit whose covariance holds no shape row
+        (``RankInfo.covariance_inverse``) inverts ``D + S`` itself, factored from the stacked
+        root ``penalty_root()`` as the face's is (``_face_ranks``); a record saved before
+        keeps the face's, ``Z (Z'(D + S)Z)^+ Z'``.
+        """
+        if face is None:
+            return profile_rank.pseudo_inverse()
+        rank_info = getattr(self._result, "rank_info", None)
+        if getattr(rank_info, "covariance_policy", "face") == "face":
+            return face_pseudo_inverse(profile_rank, face)
+        # A root of the summed ``S`` cuts a term below ``u`` times another, which can be all
+        # the curvature some direction has; each term's own root keeps it.
+        return _certified_profile_rank(
+            X_a, W, centered_data_gram, XtW1, S_active, data_rank, root=penalty_root()
+        ).pseudo_inverse()
 
     def _reformed_ranks(
         self, X_a, W, XtWX, XtW1, centered_data_gram, S_active, data_rank, face, penalty_root
@@ -1213,6 +1252,11 @@ class ModelMetrics:
         else:
             slopes = getattr(augmented, "slopes", None)
             slopes = np.asarray(augmented)[1:, 1:] if slopes is None else np.asarray(slopes)
+            rank_info = getattr(self._result, "rank_info", None)
+            if rank_info is not None and rank_info.face is not None:
+                # The fit's own rows: leverage is the face fit's, while ``augmented`` is the
+                # covariance, which holds no shape row.
+                slopes = rank_info.augmented_inverse()
             center = weighted_center(X_a, W)
             h = W / sum_w + W * quadratic_form_diagonal(X_a, slopes, center=center)
         return np.clip(h, 0.0, 1.0)

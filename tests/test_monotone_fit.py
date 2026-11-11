@@ -1058,10 +1058,14 @@ def test_a_term_the_constraint_holds_flat_publishes_its_face_statistics(kind):
 
     The fit is then the intercept alone (Meyer and Woodroofe 2000: the degrees
     of freedom of a constrained fit are its face's), so the EDF is 1, the
-    Gaussian scale is ``RSS / (n - 1)``, the AIC charges one parameter, and
-    the term's covariance is zero.  Mutation: the export's face dropped
-    (``_active_face_basis`` returning ``None``) publishes the unconstrained
-    trace, 4.7 for ``ps``, and its scale.
+    Gaussian scale is ``RSS / (n - 1)`` and the AIC charges one parameter.
+    Mutation: the export's face dropped (``_active_face_basis`` returning
+    ``None``) publishes the unconstrained trace, 4.7 for ``ps``, and its scale.
+
+    The term's covariance is not the face's, which is zero: which rows bind is
+    estimated, so the covariance holds none of them (Wood 2026, section 5.1)
+    and is the unconstrained fit's at this fit's scale.  Mutation: the
+    covariance read on the face (``RankInfo.augmented_inverse``) is zero.
     """
     from superglm._roundoff import gamma
     from superglm.model.state_ops import coef_covariance
@@ -1081,7 +1085,70 @@ def test_a_term_the_constraint_holds_flat_publishes_its_face_statistics(kind):
     metrics = model.metrics(pd.DataFrame({"x": x}), y)
     np.testing.assert_allclose(metrics.aic + 2.0 * metrics.log_likelihood, 2.0, rtol=gamma(n))
     covariance, _ = coef_covariance(model)
-    assert np.max(np.abs(covariance)) <= gamma(p) * solver.phi
+    free = _qp_fit(kind, x, y, constrained=False)
+    free_covariance, _ = coef_covariance(free)
+    np.testing.assert_allclose(
+        covariance / solver.phi,
+        free_covariance / free._solver_pirls_result().phi,
+        rtol=1e-9,
+        atol=1e-12 * np.max(np.abs(free_covariance)) / free._solver_pirls_result().phi,
+    )
+    assert np.min(np.diag(covariance)) > 0.0
+    # leverage stays the face fit's: every row weighs 1/n in an intercept-only fit
+    np.testing.assert_allclose(metrics.leverage, 1.0 / n, rtol=1e-9)
+
+
+def _published_spline_ses(model: SuperGLM, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """The largest standard error of the spline ``x`` in every reader of its covariance."""
+    from superglm.model.state_ops import coef_covariance
+
+    def curve_se_max(summary) -> float:
+        return next(row.curve_se_max for row in summary._coef_rows if row.name == "x")
+
+    covariance, _ = coef_covariance(model)
+    other_rows = model.metrics(pd.DataFrame({"x": x}), y, sample_weight=np.linspace(0.5, 2.0, 60))
+    return np.array(
+        [
+            curve_se_max(model.summary()),
+            float(np.max(model.term_inference("x").se_log_relativity)),
+            float(np.max(model.simultaneous_bands("x", n_sim=200)["se"])),
+            curve_se_max(other_rows.summary()),
+            float(np.sqrt(np.max(np.diag(covariance)))),
+        ]
+    )
+
+
+@pytest.mark.parametrize("saved_after", ["fit", "summary", "term_inference"])
+def test_a_model_saved_before_the_covariance_held_no_row_keeps_the_face_one(saved_after):
+    """A saved fit keeps the covariance it was saved with in every reader, whatever was cached.
+
+    0.43.0's record has no ``covariance_policy``, which is made here by deleting the stamp
+    before inference. Its face holds the whole term, so every standard error of it is zero; a
+    fit with the stamp reports the covariance with no row held (Wood 2026, section 5.1).
+    Against the unstamped head ``d4d43fed5`` the legacy record's readers read 0.28 to 0.53
+    however it was pickled.
+    """
+    import pickle
+
+    x = np.linspace(0.0, 1.0, 60)
+    y = 1.0 - 2.0 * x
+    expected = _published_spline_ses(_qp_fit("cr", x, y), x, y)
+    assert np.min(expected) > 0.1
+    for legacy in (False, True):
+        model = _qp_fit("cr", x, y)
+        if legacy:
+            vars(model._solver_pirls_result().rank_info).pop("covariance_policy", None)
+        if saved_after != "fit":
+            model.summary()
+        if saved_after == "term_inference":
+            model.term_inference("x")
+        loaded = pickle.loads(pickle.dumps(model))
+        published = _published_spline_ses(loaded, x, y)
+        if legacy:
+            # the face {0}: the coefficients' covariance is exactly zero there
+            assert np.max(published) <= 1e-9 * np.min(expected)
+        else:
+            np.testing.assert_allclose(published, expected, rtol=1e-12)
 
 
 @pytest.mark.parametrize("kind", sorted(QP_TERMS))

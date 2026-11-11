@@ -351,10 +351,12 @@ def test_a_repair_beside_a_constrained_term_keeps_the_face_its_fit_recorded(bind
     up to 0.087 against a largest SE of 0.076), and a record of rows that do
     not bind read as no record at all. The repair leaves ``a`` where its QP
     put it, so its rows still bind: the record keeps them and is formed again
-    at the new weights. ``a``'s EDF and curve variances are checked against
-    ``Z (Z'HZ)^-1 Z'`` for an orthonormal null-space basis ``Z`` of the
-    recorded rows, ``H`` formed from the repaired predictions, and the
-    record's weight total and mean row against those predictions. Mutation
+    at the new weights. ``a``'s EDF is checked against ``Z (Z'HZ)^-1 Z'`` for
+    an orthonormal null-space basis ``Z`` of the recorded rows, ``H`` formed
+    from the repaired predictions; its curve variances against ``H^-1``, the
+    covariance with no row held, which is what a fit whose rows bind reports
+    (Wood 2026, section 5.1); and the record's weight total and mean row
+    against those predictions. Mutation
     check: dropping the record, keeping it at the fit's weights, forming it
     again off the face, or leaving its intercept part at the fit's weights
     each fail.
@@ -402,11 +404,10 @@ def test_a_repair_beside_a_constrained_term_keeps_the_face_its_fit_recorded(bind
     face = scipy.linalg.null_space(rows) if binds else np.eye(design.shape[1])
     reduced = face.T @ (data + penalty) @ face
     covariance = face @ np.linalg.solve(reduced, face.T)
+    unheld = np.linalg.inv(data + penalty)
     term = model.term_inference("a", with_se=True, n_points=50)
     basis = model._specs["a"].transform(term.x)
-    variance = model.result.phi * np.einsum(
-        "ij,jk,ik->i", basis, covariance[group.sl, group.sl], basis
-    )
+    variance = model.result.phi * np.einsum("ij,jk,ik->i", basis, unheld[group.sl, group.sl], basis)
     # The two inverses part by their formation and solve roundings, a few u
     # per entry amplified by the reduced Hessian's condition (Higham 2002,
     # sec. 7.1); the dropped record moved the EDF by 3.8 and the variances by
@@ -414,8 +415,9 @@ def test_a_repair_beside_a_constrained_term_keeps_the_face_its_fit_recorded(bind
     bound = 64 * design.shape[1] * np.linalg.cond(reduced) * np.finfo(float).eps
     expected_edf = float(np.trace(covariance[group.sl] @ data[:, group.sl]))
     assert abs(term.edf - expected_edf) <= bound * max(1.0, expected_edf)
+    unheld_bound = 64 * design.shape[1] * np.linalg.cond(data + penalty) * np.finfo(float).eps
     np.testing.assert_allclose(
-        term.se_log_relativity**2, variance, rtol=0, atol=bound * variance.max()
+        term.se_log_relativity**2, variance, rtol=0, atol=unheld_bound * variance.max()
     )
     kept = model._solver_result.rank_info
     assert kept is not None and kept is model.result.rank_info

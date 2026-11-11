@@ -1233,9 +1233,10 @@ class RankInfo:
     data_gram_weights: bytes | None = field(default=None, repr=False, compare=False)
     # A constrained fit's active face: the orthonormal basis ``Z`` of the
     # coefficients its binding rows leave free, and the decompositions of
-    # ``Z' H Z`` for the ``augmented`` and ``coefficient`` Hessians.  The
-    # covariance is the face fit's (``augmented_inverse``); ``augmented`` and
-    # ``coefficient`` keep the penalized Gram's own rank decision.  ``None``
+    # ``Z' H Z`` for the ``augmented`` and ``coefficient`` Hessians.  Leverage
+    # and the degrees of freedom are the face fit's (``augmented_inverse``);
+    # the covariance holds no row (``covariance_inverse``), and ``augmented``
+    # and ``coefficient`` keep the penalized Gram's own rank decision.  ``None``
     # where no row binds.  ``face_rows`` are the binding rows themselves,
     # each scaled by a power of two (exact): none where no row binds, and
     # ``None`` for a fit without shape rows or a record from before fits kept
@@ -1249,6 +1250,10 @@ class RankInfo:
     # ``feature_edf`` (``irls_direct._face_factor_edf``).  ``None`` elsewhere:
     # inference forms it from the data Gram.
     feature_edf1: NDArray | None = field(default=None, repr=False, compare=False)
+    # The covariance a fit publishes on a face: ``"rule_free"``, with no shape row held, which
+    # every fit now records, and ``"face"``, the face fit's, for a record saved before fits did:
+    # it reads this default on unpickling and keeps that covariance in every reader until refit.
+    covariance_policy: Literal["face", "rule_free"] = field(default="face", compare=False)
 
     def take_data_gram(self, W: NDArray) -> NDArray | None:
         """Hand the fit's data Gram to its one reader, leaving none behind.
@@ -1278,6 +1283,20 @@ class RankInfo:
         if self.face is None or self.face_augmented is None:
             return self.augmented.pseudo_inverse()
         return face_pseudo_inverse(self.face_augmented, self.face)
+
+    def covariance_inverse(self) -> NDArray:
+        """The centred slopes' inverse Hessian with no shape row held: the covariance's.
+
+        Which rows bind is itself estimated, so a covariance conditional on them gives
+        intervals that cover too rarely (Wood 2026, "Shape constrained additive smooth
+        models", Statistical Modelling 26(4), section 5.1, p. 397). The covariance is the
+        one the fit would report with no row held; leverage and the degrees of freedom stay
+        the face fit's (``augmented_inverse``). A record saved before fits held no row
+        keeps the face fit's (``covariance_policy``).
+        """
+        if self.covariance_policy == "face":
+            return self.augmented_inverse()
+        return self.augmented.pseudo_inverse()
 
     def coefficient_inverse(self) -> NDArray:
         """The raw slopes' inverse Hessian, on the active face when there is one."""

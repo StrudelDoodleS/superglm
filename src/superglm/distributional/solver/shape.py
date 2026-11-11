@@ -14,8 +14,11 @@ penalized log-likelihood. Every iterate is feasible, since the rows are linear a
 a step are, so that likelihood is the merit function.
 
 The rows binding at the end hold the fit on an affine face (``ShapeFace``). The solver's own
-face fit then certifies it, and the covariance and degrees of freedom of the fit are those of the
-fit on that face, ``Z (Z' H Z)^+ Z'``, as the SuperGLM QP route reads its own.
+face fit then certifies it, and the degrees of freedom of the fit are those of the fit on that
+face, read from ``Z (Z' H Z)^+ Z'`` as the SuperGLM QP route reads its own. The covariance the
+fit reports is the one it had without the rules (``inference.compute_joint_inference``): the
+face's is conditional on which rows bind, and its intervals cover too rarely (Wood 2026,
+section 5.1).
 """
 
 from __future__ import annotations
@@ -230,7 +233,7 @@ def refit_with_shape_rules(
 
     Returns ``unconstrained`` itself, with a record that nothing was applied, when it already
     meets every row. Otherwise returns the fit on the face of the rows that bind, certified by
-    the solver's face fit, so its covariance and degrees of freedom treat those rows as fixed.
+    the solver's face fit, so its degrees of freedom treat those rows as fixed.
     A refit that does not converge, or finds no feasible point, is returned and disclosed
     (``converged`` False with the reason), never refused.
     """
@@ -276,6 +279,8 @@ def refit_with_shape_rules(
             unconstrained_penalized_log_likelihood=float(unconstrained.penalized_log_likelihood),
             penalized_log_likelihood=float(result.penalized_log_likelihood),
             seconds=time.perf_counter() - started,
+            # The fit publishes the covariance with no shape row held (``_fit_candidate``).
+            covariance="rule_free",
         )
 
     if _is_feasible(A, beta0, b, _QP_FEASIBILITY_TOL, abs_A=structure.abs_entries):
@@ -414,7 +419,7 @@ def refit_with_shape_rules(
         beta, state = accepted
         geometry = measure(state)
 
-    # The fit is refined on the face of the rows that bind, where the standard errors hold them.
+    # The fit is refined on the face of the rows that bind, which its degrees of freedom hold.
     # The other rows must still hold there: a refinement that crosses one steps back to where it
     # meets that row, which is then held too, and refines again (a primal active-set step).
     scale = np.sqrt(np.maximum(np.diag(np.asarray(geometry.data_curvature)), 0.0))
@@ -455,7 +460,7 @@ def refit_with_shape_rules(
     else:
         converged, reason = False, "line_search_failed"
     # A row binds by the reading that built the face, so the rows Diagnose names are the rows
-    # the standard errors hold.
+    # the degrees of freedom hold.
     final = np.asarray(polished.coefficients, dtype=np.float64)
     binding = np.array(
         [_binding_rows(A[[i]], b[[i]], final, scale).shape[0] == 1 for i in range(A.shape[0])],

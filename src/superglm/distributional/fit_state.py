@@ -754,13 +754,20 @@ def prepare_distributional_fit_state(
     requested_n_bins: int | Mapping[str, int],
     requested_chunk_size: ChunkSize | None,
     shape_fit: ShapeFit | None = None,
+    rule_free_covariance: NDArray | None = None,
 ) -> DistributionalFitState:
-    """Finish every terminal calculation before returning a publishable candidate."""
+    """Finish every terminal calculation before returning a publishable candidate.
+
+    ``rule_free_covariance`` is the covariance of the fit before its shape rules were applied,
+    which a fit whose rules bind reports (``compute_joint_inference``).
+    """
     if not isinstance(retain_rows, bool):
         raise TypeError("retain_rows must be bool")
     if solver_result.family_likelihood_plan_identifier != likelihood_plan.plan_identifier:
         raise ValueError("solver result must identify the supplied root likelihood plan")
-    inference = compute_joint_inference(layout, solver_result)
+    inference = compute_joint_inference(
+        layout, solver_result, rule_free_covariance=rule_free_covariance
+    )
     requested_solver_config = (
         solver_result.config if smoothing is None else smoothing.coefficient_fits[0].config
     )

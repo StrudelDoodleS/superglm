@@ -405,7 +405,7 @@ def _rank_edf1(rank_info, data_gram: NDArray, edf: NDArray) -> NDArray:
 def _rank_augmented_covariance(model, rank_info, active_groups):
     """Transform centered retained covariance to solver and public intercepts."""
     p_active = len(rank_info.selected_columns)
-    feature_covariance = rank_info.augmented_inverse()
+    feature_covariance = rank_info.covariance_inverse()
     mean_x = rank_info.mean_x[rank_info.selected_columns]
     intercept_cross = -(feature_covariance @ mean_x)
     solver_covariance = np.empty((p_active + 1, p_active + 1), dtype=np.float64)
@@ -464,7 +464,7 @@ def coef_covariance(model):
         return augmented.scaled(solver.phi).slopes, active_groups
     if solver.rank_info is not None:
         _, active_groups = _rank_active_state(model, solver.rank_info)
-        covariance = solver.phi * solver.rank_info.augmented_inverse()
+        covariance = solver.phi * solver.rank_info.covariance_inverse()
         return covariance, active_groups
     W = _solver_space_working_weights(model)
     _, active_groups, _, _, _, profile_inverse, _ = _legacy_active_state(model, solver, W)

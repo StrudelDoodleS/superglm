@@ -270,7 +270,8 @@ model.fit(df, y)
   times the interaction effect can go past a cap.
 - Smoothing is chosen without the rules, then the model is refit with them.
   See [REML Semantics](#reml-semantics).
-- Intervals treat a rule that binds as fixed. See
+- A rule does not narrow the intervals. A term whose rule binds keeps the
+  standard errors of the fit without the rule. See
   [QP-Backed Shape Fits](#qp-backed-shape-fits).
 - `Constraint.postfit` takes only a single shape over the whole range.
   Combinations, stretches and caps are fit-time only.
@@ -314,11 +315,15 @@ The fit works in two steps, as `SuperGLM` does:
 What you can rely on:
 
 - The curve meets every rule at every point, not only at the rows of the data.
-- Standard errors and effective degrees of freedom treat the rules that bind
-  as fixed. A binding rule has no variance of its own, so the standard error of
-  a constrained term is not the unconstrained one. `covariance="corrected"`
-  needs a fit free of its rules, so on a fit with a binding rule it returns the
-  fixed covariance and says so.
+- Standard errors, bands and posterior draws use the covariance of the fit
+  without the rules, at the same smoothing, around the ruled curve. Where a
+  rule binds is itself estimated from the data, so a covariance that treats the
+  binding checkpoints as known gives intervals that are too narrow. See
+  [What the intervals of a ruled term mean](#what-the-intervals-of-a-ruled-term-mean).
+- Effective degrees of freedom treat the rules that bind as fixed: a term held
+  flat counts as no free parameters.
+- `covariance="corrected"` needs a fit free of its rules, so on a fit with a
+  binding rule it returns the fixed covariance and says so.
 - `diagnose()` says what each rule did, one sentence per constrained term: how
   many checkpoints along the curve bind, and the largest change from the fit
   without the rule.
@@ -428,21 +433,60 @@ model.fit(df, y)
 This keeps the monotone / curvature constraint in the actual optimization
 problem rather than applying an after-the-fact repair.
 
-A QP-backed fit publishes its statistics on its *active face*: the
-coefficient directions left free by the constraint rows that bind at the fit.
-Effective degrees of freedom, the Pearson scale, AIC/BIC and the coefficient
-covariance all come from the fit on that face (Meyer and Woodroofe 2000;
-Tibshirani and Taylor, "Degrees of freedom in lasso problems", *Annals of
-Statistics* 40(2), 2012, Theorem 3).
+A QP-backed fit counts its parameters on its *active face*: the coefficient
+directions left free by the constraint rows that bind at the fit. Effective
+degrees of freedom, leverage, the Pearson scale and AIC/BIC come from the fit
+on that face (Meyer and Woodroofe 2000; Tibshirani and Taylor, "Degrees of
+freedom in lasso problems", *Annals of Statistics* 40(2), 2012, Theorem 3).
 
 - A term the constraint holds flat counts as no free parameters.
-- Standard errors and intervals are conditional on which rows bind. Along the
-  directions those rows hold, they are zero, so a term held flat has a
-  zero-width interval.
-- A rule that binds is treated as fixed. A curve held on a cap has a
-  zero-width interval along it, the same as a term held flat.
 - Under `fit_reml()`, the published scale is still the REML estimate, which
   does not read the face.
+- The editor's **Free levels** comparison moves the curve along the face when
+  it asks how a level's data pull on it, so a level the rule holds flat does
+  not move with its data.
+
+The coefficient covariance does not come from the face.
+
+### What the intervals of a ruled term mean
+
+Standard errors, pointwise intervals, simultaneous bands and posterior draws
+of a fit whose rule binds use the covariance the fit has with no constraint
+row held, at the same smoothing parameters. They are drawn around the ruled
+curve. `SuperGLM` and `SuperLSS` do the same.
+
+- **Why not the face.** Which rows bind is estimated from the data. A
+  covariance that treats them as known is conditional on that estimate, and
+  its intervals cover the true curve too rarely (Wood, "Shape constrained
+  additive smooth models", *Statistical Modelling* 26(4), 2026, section 5.1).
+  In simulation, where a rule that held for the true curve bound in the fit,
+  nominal 95% pointwise intervals from the face covered 92% of the curve, and
+  39% to 75% of it at the points the rule held when the true curve was
+  strictly increasing. Intervals from the covariance with no row held covered
+  96% and 71% to 96%.
+- **What you get.** Intervals that cover at least as often as those of the
+  fit without the rule. Where a rule binds they are wider than they need to
+  be: the rule moves the curve but is not credited with any precision.
+- **A term held flat, or held on a cap,** keeps the interval width of the fit
+  without the rule. Its interval is not zero-width.
+- **The limits need not obey the rule.** The lower limit of an increasing
+  curve can dip. The fitted curve always obeys the rule.
+- **A rule the data contradict.** The curve is the best one that obeys the
+  rule, and the interval is centred on it, so it can miss a true curve that
+  breaks the rule.
+- **Term tests are conservative.** The chi-square test of a ruled term in
+  `summary()` (`SuperGLM`) and in `term_test()` and `summary()` (`SuperLSS`)
+  reads this covariance with the reference degrees of freedom of the face, so
+  where a rule binds it rejects a term with no effect less often than its
+  level says. In simulation with a flat true curve, among fits where the rule
+  bound, the 5% test rejected 1.6% of `SuperGLM` Poisson fits and 0.9% of
+  `SuperLSS` Gamma fits, against 2.6% and 2.4% with the face's covariance.
+
+Releases up to 0.43.0 reported the covariance on the active face, with
+zero-width intervals along a term held flat. A model saved by one of them
+keeps that covariance in every standard error, interval, band, prediction
+error and rating table it reports, and a `SuperLSS` model's `diagnose()`
+says so; refit it to get the intervals described here.
 
 ## REML Semantics
 
@@ -584,8 +628,8 @@ rearrangement", *Biometrika* 96(3):559–575, 2009, Proposition 1).
 
 If you need a test or an interval for a shape-constrained term, fit the
 constraint — `Constraint.fit.*` — rather than repairing after the fact. On the
-QP engine that interval is conditional on the rows that bind (see QP-Backed
-Shape Fits).
+QP engine that interval uses the covariance with no row held (see
+[What the intervals of a ruled term mean](#what-the-intervals-of-a-ruled-term-mean)).
 
 ### Constraints on an `OrderedCategorical` bind on the whole level axis
 

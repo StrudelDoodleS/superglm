@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -21,10 +21,13 @@ class ShapeFace(PenaltyFace):
     """The affine face ``{b : A_F b = A_F b*}`` of the shape rows binding at a fit ``b*``.
 
     A constrained fit is locally the fit with its binding rows held as equalities, so its
-    covariance and degrees of freedom are those of the fit on this face, ``Z (Z' H Z)^+ Z'``
-    for ``Z`` the face's orthonormal ``null_basis`` (Meyer and Woodroofe 2000; Tibshirani and
+    degrees of freedom are those of the fit on this face, read from ``Z (Z' H Z)^+ Z'`` for
+    ``Z`` the face's orthonormal ``null_basis`` (Meyer and Woodroofe 2000; Tibshirani and
     Taylor 2012, Theorem 3). It rides in the solver's ``coefficient_face`` slot, so every
-    reader of a fit's face (covariance, EDF, rank certificate) reads it in reduced coordinates.
+    reader of a fit's face (EDF, rank certificate, the solver's own solves) reads it in reduced
+    coordinates. The covariance a fit reports is not the face's: which rows bind is itself
+    estimated, so the fit reports the covariance it had without the rules
+    (``inference.compute_joint_inference``).
     ``component_names`` are those of the exact-infinity penalty face ``base`` it sits inside,
     empty without one. ``anchor`` is ``b*``: a step is projected onto the face through it, which
     a row with a nonzero bound needs.
@@ -86,7 +89,9 @@ class ShapeFit:
     rows that bind at the reported coefficients, and ``max_violation`` the largest scaled amount
     by which any row misses its bound there. ``unconstrained_coefficients`` are the coefficients
     the same smoothing gives without the rules; ``unruled`` is True when the refit could not start
-    and those are the coefficients reported.
+    and those are the coefficients reported. ``covariance`` is the covariance the fit published:
+    ``"rule_free"``, the fit's with no shape row held, or ``"face"``, conditional on the rows that
+    bind, which a record saved before fits held no row has (``compute_joint_inference``).
     """
 
     terms: tuple[ShapeTermRecord, ...]
@@ -103,6 +108,9 @@ class ShapeFit:
     penalized_log_likelihood: float
     seconds: float = 0.0
     unruled: bool = False
+    # Absent on a record saved by 0.43.0, which reads the class default: that fit published the
+    # face's covariance, and keeps it until it is refit.
+    covariance: Literal["face", "rule_free"] = "face"
 
     def __post_init__(self) -> None:
         values = np.array(self.unconstrained_coefficients, dtype=np.float64, copy=True)
@@ -140,10 +148,19 @@ def shape_term_sentence(term: ShapeTermRecord, shape: ShapeFit) -> str:
             f"so the other terms' rules alone moved it, by at most {_change(term)}."
         )
     moved = _change(term)
-    return (
+    binds = (
         f"{rules} binds at {term.n_binding} of {term.n_rows} checkpoints along the curve; "
-        f"it moved the curve by at most {moved} from the fit without the rule, and standard "
-        "errors treat those checkpoints as fixed."
+        f"it moved the curve by at most {moved} from the fit without the rule."
+    )
+    if shape.covariance == "face":
+        return (
+            f"{binds} Its standard errors treat those checkpoints as fixed, as the version that "
+            "saved it did, so its bands there cover too rarely; refit it to get the bands of the "
+            "fit without the rule."
+        )
+    return (
+        f"{binds} Standard errors and bands are those of the fit without the rule, drawn "
+        "around the ruled curve."
     )
 
 
@@ -163,14 +180,19 @@ def shape_disclosures(shape: ShapeFit | None) -> tuple[str, ...]:
         return (
             f"SuperLSS could not apply the shape rules on {terms}: {why}. The coefficients "
             f"returned are the fit without the rules, which misses them by up to "
-            f"{shape.max_violation:.1e} of a row's scale, and no rule is held in the standard "
-            "errors. Refit with a larger max_inner_iter, or relax the rules, before reading the "
+            f"{shape.max_violation:.1e} of a row's scale, with that fit's standard errors. "
+            "Refit with a larger max_inner_iter, or relax the rules, before reading the "
             "summary.",
         )
     return (
         f"SuperLSS could not certify the fit under the shape rules on {terms}: {why}. The "
         "coefficients returned are the last the refit reached; they meet the rules to within "
         f"{shape.max_violation:.1e} of each row's scale, but they may not be the best fit that "
-        "does, and the standard errors treat only the rules that bind there as fixed. Refit "
-        "with a larger max_inner_iter, or relax the rules, before reading the summary.",
+        "does, and the standard errors "
+        + (
+            "treat only the rules that bind there as fixed"
+            if shape.covariance == "face"
+            else "are those of the fit without the rules"
+        )
+        + ". Refit with a larger max_inner_iter, or relax the rules, before reading the summary.",
     )
