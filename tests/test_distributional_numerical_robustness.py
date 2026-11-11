@@ -693,6 +693,57 @@ def test_shared_varying_scale_objective_preserves_positive_penalty_support(monke
             assert abs(mutated - expected) <= error
 
 
+@pytest.mark.parametrize("tolerance", [1e-9, 1e-7, 1e-12, 0.0])
+def test_objective_admits_the_penalty_logdet_bound_by_its_comparison_slack(monkeypatch, tolerance):
+    """A log|S| bound short of its gamma_k goal is judged by the fit's own slack.
+
+    The smoothing loops compare objectives to ``objective_tolerance (1 + |V|)``
+    with the configured tolerance. A goal-missing bound inside that slack is
+    admitted with the value unchanged; one past it refuses the evaluation. At
+    1e-7 the class default would refuse an admissible bound, and at 1e-12 it
+    would admit one 500 times the slack. A bound that met its goal is admitted
+    as before, under any slack, including zero.
+    """
+    from superglm.distributional.results.iteration import DistributionalEFSConfig
+    from superglm.distributional.smoothing import objective as objective_module
+    from superglm.reml.penalty_support import PenaltyNumericalError
+
+    model = _shared_case()[0]
+    layout = model._require_fitted().layout
+    fit = model._require_fitted().fit_state.solver_result
+    lambdas = dict(model.result_.smoothing_parameters)
+
+    def evaluate():
+        return objective_module._laplace_objective(
+            fit, layout=layout, lambdas=lambdas, face=None, objective_tolerance=tolerance
+        )
+
+    objective = evaluate()
+    assert objective == joint_laplace_objective(fit, layout=layout, lambdas=lambdas)
+    slack = tolerance * (1.0 + abs(objective))
+    default_slack = DistributionalEFSConfig().objective_tolerance * (1.0 + abs(objective))
+    original = objective_module._compute_penalty_logdet_evaluation
+    cases = [(2.0 * max(slack, default_slack), 0.0, True)]
+    if tolerance:
+        cases += [(0.5 * slack, 2.0, True), (2.0 * slack, 2.0, False)]
+    else:
+        cases += [(np.finfo(float).tiny, 2.0, False)]
+    for bound, excess, admitted in cases:
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                objective_module,
+                "_compute_penalty_logdet_evaluation",
+                lambda *args, bound=bound, excess=excess: replace(
+                    original(*args), logdet_error=bound, accuracy_excess=excess
+                ),
+            )
+            if admitted:
+                assert evaluate() == objective
+            else:
+                with pytest.raises(PenaltyNumericalError, match="comparison slack"):
+                    evaluate()
+
+
 def _ladder(values, errors):
     coarse = abs(values[1] - values[0])
     fine = abs(values[2] - values[1])

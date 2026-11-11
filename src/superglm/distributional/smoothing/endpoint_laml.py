@@ -24,6 +24,7 @@ from superglm.distributional.results.endpoint_evidence import (
     EndpointDirectionDecision,
     EndpointDirectionEvidence,
 )
+from superglm.distributional.results.iteration import DistributionalEFSConfig
 from superglm.distributional.results.solver import DenseSolverResult
 from superglm.distributional.smoothing.endpoint_direction import (
     FiniteDifferenceDirection,
@@ -33,6 +34,7 @@ from superglm.distributional.smoothing.endpoint_direction import (
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
 from superglm.distributional.smoothing.penalty_geometry import (
     EndpointLaplaceError,
+    _admit_penalty_logdet,
     _finite_penalty_evaluation_from_components,
     _PenaltyEvaluationMemo,
 )
@@ -562,6 +564,7 @@ def evaluate_endpoint_laplace(
     lambdas: Mapping[str, float],
     face: PenaltyFace,
     penalty_memo: _PenaltyEvaluationMemo | None = None,
+    objective_tolerance: float = DistributionalEFSConfig.objective_tolerance,
 ) -> EndpointLaplaceEvaluation:
     """Evaluate negative LAML on an exact, already-fitted coefficient face."""
     if not isinstance(result, DenseSolverResult):
@@ -595,6 +598,7 @@ def evaluate_endpoint_laplace(
     penalized_optimizing = result.penalized_optimizing_log_likelihood
     assert penalized_optimizing is not None
     objective = -float(penalized_optimizing) + 0.5 * (hessian_log_pdet - projected_penalty.log_pdet)
+    _admit_penalty_logdet(penalty_evaluation, objective, objective_tolerance)
     evaluation = EndpointLaplaceEvaluation(
         objective=objective,
         face_component_names=face.component_names,

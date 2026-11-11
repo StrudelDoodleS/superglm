@@ -96,6 +96,27 @@ class _PenaltyLogdetEvaluation:
     logdet_error: float
     gradient_error: dict[str, float]
     hessian_error: dict[tuple[str, str], float]
+    # Largest ratio of a bound to its gamma_k goal; 0 when every bound meets
+    # it. A positive excess leaves the log|S| bound to the objective's slack.
+    accuracy_excess: float = 0.0
+
+
+def _goal_excess(error: float, target: float, magnitude: float, failure: str) -> float:
+    """Return how far a certified volume bound is past its goal, ``target * magnitude``.
+
+    The goal decides only whether a caller tries another construction: a
+    bound within ``sqrt(u)`` of the same magnitude is kept, and its consumer
+    judges it (see ``multi_penalty._ADMISSION_RELATIVE``). A larger one, or a
+    non-finite one, still refuses.
+    """
+    from superglm.reml.multi_penalty import _ADMISSION_RELATIVE
+    from superglm.reml.penalty_support import PenaltyNumericalError
+
+    if error <= target * magnitude:
+        return 0.0
+    if not error <= _ADMISSION_RELATIVE * magnitude:
+        raise PenaltyNumericalError(failure)
+    return error / (target * magnitude)
 
 
 def _frozen_array(value: NDArray) -> NDArray:
@@ -333,7 +354,7 @@ def _support_coordinate_volume(
     return value, error
 
 
-def _active_support_volume_error(support) -> float:
+def _active_support_volume_error(support) -> tuple[float, float]:
     """Bound the volume omitted by projecting an enclosed fixed-rank target.
 
     Root-action errors only enclose the target compressed to the selected
@@ -355,7 +376,7 @@ def _active_support_volume_error(support) -> float:
     basis, rank = support.Q_plus, support.rank
     width = basis.shape[0]
     if rank == 0 or rank == width:
-        return 0.0
+        return 0.0, 0.0
     unit = UNIT_ROUNDOFF
     tiny = SMALLEST_SUBNORMAL
     roots, errors = [], []
@@ -408,14 +429,15 @@ def _active_support_volume_error(support) -> float:
         )
     )
     target = _gamma(8 * (len(root) + width + rank + len(roots) + 1))
-    if not np.isfinite(volume_error) or volume_error > target * rank:
-        raise PenaltyNumericalError("active support volume cannot meet the accuracy contract")
-    return volume_error
+    excess = _goal_excess(
+        volume_error, target, rank, "active support volume cannot meet the accuracy contract"
+    )
+    return volume_error, excess
 
 
 def _joint_near_isometry_volume_error(
     row_map: NDArray, *, rank: int, root_rows: int, components: int
-) -> float:
+) -> tuple[float, float]:
     """Bound one common coordinate volume without changing local targets.
 
     For a block-diagonal fixed local penalty with orthonormal active range U,
@@ -423,7 +445,8 @@ def _joint_near_isometry_volume_error(
     ||A A.T-I|| <= delta < 1, its absolute value is at most
     rank * -log(1-delta) <= rank * delta/(1-delta). This joint Gram includes
     cross-block terms; the volume is independent of positive weights on each
-    fixed active set, so all log-weight derivatives are unchanged.
+    fixed active set, so all log-weight derivatives are unchanged. Returns the
+    bound and its excess over the gamma_k goal (``_goal_excess``).
     """
     from superglm.reml.multi_penalty import _gamma, _matmul_enclosed, _norm_upper, _upper
     from superglm.reml.penalty_support import PenaltyNumericalError
@@ -438,7 +461,7 @@ def _joint_near_isometry_volume_error(
     ):
         raise PenaltyNumericalError("finite coefficient map has invalid dimensions")
     if rank == 0:
-        return 0.0
+        return 0.0, 0.0
     gram, arithmetic = _matmul_enclosed(row_map, row_map.T)
     # Enclose subtraction rounding too. This avoids
     # relying on exact diagonal subtraction when the map is malformed.
@@ -457,9 +480,13 @@ def _joint_near_isometry_volume_error(
     # Use the existing dimension gamma and its minimum rank operation scale
     # for this additional volume certificate, as in the active-support bound.
     dimension = root_rows + row_map.shape[1] + rank + components + 1
-    if error > _gamma(8 * dimension) * rank:
-        raise PenaltyNumericalError("finite coefficient volume cannot meet the accuracy contract")
-    return error
+    excess = _goal_excess(
+        error,
+        _gamma(8 * dimension),
+        rank,
+        "finite coefficient volume cannot meet the accuracy contract",
+    )
+    return error, excess
 
 
 def _component_geometry_key(component: PenaltyComponent) -> tuple:
@@ -490,6 +517,7 @@ class _PenaltyGroupGeometry:
     face_activity: tuple[bool, ...] | None = None
     face_support: object | None = None
     face_logdet_error: float = 0.0
+    face_volume_excess: float = 0.0
     last_weights: tuple[float, ...] | None = None
     last_evaluation: tuple | None = None
     volume_activity: tuple[bool, ...] | None = None
@@ -553,7 +581,6 @@ class _PenaltyGroupGeometry:
 
     def evaluate(self, values: NDArray):
         from superglm.reml.multi_penalty import _evaluate_penalty_summary
-        from superglm.reml.penalty_support import PenaltyNumericalError
 
         values = np.asarray(values, dtype=float)
         if (
@@ -566,18 +593,7 @@ class _PenaltyGroupGeometry:
         if weights == self.last_weights:
             return self.last_evaluation
         if self.coordinate_map is not None and np.any(values == 0):
-            try:
-                result = self._evaluate_face(values)
-            except PenaltyNumericalError:
-                if self.ssp_refined:
-                    raise
-                self.ssp_roots, self.ssp_root_errors = _ssp_component_roots(
-                    self.get_support(), self.coordinate_map, refine=True
-                )
-                self.ssp_refined = True
-                self.face_activity = self.face_support = None
-                result = self._evaluate_face(values)
-            evaluation = (result, 0.0, self.face_logdet_error)
+            evaluation = self._evaluate_refined_face(values, self.coordinate_map)
             self.last_weights, self.last_evaluation = weights, evaluation
             return evaluation
         result = _evaluate_penalty_summary(self.get_support(), values)
@@ -593,6 +609,40 @@ class _PenaltyGroupGeometry:
         # A refused candidate never replaces the last complete evaluation.
         self.last_weights, self.last_evaluation = weights, evaluation
         return evaluation
+
+    def _evaluate_refined_face(self, values: NDArray, coordinate_map: NDArray) -> tuple:
+        """Evaluate a zero-weight face, refining the SSP roots once on a refusal or goal miss.
+
+        A retry that also misses its gamma_k goal keeps whichever attempt is
+        nearer it, with the volume bound of its own roots.
+        """
+        from superglm.reml.penalty_support import PenaltyNumericalError
+
+        kept = None
+        try:
+            kept = (self._evaluate_face(values), 0.0, self.face_logdet_error)
+        except PenaltyNumericalError:
+            if self.ssp_refined:
+                raise
+        if kept is not None and (self.ssp_refined or not kept[0]._certificate.accuracy_excess):
+            return kept
+        self.ssp_roots, self.ssp_root_errors = _ssp_component_roots(
+            self.get_support(), coordinate_map, refine=True
+        )
+        self.ssp_refined = True
+        self.face_activity = self.face_support = None
+        try:
+            retry = (self._evaluate_face(values), 0.0, self.face_logdet_error)
+        except PenaltyNumericalError:
+            if kept is None:
+                raise
+            return kept
+        if (
+            kept is None
+            or retry[0]._certificate.accuracy_excess <= kept[0]._certificate.accuracy_excess
+        ):
+            return retry
+        return kept
 
     def _evaluate_face(self, values: NDArray):
         from superglm.reml.multi_penalty import _evaluate_penalty_summary
@@ -635,12 +685,17 @@ class _PenaltyGroupGeometry:
                 )
             )
             selected = replace(selected, component_root_error_bounds=errors)
-            volume_error = _active_support_volume_error(selected)
+            volume_error, volume_excess = _active_support_volume_error(selected)
             self.face_support, self.face_logdet_error = selected, volume_error
+            self.face_volume_excess = volume_excess
             self.face_activity = activity
         # Inactive components have no root rows. Unit carrier weights retain
         # their ordered zero derivatives without invoking a second projection.
-        return _evaluate_penalty_summary(self.face_support, np.where(values > 0, values, 1.0))
+        result = _evaluate_penalty_summary(self.face_support, np.where(values > 0, values, 1.0))
+        if self.face_volume_excess <= result._certificate.accuracy_excess:
+            return result
+        certificate = replace(result._certificate, accuracy_excess=self.face_volume_excess)
+        return replace(result, _certificate=certificate)
 
 
 def _context_geometry(grouped: list[PenaltyComponent]) -> _PenaltyGroupGeometry | None:
@@ -3126,6 +3181,7 @@ def _compute_penalty_logdet_evaluation(
     hessian_error: dict[tuple[str, str], float] = {}
     log_terms = []
     log_errors = []
+    excess = 0.0
     rank = 0
     unit = UNIT_ROUNDOFF
     for group_name, indices in _group_penalties(penalties).items():
@@ -3198,6 +3254,7 @@ def _compute_penalty_logdet_evaluation(
             certificate = result._certificate
             if certificate is None:
                 raise ValueError("penalty evaluation did not provide arithmetic evidence")
+            excess = max(excess, certificate.accuracy_excess)
             log_errors.append(
                 repeat * (certificate.logdet_error + volume_error)
                 + 8
@@ -3225,6 +3282,7 @@ def _compute_penalty_logdet_evaluation(
         certificate = result._certificate
         if certificate is None:
             raise ValueError("penalty evaluation did not provide arithmetic evidence")
+        excess = max(excess, certificate.accuracy_excess)
         rank += repeat * result.rank
         term = repeat * math.fsum([result.logdet_s_plus, volume])
         error = repeat * (certificate.logdet_error + volume_error) + 4 * unit * repeat * (
@@ -3255,4 +3313,5 @@ def _compute_penalty_logdet_evaluation(
         logdet_error=math.fsum(log_errors) + 2 * unit * abs(logdet),
         gradient_error=gradient_error,
         hessian_error=hessian_error,
+        accuracy_excess=excess,
     )

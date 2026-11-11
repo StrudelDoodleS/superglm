@@ -175,14 +175,17 @@ def test_joint_face_map_bound_encloses_finite_nonorthogonality_and_zero_rank():
     from superglm.reml.penalty_support import PenaltyNumericalError
 
     row_map = np.array([[1.0 + 2.0**-48, 0.0, 0.0], [0.0, 1.0, 0.0]])
-    bound = algebra._joint_near_isometry_volume_error(row_map, rank=2, root_rows=3, components=2)
+    bound, excess = algebra._joint_near_isometry_volume_error(
+        row_map, rank=2, root_rows=3, components=2
+    )
+    assert excess == 0.0
     with localcontext() as context:
         context.prec = 100
         exact = 2 * Decimal.from_float(row_map[0, 0]).ln()
         assert 0 < exact <= Decimal.from_float(bound)
-    assert (
-        algebra._joint_near_isometry_volume_error(row_map, rank=0, root_rows=3, components=2) == 0.0
-    )
+    assert algebra._joint_near_isometry_volume_error(
+        row_map, rank=0, root_rows=3, components=2
+    ) == (0.0, 0.0)
     with pytest.raises(PenaltyNumericalError, match="preserve penalty support"):
         algebra._joint_near_isometry_volume_error(
             np.zeros((1, 2)), rank=1, root_rows=1, components=1
@@ -202,3 +205,37 @@ def test_the_penalty_memo_answers_only_its_own_layout_face_and_lambdas():
     memo.put(layout, {"a": 2.0}, face, replacement := object())
     assert memo.get(layout, {"a": 2.0}, face) is replacement
     assert memo.get(layout, {"a": 1.0}, face) is None
+
+
+def test_finite_face_map_short_of_its_goal_is_kept_for_the_objective(monkeypatch):
+    """A finite coefficient volume past its gamma_k goal, inside sqrt(u), is not refused.
+
+    The face's null basis is forced 2**-40 off orthogonal: about 100 times the
+    goal at this size. The evaluation keeps the volume in its log|S| bound and
+    records the shortfall, so the objective's slack decides admission.
+    """
+    from superglm.distributional.smoothing.penalty_geometry import _admit_penalty_logdet
+    from superglm.reml.penalty_support import PenaltyNumericalError
+
+    _, _, layout, face = _retained_face_problem()
+    weights = {layout.penalty_names[0]: 0.0}
+    weights.update({item.name: 2.0 for item in layout.penalties[1:]})
+    reference = endpoint._projected_finite_penalty_evaluation(
+        layout=layout, lambdas=weights, face=face
+    )
+    assert reference.accuracy_excess == 0.0
+    original = algebra._joint_near_isometry_volume_error
+
+    def skewed(row_map, **kwargs):
+        return original(row_map * (1.0 + 2.0**-40), **kwargs)
+
+    monkeypatch.setattr(algebra, "_joint_near_isometry_volume_error", skewed)
+    result = endpoint._projected_finite_penalty_evaluation(
+        layout=layout, lambdas=weights, face=face
+    )
+    assert result.accuracy_excess > 1
+    assert result.logdet == reference.logdet
+    assert result.logdet_error >= reference.rank * 2.0**-39
+    _admit_penalty_logdet(result, result.logdet, 1e-9)
+    with pytest.raises(PenaltyNumericalError, match="comparison slack"):
+        _admit_penalty_logdet(result, result.logdet, 1e-14)

@@ -162,3 +162,37 @@ def test_unrelated_trial_errors_propagate(monkeypatch, error_type):
     monkeypatch.setattr(smoothing_loop, "_laplace_objective", objective)
     with pytest.raises(error_type, match="invalid trial provenance"):
         _fit(max_iterations=1)
+
+
+@pytest.mark.parametrize("outer", ["efs", "efs+newton"])
+def test_objective_admission_reads_the_fits_configured_tolerance(monkeypatch, outer):
+    """Every objective evaluation of a fit judges log|S| by that fit's own slack."""
+    from superglm.distributional.smoothing import endpoint_laml, objective
+
+    original = objective._admit_penalty_logdet
+    tolerances = []
+
+    def record(evaluation, value, objective_tolerance):
+        tolerances.append(objective_tolerance)
+        return original(evaluation, value, objective_tolerance)
+
+    monkeypatch.setattr(objective, "_admit_penalty_logdet", record)
+    monkeypatch.setattr(endpoint_laml, "_admit_penalty_logdet", record)
+    frame, response, predictors = _smooth_fixture()
+    fit_dense_distributional(
+        frame,
+        response,
+        family=GaussianLS(),
+        weight_contract=WeightContract(semantics="prior"),
+        predictors=predictors,
+        lambdas={"location:x#wiggle": 0.3, "scale:z#wiggle": 0.2},
+        efs_config=DistributionalEFSConfig(
+            outer=outer,
+            tolerance=1e-12,
+            max_iterations=6,
+            handoff_iterations=1,
+            objective_tolerance=1e-7,
+        ),
+    )
+    assert len(tolerances) > 1
+    assert set(tolerances) == {1e-7}

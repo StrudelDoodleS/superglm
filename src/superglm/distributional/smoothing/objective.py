@@ -16,7 +16,10 @@ from superglm.distributional.results.iteration import DistributionalEFSConfig
 from superglm.distributional.results.solver import DenseSolverResult
 from superglm.distributional.smoothing.endpoint_laml import evaluate_endpoint_laplace
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
-from superglm.distributional.smoothing.penalty_geometry import _PenaltyEvaluationMemo
+from superglm.distributional.smoothing.penalty_geometry import (
+    _admit_penalty_logdet,
+    _PenaltyEvaluationMemo,
+)
 from superglm.distributional.smoothing.proposals import _scaled_proposal
 from superglm.reml.efs_update import EFSComponentState, EFSUpdateResult
 from superglm.reml.penalty_algebra import (
@@ -33,6 +36,7 @@ def joint_laplace_objective(
     *,
     layout: StackedLayout,
     lambdas: Mapping[str, float],
+    objective_tolerance: float = DistributionalEFSConfig.objective_tolerance,
 ) -> float:
     """Return the generic joint negative Laplace criterion, up to constants.
 
@@ -60,6 +64,7 @@ def joint_laplace_objective(
     )
     if not math.isfinite(objective):
         raise ValueError("joint Laplace objective is non-finite")
+    _admit_penalty_logdet(penalty_evaluation, objective, objective_tolerance)
     return float(objective)
 
 
@@ -215,16 +220,20 @@ def _laplace_objective(
     layout: StackedLayout,
     lambdas: Mapping[str, float],
     face: PenaltyFace | None,
+    objective_tolerance: float,
     penalty_memo: _PenaltyEvaluationMemo | None = None,
 ) -> float:
     if face is None:
-        return joint_laplace_objective(result, layout=layout, lambdas=lambdas)
+        return joint_laplace_objective(
+            result, layout=layout, lambdas=lambdas, objective_tolerance=objective_tolerance
+        )
     return evaluate_endpoint_laplace(
         result,
         layout=layout,
         lambdas=lambdas,
         face=face,
         penalty_memo=penalty_memo,
+        objective_tolerance=objective_tolerance,
     ).objective
 
 

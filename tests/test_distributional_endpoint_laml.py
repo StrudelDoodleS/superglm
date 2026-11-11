@@ -2289,6 +2289,7 @@ def _independent_penalty_efs_fit(
     starting_lambdas: tuple[float, ...] | None = None,
     overlap: bool = False,
     family: object | None = None,
+    objective_tolerance: float = DistributionalEFSConfig.objective_tolerance,
 ):
     family = _UnitGaussian() if family is None else family
     penalty_labels = ("first", "second", "third")[: len(response)]
@@ -2369,9 +2370,36 @@ def _independent_penalty_efs_fit(
             tolerance=1.0e-8,
             initial_lambda=min(0.1, maximum_lambda),
             maximum_lambda=maximum_lambda,
+            objective_tolerance=objective_tolerance,
         ),
     )
     return layout, smoothing, authority_faces
+
+
+def test_face_objectives_judge_log_det_by_the_fits_configured_tolerance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cap, endpoint and joint-face objectives use the fit's objective_tolerance."""
+    from superglm.distributional.smoothing import objective as objective_module
+
+    original = penalty_geometry._admit_penalty_logdet
+    tolerances: dict[str, list[float]] = {"finite": [], "endpoint": []}
+
+    def recorder(kind: str):
+        def record(evaluation, value, objective_tolerance):
+            tolerances[kind].append(objective_tolerance)
+            return original(evaluation, value, objective_tolerance)
+
+        return record
+
+    monkeypatch.setattr(objective_module, "_admit_penalty_logdet", recorder("finite"))
+    monkeypatch.setattr(endpoint_laml_module, "_admit_penalty_logdet", recorder("endpoint"))
+    _, smoothing, _ = _independent_penalty_efs_fit(
+        monkeypatch, (0.5, 0.5), objective_tolerance=1e-7
+    )
+    assert any(item.activated_face_components for item in smoothing.history)
+    assert tolerances["finite"] and tolerances["endpoint"]
+    assert set(tolerances["finite"]) | set(tolerances["endpoint"]) == {1e-7}
 
 
 @pytest.mark.parametrize(
@@ -3133,6 +3161,45 @@ def test_scalar_endpoint_matches_closed_form_without_deciding_the_boundary(
     )
 
 
+@pytest.mark.parametrize("tolerance", [1e-9, 1e-7, 1e-12])
+def test_endpoint_objective_admits_the_penalty_logdet_bound_by_its_comparison_slack(
+    monkeypatch: pytest.MonkeyPatch, tolerance: float
+) -> None:
+    """An endpoint objective judges a goal-missing log|S| bound by the fit's own slack."""
+    from superglm.distributional.smoothing.objective import _laplace_objective
+
+    layout, face, lambdas, result = _scalar_endpoint_fit(3.0)
+
+    def evaluate() -> float:
+        return _laplace_objective(
+            result, layout=layout, lambdas=lambdas, face=face, objective_tolerance=tolerance
+        )
+
+    objective = evaluate()
+    slack = tolerance * (1.0 + abs(objective))
+    default_slack = DistributionalEFSConfig().objective_tolerance * (1.0 + abs(objective))
+    original = endpoint_laml_module._projected_finite_penalty_evaluation
+    cases = (
+        (2.0 * max(slack, default_slack), 0.0, True),
+        (0.5 * slack, 2.0, True),
+        (2.0 * slack, 2.0, False),
+    )
+    for bound, excess, admitted in cases:
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                endpoint_laml_module,
+                "_projected_finite_penalty_evaluation",
+                lambda bound=bound, excess=excess, **kwargs: replace(
+                    original(**kwargs), logdet_error=bound, accuracy_excess=excess
+                ),
+            )
+            if admitted:
+                assert evaluate() == objective
+            else:
+                with pytest.raises(penalty_support.PenaltyNumericalError, match="comparison"):
+                    evaluate()
+
+
 def test_endpoint_objective_uses_the_validated_likelihood_field() -> None:
     """An overridden convenience property cannot change endpoint authority."""
 
@@ -3606,6 +3673,7 @@ def test_analytic_endpoint_direction_resolves_anisotropic_penalty_geometry() -> 
         endpoint_face=face,
         initial=np.zeros(2),
         solver_config=DenseSolverConfig(max_iterations=50, tolerance=1.0e-12),
+        objective_tolerance=DistributionalEFSConfig().objective_tolerance,
         chunk_size=None,
         phase_recorder=None,
     )

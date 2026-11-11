@@ -36,6 +36,22 @@ _DOT2_NATIVE_MIN_WORK = 256
 # Entries refined per Dot2 batch: about 5 MiB of indices, values, bounds and
 # magnitudes, independent of the product's width.
 _DOT2_BATCH_ENTRIES = 1 << 16
+# Relative accuracy a certified geometry must reach to be returned once its
+# corrections cannot reach the gamma_k goal: half the float64 digits of each
+# log-volume term, derivative and Hessian entry. The goal has no conditioning
+# factor, and the reference correction's own conditioning (its duality and
+# whitening defects) can leave a bound some thousand u above it; this allows
+# a factor of u**-1/2. Wood, Pya and Saefken (2016, sec. 3.1.1 and
+# Supplementary Appendix C.1) state the aim of the Wood (2011) Appendix B
+# transform as freedom from catastrophic cancellation between dominant and
+# subdominant components, with no certificate; GLM REML's plain evaluator
+# (``penalty_blocks``) works so. A result short of its goal records the
+# shortfall as its certificate's ``accuracy_excess``, and the objective judges
+# such a log|S| bound by its own comparison slack (``_admit_penalty_logdet``).
+# The same admission covers the finite coefficient and active-support volumes
+# (``penalty_algebra``). The SSP coordinate volume is certified once, when a
+# context is built, and a miss there selects another construction.
+_ADMISSION_RELATIVE = math.sqrt(_UNIT_ROUNDOFF)
 
 
 @dataclass(frozen=True)
@@ -48,6 +64,8 @@ class _PenaltyCertificate:
     root_error: NDArray
     inverse_error: NDArray
     resolution_limited: bool
+    # Largest ratio of a bound to its gamma_k goal; 0 when every bound meets it.
+    accuracy_excess: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -58,6 +76,8 @@ class _PenaltySummaryCertificate:
     gradient_error: NDArray
     hessian_error: NDArray
     resolution_limited: bool
+    # Largest ratio of a bound to its gamma_k goal; 0 when every bound meets it.
+    accuracy_excess: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -72,6 +92,39 @@ class _PenaltySummary:
     _certificate: _PenaltySummaryCertificate
     _input_lambdas: NDArray
     _correction_count: int
+
+
+class _AccuracyGoalMissedError(PenaltyNumericalError):
+    """A certified geometry whose bounds exceed the gamma_k goal but meet admission.
+
+    Raised so that a caller with another construction (the native candidate,
+    the separated candidate, the direct-sum identity) still tries it first;
+    ``result`` is returned only when no construction reaches the goal.
+    ``excess`` is the largest ratio of a bound to its goal.
+    """
+
+    def __init__(self, result, excess: float) -> None:
+        super().__init__("reference root geometry cannot meet the accuracy contract")
+        self.result = result
+        self.excess = excess
+
+
+@dataclass(frozen=True)
+class _GeometryAttempt:
+    """A certified attempt kept in case none reaches the gamma_k goal."""
+
+    excess: float
+    E: NDArray
+    J: NDArray
+    logdet: float
+    eta: float
+    duality: float
+    action: tuple[NDArray, ...]
+    gradient: NDArray
+    hessian: NDArray
+    gradient_error: NDArray
+    hessian_error: NDArray
+    log_error: float
 
 
 @dataclass(frozen=True)
@@ -1201,10 +1254,11 @@ def _derivative_values(
 def _evaluate_penalty_support(
     support: _PenaltySupport, lambdas: NDArray, eps_rank: float | None = None
 ) -> SimilarityTransformResult:
-    return cast(
-        SimilarityTransformResult,
-        _evaluate_penalty_geometry(support, lambdas, eps_rank, summary_only=False),
-    )
+    try:
+        result = _evaluate_penalty_geometry(support, lambdas, eps_rank, summary_only=False)
+    except _AccuracyGoalMissedError as missed:
+        result = missed.result
+    return cast(SimilarityTransformResult, result)
 
 
 def _evaluate_penalty_summary(
@@ -1212,6 +1266,9 @@ def _evaluate_penalty_summary(
 ) -> _PenaltySummary:
     """Admit the same geometry while omitting unused dense output matrices."""
     values = _weights(lambdas, len(support.component_roots))
+    # Certified results that missed only the gamma_k goal, kept in case no
+    # construction below reaches it; the smallest excess is returned.
+    missed: list[_AccuracyGoalMissedError] = []
     if support.rank >= 128 and np.all(values > 0):
         previous_basis = support._basis_gram_evidence
         try:
@@ -1221,7 +1278,9 @@ def _evaluate_penalty_summary(
                     support, values, eps_rank, summary_only=True, _native_candidate=True
                 ),
             )
-        except PenaltyNumericalError:
+        except PenaltyNumericalError as exc:
+            if isinstance(exc, _AccuracyGoalMissedError):
+                missed.append(exc)
             # Every factor, correction and error ledger below starts again
             # from the original proposal. No failed candidate state transfers.
             object.__setattr__(support, "_basis_gram_evidence", previous_basis)
@@ -1230,11 +1289,15 @@ def _evaluate_penalty_summary(
             _PenaltySummary,
             _evaluate_penalty_geometry(support, values, eps_rank, summary_only=True),
         )
-    except PenaltyNumericalError:
+    except PenaltyNumericalError as exc:
+        if isinstance(exc, _AccuracyGoalMissedError):
+            missed.append(exc)
         direct_sum = _direct_sum_summary(support, values, eps_rank)
-        if direct_sum is None:
-            raise
-        return direct_sum
+        if direct_sum is not None:
+            return direct_sum
+        if missed:
+            return cast(_PenaltySummary, min(missed, key=lambda item: item.excess).result)
+        raise
 
 
 def _direct_sum_summary(
@@ -1388,6 +1451,9 @@ def _evaluate_penalty_geometry(
     rows = sum(len(root) for root in support.component_roots)
     target = _gamma(8 * (rows + width + rank + count + 1))
     correction_count = 0
+    # The attempt nearest the goal among those meeting admission, and its excess.
+    best: _GeometryAttempt | None = None
+    excess = 0.0
     for correction_index in range(2):
         evidence = []
         E, J, logdet, cached = _reference_correct_once(
@@ -1471,19 +1537,51 @@ def _evaluate_penalty_geometry(
             log_error = (
                 factor_log_error + _logdet_defect_bound(*whitening_evidence[0]) + dual_log_error
             )
+            g_max = np.max(g_error, initial=0)
+            h_max = np.max(h_error, initial=0)
             if (
-                np.max(g_error, initial=0) <= target * rank
-                and np.max(h_error, initial=0) <= target * rank**2
+                g_max <= target * rank
+                and h_max <= target * rank**2
                 and log_error <= target * volume_scale
             ):
                 accepted = True
                 break
+            if (
+                g_max <= _ADMISSION_RELATIVE * rank
+                and h_max <= _ADMISSION_RELATIVE * rank**2
+                and log_error <= _ADMISSION_RELATIVE * volume_scale
+            ):
+                ratio = max(
+                    g_max / (target * rank),
+                    h_max / (target * rank**2),
+                    log_error / (target * volume_scale),
+                )
+                if best is None or ratio < best.excess:
+                    best = _GeometryAttempt(
+                        float(ratio),
+                        E,
+                        J,
+                        float(logdet),
+                        eta,
+                        duality,
+                        action,
+                        gradient,
+                        hessian,
+                        g_error,
+                        h_error,
+                        float(log_error),
+                    )
         if accepted:
             break
     else:
-        raise PenaltyNumericalError("reference root geometry cannot meet the accuracy contract")
+        if best is None:
+            raise PenaltyNumericalError("reference root geometry cannot meet the accuracy contract")
+        excess, E, J, logdet = best.excess, best.E, best.J, best.logdet
+        eta, duality, action = best.eta, best.duality, best.action
+        gradient, hessian, log_error = best.gradient, best.hessian, best.log_error
+        g_error, h_error = best.gradient_error, best.hessian_error
     if summary_only:
-        return _PenaltySummary(
+        summary = _PenaltySummary(
             float(logdet),
             rank,
             _readonly(gradient),
@@ -1496,10 +1594,14 @@ def _evaluate_penalty_geometry(
                 _readonly(g_error),
                 _readonly(h_error),
                 any(support.component_resolution_limited),
+                excess,
             ),
             _readonly(values),
             correction_count,
         )
+        if excess:
+            raise _AccuracyGoalMissedError(summary, excess)
+        return summary
     try:
         inverse, inverse_error = _inverse_gram_enclosed(J, eta)
     except PenaltyNumericalError as exc:
@@ -1531,8 +1633,9 @@ def _evaluate_penalty_geometry(
         _readonly(root_error),
         _readonly(inverse_error),
         any(support.component_resolution_limited),
+        excess,
     )
-    return SimilarityTransformResult(
+    result = SimilarityTransformResult(
         float(logdet),
         inverse,
         support.Q_plus,
@@ -1548,6 +1651,9 @@ def _evaluate_penalty_geometry(
         _readonly(gradient),
         _readonly(hessian),
     )
+    if excess:
+        raise _AccuracyGoalMissedError(result, excess)
+    return result
 
 
 def _derivative_result(result, penalty_matrices, lambdas) -> SimilarityTransformResult:

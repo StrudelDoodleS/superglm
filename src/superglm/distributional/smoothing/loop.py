@@ -117,12 +117,18 @@ def _trial_laplace_objective(
     layout: StackedLayout,
     lambdas: Mapping[str, float],
     face: PenaltyFace | None,
+    objective_tolerance: float,
     penalty_memo: _PenaltyEvaluationMemo | None = None,
 ) -> float | None:
     """Reject an uncertifiable penalty trial without changing accepted state."""
     try:
         return _laplace_objective(
-            result, layout=layout, lambdas=lambdas, face=face, penalty_memo=penalty_memo
+            result,
+            layout=layout,
+            lambdas=lambdas,
+            face=face,
+            objective_tolerance=objective_tolerance,
+            penalty_memo=penalty_memo,
         )
     except PenaltyNumericalError:
         return None
@@ -273,6 +279,7 @@ def fit_distributional_efs(
             layout=layout,
             lambdas=current_lambdas,
             face=current_face,
+            objective_tolerance=outer_config.objective_tolerance,
         )
     initial_objective = current_objective
     del initial_fit  # current_fit and history own it until their live window ends.
@@ -961,6 +968,7 @@ def fit_distributional_efs(
                             layout=layout,
                             lambdas=current_lambdas,
                             face=None,
+                            objective_tolerance=outer_config.objective_tolerance,
                         )
                         source_fit_index = terminal_fit_index
                         source_fit = current_fit
@@ -1275,6 +1283,7 @@ def fit_distributional_efs(
                         layout=layout,
                         lambdas=trial_lambdas,
                         face=current_face,
+                        objective_tolerance=outer_config.objective_tolerance,
                         penalty_memo=penalty_memo,
                     )
                 if (
@@ -1345,6 +1354,7 @@ def fit_distributional_efs(
                         layout=layout,
                         lambdas=trial_lambdas,
                         face=current_face,
+                        objective_tolerance=outer_config.objective_tolerance,
                         penalty_memo=penalty_memo,
                     )
                 if trial_objective is not None and _within_ceiling(
