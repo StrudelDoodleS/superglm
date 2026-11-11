@@ -108,16 +108,30 @@ def _kept_data_gram(model, indices: NDArray, W: NDArray) -> NDArray | None:
     return 0.5 * (block + block.T)
 
 
+def _term_group_matrices(model, groups) -> list:
+    by_key = {
+        (g.name, g.start, g.end): gm
+        for gm, g in zip(model._dm.group_matrices, model._groups, strict=True)
+    }
+    return [by_key[(g.name, g.start, g.end)] for g in groups]
+
+
+def _term_rmatvec(model, groups, rows: NDArray) -> NDArray:
+    """``X_j' rows`` over the term's fitted columns."""
+    return np.concatenate(
+        [
+            np.asarray(gm.rmatvec(rows), dtype=np.float64)
+            for gm in _term_group_matrices(model, groups)
+        ]
+    )
+
+
 def _term_data_hessian(model, groups, W: NDArray) -> NDArray:
     """``X_j' W X_j`` over the fitted rows at the fit's working weights ``W``, intercept profiled."""
     kept = _kept_data_gram(model, _term_indices(groups), W)
     if kept is not None:
         return kept
-    by_key = {
-        (g.name, g.start, g.end): gm
-        for gm, g in zip(model._dm.group_matrices, model._groups, strict=True)
-    }
-    mats = [by_key[(g.name, g.start, g.end)] for g in groups]
+    mats = _term_group_matrices(model, groups)
     widths = [g.size for g in groups]
     starts = np.concatenate([[0], np.cumsum(widths)])
     gram = np.zeros((int(starts[-1]), int(starts[-1])))
@@ -612,6 +626,10 @@ def _settled_on_rule(spec, kind, beta, grid, share, certified_scale) -> NDArray 
     return beta + (2.0 * violation / ray_slack) * ray if ray_slack > 0.0 else beta
 
 
+class _WorseThanFallbackError(RuntimeError):
+    """The rule's refusal of a candidate that the feasible zero term beats in its merit."""
+
+
 def _validate_repair_for_publication(
     model,
     *,
@@ -752,7 +770,7 @@ def _validate_repair_for_publication(
         candidate_deviance > fallback_deviance + deviance_tolerance
         or candidate_merit > fallback_merit + merit_tolerance
     ):
-        raise RuntimeError(
+        raise _WorseThanFallbackError(
             "Unsafe shape repair rejected before publication: candidate objective is worse "
             "than the feasible zero-term fallback"
         )
@@ -762,6 +780,147 @@ def _validate_repair_for_publication(
     if kind in {"increasing", "decreasing", "convex", "concave"}:
         repair_result.max_violation_after = certificate.violation
     return candidate_beta, candidate_eta, candidate_intercept_shift
+
+
+# A repair's projection is the first step of the constrained penalized fit at the fit's
+# smoothing parameters, and is exact only where the merit is quadratic. Under a log link,
+# where the rule holds the curve far from the fit, the fit's quadratic model can rank a
+# feasible curve the zero term beats in true merit. That step is then continued as
+# iteratively re-weighted cone projection (Liao & Meyer, J. Stat. Softw. 89(5), 2019,
+# section 1.2), the SQP of a convex merit over a polyhedral cone (Masselot et al.,
+# arXiv:2509.18406, 2025, supplement B): at each feasible iterate the merit's Fisher model,
+# intercept profiled, is minimised over the cone by the same repairer, and the next iterate
+# lies on the segment back to the current one, which the cone holds, at Armijo's sufficient
+# decrease by halving (Nocedal & Wright, Numerical Optimization, 2nd ed., 2006, section
+# 3.1). The merit is convex and the zero term is feasible, so the iterates approach a curve
+# no worse than it. A group-lasso selection penalty enters the line search, not the model.
+#: Cone projections a continued repair takes at most; it stops long before where it converges.
+_CONTINUED_STEPS = 50
+#: Armijo's sufficient-decrease fraction, the customary 1e-4 (Nocedal & Wright, section 3.1).
+_ARMIJO = 1e-4
+#: Halvings of one continued step before the continuation stops.
+_STEP_HALVINGS = 20
+
+
+def _continued_repair(
+    model,
+    *,
+    spec,
+    kind,
+    groups,
+    repair_result,
+    grid_weights,
+    n_grid,
+    y,
+    scoring_weights,
+    smooth_penalty_terms,
+    selection_penalty,
+    current_eta,
+):
+    """The refused repair continued towards the constrained penalized fit, or ``None``.
+
+    Starts from the refused candidate and stops where the model's predicted decrease or a
+    step's actual decrease is within the merit's rounding, or a step finds no decrease.
+    ``None`` when no step is taken; the publication rule judges the result as before.
+    """
+    from dataclasses import replace
+
+    from superglm.constraints import shape_sum_tolerance
+    from superglm.distributions import _VARIANCE_FLOOR, clip_mu
+    from superglm.links import stabilize_eta
+
+    current_beta = np.asarray(model.result.beta, dtype=np.float64)
+    base_eta = np.asarray(current_eta, dtype=np.float64)
+    indices = _term_indices(groups)
+    penalty = _term_penalty_block(smooth_penalty_terms, indices, current_beta.size)
+    repairer = _repairer(kind)
+
+    def scored(beta):
+        delta = _shape_term_eta_delta(model, current_beta, beta, groups)
+        eta, _, rounding = _profile_repaired_intercept(
+            model, base_eta + delta, y=y, weights=scoring_weights
+        )
+        _, merit = _shape_candidate_objective(
+            model,
+            beta,
+            eta=eta,
+            y=y,
+            weights=scoring_weights,
+            smooth_penalty_terms=smooth_penalty_terms,
+            selection_penalty=selection_penalty,
+        )
+        return merit, eta, shape_sum_tolerance(abs(merit), len(y)) + rounding
+
+    beta = np.asarray(repair_result.repaired_beta_reparam, dtype=np.float64)
+    merit, eta, tolerance = scored(beta)
+    moved = False
+    for _ in range(_CONTINUED_STEPS):
+        eta_safe = stabilize_eta(eta, model._link)
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            mu = clip_mu(model._link.inverse(eta_safe), model._distribution)
+            variance = np.maximum(
+                np.asarray(model._distribution.variance(mu), dtype=np.float64),
+                _VARIANCE_FLOOR,
+            )
+            dmu_deta = np.asarray(model._link.deriv_inverse(eta_safe), dtype=np.float64)
+            score = scoring_weights * (y - mu) * dmu_deta / variance
+        W = fisher_working_weights(
+            distribution=model._distribution,
+            link=model._link,
+            mu=mu,
+            eta=eta_safe,
+            sample_weight=scoring_weights,
+            dmu_deta=dmu_deta,
+            variance=variance,
+        )
+        term = beta[indices]
+        H = _term_data_hessian(model, groups, W) + penalty
+        # Half the merit's gradient with the intercept profiled: the Schur complement's.
+        profiled_score = _term_rmatvec(model, groups, score) - _term_rmatvec(
+            model, groups, W
+        ) * float(np.sum(score) / np.sum(W))
+        gradient = penalty @ term - profiled_score
+        target = beta.copy()
+        try:
+            target[indices] = term - np.linalg.solve(H, gradient)
+            projected = repairer.repair(
+                spec, target, groups, weights=grid_weights, n_grid=n_grid, metric=H
+            )
+        except (np.linalg.LinAlgError, RuntimeError):
+            break
+        cone_point = np.asarray(projected.repaired_beta_reparam, dtype=np.float64)[indices]
+        step = cone_point - term
+        slope = float(gradient @ step)
+        if not slope < 0.0 or -2.0 * (slope + 0.5 * float(step @ H @ step)) <= tolerance:
+            break
+        length = 1.0
+        for _ in range(_STEP_HALVINGS):
+            trial = beta.copy()
+            # On the segment, exact at its ends.
+            trial[indices] = (1.0 - length) * term + length * cone_point
+            try:
+                trial_merit, trial_eta, trial_tolerance = scored(trial)
+            except RuntimeError:
+                trial_merit = np.inf
+            if trial_merit <= merit + _ARMIJO * length * 2.0 * slope:
+                break
+            length *= 0.5
+        else:
+            break
+        decrease = merit - trial_merit
+        beta, merit, eta, tolerance = trial, trial_merit, trial_eta, trial_tolerance
+        moved = True
+        if decrease <= tolerance:
+            break
+    if not moved:
+        return None
+    curve = np.asarray(spec.transform(repair_result.grid), dtype=np.float64) @ beta[indices]
+    return replace(
+        repair_result,
+        repaired_beta_reparam=beta,
+        repaired_log_effect=curve,
+        projection_residual=float(np.max(np.abs(curve - repair_result.original_log_effect))),
+    )
 
 
 @dataclass
@@ -1078,12 +1237,10 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
         )
         repair_result.feature_name = name
 
-        candidate_beta, current_eta, intercept_shift = _validate_repair_for_publication(
-            work_model,
+        scoring = dict(
             spec=curve_spec,
             kind=kind,
             groups=groups,
-            repair_result=repair_result,
             grid_weights=grid_weights,
             y=np.asarray(y_ref, dtype=np.float64),
             scoring_weights=scoring_weights_arr,
@@ -1091,6 +1248,20 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
             selection_penalty=selection_penalty,
             current_eta=current_eta,
         )
+        try:
+            candidate_beta, current_eta, intercept_shift = _validate_repair_for_publication(
+                work_model, repair_result=repair_result, **scoring
+            )
+        except _WorseThanFallbackError:
+            continued = _continued_repair(
+                work_model, repair_result=repair_result, n_grid=n_grid, **scoring
+            )
+            if continued is None:
+                raise
+            repair_result = continued
+            candidate_beta, current_eta, intercept_shift = _validate_repair_for_publication(
+                work_model, repair_result=repair_result, **scoring
+            )
         # Recorded only if this term's coefficients actually moved.  The early exit
         # above concerns the whole model: once any term binds the loop runs for every
         # pending term, and an already-feasible term comes back unchanged.  Recording it
