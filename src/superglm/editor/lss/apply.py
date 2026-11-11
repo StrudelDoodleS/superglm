@@ -359,6 +359,19 @@ def _projection(
     return shift - float(centre @ coefficients), coefficients / norm
 
 
+# In ``[intercept, coefficients]`` the base reads the intercept and its own
+# columns. None, nothing held, when the edit moves the base or the term has
+# none: every level then follows the nearest curve, and on a design with one
+# coefficient per level a level the edit leaves moves only where a row on its
+# coefficient, read from the moved base, makes it.
+#
+# With the base held, a design that gives each other level its own coefficient,
+# an indicator per level with the base reading none, holds every level the edit
+# leaves: a held level's coefficient is fixed and the free directions are unit
+# vectors, so a row on held coefficients alone is exactly zero along them, and
+# an edited level stops where its rows bind. Any other design, an ordered term's
+# smooth curve through its levels, cannot move one level alone, so only the
+# base is held, by its own row: the intercept moves against the columns.
 def _holds(
     design: NDArray[np.float64],
     target: NDArray[np.float64],
@@ -367,19 +380,7 @@ def _holds(
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]] | None:
     """The fits of a level design that keep the levels an edit leaves where they are: ``start + free z``.
 
-    In ``[intercept, coefficients]`` the base reads the intercept and its own
-    columns. None, nothing held, when the edit moves the base or the term has
-    none: every level then follows the nearest curve, and on a design with one
-    coefficient per level a level the edit leaves moves only where a row on its
-    coefficient, read from the moved base, makes it.
-
-    With the base held, a design that gives each other level its own coefficient,
-    an indicator per level with the base reading none, holds every level the edit
-    leaves: a held level's coefficient is fixed and the free directions are unit
-    vectors, so a row on held coefficients alone is exactly zero along them, and
-    an edited level stops where its rows bind. Any other design, an ordered term's
-    smooth curve through its levels, cannot move one level alone, so only the
-    base is held, by its own row: the intercept moves against the columns.
+    The comment above gives which designs hold which levels, and why.
     """
     if held is None or base is None or not np.all(held[base]):
         return None
@@ -400,6 +401,18 @@ def _holds(
     return start, np.eye(width)[:, ~pinned]
 
 
+# ``design`` and ``A`` carry the intercept as their first column. When the
+# unconstrained nearest fit meets the rows it is the answer, as the QP would
+# return it, so a curve already inside the rules is kept as drawn, and writing
+# it into the model again returns it unchanged. Otherwise the QP finds the
+# nearest fit that meets them, over the rows the free directions move; a row
+# they do not move keeps the slack it has at ``start``, checked with the rest.
+#
+# The QP starts from the fit of ``inside``, a curve that meets the rows, when
+# its coefficients do: the active-set method needs a feasible start, and its
+# own repair of the unconstrained fit need not reach one. The rows that fit
+# breaks are its first working rows; on a capped level design they are the
+# rows the answer binds.
 def _ruled_fit(
     design: NDArray[np.float64],
     A: NDArray[np.float64],
@@ -414,18 +427,7 @@ def _ruled_fit(
 ) -> NDArray[np.float64]:
     """The coefficients ``x`` nearest ``target`` with ``A x >= rows.c``, among ``start + free z``.
 
-    ``design`` and ``A`` carry the intercept as their first column. When the
-    unconstrained nearest fit meets the rows it is the answer, as the QP would
-    return it, so a curve already inside the rules is kept as drawn, and writing
-    it into the model again returns it unchanged. Otherwise the QP finds the
-    nearest fit that meets them, over the rows the free directions move; a row
-    they do not move keeps the slack it has at ``start``, checked with the rest.
-
-    The QP starts from the fit of ``inside``, a curve that meets the rows, when
-    its coefficients do: the active-set method needs a feasible start, and its
-    own repair of the unconstrained fit need not reach one. The rows that fit
-    breaks are its first working rows; on a capped level design they are the
-    rows the answer binds.
+    The comment above gives the solve and its fallbacks.
     """
     reduced = design @ free
     rest = target - design @ start
