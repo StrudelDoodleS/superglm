@@ -2782,3 +2782,12 @@ def test_a_repair_made_under_an_open_editor_session_marks_its_results_stale():
     model.apply_shape_postfit(df)
     assert not in_force.describes(session)
     assert InForce.of(session).describes(session)
+    # the session's curve follows the repair
+    repaired = model.term_inference(
+        "x", with_se=False, n_points=session.n_points, centering=session.centering
+    )
+    np.testing.assert_allclose(
+        session.terms["x"].original_log_effect, repaired.log_relativity, atol=1e-12
+    )
+    if hasattr(InForce, "token"):  # #623's page token changes wherever ``describes`` does
+        assert in_force.token != InForce.of(session).token

@@ -127,6 +127,9 @@ class SessionState:
     redo_stack: list[EditRecord]
     pending: tuple[PendingStep, ...] = ()
     pending_redo: tuple[PendingStep, ...] = ()
+    # The fit ``terms`` were read from (``cv._fit_in_force``), which a refit or a post-fit
+    # repair of ``model`` in place replaces.
+    fit: Any = None
 
 
 @dataclass(frozen=True)

@@ -221,4 +221,5 @@ def open_lss(
         cv_report=cv_report,
         cv=cv,
         cv_data=cv_rows,
+        with_se=with_se,
     )

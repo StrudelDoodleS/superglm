@@ -36,7 +36,7 @@ from superglm.editor.controls import (
     ordered_spline_geometry,
 )
 from superglm.editor.controls import control_points as _control_points
-from superglm.editor.cv import check_cv_data
+from superglm.editor.cv import _fit_in_force, check_cv_data
 from superglm.editor.errors import (
     EditorClientError,
     EditorIndexError,
@@ -173,6 +173,47 @@ def _warn_refit_with(name: str, replacement: str) -> None:
     )
 
 
+def _moved_curve(stale: EditableTerm, fresh: EditableTerm) -> tuple[EditableTerm, NDArray] | None:
+    """``stale``'s edits moved onto ``fresh``'s curve, and the change of curve on its grid.
+
+    ``fresh`` is the same term read from the model's new fit, in the model's level order;
+    the result keeps ``stale``'s display order. ``None`` when the grid itself changed.
+    """
+    if stale.kind != fresh.kind or stale.size != fresh.size:
+        return None
+    if stale.levels is None:
+        same_grid = fresh.levels is None and (
+            stale.x is None if fresh.x is None else np.array_equal(stale.x, fresh.x)
+        )
+        if not same_grid:
+            return None
+        order = np.arange(stale.size, dtype=np.intp)
+    else:
+        if fresh.levels is None or sorted(map(str, stale.levels)) != sorted(map(str, fresh.levels)):
+            return None
+        position = {str(level): i for i, level in enumerate(fresh.levels)}
+        order = np.array([position[str(level)] for level in stale.levels], dtype=np.intp)
+    original = np.asarray(fresh.original_log_effect, dtype=np.float64)[order]
+    change = original - stale.original_log_effect
+    moved = stale.copy()
+    moved.original_log_effect = original
+    moved.edited_log_effect = original + (stale.edited_log_effect - stale.original_log_effect)
+    for band in ("ci_lower_log_effect", "ci_upper_log_effect"):
+        values = getattr(fresh, band)
+        setattr(moved, band, None if values is None else np.asarray(values)[order])
+    moved.metadata = dict(fresh.metadata)
+    native = moved.metadata.get("native_original_log_effect")
+    if native is not None:
+        moved.metadata["native_original_log_effect"] = np.asarray(native)[order].tolist()
+    return moved, change
+
+
+def _moved_record(record: EditRecord, moved: dict[str, tuple[EditableTerm, NDArray]]) -> EditRecord:
+    """An undo record of a term whose curve moved, with the same change on its new curve."""
+    change = moved[record.term][1][record.indices] if record.term in moved else 0.0
+    return replace(record, before=record.before + change, after=record.after + change)
+
+
 class EditorSession:
     """Stateful editor for fitted 1D main effects.
 
@@ -192,12 +233,14 @@ class EditorSession:
         cv_report: Any = None,
         cv: CrossValidationResult | None = None,
         cv_data: EvaluationDataset | None = None,
+        with_se: bool = True,
     ):
         self.model = model
         self.reference_model = model if reference_model is None else reference_model
         self.terms = terms
         self.n_points = int(n_points)
         self.centering = centering
+        self.with_se = bool(with_se)
         self._evaluation_data = dict(evaluation_data or {})
         self.cv_report = cv_report
         if cv is not None and not isinstance(cv, CrossValidationResult):
@@ -318,7 +361,50 @@ class EditorSession:
             cv_report=cv_report,
             cv=cv,
             cv_data=cv_rows,
+            with_se=with_se,
         )
+
+    @property
+    def terms(self) -> dict[str, EditableTerm]:
+        """The editable terms, read again when the model's fit was replaced in place."""
+        self._follow_fit_in_place()
+        return self._terms
+
+    @terms.setter
+    def terms(self, terms: dict[str, EditableTerm]) -> None:
+        self._terms = terms
+        self._terms_fit = _fit_in_force(self.model)
+
+    def _follow_fit_in_place(self) -> None:
+        """Read the terms again if a refit or ``apply_shape_postfit`` replaced the model's fit.
+
+        Both act on the model object the session holds, so the session learns of them only
+        here (``cv._fit_in_force``). Each term's edits carry over as changes to its new curve,
+        their undo records with them, and the model revision moves on. When a term's grid
+        changed too, nothing carries over: the session starts again on the model as
+        ``replace_in_force_model`` does.
+        """
+        fit = _fit_in_force(self.model)
+        if fit is self._terms_fit:
+            return
+        stale = self._terms
+        fresh = self._editable_terms_from_model(
+            self.model,
+            list(stale),
+            n_points=self.n_points,
+            centering=self.centering,
+            with_se=self.with_se,
+            train_data=self._evaluation_data.get("train"),
+        )
+        moved = {name: _moved_curve(stale[name], fresh[name]) for name in stale}
+        self._terms_fit = fit
+        if any(move is None for move in moved.values()):
+            self.replace_in_force_model(self.model, with_se=self.with_se)
+            return
+        self._terms = {name: term for name, (term, _) in moved.items()}
+        self.history = [_moved_record(record, moved) for record in self.history]
+        self.redo_stack = [_moved_record(record, moved) for record in self.redo_stack]
+        self._advance_model_revision()
 
     @staticmethod
     def _editable_terms_from_model(
@@ -411,11 +497,13 @@ class EditorSession:
     @property
     def model_revision(self) -> int:
         """Semantic revision for prediction- or fit-evidence-changing state."""
+        self._follow_fit_in_place()
         return self._model_revision
 
     @property
     def edit_epoch(self) -> int:
         """Monotonic invalidation token for the current edited-model materialization."""
+        self._follow_fit_in_place()
         return self._edit_epoch
 
     def _advance_model_revision(self) -> None:
@@ -1579,6 +1667,7 @@ class EditorSession:
             redo_stack=list(self.redo_stack),
             pending=tuple(self.pending),
             pending_redo=tuple(self.pending_redo),
+            fit=self._terms_fit,
         )
 
     def _step_across(self, source: list[StructuralStep], target: list[StructuralStep]) -> None:
@@ -1587,6 +1676,7 @@ class EditorSession:
         target.append(replace(step, state=self._capture_state()))
         self.model = step.state.model
         self.terms = step.state.terms
+        self._terms_fit = step.state.fit
         self._selection = step.state.selection
         self._level_orders = step.state.level_orders
         self.history = step.state.history
@@ -1622,7 +1712,7 @@ class EditorSession:
         new_selection = {name: np.array([], dtype=np.intp) for name in new_terms}
 
         old_model = self.model
-        old_terms = self.terms
+        old_terms, old_terms_fit = self._terms, self._terms_fit
         old_selection = self._selection
         old_history = self.history
         old_redo_stack = self.redo_stack
@@ -1641,7 +1731,7 @@ class EditorSession:
             self._reapply_level_orders()
         except Exception:
             self.model = old_model
-            self.terms = old_terms
+            self._terms, self._terms_fit = old_terms, old_terms_fit
             self._selection = old_selection
             self.history = old_history
             self.redo_stack = old_redo_stack

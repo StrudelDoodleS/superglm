@@ -39,16 +39,21 @@ REPAIR_NEEDS_THE_ROWS = (
     "A post-fit shape repair weights its projection by the training rows and re-estimates the "
     "intercept on them; refit with retain_rows=True before calling apply_shape_postfit()."
 )
-# The search for the re-estimated intercept starts within this many link-scale units of the
-# held one, or within four times the largest change the repairs made, whichever is wider, and
-# widens by ``_INTERCEPT_GROWTH`` until the optimum lies inside it, at most
-# ``_INTERCEPT_WIDENINGS`` times: bracket, then Brent (Brent, *Algorithms for Minimization
-# without Derivatives*, 1973, ch. 5; Press et al., *Numerical Recipes*, 3rd ed., section 10.1).
-_INTERCEPT_SEARCH = 1.0
+# The search for the re-estimated intercept runs in units of the parameter's own scale on its
+# link (``_intercept_scale``), so that the response's units do not change it. It starts within
+# ``_INTERCEPT_SEARCH`` of those units of the held intercept and widens by
+# ``_INTERCEPT_GROWTH`` until the optimum lies inside it, at most ``_INTERCEPT_WIDENINGS``
+# times: bracket, then Brent (Brent, *Algorithms for Minimization without Derivatives*, 1973,
+# ch. 5; Press et al., *Numerical Recipes*, 3rd ed., section 10.1).
+_INTERCEPT_SEARCH = 4.0
 _INTERCEPT_GROWTH = 8.0
 _INTERCEPT_WIDENINGS = 6
 # An optimum this close to the edge of the search, relative to its half-width, is on the edge.
 _INTERCEPT_EDGE = 1.0e-3
+_UNIT_ROUNDOFF = np.finfo(np.float64).eps / 2.0
+# A smooth minimum is located to about sqrt(u) of its scale, since the objective is flat to
+# rounding within that distance of it (Press et al., section 10.1); Brent stops there.
+_INTERCEPT_XATOL = float(np.sqrt(_UNIT_ROUNDOFF))
 
 
 class PostfitState(Enum):
@@ -243,14 +248,18 @@ def _profiled_merit(
     held = negative_log_likelihood(0.0)
     if state.intercept_index is None:
         return 0.0, held + penalty, invalid_rows(0.0)
-    bound = max(_INTERCEPT_SEARCH, 4.0 * reach)
+    unit = _intercept_scale(eta[:, column], reach)
+    bound = _INTERCEPT_SEARCH
     for _ in range(_INTERCEPT_WIDENINGS + 1):
-        search = minimize_scalar(
-            negative_log_likelihood,
-            bounds=(-bound, bound),
-            method="bounded",
-            options={"xatol": 1e-10},
-        )
+        # Where rows are invalid the objective is infinite, and Brent's parabolic step forms
+        # inf - inf before it falls back to a golden-section step.
+        with np.errstate(invalid="ignore"):
+            search = minimize_scalar(
+                lambda t: negative_log_likelihood(unit * t),
+                bounds=(-bound, bound),
+                method="bounded",
+                options={"xatol": _INTERCEPT_XATOL},
+            )
         enclosed = abs(float(search.x)) < (1.0 - _INTERCEPT_EDGE) * bound
         if enclosed or not np.isfinite(search.fun):
             break
@@ -258,15 +267,61 @@ def _profiled_merit(
     else:
         raise RuntimeError(
             f"Shape repair rejected before publication: the {parameter} intercept could not "
-            f"be re-estimated, since the likelihood still improves at a shift of {searched:.3g} "
-            "on its link scale. Check the model's specification, or fit the rule instead "
-            "(Constraint.fit)."
+            "be re-estimated, since the likelihood still improves at a shift of "
+            f"{unit * searched:.3g} on its link scale. Check the model's specification, or fit "
+            "the rule instead (Constraint.fit)."
         )
-    # Two sums of one size: the rounding either can carry (Higham, section 3.1).
-    tolerance = 2.0 * len(rows.response) * np.finfo(np.float64).eps * abs(held)
-    if not np.isfinite(search.fun) or not search.fun < held - tolerance:
+    if not np.isfinite(search.fun):
         return 0.0, held + penalty, invalid_rows(0.0)
-    return float(search.x), float(search.fun) + penalty, 0
+    # Where the held intercept leaves rows invalid, any finite optimum is the re-estimate.
+    # Otherwise two sums of one size: the rounding either can carry (Higham, section 3.1).
+    tolerance = 4.0 * len(rows.response) * _UNIT_ROUNDOFF * abs(held)
+    if np.isfinite(held) and not search.fun < held - tolerance:
+        return 0.0, held + penalty, 0
+    return unit * float(search.x), float(search.fun) + penalty, 0
+
+
+def _intercept_scale(eta: NDArray[np.float64], reach: float) -> float:
+    """The parameter's own scale on its link: how far its linear predictor ranges over the
+    rows, or the repair's largest change, whichever is wider.
+
+    Both are differences on the link, so a log link's scale does not depend on the
+    response's units, and an identity link's scales with them. A parameter that is the
+    same on every row, with no change, falls back to the size of its value, then to 1.
+    """
+    finite = eta[np.isfinite(eta)]
+    spread = float(np.ptp(finite)) if finite.size else 0.0
+    for scale in (max(spread, reach), float(np.max(np.abs(finite), initial=0.0))):
+        if np.isfinite(scale) and scale > 0.0:
+            return scale
+    return 1.0
+
+
+def _settled(
+    term: PostfitTerm, repair: Any, fitted_coefficients: NDArray[np.float64]
+) -> NDArray[np.float64]:
+    """The repaired coefficients, certified as ``postfit_status`` reads them, or a refusal.
+
+    The projection certifies its result at the scale of the curve it repaired, while the
+    state of the rule is read at the scale of the repaired curve alone. A projection onto the
+    cone's apex can come back as coefficients that are zero only to the first scale's rounding,
+    and would read as broken; it is the zero curve, which obeys every rule, so it is published
+    as one. Any other result that does not obey its rule at the second scale is refused.
+    """
+    from superglm.constraints import shape_constraint_is_roundoff_feasible, shape_slack_tolerance
+
+    repaired = np.array(repair.repaired_beta_reparam[term.columns], dtype=np.float64)
+    apex = shape_slack_tolerance(repaired, float(np.linalg.norm(fitted_coefficients)))
+    if float(np.linalg.norm(repaired)) <= apex:
+        repaired = np.zeros_like(repaired)
+    # ``postfit_term_feasible``'s own check, on the term's block.
+    if not shape_constraint_is_roundoff_feasible(term.curve_spec, repaired, term.kind):
+        raise RuntimeError(
+            f"Shape repair of {term.term} rejected before publication: the projection could "
+            "not be certified to obey the rule at its own scale. Fit the rule instead "
+            f"(Constraint.fit.{term.kind}), or drop the term."
+        )
+    return repaired
 
 
 def repaired_model(
@@ -315,7 +370,7 @@ def repaired_model(
             weights=_grid_weights(term.curve_spec, x, weights[on_axis], n_grid),
             n_grid=n_grid,
         )
-        repaired = np.asarray(repair.repaired_beta_reparam[term.columns], dtype=np.float64)
+        repaired = _settled(term, repair, coefficients[term.columns])
         if np.array_equal(repaired, coefficients[term.columns]):
             continue
         candidate = coefficients.copy()
