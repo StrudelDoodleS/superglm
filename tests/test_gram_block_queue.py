@@ -388,6 +388,7 @@ def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
     from superglm.distributional.kernels import (
         _declared,
         _generalized_gamma_numba,
+        _negative_binomial_crps,
         _negative_binomial_numba,
         _tweedie_numba,
     )
@@ -410,6 +411,7 @@ def test_only_the_pooled_block_kernels_release_the_gil_and_none_is_parallel():
         + _group_matrix_support._POOLED_SUPPORT_KERNELS
         + _tweedie_numba._POOLED_ROW_KERNELS
         + _negative_binomial_numba._POOLED_ROW_KERNELS
+        + _negative_binomial_crps._POOLED_ROW_KERNELS
         + _generalized_gamma_numba._POOLED_ROW_KERNELS
         + tuple(kernel for module in declared_modules for kernel in module._POOLED_ROW_KERNELS)
         + _declared._POOLED_ROW_KERNELS

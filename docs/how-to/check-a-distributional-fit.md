@@ -57,7 +57,7 @@ fact decides how every weight on this page is read; the
 Methods that need a fitted CDF or quantile refuse a family that does not
 implement `DistributionFunctionFamily`; predictive simulation also draws
 through that quantile. In particular, `NegativeBinomialLS` supports log
-scores and parameter-based inference but not distributional residuals,
+scores, the CRPS and parameter-based inference but not distributional residuals,
 calibration, tail surfaces, or predictive simulation. Check the family
 guide or the method's documented requirement before choosing a diagnostic.
 ```
@@ -479,8 +479,9 @@ Pass the result to `superglm.editor.edit(model, cv=folds)` to see it on the
 Cross-validation tab, with each term drawn by fold.
 
 The continuous ranked probability score is available in closed form for the
-Gaussian, gamma and log-normal families (the catalogue of Jordan, Krüger and
-Lerch 2019) and by quantile-score integration for other supported families.
+Gaussian, gamma, log-normal, Tweedie and negative binomial families (the
+catalogue of Jordan, Krüger and Lerch 2019; for the negative binomial, Wei and
+Held 2014) and by quantile-score integration for other supported families.
 Numeric integration requires `DistributionFunctionFamily` plus an established
 bound or correction for its omitted tails. Finite `VarianceFamily` values give
 such a bound; prior-weighted rows require the corresponding
@@ -489,8 +490,10 @@ implements explicit tail corrections for `GeneralizedParetoLSS` and negative-Q
 `GeneralizedGammaLSS`. Infinite variance alone does not imply infinite CRPS.
 A CDF/quantile-only law without an applicable tail bound raises
 `NotImplementedError`: a finite grid cannot determine the existence or size of
-an unseen tail. A family without a CDF and quantile, including
-`NegativeBinomialLS`, supports log score only. Every available score follows the
+an unseen tail. A family without a CDF and quantile has no numeric
+CRPS: `NegativeBinomialLS` has its closed form but no threshold-weighted CRPS.
+Its CRPS refuses a response of 2**53 or more, and a law whose size is below
+about 1e-154 of its mean, which binary64 cannot score. Every available score follows the
 fitted weight contract. Under prior semantics the weight changes the row's
 predictive law and comparisons aggregate the retained physical rows. Under
 frequency semantics the predictive law is the unit-weight law and `w` is

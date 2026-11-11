@@ -37,8 +37,8 @@ export function renderReport(payload, { reportTitle, reportStatus, reportFrame }
 
 // A SuperGLM report shows the fixed metric columns; a model whose report
 // names other metrics (a SuperLSS scores by log score and CRPS) shows those,
-// less any a family cannot compute for any of its splits (the negative
-// binomial has no CRPS), as the Cross-validation tab leaves it out.
+// less any a family cannot compute for any of its splits (a family with
+// no CRPS), as the Cross-validation tab leaves it out.
 function metricColumns(labels, splits = []) {
   const named = Object.keys(labels);
   if (!named.length || named.some((metric) => reportMetricKeys.includes(metric))) return reportMetricKeys;

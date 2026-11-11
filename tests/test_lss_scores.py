@@ -8,15 +8,18 @@ representations of the CRPS, so agreement is evidence and not a tautology.
 
 from __future__ import annotations
 
+import itertools
 import json
 from fractions import Fraction
 from types import SimpleNamespace
 
+import mpmath as mp
 import numpy as np
 import pandas as pd
 import pytest
 from scipy import integrate, special, stats
 
+import superglm.distributional.checks.scores as scores_module
 from superglm import Categorical, Spline
 from superglm.distributional import Predictor
 from superglm.distributional.checks.compare import (
@@ -41,6 +44,7 @@ from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
 from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
 from superglm.distributional.families.log_normal import LogNormalLS
+from superglm.distributional.families.negative_binomial import NegativeBinomialLS
 from superglm.distributional.families.tweedie import TweedieLSS
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.model import DenseDistributionalModel
@@ -48,6 +52,7 @@ from superglm.distributional.weights import (
     UnsupportedLikelihoodContractError,
     resolve_likelihood_weights,
 )
+from tests._negative_binomial_crps_oracle import nb2_crps, nb2_crps_by_quadrature
 from tests.bound_predictor_fixtures import model_from_templates
 
 _GRID = 96
@@ -1665,3 +1670,229 @@ def test_tweedie_crps_at_zero_does_not_cancel_when_a_claim_is_rare():
     value = crps_closed_form(TweedieLSS(), np.array([0.0, 50.0, 100.0]), law)
     # Below every likely claim F is one to 1e-18, so the score grows by y from its value at zero.
     np.testing.assert_allclose(value, [50.0, 100.0, 150.0], rtol=1e-9)
+
+
+# --------------------------------------------------------------------------
+# Negative binomial: Wei and Held (2014), with the score at zero by quadrature
+# --------------------------------------------------------------------------
+
+#: Means and sizes from rare claims to strong overdispersion and the Poisson
+#: limit, each scored at zero, inside the first cell, on the lattice and in the tail.
+_NB_LAWS = [
+    (mean, size)
+    for mean in (1e-9, 0.003, 0.08, 0.7, 4.0, 30.0)
+    for size in (0.05, 0.6, 1.0, 2.5, 40.0, 1e9)
+]
+
+
+@pytest.mark.parametrize("mean,size", _NB_LAWS)
+def test_negative_binomial_closed_form_crps_matches_the_lattice_sum(mean, size) -> None:
+    # 70 is past the pmf sum, so the partial-moment shortfall is checked as well.
+    responses = sorted(
+        {0.0, 0.4, 1.0, 2.0, 3.7, 70.0, float(round(mean)), float(round(3 * mean + 5))}
+    )
+    theta = np.tile([mean, size], (len(responses), 1))
+    closed = crps_closed_form(NegativeBinomialLS(), np.array(responses), theta)
+    expected = [nb2_crps(mean, size, y) for y in responses]
+    np.testing.assert_allclose(closed, expected, rtol=1e-12, atol=0)
+
+
+def test_negative_binomial_crps_at_zero_does_not_cancel_when_a_claim_is_rare() -> None:
+    """At ``mean = 1e-9`` the score at zero is ``P(Y > 0)^2``, about ``1e-18``.
+
+    The hypergeometric form takes it as a difference of two terms of order ``1e-9``.
+    """
+    theta = np.array([[1e-9, 1.5], [1e-9, 0.05]])
+    closed = crps_closed_form(NegativeBinomialLS(), np.zeros(2), theta)
+    np.testing.assert_allclose(closed, [nb2_crps(*law, 0.0) for law in theta], rtol=1e-12)
+
+
+def test_negative_binomial_crps_below_the_support_grows_by_the_distance() -> None:
+    family, theta = NegativeBinomialLS(), np.array([[0.7, 2.5]] * 2)
+    below, zero = crps_closed_form(family, np.array([-2.0, 0.0]), theta)
+    assert below == pytest.approx(zero + 2.0, rel=1e-15)
+
+
+def test_the_quadrature_oracle_agrees_with_the_lattice_sum() -> None:
+    """The oracle for laws too wide to sum, checked where the lattice still runs."""
+    for mean, size, y in ((2.0, 0.5, 70.0), (30.0, 1e9, 70.0), (4.0, 2.5, 3.7)):
+        assert nb2_crps_by_quadrature(mean, size, y) == pytest.approx(
+            nb2_crps(mean, size, y), rel=1e-15
+        )
+
+
+@pytest.mark.parametrize(
+    "mean,size",
+    [(100.0, 1e-15), (1.0, 1e-16), (1.0, 1e-25), (0.07, 1e-18), (1e15, 1e-16), (1e12, 1e-6)],
+)
+def test_negative_binomial_crps_keeps_its_sign_when_the_size_is_tiny(mean, size) -> None:
+    """Past the pmf sum ``mean / (mean + size)`` rounds to one; the score is still about ``y``.
+
+    Almost all the mass is at zero, so ``CRPS(y)`` is close to ``y`` on both
+    sides of the 64 cells the pmf sum covers.  At a mean of ``1e12`` or more
+    the partial moment's recurrent form would cancel terms of order the mean,
+    so these rows take ``y F(k) - mean G(k - 1)``.
+    """
+    responses = np.array([63.0, 64.0, 70.0, 500.0])
+    theta = np.tile([mean, size], (len(responses), 1))
+    closed = crps_closed_form(NegativeBinomialLS(), responses, theta)
+    expected = [nb2_crps_by_quadrature(mean, size, y) for y in responses]
+    np.testing.assert_allclose(closed, expected, rtol=1e-13, atol=0)
+
+
+@pytest.mark.parametrize(
+    "mean,size,y,rtol",
+    [
+        (1e15, 1e16, 1e15, 1e-12),
+        (4e15, 4e15, 4e15, 1e-12),
+        (1e6, 1e3, 1e6, 1e-12),
+        # Off the centre the score takes F(k) from scipy's incomplete beta, which
+        # at these parameters is accurate to about 1e-7 relative, by platform.
+        (1e9, 1.0, 1.2e9, 1e-6),
+        (1e10, 1e20, 1e10 + 3e5, 1e-6),
+        (3e12, 5e4, 2.5e12, 1e-6),
+    ],
+)
+def test_negative_binomial_crps_is_accurate_at_large_central_counts(mean, size, y, rtol) -> None:
+    """A huge count's partial moment, ``E[(y - Y)^+]``, with no difference of probabilities.
+
+    ``y F(k) - mean G(k - 1)`` with separately evaluated incomplete betas lost
+    a third of the score at ``(1e15, 1e16)`` and was NaN at ``(4e15, 4e15)``.
+    The score is of order the standard deviation, so ``E|Y - Y'| / 2`` is
+    integrated directly rather than taken from ``CRPS(0)``, which is of order
+    the mean.
+    """
+    closed = crps_closed_form(NegativeBinomialLS(), np.array([y]), np.array([[mean, size]]))
+    np.testing.assert_allclose(closed, [nb2_crps_by_quadrature(mean, size, y)], rtol=rtol)
+
+
+def test_negative_binomial_crps_refuses_a_response_past_the_count_range() -> None:
+    with pytest.raises(ValueError, match="below 2\\*\\*53"):
+        crps_closed_form(NegativeBinomialLS(), np.array([2.0**54]), np.array([[3.0, 2.0]]))
+
+
+@pytest.mark.parametrize(
+    "responses,named",
+    [([0.0, 1.0, 2.0**54], "[2]"), ([70.0, 0.0, 3.0, 2.0**53 + 2.0], "[3]")],
+)
+def test_negative_binomial_crps_count_refusal_names_the_callers_rows(responses, named) -> None:
+    """Rows below 64 cells come first, so a position among the far rows is not the row."""
+    theta = np.tile([3.0, 2.0], (len(responses), 1))
+    with pytest.raises(ValueError, match=f"rows \\{named[:-1]}\\] are not"):
+        crps_closed_form(NegativeBinomialLS(), np.array(responses), theta)
+
+
+def test_negative_binomial_crps_beta_refusal_names_the_callers_rows(monkeypatch) -> None:
+    """A non-finite incomplete beta, forced here, is refused at the caller's row."""
+    nan_beta = SimpleNamespace(betainc=lambda *args: np.full(np.broadcast(*args).shape, np.nan))
+    monkeypatch.setattr(scores_module, "special", nan_beta)
+    theta = np.tile([3.0, 2.0], (3, 1))
+    with pytest.raises(ValueError, match="response of 64 or more \\(rows \\[2\\]\\)"):
+        crps_closed_form(NegativeBinomialLS(), np.array([0.0, 1.0, 70.0]), theta)
+
+
+def _poisson_limit_crps(mean: float, size: float, y: float) -> float:
+    """``CRPS(NB2(mean, size), y)`` as ``sum`` over unit cells of ``(F - 1{z >= y})^2``.
+
+    Each cell's term is nonnegative and ``P(Y > k)`` is summed from the pmf, so
+    nothing cancels at ``mean / (mean + size)`` far below binary64's range.
+    """
+    with mp.workdps(60):
+        mu, theta, y = mp.mpf(mean), mp.mpf(size), mp.mpf(y)
+        pmf = [mp.exp(-theta * mp.log1p(mu / theta))]
+        for k in range(int(mp.floor(y)) + 80):
+            pmf.append(pmf[-1] * mu * (k + theta) / ((mu + theta) * (k + 1)))
+        survival = list(itertools.accumulate(reversed(pmf[1:])))[::-1]  # P(Y > k)
+        score = mp.mpf(0)
+        for k, tail in enumerate(survival):
+            covered = min(max(y - k, 0), 1)  # the share of [k, k + 1) below y
+            score += (1 - tail) ** 2 * covered + tail**2 * (1 - covered)
+        return float(score)
+
+
+def test_negative_binomial_crps_keeps_the_poisson_limit_scale() -> None:
+    """At a size ``1e308``, ``mean / (mean + size)`` is subnormal or zero.
+
+    Formed alone it scored ``(1e-18, 1e308)`` at zero as 0, not about
+    ``1e-36``, and ``(1e-15, 1e308)`` 1.14% low.
+    """
+    theta = np.array([[1e-18, 1e308], [1e-15, 1e308]])
+    closed = crps_closed_form(NegativeBinomialLS(), np.zeros(2), theta)
+    expected = [_poisson_limit_crps(*law, 0.0) for law in theta]
+    np.testing.assert_allclose(closed, expected, rtol=1e-13, atol=0)
+
+
+@pytest.mark.parametrize("mean", [1e-18, 1e-15, 1e-6, 0.5, 3.0])
+def test_negative_binomial_crps_is_continuous_across_the_ratio_underflow(mean) -> None:
+    """Sizes from ``2**990`` to ``2**1080`` times the mean, across the point where
+    ``mean / (mean + size)`` leaves the normal range and then rounds to zero.
+
+    The responses stay inside the 64 cells of the pmf sum: past them, scipy's
+    ``betainc`` is NaN at sizes above about ``1e200`` and the row is refused.
+    """
+    with np.errstate(over="ignore"):
+        sizes = np.ldexp(mean, [990, 1010, 1020, 1023, 1030, 1050, 1074, 1080])
+    laws = [(mean, float(size)) for size in [*sizes, 1e308] if size < 1.7e308]
+    responses = [0.0, 0.5, 1.0, 2.0, 3.5, 63.5]
+    theta = np.array([law for law in laws for _ in responses])
+    y = np.tile(responses, len(laws))
+    closed = crps_closed_form(NegativeBinomialLS(), y, theta)
+    expected = [_poisson_limit_crps(m, s, v) for (m, s), v in zip(theta, y, strict=True)]
+    np.testing.assert_allclose(closed, expected, rtol=1e-13, atol=0)
+
+
+def test_negative_binomial_crps_refuses_a_law_binary64_cannot_score() -> None:
+    """Mean and size inside the family's range whose quadrature leaves binary64's.
+
+    At ``size / mean = 1e-170`` the score at zero is about ``2 log(2) size mean``,
+    ``1.4e-90``, and the quadrature's ``rho`` has underflowed: unguarded, it
+    returns ``1.45e25``.
+    """
+    with pytest.raises(ValueError, match="not finite in binary64 at rows \\[1\\]"):
+        crps_closed_form(NegativeBinomialLS(), np.zeros(2), np.array([[2.0, 0.5], [1e40, 1e-130]]))
+
+
+def _nb_rows(seed: int, weight_semantics: str):
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(-1.0, 1.0, 300)
+    # Powers of two, and whole numbers as frequency weights must be.
+    weight = rng.choice(
+        [0.5, 1.0, 2.0, 4.0] if weight_semantics == "prior" else [1.0, 2.0, 3.0], 300
+    )
+    mean, size = np.exp(0.2 + 0.6 * x), 1.5
+    scale = weight if weight_semantics == "prior" else np.ones(300)
+    # A prior row's count w y is NB2(w mean, w size); y = count / w is exact for these w.
+    count = rng.negative_binomial(scale * size, size / (size + mean))
+    y = count / scale
+    model = model_from_templates(
+        family=NegativeBinomialLS(),
+        weight_semantics=weight_semantics,
+        predictors=[Predictor("mean", {"x": Spline("cr", k=6)}), Predictor("theta", {})],
+    ).fit_reml(pd.DataFrame({"x": x}), y, sample_weight=weight)
+    return model, pd.DataFrame({"x": x}), y, weight
+
+
+def test_negative_binomial_crps_prior_weights_select_the_prior_weighted_law() -> None:
+    model, X, y, weight = _nb_rows(20261111, "prior")
+    fitted, frame, response, prior = model._require_fitted(), X.iloc[:12], y[:12], weight[:12]
+    closed = crps(fitted, frame, response, sample_weight=prior)
+
+    theta = np.asarray(fitted.predict_parameters(frame), dtype=np.float64)
+    # The prior law is that of C / w with C ~ NB2(w mean, w size): its CDF is a step
+    # of height P(C = k) at k / w, so its CRPS is the count's CRPS at w y over w.
+    expected = [
+        nb2_crps(w * mean, w * size, w * value) / w
+        for (mean, size), value, w in zip(theta, response, prior, strict=True)
+    ]
+    np.testing.assert_allclose(closed, expected, rtol=1e-12)
+    unit = crps(fitted, frame, response)
+    assert np.max(np.abs(closed - unit) / unit) > 0.05  # the weights are not ignored
+
+
+def test_negative_binomial_crps_frequency_weights_replicate_the_unit_score() -> None:
+    model, X, y, weight = _nb_rows(20261112, "frequency")
+    fitted, frame, response = model._require_fitted(), X.iloc[:12], y[:12]
+    weighted = crps(fitted, frame, response, sample_weight=weight[:12])
+    np.testing.assert_allclose(weighted, weight[:12] * crps(fitted, frame, response), rtol=1e-15)
+    table = model.scores(frame, response, which=("crps",), sample_weight=weight[:12])
+    np.testing.assert_array_equal(table["crps"].to_numpy(), weighted)

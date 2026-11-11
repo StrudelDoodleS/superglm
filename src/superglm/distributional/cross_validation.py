@@ -22,6 +22,7 @@ from superglm.distributional.checks.scores import (
     _retained_crps,
     _retained_log_score,
     _scoring_rows,
+    has_closed_form_crps,
 )
 from superglm.distributional.family import DistributionFunctionFamily
 from superglm.distributional.offsets import (
@@ -56,8 +57,9 @@ def _nll_parts(model, X, y, *, sample_weight=None, offset=None) -> tuple[float, 
 def _crps_parts(model, X, y, *, sample_weight=None, offset=None) -> tuple[float, float]:
     """Total CRPS and the rows' likelihood size.
 
-    NaN for a family with no distribution function, or where the numeric route
-    cannot resolve the integral, so the fold keeps its other scores. The mean CRPS
+    NaN for a family with neither a closed form nor a distribution function, or
+    where the numeric route cannot resolve the integral, so the fold keeps its
+    other scores. The mean CRPS
     then leaves that fold out, so the reason is logged. A prediction that fails is
     not one of these: it fails the fold.
     """
@@ -191,14 +193,12 @@ class LSSFolds:
 
     @property
     def default_scoring(self) -> tuple[str, ...]:
-        """Every built-in score the family has: a CRPS needs its distribution function."""
+        """Every built-in score the family has: a CRPS needs a closed form or a CDF."""
         if self.prediction_shape:
             return ("nll",)
-        return tuple(
-            name
-            for name in _SCORERS
-            if name != "crps" or isinstance(self.model.family, DistributionFunctionFamily)
-        )
+        family = self.model.family
+        has_crps = has_closed_form_crps(family) or isinstance(family, DistributionFunctionFamily)
+        return tuple(name for name in _SCORERS if name != "crps" or has_crps)
 
     @property
     def prediction_shape(self) -> tuple[int, ...]:

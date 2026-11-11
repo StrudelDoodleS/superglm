@@ -148,11 +148,13 @@ def test_prior_weighted_split_is_averaged_over_rows_not_weight():
     )
 
 
-def test_a_family_without_a_distribution_function_has_no_crps():
+def test_a_negative_binomial_split_is_scored_by_its_closed_form_crps():
     case = nb_case()
     split = dataclasses.replace(holdout_rows(case, 100), sample_weight=None)
     got = lss_dataset_metrics(case.model, split)
-    assert np.isnan(got["crps"])
+    scores = case.model.scores(split.X, split.y, which=("crps",), offsets=split.offset)["crps"]
+    assert np.all(scores > 0.0)
+    assert got["crps"] == pytest.approx(np.mean(scores), rel=64 * EPS)
     assert np.isfinite(got["log_score"]) and np.isfinite(got["actual_expected"])
 
 

@@ -451,6 +451,9 @@ def warmup() -> None:
     from superglm._tweedie_series import warmup as _warmup_tweedie_series
     from superglm.distributional.kernels._declared import _warmup_rows as _warmup_declared_rows
     from superglm.distributional.kernels._declared_bounds import _warmup_declared_bounds
+    from superglm.distributional.kernels._negative_binomial_crps import (
+        _warmup_negative_binomial_crps,
+    )
     from superglm.distributional.kernels.gamma import _warmup_gamma
     from superglm.distributional.kernels.generalized_gamma import _warmup_generalized_gamma
     from superglm.distributional.kernels.negative_binomial import _warmup_negative_binomial
@@ -484,6 +487,7 @@ def warmup() -> None:
     _warmup_declared_rows()
     _warmup_negative_binomial()
     _warmup_nb2_deviance()
+    _warmup_negative_binomial_crps()
     _warmup_scalar_observations()
     _warmup_dirichlet()
     _warmup_generalized_gamma()

@@ -6,7 +6,8 @@ global one, in response units. Closed forms follow Jordan, Krueger and Lerch
 (2019), *J. Stat. Softw.* 90(12) (Gaussian: Gneiting and Raftery 2007; gamma:
 Scheuerer and Moeller 2015; log-normal: Baran and Lerch 2015; Tweedie: the
 kernel form of Gneiting and Raftery 2007, eq. 21, on the compound Poisson-gamma
-series); the general route is the quantile-score integral of Laio and Tamea (2007),
+series; negative binomial: Wei and Held 2014, with its mean absolute difference
+by quadrature); the general route is the quantile-score integral of Laio and Tamea (2007),
 
     CRPS = 2 * integral_0^1 (1{y < Q(p)} - p) (Q(p) - y) dp,
 
@@ -47,6 +48,9 @@ from superglm.distributional.family import (
     plan_observation,
     validated_parameter_matrix,
 )
+from superglm.distributional.kernels._common import pooled_rows
+from superglm.distributional.kernels._negative_binomial_crps import negative_binomial_crps_rows
+from superglm.distributional.kernels._negative_binomial_windows import _pmf_log_jet
 from superglm.distributional.kernels.generalized_gamma import (
     location_of_mean as generalized_gamma_location_of_mean,
 )
@@ -256,6 +260,105 @@ def _tweedie_crps(family: Any, y: NDArray, theta: NDArray) -> NDArray[np.float64
     return scores
 
 
+def _negative_binomial_crps(family: Any, y: NDArray, theta: NDArray) -> NDArray[np.float64]:
+    """CRPS of the NB2 law in ``(mean, size)``: Wei and Held (2014), at a stable split.
+
+    For any real ``y``, ``CRPS(y) = CRPS(0) - y + 2 E[(y - Y)^+]``.  ``CRPS(0) =
+    sum_k P(Y > k)^2`` comes from the quadrature in ``kernels._negative_binomial_crps``
+    and the shortfall from its pmf sum or, past it, the incomplete beta function.
+    A prior weight is not a reparametrisation of this law; ``_closed_form_scores``
+    scales the count instead.
+    """
+    # CRPS(0) and E|Y - Y'| / 2 integrate nonnegative quantities, so neither a
+    # rare claim's score at zero, of order mean^2, nor a large mean's score, of
+    # order its standard deviation, cancels.  With k = floor(y), the shortfall
+    # is sum_{j <= k} (y - j) f(j) below SHORTFALL_CELLS, else the partial
+    # moment of _negative_binomial_shortfall.
+    response, parameters = _validated_scoring_inputs(y, theta)
+    # The row kernel is compiled for writable contiguous rows (warm-up's); a
+    # read-only response, such as a pandas 3 column's, would compile another.
+    response, mean, size = (
+        np.require(v, np.float64, ("C", "W")) for v in (response, *parameters.T)
+    )
+    zero, half, below = (np.empty(len(response)) for _ in range(3))
+    pooled_rows(
+        lambda start, stop: negative_binomial_crps_rows(
+            mean, size, response, zero, half, below, start, stop
+        ),
+        len(response),
+    )
+    far = np.flatnonzero(np.isnan(below))
+    if len(far):
+        below[far] = _negative_binomial_shortfall(response[far], mean[far], size[far], far)
+    # CRPS(y) = E|Y - y| - E|Y - Y'| / 2, with E|Y - y| = mean - y + 2 E[(y - Y)^+],
+    # from whichever of CRPS(0) and E|Y - Y'| / 2 is the smaller.
+    scores = zero - response + 2.0 * below
+    wide = np.flatnonzero(~np.isnan(half))
+    scores[wide] = (mean[wide] - response[wide]) + 2.0 * below[wide] - half[wide]
+    unresolved = np.flatnonzero(~np.isfinite(scores))
+    if len(unresolved):
+        raise ValueError(
+            f"NegativeBinomialLS CRPS is not finite in binary64 at rows {unresolved[:10].tolist()} "
+            "(a size below about 1e-154 of the mean, for one, is past its range); "
+            "score those rows with the log score instead"
+        )
+    return scores
+
+
+def _negative_binomial_shortfall(
+    response: NDArray, mean: NDArray, size: NDArray, rows: NDArray
+) -> NDArray[np.float64]:
+    """``E[(y - Y)^+]`` for ``k = floor(y) >= SHORTFALL_CELLS``, in the form that cancels least.
+
+    ``y F(k) - mean G(k - 1)``, ``G`` the NB2 CDF of size ``size + 1``, cancels at
+    a central count, where ``size + 1`` also loses its increment at a large size.
+    DLMF 8.17.18, ``I_x(a, b) = I_x(a + 1, b - 1) + x^a (1 - x)^(b - 1) / (a B(a, b))``
+    at ``a = size``, ``b = k + 1``, ``x = p``, gives ``F(k) - G(k - 1) = (k + size)
+    f(k) / size`` and so ``(y - mean) F(k) + mean (k + size) f(k) / size``.  That
+    cancels instead where ``G << F`` (a small size, ``y`` far below the mean), so
+    each row takes the form with the smaller terms.  ``f`` is the family's
+    saddle-point PMF (Loader 2000), its deviance formed from ``k - mean`` itself.
+    ``rows`` are these rows' positions in the caller's, for its refusals.
+    """
+    count = np.floor(response)
+    if np.any(count >= 2.0**53):
+        named = rows[count >= 2.0**53][:10].tolist()
+        raise ValueError(
+            f"NegativeBinomialLS CRPS needs responses below 2**53 (rows {named} are not); "
+            "the family's counts end there"
+        )
+    # F(k) = I_p(size, k + 1) = 1 - I_r(k + 1, size), evaluated on whichever of
+    # p = size / (mean + size) and r = mean / (mean + size) is smaller: the other
+    # rounds to one when the law is far from even odds.
+    total = mean + size
+    p, r = size / total, mean / total
+    with np.errstate(all="ignore"):
+        cdf = np.where(
+            p <= r,
+            special.betainc(size, count + 1.0, p),
+            1.0 - special.betainc(count + 1.0, size, r),
+        )
+        shifted = np.where(
+            p <= r,
+            special.betainc(size + 1.0, count, p),
+            1.0 - special.betainc(count, size + 1.0, r),
+        )
+    if not np.all(np.isfinite(cdf)):
+        named = rows[~np.isfinite(cdf)][:10].tolist()
+        raise ValueError(
+            "NegativeBinomialLS CRPS cannot evaluate the distribution function at a "
+            f"response of 64 or more (rows {named}); score those rows with the log score"
+        )
+    log_pmf = np.array(
+        [_pmf_log_jet(k, m, s, 0)[0] for k, m, s in zip(count, mean, size, strict=True)]
+    )
+    partial = mean * np.exp(log_pmf + np.log1p(count / size))
+    direct, recurrent = response * cdf, mean * shifted
+    # A NaN G compares false and leaves the recurrence's form.
+    smaller = direct + recurrent < np.abs(response - mean) * cdf + partial
+    return np.where(smaller, direct - recurrent, (response - mean) * cdf + partial)
+
+
 #: Closed-form CRPS by family class name.  A family absent from the catalogue is
 #: scored numerically when an established tail bound or correction is available.
 _CLOSED_FORMS: Mapping[str, Callable[[Any, NDArray, NDArray], NDArray[np.float64]]] = {
@@ -263,6 +366,7 @@ _CLOSED_FORMS: Mapping[str, Callable[[Any, NDArray, NDArray], NDArray[np.float64
     "GammaLS": _gamma_crps,
     "LogNormalLS": _log_normal_crps,
     "TweedieLSS": _tweedie_crps,
+    "NegativeBinomialLS": _negative_binomial_crps,
 }
 
 
@@ -770,21 +874,34 @@ def _row_law(fitted: Any, rows: _ScoringRows) -> DistributionFunctionFamily:
     return _PriorWeightedRowLaw(family, rows.prior_law)
 
 
-def _closed_form_parameters(
+def _closed_form_scores(
     family: Any,
+    response: NDArray[np.float64],
     theta: NDArray[np.float64],
     prior_law: NDArray[np.float64] | None,
 ) -> NDArray[np.float64] | None:
-    """Return natural parameters for the same prior-weighted reproductive law."""
-    if prior_law is None:
-        return theta
+    """The catalogued closed-form CRPS of the rows' unit or prior-weighted law, if any.
+
+    Prediction validated the raw parameters; prior-law scales may legitimately
+    fall below the fitted family's raw parameter floor, so they are not revalidated.
+    """
     name = type(family).__name__
+    formula = _CLOSED_FORMS.get(name)
+    if formula is None:
+        return None
+    if prior_law is None:
+        return formula(family, response, theta)
+    parameters = np.array(theta, dtype=np.float64, copy=True)
+    if name == "NegativeBinomialLS":
+        # The prior law is that of C / w with the count C ~ NB2(w mean, w size), and a
+        # CRPS scales with its variable: CRPS(C / w, y) = CRPS(C, w y) / w.
+        parameters *= prior_law[:, None]
+        return formula(family, prior_law * response, parameters) / prior_law
     if name not in {"GaussianLS", "GammaLS", "TweedieLSS"}:
         return None
-    parameters = np.array(theta, dtype=np.float64, copy=True)
     # A Tweedie prior weight is the dispersion phi / w, the others scale by 1 / sqrt(w).
     parameters[:, 1] /= prior_law if name == "TweedieLSS" else np.sqrt(prior_law)
-    return parameters
+    return formula(family, response, parameters)
 
 
 def _retained_log_score(fitted: Any, rows: _ScoringRows) -> NDArray[np.float64]:
@@ -829,6 +946,10 @@ def _retained_crps(
         theta = np.asarray(
             fitted._predict_parameters_resolved(rows.frame, rows.offsets), dtype=np.float64
         )
+    if threshold is None and method != "numeric":
+        closed = _closed_form_scores(fitted.family, rows.response, theta, rows.prior_law)
+        if closed is not None:
+            return closed
     row_law = _row_law(fitted, rows)
     if threshold is not None:
         return crps_numeric(
@@ -838,23 +959,9 @@ def _retained_crps(
             n_nodes=n_nodes,
             threshold=threshold,
         )
-    if method == "numeric":
-        return crps_numeric(row_law, rows.response, theta, n_nodes=n_nodes)
-
-    closed_theta = _closed_form_parameters(fitted.family, theta, rows.prior_law)
     if method == "closed":
-        if closed_theta is None or not has_closed_form_crps(fitted.family):
-            raise NotImplementedError(
-                f"{type(fitted.family).__name__} has no catalogued prior-weighted closed-form CRPS"
-            )
-        # Prediction validated raw parameters; prior-law scales may legitimately
-        # fall below the fitted family's raw parameter floor.
-        return _CLOSED_FORMS[type(fitted.family).__name__](
-            fitted.family, rows.response, closed_theta
-        )
-    if has_closed_form_crps(fitted.family) and closed_theta is not None:
-        return _CLOSED_FORMS[type(fitted.family).__name__](
-            fitted.family, rows.response, closed_theta
+        raise NotImplementedError(
+            f"{type(fitted.family).__name__} has no catalogued prior-weighted closed-form CRPS"
         )
     return crps_numeric(row_law, rows.response, theta, n_nodes=n_nodes)
 
