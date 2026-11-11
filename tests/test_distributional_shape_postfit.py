@@ -1204,7 +1204,7 @@ def test_a_session_takes_the_rows_of_a_refit_in_place_on_other_data(n_refit):
         session = edit(model, train_data=(X, y))
         widget = EditorWidget(session, mode="server")
         model.fit(X2, y2, sample_weight=weights, lambdas=lambdas)
-    with pytest.warns(EditorFitReplacedWarning, match="refitted in place on other rows"):
+    with pytest.warns(EditorFitReplacedWarning, match="refitted in place on other data"):
         session_payload(session)
     assert TRAINING_ROWS_FOLLOWED.format(n=n_refit) in widget._state()["notice"]
     train = session._evaluation_data["train"]
@@ -1230,7 +1230,7 @@ def _follows_the_refit(session) -> None:
     from superglm.editor.payloads import session_payload
     from superglm.editor.session import EditorFitReplacedWarning
 
-    with pytest.warns(EditorFitReplacedWarning, match="refitted in place on other rows"):
+    with pytest.warns(EditorFitReplacedWarning, match="refitted in place on other data"):
         session_payload(session)
 
 
@@ -1327,6 +1327,70 @@ def test_a_refit_in_place_rebuilds_what_a_ruled_edit_reads():
     np.testing.assert_array_equal(
         session.model.reference_design("mean:x"), fresh.model.reference_design("mean:x")
     )
+
+
+def test_a_session_takes_a_refit_in_place_on_other_feature_values():
+    # Codex's case: the same rows, responses, weights and offsets, with x replaced by x**3. At
+    # 3f528d859 the rows still matched, so the session kept its old features and exposure.
+    family = GammaLS()
+    model = SuperLSS(family, family.mean(s("x", kind="bs", k=6)), family.scale())
+    lambdas = {"mean:x#wiggle": 1.0}
+    X, y = _gamma_on(100, 0)
+    cubed = X.assign(x=X["x"] ** 3)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y, lambdas=lambdas)
+        session = edit(model, train_data=(X, y))
+        model.fit(cubed, y, lambdas=lambdas)
+    _follows_the_refit(session)
+    train = session._evaluation_data["train"]
+    np.testing.assert_array_equal(as_eager_frame(train.X).column_array("x"), cubed["x"])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fresh = edit(model, train_data=(cubed, y))
+    followed, wanted = session.terms["mean:x"], fresh.terms["mean:x"]
+    np.testing.assert_array_equal(followed.x, wanted.x)
+    np.testing.assert_array_equal(followed.weights, wanted.weights)
+
+
+@pytest.mark.parametrize("change", ["repair", "same data"])
+def test_a_follow_onto_the_same_data_takes_the_fits_rows_quietly(change):
+    # The session's split becomes the fit's kept rows after every refit or repair in place;
+    # where they hold the data it had, nothing is said and nothing the page shows moves.
+    from superglm.editor.payloads import session_payload
+    from superglm.editor.session import EditorFitReplacedWarning
+
+    family = GammaLS()
+    model = SuperLSS(
+        family,
+        family.mean(
+            s("x", kind="bs", k=6, constraint=Constraint.postfit.increasing),
+            s("z", kind="bs", k=5),
+        ),
+        family.scale(),
+    )
+    lambdas = {"mean:x#wiggle": 1.0, "mean:z#wiggle": 1.0}
+    X, y = _gamma_on(100, 0)
+    X = X.assign(z=np.random.default_rng(5).uniform(size=100))
+    weights = np.linspace(1.0, 2.0, 100)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y, sample_weight=weights, lambdas=lambdas)
+        session = edit(model, train_data=(X, y, weights))
+        before = session_payload(session)["mean:z"]
+        if change == "repair":
+            model.apply_shape_postfit()
+        else:
+            model.fit(X, y, sample_weight=weights, lambdas=lambdas)
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        after = session_payload(session)["mean:z"]
+    assert not [w for w in seen if issubclass(w.category, EditorFitReplacedWarning)]
+    train = session._evaluation_data["train"]
+    assert train.X is model._training_frame  # the fit's own rows, now
+    np.testing.assert_array_equal(train.sample_weight, weights)
+    np.testing.assert_array_equal(np.asarray(train.y), y)
+    assert after == before
 
 
 def test_a_refit_in_place_that_kept_no_rows_says_the_editor_needs_its_rows():

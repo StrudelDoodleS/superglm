@@ -20,7 +20,7 @@ from superglm.distributional.offsets import sources_of
 from superglm.distributional.weights import LikelihoodWeightError, resolve_likelihood_weights
 from superglm.editor.errors import EditorValueError
 from superglm.editor.evaluation import EvaluationDataset, coerce_dataset
-from superglm.editor.lss.view import LSSModelView, is_lss, rows_describe_fit
+from superglm.editor.lss.view import LSSModelView, fit_keeps_its_rows, is_lss, rows_describe_fit
 
 LSS_UNAVAILABLE: Mapping[str, str] = MappingProxyType(
     {
@@ -141,30 +141,36 @@ def refit_reason(model: Any, sample_weight: Any, offsets: Any, y: Any = None) ->
 
 
 TRAINING_ROWS_FOLLOWED = (
-    "The model was refitted in place on other rows than the editor's training data, which "
+    "The model was refitted in place on other data than the editor's training data, which "
     "describe an earlier fit. The editor now takes the {n} rows the refit kept as its "
     "training data: its curves, training scores, Refit and Final fit read them."
 )
 TRAINING_ROWS_LOST = (
-    "The model was refitted in place on other rows than the editor's training data, and the "
+    "The model was refitted in place on other data than the editor's training data, and the "
     "refit kept none of its rows (retain_rows=False), so the editor has no training rows for "
     "it. Open the editor again with train_data=(X, y, sample_weight, offsets), the refit's rows."
 )
 
 
-def follow_training_rows(lss: Any, train: EvaluationDataset) -> EvaluationDataset | None:
-    """The training split for a fit refitted in place on other rows than ``train``: the rows
-    the refit kept, with its responses, weights and offsets. ``None`` while ``train`` still
-    describes the fit (``rows_describe_fit``).
+def follow_training_rows(
+    lss: Any, train: EvaluationDataset
+) -> tuple[EvaluationDataset, str | None]:
+    """The training split for the fit in force after a refit or repair in place, and the
+    notice to give, ``None`` when ``train`` already described it (``rows_describe_fit``).
 
-    Raises ``EditorValueError`` when the refit kept no rows, which nothing else gives back.
+    Where the fit keeps its rows, the split is those rows, whatever changed: its frame,
+    responses, weights and offsets. Otherwise ``train`` stays while it describes the fit.
+    Raises ``EditorValueError`` when it does not, since nothing else gives the rows back.
     """
-    if rows_describe_fit(lss, train):
-        return None
+    described = rows_describe_fit(lss, train)
+    notice = None if described else TRAINING_ROWS_FOLLOWED
+    if not fit_keeps_its_rows(lss):
+        if described:
+            return train, None
+        raise EditorValueError(TRAINING_ROWS_LOST)
     state = lss._require_fitted().fit_state
     rows = state.retained_rows
-    if rows is None:
-        raise EditorValueError(TRAINING_ROWS_LOST)
+    assert rows is not None
     # The offsets a column carries are read from the frame, as the fit read them.
     offsets = {
         p.name: np.asarray(rows.offsets[p.name])
@@ -187,7 +193,7 @@ def follow_training_rows(lss: Any, train: EvaluationDataset) -> EvaluationDatase
         offset_parameters=lss.parameter_names_,
     )
     assert followed is not None
-    return followed
+    return followed, None if notice is None else notice.format(n=followed.n_obs)
 
 
 def session_refit_reason(session: Any) -> str | None:

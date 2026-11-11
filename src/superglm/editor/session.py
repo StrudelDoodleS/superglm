@@ -68,7 +68,6 @@ from superglm.editor.lss.apply import (
     prepare_ruled_edit,
 )
 from superglm.editor.lss.availability import (
-    TRAINING_ROWS_FOLLOWED,
     follow_training_rows,
     require_available,
 )
@@ -552,17 +551,14 @@ class EditorSession:
             self._acting = False
 
     def _follow_training_rows(self) -> str | None:
-        """Take the refit's own rows as the training split when the model was refitted in place
-        on other rows than it (``follow_training_rows``), and say so; ``None`` otherwise."""
+        """Take the rows the fit in force kept as the training split (``follow_training_rows``),
+        and say so when they are not the data the session held; ``None`` otherwise."""
         train = self._evaluation_data.get("train")
         if not isinstance(self.model, LSSModelView) or train is None:
             return None
-        followed = follow_training_rows(self.model.lss, train)
-        if followed is None:
-            return None
-        self._evaluation_data["train"] = followed
-        notice = TRAINING_ROWS_FOLLOWED.format(n=followed.n_obs)
-        warnings.warn(notice, EditorFitReplacedWarning, stacklevel=5)
+        self._evaluation_data["train"], notice = follow_training_rows(self.model.lss, train)
+        if notice is not None:
+            warnings.warn(notice, EditorFitReplacedWarning, stacklevel=5)
         return notice
 
     def _carry_onto_the_fit_in_force(self) -> FitFollow:

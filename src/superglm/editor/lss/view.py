@@ -151,11 +151,18 @@ def kept_rows(lss: SuperLSS, train: Any) -> Any:
     return as_eager_frame(train.X).take_rows(np.asarray(positions, dtype=np.intp))
 
 
+def fit_keeps_its_rows(lss: SuperLSS) -> bool:
+    """Whether ``lss`` holds its fit's training rows: the frame and the arrays the fit kept."""
+    return lss._require_fitted().fit_state.retained_rows is not None and (
+        lss._training_frame is not None
+    )
+
+
 def rows_describe_fit(lss: SuperLSS, train: Any) -> bool:
     """Whether ``train`` holds the rows ``lss`` is fitted on now: as many as the fit was given
-    or kept, as opening checks, and where the fit kept its rows, the same responses, weights
-    and offsets on them, each resolved as the fit resolves it, so that no weights match unit
-    ones. A refit in place on other rows or inputs leaves ``train`` describing an earlier fit.
+    or kept, as opening checks, and where the fit kept its rows, the same responses, weights,
+    offsets and read columns on them, each resolved as the fit resolves it, so that no weights
+    match unit ones. It decides only what the session says (``follow_training_rows``).
     """
     state = lss._require_fitted().fit_state
     provenance = state.weight_provenance
@@ -169,19 +176,41 @@ def rows_describe_fit(lss: SuperLSS, train: Any) -> bool:
             train.sample_weight, n_observations=train.n_obs, contract=state.weight_contract
         )
         positions = np.asarray(weights.input_positions, dtype=np.intp)
+        frame = as_eager_frame(train.X)
         offsets = prediction_offsets(
-            state.predictor_templates, as_eager_frame(train.X), train.offset, positions=positions
+            state.predictor_templates, frame, train.offset, positions=positions
         )
-    except (LikelihoodWeightError, TypeError, ValueError):
+        same_columns = _same_read_columns(lss, frame, positions)
+    except (KeyError, LikelihoodWeightError, TypeError, ValueError):
         return False  # inputs the fit's own resolution refuses are not the fit's
     response = np.asarray(train.y, dtype=np.float64).reshape(-1)[positions]
     return (
-        np.array_equal(response, rows.response)
+        same_columns
+        and np.array_equal(response, rows.response)
         and np.array_equal(weights.values, rows.likelihood_weights.values)
         and all(
             name in offsets and np.array_equal(offsets[name], values)
             for name, values in rows.offsets.items()
         )
+    )
+
+
+def _same_read_columns(lss: SuperLSS, frame: EagerFrame, positions: NDArray[np.intp]) -> bool:
+    """Whether every column the model reads holds, at ``positions``, the fit's kept values;
+    true where the fit holds no frame to compare (a model restored from a file)."""
+    if lss._training_frame is None:
+        return True
+    kept = as_eager_frame(lss._training_frame)
+    fitted = lss._require_fitted()
+    names = dict.fromkeys(
+        (
+            *_required_columns(fitted.compiled_predictors),
+            *offset_columns(fitted.fit_state.predictor_templates),
+        )
+    )
+    return all(
+        pd.Series(frame.column_array(name)[positions]).equals(pd.Series(kept.column_array(name)))
+        for name in names
     )
 
 
@@ -260,10 +289,14 @@ class LSSModelView:
     def _reading_of(self, fitted: Any, *, opening: bool = False) -> _FitReading:
         if self._train is None:
             rows = self._given_rows
-        elif opening or rows_describe_fit(self.lss, self._train):
+        elif opening:
+            rows = kept_rows(self.lss, self._train)
+        elif fit_keeps_its_rows(self.lss):
+            # After a refit or repair in place, the rows the fit kept (``follow_training_rows``).
+            rows = self.lss._training_frame
+        elif rows_describe_fit(self.lss, self._train):
             rows = kept_rows(self.lss, self._train)
         else:
-            # Refitted in place on other rows: the refit's own (``follow_training_rows``).
             rows = self.lss._term_training_frame(None)
         return _FitReading.of(self.lss, fitted, rows)
 
