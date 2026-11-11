@@ -23,7 +23,7 @@ from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, as_eager_frame
 from superglm.distributional.api import SuperLSS
-from superglm.distributional.offsets import offset_columns
+from superglm.distributional.offsets import offset_columns, prediction_offsets
 from superglm.distributional.prediction_design import _required_columns
 from superglm.distributional.response import require_scalar_response
 from superglm.distributional.revision import ShapeRepairedWarning
@@ -153,18 +153,36 @@ def kept_rows(lss: SuperLSS, train: Any) -> Any:
 
 def rows_describe_fit(lss: SuperLSS, train: Any) -> bool:
     """Whether ``train`` holds the rows ``lss`` is fitted on now: as many as the fit was given
-    or kept, as opening checks, and where the fit kept its rows, the same responses. A refit
-    in place on other rows leaves ``train`` describing an earlier fit."""
+    or kept, as opening checks, and where the fit kept its rows, the same responses, weights
+    and offsets on them, each resolved as the fit resolves it, so that no weights match unit
+    ones. A refit in place on other rows or inputs leaves ``train`` describing an earlier fit.
+    """
     state = lss._require_fitted().fit_state
     provenance = state.weight_provenance
     if train.n_obs not in (provenance.original_count, provenance.retained_count):
         return False
-    if state.retained_rows is None:
+    rows = state.retained_rows
+    if rows is None:
         return True
-    given = np.asarray(train.y, dtype=np.float64).reshape(-1)
-    if train.n_obs != provenance.retained_count:
-        given = given[state.retained_rows.likelihood_weights.input_positions]
-    return bool(np.array_equal(given, state.retained_rows.response))
+    try:
+        weights = resolve_likelihood_weights(
+            train.sample_weight, n_observations=train.n_obs, contract=state.weight_contract
+        )
+        positions = np.asarray(weights.input_positions, dtype=np.intp)
+        offsets = prediction_offsets(
+            state.predictor_templates, as_eager_frame(train.X), train.offset, positions=positions
+        )
+    except (LikelihoodWeightError, TypeError, ValueError):
+        return False  # inputs the fit's own resolution refuses are not the fit's
+    response = np.asarray(train.y, dtype=np.float64).reshape(-1)[positions]
+    return (
+        np.array_equal(response, rows.response)
+        and np.array_equal(weights.values, rows.likelihood_weights.values)
+        and all(
+            name in offsets and np.array_equal(offsets[name], values)
+            for name, values in rows.offsets.items()
+        )
+    )
 
 
 @dataclass

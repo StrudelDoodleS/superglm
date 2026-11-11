@@ -19,6 +19,7 @@ import pytest
 from scipy import optimize, stats
 
 from superglm import Constraint, GammaLS, SuperLSS, cat, s
+from superglm._frame import as_eager_frame
 from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
 from superglm.distributional.kernels.generalized_gamma import mean_exists
 from superglm.distributional.predictor import ShapeConstraintIgnoredWarning
@@ -1112,7 +1113,8 @@ def test_a_session_follows_a_refit_in_place_that_changed_a_categorical_reference
     # Sol's case: frequency weights make A the reference level of the first fit and B of the
     # refit. At 19a6ab028 the session kept the first fit's compiled specs, so an edit to C was
     # written in A's encoding and the untouched A and B predicted each other's means.
-    from superglm.editor.lss.availability import WEIGHTS_DIFFER, session_refit_reason
+    from superglm.editor.lss.availability import session_refit_reason
+    from superglm.editor.payloads import session_payload
 
     g = np.repeat(["A", "B", "C"], [200, 120, 80])
     X = pd.DataFrame({"g": g})
@@ -1134,8 +1136,10 @@ def test_a_session_follows_a_refit_in_place_that_changed_a_categorical_reference
         session = edit(model, train_data=(X, y, first))
         assert session_refit_reason(session) is None
         model.fit(X, y, sample_weight=again)
-        # the reason kept for the first fit goes with it: these rows now carry other weights
-        assert session_refit_reason(session) == WEIGHTS_DIFFER
+        # the reason kept for the first fit goes with it: the session takes the refit's weights
+        session_payload(session)
+        assert session_refit_reason(session) is None
+        np.testing.assert_array_equal(session._evaluation_data["train"].sample_weight, again)
         followed = shifted_c(session)
         fresh = shifted_c(edit(model, train_data=(X, y, again)))
         refitted = model.predict(levels)
@@ -1220,6 +1224,73 @@ def test_a_session_takes_the_rows_of_a_refit_in_place_on_other_data(n_refit):
             session.to_model().predict(X2), fresh.to_model().predict(X2), rtol=1e-12
         )
         assert widget._state()["notice"] is None  # said once
+
+
+def _follows_the_refit(session) -> None:
+    from superglm.editor.payloads import session_payload
+    from superglm.editor.session import EditorFitReplacedWarning
+
+    with pytest.warns(EditorFitReplacedWarning, match="refitted in place on other rows"):
+        session_payload(session)
+
+
+def test_a_session_takes_a_refit_in_place_on_the_same_rows_with_other_weights():
+    # Codex's case. At 02a6773bc the rows matched on count and responses alone, so the session
+    # kept its unweighted split, and its exposure, scores, Refit and Final fit had no weights.
+    from superglm.editor.lss.availability import session_refit_reason
+
+    family = GammaLS()
+    model = SuperLSS(family, family.mean(s("x", kind="bs", k=6)), family.scale())
+    lambdas = {"mean:x#wiggle": 1.0}
+    X, y = _gamma_on(100, 0)
+    weights = np.arange(1.0, 101.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y, lambdas=lambdas)
+        session = edit(model, train_data=(X, y))
+        model.fit(X, y, sample_weight=weights, lambdas=lambdas)
+    _follows_the_refit(session)
+    np.testing.assert_array_equal(session._evaluation_data["train"].sample_weight, weights)
+    assert session_refit_reason(session) is None
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fresh = edit(model, train_data=(X, y, weights))
+    np.testing.assert_array_equal(session.terms["mean:x"].weights, fresh.terms["mean:x"].weights)
+
+
+def test_a_session_takes_a_refit_in_place_on_the_same_rows_with_another_offset():
+    from superglm.editor.payloads import session_payload
+
+    family = GammaLS()
+    model = SuperLSS(family, family.mean(s("x", kind="bs", k=6), offset="exposure"), family.scale())
+    lambdas = {"mean:x#wiggle": 1.0}
+    X, y = _gamma_on(100, 0)
+    X = X.assign(exposure=np.zeros(100))
+    moved = X.assign(exposure=np.linspace(-0.2, 0.2, 100))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y, lambdas=lambdas)
+        session = edit(model, train_data=(X, y))
+        # unit weights resolve as no weights do: a refit on the same inputs is followed quietly
+        model.fit(X, y, sample_weight=np.ones(100), lambdas=lambdas)
+        warnings.simplefilter("error", UserWarning)
+        session_payload(session)
+        warnings.simplefilter("ignore")
+        model.fit(moved, y, lambdas=lambdas)
+    _follows_the_refit(session)
+    train = session._evaluation_data["train"]
+    np.testing.assert_array_equal(
+        as_eager_frame(train.X).column_array("exposure"), moved["exposure"]
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fresh = edit(model, train_data=(moved, y))
+        for opened in (session, fresh):
+            opened.select_x("mean:x", 0.2, 0.4)
+            opened.shift("mean:x", 0.1)
+        np.testing.assert_allclose(
+            session.to_model().predict(moved), fresh.to_model().predict(moved), rtol=1e-12
+        )
 
 
 def test_a_refit_in_place_that_kept_no_rows_says_the_editor_needs_its_rows():
