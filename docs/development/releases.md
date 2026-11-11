@@ -115,10 +115,13 @@ fits worse beyond the harness's tolerances is a regression. The comparison
 also counts, by error, the cases the release itself errored on or timed out,
 which it could not compare. A case both sides refuse is a standing decision,
 like the history cases refused by design. When the head runs a case the
-release could not, the comparison exits 2 and lists those cases: either the
-head fits what the release refused, or the harness did not run on that
-release, and a large count is the second until shown otherwise. Either way
-they are explained before the run is read as clean. A regression blocks the
+release could not, the comparison lists those cases under "K of them ran on
+the candidate", flagged or not: either the head fits what the release
+refused, or the harness did not run on that release, and a large count is the
+second until shown otherwise. Either way they are explained before the run is
+read as clean. A finished comparison exits 0 only when nothing is flagged
+and no such case exists, and 1 otherwise. A traceback also exits 1, so the
+assessment reads the printed lines whatever the exit status. A regression blocks the
 release until a fix restores the old result without losing what the change
 bought; otherwise it goes to the owner as a one-screen decision.
 `tests/test_userspace_040.py` holds the harness's compact subset to v0.40.0's

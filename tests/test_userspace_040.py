@@ -274,13 +274,14 @@ _UNCOMPARED_BASE = {
 
 def test_compare_counts_the_cases_a_failing_base_left_uncompared(tmp_path, capsys) -> None:
     """A base that cannot run a case flags nothing for it, so ``compare`` says how many
-    it skipped and why, and exits 2 when the candidate ran them. Fails on d34ddd69,
+    it skipped and why, lists those the candidate ran and exits 1 for them, as for a
+    flag. Fails on d34ddd69,
     where v0.42.0 errored all 144 SuperLSS cases and ``compare`` reported only
     "0 flagged" and exited 0."""
     candidate = dict.fromkeys(_UNCOMPARED_BASE, _record())
     status, printed = _compare_printed(tmp_path, capsys, _UNCOMPARED_BASE, candidate)
 
-    assert status == 2
+    assert status == 1
     assert printed[0] == "0 flagged"
     assert printed[1] == "3 of 4 cases not compared: the base errored or timed out"
     assert printed[2:4] == [f"  2 x error: {_REFUSED}", "  1 x timeout"]
@@ -299,6 +300,19 @@ def test_compare_passes_cases_refused_on_both_sides(tmp_path, capsys) -> None:
 
     worse = {**candidate, "glm/poisson/log/small/mains/exact/fit_reml": {"status": "timeout"}}
     assert _compare_printed(tmp_path, capsys, _UNCOMPARED_BASE, worse)[0] == 1
+
+
+def test_compare_lists_the_cases_only_the_base_refused_beside_a_flag(tmp_path, capsys) -> None:
+    """A flag does not hide the cases only the base refused: v0.41.0's stored run
+    flags 11 cases and has 13 that ran only on the candidate. Both print, and the
+    exit status is the flag's, so a reader of either sees both."""
+    flagged = "glm/poisson/log/small/mains/exact/fit_reml"
+    candidate = {**dict.fromkeys(_UNCOMPARED_BASE, _record()), flagged: {"status": "timeout"}}
+    status, printed = _compare_printed(tmp_path, capsys, _UNCOMPARED_BASE, candidate)
+
+    assert status == 1
+    assert printed[0].startswith(f"{flagged}: ") and printed[1] == "1 flagged"
+    assert printed[5].startswith("3 of them ran on the candidate")
 
 
 class _ReleaseUpToV042:

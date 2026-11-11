@@ -12,13 +12,15 @@ offsets, ``_lss_offsets_at_fit``), it asks the release which form it takes.
                      run the corpus at REF (a detached worktree with its own
                      environment, shared with ``books.py``) and here, then compare
     compare BASE CANDIDATE RELEASE
-                     flag candidate outcomes worse than the base; exit 1 on any flag.
-                     It also counts the cases it could not compare because the
-                     base errored or timed out, by error, and exits 2 (when
-                     nothing is flagged) if any of them ran on the candidate:
-                     the base refused a fit the candidate makes, or the harness
-                     does not run on that release, and only a reader can say
-                     which. A case refused on both sides is a standing decision.
+                     flag candidate outcomes worse than the base. It also
+                     counts the cases it could not compare because the base
+                     errored or timed out, by error, and lists those that ran
+                     on the candidate: the base refused a fit the candidate
+                     makes, or the harness does not run on that release, and
+                     only a reader can say which. A case refused on both sides
+                     is a standing decision. Exit 0 when nothing is flagged and
+                     no case ran only on the candidate, else 1; the printed
+                     lines say which.
 
 The corpus: SuperGLM over every built-in family and link, nine term kinds
 (mains, random effect, tensor pair, spline-by-category, ``fs`` and ``sz`` factor
@@ -892,7 +894,7 @@ def main(argv=None) -> int:
         base, candidate = load(Path(args.base)), load(Path(args.candidate))
         found = compare(base, candidate, args.release)
         print("\n".join(report(base, candidate, found)))
-        return 1 if found else 2 if ran_only_on_candidate(base, candidate) else 0
+        return 1 if found or ran_only_on_candidate(base, candidate) else 0
     sys.path.insert(0, str(HERE))
     import books
 
