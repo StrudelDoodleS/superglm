@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -114,16 +115,6 @@ def _has_natural_curvature_boundaries(spec: _SplineBase, kind: str) -> bool:
     return kind in {"convex", "concave"} and (
         has_natural_ends(spec) or getattr(spec, "_cr_M", None) is not None
     )
-
-
-def _shape_probe_points(spec: _SplineBase, kind: str) -> NDArray:
-    breakpoints = _shape_breakpoints(spec)
-    if _uses_span_jump_constraints(spec, kind):
-        return breakpoints
-    if breakpoints.size < 2:
-        return np.asarray([spec._lo, spec._hi], dtype=np.float64)
-    midpoints = 0.5 * (breakpoints[:-1] + breakpoints[1:])
-    return np.unique(np.concatenate((breakpoints, midpoints, [spec._lo, spec._hi])))
 
 
 def shape_derivative_matrix(spec: _SplineBase, x: NDArray, order: int) -> NDArray:
@@ -354,23 +345,6 @@ def shape_constraint_certificate(
     )
 
 
-def _violating_shape_constraint_points(
-    spec: _SplineBase,
-    beta: NDArray,
-    kind: str,
-    tolerance: float,
-) -> NDArray:
-    """Return every analytically located derivative extremum below tolerance."""
-    beta_arr = np.asarray(beta, dtype=np.float64)
-    candidates = _certificate_candidates(spec, beta_arr, kind)
-    rows = _shape_constraint_rows(spec, candidates, kind)
-    normalized_rows, _, keep = _normalized_nonzero_shape_rows(rows)
-    if not np.any(keep):
-        return np.empty(0, dtype=np.float64)
-    scaled = normalized_rows @ beta_arr
-    return candidates[keep][scaled < -tolerance]
-
-
 def shape_constraint_is_roundoff_feasible(
     spec: _SplineBase,
     beta: NDArray,
@@ -384,8 +358,9 @@ def shape_constraint_is_roundoff_feasible(
 
 
 #: Roundings behind one certified slack, per coefficient.  The slack is a unit row
-#: times ``beta``, the row comes from a conditioned basis derivative, and SLSQP
-#: leaves a linear constraint violated by up to about ``1e-12 ||beta||``; the
+#: times ``beta``, the row comes from a conditioned basis derivative, and the
+#: projection's QP accepts a linear constraint violated by up to about
+#: ``1e-12 ||beta||``; the
 #: count keeps a factor of ten over that for a term of ten coefficients.
 _SLACK_STEPS = 2**14
 #: Roundings behind one row of a deviance, merit or predictor sum, beyond the
@@ -515,6 +490,413 @@ class MonotoneRepairer:
         return _repair_shape(self.direction, spec, beta_reparam, groups, weights, n_grid)
 
 
+#: Local-reduction steps the cone projection takes before it brackets instead.
+_PROJECTION_STEPS = 12
+#: Exchange steps between the inner and outer cones once it brackets.
+_BRACKET_STEPS = 40
+#: Gap between the inner and outer cones' optima within which the inner optimum is
+#: the projection. The objective is scaled so that twice it, plus one, is the
+#: projection's loss over the dropped term's; this is the objective tolerance SLSQP
+#: was given on the same scaled problem before.
+_OBJECTIVE_GAP = 1e-12
+#: Largest curvature term one span may add to the step's Hessian, relative to
+#: ``||H||``.  Beyond it the step's saddle solve would lose more digits than float64
+#: holds, so that span takes a plain cutting-plane step instead.
+_CURVATURE_CONDITION_LIMIT = 1e8
+#: Move of a span's minimum, as a fraction of its span, within which a curvature step's
+#: local model holds and the minimum's cut replaces the span's older ones.
+_LOCAL_STEP = 0.25
+#: Width, as a fraction of its span, within which a new checkpoint repeats a kept one.
+_CHECKPOINT_SEPARATION = 1e-9
+#: Unit rows closer than this in every entry are one constraint stated twice: the
+#: two one-sided values of a continuous derivative at a knot, read from two pieces.
+_SAME_ROW = 2.0**-40
+
+
+@dataclass(frozen=True)
+class _ShapePiece:
+    """One polynomial piece of the constrained derivative ``sign * f^(order)``.
+
+    ``rows @ beta`` are the piece's monomial coefficients in ``tau``, the position
+    across its span of ``width`` scaled to ``[0, 1]``, so the derivative there is
+    ``sum_k (rows @ beta)[k] tau^k``.
+    """
+
+    width: float
+    rows: NDArray
+
+
+def _shape_pieces(spec: _SplineBase, kind: str) -> tuple[list[_ShapePiece], int]:
+    """The polynomial pieces of the constrained derivative over the fitted range.
+
+    Each piece is read by collocation at ``p + 1`` interior points of its span, so a
+    derivative that jumps at a knot is never evaluated across the jump. Returns the
+    pieces and their degree ``p``.
+    """
+    order, sign = _shape_order_and_sign(kind)
+    degree = 3 if getattr(spec, "_cr_knots", None) is not None else int(spec.degree)
+    p = degree - order
+    breaks = np.unique(np.concatenate(([spec._lo], _shape_breakpoints(spec), [spec._hi])))
+    lo, hi = breaks[:-1], breaks[1:]
+    nodes = (np.arange(p + 1) + 0.5) / (p + 1)
+    points = (lo[:, None] + (hi - lo)[:, None] * nodes[None, :]).ravel()
+    values = sign * shape_derivative_matrix(spec, points, order)
+    to_monomial = np.linalg.inv(np.vander(nodes, p + 1, increasing=True))
+    values = values.reshape(lo.size, p + 1, -1)
+    pieces = [
+        _ShapePiece(float(b - a), to_monomial @ piece_values)
+        for a, b, piece_values in zip(lo, hi, values, strict=True)
+    ]
+    return pieces, p
+
+
+def _tau_powers(tau: float, p: int, nu: int = 0) -> NDArray:
+    """The ``nu``-th ``tau`` derivative of ``(1, tau, ..., tau^p)``."""
+    k = np.arange(p + 1)
+    falling = np.ones(p + 1)
+    for j in range(nu):
+        falling *= np.maximum(k - j, 0)
+    return falling * tau ** np.maximum(k - nu, 0)
+
+
+def _piece_minimum(piece: _ShapePiece, p: int, beta: NDArray) -> tuple[float, NDArray] | None:
+    """The piece's lowest interior local minimum: its ``tau`` and the row of its value."""
+    if p < 2:
+        return None
+    from numpy.polynomial import polynomial
+
+    coefficients = piece.rows @ beta
+    slope = polynomial.polyder(coefficients)
+    roots = polynomial.polyroots(slope)
+    real = np.real(roots[np.abs(np.imag(roots)) <= 1e-12 * np.maximum(1.0, np.abs(roots))])
+    candidates = real[(real > 0.0) & (real < 1.0)]
+    candidates = candidates[polynomial.polyval(candidates, polynomial.polyder(slope)) > 0.0]
+    if candidates.size == 0:
+        return None
+    tau = float(candidates[np.argmin(polynomial.polyval(candidates, coefficients))])
+    return tau, _tau_powers(tau, p) @ piece.rows
+
+
+def _distinct_unit_rows(rows: NDArray) -> tuple[NDArray, list[list[int]]]:
+    """Unit-norm nonzero rows with repeats dropped, and the input rows each one stands for."""
+    unit, _, keep = _normalized_nonzero_shape_rows(rows)
+    sources = np.flatnonzero(keep)
+    same = np.max(np.abs(unit[:, None, :] - unit[None, :, :]), axis=2) <= _SAME_ROW
+    kept: list[int] = []
+    merged: list[list[int]] = []
+    for index in range(unit.shape[0]):
+        match = next((k for k, other in enumerate(kept) if same[index, other]), None)
+        if match is None:
+            kept.append(index)
+            merged.append([int(sources[index])])
+        else:
+            merged[match].append(int(sources[index]))
+    return unit[kept], merged
+
+
+def _end_value_rows(
+    pieces: list[_ShapePiece], p: int, natural: bool
+) -> tuple[NDArray, list[tuple[int, float]]]:
+    """Each piece's derivative at both ends of its span, and the (piece, ``tau``) of each row.
+
+    The rows are necessary, and exact for ``p <= 1``. A natural spline's boundary
+    curvature is an equality the basis already holds, so its round-off is not read
+    as an inequality.
+    """
+    rows, ends = [], []
+    for index, piece in enumerate(pieces):
+        for tau in (0.0, 1.0):
+            if natural and (index, tau) in {(0, 0.0), (len(pieces) - 1, 1.0)}:
+                continue
+            rows.append(_tau_powers(tau, p) @ piece.rows)
+            ends.append((index, tau))
+    return np.asarray(rows, dtype=np.float64).reshape(len(rows), -1), ends
+
+
+def _bernstein_rows(piece: _ShapePiece, p: int, t0: float, t1: float) -> NDArray:
+    """Rows of the derivative's Bernstein coefficients on ``[t0, t1]`` of the piece."""
+    from scipy.special import comb
+
+    nodes = (np.arange(p + 1) + 0.5) / (p + 1)
+    k = np.arange(p + 1)
+    bernstein = comb(p, k) * nodes[:, None] ** k * (1.0 - nodes[:, None]) ** (p - k)
+    values = np.stack([_tau_powers(t0 + (t1 - t0) * s, p) for s in nodes]) @ piece.rows
+    return np.linalg.solve(bernstein, values)
+
+
+def _inner_cone_rows(
+    pieces: list[_ShapePiece], p: int, checkpoints: list[list[float]], natural: bool
+) -> NDArray:
+    """Bernstein coefficients of every sub-span, split at the checkpoints.
+
+    Non-negative Bernstein coefficients bound the derivative from below on their
+    sub-span, so these rows are sufficient (Papp & Alizadeh 2014, section 3.2). A
+    quadratic piece that is non-negative has non-negative coefficients on both sides
+    of its minimum, so a split there loses nothing. The value at a split inside a
+    piece is a convex combination of its two neighbouring coefficients (the joint
+    of one polynomial is smooth), so it is implied and left out.
+    """
+    rows = []
+    for index, (piece, points) in enumerate(zip(pieces, checkpoints, strict=True)):
+        splits = np.unique(np.concatenate(([0.0], points, [1.0])))
+        for start, end in zip(splits[:-1], splits[1:], strict=True):
+            block = _bernstein_rows(piece, p, float(start), float(end))
+            first = start == 0.0 and not (natural and index == 0)
+            last = end == 1.0 and not (natural and index == len(pieces) - 1)
+            rows.append(block[(0 if first else 1) : (p + 1 if last else p)])
+            if p == 0 and (first or last):
+                rows[-1] = block
+    return np.vstack(rows)
+
+
+def _cut_rows(
+    pieces: list[_ShapePiece], p: int, cuts: list[list[float]], width: int
+) -> tuple[NDArray, NDArray, list[tuple[int, float]]]:
+    """Unit rows of the derivative at each cut, their norms, and each cut's (piece, ``tau``)."""
+    owners = [(index, t) for index, points in enumerate(cuts) for t in points]
+    raw = np.asarray(
+        [_tau_powers(t, p) @ pieces[index].rows for index, t in owners], dtype=np.float64
+    ).reshape(len(owners), width)
+    norms = np.linalg.norm(raw, axis=1)
+    return raw / np.where(norms > 0.0, norms, 1.0)[:, None], norms, owners
+
+
+def _lowest_minima(
+    pieces: list[_ShapePiece], p: int, beta: NDArray
+) -> list[tuple[float, NDArray] | None]:
+    return [_piece_minimum(piece, p, beta) for piece in pieces]
+
+
+def _minima_feasible(minima: list[tuple[float, NDArray] | None], beta: NDArray) -> bool:
+    """Whether every span's lowest interior value is non-negative to the certificate's rounding."""
+    slacks = [
+        float(row @ beta / norm) if (norm := np.linalg.norm(row)) > 0.0 else 0.0
+        for _, row in filter(None, minima)
+    ]
+    return min(slacks, default=0.0) >= -shape_slack_tolerance(beta, 1.0)
+
+
+#: Slack, in the scaled problem's units (the target's RMS is one), within which a unit
+#: row counts as held when an uncertified QP point is checked for its KKT conditions.
+_HELD_SLACK = 1e-8
+#: Relative KKT residual an uncertified QP point may leave and still be the optimum.
+_KKT_RESIDUAL = 1e-9
+
+
+def _solve_cone_qp(H: NDArray, g: NDArray, rows: NDArray, max_iter: int = 200):
+    """The repository QP on unit ``rows @ beta >= 0``; ``None`` when no solution is certified.
+
+    The QP certifies its own result, except on a face whose held rows leave no step,
+    as when every jump of a curve projected flat is held. Such a point is accepted
+    when it is feasible and ``H beta - g`` lies in the cone of its held rows, which
+    for a convex QP is optimality.
+    """
+    from scipy.optimize import nnls
+
+    from superglm.solvers.constrained_qp import solve_constrained_qp
+
+    try:
+        result = solve_constrained_qp(H, g, rows, np.zeros(rows.shape[0]), max_iter=max_iter)
+    except ValueError:
+        return None
+    if result.converged:
+        return result
+    beta = np.asarray(result.beta, dtype=np.float64)
+    slack = rows @ beta
+    if not np.all(np.isfinite(beta)) or np.min(slack, initial=0.0) < -shape_slack_tolerance(
+        beta, 1.0
+    ):
+        return None
+    gradient = H @ beta - g
+    held = rows[slack <= _HELD_SLACK]
+    residual = nnls(held.T, gradient)[1] if held.shape[0] else float(np.linalg.norm(gradient))
+    if residual <= _KKT_RESIDUAL * max(1.0, float(np.linalg.norm(g))):
+        return result
+    return None
+
+
+def _bracketed_projection(
+    H: NDArray,
+    g: NDArray,
+    pieces: list[_ShapePiece],
+    p: int,
+    end_rows: NDArray,
+    checkpoints: list[list[float]],
+    natural: bool,
+) -> tuple[NDArray | None, float]:
+    """Exchange between the Bernstein inner cone and the cutting-plane outer cone.
+
+    Every inner optimum is shape-feasible and every outer one bounds the
+    projection's objective from below, so the best inner optimum is certified once
+    the two meet. A span the projection holds flat sits at its cone's apex, which the
+    inner cone holds exactly. Returns the best inner optimum and the gap left.
+    """
+
+    def objective(beta: NDArray) -> float:
+        return float(0.5 * beta @ H @ beta - g @ beta)
+
+    best, upper, lower = None, np.inf, -np.inf
+    cuts = [list(points) for points in checkpoints]
+    for _ in range(_BRACKET_STEPS):
+        inner_rows, _ = _distinct_unit_rows(_inner_cone_rows(pieces, p, cuts, natural))
+        inner = _solve_cone_qp(H, g, inner_rows)
+        cut_rows, _, owners = _cut_rows(pieces, p, cuts, H.shape[0])
+        outer = _solve_cone_qp(H, g, np.vstack([end_rows, cut_rows]))
+        if inner is None or outer is None:
+            break
+        if objective(inner.beta) < upper:
+            best, upper = np.asarray(inner.beta, dtype=np.float64), objective(inner.beta)
+        lower = max(lower, objective(outer.beta))
+        if upper - lower <= _OBJECTIVE_GAP:
+            break
+        active = {row - end_rows.shape[0] for row in outer.active_set}
+        cuts = [[] for _ in pieces]
+        for position, (index, t) in enumerate(owners):
+            if position in active:
+                cuts[index].append(t)
+        for index, piece in enumerate(pieces):
+            for beta, violated_only in ((outer.beta, True), (inner.beta, False)):
+                minimum = _piece_minimum(piece, p, beta)
+                if (
+                    minimum is not None
+                    and (minimum[1] @ beta < 0.0 or not violated_only)
+                    and all(abs(minimum[0] - t) > _CHECKPOINT_SEPARATION for t in cuts[index])
+                ):
+                    cuts[index].append(minimum[0])
+    return best, upper - lower
+
+
+def _cone_projection(spec: _SplineBase, H: NDArray, g: NDArray, kind: str, label: str) -> NDArray:
+    """Minimise ``0.5 b'Hb - g'b`` over coefficients whose curve has ``kind`` everywhere.
+
+    A derivative of degree ``p <= 1`` on each span is non-negative exactly when its
+    span-end values are, so one QP is exact. A higher degree makes the cone a
+    semi-infinite one (Papp & Alizadeh 2014: second-order-cone representable, not
+    polyhedral), solved by exchange (Blankenship & Falk 1976; Arai & Kitahara 2026).
+    Each QP holds the span-end values and a cut at every span's lowest interior
+    minimum, keeps the cuts it holds active and drops the rest, which does not move
+    a strictly convex QP's optimum. A binding cut's minimum moves with the
+    coefficients, and adding that curvature, ``lambda d d' / q''``, to the Hessian
+    makes the step a local-reduction SQP one, quadratically convergent (Hettich &
+    Kortanek 1993). The curvature only places the cuts: the answer is the plain
+    relaxation at them, a QP optimum whose own KKT conditions hold, and it is the
+    projection once every span's minimum is feasible to the certificate's rounding.
+    Should that not happen within ``_PROJECTION_STEPS``, the cuts seed a bracket
+    between the Bernstein inner cone and the cutting-plane outer cone
+    (``_bracketed_projection``), whose result is shape-feasible by construction and
+    is disclosed if the bracket does not close.
+    """
+    if _uses_span_jump_constraints(spec, kind):
+        rows, _ = _distinct_unit_rows(_shape_constraint_rows(spec, _shape_breakpoints(spec), kind))
+        result = _solve_cone_qp(H, g, rows)
+        if result is None:
+            raise RuntimeError(f"{label} projection failed to converge")
+        return np.asarray(result.beta, dtype=np.float64)
+
+    pieces, p = _shape_pieces(spec, kind)
+    natural = _has_natural_curvature_boundaries(spec, kind)
+    end_values, ends = _end_value_rows(pieces, p, natural)
+    end_rows, end_sources = _distinct_unit_rows(end_values)
+    end_norms = np.linalg.norm(end_values, axis=1)
+    width = H.shape[0]
+    h_norm = float(np.linalg.norm(H, 2))
+    # The first cuts sit where the unconstrained optimum, the fitted curve itself,
+    # breaks the rule.
+    beta = np.linalg.lstsq(H, g, rcond=None)[0]
+    checkpoints = [
+        [] if minimum is None or minimum[1] @ beta >= 0.0 else [minimum[0]]
+        for minimum in _lowest_minima(pieces, p, beta)
+    ]
+    curvature = np.zeros_like(H)
+    for _ in range(_PROJECTION_STEPS):
+        cut_rows, cut_norms, owners = _cut_rows(pieces, p, checkpoints, width)
+        rows = np.vstack([end_rows, cut_rows])
+        result = _solve_cone_qp(H + curvature, g + curvature @ beta, rows)
+        if result is None and curvature.any():
+            curvature = np.zeros_like(H)
+            result = _solve_cone_qp(H, g, rows)
+        if result is None:
+            break
+        corrected = curvature.any()
+        previous, beta = beta, np.asarray(result.beta, dtype=np.float64)
+        minima = _lowest_minima(pieces, p, beta)
+        if _minima_feasible(minima, beta):
+            if not corrected:
+                return beta
+            # The relaxation at these cuts and every span's minimum.
+            certified_cuts = [
+                points + ([] if minimum is None else [minimum[0]])
+                for points, minimum in zip(checkpoints, minima, strict=True)
+            ]
+            certified_rows, _, _ = _cut_rows(pieces, p, certified_cuts, width)
+            certified = _solve_cone_qp(H, g, np.vstack([end_rows, certified_rows]))
+            if certified is not None and _minima_feasible(
+                _lowest_minima(pieces, p, certified.beta), certified.beta
+            ):
+                return np.asarray(certified.beta, dtype=np.float64)
+
+        active = list(result.active_set)
+        weight = np.zeros(len(pieces))
+        kept: list[list[float]] = [[] for _ in pieces]
+        if active:
+            multipliers = np.linalg.lstsq(
+                rows[active].T, (H + curvature) @ beta - g - curvature @ previous, rcond=None
+            )[0]
+            for row_index, multiplier in zip(active, multipliers, strict=True):
+                cut = row_index - end_rows.shape[0]
+                if cut < 0:
+                    # A span end held at zero beside an interior minimum brackets the
+                    # minimum with the span's cut; the force both hold belongs to the
+                    # minimum, so it counts toward that span's curvature.
+                    source = end_sources[row_index][0]
+                    near = [
+                        (abs(minima[i][0] - tau) * pieces[i].width, i)
+                        for i, tau in (ends[j] for j in end_sources[row_index])
+                        if minima[i] is not None
+                    ]
+                    if multiplier > 0.0 and near:
+                        weight[min(near)[1]] += multiplier / end_norms[source]
+                    continue
+                owner, tau = owners[cut]
+                kept[owner].append(tau)
+                if multiplier > 0.0 and cut_norms[cut] > 0.0:
+                    weight[owner] += multiplier / cut_norms[cut]
+        curvature = np.zeros_like(H)
+        for index, (piece, minimum) in enumerate(zip(pieces, minima, strict=True)):
+            if minimum is None:
+                continue
+            tau, row = minimum
+            if (row @ beta < 0.0 or weight[index] > 0.0) and all(
+                abs(tau - other) > _CHECKPOINT_SEPARATION for other in kept[index]
+            ):
+                kept[index].append(tau)
+            if weight[index] > 0.0:
+                slope_row = _tau_powers(tau, p, 1) @ piece.rows
+                bend = float(_tau_powers(tau, p, 2) @ piece.rows @ beta)
+                size = weight[index] * float(slope_row @ slope_row)
+                if bend > 0.0 and size <= _CURVATURE_CONDITION_LIMIT * h_norm * bend:
+                    curvature += (weight[index] / bend) * np.outer(slope_row, slope_row)
+                    # The curvature carries the minimum's motion, so near its old cut
+                    # the span's one cut is at its minimum: older cuts would pin a
+                    # bracket round it. A minimum that jumped keeps the bracket.
+                    if all(abs(tau - other) <= _LOCAL_STEP for other in kept[index]):
+                        kept[index] = [tau]
+        checkpoints = kept
+
+    best, gap = _bracketed_projection(H, g, pieces, p, end_rows, checkpoints, natural)
+    if best is None:
+        raise RuntimeError(f"{label} projection failed to converge")
+    if gap > _OBJECTIVE_GAP:
+        warnings.warn(
+            f"{label} repair stopped before it certified the closest {kind} curve; the "
+            f"repaired curve is {kind} everywhere, and its distance from the fitted curve "
+            f"exceeds the closest one's by at most {2.0 * gap:.1e} of the dropped term's.",
+            RuntimeWarning,
+            stacklevel=4,
+        )
+    return best
+
+
 def _project_shape_in_fitted_basis(
     spec: _SplineBase,
     x_grid: NDArray,
@@ -529,8 +911,6 @@ def _project_shape_in_fitted_basis(
     measure and avoids the lossy raw-basis -> fitted-basis round trip.  Zero coefficients
     are a feasible point and provide an objective certificate for the returned solution.
     """
-    from scipy.optimize import LinearConstraint, minimize
-
     label = "Curvature" if kind in {"convex", "concave"} else "Monotone"
 
     fitted_basis = np.asarray(spec.transform(x_grid), dtype=np.float64)
@@ -553,78 +933,7 @@ def _project_shape_in_fitted_basis(
     H_scaled = H / total_weight
     g_scaled = g / (total_weight * curve_scale)
 
-    def objective(coefficients: NDArray) -> float:
-        return float(0.5 * coefficients @ H_scaled @ coefficients - g_scaled @ coefficients)
-
-    def gradient(coefficients: NDArray) -> NDArray:
-        return H_scaled @ coefficients - g_scaled
-
-    constraint_points = list(_shape_probe_points(spec, kind))
-    beta_projected = np.zeros(fitted_basis.shape[1], dtype=np.float64)
-    scaled_constraints = np.empty((0, fitted_basis.shape[1]), dtype=np.float64)
-    max_refinements = max(8, 2 * fitted_basis.shape[1])
-    for _ in range(max_refinements):
-        constraint_matrix = _shape_constraint_rows(
-            spec,
-            np.asarray(constraint_points, dtype=np.float64),
-            kind,
-        )
-        normalized_rows, _, keep = _normalized_nonzero_shape_rows(constraint_matrix)
-        if not np.any(keep):
-            # Identically zero derivatives make the zero coefficient vector
-            # (and every candidate) shape-feasible.
-            scaled_constraints = np.empty((0, fitted_basis.shape[1]), dtype=np.float64)
-        else:
-            scaled_constraints = normalized_rows
-
-        constraints = (
-            []
-            if scaled_constraints.size == 0
-            else [LinearConstraint(scaled_constraints, 0.0, np.inf)]
-        )
-        result = minimize(
-            objective,
-            beta_projected / curve_scale,
-            jac=gradient,
-            method="SLSQP",
-            constraints=constraints,
-            options={"ftol": 1e-12, "maxiter": 500},
-        )
-        if not result.success:
-            raise RuntimeError(
-                f"{label} projection failed to converge: "
-                f"status={result.status}, message={result.message}"
-            )
-
-        beta_projected = curve_scale * np.asarray(result.x, dtype=np.float64)
-        feasibility_tolerance = shape_slack_tolerance(beta_projected, curve_scale)
-        violating_points = _violating_shape_constraint_points(
-            spec,
-            beta_projected,
-            kind,
-            feasibility_tolerance,
-        )
-        if violating_points.size == 0:
-            break
-
-        new_points = [
-            float(new_point)
-            for new_point in violating_points
-            if not any(
-                abs(new_point - old_point)
-                <= 16.0 * np.finfo(np.float64).eps * max(1.0, abs(new_point))
-                for old_point in constraint_points
-            )
-        ]
-        if not new_points:
-            certificate = shape_constraint_certificate(spec, beta_projected, kind)
-            raise RuntimeError(
-                f"{label} projection could not certify a constrained derivative span: "
-                f"minimum scaled slack={certificate.minimum_scaled_slack:.3e}"
-            )
-        constraint_points.extend(new_points)
-    else:
-        raise RuntimeError(f"{label} projection exhausted its derivative-span refinements")
+    beta_projected = curve_scale * _cone_projection(spec, H_scaled, g_scaled, kind, label)
 
     repaired_curve = fitted_basis @ beta_projected
     if not np.all(np.isfinite(beta_projected)) or not np.all(np.isfinite(repaired_curve)):

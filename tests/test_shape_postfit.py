@@ -772,8 +772,8 @@ def test_monotone_repair_certifies_between_the_repair_grid_points():
     )
 
 
-def test_monotone_span_refinement_batches_violating_extrema(monkeypatch):
-    import scipy.optimize
+def test_monotone_projection_takes_few_qp_solves(monkeypatch):
+    import superglm.solvers.constrained_qp as constrained_qp
 
     rng = np.random.default_rng(13)
     x = np.linspace(0.0, 1.0, 80)
@@ -784,19 +784,98 @@ def test_monotone_span_refinement_batches_violating_extrema(monkeypatch):
         selection_penalty=0.0,
         features={"x": PSpline(n_knots=12, constraint=Constraint.postfit.increasing)},
     ).fit(X, y)
-    real_minimize = scipy.optimize.minimize
+    real_solve = constrained_qp.solve_constrained_qp
     solve_calls = 0
 
-    def counted_minimize(*args, **kwargs):
+    def counted_solve(*args, **kwargs):
         nonlocal solve_calls
         solve_calls += 1
-        return real_minimize(*args, **kwargs)
+        return real_solve(*args, **kwargs)
 
-    monkeypatch.setattr(scipy.optimize, "minimize", counted_minimize)
+    monkeypatch.setattr(constrained_qp, "solve_constrained_qp", counted_solve)
 
     model.apply_shape_postfit(X, n_grid=500)
 
-    assert solve_calls <= 16
+    assert 1 <= solve_calls <= QP_SOLVE_BUDGET
+
+
+#: QP solves one repair may take: its exchange converges quadratically once the
+#: binding spans' minima are found, so a handful of steps suffice.
+QP_SOLVE_BUDGET = 12
+#: Relative KKT residual of the closest monotone curve, as the oracle reads it. The
+#: repair is a QP optimum feasible to rounding, so it reads about 1e-16; the SLSQP
+#: repair this replaced stopped near 1e-8.
+CLOSEST_REPAIR_KKT = 1e-9
+
+_SWEEP_SHAPES = {
+    "wiggle": (lambda x: 0.9 * x + 0.25 * np.sin(12 * x), "uniform"),
+    "hook": (
+        lambda x: 0.8 * np.log1p(6 * x) - 1.2 * np.maximum(x - 0.55, 0.0) ** 1.5,
+        "beta",
+    ),
+}
+
+
+def _x_groups(model):
+    return [group for group in model._groups if group.feature_name == "x"]
+
+
+def _sweep_fit(shape, direction, family, kind, size):
+    """One fixture of the post-fit monotone sweep: a REML fit whose repair binds."""
+    import zlib
+
+    from superglm import Spline
+
+    curve, design = _SWEEP_SHAPES[shape]
+    rng = np.random.default_rng(zlib.crc32(repr((shape, direction, family, kind, size)).encode()))
+    n = 4000
+    x = rng.uniform(0.0, 1.0, n) if design == "uniform" else rng.beta(1.0, 3.0, n)
+    eta = curve(x) if direction == "increasing" else curve(1.0 - x)
+    if family == "poisson":
+        y = rng.poisson(np.exp(0.5 + eta)).astype(np.float64)
+    else:
+        y = eta + 0.35 * rng.normal(size=n)
+    constraint = getattr(Constraint.postfit, direction)
+    spline = (
+        Spline(kind="cr", k=size, constraint=constraint)
+        if kind == "cr"
+        else Spline(kind="bs", n_knots=size, constraint=constraint)
+    )
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(family=family, selection_penalty=0.0, features={"x": spline}).fit_reml(X, y)
+    return model, X
+
+
+def _wiggly_monotone_fit(kind, size):
+    return _sweep_fit("wiggle", "increasing", "gaussian", kind, size)
+
+
+@pytest.mark.parametrize(
+    ("shape", "direction", "family", "kind", "size"),
+    [
+        # The exchange used to stop after 14 span refinements, still infeasible.
+        ("wiggle", "increasing", "gaussian", "cr", 8),
+        # SLSQP used to stop 1.7e-6 of the zero-term loss short of the closest curve.
+        ("hook", "decreasing", "poisson", "bs", 8),
+    ],
+)
+def test_monotone_repair_is_the_closest_monotone_curve(shape, direction, family, kind, size):
+    from tests._shape_projection_oracle import projection_certificate
+
+    model, X = _sweep_fit(shape, direction, family, kind, size)
+    model.apply_shape_postfit(X)
+
+    repair = model._shape_repairs["x"]
+    spec = model._specs["x"]
+    weights = shape_ops._grid_weights(
+        spec, X["x"].to_numpy(), np.asarray(model._fit_weights, dtype=np.float64), 500
+    )
+    beta = np.concatenate([repair.repaired_beta_reparam[group.sl] for group in _x_groups(model)])
+    certificate = projection_certificate(
+        spec, direction, repair.grid, repair.original_log_effect, weights, beta
+    )
+    assert certificate.minimum_derivative >= -1e-10
+    assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
 
 
 def test_select_convex_repair_certifies_each_polynomial_span():
@@ -900,9 +979,7 @@ def test_invalid_curvature_repair_is_rejected_before_publication(monkeypatch):
 
 
 def test_failed_curvature_optimizer_rolls_back_fitted_state(monkeypatch):
-    from types import SimpleNamespace
-
-    import scipy.optimize
+    import superglm.solvers.constrained_qp as constrained_qp
 
     rng = np.random.default_rng(3)
     x = np.linspace(0.0, 1.0, 120)
@@ -919,12 +996,10 @@ def test_failed_curvature_optimizer_rolls_back_fitted_state(monkeypatch):
     original_predictions = model.predict(X)
 
     monkeypatch.setattr(
-        scipy.optimize,
-        "minimize",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            success=False,
-            status=9,
-            message="injected iteration limit",
+        constrained_qp,
+        "solve_constrained_qp",
+        lambda H, *_args, **_kwargs: constrained_qp.QPResult(
+            beta=np.zeros(H.shape[0]), n_iter=200, converged=False
         ),
     )
 
@@ -2354,74 +2429,70 @@ def _non_finite_solution(x, spec):
 
 
 @pytest.mark.parametrize(
-    ("solution", "span_search", "message"),
+    ("solution", "message"),
     [
-        (
-            _scaled_solution,
-            "real",
-            "Curvature projection failed its feasible-zero objective certificate",
-        ),
-        (
-            _strictly_concave_solution,
-            "blind",
-            "Curvature projection returned an infeasible fitted state",
-        ),
-        (_non_finite_solution, "blind", "Curvature projection returned non-finite fitted state"),
-        (
-            None,
-            "stuck_on_a_known_point",
-            "Curvature projection could not certify a constrained derivative span",
-        ),
-        (
-            None,
-            "endless_new_points",
-            "Curvature projection exhausted its derivative-span refinements",
-        ),
+        (_scaled_solution, "Curvature projection failed its feasible-zero objective certificate"),
+        (_strictly_concave_solution, "Curvature projection returned an infeasible fitted state"),
+        (_non_finite_solution, "Curvature projection returned non-finite fitted state"),
     ],
 )
 @pytest.mark.parametrize("scale", [1.0, 1e-12])
 def test_faulty_projection_is_refused_and_nothing_is_published(
-    monkeypatch, solution, span_search, message, scale
+    monkeypatch, solution, message, scale
 ):
     """Each certificate of the cone projection refuses its own fault; the model is untouched."""
-    from types import SimpleNamespace
-
-    import scipy.optimize
-
     from superglm import constraints
 
     model, X = _fitted_for_publication_refusal(scale=scale)
     snapshot = _publication_snapshot(model, X)
-    real_minimize = scipy.optimize.minimize
-    real_violations = constraints._violating_shape_constraint_points
-    emitted = 0
+    real_projection = constraints._cone_projection
 
-    def minimize_with_fault(*args, **kwargs):
-        result = real_minimize(*args, **kwargs)
-        if solution is None:
-            return result
-        return SimpleNamespace(
-            success=True, status=0, message="", x=solution(result.x, model._specs["x"])
-        )
+    def projection_with_fault(spec, H, g, kind, label):
+        return solution(real_projection(spec, H, g, kind, label), spec)
 
-    def violations_with_fault(spec, beta, kind, tolerance):
-        nonlocal emitted
-        if span_search == "real":
-            return real_violations(spec, beta, kind, tolerance)
-        if span_search == "blind":
-            return np.empty(0)
-        if span_search == "stuck_on_a_known_point":
-            return np.asarray([spec._lo])
-        emitted += 1
-        return np.asarray([spec._lo + 1e-3 * emitted * (spec._hi - spec._lo)])
-
-    monkeypatch.setattr(scipy.optimize, "minimize", minimize_with_fault)
-    monkeypatch.setattr(constraints, "_violating_shape_constraint_points", violations_with_fault)
+    monkeypatch.setattr(constraints, "_cone_projection", projection_with_fault)
 
     with pytest.raises(RuntimeError, match=message):
         model.apply_shape_postfit(X)
 
     _assert_nothing_published(model, X, snapshot)
+
+
+def test_qp_that_never_certifies_a_monotone_projection_is_refused(monkeypatch):
+    """No certified QP solution, not even on the inner cone: refused, nothing published."""
+    import superglm.solvers.constrained_qp as constrained_qp
+
+    model, X = _wiggly_monotone_fit("cr", 8)
+    snapshot = _publication_snapshot(model, X)
+    monkeypatch.setattr(
+        constrained_qp,
+        "solve_constrained_qp",
+        lambda H, *_args, **_kwargs: constrained_qp.QPResult(
+            beta=np.zeros(H.shape[0]), n_iter=200, converged=False
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="Monotone projection failed to converge"):
+        model.apply_shape_postfit(X)
+
+    _assert_nothing_published(model, X, snapshot)
+
+
+def test_projection_that_runs_out_of_steps_publishes_the_inner_cone_repair(monkeypatch):
+    """Forced out of steps, the repair is still monotone everywhere, and says so."""
+    from superglm import constraints
+
+    model, X = _wiggly_monotone_fit("cr", 8)
+    monkeypatch.setattr(constraints, "_PROJECTION_STEPS", 0)
+    monkeypatch.setattr(constraints, "_BRACKET_STEPS", 1)
+
+    with pytest.warns(RuntimeWarning, match="increasing everywhere"):
+        model.apply_shape_postfit(X)
+
+    repair = model._shape_repairs["x"]
+    spec = model._specs["x"]
+    beta = np.concatenate([repair.repaired_beta_reparam[group.sl] for group in _x_groups(model)])
+    assert _minimum_signed_derivative(spec, beta, "increasing") >= -1e-12 * np.linalg.norm(beta)
 
 
 # -- the repair's tolerances follow the response's units ------------------------------------
@@ -2533,17 +2604,17 @@ def test_a_relative_violation_is_not_roundoff_when_the_coefficients_are_tiny(sca
 def test_post_fit_projection_is_equivariant_to_the_response_units(monkeypatch, kind, scale):
     from superglm import constraints
 
-    real_violations = constraints._violating_shape_constraint_points
-    tolerances = []
+    real_projection = constraints._cone_projection
+    problems = []
 
-    def spy(spec, beta, shape_kind, tolerance):
-        tolerances.append(tolerance)
-        return real_violations(spec, beta, shape_kind, tolerance)
+    def spy(spec, H, g, shape_kind, label):
+        problems.append((H.copy(), g.copy()))
+        return real_projection(spec, H, g, shape_kind, label)
 
-    monkeypatch.setattr(constraints, "_violating_shape_constraint_points", spy)
+    monkeypatch.setattr(constraints, "_cone_projection", spy)
 
     def repaired_predictions(unit):
-        tolerances.clear()
+        problems.clear()
         rng = np.random.default_rng(20261030)
         x = np.sort(rng.uniform(0.0, 1.0, 400))
         shape = (
@@ -2555,17 +2626,18 @@ def test_post_fit_projection_is_equivariant_to_the_response_units(monkeypatch, k
             features={"x": PSpline(n_knots=9, constraint=getattr(Constraint.postfit, kind))},
         ).fit(pd.DataFrame({"x": x}), unit * shape)
         model.apply_shape_postfit(pd.DataFrame({"x": x}))
-        return model.predict(pd.DataFrame({"x": x})) / unit, np.array(tolerances) / unit
+        return model.predict(pd.DataFrame({"x": x})) / unit, problems[0]
 
-    reference, reference_tolerances = repaired_predictions(1.0)
-    rescaled, rescaled_tolerances = repaired_predictions(scale)
+    reference, (reference_H, reference_g) = repaired_predictions(1.0)
+    rescaled, (rescaled_H, rescaled_g) = repaired_predictions(scale)
 
-    # The same scale-free problem solved twice agrees to the optimizer's own tolerance
-    # (ftol = 1e-12 of the zero loss), with headroom for a diverging path.
+    # The same scale-free problem solved twice agrees to the projection's own
+    # tolerance, with headroom for a diverging path.
     np.testing.assert_allclose(rescaled, reference, rtol=0.0, atol=1e-9 * np.max(np.abs(reference)))
-    # The slack carries the response's units, so its tolerance does too. Only the
-    # first solve's is compared: how many span refinements follow is a trajectory.
-    assert rescaled_tolerances[0] == pytest.approx(reference_tolerances[0], rel=1e-6)
+    # The cone projection is posed in units of the target's weighted RMS, so the
+    # problem it solves, and with it every tolerance inside it, is the same in any units.
+    np.testing.assert_allclose(rescaled_H, reference_H, rtol=1e-9, atol=0.0)
+    np.testing.assert_allclose(rescaled_g, reference_g, rtol=1e-6, atol=1e-12)
 
 
 def test_a_repair_that_collapses_a_term_is_feasible_at_the_scale_of_the_term(monkeypatch):

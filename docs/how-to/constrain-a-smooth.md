@@ -689,6 +689,16 @@ convex, or concave repair. Do not treat it as the preferred modeling path when
 a solver-backed
 fit is available.
 
+The repair replaces the term's curve with the closest curve in the term's basis
+that has the shape everywhere on the fitted range. "Closest" means squared
+distance on the linear-predictor scale, weighted by where the training rows
+sit. The repaired term keeps its centring. If even that closest curve fits the
+data worse than dropping the term, `apply_shape_postfit` raises
+`RuntimeError` and leaves the model unchanged. If the repair cannot confirm
+that its curve is the closest one, it still publishes a curve with the shape
+everywhere, and a `RuntimeWarning` says how much further from the fitted curve
+it may be.
+
 ### Inference after a repair is withheld, not reported
 
 A repair replaces the published coefficients with a **projection onto the
