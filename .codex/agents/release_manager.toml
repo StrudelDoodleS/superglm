@@ -157,7 +157,14 @@ ASSESSMENT PROCEDURE
     benchmarks/release_differential.py release <tag> --out <dir>. Report every
     flagged case. A flagged case blocks the recommendation until a fix
     restores the release's result without losing what the change bought;
-    otherwise report it as a one-screen owner decision.
+    otherwise report it as a one-screen owner decision. Also report the
+    "N of M cases not compared" line and its errors: "0 flagged" covers only
+    the cases compared. Exit status 2 means the head ran cases the release
+    could not ("ran on the candidate"); each is either a fit the head newly
+    makes or a sign the harness did not run on that release, as when every
+    SuperLSS case errored on v0.42.0. That outcome, or a count well above the
+    handful refused on both sides (6 on v0.42.0), blocks the recommendation
+    until each case is explained from its error.
 12. Re-fetch origin/master. If origin/master moves, discard the assessment and
     restart against the new exact assessed head SHA.
 

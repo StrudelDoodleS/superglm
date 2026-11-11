@@ -14,7 +14,11 @@ offsets, ``_lss_offsets_at_fit``), it asks the release which form it takes.
     compare BASE CANDIDATE RELEASE
                      flag candidate outcomes worse than the base; exit 1 on any flag.
                      It also counts the cases it could not compare because the
-                     base errored or timed out, by error.
+                     base errored or timed out, by error, and exits 2 (when
+                     nothing is flagged) if any of them ran on the candidate:
+                     the base refused a fit the candidate makes, or the harness
+                     does not run on that release, and only a reader can say
+                     which. A case refused on both sides is a standing decision.
 
 The corpus: SuperGLM over every built-in family and link, nine term kinds
 (mains, random effect, tensor pair, spline-by-category, ``fs`` and ``sz`` factor
@@ -759,7 +763,23 @@ def not_compared(base: dict[str, dict]) -> Counter[str]:
     )
 
 
-def report(base: dict[str, dict], found: dict[str, list[str]]) -> list[str]:
+def ran_only_on_candidate(base: dict[str, dict], candidate: dict[str, dict]) -> list[str]:
+    """The uncompared cases the candidate ran: those need a reader's explanation.
+
+    A case both sides refuse is a standing decision (the history cases refused by
+    design). One only the base refused is either a fit the candidate newly makes
+    or a harness that does not run on the base; only a reader can tell them apart.
+    """
+    return sorted(
+        name
+        for name, record in base.items()
+        if record["status"] != "ok" and candidate.get(name, {}).get("status") == "ok"
+    )
+
+
+def report(
+    base: dict[str, dict], candidate: dict[str, dict], found: dict[str, list[str]]
+) -> list[str]:
     """The lines ``compare`` prints: each flag, the count, and what was not compared."""
     lines = [f"{name}: {'; '.join(reasons)}" for name, reasons in sorted(found.items())]
     lines.append(f"{len(found)} flagged")
@@ -771,6 +791,16 @@ def report(base: dict[str, dict], found: dict[str, list[str]]) -> list[str]:
         lines += [f"  {count} x {reason}" for reason, count in skipped.most_common(5)]
         if len(skipped) > 5:
             lines.append(f"  and {len(skipped) - 5} other errors")
+        unexplained = ran_only_on_candidate(base, candidate)
+        if unexplained:
+            lines.append(
+                f"{len(unexplained)} of them ran on the candidate: the base refused a fit the "
+                "candidate makes, or the harness does not run on the base. Explain them before "
+                "reading this comparison as clean."
+            )
+            lines += [f"  {name}" for name in unexplained[:5]]
+            if len(unexplained) > 5:
+                lines.append(f"  and {len(unexplained) - 5} others")
     return lines
 
 
@@ -859,10 +889,10 @@ def main(argv=None) -> int:
         run(_selected(args), Path(args.out))
         return 0
     if args.cmd == "compare":
-        base = load(Path(args.base))
-        found = compare(base, load(Path(args.candidate)), args.release)
-        print("\n".join(report(base, found)))
-        return 1 if found else 0
+        base, candidate = load(Path(args.base)), load(Path(args.candidate))
+        found = compare(base, candidate, args.release)
+        print("\n".join(report(base, candidate, found)))
+        return 1 if found else 2 if ran_only_on_candidate(base, candidate) else 0
     sys.path.insert(0, str(HERE))
     import books
 

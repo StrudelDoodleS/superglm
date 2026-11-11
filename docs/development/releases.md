@@ -113,8 +113,12 @@ reproduce every break found across earlier releases. A fit the release
 converged to a sensible answer that the head refuses, leaves unconverged, or
 fits worse beyond the harness's tolerances is a regression. The comparison
 also counts, by error, the cases the release itself errored on or timed out,
-which it could not compare: a large count means the harness did not run on
-that release, not that nothing regressed. A regression blocks the
+which it could not compare. A case both sides refuse is a standing decision,
+like the history cases refused by design. When the head runs a case the
+release could not, the comparison exits 2 and lists those cases: either the
+head fits what the release refused, or the harness did not run on that
+release, and a large count is the second until shown otherwise. Either way
+they are explained before the run is read as clean. A regression blocks the
 release until a fix restores the old result without losing what the change
 bought; otherwise it goes to the owner as a one-screen decision.
 `tests/test_userspace_040.py` holds the harness's compact subset to v0.40.0's

@@ -215,6 +215,22 @@ def test_release_manager_prepares_a_bump_only_pull_request() -> None:
     assert "dedicated release worktree" not in policy
 
 
+def test_release_manager_reads_what_the_differential_did_not_compare() -> None:
+    """The differential's "0 flagged" covers only the cases it compared: v0.43.0
+    was assessed clean on a run where v0.42.0 errored every SuperLSS case. The
+    gate reports the not-compared line and blocks on the exit status that marks
+    those cases."""
+    policy = (ROOT / ".codex/agents/release_manager.toml").read_text(encoding="utf-8")
+    step = " ".join(policy.split("\n11. ", 1)[1].split("\n12. ", 1)[0].split())
+    script = (ROOT / "benchmarks/release_differential.py").read_text(encoding="utf-8")
+
+    assert '"N of M cases not compared"' in step
+    assert "cases not compared: the base errored or timed out" in script
+    assert "Exit status 2" in step and '("ran on the candidate")' in step
+    assert "ran on the candidate" in script and "else 2 if ran_only_on_candidate(" in script
+    assert "blocks the recommendation until each case is explained" in step
+
+
 def test_release_manager_policy_requires_fresh_sha_bound_assessment() -> None:
     policy = (ROOT / ".codex/agents/release_manager.toml").read_text(encoding="utf-8")
 

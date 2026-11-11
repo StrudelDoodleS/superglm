@@ -252,29 +252,53 @@ def test_the_release_command_gives_the_baseline_an_absolute_output_path(
     assert baseline == tmp_path / "results" / f"{stem}.jsonl"
 
 
-def test_compare_counts_the_cases_a_failing_base_left_uncompared(tmp_path, capsys) -> None:
-    """A base that cannot run a case flags nothing for it, so ``compare`` says how many
-    it skipped and why. Fails on d34ddd69, where v0.42.0 errored all 144 SuperLSS cases
-    and ``compare`` reported only "0 flagged"."""
-    refused = "TypeError: NegativeBinomialLS.mean() got an unexpected keyword argument 'offset'"
-    base = {
-        "lss/NegativeBinomialLS/simple/small/exact/efs": {"status": "error", "error": refused},
-        "lss/GammaLS/simple/small/exact/efs": {"status": "error", "error": refused},
-        "lss/GammaLS/simple/mid/exact/efs": {"status": "timeout"},
-        "glm/poisson/log/small/mains/exact/fit_reml": _record(),
-    }
+def _compare_printed(tmp_path, capsys, base, candidate) -> tuple[int, list[str]]:
     paths = {}
-    for side, records in (("base", base), ("candidate", dict.fromkeys(base, _record()))):
+    for side, records in (("base", base), ("candidate", candidate)):
         paths[side] = tmp_path / f"{side}.jsonl"
         lines = [json.dumps({**record, "case": name}) for name, record in records.items()]
         paths[side].write_text("\n".join(lines), encoding="utf-8")
-
     command = ["compare", str(paths["base"]), str(paths["candidate"]), "v0.42.0"]
-    assert release_differential.main(command) == 0
-    printed = capsys.readouterr().out.splitlines()
+    status = release_differential.main(command)
+    return status, capsys.readouterr().out.splitlines()
+
+
+_REFUSED = "TypeError: NegativeBinomialLS.mean() got an unexpected keyword argument 'offset'"
+_UNCOMPARED_BASE = {
+    "lss/NegativeBinomialLS/simple/small/exact/efs": {"status": "error", "error": _REFUSED},
+    "lss/GammaLS/simple/small/exact/efs": {"status": "error", "error": _REFUSED},
+    "lss/GammaLS/simple/mid/exact/efs": {"status": "timeout"},
+    "glm/poisson/log/small/mains/exact/fit_reml": _record(),
+}
+
+
+def test_compare_counts_the_cases_a_failing_base_left_uncompared(tmp_path, capsys) -> None:
+    """A base that cannot run a case flags nothing for it, so ``compare`` says how many
+    it skipped and why, and exits 2 when the candidate ran them. Fails on d34ddd69,
+    where v0.42.0 errored all 144 SuperLSS cases and ``compare`` reported only
+    "0 flagged" and exited 0."""
+    candidate = dict.fromkeys(_UNCOMPARED_BASE, _record())
+    status, printed = _compare_printed(tmp_path, capsys, _UNCOMPARED_BASE, candidate)
+
+    assert status == 2
     assert printed[0] == "0 flagged"
     assert printed[1] == "3 of 4 cases not compared: the base errored or timed out"
-    assert printed[2:] == [f"  2 x error: {refused}", "  1 x timeout"]
+    assert printed[2:4] == [f"  2 x error: {_REFUSED}", "  1 x timeout"]
+    assert printed[4].startswith("3 of them ran on the candidate")
+    assert printed[5:] == [f"  {name}" for name in sorted(_UNCOMPARED_BASE)[1:]]
+
+
+def test_compare_passes_cases_refused_on_both_sides(tmp_path, capsys) -> None:
+    """A case both releases refuse (the history cases refused by design) is a standing
+    decision: ``compare`` counts it and exits 0. A flag still exits 1."""
+    candidate = {**_UNCOMPARED_BASE, "glm/poisson/log/small/mains/exact/fit_reml": _record()}
+    status, printed = _compare_printed(tmp_path, capsys, _UNCOMPARED_BASE, candidate)
+    assert status == 0
+    assert printed[:2] == ["0 flagged", "3 of 4 cases not compared: the base errored or timed out"]
+    assert not any("ran on the candidate" in line for line in printed)
+
+    worse = {**candidate, "glm/poisson/log/small/mains/exact/fit_reml": {"status": "timeout"}}
+    assert _compare_printed(tmp_path, capsys, _UNCOMPARED_BASE, worse)[0] == 1
 
 
 class _ReleaseUpToV042:
