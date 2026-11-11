@@ -889,6 +889,37 @@ def test_monotone_repair_is_the_closest_monotone_curve(shape, direction, family,
     assert grid_certificate.kkt_residual <= CLOSEST_REPAIR_KKT
 
 
+def test_grid_repair_whose_first_inner_bracket_solve_does_not_certify_is_published():
+    """A quartic P-spline whose first Bernstein inner solve exhausts every start.
+
+    That left the bracket without a feasible point, and the repair raised where
+    master's published. A solve that does not certify still meets the inner cone's
+    rows, so it is kept as the incumbent, and the bracket goes on to close on the
+    closest monotone curve on the grid.
+    """
+    from superglm.constraints import MonotoneRepairer
+    from tests._shape_projection_oracle import grid_metric, projection_certificate
+
+    rng = np.random.default_rng(4)
+    x = np.sort(rng.uniform(size=200))
+    y = rng.normal(size=200)
+    X = pd.DataFrame({"x": x})
+    feature = PSpline(n_knots=10, degree=4, m=2)
+    model = SuperGLM(
+        family="gaussian", selection_penalty=0.0, spline_penalty=0.2, features={"x": feature}
+    ).fit(X, y)
+    spec, groups = model._specs["x"], _x_groups(model)
+
+    repair = MonotoneRepairer().repair(spec, model.result.beta, groups)
+
+    H, g = grid_metric(spec, repair.grid, repair.original_log_effect, np.ones(repair.grid.size))
+    repaired = _term_beta(repair.repaired_beta_reparam, groups)
+    fitted = _term_beta(model.result.beta, groups)
+    certificate = projection_certificate(spec, "increasing", repaired, H, g, fitted)
+    assert certificate.minimum_derivative >= -1e-10
+    assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
+
+
 def _rise_fit(t, x, **spline):
     """A Gaussian fit of a wiggly rise on predictor values ``x``, sampled at positions ``t``."""
     X = pd.DataFrame({"x": x})

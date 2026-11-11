@@ -809,6 +809,8 @@ def _solve_cone_qp(
     rows: NDArray,
     active: list[int] | None = None,
     start: NDArray | None = None,
+    *,
+    feasible: bool = False,
 ):
     """The repository QP on unit ``rows @ beta >= 0``; ``None`` when no solution is certified.
 
@@ -817,6 +819,9 @@ def _solve_cone_qp(
     when it is feasible and ``H beta - g`` lies in the cone of its held rows, which
     for a convex QP is optimality. ``active`` is a warm working set and ``start`` a
     point meeting every row (``_shifted_start``); without one, ``beta = 0`` is used.
+    ``feasible`` returns, when nothing is certified, the attempt of least objective
+    that meets every row and improves on the cone's apex, instead of ``None``: a
+    bound, not an optimum.
     """
     from scipy.optimize import nnls
 
@@ -837,6 +842,7 @@ def _solve_cone_qp(
     if active:
         starts.insert(0, (shifted, active, max(_WARM_STEPS, H.shape[0])))
     result = None
+    attempts: list[_ScaledResult] = []
     for ridged in (False, True):
         for point, working, steps in starts:
             try:
@@ -844,26 +850,41 @@ def _solve_cone_qp(
                     *problem, active_set_init=working, max_iter=steps, beta_start=point
                 )
             except ValueError:
-                return None
+                return _least_feasible(H, g, rows, attempts) if feasible else None
             result = _ScaledResult(solved, scale)
             if result.converged:
                 return result
+            attempts.append(result)
         if ridged or solved.rank == solved.width:
             break
         problem = (_null_space_ridge(problem[0], solved.rank), *problem[1:])
     assert result is not None
     beta = result.beta
     slack = rows @ beta
-    if not np.all(np.isfinite(beta)) or np.min(slack, initial=0.0) < -shape_slack_tolerance(
+    if np.all(np.isfinite(beta)) and np.min(slack, initial=0.0) >= -shape_slack_tolerance(
         beta, 1.0
     ):
-        return None
-    gradient = H @ beta - g
-    held = rows[slack <= _HELD_SLACK]
-    residual = nnls(held.T, gradient)[1] if held.shape[0] else float(np.linalg.norm(gradient))
-    if residual <= _KKT_RESIDUAL * max(1.0, float(np.linalg.norm(g))):
-        return result
-    return None
+        gradient = H @ beta - g
+        held = rows[slack <= _HELD_SLACK]
+        residual = nnls(held.T, gradient)[1] if held.shape[0] else float(np.linalg.norm(gradient))
+        if residual <= _KKT_RESIDUAL * max(1.0, float(np.linalg.norm(g))):
+            return result
+    return _least_feasible(H, g, rows, attempts) if feasible else None
+
+
+def _least_feasible(H: NDArray, g: NDArray, rows: NDArray, attempts: list) -> _ScaledResult | None:
+    """The attempt of least ``0.5 b'Hb - g'b`` below the apex's 0 among those meeting every row."""
+    best, least = None, 0.0
+    for attempt in attempts:
+        beta = attempt.beta
+        if not np.all(np.isfinite(beta)) or np.min(
+            rows @ beta, initial=0.0
+        ) < -shape_slack_tolerance(beta, 1.0):
+            continue
+        value = float(0.5 * beta @ H @ beta - g @ beta)
+        if value < least:
+            best, least = attempt, value
+    return best
 
 
 def _broken_rows(rows: NDArray, beta: NDArray) -> list[int]:
@@ -930,11 +951,13 @@ def _bracketed_projection(
 ) -> tuple[NDArray | None, float]:
     """Exchange between the Bernstein inner cone and the cutting-plane outer cone.
 
-    Every inner optimum is shape-feasible and every outer one bounds the
-    projection's objective from below, so the best inner optimum is certified once
+    Every inner point is shape-feasible and every outer optimum bounds the
+    projection's objective from below, so the best inner point is certified once
     the two meet. A span the projection holds flat sits at its cone's apex, which the
     inner cone holds exactly. Each solve starts from ``point``, the last outer
-    optimum, shifted along ``inside``. Returns the best inner optimum and the gap left.
+    optimum, shifted along ``inside``. An inner solve that does not certify still
+    gives a feasible point when one improves on the apex; with no outer optimum the
+    gap is left from the unconstrained minimum. ``None`` when no inner point is found.
     """
 
     def objective(beta: NDArray) -> float:
@@ -950,6 +973,7 @@ def _bracketed_projection(
             inner_rows,
             _broken_rows(inner_rows, point),
             _shifted_start(inner_rows, point, inside),
+            feasible=True,
         )
         cut_rows, _, owners = _cut_rows(pieces, p, cuts, H.shape[0])
         outer_rows = np.vstack([end_rows, cut_rows])
@@ -960,11 +984,11 @@ def _bracketed_projection(
             list(range(end_rows.shape[0], outer_rows.shape[0])),
             _shifted_start(outer_rows, point, inside),
         )
-        if inner is None or outer is None:
+        if inner is not None and objective(inner.beta) < upper:
+            best, upper = np.asarray(inner.beta, dtype=np.float64), objective(inner.beta)
+        if outer is None:
             break
         point = outer.beta
-        if objective(inner.beta) < upper:
-            best, upper = np.asarray(inner.beta, dtype=np.float64), objective(inner.beta)
         lower = max(lower, objective(outer.beta))
         if upper - lower <= _OBJECTIVE_GAP:
             break
@@ -974,7 +998,10 @@ def _bracketed_projection(
             if position in active:
                 cuts[index].append(t)
         for index, piece in enumerate(pieces):
-            for beta, violated_only in ((outer.beta, True), (inner.beta, False)):
+            for beta, violated_only in (
+                (outer.beta, True),
+                *([] if inner is None else [(inner.beta, False)]),
+            ):
                 minimum = _piece_minimum(piece, p, beta)
                 if (
                     minimum is not None
@@ -982,6 +1009,8 @@ def _bracketed_projection(
                     and all(abs(minimum[0] - t) > _CHECKPOINT_SEPARATION for t in cuts[index])
                 ):
                     cuts[index].append(minimum[0])
+    if lower == -np.inf:
+        lower = objective(np.linalg.lstsq(H, g, rcond=None)[0])
     return best, upper - lower
 
 
