@@ -14,6 +14,13 @@ derivative at a point ``x_i`` where that derivative touches zero. Feasibility is
 read off the exact piecewise polynomial (``scipy.interpolate.PPoly`` roots), and
 the multipliers come from ``scipy.optimize.nnls``; neither shares code with the
 repair's own QP.
+
+Scope: B-spline bases read through ``spec._knots`` and ``spec._R_inv`` (``bs``
+and ``ps``) whose degree exceeds the constrained derivative's order. It cannot
+read the jump bases, where the shape lives in the jumps at the knots (``ps`` of
+degree 0 for a monotone rule, degree 1 for a curvature rule: SciPy refuses a
+derivative order above the degree), nor the cardinal bases (``cr`` and
+``cr_cardinal``), which have no ``_knots`` B-spline form.
 """
 
 from __future__ import annotations

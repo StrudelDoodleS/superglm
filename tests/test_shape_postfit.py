@@ -878,6 +878,289 @@ def test_monotone_repair_is_the_closest_monotone_curve(shape, direction, family,
     assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
 
 
+def _rise_fit(t, x, **spline):
+    """A Gaussian fit of a wiggly rise on predictor values ``x``, sampled at positions ``t``."""
+    X = pd.DataFrame({"x": x})
+    y = 0.9 * t + 0.25 * np.sin(12 * t)
+    feature = PSpline(constraint=Constraint.postfit.increasing, **spline)
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": feature})
+    return model.fit(X, y), X
+
+
+def _repair_certificate(model, X, kind):
+    from tests._shape_projection_oracle import projection_certificate
+
+    repair = model._shape_repairs["x"]
+    spec = model._specs["x"]
+    weights = shape_ops._grid_weights(
+        spec, X["x"].to_numpy(), np.asarray(model._fit_weights, dtype=np.float64), repair.grid.size
+    )
+    beta = np.concatenate([repair.repaired_beta_reparam[group.sl] for group in _x_groups(model)])
+    return projection_certificate(
+        spec, kind, repair.grid, repair.original_log_effect, weights, beta
+    )
+
+
+@pytest.mark.parametrize("offset", [1e8, 1e12])
+def test_monotone_repair_far_from_the_origin_is_the_closest_monotone_curve(offset):
+    """Span polynomials come from representable points, not rounded collocation nodes."""
+    t = np.linspace(0.0, 1.0, 200)
+    model, X = _rise_fit(t, offset + t, n_knots=9)
+
+    model.apply_shape_postfit(X)
+
+    certificate = _repair_certificate(model, X, "increasing")
+    assert certificate.minimum_derivative >= -1e-10
+    assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
+
+
+def test_monotone_repair_across_a_one_ulp_span_is_the_closest_monotone_curve():
+    """A span one ULP wide keeps its own polynomial piece in the projection's rows."""
+    rng = np.random.default_rng(3)
+    x = np.sort(rng.uniform(0.0, 1.0, 600))
+    X = pd.DataFrame({"x": x})
+    knots = [0.4, float(np.nextafter(0.4, np.inf)), 0.8]
+    feature = PSpline(knots=knots, degree=2, constraint=Constraint.postfit.increasing)
+    y = 0.9 * x + 0.25 * np.sin(12 * x) + 0.1 * rng.normal(size=x.size)
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": feature}).fit(X, y)
+
+    model.apply_shape_postfit(X)
+
+    certificate = _repair_certificate(model, X, "increasing")
+    assert certificate.minimum_derivative >= -1e-10
+    assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
+
+
+@pytest.mark.parametrize("scale", [1e165, 1e-150])
+def test_monotone_repair_in_extreme_predictor_units_matches_unit_units(scale):
+    """Derivative rows that would under- or overflow are normalized range-safely."""
+    t = np.linspace(0.0, 1.0, 200)
+    spline = {"n_knots": 9, "penalty": "none", "m": 1}
+    unit, X_unit = _rise_fit(t, t, **spline)
+    scaled, X_scaled = _rise_fit(t, scale * t, **spline)
+
+    unit.apply_shape_postfit(X_unit)
+    scaled.apply_shape_postfit(X_scaled)
+
+    expected = unit._shape_repairs["x"].repaired_log_effect
+    repaired = scaled._shape_repairs["x"].repaired_log_effect
+    np.testing.assert_allclose(repaired, expected, rtol=0.0, atol=1e-9 * np.max(np.abs(expected)))
+
+
+def test_monotone_repair_on_a_grid_coarser_than_the_basis_is_published():
+    """Five grid points cannot pin twelve coefficients: the Hessian is semidefinite."""
+    t = np.linspace(0.0, 1.0, 200)
+    model, X = _rise_fit(t, t, n_knots=7, degree=5, m=1, penalty="none")
+
+    model.apply_shape_postfit(X, n_grid=5)
+
+    repair = model._shape_repairs["x"]
+    beta = np.concatenate([repair.repaired_beta_reparam[group.sl] for group in _x_groups(model)])
+    assert shape_constraint_is_roundoff_feasible(model._specs["x"], beta, "increasing")
+
+
+def test_monotone_repair_on_a_wide_piecewise_linear_basis_is_published():
+    """A 440-row projection gets a budget that grows with its rows."""
+    x = np.linspace(0.0, 1.0, 1000)
+    X = pd.DataFrame({"x": x})
+    feature = PSpline(
+        n_knots=220, degree=1, m=1, penalty="none", constraint=Constraint.postfit.increasing
+    )
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": feature})
+    model.fit(X, 1.0 - x)
+
+    model.apply_shape_postfit(X)
+
+    repair = model._shape_repairs["x"]
+    assert repair.max_violation_after == 0.0
+
+
+def test_distinct_unit_rows_memory_is_linear_in_the_rows():
+    """Repeated rows are found without an all-pairs comparison."""
+    import tracemalloc
+
+    from superglm.constraints import _distinct_unit_rows
+
+    rows = np.random.default_rng(0).normal(size=(400, 200))
+    repeated = np.vstack([rows, 3.0 * rows])
+
+    tracemalloc.start()
+    try:
+        unit, merged = _distinct_unit_rows(repeated)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert unit.shape == rows.shape
+    assert merged == [[index, index + 400] for index in range(400)]
+    assert peak <= 16 * repeated.nbytes
+
+
+def test_curvature_repair_of_arbitrary_coefficients_is_published():
+    """A solve whose own start stays outside the cone starts from a point inside it."""
+    from superglm import Spline
+    from superglm.constraints import CurvatureRepairer
+
+    x = np.linspace(0.0, 1.0, 500)
+    X = pd.DataFrame({"x": x})
+    feature = Spline(kind="cr", k=20, constraint=Constraint.postfit.convex)
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": feature})
+    model.fit(X, np.sin(6.0 * x))
+    spec, groups = model._specs["x"], _x_groups(model)
+    beta = model.result.beta.copy()
+    coefficients = np.random.default_rng(0).normal(size=sum(group.size for group in groups))
+    offset = 0
+    for group in groups:
+        beta[group.sl] = coefficients[offset : offset + group.size]
+        offset += group.size
+
+    repair = CurvatureRepairer("convex").repair(spec, beta, groups, n_grid=500)
+
+    repaired = np.concatenate([repair.repaired_beta_reparam[group.sl] for group in groups])
+    assert shape_constraint_is_roundoff_feasible(spec, repaired, "convex")
+
+
+@pytest.mark.slow
+def test_monotone_repair_on_a_hundred_knot_basis_is_published():
+    """Most of a large basis's rows bind; every solve still certifies."""
+    from superglm import Spline
+
+    rng = np.random.default_rng(0)
+    x = rng.uniform(0.0, 1.0, 4000)
+    X = pd.DataFrame({"x": x})
+    y = 0.9 * x + 0.25 * np.sin(12 * x) + 0.3 * rng.normal(size=x.size)
+    feature = Spline(kind="ps", n_knots=100, constraint=Constraint.postfit.increasing)
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": feature})
+    model.fit(X, y)
+
+    model.apply_shape_postfit(X)
+
+    certificate = _repair_certificate(model, X, "increasing")
+    assert certificate.minimum_derivative >= -1e-10
+
+
+def _qp_iterations(monkeypatch):
+    import superglm.solvers.constrained_qp as constrained_qp
+
+    real_solve = constrained_qp.solve_constrained_qp
+    count = {"solves": 0, "iterations": 0}
+
+    def counted_solve(*args, **kwargs):
+        result = real_solve(*args, **kwargs)
+        count["solves"] += 1
+        count["iterations"] += result.n_iter
+        return result
+
+    monkeypatch.setattr(constrained_qp, "solve_constrained_qp", counted_solve)
+    return count
+
+
+#: Active-set iterations of a curvature repair on a degree-4 basis, whose curvature
+#: is quadratic on each span, so the exchange runs. Warm starts and one quick
+#: attempt per curvature-corrected solve take it to about 900; it took 2,409.
+CURVATURE_EXCHANGE_ITERATIONS = 1500
+
+
+def test_curvature_exchange_on_a_degree_four_basis_takes_few_iterations(monkeypatch):
+    """The review's slowest curvature repair: a flat concave fit on a quartic basis."""
+    import zlib
+
+    from superglm import Spline
+
+    key = (
+        "flat",
+        "concave",
+        "gaussian",
+        "bs4",
+        sorted(dict(kind="bs", n_knots=8, degree=4).items()),
+    )
+    rng = np.random.default_rng(zlib.crc32(repr(key).encode()) + 7)
+    x = rng.uniform(0, 1, 4000) if zlib.crc32(b"flat") % 2 else rng.beta(1.2, 2.5, 4000)
+    y = 0.3 * rng.normal(size=x.size)
+    X = pd.DataFrame({"x": x})
+    feature = Spline(kind="bs", n_knots=8, degree=4, constraint=Constraint.postfit.concave)
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": feature})
+    model.fit_reml(X, y)
+    count = _qp_iterations(monkeypatch)
+
+    model.apply_shape_postfit(X)
+
+    assert "x" in model._shape_repairs
+    assert count["iterations"] <= CURVATURE_EXCHANGE_ITERATIONS, count
+
+
+#: Active-set iterations of a one-QP curvature repair: started inside the cone at
+#: the rows the fitted curve breaks, the solve certifies in 7; it took more than 8.
+ONE_QP_ITERATIONS = 8
+
+
+def test_one_qp_curvature_repair_takes_few_iterations(monkeypatch):
+    """A cubic P-spline's curvature is linear on each span, so one warm-started QP is exact."""
+    rng = np.random.default_rng(20261111)
+    x = np.sort(rng.uniform(0.0, 1.0, 600))
+    X = pd.DataFrame({"x": x})
+    y = 1.5 * (x - 0.4) ** 2 + 0.08 * np.sin(14 * x) + 0.05 * rng.normal(size=x.size)
+    feature = PSpline(n_knots=12, constraint=Constraint.postfit.convex)
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": feature}).fit(X, y)
+    count = _qp_iterations(monkeypatch)
+
+    model.apply_shape_postfit(X)
+
+    assert "x" in model._shape_repairs
+    assert count["solves"] == 1
+    assert count["iterations"] <= ONE_QP_ITERATIONS, count
+
+
+# The flat Poisson fixture of the review sweep. Its grid weights fall to 1e-5 of
+# the rest in the sparse tail, so cond(H) passes 1 / u, and an unscaled solve
+# certified on some OpenBLAS kernels and cycled on others.
+_KERNEL_FIXTURE = """
+import sys, warnings, zlib
+import numpy as np, pandas as pd
+from superglm import Constraint, Spline, SuperGLM
+warnings.simplefilter("ignore")
+key = ("flat", "decreasing", "poisson", "bs5", sorted(dict(kind="bs", n_knots=6, degree=5).items()))
+rng = np.random.default_rng(zlib.crc32(repr(key).encode()) + 7)
+x = rng.uniform(0, 1, 4000) if zlib.crc32(b"flat") % 2 else rng.beta(1.2, 2.5, 4000)
+y = rng.poisson(np.exp(0.3), 4000).astype(float)
+X = pd.DataFrame({"x": x})
+spline = Spline(kind="bs", n_knots=6, degree=5, constraint=Constraint.postfit.decreasing)
+model = SuperGLM(family="poisson", selection_penalty=0.0, features={"x": spline}).fit_reml(X, y)
+try:
+    model.apply_shape_postfit(X)
+except RuntimeError as exc:
+    print("refused", exc)
+else:
+    print("published", " ".join(repr(float(v)) for v in model._shape_repairs["x"].repaired_log_effect))
+"""
+
+
+@pytest.mark.slow
+def test_repair_decision_is_the_same_on_every_blas_kernel():
+    """Publish or refuse, and the repaired curve, agree across OpenBLAS microkernels."""
+    import os
+    import subprocess
+
+    outcomes = {}
+    for kernel in ("Haswell", "Zen", "SkylakeX", "Sandybridge"):
+        environment = {**os.environ, "OPENBLAS_CORETYPE": kernel, "OPENBLAS_NUM_THREADS": "1"}
+        run = subprocess.run(
+            [sys.executable, "-c", _KERNEL_FIXTURE],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=300,
+        )
+        outcomes[kernel] = run.stdout.split()
+
+    decisions = {kernel: words[0] for kernel, words in outcomes.items()}
+    assert set(decisions.values()) == {"published"}, decisions
+    curves = [np.asarray([float(v) for v in words[1:]]) for words in outcomes.values()]
+    for curve in curves[1:]:
+        np.testing.assert_allclose(curve, curves[0], rtol=0.0, atol=1e-9)
+
+
 def test_select_convex_repair_certifies_each_polynomial_span():
     """Selection reparameterization must not hide between-grid negative curvature."""
     rng = np.random.default_rng(0)
@@ -2447,8 +2730,8 @@ def test_faulty_projection_is_refused_and_nothing_is_published(
     snapshot = _publication_snapshot(model, X)
     real_projection = constraints._cone_projection
 
-    def projection_with_fault(spec, H, g, kind, label):
-        return solution(real_projection(spec, H, g, kind, label), spec)
+    def projection_with_fault(spec, H, g, kind, label, **kwargs):
+        return solution(real_projection(spec, H, g, kind, label, **kwargs), spec)
 
     monkeypatch.setattr(constraints, "_cone_projection", projection_with_fault)
 
@@ -2607,9 +2890,9 @@ def test_post_fit_projection_is_equivariant_to_the_response_units(monkeypatch, k
     real_projection = constraints._cone_projection
     problems = []
 
-    def spy(spec, H, g, shape_kind, label):
-        problems.append((H.copy(), g.copy()))
-        return real_projection(spec, H, g, shape_kind, label)
+    def spy(spec, H, g, shape_kind, label, inside=None):
+        problems.append((H.copy(), g.copy(), inside.copy()))
+        return real_projection(spec, H, g, shape_kind, label, inside=inside)
 
     monkeypatch.setattr(constraints, "_cone_projection", spy)
 
@@ -2628,8 +2911,8 @@ def test_post_fit_projection_is_equivariant_to_the_response_units(monkeypatch, k
         model.apply_shape_postfit(pd.DataFrame({"x": x}))
         return model.predict(pd.DataFrame({"x": x})) / unit, problems[0]
 
-    reference, (reference_H, reference_g) = repaired_predictions(1.0)
-    rescaled, (rescaled_H, rescaled_g) = repaired_predictions(scale)
+    reference, (reference_H, reference_g, reference_ray) = repaired_predictions(1.0)
+    rescaled, (rescaled_H, rescaled_g, rescaled_ray) = repaired_predictions(scale)
 
     # The same scale-free problem solved twice agrees to the projection's own
     # tolerance, with headroom for a diverging path.
@@ -2638,6 +2921,8 @@ def test_post_fit_projection_is_equivariant_to_the_response_units(monkeypatch, k
     # problem it solves, and with it every tolerance inside it, is the same in any units.
     np.testing.assert_allclose(rescaled_H, reference_H, rtol=1e-9, atol=0.0)
     np.testing.assert_allclose(rescaled_g, reference_g, rtol=1e-6, atol=1e-12)
+    # The ray its solves start along depends on the predictor alone.
+    np.testing.assert_allclose(rescaled_ray, reference_ray, rtol=1e-9, atol=0.0)
 
 
 def test_a_repair_that_collapses_a_term_is_feasible_at_the_scale_of_the_term(monkeypatch):

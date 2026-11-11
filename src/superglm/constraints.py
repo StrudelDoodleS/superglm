@@ -117,29 +117,41 @@ def _has_natural_curvature_boundaries(spec: _SplineBase, kind: str) -> bool:
     )
 
 
-def shape_derivative_matrix(spec: _SplineBase, x: NDArray, order: int) -> NDArray:
-    """Evaluate exact fitted-basis derivatives at ``x``."""
+def _raw_basis(spec: _SplineBase, exponent: int = 0):
+    """The raw basis as a spline in ``x * 2**exponent``, exact for a power of two."""
     from scipy.interpolate import BSpline, CubicSpline
 
-    points = np.asarray(x, dtype=np.float64).ravel()
     cardinal_knots = getattr(spec, "_cr_knots", None)
     if cardinal_knots is not None:
-        raw = CubicSpline(
-            np.asarray(cardinal_knots, dtype=np.float64),
+        return CubicSpline(
+            np.ldexp(np.asarray(cardinal_knots, dtype=np.float64), exponent),
             np.eye(int(spec._n_basis), dtype=np.float64),
             axis=0,
             bc_type="natural",
             extrapolate=False,
-        )(points, nu=order)
-    elif order > int(spec.degree):
-        raw = np.zeros((points.size, int(spec._n_basis)), dtype=np.float64)
-    else:
-        raw = BSpline(
-            np.asarray(spec._knots, dtype=np.float64),
-            np.eye(int(spec._n_basis), dtype=np.float64),
-            int(spec.degree),
-            extrapolate=False,
-        )(points, nu=order)
+        )
+    return BSpline(
+        np.ldexp(np.asarray(spec._knots, dtype=np.float64), exponent),
+        np.eye(int(spec._n_basis), dtype=np.float64),
+        int(spec.degree),
+        extrapolate=False,
+    )
+
+
+def _raw_derivative(spec: _SplineBase, basis, points: NDArray, order: int) -> NDArray:
+    if getattr(spec, "_cr_knots", None) is None and order > int(spec.degree):
+        return np.zeros((points.size, int(spec._n_basis)), dtype=np.float64)
+    return np.asarray(basis(points, nu=order), dtype=np.float64)
+
+
+def shape_derivative_matrix(spec: _SplineBase, x: NDArray, order: int) -> NDArray:
+    """Evaluate exact fitted-basis derivatives at ``x``."""
+    points = np.asarray(x, dtype=np.float64).ravel()
+    return _to_fitted(spec, _raw_derivative(spec, _raw_basis(spec), points, order))
+
+
+def _to_fitted(spec: _SplineBase, raw: NDArray) -> NDArray:
+    """Raw-basis rows in the fitted coefficients."""
     scop_sigma = getattr(spec, "_scop_Sigma", None)
     if scop_sigma is not None:
         drop_dim = int(getattr(spec, "_scop_null_dim", 1))
@@ -529,23 +541,36 @@ class _ShapePiece:
 def _shape_pieces(spec: _SplineBase, kind: str) -> tuple[list[_ShapePiece], int]:
     """The polynomial pieces of the constrained derivative over the fitted range.
 
-    Each piece is read by collocation at ``p + 1`` interior points of its span, so a
-    derivative that jumps at a knot is never evaluated across the jump. Returns the
-    pieces and their degree ``p``.
+    Each piece is the Taylor expansion at its span's left end, the representable
+    point from which the spline evaluates that piece (as in
+    ``_shape_span_jump_matrix``), so even a one-ULP span keeps its own polynomial.
+    The predictor is rescaled by a power of two, exactly, so the span widths are
+    near one and no derivative of order up to the degree under- or overflows; each
+    piece's rows are rescaled by a power of two as well, which leaves its cone
+    unchanged. Returns the pieces and their degree ``p``.
     """
+    from math import factorial
+
     order, sign = _shape_order_and_sign(kind)
     degree = 3 if getattr(spec, "_cr_knots", None) is not None else int(spec.degree)
     p = degree - order
     breaks = np.unique(np.concatenate(([spec._lo], _shape_breakpoints(spec), [spec._hi])))
     lo, hi = breaks[:-1], breaks[1:]
-    nodes = (np.arange(p + 1) + 0.5) / (p + 1)
-    points = (lo[:, None] + (hi - lo)[:, None] * nodes[None, :]).ravel()
-    values = sign * shape_derivative_matrix(spec, points, order)
-    to_monomial = np.linalg.inv(np.vander(nodes, p + 1, increasing=True))
-    values = values.reshape(lo.size, p + 1, -1)
+    exponent = 1 - int(np.frexp(float(breaks[-1] - breaks[0]))[1])
+    basis = _raw_basis(spec, exponent)
+    left = np.ldexp(lo, exponent)
+    width = np.ldexp(hi - lo, exponent)
+    terms = [
+        (sign / factorial(k))
+        * width[:, None] ** k
+        * _to_fitted(spec, _raw_derivative(spec, basis, left, order + k))
+        for k in range(p + 1)
+    ]
+    rows = np.stack(terms, axis=1)
+    largest = np.max(np.abs(rows), axis=(1, 2))
+    rows *= np.ldexp(1.0, -np.frexp(np.where(largest > 0.0, largest, 1.0))[1])[:, None, None]
     pieces = [
-        _ShapePiece(float(b - a), to_monomial @ piece_values)
-        for a, b, piece_values in zip(lo, hi, values, strict=True)
+        _ShapePiece(float(b - a), piece_rows) for a, b, piece_rows in zip(lo, hi, rows, strict=True)
     ]
     return pieces, p
 
@@ -578,19 +603,45 @@ def _piece_minimum(piece: _ShapePiece, p: int, beta: NDArray) -> tuple[float, ND
 
 
 def _distinct_unit_rows(rows: NDArray) -> tuple[NDArray, list[list[int]]]:
-    """Unit-norm nonzero rows with repeats dropped, and the input rows each one stands for."""
+    """Unit-norm nonzero rows with repeats dropped, and the input rows each one stands for.
+
+    A row repeats the first earlier kept row within ``_SAME_ROW`` in every entry.
+    Only rows whose entry sums lie within ``sqrt(width)`` such widths of each other
+    can match, so they are compared in sorted order: memory linear in the rows.
+    """
     unit, _, keep = _normalized_nonzero_shape_rows(rows)
     sources = np.flatnonzero(keep)
-    same = np.max(np.abs(unit[:, None, :] - unit[None, :, :]), axis=2) <= _SAME_ROW
+    count, width = unit.shape
+    # max_k |a_k - b_k| <= s implies |sum(a - b)| <= width * s; each sum of unit
+    # entries also carries up to gamma_width * width of rounding.
+    sums = unit.sum(axis=1)
+    radius = width * (_SAME_ROW + 2.0 * float(gamma(width)))
+    order = np.argsort(sums, kind="stable")
+    ordered = sums[order]
+    first = np.searchsorted(ordered, ordered - radius, side="left")
+    span = np.searchsorted(ordered, ordered + radius, side="right") - first
+    # Every row with each one in its window, as (row, candidate) pairs.
+    left = np.repeat(order, span)
+    right = order[np.arange(span.sum()) - np.repeat(np.cumsum(span) - span - first, span)]
+    earlier = right < left
+    left, right = left[earlier], right[earlier]
+    close = np.max(np.abs(unit[left] - unit[right]), axis=1, initial=0.0) <= _SAME_ROW
+    partner: dict[int, list[int]] = {}
+    for index, other in zip(left[close].tolist(), right[close].tolist(), strict=True):
+        partner.setdefault(index, []).append(other)
     kept: list[int] = []
+    representative: dict[int, int] = {}
     merged: list[list[int]] = []
-    for index in range(unit.shape[0]):
-        match = next((k for k, other in enumerate(kept) if same[index, other]), None)
+    for index in range(count):
+        match = min(
+            (other for other in partner.get(index, ()) if other in representative), default=None
+        )
         if match is None:
+            representative[index] = len(kept)
             kept.append(index)
             merged.append([int(sources[index])])
         else:
-            merged[match].append(int(sources[index]))
+            merged[representative[match]].append(int(sources[index]))
     return unit[kept], merged
 
 
@@ -657,8 +708,10 @@ def _cut_rows(
     raw = np.asarray(
         [_tau_powers(t, p) @ pieces[index].rows for index, t in owners], dtype=np.float64
     ).reshape(len(owners), width)
-    norms = np.linalg.norm(raw, axis=1)
-    return raw / np.where(norms > 0.0, norms, 1.0)[:, None], norms, owners
+    normalized, norms, keep = _normalized_nonzero_shape_rows(raw)
+    unit = np.zeros_like(raw)
+    unit[keep] = normalized
+    return unit, norms, owners
 
 
 def _lowest_minima(
@@ -669,11 +722,11 @@ def _lowest_minima(
 
 def _minima_feasible(minima: list[tuple[float, NDArray] | None], beta: NDArray) -> bool:
     """Whether every span's lowest interior value is non-negative to the certificate's rounding."""
-    slacks = [
-        float(row @ beta / norm) if (norm := np.linalg.norm(row)) > 0.0 else 0.0
-        for _, row in filter(None, minima)
-    ]
-    return min(slacks, default=0.0) >= -shape_slack_tolerance(beta, 1.0)
+    rows = [row for _, row in filter(None, minima)]
+    if not rows:
+        return True
+    unit, _, _ = _normalized_nonzero_shape_rows(np.asarray(rows, dtype=np.float64))
+    return float(np.min(unit @ beta, initial=0.0)) >= -shape_slack_tolerance(beta, 1.0)
 
 
 #: Slack, in the scaled problem's units (the target's RMS is one), within which a unit
@@ -683,25 +736,118 @@ _HELD_SLACK = 1e-8
 _KKT_RESIDUAL = 1e-9
 
 
-def _solve_cone_qp(H: NDArray, g: NDArray, rows: NDArray, max_iter: int = 200):
+def _jacobi_scale(H: NDArray) -> NDArray:
+    """Powers of two near ``1 / sqrt(diag(H))``, one per coefficient; 1 where the diagonal is 0."""
+    diagonal = np.sqrt(np.maximum(np.diag(H), 0.0))
+    return np.ldexp(1.0, -np.frexp(np.where(diagonal > 0.0, diagonal, 1.0))[1])
+
+
+#: Iterations, at least, of a solve warm-started from a working set: a right guess
+#: certifies within about as many iterations as there are coefficients.
+_WARM_STEPS = 50
+#: Ridge on a semidefinite projection Hessian's null space, relative to its largest
+#: eigenvalue: sqrt(u), far above the rank authority's cutoff of eps, so the ridged
+#: Hessian is full rank, and small enough that the grid loss it trades is at the
+#: square root of the rounding level.
+_NULL_RIDGE = 2.0**-26
+
+
+def _null_space_ridge(H: NDArray, rank: int) -> NDArray:
+    """``H`` with ``_NULL_RIDGE * ||H||`` added on the eigenvectors past its rank.
+
+    A grid of fewer well-placed points than coefficients leaves the projection's
+    objective flat along the null space of ``H``; the ridge picks, among the
+    coefficients closest on the grid, those with the least null-space part.
+    """
+    values, vectors = np.linalg.eigh(H)
+    null = vectors[:, : H.shape[0] - rank]
+    return H + (_NULL_RIDGE * float(values[-1])) * (null @ null.T)
+
+
+class _ScaledResult:
+    """A QP result in the caller's coefficients, ``beta = scale * z``."""
+
+    def __init__(self, result, scale: NDArray) -> None:
+        self.beta = scale * np.asarray(result.beta, dtype=np.float64)
+        self.active_set = list(result.active_set)
+        self.converged = bool(result.converged)
+        self.n_iter = int(result.n_iter)
+
+
+# Every solve runs in Jacobi-scaled coefficients, beta = D z with D the power of two
+# nearest 1 / sqrt(diag(H)): exact, so the QP and its answer are unchanged, while
+# cond(D H D) is within a factor p of the best any diagonal scaling gives (van der
+# Sluis, Numer. Math. 14, 1969). A grid with sparse data weighs some basis columns
+# 1e-5 of the rest, which squared in H puts cond(H) past 1 / u: the active-set path
+# then turns on how the kernel rounded H, and one kernel's solve certifies where
+# another's cycles. Scaled, the same solves certify on every kernel.
+#
+# A primal active-set solve needs a feasible start (Nocedal & Wright 2006, section
+# 16.5). Every row here is homogeneous, so a cone: the previous step's point moved
+# along a ray inside the cone just far enough to meet the new rows is one, next to
+# the answer (_shifted_start), and beta = 0, its apex, always is. With a warm
+# working set, the rows the caller expects to bind, a right guess certifies in a
+# few iterations; a wrong one on a degenerate face, where most of a large basis's
+# rows bind, can cycle, so that attempt gets a short budget. Then beta = 0, the
+# shifted start alone and the solver's own start are tried, with a budget that visits
+# every row twice beyond the solver's default, as #621 gives its own solves, and a
+# null-space ridge if the Hessian is semidefinite.
+def _solve_cone_qp(
+    H: NDArray,
+    g: NDArray,
+    rows: NDArray,
+    active: list[int] | None = None,
+    start: NDArray | None = None,
+    *,
+    placement: bool = False,
+):
     """The repository QP on unit ``rows @ beta >= 0``; ``None`` when no solution is certified.
 
     The QP certifies its own result, except on a face whose held rows leave no step,
     as when every jump of a curve projected flat is held. Such a point is accepted
     when it is feasible and ``H beta - g`` lies in the cone of its held rows, which
-    for a convex QP is optimality.
+    for a convex QP is optimality. ``active`` is a warm working set and ``start`` a
+    point meeting every row (``_shifted_start``); without one, ``beta = 0`` is used.
+    A ``placement`` solve, whose Hessian carries the exchange's curvature term and
+    whose answer only places cuts, gets its first attempt alone.
     """
     from scipy.optimize import nnls
 
     from superglm.solvers.constrained_qp import solve_constrained_qp
 
-    try:
-        result = solve_constrained_qp(H, g, rows, np.zeros(rows.shape[0]), max_iter=max_iter)
-    except ValueError:
-        return None
-    if result.converged:
-        return result
-    beta = np.asarray(result.beta, dtype=np.float64)
+    scale = _jacobi_scale(H)
+    budget = max(200, 2 * (rows.shape[0] + H.shape[0]))
+    bounds = np.zeros(rows.shape[0])
+    problem = (H * scale[:, None] * scale[None, :], g * scale, rows * scale[None, :], bounds)
+    zero = np.zeros(H.shape[0])
+    shifted = zero if start is None else start / scale
+    starts: list[tuple[NDArray | None, list[int] | None, int]] = [
+        (zero, None, budget),
+        (None, None, budget),
+    ]
+    if start is not None:
+        starts.insert(1, (shifted, None, budget))
+    if active:
+        starts.insert(0, (shifted, active, max(_WARM_STEPS, H.shape[0])))
+    if placement:
+        starts = starts[:1]
+    result = None
+    for ridged in (False, True):
+        for point, working, steps in starts:
+            try:
+                solved = solve_constrained_qp(
+                    *problem, active_set_init=working, max_iter=steps, beta_start=point
+                )
+            except ValueError:
+                return None
+            result = _ScaledResult(solved, scale)
+            if result.converged:
+                return result
+        if ridged or placement or solved.rank == solved.width:
+            break
+        problem = (_null_space_ridge(problem[0], solved.rank), *problem[1:])
+    assert result is not None
+    beta = result.beta
     slack = rows @ beta
     if not np.all(np.isfinite(beta)) or np.min(slack, initial=0.0) < -shape_slack_tolerance(
         beta, 1.0
@@ -715,6 +861,57 @@ def _solve_cone_qp(H: NDArray, g: NDArray, rows: NDArray, max_iter: int = 200):
     return None
 
 
+def _broken_rows(rows: NDArray, beta: NDArray) -> list[int]:
+    """The rows ``beta`` breaks: a working set to start a solve from."""
+    return np.flatnonzero(rows @ beta < 0.0).tolist()
+
+
+def _working_rows(
+    held: set, ends: int, owners: list[tuple[int, float]], cut_rows: NDArray, beta: NDArray
+) -> list[int]:
+    """A warm working set: the rows the last solve held, and the new cuts ``beta`` breaks.
+
+    ``held`` names end rows by index and cuts by their (piece, ``tau``), so a
+    cut keeps its place when the rows are rebuilt around it.
+    """
+    broken = cut_rows @ beta < 0.0
+    return [row for row in range(ends) if row in held] + [
+        ends + index for index, owner in enumerate(owners) if owner in held or bool(broken[index])
+    ]
+
+
+def _shifted_start(rows: NDArray, beta: NDArray, inside: NDArray | None) -> NDArray | None:
+    """``beta`` moved along ``inside`` just far enough to meet every row, or ``None``.
+
+    ``inside`` is a ray strictly inside the cone (``_inside_ray``); the shift is
+    widened by ``2**-20`` of itself, far above the rounding of the slacks, so the
+    start meets each row with room. ``None`` when the ray fails a row.
+    """
+    if inside is None:
+        return None
+    reach = rows @ inside
+    if not np.all(reach > 0.0):
+        return None
+    shift = float(np.max(-(rows @ beta) / reach, initial=0.0))
+    return beta + (shift * (1.0 + 2.0**-20)) * inside if shift > 0.0 else beta
+
+
+def _inside_ray(basis: NDArray, x: NDArray, weights: NDArray, kind: str) -> NDArray:
+    """Coefficients of a curve strictly inside the ``kind`` cone, where the basis holds one.
+
+    The weighted least-squares fit, with a free constant the centred basis lacks,
+    of ``t`` (monotone) or ``(t - 1/2)**2`` (curvature) in the dimensionless
+    position ``t`` on the grid: a spline basis reproduces those polynomials, so its
+    derivative is constant. ``_shifted_start`` checks every row it is used on.
+    """
+    order, sign = _shape_order_and_sign(kind)
+    t = (x - x[0]) / (x[-1] - x[0])
+    target = sign * (t if order == 1 else (t - 0.5) ** 2)
+    design = np.column_stack([basis, np.ones(x.size)])
+    gram = design.T @ (design * weights[:, None])
+    return np.linalg.lstsq(gram, design.T @ (weights * target), rcond=None)[0][:-1]
+
+
 def _bracketed_projection(
     H: NDArray,
     g: NDArray,
@@ -723,13 +920,16 @@ def _bracketed_projection(
     end_rows: NDArray,
     checkpoints: list[list[float]],
     natural: bool,
+    point: NDArray,
+    inside: NDArray | None,
 ) -> tuple[NDArray | None, float]:
     """Exchange between the Bernstein inner cone and the cutting-plane outer cone.
 
     Every inner optimum is shape-feasible and every outer one bounds the
     projection's objective from below, so the best inner optimum is certified once
     the two meet. A span the projection holds flat sits at its cone's apex, which the
-    inner cone holds exactly. Returns the best inner optimum and the gap left.
+    inner cone holds exactly. Each solve starts from ``point``, the last outer
+    optimum, shifted along ``inside``. Returns the best inner optimum and the gap left.
     """
 
     def objective(beta: NDArray) -> float:
@@ -739,11 +939,25 @@ def _bracketed_projection(
     cuts = [list(points) for points in checkpoints]
     for _ in range(_BRACKET_STEPS):
         inner_rows, _ = _distinct_unit_rows(_inner_cone_rows(pieces, p, cuts, natural))
-        inner = _solve_cone_qp(H, g, inner_rows)
+        inner = _solve_cone_qp(
+            H,
+            g,
+            inner_rows,
+            _broken_rows(inner_rows, point),
+            _shifted_start(inner_rows, point, inside),
+        )
         cut_rows, _, owners = _cut_rows(pieces, p, cuts, H.shape[0])
-        outer = _solve_cone_qp(H, g, np.vstack([end_rows, cut_rows]))
+        outer_rows = np.vstack([end_rows, cut_rows])
+        outer = _solve_cone_qp(
+            H,
+            g,
+            outer_rows,
+            list(range(end_rows.shape[0], outer_rows.shape[0])),
+            _shifted_start(outer_rows, point, inside),
+        )
         if inner is None or outer is None:
             break
+        point = outer.beta
         if objective(inner.beta) < upper:
             best, upper = np.asarray(inner.beta, dtype=np.float64), objective(inner.beta)
         lower = max(lower, objective(outer.beta))
@@ -782,15 +996,28 @@ def _bracketed_projection(
 # between the Bernstein inner cone and the cutting-plane outer cone
 # (_bracketed_projection), shape-feasible by construction and disclosed if the
 # bracket does not close.
-def _cone_projection(spec: _SplineBase, H: NDArray, g: NDArray, kind: str, label: str) -> NDArray:
+def _cone_projection(
+    spec: _SplineBase,
+    H: NDArray,
+    g: NDArray,
+    kind: str,
+    label: str,
+    inside: NDArray | None = None,
+) -> NDArray:
     """Minimise ``0.5 b'Hb - g'b`` over coefficients whose curve has ``kind`` everywhere.
 
     Exact on spans whose derivative is at most linear; elsewhere a local-reduction SQP
-    places the cuts. The comment above gives the method and its sources.
+    places the cuts. The comment above gives the method and its sources. ``inside`` is
+    a ray strictly inside the cone, from which each solve's start is found.
     """
+    # The unconstrained optimum is the fitted curve itself; the rows it breaks are
+    # the first working set, and the first cuts sit where it breaks the rule.
+    beta = np.linalg.lstsq(H, g, rcond=None)[0]
     if _uses_span_jump_constraints(spec, kind):
         rows, _ = _distinct_unit_rows(_shape_constraint_rows(spec, _shape_breakpoints(spec), kind))
-        result = _solve_cone_qp(H, g, rows)
+        result = _solve_cone_qp(
+            H, g, rows, _broken_rows(rows, beta), _shifted_start(rows, beta, inside)
+        )
         if result is None:
             raise RuntimeError(f"{label} projection failed to converge")
         return np.asarray(result.beta, dtype=np.float64)
@@ -802,23 +1029,37 @@ def _cone_projection(spec: _SplineBase, H: NDArray, g: NDArray, kind: str, label
     end_norms = np.linalg.norm(end_values, axis=1)
     width = H.shape[0]
     h_norm = float(np.linalg.norm(H, 2))
-    # The first cuts sit where the unconstrained optimum, the fitted curve itself,
-    # breaks the rule.
-    beta = np.linalg.lstsq(H, g, rcond=None)[0]
+    held: set = set(_broken_rows(end_rows, beta))
     checkpoints = [
         [] if minimum is None or minimum[1] @ beta >= 0.0 else [minimum[0]]
         for minimum in _lowest_minima(pieces, p, beta)
     ]
     curvature = np.zeros_like(H)
+    # A curvature step whose solve fails says the local model does not hold here;
+    # the exchange then goes on as plain cutting planes.
+    curved = True
     for _ in range(_PROJECTION_STEPS):
         cut_rows, cut_norms, owners = _cut_rows(pieces, p, checkpoints, width)
         rows = np.vstack([end_rows, cut_rows])
-        result = _solve_cone_qp(H + curvature, g + curvature @ beta, rows)
+        working = _working_rows(held, end_rows.shape[0], owners, cut_rows, beta)
+        start = _shifted_start(rows, beta, inside)
+        result = _solve_cone_qp(
+            H + curvature,
+            g + curvature @ beta,
+            rows,
+            working,
+            start,
+            placement=bool(curvature.any()),
+        )
         if result is None and curvature.any():
-            curvature = np.zeros_like(H)
-            result = _solve_cone_qp(H, g, rows)
+            curvature, curved = np.zeros_like(H), False
+            result = _solve_cone_qp(H, g, rows, working, start)
         if result is None:
             break
+        held = {
+            row if row < end_rows.shape[0] else owners[row - end_rows.shape[0]]
+            for row in result.active_set
+        }
         corrected = curvature.any()
         previous, beta = beta, np.asarray(result.beta, dtype=np.float64)
         minima = _lowest_minima(pieces, p, beta)
@@ -830,8 +1071,15 @@ def _cone_projection(spec: _SplineBase, H: NDArray, g: NDArray, kind: str, label
                 points + ([] if minimum is None else [minimum[0]])
                 for points, minimum in zip(checkpoints, minima, strict=True)
             ]
-            certified_rows, _, _ = _cut_rows(pieces, p, certified_cuts, width)
-            certified = _solve_cone_qp(H, g, np.vstack([end_rows, certified_rows]))
+            certified_cut_rows, _, certified_owners = _cut_rows(pieces, p, certified_cuts, width)
+            certified_rows = np.vstack([end_rows, certified_cut_rows])
+            certified = _solve_cone_qp(
+                H,
+                g,
+                certified_rows,
+                _working_rows(held, end_rows.shape[0], certified_owners, certified_cut_rows, beta),
+                _shifted_start(certified_rows, beta, inside),
+            )
             if certified is not None and _minima_feasible(
                 _lowest_minima(pieces, p, certified.beta), certified.beta
             ):
@@ -872,7 +1120,7 @@ def _cone_projection(spec: _SplineBase, H: NDArray, g: NDArray, kind: str, label
                 abs(tau - other) > _CHECKPOINT_SEPARATION for other in kept[index]
             ):
                 kept[index].append(tau)
-            if weight[index] > 0.0:
+            if curved and weight[index] > 0.0:
                 slope_row = _tau_powers(tau, p, 1) @ piece.rows
                 bend = float(_tau_powers(tau, p, 2) @ piece.rows @ beta)
                 size = weight[index] * float(slope_row @ slope_row)
@@ -885,7 +1133,7 @@ def _cone_projection(spec: _SplineBase, H: NDArray, g: NDArray, kind: str, label
                         kept[index] = [tau]
         checkpoints = kept
 
-    best, gap = _bracketed_projection(H, g, pieces, p, end_rows, checkpoints, natural)
+    best, gap = _bracketed_projection(H, g, pieces, p, end_rows, checkpoints, natural, beta, inside)
     if best is None:
         raise RuntimeError(f"{label} projection failed to converge")
     if gap > _OBJECTIVE_GAP:
@@ -935,7 +1183,10 @@ def _project_shape_in_fitted_basis(
     H_scaled = H / total_weight
     g_scaled = g / (total_weight * curve_scale)
 
-    beta_projected = curve_scale * _cone_projection(spec, H_scaled, g_scaled, kind, label)
+    inside = _inside_ray(fitted_basis, np.asarray(x_grid, dtype=np.float64), w / total_weight, kind)
+    beta_projected = curve_scale * _cone_projection(
+        spec, H_scaled, g_scaled, kind, label, inside=inside
+    )
 
     repaired_curve = fitted_basis @ beta_projected
     if not np.all(np.isfinite(beta_projected)) or not np.all(np.isfinite(repaired_curve)):
