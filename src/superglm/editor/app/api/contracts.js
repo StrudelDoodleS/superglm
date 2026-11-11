@@ -517,7 +517,8 @@
  * @typedef {Object} EvidenceState
  * @property {EvidenceStatus} status
  * @property {number|null} revision
- * @property {string|null} inForce the model the newest request asked about (`in_force`)
+ * @property {string|null} inForce the model (`in_force`) the newest request asked about, or the
+ *   payload describes once it lands
  * @property {number} sequence
  * @property {unknown} payload
  * @property {string|null} error

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { createEmptyEvidenceState } from "../../src/superglm/editor/app/api/contracts.js";
 import * as selectors from "../../src/superglm/editor/app/state/selectors.js";
 import * as storeModule from "../../src/superglm/editor/app/state/store.js";
 
@@ -8,6 +9,7 @@ import * as storeModule from "../../src/superglm/editor/app/state/store.js";
 /** @typedef {import('../../src/superglm/editor/app/api/contracts.js').EvidencePanel} EvidencePanel */
 
 const {
+  EVIDENCE,
   beginEvidence,
   commitLocalView,
   commitRemote,
@@ -16,6 +18,7 @@ const {
   createEditorStore,
   createInitialEditorState,
   failEvidence,
+  moveEvidence,
   normalizeSelectionIndices,
   patchView,
   selectionIndicesEqual,
@@ -357,6 +360,78 @@ test("a level reorder moves the selection anchor with its level", () => {
   // A level that is gone takes the anchor with it.
   state = commitRemote(state, brandSnapshot(["a", "c", "d"], 4));
   assert.equal(state.view.selectionAnchor, null);
+});
+
+// The evidence panel's lifecycle
+
+/** @typedef {import('../../src/superglm/editor/app/state/store.js').EvidenceEvent} EvidenceEvent */
+
+const ASKED = { path: "/metrics", payload: {} };
+/** The table's events, each as the request (sequence 1, revision 3, fit-a) it ends. */
+const EVIDENCE_EVENTS = /** @type {Record<string, EvidenceEvent>} */ ({
+  ask: { type: "ask", revision: 3, inForce: "fit-a", sequence: 2, retry: ASKED },
+  answer: { type: "answer", revision: 3, inForce: "fit-a", sequence: 1, payload: { value: "new" } },
+  fail: { type: "fail", revision: 3, sequence: 1, error: "offline" },
+  fail_kept: { type: "fail", revision: 3, sequence: 1, error: "offline" },
+  lapse: { type: "lapse", revision: 4 },
+  install: { type: "install", revision: 3, inForce: "fit-a", payload: { value: "installed" } }
+});
+
+/**
+ * A panel in `status` that waits for request 1, at revision 3 about fit-a; `fail_kept` is a
+ * failure over a payload it shows, `fail` one over none.
+ * @param {import('../../src/superglm/editor/app/api/contracts.js').EvidenceStatus} status
+ * @param {string} event
+ */
+function panelIn(status, event) {
+  return {
+    ...createEmptyEvidenceState(),
+    status,
+    revision: status === "idle" ? null : 3,
+    inForce: status === "idle" ? null : "fit-a",
+    sequence: status === "idle" ? 0 : 1,
+    payload: event === "fail" || status === "idle" ? null : { value: "old" }
+  };
+}
+
+test("the evidence table names every state and event, and every move lands where it says", () => {
+  const held = { ...snapshot(3), in_force: "fit-a" };
+  assert.deepEqual([...EVIDENCE.states].sort(), ["current", "error", "idle", "stale", "updating"]);
+  assert.deepEqual([...EVIDENCE.events].sort(), Object.keys(EVIDENCE_EVENTS).sort());
+  assert.equal(EVIDENCE.initial, "idle");
+  for (const status of EVIDENCE.states) {
+    for (const type of EVIDENCE.events) {
+      const before = panelIn(status, type);
+      const after = moveEvidence(before, EVIDENCE_EVENTS[type], held);
+      const target = EVIDENCE.next(status, type);
+      if (target === null) {
+        assert.strictEqual(after, before, `${status} takes no ${type}`);
+      } else {
+        assert.equal(after.status, target, `${status} --${type}--> ${target}`);
+      }
+    }
+  }
+});
+
+test("an evidence answer or failure about another request, model or revision moves nothing", () => {
+  const updating = panelIn("updating", "answer");
+  const later = { ...snapshot(5), in_force: "fit-b" };
+  const undone = { ...snapshot(5), in_force: "fit-a" };
+  /** @type {EvidenceEvent} */
+  const answer = { type: "answer", revision: 3, inForce: "fit-a", sequence: 1, payload: {} };
+  /** @type {EvidenceEvent} */
+  const failure = { type: "fail", revision: 3, sequence: 1, error: "superseded" };
+
+  assert.strictEqual(moveEvidence(updating, { ...answer, sequence: 0 }, undone), updating);
+  assert.strictEqual(moveEvidence(updating, answer, later), updating);
+  assert.equal(moveEvidence(updating, answer, undone).status, "current");
+  assert.equal(moveEvidence(updating, answer, undone).revision, 5);
+  // A failure lands only at the revision it was asked at, even with its model back in force.
+  assert.strictEqual(moveEvidence(updating, failure, undone), updating);
+  assert.strictEqual(moveEvidence(updating, { ...failure, sequence: 0 }, snapshot(3)), updating);
+  assert.equal(moveEvidence(updating, failure, snapshot(3)).status, "stale");
+  // A panel already at the new revision does not lapse.
+  assert.strictEqual(moveEvidence(updating, { type: "lapse", revision: 3 }, snapshot(3)), updating);
 });
 
 test("a new model revision marks every prior evidence panel stale", () => {
@@ -703,6 +778,7 @@ test("selectors expose confirmed state defaults and per-term display overrides",
 
 test("state modules expose only their requested public symbols", () => {
   assert.deepEqual(Object.keys(storeModule).sort(), [
+    "EVIDENCE",
     "beginEvidence",
     "commitLocalView",
     "commitRemote",
@@ -711,6 +787,7 @@ test("state modules expose only their requested public symbols", () => {
     "createEditorStore",
     "createInitialEditorState",
     "failEvidence",
+    "moveEvidence",
     "normalizeSelectionIndices",
     "patchView",
     "selectionIndicesEqual",

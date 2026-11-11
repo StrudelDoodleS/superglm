@@ -710,7 +710,7 @@ export function createEditorActions({
       }
       let accepted = false;
       store.update((state) => {
-        const completed = completeEvidence(state, panel, revision, sequence, response);
+        const completed = completeEvidence(state, panel, revision, sequence, response, inForce);
         accepted = completed !== state;
         return completed;
       });

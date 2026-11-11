@@ -1,11 +1,14 @@
 // @ts-check
 import { createEmptyEvidenceState } from "../api/contracts.js";
+import { defineMachine } from "./machine.js";
 import { createRiskProfiles } from "./risk.js";
 import { selectActiveTermName } from "./selectors.js";
 
 /** @typedef {import('../api/contracts.js').EditorSnapshot} EditorSnapshot */
 /** @typedef {import('../api/contracts.js').EditorState} EditorState */
 /** @typedef {import('../api/contracts.js').EvidencePanel} EvidencePanel */
+/** @typedef {import('../api/contracts.js').EvidenceState} EvidenceState */
+/** @typedef {import('../api/contracts.js').EvidenceStatus} EvidenceStatus */
 /** @typedef {import('../api/contracts.js').StructuralTransitionEnvelope} StructuralTransitionEnvelope */
 /** @typedef {import('../api/contracts.js').TermPayload} TermPayload */
 
@@ -226,14 +229,8 @@ function invalidatePriorEvidence(state, revision) {
   let changed = false;
   for (const panel of /** @type {EvidencePanel[]} */ (["metrics", "summary", "report"])) {
     const current = evidence[panel];
-    if (
-      current.revision === revision ||
-      (current.status === "idle" && current.payload === null)
-    ) {
-      continue;
-    }
-    evidence[panel] = { ...current, status: "stale", error: null };
-    changed = true;
+    evidence[panel] = moveEvidence(current, { type: "lapse", revision }, state.remote.snapshot);
+    changed ||= evidence[panel] !== current;
   }
   if (!changed) return state.request;
   return { ...state.request, evidence };
@@ -256,10 +253,9 @@ export function waitingListChanged(previous, next) {
 /** @param {EditorState} state */
 function invalidateReportEvidence(state) {
   const current = state.request.evidence.report;
-  if (current.status === "idle" && current.payload === null) return state.request;
-  const evidence = { ...state.request.evidence };
-  evidence.report = { ...current, status: "stale", error: null };
-  return { ...state.request, evidence };
+  const report = moveEvidence(current, { type: "lapse" }, state.remote.snapshot);
+  if (report === current) return state.request;
+  return { ...state.request, evidence: { ...state.request.evidence, report } };
 }
 
 /**
@@ -317,57 +313,161 @@ export function commitRemote(state, snapshot) {
 export function commitStructuralTransition(state, envelope) {
   const committed = commitRemote(state, envelope.state);
   if (committed.remote.snapshot !== envelope.state) return committed;
-  const summary = committed.request.evidence.summary;
+  const installed = movePanel(committed, "summary", {
+    type: "install",
+    revision: envelope.state.model_revision,
+    inForce: envelope.state.in_force ?? null,
+    payload: envelope.summary
+  });
   return {
-    ...committed,
-    remote: { ...committed.remote, snapshot: envelope.state, summary: envelope.summary },
-    request: {
-      ...committed.request,
-      evidence: {
-        ...committed.request.evidence,
-        summary: {
-          ...summary,
-          status: /** @type {const} */ ("current"),
-          revision: envelope.state.model_revision,
-          inForce: envelope.state.in_force ?? null,
-          payload: envelope.summary,
-          error: null,
-          retry: null
-        }
-      }
-    }
+    ...installed,
+    remote: { ...installed.remote, snapshot: envelope.state, summary: envelope.summary }
   };
 }
 
 /**
- * @param {EditorState} state
- * @param {EvidencePanel} panel
- * @param {EditorState['request']['evidence'][EvidencePanel]} evidence
- */
-function replaceEvidence(state, panel, evidence) {
-  return {
-    ...state,
-    request: {
-      ...state.request,
-      evidence: { ...state.request.evidence, [panel]: evidence }
-    }
-  };
-}
-
-/**
- * Whether evidence asked for at `revision`, about the model `inForce` names, describes the
- * snapshot the page holds now. Where the server names the model, the model decides: an undo
- * gives back the token its edit replaced, so evidence asked for before the edit describes the
- * snapshot again. A snapshot without a token is matched by its revision.
+ * Whether evidence asked for at `revision`, about the model `inForce` names, describes `snapshot`.
+ * Where the server names the model, the model decides: an undo gives back the token its edit
+ * replaced, so evidence asked for before the edit describes the snapshot again. A snapshot
+ * without a token is matched by its revision.
  *
- * @param {EditorState} state @param {number} revision @param {string|null} inForce
+ * @param {EditorSnapshot|null} snapshot @param {number} revision @param {string|null} inForce
  */
-function describesSnapshot(state, revision, inForce) {
-  const snapshot = state.remote.snapshot;
+function describesSnapshot(snapshot, revision, inForce) {
   if (inForce !== null && typeof snapshot?.in_force === "string") {
     return inForce === snapshot.in_force;
   }
   return revision === snapshot?.model_revision;
+}
+
+/**
+ * What happens to an evidence panel. `ask` sends a request, which the panel then waits for;
+ * `answer` and `fail` end the request they name by its `sequence` and by what it asked about;
+ * `lapse` is a snapshot the panel no longer describes, by a new `revision` (a panel already at
+ * that revision keeps its state) or, with none, by a changed waiting list; `install` puts in a
+ * payload that came with the snapshot, as a structural change's summary does.
+ * @typedef {{type:'ask', revision:number, inForce:string|null, sequence:number,
+ *     retry:{path:string, payload:Record<string, unknown>}}
+ *   |{type:'answer', revision:number, inForce:string|null, sequence:number, payload:unknown}
+ *   |{type:'fail', revision:number, sequence:number, error:unknown}
+ *   |{type:'lapse', revision?:number}
+ *   |{type:'install', revision:number, inForce:string|null, payload:unknown}} EvidenceEvent
+ */
+
+/**
+ * An evidence panel's lifecycle. A failure leaves a panel that shows nothing in `error`, and one
+ * that shows an earlier payload `stale` with that payload kept (`fail_kept`). An answer lands
+ * only while the panel waits for it, `updating`, or after the snapshot moved under it, `stale`:
+ * an edit and its undo put back the model it was asked about. A panel `current` from a
+ * structural change's summary takes no answer from the request that change overtook.
+ */
+export const EVIDENCE = defineMachine({
+  name: "evidence",
+  initial: /** @type {EvidenceStatus} */ ("idle"),
+  moves: {
+    idle: { ask: "updating", install: "current" },
+    updating: {
+      ask: "updating", answer: "current", fail: "error", fail_kept: "stale", lapse: "stale",
+      install: "current"
+    },
+    current: { ask: "updating", lapse: "stale", install: "current" },
+    stale: {
+      ask: "updating", answer: "current", fail: "error", fail_kept: "stale", lapse: "stale",
+      install: "current"
+    },
+    error: { ask: "updating", lapse: "stale", install: "current" }
+  }
+});
+
+/**
+ * The table's name for `event` on `evidence`: a failure over a payload the panel keeps is
+ * `fail_kept`.
+ * @param {EvidenceState} evidence @param {EvidenceEvent} event
+ */
+function evidenceMove(evidence, event) {
+  return event.type === "fail" && evidence.payload !== null ? "fail_kept" : event.type;
+}
+
+/**
+ * Make one move of an evidence panel.
+ *
+ * An answer lands only for the newest request (`sequence`) and only while the model that
+ * request asked about, its own `inForce` captured when it was sent, describes `snapshot`. A
+ * failure lands only for the newest request and only at the revision it was asked at: a
+ * request overtaken by an edit, even one since undone, is asked again rather than shown as
+ * failed.
+ *
+ * @param {EvidenceState} evidence @param {EvidenceEvent} event @param {EditorSnapshot|null} snapshot
+ * @returns {EvidenceState} `evidence` itself where its state does not take the event, or the
+ *   event is about another request or model
+ */
+export function moveEvidence(evidence, event, snapshot) {
+  const target = EVIDENCE.next(evidence.status, evidenceMove(evidence, event));
+  if (target === null) return evidence;
+  switch (event.type) {
+    case "ask":
+      return {
+        ...evidence,
+        status: target,
+        revision: event.revision,
+        inForce: event.inForce,
+        sequence: event.sequence,
+        error: null,
+        retry: event.retry
+      };
+    case "answer":
+      if (
+        event.sequence !== evidence.sequence ||
+        !describesSnapshot(snapshot, event.revision, event.inForce)
+      ) {
+        return evidence;
+      }
+      return {
+        ...evidence,
+        status: target,
+        // An answer asked for before an edit and its undo is current for the revision now held.
+        revision: snapshot?.model_revision ?? event.revision,
+        inForce: event.inForce,
+        payload: event.payload,
+        error: null,
+        retry: null
+      };
+    case "fail":
+      if (event.sequence !== evidence.sequence || event.revision !== snapshot?.model_revision) {
+        return evidence;
+      }
+      return { ...evidence, status: target, error: String(event.error) };
+    case "lapse":
+      if (event.revision !== undefined && evidence.revision === event.revision) return evidence;
+      return { ...evidence, status: target, error: null };
+    case "install":
+      return {
+        ...evidence,
+        status: target,
+        revision: event.revision,
+        inForce: event.inForce,
+        payload: event.payload,
+        error: null,
+        retry: null
+      };
+  }
+}
+
+/**
+ * @param {EditorState} state @param {EvidencePanel} panel @param {EvidenceEvent} event
+ * @returns {EditorState} `state` itself where the panel does not move
+ */
+function movePanel(state, panel, event) {
+  const current = state.request.evidence[panel];
+  const next = moveEvidence(current, event, state.remote.snapshot);
+  if (next === current) return state;
+  return {
+    ...state,
+    request: {
+      ...state.request,
+      evidence: { ...state.request.evidence, [panel]: next }
+    }
+  };
 }
 
 /**
@@ -379,57 +479,28 @@ function describesSnapshot(state, revision, inForce) {
  * @param {string|null} [inForce] the snapshot's `in_force` when the request was made
  */
 export function beginEvidence(state, panel, revision, sequence, retry, inForce = null) {
-  const previous = state.request.evidence[panel];
-  return replaceEvidence(state, panel, {
-    ...previous,
-    status: "updating",
-    revision,
-    inForce,
-    sequence,
-    error: null,
-    retry
-  });
+  return movePanel(state, panel, { type: "ask", revision, inForce, sequence, retry });
 }
 
 /**
  * @param {EditorState} state
  * @param {EvidencePanel} panel
- * @param {number} revision
+ * @param {number} revision the revision the request was made at
  * @param {number} sequence
  * @param {unknown} payload
+ * @param {string|null} [inForce] the `in_force` the request was made about
  */
-export function completeEvidence(state, panel, revision, sequence, payload) {
-  const current = state.request.evidence[panel];
-  // Only the newest request's answer lands, and only while it describes the snapshot.
-  if (sequence !== current.sequence || !describesSnapshot(state, revision, current.inForce)) {
-    return state;
-  }
-  return replaceEvidence(state, panel, {
-    ...current,
-    // An answer asked for before an edit and its undo is current for the revision now held.
-    revision: state.remote.snapshot?.model_revision ?? revision,
-    status: "current",
-    payload,
-    error: null,
-    retry: null
-  });
+export function completeEvidence(state, panel, revision, sequence, payload, inForce = null) {
+  return movePanel(state, panel, { type: "answer", revision, inForce, sequence, payload });
 }
 
 /**
  * @param {EditorState} state
  * @param {EvidencePanel} panel
- * @param {number} revision
+ * @param {number} revision the revision the request was made at
  * @param {number} sequence
  * @param {unknown} error
  */
 export function failEvidence(state, panel, revision, sequence, error) {
-  const current = state.request.evidence[panel];
-  if (sequence !== current.sequence || !describesSnapshot(state, revision, current.inForce)) {
-    return state;
-  }
-  return replaceEvidence(state, panel, {
-    ...current,
-    status: current.payload === null ? "error" : "stale",
-    error: String(error)
-  });
+  return movePanel(state, panel, { type: "fail", revision, sequence, error });
 }
