@@ -199,16 +199,39 @@ def test_reconstruct_feature_warns_of_merged_labels_and_names_its_per_pair_lists
 def test_summary_names_the_cells_of_rows_that_share_a_name(colon_fit):
     model, _, _, reference = colon_fit
     summary = model.summary()
-    note = "In row order, p:q[x:y:z] is (p=x, q=y:z) then (p=x:y, q=z)."
-    assert note in " ".join(str(summary).split())
-    assert note in summary._repr_html_()
+    notes = [
+        "p:q[x:y:z] is (p=x, q=y:z) then (p=x:y, q=z)",
+        # A row's name can read like a base cell's: that cell has no row.
+        "p:q[a:b:c] is (p=a:b, q=c), not (p=a, q=b:c), which has no row",
+    ]
     payload = build_summary_export_payload(model)
-    assert any(note in text for text in payload.notes)
+    for note in notes:
+        assert note in " ".join(str(summary).split())
+        assert note in summary._repr_html_()
+        assert any(note in text for text in payload.notes)
     # The note's order is the rows' order: each row's estimate is its cell's log relativity.
     shared = [row.estimate for row in payload.terms if row.term == "p:q[x:y:z]"]
     np.testing.assert_allclose(
         shared, np.log([reference[("x", "y:z")], reference[("x:y", "z")]]), rtol=1e-9
     )
+
+
+def test_summary_names_a_row_whose_twin_cell_was_left_out_for_want_of_data():
+    rng = np.random.default_rng(3)
+    n = 4000
+    X = pd.DataFrame({"p": rng.choice(COLON_P, n), "q": rng.choice(COLON_Q, n)})
+    X = X[~((X["p"] == "x") & (X["q"] == "y:z"))].reset_index(drop=True)
+    y = rng.poisson(np.exp(-1.0 + 0.2 * (X["p"] == "x:y"))).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"p": Categorical(base="first"), "q": Categorical(base="first")},
+        interactions=[("p", "q")],
+    )
+    model.fit(X, y)
+    assert ("x", "y:z") in model._interaction_specs["p:q"]._pruned_pairs
+    text = " ".join(str(model.summary()).split())
+    assert "p:q[x:y:z] is (p=x:y, q=z), not (p=x, q=y:z), which has no row" in text
 
 
 def test_labels_that_do_not_collide_keep_their_dicts_and_raise_no_warning():

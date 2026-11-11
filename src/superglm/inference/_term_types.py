@@ -198,7 +198,14 @@ class TermInference:
 
 @dataclass(frozen=True)
 class InteractionInference:
-    """Per-interaction inference result (lighter than TermInference)."""
+    """Per-interaction inference result (lighter than TermInference).
+
+    For a categorical-by-categorical interaction, ``relativity`` and ``log_relativity`` are
+    keyed ``"level1:level2"``, a label two cells share once a level holds a colon.
+    ``pair_relativity`` and ``pair_log_relativity`` hold every estimated non-base cell keyed
+    by its ``(level1, level2)`` tuple, in ``pairs`` order. A base cell is absent from both,
+    and its relativity is 1.
+    """
 
     name: str
     kind: str  # "spline_categorical", "categorical", "numeric_categorical", etc.

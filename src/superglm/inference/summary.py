@@ -1340,26 +1340,38 @@ def editor_shape_notes(info: dict[str, Any]) -> list[str]:
 
 
 def shared_cell_row_notes(interaction_specs: dict[str, Any]) -> list[str]:
-    """For each categorical interaction whose rows share a name, the cells in row order.
+    """For each categorical interaction whose row names other cells share, the cells.
 
-    A row is named ``term[level1:level2]``, which two cells share once a level holds a colon.
+    A row is named ``term[level1:level2]``, a label other cells of the full grid share once a
+    level holds a colon: another row's cell, or a base or unestimated cell that has no row.
     """
-    from superglm.features.interaction import CategoricalInteraction
+    from superglm.features.interaction import CategoricalInteraction, shared_cell_labels
 
     notes = []
     for name, spec in interaction_specs.items():
         if not isinstance(spec, CategoricalInteraction):
             continue
-        cells_by_label: dict[str, list[tuple]] = {}
+        grid = shared_cell_labels([spec._base1, *spec._non_base1], [spec._base2, *spec._non_base2])
+        rows_by_label: dict[str, list[tuple]] = {}
         for pair in spec._pairs:
-            cells_by_label.setdefault(f"{pair[0]}:{pair[1]}", []).append(pair)
+            label = f"{pair[0]}:{pair[1]}"
+            if label in grid:
+                rows_by_label.setdefault(label, []).append(pair)
         first, second = spec.parent_names
-        shared = [
-            f"{name}[{label}] is "
-            + " then ".join(f"({first}={level1}, {second}={level2})" for level1, level2 in cells)
-            for label, cells in cells_by_label.items()
-            if len(cells) > 1
-        ]
+
+        def cell(pair: tuple) -> str:
+            return f"({first}={pair[0]}, {second}={pair[1]})"
+
+        shared = []
+        for label, rows in rows_by_label.items():
+            text = f"{name}[{label}] is " + " then ".join(map(cell, rows))
+            rowless = [pair for pair in grid[label] if pair not in rows]
+            if rowless:
+                text += (
+                    f", not {' or '.join(map(cell, rowless))}, which has no row "
+                    "(a base or unestimated cell)"
+                )
+            shared.append(text)
         if shared:
             notes.append(
                 f"{name}: levels containing ':' give several cells one row name. In row order, "
