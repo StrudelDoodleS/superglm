@@ -705,6 +705,11 @@ def test_an_edit_made_before_an_in_place_repair_carries_over_onto_the_repaired_c
 
     model, session, before, after, _ = _open_then_repair(edit_before=shift)
     term = session.terms["mean:x"]
+    np.testing.assert_allclose(
+        term.original_log_effect,
+        session.model.term_inference("mean:x").log_relativity,
+        atol=1e-12,
+    )
     chosen = (term.x >= 2.0) & (term.x <= 4.0)
     change = term.edited_log_effect - term.original_log_effect
     np.testing.assert_allclose(change[chosen], 0.2, atol=1e-12)
