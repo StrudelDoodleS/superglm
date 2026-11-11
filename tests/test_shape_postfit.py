@@ -802,10 +802,13 @@ def test_monotone_projection_takes_few_qp_solves(monkeypatch):
 #: QP solves one repair may take: its exchange converges quadratically once the
 #: binding spans' minima are found, so a handful of steps suffice.
 QP_SOLVE_BUDGET = 12
-#: Relative KKT residual of the closest monotone curve, as the oracle reads it. The
-#: repair is a QP optimum feasible to rounding, so it reads about 1e-16; the SLSQP
-#: repair this replaced stopped near 1e-8.
-CLOSEST_REPAIR_KKT = 1e-9
+#: Relative KKT residual of the closest monotone curve, as the oracle reads it at the
+#: exact points where the derivative touches zero. Inside a span such a point is a
+#: double root, and a minimum feasible to rounding locates it only to about sqrt(u)
+#: of the span: the exchange may hold it with two cuts that far apart. So the oracle
+#: reads up to about sqrt(u) there, and about 1e-16 where the repair touches at knots.
+#: The same fixtures' repairs in the grid metric read 1e-3 to 1e-2 here.
+CLOSEST_REPAIR_KKT = float(np.sqrt(np.finfo(np.float64).eps / 2.0))
 
 _SWEEP_SHAPES = {
     "wiggle": (lambda x: 0.9 * x + 0.25 * np.sin(12 * x), "uniform"),
@@ -855,27 +858,34 @@ def _wiggly_monotone_fit(kind, size):
     [
         # The exchange used to stop after 14 span refinements, still infeasible.
         ("wiggle", "increasing", "gaussian", "cr", 8),
-        # SLSQP used to stop 1.7e-6 of the zero-term loss short of the closest curve.
+        # SLSQP used to stop 1.7e-6 of the zero-term loss short of the closest curve on
+        # the grid.
         ("hook", "decreasing", "poisson", "bs", 8),
     ],
 )
 def test_monotone_repair_is_the_closest_monotone_curve(shape, direction, family, kind, size):
-    from tests._shape_projection_oracle import projection_certificate
+    from superglm.constraints import MonotoneRepairer
+    from tests._shape_projection_oracle import grid_metric, projection_certificate
 
     model, X = _sweep_fit(shape, direction, family, kind, size)
-    model.apply_shape_postfit(X)
-
-    repair = model._shape_repairs["x"]
-    spec = model._specs["x"]
+    spec, groups = model._specs["x"], _x_groups(model)
     weights = shape_ops._grid_weights(
         spec, X["x"].to_numpy(), np.asarray(model._fit_weights, dtype=np.float64), 500
     )
-    beta = np.concatenate([repair.repaired_beta_reparam[group.sl] for group in _x_groups(model)])
-    certificate = projection_certificate(
-        spec, direction, repair.grid, repair.original_log_effect, weights, beta
+    grid_repair = MonotoneRepairer(direction).repair(
+        spec, model.result.beta, groups, weights=weights, n_grid=500
     )
+
+    certificate = _certified_repair(model, X, direction)
+
     assert certificate.minimum_derivative >= -1e-10
     assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
+    # Called without a metric, the public repairer projects the curve on the grid.
+    H, g = grid_metric(spec, grid_repair.grid, grid_repair.original_log_effect, weights)
+    grid_beta = _term_beta(grid_repair.repaired_beta_reparam, groups)
+    grid_certificate = projection_certificate(spec, direction, grid_beta, H, g)
+    assert grid_certificate.minimum_derivative >= -1e-10
+    assert grid_certificate.kkt_residual <= CLOSEST_REPAIR_KKT
 
 
 def _rise_fit(t, x, **spline):
@@ -887,18 +897,34 @@ def _rise_fit(t, x, **spline):
     return model.fit(X, y), X
 
 
-def _repair_certificate(model, X, kind):
+def _term_beta(beta, groups):
+    return np.concatenate([np.asarray(beta, dtype=np.float64)[group.sl] for group in groups])
+
+
+def _posterior_metric(model):
+    """The one-term fit's penalized Hessian, read off its own posterior covariance.
+
+    The Bayesian covariance of the term's coefficients is ``phi (X'WX + S)^-1``
+    with the intercept profiled (Wood, *Shape constrained additive smooth models*,
+    Statistical Modelling 26(4), 2026, section 2), so ``phi`` times its inverse is
+    the metric the repair projects in, formed by the inference code instead of the
+    repair's. Returns it and the fitted coefficients it projects.
+    """
+    groups = _x_groups(model)
+    covariance, active = model._coef_covariance
+    assert [group.name for group in active] == [group.name for group in groups]
+    H = model._solver_result.phi * np.linalg.inv(covariance)
+    return 0.5 * (H + H.T), _term_beta(model.result.beta, groups)
+
+
+def _certified_repair(model, X, kind, **repair):
+    """Repair the fit, and certify the result as the projection in its posterior metric."""
     from tests._shape_projection_oracle import projection_certificate
 
-    repair = model._shape_repairs["x"]
-    spec = model._specs["x"]
-    weights = shape_ops._grid_weights(
-        spec, X["x"].to_numpy(), np.asarray(model._fit_weights, dtype=np.float64), repair.grid.size
-    )
-    beta = np.concatenate([repair.repaired_beta_reparam[group.sl] for group in _x_groups(model)])
-    return projection_certificate(
-        spec, kind, repair.grid, repair.original_log_effect, weights, beta
-    )
+    H, fitted = _posterior_metric(model)
+    model.apply_shape_postfit(X, **repair)
+    beta = _term_beta(model._shape_repairs["x"].repaired_beta_reparam, _x_groups(model))
+    return projection_certificate(model._specs["x"], kind, beta, H, H @ fitted)
 
 
 @pytest.mark.parametrize("offset", [1e8, 1e12])
@@ -907,9 +933,8 @@ def test_monotone_repair_far_from_the_origin_is_the_closest_monotone_curve(offse
     t = np.linspace(0.0, 1.0, 200)
     model, X = _rise_fit(t, offset + t, n_knots=9)
 
-    model.apply_shape_postfit(X)
+    certificate = _certified_repair(model, X, "increasing")
 
-    certificate = _repair_certificate(model, X, "increasing")
     assert certificate.minimum_derivative >= -1e-10
     assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
 
@@ -924,11 +949,181 @@ def test_monotone_repair_across_a_one_ulp_span_is_the_closest_monotone_curve():
     y = 0.9 * x + 0.25 * np.sin(12 * x) + 0.1 * rng.normal(size=x.size)
     model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": feature}).fit(X, y)
 
-    model.apply_shape_postfit(X)
+    certificate = _certified_repair(model, X, "increasing")
 
-    certificate = _repair_certificate(model, X, "increasing")
     assert certificate.minimum_derivative >= -1e-10
     assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
+
+
+_REVIEW_SHAPES = {
+    "dip": lambda x: x - 0.5 * np.exp(-(((x - 0.5) / 0.07) ** 2)),
+    "rise": lambda x: np.sqrt(x) - 0.45 * x**3,
+    "hook": lambda x: 0.8 * np.log1p(6 * x) - 1.2 * np.maximum(x - 0.55, 0.0) ** 1.5,
+    "flat": lambda x: 0.0 * x,
+    "bowl": lambda x: 1.5 * (x - 0.4) ** 2 + 0.08 * np.sin(14 * x),
+}
+_REVIEW_BASES = {
+    "bs3": {"kind": "bs", "n_knots": 8},
+    "bs4": {"kind": "bs", "n_knots": 8, "degree": 4},
+    "bs5": {"kind": "bs", "n_knots": 6, "degree": 5},
+    "ps3": {"kind": "ps", "n_knots": 10},
+}
+
+
+def _review_fit(shape, direction, family, tag):
+    """One fixture of the review sweep: a REML fit, n = 4000, whose ``direction`` rule binds."""
+    import zlib
+
+    from superglm import Spline
+
+    basis = _REVIEW_BASES[tag]
+    key = repr((shape, direction, family, tag, sorted(basis.items())))
+    rng = np.random.default_rng(zlib.crc32(key.encode()) + 7)
+    n = 4000
+    x = rng.uniform(0, 1, n) if zlib.crc32(shape.encode()) % 2 else rng.beta(1.2, 2.5, n)
+    curve = _REVIEW_SHAPES[shape]
+    eta = {"decreasing": curve(1.0 - x), "concave": -curve(x)}.get(direction, curve(x))
+    if family == "poisson":
+        y = rng.poisson(np.exp(0.3 + eta)).astype(np.float64)
+    else:
+        y = eta + 0.3 * rng.normal(size=n)
+    X = pd.DataFrame({"x": x})
+    spline = Spline(constraint=getattr(Constraint.postfit, direction), **basis)
+    model = SuperGLM(family=family, selection_penalty=0.0, features={"x": spline})
+    return model.fit_reml(X, y), X
+
+
+@pytest.mark.parametrize(
+    ("shape", "direction", "family", "tag"),
+    [
+        ("dip", "increasing", "poisson", "bs4"),
+        ("rise", "decreasing", "poisson", "bs3"),
+        ("rise", "decreasing", "poisson", "ps3"),
+        ("rise", "increasing", "gaussian", "bs5"),
+        ("hook", "increasing", "poisson", "bs5"),
+        ("hook", "decreasing", "gaussian", "bs5"),
+        ("flat", "convex", "gaussian", "bs4"),
+        ("flat", "convex", "gaussian", "bs5"),
+        ("flat", "convex", "poisson", "bs5"),
+        ("bowl", "concave", "poisson", "bs4"),
+    ],
+)
+def test_repair_along_directions_the_penalty_prices_is_published(shape, direction, family, tag):
+    """Repairs master publishes, which the grid metric's exact projection refused.
+
+    Each fitted basis has wiggly directions that a sparse region of the axis barely
+    sees. The grid metric omits the smoothing penalty, so its projection travelled
+    10 to 1,000 times the fit's size along them, and the publication rule refused
+    it as worse than dropping the term. The penalized Hessian prices them as the
+    rule does: the repair publishes, and it is the projection in that metric.
+    """
+    model, X = _review_fit(shape, direction, family, tag)
+
+    certificate = _certified_repair(model, X, direction)
+
+    assert certificate.minimum_derivative >= -1e-10
+    assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
+
+
+def _beta_rise(family, n=3000):
+    """A wiggly rise on a skewed axis, n rows: an increasing rule binds where it wiggles."""
+    rng = np.random.default_rng(11)
+    x = rng.beta(1.2, 2.5, n)
+    eta = 0.9 * x + 0.25 * np.sin(12 * x)
+    if family == "poisson":
+        return pd.DataFrame({"x": x}), rng.poisson(np.exp(0.3 + eta)).astype(np.float64)
+    return pd.DataFrame({"x": x}), eta + 0.3 * rng.normal(size=n)
+
+
+@pytest.mark.parametrize("family", ["gaussian", "poisson"])
+def test_select_term_is_projected_in_both_of_its_penalties(family):
+    """``select=True`` adds a null-space penalty with its own smoothing parameter.
+
+    The posterior's precision carries both, so a metric missing either one fails
+    the oracle's optimality check.
+    """
+    from superglm import Spline
+
+    X, y = _beta_rise(family)
+    feature = Spline(kind="bs", n_knots=8, select=True, constraint=Constraint.postfit.increasing)
+    model = SuperGLM(family=family, selection_penalty=0.0, features={"x": feature}).fit_reml(X, y)
+    assert len([penalty for penalty in model._reml_penalties if penalty.group_name == "x"]) == 2
+
+    certificate = _certified_repair(model, X, "increasing")
+
+    assert certificate.minimum_derivative >= -1e-10
+    assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
+
+
+@pytest.mark.parametrize("selection_penalty", [0.1, 10.0])
+@pytest.mark.parametrize("family", ["gaussian", "poisson"])
+def test_repair_under_a_selection_penalty_is_the_projection_in_the_smooth_metric(
+    family, selection_penalty
+):
+    """The rule's merit carries the group lasso; the metric is the smooth's ``X'WX + S``.
+
+    The posterior adds the lasso's curvature, ``lambda w / ||beta|| (I - u u')``
+    (``pirls._add_selection_local_curvature``), so the reference takes it off again.
+    The term stays selected, and its repair publishes.
+    """
+    from tests._shape_projection_oracle import projection_certificate
+
+    X, y = _beta_rise(family)
+    feature = PSpline(n_knots=10, constraint=Constraint.postfit.increasing)
+    model = SuperGLM(family=family, selection_penalty=selection_penalty, features={"x": feature})
+    model.fit(X, y)
+    (group,) = _x_groups(model)
+    posterior, fitted = _posterior_metric(model)
+    norm = float(np.linalg.norm(fitted))
+    unit = fitted / norm
+    curvature = (
+        selection_penalty * group.weight / norm * (np.eye(fitted.size) - np.outer(unit, unit))
+    )
+    H = posterior - curvature
+
+    model.apply_shape_postfit(X)
+
+    beta = _term_beta(model._shape_repairs["x"].repaired_beta_reparam, [group])
+    certificate = projection_certificate(model._specs["x"], "increasing", beta, H, H @ fitted)
+    assert np.any(beta != 0.0)
+    assert certificate.minimum_derivative >= -1e-10
+    assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
+
+
+def test_two_group_term_metric_holds_its_cross_blocks():
+    """A term on two column groups gets one ``X'WX``, cross blocks included, intercept profiled.
+
+    The profiled Gram is the Gram of the columns centred at their weighted means.
+    """
+    from superglm import Spline
+
+    rng = np.random.default_rng(5)
+    n = 400
+    X = pd.DataFrame({"a": rng.uniform(0.0, 1.0, n), "b": rng.uniform(0.0, 1.0, n)})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"a": Spline(kind="cr", k=6), "b": Spline(kind="cr", k=6)},
+    )
+    model._add_interaction("a", "b", decompose=True)
+    model._build_design_matrix(X, rng.normal(size=n), np.ones(n), None)
+    pairs = [
+        (matrix, group)
+        for matrix, group in zip(model._dm.group_matrices, model._groups, strict=True)
+        if group.subgroup_type in {"bilinear", "wiggly"}
+    ]
+    assert len(pairs) == 2
+    W = rng.uniform(0.5, 2.0, n)
+    columns = np.column_stack(
+        [matrix.matvec(unit) for matrix, group in pairs for unit in np.eye(group.size)]
+    )
+    centred = columns - (W @ columns) / W.sum()
+    expected = centred.T @ (W[:, None] * centred)
+
+    metric = shape_ops._term_data_hessian(model, [group for _, group in pairs], W)
+
+    magnitude = np.abs(columns).T @ (W[:, None] * np.abs(columns))
+    np.testing.assert_array_less(np.abs(metric - expected), gamma(n + 2) * 4.0 * magnitude + 1e-300)
 
 
 @pytest.mark.parametrize("scale", [1e165, 1e-150])
@@ -1033,9 +1228,8 @@ def test_monotone_repair_on_a_hundred_knot_basis_is_published():
     model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": feature})
     model.fit(X, y)
 
-    model.apply_shape_postfit(X)
+    certificate = _certified_repair(model, X, "increasing")
 
-    certificate = _repair_certificate(model, X, "increasing")
     assert certificate.minimum_derivative >= -1e-10
 
 
@@ -1113,8 +1307,10 @@ def test_one_qp_curvature_repair_takes_few_iterations(monkeypatch):
 
 
 # The flat Poisson fixture of the review sweep. Its grid weights fall to 1e-5 of
-# the rest in the sparse tail, so cond(H) passes 1 / u, and an unscaled solve
-# certified on some OpenBLAS kernels and cycled on others.
+# the rest in the sparse tail, so the grid metric's cond(H) passes 1 / u, and an
+# unscaled solve certified on some OpenBLAS kernels and cycled on others. The
+# public repairer still projects in that metric when called without one; the full
+# call projects in the penalized Hessian, whose Gram goes through BLAS as well.
 _KERNEL_FIXTURE = """
 import sys, warnings, zlib
 import numpy as np, pandas as pd
@@ -1127,6 +1323,16 @@ y = rng.poisson(np.exp(0.3), 4000).astype(float)
 X = pd.DataFrame({"x": x})
 spline = Spline(kind="bs", n_knots=6, degree=5, constraint=Constraint.postfit.decreasing)
 model = SuperGLM(family="poisson", selection_penalty=0.0, features={"x": spline}).fit_reml(X, y)
+from superglm.constraints import MonotoneRepairer
+from superglm.model import shape_ops
+spec, groups = model._specs["x"], [g for g in model._groups if g.feature_name == "x"]
+weights = shape_ops._grid_weights(spec, x, np.asarray(model._fit_weights, dtype=float), 500)
+try:
+    grid = MonotoneRepairer("decreasing").repair(spec, model.result.beta, groups, weights=weights)
+except RuntimeError as exc:
+    print("refused", exc)
+else:
+    print("published", " ".join(repr(float(v)) for v in grid.repaired_log_effect))
 try:
     model.apply_shape_postfit(X)
 except RuntimeError as exc:
@@ -1138,7 +1344,10 @@ else:
 
 @pytest.mark.slow
 def test_repair_decision_is_the_same_on_every_blas_kernel():
-    """Publish or refuse, and the repaired curve, agree across OpenBLAS microkernels."""
+    """Publish or refuse, and the repaired curve, agree across OpenBLAS microkernels.
+
+    Each kernel runs the grid-metric repairer and the full call, in that order.
+    """
     import os
     import subprocess
 
@@ -1153,13 +1362,14 @@ def test_repair_decision_is_the_same_on_every_blas_kernel():
             check=True,
             timeout=300,
         )
-        outcomes[kernel] = run.stdout.split()
+        outcomes[kernel] = [line.split() for line in run.stdout.splitlines()]
 
-    decisions = {kernel: words[0] for kernel, words in outcomes.items()}
-    assert set(decisions.values()) == {"published"}, decisions
-    curves = [np.asarray([float(v) for v in words[1:]]) for words in outcomes.values()]
-    for curve in curves[1:]:
-        np.testing.assert_allclose(curve, curves[0], rtol=0.0, atol=1e-9)
+    for metric in (0, 1):
+        decisions = {kernel: lines[metric][0] for kernel, lines in outcomes.items()}
+        assert set(decisions.values()) == {"published"}, (metric, decisions)
+        curves = [np.asarray([float(v) for v in lines[metric][1:]]) for lines in outcomes.values()]
+        for curve in curves[1:]:
+            np.testing.assert_allclose(curve, curves[0], rtol=0.0, atol=1e-9)
 
 
 def test_select_convex_repair_certifies_each_polynomial_span():
@@ -1233,8 +1443,8 @@ def test_invalid_curvature_repair_is_rejected_before_publication(monkeypatch):
     original_predictions = model.predict(X)
 
     class InvalidRepairer:
-        def repair(self, spec, beta, groups, *, weights, n_grid):
-            del groups, weights
+        def repair(self, spec, beta, groups, *, weights, n_grid, metric):
+            del groups, weights, metric
             grid = np.linspace(spec._lo, spec._hi, n_grid)
             invalid_beta = np.full_like(beta, 1e100)
             invalid_curve = np.full(n_grid, 1e100)
@@ -1312,8 +1522,8 @@ def test_infeasible_monotone_repair_is_rejected_atomically(monkeypatch):
     original_predictions = model.predict(X)
 
     class FalselyCertifiedRepairer:
-        def repair(self, spec, beta, groups, *, weights, n_grid):
-            del groups, weights
+        def repair(self, spec, beta, groups, *, weights, n_grid, metric):
+            del groups, weights, metric
             reconstruction = spec.reconstruct(beta, n_points=n_grid)
             return MonotoneRepairResult(
                 feature_name="",
@@ -1358,8 +1568,8 @@ def test_publication_rejects_sub_grid_scaled_derivative_violation(monkeypatch):
     assert -2e-9 < certificate.minimum_scaled_slack < -1e-10
 
     class SubGridInfeasibleRepairer:
-        def repair(self, _spec, beta, groups, *, weights, n_grid):
-            del groups, weights
+        def repair(self, _spec, beta, groups, *, weights, n_grid, metric):
+            del groups, weights, metric
             reconstruction = _spec.reconstruct(beta, n_points=n_grid)
             grid = reconstruction["x"]
             repaired = _spec.transform(grid) @ term_beta
@@ -2371,8 +2581,10 @@ def _repairer_with_fault(monkeypatch, mutate):
         delegate = real_repairer(kind)
 
         class Faulty:
-            def repair(self, spec, beta, groups, *, weights, n_grid):
-                result = delegate.repair(spec, beta, groups, weights=weights, n_grid=n_grid)
+            def repair(self, spec, beta, groups, *, weights, n_grid, metric):
+                result = delegate.repair(
+                    spec, beta, groups, weights=weights, n_grid=n_grid, metric=metric
+                )
                 mutate(result, spec, groups)
                 return result
 

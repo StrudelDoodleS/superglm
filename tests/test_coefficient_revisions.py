@@ -117,15 +117,29 @@ def _projected_reference(edited, x, y, w):
     """The repair's definition applied outside any revision: projection, then exact profile.
 
     ``apply_shape_postfit`` projects the term's coefficients onto the shape
-    cone (``MonotoneRepairer`` on the grid weights) and profiles the intercept
-    at them; for a Gaussian identity fit that is the weighted mean residual,
-    ``a = sum w (y - X_pub beta_r) / sum w``, formed here in exact arithmetic.
-    Returns the projected coefficients, the public columns and the reference.
+    cone (``MonotoneRepairer`` in the term's penalized Hessian at the fit's
+    working weights) and profiles the intercept at them; for a Gaussian
+    identity fit that is the weighted mean residual, ``a = sum w (y - X_pub
+    beta_r) / sum w``, formed here in exact arithmetic.  Returns the projected
+    coefficients, the public columns and the reference.
     """
+    from superglm.model import state_ops
+
     spec, groups = edited._specs["x"], list(edited._groups)
     beta_edit = np.asarray(edited.result.beta, dtype=np.float64)
+    metric = shape_ops._term_penalized_hessian(
+        edited,
+        groups,
+        shape_ops._build_smooth_penalty_terms(edited),
+        state_ops._solver_space_working_weights(edited),
+    )
     projected = MonotoneRepairer(direction="increasing").repair(
-        spec, beta_edit, groups, weights=shape_ops._grid_weights(spec, x, w, 80), n_grid=80
+        spec,
+        beta_edit,
+        groups,
+        weights=shape_ops._grid_weights(spec, x, w, 80),
+        n_grid=80,
+        metric=metric,
     )
     beta_reference = np.asarray(projected.repaired_beta_reparam, dtype=np.float64)
     columns = np.asarray(spec.transform(x), dtype=np.float64)
@@ -187,8 +201,8 @@ def test_a_repair_after_an_edit_projects_the_edited_curve(shift):
     """A repair that keeps a curve: the projection of the edited coefficients, then the profile.
 
     ``apply_shape_postfit`` projects the term's coefficients onto the shape
-    cone (``MonotoneRepairer`` on the grid weights) and profiles the intercept
-    at them; for a Gaussian identity fit that is the weighted mean residual.
+    cone (``MonotoneRepairer`` in the term's penalized Hessian) and profiles the
+    intercept at them; for a Gaussian identity fit that is the weighted mean residual.
     The reference is that definition applied to the edited model outside any
     revision: the same projection, then ``a = sum w (y - X_pub beta_r) / sum
     w`` in exact arithmetic.  31544462 missed it by 1.5e-3 with or without an
