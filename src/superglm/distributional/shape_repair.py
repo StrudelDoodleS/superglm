@@ -1,8 +1,8 @@
 """``Constraint.postfit`` rules on SuperLSS terms, repaired after the fit as SuperGLM repairs them.
 
 A post-fit rule asks for the fitted curve to be repaired, not for the fit to be constrained.
-``SuperGLM.apply_shape_postfit`` projects each such term's curve onto its shape cone in the
-term's own fitted basis, weighting the grid by where the training rows sit along the axis
+``SuperGLM.apply_shape_postfit`` projects each such term's fitted coefficients onto its shape
+cone in the term's own fitted basis, in the term's penalized Hessian at the fit
 (``MonotoneRepairer`` and ``CurvatureRepairer`` in ``superglm.constraints``), re-estimates the
 intercept with the terms held, and withholds the repaired term's standard errors, bands and test:
 the projection is a constrained estimator whose reference distribution is not the unconstrained
@@ -11,7 +11,9 @@ fit's (Meyer and Woodroofe, *Ann. Statist.* 28(4), 2000; Meyer, *Ann. Appl. Stat
 *Biometrika* 96(3), 2009, Proposition 1).
 
 SuperLSS runs the same repairer on the same fitted basis, for a term of any parameter, on that
-parameter's link scale. The basis carries the fit's centring, so a repair keeps the term's
+parameter's link scale, in the same metric: the fit's penalized curvature on the term, with that
+parameter's intercept profiled (``_term_precision``). The basis carries the fit's centring, so a
+repair keeps the term's
 training mean on that scale; the parameter's intercept is then re-estimated on the joint
 likelihood of the retained rows with every term and every other parameter held. The result is
 published as a revision of the fit (``revision.py``): predictions, curves and rating tables
@@ -489,6 +491,34 @@ def _settled(
     return repaired
 
 
+def _term_precision(fitted: Any, term: PostfitTerm) -> NDArray[np.float64]:
+    """The metric the term's repair projects in: the fit's penalized curvature on the term's
+    coefficients, every other coefficient held and the term's parameter's intercept profiled.
+
+    The merit the publication rule judges is the fit's own penalized negative log-likelihood
+    with those coefficients held and that intercept re-estimated (``_profiled_merit``). Its
+    second-order model at the fit is the curvature the fit accepted (``-H(l) + S``, as its
+    inference reads it): holding coefficients takes the term's block, and minimising over the
+    intercept leaves the block's generalized Schur complement ``H_tt - h h' H_aa^+`` (Boyd and
+    Vandenberghe, *Convex Optimization*, 2004, appendix A.5.5; Gallier, *The Schur complement
+    and symmetric positive semidefinite matrices*, 2019, theorem 4.3, which needs only that
+    the curvature is semidefinite). This is SuperGLM's ``X'WX + S_lambda`` with its intercept
+    profiled (``model.shape_ops``). An intercept curvature at the block's rounding is taken as
+    zero, as a pseudo-inverse takes it.
+    """
+    curvature = fitted.result.terminal_penalized_curvature
+    columns = np.arange(term.columns.start, term.columns.stop)
+    block = np.array(curvature[np.ix_(columns, columns)], dtype=np.float64)
+    intercept = fitted.layout.predictor(term.parameter).intercept_index
+    if intercept is not None:
+        coupling = np.asarray(curvature[columns, intercept], dtype=np.float64)
+        own = float(curvature[intercept, intercept])
+        scale = max(float(np.max(np.abs(np.diag(block)), initial=0.0)), abs(own))
+        if own > (columns.size + 1) * _UNIT_ROUNDOFF * scale:
+            block -= np.outer(coupling, coupling) / own
+    return 0.5 * (block + block.T)
+
+
 def repaired_model(
     fitted: Any,
     X_train: FrameLike | EagerFrame | None,
@@ -534,6 +564,7 @@ def repaired_model(
             [block],
             weights=_grid_weights(term.curve_spec, x, weights[on_axis], n_grid),
             n_grid=n_grid,
+            metric=_term_precision(fitted, term),
         )
         repaired = _settled(term, repair, coefficients[term.columns])
         if np.array_equal(repaired, coefficients[term.columns]):

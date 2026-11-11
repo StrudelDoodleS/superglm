@@ -385,9 +385,12 @@ model.fit_reml(X, y)
 model.apply_shape_postfit()
 ```
 
-The repair is SuperGLM's: the fitted curve is projected onto the shape in the
-term's own basis, on its parameter's link scale, weighted by where the
-training rows sit along the axis. The basis keeps the fit's centring, so the
+The repair is SuperGLM's: the fitted curve is replaced by the closest curve
+in the term's own basis, on its parameter's link scale, that has the shape
+everywhere on the fitted range. "Closest" is measured as the fit scores a
+change to the term: how far it raises the fit's penalized objective, to second
+order, with every other term and parameter held and the parameter's intercept
+free. The basis keeps the fit's centring, so the
 term's mean over the training rows does not move. The parameter's intercept
 is then re-estimated on the joint likelihood, with every term and every other
 parameter held. Three repairs are refused, and nothing changes: one whose
