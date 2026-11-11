@@ -472,6 +472,7 @@ def solved_row_blocks(
     centre_lo: NDArray | None,
     active: NDArray,
     row_bytes: int = 0,
+    piece_row_bytes: int = 0,
 ) -> RowBlocks:
     """The active rows' solved centred rows and leverages, block by block, each in pieces.
 
@@ -482,7 +483,8 @@ def solved_row_blocks(
     overflow into the sums.  A block's values do not depend on which thread
     forms it, on any other block or on the piece size.  ``row_bytes`` is what
     the caller holds per row of a block while it reduces the block's pieces,
-    charged to a job's working set.
+    and ``piece_row_bytes`` what it holds at once per row of a piece while it
+    reduces that piece (its widest products), both charged to a job.
     """
     inverse = np.ascontiguousarray(inverse, dtype=np.float64)
     plan = _support_plan(dm, inverse, centre_hi, centre_lo)
@@ -498,16 +500,19 @@ def solved_row_blocks(
             plan, start, min(start + rows, n), p, centre_hi, centre_lo, active
         )
 
-    # A job holds one piece of solved rows and the caller's products of it, a
-    # few copies of ``piece x p``, and the piece's centred dense values,
-    # beside its block's codes and row indices and the caller's per-row terms.
-    # A piece's dense columns are gathered (at most two ``piece x width``
-    # copies) before its solved rows are formed, so within those copies.
+    # A job holds one piece of solved rows, the piece's centred dense values
+    # and the caller's products of the piece, beside its block's codes and
+    # row indices and the caller's per-row terms.  The products are charged
+    # as the caller states them (a batch's dense penalties take a ``piece x
+    # width`` product each) with one more ``piece x p`` copy for temporaries,
+    # and never below three copies.  A piece's dense columns are gathered (at
+    # most two ``piece x width`` copies) before its solved rows are formed.
     piece = min(rows, _support_piece_rows(p))
     per_row = 8 * (len(plan.offsets) + 2) + int(row_bytes)
+    products = max(3 * 8 * p, 8 * p + int(piece_row_bytes))
     return RowBlocks(
         jobs=[job(start) for start in range(0, n, rows)],
-        block_bytes=8 * piece * (4 * p + plan.dense_columns.size) + per_row * rows,
+        block_bytes=piece * (8 * (p + plan.dense_columns.size) + products) + per_row * rows,
     )
 
 

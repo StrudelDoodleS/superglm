@@ -322,13 +322,13 @@ def test_a_pooled_block_forms_its_solved_rows_a_piece_at_a_time(monkeypatch):
     assert np.all(np.abs(results[4][2] - reference_cross) <= cross_bound)
 
 
-def _wide_dense_case(n: int, width: int = 600) -> dict:
+def _wide_dense_case(n: int, width: int = 600, orders: tuple[int, ...] = (2,)) -> dict:
     """A ``width``-column dense group of cosines, three numeric columns and a categorical.
 
-    Four penalties: a second-difference penalty on the wide group (the
-    caller's dense-penalty products) and a ridge on each numeric column.  The
-    inverse is any symmetric positive definite matrix: the test reads memory
-    and bits, not values.
+    A difference penalty of each order in ``orders`` on the wide group (the
+    caller's dense-penalty products, one ``width`` wide each) and a ridge on
+    each numeric column.  The inverse is any symmetric positive definite
+    matrix: the test reads memory and bits, not values.
     """
     rng = np.random.default_rng(6203)
     u = rng.uniform(0.0, 1.0, n)
@@ -351,18 +351,30 @@ def _wide_dense_case(n: int, width: int = 600) -> dict:
     ends = np.cumsum([0, width, 1, 1, 1, 3])
     names = ["wide", "x0", "x1", "x2", "lvl"]
     groups = [GroupSlice(name=name, start=ends[i], end=ends[i + 1]) for i, name in enumerate(names)]
-    difference = np.diff(np.eye(width), n=2, axis=0)
+    differences = {order: np.diff(np.eye(width), n=order, axis=0) for order in orders}
+    wide_names = ["wide"] if len(orders) == 1 else [f"wide:{order}" for order in orders]
     penalties = [
+        PenaltyComponent(
+            name=name,
+            group_name="wide",
+            group_index=0,
+            group_sl=groups[0].sl,
+            omega_raw=None,
+            omega_ssp=differences[order].T @ differences[order],
+            penalty_kind="dense",
+        )
+        for name, order in zip(wide_names, orders, strict=True)
+    ] + [
         PenaltyComponent(
             name=group.name,
             group_name=group.name,
             group_index=i,
             group_sl=group.sl,
             omega_raw=None,
-            omega_ssp=difference.T @ difference if i == 0 else None,
-            penalty_kind="dense" if i == 0 else "identity",
+            omega_ssp=None,
+            penalty_kind="identity",
         )
-        for i, group in enumerate(groups[:4])
+        for i, group in enumerate(groups[1:4], start=1)
     ]
     result = PIRLSResult(
         beta=beta,
@@ -380,7 +392,7 @@ def _wide_dense_case(n: int, width: int = 600) -> dict:
         "groups": groups,
         "pirls_result": result,
         "XtWX_S_inv": inverse,
-        "lambdas": {"wide": 1.0, "x0": 2.0, "x1": 3.0, "x2": 0.5},
+        "lambdas": {**dict.fromkeys(wide_names, 1.0), "x0": 2.0, "x1": 3.0, "x2": 0.5},
         "sample_weight": np.ones(n),
         "offset_arr": np.zeros(n),
         "distribution": Poisson(),
@@ -388,8 +400,9 @@ def _wide_dense_case(n: int, width: int = 600) -> dict:
     }
 
 
-def test_a_pooled_jobs_charge_covers_its_traced_peak(monkeypatch):
-    """The pool charges a job at least the memory it traces, dense centring included.
+@pytest.mark.parametrize("orders", [(2,), (1, 2, 3, 4)], ids=["one_penalty", "four_penalties"])
+def test_a_pooled_jobs_charge_covers_its_traced_peak(monkeypatch, orders):
+    """The pool charges a job at least the memory it traces, dense centring and products included.
 
     The pool runs as many jobs as ``max_memory`` admits at the charge, so a
     charge below a job's peak lets the pass overrun the budget.  A wide dense
@@ -397,8 +410,11 @@ def test_a_pooled_jobs_charge_covers_its_traced_peak(monkeypatch):
     test traces each job alone (``tracemalloc``, which counts numpy's arrays)
     and compares its peak with the charge, then checks the pooled pass keeps
     the serial bits.  Blocks and pieces are scaled down together: three
-    blocks of five pieces.  Mutation: centring a block's dense columns all at
-    once (three block-sized dense arrays per job) exceeds the charge.
+    blocks of five pieces.  Four difference penalties on the wide group (as
+    ``Spline(kind="ps", m=(1, 2, 3, 4))`` gives) take four ``piece x width``
+    products at once.  Mutations: centring a block's dense columns all at once
+    (three block-sized dense arrays per job), or charging four ``piece x p``
+    copies whatever the batch's dense penalties, exceeds the charge.
     """
     import tracemalloc
 
@@ -408,7 +424,7 @@ def test_a_pooled_jobs_charge_covers_its_traced_peak(monkeypatch):
     _solved_rows_only(monkeypatch)
     monkeypatch.setattr(leverage_rows, "_BLOCK_BYTES", 4 * 1024 * 1024)
     monkeypatch.setattr(leverage_rows, "_PIECE_BYTES", 1024 * 1024)
-    case = _wide_dense_case(2560)
+    case = _wide_dense_case(2560, orders=orders)
     p = case["dm"].p
     block_rows = leverage_rows._support_block_rows(p)
     assert -(-block_rows // leverage_rows._support_piece_rows(p)) == 5

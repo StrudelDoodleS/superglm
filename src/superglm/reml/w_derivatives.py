@@ -264,6 +264,7 @@ def _leverage_derivative_terms(
                         .reshape(n_blocks, count, batch.dense)
                         .transpose(1, 0, 2)
                     )
+                    products = None  # freed before the next batch's temporaries
                 if batch.members.shape[1] > batch.dense:
                     squares = ((solved_blocks * solved_blocks).reshape(-1, width) @ ones).reshape(
                         n_blocks, count
@@ -284,7 +285,18 @@ def _leverage_derivative_terms(
     # A block's rows keep their leverage and directions, and their quadratic
     # forms and weighted directions with the cross terms.
     row_bytes = 8 * (1 + (3 if cross_terms else 2) * m)
-    blocks = solved_row_blocks(dm, inverse, mean_x, mean_lo, row_weights != 0.0, row_bytes)
+    # A piece's widest products: one batch's dense penalties, side by side.
+    piece_row_bytes = 8 * max(
+        (
+            batch.dense * (batch.stop - batch.start)
+            for batch in batches
+            if cross_terms and batch.stacked is not None
+        ),
+        default=0,
+    )
+    blocks = solved_row_blocks(
+        dm, inverse, mean_x, mean_lo, row_weights != 0.0, row_bytes, piece_row_bytes
+    )
     if blocks.block_bytes is None:
         # The chunked route runs on this thread under the fit's BLAS policy; a
         # generator, so each chunk is reduced before the next is formed.
