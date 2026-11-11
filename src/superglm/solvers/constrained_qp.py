@@ -499,6 +499,97 @@ def _solve_saddle_least_squares(KKT: NDArray, rhs: NDArray) -> NDArray:
     return np.linalg.lstsq(equilibrated, rhs * scale, rcond=None)[0] * scale
 
 
+# A saddle system at least this large, in a solve that has already taken this many
+# direct saddle solves, is solved from one factorization updated by Schur complement.
+_UPDATE_MIN_SIZE = 128
+_UPDATE_AFTER = 32
+# Working-set changes one base factorization carries before it is refactored.
+_UPDATE_LIMIT = 32
+
+
+class _SaddleUpdates:
+    """Saddle solves on a changing working set from one equilibrated LU, by Schur complement.
+
+    ``K0``, the saddle matrix of the working set at the last factorization, is
+    equilibrated as in ``_solve_saddle_direct`` and LU-factored once. A row added
+    since borders ``K0`` with its constraint row and column; a base row dropped
+    borders it with a unit row and column that free its equation and hold its
+    multiplier at zero. The bordered system is solved through its Schur complement
+    (Gill, Murray, Saunders and Wright, SIAM J. Sci. Stat. Comput. 5(3), 1984,
+    section 3.5.4), whose stability rests on ``K0``'s; ``K0`` is refactored after
+    ``_UPDATE_LIMIT`` changes or a singular complement. Owner and lifetime: one solve.
+    """
+
+    def __init__(self, H: NDArray, rows: NDArray) -> None:
+        self.H, self.rows, self.p = H, rows, H.shape[0]
+        self.lu: NDArray | None = None
+        self.usable = True
+
+    def _factor(self, active: list[int]) -> bool:
+        p, k = self.p, len(active)
+        K = np.zeros((p + k, p + k))
+        K[:p, :p] = self.H
+        K[:p, p:] = -self.rows[active].T
+        K[p:, :p] = self.rows[active]
+        scale, _, _, info = scipy.linalg.lapack.dsyequb(K)
+        if info != 0 or not np.all(np.isfinite(scale) & (scale > 0.0)):
+            scale = np.ones(p + k)
+        lu, pivots, info = scipy.linalg.lapack.dgetrf(K * scale[:, None] * scale[None, :])
+        if info != 0:
+            self.usable = False
+            return False
+        self.lu, self.pivots, self.scale = lu, pivots, scale
+        self.base = {row: p + position for position, row in enumerate(active)}
+        self.borders: dict[tuple[int, bool], tuple[NDArray, NDArray]] = {}
+        return True
+
+    def _solve(self, rhs: NDArray) -> NDArray:
+        return scipy.linalg.lapack.dgetrs(self.lu, self.pivots, rhs)[0]
+
+    def _border(self, row: int, added: bool) -> tuple[NDArray, NDArray]:
+        """The scaled border row of ``row``, and ``K0`` solved against its scaled column."""
+        if (row, added) not in self.borders:
+            column, border = np.zeros(self.lu.shape[0]), np.zeros(self.lu.shape[0])
+            if added:
+                column[: self.p], border[: self.p] = -self.rows[row], self.rows[row]
+            else:
+                column[self.base[row]] = border[self.base[row]] = 1.0
+            self.borders[row, added] = (border * self.scale, self._solve(column * self.scale))
+        return self.borders[row, added]
+
+    def step(self, active: list[int], rhs: NDArray) -> NDArray | None:
+        """The step of the saddle system on ``active``; ``None`` where only a direct solve can give it."""
+        p = self.p
+        added = (
+            [] if self.lu is None else [j for j, row in enumerate(active) if row not in self.base]
+        )
+        dropped = [] if self.lu is None else sorted(set(self.base) - set(active))
+        if self.lu is None or len(added) + len(dropped) > _UPDATE_LIMIT:
+            if not self.usable or not self._factor(active):
+                return None
+            added, dropped = [], []
+        base_rhs = np.zeros(self.lu.shape[0])
+        base_rhs[:p] = rhs[:p]
+        for j, row in enumerate(active):
+            if row in self.base:
+                base_rhs[self.base[row]] = rhs[p + j]
+        solution = self._solve(self.scale * base_rhs)
+        borders = [self._border(active[j], True) for j in added]
+        borders += [self._border(row, False) for row in dropped]
+        if borders:
+            rows = np.column_stack([border for border, _ in borders])
+            solved = np.column_stack([column for _, column in borders])
+            target = np.concatenate([rhs[p + np.asarray(added, dtype=int)], np.zeros(len(dropped))])
+            try:
+                weights = np.linalg.solve(-(rows.T @ solved), target - rows.T @ solution)
+            except np.linalg.LinAlgError:
+                self.lu = None
+                return None
+            solution = solution - solved @ weights
+        step = (self.scale * solution)[:p]
+        return step if np.all(np.isfinite(step)) else None
+
+
 def _project_feasible(
     beta: NDArray,
     A: NDArray,
@@ -1020,6 +1111,9 @@ def solve_constrained_qp(
     kkt_may_be_singular = decomposition.rank < decomposition.width
 
     zero_face_cache: dict[tuple[int, ...], bool] = {}
+    # Saddle solves of a long solve on a large system (_SaddleUpdates).
+    updates = None if kkt_may_be_singular else _SaddleUpdates(H_sym, structure.scaled_rows)
+    direct_solves = 0
     blocks = structure.blocks
     block_zero_face: dict[tuple[int, ...], bool] = {}
     # Whether ``beta`` minimizes on the current face (previous iteration took
@@ -1080,29 +1174,37 @@ def solve_constrained_qp(
                 # Solve KKT system:
                 # [H    -A_eq^T] [step  ] = [g - H @ beta]
                 # [A_eq  0     ] [lambda] = [b_eq - A_eq @ beta]
-                KKT = np.zeros((p + n_eq, p + n_eq))
-                KKT[:p, :p] = H_sym
-                KKT[:p, p:] = -A_eq.T
-                KKT[p:, :p] = A_eq
-
                 rhs = np.zeros(p + n_eq)
                 rhs[:p] = g - H_sym @ beta
                 rhs[p:] = b_eq - A_eq @ beta
 
-                if kkt_may_be_singular:
-                    # A truncated H can leave a constraint-tangent null
-                    # direction on which np.linalg.solve succeeds and drifts,
-                    # so take the minimum-norm solution directly.
-                    sol = _solve_saddle_least_squares(KKT, rhs)
-                else:
-                    try:
-                        sol = _solve_saddle_direct(KKT, rhs)
-                    except np.linalg.LinAlgError:
-                        # Singular KKT: the same equilibrated least-squares
-                        # solve as the branch above.
+                step = None
+                if (
+                    updates is not None
+                    and p + n_eq >= _UPDATE_MIN_SIZE
+                    and direct_solves >= _UPDATE_AFTER
+                ):
+                    # A long solve on a large system: reuse one factorization.
+                    step = updates.step(active, rhs)
+                if step is None:
+                    KKT = np.zeros((p + n_eq, p + n_eq))
+                    KKT[:p, :p] = H_sym
+                    KKT[:p, p:] = -A_eq.T
+                    KKT[p:, :p] = A_eq
+                    if kkt_may_be_singular:
+                        # A truncated H can leave a constraint-tangent null
+                        # direction on which np.linalg.solve succeeds and drifts,
+                        # so take the minimum-norm solution directly.
                         sol = _solve_saddle_least_squares(KKT, rhs)
-
-                step = sol[:p]
+                    else:
+                        direct_solves += 1
+                        try:
+                            sol = _solve_saddle_direct(KKT, rhs)
+                        except np.linalg.LinAlgError:
+                            # Singular KKT: the same equilibrated least-squares
+                            # solve as the branch above.
+                            sol = _solve_saddle_least_squares(KKT, rhs)
+                    step = sol[:p]
 
         # --- Check step feasibility ---
         # Judge movement per coordinate, relative to ``max(1, |beta_i|)``: an

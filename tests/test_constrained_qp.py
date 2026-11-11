@@ -3138,3 +3138,59 @@ def test_feasible_start_with_nonhomogeneous_rows():
     np.testing.assert_array_equal(_homogeneous_feasible_start(inside, cap, bounds, 1e-12), inside)
     # Zero violates ``x >= 1``: no phase-one point without an LP.
     assert _homogeneous_feasible_start(beta * -1.0, cap[:1], np.array([1.0]), 1e-12) is None
+
+
+class TestSaddleUpdates:
+    """A long solve on a large saddle system reuses one factorization, by Schur complement."""
+
+    @staticmethod
+    def _monotone_projection(frequency, noise):
+        # A wiggly sequence projected onto the monotone cone in a well-conditioned H. A
+        # noisy fast wiggle binds most of the 159 difference rows, a smooth slow one about
+        # a third: either way the working set changes row by row, from empty or from all.
+        rng = np.random.default_rng(7)
+        p = 160
+        t = np.linspace(0.0, 1.0, p)
+        target = t + 0.3 * np.sin(frequency * t) + noise * rng.normal(size=p)
+        M = rng.normal(size=(p, p)) / np.sqrt(p)
+        H = np.eye(p) + 0.1 * (M @ M.T)
+        A = np.diff(np.eye(p), axis=0)
+        return H, H @ target, A, np.zeros(p - 1)
+
+    @pytest.mark.parametrize(
+        ("start", "frequency", "noise"), [("empty", 40.0, 0.05), ("every row", 8.0, 0.0)]
+    )
+    def test_updated_solves_match_the_direct_solve(self, monkeypatch, start, frequency, noise):
+        """Rows entering (from an empty set) and leaving (from every row) both take the updates."""
+        import superglm.solvers.constrained_qp as constrained_qp
+
+        H, g, A, b = self._monotone_projection(frequency, noise)
+        init = None if start == "empty" else list(range(A.shape[0]))
+        kwargs = dict(active_set_init=init, max_iter=2000, beta_start=np.zeros(H.shape[0]))
+        real_step, real_factor = (
+            constrained_qp._SaddleUpdates.step,
+            constrained_qp._SaddleUpdates._factor,
+        )
+        count = {"steps": 0, "factors": 0}
+
+        def step(self, active, rhs):
+            result = real_step(self, active, rhs)
+            count["steps"] += result is not None
+            return result
+
+        def factor(self, active):
+            count["factors"] += 1
+            return real_factor(self, active)
+
+        monkeypatch.setattr(constrained_qp._SaddleUpdates, "step", step)
+        monkeypatch.setattr(constrained_qp._SaddleUpdates, "_factor", factor)
+        updated = solve_constrained_qp(H, g, A, b, **kwargs)
+        monkeypatch.setattr(constrained_qp, "_UPDATE_MIN_SIZE", 10**9)
+        direct = solve_constrained_qp(H, g, A, b, **kwargs)
+
+        assert updated.converged and direct.converged
+        assert count["steps"] > constrained_qp._UPDATE_LIMIT
+        assert count["factors"] >= 2
+        assert sorted(updated.active_set) == sorted(direct.active_set)
+        scale = np.max(np.abs(direct.beta))
+        np.testing.assert_allclose(updated.beta, direct.beta, rtol=0.0, atol=1e-10 * scale)
