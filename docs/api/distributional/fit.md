@@ -9,6 +9,9 @@ fixed at the `lambdas` you pass. {py:meth}`~superglm.SuperLSS.diagnose`
 returns a {py:class}`~superglm.FitDiagnosticReport` that explains how the fit
 ran and how smoothing stopped: phase timings, iteration and refit counts, and
 the terminal state of every smoothing component.
+{py:meth}`~superglm.SuperLSS.apply_shape_postfit` repairs the terms whose
+fitted curves break a `Constraint.postfit` rule, as
+{py:meth}`~superglm.SuperGLM.apply_shape_postfit` does.
 {py:attr}`~superglm.SuperLSS.predictors` and
 {py:attr}`~superglm.SuperLSS.family` echo the declaration as independent
 copies. The [how-to on fitting a distributional
@@ -32,6 +35,7 @@ syntax.
    ~superglm.SuperLSS.fit
    ~superglm.SuperLSS.fit_reml
    ~superglm.SuperLSS.diagnose
+   ~superglm.SuperLSS.apply_shape_postfit
    ~superglm.SuperLSS.predictors
    ~superglm.SuperLSS.family
    superglm.FitDiagnosticReport

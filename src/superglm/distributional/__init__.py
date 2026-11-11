@@ -218,6 +218,7 @@ _EXPORTS = {
         "superglm.distributional.revision",
         "EditedCoefficientsWarning",
     ),
+    "ShapeRepairedWarning": ("superglm.distributional.revision", "ShapeRepairedWarning"),
 }
 
 __all__ = sorted(_EXPORTS)

@@ -277,9 +277,10 @@ default="uniform"
     drawn around the ruled curve, because which rules bind is itself estimated
     (see "What the intervals of a ruled term mean" in the shape-constraints
     guide).
-    ``Constraint.postfit`` rules, which repair a curve after the fit, are not
-    applied there: ``SuperLSS`` warns with ``ShapeConstraintIgnoredWarning`` and
-    fits the term unconstrained.
+    ``Constraint.postfit`` rules, which repair a curve after the fit, mean what they
+    mean for ``SuperGLM``: the term is fitted without the rule, and
+    ``SuperLSS.apply_shape_postfit`` projects its curve onto the shape and withholds
+    its standard errors.
 
     See Also
     --------

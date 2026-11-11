@@ -296,6 +296,7 @@ def _install_execution_doubles(monkeypatch) -> dict[str, object]:
     for name in ("fit", "fit_reml", "apply_shape_postfit"):
         _method_double(monkeypatch, superglm.SuperGLM, name, side_effect=return_model)
     _method_double(monkeypatch, superglm.SuperLSS, "fit_reml", side_effect=return_model)
+    _method_double(monkeypatch, superglm.SuperLSS, "apply_shape_postfit", side_effect=return_model)
     _method_double(
         monkeypatch,
         superglm.SuperLSS,

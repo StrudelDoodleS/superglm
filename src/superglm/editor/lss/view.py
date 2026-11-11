@@ -11,6 +11,7 @@ stay as they are.
 from __future__ import annotations
 
 import copy
+import warnings
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
@@ -24,12 +25,14 @@ from superglm.distributional.api import SuperLSS
 from superglm.distributional.offsets import offset_columns
 from superglm.distributional.prediction_design import _required_columns
 from superglm.distributional.response import require_scalar_response
+from superglm.distributional.revision import ShapeRepairedWarning
 from superglm.distributional.terms import (
     _coefficient_columns,
     _compiled_predictor,
     _reference_design,
     _reference_value,
     _resolve_term,
+    repaired_terms,
 )
 from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.editor.lss.terms import LSSTermInference, lss_term_inference
@@ -224,17 +227,24 @@ class LSSModelView:
         n_points: int = 200,
         centering: str = "native",
     ) -> LSSTermInference:
-        """One term on its link scale, in the fields the editor builds an ``EditableTerm`` from."""
+        """One term on its link scale, in the fields the editor builds an ``EditableTerm`` from.
+
+        A term repaired after the fit carries no band, as ``SuperGLM``'s editor shows a
+        repaired term: its standard errors are withheld.
+        """
         if centering != "native":
             raise EditorValueError(NATIVE_ONLY)
         key = (name, with_se, n_points, centering)
         if key not in self._term_inferences:
             parameter, term = split_key(name)
-            effect = self.lss.term_inference(
-                parameter, term, X_train=self.X_train, n_points=n_points, simultaneous=False
-            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", ShapeRepairedWarning)
+                effect = self.lss.term_inference(
+                    parameter, term, X_train=self.X_train, n_points=n_points, simultaneous=False
+                )
+            repaired = name in repaired_terms(self._fitted)
             self._term_inferences[key] = lss_term_inference(
-                name, effect, self._specs[name], with_se=with_se
+                name, effect, self._specs[name], with_se=with_se and not repaired
             )
         return copy.deepcopy(self._term_inferences[key])
 
