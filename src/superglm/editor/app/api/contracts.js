@@ -487,6 +487,8 @@
  * @property {UndoRedo} undo_redo
  * @property {TimelineEntry[]} timeline
  * @property {boolean} in_force_is_original
+ * @property {string|null} [notice] what the session could not carry over when the model's
+ *   fit was replaced in place, for the alert; sent once
  * @property {PendingStep[]} [pending]
  * @property {{available:boolean, stale:boolean}} [final_fit] whether Export can offer the Final fit model
  * @property {JobStatus[]} [jobs_running] jobs still running when this state was read

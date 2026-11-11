@@ -80,6 +80,43 @@ class ShapeTermRecord:
 
 
 @dataclass(frozen=True)
+class ShapeRepairRecord:
+    """One term's ``Constraint.postfit`` repair: the projection SuperGLM's repairer made.
+
+    ``violation_before`` and ``violation_after`` are the largest amount by which the term's
+    curve broke its shape before and after the projection, as the repairer's span-wise
+    certificate measures it. ``largest_change`` is the largest change of the curve on the
+    repair grid, on the linear-predictor scale; ``log_scale`` says that scale is a log, so the
+    change is a log relativity. ``intercept_shift`` is how far the parameter's intercept moved
+    when it was re-estimated with every term held at its repaired value.
+    """
+
+    term: str
+    kind: str
+    violation_before: float
+    violation_after: float
+    largest_change: float
+    log_scale: bool
+    intercept_shift: float = 0.0
+
+
+def shape_repair_sentence(record: ShapeRepairRecord) -> str:
+    """One plain sentence on what a post-fit repair did to a term."""
+    return (
+        f"The post-fit rule {record.kind!r} on {record.term} repaired the fitted curve, which "
+        f"broke it by up to {record.violation_before:.3g}; the repair moved the curve by at most "
+        f"{_moved(record.largest_change, record.log_scale)}, and the term's standard errors, "
+        "bands and test are withheld."
+    )
+
+
+def _moved(change: float, log_scale: bool) -> str:
+    if log_scale:
+        return f"{100.0 * np.expm1(change):.1f}% ({change:.3g} on the log scale)"
+    return f"{change:.3g} on the predictor's scale"
+
+
+@dataclass(frozen=True)
 class ShapeFit:
     """What a fit's shape rules did.
 
@@ -165,9 +202,7 @@ def shape_term_sentence(term: ShapeTermRecord, shape: ShapeFit) -> str:
 
 
 def _change(term: ShapeTermRecord) -> str:
-    if term.log_scale:
-        return f"{100.0 * np.expm1(term.largest_change):.1f}% ({term.largest_change:.3g} on the log scale)"
-    return f"{term.largest_change:.3g} on the predictor's scale"
+    return _moved(term.largest_change, term.log_scale)
 
 
 def shape_disclosures(shape: ShapeFit | None) -> tuple[str, ...]:

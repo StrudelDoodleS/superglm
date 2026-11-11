@@ -85,8 +85,13 @@ from superglm.distributional.results.endpoint_evidence import EFSConvergenceReas
 from superglm.distributional.results.fit import DistributionalFitResult
 from superglm.distributional.results.iteration import DistributionalEFSConfig
 from superglm.distributional.results.solver import DenseSolverConfig
-from superglm.distributional.revision import EditedCoefficientsWarning, revised_model
+from superglm.distributional.revision import (
+    EditedCoefficientsWarning,
+    ShapeRepairedWarning,
+    revised_model,
+)
 from superglm.distributional.separation import validate_separation_policy
+from superglm.distributional.shape_repair import repaired_model
 from superglm.distributional.surfaces import (
     DensityFan,
     Portfolio,
@@ -104,6 +109,8 @@ from superglm.distributional.terms import (
     _compiled_spec,
     _prepare_term_effect,
     _term_effect_from_covariance,
+    repair_covering,
+    repaired_terms,
     summary_table,
     term_effect,
     term_test,
@@ -980,8 +987,13 @@ class SuperLSS:
         copied._model = revised
         return copied
 
-    def _warn_if_hand_edited(self) -> None:
-        """Say once, from the caller's line, that the inference quoted predates the edit."""
+    def _warn_if_hand_edited(self, *, term: str | None = None, withheld: bool = False) -> None:
+        """Say once, from the caller's line, that the inference quoted predates the revision.
+
+        A term repaired after the fit is named too: with ``term``, only when it is that term,
+        whose inference was withheld; with ``withheld``, as one of the summary's withheld
+        rows; otherwise as a term the joint covariance quoted does not describe.
+        """
         edited = self._hand_edited_terms
         if edited:
             warnings.warn(
@@ -990,6 +1002,74 @@ class SuperLSS:
                 EditedCoefficientsWarning,
                 stacklevel=3,
             )
+        fitted = self._require_fitted()
+        repaired = repaired_terms(fitted)
+        if term is not None:
+            covering = repair_covering(fitted, term)
+            repaired = () if covering is None else (covering,)
+        if not repaired:
+            return
+        names = ", ".join(repaired)
+        if term is not None:
+            message = (
+                f"{names} repaired after the fit to obey a Constraint.postfit rule; the repair is "
+                "a projection with no reference distribution of the fit's, so its standard "
+                "errors, bands and test are withheld."
+            )
+        elif withheld:
+            message = (
+                f"{names} repaired after the fit to obey a Constraint.postfit rule; the repair is "
+                "a projection with no reference distribution of the fit's, so its standard "
+                "errors and test are withheld, and so are those of its parameter's intercept, "
+                "which the repair re-estimated. The other rows' standard errors and tests are "
+                "the fit's, from before the repair."
+            )
+        else:
+            message = (
+                f"{names} repaired after the fit to obey a Constraint.postfit rule; these "
+                "standard errors, bands and draws use the covariance of the fit before the "
+                "repair, which does not describe a repaired term."
+            )
+        warnings.warn(message, ShapeRepairedWarning, stacklevel=3)
+
+    def apply_shape_postfit(
+        self,
+        X_train: FrameLike | EagerFrame | None = None,
+        *,
+        n_grid: int = 500,
+    ) -> SuperLSS:
+        """Repair every term whose curve breaks its ``Constraint.postfit`` rule.
+
+        The meaning is :meth:`superglm.SuperGLM.apply_shape_postfit`'s, for a term of any
+        parameter on that parameter's link scale: the fitted curve is projected onto the
+        monotone or curvature cone in the term's own fitted basis, weighted by where the
+        training rows sit along its axis, and the parameter's intercept is then re-estimated
+        on the joint likelihood with everything else held. A repair whose penalized objective
+        (the negative log-likelihood plus the fit's smoothing penalty) is worse than with the
+        term dropped is refused, as is one that leaves a training row without valid
+        parameters, and nothing is published.
+
+        Predictions, curves, ``coef_`` and rating tables follow the repair; ``result_`` and
+        the covariance keep describing the fit. A repaired term reports its EDF, and its
+        standard errors, bands and test are withheld: the projection is a constrained
+        estimator whose reference distribution is not the fit's. ``diagnose()`` reports
+        each repair, and each post-fit rule still waiting for one.
+
+        A term that already obeys its rule is left exactly as it is, so a second call
+        repairs nothing; a term edited after its repair so that it breaks the rule again is
+        repaired again, and its new repair replaces the earlier one. The projection reads the
+        training rows: the frame attached at ``fit``, else ``X_train`` (the frame given to the
+        fit, or the rows it kept), and the fit must have kept its rows (``retain_rows``).
+
+        Returns
+        -------
+        SuperLSS
+            The model (self), repaired.
+        """
+        fitted = self._require_fitted()
+        frame = self._training_frame if X_train is None else X_train
+        self._model = repaired_model(fitted, frame, n_grid=n_grid)
+        return self
 
     def predict_link(
         self,
@@ -1713,7 +1793,7 @@ class SuperLSS:
             covariance=covariance,
             **kwargs,
         )
-        self._warn_if_hand_edited()
+        self._warn_if_hand_edited(term=f"{parameter}:{term}")
         return effect
 
     def term_test(
@@ -1742,7 +1822,7 @@ class SuperLSS:
             covariance=covariance,
             **kwargs,
         )
-        self._warn_if_hand_edited()
+        self._warn_if_hand_edited(term=f"{parameter}:{term}")
         return test
 
     def summary(
@@ -1764,7 +1844,7 @@ class SuperLSS:
             self._term_training_frame(X_train),
             covariance=covariance,
         )
-        self._warn_if_hand_edited()
+        self._warn_if_hand_edited(withheld=True)
         return table
 
     # -- the posterior primitive ----------------------------------------- #

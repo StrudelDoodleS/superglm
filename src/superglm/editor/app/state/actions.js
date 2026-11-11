@@ -357,6 +357,19 @@ export function createEditorActions({
     setSelection(term, store.getState().remote.snapshot?.selection[term] ?? []);
   }
 
+  /**
+   * A snapshot's notice, such as edits a refit in place could not carry over, goes in the alert.
+   * @param {EditorState} state @param {EditorSnapshot} snapshot @returns {EditorState}
+   */
+  function withNotice(state, snapshot) {
+    return snapshot.notice ? moved(state, { type: "notice", message: snapshot.notice }) : state;
+  }
+
+  /** @param {EditorSnapshot} snapshot @returns {MutationEvent} */
+  function settled(snapshot) {
+    return snapshot.notice ? { type: "settle", notice: snapshot.notice } : { type: "settle" };
+  }
+
   /** @param {string|null} notice what the alert says of a change that settled, if anything */
   function finishStructuralMutation(notice) {
     try {
@@ -420,11 +433,13 @@ export function createEditorActions({
           view: { ...state.view, preview: null }
         };
       }
+      const message = retry || refused ? normalizedError.message : STRUCTURAL_OUTCOME_UNCERTAIN;
       return moved(restored, {
         type: "fail",
         operation,
         error: normalizedError.message,
-        message: retry || refused ? normalizedError.message : STRUCTURAL_OUTCOME_UNCERTAIN,
+        // A notice the recovered state carries says why the change failed: it comes first.
+        message: recovered?.notice ? `${recovered.notice} ${message}` : message,
         retry
       });
     });
@@ -453,7 +468,7 @@ export function createEditorActions({
       return { ok: false, error: new Error("Python returned an editor state this page cannot read.") };
     }
     const snapshot = /** @type {EditorSnapshot} */ (candidate);
-    store.update((state) => withLatestView(commitRemote(state, snapshot), made));
+    store.update((state) => withNotice(withLatestView(commitRemote(state, snapshot), made), snapshot));
     void Promise.resolve(scheduleVisibleEvidence(snapshot.model_revision, { immediate: true }))
       .catch(() => {});
     return { ok: true, snapshot };
@@ -486,7 +501,7 @@ export function createEditorActions({
   /** @returns {Promise<EditorSnapshot>} */
   async function initialize() {
     const snapshot = /** @type {EditorSnapshot} */ (await client.getState());
-    store.update((state) => commitRemote(state, snapshot));
+    store.update((state) => withNotice(commitRemote(state, snapshot), snapshot));
     return snapshot;
   }
 
@@ -527,7 +542,7 @@ export function createEditorActions({
     }
 
     store.update(
-      (state) => moved(withLatestView(commitRemote(state, snapshot), made), { type: "settle" })
+      (state) => moved(withLatestView(commitRemote(state, snapshot), made), settled(snapshot))
     );
     try {
       if (snapshot.model_revision !== previousRevision) {
@@ -631,7 +646,7 @@ export function createEditorActions({
       return { ok: true, envelope };
     }
     await notifyTimingHook(onPaintSettled);
-    finishStructuralMutation(null);
+    finishStructuralMutation(envelope.state.notice ?? null);
     // A staged change leaves the model, so its evidence, as it was.
     if (envelope.state.model_revision !== previousRevision) {
       try {

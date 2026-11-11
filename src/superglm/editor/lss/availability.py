@@ -15,11 +15,13 @@ from types import MappingProxyType
 from typing import Any
 
 import numpy as np
+from numpy.typing import NDArray
 
-from superglm.distributional.offsets import sources_of
+from superglm.distributional.offsets import sources_of, sum_offset_sources
 from superglm.distributional.weights import LikelihoodWeightError, resolve_likelihood_weights
 from superglm.editor.errors import EditorValueError
-from superglm.editor.lss.view import LSSModelView, is_lss
+from superglm.editor.evaluation import EvaluationDataset, coerce_dataset
+from superglm.editor.lss.view import LSSModelView, fit_keeps_its_rows, is_lss, rows_describe_fit
 
 LSS_UNAVAILABLE: Mapping[str, str] = MappingProxyType(
     {
@@ -137,6 +139,77 @@ def refit_reason(model: Any, sample_weight: Any, offsets: Any, y: Any = None) ->
     if y is not None and _weights_differ(state, sample_weight, np.asarray(y).size):
         return WEIGHTS_DIFFER
     return None
+
+
+TRAINING_ROWS_FOLLOWED = (
+    "The model was refitted in place on other data than the editor's training data, which "
+    "describe an earlier fit. The editor now takes the {n} rows the refit kept as its "
+    "training data: its curves, training scores, Refit and Final fit read them."
+)
+TRAINING_ROWS_LOST = (
+    "The model was refitted in place and kept none of its rows (retain_rows=False), so the "
+    "editor cannot check that its training data are the refit's, and has no other rows to "
+    "use. Open the editor again with train_data=(X, y, sample_weight, offsets), the refit's "
+    "rows, or refit with retain_rows=True."
+)
+
+
+def follow_training_rows(
+    lss: Any, train: EvaluationDataset
+) -> tuple[EvaluationDataset, str | None]:
+    """The training split for the fit in force after a refit or repair in place, and the
+    notice to give, ``None`` when ``train`` already described it (``rows_describe_fit``).
+
+    Where the fit keeps its rows, the split is those rows, whatever changed: its frame,
+    responses, weights and offsets. Where it keeps their arrays but no frame (a model restored
+    from a file, then repaired), ``train`` stays while it describes the fit. Raises
+    ``EditorValueError`` otherwise, a refit that kept no rows included: nothing shows that
+    ``train`` is its data, and nothing else gives its rows back.
+    """
+    described = rows_describe_fit(lss, train)
+    notice = None if described else TRAINING_ROWS_FOLLOWED
+    if not fit_keeps_its_rows(lss):
+        if described:
+            return train, None
+        raise EditorValueError(TRAINING_ROWS_LOST)
+    state = lss._require_fitted().fit_state
+    rows = state.retained_rows
+    assert rows is not None
+    offsets = _array_offsets(state.predictor_templates, rows.likelihood_weights.input_positions)
+    weights = rows.likelihood_weights
+    followed = coerce_dataset(
+        "train",
+        (
+            lss._term_training_frame(None),
+            np.asarray(rows.response),
+            # No weights only where the fit had none: a fit that dropped zero-weight rows was
+            # given weights, as a session on its rows is (``refit_reason``).
+            None
+            if weights.provenance.all_unit and weights.provenance.dropped_count == 0
+            else np.asarray(weights.values),
+            offsets or None,
+        ),
+        family=lss.family,
+        weight_semantics=lss.weight_semantics,
+        offset_parameters=lss.parameter_names_,
+    )
+    assert followed is not None
+    return followed, None if notice is None else notice.format(n=followed.n_obs)
+
+
+def _array_offsets(predictors: Any, positions: NDArray[np.intp]) -> dict[str, NDArray]:
+    """Each predictor's declared array offsets, summed at the kept ``positions``: the part of
+    its offset a split supplies (``shape_prediction_offsets``), since its columns are read
+    from the frame. Never the fit's total, whose columns would then count twice."""
+    found: dict[str, NDArray] = {}
+    for predictor in predictors:
+        arrays = [source for source in sources_of(predictor) if not isinstance(source, str)]
+        if arrays:
+            values = (getattr(source, "values", source) for source in arrays)
+            found[predictor.name] = sum_offset_sources(
+                {predictor.name: tuple(np.asarray(value) for value in values)}, positions
+            )[predictor.name]
+    return found
 
 
 def session_refit_reason(session: Any) -> str | None:

@@ -134,6 +134,12 @@ _INTERCEPT = "(intercept)"
 _SPECIAL_SUFFIX = ":special"
 #: An EDF at or below this counts as "this term has no estimable direction".
 _ABSORBED_EDF = 1.0e-10
+#: What a term repaired after the fit reports in place of its inference.
+REPAIRED_NOTE = "repaired after the fit (Constraint.postfit): inference withheld"
+#: What the intercept of a parameter with a repaired term reports in place of its inference.
+REPAIRED_INTERCEPT_NOTE = (
+    "re-estimated after the post-fit repair of {terms} (Constraint.postfit): inference withheld"
+)
 
 
 def _json_array(values: NDArray | None) -> list[float | None] | None:
@@ -257,6 +263,7 @@ class _PreparedTermEffect:
     pointwise_critical: float
     draw_count: int | None
     seed: int | None
+    withheld: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "lambdas", MappingProxyType(dict(self.lambdas)))
@@ -276,6 +283,7 @@ class _PreparedTermTest:
     design: NDArray[np.float64] | None
     alternative_edf: float | None
     reconciliation_tolerance: float
+    withheld: bool = False
 
 
 def _level_domain(spec: Any) -> tuple[Any, ...] | None:
@@ -330,6 +338,34 @@ def _resolve_term(fitted: Any, parameter: str, term: str) -> tuple[str, Any, sli
         )
         raise KeyError(f"unknown term {qualified!r}; predictor {parameter!r} has {known}") from None
     return qualified, state, term_slice
+
+
+def repaired_terms(fitted: Any) -> tuple[str, ...]:
+    """Qualified names of the terms a ``Constraint.postfit`` rule repaired after the fit."""
+    edit = fitted.fit_state.hand_edit
+    return () if edit is None else edit.repaired_terms
+
+
+def repair_covering(fitted: Any, qualified: str) -> str | None:
+    """The repaired term whose record covers ``qualified``: the term itself, or, for a free-level
+    block ``<term>:special``, the smooth it belongs to; ``None`` when neither was repaired.
+
+    A column whose own name ends in ``:special`` is a term of its own, matched exactly.
+    """
+    repaired = repaired_terms(fitted)
+    if qualified in repaired:
+        return qualified
+    parent = qualified.removesuffix(_SPECIAL_SUFFIX)
+    if parent == qualified or parent not in repaired:
+        return None
+    parameter, _, label = qualified.partition(":")
+    return None if label in _compiled_predictor(fitted, parameter).compiled.specs else parent
+
+
+def _inference_withheld(fitted: Any, qualified: str) -> bool:
+    """Whether a term's inference is withheld: it, or the smooth its free levels belong to, was
+    repaired after the fit, and the projection has no reference distribution of the fit's."""
+    return repair_covering(fitted, qualified) is not None
 
 
 def _compiled_predictor(fitted: Any, parameter: str) -> Any:
@@ -879,7 +915,8 @@ def _prepare_term_effect(
 
     draw_count: int | None = None
     resolved_seed: int | None = None
-    if simultaneous:
+    withheld = _inference_withheld(fitted, qualified)
+    if simultaneous and not withheld:
         draw_count = _posterior_draw_count(n_sim)
         resolved_seed = int(seed)
 
@@ -909,6 +946,7 @@ def _prepare_term_effect(
         pointwise_critical=float(stats.norm.isf(0.5 * resolved_alpha)),
         draw_count=draw_count,
         seed=resolved_seed,
+        withheld=withheld,
     )
 
 
@@ -926,7 +964,11 @@ def _term_effect_from_covariance(
     design = prepared.design
     columns = prepared.columns
     effect = prepared.effect
-    se = np.sqrt(_band_variance(design, matrix[np.ix_(columns, columns)]))
+    se = (
+        np.full(effect.shape, np.nan)
+        if prepared.withheld
+        else np.sqrt(_band_variance(design, matrix[np.ix_(columns, columns)]))
+    )
 
     critical: float | None = None
     lower_simultaneous: NDArray[np.float64] | None = None
@@ -1046,6 +1088,7 @@ def _prepare_term_test(
         design=design,
         alternative_edf=None if level_term else _alternative_edf(fitted, term_slice, edf),
         reconciliation_tolerance=float(fitted.inference.reconciliation_tolerance),
+        withheld=_inference_withheld(fitted, qualified),
     )
 
 
@@ -1055,6 +1098,16 @@ def _term_test_from_covariance(
     note: str = "",
 ) -> TermTest:
     """Evaluate one fully prepared term test from a resolved covariance."""
+    if prepared.withheld:
+        return TermTest(
+            parameter=prepared.parameter,
+            term=str(prepared.term),
+            statistic=float("nan"),
+            rank=float("nan"),
+            p_value=float("nan"),
+            edf=prepared.edf,
+            note=_join_notes(REPAIRED_NOTE, note),
+        )
     block = matrix[prepared.term_slice, prepared.term_slice]
     if prepared.level_term:
         statistic, rank, p_value = _block_wald(
@@ -1204,7 +1257,12 @@ def summary_table(
 
     After a hand edit, ``estimate`` is the coefficient the model predicts with;
     ``se``, the statistic, the p-value and the notes describe the fit before the
-    edit, as its standard errors do.
+    edit, as its standard errors do. A term repaired after the fit to obey a
+    ``Constraint.postfit`` rule reports its EDF and estimate, and NaN for ``se``,
+    the statistic, its rank and the p-value, with ``note`` saying so, as
+    ``SuperGLM``'s summary withholds a repaired term's inference. So does the
+    intercept of its parameter, which the repair re-estimated: the fit's standard
+    error and test do not describe the estimate shown.
     """
     beta = np.asarray(fitted.coefficients, dtype=np.float64)
     fit_beta = np.asarray(fitted.fitted_result.coefficients, dtype=np.float64)
@@ -1242,6 +1300,14 @@ def summary_table(
                 fitted.inference.intercept_edf,
             )
             row["estimate"] = float(beta[state.intercept_index])
+            repaired_here = [
+                name for name in repaired_terms(fitted) if name.partition(":")[0] == state.name
+            ]
+            if repaired_here:
+                row.update(
+                    statistic=float("nan"), rank=float("nan"), p_value=float("nan"), se=float("nan")
+                )
+                row["note"] = REPAIRED_INTERCEPT_NOTE.format(terms=", ".join(repaired_here))
             row["note"] = _join_notes(row["note"], convergence_note, covariance_note)
             rows.append(row)
         for qualified, term_slice in fitted.layout.term_slices.items():
@@ -1269,10 +1335,11 @@ def summary_table(
                     "estimate": float(beta[term_slice][0]) if single else float("nan"),
                     "se": (
                         math.sqrt(max(float(matrix[term_slice, term_slice][0, 0]), 0.0))
-                        if single
+                        if single and not prepared_tests[qualified].withheld
                         else float("nan")
                     ),
                     "note": _join_notes(
+                        outcome.note,
                         _absorption_note(
                             fitted, state.name, term, outcome.edf, fit_beta[term_slice]
                         ),

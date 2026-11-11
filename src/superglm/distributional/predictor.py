@@ -128,10 +128,11 @@ def _relativity_rules_on_log_links_only(
 
 
 def _without_postfit_rules(predictor: Predictor) -> Predictor:
-    """``predictor`` without its ``Constraint.postfit`` rules, which SuperLSS cannot repair with.
+    """``predictor`` without its ``Constraint.postfit`` rules, which repair the fit afterwards.
 
     ``Constraint.fit`` rules stay: the compiled design carries their rows
-    (``GroupSlice.constraints``, ``solver/shape.py``).
+    (``GroupSlice.constraints``, ``solver/shape.py``). The templates keep the post-fit
+    rules, which ``shape_repair.postfit_terms`` reads.
     """
     return _without_rules(predictor, lambda _, mode: mode != "fit")
 
@@ -656,18 +657,8 @@ def compile_predictors(
         raise TypeError("parameters must contain only ParameterSpec values")
     if not all(isinstance(predictor, Predictor) for predictor in predictor_tuple):
         raise TypeError("predictors must contain only Predictor values")
-    for predictor in predictor_tuple:
-        for feature, rules, mode in _constrained_features(predictor):
-            if mode == "fit":
-                continue
-            warnings.warn(
-                f"SuperLSS ignores shape constraints: {predictor.name}:{feature} asked for "
-                f"{rules} ({mode}); SuperLSS enforces Constraint.fit rules at fit time and has "
-                f"no post-fit repair, so the smooth is fitted unconstrained. Use "
-                f"Constraint.fit.{rules} to enforce it",
-                ShapeConstraintIgnoredWarning,
-                stacklevel=3,
-            )
+    # A ``Constraint.postfit`` rule repairs the fitted curve afterwards
+    # (``SuperLSS.apply_shape_postfit``, ``shape_repair.py``), so it is fitted without.
     predictor_tuple = tuple(_without_postfit_rules(predictor) for predictor in predictor_tuple)
     by_name = {parameter.name: parameter for parameter in parameter_tuple}
     predictor_tuple = tuple(

@@ -40,7 +40,8 @@ class TermRows:
 def term_rows(view: LSSModelView, key: str) -> TermRows | None:
     """The rows of the SuperLSS term ``key`` names, or None when it has no fit-time rule.
 
-    Read once per view: the rows belong to its fitted model.
+    Read once per fit: the rows belong to the fitted model, and the view's reading of a fit
+    (``_FitReading``) holds them until a refit or repair in place replaces it.
     """
     if key not in view._term_rows:
         view._term_rows[key] = _read_rows(view, key)

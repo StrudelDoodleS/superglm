@@ -204,12 +204,11 @@ def test_an_already_monotone_fit_is_the_unconstrained_fit():
     assert "did not bind" in held.diagnose().render(detail="full")
 
 
-def test_a_fit_time_rule_no_longer_warns_and_a_postfit_rule_still_does():
+def test_neither_a_fit_time_nor_a_postfit_rule_warns_and_only_the_fit_time_one_refits():
     X, y = _data("gamma")
     with warnings.catch_warnings():
         warnings.simplefilter("error", ShapeConstraintIgnoredWarning)
         _model("gamma", INCREASING).fit_reml(X, y)
-    with pytest.warns(ShapeConstraintIgnoredWarning, match="postfit"):
         post = _model("gamma", Constraint.postfit.increasing).fit_reml(X, y)
     assert _state(post).shape_fit is None
 

@@ -41,6 +41,7 @@ def session_payload(
     # This is the sole shape consumed by the browser. It intentionally converts
     # link-scale session state to relativity-scale display arrays and includes
     # only JSON-safe primitives.
+    session._follow_fit_in_place()
     payload: dict[str, dict[str, Any]] = {}
     edited = set(session.edited_terms())
     lss = is_lss(session.model)

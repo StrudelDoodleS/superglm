@@ -146,6 +146,40 @@ def _safe_export_filename(format: str, filename: str | None) -> str:
     return name
 
 
+class _FollowingLock:
+    """The widget's re-entrant lock. Whoever takes it sees the session follow its model's fit
+    first (``session.FitFollow``), so that move, like every other write, runs under the lock.
+    """
+
+    def __init__(self, session_of: Callable[[], Any]):
+        self._lock = threading.RLock()
+        self._session_of = session_of
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if not self._lock.acquire(blocking, timeout):
+            return False
+        try:
+            self._session_of()._follow_fit_in_place()
+        except BaseException:
+            self._lock.release()
+            raise
+        return True
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def __enter__(self) -> _FollowingLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._lock.release()
+
+    def _is_owned(self) -> bool:
+        """Whether the calling thread holds the lock (``RLock``'s own private check)."""
+        return getattr(self._lock, "_is_owned")()
+
+
 class EditorWidget:
     """Lightweight iframe app for an :class:`EditorSession`.
 
@@ -178,7 +212,8 @@ class EditorWidget:
         # ran on: a newer revision marks them stale rather than dropping them.
         self._cv_run: CVRun | None = None
         self._diagnose_folds: tuple[Any, list[dict[str, Any]]] | None = None
-        self._diagnose_all_rows: tuple[Any, dict[str, Any] | None] | None = None
+        # Keyed by the model and its fit in force (``cv._fit_in_force``).
+        self._diagnose_all_rows: tuple[tuple[Any, Any], dict[str, Any] | None] | None = None
         self._final_fit: FinalFit | None = None
         # Run CV and Final fit: one background job of each kind at a time.
         # A starter captures a job's inputs under the widget lock and returns
@@ -202,7 +237,7 @@ class EditorWidget:
         self.selected_term = next(iter(self.terms), "")
         self._state_generation = 0
         self._chart_generation = 0
-        self._lock = threading.RLock()
+        self._lock = _FollowingLock(lambda: self.session)
         self._closed = False
         self._evaluation_cache = EvaluationCache()
         self._evidence = EvidenceCoordinator(f"editor-{id(self):x}")
@@ -278,6 +313,8 @@ class EditorWidget:
                 # With the live edits, this says whether Revert has anything to
                 # change: a structural step or a re-profile each make it False.
                 "in_force_is_original": self.session.model is self.session.reference_model,
+                # What a refit in place could not carry over (``session.FitFollow``), once.
+                "notice": self.session._take_notice(),
                 # A job still running when the page loads, for its progress to pick up.
                 "jobs_running": self._running_jobs(),
                 # Export offers the Final fit model while it is current.
@@ -514,14 +551,15 @@ class EditorWidget:
         in_force: str | None = None,
     ) -> dict[str, Any]:
         selected_source = "in_force" if source is None or source == "selected" else source
-        calm = unavailable_evidence(
-            self.session.model,
-            "metrics",
-            model_revision=self.session.model_revision,
-            request_sequence=request_sequence,
-            metric=metric,
-            source=selected_source,
-        )
+        with self._lock:
+            calm = unavailable_evidence(
+                self.session.model,
+                "metrics",
+                model_revision=self.session.model_revision,
+                request_sequence=request_sequence,
+                metric=metric,
+                source=selected_source,
+            )
         if calm is not None:
             return calm
         with self._lock:
@@ -655,14 +693,15 @@ class EditorWidget:
         if source in {"edited", "collapse"}:
             source = "in_force"
         source = source if source in {"original", "in_force", "refit"} else "in_force"
-        calm = unavailable_evidence(
-            self.session.model,
-            "summary",
-            model_revision=self.session.model_revision,
-            request_sequence=request_sequence,
-            source=source,
-            level_display=level_display,
-        )
+        with self._lock:
+            calm = unavailable_evidence(
+                self.session.model,
+                "summary",
+                model_revision=self.session.model_revision,
+                request_sequence=request_sequence,
+                source=source,
+                level_display=level_display,
+            )
         if calm is not None:
             return calm
 

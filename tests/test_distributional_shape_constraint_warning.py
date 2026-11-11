@@ -19,11 +19,12 @@ def _data(n: int = 200, seed: int = 4):
     return pd.DataFrame({"x": x}), y
 
 
-def test_a_postfit_constraint_on_the_distributional_path_warns_and_fits_unconstrained():
-    """SuperLSS has no post-fit repair: it says so and fits the term unconstrained."""
+def test_a_postfit_constraint_is_fitted_unconstrained_and_repaired_on_request():
+    """A post-fit rule repairs the curve afterwards, as on SuperGLM: the fit is free of it."""
     frame, y = _data()
     spec = Spline(kind="ps", n_knots=6, constraint=Constraint.postfit.increasing)
-    with pytest.warns(ShapeConstraintIgnoredWarning, match="location:x"):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ShapeConstraintIgnoredWarning)
         model = model_from_templates(
             family=GaussianLS(),
             predictors=(Predictor("location", {"x": spec}), Predictor("scale", {})),
@@ -31,6 +32,9 @@ def test_a_postfit_constraint_on_the_distributional_path_warns_and_fits_unconstr
     grid = pd.DataFrame({"x": np.linspace(0.05, 0.95, 20)})
     location = model.predict_parameters(grid)["location"].to_numpy()
     assert location[0] > location[-1], "the decreasing truth is fitted, not the requested increase"
+    model.apply_shape_postfit()
+    location = model.predict_parameters(grid)["location"].to_numpy()
+    assert np.min(np.diff(location)) >= -1e-9 * np.ptp(location)
 
 
 def test_a_fit_time_constraint_on_the_distributional_path_is_enforced_without_a_warning():

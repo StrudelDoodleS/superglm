@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import numpy as np
 
@@ -26,13 +26,21 @@ from superglm.distributional.layout import StackedLayout
 from superglm.distributional.model import DenseDistributionalModel
 from superglm.distributional.results.fit import DistributionalFitResult
 from superglm.distributional.results.iteration import DistributionalEFSIteration
-from superglm.distributional.results.shape import ShapeFit, shape_term_sentence
+from superglm.distributional.results.shape import (
+    ShapeFit,
+    ShapeRepairRecord,
+    shape_repair_sentence,
+    shape_term_sentence,
+)
 from superglm.distributional.results.smoothing import DistributionalEFSResult
 from superglm.distributional.results.solver import DenseSolverResult
 from superglm.distributional.timing import FitPhaseSnapshot
 from superglm.features.spline import CubicRegressionSpline
 from superglm.solvers.rank import SHARED_RANK_POLICY, _eigensolver_relative_bar
 from superglm.types import PenaltyComponent
+
+if TYPE_CHECKING:
+    from superglm.distributional.shape_repair import PostfitStatus
 
 _MIN_DOMINANCE_UPDATES = 4
 _MIN_DOMINANCE_EQUIVALENT_WINS = 3.0
@@ -85,11 +93,15 @@ class _LSSDiagnosticContext:
     smoothing: DistributionalEFSResult | None
     exact_face_components: tuple[str, ...]
     shape_fit: ShapeFit | None
+    # Each ``Constraint.postfit`` rule's state, read on the curve the model predicts with.
+    postfit: tuple[PostfitStatus, ...]
     null_converged: bool
     null_convergence_reason: str
 
     @classmethod
     def from_model(cls, model: DenseDistributionalModel) -> _LSSDiagnosticContext:
+        from superglm.distributional.shape_repair import postfit_status
+
         if not isinstance(model, DenseDistributionalModel):
             raise TypeError("model must be a DenseDistributionalModel")
         state = model.fit_state
@@ -113,6 +125,7 @@ class _LSSDiagnosticContext:
             smoothing=state.smoothing,
             exact_face_components=state.exact_face_components,
             shape_fit=state.shape_fit,
+            postfit=postfit_status(model),
             null_converged=state.null_model.converged,
             null_convergence_reason=str(state.null_model.convergence_reason),
         )
@@ -1767,6 +1780,109 @@ def _analyze_shape_rules(context: _LSSDiagnosticContext) -> tuple[DiagnosticFind
     return tuple(findings)
 
 
+def _term_subject(term: str) -> DiagnosticSubject:
+    predictor, _, name = term.partition(":")
+    return DiagnosticSubject(
+        identifier=f"term:{term}",
+        display_name=f"the term {term!r}",
+        scope="term",
+        predictor=predictor,
+        term=name,
+    )
+
+
+def _repair_finding(record: ShapeRepairRecord) -> DiagnosticFinding:
+    """What a repair did, on a term whose curve still obeys its rule."""
+    return _finding(
+        "shape.repair",
+        _term_subject(record.term),
+        priority=3,
+        severity="info",
+        headline=shape_repair_sentence(record),
+        observed=(
+            f"The curve broke {record.kind!r} by up to {record.violation_before:.3g} and "
+            f"breaks it by {record.violation_after:.3g} after the repair; it moved by at most "
+            f"{record.largest_change:.3g} on the linear-predictor scale, and the parameter's "
+            f"intercept by {record.intercept_shift:.3g}."
+        ),
+        interpretation=(
+            "The fitted curve was projected onto the shape after the fit, so predictions "
+            "follow the repaired curve while the standard errors, bands and test of the "
+            "term are withheld: the projection has no reference distribution of the fit's."
+        ),
+        evidence=_evidence_set(
+            "fit_result",
+            ("violation_before_repair", record.violation_before),
+            ("violation_after_repair", record.violation_after),
+            ("largest_change_in_effect", record.largest_change),
+            ("intercept_shift", record.intercept_shift),
+        ),
+        action_kind="compare_fit_time_rule",
+        action_question=(
+            f"Refit with Constraint.fit.{record.kind} on the term, which enforces the rule "
+            "inside the fit and keeps its standard errors, and compare the curves."
+        ),
+        action_metrics=("fitted curve", "standard errors", "held-out score"),
+    )
+
+
+def _unrepaired_finding(status: PostfitStatus) -> DiagnosticFinding:
+    """A rule with no repair, or whose repaired curve was revised since: is it obeyed now?"""
+    from superglm.distributional.shape_repair import PostfitState
+
+    term, kind = status.term.term, status.term.kind
+    obeyed = status.state is PostfitState.OBEYED
+    headline, observed = {
+        PostfitState.OBEYED: (
+            f"The post-fit rule {kind!r} on {term} needs no repair: the fitted curve already "
+            "obeys it.",
+            "The curve the model predicts with obeys the rule.",
+        ),
+        PostfitState.PENDING: (
+            f"The post-fit rule {kind!r} on {term} has not been applied: the fitted curve "
+            "breaks it. Call apply_shape_postfit() to repair it.",
+            "The curve the model predicts with breaks the rule.",
+        ),
+        PostfitState.BROKEN: (
+            f"The post-fit rule {kind!r} on {term} was repaired after the fit, but the curve "
+            "has been edited since and breaks it again. Call apply_shape_postfit() to repair "
+            "it again.",
+            "The curve the model predicts with breaks the rule, although it was repaired once.",
+        ),
+    }[status.state]
+    return _finding(
+        "shape.repair",
+        _term_subject(term),
+        priority=3,
+        severity="info" if obeyed else "warning",
+        headline=headline,
+        observed=observed,
+        interpretation=(
+            "A Constraint.postfit rule is applied after the fit, by apply_shape_postfit(); "
+            "until then, or after an edit, the curve is not held to it."
+        ),
+        evidence=_evidence_set("fit_result", ("rule_obeyed", obeyed)),
+        action_kind="apply_postfit_repair",
+        action_question=(
+            "Call apply_shape_postfit() to project the curve onto the rule, or refit "
+            f"with Constraint.fit.{kind} to enforce it inside the fit."
+        ),
+        action_metrics=("fitted curve", "held-out score"),
+    )
+
+
+def _analyze_shape_repairs(context: _LSSDiagnosticContext) -> tuple[DiagnosticFinding, ...]:
+    """One plain finding per ``Constraint.postfit`` rule, from its state on the current curve."""
+    from superglm.distributional.shape_repair import PostfitState
+
+    return tuple(
+        _repair_finding(status.record)
+        if status.state is PostfitState.REPAIRED and status.record is not None
+        else _unrepaired_finding(status)
+        for status in context.postfit
+    )
+
+
 _ANALYZERS = (
     _analyze_fit_status,
     _analyze_lambda_caps,
@@ -1778,6 +1894,7 @@ _ANALYZERS = (
     _analyze_curvature,
     _analyze_numerics,
     _analyze_shape_rules,
+    _analyze_shape_repairs,
 )
 
 

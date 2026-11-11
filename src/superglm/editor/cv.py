@@ -296,37 +296,58 @@ def _edited_values(term) -> tuple[tuple[Any, float], ...]:
     return tuple(sorted(zip(keys, values, strict=True), key=lambda pair: str(pair[0])))
 
 
+def _fit_in_force(model) -> Any:
+    """The object a model's current fit lives in, which a refit or a post-fit repair replaces.
+
+    Both change a model in place, so the model object alone cannot tell a result made before
+    them from one made after: a SuperLSS publishes a new fitted model, a SuperGLM a new result.
+    """
+    if is_lss(model):
+        return model.lss._model
+    return getattr(model, "_result", None)
+
+
 @dataclass(frozen=True)
 class InForce:
     """What a result was computed for: the fitted model in force and the hand edits on it.
 
     Undo brings back the same model object and the same edited values, so a result made before an
     edit describes the model again once the edit is undone; the revision number only ever rises.
+    A refit or a post-fit repair made on that object in place (``apply_shape_postfit``) replaces
+    its fit, so a result made before it no longer describes the model. Anything that stands for
+    this as a value, such as a token the page compares, names ``fit`` as well as ``model``.
     """
 
     model: Any
     edits: tuple[tuple[str, tuple[tuple[Any, float], ...]], ...]
+    fit: Any = None
 
     @classmethod
     def of(cls, session) -> InForce:
         edits = tuple(
             (name, _edited_values(session.terms[name])) for name in sorted(session.edited_terms())
         )
-        return cls(session.model, edits)
+        return cls(session.model, edits, _fit_in_force(session.model))
 
     def describes(self, session) -> bool:
         """Whether ``session`` holds the model this was computed for; call it under the widget lock."""
-        return _same_fit(self.model, session.model) and self.edits == InForce.of(session).edits
+        return (
+            _same_fit(self.model, session.model)
+            and self.fit is _fit_in_force(session.model)
+            and self.edits == InForce.of(session).edits
+        )
 
     @cached_property
     def token(self) -> str:
         """This as text the page compares: equal exactly when ``describes`` would hold.
 
-        It names the fit by a serial number given once per fitted model, never reused, and the
-        edits by a digest of their values.
+        It names the model and the fit in force on it by serial numbers given once per object,
+        never reused, and the edits by a digest of their values: a refit or repair in place
+        keeps the model and replaces the fit, so it changes the token as it changes ``describes``.
         """
         digest = hashlib.blake2b(repr(self.edits).encode(), digest_size=12).hexdigest()
-        return f"{_fit_serial(self.model)}-{digest}"
+        fit = "0" if self.fit is None else _fit_serial(self.fit)
+        return f"{_fit_serial(self.model)}-{fit}-{digest}"
 
 
 _FIT_SERIALS: dict[int, tuple[weakref.ref, int]] = {}
@@ -803,6 +824,15 @@ def _same_fit(model, reference) -> bool:
     return model is reference
 
 
+def _on_the_opened_fit(session) -> bool:
+    """Whether ``session`` holds the fit it was opened on, which a supplied ``cv=`` result
+    describes: the opened model, with no refit or repair made on it in place since."""
+    return (
+        _same_fit(session.model, session.reference_model)
+        and _fit_in_force(session.model) is session._opened_fit
+    )
+
+
 def capture_cv_view(session, *, run: CVRun | None, final_fit: FinalFit | None) -> CVTabView:
     """Copy what the tab reads; the caller holds the widget lock."""
     return CVTabView(
@@ -812,8 +842,7 @@ def capture_cv_view(session, *, run: CVRun | None, final_fit: FinalFit | None) -
         run=run,
         final_fit=final_fit,
         model_revision=session.model_revision,
-        model_changed=not _same_fit(session.model, session.reference_model)
-        or bool(session.edited_terms()),
+        model_changed=not _on_the_opened_fit(session) or bool(session.edited_terms()),
         run_stale=run is not None and not run.source.describes(session),
         final_stale=final_fit is not None and not final_fit.source.describes(session),
         pending=len(session.pending),
@@ -884,7 +913,7 @@ def diagnose_report_payload(widget, *, request_sequence: int | None = None) -> d
         train = training_export_dataset(session)
         kept = widget._diagnose_folds
         kept_rows = widget._diagnose_all_rows
-        same_fit = _same_fit(model, session.reference_model)
+        same_fit = _on_the_opened_fit(session)
         run_current = run is not None and run.source.describes(session)
         in_force = InForce.of(session).token
     if run is not None:
@@ -921,9 +950,11 @@ def diagnose_report_payload(widget, *, request_sequence: int | None = None) -> d
         ) + _untraced_note(
             [i + 1 for i, fold in enumerate(supplied.estimators) if fold is not None], folds
         )
-    # The fit on all rows ranks its training rows once per fitted model, as the folds' are kept.
-    if kept_rows is None or kept_rows[0] is not model:
-        kept_rows = (model, all_rows_worst_rows(model, train))
+    # The fit on all rows ranks its training rows once per fit, as the folds' are kept: a refit
+    # or repair in place keeps the model object and replaces its fit.
+    key = (model, _fit_in_force(model))
+    if kept_rows is None or any(kept is not now for kept, now in zip(kept_rows[0], key)):
+        kept_rows = (key, all_rows_worst_rows(model, train))
         with widget._lock:
             widget._diagnose_all_rows = kept_rows
     return {

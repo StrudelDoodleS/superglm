@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import functools
+import inspect
 import warnings
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +39,7 @@ from superglm.editor.controls import (
     ordered_spline_geometry,
 )
 from superglm.editor.controls import control_points as _control_points
-from superglm.editor.cv import check_cv_data
+from superglm.editor.cv import _fit_in_force, check_cv_data
 from superglm.editor.errors import (
     EditorClientError,
     EditorIndexError,
@@ -64,8 +67,11 @@ from superglm.editor.lss.apply import (
     moves_only_empty_values,
     prepare_ruled_edit,
 )
-from superglm.editor.lss.availability import require_available
-from superglm.editor.lss.open import open_lss
+from superglm.editor.lss.availability import (
+    follow_training_rows,
+    require_available,
+)
+from superglm.editor.lss.open import open_lss, refuse_unopenable_fit
 from superglm.editor.lss.refit import lss_refit_with_drafts
 from superglm.editor.lss.rules import holds_rules
 from superglm.editor.lss.terms import lss_editable_terms
@@ -173,6 +179,129 @@ def _warn_refit_with(name: str, replacement: str) -> None:
     )
 
 
+def _moved_curve(stale: EditableTerm, fresh: EditableTerm) -> tuple[EditableTerm, NDArray] | None:
+    """``stale``'s edits moved onto ``fresh``'s curve, and the change of curve on its grid.
+
+    ``fresh`` is the same term read from the model's new fit, in the model's level order;
+    the result keeps ``stale``'s display order. ``None`` when the grid itself changed.
+    """
+    if stale.kind != fresh.kind or stale.size != fresh.size:
+        return None
+    if stale.levels is None:
+        same_grid = fresh.levels is None and (
+            (stale.x is None and fresh.x is None)
+            or (stale.x is not None and fresh.x is not None and np.array_equal(stale.x, fresh.x))
+        )
+        if not same_grid:
+            return None
+        order = np.arange(stale.size, dtype=np.intp)
+    else:
+        if fresh.levels is None or sorted(map(str, stale.levels)) != sorted(map(str, fresh.levels)):
+            return None
+        position = {str(level): i for i, level in enumerate(fresh.levels)}
+        order = np.array([position[str(level)] for level in stale.levels], dtype=np.intp)
+    original = np.asarray(fresh.original_log_effect, dtype=np.float64)[order]
+    change = original - stale.original_log_effect
+    moved = stale.copy()
+    moved.original_log_effect = original
+    moved.edited_log_effect = original + (stale.edited_log_effect - stale.original_log_effect)
+    # the exposure, as the bands, is the new fit's rows'
+    for band in ("weights", "ci_lower_log_effect", "ci_upper_log_effect"):
+        values = getattr(fresh, band)
+        setattr(moved, band, None if values is None else np.asarray(values)[order])
+    moved.metadata = dict(fresh.metadata)
+    native = moved.metadata.get("native_original_log_effect")
+    if native is not None:
+        moved.metadata["native_original_log_effect"] = np.asarray(native)[order].tolist()
+    return moved, change
+
+
+def _moved_record(record: EditRecord, moved: dict[str, tuple[EditableTerm, NDArray]]) -> EditRecord:
+    """An undo record of a term whose curve moved, with the same change on its new curve."""
+    change = moved[record.term][1][record.indices] if record.term in moved else 0.0
+    return replace(record, before=record.before + change, after=record.after + change)
+
+
+class FitFollow(Enum):
+    """What a session does when it next acts after its model's fit was replaced in place.
+
+    A refit or ``apply_shape_postfit`` on the model object the session holds replaces that
+    object's fit, which the session learns of only when it next acts: at the entry and exit of
+    each public method, when ``session_payload`` reads it, and when a widget takes its lock.
+    ``EditorSession._follow_fit_in_place`` is the one move, and ``FIT_FOLLOW_CHANGES`` says
+    what each outcome changes.
+    """
+
+    IN_STEP = "in_step"  # the terms were read from the fit in force: nothing to do
+    CARRIED = "carried"  # every grid kept: edits and their undo records move onto the new curves
+    RESTARTED = "restarted"  # a grid moved: the session starts again on the model, and says so
+
+
+# The parts of a session each outcome changes. A restart also leaves a notice, which the
+# warning and the page's next state carry, when it dropped edits or a selection. Either move
+# also takes the refit's own rows as the training split, and says so, when the model was
+# refitted on other rows than it (``_follow_training_rows``).
+FIT_FOLLOW_CHANGES: dict[FitFollow, frozenset[str]] = {
+    FitFollow.IN_STEP: frozenset(),
+    FitFollow.CARRIED: frozenset({"terms", "history", "redo_stack", "model_revision"}),
+    FitFollow.RESTARTED: frozenset(
+        {"terms", "history", "redo_stack", "pending", "selection", "model_revision"}
+    ),
+}
+
+_EDITS_NOT_CARRIED = (
+    "The model was refitted in place and {why}, so the edits and "
+    "selection made on the earlier fit could not be moved onto the new curves. The editor has "
+    "started again from the refitted model. Undo cannot bring them back: the model no longer "
+    "holds the fit they were made on."
+)
+
+
+@dataclass(frozen=True)
+class _CopyOf:
+    """A New levels copy, by its fit: the model it was made from, the fit identity it stands
+    for (its source's when it was made), and the choice that made it."""
+
+    fit: Any
+    source: Any
+    stands_for: Any
+    term: str
+    policy: str
+
+
+class EditorFitReplacedWarning(UserWarning):
+    """Edits made on a fit that a refit in place replaced could not be carried over."""
+
+
+def _following_its_model(method):
+    """``method``, run once the session has followed its model's fit (``FitFollow``), and
+    followed again after it, since Undo or Redo can put back a model refitted meanwhile."""
+
+    @functools.wraps(method)
+    def following(self, *args, **kwargs):
+        if self._acting:
+            return method(self, *args, **kwargs)
+        self._follow_fit_in_place()
+        self._acting = True
+        try:
+            result = method(self, *args, **kwargs)
+        finally:
+            self._acting = False
+        self._follow_fit_in_place()
+        return result
+
+    return following
+
+
+def _each_public_method_follows_its_model(cls):
+    """Every public method of ``cls`` first follows the model's fit; getters do not."""
+    for name, member in list(vars(cls).items()):
+        if not name.startswith("_") and inspect.isfunction(member):
+            setattr(cls, name, _following_its_model(member))
+    return cls
+
+
+@_each_public_method_follows_its_model
 class EditorSession:
     """Stateful editor for fitted 1D main effects.
 
@@ -192,13 +321,27 @@ class EditorSession:
         cv_report: Any = None,
         cv: CrossValidationResult | None = None,
         cv_data: EvaluationDataset | None = None,
+        with_se: bool = True,
     ):
+        # Inside a public method, or following the fit: no second follow starts (``FitFollow``).
+        self._acting = False
+        # Each New levels copy, by its fit: the fit identity it stands for (``_fit_identity``).
+        self._fit_sources: list[_CopyOf] = []
+        self._notice: str | None = None
         self.model = model
         self.reference_model = model if reference_model is None else reference_model
+        # The fit the session was opened on, which a supplied ``cv=`` result describes; a refit
+        # or repair of the opened model in place replaces it (``cv._on_the_opened_fit``).
+        self._opened_fit = _fit_in_force(self.reference_model)
         self.terms = terms
         self.n_points = int(n_points)
         self.centering = centering
+        self.with_se = bool(with_se)
         self._evaluation_data = dict(evaluation_data or {})
+        # Every SuperLSS view reads its training split here, the one store the follow writes.
+        for view in (self.model, self.reference_model):
+            if isinstance(view, LSSModelView):
+                view.share_splits(self._evaluation_data)
         self.cv_report = cv_report
         if cv is not None and not isinstance(cv, CrossValidationResult):
             raise TypeError(
@@ -208,8 +351,9 @@ class EditorSession:
         if cv_data is not None and cv is None:
             raise ValueError("cv_data= holds the rows a cv= result's folds index; pass cv= too.")
         self.cv = cv
-        # Fixed for the session's life: cv, cv_data and the train split are
-        # constructor inputs, so the rows Run CV replays never change.
+        # The rows Run CV replays a supplied result's folds on: cv_data, else the train split,
+        # checked again when a follow onto other data replaces that split.
+        self._cv_data = cv_data
         self.cv_check = check_cv_data(cv, cv_data, training_export_dataset(self))
         self._term_names = list(terms)
         self._selection: dict[str, NDArray[np.intp]] = {
@@ -318,7 +462,194 @@ class EditorSession:
             cv_report=cv_report,
             cv=cv,
             cv_data=cv_rows,
+            with_se=with_se,
         )
+
+    @property
+    def terms(self) -> dict[str, EditableTerm]:
+        """The editable terms, as of the session's last action (``FitFollow``)."""
+        return self._terms
+
+    @terms.setter
+    def terms(self, terms: dict[str, EditableTerm]) -> None:
+        self._terms = terms
+        self._terms_fit = self._fit_identity(self.model)
+
+    def _fit_identity(self, model) -> Any:
+        """The fit ``model``'s curves were read from: a New levels copy's is its source's."""
+        entry = self._copy_entry(model)
+        return _fit_in_force(model) if entry is None else entry.stands_for
+
+    def _copy_entry(self, model) -> _CopyOf | None:
+        fit = _fit_in_force(model)
+        return next((entry for entry in self._fit_sources if entry.fit is fit), None)
+
+    def _note_copy_of(self, copy, source, term: str, policy: str) -> None:
+        """Record that ``copy`` keeps ``source``'s fit, sending ``term``'s new levels to
+        ``policy``, as a New levels choice's copy does."""
+        entry = _CopyOf(_fit_in_force(copy), source, self._fit_identity(source), term, policy)
+        self._fit_sources.append(entry)
+
+    def _on_its_source(self, model, rebuilt: dict[int, Any]) -> Any:
+        """``model``, or, for a New levels copy whose source's fit was replaced in place since
+        the copy was made, the same choice made again on that source (``rebuilt`` memoises)."""
+        entry = self._copy_entry(model)
+        if entry is None:
+            return model
+        if id(model) not in rebuilt:
+            source = self._on_its_source(entry.source, rebuilt)
+            fresh = model
+            if source is not entry.source or self._fit_identity(source) is not entry.stands_for:
+                fresh = unseen.model_with_unseen(source, entry.term, entry.policy)
+                self._note_copy_of(fresh, source, entry.term, entry.policy)
+            rebuilt[id(model)] = fresh
+        return rebuilt[id(model)]
+
+    def _renew_copies(self, rebuilt: dict[int, Any]) -> None:
+        """Put each stale New levels copy's renewal (``_on_its_source``) in force and in the
+        Undo and Redo records, so that neither puts the replaced fit back."""
+
+        def renewed(record: EditRecord) -> EditRecord:
+            if not isinstance(record, UnseenChoice):
+                return record
+            before = self._on_its_source(record.model_before, rebuilt)
+            return replace(
+                record,
+                model_before=before,
+                model_after=self._on_its_source(record.model_after, rebuilt),
+            )
+
+        self.model = self._on_its_source(self.model, rebuilt)
+        self.history = [renewed(record) for record in self.history]
+        self.redo_stack = [renewed(record) for record in self.redo_stack]
+
+    def _take_notice(self) -> str | None:
+        """The notice a restart left for the page (``FitFollow.RESTARTED``), once."""
+        notice, self._notice = self._notice, None
+        return notice
+
+    def _follow_fit_in_place(self) -> FitFollow:
+        """Follow a refit or ``apply_shape_postfit`` that replaced the model's fit in place.
+
+        The one move of ``FitFollow``. Each term's edits carry over as the same changes to its
+        new curve, with their undo records, and the model revision moves on. When a term's
+        grid changed, nothing carries over: the session starts again on the model, as
+        ``replace_in_force_model`` does, and warns when that dropped edits or a selection.
+        """
+        if self._acting:
+            return FitFollow.IN_STEP
+        # A New levels copy stands for its source's fit as it was; a replaced source makes the
+        # copy stale even though its own fit is unchanged.
+        rebuilt: dict[int, Any] = {}
+        renewed = self._on_its_source(self.model, rebuilt)
+        if renewed is self.model and self._fit_identity(self.model) is self._terms_fit:
+            return FitFollow.IN_STEP
+        self._acting = True
+        try:
+            # A follow adopts only a fit that opening would: the refit may read censored rows.
+            if isinstance(self.model, LSSModelView):
+                refuse_unopenable_fit(self.model.lss)
+            self._renew_copies(rebuilt)
+            followed = self._follow_training_rows()
+            outcome = self._carry_onto_the_fit_in_force()
+            if followed is not None:
+                self._notice = " ".join(filter(None, (self._notice, followed)))
+            return outcome
+        finally:
+            self._acting = False
+
+    def _follow_training_rows(self) -> str | None:
+        """Take the rows the fit in force kept as the training split (``follow_training_rows``),
+        and say so when they are not the data the session held; ``None`` otherwise."""
+        train = self._evaluation_data.get("train")
+        if not isinstance(self.model, LSSModelView) or train is None:
+            return None
+        self._evaluation_data["train"], notice = follow_training_rows(self.model.lss, train)
+        if notice is not None:
+            # Other data: a supplied result's folds are checked against the rows now in force.
+            self.cv_check = check_cv_data(self.cv, self._cv_data, training_export_dataset(self))
+            warnings.warn(notice, EditorFitReplacedWarning, stacklevel=5)
+        return notice
+
+    def _carry_onto_the_fit_in_force(self) -> FitFollow:
+        stale = self._terms
+        fresh = self._editable_terms_from_model(
+            self.model,
+            list(stale),
+            n_points=self.n_points,
+            centering=self.centering,
+            with_se=self.with_se,
+            train_data=self._evaluation_data.get("train"),
+        )
+        moves = {name: _moved_curve(stale[name], fresh[name]) for name in stale}
+        moved = {name: move for name, move in moves.items() if move is not None}
+        history = [_moved_record(record, moved) for record in self.history]
+        redo_stack = [_moved_record(record, moved) for record in self.redo_stack]
+        taken_back = [
+            name
+            for name, (term, _) in moved.items()
+            if holds_rules(self.model, name)
+            and not self._carry_inside_rules(term, history, redo_stack)
+        ]
+        if len(moved) < len(moves) or taken_back:
+            dropped = bool(
+                self.history
+                or self.redo_stack
+                or self.pending
+                or self.pending_redo
+                or any(len(chosen) for chosen in self._selection.values())
+            )
+            self.replace_in_force_model(self.model, with_se=self.with_se)
+            if dropped:
+                regridded = ", ".join(name for name, move in moves.items() if move is None)
+                reasons = [f"the grid of {regridded} changed"] if regridded else []
+                if taken_back:
+                    reasons.append(f"the rules of {', '.join(taken_back)} take back an edit")
+                why = " and ".join(reasons)
+                self._notice = _EDITS_NOT_CARRIED.format(why=why)
+                warnings.warn(self._notice, EditorFitReplacedWarning, stacklevel=4)
+            return FitFollow.RESTARTED
+        self._terms_fit = self._fit_identity(self.model)
+        self._terms = {name: term for name, (term, _) in moved.items()}
+        self.history = history
+        self.redo_stack = redo_stack
+        self._advance_model_revision()
+        return FitFollow.CARRIED
+
+    def _carry_inside_rules(
+        self, term: EditableTerm, history: list[EditRecord], redo_stack: list[EditRecord]
+    ) -> bool:
+        """Keep the ruled ``term``'s carried edits inside its rules, as each was kept when made.
+
+        Its records, history then redo, are replayed in order from its new fitted curve, each
+        through ``kept_inside_rules`` and recorded whole, in place in ``history`` and
+        ``redo_stack``; the curve the history ends on is the one shown. False when the rules
+        take a carried edit back entirely: then nothing can be carried.
+        """
+        current = term.original_log_effect.copy()
+        shown = current
+        order = [(history, i) for i in range(len(history))]
+        order += [(redo_stack, i) for i in reversed(range(len(redo_stack)))]
+        for records, i in order:
+            record = records[i]
+            if not isinstance(record, EditRecord) or record.term != term.name:
+                continue
+            asked = current.copy()
+            asked[record.indices] = record.after
+            probe = term.copy()
+            probe.edited_log_effect = current
+            kept = kept_inside_rules(self.model, probe, asked)
+            if kept is None:
+                kept = asked
+            elif not np.array_equal(asked, current) and leaves_curve(kept, current, asked):
+                return False
+            whole = np.arange(term.size, dtype=np.intp)
+            records[i] = replace(record, indices=whole, before=current.copy(), after=kept)
+            current = kept
+            if records is history:
+                shown = current
+        term.edited_log_effect = shown.copy()
+        return True
 
     @staticmethod
     def _editable_terms_from_model(
@@ -1579,6 +1910,8 @@ class EditorSession:
             redo_stack=list(self.redo_stack),
             pending=tuple(self.pending),
             pending_redo=tuple(self.pending_redo),
+            fit=self._terms_fit,
+            train=self._evaluation_data.get("train"),
         )
 
     def _step_across(self, source: list[StructuralStep], target: list[StructuralStep]) -> None:
@@ -1587,12 +1920,18 @@ class EditorSession:
         target.append(replace(step, state=self._capture_state()))
         self.model = step.state.model
         self.terms = step.state.terms
+        self._terms_fit = step.state.fit
         self._selection = step.state.selection
         self._level_orders = step.state.level_orders
         self.history = step.state.history
         self.redo_stack = step.state.redo_stack
         self.pending = list(step.state.pending)
         self.pending_redo = list(step.state.pending_redo)
+        train = step.state.train
+        if train is not None and train is not self._evaluation_data.get("train"):
+            # The rows this side of the step was on; Run CV's rows are checked against them.
+            self._evaluation_data["train"] = train
+            self.cv_check = check_cv_data(self.cv, self._cv_data, training_export_dataset(self))
         self._advance_model_revision()
 
     def replace_in_force_model(
@@ -1610,6 +1949,8 @@ class EditorSession:
         """
         if is_lss(self.model) and not isinstance(model, LSSModelView):
             model = self.model.with_model(model)
+        if isinstance(model, LSSModelView):
+            model.share_splits(self._evaluation_data)
         train_data = self._evaluation_data.get("train")
         new_terms = self._editable_terms_from_model(
             model,
@@ -1622,7 +1963,7 @@ class EditorSession:
         new_selection = {name: np.array([], dtype=np.intp) for name in new_terms}
 
         old_model = self.model
-        old_terms = self.terms
+        old_terms, old_terms_fit = self._terms, self._terms_fit
         old_selection = self._selection
         old_history = self.history
         old_redo_stack = self.redo_stack
@@ -1641,7 +1982,7 @@ class EditorSession:
             self._reapply_level_orders()
         except Exception:
             self.model = old_model
-            self.terms = old_terms
+            self._terms, self._terms_fit = old_terms, old_terms_fit
             self._selection = old_selection
             self.history = old_history
             self.redo_stack = old_redo_stack

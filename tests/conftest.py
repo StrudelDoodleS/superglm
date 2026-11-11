@@ -31,6 +31,8 @@ def pytest_configure(config):
             # cannot make the root keep its double: the root reads a name on first access.
             for name in names:
                 getattr(superglm, name)
+        # The editor is a subpackage the root does not export, and it defines warnings too.
+        importlib.import_module("superglm.editor")
     _register_numba_numpy_overloads()
 
 

@@ -2254,3 +2254,42 @@ test("work that would hold the editor waits for a change already running", async
   post.resolve(snapshot(5));
   await running;
 });
+
+test("a notice a state carries, such as edits a refit in place dropped, goes in the alert", async () => {
+  const notice = "The model was refitted in place and the grid of x changed.";
+  const answered = { ...snapshot(1), notice };
+  const store = createEditorStore(createInitialEditorState(snapshot(0)));
+  const actions = createEditorActions({
+    store,
+    client: { postJSON: async () => answered, getState: async () => ({ ...snapshot(2), notice }) },
+    scheduleVisibleEvidence: () => {}
+  });
+
+  assert.equal((await actions.executeStateMutation({ name: "shift", path: "/op", payload: {} })).ok, true);
+  assert.equal(store.getState().request.mutation.status, "idle");
+  assert.deepEqual(store.getState().request.recovery, { message: notice, retry: null });
+
+  actions.dismissRecovery();
+  assert.equal((await actions.refreshFromPython()).ok, true);
+  assert.deepEqual(store.getState().request.recovery, { message: notice, retry: null });
+});
+
+test("a change refused after a restart says first why the restart happened", async () => {
+  const notice = "The model was refitted in place and the grid of x changed.";
+  const refusal = Object.assign(new Error("No points selected for term 'x'."), { status: 400 });
+  const store = createEditorStore(createInitialEditorState(snapshot(0)));
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async () => { throw refusal; },
+      getState: async () => ({ ...snapshot(1), notice })
+    },
+    scheduleVisibleEvidence: () => {}
+  });
+
+  assert.equal((await actions.executeStateMutation({ name: "shift", path: "/op", payload: {} })).ok, false);
+  assert.equal(store.getState().remote.snapshot?.model_revision, 1);
+  assert.equal(
+    store.getState().request.recovery?.message, `${notice} No points selected for term 'x'.`
+  );
+});

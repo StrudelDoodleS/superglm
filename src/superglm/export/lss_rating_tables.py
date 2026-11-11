@@ -354,6 +354,35 @@ def _parameter_table(
     )
 
 
+def _postfit_notes(fitted) -> tuple[str, ...]:
+    """A sentence for each ``Constraint.postfit`` rule its table does not simply follow: the
+    repair the table shows, a rule not yet applied, or a repaired curve edited to break it."""
+    from superglm.distributional.shape_repair import PostfitState, postfit_status
+
+    notes: list[str] = []
+    for status in postfit_status(fitted):
+        term, kind, record = status.term.term, status.term.kind, status.record
+        if status.state is PostfitState.REPAIRED and record is not None:
+            notes.append(
+                f"{term} was repaired after the fit to be {kind} (Constraint.postfit); its "
+                "table is the repaired curve, which moved by at most "
+                f"{record.largest_change:.3g} on its parameter's link scale."
+            )
+        elif status.state is PostfitState.PENDING:
+            notes.append(
+                f"{term} carries Constraint.postfit.{kind}, which has not been applied, and "
+                "its fitted curve breaks it; this table is the unrepaired curve. Call "
+                "apply_shape_postfit() before exporting to tabulate the repaired one."
+            )
+        elif status.state is PostfitState.BROKEN:
+            notes.append(
+                f"{term} was repaired after the fit to be {kind} (Constraint.postfit), but it "
+                f"has been edited since and this table is not {kind}. Call "
+                "apply_shape_postfit() before exporting to tabulate a curve that obeys the rule."
+            )
+    return tuple(notes)
+
+
 def _constant_sentence(fitted, parameter: str) -> str:
     """What to say of a parameter with no terms and no table: its one value."""
     state = fitted.layout.predictor(parameter)
@@ -384,7 +413,9 @@ def build_lss_rating_table_payload(
     ``rule`` turns that into the model's parameter.  It reproduces ``predict_parameters`` to
     round-off wherever the linear predictor stays inside float64's exponent range.  The tables
     follow the coefficients the model predicts with, so a hand-edited model is tabulated as
-    edited.
+    edited, and a term repaired after the fit (``SuperLSS.apply_shape_postfit``) as repaired,
+    with a note saying so; a note also names each ``Constraint.postfit`` rule whose curve still
+    breaks it.
 
     A parameter whose link is not a log or a floored log is left out, with a sentence in
     ``omitted`` that gives its value where it has no terms; so is one holding a term that has
@@ -429,7 +460,7 @@ def build_lss_rating_table_payload(
             )
     if not tables:
         raise ValueError(" ".join(omitted.values()))
-    notes = (_WEIGHT_NOTE, *_family_notes(family, model))
+    notes = (_WEIGHT_NOTE, *_family_notes(family, model), *_postfit_notes(fitted))
     return LSSRatingTablePayload(parameters=tuple(tables), omitted=omitted, notes=notes)
 
 
