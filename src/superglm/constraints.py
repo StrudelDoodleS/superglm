@@ -798,11 +798,13 @@ def _null_space_ridge(H: NDArray, rank: int) -> NDArray:
 class _ScaledResult:
     """A QP result in the caller's coefficients, ``beta = scale * z``."""
 
-    def __init__(self, result, scale: NDArray) -> None:
+    def __init__(self, result, scale: NDArray, truncated: bool = False) -> None:
         self.beta = scale * np.asarray(result.beta, dtype=np.float64)
         self.active_set = list(result.active_set)
         self.converged = bool(result.converged)
         self.n_iter = int(result.n_iter)
+        # Whether the rank authority truncated the Hessian given, before any ridge.
+        self.truncated = truncated
 
 
 # Every solve runs in Jacobi-scaled coefficients, beta = D z with D the power of two
@@ -831,6 +833,7 @@ def _solve_cone_qp(
     start: NDArray | None = None,
     *,
     feasible: bool = False,
+    regular: bool = False,
 ):
     """The repository QP on unit ``rows @ beta >= 0``; ``None`` when no solution is certified.
 
@@ -841,11 +844,13 @@ def _solve_cone_qp(
     point meeting every row (``_shifted_start``); without one, ``beta = 0`` is used.
     ``feasible`` returns, when nothing is certified, the attempt of least objective
     that meets every row and improves on the cone's apex, instead of ``None``: a
-    bound, not an optimum.
+    bound, not an optimum. ``regular`` returns ``None`` at once where the QP would
+    truncate ``H``'s rank.
     """
     from scipy.optimize import nnls
 
     from superglm.solvers.constrained_qp import solve_constrained_qp
+    from superglm.solvers.rank import _symmetric_part, decompose_gram
 
     scale = _jacobi_scale(H)
     budget = max(200, 2 * (rows.shape[0] + H.shape[0]))
@@ -863,15 +868,28 @@ def _solve_cone_qp(
         starts.insert(0, (shifted, active, max(_WARM_STEPS, H.shape[0])))
     result = None
     attempts: list[_ScaledResult] = []
+    truncated = False
     for ridged in (False, True):
+        try:
+            # One decomposition of the round's Hessian serves every start's solve.
+            decomposition = decompose_gram(_symmetric_part(problem[0]))
+        except ValueError:
+            return _least_feasible(H, g, rows, attempts) if feasible else None
+        truncated = truncated or decomposition.rank < decomposition.width
+        if regular and truncated:
+            return None
         for point, working, steps in starts:
             try:
                 solved = solve_constrained_qp(
-                    *problem, active_set_init=working, max_iter=steps, beta_start=point
+                    *problem,
+                    active_set_init=working,
+                    max_iter=steps,
+                    beta_start=point,
+                    _decomposition=decomposition,
                 )
             except ValueError:
                 return _least_feasible(H, g, rows, attempts) if feasible else None
-            result = _ScaledResult(solved, scale)
+            result = _ScaledResult(solved, scale, truncated)
             if result.converged:
                 return result
             attempts.append(result)
@@ -1089,18 +1107,25 @@ def _cone_projection(
         for minimum in _lowest_minima(pieces, p, beta)
     ]
     curvature = np.zeros_like(H)
+    # Whether the QP truncates H itself, read off the first step, whose curvature is 0.
+    truncated = None
     for _ in range(_PROJECTION_STEPS):
         cut_rows, cut_norms, owners = _cut_rows(pieces, p, checkpoints, width)
         rows = np.vstack([end_rows, cut_rows])
         working = _working_rows(held, end_rows.shape[0], owners, cut_rows, beta)
         start = _shifted_start(rows, beta, inside)
+        # A curvature step whose Hessian the QP would truncate, where H's it does not,
+        # is not taken: the truncated solve's least-squares steps do not certify.
         result = _solve_cone_qp(
             H + curvature,
             g + curvature @ beta,
             rows,
             working,
             start,
+            regular=bool(curvature.any()) and truncated is False,
         )
+        if truncated is None and result is not None:
+            truncated = result.truncated
         if result is None and curvature.any():
             curvature = np.zeros_like(H)
             result = _solve_cone_qp(H, g, rows, working, start)

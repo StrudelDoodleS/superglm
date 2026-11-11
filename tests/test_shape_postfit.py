@@ -1417,6 +1417,49 @@ def test_one_qp_curvature_repair_takes_few_iterations(monkeypatch):
     assert count["iterations"] <= ONE_QP_ITERATIONS, count
 
 
+#: Active-set iterations of the grid repair below. Grid weights 5e-10 of the rest
+#: across the gap give cond(H) = 1e13, and the exchange's curvature then took the
+#: step's Hessian past the rank cut, where every start ran its budget: 6,557
+#: iterations over 20 solves at 756d983c1. Held below that cut, it takes about 400.
+GAPPED_GRID_ITERATIONS = 1500
+
+
+@pytest.mark.slow
+def test_grid_repair_with_near_zero_weights_on_a_large_basis_is_the_closest_curve(monkeypatch):
+    """A 120-knot P-spline on data with a gap, projected on the grid at its raw frequencies."""
+    import warnings
+
+    from superglm import Spline
+    from superglm.constraints import MonotoneRepairer
+    from tests._shape_projection_oracle import grid_metric, projection_certificate
+
+    rng = np.random.default_rng(0)
+    u = rng.uniform(0.0, 0.6, 3000)
+    x = np.where(u < 0.3, u, u + 0.4)
+    y = 0.9 * x + 0.25 * np.sin(12 * x) + 0.3 * rng.normal(size=x.size)
+    X = pd.DataFrame({"x": x})
+    feature = Spline(kind="ps", n_knots=120, constraint=Constraint.postfit.increasing)
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": feature}).fit(X, y)
+    spec, groups = model._specs["x"], _x_groups(model)
+    counts = np.histogram(x, bins=500)[0]
+    weights = counts / counts.sum() + 1e-12
+    count = _qp_iterations(monkeypatch)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        repair = MonotoneRepairer("increasing").repair(
+            spec, model.result.beta, groups, weights=weights
+        )
+
+    H, g = grid_metric(spec, repair.grid, repair.original_log_effect, weights)
+    repaired = _term_beta(repair.repaired_beta_reparam, groups)
+    fitted = _term_beta(model.result.beta, groups)
+    certificate = projection_certificate(spec, "increasing", repaired, H, g, fitted)
+    assert certificate.minimum_derivative >= -1e-10
+    assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
+    assert count["iterations"] <= GAPPED_GRID_ITERATIONS, count
+
+
 # The flat Poisson fixture of the review sweep. Its grid weights fall to 1e-5 of
 # the rest in the sparse tail, so the grid metric's cond(H) passes 1 / u, and an
 # unscaled solve certified on some OpenBLAS kernels and cycled on others. The
