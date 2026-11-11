@@ -115,7 +115,7 @@ def set_unseen(session: EditorSession, term: str, policy: Any) -> UnseenChoice |
         model_before=before,
         model_after=model_with_unseen(before, term, policy),
     )
-    session._note_copy_of(record.model_after, before)
+    session._note_copy_of(record.model_after, before, term, policy)
     session.history.append(record)
     session._end_redo()
     session.model = record.model_after
@@ -141,7 +141,7 @@ def step_across(session: EditorSession, record: UnseenChoice, *, undo: bool) -> 
     if session.model is not here:
         # Out of time order: a copy of the in-force model, with its curves and fit.
         there = model_with_unseen(session.model, record.term, policy)
-        session._note_copy_of(there, session.model)
+        session._note_copy_of(there, session.model, record.term, policy)
     session.model = there
     session._advance_model_revision()
 

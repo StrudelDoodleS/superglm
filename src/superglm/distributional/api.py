@@ -109,6 +109,7 @@ from superglm.distributional.terms import (
     _compiled_spec,
     _prepare_term_effect,
     _term_effect_from_covariance,
+    repair_covering,
     repaired_terms,
     summary_table,
     term_effect,
@@ -1001,9 +1002,11 @@ class SuperLSS:
                 EditedCoefficientsWarning,
                 stacklevel=3,
             )
-        repaired = repaired_terms(self._require_fitted())
+        fitted = self._require_fitted()
+        repaired = repaired_terms(fitted)
         if term is not None:
-            repaired = tuple(name for name in repaired if name == term.removesuffix(":special"))
+            covering = repair_covering(fitted, term)
+            repaired = () if covering is None else (covering,)
         if not repaired:
             return
         names = ", ".join(repaired)

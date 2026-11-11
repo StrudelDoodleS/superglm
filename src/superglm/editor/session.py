@@ -6,7 +6,7 @@ import functools
 import inspect
 import warnings
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -251,6 +251,18 @@ _EDITS_NOT_CARRIED = (
 )
 
 
+@dataclass(frozen=True)
+class _CopyOf:
+    """A New levels copy, by its fit: the model it was made from, the fit identity it stands
+    for (its source's when it was made), and the choice that made it."""
+
+    fit: Any
+    source: Any
+    stands_for: Any
+    term: str
+    policy: str
+
+
 class EditorFitReplacedWarning(UserWarning):
     """Edits made on a fit that a refit in place replaced could not be carried over."""
 
@@ -307,11 +319,14 @@ class EditorSession:
     ):
         # Inside a public method, or following the fit: no second follow starts (``FitFollow``).
         self._acting = False
-        # Each New levels copy's fit, beside the fit identity it stands for (``_fit_identity``).
-        self._fit_sources: list[tuple[Any, Any]] = []
+        # Each New levels copy, by its fit: the fit identity it stands for (``_fit_identity``).
+        self._fit_sources: list[_CopyOf] = []
         self._notice: str | None = None
         self.model = model
         self.reference_model = model if reference_model is None else reference_model
+        # The fit the session was opened on, which a supplied ``cv=`` result describes; a refit
+        # or repair of the opened model in place replaces it (``cv._on_the_opened_fit``).
+        self._opened_fit = _fit_in_force(self.reference_model)
         self.terms = terms
         self.n_points = int(n_points)
         self.centering = centering
@@ -451,15 +466,51 @@ class EditorSession:
 
     def _fit_identity(self, model) -> Any:
         """The fit ``model``'s curves were read from: a New levels copy's is its source's."""
-        fit = _fit_in_force(model)
-        for copy_fit, source in self._fit_sources:
-            if copy_fit is fit:
-                return source
-        return fit
+        entry = self._copy_entry(model)
+        return _fit_in_force(model) if entry is None else entry.stands_for
 
-    def _note_copy_of(self, copy, source) -> None:
-        """Record that ``copy`` keeps ``source``'s fit, as a New levels choice's copy does."""
-        self._fit_sources.append((_fit_in_force(copy), self._fit_identity(source)))
+    def _copy_entry(self, model) -> _CopyOf | None:
+        fit = _fit_in_force(model)
+        return next((entry for entry in self._fit_sources if entry.fit is fit), None)
+
+    def _note_copy_of(self, copy, source, term: str, policy: str) -> None:
+        """Record that ``copy`` keeps ``source``'s fit, sending ``term``'s new levels to
+        ``policy``, as a New levels choice's copy does."""
+        entry = _CopyOf(_fit_in_force(copy), source, self._fit_identity(source), term, policy)
+        self._fit_sources.append(entry)
+
+    def _on_its_source(self, model, rebuilt: dict[int, Any]) -> Any:
+        """``model``, or, for a New levels copy whose source's fit was replaced in place since
+        the copy was made, the same choice made again on that source (``rebuilt`` memoises)."""
+        entry = self._copy_entry(model)
+        if entry is None:
+            return model
+        if id(model) not in rebuilt:
+            source = self._on_its_source(entry.source, rebuilt)
+            fresh = model
+            if source is not entry.source or self._fit_identity(source) is not entry.stands_for:
+                fresh = unseen.model_with_unseen(source, entry.term, entry.policy)
+                self._note_copy_of(fresh, source, entry.term, entry.policy)
+            rebuilt[id(model)] = fresh
+        return rebuilt[id(model)]
+
+    def _renew_copies(self, rebuilt: dict[int, Any]) -> None:
+        """Put each stale New levels copy's renewal (``_on_its_source``) in force and in the
+        Undo and Redo records, so that neither puts the replaced fit back."""
+
+        def renewed(record: EditRecord) -> EditRecord:
+            if not isinstance(record, UnseenChoice):
+                return record
+            before = self._on_its_source(record.model_before, rebuilt)
+            return replace(
+                record,
+                model_before=before,
+                model_after=self._on_its_source(record.model_after, rebuilt),
+            )
+
+        self.model = self._on_its_source(self.model, rebuilt)
+        self.history = [renewed(record) for record in self.history]
+        self.redo_stack = [renewed(record) for record in self.redo_stack]
 
     def _take_notice(self) -> str | None:
         """The notice a restart left for the page (``FitFollow.RESTARTED``), once."""
@@ -474,10 +525,17 @@ class EditorSession:
         grid changed, nothing carries over: the session starts again on the model, as
         ``replace_in_force_model`` does, and warns when that dropped edits or a selection.
         """
-        if self._acting or self._fit_identity(self.model) is self._terms_fit:
+        if self._acting:
+            return FitFollow.IN_STEP
+        # A New levels copy stands for its source's fit as it was; a replaced source makes the
+        # copy stale even though its own fit is unchanged.
+        rebuilt: dict[int, Any] = {}
+        renewed = self._on_its_source(self.model, rebuilt)
+        if renewed is self.model and self._fit_identity(self.model) is self._terms_fit:
             return FitFollow.IN_STEP
         self._acting = True
         try:
+            self._renew_copies(rebuilt)
             return self._carry_onto_the_fit_in_force()
         finally:
             self._acting = False

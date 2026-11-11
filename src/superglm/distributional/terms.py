@@ -346,10 +346,26 @@ def repaired_terms(fitted: Any) -> tuple[str, ...]:
     return () if edit is None else edit.repaired_terms
 
 
+def repair_covering(fitted: Any, qualified: str) -> str | None:
+    """The repaired term whose record covers ``qualified``: the term itself, or, for a free-level
+    block ``<term>:special``, the smooth it belongs to; ``None`` when neither was repaired.
+
+    A column whose own name ends in ``:special`` is a term of its own, matched exactly.
+    """
+    repaired = repaired_terms(fitted)
+    if qualified in repaired:
+        return qualified
+    parent = qualified.removesuffix(_SPECIAL_SUFFIX)
+    if parent == qualified or parent not in repaired:
+        return None
+    parameter, _, label = qualified.partition(":")
+    return None if label in _compiled_predictor(fitted, parameter).compiled.specs else parent
+
+
 def _inference_withheld(fitted: Any, qualified: str) -> bool:
     """Whether a term's inference is withheld: it, or the smooth its free levels belong to, was
     repaired after the fit, and the projection has no reference distribution of the fit's."""
-    return qualified.removesuffix(_SPECIAL_SUFFIX) in repaired_terms(fitted)
+    return repair_covering(fitted, qualified) is not None
 
 
 def _compiled_predictor(fitted: Any, parameter: str) -> Any:

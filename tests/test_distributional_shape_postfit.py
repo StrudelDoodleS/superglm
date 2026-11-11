@@ -235,6 +235,29 @@ def test_a_repaired_term_withholds_its_inference_and_keeps_its_edf():
         model.predict_link(_GRID, se_fit=True)
 
 
+def test_a_column_named_like_a_free_level_block_keeps_its_repair_record():
+    # A column whose own name ends in ":special" is a term of its own. At f6346704d the suffix
+    # was stripped before the exact match, so its inference was quoted, unwithheld and unwarned.
+    family = GammaLS()
+    X, y = _data("mean")
+    X = X.rename(columns={"x": "x:special"})
+    rule = Constraint.postfit.increasing
+    model = SuperLSS(
+        family, family.mean(s("x:special", kind="bs", k=8, constraint=rule)), family.scale()
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(X, y)
+    model.apply_shape_postfit()
+    assert model._model.fit_state.hand_edit.repaired_terms == ("mean:x:special",)
+    with pytest.warns(ShapeRepairedWarning, match="mean:x:special"):
+        effect = model.term_inference("mean", "x:special")
+    assert np.all(np.isnan(effect.se))
+    with pytest.warns(ShapeRepairedWarning, match="mean:x:special"):
+        test = model.term_test("mean", "x:special")
+    assert np.isnan(test.p_value)
+
+
 def test_an_unrepaired_term_keeps_its_inference_and_draws_no_warning():
     family = GammaLS()
     X, y = _data("mean")
@@ -327,6 +350,29 @@ def test_a_repair_that_fits_worse_than_no_term_is_refused_and_nothing_is_publish
     assert model._model is before
 
 
+def _profile_optimum(model: SuperLSS, parameter: str, X, y) -> float:
+    """The further shift of ``parameter``'s intercept that minimizes the model's own log score,
+    found by SciPy's bounded Brent on the public scoring path."""
+    fitted = model._model
+    index = fitted.layout.predictor(parameter).intercept_index
+    beta = np.array(fitted.coefficients, dtype=np.float64)
+    edited = list(fitted.fit_state.hand_edit.edited_terms)
+
+    def log_score(shift: float) -> float:
+        moved = beta.copy()
+        moved[index] += shift
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            there = model._with_revised_coefficients(moved, edited_terms=edited)
+            value = float(there.scores(X, y, which=("log",))["log"].sum())
+        return value if np.isfinite(value) else 1e300
+
+    search = optimize.minimize_scalar(
+        log_score, bounds=(-0.5, 0.5), method="bounded", options={"xatol": 1e-9}
+    )
+    return float(search.x)
+
+
 def test_a_repair_that_needs_its_intercept_to_keep_every_row_valid_is_published():
     # Mean-form generalized gamma has a finite mean only where scale * |shape| < 1 for a
     # negative shape. Every row has one at this revision. The decreasing repair of the shape
@@ -345,7 +391,7 @@ def test_a_repair_that_needs_its_intercept_to_keep_every_row_valid_is_published(
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model.fit_reml(X, np.random.default_rng(0).gamma(4.0, 0.25, 200))
+        model.fit_reml(X, y := np.random.default_rng(0).gamma(4.0, 0.25, 200))
     fitted = model._model
     beta = np.array(fitted.coefficients, dtype=np.float64)
     targets = {"scale": np.log(0.49) + x * np.log(1.99 / 0.49), "shape": -1.0 + 0.8 * x}
@@ -363,7 +409,12 @@ def test_a_repair_that_needs_its_intercept_to_keep_every_row_valid_is_published(
 
     revised.apply_shape_postfit()
     (record,) = revised._model.fit_state.hand_edit.repairs
-    assert record.term == "shape:x" and record.intercept_shift > 0.0
+    assert record.term == "shape:x"
+    # The re-estimate is the profile's optimum. At f6346704d the search started from its
+    # farthest valid probe and published +419,428.8, where predict_cdf(X, 1) was 0 on every row.
+    assert record.intercept_shift == pytest.approx(1.18338, abs=1e-4)
+    assert _profile_optimum(revised, "shape", X, y) == pytest.approx(0.0, abs=1e-5)
+    assert revised.predict_cdf(X, np.ones(len(x))).min() > 0.5
     theta = revised.predict_parameters(X)
     assert mean_exists(theta["scale"].to_numpy(), theta["shape"].to_numpy()).all()
     assert monotonicity_violation(theta["shape"].to_numpy(), "decreasing") == 0.0
@@ -407,6 +458,39 @@ def test_the_re_estimated_intercept_does_not_depend_on_the_response_units():
     assert abs(natural.intercept_shift) > 1e-3
     # Brent locates the optimum to sqrt(u) of the location's range on the link
     np.testing.assert_allclose(tiny.intercept_shift / 1e-15, natural.intercept_shift, rtol=1e-5)
+
+
+def test_the_intercept_is_re_estimated_however_far_a_revision_moved_it_in_scale_units():
+    # Sol's case: a response of scale 1e-9 whose location intercept a revision moved by 0.2,
+    # 2e8 of its own units. At f6346704d the bracket widened at most 6 times from 4 units and
+    # refused at a shift of -0.000562; it now widens until the likelihood rises.
+    from superglm import GaussianLS
+
+    x = np.linspace(0.0, 1.0, 200)
+    X = pd.DataFrame({"x": x, "off": np.full(200, np.log(1e-9))})
+    y = 1.0 + 1e-9 * (-x + 0.1 * np.random.default_rng(3).normal(size=200))
+    family = GaussianLS(scale_floor=0.0)
+    model = SuperLSS(
+        family,
+        family.location(s("x", kind="bs", k=8, constraint=Constraint.postfit.increasing)),
+        family.scale(offset="off"),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y, lambdas={"location:x#wiggle": 0.0})
+        fitted = model._model
+        beta = np.array(fitted.coefficients, dtype=np.float64)
+        beta[fitted.layout.predictor("location").intercept_index] += 0.2
+        revised = model._with_revised_coefficients(beta, edited_terms=["location:x"])
+        revised.apply_shape_postfit()
+    (record,) = revised._model.fit_state.hand_edit.repairs
+    assert record.intercept_shift == pytest.approx(-0.2, abs=1e-6)
+    # with the scale held, the location intercept's optimum is the precision-weighted mean
+    # residual's zero: here to a millionth of the response's scale
+    theta = revised.predict_parameters(X)
+    precision = 1.0 / theta["scale"].to_numpy() ** 2
+    residual = y - theta["location"].to_numpy()
+    assert abs(np.sum(precision * residual) / np.sum(precision)) <= 1e-6 * 1e-9
 
 
 def _perturbed_repairer(monkeypatch, block):
@@ -916,3 +1000,67 @@ def test_the_intercept_is_re_estimated_where_valid_shifts_are_a_narrow_interval(
     (record,) = revised._model.fit_state.hand_edit.repairs
     assert record.intercept_shift == pytest.approx(4.55323, abs=1e-4)
     assert revised.predict_parameters(X)["scale"].max() == pytest.approx(0.64969, abs=1e-4)
+
+
+def test_the_diagnose_rows_follow_an_in_place_repair_made_after_the_report_was_opened():
+    # The rows are kept per fit. At f6346704d they were kept per model view, which a repair
+    # keeps, so row 303 still read predicted 8.511 and cost 8.674 against 9.381 and 7.590.
+    from superglm.editor.cv import diagnose_report_payload
+    from superglm.editor.widget import EditorWidget
+
+    model = _fit("mean", Constraint.postfit.increasing, kind="bs", k=8)
+    X, y = _data("mean")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        widget = EditorWidget(edit(model, train_data=(X, y)), mode="server")
+        before = diagnose_report_payload(widget)["fits"]
+        model.apply_shape_postfit()
+        after = diagnose_report_payload(widget)["fits"]
+        fresh = EditorWidget(edit(model, train_data=(X, y)), mode="server")
+        wanted = diagnose_report_payload(fresh)["fits"]
+    assert after != before
+    assert after == wanted
+
+
+def test_supplied_cv_results_say_they_were_made_on_the_fit_before_an_in_place_repair():
+    # A cv= result describes the fit the session was opened on. At f6346704d the session
+    # compared models only, which a repair keeps, so after it the supplied scores and fold
+    # curves read stale=False and Diagnose did not say the folds were of the earlier model.
+    from sklearn.model_selection import KFold
+
+    from superglm import cross_validate
+    from superglm.editor.cv import capture_cv_view, cv_tab_payload, diagnose_report_payload
+    from superglm.editor.payloads import session_payload
+    from superglm.editor.widget import EditorWidget
+
+    model = _fit("mean", Constraint.postfit.increasing, kind="bs", k=8)
+    X, y = _data("mean")
+    earlier = "fitted on the model as first opened"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        supplied = cross_validate(
+            model,
+            X,
+            y,
+            cv=KFold(2, shuffle=True, random_state=0),
+            fit_mode="fit_reml",
+            return_estimators=True,
+            error_score="raise",
+        )
+        session = edit(model, train_data=(X, y), cv=supplied)
+        widget = EditorWidget(session, mode="server")
+
+        def stale() -> tuple[list[bool], bool, bool]:
+            report = cv_tab_payload(capture_cv_view(session, run=None, final_fit=None), jobs={})
+            note = diagnose_report_payload(widget)["note"]
+            return (
+                [r["stale"] for r in report["results"]],
+                report["relativities"]["stale"],
+                (earlier in note),
+            )
+
+        assert stale() == ([False], False, False)
+        model.apply_shape_postfit()
+        session_payload(session)
+        assert not session.edited_terms()
+        assert stale() == ([True], True, True)

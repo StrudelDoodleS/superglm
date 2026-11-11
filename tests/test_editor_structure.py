@@ -2077,6 +2077,51 @@ def test_a_refit_in_place_made_while_a_new_levels_copy_is_in_force_is_followed_o
     np.testing.assert_allclose(change[~chosen], 0.0, atol=1e-12)
 
 
+def test_a_repair_made_while_a_new_levels_copy_is_in_force_is_followed_through_undo_and_redo():
+    # The copy stands for the opened model's fit as it was, which a repair in place replaces.
+    # At f6346704d the session kept the copy: its curve stayed 0.17 off the repaired one and
+    # to_model() carried no repair. Undo followed the repair; Redo put the copy back.
+    rng = np.random.default_rng(20261003)
+    region = rng.choice(["A", "B", "C", "D"], 600, p=[0.3, 0.3, 0.2, 0.2])
+    x = rng.uniform(0.0, 10.0, 600)
+    effects = {"A": 0.0, "B": 0.15, "C": 0.2, "D": 0.25}
+    bump = 0.4 * np.exp(-(((x - 6.0) / 0.9) ** 2))
+    y = 0.4 + np.array([effects[r] for r in region]) + 0.02 * (x - 5.0) ** 2 + bump
+    X = pd.DataFrame({"region": region, "x": x})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.1,
+        features={
+            "region": Categorical(
+                base="first", grouping=collapse_levels(X["region"], groups={"Other": ["C", "D"]})
+            ),
+            "x": Spline(n_knots=10, constraint=Constraint.postfit.convex),
+        },
+    )
+    model.fit(X, y + rng.normal(0.0, 0.02, 600))
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    session.select_x("x", 0.6, 0.8)
+    session.shift("x", 0.1)
+    session.set_unseen("region", "Other")
+    model.apply_shape_postfit(X)
+
+    def off_by() -> float:
+        term = session.terms["x"]
+        repaired = model.term_inference(
+            "x", with_se=False, n_points=session.n_points, centering=session.centering
+        )
+        return float(np.max(np.abs(term.original_log_effect - repaired.log_relativity)))
+
+    for act in (lambda: None, session.undo, session.redo):
+        act()
+        session_payload(session)
+        assert off_by() <= 1e-12
+        assert "x" in session.to_model()._shape_repairs
+    assert session.model._specs["region"].unseen == "Other"
+    assert session.edited_terms() == ["x"]
+
+
 def _with_new_level(X, rows: int = 5):
     new = X.iloc[:40].copy()
     new.loc[new.index[:rows], "region"] = "Z"

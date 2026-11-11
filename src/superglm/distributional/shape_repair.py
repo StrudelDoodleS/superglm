@@ -40,22 +40,22 @@ REPAIR_NEEDS_THE_ROWS = (
     "intercept on them; refit with retain_rows=True before calling apply_shape_postfit()."
 )
 # The search for the re-estimated intercept runs in units of the parameter's own scale on its
-# link (``_intercept_scale``), so that the response's units do not change it. It starts within
-# ``_INTERCEPT_SEARCH`` of those units of the held intercept and widens by
-# ``_INTERCEPT_GROWTH`` until the optimum lies inside it, at most ``_INTERCEPT_WIDENINGS``
-# times: bracket, then Brent (Brent, *Algorithms for Minimization without Derivatives*, 1973,
-# ch. 5; Press et al., *Numerical Recipes*, 3rd ed., section 10.1).
+# link (``_intercept_scale``), so that the response's units do not change it: bracket, then
+# Brent (Brent, *Algorithms for Minimization without Derivatives*, 1973, ch. 5; Press et al.,
+# *Numerical Recipes*, 3rd ed., section 10.1). The bracket's first steps are
+# ``_INTERCEPT_SEARCH`` of those units either side of the held intercept; downhill, each next
+# step is ``_INTERCEPT_GROWTH`` times the last, until the objective rises, a row turns invalid,
+# or the shift leaves float64's range. No count limits it, so an optimum any number of units
+# away is bracketed in a number of steps logarithmic in its distance.
 _INTERCEPT_SEARCH = 4.0
 _INTERCEPT_GROWTH = 8.0
-_INTERCEPT_WIDENINGS = 6
-# An optimum this close to the edge of the search, relative to its half-width, is on the edge.
-_INTERCEPT_EDGE = 1.0e-3
 _UNIT_ROUNDOFF = np.finfo(np.float64).eps / 2.0
 # A smooth minimum is located to about sqrt(u) of its scale, since the objective is flat to
 # rounding within that distance of it (Press et al., section 10.1); Brent stops there.
 _INTERCEPT_XATOL = float(np.sqrt(_UNIT_ROUNDOFF))
-# Where the held intercept leaves rows invalid, the search starts from the first valid shift
-# among the widest search's halvings, both ways: down to 2**-60 of it.
+# Where the held intercept leaves rows invalid, the search starts from the nearest valid shift
+# among doublings both ways, from 2**-60 of ``_INTERCEPT_WIDEST`` units up to it.
+_INTERCEPT_WIDEST = 2.0**20
 _INTERCEPT_PROBES = 61
 
 
@@ -213,8 +213,8 @@ def _profiled_merit(
     infinite where a retained row has no valid parameters; the third value counts those rows
     (``None`` where the parameters cannot be formed at all).
 
-    Raises ``RuntimeError`` when the likelihood still improves at the edge of the widest
-    search, so that no intercept could be re-estimated.
+    Raises ``RuntimeError`` when the likelihood still improves where the shift leaves
+    float64's range, so that no intercept could be re-estimated.
     """
     family = fitted.family
     plan = family.bind_likelihood(rows.response, rows.likelihood_weights, rows.observation)
@@ -253,48 +253,35 @@ def _profiled_merit(
         return 0.0, held + penalty, invalid_rows(0.0)
     unit = _intercept_scale(eta[:, column], reach)
 
-    def objective(t: float) -> float:
-        return negative_log_likelihood(unit * t)
+    values: dict[float, float] = {}
 
-    widest = _INTERCEPT_SEARCH * _INTERCEPT_GROWTH**_INTERCEPT_WIDENINGS
-    start = 0.0 if np.isfinite(held) else _finite_start(objective, widest)
+    def objective(t: float) -> float:
+        # Memoised: the bracket and the walls' bisection revisit their end points.
+        if t not in values:
+            values[t] = negative_log_likelihood(unit * t)
+        return values[t]
+
+    start = 0.0 if np.isfinite(held) else _finite_start(objective)
     if start is None:
         return 0.0, held + penalty, invalid_rows(0.0)
-    bound = _INTERCEPT_SEARCH
-    for _ in range(_INTERCEPT_WIDENINGS + 1):
-        # Brent runs only where every row is valid: an infinite value ties with another and
-        # gives golden section no direction, so it could lose the valid interval altogether.
-        lower = _finite_reach(objective, start, start - bound)
-        upper = _finite_reach(objective, start, start + bound)
-        best, best_value = start, objective(start)
-        if upper > lower:
-            # A row could still turn invalid inside, where Brent's parabolic step forms
-            # inf - inf before it falls back to a golden-section step.
-            with np.errstate(invalid="ignore"):
-                search = minimize_scalar(
-                    objective,
-                    bounds=(lower, upper),
-                    method="bounded",
-                    options={"xatol": _INTERCEPT_XATOL},
-                )
-            if search.fun < best_value:
-                best, best_value = float(search.x), float(search.fun)
-        # An optimum at the edge of the search, but not at a wall of invalid rows, may lie
-        # further out.
-        margin = _INTERCEPT_EDGE * bound
-        on_edge = (upper == start + bound and best > upper - margin) or (
-            lower == start - bound and best < lower + margin
-        )
-        if not on_edge:
-            break
-        searched, bound = bound, bound * _INTERCEPT_GROWTH
-    else:
+    bracket = _bracket(objective, start, unit)
+    if bracket is None:
         raise RuntimeError(
             f"Shape repair rejected before publication: the {parameter} intercept could not "
-            "be re-estimated, since the likelihood still improves at a shift of "
-            f"{unit * (start + np.sign(best - start) * searched):.3g} on its link scale. Check "
-            "the model's specification, or fit the rule instead (Constraint.fit)."
+            "be re-estimated, since the likelihood still improves where the shift leaves "
+            "float64's range on its link scale. Check the model's specification, or fit the "
+            "rule instead (Constraint.fit)."
         )
+    best = _brent(objective, *bracket, centre=start)
+    if abs(best - start) > _INTERCEPT_SEARCH:
+        # Brent's tolerance is relative to the distance from ``centre`` (scipy's is
+        # sqrt(eps) times it), so an optimum found beyond the first steps is polished in
+        # coordinates centred on it, over a window that holds that tolerance.
+        polish = _INTERCEPT_SEARCH * (abs(best - start) * np.sqrt(np.finfo(float).eps) + 1.0)
+        lower = _finite_reach(objective, best, best - polish)
+        upper = _finite_reach(objective, best, best + polish)
+        best = _brent(objective, lower, upper, centre=best)
+    best_value = objective(best)
     # Where the held intercept leaves rows invalid, any finite optimum is the re-estimate.
     # Otherwise two sums of one size: the rounding either can carry (Higham, section 3.1).
     tolerance = 4.0 * len(rows.response) * _UNIT_ROUNDOFF * abs(held)
@@ -303,15 +290,61 @@ def _profiled_merit(
     return unit * best, best_value + penalty, 0
 
 
-def _finite_start(objective: Callable[[float], float], widest: float) -> float | None:
-    """A shift at which ``objective`` is finite, probed out from zero to ``widest`` both
-    ways by halvings, or ``None`` when every probe leaves a row invalid."""
-    for halvings in range(_INTERCEPT_PROBES):
-        reach = widest * 0.5**halvings
+def _finite_start(objective: Callable[[float], float]) -> float | None:
+    """The nearest shift to zero at which ``objective`` is finite, probed by doublings both
+    ways out to ``_INTERCEPT_WIDEST``, or ``None`` when every probe leaves a row invalid.
+
+    Nearest first: the probe found lies within a factor of 2 of the wall of invalid rows.
+    """
+    for doublings in range(_INTERCEPT_PROBES):
+        reach = _INTERCEPT_WIDEST * 0.5 ** (_INTERCEPT_PROBES - 1 - doublings)
         for shift in (reach, -reach):
             if np.isfinite(objective(shift)):
                 return shift
     return None
+
+
+def _bracket(
+    objective: Callable[[float], float], start: float, unit: float
+) -> tuple[float, float] | None:
+    """An interval of finite values around a minimum of ``objective`` near ``start``, or
+    ``None`` when the objective still falls where ``unit`` times the shift overflows.
+
+    Downhill steps grow geometrically (Press et al., section 10.1, ``mnbrak``) until the
+    objective rises or a wall of invalid rows is met, where the finite optimum is taken.
+    """
+    up = _finite_reach(objective, start, start + _INTERCEPT_SEARCH)
+    down = _finite_reach(objective, start, start - _INTERCEPT_SEARCH)
+    if min(objective(up), objective(down)) >= objective(start):
+        return down, up
+    behind, near = (start, up) if objective(up) <= objective(down) else (start, down)
+    while True:
+        far = near + _INTERCEPT_GROWTH * (near - behind)
+        if not np.isfinite(unit * far):
+            return None
+        reached = _finite_reach(objective, near, far)
+        if reached != far or objective(reached) >= objective(near):
+            # The objective rose, or the valid interval ends: the minimum lies in between.
+            return min(behind, reached), max(behind, reached)
+        behind, near = near, reached
+
+
+def _brent(objective: Callable[[float], float], lower: float, upper: float, *, centre: float):
+    """Brent's bounded minimum of ``objective`` on ``[lower, upper]``, run in coordinates
+    centred on ``centre``, or whichever of ``centre`` and the end points is lower."""
+    candidates = [centre, lower, upper]
+    if upper > lower:
+        # A row could still turn invalid inside, where Brent's parabolic step forms
+        # inf - inf before it falls back to a golden-section step.
+        with np.errstate(invalid="ignore"):
+            search = minimize_scalar(
+                lambda d: objective(centre + d),
+                bounds=(lower - centre, upper - centre),
+                method="bounded",
+                options={"xatol": _INTERCEPT_XATOL},
+            )
+        candidates.insert(1, centre + float(search.x))
+    return min(candidates, key=objective)
 
 
 def _finite_reach(objective: Callable[[float], float], start: float, edge: float) -> float:
@@ -325,6 +358,8 @@ def _finite_reach(objective: Callable[[float], float], start: float, edge: float
     inside, outside = start, edge
     while abs(outside - inside) > _INTERCEPT_XATOL:
         middle = 0.5 * (inside + outside)
+        if middle in (inside, outside):  # adjacent floats, far out: the wall is found
+            break
         if np.isfinite(objective(middle)):
             inside = middle
         else:

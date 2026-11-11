@@ -212,7 +212,8 @@ class EditorWidget:
         # ran on: a newer revision marks them stale rather than dropping them.
         self._cv_run: CVRun | None = None
         self._diagnose_folds: tuple[Any, list[dict[str, Any]]] | None = None
-        self._diagnose_all_rows: tuple[Any, dict[str, Any] | None] | None = None
+        # Keyed by the model and its fit in force (``cv._fit_in_force``).
+        self._diagnose_all_rows: tuple[tuple[Any, Any], dict[str, Any] | None] | None = None
         self._final_fit: FinalFit | None = None
         # Run CV and Final fit: one background job of each kind at a time.
         # A starter captures a job's inputs under the widget lock and returns

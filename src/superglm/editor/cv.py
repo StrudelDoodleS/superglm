@@ -822,6 +822,15 @@ def _same_fit(model, reference) -> bool:
     return model is reference
 
 
+def _on_the_opened_fit(session) -> bool:
+    """Whether ``session`` holds the fit it was opened on, which a supplied ``cv=`` result
+    describes: the opened model, with no refit or repair made on it in place since."""
+    return (
+        _same_fit(session.model, session.reference_model)
+        and _fit_in_force(session.model) is session._opened_fit
+    )
+
+
 def capture_cv_view(session, *, run: CVRun | None, final_fit: FinalFit | None) -> CVTabView:
     """Copy what the tab reads; the caller holds the widget lock."""
     return CVTabView(
@@ -831,8 +840,7 @@ def capture_cv_view(session, *, run: CVRun | None, final_fit: FinalFit | None) -
         run=run,
         final_fit=final_fit,
         model_revision=session.model_revision,
-        model_changed=not _same_fit(session.model, session.reference_model)
-        or bool(session.edited_terms()),
+        model_changed=not _on_the_opened_fit(session) or bool(session.edited_terms()),
         run_stale=run is not None and not run.source.describes(session),
         final_stale=final_fit is not None and not final_fit.source.describes(session),
         pending=len(session.pending),
@@ -903,7 +911,7 @@ def diagnose_report_payload(widget, *, request_sequence: int | None = None) -> d
         train = training_export_dataset(session)
         kept = widget._diagnose_folds
         kept_rows = widget._diagnose_all_rows
-        same_fit = _same_fit(model, session.reference_model)
+        same_fit = _on_the_opened_fit(session)
         run_current = run is not None and run.source.describes(session)
         in_force = InForce.of(session).token
     if run is not None:
@@ -940,9 +948,11 @@ def diagnose_report_payload(widget, *, request_sequence: int | None = None) -> d
         ) + _untraced_note(
             [i + 1 for i, fold in enumerate(supplied.estimators) if fold is not None], folds
         )
-    # The fit on all rows ranks its training rows once per fitted model, as the folds' are kept.
-    if kept_rows is None or kept_rows[0] is not model:
-        kept_rows = (model, all_rows_worst_rows(model, train))
+    # The fit on all rows ranks its training rows once per fit, as the folds' are kept: a refit
+    # or repair in place keeps the model object and replaces its fit.
+    key = (model, _fit_in_force(model))
+    if kept_rows is None or any(kept is not now for kept, now in zip(kept_rows[0], key)):
+        kept_rows = (key, all_rows_worst_rows(model, train))
         with widget._lock:
             widget._diagnose_all_rows = kept_rows
     return {
