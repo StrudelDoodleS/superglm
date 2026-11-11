@@ -140,37 +140,108 @@ class TestNB2DevianceUnit:
         assert np.isfinite(result.deviance)
         assert result.intercept < 60.0
 
-    @pytest.mark.parametrize("theta", [1.7, 1e4, 1e8, 1e12])
-    def test_poisson_limit_keeps_the_deviance_to_a_few_u_of_its_terms(self, theta):
-        """#604: at theta = 1e8 the quotient form lost about ``theta u`` per row.
+    @pytest.mark.parametrize("theta", [1e-3, 1.7, 1e4, 1e8, 1e12])
+    def test_unit_deviance_is_within_512_u_of_an_80_digit_reference(self, theta):
+        """#604 and the review of #614: every row keeps a few hundred ``u`` of its own value.
 
-        ``(y + theta) log((y + theta) / (mu + theta))`` takes the log of a quotient
-        within 1e-8 of one, so a rounding of ``u`` in the quotient became an error of
-        about ``theta u = 1e-8`` on a unit deviance of order one. The inner solve's line
-        search then could not resolve its own steps, and an NB2 REML fit with theta
-        on its upper bound stopped ``line_search_failed``. The reference is the same
-        formula at 80 digits.
+        Two cancellations are covered. At theta = 1e8 the quotient form took the log of
+        ``(y + theta) / (mu + theta)``, within 1e-8 of one, and its rounding of ``u``
+        became about ``theta u = 1e-8`` on a deviance of order one, so an NB2 REML fit
+        with theta on its bound stopped ``line_search_failed``. And with ``y`` within
+        1e-8 of ``mu`` the count term ``y log(y / mu)`` carried ``y u`` against a
+        deviance near ``(y - mu)**2 / mu``, which came out negative and gave NaN
+        deviance residuals, at every theta. The fixture holds both, the edges of the
+        centred window (``|t| = 1/8``), and ``theta`` far below ``mu``.
 
-        Bound: the deviance subtracts two terms, ``y log(y / mu)`` and the theta term;
-        each is formed by at most ten roundings and one ``log`` or ``log1p`` (at most
-        4 ulp = 8 u each in NumPy's builds), so 32 u of their summed magnitude covers
-        it with room. Unfixed, theta = 1e8 misses that bound by about seven decades.
+        Bound: inside ``|t| <= 1/8`` the centred series subtracts nothing and is within
+        a few ``u``. Outside it the deviance is a difference of two terms whose summed
+        size is at most 35 times the result; each is a product with one ``log`` or
+        ``log1p`` (at most 4 ulp = 8 u in NumPy's builds) and a few correctly rounded
+        operations, so 12 u of each term and 35 * 12 u < 512 u of the value. The
+        unfixed code misses it by more than six decades on the near-equal rows.
         """
-        mp = pytest.importorskip("mpmath")
-        y = np.array([0.0, 0.0, 1.0, 1.0, 3.0, 12.0, 12.0, 30.0])
-        mu = np.array([0.4, 30.0, 0.4, 2.5, 2.5, 7.0, 30.0, 12.0])
+        from tests._nb2_oracle import unit_deviance
+
+        y = np.array([0.0, 0.0, 1.0, 1.0, 3.0, 12.0, 12.0, 30.0, 1.0, 3.0, 12.0, 8.0, 8.0])
+        mu = np.array(
+            [
+                0.4,
+                30.0,
+                0.4,
+                2.5,
+                2.5,
+                7.0,
+                30.0,
+                12.0,
+                1.0 + 1e-10,
+                3.0 * (1.0 - 1e-9),
+                12.0 * (1.0 + 1e-14),
+                8.0 / 1.125,
+                8.0 / 0.875,
+            ]
+        )
         actual = NegativeBinomial(theta=theta).deviance_unit(y, mu)
-        expected, magnitude = [], []
-        with mp.workdps(80):
-            size = mp.mpf(theta)
-            for count, mean in zip(y, mu, strict=True):
-                count, mean = mp.mpf(count), mp.mpf(mean)
-                theta_term = (count + size) * mp.log((count + size) / (mean + size))
-                count_term = count * mp.log(count / mean) if count > 0 else mp.mpf(0)
-                expected.append(float(2 * (count_term - theta_term)))
-                magnitude.append(float(2 * (abs(count_term) + abs(theta_term))))
+        expected = np.array([unit_deviance(a, b, theta) for a, b in zip(y, mu, strict=True)])
         u = 2.0**-53
-        assert np.all(np.abs(actual - np.array(expected)) <= 32 * u * np.array(magnitude))
+        assert np.all(actual >= 0.0)
+        assert np.all(np.abs(actual - expected) <= 512 * u * expected)
+
+    @pytest.mark.parametrize(("y", "mu"), [(5e-324, 10.0), (1e-320, 1e6), (1e-300, 1e30)], ids=str)
+    def test_a_tiny_positive_response_keeps_its_finite_deviance(self, y, mu):
+        """Review of #614: ``y / mu`` underflows to zero and its log to ``-inf``.
+
+        The deviance there is finite (7.167 at y = 5e-324, mu = 10, theta = 2). The
+        logarithm falls back to ``log(y) - log(mu)`` where the quotient is not
+        normal, as the Poisson deviance does. Unfixed, all three rows were ``-inf``;
+        master's ``max(y, 1e-300)`` floor already gave ``-inf`` on the third.
+        """
+        from tests._nb2_oracle import unit_deviance
+
+        actual = NegativeBinomial(theta=2.0).deviance_unit(np.array([y]), np.array([mu]))
+        expected = unit_deviance(y, mu, 2.0)
+        np.testing.assert_allclose(actual, expected, rtol=512 * 2.0**-53)
+
+    def test_a_tiny_positive_response_fits_as_on_master(self):
+        """Review of #614: one y = 5e-324 row made a fixed-theta fit raise.
+
+        Its unit deviance was ``-inf``, so the fit stopped with ``fit candidate scalar
+        results must be finite``. Master converges with deviance 9.581134238706705.
+        """
+        x = np.random.default_rng(42).normal(size=200)
+        y = np.full(200, 20.0)
+        y[0] = 5e-324
+        model = SuperGLM(
+            family=NegativeBinomial(theta=2.0),
+            features={"x": Numeric()},
+            selection_penalty=0.0,
+        )
+        model.fit(pd.DataFrame({"x": x}), y)
+        assert model.result.converged
+        np.testing.assert_allclose(model.result.deviance, 9.581134238706705, rtol=1e-10)
+
+    @pytest.mark.parametrize("theta", [2.0, 1e8])
+    def test_deviance_residuals_are_finite_where_y_is_almost_mu(self, theta):
+        """Review of #614: a negative unit deviance made ``sqrt`` return NaN.
+
+        Twenty responses are set to ``mu_hat (1 - 1e-10)``. Unfixed, 8 of them were
+        NaN at theta = 2 and 10 at theta = 1e8; Poisson's centred deviance gave none.
+        """
+        rng = np.random.default_rng(3)
+        n = 400
+        x = rng.uniform(0.0, 2.0, n)
+        X = pd.DataFrame({"x": x})
+        y = rng.poisson(np.exp(0.5 + 0.4 * x)).astype(float)
+        model = SuperGLM(
+            family=NegativeBinomial(theta=theta),
+            features={"x": Numeric()},
+            selection_penalty=0.0,
+        )
+        model.fit(X, y)
+        y[:20] = model.predict(X)[:20] * (1.0 - 1e-10)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            residuals = model.metrics(X, y).residuals(kind="deviance")
+        assert np.all(np.isfinite(residuals))
 
     def test_values_are_the_both_branch_formula_to_the_log_ulps(self):
         theta = 1.7
