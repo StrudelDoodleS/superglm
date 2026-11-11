@@ -283,8 +283,9 @@ class StoredFolds:
 
 def _edited_values(term) -> tuple[tuple[Any, float], ...]:
     """A term's edited values by level or point, in a fixed order: putting the levels in another
-    order on screen changes no value, so it changes nothing a result describes."""
-    values = np.asarray(term.edited_log_effect, dtype=np.float64).tolist()
+    order on screen changes no value, so it changes nothing a result describes. Adding 0.0 turns
+    -0.0 into 0.0, which compare equal, so they also print, and hash, the same."""
+    values = (np.asarray(term.edited_log_effect, dtype=np.float64) + 0.0).tolist()
     keys = (
         term.levels
         if term.levels is not None

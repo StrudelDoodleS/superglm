@@ -522,6 +522,22 @@ def test_a_final_report_says_whether_the_final_fit_describes_its_model(monkeypat
     assert raced["final_fit"]["stale"] is steady["final_fit"]["stale"]
 
 
+def test_a_value_that_turns_to_minus_zero_keeps_the_token():
+    # A drag can write -0.0 where 0.0 stood. The two compare equal, so ``describes`` holds, and
+    # the token the page compares must agree, or answers to the model in force are dropped.
+    from superglm.editor.cv import InForce
+
+    session = _split_session()
+    session.shift("x_spline", 0.2)
+    term = session.terms["x_spline"]
+    term.edited_log_effect[0] = 0.0
+    before = InForce.of(session)
+    term.edited_log_effect[0] = -0.0
+
+    assert before.describes(session)
+    assert InForce.of(session).token == before.token
+
+
 def test_evidence_records_are_immutable():
     key = EvidenceKey(1, "metrics", "validation")
     outcome = EvidenceOutcome("complete", key, {"value": 1})
