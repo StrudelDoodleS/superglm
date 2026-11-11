@@ -499,6 +499,12 @@ class MonotoneRepairer:
             Grid weights (from training data histogram). If None, uniform.
         n_grid : int
             Number of grid points for curve reconstruction.
+        metric : NDArray or None
+            The term's penalized Hessian ``X'WX + S_lambda`` in its fitted
+            coefficients, with the intercept profiled, as
+            ``apply_shape_postfit`` passes it: the fitted coefficients are
+            projected in it. If None, the curve is projected on the grid,
+            weighted by ``weights``.
 
         Returns
         -------

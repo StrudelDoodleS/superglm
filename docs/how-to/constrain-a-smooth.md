@@ -690,9 +690,14 @@ a solver-backed
 fit is available.
 
 The repair replaces the term's curve with the closest curve in the term's basis
-that has the shape everywhere on the fitted range. "Closest" means squared
-distance on the linear-predictor scale, weighted by where the training rows
-sit. The repaired term keeps its centring. If even that closest curve fits the
+that has the shape everywhere on the fitted range. "Closest" is measured as the
+fit itself scores a change to the term: how far a change raises the fit's
+penalized objective, to second order, at the fit's smoothing parameters, with
+the other terms held and the intercept free (Mammen, Marron, Turlach and Wand,
+*Statistical Science* 16(3), 2001, section 5; Wood, *Statistical Modelling*
+26(4), 2026, section 4.1). A change the data barely see but the smoothing
+penalty does is costly, so the repair stays smooth where the data are sparse.
+The repaired term keeps its centring. If even that closest curve fits the
 data worse than dropping the term, `apply_shape_postfit` raises
 `RuntimeError` and leaves the model unchanged. If the repair cannot confirm
 that its curve is the closest one, it still publishes a curve with the shape
