@@ -844,9 +844,8 @@ def test_an_open_editor_session_sees_a_repair_made_on_its_model():
     np.testing.assert_allclose(
         session.model.term_coefficients("mean:x"), model._model.coefficients[columns]
     )
-    # #623's page token must change wherever ``describes`` does, a repair in place included
-    if hasattr(InForce, "token"):
-        assert in_force.token != InForce.of(session).token
+    # the page's token must change wherever ``describes`` does, a repair in place included
+    assert in_force.token != InForce.of(session).token
 
 
 def _open_then_repair(*, edit_before=None):

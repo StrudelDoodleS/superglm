@@ -341,11 +341,13 @@ class InForce:
     def token(self) -> str:
         """This as text the page compares: equal exactly when ``describes`` would hold.
 
-        It names the fit by a serial number given once per fitted model, never reused, and the
-        edits by a digest of their values.
+        It names the model and the fit in force on it by serial numbers given once per object,
+        never reused, and the edits by a digest of their values: a refit or repair in place
+        keeps the model and replaces the fit, so it changes the token as it changes ``describes``.
         """
         digest = hashlib.blake2b(repr(self.edits).encode(), digest_size=12).hexdigest()
-        return f"{_fit_serial(self.model)}-{digest}"
+        fit = "0" if self.fit is None else _fit_serial(self.fit)
+        return f"{_fit_serial(self.model)}-{fit}-{digest}"
 
 
 _FIT_SERIALS: dict[int, tuple[weakref.ref, int]] = {}
