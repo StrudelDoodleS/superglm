@@ -307,9 +307,11 @@ def _stationarity_certificate(
         return True, None, np.zeros(len(active_matrix))
     if not np.isfinite(objective_scale):
         return False, None, np.zeros(len(active_matrix))
-    residual = np.asarray((products - g_values) / objective_scale, dtype=float)
-    h_action = np.asarray(h_action / objective_scale, dtype=float)
-    g_action = np.asarray(g_action / objective_scale, dtype=float)
+    residual = (products - g_values) / objective_scale
+    h_action = h_action / objective_scale
+    g_action = g_action / objective_scale
+    own = np.maximum(h_action, g_action)
+    objective_action = h_action + g_action
     row_scale = np.max(np.abs(active_matrix), axis=1, initial=0.0)
     rows = np.divide(
         active_matrix,
@@ -326,7 +328,6 @@ def _stationarity_certificate(
         # Weights stay at most 1 / sqrt(TINY), so the weighted rows and any
         # product of two of them are finite (the square-root safe range of
         # LAPACK's la_constants; Anderson, ACM TOMS 44, 2017).
-        own = np.maximum(h_action, g_action)
         weight = 1.0 / np.where(own > 0.0, np.maximum(own, _SQRT_TINY), 1.0)
         rank = np.linalg.matrix_rank(rows.T)
         weighted = rows.T * weight[:, None]
@@ -336,9 +337,10 @@ def _stationarity_certificate(
         inverse_action = np.zeros((len(rows), len(beta)))
         inverse_action[np.ix_(pivots[:rank], order)] = basic * weight[order]
         multipliers = inverse_action @ residual
-        dual_action = np.abs(rows.T) @ np.abs(multipliers)
-        score_scale = np.maximum(np.maximum(h_action, g_action), dual_action)
-        score_error = arithmetic * (h_action + g_action + dual_action)
+        abs_rows_t = np.abs(rows.T)
+        dual_action = abs_rows_t @ np.abs(multipliers)
+        score_scale = np.maximum(own, dual_action)
+        score_error = arithmetic * (objective_action + dual_action)
         multiplier_allowance = np.abs(inverse_action) @ (tol * score_scale + score_error)
         multiplier_allowance += arithmetic * np.abs(multipliers)
         if not np.all(np.isfinite(multipliers)) or not np.all(np.isfinite(multiplier_allowance)):
@@ -349,13 +351,13 @@ def _stationarity_certificate(
             return False, worst, multipliers
         multipliers = np.maximum(multipliers, 0.0)
         dual = rows.T @ multipliers
-        dual_action = np.abs(rows.T) @ multipliers
+        dual_action = abs_rows_t @ multipliers
     else:
         multipliers = np.empty(0)
         dual = np.zeros_like(residual)
         dual_action = np.zeros_like(residual)
-    score_scale = np.maximum(np.maximum(h_action, g_action), dual_action)
-    allowance = tol * score_scale + arithmetic * (h_action + g_action + dual_action)
+    score_scale = np.maximum(own, dual_action)
+    allowance = tol * score_scale + arithmetic * (objective_action + dual_action)
     stationary = bool(np.all(np.abs(residual - dual) <= allowance))
     return stationary, None, multipliers
 

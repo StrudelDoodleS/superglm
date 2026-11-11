@@ -433,13 +433,15 @@ def _repair_shape(
         )
 
     w_grid = np.ones(n_grid) if weights is None else weights
-    beta_reparam_new, repaired_check, proj_residual = _project_shape_in_fitted_basis(
-        spec,
-        x_grid,
-        log_rels,
-        w_grid,
-        shape,
-        **({} if metric is None else {"metric": (metric, beta_combined)}),
+    beta_reparam_new, repaired_check, proj_residual, certificate_after = (
+        _project_shape_in_fitted_basis(
+            spec,
+            x_grid,
+            log_rels,
+            w_grid,
+            shape,
+            **({} if metric is None else {"metric": (metric, beta_combined)}),
+        )
     )
     beta_out = beta_reparam.copy()
     offset = 0
@@ -447,11 +449,6 @@ def _repair_shape(
         g_size = g.size
         beta_out[g.sl] = beta_reparam_new[offset : offset + g_size]
         offset += g_size
-    certificate_after = shape_constraint_certificate(
-        spec,
-        beta_reparam_new,
-        shape,
-    )
     viol_after = certificate_after.violation
 
     return MonotoneRepairResult(
@@ -1085,7 +1082,7 @@ def _cone_projection(
     end_rows, end_sources = _distinct_unit_rows(end_values)
     end_norms = np.linalg.norm(end_values, axis=1)
     width = H.shape[0]
-    h_norm = float(np.linalg.norm(H, 2))
+    h_norm = None  # ||H||_2, formed when a curvature step first needs it
     held: set = set(_broken_rows(end_rows, beta))
     checkpoints = [
         [] if minimum is None or minimum[1] @ beta >= 0.0 else [minimum[0]]
@@ -1177,6 +1174,8 @@ def _cone_projection(
                 slope_row = _tau_powers(tau, p, 1) @ piece.rows
                 bend = float(_tau_powers(tau, p, 2) @ piece.rows @ beta)
                 size = weight[index] * float(slope_row @ slope_row)
+                if h_norm is None:
+                    h_norm = float(np.linalg.norm(H, 2))
                 if bend > 0.0 and size <= _CURVATURE_CONDITION_LIMIT * h_norm * bend:
                     curvature += (weight[index] / bend) * np.outer(slope_row, slope_row)
                     # The curvature carries the minimum's motion, so near its old cut
@@ -1207,7 +1206,7 @@ def _project_shape_in_fitted_basis(
     weights: NDArray,
     kind: str,
     metric: tuple[NDArray, NDArray] | None = None,
-) -> tuple[NDArray, NDArray, float]:
+) -> tuple[NDArray, NDArray, float, ShapeConstraintCertificate]:
     """Project a curve onto a shape cone in fitted coefficient coordinates.
 
     The fitted spline basis already contains the model's identifiability projection.
@@ -1215,7 +1214,8 @@ def _project_shape_in_fitted_basis(
     measure and avoids the lossy raw-basis -> fitted-basis round trip.  Zero coefficients
     are a feasible point and provide an objective certificate for the returned solution.
     ``metric``, a pair ``(H, fitted)``, projects ``fitted`` in ``H`` instead of the
-    curve on the grid; ``H`` is the term's penalized Hessian (``shape_ops``).
+    curve on the grid; ``H`` is the term's penalized Hessian (``shape_ops``). Returns the
+    coefficients, the repaired curve, its largest change and the coefficients' certificate.
     """
     label = "Curvature" if kind in {"convex", "concave"} else "Monotone"
 
@@ -1285,7 +1285,7 @@ def _project_shape_in_fitted_basis(
             f"projected={projection_loss:.6g}, zero={zero_loss:.6g}"
         )
     max_curve_change = float(np.max(np.abs(residual))) if residual.size else 0.0
-    return beta_projected, repaired_curve, max_curve_change
+    return beta_projected, repaired_curve, max_curve_change, certificate
 
 
 class CurvatureRepairer:
