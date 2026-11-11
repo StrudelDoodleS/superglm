@@ -736,6 +736,8 @@ class EditorWidget:
             datasets = tuple(evaluation_datasets(self.session))
             final_fit = self._final_fit
             reference_model = getattr(self.session, "reference_model", self.session.model)
+            fit_dataset = training_export_dataset(self.session)
+            metrics_dataset = default_metrics_dataset(self.session)
             if reference_model is None:
                 return {
                     **report_payload(
@@ -748,9 +750,10 @@ class EditorWidget:
                 }
 
         summary_model = edited_model
-        if report == "final" and self.session.edited_terms() and not is_lss(reference_model):
-            fit_dataset = training_export_dataset(self.session)
-            metrics_dataset = default_metrics_dataset(self.session)
+        # Whether the model is edited is read from ``source``, the model the report describes,
+        # never from the session now: an edit back to the fitted values and its undo while the
+        # report is built put back that model, so they must not change which summary it shows.
+        if report == "final" and source.edits and not is_lss(reference_model):
             if fit_dataset is not None and (
                 metrics_dataset is None or fit_dataset.name != metrics_dataset.name
             ):

@@ -332,12 +332,80 @@ def test_a_report_asked_for_before_an_edit_and_its_undo_is_answered(evidence_wid
     assert (edited["status"], edited["in_force"]) == ("superseded", source.token)
 
 
+def test_a_final_report_keeps_the_edit_state_of_the_model_it_describes(monkeypatch):
+    """An edited model's Final report shows the summary refitted on the training rows.
+
+    Whether the model is edited is decided with the model the report describes. An edit back to
+    the fitted values and its undo while the report is built put that model back, so they must
+    not give it the unedited model's summary, read on the validation rows.
+    """
+    import superglm.editor.widget as widget_module
+
+    rng = np.random.default_rng(20260805)
+    X = pd.DataFrame({"x_spline": rng.uniform(0.0, 10.0, 240)})
+    y = 0.4 + 0.2 * np.sin(X["x_spline"].to_numpy()) + rng.normal(0.0, 0.03, 240)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.1,
+        features={"x_spline": Spline(n_knots=7)},
+    ).fit(X.iloc[:180], y[:180])
+    session = EditorSession.from_model(
+        model,
+        terms=["x_spline"],
+        train_data=(X.iloc[:180], y[:180], None, None),
+        validation_data=(X.iloc[180:], y[180:], None),
+    )
+    session.select_indices("x_spline", [10, 11, 12])
+    session.shift("x_spline", 0.2)
+    widget = session.widget()
+    datasets = widget_module.evaluation_datasets
+    materialize, score = (
+        widget._model_materialized_for_dataset,
+        widget._dataset_metrics_for_evidence,
+    )
+    moves: list[str] = []
+
+    def edit_back_while_deciding(*args):
+        if not moves:
+            moves.append("back")
+            with widget._lock:
+                session.shift("x_spline", -0.2)
+        return datasets(*args)
+
+    def undo_then(step):
+        def undone(*args):
+            if moves == ["back"]:
+                moves.append("undo")
+                with widget._lock:
+                    session.undo()
+            return step(*args)
+
+        return undone
+
+    try:
+        asked = widget._state()
+        steady = widget._report("final", in_force=asked["in_force"])
+        monkeypatch.setattr(widget_module, "evaluation_datasets", edit_back_while_deciding)
+        monkeypatch.setattr(widget, "_model_materialized_for_dataset", undo_then(materialize))
+        monkeypatch.setattr(widget, "_dataset_metrics_for_evidence", undo_then(score))
+        raced = widget._report("final", in_force=asked["in_force"])
+    finally:
+        monkeypatch.undo()
+        widget.close()
+
+    assert moves == ["back", "undo"]
+    assert steady["summary"]["compact"]["model"]["n_obs"] == 180
+    assert (raced.get("status"), raced["in_force"]) == (None, asked["in_force"])
+    assert raced["summary"]["compact"]["model"] == steady["summary"]["compact"]["model"]
+
+
 def test_evidence_records_are_immutable():
     key = EvidenceKey(1, "metrics", "validation")
     outcome = EvidenceOutcome("complete", key, {"value": 1})
 
     with pytest.raises(FrozenInstanceError):
-        key.model_revision = 2
+        key.model = 2
     with pytest.raises(FrozenInstanceError):
         outcome.status = "superseded"
 
