@@ -154,10 +154,22 @@ ASSESSMENT PROCEDURE
     the highest impact.
 11. Run the release differential against the selected tag through benchboard:
     benchboard heavy release-differential -- timeout 7200 uv run python
-    benchmarks/release_differential.py release <tag> --out <dir>. Report every
-    flagged case. A flagged case blocks the recommendation until a fix
+    benchmarks/release_differential.py release <tag> --out <dir>. Read and
+    report what it prints whatever its exit status. Status 0 means nothing
+    was flagged and no case ran only on the head; any other status is
+    explained from the output, since 1 also follows a traceback, 2 a usage
+    error, 3 a benchboard wait and 124 the timeout. Report every flagged
+    case. A flagged case blocks the recommendation until a fix
     restores the release's result without losing what the change bought;
-    otherwise report it as a one-screen owner decision.
+    otherwise report it as a one-screen owner decision. Also report the
+    "N of M cases not compared" line and its errors: "0 flagged" covers only
+    the cases compared. A "K of them ran on the candidate" line lists cases
+    only the release refused; each is either a fit the head newly makes or a
+    sign the harness did not run on that release, as when every SuperLSS case
+    errored on v0.42.0. Every such case, and a not-compared count well above
+    the handful refused on both sides (6 on v0.42.0), blocks the
+    recommendation until each case is explained from its error, whether or
+    not anything is flagged and whatever the exit status.
 12. Re-fetch origin/master. If origin/master moves, discard the assessment and
     restart against the new exact assessed head SHA.
 

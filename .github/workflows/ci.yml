@@ -31,7 +31,18 @@ jobs:
     # Keep the 3.14 names listed in the Protect master ruleset.
     name: Python ${{ matrix.runtime.python-version }} · non-browser regression suite · balanced ${{ matrix.label }}${{ matrix.runtime.suffix }}
     runs-on: ${{ matrix.runtime.os }}
-    timeout-minutes: 15
+    # A hang limit, not a budget, set per runtime (hang-limit) so that its
+    # slowest measured shard stays under about 80% of it. Over 15 runs on
+    # 2026-11-09 to 11 the slowest shard took 7.5 minutes on Linux ARM64 and
+    # 10.5-11.2 on Linux 3.12 and 3.14 and macOS, but 14.2 on Windows. A
+    # Windows shard's mean is already 11-12 minutes, 74-79% of 15, so no split
+    # leaves room for the 1.2-1.4x between shards of one run that every
+    # runtime shows on refreshed durations; Windows gets 20.
+    # The push run's Python 3.12 shards run under branch coverage, which on
+    # 3.12 only coverage.py's trace-function core can measure (sys.monitoring
+    # measures branches from 3.14). The same tests take 1.5-2x as long there,
+    # 10-15 minutes a shard, so those four get 20 as well.
+    timeout-minutes: ${{ github.event_name == 'push' && matrix.runtime.python-version == '3.12' && 20 || matrix.runtime.hang-limit }}
     strategy:
       fail-fast: false
       max-parallel: 20
@@ -41,18 +52,23 @@ jobs:
           - python-version: "3.12"
             os: ubuntu-latest
             suffix: ""
+            hang-limit: 15
           - python-version: "3.14"
             os: ubuntu-latest
             suffix: ""
+            hang-limit: 15
           - python-version: "3.13"
             os: windows-2025
             suffix: " · Windows"
+            hang-limit: 20
           - python-version: "3.13"
             os: macos-15
             suffix: " · macOS ARM64"
+            hang-limit: 15
           - python-version: "3.13"
             os: ubuntu-24.04-arm
             suffix: " · Linux ARM64"
+            hang-limit: 15
         include:
           - group: 1
             label: A

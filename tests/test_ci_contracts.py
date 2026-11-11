@@ -110,13 +110,55 @@ def _collect_non_browser_nodeids() -> set[str]:
     }
 
 
+def _duration_shortfall(collected: set[str], recorded: dict[str, float]) -> str | None:
+    """What to do when ``.test_durations`` records under 99% of the suite, else None.
+
+    pytest-split gives an unrecorded test the mean recorded time, about 50 ms,
+    whatever it really takes. At 95% the 1,132 tests added by #611 and #612 went
+    unrecorded, 4-12% of a CI shard's measured time.
+    """
+    missing = sorted(collected - recorded.keys())
+    if len(collected) - len(missing) >= 0.99 * len(collected):
+        return None
+    return (
+        f"{len(missing)} of {len(collected)} collected tests have no entry in .test_durations "
+        f"(at most 1% may), for example {', '.join(missing[:3])}. Refresh it from this pull "
+        "request's own CI run, whose shards upload their per-test times even when they fail: "
+        "`uv run python scripts/update_test_durations.py --run <run id>`, then commit "
+        ".test_durations. The run id is the number after /actions/runs/ in the link of any of "
+        "the pull request's CI checks, or what `gh run list --workflow ci.yml --event "
+        "pull_request --branch <your branch> --limit 1 --json databaseId -q '.[0].databaseId'` "
+        "prints. Its artifacts last 7 days."
+    )
+
+
 def test_duration_manifest_covers_the_non_browser_suite() -> None:
     recorded = json.loads((_ROOT / ".test_durations").read_text(encoding="utf-8"))
     collected = _collect_non_browser_nodeids()
-    covered = collected.intersection(recorded)
 
     assert collected
-    assert len(covered) / len(collected) >= 0.95
+    shortfall = _duration_shortfall(collected, recorded)
+    assert shortfall is None, shortfall
+
+
+def test_a_stale_duration_manifest_says_how_to_refresh_it() -> None:
+    """The failure names the unrecorded tests and the refresh command a pull request
+    can run from its own CI run, rather than a bare ratio."""
+    collected = {f"tests/test_x.py::test_{i}" for i in range(1000)}
+    recorded = {node: 0.05 for node in sorted(collected)[:989]}
+
+    assert _duration_shortfall(collected, {**recorded, "tests/test_x.py::test_999": 0.05}) is None
+    message = _duration_shortfall(collected, recorded)
+    assert message is not None
+    assert message.startswith("11 of 1000 collected tests have no entry in .test_durations")
+    assert sorted(collected)[989] in message
+    assert "scripts/update_test_durations.py --run <run id>" in message
+    assert "/actions/runs/" in message
+    # gh run list's first column is the run's status; --json prints the id alone.
+    assert (
+        "`gh run list --workflow ci.yml --event pull_request --branch <your branch> --limit 1 "
+        "--json databaseId -q '.[0].databaseId'`" in message
+    )
 
 
 _PYTHON_FLOOR_CHECK = "Python 3.12 · non-browser suite · version floor"
@@ -189,7 +231,8 @@ def test_compatibility_shards_do_not_queue_platforms_behind_each_other() -> None
 def test_compatibility_shards_collect_all_failures_with_a_hang_limit() -> None:
     workflow = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     job = yaml.safe_load(workflow)["jobs"]["test-compatibility"]
-    assert 0 < job.get("timeout-minutes", 0) <= 15
+    for runtime in job["strategy"]["matrix"]["runtime"]:
+        assert 0 < _shard_hang_limit(job, runtime, push=False) <= 20
     assert job["strategy"].get("fail-fast", True) is False
     suite_commands = [
         shlex.split(step["run"])
@@ -205,6 +248,142 @@ def test_compatibility_shards_collect_all_failures_with_a_hang_limit() -> None:
     assert report_step["if"] == "${{ always() }}"
     # The threads stage writes pytest-results-threads.xml beside the parallel report.
     assert report_step["with"]["path"] == "pytest-results*.xml"
+
+
+def _coverage_condition(job: dict) -> tuple[str, str]:
+    """The coverage step's ``if`` and the Python version whose push run it covers."""
+    (coverage_if,) = {step["if"] for step in job["steps"] if "--cov=" in step.get("run", "")}
+    covered_version = re.fullmatch(
+        r"github\.event_name == 'push' && matrix\.runtime\.python-version == '([\d.]+)'",
+        coverage_if,
+    ).group(1)
+    return coverage_if, covered_version
+
+
+def _shard_hang_limit(job: dict, runtime: dict, *, push: bool) -> int:
+    """The minutes ``ci.yml`` gives one runtime's compatibility shard on a push or a
+    pull-request run: its ``timeout-minutes`` expression evaluated for that runtime."""
+    coverage_if, covered_version = _coverage_condition(job)
+    match = re.fullmatch(
+        rf"\$\{{\{{ {re.escape(coverage_if)} && (\d+) \|\| (\d+|matrix\.runtime\.hang-limit) \}}\}}",
+        str(job["timeout-minutes"]),
+    )
+    assert match, "the coverage shards' limit must key on the coverage step's own condition"
+    if push and runtime["python-version"] == covered_version:
+        return int(match.group(1))
+    return runtime["hang-limit"] if match.group(2).startswith("matrix.") else int(match.group(2))
+
+
+def _compatibility_job() -> dict:
+    workflow = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    return yaml.safe_load(workflow)["jobs"]["test-compatibility"]
+
+
+def test_coverage_shards_get_a_longer_limit_than_the_uninstrumented_ones() -> None:
+    """Branch coverage on Python 3.12 makes a shard 1.5-2x slower, so its limit
+    is longer, and only the shards that run under coverage get it."""
+    job = _compatibility_job()
+    runtimes = job["strategy"]["matrix"]["runtime"]
+    (linux_312,) = [r for r in runtimes if r["python-version"] == "3.12"]
+    plain = _shard_hang_limit(job, linux_312, push=False)
+    covered = _shard_hang_limit(job, linux_312, push=True)
+    # A coverage shard measured 869 s in pytest alone and was cancelled at 15 minutes.
+    assert plain <= 15 < covered <= 2 * plain
+    for runtime in runtimes:
+        if runtime is not linux_312:
+            on_push = _shard_hang_limit(job, runtime, push=True)
+            assert on_push == _shard_hang_limit(job, runtime, push=False)
+
+
+# The slowest shard of each runtime, in job seconds, over the 15 CI runs from
+# 42640955169 to 42937426038 (2026-11-09 to 11, four of them master pushes),
+# keyed by the job name's suffix and whether it ran under coverage. These are
+# measured snapshots: the headroom test fails when a limit is lowered below a
+# runtime's measured worst case, or when a runtime has no figure, but it cannot
+# notice a shard growing slower. The coverage figure is the slowest completed
+# shard (run 42690868368).
+_SLOWEST_SHARD_SECONDS = {
+    ("3.12", "", False): 671,
+    ("3.12", "", True): 897,
+    ("3.14", "", False): 634,
+    ("3.13", " · Windows", False): 850,
+    ("3.13", " · macOS ARM64", False): 670,
+    ("3.13", " · Linux ARM64", False): 452,
+}
+# Lower bounds from shards cancelled at their limit, whose real time is unknown:
+# run 42839237921's coverage shard B was cancelled at the old 15 minutes.
+_CANCELLED_SHARD_SECONDS = {("3.12", "", True): 916}
+
+_MEASURE_A_SHARD = (
+    "Measure one from a recent CI run, `gh run view <run id> --json jobs -q '.jobs[] | "
+    '"\\(.name)\\t\\((.completedAt|fromdate) - (.startedAt|fromdate))"\'`, which prints each '
+    "job's seconds (`gh run list --workflow ci.yml --branch master --limit 1 --json databaseId "
+    "-q '.[0].databaseId'` prints the latest master run's id), and record the "
+    "runtime's slowest shard in _SLOWEST_SHARD_SECONDS in tests/test_ci_contracts.py before "
+    "setting its hang-limit."
+)
+
+
+def _headroom_shortfalls(job: dict, slowest: dict, cancelled: dict) -> list[str]:
+    """Every compatibility shard whose hang limit lacks a measured figure, or leaves
+    under 20% over it, plus table entries that match no shard of the matrix."""
+    _, covered_version = _coverage_condition(job)
+    shards = [
+        ((runtime["python-version"], runtime["suffix"], push), runtime)
+        for runtime in job["strategy"]["matrix"]["runtime"]
+        for push in (False, True)
+        if not push or runtime["python-version"] == covered_version
+    ]
+    shortfalls = []
+    for key, runtime in shards:
+        limit = _shard_hang_limit(job, runtime, push=key[2])
+        shard = f"Python {key[0]}{key[1]}{' under coverage (push)' if key[2] else ''}"
+        seconds = slowest.get(key)
+        if seconds is None:
+            shortfalls.append(f"{shard} has no slowest-shard figure. {_MEASURE_A_SHARD}")
+        elif seconds > 0.8 * 60 * limit:
+            shortfalls.append(f"{shard}: slowest shard {seconds} s is over 80% of {limit} minutes")
+        if cancelled.get(key, 0) >= 60 * limit:
+            shortfalls.append(f"{shard}: a shard was cancelled after {cancelled[key]} s")
+        if limit > 20:
+            shortfalls.append(f"{shard}: {limit} minutes is a budget, not a hang limit")
+    unmatched = sorted((slowest.keys() | cancelled.keys()) - {key for key, _ in shards})
+    shortfalls += [f"{key} matches no shard of the matrix" for key in unmatched]
+    return shortfalls
+
+
+def test_every_shard_limit_leaves_headroom_over_its_slowest_measured_shard() -> None:
+    """A hang limit within 20% of a runtime's slowest measured shard cancels a
+    healthy run whenever the runner is slow; at 15 minutes Windows ran at 94%."""
+    job = _compatibility_job()
+    shortfalls = _headroom_shortfalls(job, _SLOWEST_SHARD_SECONDS, _CANCELLED_SHARD_SECONDS)
+    assert not shortfalls, shortfalls
+
+
+def test_a_runtime_without_a_measured_shard_says_how_to_measure_one() -> None:
+    """A runtime added to the matrix, or one whose suffix changes, has no figure:
+    the headroom check names it and says how to measure one, rather than passing
+    it unchecked or failing on an unpack."""
+    job = _compatibility_job()
+    runtimes = job["strategy"]["matrix"]["runtime"]
+    (windows,) = [r for r in runtimes if r["suffix"] == " · Windows"]
+    renamed = {**windows, "suffix": " · Windows x64"}
+    arm = {**windows, "os": "windows-11-arm", "suffix": " · Windows ARM64", "hang-limit": 10}
+    others = [r for r in runtimes if r is not windows]
+    job["strategy"]["matrix"]["runtime"] = [*others, renamed, arm]
+
+    shortfalls = _headroom_shortfalls(job, _SLOWEST_SHARD_SECONDS, _CANCELLED_SHARD_SECONDS)
+    assert shortfalls == [
+        f"Python 3.13 · Windows x64 has no slowest-shard figure. {_MEASURE_A_SHARD}",
+        f"Python 3.13 · Windows ARM64 has no slowest-shard figure. {_MEASURE_A_SHARD}",
+        "('3.13', ' · Windows', False) matches no shard of the matrix",
+    ]
+    assert "gh run view <run id> --json jobs" in _MEASURE_A_SHARD
+
+    lowered = {**_CANCELLED_SHARD_SECONDS, ("3.12", "", True): 1200}
+    assert _headroom_shortfalls(_compatibility_job(), _SLOWEST_SHARD_SECONDS, lowered) == [
+        "Python 3.12 under coverage (push): a shard was cancelled after 1200 s"
+    ]
 
 
 @pytest.mark.parametrize("stage", [0, 1], ids=["parallel", "threads"])

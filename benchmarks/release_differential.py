@@ -3,7 +3,8 @@
 A fit the last release converged to a sensible answer must not be refused, left
 unconverged or made worse on the candidate.  This runs one seeded corpus in two
 environments and flags every such case.  It needs only superglm's public API,
-so it runs unchanged on any release from v0.40.0.
+so it runs unchanged on any release from v0.40.0: where that API moved (SuperLSS
+offsets, ``_lss_offsets_at_fit``), it asks the release which form it takes.
 
     run --out FILE [--only REGEX] [--subset] [--shard I/K]
                      fit the corpus in this process, one JSON line per case
@@ -11,7 +12,15 @@ so it runs unchanged on any release from v0.40.0.
                      run the corpus at REF (a detached worktree with its own
                      environment, shared with ``books.py``) and here, then compare
     compare BASE CANDIDATE RELEASE
-                     flag candidate outcomes worse than the base; exit 1 on any flag
+                     flag candidate outcomes worse than the base. It also
+                     counts the cases it could not compare because the base
+                     errored or timed out, by error, and lists those that ran
+                     on the candidate: the base refused a fit the candidate
+                     makes, or the harness does not run on that release, and
+                     only a reader can say which. A case refused on both sides
+                     is a standing decision. Exit 0 when nothing is flagged and
+                     no case ran only on the candidate, else 1; the printed
+                     lines say which.
 
 The corpus: SuperGLM over every built-in family and link, nine term kinds
 (mains, random effect, tensor pair, spline-by-category, ``fs`` and ``sz`` factor
@@ -30,6 +39,7 @@ release and broken on a later one (``HISTORY``).  Run it through benchboard
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import math
 import re
@@ -39,6 +49,7 @@ import sys
 import time
 import traceback
 import warnings
+from collections import Counter
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -412,6 +423,15 @@ def _glm_nll(family, distribution, y, mu, weights, phi):
     return None  # Tweedie: deviance and Gini carry the comparison
 
 
+def _lss_offsets_at_fit(model_class) -> bool:
+    """Whether this release takes SuperLSS offsets at fit, ``fit_reml(offsets=)``.
+
+    Up to v0.42 it does, and its predictor helpers take no ``offset``; from v0.43
+    the helpers declare them (``offset=``) and ``fit_reml`` takes none.
+    """
+    return "offsets" in inspect.signature(model_class.fit_reml).parameters
+
+
 def run_lss(family_name, spec, size, route, outer) -> dict:
     import numpy as np
 
@@ -448,10 +468,14 @@ def run_lss(family_name, spec, size, route, outer) -> dict:
     if spec == "rich":
         first += [s("x2", kind="cr", k=6), re("c2"), ti("x1", "x2")]
         second = [s("x2", kind="cr", k=5)]
-    train_offsets = None if offsets is None else {k: v[:n] for k, v in offsets.items()}
+    train_offsets = {} if offsets is None else {k: v[:n] for k, v in offsets.items()}
     test_offsets = None if offsets is None else {k: v[n:] for k, v in offsets.items()}
+    at_fit = _lss_offsets_at_fit(SuperLSS)
+    declared = {} if at_fit else train_offsets  # passed to the helpers only where they take it
     declarations = [
-        getattr(family, helper)(*terms, offset=(train_offsets or {}).get(parameter.name))
+        getattr(family, helper)(
+            *terms, **({"offset": declared[parameter.name]} if parameter.name in declared else {})
+        )
         for parameter, helper, terms in zip(
             family.parameters, helpers, [first, second, *([] for _ in helpers[2:])], strict=True
         )
@@ -460,6 +484,8 @@ def run_lss(family_name, spec, size, route, outer) -> dict:
     kwargs = {"outer": outer}
     if weights is not None:
         kwargs["sample_weight"] = weights[:n]
+    if at_fit and train_offsets:
+        kwargs["offsets"] = train_offsets
     model.fit_reml(frame.iloc[:n], y[:n], **kwargs)
     smoothing = model._model.fit_state.smoothing
     out = {
@@ -726,6 +752,60 @@ def compare(
     return out
 
 
+def not_compared(base: dict[str, dict]) -> Counter[str]:
+    """The base cases that errored or timed out, counted by what went wrong.
+
+    ``compare`` flags nothing for them, so a base that cannot run a whole family
+    of cases would otherwise read as a clean comparison.
+    """
+    return Counter(
+        f"{record['status']}: {record.get('error', '')[:160]}".rstrip(": ")
+        for record in base.values()
+        if record["status"] != "ok"
+    )
+
+
+def ran_only_on_candidate(base: dict[str, dict], candidate: dict[str, dict]) -> list[str]:
+    """The uncompared cases the candidate ran: those need a reader's explanation.
+
+    A case both sides refuse is a standing decision (the history cases refused by
+    design). One only the base refused is either a fit the candidate newly makes
+    or a harness that does not run on the base; only a reader can tell them apart.
+    """
+    return sorted(
+        name
+        for name, record in base.items()
+        if record["status"] != "ok" and candidate.get(name, {}).get("status") == "ok"
+    )
+
+
+def report(
+    base: dict[str, dict], candidate: dict[str, dict], found: dict[str, list[str]]
+) -> list[str]:
+    """The lines ``compare`` prints: each flag, the count, and what was not compared."""
+    lines = [f"{name}: {'; '.join(reasons)}" for name, reasons in sorted(found.items())]
+    lines.append(f"{len(found)} flagged")
+    skipped = not_compared(base)
+    if skipped:
+        lines.append(
+            f"{skipped.total()} of {len(base)} cases not compared: the base errored or timed out"
+        )
+        lines += [f"  {count} x {reason}" for reason, count in skipped.most_common(5)]
+        if len(skipped) > 5:
+            lines.append(f"  and {len(skipped) - 5} other errors")
+        unexplained = ran_only_on_candidate(base, candidate)
+        if unexplained:
+            lines.append(
+                f"{len(unexplained)} of them ran on the candidate: the base refused a fit the "
+                "candidate makes, or the harness does not run on the base. Explain them before "
+                "reading this comparison as clean."
+            )
+            lines += [f"  {name}" for name in unexplained[:5]]
+            if len(unexplained) > 5:
+                lines.append(f"  and {len(unexplained) - 5} others")
+    return lines
+
+
 # --------------------------------------------------------------------------- CLI
 
 
@@ -811,11 +891,10 @@ def main(argv=None) -> int:
         run(_selected(args), Path(args.out))
         return 0
     if args.cmd == "compare":
-        found = compare(load(Path(args.base)), load(Path(args.candidate)), args.release)
-        for name, reasons in sorted(found.items()):
-            print(f"{name}: {'; '.join(reasons)}")
-        print(f"{len(found)} flagged")
-        return 1 if found else 0
+        base, candidate = load(Path(args.base)), load(Path(args.candidate))
+        found = compare(base, candidate, args.release)
+        print("\n".join(report(base, candidate, found)))
+        return 1 if found or ran_only_on_candidate(base, candidate) else 0
     sys.path.insert(0, str(HERE))
     import books
 
