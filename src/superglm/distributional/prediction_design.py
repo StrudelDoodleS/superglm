@@ -667,6 +667,25 @@ def build_predictor_design(
     )
 
 
+def build_feature_rows(
+    predictor: CompiledPredictor, state: Any, name: str, values: NDArray
+) -> NDArray[np.float64]:
+    """``predictor``'s local design at ``values`` of main effect ``name``'s column, zero elsewhere.
+
+    A main effect ``predictor`` does not read with levels reads its own column alone, so
+    its columns here are the ones :func:`build_predictor_design` gives at those values.
+    """
+    width = state.coefficient_slice.stop - state.coefficient_slice.start
+    matrix = np.zeros((len(values), width), dtype=np.float64)
+    indices = _term_indices(predictor.compiled.groups, name) + int(
+        state.intercept_index is not None
+    )
+    matrix[:, indices] = _feature_rows(
+        predictor.compiled.specs[name], values, width=len(indices), term_name=name
+    )
+    return matrix
+
+
 def build_joint_prediction_design(
     X: FrameLike | EagerFrame,
     compiled_predictors: Sequence[CompiledPredictor],

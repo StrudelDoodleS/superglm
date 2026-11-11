@@ -28,6 +28,7 @@ import pandas as pd
 
 from superglm._frame import as_eager_frame
 from superglm.distributional.prediction_design import _required_columns
+from superglm.distributional.terms import _held_as_number
 from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.editor.lss.apply import _native_levels
 from superglm.editor.lss.panel import (
@@ -38,6 +39,7 @@ from superglm.editor.lss.panel import (
     _parameters,
 )
 from superglm.editor.lss.view import LSSModelView, lss_key
+from superglm.features.numeric import _numeric_values
 
 MAX_RISKS = 8
 # A refusal names this many of a column's levels.
@@ -50,16 +52,22 @@ def _lss_view(session: Any) -> LSSModelView:
     return session.model
 
 
+def _takes_numbers(view: LSSModelView, frame: Any, column: str) -> bool:
+    """Whether ``column`` is stored as numbers, or held as one (:func:`_held_as_number`)."""
+    return frame.column_kind(column) == "numeric" or _held_as_number(view._fitted, frame, column)
+
+
 def _scan(view: LSSModelView, column: str) -> tuple:
     """What the training rows hold in ``column``: its range, or its values by label and in order.
 
-    Read once per view and kept on it: a view's training rows do not change.
+    A column that takes numbers (:func:`_takes_numbers`) has a range, whatever its
+    storage. Read once per view and kept on it: a view's training rows do not change.
     """
     if column not in view._column_scans:
         frame = as_eager_frame(view.X_train)
         values = frame.column_array(column)
-        if frame.column_kind(column) == "numeric":
-            numbers = np.asarray(values, dtype=np.float64)
+        if _takes_numbers(view, frame, column):
+            numbers = _numeric_values(values)
             view._column_scans[column] = (float(np.nanmin(numbers)), float(np.nanmax(numbers)))
         else:
             seen = {str(v): v for v in pd.unique(values) if pd.notna(v)}
@@ -243,7 +251,7 @@ def risk_row(session: Any, index: int | None = None) -> dict[str, Any]:
     elif not complete[index]:
         raise EditorValueError(f"Row {index} has a missing value; choose another row.")
     values = {
-        column: float(array[index]) if frame.column_kind(column) == "numeric" else str(array[index])
+        column: float(array[index]) if _takes_numbers(view, frame, column) else str(array[index])
         for column, array in arrays.items()
     }
     return {"values": values, "index": index}

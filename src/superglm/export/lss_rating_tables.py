@@ -287,8 +287,7 @@ def _parameter_table(
             # applies to the value itself, so what the effect leaves out goes back on the base.
             log_base += float(
                 prepared.effect[0]
-                + _reference_design(fitted, frame, parameter, name, state, *blocks)
-                @ beta[_coefficient_columns(*blocks)]
+                + prepared.anchor @ beta[_coefficient_columns(*blocks)]
                 - slope * np.asarray(prepared.x, dtype=np.float64)[0]
             )
             table = pd.DataFrame(

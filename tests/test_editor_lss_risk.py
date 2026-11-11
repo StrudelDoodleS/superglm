@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, GammaLS, SuperLSS, term
+from superglm import Categorical, GammaLS, Numeric, SuperLSS, s, term
 from superglm.editor import EditorSession, edit, notebook
 from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.editor.lss.apply import lss_model_with_edits
@@ -403,3 +403,57 @@ def test_a_column_read_only_by_an_interaction_keeps_its_parameter_in_the_walk():
     assert set(features) == {"x", "g"}
     for column in ("x", "g"):
         assert list(features[column]["terms"]) == ["mean"]
+
+
+def _linear_session(storage):
+    """A ``Numeric`` term on ``x`` stored as ``storage``; booleans split exactly in half."""
+    rng = np.random.default_rng(617)
+    if storage == "bool":
+        x = pd.Series(np.arange(300) % 2 == 0)
+    else:
+        x = pd.Series(10.0 + rng.uniform(0.0, 1.0, 300)).astype(storage)
+    X = pd.DataFrame({"x": x, "z": rng.uniform(0.0, 1.0, 300)})
+    numbers = np.asarray(x, dtype=np.float64)
+    y = rng.gamma(10.0, np.exp(1.0 + 0.4 * numbers + X["z"].to_numpy()) / 10.0)
+    family = GammaLS()
+    model = SuperLSS(
+        family, family.mean(term("x", Numeric()), s("z", k=5)), family.scale()
+    ).fit_reml(X, y)
+    return edit(model, train_data=(X, y)), model, numbers
+
+
+@pytest.mark.parametrize("storage", ["float64", "object", "str", "bool"])
+def test_a_linear_column_round_trips_through_the_explain_tab_whatever_its_storage(storage):
+    session, model, numbers = _linear_session(storage)
+    reply = risk_payload(session, [{"z": 0.3}], edited=model)
+    (feature,) = [f for f in reply["features"] if f["column"] == "x"]
+    if storage == "bool":
+        # A boolean column keeps its levels, and is held at one it takes: a tied mode
+        # goes to the first, False, so the reference risk is a real one.
+        assert feature["kind"] == "levels"
+        assert feature["reference"] == "False" and feature["reference"] in feature["levels"]
+        held = 0.0
+    else:
+        assert feature["kind"] == "numeric"
+        assert feature["reference"] == np.median(numbers)
+        assert (feature["min"], feature["max"]) == (numbers.min(), numbers.max())
+        held = feature["reference"]
+    # The reference risk is priced at the held value, which the Editor curve is read from.
+    expected = model.predict_link(pd.DataFrame({"x": [held], "z": [0.3]})).to_numpy()[0]
+    np.testing.assert_allclose(
+        reply["risks"][0]["eta"]["fitted"], expected, rtol=0.0, atol=_tolerance(session, expected)
+    )
+    effect = model.term_inference("mean", "x", n_points=3, simultaneous=False)
+    np.testing.assert_allclose(
+        effect.effect, model.coef_["mean:x"] * (effect.x - held), rtol=1e-12, atol=1e-15
+    )
+
+    # A reply's own values, and a training row's, are accepted when sent back.
+    again = risk_payload(session, [reply["risks"][0]["values"]], edited=model)
+    assert again["risks"][0]["eta"] == reply["risks"][0]["eta"]
+    row = risk_row(session, 5)["values"]
+    (priced,) = risk_payload(session, [row], edited=model)["risks"]
+    training = model.predict_link(session.model.X_train.iloc[[5]]).to_numpy()[0]
+    np.testing.assert_allclose(
+        priced["eta"]["fitted"], training, rtol=0.0, atol=_tolerance(session, training)
+    )

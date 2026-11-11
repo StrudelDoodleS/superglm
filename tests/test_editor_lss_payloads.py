@@ -178,6 +178,55 @@ def test_the_editor_opens_on_a_column_linear_in_one_parameter_and_levels_in_anot
     assert {feature["column"] for feature in reply["features"]} == {"band", "z"}
 
 
+def test_a_linear_term_reads_its_own_column_alone_for_its_anchor(monkeypatch):
+    # Mutation check: building the anchor from a whole sweep and a two-row design, as
+    # 9b1ed58eb did, reads every other column again and builds two more designs per
+    # linear term: 14 reads, 9 designs and 5 sweeps to open, 16, 10 and 6 for the tables.
+    from superglm import cat
+    from superglm.distributional import terms as terms_module
+
+    rng = np.random.default_rng(664)
+    X = pd.DataFrame(
+        {
+            "a": rng.uniform(18.0, 90.0, 300),
+            "b": rng.uniform(0.0, 1.0, 300),
+            "c": rng.choice(list("ABCD"), 300),
+        }
+    )
+    y = rng.gamma(10.0, np.exp(0.01 * X["a"] + 0.2 * X["b"]) / 10.0)
+    family = GammaLS()
+    model = SuperLSS(
+        family,
+        family.mean(term("a", Numeric()), cat("c")),
+        family.scale(term("b", Numeric())),
+    ).fit_reml(X, y)
+
+    counts = dict.fromkeys(("_reference_value", "_term_design", "_sweep"), 0)
+    for name in counts:
+        original = getattr(terms_module, name)
+
+        def counting(*args, _original=original, _name=name, **kwargs):
+            counts[_name] += 1
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(terms_module, name, counting)
+    monkeypatch.setattr("superglm.editor.lss.view._reference_value", terms_module._reference_value)
+
+    def measured(action):
+        counts.update(dict.fromkeys(counts, 0))
+        action()
+        return dict(counts)
+
+    # One sweep and one design per term, each holding the two other columns, as at
+    # 0.43.0; each linear term then reads its own column once for its curve's anchor
+    # and once for the anchor the editor carries through a Refit.
+    opened = measured(lambda: session_payload(edit(model, train_data=(X, y))))
+    assert opened == {"_reference_value": 3 * 2 + 2 * 2, "_term_design": 3, "_sweep": 3}
+    # The tables add the categorical term's base row, and read each anchor once.
+    tables = measured(lambda: model.rating_table_payload(X))
+    assert tables == {"_reference_value": 4 * 2 + 2, "_term_design": 4, "_sweep": 4}
+
+
 def test_nb_theta_is_the_relativity_of_the_overdispersion():
     case = nb_case()
     session = open_case(case)
