@@ -120,6 +120,9 @@ def lss_editable_terms(
             # A carried edit reads whether the term holds flat or continues its end slopes.
             term.metadata["extrapolation"] = view._specs[key].extrapolation
         term.metadata["shape_support"] = None
+        if term.metadata["term_type"] == "numeric":
+            # Shown against its column's training centre; a Refit's carry puts this back.
+            term.metadata["anchor_log_effect"] = view.reference_log_effect(key)
         term.weights = term_weights_from_data(
             train.X, train.sample_weight, view.column_of(key), term
         )

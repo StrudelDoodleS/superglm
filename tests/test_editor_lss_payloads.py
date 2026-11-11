@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -13,9 +14,12 @@ import pytest
 from superglm import GammaLS, Numeric, OrderedCategorical, Spline, SuperLSS, term
 from superglm.distributional.terms import _resolve_term, _term_design
 from superglm.editor import EditorSession, edit
+from superglm.editor.cv import fold_log_curves, fold_term_items
 from superglm.editor.lss import INVERSE_THETA, RELATIVITY, display_for
 from superglm.editor.lss.apply import lss_model_with_edits
 from superglm.editor.lss.availability import LSS_UNAVAILABLE
+from superglm.editor.lss.display import fold_chart_display
+from superglm.editor.lss.risk import risk_payload
 from superglm.editor.operations import running_extreme_values
 from superglm.editor.payloads import session_payload
 from tests._lss_editor_fixtures import (
@@ -27,6 +31,7 @@ from tests._lss_editor_fixtures import (
     tweedie_case,
 )
 from tests.test_editor import editor_frame, editor_model  # noqa: F401
+from tests.test_lss_terms import mixed_band_fit, scale_ratio_to_reference
 
 FIXTURE = Path(__file__).parent / "editor_frontend" / "fixtures" / "display_transforms.json"
 TOLERANCE = 64 * EPS
@@ -101,21 +106,125 @@ def test_tweedie_dispersion_is_shown_as_relativities():
     assert not any(key.startswith("power:") for key in payload if isinstance(key, str))
 
 
-def test_a_spread_band_far_from_the_link_origin_brackets_its_curve():
-    # Each band end lies about 70 from zero on the link scale: a relativity of 1e30 and more.
+def _far_from_origin_fit():
+    """A CV slope on a covariate near 1000: ``beta x`` is about 710, past where ``exp`` overflows."""
     rng = np.random.default_rng(578)
     t = np.linspace(0.0, 1.0, 360)
-    X = pd.DataFrame({"x": 100.0 + t})
+    X = pd.DataFrame({"x": 1000.0 + t})
     y = rng.gamma(np.exp(2.0 - 2.0 * t), np.exp(1.0) * np.exp(-2.0 + 2.0 * t))
     family = GammaLS()
     model = SuperLSS(family, family.mean(), family.scale(term("x", Numeric()))).fit_reml(X, y)
+    return model, X, y
+
+
+def test_a_spread_band_far_from_the_link_origin_brackets_its_curve():
+    model, X, y = _far_from_origin_fit()
     term_payload = session_payload(edit(model, train_data=(X, y)))["scale:x"]
-    curve = np.asarray(term_payload["y"])
-    lower = np.asarray(term_payload["ci_lower_y"])
-    upper = np.asarray(term_payload["ci_upper_y"])
+    curve = np.asarray(term_payload["y"], dtype=np.float64)
+    lower = np.asarray(term_payload["ci_lower_y"], dtype=np.float64)
+    upper = np.asarray(term_payload["ci_upper_y"], dtype=np.float64)
+    # Read against the training median, the curve is a relativity of 1 there.
+    x = np.asarray(term_payload["x"], dtype=np.float64)
+    slope = model.coef_["scale:x"]
+    np.testing.assert_allclose(curve, np.exp(slope * (x - np.median(X["x"]))), rtol=TOLERANCE)
     assert np.all(np.isfinite(lower)) and np.all(np.isfinite(upper))
     assert np.all(lower <= curve) and np.all(curve <= upper)
     assert np.all(upper > lower)
+
+
+def test_a_linear_term_reads_the_same_on_the_editor_cv_and_explain_tabs():
+    model, X, y = _far_from_origin_fit()
+    session = edit(model, train_data=(X, y))
+    shown = session_payload(session)["scale:x"]
+    curve = np.asarray(shown["y"], dtype=np.float64)
+    assert np.all(np.isfinite(curve))
+
+    # The Cross-validation tab draws the in-force curve, and a fold sits at its level.
+    curves = {0: fold_log_curves(model, session.terms)}
+    (item,) = fold_term_items(
+        {"scale:x": session.terms["scale:x"]},
+        curves,
+        display=partial(fold_chart_display, family=model.family),
+    )
+    np.testing.assert_allclose(item["fit"], curve, rtol=1e-12, atol=0.0)
+    np.testing.assert_allclose(item["folds"][0]["values"], curve, rtol=1e-9, atol=0.0)
+
+    # The Explain tab's walk moves x alone from the reference risk, the training median.
+    picked = [0, 120, 199]
+    reply = risk_payload(session, [{"x": float(shown["x"][i])} for i in picked], edited=model)
+    (feature,) = [f for f in reply["features"] if f["column"] == "x"]
+    assert feature["reference"] == np.median(X["x"])
+    column = [f["column"] for f in reply["features"]].index("x")
+    parameter = [p["name"] for p in reply["parameters"]].index("scale")
+    moves = np.array([risk["effects"]["fitted"][column][parameter] for risk in reply["risks"]])
+    # Each move is a difference of two linear predictors built from terms near 710.
+    np.testing.assert_allclose(np.log(curve[picked]), moves, rtol=0.0, atol=1e3 * 710 * EPS)
+
+
+def test_the_editor_opens_on_a_column_linear_in_one_parameter_and_levels_in_another():
+    model, X, y = mixed_band_fit()
+    session = edit(model, train_data=(X, y))
+    payload = session_payload(session)["scale:band"]
+    x = np.asarray(payload["x"], dtype=np.float64)
+    curve = np.asarray(payload["y"], dtype=np.float64)
+    assert np.all(np.isfinite(curve))
+    ends = [0, len(x) - 1]
+    np.testing.assert_array_equal(x[ends], [1.0, 4.0])
+    np.testing.assert_allclose(
+        curve[ends], scale_ratio_to_reference(model, X, x[ends]), rtol=1e-12, atol=0.0
+    )
+    # The Explain tab walks the same column from the same reference.
+    reply = risk_payload(session, [{"band": 1, "z": 0.5}], edited=model)
+    assert {feature["column"] for feature in reply["features"]} == {"band", "z"}
+
+
+def test_a_linear_term_reads_its_own_column_alone_for_its_anchor(monkeypatch):
+    # Mutation check: building the anchor from a whole sweep and a two-row design, as
+    # 9b1ed58eb did, reads every other column again and builds two more designs per
+    # linear term: 14 reads, 9 designs and 5 sweeps to open, 16, 10 and 6 for the tables.
+    from superglm import cat
+    from superglm.distributional import terms as terms_module
+
+    rng = np.random.default_rng(664)
+    X = pd.DataFrame(
+        {
+            "a": rng.uniform(18.0, 90.0, 300),
+            "b": rng.uniform(0.0, 1.0, 300),
+            "c": rng.choice(list("ABCD"), 300),
+        }
+    )
+    y = rng.gamma(10.0, np.exp(0.01 * X["a"] + 0.2 * X["b"]) / 10.0)
+    family = GammaLS()
+    model = SuperLSS(
+        family,
+        family.mean(term("a", Numeric()), cat("c")),
+        family.scale(term("b", Numeric())),
+    ).fit_reml(X, y)
+
+    counts = dict.fromkeys(("_reference_value", "_term_design", "_sweep"), 0)
+    for name in counts:
+        original = getattr(terms_module, name)
+
+        def counting(*args, _original=original, _name=name, **kwargs):
+            counts[_name] += 1
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(terms_module, name, counting)
+    monkeypatch.setattr("superglm.editor.lss.view._reference_value", terms_module._reference_value)
+
+    def measured(action):
+        counts.update(dict.fromkeys(counts, 0))
+        action()
+        return dict(counts)
+
+    # One sweep and one design per term, each holding the two other columns, as at
+    # 0.43.0; each linear term then reads its own column once for its curve's anchor
+    # and once for the anchor the editor carries through a Refit.
+    opened = measured(lambda: session_payload(edit(model, train_data=(X, y))))
+    assert opened == {"_reference_value": 3 * 2 + 2 * 2, "_term_design": 3, "_sweep": 3}
+    # The tables add the categorical term's base row, and read each anchor once.
+    tables = measured(lambda: model.rating_table_payload(X))
+    assert tables == {"_reference_value": 4 * 2 + 2, "_term_design": 4, "_sweep": 4}
 
 
 def test_nb_theta_is_the_relativity_of_the_overdispersion():

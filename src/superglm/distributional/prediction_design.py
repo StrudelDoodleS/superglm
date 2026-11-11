@@ -640,6 +640,52 @@ def map_design_blocks(
         return pooled_for(run, spans, step * widest * 8 * 3)
 
 
+def build_predictor_design(
+    X: FrameLike | EagerFrame, predictor: CompiledPredictor, state: Any
+) -> NDArray[np.float64]:
+    """One predictor's local design, reading each column only as its own terms read it.
+
+    A column one parameter reads as a number and another as levels is read here only as
+    ``predictor`` reads it, so sweeping it through one term never hands the other a value.
+    """
+    frame = as_eager_frame(X)
+    predictors = (predictor,)
+    frame.require_columns(_required_columns(predictors))
+    if not len(frame):
+        return np.zeros((0, state.coefficient_slice.stop - state.coefficient_slice.start))
+    columns: dict[Any, NDArray] = {
+        name: frame.column_array(name) for name in _required_columns(predictors)
+    }
+    return _predictor_rows(
+        predictor,
+        state,
+        columns,
+        label_columns(frame, predictors),
+        _group_term_constants(predictors),
+        slice(0, len(frame)),
+        None,
+    )
+
+
+def build_feature_rows(
+    predictor: CompiledPredictor, state: Any, name: str, values: NDArray
+) -> NDArray[np.float64]:
+    """``predictor``'s local design at ``values`` of main effect ``name``'s column, zero elsewhere.
+
+    A main effect ``predictor`` does not read with levels reads its own column alone, so
+    its columns here are the ones :func:`build_predictor_design` gives at those values.
+    """
+    width = state.coefficient_slice.stop - state.coefficient_slice.start
+    matrix = np.zeros((len(values), width), dtype=np.float64)
+    indices = _term_indices(predictor.compiled.groups, name) + int(
+        state.intercept_index is not None
+    )
+    matrix[:, indices] = _feature_rows(
+        predictor.compiled.specs[name], values, width=len(indices), term_name=name
+    )
+    return matrix
+
+
 def build_joint_prediction_design(
     X: FrameLike | EagerFrame,
     compiled_predictors: Sequence[CompiledPredictor],

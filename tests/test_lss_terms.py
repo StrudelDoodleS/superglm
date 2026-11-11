@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 from scipy import stats
 
-from superglm import Categorical, Numeric, Spline
+from superglm import Categorical, GammaLS, Numeric, Spline, SuperLSS, cat, term
 from superglm.diagnostics.convergence import ConvergenceWarning
 from superglm.distributional import Predictor
 from superglm.distributional import terms as terms_module
@@ -292,7 +292,66 @@ def test_single_column_numeric_term_is_reported_as_a_line(fit_case) -> None:
 
     assert effect.kind == "numeric"
     slope = float(np.asarray(fitted.coefficients)[fitted.layout.term_slices["location:w"]][0])
-    assert effect.effect == pytest.approx(slope * effect.x)
+    # Read against the column's training median, as every other column is held there.
+    assert effect.effect == pytest.approx(slope * (effect.x - np.median(frame["w"])))
+
+
+@pytest.mark.parametrize("storage", ["float64", "object", "str"])
+def test_a_linear_term_is_anchored_at_one_median_whatever_its_storage(storage) -> None:
+    t = np.linspace(0.0, 1.0, 180)
+    y = np.random.default_rng(617).gamma(20.0, np.exp(1.0 + 0.4 * t) / 20.0)
+    family = GammaLS()
+    X = pd.DataFrame({"x": 10.0 + t}).astype(storage)
+    model = SuperLSS(family, family.mean(term("x", Numeric())), family.scale()).fit_reml(X, y)
+    effect = model.term_inference("mean", "x", n_points=3, simultaneous=False)
+
+    # A Numeric term reads every one of these storages as the same numbers, so its
+    # effect is the mean's ratio to the mean at the numbers' median, 10.5.
+    mean = model.predict_parameters(pd.DataFrame({"x": [*effect.x, 10.5]}))["mean"].to_numpy()
+    np.testing.assert_allclose(effect.multiplier, mean[:-1] / mean[-1], rtol=1e-12, atol=0.0)
+    assert effect.multiplier[1] == 1.0
+
+
+def mixed_band_fit():
+    """``band`` (levels 1-4) read as levels by the mean and as a number by the scale."""
+    rng = np.random.default_rng(4)
+    band = rng.integers(1, 5, 400)
+    X = pd.DataFrame({"band": band, "z": rng.uniform(0.0, 1.0, 400)})
+    y = rng.gamma(10.0, np.exp(0.2 * band + X["z"].to_numpy()) / 10.0)
+    family = GammaLS()
+    model = SuperLSS(
+        family,
+        family.mean(cat("band"), term("z", Numeric())),
+        family.scale(term("band", Numeric())),
+    ).fit_reml(X, y)
+    return model, X, y
+
+
+def scale_ratio_to_reference(model, X, bands) -> np.ndarray:
+    """The scale at each of ``bands`` over the scale at the column's training centre.
+
+    The mean reads ``band`` with levels, so its centre is its most frequent level.
+    """
+    reference = int(np.argmax(np.bincount(X["band"])))
+    rows = pd.DataFrame({"band": [*np.asarray(bands).astype(int), reference], "z": 0.5})
+    scale = model.predict_parameters(rows)["scale"].to_numpy()
+    return scale[:-1] / scale[-1]
+
+
+def test_a_column_linear_in_one_parameter_and_levels_in_another_has_effects() -> None:
+    model, X, _ = mixed_band_fit()
+    # The sweep runs between the levels the mean was fitted on, at 1.5 and 2.5.
+    effect = model.term_inference("scale", "band", n_points=7, simultaneous=False)
+
+    np.testing.assert_allclose(
+        effect.multiplier[::2],
+        scale_ratio_to_reference(model, X, effect.x[::2]),
+        rtol=1e-12,
+        atol=0.0,
+    )
+    assert np.all(np.isfinite(effect.multiplier))
+    levels = model.term_inference("mean", "band", simultaneous=False)
+    assert np.all(np.isfinite(levels.multiplier))
 
 
 def test_effect_serialises_to_plain_json(fit_case) -> None:

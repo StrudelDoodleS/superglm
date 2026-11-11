@@ -283,8 +283,12 @@ def _parameter_table(
                 fitted, frame, parameter, name, n_points=2, simultaneous=False
             )
             slope = float(beta[qualified][0])
+            # The effect is read against the column's reference value; the per-unit factor
+            # applies to the value itself, so what the effect leaves out goes back on the base.
             log_base += float(
-                prepared.effect[0] - slope * np.asarray(prepared.x, dtype=np.float64)[0]
+                prepared.effect[0]
+                + prepared.anchor @ beta[_coefficient_columns(*blocks)]
+                - slope * np.asarray(prepared.x, dtype=np.float64)[0]
             )
             table = pd.DataFrame(
                 {name: ["per_unit"], "Relativity": [np.exp(sign * slope)], "Weight": [0.0]}

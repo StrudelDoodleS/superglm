@@ -101,8 +101,10 @@ from superglm.distributional.posterior import (
 )
 from superglm.distributional.prediction_design import (
     _required_columns,
-    build_joint_prediction_design,
+    build_feature_rows,
+    build_predictor_design,
 )
+from superglm.features.numeric import _numeric_values
 from superglm.links import _is_shifted_log_link
 from superglm.stats.wood_pvalue import wood_test_smooth
 from superglm.terms import resolve_label
@@ -243,6 +245,8 @@ class _PreparedTermEffect:
     levels: tuple[str, ...] | None
     special: tuple[bool, ...] | None
     design: NDArray[np.float64]
+    # The term's own columns at its reference, which ``design`` is measured from.
+    anchor: NDArray[np.float64]
     columns: NDArray[np.intp]
     beta: NDArray[np.float64]
     effect: NDArray[np.float64]
@@ -497,12 +501,34 @@ def _numeric_range(frame: EagerFrame, name: Hashable, n_points: int) -> NDArray[
     return np.linspace(float(np.nanmin(values)), float(np.nanmax(values)), n_points)
 
 
+def _held_as_number(fitted: Any, frame: EagerFrame, name: Hashable) -> bool:
+    """Whether column ``name`` is held, and described, as a number rather than by its levels.
+
+    True for a column no term reads with levels that is stored as numbers, or that
+    a ``Numeric`` term reads and is not stored as booleans.  A boolean column keeps
+    its levels, so it is held at a value it takes, never at a median such as 0.5.
+    """
+    from superglm.features.numeric import Numeric
+
+    if _fitted_levels(fitted, name) is not None:
+        return False
+    kind = frame.column_kind(name)
+    return kind == "numeric" or (
+        kind != "boolean"
+        and any(
+            isinstance(predictor.compiled.specs.get(name), Numeric)
+            for predictor in fitted.compiled_predictors
+        )
+    )
+
+
 def _reference_value(fitted: Any, frame: EagerFrame, name: Hashable) -> Any:
     """Return a column's training centre, missing values ignored.
 
-    A numeric column without levels is held at its median.  Any other column is
-    held at its most frequent fitted level, counted over the labels the term reads
-    at it; a tie goes to the level that comes first in :func:`_column_levels` order.
+    A column :func:`_held_as_number` is held at the median of its values as
+    ``Numeric`` converts them.  Any other column is held at its most frequent
+    fitted level, counted over the labels the term reads at it; a tie goes to the
+    level that comes first in :func:`_column_levels` order.
     A label the term reads at no fitted level is held only if no fitted level is
     present.  The value returned is the chosen level's most frequent label, so a
     grouped term is held at one of its members; when some label is read at a
@@ -514,8 +540,13 @@ def _reference_value(fitted: Any, frame: EagerFrame, name: Hashable) -> Any:
         f"column {name!r} has no non-missing values to take a training centre from; "
         "pass rows that have values for it, or name its value in a surface's reference"
     )
-    if _fitted_levels(fitted, name) is None and frame.column_kind(name) == "numeric":
-        numeric = np.asarray(values, dtype=np.float64)
+    if _held_as_number(fitted, frame, name):
+        # Missing entries are dropped before conversion: ``pd.NA`` in an object or
+        # string column does not convert to a float, and the centre ignores them.
+        present = values[~pd.isna(values)]
+        if present.size == 0:
+            raise ValueError(empty)
+        numeric = _numeric_values(present)
         if np.all(np.isnan(numeric)):
             raise ValueError(empty)
         return float(np.nanmedian(numeric))
@@ -606,6 +637,24 @@ def _reference_row(
     return design[levels.index(str(base))]
 
 
+def _numeric_anchor(
+    fitted: Any, frame: EagerFrame, parameter: str, term: str, state: Any, *term_slices: slice
+) -> NDArray[np.float64]:
+    """A ``Numeric`` term's own columns at its column's training centre, which it is read against.
+
+    That centre (:func:`_reference_value`) is the value a sweep holds the column at for
+    every other term, so the term's effect is ``beta (x - x_ref)``.  The term reads its
+    own column alone, so no other column is read.
+    """
+    column = _feature_label(fitted, parameter, term)
+    values = np.array([_reference_value(fitted, frame, column)])
+    local = build_feature_rows(_compiled_predictor(fitted, state.name), state, column, values)
+    offset = state.coefficient_slice.start
+    return np.hstack(
+        [local[0, block.start - offset : block.stop - offset] for block in term_slices]
+    )
+
+
 def _reference_design(
     fitted: Any,
     frame: EagerFrame,
@@ -614,8 +663,16 @@ def _reference_design(
     state: Any,
     *term_slices: slice,
 ) -> NDArray[np.float64]:
-    """The term's own columns at its reference level, or zeros for a term with none."""
+    """The term's own columns at its reference, or zeros for a term with none.
+
+    A term with levels is read against its reference level (:func:`_reference_row`)
+    and a ``Numeric`` term against its column's training centre
+    (:func:`_numeric_anchor`).  A spline's columns are centred on fitting and are
+    read as they are.
+    """
     spec = _compiled_spec(fitted, parameter, term)
+    if spec is not None and _term_kind(spec) == "numeric":
+        return _numeric_anchor(fitted, frame, parameter, term, state, *term_slices)
     if spec is None or _level_domain(spec) is None:
         return np.zeros(sum(block.stop - block.start for block in term_slices), dtype=np.float64)
     evaluation, _, levels = _sweep(fitted, frame, parameter, term, 2)
@@ -632,13 +689,11 @@ def _term_design(
 
     Several slices are laid side by side in the order given, which is how a
     level term whose free levels live in a second block is evaluated as one
-    function of its levels.
+    function of its levels.  Only the term's own predictor is built, so a column
+    another parameter reads with levels is never handed a swept value.
     """
-    design = build_joint_prediction_design(
-        evaluation_frame, fitted.compiled_predictors, fitted.layout
-    )
+    local = build_predictor_design(evaluation_frame, _compiled_predictor(fitted, state.name), state)
     offset = state.coefficient_slice.start
-    local = design.local[state.name]
     return np.hstack(
         [
             np.asarray(local[:, block.start - offset : block.stop - offset], dtype=np.float64)
@@ -727,7 +782,8 @@ def term_effect(
     (:func:`_reference_value`: missing values ignored, a tied mode going to the
     level first in the fitted level order); a term with levels reports one row per
     fitted level, the reference level (and any level pinned to it) reading back as
-    an exact zero.  Bands are the
+    an exact zero.  A ``Numeric`` term is read against its column's training
+    centre, so its effect is ``beta (x - x_ref)`` and is zero there.  Bands are the
     Bayesian pointwise interval and, unless ``simultaneous=False``, the
     max-deviation simultaneous band of Ruppert, Wand and Carroll (2003),
     section 6.5, over ``n_sim`` posterior draws.  ``multiplier`` is
@@ -790,7 +846,11 @@ def _prepare_term_effect(
     names = (qualified,) if special_slice is None else (qualified, special_name)
     spec = _compiled_spec(fitted, parameter, term)
     design = _term_design(fitted, evaluation, state, *blocks)
-    design = design - _reference_row(spec, levels, design)
+    if _term_kind(spec) == "numeric":
+        anchor = _numeric_anchor(fitted, frame, parameter, term, state, *blocks)
+    else:
+        anchor = _reference_row(spec, levels, design)
+    design = design - anchor
     columns = _coefficient_columns(*blocks)
     beta = np.asarray(fitted.coefficients, dtype=np.float64)
     effect = design @ beta[columns]
@@ -814,6 +874,7 @@ def _prepare_term_effect(
         levels=levels,
         special=special,
         design=design,
+        anchor=anchor,
         columns=columns,
         beta=beta,
         effect=effect,
