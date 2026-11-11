@@ -1393,6 +1393,120 @@ def test_a_follow_onto_the_same_data_takes_the_fits_rows_quietly(change):
     assert after == before
 
 
+_OFFSETS = ("none", "column", "array", "column and array", "several parameters")
+_WEIGHTS = ("none", "prior", "frequency", "exposure")
+
+
+def _follow_case(offsets: str, weights: str, seed: int):
+    """A 100-row SuperLSS whose mean term has a dip a post-fit increasing rule repairs, its
+    offsets declared as ``offsets`` names, and its data for ``seed``: ``(model, X, y, w, given)``,
+    ``given`` being the offsets a ``train_data`` supplies (its array parts)."""
+    from superglm import NegativeBinomialLS
+
+    rng = np.random.default_rng(seed)
+    x = np.sort(rng.uniform(0.0, 10.0, 100))
+    X = pd.DataFrame({"x": x, "exposure": rng.uniform(-0.3, 0.3, 100)})
+    array = np.linspace(-0.2, 0.2, 100)  # declared on the model, so the same for every seed
+    mean_sources = {
+        "none": (),
+        "column": ("exposure",),
+        "array": (array,),
+        "column and array": ("exposure", array),
+        "several parameters": ("exposure",),
+    }[offsets]
+    other_sources = (0.5 * array,) if offsets == "several parameters" else ()
+    family = NegativeBinomialLS() if weights == "exposure" else GammaLS()
+    other = family.theta if weights == "exposure" else family.scale
+    rule = Constraint.postfit.increasing
+    term = s("x", kind="bs", k=8, constraint=rule)
+    model = SuperLSS(
+        family,
+        family.mean(term, **({"offset": mean_sources} if mean_sources else {})),
+        other(**({"offset": other_sources} if other_sources else {})),
+        weight_semantics="frequency" if weights == "frequency" else "prior",
+    )
+    log_mean = 0.4 + 0.18 * x - 0.8 * np.exp(-(((x - 6.0) / 0.9) ** 2))
+    log_mean = log_mean + sum(
+        X[s_].to_numpy() if isinstance(s_, str) else s_ for s_ in mean_sources
+    )
+    w = {
+        "none": None,
+        "prior": rng.uniform(0.5, 2.0, 100),
+        "frequency": rng.integers(1, 4, 100).astype(float),
+        "exposure": rng.uniform(0.5, 2.0, 100),
+    }[weights]
+    if weights == "exposure":  # a rate: counts over the exposure
+        y = rng.negative_binomial(5.0, 5.0 / (5.0 + 4.0 * w * np.exp(log_mean))) / w
+    else:
+        y = rng.gamma(6.0, np.exp(log_mean) / 6.0)
+    given = {
+        name: sum(source for source in sources if not isinstance(source, str))
+        for name, sources in (("mean", mean_sources), (other.__name__, other_sources))
+        if any(not isinstance(source, str) for source in sources)
+    }
+    return model, X, y, w, given or None
+
+
+def _shown(session, X):
+    """Everything a session shows of its training rows, and of one edit and its export."""
+    from superglm.editor.lss.validation import lss_dataset_metrics
+    from superglm.editor.payloads import session_payload
+
+    session_payload(session)  # an action: the session follows its model, as the page's do
+    train = session._evaluation_data["train"]
+    frame = as_eager_frame(train.X)
+    lss = session.model.lss
+    shown = {
+        "x": frame.column_array("x"),
+        "exposure": frame.column_array("exposure"),
+        "y": np.asarray(train.y, dtype=np.float64),
+        "w": np.ones(train.n_obs) if train.sample_weight is None else train.sample_weight,
+        "link": lss.predict_link(train.X, offsets=train.offset).to_numpy(),
+        "metrics": np.array(list(lss_dataset_metrics(session.model, train).values())),
+        "exposure weights": session.terms["mean:x"].weights,
+    }
+    session.select_x("mean:x", 2.0, 5.0)
+    session.shift("mean:x", 0.1)
+    shown["payload"] = session_payload(session)
+    shown["edited"] = session.to_model().predict_link(train.X, offsets=train.offset).to_numpy()
+    return shown
+
+
+@pytest.mark.parametrize("follow", ["refit on the same data", "refit on other data", "repair"])
+@pytest.mark.parametrize("weights", _WEIGHTS)
+@pytest.mark.parametrize("offsets", _OFFSETS)
+def test_a_followed_session_shows_what_a_fresh_one_on_the_refit_shows(offsets, weights, follow):
+    # The invariant that closes the follow's family of findings: after any follow, the
+    # session's training rows and every number it shows equal those of a session opened fresh
+    # on the refitted model with the refit's own data. Codex's case is a column and an array
+    # offset: at b28e71770 the follow stored the total offset as the split's array part, and
+    # shape_prediction_offsets added the column a second time.
+    model, X, y, w, given = _follow_case(offsets, weights, 0)
+    lambdas = {"mean:x#wiggle": 1.0}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y, sample_weight=w, lambdas=lambdas)
+        session = edit(model, train_data=(X, y, w, given))
+        opened = model._model
+        if follow == "repair":
+            model.apply_shape_postfit()
+            assert model._model.fit_state.hand_edit.repairs  # a repair was made
+            data = (X, y, w, given)
+        else:
+            _, X2, y2, w2, _ = _follow_case(offsets, weights, 0 if "same" in follow else 1)
+            model.fit(X2, y2, sample_weight=w2, lambdas=lambdas)
+            data = (X2, y2, w2, given)
+        assert model._model is not opened
+        followed = _shown(session, data[0])
+        fresh = _shown(edit(model, train_data=data), data[0])
+    assert followed.keys() == fresh.keys()
+    for name in followed:
+        if name == "payload":
+            assert followed[name] == fresh[name], name
+        else:
+            np.testing.assert_allclose(followed[name], fresh[name], rtol=1e-12, err_msg=name)
+
+
 def test_a_refit_in_place_that_kept_no_rows_says_the_editor_needs_its_rows():
     from superglm.editor.errors import EditorValueError
     from superglm.editor.lss.availability import TRAINING_ROWS_LOST

@@ -15,8 +15,9 @@ from types import MappingProxyType
 from typing import Any
 
 import numpy as np
+from numpy.typing import NDArray
 
-from superglm.distributional.offsets import sources_of
+from superglm.distributional.offsets import sources_of, sum_offset_sources
 from superglm.distributional.weights import LikelihoodWeightError, resolve_likelihood_weights
 from superglm.editor.errors import EditorValueError
 from superglm.editor.evaluation import EvaluationDataset, coerce_dataset
@@ -171,14 +172,7 @@ def follow_training_rows(
     state = lss._require_fitted().fit_state
     rows = state.retained_rows
     assert rows is not None
-    # The offsets a column carries are read from the frame, as the fit read them.
-    offsets = {
-        p.name: np.asarray(rows.offsets[p.name])
-        for p in state.predictor_templates
-        if p.name in rows.offsets
-        and state.null_model.offset_semantics.get(p.name) != "zero_offset"
-        and not (sources_of(p) and all(isinstance(s, str) for s in sources_of(p)))
-    }
+    offsets = _array_offsets(state.predictor_templates, rows.likelihood_weights.input_positions)
     weights = rows.likelihood_weights
     followed = coerce_dataset(
         "train",
@@ -194,6 +188,21 @@ def follow_training_rows(
     )
     assert followed is not None
     return followed, None if notice is None else notice.format(n=followed.n_obs)
+
+
+def _array_offsets(predictors: Any, positions: NDArray[np.intp]) -> dict[str, NDArray]:
+    """Each predictor's declared array offsets, summed at the kept ``positions``: the part of
+    its offset a split supplies (``shape_prediction_offsets``), since its columns are read
+    from the frame. Never the fit's total, whose columns would then count twice."""
+    found: dict[str, NDArray] = {}
+    for predictor in predictors:
+        arrays = [source for source in sources_of(predictor) if not isinstance(source, str)]
+        if arrays:
+            values = (getattr(source, "values", source) for source in arrays)
+            found[predictor.name] = sum_offset_sources(
+                {predictor.name: tuple(np.asarray(value) for value in values)}, positions
+            )[predictor.name]
+    return found
 
 
 def session_refit_reason(session: Any) -> str | None:
