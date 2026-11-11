@@ -52,20 +52,41 @@ _LEFT_SPAN = 14.0
 _RIGHT_SPAN = 40.0
 #: Below this many cells the shortfall is the pmf sum, whose terms are all positive.
 SHORTFALL_CELLS = 64
-#: ``1 / n!`` for ``n = 2, ..., 20``: ``e2`` on ``|z| < 1`` to within ``1 / 21!``.
-_E2_SERIES = np.array([1.0 / math.factorial(n) for n in range(20, 1, -1)])
+#: ``1 / n!`` for ``n = 2, ..., 16``: ``e2`` on ``|z| < 1/2`` to within ``1e-17``
+#: relative; past it ``expm1(z) - z`` loses at most a factor five to cancellation.
+_E2_SERIES = np.array([1.0 / math.factorial(n) for n in range(16, 1, -1)])
+#: A tail node past the outer features whose term is below this fraction of the
+#: sum so far ends its side: the terms there fall double-exponentially.
+_NEGLIGIBLE = 2.0**-60
 _TWO_PI = 2.0 * math.pi
 
 
 @njit(cache=True)
 def _expm1_less_identity(z: float) -> float:
     """``e^z - 1 - z``, by its Taylor series where the difference would cancel."""
-    if abs(z) < 1.0:
+    if abs(z) < 0.5:
         acc = 0.0
         for coefficient in _E2_SERIES:
             acc = acc * z + coefficient
         return acc * z * z
     return math.expm1(z) - z
+
+
+@njit(cache=True)
+def _node_term(
+    s: float, centre: float, spread: float, size: float, w: float, rho: float
+) -> tuple[float, float]:
+    """``(x, e2(size log R) e^{-x} dx/ds)`` at the sinh-mapped node ``s``."""
+    grow = math.exp(s)
+    shrink = 1.0 / grow
+    x = centre + spread * 0.5 * (grow - shrink)
+    inverse_v = math.exp(-x)
+    decay = inverse_v * inverse_v  # 1 / v^2
+    cosine = decay / (1.0 + decay)  # 1 / (1 + v^2)
+    drop = w / (1.0 + decay)  # 1 - R = w v^2 / (1 + v^2)
+    log_ratio = math.log1p(-drop) if drop < 0.5 else math.log(rho + w * cosine)
+    jacobian = spread * 0.5 * (grow + shrink)
+    return x, _expm1_less_identity(size * log_ratio) * inverse_v * jacobian
 
 
 @njit(cache=True, nogil=True)
@@ -81,17 +102,19 @@ def _zero_score(mean: float, size: float) -> float:
     centre = 0.5 * (left + right)
     spread = 0.5 * (right - left) + 1.0
     step = _STEP / spread
-    first = -math.ceil(math.asinh((spread + _LEFT_SPAN) / spread) / step)
-    last = math.ceil(math.asinh((spread + _RIGHT_SPAN) / spread) / step)
+    first = int(math.ceil(math.asinh((spread + _LEFT_SPAN) / spread) / step))
+    last = int(math.ceil(math.asinh((spread + _RIGHT_SPAN) / spread) / step))
     acc = 0.0
-    for node in range(int(first), int(last) + 1):
-        s = node * step
-        x = centre + spread * math.sinh(s)
-        decay = math.exp(-2.0 * x)
-        cosine = decay / (1.0 + decay)  # 1 / (1 + v^2)
-        drop = w / (1.0 + decay)  # 1 - R = w v^2 / (1 + v^2)
-        log_ratio = math.log1p(-drop) if drop < 0.5 else math.log(rho + w * cosine)
-        acc += _expm1_less_identity(size * log_ratio) * math.exp(-x) * spread * math.cosh(s)
+    for node in range(0, last + 1):
+        x, term = _node_term(node * step, centre, spread, size, w, rho)
+        acc += term
+        if x > right + 1.0 and term <= _NEGLIGIBLE * acc:
+            break
+    for node in range(1, first + 1):
+        x, term = _node_term(-node * step, centre, spread, size, w, rho)
+        acc += term
+        if x < left - 1.0 and term <= _NEGLIGIBLE * acc:
+            break
     return acc * step * (1.0 + r) / (_TWO_PI * q)
 
 
