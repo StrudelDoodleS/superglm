@@ -442,6 +442,9 @@ freedom in lasso problems", *Annals of Statistics* 40(2), 2012, Theorem 3).
 - A term the constraint holds flat counts as no free parameters.
 - Under `fit_reml()`, the published scale is still the REML estimate, which
   does not read the face.
+- The editor's **Free levels** comparison moves the curve along the face when
+  it asks how a level's data pull on it, so a level the rule holds flat does
+  not move with its data.
 
 The coefficient covariance does not come from the face.
 
