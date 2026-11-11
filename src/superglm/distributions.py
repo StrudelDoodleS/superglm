@@ -395,80 +395,6 @@ def _negative_binomial_log_density(y: NDArray, mu: NDArray, theta: NDArray | flo
     return density
 
 
-def _log_of_quotient(numerator: NDArray, denominator: NDArray) -> NDArray:
-    """Return log(numerator / denominator), as a difference of logs where the quotient is not normal."""
-    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-        quotient = numerator / denominator
-        result = np.log(quotient)
-        exceptional = ~np.isfinite(quotient) | (quotient < _FLOAT64_MIN_NORMAL)
-        result[exceptional] = np.log(numerator[exceptional]) - np.log(denominator[exceptional])
-    return result
-
-
-# Terms of the centred NB2 series below; the omitted tail is under 1e-20 of the sum.
-_NB2_CENTRED_TERMS = 18
-
-
-# The NB2 half deviance for y > 0, by two algorithms chosen by t = (y - mu) / mu.
-# Near y = mu (|t| <= 1/8), with r = y - mu, s = mu / (mu + theta) and
-# 1 - s = theta / (mu + theta), it is the series
-#     (r t) (1 - s) sum_k (-t)^k (1 + s + ... + s^k) / ((k + 1)(k + 2)),
-# from (1 + t) log1p(t) - t = sum_n (-t)^n / (n (n - 1)) at (mu, t) and at
-# (mu + theta, r / (mu + theta)). Its terms fall by a factor of eight, the first
-# is 1/2 and the sum is at least 0.45, so it subtracts nothing. r is exact there
-# (Sterbenz), and s and 1 - s come from min(mu, theta) / max(mu, theta), so
-# neither overflows. Off that window it is
-#     y log(y (mu + theta) / (mu (y + theta))) - theta log((y + theta) / (mu + theta)),
-# which leaves no theta-sized factor on a logarithm near zero: the two terms'
-# summed size is at most 35 times the result (at t = 1/8 in the Poisson limit).
-# Each logarithm takes log1p of its difference where its argument lies in
-# (1/2, 2) (Goldberg 1991, Theorem 4), and a difference of logarithms where the
-# quotient underflows or overflows, so a tiny y keeps a finite deviance. The
-# windows select the algorithm, not the value; a result below zero in the last
-# bits is set to zero.
-def _nb2_positive_half_deviance(count: NDArray, mean: NDArray, theta: float) -> NDArray:
-    """Return ``y log(y / mu) - (y + theta) log((y + theta) / (mu + theta))`` for ``y > 0``.
-
-    Each row is within a few ``u`` of its value and never negative, at every
-    ``theta``; the comment above gives the two algorithms and their bounds.
-    """
-    result = np.empty_like(count, dtype=np.float64)
-    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-        difference = count - mean
-        t = difference / mean
-        close = np.abs(t) <= 0.125
-        far = ~close
-        if np.any(close):
-            tc, mc = t[close], mean[close]
-            small_ratio = np.minimum(mc, theta) / np.maximum(mc, theta)
-            share = 1.0 / (1.0 + small_ratio)
-            mean_is_smaller = mc <= theta
-            s = np.where(mean_is_smaller, small_ratio * share, share)
-            one_minus_s = np.where(mean_is_smaller, share, small_ratio * share)
-            series = np.zeros_like(tc)
-            power = np.ones_like(tc)
-            partial = np.ones_like(tc)
-            for k in range(_NB2_CENTRED_TERMS):
-                series += power * partial * ((-1.0) ** k / ((k + 1) * (k + 2)))
-                power *= tc
-                partial = 1.0 + s * partial
-            result[close] = (difference[close] * tc) * one_minus_s * series
-        if np.any(far):
-            y_far, mean_far, r_far = count[far], mean[far], difference[far]
-            shifted_count = y_far + theta
-            shifted_mean = mean_far + theta
-            shifted_log = _log_of_quotient(shifted_count, shifted_mean)
-            relative = r_far / shifted_mean
-            near = (relative > -0.5) & (relative < 1.0)
-            shifted_log[near] = np.log1p(relative[near])
-            cross_log = _log_of_quotient(y_far, mean_far) - shifted_log
-            delta = (theta / shifted_count) * t[far]
-            near = (delta > -0.5) & (delta < 1.0)
-            cross_log[near] = np.log1p(delta[near])
-            result[far] = np.maximum(y_far * cross_log - theta * shifted_log, 0.0)
-    return result
-
-
 class NegativeBinomial:
     """Negative binomial (NB2) family with overdispersion controlled by ``theta``.
 
@@ -509,21 +435,12 @@ class NegativeBinomial:
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
         """NB2 unit deviance, ``2 [y log(y / mu) - (y + theta) log((y + theta) / (mu + theta))]``.
 
-        A ``y = 0`` row is ``2 theta log1p(mu / theta)``; the positive rows are
-        ``_nb2_positive_half_deviance``, whose docstring states the accuracy.
+        Each row is within a few ``u`` of its value and never negative, at every
+        ``theta``; ``superglm._nb2_deviance`` gives the algorithms and their bounds.
         """
-        theta = float(self.theta)
-        y, mu = np.broadcast_arrays(
-            np.asarray(y, dtype=np.float64), np.asarray(mu, dtype=np.float64)
-        )
-        d = np.empty(y.shape, dtype=np.float64)
-        positive = y > 0
-        # errstate keeps a trial mu of 0 or inf at its infinite or NaN deviance
-        # without a warning.
-        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-            d[~positive] = 2 * theta * _log1p_ratio(mu[~positive], np.asarray(theta))
-        d[positive] = 2 * _nb2_positive_half_deviance(y[positive], mu[positive], theta)
-        return d
+        from superglm._nb2_deviance import unit_deviance
+
+        return unit_deviance(y, mu, float(self.theta))
 
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
         """NB2 log-likelihood: Σ w[log Γ(y+θ) - log Γ(θ) - log Γ(y+1) + θ log(θ/(μ+θ)) + y log(μ/(μ+θ))]."""

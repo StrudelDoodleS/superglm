@@ -284,6 +284,30 @@ class TestNB2DevianceUnit:
             np.abs(actual[finite] - expected[finite]) <= (16 + 4) * u * scale[finite] + underflow
         )
 
+    def test_unit_deviance_allocates_its_output_and_under_half_a_row_more(self):
+        """Review of #614: NB2 fits slowed by 38-59% on masked copies of every positive row.
+
+        The deviance runs in chunks of ``_CHUNK`` rows, two compiled passes around four
+        whole-chunk logarithms, so its only allocations are the output and four
+        buffers of one chunk: 1 MiB, under half the output at this size. At cfc77fa21
+        the masked-array algorithm peaked at several rows of floats on this count data.
+        """
+        import tracemalloc
+
+        rng = np.random.default_rng(614)
+        n = 400_000
+        mu = 2.0 * np.exp(0.3 * rng.standard_normal(n))
+        y = rng.negative_binomial(2.0, 2.0 / (2.0 + mu)).astype(np.float64)
+        family = NegativeBinomial(theta=2.0)
+        family.deviance_unit(y[:8], mu[:8])
+        tracemalloc.start()
+        try:
+            family.deviance_unit(y, mu)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert peak <= 1.5 * 8 * n
+
 
 class TestNB2LogLikelihood:
     def test_matches_scipy(self):
