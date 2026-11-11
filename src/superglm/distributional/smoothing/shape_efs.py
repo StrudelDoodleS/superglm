@@ -36,7 +36,6 @@ from superglm.distributional.layout import StackedLayout
 from superglm.distributional.results.iteration import DistributionalEFSConfig
 from superglm.distributional.results.shape import ShapeFit, ShapeSmoothing
 from superglm.distributional.results.solver import DenseSolverConfig, DenseSolverResult
-from superglm.distributional.smoothing.acceleration import WindowedTypeIIAnderson
 from superglm.distributional.smoothing.face_efs import projected_component_states
 from superglm.distributional.smoothing.objective import _component_states
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
@@ -164,8 +163,11 @@ def choose_smoothing_with_shape_rules(
     penalty keeps the search's value. The search may stop at the exact gradient rather than at
     the Fellner--Schall fixed point, which neglects the curvature's change with the smoothing,
     so the update is read against its own value at the search's fit: the step re-chosen is
-    ``s_face(rho) - s_free``, which is zero wherever the face is the whole space. Windowed
-    Type-II Anderson acceleration (``acceleration.py``, as the search uses) takes the steps.
+    ``s_face(rho) - s_free``, which is zero wherever the face is the whole space. The steps are
+    the update's own, unaccelerated: the face's likelihood is smooth only while the rows that
+    bind stay the same, so it can hold a fixed point on more than one face, and plain steps
+    from the search's smoothing reach the nearest one, the same one on every platform, where
+    an extrapolated step can jump to another.
 
     Returns the rule fit where that step vanishes to the search's tolerance, its record, and
     its smoothing. A fit the rules leave in place, or a refit that did not converge, is
@@ -188,10 +190,6 @@ def choose_smoothing_with_shape_rules(
     )
     exact = () if base is None else tuple(base.component_names)
     lower, upper = math.log(efs_config.minimum_lambda), math.log(efs_config.maximum_lambda)
-    accelerator = WindowedTypeIIAnderson(
-        history=efs_config.acceleration_history,
-        max_amplification=efs_config.acceleration_max_amplification,
-    )
     session = _DenseObservedReuseSession()
 
     def step_at(fit: DenseSolverResult, current: Mapping[str, float]) -> NDArray:
@@ -227,9 +225,9 @@ def choose_smoothing_with_shape_rules(
     refits = 0
     step = step_at(fit, current)
     # A penalty whose step reverses moves at most half its last move next, so steps that cross
-    # the smoothing at which a row starts to bind bisect onto it: below it the row binds and the face's update
-    # rises, above it the row is free and the search's update falls. A fixed point of the
-    # update on either side, if there is one, is reached inside the bracket.
+    # the smoothing at which a row starts to bind bisect onto it: below it the row binds and
+    # the face's update rises, above it the row is free and the search's update falls. A fixed
+    # point of the update on either side, if there is one, is reached inside the bracket.
     reach = np.full(len(names), float(efs_config.max_log_step))
     crossed = False
     held = (fit, record, current, step)  # the last iterate whose rows bind
@@ -249,36 +247,15 @@ def choose_smoothing_with_shape_rules(
         if refits >= efs_config.max_iterations:
             break
         here = np.log([current[name] for name in names])
-        plain = here + np.clip(step, -reach, reach)
-        decision = None
-        if not crossed:
-            accelerator.record_accepted(
-                log_lambdas=here, raw_residual=step, provenance=(names, face_of(record))
-            )
-            decision = accelerator.propose(
-                max_log_step=efs_config.max_log_step,
-                minimum_log_lambda=lower,
-                maximum_log_lambda=upper,
-            ).proposal
-        proposals = [plain] if decision is None else [decision.log_lambdas, plain]
-        accepted = None
-        for proposal in proposals:
-            trial = {**current, **dict(zip(names, np.exp(proposal).tolist(), strict=True))}
-            refitted, refit_record = refit(trial)
-            refits += 1
-            if not refit_record.converged:
-                continue
-            trial_step = step_at(refitted, trial)
-            # an accelerated step must shrink the residual; the plain step is taken as it comes
-            if proposal is plain or np.max(np.abs(trial_step)) < residual:
-                accepted = (refitted, refit_record, trial, trial_step)
-                break
-            accelerator.reject()
-        if accepted is None:
+        target = here + np.clip(step, -reach, reach)
+        trial = {**current, **dict(zip(names, np.exp(target).tolist(), strict=True))}
+        refitted, refit_record = refit(trial)
+        refits += 1
+        if not refit_record.converged:
             converged, reason = False, "refit_not_converged"
             break
         face = face_of(record)
-        fit, record, current, step = accepted
+        fit, record, current, step = refitted, refit_record, trial, step_at(refitted, trial)
         move = np.log([current[name] for name in names]) - here
         reversed_ = np.sign(step) * np.sign(move) < 0
         reach = np.where(reversed_, 0.5 * np.abs(move), reach)
