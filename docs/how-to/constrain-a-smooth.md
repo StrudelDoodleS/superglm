@@ -409,9 +409,13 @@ What you get afterwards:
   `ShapeRepairedWarning`. `summary()` shows NaN for them and a note, and so
   does the intercept row of the term's parameter, which the repair
   re-estimated. In the editor the term has no band. An editor session open
-  on the model sees the repair: it shows the repaired curve, edits already
-  made carry over onto it as the same changes, and its cross-validation and
-  final-fit results are marked as made on an earlier version.
+  on the model sees the repair at its next action (an edit, Undo, Redo, or the
+  page asking for its state): it shows the repaired curve, edits already made
+  carry over onto it as the same changes, Undo and Redo included, and its
+  cross-validation and final-fit results are marked as made on an earlier
+  version. A refit of the model in place is followed the same way. When the
+  refit moved a term's grid, the edits cannot carry over: the session starts
+  again on the refitted model and says so, in a warning and on the page.
 - Standard errors that read the whole covariance (`predict_link(se_fit=True)`,
   posterior draws and bounds) warn that the covariance is the fit's from before
   the repair.

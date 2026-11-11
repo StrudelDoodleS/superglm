@@ -6670,11 +6670,11 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
         "await waitForPaint()"
     )
     assert transition_source.index("await waitForPaint()") < transition_source.index(
-        "finishStructuralMutation(null)"
+        "finishStructuralMutation(envelope.state.notice ?? null)"
     )
-    assert transition_source.index("finishStructuralMutation(null)") < transition_source.index(
-        "scheduleVisibleEvidence"
-    )
+    assert transition_source.index(
+        "finishStructuralMutation(envelope.state.notice ?? null)"
+    ) < transition_source.index("scheduleVisibleEvidence")
     assert "immediate: true" in transition_source
     assert "summaryCommitted: true" in transition_source
     assert "actions.initialize()" not in refit_source
@@ -7109,10 +7109,9 @@ def _editor_token_header(url: str) -> dict[str, str]:
     return {}
 
 
-def test_a_session_follows_a_refit_of_its_model_in_place_that_moves_the_grid():
-    # A refit in place replaces the model's fit behind the session. The term's grid moved
-    # with the new data, so its edits cannot carry over: the session starts again on the
-    # refitted model, as a new model in force does. At b7cc25f0c it kept the old curve.
+def _refit_moves_the_grid():
+    """A SuperGLM session with an edit, an undone edit and a selection, and a refit in place
+    of its model that moves the term's grid."""
     from superglm import PSpline, SuperGLM
     from superglm.editor import edit
 
@@ -7124,9 +7123,26 @@ def test_a_session_follows_a_refit_of_its_model_in_place_that_moves_the_grid():
     session = edit(model, train_data=(df, y))
     session.select_x("x", 0.2, 0.4)
     session.shift("x", 0.3)
+    session.shift("x", 0.1)
+    session.undo()
+
+    def refit():
+        model.fit(pd.DataFrame({"x": 2.0 * x}), np.cos(3.0 * x) + 0.05 * rng.normal(size=len(x)))
+
+    return model, session, refit
+
+
+def test_a_session_follows_a_refit_of_its_model_in_place_that_moves_the_grid():
+    # A refit in place replaces the model's fit behind the session. The term's grid moved
+    # with the new data, so its edits cannot carry over: the session starts again on the
+    # refitted model, as a new model in force does. At b7cc25f0c it kept the old curve.
+    from superglm.editor.session import EditorFitReplacedWarning
+
+    model, session, refit = _refit_moves_the_grid()
     revision = session.model_revision
-    wider = pd.DataFrame({"x": 2.0 * x})
-    model.fit(wider, np.cos(3.0 * x) + 0.05 * rng.normal(size=len(x)))
+    refit()
+    with pytest.warns(EditorFitReplacedWarning):
+        assert not session.edited_terms()
 
     refitted = model.term_inference(
         "x", with_se=False, n_points=session.n_points, centering=session.centering
@@ -7134,5 +7150,84 @@ def test_a_session_follows_a_refit_of_its_model_in_place_that_moves_the_grid():
     term = session.terms["x"]
     np.testing.assert_allclose(term.x, refitted.x)
     np.testing.assert_allclose(term.original_log_effect, refitted.log_relativity, atol=1e-12)
-    assert not session.edited_terms() and not session.history
+    assert not session.history
     assert session.model_revision > revision
+
+
+def test_a_refit_that_moves_the_grid_says_the_edits_and_selection_were_not_carried():
+    # At c3c56d40a the restart dropped the edits and the selection without a word, and the
+    # next shift failed with "No points selected for term 'x'" and nothing to say why.
+    from superglm.editor.errors import EditorValueError
+    from superglm.editor.session import EditorFitReplacedWarning
+    from superglm.editor.widget import EditorWidget
+
+    _, session, refit = _refit_moves_the_grid()
+    widget = EditorWidget(session, mode="server")
+    refit()
+    with (
+        pytest.warns(EditorFitReplacedWarning, match=r"the grid of x changed.*Undo cannot"),
+        pytest.raises(EditorValueError, match="No points selected"),
+    ):
+        session.shift("x", 0.1)
+    # the page's next state carries the same sentence, once
+    first, second = widget._state(), widget._state()
+    assert "the grid of x changed" in first["notice"] and second["notice"] is None
+
+
+def test_each_fit_follow_outcome_changes_what_its_table_says():
+    # The one move a session makes when its model's fit was replaced in place.
+    from superglm import Constraint
+    from superglm.editor import edit
+    from superglm.editor.session import FIT_FOLLOW_CHANGES, EditorFitReplacedWarning, FitFollow
+    from tests.test_distributional_shape_postfit import _data, _fit
+
+    held = []  # every part read, kept alive so that no id below is reused
+
+    def parts(session):
+        lists = {name: getattr(session, name) for name in ("history", "redo_stack", "pending")}
+        held.extend([session._terms, session._selection, *lists.values()])
+        found = {name: (id(kept), tuple(map(id, kept))) for name, kept in lists.items()}
+        held.extend([*session.history, *session.redo_stack, *session._selection.values()])
+        found["terms"] = id(session._terms)
+        found["selection"] = (
+            id(session._selection),
+            tuple((name, id(chosen)) for name, chosen in session._selection.items()),
+        )
+        found["model_revision"] = session._model_revision
+        return found
+
+    def changed(before, after):
+        return {name for name in before if before[name] != after[name]}
+
+    # IN_STEP and CARRIED on a SuperLSS repair, RESTARTED on a SuperGLM refit that moves a grid
+    model = _fit("mean", Constraint.postfit.increasing, kind="bs", k=8)
+    X, y = _data("mean")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        session = edit(model, train_data=(X, y))
+        session.select_x("mean:x", 2.0, 4.0)
+        session.shift("mean:x", 0.2)
+        session.shift("mean:x", 0.1)
+        session.undo()
+        outcomes = {}
+        before = parts(session)
+        outcomes[FitFollow.IN_STEP] = (
+            session._follow_fit_in_place(),
+            changed(before, parts(session)),
+        )
+        model.apply_shape_postfit()
+        before = parts(session)
+        outcomes[FitFollow.CARRIED] = (
+            session._follow_fit_in_place(),
+            changed(before, parts(session)),
+        )
+    _, session, refit = _refit_moves_the_grid()
+    refit()
+    before = parts(session)
+    with pytest.warns(EditorFitReplacedWarning):
+        outcome = session._follow_fit_in_place()
+    outcomes[FitFollow.RESTARTED] = (outcome, changed(before, parts(session)))
+    assert set(outcomes) == set(FitFollow) == set(FIT_FOLLOW_CHANGES)
+    for wanted, (outcome, moved) in outcomes.items():
+        assert outcome is wanted
+        assert moved == FIT_FOLLOW_CHANGES[wanted], wanted

@@ -2028,6 +2028,55 @@ def _grouped_region(unseen: str = "error"):
     return model, X, y
 
 
+def test_a_new_levels_choice_its_undo_and_redo_read_no_term_again(monkeypatch):
+    # The choice swaps in a copy of the model with the same fit. At c3c56d40a the session took
+    # the copy for a refit in place: each of the three re-read every term and moved the
+    # revision on twice (0.7 s each on the freMTPL2 book, against 0.008 s).
+    model, _, _ = _grouped_region()
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    session.select_x("x", 2.0, 4.0)
+    session.shift("x", 0.1)
+    reads = []
+    real = EditorSession._editable_terms_from_model
+    monkeypatch.setattr(
+        EditorSession,
+        "_editable_terms_from_model",
+        staticmethod(lambda *args, **kwargs: reads.append(args) or real(*args, **kwargs)),
+    )
+    for act in (
+        lambda: session.set_unseen("region", "Other"),
+        session.undo,
+        session.redo,
+    ):
+        revision = session.model_revision
+        act()
+        session_payload(session)
+        assert session.model_revision == revision + 1
+    assert reads == []
+    assert session.edited_terms() == ["x"]
+
+
+def test_a_refit_in_place_made_while_a_new_levels_copy_is_in_force_is_followed_on_undo():
+    # The copy stands for the fit it was made from, so the session follows the opened model's
+    # refit once Undo puts that model back in force, carrying the pending edit onto it.
+    model, X, y = _grouped_region()
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    session.select_x("x", 2.0, 4.0)
+    session.shift("x", 0.1)
+    session.set_unseen("region", "Other")
+    model.fit(X, y + 0.2 * np.sin(X["x"].to_numpy()))
+    session.undo()  # the New levels choice: the opened, refitted model is in force again
+    term = session.terms["x"]
+    refitted = model.term_inference(
+        "x", with_se=False, n_points=session.n_points, centering=session.centering
+    )
+    np.testing.assert_allclose(term.original_log_effect, refitted.log_relativity, atol=1e-12)
+    chosen = (term.x >= 2.0) & (term.x <= 4.0)
+    change = term.edited_log_effect - term.original_log_effect
+    np.testing.assert_allclose(change[chosen], 0.1, atol=1e-12)
+    np.testing.assert_allclose(change[~chosen], 0.0, atol=1e-12)
+
+
 def _with_new_level(X, rows: int = 5):
     new = X.iloc[:40].copy()
     new.loc[new.index[:rows], "region"] = "Z"

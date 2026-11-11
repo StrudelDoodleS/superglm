@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import functools
+import inspect
 import warnings
 from collections.abc import Callable
 from dataclasses import replace
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -215,6 +218,72 @@ def _moved_record(record: EditRecord, moved: dict[str, tuple[EditableTerm, NDArr
     return replace(record, before=record.before + change, after=record.after + change)
 
 
+class FitFollow(Enum):
+    """What a session does when it next acts after its model's fit was replaced in place.
+
+    A refit or ``apply_shape_postfit`` on the model object the session holds replaces that
+    object's fit, which the session learns of only when it next acts: at the entry and exit of
+    each public method, when ``session_payload`` reads it, and when a widget takes its lock.
+    ``EditorSession._follow_fit_in_place`` is the one move, and ``FIT_FOLLOW_CHANGES`` says
+    what each outcome changes.
+    """
+
+    IN_STEP = "in_step"  # the terms were read from the fit in force: nothing to do
+    CARRIED = "carried"  # every grid kept: edits and their undo records move onto the new curves
+    RESTARTED = "restarted"  # a grid moved: the session starts again on the model, and says so
+
+
+# The parts of a session each outcome changes. A restart also leaves a notice, which the
+# warning and the page's next state carry, when it dropped edits or a selection.
+FIT_FOLLOW_CHANGES: dict[FitFollow, frozenset[str]] = {
+    FitFollow.IN_STEP: frozenset(),
+    FitFollow.CARRIED: frozenset({"terms", "history", "redo_stack", "model_revision"}),
+    FitFollow.RESTARTED: frozenset(
+        {"terms", "history", "redo_stack", "pending", "selection", "model_revision"}
+    ),
+}
+
+_EDITS_NOT_CARRIED = (
+    "The model was refitted in place and the grid of {terms} changed, so the edits and "
+    "selection made on the earlier fit could not be moved onto the new curves. The editor has "
+    "started again from the refitted model. Undo cannot bring them back: the model no longer "
+    "holds the fit they were made on."
+)
+
+
+class EditorFitReplacedWarning(UserWarning):
+    """Edits made on a fit that a refit in place replaced could not be carried over."""
+
+
+def _following_its_model(method):
+    """``method``, run once the session has followed its model's fit (``FitFollow``), and
+    followed again after it, since Undo or Redo can put back a model refitted meanwhile."""
+
+    @functools.wraps(method)
+    def following(self, *args, **kwargs):
+        if self._acting:
+            return method(self, *args, **kwargs)
+        self._follow_fit_in_place()
+        self._acting = True
+        try:
+            result = method(self, *args, **kwargs)
+        finally:
+            self._acting = False
+        self._follow_fit_in_place()
+        return result
+
+    return following
+
+
+def _each_public_method_follows_its_model(cls):
+    """Every public method of ``cls`` first follows the model's fit; getters do not."""
+    for name, member in list(vars(cls).items()):
+        if not name.startswith("_") and inspect.isfunction(member):
+            setattr(cls, name, _following_its_model(member))
+    return cls
+
+
+@_each_public_method_follows_its_model
 class EditorSession:
     """Stateful editor for fitted 1D main effects.
 
@@ -236,6 +305,11 @@ class EditorSession:
         cv_data: EvaluationDataset | None = None,
         with_se: bool = True,
     ):
+        # Inside a public method, or following the fit: no second follow starts (``FitFollow``).
+        self._acting = False
+        # Each New levels copy's fit, beside the fit identity it stands for (``_fit_identity``).
+        self._fit_sources: list[tuple[Any, Any]] = []
+        self._notice: str | None = None
         self.model = model
         self.reference_model = model if reference_model is None else reference_model
         self.terms = terms
@@ -367,27 +441,48 @@ class EditorSession:
 
     @property
     def terms(self) -> dict[str, EditableTerm]:
-        """The editable terms, read again when the model's fit was replaced in place."""
-        self._follow_fit_in_place()
+        """The editable terms, as of the session's last action (``FitFollow``)."""
         return self._terms
 
     @terms.setter
     def terms(self, terms: dict[str, EditableTerm]) -> None:
         self._terms = terms
-        self._terms_fit = _fit_in_force(self.model)
+        self._terms_fit = self._fit_identity(self.model)
 
-    def _follow_fit_in_place(self) -> None:
-        """Read the terms again if a refit or ``apply_shape_postfit`` replaced the model's fit.
+    def _fit_identity(self, model) -> Any:
+        """The fit ``model``'s curves were read from: a New levels copy's is its source's."""
+        fit = _fit_in_force(model)
+        for copy_fit, source in self._fit_sources:
+            if copy_fit is fit:
+                return source
+        return fit
 
-        Both act on the model object the session holds, so the session learns of them only
-        here (``cv._fit_in_force``). Each term's edits carry over as changes to its new curve,
-        their undo records with them, and the model revision moves on. When a term's grid
-        changed too, nothing carries over: the session starts again on the model as
-        ``replace_in_force_model`` does.
+    def _note_copy_of(self, copy, source) -> None:
+        """Record that ``copy`` keeps ``source``'s fit, as a New levels choice's copy does."""
+        self._fit_sources.append((_fit_in_force(copy), self._fit_identity(source)))
+
+    def _take_notice(self) -> str | None:
+        """The notice a restart left for the page (``FitFollow.RESTARTED``), once."""
+        notice, self._notice = self._notice, None
+        return notice
+
+    def _follow_fit_in_place(self) -> FitFollow:
+        """Follow a refit or ``apply_shape_postfit`` that replaced the model's fit in place.
+
+        The one move of ``FitFollow``. Each term's edits carry over as the same changes to its
+        new curve, with their undo records, and the model revision moves on. When a term's
+        grid changed, nothing carries over: the session starts again on the model, as
+        ``replace_in_force_model`` does, and warns when that dropped edits or a selection.
         """
-        fit = _fit_in_force(self.model)
-        if fit is self._terms_fit:
-            return
+        if self._acting or self._fit_identity(self.model) is self._terms_fit:
+            return FitFollow.IN_STEP
+        self._acting = True
+        try:
+            return self._carry_onto_the_fit_in_force()
+        finally:
+            self._acting = False
+
+    def _carry_onto_the_fit_in_force(self) -> FitFollow:
         stale = self._terms
         fresh = self._editable_terms_from_model(
             self.model,
@@ -399,14 +494,26 @@ class EditorSession:
         )
         moves = {name: _moved_curve(stale[name], fresh[name]) for name in stale}
         moved = {name: move for name, move in moves.items() if move is not None}
-        self._terms_fit = fit
         if len(moved) < len(moves):
+            dropped = bool(
+                self.history
+                or self.redo_stack
+                or self.pending
+                or self.pending_redo
+                or any(len(chosen) for chosen in self._selection.values())
+            )
             self.replace_in_force_model(self.model, with_se=self.with_se)
-            return
+            if dropped:
+                regridded = ", ".join(name for name, move in moves.items() if move is None)
+                self._notice = _EDITS_NOT_CARRIED.format(terms=regridded)
+                warnings.warn(self._notice, EditorFitReplacedWarning, stacklevel=4)
+            return FitFollow.RESTARTED
+        self._terms_fit = self._fit_identity(self.model)
         self._terms = {name: term for name, (term, _) in moved.items()}
         self.history = [_moved_record(record, moved) for record in self.history]
         self.redo_stack = [_moved_record(record, moved) for record in self.redo_stack]
         self._advance_model_revision()
+        return FitFollow.CARRIED
 
     @staticmethod
     def _editable_terms_from_model(
@@ -499,13 +606,11 @@ class EditorSession:
     @property
     def model_revision(self) -> int:
         """Semantic revision for prediction- or fit-evidence-changing state."""
-        self._follow_fit_in_place()
         return self._model_revision
 
     @property
     def edit_epoch(self) -> int:
         """Monotonic invalidation token for the current edited-model materialization."""
-        self._follow_fit_in_place()
         return self._edit_epoch
 
     def _advance_model_revision(self) -> None:

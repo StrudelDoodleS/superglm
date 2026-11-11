@@ -20,7 +20,7 @@ follow it, while ``result_`` and the covariance keep describing the fit.
 
 from __future__ import annotations
 
-from collections.abc import Hashable
+from collections.abc import Callable, Hashable
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType, SimpleNamespace
@@ -54,6 +54,9 @@ _UNIT_ROUNDOFF = np.finfo(np.float64).eps / 2.0
 # A smooth minimum is located to about sqrt(u) of its scale, since the objective is flat to
 # rounding within that distance of it (Press et al., section 10.1); Brent stops there.
 _INTERCEPT_XATOL = float(np.sqrt(_UNIT_ROUNDOFF))
+# Where the held intercept leaves rows invalid, the search starts from the first valid shift
+# among the widest search's halvings, both ways: down to 2**-60 of it.
+_INTERCEPT_PROBES = 61
 
 
 class PostfitState(Enum):
@@ -249,36 +252,84 @@ def _profiled_merit(
     if state.intercept_index is None:
         return 0.0, held + penalty, invalid_rows(0.0)
     unit = _intercept_scale(eta[:, column], reach)
+
+    def objective(t: float) -> float:
+        return negative_log_likelihood(unit * t)
+
+    widest = _INTERCEPT_SEARCH * _INTERCEPT_GROWTH**_INTERCEPT_WIDENINGS
+    start = 0.0 if np.isfinite(held) else _finite_start(objective, widest)
+    if start is None:
+        return 0.0, held + penalty, invalid_rows(0.0)
     bound = _INTERCEPT_SEARCH
     for _ in range(_INTERCEPT_WIDENINGS + 1):
-        # Where rows are invalid the objective is infinite, and Brent's parabolic step forms
-        # inf - inf before it falls back to a golden-section step.
-        with np.errstate(invalid="ignore"):
-            search = minimize_scalar(
-                lambda t: negative_log_likelihood(unit * t),
-                bounds=(-bound, bound),
-                method="bounded",
-                options={"xatol": _INTERCEPT_XATOL},
-            )
-        enclosed = abs(float(search.x)) < (1.0 - _INTERCEPT_EDGE) * bound
-        if enclosed or not np.isfinite(search.fun):
+        # Brent runs only where every row is valid: an infinite value ties with another and
+        # gives golden section no direction, so it could lose the valid interval altogether.
+        lower = _finite_reach(objective, start, start - bound)
+        upper = _finite_reach(objective, start, start + bound)
+        best, best_value = start, objective(start)
+        if upper > lower:
+            # A row could still turn invalid inside, where Brent's parabolic step forms
+            # inf - inf before it falls back to a golden-section step.
+            with np.errstate(invalid="ignore"):
+                search = minimize_scalar(
+                    objective,
+                    bounds=(lower, upper),
+                    method="bounded",
+                    options={"xatol": _INTERCEPT_XATOL},
+                )
+            if search.fun < best_value:
+                best, best_value = float(search.x), float(search.fun)
+        # An optimum at the edge of the search, but not at a wall of invalid rows, may lie
+        # further out.
+        margin = _INTERCEPT_EDGE * bound
+        on_edge = (upper == start + bound and best > upper - margin) or (
+            lower == start - bound and best < lower + margin
+        )
+        if not on_edge:
             break
         searched, bound = bound, bound * _INTERCEPT_GROWTH
     else:
         raise RuntimeError(
             f"Shape repair rejected before publication: the {parameter} intercept could not "
             "be re-estimated, since the likelihood still improves at a shift of "
-            f"{unit * searched:.3g} on its link scale. Check the model's specification, or fit "
-            "the rule instead (Constraint.fit)."
+            f"{unit * (start + np.sign(best - start) * searched):.3g} on its link scale. Check "
+            "the model's specification, or fit the rule instead (Constraint.fit)."
         )
-    if not np.isfinite(search.fun):
-        return 0.0, held + penalty, invalid_rows(0.0)
     # Where the held intercept leaves rows invalid, any finite optimum is the re-estimate.
     # Otherwise two sums of one size: the rounding either can carry (Higham, section 3.1).
     tolerance = 4.0 * len(rows.response) * _UNIT_ROUNDOFF * abs(held)
-    if np.isfinite(held) and not search.fun < held - tolerance:
+    if np.isfinite(held) and not best_value < held - tolerance:
         return 0.0, held + penalty, 0
-    return unit * float(search.x), float(search.fun) + penalty, 0
+    return unit * best, best_value + penalty, 0
+
+
+def _finite_start(objective: Callable[[float], float], widest: float) -> float | None:
+    """A shift at which ``objective`` is finite, probed out from zero to ``widest`` both
+    ways by halvings, or ``None`` when every probe leaves a row invalid."""
+    for halvings in range(_INTERCEPT_PROBES):
+        reach = widest * 0.5**halvings
+        for shift in (reach, -reach):
+            if np.isfinite(objective(shift)):
+                return shift
+    return None
+
+
+def _finite_reach(objective: Callable[[float], float], start: float, edge: float) -> float:
+    """How far from ``start`` toward ``edge`` the objective stays finite: ``edge`` itself,
+    or a finite point within ``_INTERCEPT_XATOL`` of the first row to turn invalid.
+
+    The rows' valid shifts form an interval around ``start``, so bisection finds its end.
+    """
+    if np.isfinite(objective(edge)):
+        return edge
+    inside, outside = start, edge
+    while abs(outside - inside) > _INTERCEPT_XATOL:
+        middle = 0.5 * (inside + outside)
+        if np.isfinite(objective(middle)):
+            inside = middle
+        else:
+            outside = middle
+    return inside
 
 
 def _intercept_scale(eta: NDArray[np.float64], reach: float) -> float:

@@ -763,3 +763,156 @@ def test_with_an_edit_pending_the_evidence_model_follows_an_in_place_repair():
     np.testing.assert_allclose(
         current.predict_link(X)["mean"], wanted.predict_link(X)["mean"], atol=1e-12
     )
+
+
+def _session_with(*edits):
+    """The PR's Gamma ``bs``/k=8 mean fit, an editor session on it, and ``edits`` made on it."""
+    model = _fit("mean", Constraint.postfit.increasing, kind="bs", k=8)
+    X, y = _data("mean")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        session = edit(model, train_data=(X, y))
+        for start, stop, delta in edits:
+            session.select_x("mean:x", start, stop)
+            session.shift("mean:x", delta)
+    return model, session
+
+
+def _off_by(session, edits) -> float:
+    """How far the session's edited curve is from the repaired curve plus ``edits``."""
+    term = session.terms["mean:x"]
+    repaired = session.model.term_inference("mean:x").log_relativity  # the model's, repaired
+    wanted = np.asarray(repaired, dtype=np.float64).copy()
+    for start, stop, delta in edits:
+        wanted[(term.x >= start) & (term.x <= stop)] += delta
+    return float(np.max(np.abs(term.edited_log_effect - wanted)))
+
+
+_EDIT_A, _EDIT_B = (2.0, 4.0, 0.2), (3.0, 5.0, -0.1)
+
+
+def test_undo_and_redo_straight_after_an_in_place_repair_act_on_the_repaired_curve():
+    # The review's sequence, with nothing read between the repair and the undo. At c3c56d40a
+    # undo took its record before the session followed the repair, so it wrote the fit's
+    # pre-repair values back: 0.156, 0.143 and 0.143 off after undo, undo and redo.
+    model, session = _session_with(_EDIT_A, _EDIT_B)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.apply_shape_postfit()
+        session.undo()
+        assert _off_by(session, [_EDIT_A]) <= 1e-12
+        session.undo()
+        assert _off_by(session, []) <= 1e-12 and not session.edited_terms()
+        session.redo()
+        assert _off_by(session, [_EDIT_A]) <= 1e-12
+
+
+def test_redo_straight_after_an_in_place_repair_redoes_the_same_change():
+    # At c3c56d40a the redone change on A's points was [0.198, 0.356] where 0.2 is wanted.
+    model, session = _session_with(_EDIT_A)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        session.undo()
+        model.apply_shape_postfit()
+        session.redo()
+    assert _off_by(session, [_EDIT_A]) <= 1e-12
+
+
+def test_undo_of_a_whole_curve_shift_straight_after_a_repair_restores_the_repaired_curve():
+    # Sol's case: at c3c56d40a the undo brought back the fit's dip (0.1879 off), the term stayed
+    # edited and the model it published read BROKEN.
+    model, session = _session_with((0.0, 10.0, 0.2))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.apply_shape_postfit()
+        session.undo()
+        published = session.to_model()
+    assert _off_by(session, []) <= 1e-12 and not session.edited_terms()
+    (status,) = postfit_status(published._model)
+    assert status.state is PostfitState.REPAIRED
+
+
+def test_the_page_undo_straight_after_a_repair_acts_on_the_repaired_curve():
+    # The page's Undo posts no term, so nothing reads the terms before the undo.
+    from superglm.editor.widget import EditorWidget
+
+    model, session = _session_with(_EDIT_A)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        widget = EditorWidget(session, mode="server")
+        model.apply_shape_postfit()
+        widget._operate("undo")
+    assert _off_by(session, []) <= 1e-12
+
+
+def test_a_session_follows_a_repair_only_under_the_widget_lock_and_its_getters_change_nothing(
+    monkeypatch,
+):
+    # At c3c56d40a reading ``model_revision`` followed the repair, and the widget read it
+    # before taking its lock, so the follow could rewrite the history beside a request.
+    from superglm.editor.widget import EditorWidget
+
+    model, session = _session_with(_EDIT_A)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        widget = EditorWidget(session, mode="server")
+        model.apply_shape_postfit()
+    history, terms, revision = session.history, session.terms, session.model_revision
+    assert session.edit_epoch == session._edit_epoch and session.history is history
+    assert session.terms is terms and session.model_revision == revision
+
+    owned = []
+    follow = session._carry_onto_the_fit_in_force
+    monkeypatch.setattr(
+        session,
+        "_carry_onto_the_fit_in_force",
+        lambda: owned.append(widget._lock._is_owned()) or follow(),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        widget._metrics("deviance")
+    assert owned == [True] and session.model_revision > revision
+
+
+def test_the_intercept_is_re_estimated_where_valid_shifts_are_a_narrow_interval():
+    # Sol's case: a generalized gamma whose scale rows are valid over a narrow band of shifts
+    # of the scale intercept. At c3c56d40a the bounded search probed only invalid shifts and
+    # kept the held intercept; an independent SciPy profile finds +4.55323, lowering the
+    # negative log-likelihood from 1035.04 to 808.92.
+    x = np.linspace(0.0, 1.0, 200)
+    X = pd.DataFrame({"x": x, "off": -35.0 + 30.0 * x})
+    y = 1.0 + 0.005 * np.random.default_rng(0).normal(size=200)
+    family = GeneralizedGammaLSS()
+    rule = Constraint.postfit.increasing
+    model = SuperLSS(
+        family,
+        family.mean(s("x", kind="bs", k=6)),
+        family.scale(s("x", kind="bs", k=6, constraint=rule), offset="off"),
+        family.shape(s("x", kind="bs", k=6)),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(X, y)
+    fitted = model._model
+    layout = fitted.layout
+    beta = np.array(fitted.coefficients, dtype=np.float64)
+    for parameter, intercept in (("mean", np.log(1.03)), ("scale", 0.0), ("shape", -1.5)):
+        beta[layout.predictor(parameter).intercept_index] = intercept
+        beta[layout.term_slices[f"{parameter}:x"]] = 0.0
+    design = _term_of(fitted, "scale").transform(x)
+    beta[layout.term_slices["scale:x"]] = np.linalg.lstsq(design, 0.2 * np.sin(6 * x), rcond=None)[
+        0
+    ]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", EditedCoefficientsWarning)
+        revised = model._with_revised_coefficients(
+            beta, edited_terms=["mean:x", "scale:x", "shape:x"]
+        )
+    assert revised.predict_parameters(X)["scale"].max() < 0.017
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        revised.apply_shape_postfit()
+    (record,) = revised._model.fit_state.hand_edit.repairs
+    assert record.intercept_shift == pytest.approx(4.55323, abs=1e-4)
+    assert revised.predict_parameters(X)["scale"].max() == pytest.approx(0.64969, abs=1e-4)
