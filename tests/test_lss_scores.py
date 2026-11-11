@@ -1738,17 +1738,19 @@ def test_negative_binomial_crps_keeps_its_sign_when_the_size_is_tiny(mean, size)
 
 
 @pytest.mark.parametrize(
-    "mean,size,y",
+    "mean,size,y,rtol",
     [
-        (1e15, 1e16, 1e15),
-        (4e15, 4e15, 4e15),
-        (1e6, 1e3, 1e6),
-        (1e9, 1.0, 1.2e9),
-        (1e10, 1e20, 1e10 + 3e5),
-        (3e12, 5e4, 2.5e12),
+        (1e15, 1e16, 1e15, 1e-12),
+        (4e15, 4e15, 4e15, 1e-12),
+        (1e6, 1e3, 1e6, 1e-12),
+        # Off the centre the score takes F(k) from scipy's incomplete beta, which
+        # at these parameters is accurate to about 1e-7 relative, by platform.
+        (1e9, 1.0, 1.2e9, 1e-6),
+        (1e10, 1e20, 1e10 + 3e5, 1e-6),
+        (3e12, 5e4, 2.5e12, 1e-6),
     ],
 )
-def test_negative_binomial_crps_is_accurate_at_large_central_counts(mean, size, y) -> None:
+def test_negative_binomial_crps_is_accurate_at_large_central_counts(mean, size, y, rtol) -> None:
     """A huge count's partial moment, ``E[(y - Y)^+]``, with no difference of probabilities.
 
     ``y F(k) - mean G(k - 1)`` with separately evaluated incomplete betas lost
@@ -1758,7 +1760,7 @@ def test_negative_binomial_crps_is_accurate_at_large_central_counts(mean, size, 
     the mean.
     """
     closed = crps_closed_form(NegativeBinomialLS(), np.array([y]), np.array([[mean, size]]))
-    np.testing.assert_allclose(closed, [nb2_crps_by_quadrature(mean, size, y)], rtol=1e-12)
+    np.testing.assert_allclose(closed, [nb2_crps_by_quadrature(mean, size, y)], rtol=rtol)
 
 
 def test_negative_binomial_crps_refuses_a_response_past_the_count_range() -> None:
