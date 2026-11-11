@@ -13,6 +13,7 @@ from __future__ import annotations
 import copy
 import warnings
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
@@ -34,6 +35,7 @@ from superglm.distributional.terms import (
     _resolve_term,
     repaired_terms,
 )
+from superglm.distributional.weights import LikelihoodWeightError, resolve_likelihood_weights
 from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.editor.lss.terms import LSSTermInference, lss_term_inference
 from superglm.features.rebuild import interaction_users as glm_interaction_users
@@ -125,6 +127,69 @@ def parameter_offsets(
     return owned
 
 
+def kept_rows(lss: SuperLSS, train: Any) -> Any:
+    """The training rows the fit kept, which alone set the term grids and reference values.
+
+    A Refit and the training scores still read every row of ``train``.
+    """
+    state = lss._require_fitted().fit_state
+    if train.n_obs == state.weight_provenance.retained_count:
+        return train.X
+    if state.retained_rows is not None:
+        positions = state.retained_rows.likelihood_weights.input_positions
+    else:
+        try:
+            positions = resolve_likelihood_weights(
+                train.sample_weight, n_observations=train.n_obs, contract=state.weight_contract
+            ).input_positions
+        except LikelihoodWeightError as exc:
+            raise EditorValueError(
+                "The editor finds the rows this model's fit kept from train_data's weights, "
+                f"and this model cannot take them: {exc}. Open the editor with the rows and "
+                "weights the model was fitted on: train_data=(X, y, sample_weight, offsets)."
+            ) from exc
+    return as_eager_frame(train.X).take_rows(np.asarray(positions, dtype=np.intp))
+
+
+@dataclass
+class _FitReading:
+    """What an ``LSSModelView`` read from one fit of its model: the compiled terms, keyed by
+    ``lss_key``, and every answer kept from them. The view replaces it whole when the model's
+    fit is replaced in place, so nothing read from an earlier fit outlives it."""
+
+    fit: Any
+    # The training rows the fit kept, which set the term grids and reference values.
+    rows: Any
+    specs: Mapping[str, Any]
+    feature_order: list[str]
+    interaction_specs: Mapping[str, Any]
+    reference_row: pd.DataFrame | None = None
+    column_scans: dict[str, tuple] = field(default_factory=dict)
+    reference_designs: dict[str, NDArray[np.float64]] = field(default_factory=dict)
+    # Why Refit cannot run on the session's training rows, and why Final fit cannot fit its
+    # splits, each with the rows it was read for.
+    refit_reason: tuple[Any, str | None] | None = None
+    final_split_reason: tuple[tuple[Any, ...], str | None] | None = None
+    # Each term's sweep, by its arguments. A caller gets its own copy.
+    term_inferences: dict[tuple[str, bool, int, str], Any] = field(default_factory=dict)
+    # Each term's shape-rule rows (``lss.rules.term_rows``).
+    term_rows: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def of(cls, lss: SuperLSS, fitted: Any, rows: Any) -> _FitReading:
+        specs: dict[str, Any] = {}
+        interactions: dict[str, Any] = {}
+        for parameter in lss.parameter_names_:
+            compiled = _compiled_predictor(fitted, parameter).compiled
+            for term in compiled.feature_order:
+                specs[lss_key(parameter, term)] = compiled.specs[term]
+            for name in compiled.interaction_order:
+                interactions[lss_key(parameter, name)] = compiled.interaction_specs[name]
+        return cls(
+            fitted, rows, MappingProxyType(specs), list(specs), MappingProxyType(interactions)
+        )
+
+
 class LSSModelView:
     """The editor's view of a fitted SuperLSS and the rows it was fitted on.
 
@@ -138,27 +203,16 @@ class LSSModelView:
         X_train: Any,
         *,
         amount_unit: str | None = None,
+        train: Any = None,
     ) -> None:
         fitted = lss._require_fitted()
         require_scalar_response(lss.family, "editor")
         self.lss = lss
-        self.X_train = X_train
+        # ``train``, the session's training rows, gives each fit's kept rows; else ``X_train``.
+        self._train = train
+        self._given_rows = X_train
         self.amount_unit = amount_unit
         self.family = lss.family
-        # The fit the sweeps below were read from: ``_fitted`` follows ``lss``, whose fit a
-        # post-fit repair replaces in place.
-        self._swept_fit = fitted
-        specs: dict[str, Any] = {}
-        interactions: dict[str, Any] = {}
-        for parameter in lss.parameter_names_:
-            compiled = _compiled_predictor(fitted, parameter).compiled
-            for term in compiled.feature_order:
-                specs[lss_key(parameter, term)] = compiled.specs[term]
-            for name in compiled.interaction_order:
-                interactions[lss_key(parameter, name)] = compiled.interaction_specs[name]
-        self._specs: Mapping[str, Any] = MappingProxyType(specs)
-        self._feature_order: list[str] = list(specs)
-        self._interaction_specs: Mapping[str, Any] = MappingProxyType(interactions)
         # The terms as declared, keyed like ``_specs``: what the knot and basis tools rebuild from.
         self._config = SimpleNamespace(
             feature_templates=tuple(
@@ -167,30 +221,65 @@ class LSSModelView:
                 for term, declared in predictor.features.items()
             )
         )
-        self._reference_row: pd.DataFrame | None = None
-        # What the one-risk view read from each training column, kept as the reference row is.
-        self._column_scans: dict[str, tuple] = {}
-        self._reference_designs: dict[str, NDArray[np.float64]] = {}
-        # Why Refit cannot run on the session's training rows, and why Final fit cannot fit
-        # its splits, each with the splits it was read for. Owned by this view: one fitted
-        # model, over splits a session never changes; a Refit makes a new view.
-        self._refit_reason: tuple[Any, str | None] | None = None
-        self._final_split_reason: tuple[tuple[Any, ...], str | None] | None = None
-        # Each term's sweep, by its arguments, for the fit in ``_swept_fit``: ``_fitted``
-        # empties it when that fit is replaced. A caller gets its own copy.
-        self._term_inferences: dict[tuple[str, bool, int, str], Any] = {}
-        # Each term's shape-rule rows (``lss.rules.term_rows``), read from this view's fit.
-        self._term_rows: dict[str, Any] = {}
+        self._read = self._reading_of(fitted)
+
+    def _reading_of(self, fitted: Any) -> _FitReading:
+        rows = self._given_rows if self._train is None else kept_rows(self.lss, self._train)
+        return _FitReading.of(self.lss, fitted, rows)
+
+    @property
+    def _reading(self) -> _FitReading:
+        """What the view read from the fit ``lss`` predicts with now. A refit or repair in
+        place (``apply_shape_postfit``) replaces that fit, and with it everything read here."""
+        fitted = self.lss._require_fitted()
+        if fitted is not self._read.fit:
+            self._read = self._reading_of(fitted)
+        return self._read
 
     @property
     def _fitted(self):
-        """The fit ``lss`` predicts with now; a repair in place (``apply_shape_postfit``)
-        replaces it, and the term sweeps read from the earlier one are dropped."""
-        fitted = self.lss._require_fitted()
-        if fitted is not self._swept_fit:
-            self._term_inferences.clear()
-            self._swept_fit = fitted
-        return fitted
+        """The fit ``lss`` predicts with now (``_reading``)."""
+        return self._reading.fit
+
+    @property
+    def X_train(self) -> Any:
+        return self._reading.rows
+
+    @property
+    def _specs(self) -> Mapping[str, Any]:
+        return self._reading.specs
+
+    @property
+    def _feature_order(self) -> list[str]:
+        return self._reading.feature_order
+
+    @property
+    def _interaction_specs(self) -> Mapping[str, Any]:
+        return self._reading.interaction_specs
+
+    @property
+    def _column_scans(self) -> dict[str, tuple]:
+        return self._reading.column_scans
+
+    @property
+    def _term_rows(self) -> dict[str, Any]:
+        return self._reading.term_rows
+
+    @property
+    def _refit_reason(self) -> tuple[Any, str | None] | None:
+        return self._reading.refit_reason
+
+    @_refit_reason.setter
+    def _refit_reason(self, value: tuple[Any, str | None]) -> None:
+        self._reading.refit_reason = value
+
+    @property
+    def _final_split_reason(self) -> tuple[tuple[Any, ...], str | None] | None:
+        return self._reading.final_split_reason
+
+    @_final_split_reason.setter
+    def _final_split_reason(self, value: tuple[tuple[Any, ...], str | None]) -> None:
+        self._reading.final_split_reason = value
 
     @property
     def _result(self):
@@ -216,7 +305,7 @@ class LSSModelView:
 
     def with_model(self, lss: SuperLSS) -> LSSModelView:
         """A view of ``lss``, another fit of the same model, over the same rows."""
-        return LSSModelView(lss, self.X_train, amount_unit=self.amount_unit)
+        return LSSModelView(lss, self._given_rows, amount_unit=self.amount_unit, train=self._train)
 
     def term_coefficients(self, key: str) -> NDArray[np.float64]:
         """The fitted coefficients of the term ``key`` names, as its spec scores them."""
@@ -244,19 +333,19 @@ class LSSModelView:
         if centering != "native":
             raise EditorValueError(NATIVE_ONLY)
         key = (name, with_se, n_points, centering)
-        fitted = self._fitted
-        if key not in self._term_inferences:
+        reading = self._reading
+        if key not in reading.term_inferences:
             parameter, term = split_key(name)
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", ShapeRepairedWarning)
                 effect = self.lss.term_inference(
                     parameter, term, X_train=self.X_train, n_points=n_points, simultaneous=False
                 )
-            repaired = name in repaired_terms(fitted)
-            self._term_inferences[key] = lss_term_inference(
-                name, effect, self._specs[name], with_se=with_se and not repaired
+            repaired = name in repaired_terms(reading.fit)
+            reading.term_inferences[key] = lss_term_inference(
+                name, effect, reading.specs[name], with_se=with_se and not repaired
             )
-        return copy.deepcopy(self._term_inferences[key])
+        return copy.deepcopy(reading.term_inferences[key])
 
     def data_columns(self) -> tuple[str, ...]:
         """The model's feature, interaction-parent and offset columns."""
@@ -276,17 +365,18 @@ class LSSModelView:
         level, as a term sweep holds the columns it is not sweeping. The row is
         computed once; each call returns a copy.
         """
-        if self._reference_row is None:
+        reading = self._reading
+        if reading.reference_row is None:
             frame = as_eager_frame(self.X_train)
             # One row, even for a model that reads no column.
-            self._reference_row = pd.DataFrame(
+            reading.reference_row = pd.DataFrame(
                 {
                     name: [_reference_value(self._fitted, frame, name)]
                     for name in self.data_columns()
                 },
                 index=[0],
             )
-        return self._reference_row.copy()
+        return reading.reference_row.copy()
 
     def _term_blocks(self, key: str) -> tuple[Any, tuple[slice, ...]]:
         """The term's predictor state and its coefficient blocks, its free levels' last."""
@@ -297,10 +387,11 @@ class LSSModelView:
 
     def reference_design(self, key: str) -> NDArray[np.float64]:
         """The term's own columns at its reference, which its shown effect is measured from."""
-        if key not in self._reference_designs:
+        designs = self._reading.reference_designs
+        if key not in designs:
             parameter, term = split_key(key)
             state, blocks = self._term_blocks(key)
-            self._reference_designs[key] = _reference_design(
+            designs[key] = _reference_design(
                 self._fitted,
                 as_eager_frame(self.X_train),
                 parameter,
@@ -309,7 +400,7 @@ class LSSModelView:
                 *blocks,
                 reference=self.reference_row,
             )
-        return self._reference_designs[key]
+        return designs[key]
 
     def reference_log_effect(self, key: str) -> float:
         """The term's scored contribution at its reference, which its shown effect leaves out."""

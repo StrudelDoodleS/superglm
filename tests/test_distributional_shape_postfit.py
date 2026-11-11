@@ -18,7 +18,7 @@ import pandas as pd
 import pytest
 from scipy import optimize, stats
 
-from superglm import Constraint, GammaLS, SuperLSS, s
+from superglm import Constraint, GammaLS, SuperLSS, cat, s
 from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
 from superglm.distributional.kernels.generalized_gamma import mean_exists
 from superglm.distributional.predictor import ShapeConstraintIgnoredWarning
@@ -491,6 +491,37 @@ def test_the_intercept_is_re_estimated_however_far_a_revision_moved_it_in_scale_
     precision = 1.0 / theta["scale"].to_numpy() ** 2
     residual = y - theta["location"].to_numpy()
     assert abs(np.sum(precision * residual) / np.sum(precision)) <= 1e-6 * 1e-9
+
+
+def test_a_probe_whose_likelihood_overflows_is_a_wall_of_the_intercept_search():
+    # Sol's case: the scale's offset runs from -100 to 0, so a trial shift of the scale
+    # intercept far enough down overflows the Gaussian likelihood. At 19a6ab028 that raised
+    # ValueError at the search's lower probe instead of bounding the search there.
+    from superglm import GaussianLS
+
+    x = np.linspace(0.0, 1.0, 200)
+    X = pd.DataFrame({"x": x, "off": -100.0 + 100.0 * x, "zero": np.zeros(200)})
+    y = np.exp(X["off"].to_numpy() + 0.2 * np.sin(6.0 * x))
+    y = y * np.random.default_rng(3).normal(size=200)
+    family = GaussianLS(scale_floor=0.0)
+    model = SuperLSS(
+        family,
+        family.location("zero", intercept=False),
+        family.scale(
+            s("x", kind="bs", k=8, constraint=Constraint.postfit.increasing), offset="off"
+        ),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y, lambdas={"scale:x#wiggle": 0.0}, max_inner_iter=500)
+        model.apply_shape_postfit()
+    (status,) = postfit_status(model._model)
+    assert status.state is PostfitState.REPAIRED
+    theta = model.predict_parameters(X)
+    log_likelihood = stats.norm.logpdf(y, theta["location"], theta["scale"]).sum()
+    assert np.isfinite(log_likelihood)
+    # the published intercept is the profile's optimum
+    assert abs(_profile_optimum(model, "scale", X, y)) <= 1e-5
 
 
 def _perturbed_repairer(monkeypatch, block):
@@ -1000,6 +1031,70 @@ def test_the_intercept_is_re_estimated_where_valid_shifts_are_a_narrow_interval(
     (record,) = revised._model.fit_state.hand_edit.repairs
     assert record.intercept_shift == pytest.approx(4.55323, abs=1e-4)
     assert revised.predict_parameters(X)["scale"].max() == pytest.approx(0.64969, abs=1e-4)
+
+
+def test_a_session_follows_a_refit_in_place_that_changed_a_categorical_reference():
+    # Sol's case: frequency weights make A the reference level of the first fit and B of the
+    # refit. At 19a6ab028 the session kept the first fit's compiled specs, so an edit to C was
+    # written in A's encoding and the untouched A and B predicted each other's means.
+    from superglm.editor.lss.availability import WEIGHTS_DIFFER, session_refit_reason
+
+    g = np.repeat(["A", "B", "C"], [200, 120, 80])
+    X = pd.DataFrame({"g": g})
+    mean = pd.Series({"A": 1.0, "B": 2.0, "C": 1.5})[g].to_numpy()
+    y = np.random.default_rng(0).gamma(4.0, mean / 4.0)
+    first, again = np.ones(len(g)), np.where(g == "B", 10.0, 1.0)
+    family = GammaLS()
+    model = SuperLSS(family, family.mean(cat("g")), family.scale(), weight_semantics="frequency")
+    levels = pd.DataFrame({"g": ["A", "B", "C"]})
+
+    def shifted_c(session):
+        session.select_levels("mean:g", ["C"])
+        session.shift("mean:g", 0.1)
+        return session.to_model().predict(levels)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y, sample_weight=first)
+        session = edit(model, train_data=(X, y, first))
+        assert session_refit_reason(session) is None
+        model.fit(X, y, sample_weight=again)
+        # the reason kept for the first fit goes with it: these rows now carry other weights
+        assert session_refit_reason(session) == WEIGHTS_DIFFER
+        followed = shifted_c(session)
+        fresh = shifted_c(edit(model, train_data=(X, y, again)))
+        refitted = model.predict(levels)
+    np.testing.assert_allclose(followed, fresh, rtol=1e-12)
+    np.testing.assert_allclose(followed[:2], refitted[:2], rtol=1e-12)
+    np.testing.assert_allclose(followed[2], refitted[2] * np.exp(0.1), rtol=1e-12)
+
+
+def test_a_session_follows_a_refit_in_place_that_kept_other_rows():
+    # The term grids and reference values are read from the rows a fit kept. At 19a6ab028 the
+    # session kept the first fit's 400 rows after a refit that kept 220, so its grid differed
+    # from a fresh session's and its curve was 0.028 off.
+    from superglm.editor.payloads import session_payload
+
+    rng = np.random.default_rng(0)
+    x = rng.uniform(0.0, 10.0, 400)
+    X = pd.DataFrame({"x": x})
+    y = rng.gamma(4.0, np.exp(0.1 * x) / 4.0)
+    kept = np.where(x < 5.0, 0.0, 1.0)
+    kept[:5] = 1.0
+    family = GammaLS()
+    model = SuperLSS(family, family.mean(s("x", k=6)), family.scale(), weight_semantics="frequency")
+    lambdas = {"mean:x#wiggle": 1.0}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y, sample_weight=np.ones(400), lambdas=lambdas)
+        session = edit(model, train_data=(X, y, np.ones(400)))
+        model.fit(X, y, sample_weight=kept, lambdas=lambdas)
+        session_payload(session)
+        fresh = edit(model, train_data=(X, y, kept))
+    assert len(session.model.X_train) == len(fresh.model.X_train) == 220
+    followed, wanted = session.terms["mean:x"], fresh.terms["mean:x"]
+    np.testing.assert_array_equal(followed.x, wanted.x)
+    np.testing.assert_allclose(followed.original_log_effect, wanted.original_log_effect, atol=1e-12)
 
 
 def test_the_diagnose_rows_follow_an_in_place_repair_made_after_the_report_was_opened():

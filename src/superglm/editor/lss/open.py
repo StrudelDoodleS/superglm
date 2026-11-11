@@ -16,11 +16,9 @@ from typing import Any
 
 import numpy as np
 
-from superglm._frame import as_eager_frame
 from superglm.distributional.families import LogNormalLS, TweedieLSS
 from superglm.distributional.prediction_design import _required_columns
 from superglm.distributional.predictor import resolve_predictor_link
-from superglm.distributional.weights import LikelihoodWeightError, resolve_likelihood_weights
 from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.editor.evaluation import coerce_dataset, coerce_evaluation_data
 from superglm.editor.lss.display import SPREAD_FAMILIES
@@ -78,30 +76,6 @@ def _refuse_other_rows(lss, n_rows: int) -> None:
             f"but the fit was given {provenance.original_count} and kept "
             f"{provenance.retained_count}. Pass the frame the model was fitted on."
         )
-
-
-def _kept_rows(lss, train) -> Any:
-    """The training rows the fit kept, which alone set the term grids and reference values.
-
-    A Refit and the training scores still read every row of ``train``.
-    """
-    state = lss._model.fit_state
-    if train.n_obs == state.weight_provenance.retained_count:
-        return train.X
-    if state.retained_rows is not None:
-        positions = state.retained_rows.likelihood_weights.input_positions
-    else:
-        try:
-            positions = resolve_likelihood_weights(
-                train.sample_weight, n_observations=train.n_obs, contract=state.weight_contract
-            ).input_positions
-        except LikelihoodWeightError as exc:
-            raise EditorValueError(
-                "The editor finds the rows this model's fit kept from train_data's weights, "
-                f"and this model cannot take them: {exc}. Open the editor with the rows and "
-                "weights the model was fitted on: train_data=(X, y, sample_weight, offsets)."
-            ) from exc
-    return as_eager_frame(train.X).take_rows(np.asarray(positions, dtype=np.intp))
 
 
 def _refuse_unopenable(lss, train_data, centering: str) -> None:
@@ -207,7 +181,7 @@ def open_lss(
     )
     train = evaluation_data["train"]
     _refuse_other_rows(lss, train.n_obs)
-    view = LSSModelView(lss, _kept_rows(lss, train), amount_unit=amount_unit)
+    view = LSSModelView(lss, None, amount_unit=amount_unit, train=train)
     editable = lss_editable_terms(
         view, _term_keys(view, terms), n_points=n_points, with_se=with_se, train=train
     )

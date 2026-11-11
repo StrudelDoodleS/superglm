@@ -212,7 +212,7 @@ def _profiled_merit(
     negative log-likelihood on the retained rows plus half its penalty quadratic. A shift no
     better than rounding, or for a parameter with no intercept, is not taken. The merit is
     infinite where a retained row has no valid parameters; the third value counts those rows
-    (``None`` where the parameters cannot be formed at all).
+    (``None`` where the parameters or the likelihood cannot be evaluated at all).
 
     Raises ``RuntimeError`` when the likelihood still improves where the shift leaves
     float64's range, so that no intercept could be re-estimated.
@@ -228,11 +228,13 @@ def _profiled_merit(
         """Each row's log-likelihood, ``-inf`` where its parameters are not valid."""
         shifted = np.array(eta, dtype=np.float64, copy=True)
         shifted[:, column] += shift
+        # A probe is a value-only trial of the fit's likelihood, refused as the solver refuses
+        # one: parameters or a likelihood with no float64 value make the probe invalid.
         try:
             theta = fitted.parameters_from_eta(shifted)
-        except ValueError:
+            evaluation = family.evaluate_natural(rows.response, theta, plan, derivative_order=0)
+        except (ValueError, FloatingPointError, OverflowError):
             return None
-        evaluation = family.evaluate_natural(rows.response, theta, plan, derivative_order=0)
         values = np.array(evaluation.optimizing_log_likelihood, dtype=np.float64, copy=True)
         if evaluation.valid is not None:
             values[~np.asarray(evaluation.valid, dtype=np.bool_)] = -np.inf
@@ -475,7 +477,7 @@ def repaired_model(
         )
         if not np.isfinite(merit):
             where = (
-                "the model's parameters cannot be formed on the training rows"
+                "the model's parameters or likelihood cannot be evaluated on the training rows"
                 if invalid is None
                 else f"{invalid} of the {len(rows.response)} training rows have no valid "
                 "parameters there (the family's likelihood is not finite)"
