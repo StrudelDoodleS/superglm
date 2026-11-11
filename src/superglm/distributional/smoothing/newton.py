@@ -468,6 +468,7 @@ class _TrialFitter:
         *,
         face: PenaltyFace | None,
         solver_config: DenseSolverConfig,
+        objective_tolerance: float,
         chunk_size: ChunkSize | None,
         phase_recorder: FitPhaseRecorder | None,
         reuse_session: _DenseObservedReuseSession,
@@ -478,6 +479,7 @@ class _TrialFitter:
         self.likelihood_plan = likelihood_plan
         self.face = face
         self.config = solver_config if face is None else _face_authority_config(solver_config)
+        self.objective_tolerance = objective_tolerance
         self.chunk_size = chunk_size
         self.phase_recorder = phase_recorder
         self.reuse_session = reuse_session
@@ -531,7 +533,11 @@ class _TrialFitter:
         try:
             with measure_phase(self.phase_recorder, _ENDGAME_PHASE):
                 objective = _laplace_objective(
-                    result, layout=self.layout, lambdas=lambdas, face=self.face
+                    result,
+                    layout=self.layout,
+                    lambdas=lambdas,
+                    face=self.face,
+                    objective_tolerance=self.objective_tolerance,
                 )
         except ValueError:
             return result, None
@@ -707,6 +713,7 @@ def run_newton_endgame(
         likelihood_plan,
         face=state.face,
         solver_config=solver_config,
+        objective_tolerance=config.objective_tolerance,
         chunk_size=chunk_size,
         phase_recorder=phase_recorder,
         reuse_session=reuse_session,
@@ -1245,6 +1252,7 @@ def bracket_refused_component(
         likelihood_plan,
         face=state.face,
         solver_config=solver_config,
+        objective_tolerance=efs_config.objective_tolerance,
         chunk_size=chunk_size,
         phase_recorder=phase_recorder,
         reuse_session=reuse_session,

@@ -138,6 +138,8 @@ def test_zero_activity_keeps_generic_gradient_and_mixed_hessian():
 
 
 def test_zero_activity_cannot_ignore_perpendicular_root_uncertainty():
+    from superglm.distributional.smoothing.penalty_geometry import _admit_penalty_logdet
+
     raw = [np.diag([1.0, 0.0]), np.diag([0.0, 1.0])]
     components, _, _ = _context(raw, np.eye(2))
     geometry = algebra._context_geometry(components)
@@ -145,9 +147,67 @@ def test_zero_activity_cannot_ignore_perpendicular_root_uncertainty():
     geometry.ssp_refined = True
     # Both [1, 0] and [1, 1e-5] satisfy this root enclosure. Their rank-one
     # log determinants differ by log(1 + 1e-10), even though the uncertainty
-    # times the selected inverse action [1, 0].T vanishes exactly.
+    # times the selected inverse action [1, 0].T vanishes exactly. That is
+    # past the volume's gamma_k goal but inside sqrt(u): the bound carries it,
+    # and the objective's slack decides.
+    weights = {"shared:a": 1.0, "shared:b": 0.0}
+    result = algebra._compute_penalty_logdet_evaluation(weights, components)
+    assert result.logdet_error >= np.log1p(1e-10)
+    assert result.accuracy_excess > 1
+    _admit_penalty_logdet(result, 0.0, 1e-9)
+    with pytest.raises(PenaltyNumericalError, match="comparison slack"):
+        _admit_penalty_logdet(result, 0.0, 1e-11)
+    # A perpendicular uncertainty past sqrt(u) of the volume still refuses.
+    geometry.ssp_root_errors = (np.array([[0.0, 1e-3]]), np.zeros((1, 2)))
+    geometry.last_weights = geometry.face_activity = None
     with pytest.raises(PenaltyNumericalError, match="active support volume"):
-        algebra._compute_penalty_logdet_evaluation({"shared:a": 1.0, "shared:b": 0.0}, components)
+        algebra._compute_penalty_logdet_evaluation(weights, components)
+
+
+@pytest.mark.parametrize("retry_meets_goal", [True, False])
+def test_zero_activity_goal_miss_refines_the_ssp_roots_before_keeping_it(
+    monkeypatch, retry_meets_goal
+):
+    """A zero-weight face short of its gamma_k goal refines its SSP roots and tries again.
+
+    Every attempt on the unrefined roots is forced 1e-12 past its log|S| goal.
+    The refined roots then meet it, with a bound below the forced charge; if
+    they miss too, the attempt nearer the goal is kept with its own bound.
+    """
+    roots = np.array([[1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+    raw = [np.outer(root, root) for root in roots]
+    _, coordinate_map = _exact_geometry()
+    components, _, _ = _context(raw, coordinate_map)
+    values = np.array([2.0, 3.0, 5.0, 0.0])
+    weights = dict(zip((component.name for component in components), values, strict=True))
+    reference = algebra._compute_penalty_logdet_evaluation(weights, components)
+    assert reference.accuracy_excess == 0.0
+
+    components, _, _ = _context(raw, coordinate_map)
+    geometry = algebra._context_geometry(components)
+    refined = []
+    original_roots = algebra._ssp_component_roots
+    original_defect = multi_penalty._logdet_defect_bound
+
+    def roots_recorded(*args, refine=False, **kwargs):
+        refined.append(refine)
+        return original_roots(*args, refine=refine, **kwargs)
+
+    def defect(*args):
+        loose = not (retry_meets_goal and any(refined))
+        return original_defect(*args) + 1e-12 * loose
+
+    monkeypatch.setattr(algebra, "_ssp_component_roots", roots_recorded)
+    monkeypatch.setattr(multi_penalty, "_logdet_defect_bound", defect)
+    result = algebra._compute_penalty_logdet_evaluation(weights, components)
+    assert geometry.ssp_refined and refined.count(True) == 1
+    assert abs(result.logdet - np.log(89 * 31)) <= result.logdet_error
+    if retry_meets_goal:
+        assert result.accuracy_excess == 0.0
+        assert result.logdet_error < 1e-12
+    else:
+        assert result.accuracy_excess > 1
+        assert result.logdet_error >= 1e-12
 
 
 def test_invertible_ssp_map_preserves_shared_raw_support():

@@ -45,8 +45,12 @@ _DOT2_BATCH_ENTRIES = 1 << 16
 # Supplementary Appendix C.1) state the aim of the Wood (2011) Appendix B
 # transform as freedom from catastrophic cancellation between dominant and
 # subdominant components, with no certificate; GLM REML's plain evaluator
-# (``penalty_blocks``) works so. Each consumer compares the returned bounds
-# with what it reads (``_admit_penalty_logdet`` for the objective).
+# (``penalty_blocks``) works so. A result short of its goal records the
+# shortfall as its certificate's ``accuracy_excess``, and the objective judges
+# such a log|S| bound by its own comparison slack (``_admit_penalty_logdet``).
+# The same admission covers the finite coefficient and active-support volumes
+# (``penalty_algebra``). The SSP coordinate volume is certified once, when a
+# context is built, and a miss there selects another construction.
 _ADMISSION_RELATIVE = math.sqrt(_UNIT_ROUNDOFF)
 
 
@@ -60,6 +64,8 @@ class _PenaltyCertificate:
     root_error: NDArray
     inverse_error: NDArray
     resolution_limited: bool
+    # Largest ratio of a bound to its gamma_k goal; 0 when every bound meets it.
+    accuracy_excess: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -70,6 +76,8 @@ class _PenaltySummaryCertificate:
     gradient_error: NDArray
     hessian_error: NDArray
     resolution_limited: bool
+    # Largest ratio of a bound to its gamma_k goal; 0 when every bound meets it.
+    accuracy_excess: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -1586,6 +1594,7 @@ def _evaluate_penalty_geometry(
                 _readonly(g_error),
                 _readonly(h_error),
                 any(support.component_resolution_limited),
+                excess,
             ),
             _readonly(values),
             correction_count,
@@ -1624,6 +1633,7 @@ def _evaluate_penalty_geometry(
         _readonly(root_error),
         _readonly(inverse_error),
         any(support.component_resolution_limited),
+        excess,
     )
     result = SimilarityTransformResult(
         float(logdet),

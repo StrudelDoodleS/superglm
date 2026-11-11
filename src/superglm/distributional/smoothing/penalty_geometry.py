@@ -14,24 +14,25 @@ from superglm.reml.penalty_algebra import _PenaltyLogdetEvaluation, penalty_comp
 from superglm.types import PenaltyComponent
 
 
-def _admit_penalty_logdet(evaluation: _PenaltyLogdetEvaluation, objective: float) -> None:
-    """Refuse a penalty log-determinant whose error bound the objective's comparisons can see.
+def _admit_penalty_logdet(
+    evaluation: _PenaltyLogdetEvaluation, objective: float, objective_tolerance: float
+) -> None:
+    """Refuse a log-determinant short of its gamma_k goal whose bound the comparisons can see.
 
     The smoothing loops accept a trial within ``objective_tolerance (1 + |V|)``
     of the current objective. Such a relaxed comparison stays sound while each
     compared value's error is under half that slack (Lou, Sun and Nocedal,
     *Design guidelines for noise-tolerant optimization*, 2024, eq. 4.1 and
-    Theorem 6.7). ``log|S|`` enters ``V`` halved, so its bound must stay under
-    the default tolerance times ``1 + |V|``; this, not the geometry's gamma_k
-    goal, decides admission. On the GammaLS fit of #604 the bound is 8.7e-11
-    against 3.8e-6.
+    Theorem 6.7). ``log|S|`` enters ``V`` halved, so a bound past its goal must
+    stay under the fit's ``objective_tolerance`` times ``1 + |V|``. A bound
+    that meets every goal is admitted as before, also under a smaller slack,
+    such as zero, which no float64 evaluation of ``V`` can meet.
     """
-    from superglm.distributional.results.iteration import DistributionalEFSConfig
     from superglm.reml.penalty_support import PenaltyNumericalError
 
-    if not math.isfinite(objective):
-        return  # the caller's own finiteness check decides
-    slack = DistributionalEFSConfig.objective_tolerance * (1.0 + abs(objective))
+    if not evaluation.accuracy_excess or not math.isfinite(objective):
+        return  # the caller's own finiteness check decides a non-finite V
+    slack = objective_tolerance * (1.0 + abs(objective))
     if not evaluation.logdet_error <= slack:
         raise PenaltyNumericalError(
             "penalty log-determinant error exceeds the objective's comparison slack"
@@ -99,6 +100,7 @@ def _finite_penalty_evaluation_from_components(
     rank = 0
     log_terms = []
     log_errors = []
+    excess = 0.0
     unit = UNIT_ROUNDOFF
     for indices in groups:
         components = tuple(finite_components[index] for index in indices)
@@ -172,6 +174,7 @@ def _finite_penalty_evaluation_from_components(
         rank += int(group_rank)
         log_terms.append(float(group_log_pdet))
         log_errors.append(certificate.logdet_error)
+        excess = max(excess, certificate.accuracy_excess)
         for i, component_i in enumerate(components):
             gradient[component_i.name] = float(group_gradient[i])
             gradient_error[component_i.name] = float(certificate.gradient_error[i])
@@ -192,6 +195,7 @@ def _finite_penalty_evaluation_from_components(
         logdet_error=math.fsum(log_errors) + 2 * unit * abs(logdet),
         gradient_error=gradient_error,
         hessian_error=hessian_error,
+        accuracy_excess=excess,
     )
 
 
@@ -246,6 +250,7 @@ def _retained_finite_penalty_evaluation(
                     rank=summary.rank,
                     logdet=summary.logdet_s_plus,
                     logdet_error=certificate.logdet_error,
+                    accuracy_excess=certificate.accuracy_excess,
                     gradient={
                         item.name: float(summary.gradient[i]) for i, item in enumerate(local)
                     },
@@ -267,7 +272,7 @@ def _retained_finite_penalty_evaluation(
             evaluations.append(evaluation)
             rows.extend(range(local[0].group_sl.start, local[0].group_sl.stop))
         rank = sum(item.rank for item in evaluations)
-        volume_error = _joint_near_isometry_volume_error(
+        volume_error, volume_excess = _joint_near_isometry_volume_error(
             face.null_basis[rows],
             rank=rank,
             root_rows=root_rows,
@@ -304,6 +309,7 @@ def _retained_finite_penalty_evaluation(
         ),
         gradient_error=gradient_error,
         hessian_error=hessian_error,
+        accuracy_excess=max(volume_excess, *(item.accuracy_excess for item in evaluations)),
     )
 
 

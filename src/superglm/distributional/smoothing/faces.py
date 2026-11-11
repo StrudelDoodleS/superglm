@@ -144,6 +144,7 @@ def _check_face_direction(
     allow_nonstationary_cap: bool = False,
     source_fit: DenseSolverResult | None = None,
     solver_config: DenseSolverConfig,
+    objective_tolerance: float,
     chunk_size: ChunkSize | None,
     phase_recorder: FitPhaseRecorder | None,
     _reuse_session: _DenseObservedReuseSession | None = None,
@@ -197,6 +198,7 @@ def _check_face_direction(
             layout=layout,
             lambdas=lambdas,
             face=finite_face,
+            objective_tolerance=objective_tolerance,
         )
     endpoint_fit = _fit_endpoint_authority_stationary(
         family,
@@ -281,6 +283,7 @@ def _check_face_direction(
             layout=layout,
             lambdas=lambdas,
             face=endpoint_face,
+            objective_tolerance=objective_tolerance,
         )
         try:
             analytic = evaluate_endpoint_laplace_derivative(
@@ -395,6 +398,7 @@ def _assess_joint_face_directions(
                 layout=layout,
                 lambdas=lambdas,
                 face=joint_face,
+                objective_tolerance=efs_config.objective_tolerance,
             )
         except (ValueError, FloatingPointError, np.linalg.LinAlgError):
             return refused("joint_analytic_unavailable", endpoint_fit)
@@ -590,6 +594,7 @@ def _try_exact_face(
         allow_nonstationary_cap=sole_capped_component,
         source_fit=current_fit,
         solver_config=solver_config,
+        objective_tolerance=efs_config.objective_tolerance,
         chunk_size=chunk_size,
         phase_recorder=phase_recorder,
         _reuse_session=_reuse_session,
@@ -684,6 +689,7 @@ def _recheck_exact_face(
                 allow_nonstationary_cap=sole_capped_component,
                 source_fit=canonical_fit,
                 solver_config=solver_config,
+                objective_tolerance=efs_config.objective_tolerance,
                 chunk_size=chunk_size,
                 phase_recorder=phase_recorder,
                 _reuse_session=_reuse_session,
@@ -729,6 +735,7 @@ def _recheck_exact_face(
                 layout=layout,
                 lambdas=lambdas,
                 face=None,
+                objective_tolerance=efs_config.objective_tolerance,
             )
             failed_assessments = () if attempt is None else attempt.assessment_fits
             return _FaceRecheck(
