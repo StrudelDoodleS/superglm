@@ -1717,12 +1717,7 @@ def _spline_categorical_block(
     factor = dict(zip(map(str, ispec._non_base), np.exp(log_deviation).T, strict=True))
     ones = np.ones(len(keys))
     levels = [str(level) for level in ispec._cat_levels]
-    # A level named like the key column would overwrite it: the header is the
-    # parent's name, suffixed until no level carries it.
-    axis = parent1
-    while axis in levels:
-        axis = f"{axis} (axis 1)"
-    columns = {axis: keys}
+    columns = {_row_key_header(parent1, levels): keys}
     for level in levels:
         columns[level] = factor.get(level, ones)
     return InteractionTableBlock(name=name, table=pd.DataFrame(columns), kind=kind)
@@ -1792,17 +1787,31 @@ def _interaction_blocks(
                 f"Interaction {name!r} is not yet exportable as a rating table."
             )
 
-        levels1 = raw["levels1"]
+        from superglm.features.interaction import interaction_cells
+
         levels2 = raw["levels2"]
-        rows = []
-        for level1 in levels1:
-            row: dict[str, str | float] = {parent1: level1}
-            for level2 in levels2:
-                key = f"{level1}:{level2}"
-                row[level2] = float(raw["relativities"].get(key, 1.0))
-            rows.append(row)
-        blocks.append(InteractionTableBlock(name=name, table=pd.DataFrame(rows), kind="cells"))
+        cells = interaction_cells(raw)
+        rows = [
+            [level1, *(cells.get((level1, level2), 1.0) for level2 in levels2)]
+            for level1 in raw["levels1"]
+        ]
+        columns = [_row_key_header(parent1, levels2), *levels2]
+        table = pd.DataFrame(rows, columns=columns)
+        blocks.append(InteractionTableBlock(name=name, table=table, kind="cells"))
     return blocks
+
+
+def _row_key_header(parent: str, levels) -> str:
+    """The header of a cell table's row-key column: the first parent's name.
+
+    A column level named like it would share its header, so the name is suffixed until
+    no level carries it.
+    """
+    names = {str(level) for level in levels}
+    header = parent
+    while header in names:
+        header = f"{header} (axis 1)"
+    return header
 
 
 def _total_centering_shift(blocks: list[RatingTableBlock]) -> float:

@@ -46,10 +46,11 @@ from superglm.export.rating_tables import (
     _offset_multiplier_block,
     _require_excel_format,
     _require_usable_relativities_export,
+    _row_key_header,
     _weights_array,
     _weights_by_level,
 )
-from superglm.features.interaction import CategoricalInteraction
+from superglm.features.interaction import CategoricalInteraction, interaction_cells
 from superglm.features.spline import _SplineBase
 from superglm.inference._term_helpers import _build_spline_metadata
 from superglm.links import _LOG_LINK_PROBE, _is_shifted_log_link
@@ -217,33 +218,16 @@ def _categorical_block(prepared, name, frame, column, sample_weight, sign) -> Ra
 
 def _cell_block(name, ispec, beta, sign) -> InteractionTableBlock:
     raw = ispec.reconstruct(beta)
-    # The fitted cells are keyed "level1:level2", so levels holding a colon can give two cells,
-    # or a cell and a base cell, one key and one cell's factor would be read for both.
-    keys = [f"{level1}:{level2}" for level1 in raw["levels1"] for level2 in raw["levels2"]]
-    if len(set(keys)) != len(keys):
-        raise ValueError(
-            f"its interaction {name!r} has levels whose names contain ':', so two of its cells "
-            "share a name and cannot both be read back; rename those levels to export."
-        )
-    # A row is keyed by the first parent's column, which a second-parent level of that name
-    # would overwrite.
-    first, second = ispec.parent_names
-    if any(str(level) == str(first) for level in raw["levels2"]):
-        raise ValueError(
-            f"its interaction {name!r} has a {second!r} level named {first!r}, the column its "
-            f"rows are keyed by; rename that level to export."
-        )
+    # Cells are read by their pair of levels, since the "level1:level2" labels collide once a
+    # level holds a colon; the row-key header follows the SuperGLM cell table's rule.
+    cells = interaction_cells(raw)
+    levels2 = raw["levels2"]
     rows = [
-        {
-            ispec.parent_names[0]: level1,
-            **{
-                level2: float(raw["relativities"].get(f"{level1}:{level2}", 1.0)) ** sign
-                for level2 in raw["levels2"]
-            },
-        }
+        [level1, *(cells.get((level1, level2), 1.0) ** sign for level2 in levels2)]
         for level1 in raw["levels1"]
     ]
-    return InteractionTableBlock(name=name, table=pd.DataFrame(rows), kind="cells")
+    columns = [_row_key_header(ispec.parent_names[0], levels2), *levels2]
+    return InteractionTableBlock(name=name, table=pd.DataFrame(rows, columns=columns), kind="cells")
 
 
 def _parameter_table(

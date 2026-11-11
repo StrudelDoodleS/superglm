@@ -41,6 +41,9 @@ def _interaction_inference(
         )
 
     if "pairs" in raw:
+        from superglm.features.interaction import interaction_cells, warn_shared_cell_labels
+
+        warn_shared_cell_labels(name, raw, "`pair_relativity` and `pair_log_relativity`")
         return InteractionInference(
             name=name,
             kind="categorical",
@@ -48,6 +51,8 @@ def _interaction_inference(
             pairs=raw["pairs"],
             log_relativity=raw["log_relativities"],
             relativity=raw["relativities"],
+            pair_log_relativity=interaction_cells(raw, "log_relativities"),
+            pair_relativity=interaction_cells(raw),
         )
 
     if "relativities_per_unit" in raw:

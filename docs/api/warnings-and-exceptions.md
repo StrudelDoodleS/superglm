@@ -24,6 +24,7 @@ silence. Each docstring says when it fires and what to do about it.
    superglm.FractionalFrequencyWeightWarning
    superglm.PriorWeightLatticeWarning
    superglm.FactorSmoothGroupTermWarning
+   superglm.InteractionCellLabelWarning
    superglm.RedundantInteractionWarning
    superglm.SplineOptionWarning
    superglm.SCOPRetiredWarning

@@ -531,12 +531,13 @@ def test_the_notes_define_weight_and_a_tweedie_gives_the_chance_of_no_claim(tmp_
         np.testing.assert_allclose(np.exp(-lam), atom, rtol=1e-9)
 
 
-def test_an_interaction_whose_level_names_collide_on_a_colon_is_left_out_by_name():
-    """("a", "b:c") and ("a:b", "c") share the key "a:b:c"; one factor would be read for both."""
+def test_an_interaction_whose_level_names_collide_on_a_colon_gives_each_cell_its_own_factor():
+    """("a", "b:c") and ("a:b", "c") share the label "a:b:c"; each still gets its own factor."""
     X, rng = _book(seed=3), np.random.default_rng(4)
     X["region"] = X["region"].map({"A": "a", "B": "a:b", "C": "z"})
     X["seg"] = X["seg"].map({"p": "b:c", "q": "c"})
-    y = rng.gamma(4.0, np.exp(1 + 0.3 * (X.region == "a:b") + 0.4 * (X.seg == "c")) / 4.0)
+    eta = 1 + 0.3 * (X.region == "a:b") + 0.4 * (X.seg == "c")
+    y = rng.gamma(4.0, np.exp(eta + 0.5 * ((X.region == "a:b") & (X.seg == "c"))) / 4.0)
     model = _fit(
         GammaLS(),
         (cat("region"), cat("seg"), interaction(CategoricalInteraction("region", "seg"))),
@@ -545,15 +546,22 @@ def test_an_interaction_whose_level_names_collide_on_a_colon_is_left_out_by_name
         X,
     )
     payload = model.rating_table_payload(X)
-    assert [table.parameter for table in payload.parameters] == ["scale"]
-    assert "contain ':'" in payload.omitted["mean"] and "region:seg" in payload.omitted["mean"]
+    assert payload.omitted == {}
+    mean = next(table for table in payload.parameters if table.parameter == "mean")
+    (block,) = mean.interactions
+    assert block.table.columns[0] == "region"
+    assert sorted(block.table.columns[1:]) == ["b:c", "c"]
+    assert sorted(block.table["region"]) == ["a", "a:b", "z"]
+    for table in payload.parameters:
+        check(table, X, None, model)
 
 
-def test_an_interaction_level_named_as_its_row_column_is_left_out_by_name():
-    """A "seg" level called "region" would overwrite the region label of every interaction row."""
+def test_an_interaction_level_named_as_its_row_column_keeps_its_row_keys():
+    """A "seg" level called "region" takes the row-key header, so that header is suffixed."""
     X, rng = _book(seed=8), np.random.default_rng(9)
     X["seg"] = X["seg"].map({"p": "region", "q": "other"})
-    y = rng.gamma(4.0, np.exp(1 + 0.3 * (X.region == "B") + 0.4 * (X.seg == "other")) / 4.0)
+    eta = 1 + 0.3 * (X.region == "B") + 0.4 * (X.seg == "other")
+    y = rng.gamma(4.0, np.exp(eta + 0.5 * ((X.region == "C") & (X.seg == "other"))) / 4.0)
     model = _fit(
         GammaLS(),
         (cat("region"), cat("seg"), interaction(CategoricalInteraction("region", "seg"))),
@@ -562,8 +570,14 @@ def test_an_interaction_level_named_as_its_row_column_is_left_out_by_name():
         X,
     )
     payload = model.rating_table_payload(X)
-    assert [table.parameter for table in payload.parameters] == ["scale"]
-    assert "level named 'region'" in payload.omitted["mean"]
+    assert payload.omitted == {}
+    mean = next(table for table in payload.parameters if table.parameter == "mean")
+    (block,) = mean.interactions
+    assert block.table.columns[0] == "region (axis 1)"
+    assert sorted(block.table.columns[1:]) == ["other", "region"]
+    assert sorted(block.table["region (axis 1)"]) == ["A", "B", "C"]
+    for table in payload.parameters:
+        check(table, X, None, model)
 
 
 def test_a_frequency_weighted_tweedie_gives_the_chance_of_no_claim_without_the_weight(tmp_path):

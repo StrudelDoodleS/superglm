@@ -198,7 +198,14 @@ class TermInference:
 
 @dataclass(frozen=True)
 class InteractionInference:
-    """Per-interaction inference result (lighter than TermInference)."""
+    """Per-interaction inference result (lighter than TermInference).
+
+    For a categorical-by-categorical interaction, ``relativity`` and ``log_relativity`` are
+    keyed ``"level1:level2"``, a label two cells share once a level holds a colon.
+    ``pair_relativity`` and ``pair_log_relativity`` hold every estimated non-base cell keyed
+    by its ``(level1, level2)`` tuple, in ``pairs`` order. A base cell is absent from both,
+    and its relativity is 1.
+    """
 
     name: str
     kind: str  # "spline_categorical", "categorical", "numeric_categorical", etc.
@@ -209,10 +216,15 @@ class InteractionInference:
     levels: list[str] | None = None
     per_level: dict[str, dict[str, NDArray]] | None = None
 
-    # For categorical×categorical: per-pair
+    # For categorical×categorical: per-pair. ``relativity`` and ``log_relativity`` are keyed
+    # "level1:level2", a label two cells share once a level holds a colon; the ``pair_`` fields
+    # hold every non-base cell keyed by its ``(level1, level2)`` tuple, in ``pairs`` order. A
+    # base cell is absent from both, and its relativity is 1.
     pairs: list[tuple[str, str]] | None = None
     log_relativity: NDArray | dict[str, float] | None = None
     relativity: NDArray | dict[str, float] | None = None
+    pair_log_relativity: dict[tuple[str, str], float] | None = None
+    pair_relativity: dict[tuple[str, str], float] | None = None
 
     # For numeric×categorical: per-level slopes
     relativities_per_unit: dict[str, float] | None = None

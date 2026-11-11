@@ -51,6 +51,7 @@ PUBLIC_API = [
     "GroupElasticNet",
     "GroupLasso",
     "IdentityLink",
+    "InteractionCellLabelWarning",
     "InteractionInference",
     "InverseLink",
     "InverseSquaredLink",

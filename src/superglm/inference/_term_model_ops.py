@@ -178,14 +178,19 @@ def relativities(
                 )
 
         elif "pairs" in raw:
-            pairs_labels = [f"{l1}:{l2}" for l1, l2 in raw["pairs"]]
-            rels = raw["relativities"]
-            log_rels = raw["log_relativities"]
+            from superglm.features.interaction import interaction_cells
+
+            rels = interaction_cells(raw)
+            log_rels = interaction_cells(raw, "log_relativities")
+            # "level" is "level1:level2", which two cells share once a level holds a colon;
+            # the trailing parent-level columns name each row's cell.
             out[iname] = pd.DataFrame(
                 {
-                    "level": pairs_labels,
-                    "relativity": [rels[k] for k in pairs_labels],
-                    "log_relativity": [log_rels[k] for k in pairs_labels],
+                    "level": [f"{l1}:{l2}" for l1, l2 in rels],
+                    "relativity": list(rels.values()),
+                    "log_relativity": list(log_rels.values()),
+                    "level1": [l1 for l1, _ in rels],
+                    "level2": [l2 for _, l2 in rels],
                 }
             )
 
