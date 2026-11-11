@@ -101,8 +101,9 @@ from superglm.distributional.posterior import (
 )
 from superglm.distributional.prediction_design import (
     _required_columns,
-    build_joint_prediction_design,
+    build_predictor_design,
 )
+from superglm.features.numeric import _numeric_values
 from superglm.links import _is_shifted_log_link
 from superglm.stats.wood_pvalue import wood_test_smooth
 from superglm.terms import resolve_label
@@ -497,10 +498,22 @@ def _numeric_range(frame: EagerFrame, name: Hashable, n_points: int) -> NDArray[
     return np.linspace(float(np.nanmin(values)), float(np.nanmax(values)), n_points)
 
 
+def _read_as_number(fitted: Any, name: Hashable) -> bool:
+    """Whether a ``Numeric`` term reads column ``name``."""
+    from superglm.features.numeric import Numeric
+
+    return any(
+        isinstance(predictor.compiled.specs.get(name), Numeric)
+        for predictor in fitted.compiled_predictors
+    )
+
+
 def _reference_value(fitted: Any, frame: EagerFrame, name: Hashable) -> Any:
     """Return a column's training centre, missing values ignored.
 
-    A numeric column without levels is held at its median.  Any other column is
+    A column no term reads with levels is held at its median when it is numeric
+    or a ``Numeric`` term reads it, the values converted as ``Numeric`` converts
+    them, so every storage a ``Numeric`` term accepts gives one centre.  Any other column is
     held at its most frequent fitted level, counted over the labels the term reads
     at it; a tie goes to the level that comes first in :func:`_column_levels` order.
     A label the term reads at no fitted level is held only if no fitted level is
@@ -514,8 +527,10 @@ def _reference_value(fitted: Any, frame: EagerFrame, name: Hashable) -> Any:
         f"column {name!r} has no non-missing values to take a training centre from; "
         "pass rows that have values for it, or name its value in a surface's reference"
     )
-    if _fitted_levels(fitted, name) is None and frame.column_kind(name) == "numeric":
-        numeric = np.asarray(values, dtype=np.float64)
+    if _fitted_levels(fitted, name) is None and (
+        frame.column_kind(name) == "numeric" or _read_as_number(fitted, name)
+    ):
+        numeric = _numeric_values(values)
         if np.all(np.isnan(numeric)):
             raise ValueError(empty)
         return float(np.nanmedian(numeric))
@@ -663,13 +678,11 @@ def _term_design(
 
     Several slices are laid side by side in the order given, which is how a
     level term whose free levels live in a second block is evaluated as one
-    function of its levels.
+    function of its levels.  Only the term's own predictor is built, so a column
+    another parameter reads with levels is never handed a swept value.
     """
-    design = build_joint_prediction_design(
-        evaluation_frame, fitted.compiled_predictors, fitted.layout
-    )
+    local = build_predictor_design(evaluation_frame, _compiled_predictor(fitted, state.name), state)
     offset = state.coefficient_slice.start
-    local = design.local[state.name]
     return np.hstack(
         [
             np.asarray(local[:, block.start - offset : block.stop - offset], dtype=np.float64)

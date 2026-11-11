@@ -640,6 +640,33 @@ def map_design_blocks(
         return pooled_for(run, spans, step * widest * 8 * 3)
 
 
+def build_predictor_design(
+    X: FrameLike | EagerFrame, predictor: CompiledPredictor, state: Any
+) -> NDArray[np.float64]:
+    """One predictor's local design, reading each column only as its own terms read it.
+
+    A column one parameter reads as a number and another as levels is read here only as
+    ``predictor`` reads it, so sweeping it through one term never hands the other a value.
+    """
+    frame = as_eager_frame(X)
+    predictors = (predictor,)
+    frame.require_columns(_required_columns(predictors))
+    if not len(frame):
+        return np.zeros((0, state.coefficient_slice.stop - state.coefficient_slice.start))
+    columns: dict[Any, NDArray] = {
+        name: frame.column_array(name) for name in _required_columns(predictors)
+    }
+    return _predictor_rows(
+        predictor,
+        state,
+        columns,
+        label_columns(frame, predictors),
+        _group_term_constants(predictors),
+        slice(0, len(frame)),
+        None,
+    )
+
+
 def build_joint_prediction_design(
     X: FrameLike | EagerFrame,
     compiled_predictors: Sequence[CompiledPredictor],

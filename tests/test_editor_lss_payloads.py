@@ -31,6 +31,7 @@ from tests._lss_editor_fixtures import (
     tweedie_case,
 )
 from tests.test_editor import editor_frame, editor_model  # noqa: F401
+from tests.test_lss_terms import mixed_band_fit, scale_ratio_to_reference
 
 FIXTURE = Path(__file__).parent / "editor_frontend" / "fixtures" / "display_transforms.json"
 TOLERANCE = 64 * EPS
@@ -158,6 +159,23 @@ def test_a_linear_term_reads_the_same_on_the_editor_cv_and_explain_tabs():
     moves = np.array([risk["effects"]["fitted"][column][parameter] for risk in reply["risks"]])
     # Each move is a difference of two linear predictors built from terms near 710.
     np.testing.assert_allclose(np.log(curve[picked]), moves, rtol=0.0, atol=1e3 * 710 * EPS)
+
+
+def test_the_editor_opens_on_a_column_linear_in_one_parameter_and_levels_in_another():
+    model, X, y = mixed_band_fit()
+    session = edit(model, train_data=(X, y))
+    payload = session_payload(session)["scale:band"]
+    x = np.asarray(payload["x"], dtype=np.float64)
+    curve = np.asarray(payload["y"], dtype=np.float64)
+    assert np.all(np.isfinite(curve))
+    ends = [0, len(x) - 1]
+    np.testing.assert_array_equal(x[ends], [1.0, 4.0])
+    np.testing.assert_allclose(
+        curve[ends], scale_ratio_to_reference(model, X, x[ends]), rtol=1e-12, atol=0.0
+    )
+    # The Explain tab walks the same column from the same reference.
+    reply = risk_payload(session, [{"band": 1, "z": 0.5}], edited=model)
+    assert {feature["column"] for feature in reply["features"]} == {"band", "z"}
 
 
 def test_nb_theta_is_the_relativity_of_the_overdispersion():
