@@ -520,12 +520,13 @@ class _SaddleUpdates:
     borders it with a unit row and column that free its equation and hold its
     multiplier at zero. The bordered system is solved through its Schur complement
     (Gill, Murray, Saunders and Wright, SIAM J. Sci. Stat. Comput. 5(3), 1984,
-    section 3.5.4), whose stability rests on ``K0``'s; ``K0`` is refactored after
-    ``_UPDATE_LIMIT`` changes or a singular complement. Owner and lifetime: one solve.
+    section 3.6.2). ``K0`` is refactored on the working set after ``_UPDATE_LIMIT``
+    changes, and wherever an updated step fails its check (``step``), as SQIC does
+    (Gill and Wong, UCSD CCoM 14-03, 2014, section 7). Owner and lifetime: one solve.
     """
 
-    def __init__(self, H: NDArray, rows: NDArray) -> None:
-        self.H, self.rows, self.p = H, rows, H.shape[0]
+    def __init__(self, H: NDArray, rows: NDArray, tol: float) -> None:
+        self.H, self.rows, self.p, self.tol = H, rows, H.shape[0], tol
         self.lu: NDArray | None = None
         self.size = 0
         self.usable = True
@@ -563,16 +564,39 @@ class _SaddleUpdates:
         return self.borders[row, added]
 
     def step(self, active: list[int], rhs: NDArray) -> NDArray | None:
-        """The step of the saddle system on ``active``; ``None`` where only a direct solve can give it."""
+        """The step of the saddle system on ``active``; ``None`` where only a direct solve can give it.
+
+        ``K0``'s own solve is LU's, as the direct path's. An updated step is kept when the
+        complement is not singular to working precision (a condition estimate below
+        ``1 / u``) and the step meets the working rows to ``tol`` of their own magnitudes,
+        ``|A_w||s| + |r|``. Its error shows there: ``K0``'s backward error times the
+        bordered multipliers, large where the complement is ill-conditioned, which in the
+        gradient rows is small beside those multipliers' own terms.
+        """
+        if self.lu is not None:
+            added = [j for j, row in enumerate(active) if row not in self.base]
+            dropped = sorted(set(self.base) - set(active))
+            if len(added) + len(dropped) <= _UPDATE_LIMIT:
+                step = self._bordered(active, rhs, added, dropped)
+                unchanged = not (added or dropped)
+                if step is not None and (unchanged or self._holds(active, rhs, step)):
+                    return step
+        if not self.usable or not self._factor(active):
+            return None
+        return self._bordered(active, rhs, [], [])
+
+    def _holds(self, active: list[int], rhs: NDArray, step: NDArray) -> bool:
+        """Whether ``step`` meets the working rows to ``tol`` of their own magnitudes."""
+        rows, target = self.rows[active], rhs[self.p :]
+        magnitude = np.abs(rows) @ np.abs(step) + np.abs(target)
+        bound = (self.tol + _roundoff_tolerance(self.p)) * magnitude
+        return bool(np.all(np.abs(rows @ step - target) <= bound))
+
+    def _bordered(
+        self, active: list[int], rhs: NDArray, added: list[int], dropped: list[int]
+    ) -> NDArray | None:
+        """``K0`` bordered by ``added`` and ``dropped``, solved; ``None`` past working precision."""
         p = self.p
-        added = (
-            [] if self.lu is None else [j for j, row in enumerate(active) if row not in self.base]
-        )
-        dropped = [] if self.lu is None else sorted(set(self.base) - set(active))
-        if self.lu is None or len(added) + len(dropped) > _UPDATE_LIMIT:
-            if not self.usable or not self._factor(active):
-                return None
-            added, dropped = [], []
         base_rhs = np.zeros(self.size)
         base_rhs[:p] = rhs[:p]
         for j, row in enumerate(active):
@@ -585,12 +609,14 @@ class _SaddleUpdates:
             rows = np.column_stack([border for border, _ in borders])
             solved = np.column_stack([column for _, column in borders])
             target = np.concatenate([rhs[p + np.asarray(added, dtype=int)], np.zeros(len(dropped))])
-            try:
-                weights = np.linalg.solve(-(rows.T @ solved), target - rows.T @ solution)
-            except np.linalg.LinAlgError:
-                self.lu = None
+            complement = -(rows.T @ solved)
+            lu, pivots, info = _LAPACK.dgetrf(complement)
+            if info != 0:
                 return None
-            solution = solution - solved @ weights
+            rcond, _ = _LAPACK.dgecon(lu, float(np.abs(complement).sum(axis=0).max()))
+            if not rcond > UNIT_ROUNDOFF:
+                return None
+            solution = solution - solved @ _LAPACK.dgetrs(lu, pivots, target - rows.T @ solution)[0]
         step = (self.scale * solution)[:p]
         return step if np.all(np.isfinite(step)) else None
 
@@ -954,6 +980,7 @@ def solve_constrained_qp(
     beta_start: NDArray | None = None,
     _trace_run: TraceRun | None = None,
     _structure: _ConstraintStructure | None = None,
+    _decomposition: RankDecomposition | None = None,
 ) -> QPResult:
     """Solve a convex quadratic subject to A @ beta >= b.
 
@@ -985,6 +1012,7 @@ def solve_constrained_qp(
     rows. A beta_start that does not meet them is ignored. The optional _trace_run emits blocking decisions
     only when explicitly enabled. _structure is _constraint_structure(A), for a
     caller that solves on one A repeatedly; without it each solve builds it.
+    _decomposition is likewise decompose_gram of H's symmetric part.
     Result rank metadata describes the shared H decomposition; no ridge is
     added.
     """
@@ -1015,7 +1043,7 @@ def solve_constrained_qp(
     # One decomposition by the shared rank policy serves every pure-H solve;
     # a singular H is rank-truncated rather than raising LinAlgError.
     try:
-        decomposition = decompose_gram(H_sym)
+        decomposition = decompose_gram(H_sym) if _decomposition is None else _decomposition
     except ValueError as exc:
         raise ValueError(f"solve_constrained_qp requires a usable PSD H: {exc}") from exc
 
@@ -1117,7 +1145,7 @@ def solve_constrained_qp(
 
     zero_face_cache: dict[tuple[int, ...], bool] = {}
     # Saddle solves of a long solve on a large system (_SaddleUpdates).
-    updates = None if kkt_may_be_singular else _SaddleUpdates(H_sym, structure.scaled_rows)
+    updates = None if kkt_may_be_singular else _SaddleUpdates(H_sym, structure.scaled_rows, tol)
     direct_solves = 0
     blocks = structure.blocks
     block_zero_face: dict[tuple[int, ...], bool] = {}

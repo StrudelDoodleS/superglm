@@ -3194,3 +3194,74 @@ class TestSaddleUpdates:
         assert sorted(updated.active_set) == sorted(direct.active_set)
         scale = np.max(np.abs(direct.beta))
         np.testing.assert_allclose(updated.beta, direct.beta, rtol=0.0, atol=1e-10 * scale)
+
+    @staticmethod
+    def _dense_rows_qp(seed, decades):
+        # Dense rows on an H whose eigenvalues span ``decades``: K0 stays well
+        # conditioned while the complement of the rows that change grows ill-conditioned.
+        rng = np.random.default_rng(seed)
+        p, m = 150, 225
+        Q, _ = np.linalg.qr(rng.normal(size=(p, p)))
+        H = (Q * np.logspace(0.0, -decades, p)) @ Q.T
+        H = 0.5 * (H + H.T)
+        A = rng.normal(size=(m, p))
+        b = A @ (0.01 * rng.normal(size=p)) - 0.1 * np.abs(rng.normal(size=m))
+        return H, H @ np.linspace(0.0, 1.0, p), A, b
+
+    def test_a_solve_through_an_ill_conditioned_complement_certifies(self, monkeypatch):
+        """A K0 of cond 4e3 bordered into a complement of cond 1e9, as the review found.
+
+        The updated step was rounding, 3.1e-9 against 6.1e-5; the working set stopped
+        changing, so no refactor came, and the solve ran to its budget uncertified.
+        """
+        import superglm.solvers.constrained_qp as constrained_qp
+
+        H, g, A, b = self._dense_rows_qp(seed=1, decades=8)
+        updated = solve_constrained_qp(H, g, A, b, max_iter=1500)
+        monkeypatch.setattr(constrained_qp, "_UPDATE_MIN_SIZE", 10**9)
+        direct = solve_constrained_qp(H, g, A, b, max_iter=1500)
+
+        assert direct.converged
+        assert updated.converged
+        assert sorted(updated.active_set) == sorted(direct.active_set)
+        # Two certified minimizers of one strictly convex QP, cond(H) = 1e8 apart at most.
+        scale = np.max(np.abs(direct.beta))
+        np.testing.assert_allclose(updated.beta, direct.beta, rtol=0.0, atol=1e-6 * scale)
+
+    @pytest.mark.parametrize("fault", ["working rows missed", "complement singular"])
+    def test_an_updated_step_that_fails_its_check_is_solved_on_a_refactored_k0(
+        self, monkeypatch, fault
+    ):
+        """Each failure the check reads, forced: K0 is refactored on the working set."""
+        from types import SimpleNamespace
+
+        import superglm.solvers.constrained_qp as constrained_qp
+
+        H, g, A, _ = self._monotone_projection(40.0, 0.05)
+        p = H.shape[0]
+        updates = constrained_qp._SaddleUpdates(H, A, 1e-12)
+        updates.step([0, 2, 4], np.concatenate([g, np.zeros(3)]))
+        if fault == "complement singular":
+            lapack = constrained_qp._LAPACK
+            names = ("dsyequb", "dgetrf", "dgetrs")
+            singular = SimpleNamespace(**{name: getattr(lapack, name) for name in names})
+            singular.dgecon = lambda lu, anorm: (2.0**-54, 0)
+            monkeypatch.setattr(constrained_qp, "_LAPACK", singular)
+        else:
+            bordered = constrained_qp._SaddleUpdates._bordered
+            noise = 1e-6 * np.random.default_rng(0).normal(size=p)
+
+            def missed(self, active, rhs, added, dropped):
+                step = bordered(self, active, rhs, added, dropped)
+                return step + noise if added or dropped else step
+
+            monkeypatch.setattr(constrained_qp._SaddleUpdates, "_bordered", missed)
+        active = [0, 2, 4, 6]
+        rhs = np.concatenate([g, np.zeros(len(active))])
+
+        step = updates.step(active, rhs)
+
+        assert sorted(updates.base) == active
+        KKT = np.block([[H, -A[active].T], [A[active], np.zeros((len(active),) * 2)]])
+        direct = constrained_qp._solve_saddle_direct(KKT, rhs)[:p]
+        np.testing.assert_allclose(step, direct, rtol=0.0, atol=1e-12 * np.max(np.abs(direct)))
