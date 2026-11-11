@@ -50,6 +50,10 @@ _SPECTRAL_DIMENSION_SLACK = 512.0
 _STRUCTURAL_NORM_ROUNDING_SLACK = 32.0
 _STRUCTURAL_CONSISTENCY_FLOOR = _STRUCTURAL_NORM_ROUNDING_SLACK * _EPS
 
+# Row actions past these, or tiny but nonzero, take the scaled path in ``_constraint_actions``.
+_HUGE_ACTION = np.finfo(np.float64).max / 4
+_TINY_ACTION = np.finfo(np.float64).tiny
+
 
 @dataclass
 class QPResult:
@@ -167,6 +171,7 @@ def _constraint_actions(A, beta, b, abs_A=None, step=None, *, common=False):
     common exponent across all rows to preserve multiplier units.
     """
     A, beta, b = np.asarray(A, float), np.asarray(beta, float), np.asarray(b, float)
+    abs_A = np.abs(A) if abs_A is None else abs_A
     products, magnitude = _constraint_products(A, beta, abs_A)
     action, motion = (
         _constraint_products(A, step, abs_A)
@@ -174,12 +179,20 @@ def _constraint_actions(A, beta, b, abs_A=None, step=None, *, common=False):
         else (np.zeros_like(b), np.zeros_like(b))
     )
     bound = b.copy()
-    unsafe = np.abs(b) > np.finfo(float).max / 4
-    for vector, absolute in ((beta, magnitude), (step, motion)):
-        if vector is None:
-            continue
-        unsafe |= ~np.isfinite(absolute) | (absolute > np.finfo(float).max / 4)
-        unsafe |= (absolute < np.finfo(float).tiny) & np.any((A != 0) & (vector != 0), axis=1)
+    vectors = ((beta, magnitude),) if step is None else ((beta, magnitude), (step, motion))
+    # Every row is normal when no |b| or action passes the range or falls below it.
+    if np.max(np.abs(b), initial=0.0) <= _HUGE_ACTION and all(
+        np.max(absolute, initial=0.0) <= _HUGE_ACTION
+        and np.min(absolute, initial=np.inf) >= _TINY_ACTION
+        for _, absolute in vectors
+    ):
+        return products, magnitude, bound, action, motion
+    unsafe = np.abs(b) > _HUGE_ACTION
+    for vector, absolute in vectors:
+        unsafe |= ~np.isfinite(absolute) | (absolute > _HUGE_ACTION)
+        small = absolute < _TINY_ACTION
+        if np.any(small):
+            unsafe[small] |= np.any((A[small] != 0) & (vector != 0), axis=1)
     if not np.any(unsafe):
         return products, magnitude, bound, action, motion
     if common:
@@ -257,14 +270,14 @@ def _roundoff_tolerance(width: int) -> float:
 
 
 def _scaled_constraint_step(
-    A: NDArray, beta: NDArray, step: NDArray, b: NDArray, abs_A: NDArray
-) -> tuple[NDArray, NDArray]:
-    """Normalize a directional action, including motion off an exact zero row."""
-    products, magnitude, bounds, action, step_magnitude = _constraint_actions(
-        A, beta, b, abs_A, step
-    )
-    scale = np.maximum(_feasibility_scale(products, bounds, abs_products=magnitude), step_magnitude)
-    return np.divide(action, scale, out=np.zeros_like(action), where=scale > 0.0), scale
+    products: NDArray, magnitude: NDArray, bounds: NDArray, action: NDArray, motion: NDArray
+) -> NDArray:
+    """Normalize a directional action, including motion off an exact zero row.
+
+    The arguments are ``_constraint_actions(A, beta, b, abs_A, step)``.
+    """
+    scale = np.maximum(_feasibility_scale(products, bounds, abs_products=magnitude), motion)
+    return np.divide(action, scale, out=np.zeros_like(action), where=scale > 0.0)
 
 
 def _stationarity_certificate(
@@ -356,6 +369,8 @@ def _certifies_kkt_point(
     active: list[int],
     tol: float,
     abs_A: NDArray,
+    *,
+    feasible: bool = False,
 ) -> tuple[bool, int | None]:
     """Whether ``beta`` passes the complete KKT certificate on ``active``, and the row to release.
 
@@ -364,8 +379,9 @@ def _certifies_kkt_point(
     branch of ``solve_constrained_qp`` converges on, read without repairing
     ``beta``. A multiplier below its allowance names the working position
     the face must release, as the small-step branch releases it.
+    ``feasible`` says ``_is_feasible`` has already passed this ``beta``.
     """
-    if not _is_feasible(A, beta, b, tol, abs_A=abs_A):
+    if not feasible and not _is_feasible(A, beta, b, tol, abs_A=abs_A):
         return False, None
     stationary, drop_idx, multipliers = _stationarity_certificate(H, g, beta, A[active], tol)
     if not stationary or drop_idx is not None:
@@ -547,6 +563,14 @@ def _constraint_blocks(A: NDArray) -> _ConstraintBlocks:
     working rows constrain only that block's coefficients.
     """
     m, p = A.shape
+    support = A != 0
+    if p and np.any(np.all(support, axis=1)):
+        # A row touching every coefficient joins them, and every nonzero row, in one block.
+        return _ConstraintBlocks(
+            columns=[np.arange(p)],
+            row_label=np.where(np.any(support, axis=1), 0, -1).astype(np.intp),
+            width=np.array([p]),
+        )
     rows, cols = np.nonzero(A)
     # ``np.nonzero`` lists entries row by row, so the row nodes' adjacency is
     # already in CSR order; the column nodes have no stored entries.
@@ -954,15 +978,12 @@ def solve_constrained_qp(
                 "example add a ridge term) or drop the aliased columns."
             )
 
-    unconstrained_stationary, _, _ = _stationarity_certificate(
-        H_sym, g, beta_unc, np.empty((0, p)), tol
-    )
-    if m == 0:
-        # No constraints: the unconstrained solve above is already the answer.
-        return _result(beta_unc, [], 0, converged=unconstrained_stationary)
-
     abs_A = None if _structure is None else _structure.abs_entries
-    if _is_feasible(A, beta_unc, b, tol, abs_A=abs_A):
+    # No constraints, or none the unconstrained solve breaks: it is the answer.
+    if m == 0 or _is_feasible(A, beta_unc, b, tol, abs_A=abs_A):
+        unconstrained_stationary, _, _ = _stationarity_certificate(
+            H_sym, g, beta_unc, np.empty((0, p)), tol
+        )
         return _result(beta_unc, [], 0, converged=unconstrained_stationary)
 
     structure = _constraint_structure(A) if _structure is None else _structure
@@ -1012,8 +1033,11 @@ def solve_constrained_qp(
             # Read before the next saddle solve, whose step a pass discards.
             # A negative multiplier releases its row (Nocedal and Wright 2006,
             # Algorithm 16.3): re-solving the same face repeats the same step.
+            # Only a full step that passed ``_is_feasible`` sets the flag.
             at_face_minimum = False
-            certified, release = _certifies_kkt_point(H_sym, g, beta, A, b, active, tol, abs_A)
+            certified, release = _certifies_kkt_point(
+                H_sym, g, beta, A, b, active, tol, abs_A, feasible=True
+            )
             if certified:
                 return _result(beta, active, it + 1, converged=True)
             if release is not None:
@@ -1129,10 +1153,11 @@ def solve_constrained_qp(
             alpha_min = 1.0
             blocking = -1
 
-            products, _, bounds, raw_step, _ = _constraint_actions(A, beta, b, abs_A, step)
+            actions = _constraint_actions(A, beta, b, abs_A, step)
+            products, _, bounds, raw_step, _ = actions
             # Same scale ``_is_feasible`` uses, which is what makes "does this
             # step move the row" agree with "is this row satisfied".
-            scaled_step, _ = _scaled_constraint_step(A, beta, step, b, abs_A)
+            scaled_step = _scaled_constraint_step(*actions)
             # Gate on the scaled derivative, as _is_feasible does; take the
             # ratio from the raw pair, which rounds once.
             gated = scaled_step < -tol
@@ -1174,8 +1199,9 @@ def solve_constrained_qp(
                 active.append(blocking)
                 basis.insert(blocking)
             else:
+                # The full step breaks a row no blocking candidate could hold, so
+                # it cannot certify: the next iteration solves the face again.
                 beta = beta_new
-                at_face_minimum = True
 
     # Exhaustion is non-convergence even at a feasible point: the KKT
     # certificate was never completed.
