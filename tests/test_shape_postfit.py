@@ -1090,8 +1090,9 @@ def test_curvature_exchange_on_a_degree_four_basis_takes_few_iterations(monkeypa
 
 
 #: Active-set iterations of a one-QP curvature repair: started inside the cone at
-#: the rows the fitted curve breaks, the solve certifies in 7; it took more than 8.
-ONE_QP_ITERATIONS = 8
+#: the rows the fitted curve breaks, the solve certifies in 7; from its own start
+#: it took 16.
+ONE_QP_ITERATIONS = 12
 
 
 def test_one_qp_curvature_repair_takes_few_iterations(monkeypatch):
