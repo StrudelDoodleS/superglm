@@ -287,9 +287,9 @@ class TestNB2DevianceUnit:
     def test_unit_deviance_allocates_its_output_and_under_half_a_row_more(self):
         """Review of #614: NB2 fits slowed by 38-59% on masked copies of every positive row.
 
-        The deviance runs in chunks of ``_CHUNK`` rows, two compiled passes around four
-        whole-chunk logarithms, so its only allocations are the output and four
-        buffers of one chunk: 1 MiB, under half the output at this size. At cfc77fa21
+        The deviance runs in chunks of ``_CHUNK`` rows, two compiled passes around two
+        whole-chunk logarithms, so its only allocations are the output and two
+        buffers of one chunk: 512 KiB, under a sixth of the output at this size. At cfc77fa21
         the masked-array algorithm peaked at several rows of floats on this count data.
         """
         import tracemalloc
@@ -307,6 +307,39 @@ class TestNB2DevianceUnit:
         finally:
             tracemalloc.stop()
         assert peak <= 1.5 * 8 * n
+
+    def test_unit_deviance_takes_two_logs_a_row_and_no_log1p(self, monkeypatch):
+        """Review of #614: NumPy's float64 ``log1p`` is a SIMD loop only with AVX-512.
+
+        Without it ``np.log1p`` costs about 12 ns a row against 3 ns for ``np.log``, and
+        9bd97bff1 ran ``np.log1p`` over every row twice beside two ``np.log``, which
+        made NB2 fits slower than master on AVX2 and ARM64. Each ``log1p`` window is
+        now ``log(1 + x)`` plus its exact rounding error, so NumPy evaluates
+        ``np.log`` over two arguments a row and ``np.log1p`` over none. The count
+        covers two chunks of count data with zero, centred and far rows.
+        """
+        from superglm import _nb2_deviance
+
+        rows = {"log": 0, "log1p": 0}
+
+        def counted(name, ufunc):
+            def call(x, *args, **kwargs):
+                rows[name] += np.size(x)
+                return ufunc(x, *args, **kwargs)
+
+            return call
+
+        rng = np.random.default_rng(614)
+        n = 2 * _nb2_deviance._CHUNK + 5
+        mu = 2.0 * np.exp(0.3 * rng.standard_normal(n))
+        y = rng.negative_binomial(2.0, 2.0 / (2.0 + mu)).astype(np.float64)
+        family = NegativeBinomial(theta=2.0)
+        expected = family.deviance_unit(y, mu)
+        monkeypatch.setattr(_nb2_deviance.np, "log", counted("log", np.log))
+        monkeypatch.setattr(_nb2_deviance.np, "log1p", counted("log1p", np.log1p))
+        actual = family.deviance_unit(y, mu)
+        np.testing.assert_array_equal(actual, expected)
+        assert rows == {"log": 2 * n, "log1p": 0}
 
 
 class TestNB2LogLikelihood:
