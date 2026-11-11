@@ -863,6 +863,36 @@ def test_an_edit_at_values_without_training_rows_says_so_rather_than_blame_the_r
     assert len(session.history) == 1
 
 
+@pytest.mark.parametrize("step", [-0.5, 0.3, 0.5])
+def test_an_edit_of_a_whole_stretch_without_training_rows_is_refused_not_recorded(step):
+    # The projection floors an empty value's weight at 1e-12, so on a poorly conditioned
+    # P-spline such an edit moved the kept curve by a few billionths of the change asked:
+    # past the no-move bar, so it was recorded as an edit that changed nothing a chart shows.
+    rng = np.random.default_rng(5)
+    x = np.concatenate([rng.uniform(0.0, 4.5, 1500), rng.uniform(9.5, 14.0, 1500)])
+    X = pd.DataFrame({"x": x})
+    y = rng.gamma(4.0, np.exp(0.2 + 0.05 * x) / 4.0)
+    family = GammaLS()
+    model = SuperLSS(
+        family,
+        family.mean(s("x", kind="ps", k=14, constraint=Constraint.fit.increasing)),
+        family.scale(),
+    ).fit_reml(X, y)
+    session = edit(model, train_data=(X, y, None, None))
+    term = session.terms["mean:x"]
+    empty = np.flatnonzero(np.asarray(term.weights) == 0.0)
+    assert empty.size > 20
+    curve = term.edited_log_effect.copy()
+    revision = session.model_revision
+
+    with pytest.raises(EditorValueError, match="no training rows sit at the values it moves"):
+        session.set_values("mean:x", empty, curve[empty] + step)
+
+    assert session.history == []
+    assert session.model_revision == revision
+    np.testing.assert_array_equal(session.terms["mean:x"].edited_log_effect, curve)
+
+
 def test_a_seeded_solve_that_does_not_certify_is_retried_from_the_current_curve(monkeypatch):
     session = open_case(_many_levels_case())
     term = session.terms["mean:g"]

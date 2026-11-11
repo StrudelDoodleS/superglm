@@ -213,12 +213,23 @@ def absorbed_message(model: Any, term: EditableTerm, asked: NDArray[np.float64])
     values with none is taken back whatever the rules say; the rules are blamed
     only for an edit that moves a value with rows.
     """
-    moved = np.asarray(asked) != term.edited_log_effect
-    if term.weights is not None and not np.any(np.asarray(term.weights)[moved] > 0.0):
+    if moves_only_empty_values(term, asked):
         return _NO_ROWS.format(term=term.name)
     rows = term_rows(model, term.name)
     held = ", with the levels the edit leaves held where they are" if term.levels else ""
     return _ABSORBED.format(term=term.name, rules="" if rows is None else rows.text, held=held)
+
+
+def moves_only_empty_values(term: EditableTerm, asked: NDArray[np.float64]) -> bool:
+    """Whether every value ``asked`` changes on ``term`` has no training rows.
+
+    A ruled edit is kept by a projection weighed by training rows, so it keeps
+    nothing of such an edit, whatever the rules say.
+    """
+    if term.weights is None:
+        return False
+    moved = np.asarray(asked) != term.edited_log_effect
+    return bool(moved.any()) and not np.any(np.asarray(term.weights)[moved] > 0.0)
 
 
 # A kept curve that moves no value by more than this fraction of the change asked for, or of
@@ -545,6 +556,7 @@ __all__ = [
     "absorbed_message",
     "kept_inside_rules",
     "leaves_curve",
+    "moves_only_empty_values",
     "lss_model_with_edits",
     "prepare_ruled_edit",
 ]

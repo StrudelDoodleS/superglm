@@ -61,6 +61,7 @@ from superglm.editor.lss.apply import (
     absorbed_message,
     kept_inside_rules,
     leaves_curve,
+    moves_only_empty_values,
     prepare_ruled_edit,
 )
 from superglm.editor.lss.availability import require_available
@@ -2020,7 +2021,11 @@ class EditorSession:
         curve[indices] = after
         kept = kept_inside_rules(self.model, editable, curve)
         if kept is not None:
-            if leaves_curve(kept, editable.edited_log_effect, curve):
+            # The projection floors a value without rows at a tiny weight, so an edit of only
+            # such values can move the curve by a few billionths: that is still none of it.
+            if leaves_curve(kept, editable.edited_log_effect, curve) or moves_only_empty_values(
+                editable, curve
+            ):
                 # The rules took the whole edit back: there is nothing to record or undo,
                 # and an edit that asked for a change a chart shows says why it made none.
                 # A rounding-scale ask, "Make increasing" on a curve its rule already holds
