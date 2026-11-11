@@ -29,6 +29,7 @@ state its saver scored with.
 
 from __future__ import annotations
 
+import json
 import pickle
 import sys
 import warnings
@@ -38,6 +39,7 @@ import numpy as np
 import pytest
 from benchmarks import release_differential
 
+from superglm import NegativeBinomialLS, SuperLSS
 from superglm._group_matrix import _group_matrix_centered
 
 from .test_saved_fs_models import assert_predicts_as_saved
@@ -248,6 +250,89 @@ def test_the_release_command_gives_the_baseline_an_absolute_output_path(
     baseline = Path(launched[0][launched[0].index("--out") + 1])
     assert baseline.is_absolute()
     assert baseline == tmp_path / "results" / f"{stem}.jsonl"
+
+
+def test_compare_counts_the_cases_a_failing_base_left_uncompared(tmp_path, capsys) -> None:
+    """A base that cannot run a case flags nothing for it, so ``compare`` says how many
+    it skipped and why. Fails on d34ddd69, where v0.42.0 errored all 144 SuperLSS cases
+    and ``compare`` reported only "0 flagged"."""
+    refused = "TypeError: NegativeBinomialLS.mean() got an unexpected keyword argument 'offset'"
+    base = {
+        "lss/NegativeBinomialLS/simple/small/exact/efs": {"status": "error", "error": refused},
+        "lss/GammaLS/simple/small/exact/efs": {"status": "error", "error": refused},
+        "lss/GammaLS/simple/mid/exact/efs": {"status": "timeout"},
+        "glm/poisson/log/small/mains/exact/fit_reml": _record(),
+    }
+    paths = {}
+    for side, records in (("base", base), ("candidate", dict.fromkeys(base, _record()))):
+        paths[side] = tmp_path / f"{side}.jsonl"
+        lines = [json.dumps({**record, "case": name}) for name, record in records.items()]
+        paths[side].write_text("\n".join(lines), encoding="utf-8")
+
+    command = ["compare", str(paths["base"]), str(paths["candidate"]), "v0.42.0"]
+    assert release_differential.main(command) == 0
+    printed = capsys.readouterr().out.splitlines()
+    assert printed[0] == "0 flagged"
+    assert printed[1] == "3 of 4 cases not compared: the base errored or timed out"
+    assert printed[2:] == [f"  2 x error: {refused}", "  1 x timeout"]
+
+
+class _ReleaseUpToV042:
+    """SuperLSS as v0.40.0 to v0.42.0 take offsets: at fit, with none on the helpers.
+
+    Built on this release's classes, so a fit it runs is this release's fit with
+    each offset moved back to ``fit_reml(offsets=)``.
+    """
+
+    class Family:
+        def __init__(self) -> None:
+            self.current = NegativeBinomialLS()
+            self.parameters = self.current.parameters
+
+        def __getattr__(self, helper: str):
+            def declare(*terms, **options):
+                if "offset" in options:
+                    raise TypeError(f"{helper}() got an unexpected keyword argument 'offset'")
+                return helper, terms, options
+
+            return declare
+
+    class Model:
+        def __init__(self, family, *declarations, **options) -> None:
+            self._declared = family, declarations, options
+
+        def fit_reml(self, X, y, sample_weight=None, *, offsets=None, **kwargs):
+            family, declarations, options = self._declared
+            offsets = offsets or {}
+            bound = [
+                getattr(family.current, helper)(
+                    *terms, **given, **({"offset": offsets[p.name]} if p.name in offsets else {})
+                )
+                for p, (helper, terms, given) in zip(family.parameters, declarations, strict=True)
+            ]
+            model = SuperLSS(family.current, *bound, **options)
+            self.fitted = model.fit_reml(X, y, sample_weight, **kwargs)
+            return self
+
+        def __getattr__(self, name: str):
+            return getattr(self.__dict__["fitted"], name)
+
+
+def test_an_lss_case_declares_its_offsets_where_the_release_takes_them(monkeypatch) -> None:
+    """Up to v0.42 SuperLSS offsets go to ``fit_reml(offsets=)``, from v0.43 to the
+    predictor helpers. The case fits the same model either way. Fails on d34ddd69,
+    whose harness errored every SuperLSS case on v0.42.0's API."""
+    import superglm
+
+    case = ("NegativeBinomialLS", "simple", "small", "exact", "efs")
+    current = release_differential.run_lss(*case)
+    monkeypatch.setattr(superglm, "SuperLSS", _ReleaseUpToV042.Model)
+    monkeypatch.setattr(superglm, "NegativeBinomialLS", _ReleaseUpToV042.Family)
+    earlier = release_differential.run_lss(*case)
+
+    assert earlier.keys() == current.keys()
+    for key, value in current.items():
+        assert earlier[key] == (value if isinstance(value, (bool, str)) else pytest.approx(value))
 
 
 @pytest.mark.slow

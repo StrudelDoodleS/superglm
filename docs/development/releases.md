@@ -111,7 +111,10 @@ seeded corpus (every family, link, term kind and route of `SuperGLM`, and
 every `SuperLSS` family) on the release and on the head, plus cases that
 reproduce every break found across earlier releases. A fit the release
 converged to a sensible answer that the head refuses, leaves unconverged, or
-fits worse beyond the harness's tolerances is a regression. It blocks the
+fits worse beyond the harness's tolerances is a regression. The comparison
+also counts, by error, the cases the release itself errored on or timed out,
+which it could not compare: a large count means the harness did not run on
+that release, not that nothing regressed. A regression blocks the
 release until a fix restores the old result without losing what the change
 bought; otherwise it goes to the owner as a one-screen decision.
 `tests/test_userspace_040.py` holds the harness's compact subset to v0.40.0's
