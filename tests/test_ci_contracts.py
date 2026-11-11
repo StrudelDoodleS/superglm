@@ -126,8 +126,9 @@ def _duration_shortfall(collected: set[str], recorded: dict[str, float]) -> str 
         "request's own CI run, whose shards upload their per-test times even when they fail: "
         "`uv run python scripts/update_test_durations.py --run <run id>`, then commit "
         ".test_durations. The run id is the number after /actions/runs/ in the link of any of "
-        "the pull request's CI checks, or the first column of `gh run list --workflow ci.yml "
-        "--event pull_request --branch <your branch> --limit 1`. Its artifacts last 7 days."
+        "the pull request's CI checks, or what `gh run list --workflow ci.yml --event "
+        "pull_request --branch <your branch> --limit 1 --json databaseId -q '.[0].databaseId'` "
+        "prints. Its artifacts last 7 days."
     )
 
 
@@ -152,7 +153,12 @@ def test_a_stale_duration_manifest_says_how_to_refresh_it() -> None:
     assert message.startswith("11 of 1000 collected tests have no entry in .test_durations")
     assert sorted(collected)[989] in message
     assert "scripts/update_test_durations.py --run <run id>" in message
-    assert "/actions/runs/" in message and "gh run list --workflow ci.yml" in message
+    assert "/actions/runs/" in message
+    # gh run list's first column is the run's status; --json prints the id alone.
+    assert (
+        "`gh run list --workflow ci.yml --event pull_request --branch <your branch> --limit 1 "
+        "--json databaseId -q '.[0].databaseId'`" in message
+    )
 
 
 _PYTHON_FLOOR_CHECK = "Python 3.12 · non-browser suite · version floor"
