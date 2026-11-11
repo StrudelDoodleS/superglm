@@ -20,6 +20,7 @@ follow it, while ``result_`` and the covariance keep describing the fit.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable, Hashable
 from dataclasses import dataclass
 from enum import Enum
@@ -58,6 +59,13 @@ _INTERCEPT_XATOL = float(np.sqrt(_UNIT_ROUNDOFF))
 # among doublings both ways, from 2**-60 of ``_INTERCEPT_WIDEST`` units up to it.
 _INTERCEPT_WIDEST = 2.0**20
 _INTERCEPT_PROBES = 61
+# Where no probe is valid, the gaps between them are bisected (``_between_probes``) with at
+# most this many evaluations. Where each midpoint's invalid rows say which side the valid
+# shifts lie on, the gap holding them is bisected to adjacent floats, about 53 of them. Where
+# a midpoint's rows cannot say (an evaluation refused as a whole has no row-wise answer),
+# both halves are searched, breadth first over every gap that may hold the band: with ``G``
+# such gaps, a band wider than 2**-(d+1) of its gap is found once G * (2**(d+1) - 1) <= 256.
+_BETWEEN_PROBES = 256
 
 
 class PostfitState(Enum):
@@ -257,14 +265,23 @@ def _profiled_merit(
     unit = _intercept_scale(eta[:, column], reach)
 
     values: dict[float, float] = {}
+    invalid: dict[float, NDArray[np.bool_] | None] = {}
 
     def objective(t: float) -> float:
         # Memoised: the bracket and the walls' bisection revisit their end points.
         if t not in values:
-            values[t] = negative_log_likelihood(unit * t)
+            found = rows_at(unit * t)
+            failed = None if found is None else ~np.isfinite(found)
+            invalid[t] = failed
+            whole = found is not None and failed is not None and not failed.any()
+            values[t] = -float(np.sum(found, dtype=np.float64)) if whole else np.inf
         return values[t]
 
-    start = 0.0 if np.isfinite(held) else _finite_start(objective)
+    def invalid_at(t: float) -> NDArray[np.bool_] | None:
+        objective(t)
+        return invalid[t]
+
+    start = 0.0 if np.isfinite(held) else _finite_start(objective, invalid_at)
     if start is None:
         return 0.0, held + penalty, invalid_rows(0.0)
     lower = _finite_reach(objective, start, start - _INTERCEPT_SEARCH)
@@ -302,17 +319,71 @@ def _profiled_merit(
     return unit * best, best_value + penalty, 0
 
 
-def _finite_start(objective: Callable[[float], float]) -> float | None:
+def _finite_start(
+    objective: Callable[[float], float],
+    invalid_at: Callable[[float], NDArray[np.bool_] | None],
+) -> float | None:
     """The nearest shift to zero at which ``objective`` is finite, probed by doublings both
-    ways out to ``_INTERCEPT_WIDEST``, or ``None`` when every probe leaves a row invalid.
+    ways out to ``_INTERCEPT_WIDEST``; else a finite shift between two probes
+    (``_between_probes``), or ``None`` when neither finds one.
 
     Nearest first: the probe found lies within a factor of 2 of the wall of invalid rows.
     """
+    probes = [0.0]
     for doublings in range(_INTERCEPT_PROBES):
         reach = _INTERCEPT_WIDEST * 0.5 ** (_INTERCEPT_PROBES - 1 - doublings)
         for shift in (reach, -reach):
             if np.isfinite(objective(shift)):
                 return shift
+            probes.append(shift)
+    return _between_probes(objective, invalid_at, sorted(probes))
+
+
+def _within(rows: NDArray[np.bool_] | None, others: NDArray[np.bool_] | None) -> bool:
+    """Whether the invalid ``rows`` are among ``others``; an unknown set (``None``) may be."""
+    return rows is None or others is None or not np.any(rows & ~others)
+
+
+def _between_probes(
+    objective: Callable[[float], float],
+    invalid_at: Callable[[float], NDArray[np.bool_] | None],
+    probes: list[float],
+) -> float | None:
+    """A finite shift between two consecutive ``probes``, each invalid, or ``None``.
+
+    Each row is taken to be valid on an interval of shifts, as ``_finite_reach`` takes it: a
+    domain wall or an overflow at each end. All rows are valid on the intersection ``I``. Left
+    of ``I`` a shift's invalid rows are those whose interval starts above it, so they shrink
+    toward ``I``; right of it they grow. Gaps where that can hold are bisected, nearest zero
+    first: a midpoint lies left of ``I`` only if its invalid rows are among its left end's,
+    and right only if among its right end's. Where both may hold, both halves are searched,
+    breadth first. At most ``_BETWEEN_PROBES`` evaluations are spent (see there).
+    """
+    rows = [invalid_at(probe) for probe in probes]
+    falls = [True]  # each probe's invalid rows shrink from the leftmost probe up to it
+    for j in range(1, len(probes)):
+        falls.append(falls[-1] and _within(rows[j], rows[j - 1]))
+    rises = [True]  # and grow from it to the rightmost probe
+    for j in range(len(probes) - 2, -1, -1):
+        rises.append(rises[-1] and _within(rows[j], rows[j + 1]))
+    rises.reverse()
+    gaps = [j for j in range(len(probes) - 1) if falls[j] and rises[j + 1]]
+    gaps.sort(key=lambda j: min(abs(probes[j]), abs(probes[j + 1])))
+    queue = deque((probes[j], probes[j + 1], rows[j], rows[j + 1]) for j in gaps)
+    for _ in range(_BETWEEN_PROBES):
+        if not queue:
+            return None
+        left, right, left_rows, right_rows = queue.popleft()
+        middle = 0.5 * (left + right)
+        if middle in (left, right):  # adjacent floats: no shift lies between
+            continue
+        if np.isfinite(objective(middle)):
+            return middle
+        middle_rows = invalid_at(middle)
+        if _within(middle_rows, left_rows):
+            queue.append((middle, right, middle_rows, right_rows))
+        if _within(middle_rows, right_rows):
+            queue.append((left, middle, left_rows, middle_rows))
     return None
 
 

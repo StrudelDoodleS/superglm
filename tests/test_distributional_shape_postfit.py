@@ -429,6 +429,82 @@ def test_a_repair_that_needs_its_intercept_to_keep_every_row_valid_is_published(
     assert not mean_exists(theta["scale"].to_numpy(), theta["shape"].to_numpy()).all()
 
 
+def _generalized_gamma_with_a_narrow_band(spread: float):
+    """Codex's revision: a scale offset falling ``spread`` over x, the scale link predictor
+    ``0.5 - x`` and the shape ``-0.01 - 1.49 x``. Flattening the scale's term to increasing
+    leaves valid only the shifts between an overflow wall below and a mean wall above."""
+    x = np.linspace(0.0, 1.0, 200)
+    X = pd.DataFrame({"x": x, "off": -spread + (spread - 5.0) * x})
+    family = GeneralizedGammaLSS()
+    model = SuperLSS(
+        family,
+        family.mean(),
+        family.scale(
+            s("x", kind="bs", k=6, constraint=Constraint.postfit.increasing), offset="off"
+        ),
+        family.shape(s("x", kind="bs", k=6)),
+    )
+    y = np.random.default_rng(0).gamma(4.0, 0.25, 200)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(X, y)
+    fitted = model._model
+    beta = np.array(fitted.coefficients, dtype=np.float64)
+    targets = {"scale": 0.5 - x - X["off"].to_numpy(), "shape": -0.01 - 1.49 * x}
+    for parameter, target in targets.items():
+        design = np.column_stack([np.ones(len(x)), _term_of(fitted, parameter).transform(x)])
+        solution = np.linalg.lstsq(design, target, rcond=None)[0]
+        beta[fitted.layout.predictor(parameter).intercept_index] = solution[0]
+        beta[fitted.layout.term_slices[f"{parameter}:x"]] = solution[1:]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", EditedCoefficientsWarning)
+        revised = model._with_revised_coefficients(beta, edited_terms=["scale:x", "shape:x"])
+    return revised, X
+
+
+def test_a_valid_band_between_two_intercept_probes_is_found():
+    # Codex's case. The valid shifts lie between -27.5 and -15.42, inside the gap between the
+    # probes -15.5 and -31 (in the scale's own units, -0.5 and -1); at 19a6ab028 the search
+    # tried only the probes and refused. The band's sides are told apart by the rows invalid
+    # at each midpoint, and the published shift sits on the mean wall, where the likelihood
+    # still improves.
+    revised, X = _generalized_gamma_with_a_narrow_band(35.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        revised.apply_shape_postfit()
+    (record,) = revised._model.fit_state.hand_edit.repairs
+    assert record.intercept_shift == pytest.approx(-15.42058, abs=1e-4)
+    theta = revised.predict_parameters(X)
+    sigma, shape = theta["scale"].to_numpy(), theta["shape"].to_numpy()
+    assert mean_exists(sigma, shape).all()
+    assert [status.state for status in postfit_status(revised._model)] == [PostfitState.REPAIRED]
+    # the wall: a further 1e-5 leaves a row with no mean
+    assert not mean_exists(sigma * np.exp(1e-5), shape).all()
+
+
+def test_the_repair_is_refused_when_no_intercept_shift_leaves_every_row_valid():
+    # With the offset falling 60 rather than 35, the overflow wall lies above the mean wall:
+    # no shift is valid, as a grid of 6001 shifts confirms. The gap search ends within its
+    # budget and the repair is refused with nothing published.
+    revised, X = _generalized_gamma_with_a_narrow_band(60.0)
+    before = revised._model
+    evaluations = []
+    real = GeneralizedGammaLSS.evaluate_natural
+
+    def counted(self, *args, **kwargs):
+        evaluations.append(1)
+        return real(self, *args, **kwargs)
+
+    with warnings.catch_warnings(), pytest.MonkeyPatch.context() as patch:
+        warnings.simplefilter("ignore")
+        patch.setattr(GeneralizedGammaLSS, "evaluate_natural", counted)
+        with pytest.raises(RuntimeError, match="rejected before publication"):
+            revised.apply_shape_postfit()
+    assert revised._model is before
+    # the held intercept, 122 probes, the held shift again and the gap search's budget
+    assert len(evaluations) <= 1 + 122 + 1 + 256 + 4
+
+
 def _gaussian_in_units(unit: float) -> SuperLSS:
     """A Gaussian location repair with the response and its known sigma in ``unit``."""
     from superglm import GaussianLS
