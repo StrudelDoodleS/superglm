@@ -8,15 +8,18 @@ representations of the CRPS, so agreement is evidence and not a tautology.
 
 from __future__ import annotations
 
+import itertools
 import json
 from fractions import Fraction
 from types import SimpleNamespace
 
+import mpmath as mp
 import numpy as np
 import pandas as pd
 import pytest
 from scipy import integrate, special, stats
 
+import superglm.distributional.checks.scores as scores_module
 from superglm import Categorical, Spline
 from superglm.distributional import Predictor
 from superglm.distributional.checks.compare import (
@@ -1766,6 +1769,76 @@ def test_negative_binomial_crps_is_accurate_at_large_central_counts(mean, size, 
 def test_negative_binomial_crps_refuses_a_response_past_the_count_range() -> None:
     with pytest.raises(ValueError, match="below 2\\*\\*53"):
         crps_closed_form(NegativeBinomialLS(), np.array([2.0**54]), np.array([[3.0, 2.0]]))
+
+
+@pytest.mark.parametrize(
+    "responses,named",
+    [([0.0, 1.0, 2.0**54], "[2]"), ([70.0, 0.0, 3.0, 2.0**53 + 2.0], "[3]")],
+)
+def test_negative_binomial_crps_count_refusal_names_the_callers_rows(responses, named) -> None:
+    """Rows below 64 cells come first, so a position among the far rows is not the row."""
+    theta = np.tile([3.0, 2.0], (len(responses), 1))
+    with pytest.raises(ValueError, match=f"rows \\{named[:-1]}\\] are not"):
+        crps_closed_form(NegativeBinomialLS(), np.array(responses), theta)
+
+
+def test_negative_binomial_crps_beta_refusal_names_the_callers_rows(monkeypatch) -> None:
+    """A non-finite incomplete beta, forced here, is refused at the caller's row."""
+    nan_beta = SimpleNamespace(betainc=lambda *args: np.full(np.broadcast(*args).shape, np.nan))
+    monkeypatch.setattr(scores_module, "special", nan_beta)
+    theta = np.tile([3.0, 2.0], (3, 1))
+    with pytest.raises(ValueError, match="response of 64 or more \\(rows \\[2\\]\\)"):
+        crps_closed_form(NegativeBinomialLS(), np.array([0.0, 1.0, 70.0]), theta)
+
+
+def _poisson_limit_crps(mean: float, size: float, y: float) -> float:
+    """``CRPS(NB2(mean, size), y)`` as ``sum`` over unit cells of ``(F - 1{z >= y})^2``.
+
+    Each cell's term is nonnegative and ``P(Y > k)`` is summed from the pmf, so
+    nothing cancels at ``mean / (mean + size)`` far below binary64's range.
+    """
+    with mp.workdps(60):
+        mu, theta, y = mp.mpf(mean), mp.mpf(size), mp.mpf(y)
+        pmf = [mp.exp(-theta * mp.log1p(mu / theta))]
+        for k in range(int(mp.floor(y)) + 80):
+            pmf.append(pmf[-1] * mu * (k + theta) / ((mu + theta) * (k + 1)))
+        survival = list(itertools.accumulate(reversed(pmf[1:])))[::-1]  # P(Y > k)
+        score = mp.mpf(0)
+        for k, tail in enumerate(survival):
+            covered = min(max(y - k, 0), 1)  # the share of [k, k + 1) below y
+            score += (1 - tail) ** 2 * covered + tail**2 * (1 - covered)
+        return float(score)
+
+
+def test_negative_binomial_crps_keeps_the_poisson_limit_scale() -> None:
+    """At a size ``1e308``, ``mean / (mean + size)`` is subnormal or zero.
+
+    Formed alone it scored ``(1e-18, 1e308)`` at zero as 0, not about
+    ``1e-36``, and ``(1e-15, 1e308)`` 1.14% low.
+    """
+    theta = np.array([[1e-18, 1e308], [1e-15, 1e308]])
+    closed = crps_closed_form(NegativeBinomialLS(), np.zeros(2), theta)
+    expected = [_poisson_limit_crps(*law, 0.0) for law in theta]
+    np.testing.assert_allclose(closed, expected, rtol=1e-13, atol=0)
+
+
+@pytest.mark.parametrize("mean", [1e-18, 1e-15, 1e-6, 0.5, 3.0])
+def test_negative_binomial_crps_is_continuous_across_the_ratio_underflow(mean) -> None:
+    """Sizes from ``2**990`` to ``2**1080`` times the mean, across the point where
+    ``mean / (mean + size)`` leaves the normal range and then rounds to zero.
+
+    The responses stay inside the 64 cells of the pmf sum: past them, scipy's
+    ``betainc`` is NaN at sizes above about ``1e200`` and the row is refused.
+    """
+    with np.errstate(over="ignore"):
+        sizes = np.ldexp(mean, [990, 1010, 1020, 1023, 1030, 1050, 1074, 1080])
+    laws = [(mean, float(size)) for size in [*sizes, 1e308] if size < 1.7e308]
+    responses = [0.0, 0.5, 1.0, 2.0, 3.5, 63.5]
+    theta = np.array([law for law in laws for _ in responses])
+    y = np.tile(responses, len(laws))
+    closed = crps_closed_form(NegativeBinomialLS(), y, theta)
+    expected = [_poisson_limit_crps(m, s, v) for (m, s), v in zip(theta, y, strict=True)]
+    np.testing.assert_allclose(closed, expected, rtol=1e-13, atol=0)
 
 
 def test_negative_binomial_crps_refuses_a_law_binary64_cannot_score() -> None:

@@ -275,8 +275,11 @@ def _negative_binomial_crps(family: Any, y: NDArray, theta: NDArray) -> NDArray[
     # is sum_{j <= k} (y - j) f(j) below SHORTFALL_CELLS, else the partial
     # moment of _negative_binomial_shortfall.
     response, parameters = _validated_scoring_inputs(y, theta)
-    response = np.ascontiguousarray(response)
-    mean, size = np.ascontiguousarray(parameters[:, 0]), np.ascontiguousarray(parameters[:, 1])
+    # The row kernel is compiled for writable contiguous rows (warm-up's); a
+    # read-only response, such as a pandas 3 column's, would compile another.
+    response, mean, size = (
+        np.require(v, np.float64, ("C", "W")) for v in (response, *parameters.T)
+    )
     zero, half, below = (np.empty(len(response)) for _ in range(3))
     pooled_rows(
         lambda start, stop: negative_binomial_crps_rows(
@@ -286,7 +289,7 @@ def _negative_binomial_crps(family: Any, y: NDArray, theta: NDArray) -> NDArray[
     )
     far = np.flatnonzero(np.isnan(below))
     if len(far):
-        below[far] = _negative_binomial_shortfall(response[far], mean[far], size[far])
+        below[far] = _negative_binomial_shortfall(response[far], mean[far], size[far], far)
     # CRPS(y) = E|Y - y| - E|Y - Y'| / 2, with E|Y - y| = mean - y + 2 E[(y - Y)^+],
     # from whichever of CRPS(0) and E|Y - Y'| / 2 is the smaller.
     scores = zero - response + 2.0 * below
@@ -303,7 +306,7 @@ def _negative_binomial_crps(family: Any, y: NDArray, theta: NDArray) -> NDArray[
 
 
 def _negative_binomial_shortfall(
-    response: NDArray, mean: NDArray, size: NDArray
+    response: NDArray, mean: NDArray, size: NDArray, rows: NDArray
 ) -> NDArray[np.float64]:
     """``E[(y - Y)^+]`` for ``k = floor(y) >= SHORTFALL_CELLS``, in the form that cancels least.
 
@@ -315,12 +318,13 @@ def _negative_binomial_shortfall(
     cancels instead where ``G << F`` (a small size, ``y`` far below the mean), so
     each row takes the form with the smaller terms.  ``f`` is the family's
     saddle-point PMF (Loader 2000), its deviance formed from ``k - mean`` itself.
+    ``rows`` are these rows' positions in the caller's, for its refusals.
     """
     count = np.floor(response)
     if np.any(count >= 2.0**53):
-        rows = np.flatnonzero(count >= 2.0**53)[:10].tolist()
+        named = rows[count >= 2.0**53][:10].tolist()
         raise ValueError(
-            f"NegativeBinomialLS CRPS needs responses below 2**53 (rows {rows} are not); "
+            f"NegativeBinomialLS CRPS needs responses below 2**53 (rows {named} are not); "
             "the family's counts end there"
         )
     # F(k) = I_p(size, k + 1) = 1 - I_r(k + 1, size), evaluated on whichever of
@@ -340,10 +344,10 @@ def _negative_binomial_shortfall(
             1.0 - special.betainc(count, size + 1.0, r),
         )
     if not np.all(np.isfinite(cdf)):
-        rows = np.flatnonzero(~np.isfinite(cdf))[:10].tolist()
+        named = rows[~np.isfinite(cdf)][:10].tolist()
         raise ValueError(
             "NegativeBinomialLS CRPS cannot evaluate the distribution function at a "
-            f"response of 64 or more (rows {rows}); score those rows with the log score"
+            f"response of 64 or more (rows {named}); score those rows with the log score"
         )
     log_pmf = np.array(
         [_pmf_log_jet(k, m, s, 0)[0] for k, m, s in zip(count, mean, size, strict=True)]

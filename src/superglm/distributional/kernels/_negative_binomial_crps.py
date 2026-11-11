@@ -70,6 +70,8 @@ _NEGLIGIBLE = 2.0**-60
 _TWO_PI = 2.0 * math.pi
 #: The smallest normal binary64 number: below it ``rho`` has lost its digits.
 _TINY = 2.0**-1022
+#: Below this ``d``, ``-log1p(-d) = d (1 + d / 2 + ...)`` is ``d`` to within ``u``.
+_SMALL_DROP = 2.0**-53
 
 
 @njit(cache=True)
@@ -85,9 +87,13 @@ def _expm1_less_identity(z: float) -> float:
 
 @njit(cache=True)
 def _node(
-    s: float, centre: float, spread: float, size: float, w: float, rho: float
+    s: float, centre: float, spread: float, size: float, w: float, rho: float, size_w: float
 ) -> tuple[float, float, float, float]:
-    """``(x, z = size log R, e^{-x}, dx/ds)`` at the sinh-mapped node ``s``."""
+    """``(x, z = size log R, e^{-x}, dx/ds)`` at the sinh-mapped node ``s``.
+
+    Where ``1 - R`` is below ``_SMALL_DROP``, ``z = -size w / (1 + v^-2)`` from
+    ``size_w``: ``w`` itself underflows near the Poisson limit, ``size >> mean``.
+    """
     grow = math.exp(s)
     shrink = 1.0 / grow
     x = centre + spread * 0.5 * (grow - shrink)
@@ -95,16 +101,21 @@ def _node(
     decay = inverse_v * inverse_v  # 1 / v^2
     cosine = decay / (1.0 + decay)  # 1 / (1 + v^2)
     drop = w / (1.0 + decay)  # 1 - R = w v^2 / (1 + v^2)
-    log_ratio = math.log1p(-drop) if drop < 0.5 else math.log(rho + w * cosine)
-    return x, size * log_ratio, inverse_v, spread * 0.5 * (grow + shrink)
+    if drop < _SMALL_DROP:
+        z = -size_w / (1.0 + decay)
+    elif drop < 0.5:
+        z = size * math.log1p(-drop)
+    else:
+        z = size * math.log(rho + w * cosine)
+    return x, z, inverse_v, spread * 0.5 * (grow + shrink)
 
 
 @njit(cache=True)
 def _node_term(
-    s: float, centre: float, spread: float, size: float, w: float, rho: float
+    s: float, centre: float, spread: float, size: float, w: float, rho: float, size_w: float
 ) -> tuple[float, float]:
     """``(x, e2(size log R) e^{-x} dx/ds)`` at the sinh-mapped node ``s``."""
-    x, z, inverse_v, jacobian = _node(s, centre, spread, size, w, rho)
+    x, z, inverse_v, jacobian = _node(s, centre, spread, size, w, rho, size_w)
     return x, _expm1_less_identity(z) * inverse_v * jacobian
 
 
@@ -122,6 +133,7 @@ def _half_side(
     size: float,
     w: float,
     rho: float,
+    size_w: float,
 ) -> float:
     """``1 - e^z``'s terms at ``s = sign (j + offset) step`` for ``j = first..last``.
 
@@ -130,7 +142,9 @@ def _half_side(
     """
     half = 0.0
     for j in range(first, last + 1):
-        x, z, inverse_v, jacobian = _node(sign * (j + offset) * step, centre, spread, size, w, rho)
+        x, z, inverse_v, jacobian = _node(
+            sign * (j + offset) * step, centre, spread, size, w, rho, size_w
+        )
         lost = -math.expm1(z) * inverse_v * jacobian  # 1 - e^z, without cancellation
         half += lost
         if (x - edge) * sign > 0.0 and lost <= _NEGLIGIBLE * (half + before):
@@ -156,11 +170,13 @@ def _zero_score(mean: float, size: float) -> tuple[float, float]:
     r = mean / total
     q = size / total
     w = 4.0 * r / ((1.0 + r) * (1.0 + r))
+    # size w = 4 mean q / (1 + r)^2, formed without r, which underflows where size >> mean.
+    size_w = 4.0 * mean * q / ((1.0 + r) * (1.0 + r))
     sqrt_rho = q / (1.0 + r)
     rho = sqrt_rho * sqrt_rho
     if rho < _TINY:
         return np.nan, np.nan
-    left = -0.5 * math.log1p(size * w)
+    left = -0.5 * math.log1p(size_w)
     right = max(math.log1p(r) - math.log(q), 0.0)
     centre = 0.5 * (left + right)
     spread = 0.5 * (right - left) + 1.0
@@ -169,12 +185,12 @@ def _zero_score(mean: float, size: float) -> tuple[float, float]:
     last = int(math.ceil(math.asinh((spread + _RIGHT_SPAN) / spread) / step))
     acc = 0.0
     for node in range(0, last + 1):
-        x, term = _node_term(node * step, centre, spread, size, w, rho)
+        x, term = _node_term(node * step, centre, spread, size, w, rho, size_w)
         acc += term
         if x > right + 1.0 and term <= _NEGLIGIBLE * acc:
             break
     for node in range(1, first + 1):
-        x, term = _node_term(-node * step, centre, spread, size, w, rho)
+        x, term = _node_term(-node * step, centre, spread, size, w, rho, size_w)
         acc += term
         if x < left - 1.0 and term <= _NEGLIGIBLE * acc:
             break
@@ -184,7 +200,7 @@ def _zero_score(mean: float, size: float) -> tuple[float, float]:
     # Each side runs until the half mean difference's own tail is negligible;
     # on the left it decays only like ``size w e^x``.  The left side's ``j``
     # counts nodes from ``s = -step``.
-    law = (centre, spread, size, w, rho)
+    law = (centre, spread, size, w, rho, size_w)
     reach = int(math.ceil(math.asinh((spread + _HALF_LEFT_SPAN) / spread) / step))
     half = _half_side(1.0, 0.0, 0, last, step, right + 1.0, 0.0, *law)
     half += _half_side(-1.0, 1.0, 0, reach - 1, step, left - 1.0, half, *law)
@@ -195,12 +211,17 @@ def _zero_score(mean: float, size: float) -> tuple[float, float]:
 
 @njit(cache=True)
 def _shortfall(mean: float, size: float, response: float, cells: int) -> float:
-    """``sum_{j < cells} (y - j) f(j)`` from ``f(0) = (size / (mean + size))^size``."""
-    rate = mean / (mean + size)
-    mass = math.exp(-size * math.log1p(mean / size))
+    """``sum_{j < cells} (y - j) f(j)`` from ``f(0) = (size / (mean + size))^size``.
+
+    Neither ``mean / (mean + size)`` nor ``mean / size`` is formed alone: both
+    underflow near the Poisson limit, where ``size log1p(mean / size)`` is ``mean``.
+    """
+    total = mean + size
+    ratio = mean / size
+    mass = math.exp(-mean if ratio < _SMALL_DROP else -size * math.log1p(ratio))
     acc = response * mass
     for j in range(1, cells):
-        mass *= rate * (j - 1.0 + size) / j
+        mass *= (mean / j) * ((j - 1.0 + size) / total)
         acc += (response - j) * mass
     return acc
 
