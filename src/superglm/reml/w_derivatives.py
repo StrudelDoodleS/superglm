@@ -271,6 +271,8 @@ def _leverage_derivative_terms(
                     quadratic[span, batch.members[:, batch.dense :]] = (
                         squares.T[:, :, None] * batch.identity_scales[None, :, :]
                     )
+            # Drop this piece and its products before the next piece is formed.
+            solved = solved_blocks = piece_leverage = products = squares = None
         weighted = row_weights[rows, None] * directions
         gradient = weighted.T @ (0.5 * (leverage + 1.0 / sum_w))
         return (gradient,) if quadratic is None else (gradient, quadratic.T @ weighted)

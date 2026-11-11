@@ -419,6 +419,8 @@ def _support_block(
                 plan.dense_inverse,
             )
             yield span, solved, leverage
+            # Free this piece before the next is formed, so a job holds one piece.
+            del solved, leverage
 
     return start + local, pieces()
 
