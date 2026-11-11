@@ -561,18 +561,19 @@ def _skewed_tensor_margins(kind, sigma):
     return x1, x2, {"a": margin_1, "b": margin_2}
 
 
-@pytest.mark.parametrize("kind", ["cr", "bs"])
-def test_a_decomposed_discrete_tensor_reads_its_null_space_from_the_structural_margins(kind):
+@pytest.mark.parametrize(("kind", "sigma"), [("cr", 2.25), ("bs", 2.0)], ids=["cr", "bs"])
+def test_a_decomposed_discrete_tensor_reads_its_null_space_from_the_structural_margins(kind, sigma):
     """The split counted the eigenvalues under eps**(2/3) of the largest: a skewed cr
     margin's spread put a range direction there (2 null eigenvalues, not 1), and the
-    kindless default is cr. The structural margins give the bilinear direction. A bs
+    kindless default is cr. On lognormal(0, 2.25) that direction sits an order of
+    magnitude under the cut whichever way the margin is binned. The structural margins give the bilinear direction. A bs
     margin's tail, at 1.6e-13 of its largest curvature, is certified 54 times over;
     its penalty is not normalised, and its components, symmetrised only as a sum,
     missed that sum by round-off of its 2.6e10 scale and failed GroupInfo's check."""
     from superglm.features._spline_select import _null_mask
     from superglm.features.interaction import TensorInteraction, _normalize_tensor_penalty
 
-    x1, x2, margins = _skewed_tensor_margins(kind, 2.0)
+    x1, x2, margins = _skewed_tensor_margins(kind, sigma)
     tensor = TensorInteraction("a", "b", decompose=True)
     infos = tensor.build_discrete(x1, x2, margins, n_bins=(256, 256)).infos
     assert [info.subgroup_name for info in infos] == ["bilinear", "wiggly"]
