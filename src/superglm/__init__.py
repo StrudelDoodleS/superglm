@@ -73,6 +73,9 @@ if _typing.TYPE_CHECKING:
         CategoricalInteraction as CategoricalInteraction,
     )
     from superglm.features.interaction import (
+        InteractionCellLabelWarning as InteractionCellLabelWarning,
+    )
+    from superglm.features.interaction import (
         NumericCategorical as NumericCategorical,
     )
     from superglm.features.interaction import (
@@ -235,6 +238,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
     "superglm.features.grouping": ("LevelGrouping", "collapse_levels"),
     "superglm.features.interaction": (
         "CategoricalInteraction",
+        "InteractionCellLabelWarning",
         "NumericCategorical",
         "NumericInteraction",
         "PolynomialCategorical",
@@ -593,6 +597,7 @@ __all__ = [
     "InteractionInference",
     "ConvergenceWarning",
     "FactorSmoothGroupTermWarning",
+    "InteractionCellLabelWarning",
     "RedundantInteractionWarning",
     "SCOPRetiredWarning",
     "SplineOptionWarning",

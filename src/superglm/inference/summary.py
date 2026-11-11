@@ -846,6 +846,8 @@ class ModelSummary:
             lines.extend(textwrap.wrap(info["convergence_note"], width=max(60, min(W + 2, 100))))
         for note in _editor_notes(info):
             lines.append(note)
+        for note in info.get("shared_cell_rows") or ():
+            lines.extend(textwrap.wrap(note, width=max(60, min(W + 2, 100))))
         has_smooth = any(_is_smooth_group_row(r) for r in self._coef_rows)
         if not info.get("editor_inference_stale", False):
             if has_smooth:
@@ -1284,6 +1286,11 @@ class ModelSummary:
                 f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
                 f'color:#8a4b00;font-style:italic;border:none;">{note}</td></tr>'
             )
+        for note in info.get("shared_cell_rows") or ():
+            parts.append(
+                f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
+                f'white-space:normal;border:none;">{html_escape(note)}</td></tr>'
+            )
         has_smooth = any(_is_smooth_group_row(r) for r in self._coef_rows)
         if not info.get("editor_inference_stale", False):
             if has_smooth:
@@ -1330,6 +1337,37 @@ def editor_shape_notes(info: dict[str, Any]) -> list[str]:
     """The note for terms whose shaped ranges were chosen in the editor."""
     terms = info.get("editor_shape_terms") or []
     return [f"Shaped ranges for {', '.join(terms)} {_EDITOR_SHAPE_NOTE}"] if terms else []
+
+
+def shared_cell_row_notes(interaction_specs: dict[str, Any]) -> list[str]:
+    """For each categorical interaction whose rows share a name, the cells in row order.
+
+    A row is named ``term[level1:level2]``, which two cells share once a level holds a colon.
+    """
+    from superglm.features.interaction import CategoricalInteraction
+
+    notes = []
+    for name, spec in interaction_specs.items():
+        if not isinstance(spec, CategoricalInteraction):
+            continue
+        cells_by_label: dict[str, list[tuple]] = {}
+        for pair in spec._pairs:
+            cells_by_label.setdefault(f"{pair[0]}:{pair[1]}", []).append(pair)
+        first, second = spec.parent_names
+        shared = [
+            f"{name}[{label}] is "
+            + " then ".join(f"({first}={level1}, {second}={level2})" for level1, level2 in cells)
+            for label, cells in cells_by_label.items()
+            if len(cells) > 1
+        ]
+        if shared:
+            notes.append(
+                f"{name}: levels containing ':' give several cells one row name. In row order, "
+                f"{'; '.join(shared)}. relativities()[{name!r}] names each row's cell in its "
+                "level1 and level2 columns; renaming the levels so none contains ':' gives every "
+                "row its own name."
+            )
+    return notes
 
 
 def _editor_notes(info: dict[str, Any]) -> list[str]:

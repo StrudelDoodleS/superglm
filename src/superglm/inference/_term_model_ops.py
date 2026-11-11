@@ -182,11 +182,15 @@ def relativities(
 
             rels = interaction_cells(raw)
             log_rels = interaction_cells(raw, "log_relativities")
+            # "level" is "level1:level2", which two cells share once a level holds a colon;
+            # the trailing parent-level columns name each row's cell.
             out[iname] = pd.DataFrame(
                 {
                     "level": [f"{l1}:{l2}" for l1, l2 in rels],
                     "relativity": list(rels.values()),
                     "log_relativity": list(log_rels.values()),
+                    "level1": [l1 for l1, _ in rels],
+                    "level2": [l2 for _, l2 in rels],
                 }
             )
 

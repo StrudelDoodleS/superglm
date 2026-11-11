@@ -13,6 +13,7 @@ effects.
 from __future__ import annotations
 
 import itertools
+import warnings
 from io import BytesIO
 
 import numpy as np
@@ -20,9 +21,11 @@ import pandas as pd
 import pytest
 from openpyxl import load_workbook
 
-from superglm import Categorical, SuperGLM
+from superglm import Categorical, InteractionCellLabelWarning, SuperGLM
 from superglm.export.excel import write_rating_table_workbook
 from superglm.export.rating_tables import build_rating_table_payload
+from superglm.export.summary import build_summary_export_payload
+from superglm.features.interaction import interaction_cells
 from superglm.plotting import plot_interaction
 from superglm.plotting.data import build_interaction_plot_data
 
@@ -69,9 +72,7 @@ def test_the_fixture_has_colliding_labels(colon_fit):
     model, *_ = colon_fit
     labels = [f"{a}:{b}" for a, b in itertools.product(COLON_P, COLON_Q)]
     assert len(set(labels)) < len(labels)
-    assert set(model.reconstruct_feature("p:q")["pairs"]) == set(
-        itertools.product(COLON_P[1:], COLON_Q[1:])
-    )
+    assert set(_pairs(model)) == set(itertools.product(COLON_P[1:], COLON_Q[1:]))
 
 
 def test_rating_table_gives_each_colon_cell_its_own_factor(colon_fit):
@@ -140,13 +141,89 @@ def test_plotly_heatmap_gives_each_colon_cell_its_own_factor(colon_fit):
 def test_relativities_give_each_colon_cell_its_own_factor(colon_fit):
     model, _, _, reference = colon_fit
     table = model.relativities()["p:q"]
-    pairs = model.reconstruct_feature("p:q")["pairs"]
-    # The labels stay "level1:level2" in pair order, so two rows share "x:y:z".
+    pairs = _pairs(model)
+    # The labels stay "level1:level2" in pair order, so two rows share "x:y:z"; the trailing
+    # level1 and level2 columns say which cell each row is.
+    assert list(table.columns) == ["level", "relativity", "log_relativity", "level1", "level2"]
     assert list(table["level"]) == [f"{a}:{b}" for a, b in pairs]
+    assert list(zip(table["level1"], table["level2"])) == pairs
+    by_cell = table.set_index(["level1", "level2"])["relativity"]
     np.testing.assert_allclose(
-        table["relativity"], [reference[tuple(pair)] for pair in pairs], rtol=1e-9
+        [by_cell[pair] for pair in pairs], [reference[pair] for pair in pairs], rtol=1e-9
     )
     np.testing.assert_allclose(np.exp(table["log_relativity"]), table["relativity"], rtol=1e-12)
+
+
+def _pairs(model) -> list[tuple[str, str]]:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", InteractionCellLabelWarning)
+        return [tuple(pair) for pair in model.reconstruct_feature("p:q")["pairs"]]
+
+
+def test_term_inference_reads_each_colon_cell_by_its_pair_and_warns_of_merged_labels(colon_fit):
+    model, _, _, reference = colon_fit
+    with pytest.warns(InteractionCellLabelWarning) as record:
+        inference = model.term_inference("p:q")
+    warning = record.pop(InteractionCellLabelWarning)
+    message = str(warning.message)
+    assert "'x:y:z' is ('x', 'y:z') and ('x:y', 'z')" in message
+    assert "'a:b:c' is ('a', 'b:c') and ('a:b', 'c')" in message
+    assert "pair_relativity" in message
+    assert warning.filename == __file__  # at the caller's line, not inside superglm
+
+    pairs = _pairs(model)
+    assert list(inference.pair_relativity) == list(inference.pair_log_relativity) == pairs
+    np.testing.assert_allclose(
+        [inference.pair_relativity[pair] for pair in pairs],
+        [reference[pair] for pair in pairs],
+        rtol=1e-9,
+    )
+    np.testing.assert_allclose(
+        np.exp(list(inference.pair_log_relativity.values())),
+        list(inference.pair_relativity.values()),
+        rtol=1e-12,
+    )
+    # The label-keyed dict is unchanged: one entry per label, so it merges two cells.
+    assert len(inference.relativity) == len(pairs) - 1
+
+
+def test_reconstruct_feature_warns_of_merged_labels_and_names_its_per_pair_lists(colon_fit):
+    model, _, _, reference = colon_fit
+    with pytest.warns(InteractionCellLabelWarning, match="pair_relativities") as record:
+        raw = model.reconstruct_feature("p:q")
+    assert record.pop(InteractionCellLabelWarning).filename == __file__
+    cells = interaction_cells(raw)
+    np.testing.assert_allclose(list(cells.values()), [reference[pair] for pair in cells], rtol=1e-9)
+
+
+def test_summary_names_the_cells_of_rows_that_share_a_name(colon_fit):
+    model, _, _, reference = colon_fit
+    summary = model.summary()
+    note = "In row order, p:q[x:y:z] is (p=x, q=y:z) then (p=x:y, q=z)."
+    assert note in " ".join(str(summary).split())
+    assert note in summary._repr_html_()
+    payload = build_summary_export_payload(model)
+    assert any(note in text for text in payload.notes)
+    # The note's order is the rows' order: each row's estimate is its cell's log relativity.
+    shared = [row.estimate for row in payload.terms if row.term == "p:q[x:y:z]"]
+    np.testing.assert_allclose(
+        shared, np.log([reference[("x", "y:z")], reference[("x:y", "z")]]), rtol=1e-9
+    )
+
+
+def test_labels_that_do_not_collide_keep_their_dicts_and_raise_no_warning():
+    p_levels, q_levels = ["A", "B"], ["base", "p", "z"]
+    model, _, _ = _fit(p_levels, q_levels, seed=1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", InteractionCellLabelWarning)
+        inference = model.term_inference("p:q")
+        raw = model.reconstruct_feature("p:q")
+        text = str(model.summary())
+    assert "In row order" not in text
+    assert inference.relativity == raw["relativities"]
+    assert inference.relativity == {
+        f"{a}:{b}": v for (a, b), v in inference.pair_relativity.items()
+    }
 
 
 def test_rating_table_keeps_its_row_keys_when_a_level_is_named_like_the_row_column():

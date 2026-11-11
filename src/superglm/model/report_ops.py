@@ -296,6 +296,9 @@ def summary(
             else res.n_iter
         ),
     }
+    from superglm.inference.summary import shared_cell_row_notes
+
+    model_info["shared_cell_rows"] = shared_cell_row_notes(model._interaction_specs)
     termination_reason, convergence_note = _terminal_stop(model, res)
     if convergence_note is not None:
         model_info["termination_reason"] = termination_reason
@@ -830,7 +833,14 @@ def reconstruct_feature(model, name: str) -> dict[str, Any]:
             raw, name, model._interaction_specs, model._groups, res.beta, model._specs[name]
         )
     if in_inter:
-        return cast(dict[str, Any], model._interaction_specs[name].reconstruct(beta_combined))
+        raw = cast(dict[str, Any], model._interaction_specs[name].reconstruct(beta_combined))
+        if "pairs" in raw:
+            from superglm.features.interaction import warn_shared_cell_labels
+
+            warn_shared_cell_labels(
+                name, raw, "the lists `pair_relativities` and `pair_log_relativities`"
+            )
+        return raw
     raise KeyError(f"Feature not found: {name}")
 
 

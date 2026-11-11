@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 import inspect
+import itertools
 import warnings
 from collections.abc import Iterator
 from dataclasses import replace
@@ -1364,6 +1365,47 @@ def interaction_cells(raw: dict[str, Any], values: str = "relativities") -> dict
         labelled = raw[values]
         per_pair = [labelled[f"{level1}:{level2}"] for level1, level2 in pairs]
     return dict(zip(pairs, map(float, per_pair), strict=True))
+
+
+class InteractionCellLabelWarning(UserWarning):
+    """Two cells of a categorical interaction share a ``"level1:level2"`` label.
+
+    Raised by ``term_inference`` and ``reconstruct_feature`` when a level holds a colon:
+    ``("x", "y:z")`` and ``("x:y", "z")`` are both labelled ``"x:y:z"``, so a dict keyed by
+    those labels holds one value for both, and a fitted cell's label can read like a base
+    cell's. The values themselves are right. Read each cell by its pair of levels from the
+    per-pair fields the warning names, or rename the levels so none contains ``":"``.
+    """
+
+
+def shared_cell_labels(levels1, levels2) -> dict[str, list[tuple]]:
+    """The ``"level1:level2"`` labels that several cells of the full grid share, with the cells."""
+    cells_by_label: dict[str, list[tuple]] = {}
+    for pair in itertools.product(levels1, levels2):
+        cells_by_label.setdefault(f"{pair[0]}:{pair[1]}", []).append(pair)
+    return {label: cells for label, cells in cells_by_label.items() if len(cells) > 1}
+
+
+def warn_shared_cell_labels(name: str, raw: dict[str, Any], per_pair_fields: str) -> None:
+    """Warn, at the caller's line, when ``raw``'s label-keyed dicts merge two cells."""
+    pairs = raw["pairs"]
+    shared = shared_cell_labels(
+        raw.get("levels1") or dict.fromkeys(pair[0] for pair in pairs),
+        raw.get("levels2") or dict.fromkeys(pair[1] for pair in pairs),
+    )
+    if not shared:
+        return
+    from superglm._warn import warn_caller
+
+    examples = [f"{label!r} is {' and '.join(map(repr, cells))}" for label, cells in shared.items()]
+    more = f", and {len(examples) - 3} more" if len(examples) > 3 else ""
+    warn_caller(
+        f"Interaction {name!r} has levels containing ':', so some of its cells share a "
+        f"'level1:level2' label ({'; '.join(examples[:3])}{more}). A dict keyed by those "
+        "labels gives one cell's value for the other. Read each cell by its pair of levels "
+        f"from {per_pair_fields}, or rename the levels so none contains ':'.",
+        InteractionCellLabelWarning,
+    )
 
 
 class CategoricalInteraction:
