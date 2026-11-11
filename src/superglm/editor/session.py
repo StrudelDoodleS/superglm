@@ -57,7 +57,12 @@ from superglm.editor.level_order import (
     level_order_for_labels,
     level_order_for_target,
 )
-from superglm.editor.lss.apply import kept_inside_rules, leaves_curve
+from superglm.editor.lss.apply import (
+    absorbed_message,
+    kept_inside_rules,
+    leaves_curve,
+    prepare_ruled_edit,
+)
 from superglm.editor.lss.availability import require_available
 from superglm.editor.lss.open import open_lss
 from superglm.editor.lss.refit import lss_refit_with_drafts
@@ -1980,6 +1985,10 @@ class EditorSession:
                 return True
         return False
 
+    def _prepare_edit(self, term: str) -> None:
+        """Build what the first edit of ``term`` reads, for a term a page has just shown."""
+        prepare_ruled_edit(self.model, term)
+
     def _commit(
         self,
         term: str,
@@ -2000,7 +2009,7 @@ class EditorSession:
         An edit of a SuperLSS term with shape rules is kept inside them: the
         whole curve becomes the nearest one the rules allow
         (``kept_inside_rules``), and the record holds all of it. An edit the
-        rules take back entirely is not recorded.
+        rules take back entirely is not recorded and is refused with the reason.
         """
         indices = np.asarray(indices, dtype=np.intp).copy()
         before = np.asarray(before, dtype=np.float64).copy()
@@ -2012,8 +2021,11 @@ class EditorSession:
         kept = kept_inside_rules(self.model, editable, curve)
         if kept is not None:
             if leaves_curve(kept, editable.edited_log_effect, curve):
-                # The rules took the whole edit back: there is nothing to record or undo.
-                return
+                # The rules took the whole edit back: there is nothing to record or undo,
+                # and an edit that asked for a change says why it made none.
+                if np.array_equal(curve, editable.edited_log_effect):
+                    return
+                raise EditorValueError(absorbed_message(self.model, editable))
             indices = np.arange(editable.size, dtype=np.intp)
             before, after = editable.edited_log_effect.copy(), kept
         changed = not np.array_equal(before, after)

@@ -92,16 +92,22 @@ def rule_payload(model: Any, name: str) -> dict[str, Any] | None:
     return {"text": text, "fit": fit, "kept": holds_rules(model, name)}
 
 
-_MIRRORED = {"increasing": "decreasing", "decreasing": "increasing"}
+_MIRRORED = {
+    "increasing": "decreasing",
+    "decreasing": "increasing",
+    "convex": "concave",
+    "concave": "convex",
+}
 
 
 def _on_overdispersion(rule: ConstraintSpec) -> str:
     """A rule on θ as it reads on the curve a theta term draws, the overdispersion 1/θ.
 
-    1/θ falls where θ rises, so a direction swaps, a cap's bounds invert and swap,
-    and a step's largest rise and fall trade places, each inverted: adjacent θ
-    ratios in [1 - down, 1 + up] are 1/θ ratios in [1/(1 + up), 1/(1 - down)].
-    Curvature has no image under 1/θ, so a convex or concave rule names θ.
+    A rule holds on the linear predictor, log θ, and log(1/θ) = -log θ. So a
+    direction swaps, and so does a curvature, as it reads on the log scale the
+    rule holds on; a cap's bounds invert and swap, and a step's largest rise and
+    fall trade places, each inverted: adjacent θ ratios in [1 - down, 1 + up] are
+    1/θ ratios in [1/(1 + up), 1/(1 - down)].
     """
     if rule.kind in _MIRRORED:
         return rule.describe().replace(rule.kind, _MIRRORED[rule.kind], 1)
@@ -112,8 +118,6 @@ def _on_overdispersion(rule: ConstraintSpec) -> str:
         up, down = rule.bounds
         rise, fall = down / (1.0 - down), up / (1.0 + up)
         return f"max_step({rise:.3g}, {fall:.3g})"
-    if rule.kind in ("convex", "concave"):
-        return f"{rule.describe()} in θ"
     return rule.describe()
 
 

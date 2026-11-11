@@ -109,7 +109,6 @@ def lss_editable_terms(
     Each carries the values a shaped range is counted on (``shape_support``).
     """
     # Imported here: the shape tools read the view, which builds its terms from this module.
-    from superglm.editor.lss.rules import term_rows
     from superglm.editor.shapes import shape_support
 
     editable: dict[str, EditableTerm] = {}
@@ -132,10 +131,4 @@ def lss_editable_terms(
             view, key, term.x, train.X, train.sample_weight
         )
         editable[key] = term
-        if term_rows(view, key) is not None:
-            # A ruled edit reads the term at the reference row, which the view builds
-            # from every training row once: build it while the editor opens, not on
-            # the term's first edit.
-            view.reference_row()
-            view.reference_design(key)
     return editable

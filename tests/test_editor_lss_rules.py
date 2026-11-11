@@ -9,20 +9,23 @@ import pandas as pd
 import pytest
 from scipy.optimize import minimize_scalar
 
+import superglm.distributional.terms as distributional_terms
 import superglm.editor.lss.apply as lss_apply
 import superglm.editor.lss.view as lss_view
 from superglm import (
     Constraint,
     GammaLS,
     NegativeBinomialLS,
+    OrderedCategorical,
     Poisson,
     Spline,
     SuperGLM,
     SuperLSS,
     cat,
     s,
+    term,
 )
-from superglm.editor import EditorSession
+from superglm.editor import EditorSession, edit
 from superglm.editor.errors import EditorValueError
 from superglm.editor.lss.apply import lss_model_with_edits
 from superglm.editor.payloads import session_payload
@@ -31,6 +34,7 @@ from tests._lss_editor_fixtures import (
     _SEEDS,
     N_ROWS,
     FitCase,
+    _gamma_rows,
     _nb_rows,
     open_case,
     ruled_case,
@@ -283,7 +287,7 @@ def test_an_edit_whose_nearest_curve_is_flat_is_kept_and_exported():
     )
 
 
-def test_an_edit_the_rules_take_back_entirely_records_nothing():
+def test_an_edit_the_rules_take_back_entirely_records_nothing_and_says_why():
     session = open_case(ruled_case())
     term = session.terms["scale:region"]
     base = term.levels.index(str(session.model._specs["scale:region"]._base_level))
@@ -292,8 +296,9 @@ def test_an_edit_the_rules_take_back_entirely_records_nothing():
     assert relative[at_cap] == pytest.approx(_CAP[1], abs=1e-9)
     revision = session.model_revision
 
-    # Raising a level that already sits at its cap: the rule puts it straight back.
-    session.set_values("scale:region", [at_cap], [term.edited_log_effect[at_cap] + 0.5])
+    # Raising a level that already sits at its cap: the rule puts it straight back, and says so.
+    with pytest.raises(EditorValueError, match=r"changed nothing: its rules \(cap\(0.8, 1.25\)\)"):
+        session.set_values("scale:region", [at_cap], [term.edited_log_effect[at_cap] + 0.5])
 
     assert session.history == []
     assert session.edited_terms() == []
@@ -373,23 +378,47 @@ def test_a_projection_the_qp_does_not_certify_is_refused(monkeypatch):
     np.testing.assert_array_equal(session.terms["mean:power"].edited_log_effect, before)
 
 
-def test_the_first_ruled_edit_reads_no_training_rows(monkeypatch):
-    session = open_case(ruled_case())
-    term = session.terms["mean:power"]
+def test_opening_reads_no_reference_and_a_shown_term_edits_without_reading_rows(monkeypatch):
     reads = []
     original = lss_view._reference_value
     monkeypatch.setattr(
         lss_view, "_reference_value", lambda *a, **k: reads.append(a[-1]) or original(*a, **k)
     )
+    session = open_case(ruled_case())
+    # Opening builds no reference row; only a term the page shows builds what its edit reads.
+    assert reads == []
+    monkeypatch.setattr(
+        distributional_terms, "_sweep", lambda *a, **k: pytest.fail("a level sweep for one row")
+    )
+    session._prepare_edit("mean:power")
+    session._prepare_edit("scale:region")
+    built = len(reads)
+    assert built > 0
     monkeypatch.setattr(
         lss_view, "_reference_design", lambda *a, **k: pytest.fail("built on the first edit")
     )
+    term = session.terms["mean:power"]
     tail = np.flatnonzero(term.x > 10.0)
 
     session.set_values("mean:power", tail, term.edited_log_effect[tail] - 0.4)
     session.set_values("scale:region", [1], [session.terms["scale:region"].edited_log_effect[1]])
 
-    assert reads == []
+    assert len(reads) == built
+
+
+@pytest.mark.parametrize(
+    ("case", "key"),
+    [("ruled", "scale:region"), ("ruled", "mean:region"), ("ordered", "mean:band")],
+)
+def test_a_reference_design_from_the_reference_row_is_the_sweep_s(case, key):
+    view = open_case(ruled_case() if case == "ruled" else _ordered_case()).model
+    parameter, column = key.split(":")
+    _, state, term_slice = distributional_terms._resolve_term(view._fitted, parameter, column)
+    frame = distributional_terms.as_eager_frame(view.X_train)
+    swept = distributional_terms._reference_design(
+        view._fitted, frame, parameter, column, state, term_slice
+    )
+    np.testing.assert_allclose(view.reference_design(key), swept, rtol=0.0, atol=1e-14)
 
 
 @functools.cache
@@ -415,8 +444,10 @@ def test_a_theta_term_names_its_rule_on_the_overdispersion_it_draws():
     assert payload["theta:age"]["rules"]["text"] == "increasing"
     assert np.min(np.diff(payload["theta:age"]["y"])) >= -1e-9
     assert payload["theta:region"]["rules"]["text"] == "cap(0.667, 1.43)"
-    # Curvature in θ has no image in 1/θ, so the rule names θ.
-    assert payload["theta:power"]["rules"]["text"] == "convex in θ"
+    # A rule holds on log θ, and log(1/θ) = -log θ: convex in θ reads concave on the log of the
+    # 1/θ the chart draws, as every rule reads on the log scale.
+    assert payload["theta:power"]["rules"]["text"] == "concave"
+    assert np.max(np.diff(np.log(payload["theta:power"]["y"]), 2)) <= _TOL
 
 
 def test_shape_support_counts_the_bins_a_per_column_bin_count_gives():
@@ -433,3 +464,208 @@ def test_shape_support_counts_the_bins_a_per_column_bin_count_gives():
 
     # The refit bins ``x`` into 512, as its own ``n_bins`` entry says, not the default 256.
     assert support["through"][-1] == fit_support(X["x"].to_numpy(), 512).size
+
+
+def _level_curve(model, key, levels):
+    """The exported model's link-scale effect of ``key`` at each level, from the first level."""
+    parameter, column = key.split(":")
+    case = ruled_case()
+    rows = pd.concat([case.X.iloc[[0]]] * len(levels), ignore_index=True)
+    rows[column] = list(levels)
+    values = model.predict_link(rows)[parameter].to_numpy()
+    return values - values[0]
+
+
+def test_a_reordered_capped_term_still_edits_resets_and_exports():
+    session = open_case(ruled_case())
+    key = "scale:region"
+    term = session.terms[key]
+    r2 = term.levels.index("R2")
+    session.set_values(key, [r2], [term.edited_log_effect[r2] + 0.1])
+    # The chart's order drag: R2 to the end of the axis.
+    session.select_indices(key, [r2])
+    order = list(term.levels)
+    session.reorder_levels(key, target_index=term.size - 1)
+    moved = session.terms[key]
+    assert moved.levels != order and moved.levels.index("R2") != r2
+
+    r3 = moved.levels.index("R3")
+    session.select_indices(key, [r3])
+    session.shift(key, 0.05)
+    session.select_indices(key, [moved.levels.index("R2")])
+    session.reset(key)
+
+    assert _capped(session)
+    curve = session.terms[key].edited_log_effect
+    assert curve[r3] > moved.original_log_effect[r3] + 0.01
+    # The exported model carries the curve the session draws, level by level.
+    shown = _level_curve(session.to_model(), key, moved.levels)
+    np.testing.assert_allclose(shown, curve - curve[0], rtol=0.0, atol=1e-9)
+
+
+def test_an_edit_of_the_base_moves_the_levels_its_cap_ties_to_it_and_no_others():
+    session = open_case(ruled_case())
+    key = "scale:region"
+    term = session.terms[key]
+    base = term.levels.index(str(session.model._specs[key]._base_level))
+    before = term.edited_log_effect.copy()
+    relative = before - before[base]
+    at_cap = np.abs(relative - _CAP[1]) <= 1e-9
+    assert at_cap.any()
+
+    # Lowering the base lifts every level read from it, which those at the cap cannot take.
+    session.set_values(key, [base], [before[base] - 0.05])
+
+    assert len(session.history) == 1
+    assert _capped(session)
+    curve = session.terms[key].edited_log_effect
+    assert curve[base] < before[base] - 0.01
+    # The levels at the cap come down with the base, held at the cap; the rest stay.
+    np.testing.assert_allclose(curve[at_cap] - curve[base], _CAP[1], rtol=0.0, atol=1e-9)
+    free = ~at_cap
+    free[base] = False
+    np.testing.assert_allclose(curve[free], before[free], rtol=0.0, atol=1e-12)
+    shown = _level_curve(session.to_model(), key, term.levels)
+    np.testing.assert_allclose(shown, curve - curve[0], rtol=0.0, atol=1e-9)
+
+
+@functools.cache
+def _ordered_case() -> FitCase:
+    """A gamma mean over ten ordered bands, 100 rows each, increasing through a cr k=5 basis."""
+    bands = [f"B{i}" for i in range(10)]
+    rng = np.random.default_rng(621)
+    X = pd.DataFrame({"band": np.repeat(bands, 100), "age": rng.uniform(18.0, 90.0, 1000)})
+    mean = np.exp(1.0 + 0.08 * np.repeat(np.arange(10), 100))
+    y = rng.gamma(4.0, mean / 4.0)
+    family = GammaLS()
+    basis = Spline(kind="cr", k=5, constraint=Constraint.fit.increasing)
+    model = SuperLSS(
+        family,
+        family.mean(term("band", OrderedCategorical(order=bands, basis=basis))),
+        family.scale(),
+    ).fit_reml(X, y, outer="efs+newton")
+    return FitCase(model, X, y, None, None)
+
+
+def test_an_edit_of_one_ordered_band_holds_the_base_and_moves_the_curve():
+    case = _ordered_case()
+    session = open_case(case)
+    key = "mean:band"
+    term = session.terms[key]
+    base = term.levels.index(str(session.model._specs[key]._base_level))
+    before = term.edited_log_effect.copy()
+    last = term.size - 1
+    assert base != last
+
+    session.set_values(key, [last], [before[last] - 0.5])
+
+    curve = session.terms[key].edited_log_effect
+    # A smooth basis cannot move one band alone: the nearest curve moves, the base does not.
+    assert curve[last] < before[last] - 0.05
+    assert _increasing(curve)
+    assert curve[base] == pytest.approx(before[base], abs=1e-12)
+    # Nor do the exported predictions of the base band's rows.
+    fitted = case.model.predict_link(case.X)["mean"].to_numpy()
+    exported = session.to_model().predict_link(case.X)["mean"].to_numpy()
+    rows = (case.X["band"] == term.levels[base]).to_numpy()
+    np.testing.assert_allclose(exported[rows], fitted[rows], rtol=0.0, atol=1e-12)
+
+
+def test_opening_skips_rows_without_weight_whatever_they_hold():
+    X, y, _ = _gamma_rows(_SEEDS[GammaLS], 180)
+    X = X.astype({"power": object})
+    X.loc[X.index[-1], "power"] = "ignored"
+    weights = np.ones(len(X))
+    weights[-1] = 0.0
+    family = GammaLS()
+    model = SuperLSS(family, family.mean(s("age", k=5), s("power", k=5)), family.scale()).fit_reml(
+        X, y, sample_weight=weights
+    )
+
+    session = edit(model, train_data=(X, y, weights))
+
+    assert session.terms["mean:power"].metadata["shape_support"] is not None
+
+
+def test_a_bulk_edit_of_many_capped_levels_takes_a_few_qp_steps(monkeypatch):
+    session = open_case(_many_levels_case())
+    term = session.terms["mean:g"]
+    steps = []
+    solve = lss_apply.solve_constrained_qp
+
+    def counted(*args, **kwargs):
+        result = solve(*args, **kwargs)
+        steps.append(result.n_iter)
+        return result
+
+    monkeypatch.setattr(lss_apply, "solve_constrained_qp", counted)
+    others = np.arange(1, term.size)
+
+    # Raising every level but the base pushes each past its cap, where it stops.
+    session.set_values("mean:g", others, term.edited_log_effect[others] + 0.3)
+
+    curve = session.terms["mean:g"].edited_log_effect
+    np.testing.assert_allclose(
+        curve[others] - curve[0],
+        np.minimum(term.original_log_effect[others] - curve[0] + 0.3, _CAP[1]),
+        rtol=0.0,
+        atol=1e-9,
+    )
+    # The rows the unconstrained fit breaks are the ones the answer binds: one solve, few steps.
+    assert len(steps) == 1
+    assert steps[0] <= 3
+
+
+@functools.cache
+def _convex_nb_case() -> FitCase:
+    """An NB mean held convex in ``age`` (cr k=12) on 3,000 rows drawn with a concave hump."""
+    X, y, offsets = _nb_rows(_SEEDS[NegativeBinomialLS], 3000)
+    family = NegativeBinomialLS()
+    model = SuperLSS(
+        family,
+        family.mean(
+            s("age", kind="cr", k=12, constraint=Constraint.fit.convex), offset=offsets["mean"]
+        ),
+        family.theta(),
+    ).fit_reml(X, y)
+    return FitCase(model, X, y, None, offsets)
+
+
+@pytest.mark.parametrize("delta", [0.3, 0.1])
+def test_lowering_the_tail_of_a_convex_curve_is_kept_inside_the_rule(delta):
+    case = _convex_nb_case()
+    session = open_case(case)
+    term = session.terms["mean:age"]
+    tail = np.flatnonzero(term.x > np.quantile(term.x, 0.8))
+    before = term.edited_log_effect.copy()
+
+    # The QP starts from the current curve, which meets the rule, so the edit is made.
+    session.set_values("mean:age", tail, before[tail] - delta)
+
+    curve = session.terms["mean:age"].edited_log_effect
+    assert len(session.history) == 1
+    assert curve[-1] < before[-1] - 0.01
+    assert _convex(curve, term.x)
+    rows = pd.concat([case.X.iloc[[0]]] * term.size, ignore_index=True)
+    rows["age"] = term.x
+    zero = {"mean": np.zeros(term.size)}
+    shown = session.to_model().predict_link(rows, offsets=zero)["mean"].to_numpy()
+    np.testing.assert_allclose(shown - shown[0], curve - curve[0], rtol=0.0, atol=1e-9)
+
+
+def test_the_convex_tail_edit_needs_only_the_feasible_start(monkeypatch):
+    # Without its first working rows the QP still reaches the answer from the current curve.
+    solve = lss_apply.solve_constrained_qp
+    monkeypatch.setattr(
+        lss_apply,
+        "solve_constrained_qp",
+        lambda *a, **k: solve(*a, **{**k, "active_set_init": None}),
+    )
+    session = open_case(_convex_nb_case())
+    term = session.terms["mean:age"]
+    tail = np.flatnonzero(term.x > np.quantile(term.x, 0.8))
+
+    session.set_values("mean:age", tail, term.edited_log_effect[tail] - 0.3)
+
+    assert len(session.history) == 1
+    assert _convex(session.terms["mean:age"].edited_log_effect, term.x)

@@ -312,6 +312,8 @@ class EditorWidget:
         with self._lock:
             self._select_term(term)
             self.session.select_indices(term, indices)
+            # The note arrives while the page shows the term, before any edit of it.
+            self.session._prepare_edit(term)
         return {"ok": True}
 
     def _select(self, term: str, indices: list[int]) -> dict[str, Any]:

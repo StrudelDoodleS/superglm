@@ -135,6 +135,36 @@ class TestWarmStart:
         assert result_warm.n_iter <= result_cold.n_iter
 
 
+class TestFeasibleStart:
+    """A start the caller knows meets the rows (Nocedal and Wright 2006, Algorithm 16.3)."""
+
+    def _isotonic(self):
+        target = np.array([3.0, 1.0, 2.0, 4.0])
+        return np.eye(4), target, np.diff(np.eye(4), axis=0), np.zeros(3)
+
+    def test_a_feasible_start_replaces_the_repair_of_the_unconstrained_optimum(self, monkeypatch):
+        import superglm.solvers.constrained_qp as qp
+
+        H, g, A, b = self._isotonic()
+        monkeypatch.setattr(
+            qp, "_project_feasible", lambda *a, **k: pytest.fail("repaired a feasible start")
+        )
+
+        result = qp.solve_constrained_qp(H, g, A, b, beta_start=np.array([0.0, 1.0, 1.0, 5.0]))
+
+        assert result.converged
+        np.testing.assert_allclose(result.beta, [2.0, 2.0, 2.0, 4.0], atol=1e-12)
+
+    def test_a_start_that_breaks_a_row_is_ignored(self):
+        H, g, A, b = self._isotonic()
+
+        cold = solve_constrained_qp(H, g, A, b)
+        started = solve_constrained_qp(H, g, A, b, beta_start=np.array([3.0, 1.0, 2.0, 4.0]))
+
+        assert started.converged
+        np.testing.assert_allclose(started.beta, cold.beta, rtol=0.0, atol=1e-12)
+
+
 class TestFeasibilityRestoration:
     """Solver handles infeasible starting points."""
 

@@ -242,9 +242,12 @@ def _refit_support(model, name: str, spec, X, sample_weight) -> NDArray:
     The distinct positive-weight values, or the occupied bin centres when the
     refit bins: the support the library certifies a range against.
     """
-    x = np.asarray(as_eager_frame(X).column_array(column_of(model, name)), dtype=np.float64)
+    # Rows without weight are left out before the values are read as numbers: the fit
+    # never read them, so they may hold anything.
+    column = np.asarray(as_eager_frame(X).column_array(column_of(model, name)))
     if sample_weight is not None:
-        x = x[np.asarray(sample_weight, dtype=np.float64) > 0.0]
+        column = column[np.asarray(sample_weight, dtype=np.float64) > 0.0]
+    x = np.asarray(column, dtype=np.float64)
     binned = should_discretize(spec, model._discrete)
     n_bins = (
         resolve_discrete_n_bins(column_of(model, name), spec, model._n_bins) if binned else None

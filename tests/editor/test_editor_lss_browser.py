@@ -365,6 +365,8 @@ def test_a_ruled_term_names_its_rule_and_an_edit_keeps_to_it(open_lss_editor_pag
         points = page.locator("#chart .point")
         with page.expect_response(_posted("/select")):
             points.nth(points.count() - 1).click()
+        # The page's note of the term it shows builds what the term's first ruled edit reads.
+        assert "mean:power" in session.model._reference_designs
         page.locator("#selectionMenu").wait_for(state="visible")
         for _ in range(4):
             with page.expect_response(_posted("/op")):
@@ -380,7 +382,7 @@ def test_a_ruled_term_names_its_rule_and_an_edit_keeps_to_it(open_lss_editor_pag
         assert np.diff(heights).max() <= 1e-6
 
 
-def test_an_edit_the_rule_takes_back_leaves_no_history(open_lss_editor_page):
+def test_an_edit_the_rule_takes_back_leaves_no_history_and_says_why(open_lss_editor_page):
     case = ruled_case()
     with open_lss_editor_page(case=case, selected_term="scale:region") as (page, session):
         term = session.terms["scale:region"]
@@ -395,7 +397,10 @@ def test_an_edit_the_rule_takes_back_leaves_no_history(open_lss_editor_page):
             page.get_by_role("button", name="Increase selection", exact=True).click()
         page.wait_for_function("() => window.__superglmTest.mutationStatus() !== 'running'")
 
-        # The level already sits at its cap: the rule puts it back, and nothing is recorded.
+        # The level already sits at its cap: the rule puts it back, records nothing and says so.
+        alert = page.locator("#appAlert")
+        alert.wait_for(state="visible")
+        assert "changed nothing: its rules (cap(0.8, 1.25))" in alert.inner_text()
         assert session.history == []
         np.testing.assert_array_equal(
             session.terms["scale:region"].edited_log_effect, term.original_log_effect

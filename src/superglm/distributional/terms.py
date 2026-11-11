@@ -662,21 +662,43 @@ def _reference_design(
     term: str,
     state: Any,
     *term_slices: slice,
+    reference: pd.DataFrame | None = None,
 ) -> NDArray[np.float64]:
     """The term's own columns at its reference, or zeros for a term with none.
 
-    A term with levels is read against its reference level (:func:`_reference_row`)
-    and a ``Numeric`` term against its column's training centre
-    (:func:`_numeric_anchor`).  A spline's columns are centred on fitting and are
-    read as they are.
+    A term with levels is read against its reference level and a ``Numeric`` term
+    against its column's training centre (:func:`_numeric_anchor`); a spline's
+    columns are centred on fitting and are read as they are.  ``reference`` is a
+    one-row frame of every column the model reads, such as the row a caller holds
+    at the training centre: a level term is then evaluated at its reference level
+    in that row alone, not in a sweep of every level.  The term's own columns read
+    only its own column, so the other values change nothing but the cost.
     """
     spec = _compiled_spec(fitted, parameter, term)
     if spec is not None and _term_kind(spec) == "numeric":
         return _numeric_anchor(fitted, frame, parameter, term, state, *term_slices)
-    if spec is None or _level_domain(spec) is None:
-        return np.zeros(sum(block.stop - block.start for block in term_slices), dtype=np.float64)
-    evaluation, _, levels = _sweep(fitted, frame, parameter, term, 2)
-    return _reference_row(spec, levels, _term_design(fitted, evaluation, state, *term_slices))
+    zeros = np.zeros(sum(block.stop - block.start for block in term_slices), dtype=np.float64)
+    domain = _level_domain(spec) if spec is not None else None
+    if domain is None:
+        return zeros
+    if reference is None:
+        evaluation, _, levels = _sweep(fitted, frame, parameter, term, 2)
+        return _reference_row(spec, levels, _term_design(fitted, evaluation, state, *term_slices))
+    base = getattr(spec, "_base_level", None)
+    names = [str(level) for level in domain]
+    if base is None or str(base) not in names:
+        return zeros
+    column = _feature_label(fitted, parameter, term)
+    readers = [
+        spec,
+        *(other for other in _fitted_level_specs(fitted, column) if other is not spec),
+    ]
+    # ``_level_inputs`` reads the column only for a grouped term or a column several terms read.
+    plain = getattr(spec, "_grouping", None) is None and len(readers) < 2
+    values = None if plain else frame.column_array(column)
+    evaluation = reference.copy()
+    evaluation[column] = _level_inputs(readers, [domain[names.index(str(base))]], values)
+    return _term_design(fitted, evaluation, state, *term_slices)[0]
 
 
 def _term_design(

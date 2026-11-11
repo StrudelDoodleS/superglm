@@ -281,7 +281,13 @@ class LSSModelView:
             parameter, term = split_key(key)
             state, blocks = self._term_blocks(key)
             self._reference_designs[key] = _reference_design(
-                self._fitted, as_eager_frame(self.X_train), parameter, term, state, *blocks
+                self._fitted,
+                as_eager_frame(self.X_train),
+                parameter,
+                term,
+                state,
+                *blocks,
+                reference=self.reference_row(),
             )
         return self._reference_designs[key]
 
