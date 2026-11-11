@@ -58,13 +58,17 @@ def _term_penalty_block(terms, indices: NDArray, width: int) -> NDArray:
     if isinstance(terms, _CompactPenaltyTerms):
         from superglm.reml.penalty_algebra import total_penalty_matvec
 
+        # A component off the term's coefficients adds exact zeros to the entries read.
+        own = [
+            component
+            for component in terms.penalties
+            if np.any((indices >= component.group_sl.start) & (indices < component.group_sl.stop))
+        ]
         block = np.zeros((indices.size, indices.size))
         for column, index in enumerate(indices):
             unit = np.zeros(width)
             unit[index] = 1.0
-            product = total_penalty_matvec(
-                unit, terms.lambdas, list(terms.penalties), list(terms.group_matrices)
-            )
+            product = total_penalty_matvec(unit, terms.lambdas, own, list(terms.group_matrices))
             block[:, column] = product[indices]
         return 0.5 * (block + block.T)
     block = np.zeros((indices.size, indices.size))

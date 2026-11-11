@@ -605,6 +605,14 @@ def _piece_minimum(piece: _ShapePiece, p: int, beta: NDArray) -> tuple[float, ND
     from numpy.polynomial import polynomial
 
     coefficients = piece.rows @ beta
+    if p == 2:
+        # The vertex, in the float64 operations the general path below performs on a
+        # quadratic: its slope's one root, a minimum where the slope rises.
+        bend = 2.0 * coefficients[2]
+        vertex = -coefficients[1] / bend if bend > 0.0 else np.nan
+        if not 0.0 < vertex < 1.0:
+            return None
+        return float(vertex), _tau_powers(float(vertex), p) @ piece.rows
     slope = polynomial.polyder(coefficients)
     roots = polynomial.polyroots(slope)
     real = np.real(roots[np.abs(np.imag(roots)) <= 1e-12 * np.maximum(1.0, np.abs(roots))])
