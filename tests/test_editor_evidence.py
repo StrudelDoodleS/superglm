@@ -522,6 +522,40 @@ def test_a_final_report_says_whether_the_final_fit_describes_its_model(monkeypat
     assert raced["final_fit"]["stale"] is steady["final_fit"]["stale"]
 
 
+@pytest.mark.parametrize("endpoint", ["metrics", "summary", "report"])
+def test_a_reply_carries_the_revision_of_the_model_it_was_built_for(monkeypatch, endpoint):
+    # A caller that names only a revision is answered while it stands; an edit landing before
+    # the model is captured makes the reply describe the edited model, so it names that revision.
+    session = _split_session()
+    session.shift("x_spline", 0.2)
+    widget = session.widget()
+    capture = widget._current_model_for_evidence
+
+    def edit_then_capture():
+        with widget._lock:
+            session.shift("x_spline", 0.1)
+        return capture()
+
+    asked = session.model_revision
+    monkeypatch.setattr(widget, "_current_model_for_evidence", edit_then_capture)
+    call = {
+        "metrics": lambda: widget._metrics("deviance", model_revision=asked),
+        "summary": lambda: widget._summary("in_force", model_revision=asked),
+        "report": lambda: widget._report("validation", model_revision=asked),
+    }[endpoint]
+    try:
+        reply = call()
+        with widget._lock:
+            token = widget._state()["in_force"]
+    finally:
+        monkeypatch.undo()
+        widget.close()
+
+    assert session.model_revision == asked + 1
+    assert reply.get("status") is None
+    assert (reply["model_revision"], reply["in_force"]) == (session.model_revision, token)
+
+
 def test_a_value_that_turns_to_minus_zero_keeps_the_token():
     # A drag can write -0.0 where 0.0 stood. The two compare equal, so ``describes`` holds, and
     # the token the page compares must agree, or answers to the model in force are dropped.

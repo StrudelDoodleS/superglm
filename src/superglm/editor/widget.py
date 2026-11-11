@@ -539,6 +539,8 @@ class EditorWidget:
         with self._lock:
             if not model_source.describes(self.session):
                 return _superseded_payload(revision, request_sequence, model_source.token)
+            # The reply is for the model checked here, so it carries that model's revision.
+            revision = self.session.model_revision
             reference_model = getattr(self.session, "reference_model", self.session.model)
             eval_dataset = named_metrics_dataset(self.session, dataset)
             if reference_model is None or eval_dataset is None:
@@ -699,6 +701,7 @@ class EditorWidget:
         with self._lock:
             if not in_force_source.describes(self.session):
                 return _superseded_payload(revision, request_sequence, in_force_source.token)
+            revision = self.session.model_revision
         payload["model_revision"] = revision
         payload["request_sequence"] = request_sequence
         payload["in_force"] = in_force_source.token
@@ -733,6 +736,7 @@ class EditorWidget:
         with self._lock:
             if not source.describes(self.session):
                 return _superseded_payload(revision, request_sequence, source.token)
+            revision = self.session.model_revision
             datasets = tuple(evaluation_datasets(self.session))
             final_fit = self._final_fit
             reference_model = getattr(self.session, "reference_model", self.session.model)
