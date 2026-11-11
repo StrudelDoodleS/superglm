@@ -11,7 +11,7 @@ from numpy.typing import NDArray
 from superglm._frame import as_eager_frame
 from superglm._utils import weighted_row_sum
 from superglm.features.constraint import rules_of
-from superglm.group_matrix import GroupMatrix
+from superglm.group_matrix import GroupMatrix, _cross_gram
 from superglm.model.fit_state import (
     FittedStateRevision,
     canonical_intercept_shift,
@@ -77,11 +77,8 @@ def _term_penalty_block(terms, indices: NDArray, width: int) -> NDArray:
     return full[np.ix_(indices, indices)]
 
 
-def _term_data_hessian(model, groups) -> NDArray:
-    """``X_j' W X_j`` over the fitted rows at the fit's working weights, intercept profiled."""
-    from superglm.model import state_ops
-
-    W = state_ops._solver_space_working_weights(model)
+def _term_data_hessian(model, groups, W: NDArray) -> NDArray:
+    """``X_j' W X_j`` over the fitted rows at the fit's working weights ``W``, intercept profiled."""
     by_key = {
         (g.name, g.start, g.end): gm
         for gm, g in zip(model._dm.group_matrices, model._groups, strict=True)
@@ -96,21 +93,22 @@ def _term_data_hessian(model, groups) -> NDArray:
         gram[sa, sa] = np.asarray(gm.gram(W), dtype=np.float64)
         cross[sa] = np.asarray(gm.rmatvec(W), dtype=np.float64)
         for b in range(a + 1, len(mats)):
-            for k in range(widths[b]):
-                unit = np.zeros(widths[b])
-                unit[k] = 1.0
-                column = np.asarray(mats[b].matvec(unit), dtype=np.float64)
-                gram[sa, starts[b] + k] = np.asarray(gm.rmatvec(W * column), dtype=np.float64)
-            gram[starts[b] : starts[b + 1], sa] = gram[sa, starts[b] : starts[b + 1]].T
+            sb = slice(starts[b], starts[b + 1])
+            gram[sa, sb] = np.asarray(_cross_gram(gm, mats[b], W), dtype=np.float64)
+            gram[sb, sa] = gram[sa, sb].T
     # The Schur complement of the constant column: the intercept moves freely.
     return 0.5 * (gram + gram.T) - np.outer(cross, cross) / float(np.sum(W))
 
 
-def _term_penalized_hessian(model, groups, smooth_penalty_terms) -> NDArray:
-    """``X'WX + S_lambda`` on one term's coefficients: the metric its repair projects in."""
+def _term_penalized_hessian(model, groups, smooth_penalty_terms, working_weights) -> NDArray:
+    """``X'WX + S_lambda`` on one term's coefficients: the metric its repair projects in.
+
+    ``working_weights`` are the unconstrained fit's, which every term of one call
+    projects from.
+    """
     indices = _term_indices(groups)
     penalty = _term_penalty_block(smooth_penalty_terms, indices, model.result.beta.size)
-    return _term_data_hessian(model, groups) + penalty
+    return _term_data_hessian(model, groups, working_weights) + penalty
 
 
 def _repairer(kind: str):
@@ -984,7 +982,9 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
             groups,
             weights=grid_weights,
             n_grid=n_grid,
-            metric=_term_penalized_hessian(work_model, groups, smooth_penalty_terms),
+            metric=_term_penalized_hessian(
+                work_model, groups, smooth_penalty_terms, prior_working_weights
+            ),
         )
         repair_result.feature_name = name
 
