@@ -1293,6 +1293,42 @@ def test_a_session_takes_a_refit_in_place_on_the_same_rows_with_another_offset()
         )
 
 
+def test_a_refit_in_place_rebuilds_what_a_ruled_edit_reads():
+    # #621 reads a ruled term's rule rows, the reference row and its reference design lazily
+    # and keeps them on the view; each is read from the fit, so a refit in place drops them.
+    from superglm.editor.lss.rules import term_rows
+    from superglm.editor.payloads import session_payload
+
+    family = GammaLS()
+    model = SuperLSS(
+        family,
+        family.mean(s("x", kind="bs", k=6, constraint=Constraint.fit.increasing)),
+        family.scale(),
+    )
+    lambdas = {"mean:x#wiggle": 1.0}
+    X, y = _gamma_on(100, 0)
+    X2, y2 = X.assign(x=np.linspace(1.0, 3.0, 100)), _gamma_on(100, 1)[1]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y, lambdas=lambdas)
+        session = edit(model, train_data=(X, y))
+        session._prepare_edit("mean:x")
+        before = term_rows(session.model, "mean:x"), session.model.reference_row()
+        model.fit(X2, y2, lambdas=lambdas)
+        session_payload(session)
+        fresh = edit(model, train_data=(X2, y2))
+        fresh._prepare_edit("mean:x")
+    followed, wanted = term_rows(session.model, "mean:x"), term_rows(fresh.model, "mean:x")
+    assert followed is not before[0]
+    np.testing.assert_array_equal(followed.A, wanted.A)
+    np.testing.assert_array_equal(followed.c, wanted.c)
+    pd.testing.assert_frame_equal(session.model.reference_row(), fresh.model.reference_row())
+    assert not before[1].equals(session.model.reference_row())
+    np.testing.assert_array_equal(
+        session.model.reference_design("mean:x"), fresh.model.reference_design("mean:x")
+    )
+
+
 def test_a_refit_in_place_that_kept_no_rows_says_the_editor_needs_its_rows():
     from superglm.editor.errors import EditorValueError
     from superglm.editor.lss.availability import TRAINING_ROWS_LOST

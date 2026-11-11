@@ -306,6 +306,10 @@ class LSSModelView:
         return self._reading.term_rows
 
     @property
+    def _reference_designs(self) -> dict[str, NDArray[np.float64]]:
+        return self._reading.reference_designs
+
+    @property
     def _refit_reason(self) -> tuple[Any, str | None] | None:
         return self._reading.refit_reason
 
