@@ -400,6 +400,128 @@ def test_a_final_report_keeps_the_edit_state_of_the_model_it_describes(monkeypat
     assert raced["summary"]["compact"]["model"] == steady["summary"]["compact"]["model"]
 
 
+class _FinalFitContext:
+    """A job context that never cancels."""
+
+    def check(self):
+        return None
+
+    def progress(self, *args, **kwargs):
+        return None
+
+
+def _split_session():
+    """A Gaussian spline with 180 training and 60 validation rows, nothing edited."""
+    rng = np.random.default_rng(20260805)
+    X = pd.DataFrame({"x_spline": rng.uniform(0.0, 10.0, 240)})
+    y = 0.4 + 0.2 * np.sin(X["x_spline"].to_numpy()) + rng.normal(0.0, 0.03, 240)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.1,
+        features={"x_spline": Spline(n_knots=7)},
+    ).fit(X.iloc[:180], y[:180])
+    session = EditorSession.from_model(
+        model,
+        terms=["x_spline"],
+        train_data=(X.iloc[:180], y[:180], None, None),
+        validation_data=(X.iloc[180:], y[180:], None),
+    )
+    session.select_indices("x_spline", [10, 11, 12])
+    return session
+
+
+def _run_final_fit(widget):
+    from superglm.editor.cv import capture_final_fit, run_final_fit
+
+    with widget._lock:
+        plan = capture_final_fit(widget.session)
+    widget._final_fit = run_final_fit(plan, _FinalFitContext())
+
+
+def _report_with_a_change_put_back(monkeypatch, widget, report, change, put_back):
+    """The steady reply, then the reply when ``change`` lands as the report is built and
+    ``put_back`` restores the model before the final check."""
+    import superglm.editor.widget as widget_module
+
+    build = widget_module.report_payload
+    moves: list[str] = []
+
+    def build_between(*args, **kwargs):
+        with widget._lock:
+            change()
+        moves.append("change")
+        try:
+            return build(*args, **kwargs)
+        finally:
+            with widget._lock:
+                put_back()
+            moves.append("put back")
+
+    asked = widget._state()
+    steady = widget._report(report, in_force=asked["in_force"])
+    monkeypatch.setattr(widget_module, "report_payload", build_between)
+    try:
+        raced = widget._report(report, in_force=asked["in_force"])
+    finally:
+        monkeypatch.undo()
+    assert moves == ["change", "put back"]
+    assert (steady.get("status"), steady["in_force"]) == (None, asked["in_force"])
+    assert (raced.get("status"), raced["in_force"]) == (None, asked["in_force"])
+    return steady, raced
+
+
+def test_a_validation_report_compares_the_edit_of_the_model_it_describes(monkeypatch):
+    """An edit back to the fitted values and its undo while the report is built must not hide the
+    edited model's change column."""
+    session = _split_session()
+    session.shift("x_spline", 0.2)
+    widget = session.widget()
+    try:
+        steady, raced = _report_with_a_change_put_back(
+            monkeypatch,
+            widget,
+            "validation",
+            lambda: session.shift("x_spline", -0.2),
+            session.undo,
+        )
+    finally:
+        widget.close()
+
+    assert steady["compares_edit"] is True
+    assert raced["compares_edit"] is True
+    assert raced["splits"] == steady["splits"]
+
+
+@pytest.mark.parametrize("fitted_edited", [False, True], ids=["fit-then-edit", "fit-on-edit"])
+def test_a_final_report_says_whether_the_final_fit_describes_its_model(monkeypatch, fitted_edited):
+    """A Final fit is stale exactly when it was run on another model than the one the report
+    describes, whatever is in force for a moment while the report is built.
+
+    fit-then-edit: run unedited, then edited; an undo and its redo while the report is built.
+    fit-on-edit: run on the edited model; an edit and its undo while the report is built.
+    """
+    session = _split_session()
+    widget = session.widget()
+    try:
+        if fitted_edited:
+            session.shift("x_spline", 0.2)
+            _run_final_fit(widget)
+            change, put_back = (lambda: session.shift("x_spline", 0.1)), session.undo
+        else:
+            _run_final_fit(widget)
+            session.shift("x_spline", 0.2)
+            change, put_back = session.undo, session.redo
+        steady, raced = _report_with_a_change_put_back(
+            monkeypatch, widget, "final", change, put_back
+        )
+    finally:
+        widget.close()
+
+    assert steady["final_fit"]["stale"] is not fitted_edited
+    assert raced["final_fit"]["stale"] is steady["final_fit"]["stale"]
+
+
 def test_evidence_records_are_immutable():
     key = EvidenceKey(1, "metrics", "validation")
     outcome = EvidenceOutcome("complete", key, {"value": 1})

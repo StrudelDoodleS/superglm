@@ -738,6 +738,12 @@ class EditorWidget:
             reference_model = getattr(self.session, "reference_model", self.session.model)
             fit_dataset = training_export_dataset(self.session)
             metrics_dataset = default_metrics_dataset(self.session)
+            # The report's flags are decided here, with the model it describes: an edit and its
+            # undo while it is built put that model back, so they must not change what it says.
+            compares_edit = reference_model is not self.session.model or bool(source.edits)
+            final_fit_stale = (
+                None if final_fit is None else not final_fit.source.describes(self.session)
+            )
             if reference_model is None:
                 return {
                     **report_payload(
@@ -745,6 +751,8 @@ class EditorWidget:
                         report,
                         model_revision=revision,
                         request_sequence=request_sequence,
+                        compares_edit=compares_edit,
+                        final_fit_stale=final_fit_stale,
                     ),
                     "in_force": source.token,
                 }
@@ -790,6 +798,8 @@ class EditorWidget:
             request_sequence=request_sequence,
             model_override=summary_model,
             final_fit=final_fit,
+            compares_edit=compares_edit,
+            final_fit_stale=final_fit_stale,
         )
         with self._lock:
             if not source.describes(self.session):

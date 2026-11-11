@@ -49,8 +49,13 @@ def validation_report_payload(
     splits: list[dict[str, Any]] | None = None,
     model_revision: int | None = None,
     request_sequence: int | None = None,
+    compares_edit: bool | None = None,
 ) -> dict[str, Any]:
-    """Return train/validation/test metrics plus optional supplied CV evidence."""
+    """Return train/validation/test metrics plus optional supplied CV evidence.
+
+    ``compares_edit`` is decided by the caller with the model the report describes; without it
+    the session is read now.
+    """
     if splits is None:
         splits = _split_metrics(session)
     revision = session.model_revision if model_revision is None else int(model_revision)
@@ -62,7 +67,7 @@ def validation_report_payload(
         "title": "Validation Report",
         "note": _validation_note(session, splits),
         "metric_labels": report_metrics(session.model),
-        "compares_edit": _compares_edit(session),
+        "compares_edit": _compares_edit(session) if compares_edit is None else compares_edit,
         "splits": splits,
         "cv_report": getattr(session, "cv_report", None),
         "can_run_cv": False,
@@ -77,8 +82,14 @@ def final_fit_report_payload(
     request_sequence: int | None = None,
     model_override=None,
     final_fit=None,
+    compares_edit: bool | None = None,
+    final_fit_stale: bool | None = None,
 ) -> dict[str, Any]:
-    """Return the current in-force model summary, split metrics and any Final fit."""
+    """Return the current in-force model summary, split metrics and any Final fit.
+
+    ``compares_edit`` and ``final_fit_stale`` are decided by the caller with the model the report
+    describes; without them the session is read now.
+    """
     if splits is None:
         splits = _split_metrics(widget.session)
     revision = widget.session.model_revision if model_revision is None else int(model_revision)
@@ -98,11 +109,13 @@ def final_fit_report_payload(
             "and fit statistics still describe the fit before the move."
         ),
         "metric_labels": report_metrics(widget.session.model),
-        "compares_edit": _compares_edit(widget.session),
+        "compares_edit": (
+            _compares_edit(widget.session) if compares_edit is None else compares_edit
+        ),
         "splits": splits,
         **summary,
         "can_run_cv": False,
-        "final_fit": _final_fit_section(widget, final_fit),
+        "final_fit": _final_fit_section(widget, final_fit, final_fit_stale),
     }
 
 
@@ -131,7 +144,7 @@ def _final_fit_stale(widget, final_fit) -> bool:
         return not final_fit.source.describes(widget.session)
 
 
-def _final_fit_section(widget, final_fit) -> dict[str, Any]:
+def _final_fit_section(widget, final_fit, stale: bool | None = None) -> dict[str, Any]:
     """The Final fit on train and validation rows, once one has run."""
     if final_fit is None:
         return {"available": False, "note": FINAL_NOT_RUN}
@@ -141,7 +154,7 @@ def _final_fit_section(widget, final_fit) -> dict[str, Any]:
         compact = summary_payload(widget, "in_force", model_override=final_fit.model).get("compact")
     return {
         "available": True,
-        "stale": _final_fit_stale(widget, final_fit),
+        "stale": _final_fit_stale(widget, final_fit) if stale is None else stale,
         "n_rows": final_fit.n_rows,
         "splits": list(final_fit.splits),
         "carried": [
@@ -167,6 +180,8 @@ def report_payload(
     request_sequence: int | None = None,
     model_override=None,
     final_fit=None,
+    compares_edit: bool | None = None,
+    final_fit_stale: bool | None = None,
 ) -> dict[str, Any]:
     """Dispatch a named report for the local editor app."""
     if report == "cv":
@@ -181,12 +196,15 @@ def report_payload(
             request_sequence=request_sequence,
             model_override=model_override,
             final_fit=final_fit,
+            compares_edit=compares_edit,
+            final_fit_stale=final_fit_stale,
         )
     return validation_report_payload(
         widget.session,
         splits=splits,
         model_revision=model_revision,
         request_sequence=request_sequence,
+        compares_edit=compares_edit,
     )
 
 
