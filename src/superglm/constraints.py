@@ -404,10 +404,13 @@ def _repair_shape(
     groups: list[GroupSlice],
     weights: NDArray | None,
     n_grid: int,
+    metric: NDArray | None = None,
 ) -> MonotoneRepairResult:
     """Project a fitted spline curve onto the ``shape`` cone, in the fitted basis.
 
     The body behind ``MonotoneRepairer.repair`` and ``CurvatureRepairer.repair``.
+    ``metric``, when given, is the term's penalized Hessian in its fitted
+    coefficients, and the projection is taken in it rather than on the grid.
     """
     beta_combined = np.concatenate([beta_reparam[g.sl] for g in groups])
     recon = spec.reconstruct(beta_combined, n_points=n_grid)
@@ -436,6 +439,7 @@ def _repair_shape(
         log_rels,
         w_grid,
         shape,
+        **({} if metric is None else {"metric": (metric, beta_combined)}),
     )
     beta_out = beta_reparam.copy()
     offset = 0
@@ -478,6 +482,7 @@ class MonotoneRepairer:
         groups: list[GroupSlice],
         weights: NDArray | None = None,
         n_grid: int = 500,
+        metric: NDArray | None = None,
     ) -> MonotoneRepairResult:
         """Project the fitted spline curve onto the requested monotone cone.
 
@@ -499,7 +504,7 @@ class MonotoneRepairer:
         -------
         MonotoneRepairResult
         """
-        return _repair_shape(self.direction, spec, beta_reparam, groups, weights, n_grid)
+        return _repair_shape(self.direction, spec, beta_reparam, groups, weights, n_grid, metric)
 
 
 #: Local-reduction steps the cone projection takes before it brackets instead.
@@ -798,8 +803,6 @@ def _solve_cone_qp(
     rows: NDArray,
     active: list[int] | None = None,
     start: NDArray | None = None,
-    *,
-    placement: bool = False,
 ):
     """The repository QP on unit ``rows @ beta >= 0``; ``None`` when no solution is certified.
 
@@ -808,8 +811,6 @@ def _solve_cone_qp(
     when it is feasible and ``H beta - g`` lies in the cone of its held rows, which
     for a convex QP is optimality. ``active`` is a warm working set and ``start`` a
     point meeting every row (``_shifted_start``); without one, ``beta = 0`` is used.
-    A ``placement`` solve, whose Hessian carries the exchange's curvature term and
-    whose answer only places cuts, gets its first attempt alone.
     """
     from scipy.optimize import nnls
 
@@ -829,8 +830,6 @@ def _solve_cone_qp(
         starts.insert(1, (shifted, None, budget))
     if active:
         starts.insert(0, (shifted, active, max(_WARM_STEPS, H.shape[0])))
-    if placement:
-        starts = starts[:1]
     result = None
     for ridged in (False, True):
         for point, working, steps in starts:
@@ -843,7 +842,7 @@ def _solve_cone_qp(
             result = _ScaledResult(solved, scale)
             if result.converged:
                 return result
-        if ridged or placement or solved.rank == solved.width:
+        if ridged or solved.rank == solved.width:
             break
         problem = (_null_space_ridge(problem[0], solved.rank), *problem[1:])
     assert result is not None
@@ -1035,9 +1034,6 @@ def _cone_projection(
         for minimum in _lowest_minima(pieces, p, beta)
     ]
     curvature = np.zeros_like(H)
-    # A curvature step whose solve fails says the local model does not hold here;
-    # the exchange then goes on as plain cutting planes.
-    curved = True
     for _ in range(_PROJECTION_STEPS):
         cut_rows, cut_norms, owners = _cut_rows(pieces, p, checkpoints, width)
         rows = np.vstack([end_rows, cut_rows])
@@ -1049,10 +1045,9 @@ def _cone_projection(
             rows,
             working,
             start,
-            placement=bool(curvature.any()),
         )
         if result is None and curvature.any():
-            curvature, curved = np.zeros_like(H), False
+            curvature = np.zeros_like(H)
             result = _solve_cone_qp(H, g, rows, working, start)
         if result is None:
             break
@@ -1120,7 +1115,7 @@ def _cone_projection(
                 abs(tau - other) > _CHECKPOINT_SEPARATION for other in kept[index]
             ):
                 kept[index].append(tau)
-            if curved and weight[index] > 0.0:
+            if weight[index] > 0.0:
                 slope_row = _tau_powers(tau, p, 1) @ piece.rows
                 bend = float(_tau_powers(tau, p, 2) @ piece.rows @ beta)
                 size = weight[index] * float(slope_row @ slope_row)
@@ -1153,6 +1148,7 @@ def _project_shape_in_fitted_basis(
     original_curve: NDArray,
     weights: NDArray,
     kind: str,
+    metric: tuple[NDArray, NDArray] | None = None,
 ) -> tuple[NDArray, NDArray, float]:
     """Project a curve onto a shape cone in fitted coefficient coordinates.
 
@@ -1160,6 +1156,8 @@ def _project_shape_in_fitted_basis(
     Solving in that basis therefore keeps the repaired term centred under the training
     measure and avoids the lossy raw-basis -> fitted-basis round trip.  Zero coefficients
     are a feasible point and provide an objective certificate for the returned solution.
+    ``metric``, a pair ``(H, fitted)``, projects ``fitted`` in ``H`` instead of the
+    curve on the grid; ``H`` is the term's penalized Hessian (``shape_ops``).
     """
     label = "Curvature" if kind in {"convex", "concave"} else "Monotone"
 
@@ -1173,15 +1171,29 @@ def _project_shape_in_fitted_basis(
     if not np.all(np.isfinite(fitted_basis)) or not np.all(np.isfinite(target)):
         raise RuntimeError(f"{label} projection requires finite fitted-basis geometry")
 
-    H = fitted_basis.T @ (fitted_basis * w[:, None])
-    g = fitted_basis.T @ (target * w)
-    zero_loss = float(np.dot(w, target * target))
+    total_weight = float(np.sum(w))
     # The optimizer works in units of the target's weighted RMS, so its
     # tolerances and step control do not depend on the response's units.
-    total_weight = float(np.sum(w))
-    curve_scale = float(np.sqrt(zero_loss / total_weight)) or 1.0
-    H_scaled = H / total_weight
-    g_scaled = g / (total_weight * curve_scale)
+    curve_scale = float(np.sqrt(float(np.dot(w, target * target)) / total_weight)) or 1.0
+    if metric is None:
+        H = fitted_basis.T @ (fitted_basis * w[:, None])
+        g = fitted_basis.T @ (target * w)
+        zero_loss = float(np.dot(w, target * target))
+        H_scaled = H / total_weight
+        g_scaled = g / (total_weight * curve_scale)
+    else:
+        # The fitted coefficients' distance in the penalized Hessian: the second-order
+        # model of the penalized objective the publication rule judges.
+        H = np.asarray(metric[0], dtype=np.float64)
+        fitted = np.asarray(metric[1], dtype=np.float64)
+        g = H @ fitted
+        zero_loss = float(fitted @ g)
+        if not np.all(np.isfinite(H)) or not np.isfinite(zero_loss) or zero_loss <= 0.0:
+            raise RuntimeError(f"{label} projection requires a positive definite metric")
+        # Scaled, as on the grid, so the dropped term's objective is 0 and the fitted
+        # one's is -1/2.
+        H_scaled = H * (curve_scale * curve_scale / zero_loss)
+        g_scaled = g * (curve_scale / zero_loss)
 
     inside = _inside_ray(fitted_basis, np.asarray(x_grid, dtype=np.float64), w / total_weight, kind)
     beta_projected = curve_scale * _cone_projection(
@@ -1201,8 +1213,14 @@ def _project_shape_in_fitted_basis(
         )
 
     residual = repaired_curve - target
-    projection_loss = float(np.dot(w, residual * residual))
-    objective_tolerance = shape_sum_tolerance(zero_loss, w.size)
+    if metric is None:
+        projection_loss = float(np.dot(w, residual * residual))
+        objective_tolerance = shape_sum_tolerance(zero_loss, w.size)
+    else:
+        step = beta_projected - fitted
+        projection_loss = float(step @ H @ step)
+        magnitude = float(np.abs(step) @ np.abs(H) @ np.abs(step)) + zero_loss
+        objective_tolerance = shape_sum_tolerance(magnitude, H.shape[0])
     if not np.isfinite(projection_loss) or projection_loss > zero_loss + objective_tolerance:
         raise RuntimeError(
             f"{label} projection failed its feasible-zero objective certificate: "
@@ -1227,5 +1245,6 @@ class CurvatureRepairer:
         groups: list[GroupSlice],
         weights: NDArray | None = None,
         n_grid: int = 500,
+        metric: NDArray | None = None,
     ) -> MonotoneRepairResult:
-        return _repair_shape(self.kind, spec, beta_reparam, groups, weights, n_grid)
+        return _repair_shape(self.kind, spec, beta_reparam, groups, weights, n_grid, metric)

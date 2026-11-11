@@ -37,6 +37,82 @@ def _grid_weights(spec, x_col, sample_weight, n_grid: int):
     return np.maximum(grid_weights, 1e-6)
 
 
+# The metric a post-fit repair projects in. A repair keeps the fit's smoothing
+# parameters, so the standard estimate is the constrained penalized fit at them,
+# and its first Newton step from the unconstrained fit is the projection of the
+# fitted coefficients onto the shape cone in X'WX + S_lambda: the penalized
+# Hessian (Wood 2026, Statistical Modelling 26(4), section 4.1; Mammen, Marron,
+# Turlach & Wand 2001, Statistical Science 16(3), Proposition 2 and section 5.1,
+# where the penalty in the norm is what keeps the projection smooth). It is the
+# second-order model of the penalized objective the publication rule judges, with
+# the other terms held and the intercept profiled, as the rule holds and profiles
+# them, so the zero term, a feasible point, can never beat the projection there.
+# The grid's L2 metric omits S_lambda and sees the wiggly fitted-basis directions
+# of a sparse region only weakly, and its projection travels far along them.
+def _term_indices(groups) -> NDArray:
+    return np.concatenate([np.arange(g.start, g.end) for g in groups])
+
+
+def _term_penalty_block(terms, indices: NDArray, width: int) -> NDArray:
+    """``S_lambda`` on the term's coefficients, as ``_smooth_penalty_value`` reads it."""
+    if isinstance(terms, _CompactPenaltyTerms):
+        from superglm.reml.penalty_algebra import total_penalty_matvec
+
+        block = np.zeros((indices.size, indices.size))
+        for column, index in enumerate(indices):
+            unit = np.zeros(width)
+            unit[index] = 1.0
+            product = total_penalty_matvec(
+                unit, terms.lambdas, list(terms.penalties), list(terms.group_matrices)
+            )
+            block[:, column] = product[indices]
+        return 0.5 * (block + block.T)
+    full = np.zeros((width, width))
+    for group_slice, lam, omega, raw_projection in terms:
+        omega_arr = np.asarray(omega, dtype=np.float64)
+        if raw_projection is not None:
+            R = np.asarray(raw_projection, dtype=np.float64)
+            omega_arr = R.T @ omega_arr @ R
+        full[group_slice, group_slice] += lam * omega_arr
+    return full[np.ix_(indices, indices)]
+
+
+def _term_data_hessian(model, groups) -> NDArray:
+    """``X_j' W X_j`` over the fitted rows at the fit's working weights, intercept profiled."""
+    from superglm.model import state_ops
+
+    W = state_ops._solver_space_working_weights(model)
+    by_key = {
+        (g.name, g.start, g.end): gm
+        for gm, g in zip(model._dm.group_matrices, model._groups, strict=True)
+    }
+    mats = [by_key[(g.name, g.start, g.end)] for g in groups]
+    widths = [g.size for g in groups]
+    starts = np.concatenate([[0], np.cumsum(widths)])
+    gram = np.zeros((int(starts[-1]), int(starts[-1])))
+    cross = np.zeros(int(starts[-1]))
+    for a, gm in enumerate(mats):
+        sa = slice(starts[a], starts[a + 1])
+        gram[sa, sa] = np.asarray(gm.gram(W), dtype=np.float64)
+        cross[sa] = np.asarray(gm.rmatvec(W), dtype=np.float64)
+        for b in range(a + 1, len(mats)):
+            for k in range(widths[b]):
+                unit = np.zeros(widths[b])
+                unit[k] = 1.0
+                column = np.asarray(mats[b].matvec(unit), dtype=np.float64)
+                gram[sa, starts[b] + k] = np.asarray(gm.rmatvec(W * column), dtype=np.float64)
+            gram[starts[b] : starts[b + 1], sa] = gram[sa, starts[b] : starts[b + 1]].T
+    # The Schur complement of the constant column: the intercept moves freely.
+    return 0.5 * (gram + gram.T) - np.outer(cross, cross) / float(np.sum(W))
+
+
+def _term_penalized_hessian(model, groups, smooth_penalty_terms) -> NDArray:
+    """``X'WX + S_lambda`` on one term's coefficients: the metric its repair projects in."""
+    indices = _term_indices(groups)
+    penalty = _term_penalty_block(smooth_penalty_terms, indices, model.result.beta.size)
+    return _term_data_hessian(model, groups) + penalty
+
+
 def _repairer(kind: str):
     from superglm.constraints import CurvatureRepairer, MonotoneRepairer
 
@@ -908,6 +984,7 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
             groups,
             weights=grid_weights,
             n_grid=n_grid,
+            metric=_term_penalized_hessian(work_model, groups, smooth_penalty_terms),
         )
         repair_result.feature_name = name
 
