@@ -48,7 +48,8 @@ from superglm.distributional.family import (
     plan_observation,
     validated_parameter_matrix,
 )
-from superglm.distributional.kernels._negative_binomial_crps import negative_binomial_crps_parts
+from superglm.distributional.kernels._common import pooled_rows
+from superglm.distributional.kernels._negative_binomial_crps import negative_binomial_crps_rows
 from superglm.distributional.kernels.generalized_gamma import (
     location_of_mean as generalized_gamma_location_of_mean,
 )
@@ -261,21 +262,27 @@ def _tweedie_crps(family: Any, y: NDArray, theta: NDArray) -> NDArray[np.float64
 def _negative_binomial_crps(family: Any, y: NDArray, theta: NDArray) -> NDArray[np.float64]:
     """CRPS of the NB2 law in ``(mean, size)``: Wei and Held (2014), at a stable split.
 
-    For any real ``y``, with ``k = floor(y)``,
-    ``CRPS(y) = CRPS(0) - y + 2 E[(y - Y)^+]``. The shortfall is the pmf sum
-    ``sum_{j <= k} (y - j) f(j)`` for a small count and otherwise
-    ``y F(k) - mean G(k - 1)``, where ``F`` is the NB2 CDF and ``G`` that of
-    size ``size + 1`` (``k f(k) = mean g(k - 1)``); scipy's incomplete beta
-    loses about five digits at a size near ``1e9``, which the sum does not.
-    ``CRPS(0) = sum_k P(Y > k)^2`` is the integral of a nonnegative quantity
-    (``kernels._negative_binomial_crps``), so a rare claim's score at zero, of
-    order ``mean^2``, does not cancel. A prior weight
-    ``w`` is not a reparametrisation of this law; ``_closed_form_scores`` scales
-    the count instead.
+    For any real ``y``, ``CRPS(y) = CRPS(0) - y + 2 E[(y - Y)^+]``.  ``CRPS(0) =
+    sum_k P(Y > k)^2`` comes from the quadrature in ``kernels._negative_binomial_crps``
+    and the shortfall from its pmf sum or, past it, the incomplete beta function.
+    A prior weight is not a reparametrisation of this law; ``_closed_form_scores``
+    scales the count instead.
     """
+    # CRPS(0) integrates a nonnegative quantity, so a rare claim's score at zero,
+    # of order mean^2, does not cancel.  With k = floor(y), the shortfall is
+    # sum_{j <= k} (y - j) f(j) below SHORTFALL_CELLS, else y F(k) - mean G(k - 1),
+    # where G is the NB2 CDF of size + 1 (k f(k) = mean g(k - 1)); the sum comes
+    # first because scipy's incomplete beta loses about five digits near size 1e9.
     response, parameters = _validated_scoring_inputs(y, theta)
-    mean, size = parameters[:, 0], parameters[:, 1]
-    zero, below = negative_binomial_crps_parts(mean, size, response)
+    response = np.ascontiguousarray(response)
+    mean, size = np.ascontiguousarray(parameters[:, 0]), np.ascontiguousarray(parameters[:, 1])
+    zero, below = np.empty(len(response)), np.empty(len(response))
+    pooled_rows(
+        lambda start, stop: negative_binomial_crps_rows(
+            mean, size, response, zero, below, start, stop
+        ),
+        len(response),
+    )
     # Past the kernel's pmf sum, F(k) = I_p(size, k + 1) = 1 - I_r(k + 1, size):
     # r = mean / (mean + size) keeps its digits where p rounds to one.
     far = np.isnan(below)

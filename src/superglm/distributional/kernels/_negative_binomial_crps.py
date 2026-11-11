@@ -41,9 +41,6 @@ import math
 
 import numpy as np
 from numba import njit  # type: ignore[import-untyped]
-from numpy.typing import NDArray
-
-from superglm.distributional.kernels._common import pooled_rows
 
 #: The step in the sinh variable at unit feature spread.
 _STEP = 0.2
@@ -90,7 +87,7 @@ def _node_term(
     return x, _expm1_less_identity(size * log_ratio) * inverse_v * jacobian
 
 
-@njit(cache=True, nogil=True)
+@njit(cache=True)
 def _zero_score(mean: float, size: float) -> float:
     total = mean + size
     r = mean / total
@@ -119,7 +116,7 @@ def _zero_score(mean: float, size: float) -> float:
     return acc * step * (1.0 + r) / (_TWO_PI * q)
 
 
-@njit(cache=True, nogil=True)
+@njit(cache=True)
 def _shortfall(mean: float, size: float, response: float, cells: int) -> float:
     """``sum_{j < cells} (y - j) f(j)`` from ``f(0) = (size / (mean + size))^size``."""
     rate = mean / (mean + size)
@@ -131,8 +128,15 @@ def _shortfall(mean: float, size: float, response: float, cells: int) -> float:
     return acc
 
 
-@njit(cache=True, nogil=True)
-def _scores(mean, size, response, zero, shortfall, start, stop):
+@njit(cache=True)
+def negative_binomial_crps_rows(mean, size, response, zero, shortfall, start, stop):
+    """Write ``CRPS(NB2(mean, size), 0)`` and ``E[(y - Y)^+]`` for rows ``start:stop``.
+
+    The caller passes contiguous float64 rows (positive finite ``mean`` and
+    ``size``, finite ``response``) and the two outputs, and runs the row blocks.
+    The shortfall is NaN where the response reaches ``SHORTFALL_CELLS``, for the
+    caller to take from the incomplete beta function.  Returns ``(0, -1)``.
+    """
     for row in range(start, stop):
         zero[row] = _zero_score(mean[row], size[row])
         cells = math.floor(response[row]) + 1.0
@@ -145,23 +149,4 @@ def _scores(mean, size, response, zero, shortfall, start, stop):
     return 0, -1
 
 
-def negative_binomial_crps_parts(
-    mean: NDArray[np.float64], size: NDArray[np.float64], response: NDArray[np.float64]
-) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-    """``CRPS(NB2(mean, size), 0)`` and ``E[(y - Y)^+]`` per row.
-
-    The shortfall is NaN where the response reaches ``SHORTFALL_CELLS``, for the
-    caller to take from the incomplete beta function. ``mean`` and ``size`` are
-    positive finite rows and ``response`` finite rows of the same length.
-    """
-    mean, size, response = (
-        np.ascontiguousarray(values, dtype=np.float64) for values in (mean, size, response)
-    )
-    zero, shortfall = np.empty(len(mean)), np.empty(len(mean))
-    pooled_rows(
-        lambda start, stop: _scores(mean, size, response, zero, shortfall, start, stop), len(mean)
-    )
-    return zero, shortfall
-
-
-__all__ = ["SHORTFALL_CELLS", "negative_binomial_crps_parts"]
+__all__ = ["SHORTFALL_CELLS", "negative_binomial_crps_rows"]
