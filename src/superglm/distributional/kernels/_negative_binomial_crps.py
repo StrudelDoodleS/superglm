@@ -13,13 +13,14 @@ section 4.3) is applied instead, to an integrand that is already the score.
 
 With ``r = mu / (mu + theta)``, ``q = 1 - r``, ``w = 4r / (1 + r)^2`` and
 ``rho = (q / (1 + r))^2``, the lattice Fourier identity
-``|d| = (1 / 2 pi) int (1 - cos dt) / (1 - cos t) dt`` and ``v = tan(t / 2) (1 + r) / q``
-take Euler's integral of that ``2F1`` to
+``|d| = (1 / 2 pi) int (1 - cos dt) / (1 - cos t) dt`` and
+``v = tan(t / 2) (1 + r) / q`` take Euler's integral of that ``2F1`` to
 
     E|Y - Y'| / 2 = C int_0^inf (1 - R(v)^theta) / v^2 dv,
     R(v) = (1 + rho v^2) / (1 + v^2),   C = (1 + r) / (2 pi q).
 
-Because ``C int -theta log R / v^2 dv = C theta pi (1 - sqrt(rho)) = mu``, the score at zero is
+Because ``C int -theta log R / v^2 dv = C theta pi (1 - sqrt(rho)) = mu``, the
+score at zero is
 
     CRPS(0) = C int_0^inf e2(theta log R(v)) / v^2 dv,   e2(z) = e^z - 1 - z >= 0,
 
@@ -28,10 +29,10 @@ decays like ``e^{3x}`` to the left and ``e^{-x}`` to the right, with its
 features at ``x = -log(1 + theta w) / 2`` (where ``theta log R`` reaches one),
 ``0`` and ``log((1 + r) / q)`` (where ``R`` reaches ``rho``).  A sinh-mapped
 trapezoid rule (Takahasi and Mori 1974) centred between them, with its step
-scaled to their spread, keeps every node of the strip of analyticity,
-``|Im x| < pi / 4``, resolved; it agrees with a direct lattice sum to about
-``1e-14`` relative from ``mu = 1e-8`` to ``1e3`` and from ``theta = 1e-4`` to
-``1e12``.
+scaled to their spread, spaces its nodes about 0.3 apart in ``x`` across them,
+well inside the integrand's strip of analyticity. It agrees with a direct
+lattice sum to about ``1e-14`` relative from ``mu = 1e-8`` to ``1e3`` and from
+``theta = 1e-4`` to ``1e12``.
 """
 
 from __future__ import annotations
