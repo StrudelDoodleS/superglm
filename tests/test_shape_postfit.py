@@ -3488,3 +3488,25 @@ def test_a_repair_made_under_an_open_editor_session_marks_its_results_stale():
     )
     if hasattr(InForce, "token"):  # #623's page token changes wherever ``describes`` does
         assert in_force.token != InForce.of(session).token
+
+
+def test_a_response_far_below_one_is_repaired_rather_than_refused():
+    # The metric's quadratic forms and the target's scale are taken in units of a power of
+    # two near their largest entries, so at 1e-165, where ``fitted @ H @ fitted`` and
+    # ``target @ target`` underflow, the repair completes with a curve that obeys its rule.
+    # (At that scale the deviances the publication rule compares are themselves below
+    # float64's resolution, so which candidate it keeps is not asserted.)
+    x = np.linspace(0.0, 1.0, 200)
+    X = pd.DataFrame({"x": x})
+    y = 1e-165 * (0.9 * x + 0.25 * np.sin(12.0 * x))
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=9, constraint=Constraint.postfit.increasing)},
+    ).fit(X, y)
+
+    model.apply_shape_postfit(X)
+
+    curve = np.asarray(model._shape_repairs["x"].repaired_log_effect)
+    assert np.all(np.isfinite(curve))
+    assert np.all(np.diff(curve) >= -1e-12 * max(float(np.max(np.abs(curve))), 1e-300))

@@ -1232,7 +1232,16 @@ def _project_shape_in_fitted_basis(
     total_weight = float(np.sum(w))
     # The optimizer works in units of the target's weighted RMS, so its
     # tolerances and step control do not depend on the response's units.
-    curve_scale = float(np.sqrt(float(np.dot(w, target * target)) / total_weight)) or 1.0
+    # Taken in units of a power of two near the target's largest value, which is exact and
+    # keeps ``target * target`` normal for a response far from 1.
+    target_largest = float(np.max(np.abs(target))) if target.size else 0.0
+    target_unit = (
+        float(np.ldexp(1.0, int(np.frexp(target_largest)[1]))) if target_largest > 0.0 else 1.0
+    )
+    curve_scale = (
+        target_unit * float(np.sqrt(float(np.dot(w, (target / target_unit) ** 2)) / total_weight))
+        or 1.0
+    )
     if metric is None:
         H = fitted_basis.T @ (fitted_basis * w[:, None])
         g = fitted_basis.T @ (target * w)
@@ -1244,14 +1253,19 @@ def _project_shape_in_fitted_basis(
         # model of the penalized objective the publication rule judges.
         H = np.asarray(metric[0], dtype=np.float64)
         fitted = np.asarray(metric[1], dtype=np.float64)
-        g = H @ fitted
-        zero_loss = float(fitted @ g)
-        if not np.all(np.isfinite(H)) or not np.isfinite(zero_loss) or zero_loss <= 0.0:
+        # The quadratic forms are taken on the coefficients in units of a power of two near
+        # their largest entry: exact to rescale, and normal for a response of any size, where
+        # ``fitted @ H @ fitted`` itself can underflow.
+        largest = float(np.max(np.abs(fitted))) if fitted.size else 0.0
+        unit = float(np.ldexp(1.0, int(np.frexp(largest)[1]))) if largest > 0.0 else 1.0
+        g_unit = H @ (fitted / unit)
+        zero_unit = float((fitted / unit) @ g_unit)
+        if not np.all(np.isfinite(H)) or not np.isfinite(zero_unit) or zero_unit <= 0.0:
             raise RuntimeError(f"{label} projection requires a positive definite metric")
         # Scaled, as on the grid, so the dropped term's objective is 0 and the fitted
         # one's is -1/2.
-        H_scaled = H * (curve_scale * curve_scale / zero_loss)
-        g_scaled = g * (curve_scale / zero_loss)
+        H_scaled = H * ((curve_scale / unit) ** 2 / zero_unit)
+        g_scaled = g_unit * (curve_scale / unit / zero_unit)
 
     inside = _inside_ray(fitted_basis, np.asarray(x_grid, dtype=np.float64), w / total_weight, kind)
     beta_projected = curve_scale * _cone_projection(
@@ -1275,10 +1289,12 @@ def _project_shape_in_fitted_basis(
         projection_loss = float(np.dot(w, residual * residual))
         objective_tolerance = shape_sum_tolerance(zero_loss, w.size)
     else:
-        step = beta_projected - fitted
+        step = (beta_projected - fitted) / unit
         projection_loss = float(step @ H @ step)
-        magnitude = float(np.abs(step) @ np.abs(H) @ np.abs(step)) + zero_loss
+        magnitude = float(np.abs(step) @ np.abs(H) @ np.abs(step)) + zero_unit
         objective_tolerance = shape_sum_tolerance(magnitude, H.shape[0])
+        # Both losses in the coefficient units above, where neither can underflow.
+        zero_loss = zero_unit
     if not np.isfinite(projection_loss) or projection_loss > zero_loss + objective_tolerance:
         raise RuntimeError(
             f"{label} projection failed its feasible-zero objective certificate: "
