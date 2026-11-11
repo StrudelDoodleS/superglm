@@ -1386,17 +1386,25 @@ else:
     print("published", " ".join(repr(float(v)) for v in model._shape_repairs["x"].repaired_log_effect))
 """
 
+#: How a process ends when it runs an instruction its CPU lacks: killed by SIGILL on
+#: POSIX, ``STATUS_ILLEGAL_INSTRUCTION`` on Windows.
+_ILLEGAL_INSTRUCTION_EXITS = {-4, 0xC000001D}
+
 
 @pytest.mark.slow
 def test_repair_decision_is_the_same_on_every_blas_kernel():
     """Publish or refuse, and the repaired curve, agree across OpenBLAS microkernels.
 
-    Each kernel runs the grid-metric repairer and the full call, in that order.
+    Each kernel runs the grid-metric repairer and the full call, in that order. A
+    kernel forced past the host CPU's instruction set (SkylakeX's AVX-512 on an AVX2
+    runner) dies of an illegal instruction: it cannot run here, so it is reported
+    and left out. Any other failure fails the test.
     """
     import os
     import subprocess
+    import warnings
 
-    outcomes = {}
+    outcomes, not_run = {}, {}
     for kernel in ("Haswell", "Zen", "SkylakeX", "Sandybridge"):
         environment = {**os.environ, "OPENBLAS_CORETYPE": kernel, "OPENBLAS_NUM_THREADS": "1"}
         run = subprocess.run(
@@ -1404,11 +1412,19 @@ def test_repair_decision_is_the_same_on_every_blas_kernel():
             env=environment,
             capture_output=True,
             text=True,
-            check=True,
+            check=False,
             timeout=300,
         )
+        if run.returncode in _ILLEGAL_INSTRUCTION_EXITS:
+            not_run[kernel] = f"illegal instruction (exit {run.returncode}): the CPU lacks it"
+            continue
+        assert run.returncode == 0, (kernel, run.returncode, run.stderr[-4000:])
         outcomes[kernel] = [line.split() for line in run.stdout.splitlines()]
 
+    if not_run:
+        warnings.warn(f"OpenBLAS kernels this CPU cannot run, left out: {not_run}", stacklevel=1)
+    if len(outcomes) < 2:
+        pytest.skip(f"fewer than two OpenBLAS kernels run on this CPU; left out {not_run}")
     for metric in (0, 1):
         decisions = {kernel: lines[metric][0] for kernel, lines in outcomes.items()}
         assert set(decisions.values()) == {"published"}, (metric, decisions)
