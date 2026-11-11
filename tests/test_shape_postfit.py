@@ -1267,6 +1267,41 @@ def test_distinct_unit_rows_memory_is_linear_in_the_rows():
     assert peak <= 16 * repeated.nbytes
 
 
+def test_distinct_unit_rows_memory_is_linear_when_the_rows_share_a_sum():
+    """An evenly spaced degree-0 basis's jump rows share their entry sums.
+
+    Every pair then falls in one sorted window; comparing them all at once held
+    about 400 times the rows.
+    """
+    import tracemalloc
+
+    from superglm.constraints import (
+        _distinct_unit_rows,
+        _shape_breakpoints,
+        _shape_constraint_rows,
+    )
+
+    x = np.repeat(np.linspace(0.0, 1.0, 401), 3)
+    feature = PSpline(
+        n_knots=399, degree=0, m=1, penalty="none", constraint=Constraint.postfit.increasing
+    )
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": feature})
+    model.fit(pd.DataFrame({"x": x}), np.sin(6.0 * x))
+    spec = model._specs["x"]
+    rows = _shape_constraint_rows(spec, _shape_breakpoints(spec), "increasing")
+
+    tracemalloc.start()
+    try:
+        unit, merged = _distinct_unit_rows(rows)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert unit.shape == (399, rows.shape[1])
+    assert merged == [[index] for index in range(399)]
+    assert peak <= 16 * rows.nbytes
+
+
 def test_curvature_repair_of_arbitrary_coefficients_is_published():
     """A solve whose own start stays outside the cone starts from a point inside it."""
     from superglm import Spline

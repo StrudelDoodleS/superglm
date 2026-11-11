@@ -534,6 +534,9 @@ _CHECKPOINT_SEPARATION = 1e-9
 #: Unit rows closer than this in every entry are one constraint stated twice: the
 #: two one-sided values of a continuous derivative at a knot, read from two pieces.
 _SAME_ROW = 2.0**-40
+#: Entries of row differences one block of candidate pairs may hold (2 MiB of
+#: binary64); a typical repair compares all its pairs in one block.
+_PAIR_BLOCK = 2**18
 
 
 @dataclass(frozen=True)
@@ -618,7 +621,8 @@ def _distinct_unit_rows(rows: NDArray) -> tuple[NDArray, list[list[int]]]:
 
     A row repeats the first earlier kept row within ``_SAME_ROW`` in every entry.
     Only rows whose entry sums lie within ``sqrt(width)`` such widths of each other
-    can match, so they are compared in sorted order: memory linear in the rows.
+    can match, so they are compared in sorted order, a block of rows at a time:
+    memory linear in the rows, even when many sums tie.
     """
     unit, _, keep = _normalized_nonzero_shape_rows(rows)
     sources = np.flatnonzero(keep)
@@ -631,15 +635,26 @@ def _distinct_unit_rows(rows: NDArray) -> tuple[NDArray, list[list[int]]]:
     ordered = sums[order]
     first = np.searchsorted(ordered, ordered - radius, side="left")
     span = np.searchsorted(ordered, ordered + radius, side="right") - first
-    # Every row with each one in its window, as (row, candidate) pairs.
-    left = np.repeat(order, span)
-    right = order[np.arange(span.sum()) - np.repeat(np.cumsum(span) - span - first, span)]
-    earlier = right < left
-    left, right = left[earlier], right[earlier]
-    close = np.max(np.abs(unit[left] - unit[right]), axis=1, initial=0.0) <= _SAME_ROW
+    # Every row with each one in its window, as (row, candidate) pairs, for the sorted
+    # rows start:stop, whose pairs' differences hold at most _PAIR_BLOCK entries or
+    # one row's window: evenly spaced jump rows share a sum, putting every pair in it.
+    ends = np.cumsum(span)
     partner: dict[int, list[int]] = {}
-    for index, other in zip(left[close].tolist(), right[close].tolist(), strict=True):
-        partner.setdefault(index, []).append(other)
+    start = 0
+    while start < count:
+        budget = ends[start] - span[start] + _PAIR_BLOCK // width
+        stop = max(start + 1, int(np.searchsorted(ends, budget, side="right")))
+        block = span[start:stop]
+        left = np.repeat(order[start:stop], block)
+        right = order[
+            np.arange(block.sum()) - np.repeat(np.cumsum(block) - block - first[start:stop], block)
+        ]
+        earlier = right < left
+        left, right = left[earlier], right[earlier]
+        close = np.max(np.abs(unit[left] - unit[right]), axis=1, initial=0.0) <= _SAME_ROW
+        for index, other in zip(left[close].tolist(), right[close].tolist(), strict=True):
+            partner.setdefault(index, []).append(other)
+        start = stop
     kept: list[int] = []
     representative: dict[int, int] = {}
     merged: list[list[int]] = []
