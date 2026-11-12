@@ -385,26 +385,19 @@ def _newton_minimum(
     unit: float,
     rows: int,
 ) -> float | None:
-    """A minimum of the objective from ``start``, by Newton's method on its slope kept inside
-    a bracket of the minimum; ``None`` where it cannot say, and the derivative-free search
-    decides.
+    """A minimum of the objective from ``start`` by Newton's method on its slope, kept inside a
+    bracket of the minimum (Press et al., section 9.4, ``rtsafe``; Hager, *Comput. Math. Appl.*
+    18(9), 1989); ``None`` where it cannot say, and the derivative-free search decides.
 
     ``probe(t)`` is the objective at ``t``, infinite where a row is invalid, and where every row
-    is valid its slope, its curvature and the sum of its ``rows`` terms' magnitudes (else
-    ``None``). The minimum lies above a point of negative slope, below one of positive slope,
-    and on the best point's side of a point no lower than it or invalid. A Newton step that
-    leaves that bracket, or is not half the step two before it, is replaced by bisection (Press
-    et al., section 9.4, ``rtsafe``; Hager, *Comput. Math. Appl.* 18(9), 1989), or while the
-    bracket is open downhill by a step that grows as ``_bracket``'s walk does. It stops where the
-    decrease Newton's model predicts (the Newton decrement: Boyd and Vandenberghe, *Convex
-    Optimization*, 2004, section 9.5) is below the objective's last place, or its step is
-    within the location tolerance and that decrease within the sum's rounding; or where the
-    bracket closes to the tolerance on a wall of invalid rows. ``None``: a point it moves to has
-    no slope, the open bracket would leave float64's range in ``unit``s, or ``_NEWTON_STEPS``
-    pass.
+    is valid its slope, curvature and the sum of its ``rows`` terms' magnitudes (else ``None``).
+    ``None`` comes back where a point it moves to has no slope, where the open bracket would
+    leave float64's range in ``unit``s, or after ``_NEWTON_STEPS``.
     """
     x = start
     value, derivatives = probe(x)
+    # The minimum lies above a point of negative slope, below one of positive slope, and on the
+    # best point's side of a point no lower than it or invalid (a wall).
     lower, upper = -np.inf, np.inf
     before = last = np.inf  # the last two step lengths, as rtsafe keeps them
     for _ in range(_NEWTON_STEPS):
@@ -420,7 +413,11 @@ def _newton_minimum(
         far = upper if slope < 0.0 else lower
         tolerance = _INTERCEPT_XATOL * (1.0 + abs(x - start))
         step = -slope / curvature if curvature > 0.0 else np.nan
-        # A short step alone says nothing beside a wall, where the curvature can be vast.
+        # Stop where the decrease Newton's model predicts (the Newton decrement: Boyd and
+        # Vandenberghe, Convex Optimization, 2004, section 9.5) is below the objective's last
+        # place, or where the step is within the tolerance and that decrease within the sum's
+        # rounding: a short step alone says nothing beside a wall, where the curvature can be
+        # vast. Or where the bracket has closed on a wall.
         decrease = -0.5 * slope * step
         rounding = 4.0 * rows * _UNIT_ROUNDOFF * size
         if decrease <= _UNIT_ROUNDOFF * size or (abs(step) <= tolerance and decrease <= rounding):
@@ -428,7 +425,9 @@ def _newton_minimum(
         if abs(far - x) <= tolerance:
             return x
         trial = x + step
-        # No step (NaN), one that overflows, or one too short to move x is not taken.
+        # No step (NaN), one that overflows, or one too short to move x is not taken. One that
+        # leaves the bracket, or is not half the step two before it, gives way to bisection, or
+        # while the bracket is open downhill to a step growing as ``_bracket``'s walk does.
         newton = bool(np.isfinite(unit * trial)) and trial != x
         if not (newton and lower < trial < upper and abs(step) <= 0.5 * before):
             if np.isfinite(far):
