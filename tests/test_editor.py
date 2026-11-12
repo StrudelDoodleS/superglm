@@ -2142,10 +2142,37 @@ def test_offset_labels_use_native_values_for_mean_centered_terms(editor_model):
     session.shift("x_spline", 0.35)
 
     label = offset_label_payload(session, ["x_spline"])[0]
-    actual = np.asarray([row["log_offset"] for row in label["values"]], dtype=np.float64)
+    # The model is Gaussian/identity, so each value is the amount the term adds.
+    actual = np.asarray([row["effect"] for row in label["values"]], dtype=np.float64)
     expected = native_log_effect_values(session.terms["x_spline"])
 
     np.testing.assert_allclose(actual, expected)
+
+
+@pytest.mark.parametrize(
+    ("fixture", "scale", "shown"),
+    [
+        ("editor_model", "edited added amount", "effect"),
+        ("editor_log_link_model", "log edited relativity", "relativity"),
+    ],
+)
+def test_offset_labels_follow_the_terms_display(fixture, scale, shown, request):
+    from superglm.editor.summaries import offset_label_payload
+    from superglm.editor.terms import native_log_effect_values
+
+    model = request.getfixturevalue(fixture)
+    session = EditorSession.from_model(model, terms=["region"], with_se=False)
+    session.select_indices("region", [1])
+    session.shift("region", 0.35)
+
+    label = offset_label_payload(session, ["region"])[0]
+    effect = native_log_effect_values(session.terms["region"])
+    values = np.asarray([row[shown] for row in label["values"]], dtype=np.float64)
+    # A Gaussian/identity term adds its effect to the mean; a log-link term multiplies it.
+    expected = effect if shown == "effect" else np.exp(effect)
+    assert label["scale"] == scale
+    np.testing.assert_allclose(values, expected, rtol=1e-15, atol=0.0)
+    assert all(("relativity" in row) == (shown == "relativity") for row in label["values"])
 
 
 def test_to_model_marks_edited_copy_inference_stale(editor_model):
@@ -5542,7 +5569,7 @@ def test_widget_http_summary_and_fixed_offset_refit(editor_model):
         assert refit["compact"]["rows"]
         assert all("sig_class" in row for row in refit["compact"]["rows"])
         assert refit["offset_labels"][0]["term"] == "region"
-        assert refit["offset_labels"][0]["scale"] == "log edited relativity"
+        assert refit["offset_labels"][0]["scale"] == "edited added amount"
         assert any(item["label"] == "B" for item in refit["offset_labels"][0]["values"])
 
         after_refit = _post_json(f"{widget.url}/summary", {"source": "refit"})

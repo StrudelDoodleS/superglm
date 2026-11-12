@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 
 from superglm.editor.apply import materialize_edit_request
+from superglm.editor.display import display_for
 from superglm.editor.terms import native_log_effect_values
 from superglm.inference.summary import editor_shape_notes
 from superglm.inference.summary_levels import validate_level_display
@@ -97,17 +98,22 @@ def _in_force_summary_model(session, *, model_override=None):
 
 
 def offset_label_payload(session, terms: list[str]) -> list[dict[str, Any]]:
-    # Edited offset terms are absent from the refit coefficient table, so expose
-    # their fixed factors separately for audit/display.
+    """Each edited term's fixed offset, shown as its curve is (``display_for``).
+
+    Edited offset terms are absent from the refit coefficient table, so their
+    values are listed here: a relativity term's as its log offset and the
+    relativity, an additive term's as the amount it adds to the linear predictor.
+    """
     labels: list[dict[str, Any]] = []
     for name in terms:
         term = session.terms[name]
-        values, omitted = _offset_values(term)
+        additive = display_for(session.model, name).kind == "additive"
+        values, omitted = _offset_values(term, additive=additive)
         labels.append(
             {
                 "term": name,
                 "kind": term.kind,
-                "scale": "log edited relativity",
+                "scale": "edited added amount" if additive else "log edited relativity",
                 "values": values,
                 "omitted": omitted,
             }
@@ -115,15 +121,17 @@ def offset_label_payload(session, terms: list[str]) -> list[dict[str, Any]]:
     return labels
 
 
-def _offset_values(term) -> tuple[list[dict[str, Any]], int]:
+def _shown(value: float, *, additive: bool) -> dict[str, float]:
+    if additive:
+        return {"effect": float(value)}
+    return {"log_offset": float(value), "relativity": float(np.exp(value))}
+
+
+def _offset_values(term, *, additive: bool) -> tuple[list[dict[str, Any]], int]:
     log_effect = native_log_effect_values(term)
     if term.levels is not None:
         return [
-            {
-                "label": str(label),
-                "log_offset": float(value),
-                "relativity": float(np.exp(value)),
-            }
+            {"label": str(label), **_shown(value, additive=additive)}
             for label, value in zip(term.levels, log_effect, strict=False)
         ], 0
 
@@ -133,22 +141,12 @@ def _offset_values(term) -> tuple[list[dict[str, Any]], int]:
             idx = np.unique(np.linspace(0, x.size - 1, 80, dtype=np.intp))
         else:
             idx = np.arange(x.size, dtype=np.intp)
-        return [
-            {
-                "x": float(x[i]),
-                "log_offset": float(log_effect[i]),
-                "relativity": float(np.exp(log_effect[i])),
-            }
-            for i in idx
-        ], int(x.size - idx.size)
+        return [{"x": float(x[i]), **_shown(log_effect[i], additive=additive)} for i in idx], int(
+            x.size - idx.size
+        )
 
     return [
-        {
-            "index": int(i),
-            "log_offset": float(value),
-            "relativity": float(np.exp(value)),
-        }
-        for i, value in enumerate(log_effect)
+        {"index": int(i), **_shown(value, additive=additive)} for i, value in enumerate(log_effect)
     ], 0
 
 
