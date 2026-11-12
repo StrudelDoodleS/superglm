@@ -3664,14 +3664,14 @@ def test_intercept_search_that_cannot_converge_is_refused_and_nothing_is_publish
     _assert_nothing_published(model, X, snapshot)
 
 
-def test_a_repair_whose_intercept_has_no_minimum_is_published_flat_as_master_publishes_it():
+def test_a_repair_whose_intercept_has_no_minimum_continues_from_the_flat_curve():
     """A stress case master publishes: a concave rule on a bump under the binomial's log link.
 
     With the projected curve, the deviance falls as the intercept rises until a row's mean
     reaches one, so its intercept has no minimum; with the term dropped it has. The term is
-    published flat with the dropped term's intercept, the minimum of the deviance in closed
-    form (scipy's bounded Brent). At 77cc83001 the repair was refused. Master publishes a
-    concave curve here that fits better; the test pins the publication, not its optimality.
+    continued from the dropped term's profiled intercept. At 77cc83001 the repair was
+    refused, and #626 published it flat at deviance 237.426. Continuing from that feasible
+    curve finds a nonflat concave curve that fits better, as master already did.
     """
     from scipy import optimize
 
@@ -3688,15 +3688,15 @@ def test_a_repair_whose_intercept_has_no_minimum_is_published_flat_as_master_pub
         features={"x": PSpline(n_knots=6, constraint=Constraint.postfit.concave)},
     ).fit(X, y, offset=offset)
 
-    with pytest.warns(RuntimeWarning, match=f"term 'x' {FLAT}.*Constraint.fit.concave"):
-        model.apply_shape_postfit(X, offset=offset)
+    model.apply_shape_postfit(X, offset=offset)
 
     spec, groups = model._specs["x"], _x_groups(model)
-    zero = np.zeros(sum(group.size for group in groups))
-    np.testing.assert_array_equal(_term_beta(model.result.beta, groups), zero)
+    beta = _term_beta(model.result.beta, groups)
+    assert np.any(beta)
     record = model._shape_repairs["x"]
-    assert record.flat and record.max_violation_after == 0.0
-    assert record.certificate == shape_constraint_certificate(spec, zero, "concave")
+    assert not record.flat
+    assert record.certificate == shape_constraint_certificate(spec, beta, "concave")
+    assert _minimum_signed_derivative(spec, beta, "concave") >= -1e-9
 
     def deviance(intercept):
         mu = np.exp(offset + intercept)
@@ -3705,10 +3705,9 @@ def test_a_repair_whose_intercept_has_no_minimum_is_published_flat_as_master_pub
     oracle = optimize.minimize_scalar(
         deviance, bounds=(-2.0, 0.05), method="bounded", options={"xatol": 1e-12}
     )
-    published = np.log(model.predict(X, offset=offset)) - offset
-    assert np.ptp(published) <= 1e-14
-    assert abs(published[0] - oracle.x) <= 1e-6
-    assert deviance(published[0]) <= oracle.fun + 1e-9
+    mu = model.predict(X, offset=offset)
+    published = -2.0 * float(np.sum(y * np.log(mu) + (1.0 - y) * np.log1p(-mu)))
+    assert published < oracle.fun - 1.0
 
 
 def test_repair_without_retained_response_is_refused_and_nothing_is_published():

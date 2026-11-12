@@ -715,7 +715,12 @@ def _settled(
 
 
 def _profiled_curvature(
-    fitted: Any, term: PostfitTerm, curvature: NDArray[np.float64]
+    fitted: Any,
+    term: PostfitTerm,
+    curvature: NDArray[np.float64],
+    *,
+    coefficients: NDArray[np.float64] | None = None,
+    source: str | None = None,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64] | None]:
     """``curvature`` on the term's coefficients with its parameter's intercept profiled, and
     the intercept's coupling over its own curvature (``None`` where nothing is profiled), which
@@ -734,13 +739,118 @@ def _profiled_curvature(
         own = float(curvature[intercept, intercept])
         scale = max(float(np.max(np.abs(np.diag(block)), initial=0.0)), abs(own))
         if own > (columns.size + 1) * _UNIT_ROUNDOFF * scale:
-            block -= np.outer(coupling, coupling) / own
             ratio = coupling / own
+            if _profile_cancels(block, coupling, own):
+                # Raw second moments can agree in nearly every digit when one
+                # observation carries the information. Center before the product,
+                # as for stable variances (Chan, Golub and LeVeque 1983).
+                try:
+                    block = _centered_term_curvature(fitted, term, ratio, coefficients, source)
+                    if not np.all(np.isfinite(block)):
+                        raise FloatingPointError("nonfinite centered repair metric")
+                except (
+                    ValueError,
+                    FloatingPointError,
+                    OverflowError,
+                    MemoryError,
+                    np.linalg.LinAlgError,
+                ):
+                    block = np.array(curvature[np.ix_(columns, columns)], dtype=np.float64)
+                    block -= np.outer(coupling, coupling) / own
+                    warnings.warn(
+                        "The repair's centered curvature could not be evaluated; intercept "
+                        "profiling loses precision in the stored curvature, so the closest "
+                        "curve is not certified. The available repair is published.",
+                        RuntimeWarning,
+                        stacklevel=3,
+                    )
+            else:
+                block -= np.outer(coupling, coupling) / own
     return 0.5 * (block + block.T), ratio
 
 
+def _profile_cancels(block, coupling, own) -> bool:
+    """Whether the rank-one intercept subtraction loses half the float64 digits.
+
+    With ``v = h / sqrt(H_aa)``, ``H_tt - vv'`` has a small generalized
+    eigenvalue exactly when ``v' H_tt^-1 v`` approaches one. Read in Jacobi
+    coordinates so coefficient units do not choose this exceptional row pass.
+    This chooses a stable formation, not a rank or a convergence decision.
+    """
+    from scipy.linalg import solve_triangular
+
+    if not np.any(coupling):
+        return False
+    diagonal = np.diag(block)
+    if np.any(diagonal <= 0.0):
+        return True
+    scale = np.sqrt(diagonal)
+    try:
+        root = np.linalg.cholesky(block / scale[:, None] / scale[None, :])
+        projected = solve_triangular(
+            root, coupling / np.sqrt(own) / scale, lower=True, check_finite=False
+        )
+    except np.linalg.LinAlgError:
+        return True
+    return 1.0 - float(projected @ projected) <= np.sqrt(_UNIT_ROUNDOFF)
+
+
+def _centered_term_curvature(fitted, term, ratio, coefficients, source):
+    """``B_c' D B_c + S`` from the fit's actual curvature source, in bounded chunks.
+
+    Only the cancellation path replays likelihood derivatives. No row matrix or
+    new cache survives this call. Each chunk uses the fitted design, including
+    its identifiability transformations, before subtracting the intercept mean.
+    """
+    from superglm.distributional.solver import chunks
+
+    rows = fitted.fit_state.retained_rows
+    beta = fitted.coefficients if coefficients is None else coefficients
+    actual = fitted.result.terminal_curvature.actual_source if source is None else source
+    plan = fitted.family.bind_likelihood(rows.response, rows.likelihood_weights, rows.observation)
+    state = fitted.layout.predictor(term.parameter)
+    start = (
+        term.columns.start - state.coefficient_slice.start - int(state.intercept_index is not None)
+    )
+    stop = start + term.columns.stop - term.columns.start
+    selected, offset = [], 0
+    for group in state.design.group_matrices:
+        end = offset + group.shape[1]
+        if start < end and stop > offset:
+            selected.append(
+                (group, slice(max(start - offset, 0), min(stop - offset, group.shape[1])))
+            )
+        offset = end
+    diagonal = packed_pairs(len(fitted.layout.predictors)).index(
+        (state.parameter_index, state.parameter_index)
+    )
+    block = np.array(fitted.result.penalty[term.columns, term.columns], copy=True)
+    for chunk in chunks.iter_likelihood_chunks(
+        fitted.family,
+        fitted.layout,
+        rows.response,
+        plan,
+        beta,
+        chunk_size=fitted.result.resolved_chunk_size or 2048,
+        curvature_source=actual,
+    ):
+        basis = np.hstack(
+            [
+                group.row_subset(chunk.rows.indices).toarray()[:, columns]
+                for group, columns in selected
+            ]
+        )
+        basis -= ratio
+        block += basis.T @ (chunk.curvature_packed[:, diagonal, None] * basis)
+    return block
+
+
 def _term_precision(
-    fitted: Any, term: PostfitTerm, curvature: NDArray[np.float64] | None = None
+    fitted: Any,
+    term: PostfitTerm,
+    curvature: NDArray[np.float64] | None = None,
+    *,
+    source: str | None = None,
 ) -> NDArray[np.float64]:
     """The metric the term's repair projects in: the penalized curvature at the coefficients
     being repaired on the term's coefficients, every other coefficient held and the term's
@@ -753,12 +863,12 @@ def _term_precision(
     """
     if curvature is None:
         curvature = fitted.result.terminal_penalized_curvature
-    return _profiled_curvature(fitted, term, curvature)[0]
+    return _profiled_curvature(fitted, term, curvature, source=source)[0]
 
 
 def _curvature_at(
     fitted: Any, rows: Any
-) -> Callable[[NDArray[np.float64]], tuple[NDArray[np.float64], NDArray[np.float64]] | None]:
+) -> Callable[[NDArray[np.float64]], tuple[NDArray[np.float64], NDArray[np.float64], str] | None]:
     """The penalized score and curvature at given coefficients, as the fit forms its terminal
     ones (``solver.solver``), on the fit's backend and smoothing parameters: the observed
     curvature unless it is materially indefinite, then the expected (Fisher), then the nearest
@@ -773,7 +883,7 @@ def _curvature_at(
 
     def at(
         coefficients: NDArray[np.float64],
-    ) -> tuple[NDArray[np.float64], NDArray[np.float64]] | None:
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], str] | None:
         if not context:
             plan = fitted.family.bind_likelihood(
                 rows.response, rows.likelihood_weights, rows.observation
@@ -827,6 +937,7 @@ def _curvature_at(
         return (
             np.asarray(observed.score_penalized, dtype=np.float64),
             np.asarray(accepted.penalized_curvature, dtype=np.float64),
+            decision.telemetry.actual_source,
         )
 
     return at
@@ -926,8 +1037,8 @@ def _continued_repair(
         local = curvature_at(beta)
         if local is None:
             break
-        score, curvature = local
-        H, ratio = _profiled_curvature(fitted, term, curvature)
+        score, curvature, source = local
+        H, ratio = _profiled_curvature(fitted, term, curvature, coefficients=beta, source=source)
         # The merit's gradient is the penalized score's negative, profiled as its curvature is.
         gradient = -score[columns] if ratio is None else ratio * score[intercept] - score[columns]
         current = beta[columns]
@@ -1049,10 +1160,11 @@ def repaired_model(
     # The metric follows a revision, as SuperGLM's follows its working weights: the fit's own
     # terminal curvature at the fit's coefficients, else the curvature at the coefficients being
     # repaired, formed as the fit forms it, or the fit's where none is accepted there.
-    curvature = None
+    curvature, curvature_source = None, None
     if not np.array_equal(coefficients, fitted.result.coefficients):
         local = curvature_at(coefficients)
         curvature = None if local is None else local[1]
+        curvature_source = None if local is None else local[2]
 
     records: list[ShapeRepairRecord] = []
     flat: list[str] = []  # one warning per term published flat, once the revision is formed
@@ -1070,7 +1182,11 @@ def repaired_model(
                 [block],
                 weights=grid_weights,
                 n_grid=n_grid,
-                metric=_term_precision(fitted, term, curvature),
+                metric=(
+                    _term_precision(fitted, term)
+                    if curvature is None
+                    else _term_precision(fitted, term, curvature, source=curvature_source)
+                ),
                 certificate=certificates[term.term],
             )
             repaired = _settled(term, repair, coefficients[term.columns], grid_weights)
@@ -1101,12 +1217,25 @@ def repaired_model(
         )
         bar = fallback_merit + shape_sum_tolerance(abs(fallback_merit), len(rows.response))
         state = fitted.layout.predictor(term.parameter)
-        if candidate is not None and merit > bar:
-            start = candidate.copy()
+        if not repair.flat and (candidate is None or merit > bar):
+            # A candidate whose intercept has no minimum does not rule out the
+            # cone's other curves. Its apex has just been profiled successfully.
+            start = fallback.copy() if candidate is None else candidate.copy()
+            start_shift = fallback_shift if candidate is None else shift
+            start_merit = fallback_merit if candidate is None else merit
             if state.intercept_index is not None:
-                start[state.intercept_index] += shift
+                start[state.intercept_index] += start_shift
             continued = _continued_repair(
-                fitted, rows, frame, term, repair, start, merit, curvature_at, grid_weights, n_grid
+                fitted,
+                rows,
+                frame,
+                term,
+                repair,
+                start,
+                start_merit,
+                curvature_at,
+                grid_weights,
+                n_grid,
             )
             if continued is not None:
                 repair, certified = continued
@@ -1154,10 +1283,74 @@ def repaired_model(
         )
     if not records:
         return fitted
+    repaired_terms = {record.term for record in records}
+    parameters = tuple(
+        dict.fromkeys(
+            term.parameter
+            for term in pending
+            if term.term in repaired_terms
+            and fitted.layout.predictor(term.parameter).intercept_index is not None
+        )
+    )
+    if len(parameters) > 1:
+        from dataclasses import replace
+
+        coefficients = _settled_intercepts(fitted, rows, frame, coefficients, parameters)
+        parameter_of = {term.term: term.parameter for term in pending}
+        records = [
+            replace(
+                record,
+                intercept_shift=(
+                    float(coefficients[index] - fitted.coefficients[index])
+                    if (index := fitted.layout.predictor(parameter_of[record.term]).intercept_index)
+                    is not None
+                    else 0.0
+                ),
+            )
+            for record in records
+        ]
     revised = revised_model(fitted, coefficients, (), frame, repairs=records)
     for message in flat:
         warnings.warn(message, RuntimeWarning, stacklevel=3)
     return revised
+
+
+def _settled_intercepts(fitted, rows, frame, coefficients, parameters):
+    """Settle the repaired parameters' coupled intercepts with all term curves held.
+
+    One sweep leaves earlier conditional optima stale after a later parameter
+    moves. Cyclic conditional minimization revisits them until none improves
+    beyond the likelihood's rounding (Tseng 2001, section 2, cyclic rule).
+    Single-parameter repairs keep their existing one-profile path.
+    """
+    from superglm.constraints import _InterceptSearchError
+
+    beta = coefficients.copy()
+    for _ in range(_NEWTON_STEPS):
+        changed = False
+        for parameter in parameters:
+            index = fitted.layout.predictor(parameter).intercept_index
+            if index is None:
+                continue
+            try:
+                shift, _, _ = _profiled_merit(fitted, rows, frame, beta, parameter, 0.0)
+            except _InterceptSearchError:
+                break
+            if shift != 0.0:
+                beta[index] += shift
+                changed = True
+        else:
+            if not changed:
+                return beta
+            continue
+        break
+    warnings.warn(
+        "The repaired parameters' intercepts did not settle jointly; the last valid "
+        "repair is published with its conditional intercept estimates.",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+    return beta
 
 
 __all__ = [

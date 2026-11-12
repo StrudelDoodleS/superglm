@@ -950,8 +950,9 @@ def _null_space_ridge(H: NDArray, rank: int) -> NDArray:
     """``H`` with ``_NULL_RIDGE * ||H||`` added on the eigenvectors past its rank.
 
     A grid of fewer well-placed points than coefficients leaves the projection's
-    objective flat along the null space of ``H``; the ridge picks, among the
-    coefficients closest on the grid, those with the least null-space part.
+    objective flat along the null space of ``H``. The ridge stabilizes the QP
+    but can perturb its closest grid curve when the shape couples that null
+    space to the range; the public coarse-grid repair discloses this.
     """
     values, vectors = np.linalg.eigh(H)
     null = vectors[:, : H.shape[0] - rank]
@@ -969,7 +970,7 @@ def _null_space_ridge(H: NDArray, rank: int) -> NDArray:
 # those directions alone the projection moves least from the fit. That is the
 # proximal regularisation qpOASES applies to a semidefinite Hessian (Ferreau et al.,
 # Math. Prog. Comp. 6, 2014, section 3.11), centred on the fit. A grid coarser than
-# the basis has a structural null space, which _null_space_ridge picks from as before.
+# the basis has a structural null space; its regularization is disclosed separately.
 #: Bits to which the grid metric must give its smallest eigenvalue to count as
 #: resolved; below them the projection's coefficients along it have no more.
 _METRIC_BITS = 4
@@ -1367,11 +1368,18 @@ def _cone_projection(
     beta = np.linalg.lstsq(H, g, rcond=None)[0]
     if _uses_span_jump_constraints(spec, kind):
         rows, _ = _distinct_unit_rows(_shape_constraint_rows(spec, _shape_breakpoints(spec), kind))
-        result = _solve_cone_qp(
-            H, g, rows, _broken_rows(rows, beta), _shifted_start(rows, beta, inside)
-        )
+        start = _shifted_start(rows, beta, inside)
+        result = _solve_cone_qp(H, g, rows, _broken_rows(rows, beta), start)
         if result is None:
-            raise RuntimeError(f"{label} projection failed to converge")
+            # These cones are polyhedral, but a feasible QP can still exhaust
+            # certification. Keep the bracket path's disclose-and-publish rule:
+            # the apex is feasible and the unconstrained minimum is a lower bound.
+            lower = float(0.5 * beta @ H @ beta - g @ beta)
+            result = _solve_cone_qp(H, g, rows, _broken_rows(rows, beta), start, feasible=True)
+            best = np.zeros_like(beta) if result is None else np.asarray(result.beta)
+            upper = float(0.5 * best @ H @ best - g @ best)
+            _warn_projection_gap(label, kind, max(0.0, upper - lower))
+            return best
         return np.asarray(result.beta, dtype=np.float64)
 
     pieces, p = _shape_pieces(spec, kind)
@@ -1493,6 +1501,12 @@ def _cone_projection(
     best, gap = _bracketed_projection(
         H, g, pieces, p, end_rows, checkpoints, natural, beta, inside, skip_flat
     )
+    _warn_projection_gap(label, kind, gap)
+    return best
+
+
+def _warn_projection_gap(label: str, kind: str, gap: float) -> None:
+    """Disclose an unfinished projection whose feasible incumbent is published."""
     if gap > _OBJECTIVE_GAP:
         warnings.warn(
             f"{label} repair stopped before it certified the closest {kind} curve; the "
@@ -1501,7 +1515,6 @@ def _cone_projection(
             RuntimeWarning,
             stacklevel=4,
         )
-    return best
 
 
 def _in_binary_units(values: NDArray) -> NDArray:
@@ -1632,6 +1645,17 @@ def _project_shape_in_fitted_basis(
         raise RuntimeError(
             f"{label} projection failed its feasible-zero objective certificate: "
             f"projected={projection_loss:.6g}, zero={zero_loss:.6g}"
+        )
+    if metric is None and fitted_basis.shape[0] < fitted_basis.shape[1]:
+        warnings.warn(
+            f"{label} repair used a rank-deficient projection grid: "
+            f"{fitted_basis.shape[0]} points for {fitted_basis.shape[1]} coefficients. "
+            "The curve obeys its rule, but null-space regularization can move its "
+            "distance from the closest curve in the original grid metric; that "
+            "distance is not certified. Supply a positive definite metric or use "
+            "more grid points to resolve it.",
+            RuntimeWarning,
+            stacklevel=4,
         )
     max_curve_change = float(np.max(np.abs(residual))) if residual.size else 0.0
     return beta_projected, repaired_curve, max_curve_change, certificate
