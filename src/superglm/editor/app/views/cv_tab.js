@@ -1,5 +1,6 @@
 // @ts-check
 
+import { noEffect } from "../chart/display.js";
 import { escapeHTML, fmt } from "../format.js";
 
 /** @typedef {import('../api/contracts.js').CVReportPayload} CVReportPayload */
@@ -686,7 +687,7 @@ function frameMarkup(term, y, ticks) {
   return ticks.map((tick) => `<line class="cv-grid" x1="${left}" x2="${width - right}"
       y1="${px(y(tick))}" y2="${px(y(tick))}"></line>
     <text class="cv-tick" x="${left - 6}" y="${px(y(tick) + 4)}" text-anchor="end">${escapeHTML(fmt(tick))}</text>`).join("")
-    + `<line class="zero" x1="${left}" x2="${width - right}" y1="${px(y(1))}" y2="${px(y(1))}"></line>`
+    + `<line class="zero" x1="${left}" x2="${width - right}" y1="${px(y(noEffect(term.display)))}" y2="${px(y(noEffect(term.display)))}"></line>`
     + `<text class="cv-axis-title" x="${left}" y="16">${escapeHTML(termLabel(term))} · ${escapeHTML(term.value_label ?? "relativity")}</text>`;
 }
 
@@ -718,8 +719,10 @@ function yScale(term) {
   const { height, top, bottom } = CHART;
   const values = [...term.folds.flatMap((fold) => fold.values), ...term.fit, ...(term.edited ?? [])]
     .filter(isNumber);
-  const lo = Math.min(...values, 1);
-  const hi = Math.max(...values, 1);
+  // The no-effect line is always in view: 1 on a relativity, 0 on an added effect.
+  const none = noEffect(term.display);
+  const lo = Math.min(...values, none);
+  const hi = Math.max(...values, none);
   const pad = (hi - lo) * 0.1 || 0.05;
   const domain = [lo - pad, hi + pad];
   const y = (/** @type {number} */ value) =>

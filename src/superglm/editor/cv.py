@@ -773,6 +773,7 @@ def _term_item(
         "group": shown.group,
         "role": shown.role,
         "value_label": shown.value,
+        "display": shown.transform.to_payload(),
         "kind": grid.kind,
         "x": None if grid.kind == "levels" else grid.points,
         "levels": grid.labels,

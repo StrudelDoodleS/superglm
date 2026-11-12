@@ -895,3 +895,36 @@ test("the Final fit button mentions the held-out test split only where the sessi
   const held = cvTabMarkup(cvPayload({ final_fit: { ...cvPayload().final_fit, has_test_split: true } }), idle());
   assert.match(held, /test split stays held out/);
 });
+
+/** Each grid line's height by its tick label, and the no-effect line's height. */
+function frameHeights(markup) {
+  const ticks = new Map();
+  for (const match of markup.matchAll(/class="cv-grid"[^>]*y1="([^"]+)"[\s\S]*?class="cv-tick"[^>]*>([^<]*)</g)) {
+    ticks.set(match[2], Number(match[1]));
+  }
+  const zero = Number(markup.match(/class="zero"[^>]*y1="([^"]+)"/)[1]);
+  return { ticks, zero };
+}
+
+test("an added-effect term's no-effect line sits at 0, a relativity's at 1", () => {
+  const additive = {
+    ...age,
+    display: { kind: "additive", link: "identity" },
+    folds: [
+      { label: "Fold 1", values: [-0.16, 0.02, 0.2, 0.31] },
+      { label: "Fold 2", values: [-0.14, 0.0, 0.18, 0.29] }
+    ],
+    fit: [-0.15, 0.01, 0.19, 0.3],
+    edited: null
+  };
+  for (const markup of [curveChartMarkup(additive), levelChartMarkup({ ...additive, kind: "levels", x: null, levels: ["B1", "B2", "B10", "B11"] })]) {
+    const { ticks, zero } = frameHeights(markup);
+    assert.equal(zero, ticks.get("0"));
+    // The range is the curve's own: 1, no effect on a relativity, is not forced in.
+    assert.ok(![...ticks.keys()].some((label) => Number(label) >= 0.5), [...ticks.keys()].join(","));
+  }
+  for (const markup of [curveChartMarkup(age), levelChartMarkup(brand)]) {
+    const { ticks, zero } = frameHeights(markup);
+    assert.equal(zero, ticks.get("1"));
+  }
+});

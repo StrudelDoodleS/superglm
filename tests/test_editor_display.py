@@ -135,6 +135,7 @@ def test_cv_fold_items_follow_the_glm_link(editor_model):  # noqa: F811
     np.testing.assert_allclose(item["fit"], shown["original_y"], rtol=0.0, atol=1e-12)
     np.testing.assert_allclose(item["fit"], session.terms["x_spline"].original_log_effect)
     assert item["value_label"] == "effect on the mean"
+    assert item["display"] == shown["display"] == {"kind": "additive", "link": "identity"}
 
 
 @pytest.fixture

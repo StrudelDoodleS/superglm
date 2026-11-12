@@ -326,6 +326,8 @@ def assert_cv_tab_draws_the_editor_curves(session, items) -> None:
             assert not np.allclose(edited, fit, rtol=0.0, atol=1e-14)
             np.testing.assert_allclose(item["edited"], edited, rtol=1e-12, atol=0.0)
         assert item["value_label"] == term["y_label"]
+        # The chart's no-effect line follows the curve's own unit.
+        assert item["display"]["kind"] == term.get("display", {"kind": "relativity"})["kind"]
         weights = np.asarray(item["weights"], dtype=np.float64)
         anchor = np.log(edited if item["held"] else fit)
         for fold in item["folds"]:

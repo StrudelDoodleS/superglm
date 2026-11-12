@@ -667,7 +667,8 @@
  * @property {CVFoldCurve[]} folds
  * @property {number[]} fit
  * @property {number[]|null} edited
- * @property {string} [value_label] what the curve is a relativity of
+ * @property {string} [value_label] what the curve shows
+ * @property {DisplaySpec} [display] the unit of the curve; absent means relativity
  * @property {boolean} [held] a hand edit Run CV put back on every fold; it has no fold gap
  * @property {number|null} fold_gap
  * @property {number|null} min_correlation
