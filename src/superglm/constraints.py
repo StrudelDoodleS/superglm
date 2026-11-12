@@ -939,10 +939,9 @@ def _solve_cone_qp(
     for a convex QP is optimality. ``active`` is a warm working set and ``start`` a
     point meeting every row (``_shifted_start``); without one, ``beta = 0`` is used.
     ``feasible`` returns, when nothing is certified, the point of least objective that
-    meets every row and improves on the cone's apex, instead of ``None``: a bound, not
-    an optimum. It is an attempt, or the best multiple of ``start``, which the cone
-    holds with ``start``. ``regular`` returns ``None`` at once where the QP would
-    truncate ``H``'s rank.
+    meets every row and improves on the cone's apex (an attempt, or the best multiple
+    of ``start``, which the cone holds): a bound, not an optimum. ``regular`` returns
+    ``None`` at once where the QP would truncate ``H``'s rank.
     """
     from scipy.optimize import nnls
 
