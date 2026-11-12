@@ -3143,6 +3143,85 @@ def test_feasible_start_with_nonhomogeneous_rows():
 class TestDegenerateFaceRecovery:
     """A rounded face minimum must not repeat the same unsuccessful saddle solve."""
 
+    def test_a_feasible_face_minimum_with_a_residual_tangent_score_is_recovered(self, monkeypatch):
+        """Force a failed face certificate without ever violating a row."""
+        import superglm.solvers.constrained_qp as qp
+
+        original = qp._solve_saddle_direct
+
+        def rounded_saddle(matrix, rhs):
+            solved = original(matrix, rhs)
+            solved[1] += 2.0**-20
+            return solved
+
+        monkeypatch.setattr(qp, "_solve_saddle_direct", rounded_saddle)
+        result = qp.solve_constrained_qp(
+            np.eye(2),
+            np.array([-1.0, 2.0]),
+            np.array([[1.0, 0.0]]),
+            np.zeros(1),
+            active_set_init=[0],
+            beta_start=np.zeros(2),
+            max_iter=12,
+        )
+
+        assert result.converged
+        np.testing.assert_allclose(result.beta, [0.0, 2.0], rtol=1e-12, atol=1e-12)
+
+    def test_a_small_step_recovers_a_residual_infeasibility_before_projecting_again(
+        self, monkeypatch
+    ):
+        """A phase-one rounding residue near the apex must not prevent certification."""
+        import superglm.solvers.constrained_qp as qp
+
+        residue = np.full(2, -(2.0**-50))
+        monkeypatch.setattr(qp, "_project_feasible", lambda *a, **k: residue.copy())
+        result = qp.solve_constrained_qp(
+            np.eye(2),
+            -np.ones(2),
+            np.ones((1, 2)),
+            np.zeros(1),
+            active_set_init=[0],
+            max_iter=12,
+        )
+
+        assert result.converged
+        np.testing.assert_allclose(result.beta, np.zeros(2), atol=1e-14)
+
+    def test_a_changed_working_set_tries_its_ordinary_solve_before_recovery(self, monkeypatch):
+        """A recovered face must not replace later Schur updates with full QR solves."""
+        import superglm.solvers.constrained_qp as qp
+
+        original = qp._solve_saddle_direct
+        recover = qp._coordinate_face_minimum
+        recovered_widths = []
+
+        def rounded_first_face(matrix, rhs):
+            solved = original(matrix, rhs)
+            if len(rhs) == 4:
+                solved[1] += 2.0
+            return solved
+
+        def counted_recovery(H, g, rows, bounds):
+            recovered_widths.append(len(rows))
+            return recover(H, g, rows, bounds)
+
+        monkeypatch.setattr(qp, "_solve_saddle_direct", rounded_first_face)
+        monkeypatch.setattr(qp, "_coordinate_face_minimum", counted_recovery)
+        result = qp.solve_constrained_qp(
+            np.eye(3),
+            np.array([-1.0, -1.0, 2.0]),
+            np.eye(3)[:2],
+            np.zeros(2),
+            active_set_init=[0],
+            beta_start=np.zeros(3),
+            max_iter=12,
+        )
+
+        assert result.converged
+        np.testing.assert_allclose(result.beta, [0.0, 0.0, 2.0], atol=1e-12)
+        assert recovered_widths == [1]
+
     @pytest.mark.parametrize("affine", [False, True])
     @pytest.mark.parametrize("powers", [(0, 0), (-500, 500), (500, -500)])
     def test_roundoff_off_the_working_face_does_not_exhaust_the_budget(

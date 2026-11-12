@@ -1079,8 +1079,9 @@ def solve_constrained_qp(
 
     A failed face certificate or an infeasible step with no independent
     blocker switches the equality subproblem to coordinate null-space form.
-    Each working face tries that recovery once, then permits ordinary saddle
-    refinement. The complete original certificate still decides convergence.
+    A coordinate calculation on a face permits ordinary saddle refinement
+    afterwards; changed faces try their ordinary solve first. The complete
+    original certificate still decides convergence.
 
     active_set_init supplies a warm active set; a row dependent on those
     before it is left out. beta_start is a point the caller knows meets the
@@ -1237,7 +1238,7 @@ def solve_constrained_qp(
     # Switch factorizations only after the ordinary face solve fails. Bland
     # tie-breaking or EXPAND cannot repair a step off an unchanged working
     # face: no independent row can block its numerical normal component.
-    coordinate_face = False
+    coordinate_face: tuple[int, ...] | None = None
     recovered_face: tuple[int, ...] | None = None
 
     for it in range(max_iter):
@@ -1256,7 +1257,7 @@ def solve_constrained_qp(
                 active.pop(release)
                 basis.delete(release)
                 continue
-            coordinate_face = True
+            coordinate_face = tuple(active)
         at_face_minimum = False
         face_candidate = None
         # --- Equality-constrained subproblem on active set ---
@@ -1297,8 +1298,12 @@ def solve_constrained_qp(
                 rhs[p:] = b_eq - A_eq @ beta
 
                 step = None
-                if coordinate_face and tuple(active) != recovered_face:
-                    recovered_face = tuple(active)
+                if (
+                    coordinate_face is not None
+                    and coordinate_face == tuple(active)
+                    and coordinate_face != recovered_face
+                ):
+                    recovered_face = coordinate_face
                     face_candidate = _coordinate_face_minimum(H_sym, g, A_eq, b_eq)
                     if face_candidate is not None:
                         face_candidate = _zero_block_faces(
@@ -1353,8 +1358,8 @@ def solve_constrained_qp(
                 continue
             feasible = _is_feasible(A, beta, b, tol, abs_A=abs_A)
             if not feasible:
-                if active and not kkt_may_be_singular and not coordinate_face:
-                    coordinate_face = True
+                if active and not kkt_may_be_singular and coordinate_face != tuple(active):
+                    coordinate_face = tuple(active)
                     continue
                 beta = _project_feasible(beta, A, b, tol, structure=structure)
                 feasible = _is_feasible(A, beta, b, tol, abs_A=abs_A)
@@ -1368,11 +1373,6 @@ def solve_constrained_qp(
                     active.pop(drop_idx)
                     basis.delete(drop_idx)
                     continue
-                if face_candidate is not None:
-                    # Projection changed the start, so its direction to the
-                    # face minimum changed too. An exactly zero old step must
-                    # not hide an inactive row the restored start can hit.
-                    step = face_candidate - beta
             complementary = _complementarity_certificate(
                 H_sym, g, beta, A[active], b[active], multipliers, tol, objective
             )
@@ -1380,8 +1380,8 @@ def solve_constrained_qp(
                 return _result(beta, active, it + 1, converged=True)
             if feasible and face_candidate is not None:
                 # A recovered face may still need ordinary saddle refinement.
-                # Try that next, rather than repeat this factorization or
-                # refuse it solely because its recomputed step is exactly 0.
+                # Projection can also change the start: re-solve from it next
+                # so an inactive row can block, even if the old step was 0.
                 continue
             if not feasible or not np.any(step != 0.0):
                 return _result(beta, active, it + 1, converged=False)
@@ -1448,8 +1448,8 @@ def solve_constrained_qp(
                 active.append(blocking)
                 basis.insert(blocking)
             else:
-                if active and not kkt_may_be_singular and not coordinate_face:
-                    coordinate_face = True
+                if active and not kkt_may_be_singular and coordinate_face != tuple(active):
+                    coordinate_face = tuple(active)
                     continue
                 # The full step breaks a row no blocking candidate could hold, so
                 # it cannot certify: the next iteration solves the face again.
