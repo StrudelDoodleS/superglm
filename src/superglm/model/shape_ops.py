@@ -459,10 +459,16 @@ def _searched_intercept(
         nonlocal held
         trial_eta = eta_base + shift
         eta_safe = stabilize_eta(trial_eta, model._link)
+        # Each row vector is dropped once the clamp test has read it: at book size each
+        # is megabytes, beside the evaluation's own.
+        clamped = eta_safe != trial_eta
+        del trial_eta
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
             unclipped = model._link.inverse(eta_safe)
             mu = clip_mu(unclipped, model._distribution)
-            clamped = carried & ((eta_safe != trial_eta) | (mu != unclipped))
+            clamped |= mu != unclipped
+            del unclipped
+            clamped &= carried
             if held is None:
                 held = clamped
             elif np.any(clamped & ~held):
@@ -513,11 +519,12 @@ def _searched_intercept(
     shift = 0.0
     state = evaluate(shift)
     assert state is not None and held is not None  # the first evaluation holds its rows
-    # The shifts the link's clamp leaves the rows it does not hold.
-    free_eta = eta_base[carried & ~held]
+    # The shifts the link's clamp leaves the rows it does not hold (none held: unbounded).
+    free = carried & ~held
     eta_floor, eta_ceiling = stabilize_eta(np.array([-np.inf, np.inf]), model._link)
-    lower = float(eta_floor - np.min(free_eta)) if free_eta.size else -np.inf
-    upper = float(eta_ceiling - np.max(free_eta)) if free_eta.size else np.inf
+    lower = float(eta_floor - np.min(eta_base, where=free, initial=np.inf))
+    upper = float(eta_ceiling - np.max(eta_base, where=free, initial=-np.inf))
+    del free
     # The score is minus half the deviance's slope in the shift, so a shift whose score is
     # positive lies below a minimum and one whose score is negative above it. The search is
     # Newton's method kept inside the bracket those signs give, bisecting where Newton would
@@ -1350,6 +1357,9 @@ def _apply_shape_postfit(model, X, sample_weight, offset, *, n_grid: int):
         # Formed once the repaired scale is (_refresh_repaired_scale_and_statistics).
         statistics=False,
     )
+    # The adapter holds every column the checks and the refreshed means read; nothing
+    # after them reads the frame.
+    del frame, checked
     _refresh_repaired_geometry(work_model, prior_working_weights, prior_selected_names)
     _refresh_repaired_scale_and_statistics(work_model)
     return revision.commit()
