@@ -1622,6 +1622,69 @@ def test_a_continued_projection_at_the_apex_to_rounding_is_published_as_the_zero
     assert record.intercept_shift == pytest.approx(4.55323, abs=1e-4)
 
 
+def test_a_continued_repair_at_the_zero_curve_takes_the_dropped_terms_intercept():
+    # A generalized gamma's shape under the logit link, its term edited to a falling curve and
+    # its intercept to 40 past the fit's, where the link is saturated and the likelihood flat in
+    # the intercept. The continuation reaches the zero curve, the dropped term. At ddda43d45 the
+    # flat profile stopped where it started and the repair published a term of norm 1.03 at
+    # merit -27.709; at 6a5120117 the dropped term's profile reached -27.908 but the zero
+    # curve's, from the continued repair's scale, stopped on the plateau at -5.77, and the tie
+    # was refused. The zero curve takes the dropped term's profile, the minimum SciPy finds.
+    from scipy.optimize import minimize_scalar
+
+    rng = np.random.default_rng(814672207)
+    x = rng.uniform(0.0, 1.0, 300)
+    shape = 2.0 + 6.0 * x
+    y = rng.gamma(shape, np.exp(0.5 - 0.8 * x + 0.25 * np.sin(12.0 * x)) / shape)
+    X = pd.DataFrame({"x": x})
+    family = GeneralizedGammaLSS()
+    rule = Constraint.postfit.increasing
+    model = SuperLSS(
+        family,
+        family.mean(),
+        family.scale(),
+        family.shape(s("x", kind="bs", k=6, constraint=rule), link="logit"),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y, lambdas={"shape:x#wiggle": 1.0})
+    fitted = model._model
+    columns = fitted.layout.term_slices["shape:x"]
+    index = fitted.layout.predictor("shape").intercept_index
+    beta = np.array(fitted.coefficients, dtype=np.float64)
+    falling = -0.3 * (x - 0.5) + 0.03 * np.sin(12.0 * x)
+    beta[columns] = np.linalg.lstsq(_term_of(fitted, "shape").transform(x), falling, rcond=None)[0]
+    fitted_intercept = float(beta[index])
+    beta[index] = fitted_intercept + 40.0
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", EditedCoefficientsWarning)
+        revised = model._with_revised_coefficients(beta, edited_terms=["shape:x"])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        revised.apply_shape_postfit()
+
+    (status,) = postfit_status(revised._model)
+    assert status.state is PostfitState.REPAIRED
+    published = np.array(revised._model.coefficients, dtype=np.float64)
+    assert not np.any(published[columns])
+    dropped = beta.copy()
+    dropped[columns] = 0.0
+    edited = ["shape:x"]
+
+    def score(t):
+        return _profiled_log_score(model, dropped, "shape", X, y, edited, [t - beta[index]])
+
+    least = minimize_scalar(
+        score,
+        bounds=(fitted_intercept - 20.0, fitted_intercept + 20.0),
+        method="bounded",
+        options={"xatol": 1e-10},
+    )
+    assert published[index] == pytest.approx(least.x, abs=1e-5)
+    rounding = 4.0 * len(y) * np.finfo(np.float64).eps / 2.0 * abs(least.fun)
+    assert score(published[index]) <= least.fun + rounding
+
+
 def test_a_session_follows_a_refit_in_place_that_changed_a_categorical_reference():
     # Sol's case: frequency weights make A the reference level of the first fit and B of the
     # refit. At 19a6ab028 the session kept the first fit's compiled specs, so an edit to C was

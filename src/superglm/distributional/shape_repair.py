@@ -1054,7 +1054,7 @@ def repaired_model(
         )
         fallback = coefficients.copy()
         fallback[term.columns] = 0.0
-        _, fallback_merit, _ = _profiled_merit(
+        fallback_shift, fallback_merit, _ = _profiled_merit(
             fitted, rows, frame, fallback, term.parameter, reach, dropped=term.label
         )
         bar = fallback_merit + shape_sum_tolerance(abs(fallback_merit), len(rows.response))
@@ -1072,9 +1072,16 @@ def repaired_model(
                     term, repair, coefficients[term.columns], grid_weights, certified
                 )
                 reach = float(repair.projection_residual)
-                candidate, shift, merit = _candidate(
-                    fitted, rows, frame, coefficients, term, repaired, reach
-                )
+                if np.any(repaired):
+                    candidate, shift, merit = _candidate(
+                        fitted, rows, frame, coefficients, term, repaired, reach
+                    )
+                else:
+                    # The zero curve is the dropped term, whose intercept is profiled above. A
+                    # profile from a scale of the continued repair's could end elsewhere where
+                    # the likelihood is flat in the intercept (a saturated link's), and refuse
+                    # a tie.
+                    candidate, shift, merit = fallback.copy(), fallback_shift, fallback_merit
         if merit > bar:
             raise RuntimeError(
                 f"Unsafe shape repair of {term.term} rejected before publication: its penalized "
