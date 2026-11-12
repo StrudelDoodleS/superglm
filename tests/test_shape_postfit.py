@@ -3173,6 +3173,58 @@ def test_faulty_repair_result_is_refused_and_nothing_is_published(monkeypatch, f
     _assert_nothing_published(model, X, snapshot)
 
 
+def _settle_inside_the_rule(result, spec, groups):
+    """1e-8 of the projection, pushed off the convex rule by far less than the rounding it
+    was certified at and far more than its own: publication moves it inside the rule."""
+    (group,) = groups
+    block = np.asarray(result.repaired_beta_reparam, dtype=np.float64)[group.sl]
+    row = shape_derivative_matrix(spec, [0.5 * (spec._lo + spec._hi)], 2)[0]
+    pushed = 1e-8 * block - 1e-14 * np.linalg.norm(block) * row / np.linalg.norm(row)
+    result.repaired_beta_reparam = result.repaired_beta_reparam.copy()
+    result.repaired_beta_reparam[group.sl] = pushed
+    result.certificate = shape_constraint_certificate(spec, pushed, "convex")
+
+
+@pytest.mark.parametrize("how", ["moved_inside_the_rule", "continued"])
+def test_a_published_repair_carries_the_certificate_of_its_published_coefficients(monkeypatch, how):
+    """``MonotoneRepairResult.certificate`` describes the coefficients published.
+
+    At 1984d54f3 it stayed the projection's where publication moved the projection inside
+    its rule or continued it: a stale certificate of other coefficients.
+    """
+    if how == "continued":
+        model, X, _ = _sweep_case(12, False, "uniform", "bump", "poisson", "increasing")
+        kind = "increasing"
+        continued = []
+        real = shape_ops._continued_repair
+        monkeypatch.setattr(
+            shape_ops,
+            "_continued_repair",
+            lambda *args, **kwargs: (continued.append(1), real(*args, **kwargs))[1],
+        )
+    else:
+        model, X = _fitted_for_publication_refusal()
+        kind = "convex"
+        _repairer_with_fault(monkeypatch, _settle_inside_the_rule)
+    projected = []
+    real_validate = shape_ops._validate_repair_for_publication
+
+    def validated(model, *, repair_result, **kwargs):
+        projected.append(_term_beta(repair_result.repaired_beta_reparam, kwargs["groups"]))
+        return real_validate(model, repair_result=repair_result, **kwargs)
+
+    monkeypatch.setattr(shape_ops, "_validate_repair_for_publication", validated)
+
+    model.apply_shape_postfit(X)
+
+    published = _term_beta(model.result.beta, _x_groups(model))
+    assert not np.array_equal(published, projected[0])
+    record = model._shape_repairs["x"]
+    assert record.certificate == shape_constraint_certificate(model._specs["x"], published, kind)
+    if how == "continued":
+        assert continued
+
+
 def test_continued_repair_is_judged_by_the_same_rule(monkeypatch):
     """The rule judges a continued repair as it judged the candidate it continues.
 
@@ -3268,7 +3320,11 @@ def test_a_continued_projection_is_judged_at_the_scale_it_was_certified_at(monke
     assert certificate.minimum_scaled_slack < -rounding * first
     assert rounding * np.linalg.norm(fitted) < np.linalg.norm(block) < rounding * last
     assert "x" in model._shape_repairs
-    assert not np.any(_term_beta(model.result.beta, _x_groups(model)))
+    published = _term_beta(model.result.beta, _x_groups(model))
+    assert not np.any(published)
+    assert model._shape_repairs["x"].certificate == shape_constraint_certificate(
+        model._specs["x"], published, "decreasing"
+    )
 
 
 def _sweep_case(n_knots, select, axis, shape, family, kind):

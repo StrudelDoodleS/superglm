@@ -947,7 +947,10 @@ def _validate_repair_for_publication(
     repair_result.repaired_beta_reparam = candidate_beta
     repair_result.repaired_log_effect = repaired_curve.copy()
     if kind in {"increasing", "decreasing", "convex", "concave"}:
+        # The certificate of the coefficients published: moved inside the rule, zeroed or
+        # continued, they are not the projection's.
         repair_result.max_violation_after = certificate.violation
+        repair_result.certificate = certificate
     return candidate_beta, candidate_eta, candidate_intercept_shift
 
 
@@ -996,7 +999,11 @@ def _continued_repair(
     """
     from dataclasses import replace
 
-    from superglm.constraints import _fitted_basis, shape_sum_tolerance
+    from superglm.constraints import (
+        _fitted_basis,
+        shape_constraint_certificate,
+        shape_sum_tolerance,
+    )
     from superglm.distributions import _VARIANCE_FLOOR, clip_mu
     from superglm.links import stabilize_eta
 
@@ -1094,6 +1101,7 @@ def _continued_repair(
         repaired_beta_reparam=beta,
         repaired_log_effect=curve,
         projection_residual=float(np.max(np.abs(curve - repair_result.original_log_effect))),
+        certificate=shape_constraint_certificate(spec, beta[indices], kind),
     )
     return continued, certified
 
