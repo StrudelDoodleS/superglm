@@ -444,10 +444,16 @@ scale at the repaired coefficients, so the other terms' standard errors move.
 a hand edit: the other terms' standard errors are those of the fit before the
 repair, and `ShapeRepairedWarning` says so wherever they are quoted.
 
-Monotone repairs can fail to converge on some curves, on both models. When a
-term's derivative has its lowest point inside a knot span, the repair adds
-checkpoints until it runs out. It then raises `RuntimeError`, and the model is
-unchanged. Prefer `Constraint.fit` where you need the rule to hold.
+A repair can stop before it has proved its curve the closest one, on both
+models. When a term's derivative has its lowest point inside a knot span, the
+repair checks more points of the span to narrow the gap between the curve it
+holds and the closest one, and on some curves it stops with the gap open. The
+curve it publishes still obeys the rule everywhere, and a `RuntimeWarning`
+says it may not be the closest one and bounds how much farther from the fit it
+is. A step spline's monotone repair and a piecewise-linear spline's convex or
+concave repair are one solve each; if it does not converge, the repair raises
+`RuntimeError`, and the model is unchanged. Prefer
+`Constraint.fit` where you need the fit itself to obey the rule.
 
 ## Linear Predictor Semantics
 

@@ -891,17 +891,13 @@ def test_monotone_repair_is_the_closest_monotone_curve(shape, direction, family,
     assert grid_certificate.kkt_residual <= CLOSEST_REPAIR_KKT
 
 
-def test_grid_repair_whose_first_inner_bracket_solve_does_not_certify_is_published():
-    """A quartic P-spline whose first Bernstein inner solve exhausts every start.
+def _quartic_noise_fit():
+    """A quartic P-spline on 200 Gaussian rows of noise, whose bracket's inner solves stall.
 
-    That left the bracket without a feasible point, and the repair raised where
-    master's published. A solve that does not certify still meets the inner cone's
-    rows, so it is kept as the incumbent, and the bracket goes on to close on the
-    closest monotone curve on the grid.
+    Its first Bernstein inner solve exhausts every start on every OpenBLAS kernel;
+    whether a later one certifies, or the outer relaxation's does, turns on the
+    kernel's rounding.
     """
-    from superglm.constraints import MonotoneRepairer
-    from tests._shape_projection_oracle import grid_metric, projection_certificate
-
     rng = np.random.default_rng(4)
     x = np.sort(rng.uniform(size=200))
     y = rng.normal(size=200)
@@ -910,16 +906,54 @@ def test_grid_repair_whose_first_inner_bracket_solve_does_not_certify_is_publish
     model = SuperGLM(
         family="gaussian", selection_penalty=0.0, spline_penalty=0.2, features={"x": feature}
     ).fit(X, y)
+    return model, X
+
+
+def test_grid_repair_whose_bracket_inner_solve_never_certifies_is_published(monkeypatch):
+    """A bracket whose inner solve stops off the inner cone publishes, with its gap disclosed.
+
+    Forced: the exchange is skipped, the bracket takes one step, and every start of
+    its inner solve stops uncertified at the unconstrained minimum, which breaks the
+    inner rows. The bracket then held no feasible point and the repair raised. Its
+    incumbent is feasible without a solve (the apex, or the best multiple of the
+    solve's start), so the repair is increasing everywhere and says it is not the
+    closest such curve.
+    """
+    import superglm.solvers.constrained_qp as constrained_qp
+    from superglm import constraints
+    from tests._shape_projection_oracle import grid_metric, projection_certificate
+
+    model, _ = _quartic_noise_fit()
     spec, groups = model._specs["x"], _x_groups(model)
+    monkeypatch.setattr(constraints, "_PROJECTION_STEPS", 0)
+    monkeypatch.setattr(constraints, "_BRACKET_STEPS", 1)
+    real_solve_cone_qp = constraints._solve_cone_qp
+    inner_solves = []
 
-    repair = MonotoneRepairer().repair(spec, model.result.beta, groups)
+    def off_the_rows(H, g, A, b, **kwargs):
+        beta = np.linalg.lstsq(H, g, rcond=None)[0]
+        assert np.min(A @ beta - b) < 0.0
+        return constrained_qp.QPResult(beta=beta, n_iter=kwargs["max_iter"], converged=False)
 
+    def inner_never_certifies(*args, feasible=False, **kwargs):
+        if not feasible:
+            return real_solve_cone_qp(*args, **kwargs)
+        inner_solves.append(args[2].shape)
+        with monkeypatch.context() as patch:
+            patch.setattr(constrained_qp, "solve_constrained_qp", off_the_rows)
+            return real_solve_cone_qp(*args, feasible=True, **kwargs)
+
+    monkeypatch.setattr(constraints, "_solve_cone_qp", inner_never_certifies)
+
+    with pytest.warns(RuntimeWarning, match="stopped before it certified the closest increasing"):
+        repair = constraints.MonotoneRepairer().repair(spec, model.result.beta, groups)
+
+    assert len(inner_solves) == 1
     H, g = grid_metric(spec, repair.grid, repair.original_log_effect, np.ones(repair.grid.size))
     repaired = _term_beta(repair.repaired_beta_reparam, groups)
     fitted = _term_beta(model.result.beta, groups)
     certificate = projection_certificate(spec, "increasing", repaired, H, g, fitted)
     assert certificate.minimum_derivative >= -1e-10
-    assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
 
 
 def _rise_fit(t, x, **spline):
@@ -1589,12 +1623,10 @@ else:
 _ILLEGAL_INSTRUCTION_EXITS = {-4, 0xC000001D}
 
 
-@pytest.mark.slow
-def test_repair_decision_is_the_same_on_every_blas_kernel():
-    """Publish or refuse, and the repaired curve, agree across OpenBLAS microkernels.
+def _kernel_outcomes(script, kernels):
+    """Each OpenBLAS kernel's output lines of ``script``, split into words.
 
-    Each kernel runs the grid-metric repairer and the full call, in that order. A
-    kernel forced past the host CPU's instruction set (SkylakeX's AVX-512 on an AVX2
+    A kernel forced past the host CPU's instruction set (SkylakeX's AVX-512 on an AVX2
     runner) dies of an illegal instruction: it cannot run here, so it is reported
     and left out. Any other failure fails the test.
     """
@@ -1603,10 +1635,10 @@ def test_repair_decision_is_the_same_on_every_blas_kernel():
     import warnings
 
     outcomes, not_run = {}, {}
-    for kernel in ("Haswell", "Zen", "SkylakeX", "Sandybridge"):
+    for kernel in kernels:
         environment = {**os.environ, "OPENBLAS_CORETYPE": kernel, "OPENBLAS_NUM_THREADS": "1"}
         run = subprocess.run(
-            [sys.executable, "-c", _KERNEL_FIXTURE],
+            [sys.executable, "-c", script],
             env=environment,
             capture_output=True,
             text=True,
@@ -1620,15 +1652,92 @@ def test_repair_decision_is_the_same_on_every_blas_kernel():
         outcomes[kernel] = [line.split() for line in run.stdout.splitlines()]
 
     if not_run:
-        warnings.warn(f"OpenBLAS kernels this CPU cannot run, left out: {not_run}", stacklevel=1)
+        warnings.warn(f"OpenBLAS kernels this CPU cannot run, left out: {not_run}", stacklevel=2)
     if len(outcomes) < 2:
         pytest.skip(f"fewer than two OpenBLAS kernels run on this CPU; left out {not_run}")
+    return outcomes
+
+
+@pytest.mark.slow
+def test_repair_decision_is_the_same_on_every_blas_kernel():
+    """Publish or refuse, and the repaired curve, agree across OpenBLAS microkernels.
+
+    Each kernel runs the grid-metric repairer and the full call, in that order.
+    """
+    outcomes = _kernel_outcomes(_KERNEL_FIXTURE, ("Haswell", "Zen", "SkylakeX", "Sandybridge"))
     for metric in (0, 1):
         decisions = {kernel: lines[metric][0] for kernel, lines in outcomes.items()}
         assert set(decisions.values()) == {"published"}, (metric, decisions)
         curves = [np.asarray([float(v) for v in lines[metric][1:]]) for lines in outcomes.values()]
         for curve in curves[1:]:
             np.testing.assert_allclose(curve, curves[0], rtol=0.0, atol=1e-9)
+
+
+# The quartic P-spline of _quartic_noise_fit, through the public grid repairer. On an
+# AVX-512 host's Prescott and Nehalem kernels its bracket's outer relaxation does not
+# certify either, so the bracket stops at its incumbent and discloses the gap; on
+# SkylakeX, Haswell and Sandybridge it closes. On macOS ARM64 the bracket used to end
+# with no feasible point, and the repair raised.
+_BRACKET_KERNEL_FIXTURE = """
+import warnings
+import numpy as np, pandas as pd
+from superglm import PSpline, SuperGLM
+from superglm.constraints import MonotoneRepairer
+rng = np.random.default_rng(4)
+x = np.sort(rng.uniform(size=200))
+y = rng.normal(size=200)
+feature = PSpline(n_knots=10, degree=4, m=2)
+model = SuperGLM(
+    family="gaussian", selection_penalty=0.0, spline_penalty=0.2, features={"x": feature}
+).fit(pd.DataFrame({"x": x}), y)
+spec, groups = model._specs["x"], [g for g in model._groups if g.feature_name == "x"]
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    try:
+        repair = MonotoneRepairer().repair(spec, model.result.beta, groups)
+    except RuntimeError as exc:
+        print("refused", exc)
+        raise SystemExit
+gap = any("stopped before it certified" in str(w.message) for w in caught)
+print("published", "disclosed" if gap else "certified")
+print(" ".join(repr(float(v)) for v in repair.repaired_log_effect))
+print(" ".join(repr(float(v)) for g in groups for v in repair.repaired_beta_reparam[g.sl]))
+"""
+
+
+@pytest.mark.slow
+def test_bracket_repair_publishes_on_every_blas_kernel():
+    """Every OpenBLAS kernel publishes the bracketed repair, increasing everywhere.
+
+    A kernel whose bracket closes publishes the closest curve, and those curves agree;
+    one whose bracket does not discloses that, and publishes its best feasible point.
+    """
+    import warnings
+
+    from superglm.constraints import MonotoneRepairer
+    from tests._shape_projection_oracle import grid_metric, projection_certificate
+
+    model, _ = _quartic_noise_fit()
+    spec, groups = model._specs["x"], _x_groups(model)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        local = MonotoneRepairer().repair(spec, model.result.beta, groups)
+    H, g = grid_metric(spec, local.grid, local.original_log_effect, np.ones(local.grid.size))
+    fitted = _term_beta(model.result.beta, groups)
+    outcomes = _kernel_outcomes(
+        _BRACKET_KERNEL_FIXTURE, ("Prescott", "Nehalem", "Sandybridge", "Haswell", "SkylakeX")
+    )
+    decisions = {kernel: lines[0] for kernel, lines in outcomes.items()}
+    assert all(decision[0] == "published" for decision in decisions.values()), decisions
+    certified = []
+    for kernel, ((_, status), curve, beta) in outcomes.items():
+        coefficients = np.asarray([float(v) for v in beta])
+        certificate = projection_certificate(spec, "increasing", coefficients, H, g, fitted)
+        assert certificate.minimum_derivative >= -1e-10, (kernel, certificate)
+        if status == "certified":
+            certified.append(np.asarray([float(v) for v in curve]))
+    for curve in certified[1:]:
+        np.testing.assert_allclose(curve, certified[0], rtol=0.0, atol=1e-9)
 
 
 def test_select_convex_repair_certifies_each_polynomial_span():
@@ -1731,9 +1840,8 @@ def test_invalid_curvature_repair_is_rejected_before_publication(monkeypatch):
     np.testing.assert_array_equal(model.predict(X), original_predictions)
 
 
-def test_failed_curvature_optimizer_rolls_back_fitted_state(monkeypatch):
-    import superglm.solvers.constrained_qp as constrained_qp
-
+def test_qp_that_never_certifies_a_curvature_projection_is_disclosed(monkeypatch):
+    """No QP solve certifies a convex repair: published convex everywhere, with a warning."""
     rng = np.random.default_rng(3)
     x = np.linspace(0.0, 1.0, 120)
     X = pd.DataFrame({"x": x})
@@ -1743,27 +1851,15 @@ def test_failed_curvature_optimizer_rolls_back_fitted_state(monkeypatch):
         selection_penalty=0.0,
         features={"x": PSpline(n_knots=10, constraint=Constraint.postfit.convex)},
     ).fit(X, y)
-    original_dict = model.__dict__
-    original_result = model.result
-    original_beta = model.result.beta.copy()
-    original_predictions = model.predict(X)
+    _never_certifying_qp(monkeypatch, nnls_stops=False)
 
-    monkeypatch.setattr(
-        constrained_qp,
-        "solve_constrained_qp",
-        lambda H, *_args, **_kwargs: constrained_qp.QPResult(
-            beta=np.zeros(H.shape[0]), n_iter=200, converged=False
-        ),
-    )
-
-    with pytest.raises(RuntimeError, match="Curvature projection failed to converge"):
+    with pytest.warns(RuntimeWarning, match="stopped before it certified the closest convex"):
         model.apply_shape_postfit(X)
 
-    assert model.__dict__ is original_dict
-    assert model.result is original_result
-    assert not hasattr(model, "_shape_repairs")
-    np.testing.assert_array_equal(model.result.beta, original_beta)
-    np.testing.assert_array_equal(model.predict(X), original_predictions)
+    beta = _term_beta(model._shape_repairs["x"].repaired_beta_reparam, _x_groups(model))
+    assert _minimum_signed_derivative(model._specs["x"], beta, "convex") >= -1e-12 * float(
+        np.linalg.norm(beta)
+    )
 
 
 def test_infeasible_monotone_repair_is_rejected_atomically(monkeypatch):
@@ -3420,12 +3516,12 @@ def test_faulty_projection_is_refused_and_nothing_is_published(
     _assert_nothing_published(model, X, snapshot)
 
 
-def test_qp_that_never_certifies_a_monotone_projection_is_refused(monkeypatch):
-    """No certified QP solution, not even on the inner cone: refused, nothing published."""
+def _never_certifying_qp(monkeypatch, nnls_stops):
+    """Every QP start stops uncertified at the apex; ``nnls_stops``: so does NNLS's KKT check."""
+    import scipy.optimize
+
     import superglm.solvers.constrained_qp as constrained_qp
 
-    model, X = _wiggly_monotone_fit("cr", 8)
-    snapshot = _publication_snapshot(model, X)
     monkeypatch.setattr(
         constrained_qp,
         "solve_constrained_qp",
@@ -3433,11 +3529,35 @@ def test_qp_that_never_certifies_a_monotone_projection_is_refused(monkeypatch):
             beta=np.zeros(H.shape[0]), n_iter=200, converged=False
         ),
     )
+    if nnls_stops:
 
-    with pytest.raises(RuntimeError, match="Monotone projection failed to converge"):
+        def nnls_at_its_limit(*_args, **_kwargs):
+            raise RuntimeError("Maximum number of iterations reached.")
+
+        monkeypatch.setattr(scipy.optimize, "nnls", nnls_at_its_limit)
+
+
+@pytest.mark.parametrize("nnls_stops", [False, True])
+def test_qp_that_never_certifies_a_monotone_projection_is_disclosed(monkeypatch, nnls_stops):
+    """No QP solve certifies: the repair is a feasible point no solve was needed for, disclosed.
+
+    The bracket's incumbent is the best multiple of its inner solve's start, which
+    the cone holds, so the term is published monotone everywhere with a warning that
+    it is not the closest such curve. That holds when NNLS stops at its iteration
+    limit inside the uncertified point's KKT check, too.
+    """
+    model, X = _wiggly_monotone_fit("cr", 8)
+    _never_certifying_qp(monkeypatch, nnls_stops)
+
+    with pytest.warns(RuntimeWarning, match="stopped before it certified the closest increasing"):
         model.apply_shape_postfit(X)
 
-    _assert_nothing_published(model, X, snapshot)
+    repair = model._shape_repairs["x"]
+    beta = _term_beta(repair.repaired_beta_reparam, _x_groups(model))
+    assert np.linalg.norm(beta) > 0.0
+    assert _minimum_signed_derivative(model._specs["x"], beta, "increasing") >= -1e-12 * float(
+        np.linalg.norm(beta)
+    )
 
 
 def test_projection_that_runs_out_of_steps_publishes_the_inner_cone_repair(monkeypatch):

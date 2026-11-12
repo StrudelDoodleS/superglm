@@ -938,14 +938,15 @@ def _solve_cone_qp(
     when it is feasible and ``H beta - g`` lies in the cone of its held rows, which
     for a convex QP is optimality. ``active`` is a warm working set and ``start`` a
     point meeting every row (``_shifted_start``); without one, ``beta = 0`` is used.
-    ``feasible`` returns, when nothing is certified, the attempt of least objective
-    that meets every row and improves on the cone's apex, instead of ``None``: a
-    bound, not an optimum. ``regular`` returns ``None`` at once where the QP would
+    ``feasible`` returns, when nothing is certified, the point of least objective that
+    meets every row and improves on the cone's apex, instead of ``None``: a bound, not
+    an optimum. It is an attempt, or the best multiple of ``start``, which the cone
+    holds with ``start``. ``regular`` returns ``None`` at once where the QP would
     truncate ``H``'s rank.
     """
     from scipy.optimize import nnls
 
-    from superglm.solvers.constrained_qp import solve_constrained_qp
+    from superglm.solvers.constrained_qp import QPResult, solve_constrained_qp
     from superglm.solvers.rank import _symmetric_part, decompose_gram
 
     scale = _jacobi_scale(H)
@@ -964,6 +965,11 @@ def _solve_cone_qp(
         starts.insert(0, (shifted, active, max(_WARM_STEPS, H.shape[0])))
     result = None
     attempts: list[_ScaledResult] = []
+    if feasible and start is not None:
+        reach, bend = float(g @ start), float(start @ H @ start)
+        if reach > 0.0 and bend > 0.0:
+            ray = QPResult(beta=(reach / bend) * shifted, converged=False)
+            attempts.append(_ScaledResult(ray, scale))
     truncated = False
     for ridged in (False, True):
         try:
@@ -1000,7 +1006,13 @@ def _solve_cone_qp(
     ):
         gradient = H @ beta - g
         held = rows[slack <= _HELD_SLACK]
-        residual = nnls(held.T, gradient)[1] if held.shape[0] else float(np.linalg.norm(gradient))
+        try:
+            residual = (
+                nnls(held.T, gradient)[1] if held.shape[0] else float(np.linalg.norm(gradient))
+            )
+        except RuntimeError:
+            # NNLS stopped at its iteration limit: the point is not certified.
+            residual = np.inf
         if residual <= _KKT_RESIDUAL * max(1.0, float(np.linalg.norm(g))):
             return result
     return _least_feasible(H, g, rows, attempts) if feasible else None
@@ -1072,6 +1084,18 @@ def _inside_ray(basis: NDArray, x: NDArray, weights: NDArray, kind: str) -> NDAr
     return np.linalg.lstsq(gram, design.T @ (weights * target), rcond=None)[0][:-1]
 
 
+# A cutting-plane relaxation's optimum is feasible only in the limit (Oustry & Cerulli,
+# Optim. Lett. 19(3), 2025, section 3, of Blankenship and Falk's method), so the bracket
+# keeps a feasible incumbent from the start, as their inner-outer approximation does:
+# the cone's apex, then the best inner point found. A relaxation's point moved along a
+# ray strictly inside the cone until it meets the inner rows is feasible without a
+# solve, and so is each multiple of it: the proof of their Theorem 14 makes its feasible
+# point by such a move toward a Slater point, as Arai & Kitahara (2026, section 5) make
+# a relaxed spline nonnegative by adding a positive constant. The best multiple stands
+# in for an inner solve that does not certify, so the bracket never ends without a
+# feasible point; a gap it leaves open is disclosed, not refused.
+
+
 def _bracketed_projection(
     H: NDArray,
     g: NDArray,
@@ -1083,22 +1107,23 @@ def _bracketed_projection(
     point: NDArray,
     inside: NDArray | None,
     skip_flat: bool = False,
-) -> tuple[NDArray | None, float]:
+) -> tuple[NDArray, float]:
     """Exchange between the Bernstein inner cone and the cutting-plane outer cone.
 
     Every inner point is shape-feasible and every outer optimum bounds the
     projection's objective from below, so the best inner point is certified once
     the two meet. A span the projection holds flat sits at its cone's apex, which the
     inner cone holds exactly. Each solve starts from ``point``, the last outer
-    optimum, shifted along ``inside``. An inner solve that does not certify still
-    gives a feasible point when one improves on the apex; with no outer optimum the
-    gap is left from the unconstrained minimum. ``None`` when no inner point is found.
+    optimum, shifted along ``inside``. The incumbent starts at the apex, and an inner
+    solve that does not certify still gives a feasible point when one improves on
+    it; with no outer optimum the gap is left from the unconstrained minimum.
+    Returns the best inner point and the gap.
     """
 
     def objective(beta: NDArray) -> float:
         return float(0.5 * beta @ H @ beta - g @ beta)
 
-    best, upper, lower = None, np.inf, -np.inf
+    best, upper, lower = np.zeros(H.shape[0]), 0.0, -np.inf
     cuts = [list(points) for points in checkpoints]
     for _ in range(_BRACKET_STEPS):
         inner_rows, _ = _distinct_unit_rows(_inner_cone_rows(pieces, p, cuts, natural))
@@ -1324,8 +1349,6 @@ def _cone_projection(
     best, gap = _bracketed_projection(
         H, g, pieces, p, end_rows, checkpoints, natural, beta, inside, skip_flat
     )
-    if best is None:
-        raise RuntimeError(f"{label} projection failed to converge")
     if gap > _OBJECTIVE_GAP:
         warnings.warn(
             f"{label} repair stopped before it certified the closest {kind} curve; the "
