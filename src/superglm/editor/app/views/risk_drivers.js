@@ -47,8 +47,10 @@ import { fmtSignificant } from "../format.js";
  * @property {number[]} reach  per parameter, the step a full bar stands for
  */
 
-// A bar is full at a quarter up or down, or at the largest step drawn where that is larger.
+// A bar is full at a quarter up or down, or at the largest step drawn where that is larger:
+// a factor of 1.25, or on an added amount a quarter of the parameter's own value.
 const MIN_REACH = Math.log(1.25);
+const MIN_SHARE = 0.25;
 
 /** @param {number | string} value a feature's value as the view writes it */
 export const shownValue = (value) =>
@@ -193,7 +195,13 @@ export function driversModel(reply, selected) {
     together,
     end,
     empty: drawn.length || edited ? null : nothingMoves(base ? letter(base) : null, letter(last)),
-    reach: parameters.map((_p, p) => Math.max(MIN_REACH, ...drawn.map((row) => Math.abs(row.steps[p].move)))),
+    reach: parameters.map((_p, p) => {
+      const largest = Math.max(0, ...drawn.map((row) => Math.abs(row.steps[p].move)));
+      if (!isAdditive(parameters[p])) return Math.max(MIN_REACH, largest);
+      const ends = [inForce.from[p], inForce.to[p], original.from[p], original.to[p]];
+      // A parameter at zero that nothing moves draws no bar; any reach will do.
+      return Math.max(MIN_SHARE * Math.max(...ends.map(Math.abs)), largest) || 1;
+    }),
   };
 }
 

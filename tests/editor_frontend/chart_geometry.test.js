@@ -400,6 +400,21 @@ test("an additive curve is padded below zero, where its values can go", () => {
   assert.equal(paddedYRange(1, 12, false)[0], 1 - (12 - 1) * 0.12);
 });
 
+test("a small additive curve fills the plot, padded by its own span", () => {
+  // A Gamma/inverse effect of +-3e-4: a 0.05 pad would draw it flat.
+  const [low, high] = paddedYRange(-3e-4, 3e-4, false);
+  assert.ok((6e-4) / (high - low) > 0.75, `${low}, ${high}`);
+  assert.ok(low < -3e-4 && high > 3e-4);
+  // A flat curve still gets a range: a share of its value, or a fixed pad at zero.
+  const [flatLow, flatHigh] = paddedYRange(2e-3, 2e-3, false);
+  assert.ok(flatLow < 2e-3 && flatHigh > 2e-3);
+  assert.ok(Math.abs(flatHigh - flatLow - 2e-4) < 1e-12, `${flatLow}, ${flatHigh}`);
+  const [zeroLow, zeroHigh] = paddedYRange(0, 0, false);
+  assert.ok(zeroLow < 0 && zeroHigh > 0);
+  // A relativity keeps its 0.05 floor.
+  assert.deepEqual(paddedYRange(1, 1), [0.95, 1.05]);
+});
+
 test("ticks sit at 1, 2 or 5 times a power of ten, inside the range", () => {
   for (const [min, max, n] of [[0, 12.5, 5], [0.83, 1.21, 5], [18, 90, 6], [0, 126036.5, 4], [-0.2, 3.1, 5]]) {
     const ticks = roundTicks(min, max, n);

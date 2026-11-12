@@ -363,15 +363,25 @@ function assertNonnegativeInteger(name, value) {
 
 /**
  * The y range a curve is drawn in: its own range with 12% padding each side. A
- * positive curve (every relativity, CV and overdispersion is one) that stays at
- * zero or above is never padded below zero, which no such value can reach; an
- * additive curve, `positive` false, can go below zero and is padded there too.
+ * positive curve (every relativity, CV and overdispersion is one) is padded by at
+ * least 0.05, 5% of no effect, and one that stays at zero or above is never padded
+ * below zero, which no such value can reach. An additive curve, `positive` false,
+ * is in its link's own units, so no fixed pad fits it: it is padded by its span
+ * alone, at least a millionth of its size so rounding noise is not drawn as a
+ * shape, and a flat one by 5% of its value (0.05 at zero). It can go below zero
+ * and is padded there too.
  * @param {number} min @param {number} max @param {boolean} [positive]
  * @returns {[number, number]}
  */
 export function paddedYRange(min, max, positive = true) {
-  const pad = Math.max((max - min) * 0.12, 0.05);
-  return [positive && min >= 0 ? Math.max(min - pad, 0) : min - pad, max + pad];
+  const span = (max - min) * 0.12;
+  if (!positive) {
+    const size = Math.max(Math.abs(min), Math.abs(max));
+    const pad = span > 0 ? Math.max(span, 1e-6 * size) : 0.05 * size || 0.05;
+    return [min - pad, max + pad];
+  }
+  const pad = Math.max(span, 0.05);
+  return [min >= 0 ? Math.max(min - pad, 0) : min - pad, max + pad];
 }
 
 /**

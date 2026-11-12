@@ -716,6 +716,17 @@ test("an additive parameter's step reads as the amount added, and an uninverted 
   const model = driversModel(gaussian);
   assert.deepEqual(model.rows[0].steps.map((step) => [step.text, step.move]), [["+150", 150], ["+0.200", 0.2]]);
   assert.deepEqual(model.end.values.map((value) => value.text), ["€1,150", ""]);
+  // A full bar is a quarter of the parameter's own value, or its largest step where that is
+  // larger: an amount added has no fixed unit, as a factor of x1.25 is.
+  assert.deepEqual(model.reach, [0.25 * 1150, 0.25 * 1.2]);
+  // A step of 3e-4 on an inverse link whose value is 1e-3 is most of a full bar, not none of it.
+  const tiny = driversModel({
+    ...gaussian,
+    reference: { fitted: [1000, 1e-3], edited: [1000, 1e-3] },
+    risks: [{ ...gaussian.risks[0], eta: { fitted: [1150, 1.3e-3], edited: [1150, 1.3e-3] },
+      effects: { fitted: [[150, 3e-4], [0, 0]], edited: [[150, 3e-4], [0, 0]] } }]
+  });
+  assert.ok(tiny.rows[0].steps[1].move / tiny.reach[1] > 0.9, String(tiny.reach[1]));
   // An unavailable reply says why the view draws no distribution.
   assert.equal(riskModel(gaussian, { mode: "amount", value: 100, style: "percent" }).empty, "Not drawn yet.");
 });
