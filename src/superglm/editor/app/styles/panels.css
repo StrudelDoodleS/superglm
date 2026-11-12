@@ -133,7 +133,8 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* The mini curve takes the third line, in its parameter's colour. */
+/* The mini curve takes the third line, in its parameter's colour; a SuperGLM
+   term's curve is of the mean, so a row outside a parameter group takes the mean's. */
 .mini-curve {
   grid-row: 3;
   grid-column: 1 / -1;
@@ -146,19 +147,13 @@
 }
 
 .mini-curve path {
+  stroke: var(--param-average);
   stroke-width: 1.5;
 }
 
 .mini-curve rect {
-  stroke: none;
-}
-
-.feature-group[data-role="average"] .mini-curve path {
-  stroke: var(--param-average);
-}
-
-.feature-group[data-role="average"] .mini-curve rect {
   fill: var(--param-average);
+  stroke: none;
 }
 
 .feature-group[data-role="spread"] .mini-curve path {
@@ -169,8 +164,9 @@
   fill: var(--param-spread);
 }
 
-/* The reference level sets the zero, so it is not in its parameter's colour. */
-.feature-group .mini-curve rect.mini-reference {
+/* The reference level sets the zero, so it is not in its parameter's colour: a bar
+   among levels, or a dot on an ordered factor's line. */
+.feature-group .mini-curve .mini-reference {
   fill: var(--text);
 }
 

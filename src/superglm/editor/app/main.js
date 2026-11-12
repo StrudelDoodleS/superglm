@@ -1678,13 +1678,12 @@ function featureGroups(terms) {
     : groupedTerms(terms);
 }
 
-// The mini curves of a distributional model follow every edit, so its key
-// carries the chart generation.
+// Every row's mini curve follows every edit, so the key carries the chart generation.
 function termCatalogueKey(terms, chartGeneration) {
   const groups = featureGroups(terms).map(
     ([group, names]) => `${group}\u0000${names.join("\u0000")}`
   ).join("\u0001");
-  return hasParameters(terms) ? `${groups}\u0002${chartGeneration ?? 0}` : groups;
+  return `${groups}\u0002${chartGeneration ?? 0}`;
 }
 
 // The revision stands in for every row's EDF, which only a refit changes; a
