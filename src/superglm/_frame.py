@@ -57,6 +57,9 @@ class EagerFrame:
     _polars_digests: dict[tuple[object, ...], bytes] = field(
         default_factory=dict, init=False, repr=False
     )
+    _pandas_digests: dict[tuple[tuple[object, ...] | None, bool], bytes] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     @property
     def _polars_frame(self) -> nw.DataFrame:
@@ -197,25 +200,20 @@ class EagerFrame:
         include_index: bool = True,
     ) -> bytes:
         """Hash selected logical contents for retained fit-data verification."""
+        # Operation-local, like ``_arrays``: owned by this adapter, which lives for one
+        # operation on a frame that operation does not change, so one digest per key
+        # serves every check the operation makes. A fit stores its data guard and its
+        # geometry guard from one adapter, and on Polars the second reuses the first's
+        # digest; a post-fit repair checks its retained frame and stores its new guard
+        # through one adapter.
         if self.backend == "pandas":
-            native = cast(pd.DataFrame, self.native)
-            guarded = native if columns is None else _select_pandas_columns(native, columns)
-            digest = hashlib.blake2b(digest_size=16, person=b"superglm-fit-v1")
-            metadata = tuple((repr(name), str(dtype)) for name, dtype in guarded.dtypes.items())
-            digest.update(repr((guarded.shape, metadata)).encode("utf-8"))
-            if guarded.shape[1] or include_index:
-                row_hashes = pd.util.hash_pandas_object(
-                    guarded,
-                    index=include_index,
-                    categorize=True,
-                ).to_numpy(dtype=np.uint64, copy=False)
-                digest.update(np.ascontiguousarray(row_hashes).data)
-            return digest.digest()
+            key = (None if columns is None else tuple(columns), include_index)
+            if key not in self._pandas_digests:
+                self._pandas_digests[key] = self._pandas_digest(columns, include_index)
+            return self._pandas_digests[key]
 
         selected = self.columns if columns is None else tuple(columns)
         self.require_columns(selected)
-        # Operation-local, like ``_arrays``: a fit stores its data guard and its
-        # geometry guard from one adapter, and the second reuses the first's digest.
         if selected not in self._polars_digests:
             digest = hashlib.blake2b(digest_size=16, person=b"superglm-fit-pl1")
             digest.update(repr((len(self), len(selected))).encode("utf-8"))
@@ -225,6 +223,23 @@ class EagerFrame:
                 _update_polars_column(digest, str(name), column, dtype)
             self._polars_digests[selected] = digest.digest()
         return self._polars_digests[selected]
+
+    def _pandas_digest(self, columns: tuple[object, ...] | None, include_index: bool) -> bytes:
+        native = cast(pd.DataFrame, self.native)
+        # Every column in native order selects the frame itself, which hashes as the selection.
+        whole = columns is None or tuple(columns) == tuple(native.columns)
+        guarded = native if whole else _select_pandas_columns(native, cast(tuple, columns))
+        digest = hashlib.blake2b(digest_size=16, person=b"superglm-fit-v1")
+        metadata = tuple((repr(name), str(dtype)) for name, dtype in guarded.dtypes.items())
+        digest.update(repr((guarded.shape, metadata)).encode("utf-8"))
+        if guarded.shape[1] or include_index:
+            row_hashes = pd.util.hash_pandas_object(
+                guarded,
+                index=include_index,
+                categorize=True,
+            ).to_numpy(dtype=np.uint64, copy=False)
+            digest.update(np.ascontiguousarray(row_hashes).data)
+        return digest.digest()
 
     @property
     def digest_scheme(self) -> str:

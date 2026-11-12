@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -10,8 +11,10 @@ from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
 from superglm._utils import weighted_row_sum
+from superglm.distributions import Binomial, Gamma, NegativeBinomial, Poisson, Tweedie
 from superglm.features.constraint import rules_of
-from superglm.group_matrix import GroupMatrix
+from superglm.group_matrix import DesignMatrix, GroupMatrix
+from superglm.links import CloglogLink, IdentityLink, InverseLink, LogitLink, LogLink, ProbitLink
 from superglm.model.fit_state import (
     FittedStateRevision,
     canonical_intercept_shift,
@@ -35,6 +38,131 @@ def _grid_weights(spec, x_col, sample_weight, n_grid: int):
         hist_counts.astype(np.float64) + 1.0,
     )
     return np.maximum(grid_weights, 1e-6)
+
+
+# The metric a post-fit repair projects in. A repair keeps the fit's smoothing
+# parameters, so the standard estimate is the constrained penalized fit at them,
+# and its first Newton step from the unconstrained fit is the projection of the
+# fitted coefficients onto the shape cone in X'WX + S_lambda: the penalized
+# Hessian (Wood 2026, Statistical Modelling 26(4), section 4.1; Mammen, Marron,
+# Turlach & Wand 2001, Statistical Science 16(3), Proposition 2 and section 5.1,
+# where the penalty in the norm is what keeps the projection smooth). It is the
+# second-order model of the penalized objective the publication rule judges, with
+# the other terms held and the intercept profiled, as the rule holds and profiles
+# them, so the zero term, a feasible point, can never beat the projection there.
+# The grid's L2 metric omits S_lambda and sees the wiggly fitted-basis directions
+# of a sparse region only weakly, and its projection travels far along them.
+def _term_indices(groups) -> NDArray:
+    return np.concatenate([np.arange(g.start, g.end) for g in groups])
+
+
+def _term_penalty_block(terms, indices: NDArray, width: int) -> NDArray:
+    """``S_lambda`` on the term's coefficients, as ``_smooth_penalty_value`` reads it."""
+    if isinstance(terms, _CompactPenaltyTerms):
+        from superglm.reml.penalty_algebra import total_penalty_matvec
+
+        # A component off the term's coefficients adds exact zeros to the entries read.
+        own = [
+            component
+            for component in terms.penalties
+            if np.any((indices >= component.group_sl.start) & (indices < component.group_sl.stop))
+        ]
+        block = np.zeros((indices.size, indices.size))
+        for column, index in enumerate(indices):
+            unit = np.zeros(width)
+            unit[index] = 1.0
+            product = total_penalty_matvec(unit, terms.lambdas, own, list(terms.group_matrices))
+            block[:, column] = product[indices]
+        return 0.5 * (block + block.T)
+    from superglm.reml.penalty_algebra import ssp_penalty_matrix
+
+    block = np.zeros((indices.size, indices.size))
+    for group_slice, lam, omega, raw_projection in terms:
+        where = np.flatnonzero((indices >= group_slice.start) & (indices < group_slice.stop))
+        if where.size == 0:
+            continue
+        omega_arr = np.asarray(omega, dtype=np.float64)
+        if raw_projection is not None:
+            # Formed as the fit forms it (``build_penalty_matrix``): the Gram of a
+            # transported root keeps the penalty's null space, where the congruence
+            # ``R' Omega R`` leaves rounding that a large lambda makes curvature.
+            omega_arr = ssp_penalty_matrix(raw_projection, omega_arr)
+        local = indices[where] - group_slice.start
+        block[np.ix_(where, where)] += lam * omega_arr[np.ix_(local, local)]
+    return block
+
+
+def _kept_data_gram(model, indices: NDArray, W: NDArray) -> NDArray | None:
+    """The term's block of the centred data Gram the fit kept at ``W``, or ``None``.
+
+    A fit records the Gram it decided its rank from, ``X'WX`` centred at the weighted
+    column means, with a fingerprint of its weights (``RankInfo.data_gram``). It is read
+    in place, so the fit's first inference still takes it.
+    """
+    from superglm.solvers.rank import weights_fingerprint
+
+    record = getattr(getattr(model, "_solver_result", None), "rank_info", None)
+    if record is None or record.data_gram is None:
+        return None
+    if record.data_gram_weights != weights_fingerprint(W):
+        return None
+    gram = record.data_gram
+    selected = np.asarray(record.selected_columns)
+    position = np.minimum(np.searchsorted(selected, indices), max(selected.size - 1, 0))
+    if selected.size == 0 or not np.array_equal(selected[position], indices):
+        return None
+    block = np.asarray(gram, dtype=np.float64)[np.ix_(position, position)]
+    return 0.5 * (block + block.T)
+
+
+def _term_group_matrices(model, groups) -> list:
+    by_key = {
+        (g.name, g.start, g.end): gm
+        for gm, g in zip(model._dm.group_matrices, model._groups, strict=True)
+    }
+    return [by_key[(g.name, g.start, g.end)] for g in groups]
+
+
+def _term_rmatvec(model, groups, rows: NDArray) -> NDArray:
+    """``X_j' rows`` over the term's fitted columns."""
+    return np.concatenate(
+        [
+            np.asarray(gm.rmatvec(rows), dtype=np.float64)
+            for gm in _term_group_matrices(model, groups)
+        ]
+    )
+
+
+def _term_data_hessian(model, groups, W: NDArray) -> NDArray:
+    """``X_j' W X_j`` over the fitted rows at the fit's working weights ``W``, intercept profiled.
+
+    Without the fit's kept Gram, it is formed as inference forms it: from the columns
+    centred at their weighted means (``build_centered_system``). The Schur complement
+    ``X'WX - (X'W1)(1'WX) / 1'W`` cancels catastrophically where a term's curvature is
+    small beside its raw moments, as the textbook variance formula does (Chan, Golub &
+    LeVeque 1983).
+    """
+    kept = _kept_data_gram(model, _term_indices(groups), W)
+    if kept is not None:
+        return kept
+    from superglm.model.state_ops import _rank_centered_data_gram
+
+    design = DesignMatrix(
+        _term_group_matrices(model, groups), n=model._dm.n, p=sum(g.size for g in groups)
+    )
+    gram = _rank_centered_data_gram(design, np.asarray(W, dtype=np.float64))
+    return 0.5 * (gram + gram.T)
+
+
+def _term_penalized_hessian(model, groups, smooth_penalty_terms, working_weights) -> NDArray:
+    """``X'WX + S_lambda`` on one term's coefficients: the metric its repair projects in.
+
+    ``working_weights`` are the unconstrained fit's, which every term of one call
+    projects from.
+    """
+    indices = _term_indices(groups)
+    penalty = _term_penalty_block(smooth_penalty_terms, indices, model.result.beta.size)
+    return _term_data_hessian(model, groups, working_weights) + penalty
 
 
 def _repairer(kind: str):
@@ -243,14 +371,23 @@ def _deviance_rounding(model, eta, *, y, weights) -> float:
 
 
 class _InterceptState(NamedTuple):
-    """The profiled deviance and score at one intercept shift."""
+    """The deviance and score at one intercept shift, and the rounding the deviance keeps there."""
 
     deviance: float
+    mean_rounding: float
     deviance_rounding: float
     score: float
     score_scale: float
     score_rounding: float
     information: float
+    #: The rows a clamp holds there, where a rerun reads them (``_searched_intercept``).
+    clamped: NDArray | None = None
+    #: Half the scored deviance's second derivative in the shift, where it is formed: near a
+    #: stationary shift of a pairing whose deviance is not convex (``_searched_intercept``).
+    curvature: float = np.nan
+    #: Whether the scored deviance's own slope, flat on the rows a clamp holds, is stationary
+    #: there to the looser test, where the first run keeps those rows' scores.
+    scored: bool = True
 
 
 def _profile_repaired_intercept(
@@ -259,18 +396,61 @@ def _profile_repaired_intercept(
     *,
     y,
     weights,
-) -> tuple[np.ndarray, float, float]:
+) -> tuple[np.ndarray, float, float, float | None]:
     """Minimize deviance over the unpenalized intercept for fixed coefficients.
 
-    Returns the profiled predictor, its shift and the deviance's rounding there
-    (``_deviance_rounding``), which each evaluation already holds.
+    Returns the profiled predictor, its shift, the deviance's rounding there
+    (``_deviance_rounding``) and the weighted deviance there, which the search holds
+    (``None`` for the closed form), as ``_shape_candidate_objective`` forms it. A repair
+    call reads a profile it has formed from its memo (``constraints.reuse_repair_evidence``):
+    the zero-term fallback's in a second publication check, a continued repair's start.
     """
-    from superglm.distributions import _VARIANCE_FLOOR, Gaussian, clip_mu
-    from superglm.links import IdentityLink, stabilize_eta
+    from superglm.constraints import _fingerprint, _reused
 
     eta_base = np.asarray(eta, dtype=np.float64)
     y_arr = np.asarray(y, dtype=np.float64)
     weights_arr = np.asarray(weights, dtype=np.float64)
+
+    def compute() -> tuple[float, float, float | None]:
+        _, shift, rounding, deviance = _searched_intercept(
+            model, eta_base, y=y_arr, weights=weights_arr
+        )
+        return shift, rounding, deviance
+
+    # The memo holds the shift, not a predictor of the rows: ``eta_base + shift`` is the
+    # profiled predictor the search returns, formed by the same operation.
+    key = ("intercept", _fingerprint(eta_base, y_arr, weights_arr))
+    shift, rounding, deviance = _reused(model, key, compute)
+    return eta_base + shift, shift, rounding, deviance
+
+
+#: The links under which each family's unit deviance is convex in the linear predictor,
+#: whatever the response, so that a root of the intercept's score is the profile's minimum:
+#: a canonical link, where it is twice the convex cumulant less a linear term, and those
+#: whose second derivative in the predictor is positive by hand: the Poisson's under the
+#: identity link (2y/eta**2), the gamma's and the Tweedie's (1 < p < 2) under the log link,
+#: the negative binomial's under the log link (2(y+t)t e**eta/(t+e**eta)**2), and the
+#: binomial's under the probit, cloglog and log links, whose probabilities and complements
+#: are log-concave. Any other pairing, or a subclass, is not taken to be convex.
+_CONVEX_DEVIANCE_LINKS: dict[type, tuple[type, ...]] = {
+    Poisson: (LogLink, IdentityLink),
+    Gamma: (InverseLink, LogLink),
+    NegativeBinomial: (LogLink,),
+    Tweedie: (LogLink,),
+    Binomial: (LogitLink, ProbitLink, CloglogLink, LogLink),
+}
+
+
+def _searched_intercept(
+    model, eta_base: NDArray, *, y: NDArray, weights: NDArray
+) -> tuple[np.ndarray, float, float, float | None]:
+    from superglm._roundoff import gamma
+    from superglm.constraints import _ROW_STEPS, shape_sum_tolerance
+    from superglm.distributions import _VARIANCE_FLOOR, Gaussian, clip_mu
+    from superglm.links import IdentityLink, stabilize_eta
+
+    y_arr, weights_arr = y, weights
+    row_gamma = float(gamma(_ROW_STEPS))
     if eta_base.shape != y_arr.shape or weights_arr.shape != y_arr.shape:
         raise RuntimeError(
             "Unsafe shape repair rejected before publication: incoherent intercept geometry"
@@ -302,14 +482,50 @@ def _profile_repaired_intercept(
             profiled_eta,
             shift,
             _deviance_rounding(model, profiled_eta, y=y_arr, weights=weights_arr),
+            None,
         )
 
     carried = weights_arr != 0.0
+    # The rows the link's clamp (``stabilize_eta``) or the family's (``clip_mu``) holds at
+    # the fitted shift, read by its evaluation. To the first run, a trial that clamps any
+    # other row is outside the search's domain: there the clamp flattens the deviance, which
+    # no longer has the score's slope. The rerun (``clamps``) searches the deviance the rule
+    # scores, clamps and all: a clamped row's slope is that deviance's, zero, and a trial may
+    # enter a clamp where the row's own deviance still falls (a separated binomial row, whose
+    # cap only understates the fall), but not where it rises: there the cap would hold the
+    # row at its worst, and a minimum past it is the cap's. (Its unclamped slope instead,
+    # beside a floored variance, is vast and meaningless.)
+    held: NDArray | None = None
+    # Whether a search's root is compared with its start (below): not where every row's
+    # deviance is convex in its predictor and no row is held.
+    checked = type(model._link) not in _CONVEX_DEVIANCE_LINKS.get(type(model._distribution), ())
+    # Where the deviance is not convex, a stationary shift can be a maximum, at which the
+    # Fisher information is still positive: a search's stationary shift is then a minimum only
+    # where the deviance's own curvature there is positive (``_deviance_curvature``).
+    nonconvex = checked
 
-    def evaluate(shift: float) -> _InterceptState:
-        eta_safe = stabilize_eta(eta_base + shift, model._link)
+    def evaluate(
+        shift: float, compared: bool, clamps: bool = False, origin=None
+    ) -> _InterceptState | None:
+        """The state at ``shift``, or ``None`` outside the run's domain. ``origin``, the shift
+        a rerun steps from and the rows clamped there, decides which clamps it may enter."""
+        nonlocal held
+        trial_eta = eta_base + shift
+        eta_safe = stabilize_eta(trial_eta, model._link)
+        # Each row vector is dropped once the clamp test has read it: at book size each
+        # is megabytes, beside the evaluation's own.
+        clamped = eta_safe != trial_eta
+        del trial_eta
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-            mu = clip_mu(model._link.inverse(eta_safe), model._distribution)
+            unclipped = model._link.inverse(eta_safe)
+            mu = clip_mu(unclipped, model._distribution)
+            clamped |= mu != unclipped
+            del unclipped
+            clamped &= carried
+            if held is None:
+                held = clamped
+            elif not clamps and np.any(clamped & ~held):
+                return None
             variance = np.maximum(
                 np.asarray(model._distribution.variance(mu), dtype=np.float64),
                 _VARIANCE_FLOOR,
@@ -318,8 +534,14 @@ def _profile_repaired_intercept(
             score_rows = weights_arr * (y_arr - mu) * dmu_deta / variance
             residual_rounding = _residual_rounding(y_arr, mu, eta_safe, dmu_deta)
             score_rounding = np.abs(weights_arr * dmu_deta / variance) * residual_rounding
-            # ``_deviance_rounding`` from this pass's rows, over the carried rows.
-            deviance_rows = np.abs(weights_arr * (y_arr - mu) / variance)[carried]
+            # ``_deviance_rounding`` from this pass's rows, over the carried rows. A row a clamp
+            # holds has its mean at the clamp's own constant, which keeps nothing from the
+            # predictor's rounding: its unit deviance's rounding is the sum's alone. (Its slope
+            # in the mean, beside a floor of 1e-50, would make the bound 1e40 and every
+            # comparison a tie.)
+            deviance_rows = np.where(clamped, 0.0, np.abs(weights_arr * (y_arr - mu) / variance))[
+                carried
+            ]
             deviance_rounding = 2.0 * float(
                 np.sum(deviance_rows * residual_rounding[carried], dtype=np.float64)
             )
@@ -332,66 +554,258 @@ def _profile_repaired_intercept(
                 dmu_deta=dmu_deta,
                 variance=variance,
             )
-            deviance = weighted_row_sum(weights_arr, model._distribution.deviance_unit, y_arr, mu)
+            if clamps and origin is not None:
+                # A row's score is minus half its deviance's slope, so a step enters the
+                # row's clamp rising where the two have opposite signs.
+                entering = clamped & ~origin[1]
+                if np.any(entering & (score_rows * (shift - origin[0]) < 0.0)):
+                    return None
+            if clamps:
+                score_rows[clamped] = 0.0
+                score_rounding[clamped] = 0.0
+                information_rows = np.where(clamped, 0.0, information_rows)
             score = float(np.sum(score_rows, dtype=np.float64))
             information = float(np.sum(information_rows, dtype=np.float64))
+            score_scale = float(np.sum(np.abs(score_rows), dtype=np.float64))
+            score_rounding_sum = float(np.sum(score_rounding, dtype=np.float64))
+            curvature, scored = np.nan, True
+            if abs(score) <= 1e-9 * score_scale + score_rounding_sum:
+                if nonconvex:
+                    curvature = _deviance_curvature(
+                        model, y_arr, mu, eta_safe, dmu_deta, variance, weights_arr, clamped
+                    )
+                if not clamps and np.any(clamped):
+                    free = ~clamped
+                    scored = abs(float(np.sum(score_rows[free], dtype=np.float64))) <= 1e-9 * float(
+                        np.sum(np.abs(score_rows[free]), dtype=np.float64)
+                    ) + float(np.sum(score_rounding[free], dtype=np.float64))
+            # The deviance only where it is read: every trial a bracket is kept by, a start
+            # compared, and the stationary shift a search returns, which publication reads.
+            # Where compared, with what it keeps from the mean alone: each unit deviance is
+            # evaluated without cancellation given the mean (``_deviance_rounding``), so the
+            # residual's cancellation does not enter it, while beside a pole it would be vast.
+            # One that is not finite is publication's to refuse.
+            deviance = mean_rounding = np.nan
+            if compared or abs(score) <= 1e-11 * score_scale + score_rounding_sum:
+                deviance = weighted_row_sum(
+                    weights_arr, model._distribution.deviance_unit, y_arr, mu
+                )
+                if compared or checked:
+                    mean_terms = (np.abs(mu) + np.abs(dmu_deta * eta_safe))[carried]
+                    mean_rounding = (
+                        2.0
+                        * row_gamma
+                        * float(np.sum(deviance_rows * mean_terms, dtype=np.float64))
+                    )
+        # Where a clamp holds every row the rerun's deviance is flat: no information.
         if not (
-            np.isfinite(deviance)
-            and np.isfinite(score)
+            np.isfinite(score)
             and np.isfinite(information)
-            and information > 0.0
+            and (information > 0.0 or (clamps and information == 0.0))
         ):
             raise RuntimeError(
                 "Unsafe shape repair rejected before publication: invalid profiled intercept"
             )
         return _InterceptState(
             deviance=deviance,
+            mean_rounding=mean_rounding,
             deviance_rounding=deviance_rounding,
             score=score,
-            score_scale=float(np.sum(np.abs(score_rows), dtype=np.float64)),
-            score_rounding=float(np.sum(score_rounding, dtype=np.float64)),
+            score_scale=score_scale,
+            score_rounding=score_rounding_sum,
             information=information,
+            clamped=clamped if clamps else None,
+            curvature=curvature,
+            scored=scored,
         )
 
-    def stationary(state: _InterceptState, relative: float) -> bool:
+    # The shifts at which a run stopped on a stationary point that is not a minimum.
+    maxima: list[float] = []
+
+    def stationary(state: _InterceptState, relative: float, shift: float) -> bool:
         # Relative to the scores' own size, and never tighter than the rounding
-        # their residuals carry.
-        return abs(state.score) <= relative * state.score_scale + state.score_rounding
+        # their residuals carry; a minimum, where the deviance is not convex.
+        if not abs(state.score) <= relative * state.score_scale + state.score_rounding:
+            return False
+        if nonconvex and state.information > 0.0 and not state.curvature > 0.0:
+            maxima.append(shift)
+            return False
+        return True
 
-    shift = 0.0
-    state = evaluate(shift)
-    for _ in range(50):
-        if stationary(state, 1e-11):
-            return eta_base + shift, shift, state.deviance_rounding
+    start = evaluate(0.0, checked)
+    assert start is not None and held is not None  # the first evaluation holds its rows
+    if not checked and held.any():
+        # A held row's deviance is flat in the shift until it leaves the clamp, so the
+        # profile can bend there: its root is compared with the start after all.
+        checked = True
+        start = evaluate(0.0, True)
+        assert start is not None
+    # The shifts the link's clamp leaves the rows it does not hold (none held: unbounded).
+    free = carried & ~held
+    eta_floor, eta_ceiling = stabilize_eta(np.array([-np.inf, np.inf]), model._link)
+    lower = float(eta_floor - np.min(eta_base, where=free, initial=np.inf))
+    upper = float(eta_ceiling - np.max(eta_base, where=free, initial=-np.inf))
+    plateau_low = float(eta_floor - np.max(eta_base, where=carried, initial=-np.inf))
+    plateau_high = float(eta_ceiling - np.min(eta_base, where=carried, initial=np.inf))
+    del free
 
-        proposal = state.score / state.information
-        if not np.isfinite(proposal):
-            break
+    def higher(state: _InterceptState, than: _InterceptState) -> bool:
+        # Beyond the two deviances' rounding: of each sum (Higham, section 3.1) and what each
+        # keeps from its mean. One not formed is no lower.
+        return not state.deviance <= than.deviance + (
+            shape_sum_tolerance(max(state.deviance, than.deviance), len(y_arr))
+            + state.mean_rounding
+            + than.mean_rounding
+        )
 
-        accepted = False
-        for halving in range(21):
-            trial_shift = shift + proposal * (2.0**-halving)
-            trial = evaluate(trial_shift)
-            # Two deviances' rounding: relative to each sum, and what each keeps
-            # from its residuals.
-            roundoff = (
-                64.0 * np.finfo(np.float64).eps * max(abs(state.deviance), abs(trial.deviance))
-                + state.deviance_rounding
-                + trial.deviance_rounding
-            )
-            if trial.deviance <= state.deviance + roundoff:
-                shift, state = trial_shift, trial
-                accepted = True
+    def search(rerun: bool) -> tuple[float, _InterceptState] | None:
+        """The stationary shift a run reaches, or ``None``."""
+        shift, state = 0.0, (evaluate(0.0, True, True) if rerun else start)
+        assert state is not None
+        # Beyond these the link's clamp holds every row, and the deviance is flat.
+        low, high = (plateau_low, plateau_high) if rerun else (lower, upper)
+        below, above = -np.inf, np.inf
+        last = before_last = np.inf
+        for _ in range(_INTERCEPT_STEPS):
+            if state.information > 0.0 and stationary(state, 1e-11, shift):
+                return shift, state
+            if maxima and maxima[-1] == shift:
+                return None  # a maximum, where the Fisher step is null
+            if state.score > 0.0:
+                below = shift
+            else:
+                above = shift
+            step = state.score / state.information if state.information > 0.0 else np.nan
+            proposal = shift + step
+            if not (below < proposal < above) or abs(2.0 * step) > abs(before_last):
+                if np.isfinite(below) and np.isfinite(above):
+                    proposal = below + 0.5 * (above - below)
+            proposal = min(max(proposal, low), high)
+            if not np.isfinite(proposal) or proposal == shift:
                 break
-        if not accepted:
-            break
+            trial = evaluate(proposal, rerun, rerun, (shift, state.clamped) if rerun else None)
+            if trial is None or (rerun and (trial.information == 0.0 or higher(trial, state))):
+                # Past a clamp, flat or higher: a minimum lies short of this trial.
+                below, above = (below, proposal) if proposal > shift else (proposal, above)
+                continue
+            before_last, last = last, proposal - shift
+            shift, state = proposal, trial
+        if not (state.information > 0.0 and stationary(state, 1e-9, shift)):
+            return None
+        if np.isnan(state.deviance):
+            state = evaluate(shift, True)  # stationary only to the looser test
+            assert state is not None  # a shift the search has held
+        return shift, state
 
-    if not stationary(state, 1e-9):
-        raise RuntimeError(
+    # The score is minus half the deviance's slope in the shift, so a minimum lies above a
+    # shift whose score is positive and below one whose score is negative. The search is
+    # Newton's method kept inside the bracket those signs give, bisecting where Newton would
+    # leave it or does not halve its step every two steps (Press et al., Numerical Recipes,
+    # 3rd ed., 2007, section 9.4, rtsafe), with Fisher scoring's step. A side the bracket
+    # leaves open is bounded by the link's clamp, and a trial past either clamp bounds it.
+    # Where the deviance is not convex in the shift (a square-root link's branches meet at a
+    # pole), a root of the score can lie higher than the start; where it is, and no row is
+    # held, no row is clamped between them, so the root is the minimum. Where the root lies
+    # higher than the start, or is not reached (a minimum past a row's clamp), the search runs
+    # again on the deviance the rule scores, clamped rows and all, keeping the bracket by
+    # deviances as Brent's search with derivatives keeps it (Press et al., Numerical Recipes
+    # in Fortran 77, 2nd ed., 1992, section 10.3, dbrent): the shift held is the lowest found
+    # and a trial no lower ends its side, so the bracket holds a minimum no higher than the
+    # start.
+    found = search(rerun=False)
+    if (
+        found is None
+        or not found[1].scored
+        or (
+            checked
+            and np.isfinite(start.deviance)
+            and np.isfinite(found[1].deviance)
+            and higher(found[1], start)
+        )
+    ):
+        # The first run's root is a held row's balance, not the scored deviance's minimum,
+        # where that row's kept score is not small beside the others (under the identity link
+        # a clamped mean's is (y - mu) / mu): the rerun reads the deviance scored.
+        found = search(rerun=True)
+    if found is None and maxima:
+        # A run stopped on a maximum, where the Fisher step is null and neither run can leave:
+        # the derivative-free search decides, as SuperLSS's does.
+        found = _derivative_free_intercept(eta_base[carried], evaluate)
+    if found is None:
+        from superglm.constraints import _InterceptSearchError
+
+        raise _InterceptSearchError(
             "Unsafe shape repair rejected before publication: conditional intercept "
             "optimization did not converge"
         )
-    return eta_base + shift, shift, state.deviance_rounding
+    shift, state = found
+    return eta_base + shift, shift, state.deviance_rounding, state.deviance
+
+
+#: Evaluations each run of the conditional intercept search takes at most: bisection
+#: resolves a bracket as wide as the log link's clamp to the last bit in about 60.
+_INTERCEPT_STEPS = 100
+
+
+def _deviance_curvature(model, y, mu, eta, dmu_deta, variance, weights, clamped) -> float:
+    """Half the weighted deviance's second derivative in the intercept, on the rows no clamp
+    holds; NaN where the family or link gives no second derivative.
+
+    A row's score, ``w (y - mu) mu' / V``, is minus half its deviance's slope, so half the
+    curvature is minus the score's derivative, ``w (mu'^2 - (y - mu) (mu'' - mu'^2 V' / V)) / V``:
+    the Fisher information's term less the residual's, which the expectation drops. ``V'`` is
+    zero where the variance floor holds.
+    """
+    from superglm.distributions import _VARIANCE_FLOOR
+
+    second = getattr(model._link, "deriv2_inverse", None)
+    slope = getattr(model._distribution, "variance_derivative", None)
+    if not (callable(second) and callable(slope)):
+        return np.nan
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        d2mu = np.asarray(second(eta), dtype=np.float64)
+        dvariance = np.where(
+            variance > _VARIANCE_FLOOR, np.asarray(slope(mu), dtype=np.float64), 0.0
+        )
+        rows = (
+            weights
+            * (dmu_deta * dmu_deta - (y - mu) * (d2mu - dmu_deta * dmu_deta * dvariance / variance))
+            / variance
+        )
+        rows = np.where(clamped | (weights == 0.0), 0.0, rows)
+        return float(np.sum(rows, dtype=np.float64))
+
+
+def _derivative_free_intercept(eta, evaluate) -> tuple[float, _InterceptState] | None:
+    """The shift minimising the deviance the rule scores by bracketing and Brent alone
+    (``distributional.shape_repair._derivative_free_minimum``), in units of the carried rows'
+    predictor ``eta``; ``None`` when it still falls where the shift overflows.
+
+    ``evaluate`` is ``_searched_intercept``'s, read on its first run's domain: a shift that
+    clamps a row the start does not hold is infinitely high, since past a clamp holding a row
+    at its worst the capped deviance has minima the model does not have.
+    """
+    from superglm.distributional.shape_repair import _derivative_free_minimum, _intercept_scale
+
+    unit = _intercept_scale(eta, 0.0)
+    values: dict[float, float] = {}
+
+    def objective(t: float) -> float:
+        if t not in values:
+            try:
+                state = evaluate(unit * t, True)
+            except RuntimeError:
+                state = None
+            deviance = np.inf if state is None else state.deviance
+            values[t] = deviance if np.isfinite(deviance) else np.inf
+        return values[t]
+
+    best = _derivative_free_minimum(objective, 0.0, unit)
+    if best is None or not np.isfinite(objective(best)):
+        return None
+    state = evaluate(unit * best, True)
+    assert state is not None  # a shift whose deviance was formed
+    return unit * best, state
 
 
 def _shape_candidate_objective(
@@ -403,8 +817,13 @@ def _shape_candidate_objective(
     weights,
     smooth_penalty_terms,
     selection_penalty,
+    deviance=None,
 ) -> tuple[float, float]:
-    """Return weighted deviance and the fitted penalized merit for a coefficient state."""
+    """Return weighted deviance and the fitted penalized merit for a coefficient state.
+
+    ``deviance``, where given, is the weighted deviance at ``eta`` as the intercept profile
+    formed it (``_profile_repaired_intercept``), by the operations below; it is not formed again.
+    """
     beta_arr = np.asarray(beta, dtype=np.float64)
     if beta_arr.shape != model.result.beta.shape or not np.all(np.isfinite(beta_arr)):
         raise RuntimeError("Unsafe shape repair rejected before publication: invalid coefficients")
@@ -419,17 +838,20 @@ def _shape_candidate_objective(
     from superglm.distributions import clip_mu
     from superglm.links import stabilize_eta
 
-    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-        eta_safe = stabilize_eta(eta, model._link)
-        mu = clip_mu(model._link.inverse(eta_safe), model._distribution)
-        deviance_units = np.asarray(model._distribution.deviance_unit(y, mu), dtype=np.float64)
-    carried = np.asarray(weights, dtype=np.float64) != 0.0
-    if not np.all(np.isfinite(mu)) or not np.all(np.isfinite(deviance_units[carried])):
+    if deviance is None:
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            eta_safe = stabilize_eta(eta, model._link)
+            mu = clip_mu(model._link.inverse(eta_safe), model._distribution)
+            deviance_units = np.asarray(model._distribution.deviance_unit(y, mu), dtype=np.float64)
+        carried = np.asarray(weights, dtype=np.float64) != 0.0
+        if not np.all(np.isfinite(mu)) or not np.all(np.isfinite(deviance_units[carried])):
+            deviance = np.nan
+        else:
+            deviance = weighted_row_sum(weights, lambda units: units, deviance_units)
+    if not np.isfinite(deviance):
         raise RuntimeError(
             "Unsafe shape repair rejected before publication: invalid link-domain predictions"
         )
-
-    deviance = weighted_row_sum(weights, lambda units: units, deviance_units)
     smooth_value = _smooth_penalty_value(beta_arr, smooth_penalty_terms)
     selection_value = 2.0 * float(selection_penalty.eval(beta_arr, model._groups))
     merit = deviance + smooth_value + selection_value
@@ -462,6 +884,54 @@ def _shape_term_eta_delta(model, current_beta, candidate_beta, groups) -> np.nda
     return contribution
 
 
+def _certified_curve_scale(target: NDArray, weights: NDArray) -> float:
+    """The scale a repairer certifies its projection at: the curve it repaired, as a weighted RMS.
+
+    As ``constraints._project_shape_in_fitted_basis`` takes it: in units of a power of two
+    near the curve's largest value, which is exact, and 1 for the zero curve.
+    """
+    target = np.asarray(target, dtype=np.float64)
+    weights = np.asarray(weights, dtype=np.float64)
+    largest = float(np.max(np.abs(target), initial=0.0))
+    unit = float(np.ldexp(1.0, int(np.frexp(largest)[1]))) if largest > 0.0 else 1.0
+    mean_square = float(np.dot(weights, (target / unit) ** 2)) / float(np.sum(weights))
+    return unit * float(np.sqrt(mean_square)) or 1.0
+
+
+def _settled_on_rule(spec, kind, beta, grid, share, certified_scale) -> NDArray | None:
+    """``beta`` as its rule publishes it, or ``None`` when it breaks the rule beyond rounding.
+
+    A repairer certifies its projection at ``certified_scale``, the larger of the result's
+    norm and the curve's (``_certified_curve_scale``); a later reader judges the result at
+    its own norm. A result off its rule there by no more than its certified rounding is moved
+    strictly inside the cone along the repairer's own inside ray by twice the violation: the
+    least slack is superadditive in the coefficients, so every slack is then at least the
+    violation, and the curve moves by a rounding of the curve repaired. Where the basis holds
+    no ray strictly inside (a natural curvature boundary), the result is published as
+    certified. ``share`` is the grid's weights, summing to one.
+    """
+    from superglm.constraints import (
+        _fitted_basis,
+        _inside_ray,
+        shape_constraint_certificate,
+        shape_slack_tolerance,
+    )
+
+    violation = -shape_constraint_certificate(spec, beta, kind).minimum_scaled_slack
+    if violation <= shape_slack_tolerance(beta):
+        return beta
+    if violation > shape_slack_tolerance(beta, certified_scale):
+        return None
+    ray = _inside_ray(_fitted_basis(spec, grid), grid, share, kind)
+    ray_slack = shape_constraint_certificate(spec, ray, kind).minimum_scaled_slack
+    return beta + (2.0 * violation / ray_slack) * ray if ray_slack > 0.0 else beta
+
+
+class _WorseThanFallbackError(RuntimeError):
+    """The rule's finding that the feasible zero term beats a candidate in its merit: the
+    candidate is continued, and the term published flat where that is beaten too."""
+
+
 def _validate_repair_for_publication(
     model,
     *,
@@ -469,14 +939,21 @@ def _validate_repair_for_publication(
     kind,
     groups,
     repair_result,
+    grid_weights,
     y,
     scoring_weights,
     smooth_penalty_terms,
     selection_penalty,
     current_eta,
+    certified_scale=None,
 ) -> tuple[np.ndarray, np.ndarray, float]:
-    """Certify fitted geometry and objective quality before changing private state."""
-    from superglm.constraints import shape_slack_tolerance, shape_sum_tolerance
+    """Certify fitted geometry and objective quality before changing private state.
+
+    ``certified_scale`` is the scale a continued repair's result is certified at; by
+    default the curve it repaired (``_certified_curve_scale``), as for a projection.
+    """
+    from superglm.constraints import _fitted_basis, shape_slack_tolerance, shape_sum_tolerance
+    from superglm.distributional.shape_repair import _zero_to_rounding
 
     current_beta = np.asarray(model.result.beta, dtype=np.float64)
     candidate_beta = np.asarray(repair_result.repaired_beta_reparam, dtype=np.float64)
@@ -489,19 +966,24 @@ def _validate_repair_for_publication(
     term_beta = np.concatenate([candidate_beta[group.sl] for group in groups])
     current_term_beta = np.concatenate([current_beta[group.sl] for group in groups])
     fitted_scale = float(np.linalg.norm(current_term_beta))
-    # A term within the slack's rounding of zero at the fitted term's scale is
-    # the zero term, and is published as exactly that: a later call sees only
-    # the published term, and would judge the rounding at its own scale.
-    if float(np.linalg.norm(term_beta)) <= shape_slack_tolerance(term_beta, fitted_scale):
-        candidate_beta = candidate_beta.copy()
-        for group in groups:
-            candidate_beta[group.sl] = 0.0
-        term_beta = np.zeros_like(term_beta)
-    fitted_basis = np.asarray(spec.transform(grid), dtype=np.float64)
+    if certified_scale is not None:
+        fitted_scale = max(fitted_scale, certified_scale)
+    fitted_basis = _fitted_basis(spec, grid)
     if fitted_basis.shape != (grid.size, term_beta.size):
         raise RuntimeError(
             "Unsafe shape repair rejected before publication: incoherent fitted-basis geometry"
         )
+    # A term within the slack's rounding of zero at the fitted term's scale, or the larger
+    # one a continued repair was certified at, in its coefficients or along its curve, is
+    # the zero term, and is published as exactly that: a later call sees only the published
+    # term, and would judge the rounding at its own scale (``_zero_to_rounding``).
+    if _zero_to_rounding(
+        term_beta, lambda: fitted_basis, shape_slack_tolerance(term_beta, fitted_scale)
+    ):
+        candidate_beta = candidate_beta.copy()
+        for group in groups:
+            candidate_beta[group.sl] = 0.0
+        term_beta = np.zeros_like(term_beta)
     repaired_curve = fitted_basis @ term_beta
     if not np.all(np.isfinite(repaired_curve)):
         raise RuntimeError(
@@ -511,15 +993,29 @@ def _validate_repair_for_publication(
     if kind in {"increasing", "decreasing", "convex", "concave"}:
         from superglm.constraints import shape_constraint_certificate
 
-        certificate = shape_constraint_certificate(spec, term_beta, kind)
-        feasibility_tolerance = shape_slack_tolerance(term_beta, fitted_scale)
-        if certificate.minimum_scaled_slack < -feasibility_tolerance:
+        # Judged at the scale the repairer certified at, as SuperLSS's repair judges it.
+        weights = np.asarray(grid_weights, dtype=np.float64)
+        if certified_scale is None:
+            certified_scale = _certified_curve_scale(repair_result.original_log_effect, weights)
+        settled = _settled_on_rule(
+            spec, kind, term_beta, grid, weights / float(np.sum(weights)), certified_scale
+        )
+        if settled is None:
             constraint_name = (
                 "monotonicity" if kind in {"increasing", "decreasing"} else "curvature"
             )
             raise RuntimeError(
                 f"Unsafe shape repair rejected before publication: infeasible {constraint_name}"
             )
+        if settled is not term_beta:
+            candidate_beta = candidate_beta.copy()
+            offset = 0
+            for group in groups:
+                candidate_beta[group.sl] = settled[offset : offset + group.size]
+                offset += group.size
+            term_beta = settled
+            repaired_curve = fitted_basis @ term_beta
+        certificate = shape_constraint_certificate(spec, term_beta, kind)
 
     candidate_eta_delta = _shape_term_eta_delta(
         model,
@@ -551,13 +1047,15 @@ def _validate_repair_for_publication(
         fallback_beta,
         groups,
     )
-    candidate_eta, candidate_intercept_shift, candidate_rounding = _profile_repaired_intercept(
-        model,
-        np.asarray(current_eta, dtype=np.float64) + candidate_eta_delta,
-        y=y,
-        weights=scoring_weights,
+    candidate_eta, candidate_intercept_shift, candidate_rounding, candidate_profiled = (
+        _profile_repaired_intercept(
+            model,
+            np.asarray(current_eta, dtype=np.float64) + candidate_eta_delta,
+            y=y,
+            weights=scoring_weights,
+        )
     )
-    fallback_eta, _, fallback_rounding = _profile_repaired_intercept(
+    fallback_eta, _, fallback_rounding, fallback_profiled = _profile_repaired_intercept(
         model,
         np.asarray(current_eta, dtype=np.float64) + fallback_eta_delta,
         y=y,
@@ -571,6 +1069,7 @@ def _validate_repair_for_publication(
         weights=scoring_weights,
         smooth_penalty_terms=smooth_penalty_terms,
         selection_penalty=selection_penalty,
+        deviance=candidate_profiled,
     )
     fallback_deviance, fallback_merit = _shape_candidate_objective(
         model,
@@ -580,6 +1079,7 @@ def _validate_repair_for_publication(
         weights=scoring_weights,
         smooth_penalty_terms=smooth_penalty_terms,
         selection_penalty=selection_penalty,
+        deviance=fallback_profiled,
     )
     deviance_rounding = candidate_rounding + fallback_rounding
     deviance_tolerance = shape_sum_tolerance(abs(fallback_deviance), len(y)) + deviance_rounding
@@ -588,7 +1088,7 @@ def _validate_repair_for_publication(
         candidate_deviance > fallback_deviance + deviance_tolerance
         or candidate_merit > fallback_merit + merit_tolerance
     ):
-        raise RuntimeError(
+        raise _WorseThanFallbackError(
             "Unsafe shape repair rejected before publication: candidate objective is worse "
             "than the feasible zero-term fallback"
         )
@@ -596,8 +1096,254 @@ def _validate_repair_for_publication(
     repair_result.repaired_beta_reparam = candidate_beta
     repair_result.repaired_log_effect = repaired_curve.copy()
     if kind in {"increasing", "decreasing", "convex", "concave"}:
+        # The certificate of the coefficients published: moved inside the rule, zeroed or
+        # continued, they are not the projection's.
         repair_result.max_violation_after = certificate.violation
+        repair_result.certificate = certificate
     return candidate_beta, candidate_eta, candidate_intercept_shift
+
+
+# A repair's projection is the first step of the constrained penalized fit at the fit's
+# smoothing parameters, and is exact only where the merit is quadratic. Under a log link,
+# where the rule holds the curve far from the fit, the fit's quadratic model can rank a
+# feasible curve the zero term beats in true merit. That step is then continued as
+# iteratively re-weighted cone projection (Liao & Meyer, J. Stat. Softw. 89(5), 2019,
+# section 1.2), the SQP of a convex merit over a polyhedral cone (Masselot et al.,
+# arXiv:2509.18406, 2025, supplement B): at each feasible iterate the merit's Fisher model,
+# intercept profiled, is minimised over the cone by the same repairer, and the next iterate
+# lies on the segment back to the current one, which the cone holds, at Armijo's sufficient
+# decrease by halving (Nocedal & Wright, Numerical Optimization, 2nd ed., 2006, section
+# 3.1). The merit is convex and the zero term is feasible, so the iterates approach a curve
+# no worse than it. A group-lasso selection penalty enters the line search, not the model.
+#: Cone projections a continued repair takes at most; it stops long before where it converges.
+_CONTINUED_STEPS = 50
+#: Armijo's sufficient-decrease fraction, the customary 1e-4 (Nocedal & Wright, section 3.1).
+_ARMIJO = 1e-4
+#: Halvings of one continued step before the continuation stops.
+_STEP_HALVINGS = 20
+
+
+def _continued_repair(
+    model,
+    *,
+    spec,
+    kind,
+    groups,
+    repair_result,
+    grid_weights,
+    n_grid,
+    y,
+    scoring_weights,
+    smooth_penalty_terms,
+    selection_penalty,
+    current_eta,
+    inward=False,
+    worst=None,
+):
+    """The refused repair continued towards the constrained penalized fit, and the scale it is
+    certified at; or ``None``.
+
+    Starts from the refused candidate and stops where the model's predicted decrease or a
+    step's actual decrease is within the merit's rounding, or a step finds no decrease.
+    ``None`` when no step is taken; the publication rule judges the result as before, at
+    the scale returned (``_continued_scale``). The model reads no derivative from a row a
+    clamp holds, or with ``inward``, only from one held at its worst (see the loop); a step
+    that meets such a row appends to ``worst``, a list, where one is given.
+    """
+    from dataclasses import replace
+
+    from superglm.constraints import (
+        _fitted_basis,
+        shape_constraint_certificate,
+        shape_sum_tolerance,
+    )
+    from superglm.distributions import _VARIANCE_FLOOR, clip_mu
+    from superglm.links import stabilize_eta
+
+    current_beta = np.asarray(model.result.beta, dtype=np.float64)
+    base_eta = np.asarray(current_eta, dtype=np.float64)
+    indices = _term_indices(groups)
+    penalty = _term_penalty_block(smooth_penalty_terms, indices, current_beta.size)
+    repairer = _repairer(kind)
+
+    def scored(beta):
+        delta = _shape_term_eta_delta(model, current_beta, beta, groups)
+        eta, _, rounding, deviance = _profile_repaired_intercept(
+            model, base_eta + delta, y=y, weights=scoring_weights
+        )
+        _, merit = _shape_candidate_objective(
+            model,
+            beta,
+            eta=eta,
+            y=y,
+            weights=scoring_weights,
+            smooth_penalty_terms=smooth_penalty_terms,
+            selection_penalty=selection_penalty,
+            deviance=deviance,
+        )
+        return merit, eta, shape_sum_tolerance(abs(merit), len(y)) + rounding
+
+    beta = np.asarray(repair_result.repaired_beta_reparam, dtype=np.float64)
+    merit, eta, tolerance = scored(beta)
+    certified = _certified_curve_scale(repair_result.original_log_effect, grid_weights)
+    moved = False
+    for _ in range(_CONTINUED_STEPS):
+        eta_safe = stabilize_eta(eta, model._link)
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            unclipped = model._link.inverse(eta_safe)
+            mu = clip_mu(unclipped, model._distribution)
+            variance = np.maximum(
+                np.asarray(model._distribution.variance(mu), dtype=np.float64),
+                _VARIANCE_FLOOR,
+            )
+            dmu_deta = np.asarray(model._link.deriv_inverse(eta_safe), dtype=np.float64)
+            score = scoring_weights * (y - mu) * dmu_deta / variance
+            # The deviance scored is flat on a row a clamp holds, so the model reads no
+            # derivative there: its Fisher weight can be vast (1e50 under the identity link at
+            # clip_mu's floor), and its target then rounds back to the current coefficients.
+            # A row held at its worst, though, whose deviance falls on leaving the clamp, has
+            # no slope to lead it back inside; with ``inward`` it keeps its own derivatives,
+            # which do (the line search still judges each step on the merit scored).
+            flat = (eta_safe != eta) | (mu != unclipped)
+            if np.any(flat):
+                back = np.where(
+                    eta_safe != eta,
+                    np.sign(eta_safe - eta),
+                    np.sign(mu - unclipped) * np.sign(dmu_deta),
+                )
+                at_worst = flat & (score * back > 0.0)
+                if np.any(at_worst):
+                    if worst is not None:
+                        worst.append(True)
+                    if inward:
+                        flat = flat & ~at_worst
+            score = np.where(flat, 0.0, score)
+        W = fisher_working_weights(
+            distribution=model._distribution,
+            link=model._link,
+            mu=mu,
+            eta=eta_safe,
+            sample_weight=scoring_weights,
+            dmu_deta=dmu_deta,
+            variance=variance,
+        )
+        W = np.where(flat, 0.0, W)
+        if not np.sum(W) > 0.0:
+            break  # a clamp holds every row: the scored deviance is flat
+        term = beta[indices]
+        H = _term_data_hessian(model, groups, W) + penalty
+        # Half the merit's gradient with the intercept profiled: the Schur complement's.
+        profiled_score = _term_rmatvec(model, groups, score) - _term_rmatvec(
+            model, groups, W
+        ) * float(np.sum(score) / np.sum(W))
+        gradient = penalty @ term - profiled_score
+        target = beta.copy()
+        try:
+            target[indices] = term - np.linalg.solve(H, gradient)
+            projected = repairer.repair(
+                spec, target, groups, weights=grid_weights, n_grid=n_grid, metric=H
+            )
+        except (np.linalg.LinAlgError, RuntimeError):
+            break
+        cone_point = np.asarray(projected.repaired_beta_reparam, dtype=np.float64)[indices]
+        step = cone_point - term
+        slope = float(gradient @ step)
+        if not slope < 0.0 or -2.0 * (slope + 0.5 * float(step @ H @ step)) <= tolerance:
+            break
+        length = 1.0
+        for _ in range(_STEP_HALVINGS):
+            trial = beta.copy()
+            # On the segment, exact at its ends.
+            trial[indices] = (1.0 - length) * term + length * cone_point
+            try:
+                trial_merit, trial_eta, trial_tolerance = scored(trial)
+            except RuntimeError:
+                trial_merit = np.inf
+            if trial_merit <= merit + _ARMIJO * length * 2.0 * slope:
+                break
+            length *= 0.5
+        else:
+            break
+        decrease = merit - trial_merit
+        certified = _continued_scale(certified, term, cone_point, projected, grid_weights)
+        beta, merit, eta, tolerance = trial, trial_merit, trial_eta, trial_tolerance
+        moved = True
+        if decrease <= tolerance:
+            break
+    if not moved:
+        return None
+    curve = _fitted_basis(spec, repair_result.grid) @ beta[indices]
+    continued = replace(
+        repair_result,
+        repaired_beta_reparam=beta,
+        repaired_log_effect=curve,
+        projection_residual=float(np.max(np.abs(curve - repair_result.original_log_effect))),
+        certificate=shape_constraint_certificate(spec, beta[indices], kind),
+    )
+    return continued, certified
+
+
+def _continued_scale(certified, current, cone_point, projected, grid_weights) -> float:
+    """The scale a continued step's iterate is certified at, from ``certified``, its start's.
+
+    The iterate lies on the segment from ``current`` to ``cone_point``, which the repairer
+    certified at the scale of the curve it projected (``projected.original_log_effect``,
+    ``_certified_curve_scale``). The least slack is superadditive in the coefficients, so
+    the iterate breaks its rule by no more than the larger of its ends' violations: it is
+    certified at the largest of their scales and norms, at least the start's.
+    """
+    return max(
+        certified,
+        float(np.linalg.norm(current)),
+        float(np.linalg.norm(cone_point)),
+        _certified_curve_scale(projected.original_log_effect, grid_weights),
+    )
+
+
+def _publishable_repair(model, repair_result, n_grid, scoring):
+    """The publication of ``repair_result`` (``_validate_repair_for_publication``'s values) and
+    the record it publishes, its continuation's where the rule refuses it as worse than the
+    dropped term; ``None`` where no curve the rule allows beats the dropped term, or the
+    intercept with the curve held cannot be re-estimated.
+    """
+    from superglm.constraints import _InterceptSearchError
+
+    try:
+        return _validate_repair_for_publication(
+            model, repair_result=repair_result, **scoring
+        ), repair_result
+    except _InterceptSearchError:
+        return None
+    except _WorseThanFallbackError:
+        pass
+    worst: list[bool] = []
+    # Continued on the deviance scored; where that is still refused and it met rows a clamp
+    # holds at their worst, once more with them led back inside (``_continued_repair``).
+    for inward in (False, True):
+        if inward and not worst:
+            break
+        continued = _continued_repair(
+            model, repair_result=repair_result, n_grid=n_grid, inward=inward, worst=worst, **scoring
+        )
+        if continued is None:
+            continue
+        try:
+            return _validate_repair_for_publication(
+                model, repair_result=continued[0], certified_scale=continued[1], **scoring
+            ), continued[0]
+        except (_WorseThanFallbackError, _InterceptSearchError):
+            continue
+    return None
+
+
+def flat_publication_message(term: str, kind: str) -> str:
+    """The warning of a post-fit repair that publishes ``term`` flat, on SuperGLM and SuperLSS."""
+    return (
+        f"The post-fit repair of the term {term} could not improve on dropping the term, so "
+        f"the term is published flat: its curve is zero, which obeys the {kind!r} rule. "
+        f"Constraint.fit.{kind} chooses the smoothing under the rule and finds the "
+        "constrained optimum; refit with it for a curve with the shape."
+    )
 
 
 @dataclass
@@ -807,7 +1553,13 @@ def _refresh_repaired_scale_and_statistics(model) -> None:
 
 def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: int = 500):
     """Repair the shapes of a fitted model's smooths after the fit."""
+    from superglm.constraints import reuse_repair_evidence
 
+    with reuse_repair_evidence():
+        return _apply_shape_postfit(model, X, sample_weight, offset, n_grid=n_grid)
+
+
+def _apply_shape_postfit(model, X, sample_weight, offset, *, n_grid: int):
     if model._result is None:
         raise RuntimeError("Model must be fitted before calling apply_shape_postfit().")
     if not getattr(model, "_retain_fit_state", True):
@@ -825,11 +1577,17 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
         raise RuntimeError("Post-fit shape repair requires retained fit features and response.")
     from superglm.model.fit_data_guard import require_unchanged_fit_data
 
-    require_unchanged_fit_data(model, X, y_ref)
-    frame = as_eager_frame(X)
+    # One adapter for every check of ``X`` in this call, so its digest is formed once; an
+    # ``X`` it cannot read is refused by the guard, as before.
+    try:
+        checked = as_eager_frame(X)
+    except (TypeError, ValueError):
+        checked = None
+    require_unchanged_fit_data(model, X, y_ref, frame=checked)
+    frame = as_eager_frame(X) if checked is None else checked
     fit_data_guard = model._fit_data_guard
     if not fit_data_guard.matches(
-        X,
+        frame,
         y_ref,
         sample_weight,
         offset,
@@ -891,6 +1649,9 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
     # block leaves the fitted mean alone (`_validate_repair_for_publication` refuses
     # repairs that move it).  Building the block over all rows would break this
     # silently.
+    from superglm.constraints import _flat_repair, _IndefiniteMetricError
+
+    flat: list[str] = []  # one warning per term published flat, once the revision commits
     for pending in pending_repairs:
         name, kind, groups = pending.name, pending.kind, pending.groups
         curve_spec = pending.curve_spec
@@ -902,27 +1663,45 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
         axis_weights = scoring_weights_arr if axis_rows.all() else scoring_weights_arr[axis_rows]
         grid_weights = _grid_weights(curve_spec, x_col, axis_weights, n_grid)
 
-        repair_result = _repairer(kind).repair(
-            curve_spec,
-            beta,
-            groups,
-            weights=grid_weights,
-            n_grid=n_grid,
-        )
+        try:
+            repair_result = _repairer(kind).repair(
+                curve_spec,
+                beta,
+                groups,
+                weights=grid_weights,
+                n_grid=n_grid,
+                metric=_term_penalized_hessian(
+                    work_model, groups, smooth_penalty_terms, prior_working_weights
+                ),
+            )
+        except _IndefiniteMetricError:
+            repair_result = _flat_repair(kind, curve_spec, beta, groups, n_grid)
         repair_result.feature_name = name
 
-        candidate_beta, current_eta, intercept_shift = _validate_repair_for_publication(
-            work_model,
+        scoring = dict(
             spec=curve_spec,
             kind=kind,
             groups=groups,
-            repair_result=repair_result,
+            grid_weights=grid_weights,
             y=np.asarray(y_ref, dtype=np.float64),
             scoring_weights=scoring_weights_arr,
             smooth_penalty_terms=smooth_penalty_terms,
             selection_penalty=selection_penalty,
             current_eta=current_eta,
         )
+        published = _publishable_repair(work_model, repair_result, n_grid, scoring)
+        if published is None:
+            # No curve the rule allows beats the dropped term, so the term is published flat,
+            # its intercept the dropped term's profile, which the rule has formed; it is
+            # refused where that profile cannot be formed or its likelihood is not finite.
+            repair_result = _flat_repair(kind, curve_spec, beta, groups, n_grid, repair_result)
+            published = (
+                _validate_repair_for_publication(
+                    work_model, repair_result=repair_result, **scoring
+                ),
+                repair_result,
+            )
+        (candidate_beta, current_eta, intercept_shift), repair_result = published
         # Recorded only if this term's coefficients actually moved.  The early exit
         # above concerns the whole model: once any term binds the loop runs for every
         # pending term, and an already-feasible term comes back unchanged.  Recording it
@@ -932,6 +1711,13 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
         _replace_result_beta(work_model, candidate_beta)
         move_public_intercept(work_model, intercept_shift)
         if projected:
+            if not np.any(candidate_beta[_term_indices(groups)]):
+                # The zero curve, however it was reached: disclosed, its record the flat one's.
+                repair_result.flat = True
+                repair_result.projection_residual = float(
+                    np.max(np.abs(repair_result.original_log_effect), initial=0.0)
+                )
+                flat.append(flat_publication_message(repr(name), kind))
             work_model._shape_repairs[name] = repair_result
             if kind in {"increasing", "decreasing"}:
                 work_model._monotone_repairs[name] = repair_result
@@ -947,7 +1733,16 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
         sample_weight=scoring_weight,
         offset=scoring_offset,
         use_fitted_design=True,
+        frame=frame,
+        # Formed once the repaired scale is (_refresh_repaired_scale_and_statistics).
+        statistics=False,
     )
+    # The adapter holds every column the checks and the refreshed means read; nothing
+    # after them reads the frame.
+    del frame, checked
     _refresh_repaired_geometry(work_model, prior_working_weights, prior_selected_names)
     _refresh_repaired_scale_and_statistics(work_model)
-    return revision.commit()
+    committed = revision.commit()
+    for message in flat:
+        warnings.warn(message, RuntimeWarning, stacklevel=4)
+    return committed

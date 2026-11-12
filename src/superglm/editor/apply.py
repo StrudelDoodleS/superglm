@@ -31,7 +31,7 @@ from superglm.solvers.dispersion import model_weight_semantics
 from superglm.solvers.mode_score import linear_predictor
 
 if TYPE_CHECKING:
-    from superglm._frame import FrameLike
+    from superglm._frame import EagerFrame, FrameLike
     from superglm.editor.session import EditableTerm
     from superglm.types import GroupSlice
 
@@ -597,7 +597,13 @@ def _refresh_fit_statistics(
     sample_weight=None,
     offset=None,
     use_fitted_design: bool = False,
+    frame: EagerFrame | None = None,
+    statistics: bool = True,
 ) -> None:
+    """Refresh fitted means and statistics; ``frame`` is the caller's adapter of ``X``.
+
+    ``statistics=False`` leaves ``_fit_stats`` empty, for a caller that forms them itself.
+    """
     from superglm.distributions import clip_mu
     from superglm.links import stabilize_eta
     from superglm.model.fit_ops import (
@@ -618,7 +624,7 @@ def _refresh_fit_statistics(
     if uses_retained_data and X_ref is not None and y_ref is not None:
         from superglm.model.fit_data_guard import require_unchanged_fit_data
 
-        require_unchanged_fit_data(model, X_ref, y_ref)
+        require_unchanged_fit_data(model, X_ref, y_ref, frame=None if X is None else frame)
     if y_ref is None:
         model._fit_stats = None
         return
@@ -636,7 +642,7 @@ def _refresh_fit_statistics(
         explicit_scoring_data or sample_weight is not None or offset is not None
     ):
         validated_override = validate_fit_input(
-            X_ref,
+            X_ref if X is None or frame is None else frame,
             y_ref,
             validation_weight,
             validation_offset,
@@ -729,16 +735,20 @@ def _refresh_fit_statistics(
         weight_semantics=model_weight_semantics(model),
     )
     deviance = weighted_row_sum(weights, model._distribution.deviance_unit, y_arr, mu)
-    model._fit_stats = _compute_fit_stats(
-        y_arr,
-        mu,
-        weights,
-        offset_arr,
-        model._distribution,
-        model._link,
-        model.result.phi,
-        null_mu=null_mu,
-        weight_semantics=model_weight_semantics(model),
+    model._fit_stats = (
+        _compute_fit_stats(
+            y_arr,
+            mu,
+            weights,
+            offset_arr,
+            model._distribution,
+            model._link,
+            model.result.phi,
+            null_mu=null_mu,
+            weight_semantics=model_weight_semantics(model),
+        )
+        if statistics
+        else None
     )
     for result_name in ("_result", "_solver_result"):
         result = getattr(model, result_name, None)

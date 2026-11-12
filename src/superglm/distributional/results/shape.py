@@ -88,7 +88,9 @@ class ShapeRepairRecord:
     certificate measures it. ``largest_change`` is the largest change of the curve on the
     repair grid, on the linear-predictor scale; ``log_scale`` says that scale is a log, so the
     change is a log relativity. ``intercept_shift`` is how far the parameter's intercept moved
-    when it was re-estimated with every term held at its repaired value.
+    when it was re-estimated with every term held at its repaired value. ``flat`` says the
+    repair published the term flat, its curve zero, as no curve the rule allows fitted better
+    than the term dropped.
     """
 
     term: str
@@ -98,10 +100,18 @@ class ShapeRepairRecord:
     largest_change: float
     log_scale: bool
     intercept_shift: float = 0.0
+    flat: bool = False
 
 
 def shape_repair_sentence(record: ShapeRepairRecord) -> str:
     """One plain sentence on what a post-fit repair did to a term."""
+    if record.flat:
+        return (
+            f"The post-fit rule {record.kind!r} on {record.term} could not be met by a curve "
+            "that fits better than dropping the term, so the term is published flat; the fitted "
+            f"curve broke the rule by up to {record.violation_before:.3g}, and the repair moved "
+            f"it by at most {_moved(record.largest_change, record.log_scale)}."
+        )
     return (
         f"The post-fit rule {record.kind!r} on {record.term} repaired the fitted curve, which "
         f"broke it by up to {record.violation_before:.3g}; the repair moved the curve by at most "

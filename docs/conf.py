@@ -126,11 +126,14 @@ nitpick_ignore_regex = [
     # ``PIRLSResult`` (solver return record), ``FeatureSpec`` (typing alias),
     # ``DiagnosticFinding`` / ``FitWorkProfile`` / ``JsonValue``
     # (fit-report records and their JSON alias), and ``ResponseBounds``
-    # (the bounded-row record a family's ``censored_recession`` reads).
+    # (the bounded-row record a family's ``censored_recession`` reads), and
+    # ``ShapeConstraintCertificate`` (the span-wise certificate a shape repair
+    # takes and returns).
     (
         "py:class",
         r"superglm\.(diagnostics\.fit_report\.(DiagnosticFinding|FitWorkProfile"
         r"|JsonValue)|distributional\.observation\.ResponseBounds"
+        r"|constraints\.ShapeConstraintCertificate"
         r"|distributions\.Distribution|links\.Link"
         r"|penalties\.base\.Penalty|solvers\.pirls\.PIRLSResult"
         r"|types\.FeatureSpec)",
@@ -138,6 +141,8 @@ nitpick_ignore_regex = [
     # Private row records behind ``ModelSummary``; private by design, so they
     # get no page and no cross-reference target.
     ("py:class", r"_(CoefRow|BasisDetailRow)"),
+    # The repairers' annotations name the certificate unqualified as well.
+    ("py:class", r"ShapeConstraintCertificate"),
     # Display helper for summary levels; not exported, so no page.
     ("py:class", r"SummaryLevelDisplay"),
     # Private declared-family bases shown by inheritance on LomaxLSS and

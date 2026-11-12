@@ -1935,7 +1935,9 @@ class SuperGLM:
         This is a manual, post-fit repair step. It finds all spline features
         configured with ``Constraint.postfit.*``, applies the corresponding
         weighted shape projection to the fitted curve, and projects the
-        repaired curve back to spline coefficients.
+        repaired curve back to spline coefficients. Where no curve with the
+        shape fits better than dropping the term, the term is published flat
+        (its curve zero) and a ``RuntimeWarning`` says so.
 
         Idempotent: calling twice does not re-repair already-repaired features.
 

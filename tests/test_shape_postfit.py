@@ -19,10 +19,12 @@ from superglm import (
 from superglm._roundoff import gamma
 from superglm.constraints import (
     _ROW_STEPS,
+    _SLACK_STEPS,
     MonotoneRepairResult,
     shape_constraint_certificate,
     shape_constraint_is_roundoff_feasible,
     shape_derivative_matrix,
+    shape_slack_tolerance,
 )
 from superglm.distributions import Gamma, Gaussian, Poisson
 from superglm.links import IdentityLink, LogLink
@@ -121,6 +123,50 @@ def test_apply_shape_postfit_installs_one_synchronized_revision_without_row_copi
     assert not model.result.beta.flags.writeable
     with pytest.raises(AttributeError, match="published"):
         model.result.deviance = 0.0
+
+
+def test_a_repair_forms_its_frame_digest_certificates_and_grid_basis_once(monkeypatch):
+    # The retained-data guard, the scoring guard and the guard the repair stores each read
+    # the frame's digest; the early exit and the repairer certify the fitted coefficients,
+    # and the repairer and the publication rule the repaired ones; the projection and the
+    # publication rule evaluate the fitted basis on the grid. Each is formed once a call.
+    import superglm.constraints as constraints
+
+    rng = np.random.default_rng(20260718)
+    x = np.linspace(0.0, 1.0, 240)
+    y = -((x - 0.4) ** 2) + 0.03 * rng.normal(size=x.size)
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=10, constraint=Constraint.postfit.convex)},
+    ).fit(X, y)
+    spec, n_grid = model._specs["x"], 500
+    counts = {"digests": 0, "certificates": 0, "grid bases": 0}
+    real_hash, real_certificate = pd.util.hash_pandas_object, constraints._certificate_candidates
+    real_transform = spec.transform
+
+    def counted_hash(frame, *args, **kwargs):
+        counts["digests"] += isinstance(frame, pd.DataFrame)
+        return real_hash(frame, *args, **kwargs)
+
+    def counted_certificate(*args, **kwargs):
+        counts["certificates"] += 1
+        return real_certificate(*args, **kwargs)
+
+    def counted_transform(points):
+        counts["grid bases"] += np.size(points) == n_grid
+        return real_transform(points)
+
+    monkeypatch.setattr(pd.util, "hash_pandas_object", counted_hash)
+    monkeypatch.setattr(constraints, "_certificate_candidates", counted_certificate)
+    monkeypatch.setattr(spec, "transform", counted_transform)
+    revision = model._fit_revision
+
+    model.apply_shape_postfit(X, n_grid=n_grid)
+
+    assert model._fit_revision == revision + 1
+    assert counts == {"digests": 1, "certificates": 2, "grid bases": 1}
 
 
 def test_gaussian_shape_repair_refreshes_dispersion_after_final_edf() -> None:
@@ -772,8 +818,8 @@ def test_monotone_repair_certifies_between_the_repair_grid_points():
     )
 
 
-def test_monotone_span_refinement_batches_violating_extrema(monkeypatch):
-    import scipy.optimize
+def test_monotone_projection_takes_few_qp_solves(monkeypatch):
+    import superglm.solvers.constrained_qp as constrained_qp
 
     rng = np.random.default_rng(13)
     x = np.linspace(0.0, 1.0, 80)
@@ -784,19 +830,1033 @@ def test_monotone_span_refinement_batches_violating_extrema(monkeypatch):
         selection_penalty=0.0,
         features={"x": PSpline(n_knots=12, constraint=Constraint.postfit.increasing)},
     ).fit(X, y)
-    real_minimize = scipy.optimize.minimize
+    real_solve = constrained_qp.solve_constrained_qp
     solve_calls = 0
 
-    def counted_minimize(*args, **kwargs):
+    def counted_solve(*args, **kwargs):
         nonlocal solve_calls
         solve_calls += 1
-        return real_minimize(*args, **kwargs)
+        return real_solve(*args, **kwargs)
 
-    monkeypatch.setattr(scipy.optimize, "minimize", counted_minimize)
+    monkeypatch.setattr(constrained_qp, "solve_constrained_qp", counted_solve)
 
     model.apply_shape_postfit(X, n_grid=500)
 
-    assert solve_calls <= 16
+    assert 1 <= solve_calls <= QP_SOLVE_BUDGET
+
+
+#: QP solves one repair may take: its exchange converges quadratically once the
+#: binding spans' minima are found, so a handful of steps suffice.
+QP_SOLVE_BUDGET = 12
+#: Relative KKT residual of the closest monotone curve, as the oracle reads it at the
+#: exact points where the derivative touches zero. Inside a span such a point is a
+#: double root, and a minimum feasible to rounding locates it only to about sqrt(u)
+#: of the span: the exchange may hold it with two cuts that far apart. So the oracle
+#: reads up to about sqrt(u) there, and about 1e-16 where the repair touches at knots.
+#: The same fixtures' repairs in the grid metric read 1e-3 to 1e-2 here.
+CLOSEST_REPAIR_KKT = float(np.sqrt(np.finfo(np.float64).eps / 2.0))
+
+_SWEEP_SHAPES = {
+    "wiggle": (lambda x: 0.9 * x + 0.25 * np.sin(12 * x), "uniform"),
+    "hook": (
+        lambda x: 0.8 * np.log1p(6 * x) - 1.2 * np.maximum(x - 0.55, 0.0) ** 1.5,
+        "beta",
+    ),
+}
+
+
+def _x_groups(model):
+    return [group for group in model._groups if group.feature_name == "x"]
+
+
+def _sweep_fit(shape, direction, family, kind, size):
+    """One fixture of the post-fit monotone sweep: a REML fit whose repair binds."""
+    import zlib
+
+    from superglm import Spline
+
+    curve, design = _SWEEP_SHAPES[shape]
+    rng = np.random.default_rng(zlib.crc32(repr((shape, direction, family, kind, size)).encode()))
+    n = 4000
+    x = rng.uniform(0.0, 1.0, n) if design == "uniform" else rng.beta(1.0, 3.0, n)
+    eta = curve(x) if direction == "increasing" else curve(1.0 - x)
+    if family == "poisson":
+        y = rng.poisson(np.exp(0.5 + eta)).astype(np.float64)
+    else:
+        y = eta + 0.35 * rng.normal(size=n)
+    constraint = getattr(Constraint.postfit, direction)
+    spline = (
+        Spline(kind="cr", k=size, constraint=constraint)
+        if kind == "cr"
+        else Spline(kind="bs", n_knots=size, constraint=constraint)
+    )
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(family=family, selection_penalty=0.0, features={"x": spline}).fit_reml(X, y)
+    return model, X
+
+
+def _wiggly_monotone_fit(kind, size):
+    return _sweep_fit("wiggle", "increasing", "gaussian", kind, size)
+
+
+@pytest.mark.parametrize(
+    ("shape", "direction", "family", "kind", "size"),
+    [
+        # The exchange used to stop after 14 span refinements, still infeasible.
+        ("wiggle", "increasing", "gaussian", "cr", 8),
+        # SLSQP used to stop 1.7e-6 of the zero-term loss short of the closest curve on
+        # the grid.
+        ("hook", "decreasing", "poisson", "bs", 8),
+    ],
+)
+def test_monotone_repair_is_the_closest_monotone_curve(shape, direction, family, kind, size):
+    from superglm.constraints import MonotoneRepairer
+    from tests._shape_projection_oracle import grid_metric, projection_certificate
+
+    model, X = _sweep_fit(shape, direction, family, kind, size)
+    spec, groups = model._specs["x"], _x_groups(model)
+    weights = shape_ops._grid_weights(
+        spec, X["x"].to_numpy(), np.asarray(model._fit_weights, dtype=np.float64), 500
+    )
+    grid_repair = MonotoneRepairer(direction).repair(
+        spec, model.result.beta, groups, weights=weights, n_grid=500
+    )
+    fitted = _term_beta(model.result.beta, groups)
+
+    certificate = _certified_repair(model, X, direction)
+
+    assert certificate.minimum_derivative >= -1e-10
+    assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
+    # Called without a metric, the public repairer projects the curve on the grid.
+    H, g = grid_metric(spec, grid_repair.grid, grid_repair.original_log_effect, weights)
+    grid_beta = _term_beta(grid_repair.repaired_beta_reparam, groups)
+    grid_certificate = projection_certificate(spec, direction, grid_beta, H, g, fitted)
+    assert grid_certificate.minimum_derivative >= -1e-10
+    assert grid_certificate.kkt_residual <= CLOSEST_REPAIR_KKT
+
+
+def _quartic_noise_fit():
+    """A quartic P-spline on 200 Gaussian rows of noise, whose bracket's inner solves stall.
+
+    Its first Bernstein inner solve exhausts every start on every OpenBLAS kernel;
+    whether a later one certifies, or the outer relaxation's does, turns on the
+    kernel's rounding.
+    """
+    rng = np.random.default_rng(4)
+    x = np.sort(rng.uniform(size=200))
+    y = rng.normal(size=200)
+    X = pd.DataFrame({"x": x})
+    feature = PSpline(n_knots=10, degree=4, m=2)
+    model = SuperGLM(
+        family="gaussian", selection_penalty=0.0, spline_penalty=0.2, features={"x": feature}
+    ).fit(X, y)
+    return model, X
+
+
+def test_grid_repair_whose_bracket_inner_solve_never_certifies_is_published(monkeypatch):
+    """A bracket whose inner solve stops off the inner cone publishes, with its gap disclosed.
+
+    Forced: the exchange is skipped, the bracket takes one step, and every start of
+    its inner solve stops uncertified at the unconstrained minimum, which breaks the
+    inner rows. The bracket then held no feasible point and the repair raised. Its
+    incumbent is feasible without a solve (the apex, or the best multiple of the
+    solve's start), so the repair is increasing everywhere and says it is not the
+    closest such curve.
+    """
+    import superglm.solvers.constrained_qp as constrained_qp
+    from superglm import constraints
+    from tests._shape_projection_oracle import grid_metric, projection_certificate
+
+    model, _ = _quartic_noise_fit()
+    spec, groups = model._specs["x"], _x_groups(model)
+    monkeypatch.setattr(constraints, "_PROJECTION_STEPS", 0)
+    monkeypatch.setattr(constraints, "_BRACKET_STEPS", 1)
+    real_solve_cone_qp = constraints._solve_cone_qp
+    inner_solves = []
+
+    def off_the_rows(H, g, A, b, **kwargs):
+        beta = np.linalg.lstsq(H, g, rcond=None)[0]
+        assert np.min(A @ beta - b) < 0.0
+        return constrained_qp.QPResult(beta=beta, n_iter=kwargs["max_iter"], converged=False)
+
+    def inner_never_certifies(*args, feasible=False, **kwargs):
+        if not feasible:
+            return real_solve_cone_qp(*args, **kwargs)
+        inner_solves.append(args[2].shape)
+        with monkeypatch.context() as patch:
+            patch.setattr(constrained_qp, "solve_constrained_qp", off_the_rows)
+            return real_solve_cone_qp(*args, feasible=True, **kwargs)
+
+    monkeypatch.setattr(constraints, "_solve_cone_qp", inner_never_certifies)
+
+    with pytest.warns(RuntimeWarning, match="stopped before it certified the closest increasing"):
+        repair = constraints.MonotoneRepairer().repair(spec, model.result.beta, groups)
+
+    assert len(inner_solves) == 1
+    H, g = grid_metric(spec, repair.grid, repair.original_log_effect, np.ones(repair.grid.size))
+    repaired = _term_beta(repair.repaired_beta_reparam, groups)
+    fitted = _term_beta(model.result.beta, groups)
+    certificate = projection_certificate(spec, "increasing", repaired, H, g, fitted)
+    assert certificate.minimum_derivative >= -1e-10
+
+
+def _rise_fit(t, x, **spline):
+    """A Gaussian fit of a wiggly rise on predictor values ``x``, sampled at positions ``t``."""
+    X = pd.DataFrame({"x": x})
+    y = 0.9 * t + 0.25 * np.sin(12 * t)
+    feature = PSpline(constraint=Constraint.postfit.increasing, **spline)
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": feature})
+    return model.fit(X, y), X
+
+
+def _term_beta(beta, groups):
+    return np.concatenate([np.asarray(beta, dtype=np.float64)[group.sl] for group in groups])
+
+
+def _posterior_metric(model):
+    """The one-term fit's penalized Hessian, read off its own posterior covariance.
+
+    The Bayesian covariance of the term's coefficients is ``phi (X'WX + S)^-1``
+    with the intercept profiled (Wood, *Shape constrained additive smooth models*,
+    Statistical Modelling 26(4), 2026, section 2), so ``phi`` times its inverse is
+    the metric the repair projects in, formed by the inference code instead of the
+    repair's. Returns it and the fitted coefficients it projects.
+    """
+    groups = _x_groups(model)
+    covariance, active = model._coef_covariance
+    assert [group.name for group in active] == [group.name for group in groups]
+    H = model._solver_result.phi * np.linalg.inv(covariance)
+    return 0.5 * (H + H.T), _term_beta(model.result.beta, groups)
+
+
+def _certified_repair(model, X, kind, **repair):
+    """Repair the fit, and certify the result as the projection in its posterior metric."""
+    from tests._shape_projection_oracle import projection_certificate
+
+    H, fitted = _posterior_metric(model)
+    model.apply_shape_postfit(X, **repair)
+    beta = _term_beta(model._shape_repairs["x"].repaired_beta_reparam, _x_groups(model))
+    return projection_certificate(model._specs["x"], kind, beta, H, H @ fitted, fitted)
+
+
+@pytest.mark.parametrize("offset", [1e8, 1e12])
+def test_monotone_repair_far_from_the_origin_is_the_closest_monotone_curve(offset):
+    """Span polynomials come from representable points, not rounded collocation nodes."""
+    t = np.linspace(0.0, 1.0, 200)
+    model, X = _rise_fit(t, offset + t, n_knots=9)
+
+    certificate = _certified_repair(model, X, "increasing")
+
+    assert certificate.minimum_derivative >= -1e-10
+    assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
+
+
+def test_monotone_repair_across_a_one_ulp_span_is_the_closest_monotone_curve():
+    """A span one ULP wide keeps its own polynomial piece in the projection's rows."""
+    rng = np.random.default_rng(3)
+    x = np.sort(rng.uniform(0.0, 1.0, 600))
+    X = pd.DataFrame({"x": x})
+    knots = [0.4, float(np.nextafter(0.4, np.inf)), 0.8]
+    feature = PSpline(knots=knots, degree=2, constraint=Constraint.postfit.increasing)
+    y = 0.9 * x + 0.25 * np.sin(12 * x) + 0.1 * rng.normal(size=x.size)
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": feature}).fit(X, y)
+
+    certificate = _certified_repair(model, X, "increasing")
+
+    assert certificate.minimum_derivative >= -1e-10
+    assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
+
+
+_REVIEW_SHAPES = {
+    "dip": lambda x: x - 0.5 * np.exp(-(((x - 0.5) / 0.07) ** 2)),
+    "rise": lambda x: np.sqrt(x) - 0.45 * x**3,
+    "hook": lambda x: 0.8 * np.log1p(6 * x) - 1.2 * np.maximum(x - 0.55, 0.0) ** 1.5,
+    "flat": lambda x: 0.0 * x,
+    "bowl": lambda x: 1.5 * (x - 0.4) ** 2 + 0.08 * np.sin(14 * x),
+}
+_REVIEW_BASES = {
+    "bs3": {"kind": "bs", "n_knots": 8},
+    "bs4": {"kind": "bs", "n_knots": 8, "degree": 4},
+    "bs5": {"kind": "bs", "n_knots": 6, "degree": 5},
+    "ps3": {"kind": "ps", "n_knots": 10},
+}
+
+
+def _review_fit(shape, direction, family, tag):
+    """One fixture of the review sweep: a REML fit, n = 4000, whose ``direction`` rule binds."""
+    import zlib
+
+    from superglm import Spline
+
+    basis = _REVIEW_BASES[tag]
+    key = repr((shape, direction, family, tag, sorted(basis.items())))
+    rng = np.random.default_rng(zlib.crc32(key.encode()) + 7)
+    n = 4000
+    x = rng.uniform(0, 1, n) if zlib.crc32(shape.encode()) % 2 else rng.beta(1.2, 2.5, n)
+    curve = _REVIEW_SHAPES[shape]
+    eta = {"decreasing": curve(1.0 - x), "concave": -curve(x)}.get(direction, curve(x))
+    if family == "poisson":
+        y = rng.poisson(np.exp(0.3 + eta)).astype(np.float64)
+    else:
+        y = eta + 0.3 * rng.normal(size=n)
+    X = pd.DataFrame({"x": x})
+    spline = Spline(constraint=getattr(Constraint.postfit, direction), **basis)
+    model = SuperGLM(family=family, selection_penalty=0.0, features={"x": spline})
+    return model.fit_reml(X, y), X
+
+
+@pytest.mark.parametrize(
+    ("shape", "direction", "family", "tag"),
+    [
+        ("dip", "increasing", "poisson", "bs4"),
+        ("rise", "decreasing", "poisson", "bs3"),
+        ("rise", "decreasing", "poisson", "ps3"),
+        ("rise", "increasing", "gaussian", "bs5"),
+        ("hook", "increasing", "poisson", "bs5"),
+        ("hook", "decreasing", "gaussian", "bs5"),
+        ("flat", "convex", "gaussian", "bs4"),
+        ("flat", "convex", "gaussian", "bs5"),
+        ("flat", "convex", "poisson", "bs5"),
+        ("bowl", "concave", "poisson", "bs4"),
+    ],
+)
+def test_repair_along_directions_the_penalty_prices_is_published(shape, direction, family, tag):
+    """Repairs master publishes, which the grid metric's exact projection refused.
+
+    Each fitted basis has wiggly directions that a sparse region of the axis barely
+    sees. The grid metric omits the smoothing penalty, so its projection travelled
+    10 to 1,000 times the fit's size along them, and the publication rule refused
+    it as worse than dropping the term. The penalized Hessian prices them as the
+    rule does: the repair publishes, and it is the projection in that metric.
+    """
+    model, X = _review_fit(shape, direction, family, tag)
+
+    certificate = _certified_repair(model, X, direction)
+
+    assert certificate.minimum_derivative >= -1e-10
+    assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
+
+
+def _beta_rise(family, n=3000):
+    """A wiggly rise on a skewed axis, n rows: an increasing rule binds where it wiggles."""
+    rng = np.random.default_rng(11)
+    x = rng.beta(1.2, 2.5, n)
+    eta = 0.9 * x + 0.25 * np.sin(12 * x)
+    if family == "poisson":
+        return pd.DataFrame({"x": x}), rng.poisson(np.exp(0.3 + eta)).astype(np.float64)
+    return pd.DataFrame({"x": x}), eta + 0.3 * rng.normal(size=n)
+
+
+@pytest.mark.parametrize("family", ["gaussian", "poisson"])
+def test_select_term_is_projected_in_both_of_its_penalties(family):
+    """``select=True`` adds a null-space penalty with its own smoothing parameter.
+
+    The posterior's precision carries both, so a metric missing either one fails
+    the oracle's optimality check.
+    """
+    from superglm import Spline
+
+    X, y = _beta_rise(family)
+    feature = Spline(kind="bs", n_knots=8, select=True, constraint=Constraint.postfit.increasing)
+    model = SuperGLM(family=family, selection_penalty=0.0, features={"x": feature}).fit_reml(X, y)
+    assert len([penalty for penalty in model._reml_penalties if penalty.group_name == "x"]) == 2
+
+    certificate = _certified_repair(model, X, "increasing")
+
+    assert certificate.minimum_derivative >= -1e-10
+    assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
+
+
+@pytest.mark.parametrize("selection_penalty", [0.1, 10.0])
+@pytest.mark.parametrize("family", ["gaussian", "poisson"])
+def test_repair_under_a_selection_penalty_is_the_projection_in_the_smooth_metric(
+    family, selection_penalty
+):
+    """The rule's merit carries the group lasso; the metric is the smooth's ``X'WX + S``.
+
+    The posterior adds the lasso's curvature, ``lambda w / ||beta|| (I - u u')``
+    (``pirls._add_selection_local_curvature``), so the reference takes it off again.
+    The term stays selected, and its repair publishes.
+    """
+    from tests._shape_projection_oracle import projection_certificate
+
+    X, y = _beta_rise(family)
+    feature = PSpline(n_knots=10, constraint=Constraint.postfit.increasing)
+    model = SuperGLM(family=family, selection_penalty=selection_penalty, features={"x": feature})
+    model.fit(X, y)
+    (group,) = _x_groups(model)
+    posterior, fitted = _posterior_metric(model)
+    norm = float(np.linalg.norm(fitted))
+    unit = fitted / norm
+    curvature = (
+        selection_penalty * group.weight / norm * (np.eye(fitted.size) - np.outer(unit, unit))
+    )
+    H = posterior - curvature
+
+    model.apply_shape_postfit(X)
+
+    beta = _term_beta(model._shape_repairs["x"].repaired_beta_reparam, [group])
+    certificate = projection_certificate(
+        model._specs["x"], "increasing", beta, H, H @ fitted, fitted
+    )
+    assert np.any(beta != 0.0)
+    assert certificate.minimum_derivative >= -1e-10
+    assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
+
+
+def test_repair_metric_reads_the_fits_kept_gram_as_it_would_form_it():
+    """The fit keeps its centred data Gram at its weights; the metric reads it in place.
+
+    Read, it equals the Gram formed over the rows to rounding, and it is still there
+    for the fit's first inference, which takes it.
+    """
+    from superglm.model import state_ops
+
+    model, _ = _sweep_fit("hook", "decreasing", "poisson", "bs", 8)
+    groups = _x_groups(model)
+    W = state_ops._solver_space_working_weights(model)
+    record = model._solver_result.rank_info
+    assert record.data_gram is not None
+
+    kept = shape_ops._term_data_hessian(model, groups, W)
+
+    assert record.data_gram is not None
+    model._fit_inference_info  # noqa: B018 - the first inference takes the Gram
+    assert record.data_gram is None
+    formed = shape_ops._term_data_hessian(model, groups, W)
+    (matrix,) = [
+        gm for gm, g in zip(model._dm.group_matrices, model._groups, strict=True) if g in groups
+    ]
+    columns = np.column_stack([matrix.matvec(unit) for unit in np.eye(formed.shape[0])])
+    magnitude = np.abs(columns).T @ (W[:, None] * np.abs(columns))
+    np.testing.assert_array_less(
+        np.abs(kept - formed), gamma(W.size + 2) * 4.0 * magnitude + 1e-300
+    )
+
+
+def test_two_group_term_metric_holds_its_cross_blocks():
+    """A term on two column groups gets one ``X'WX``, cross blocks included, intercept profiled.
+
+    The profiled Gram is the Gram of the columns centred at their weighted means.
+    """
+    from superglm import Spline
+
+    rng = np.random.default_rng(5)
+    n = 400
+    X = pd.DataFrame({"a": rng.uniform(0.0, 1.0, n), "b": rng.uniform(0.0, 1.0, n)})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"a": Spline(kind="cr", k=6), "b": Spline(kind="cr", k=6)},
+    )
+    model._add_interaction("a", "b", decompose=True)
+    model._build_design_matrix(X, rng.normal(size=n), np.ones(n), None)
+    pairs = [
+        (matrix, group)
+        for matrix, group in zip(model._dm.group_matrices, model._groups, strict=True)
+        if group.subgroup_type in {"bilinear", "wiggly"}
+    ]
+    assert len(pairs) == 2
+    W = rng.uniform(0.5, 2.0, n)
+    columns = np.column_stack(
+        [matrix.matvec(unit) for matrix, group in pairs for unit in np.eye(group.size)]
+    )
+    centred = columns - (W @ columns) / W.sum()
+    expected = centred.T @ (W[:, None] * centred)
+
+    metric = shape_ops._term_data_hessian(model, [group for _, group in pairs], W)
+
+    magnitude = np.abs(columns).T @ (W[:, None] * np.abs(columns))
+    np.testing.assert_array_less(np.abs(metric - expected), gamma(n + 2) * 4.0 * magnitude + 1e-300)
+
+
+@pytest.mark.parametrize(("n_knots", "degree"), [(0, 1), (6, 3)])
+def test_repair_after_summary_publishes_what_it_publishes_before(n_knots, degree):
+    """``summary()`` takes the fit's kept Gram, so the repair forms its metric again.
+
+    One row carries unit weight and the rest 1e-20, so the term's curvature, about 7e-19,
+    is far below the rounding of its raw moments. Profiled as ``X'WX - (X'W1)(1'WX) / 1'W``
+    it came out -6e-17, and the repair refused the metric as not positive definite. Formed
+    from centred columns, as the fit forms it, the repair publishes the same curve.
+    """
+    x = np.linspace(0.0, 1.0, 100)
+    X = pd.DataFrame({"x": x})
+    weights = np.full(x.size, 1e-20)
+    weights[-1] = 1.0
+    feature = PSpline(
+        n_knots=n_knots,
+        degree=degree,
+        m=1,
+        penalty="none",
+        constraint=Constraint.postfit.increasing,
+    )
+    model = SuperGLM(
+        family="gaussian", selection_penalty=0.0, spline_penalty=0.0, features={"x": feature}
+    ).fit(X, 1.0 - x, sample_weight=weights)
+    summarised = copy.deepcopy(model)
+    summarised.summary()
+    assert summarised._solver_result.rank_info.data_gram is None
+
+    model.apply_shape_postfit(X)
+    summarised.apply_shape_postfit(X)
+
+    assert "x" in model._shape_repairs and "x" in summarised._shape_repairs
+    np.testing.assert_allclose(summarised.predict(X), model.predict(X), rtol=0.0, atol=1e-12)
+
+
+def test_repair_under_a_large_smoothing_parameter_is_the_projection_in_the_fits_hessian():
+    """The metric's penalty block is formed as the fit forms it, from a transported root.
+
+    At lambda 1e14 the congruence ``R' Omega R`` left rounding on the penalty's null space
+    that lambda turned into up to 2% of the data's curvature there, and the repair was the
+    projection in another metric: a KKT residual of 7e-5 in the posterior's.
+    """
+    x = np.linspace(0.0, 1.0, 200)
+    X = pd.DataFrame({"x": x})
+    feature = PSpline(n_knots=9, m=3, constraint=Constraint.postfit.increasing)
+    model = SuperGLM(
+        family="gaussian", selection_penalty=0.0, spline_penalty=1e14, features={"x": feature}
+    ).fit(X, (x - 0.4) ** 2)
+
+    certificate = _certified_repair(model, X, "increasing")
+
+    assert certificate.minimum_derivative >= -1e-10
+    assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
+
+
+@pytest.mark.parametrize("scale", [1e165, 1e-150])
+def test_monotone_repair_in_extreme_predictor_units_matches_unit_units(scale):
+    """Derivative rows that would under- or overflow are normalized range-safely."""
+    t = np.linspace(0.0, 1.0, 200)
+    spline = {"n_knots": 9, "penalty": "none", "m": 1}
+    unit, X_unit = _rise_fit(t, t, **spline)
+    scaled, X_scaled = _rise_fit(t, scale * t, **spline)
+
+    unit.apply_shape_postfit(X_unit)
+    scaled.apply_shape_postfit(X_scaled)
+
+    expected = unit._shape_repairs["x"].repaired_log_effect
+    repaired = scaled._shape_repairs["x"].repaired_log_effect
+    np.testing.assert_allclose(repaired, expected, rtol=0.0, atol=1e-9 * np.max(np.abs(expected)))
+
+
+def test_monotone_repair_on_a_grid_coarser_than_the_basis_is_published():
+    """Five grid points cannot pin twelve coefficients: the grid metric is semidefinite.
+
+    The repairer called without a metric projects on that grid; the full call
+    projects in the penalized Hessian over the rows, which is definite.
+    """
+    from superglm.constraints import MonotoneRepairer
+
+    t = np.linspace(0.0, 1.0, 200)
+    model, X = _rise_fit(t, t, n_knots=7, degree=5, m=1, penalty="none")
+    spec, groups = model._specs["x"], _x_groups(model)
+    fit_weights = np.asarray(model._fit_weights, dtype=np.float64)
+    weights = shape_ops._grid_weights(spec, X["x"].to_numpy(), fit_weights, 5)
+    grid_repair = MonotoneRepairer("increasing").repair(
+        spec, model.result.beta, groups, weights=weights, n_grid=5
+    )
+
+    model.apply_shape_postfit(X, n_grid=5)
+
+    for repair in (grid_repair, model._shape_repairs["x"]):
+        beta = _term_beta(repair.repaired_beta_reparam, groups)
+        assert shape_constraint_is_roundoff_feasible(spec, beta, "increasing")
+
+
+def test_monotone_repair_on_a_wide_piecewise_linear_basis_is_published():
+    """A 440-row projection gets a budget that grows with its rows."""
+    x = np.linspace(0.0, 1.0, 1000)
+    X = pd.DataFrame({"x": x})
+    feature = PSpline(
+        n_knots=220, degree=1, m=1, penalty="none", constraint=Constraint.postfit.increasing
+    )
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": feature})
+    model.fit(X, 1.0 - x)
+
+    model.apply_shape_postfit(X)
+
+    repair = model._shape_repairs["x"]
+    assert repair.max_violation_after == 0.0
+
+
+def test_distinct_unit_rows_memory_is_linear_in_the_rows():
+    """Repeated rows are found without an all-pairs comparison."""
+    import tracemalloc
+
+    from superglm.constraints import _distinct_unit_rows
+
+    rows = np.random.default_rng(0).normal(size=(400, 200))
+    repeated = np.vstack([rows, 3.0 * rows])
+
+    tracemalloc.start()
+    try:
+        unit, merged = _distinct_unit_rows(repeated)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert unit.shape == rows.shape
+    assert merged == [[index, index + 400] for index in range(400)]
+    assert peak <= 16 * repeated.nbytes
+
+
+def test_distinct_unit_rows_memory_is_linear_when_the_rows_share_a_sum():
+    """An evenly spaced degree-0 basis's jump rows share their entry sums.
+
+    Every pair then falls in one sorted window; comparing them all at once held
+    about 400 times the rows.
+    """
+    import tracemalloc
+
+    from superglm.constraints import (
+        _distinct_unit_rows,
+        _shape_breakpoints,
+        _shape_constraint_rows,
+    )
+
+    x = np.repeat(np.linspace(0.0, 1.0, 401), 3)
+    feature = PSpline(
+        n_knots=399, degree=0, m=1, penalty="none", constraint=Constraint.postfit.increasing
+    )
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": feature})
+    model.fit(pd.DataFrame({"x": x}), np.sin(6.0 * x))
+    spec = model._specs["x"]
+    rows = _shape_constraint_rows(spec, _shape_breakpoints(spec), "increasing")
+
+    tracemalloc.start()
+    try:
+        unit, merged = _distinct_unit_rows(rows)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert unit.shape == (399, rows.shape[1])
+    assert merged == [[index] for index in range(399)]
+    assert peak <= 16 * rows.nbytes
+
+
+def test_curvature_repair_of_arbitrary_coefficients_is_published():
+    """A solve whose own start stays outside the cone starts from a point inside it."""
+    from superglm import Spline
+    from superglm.constraints import CurvatureRepairer
+
+    x = np.linspace(0.0, 1.0, 500)
+    X = pd.DataFrame({"x": x})
+    feature = Spline(kind="cr", k=20, constraint=Constraint.postfit.convex)
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": feature})
+    model.fit(X, np.sin(6.0 * x))
+    spec, groups = model._specs["x"], _x_groups(model)
+    beta = model.result.beta.copy()
+    coefficients = np.random.default_rng(0).normal(size=sum(group.size for group in groups))
+    offset = 0
+    for group in groups:
+        beta[group.sl] = coefficients[offset : offset + group.size]
+        offset += group.size
+
+    repair = CurvatureRepairer("convex").repair(spec, beta, groups, n_grid=500)
+
+    repaired = np.concatenate([repair.repaired_beta_reparam[group.sl] for group in groups])
+    assert shape_constraint_is_roundoff_feasible(spec, repaired, "convex")
+
+
+@pytest.mark.slow
+def test_monotone_repair_on_a_hundred_knot_basis_is_published():
+    """Most of a large basis's rows bind; every solve still certifies."""
+    from superglm import Spline
+
+    rng = np.random.default_rng(0)
+    x = rng.uniform(0.0, 1.0, 4000)
+    X = pd.DataFrame({"x": x})
+    y = 0.9 * x + 0.25 * np.sin(12 * x) + 0.3 * rng.normal(size=x.size)
+    feature = Spline(kind="ps", n_knots=100, constraint=Constraint.postfit.increasing)
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": feature})
+    model.fit(X, y)
+
+    certificate = _certified_repair(model, X, "increasing")
+
+    assert certificate.minimum_derivative >= -1e-10
+
+
+def _qp_iterations(monkeypatch):
+    import superglm.solvers.constrained_qp as constrained_qp
+
+    real_solve = constrained_qp.solve_constrained_qp
+    count = {"solves": 0, "iterations": 0}
+
+    def counted_solve(*args, **kwargs):
+        result = real_solve(*args, **kwargs)
+        count["solves"] += 1
+        count["iterations"] += result.n_iter
+        return result
+
+    monkeypatch.setattr(constrained_qp, "solve_constrained_qp", counted_solve)
+    return count
+
+
+#: Active-set iterations of a curvature repair on a degree-4 basis, whose curvature
+#: is quadratic on each span, so the exchange runs. Warm-started solves in the
+#: penalized Hessian take it to about 300; from the QP's own start it took 2,409.
+CURVATURE_EXCHANGE_ITERATIONS = 900
+
+
+def test_curvature_exchange_on_a_degree_four_basis_takes_few_iterations(monkeypatch):
+    """The review's slowest curvature repair: a flat concave fit on a quartic basis."""
+    import zlib
+
+    from superglm import Spline
+
+    key = (
+        "flat",
+        "concave",
+        "gaussian",
+        "bs4",
+        sorted(dict(kind="bs", n_knots=8, degree=4).items()),
+    )
+    rng = np.random.default_rng(zlib.crc32(repr(key).encode()) + 7)
+    x = rng.uniform(0, 1, 4000) if zlib.crc32(b"flat") % 2 else rng.beta(1.2, 2.5, 4000)
+    y = 0.3 * rng.normal(size=x.size)
+    X = pd.DataFrame({"x": x})
+    feature = Spline(kind="bs", n_knots=8, degree=4, constraint=Constraint.postfit.concave)
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": feature})
+    model.fit_reml(X, y)
+    count = _qp_iterations(monkeypatch)
+
+    model.apply_shape_postfit(X)
+
+    assert "x" in model._shape_repairs
+    assert count["iterations"] <= CURVATURE_EXCHANGE_ITERATIONS, count
+
+
+#: Active-set iterations of a one-QP curvature repair: started inside the cone at
+#: the rows the fitted curve breaks, the solve certifies in 7; from its own start
+#: it took 16.
+ONE_QP_ITERATIONS = 12
+
+
+def test_one_qp_curvature_repair_takes_few_iterations(monkeypatch):
+    """A cubic P-spline's curvature is linear on each span, so one warm-started QP is exact."""
+    rng = np.random.default_rng(20261111)
+    x = np.sort(rng.uniform(0.0, 1.0, 600))
+    X = pd.DataFrame({"x": x})
+    y = 1.5 * (x - 0.4) ** 2 + 0.08 * np.sin(14 * x) + 0.05 * rng.normal(size=x.size)
+    feature = PSpline(n_knots=12, constraint=Constraint.postfit.convex)
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": feature}).fit(X, y)
+    count = _qp_iterations(monkeypatch)
+
+    model.apply_shape_postfit(X)
+
+    assert "x" in model._shape_repairs
+    assert count["solves"] == 1
+    assert count["iterations"] <= ONE_QP_ITERATIONS, count
+
+
+# A grid repair at near-zero weights, below. Most spans of these projections come out
+# flat, and a flat span's lowest point was its rounding: cuts there made the QPs
+# degenerate, so starts ran their whole budgets, and its curvature took each exchange
+# step past the rank cut, where the QP refused it. Iteration totals on this
+# near-singular metric turn on the BLAS kernel's rounding (the 200-knot repair takes
+# 279 to 1,134 single-threaded across this host's OpenBLAS kernels, and 1,585 on Linux
+# ARM64), so the tests assert what the fix makes structural: the flat-span rule
+# fires, every cone QP certifies, and at 200 knots the QP is given the floored,
+# full-rank metric. The counts are a backstop well above every kernel's and below the
+# unfixed code's: at 721150d40 the four 120-knot repairs took 249, 14,977, 2,974 and
+# 468 iterations, and the 200-knot one 8,697.
+NEAR_ZERO_GRID_ITERATIONS = 1_000
+FLOORED_GRID_ITERATIONS = 4_000
+
+
+def _repair_work(monkeypatch):
+    """Spies on a repair's work: QP iterations and ranks, cone solves, flat spans skipped."""
+    import superglm.solvers.constrained_qp as constrained_qp
+    from superglm import constraints
+
+    work = {"iterations": 0, "truncated": 0, "uncertified": 0, "flat": 0}
+    real_qp = constrained_qp.solve_constrained_qp
+    real_cone = constraints._solve_cone_qp
+    real_minimum = constraints._piece_minimum
+
+    def qp(*args, **kwargs):
+        result = real_qp(*args, **kwargs)
+        work["iterations"] += result.n_iter
+        work["truncated"] += result.rank < result.width
+        return result
+
+    def cone(*args, **kwargs):
+        result = real_cone(*args, **kwargs)
+        work["uncertified"] += result is None
+        return result
+
+    def minimum(piece, p, beta, skip_flat=False):
+        if not skip_flat:
+            return real_minimum(piece, p, beta)
+        found = real_minimum(piece, p, beta, skip_flat)
+        work["flat"] += found is None and real_minimum(piece, p, beta) is not None
+        return found
+
+    monkeypatch.setattr(constrained_qp, "solve_constrained_qp", qp)
+    monkeypatch.setattr(constraints, "_solve_cone_qp", cone)
+    monkeypatch.setattr(constraints, "_piece_minimum", minimum)
+    return work
+
+
+def _near_zero_weight_repair(data, direction, knots, monkeypatch):
+    """A ``ps`` repair on the grid at raw frequencies plus 1e-12: the grid metric and its work."""
+    import warnings
+
+    from superglm import Spline
+    from superglm.constraints import MonotoneRepairer
+    from tests._shape_projection_oracle import grid_metric, projection_certificate
+
+    rng = np.random.default_rng(0)
+    if data == "gapped":
+        u = rng.uniform(0.0, 0.6, 3000)
+        x = np.where(u < 0.3, u, u + 0.4)
+    else:
+        x = rng.beta(0.4, 3.0, 3000)
+    t = x if direction == "increasing" else 1.0 - x
+    y = 0.9 * t + 0.25 * np.sin(12 * t) + 0.3 * rng.normal(size=x.size)
+    feature = Spline(kind="ps", n_knots=knots, constraint=getattr(Constraint.postfit, direction))
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": feature})
+    model.fit(pd.DataFrame({"x": x}), y)
+    spec, groups = model._specs["x"], _x_groups(model)
+    counts = np.histogram(x, bins=500)[0]
+    weights = counts / counts.sum() + 1e-12
+    work = _repair_work(monkeypatch)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        repair = MonotoneRepairer(direction).repair(
+            spec, model.result.beta, groups, weights=weights
+        )
+
+    H, g = grid_metric(spec, repair.grid, repair.original_log_effect, weights)
+    repaired = _term_beta(repair.repaired_beta_reparam, groups)
+    fitted = _term_beta(model.result.beta, groups)
+    return H, projection_certificate(spec, direction, repaired, H, g, fitted), work
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("direction", ["increasing", "decreasing"])
+@pytest.mark.parametrize("data", ["gapped", "skewed"])
+def test_grid_repair_with_near_zero_weights_on_a_large_basis_is_the_closest_curve(
+    data, direction, monkeypatch
+):
+    """120-knot P-splines on data with a gap or a long tail, at the grid's raw frequencies."""
+    _, certificate, work = _near_zero_weight_repair(data, direction, 120, monkeypatch)
+    assert certificate.minimum_derivative >= -1e-10
+    assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
+    assert work["flat"] > 0, work
+    # No exchange step's QP is left uncertified, nor a curvature step refused at the rank cut.
+    assert work["uncertified"] == 0, work
+    assert work["iterations"] <= NEAR_ZERO_GRID_ITERATIONS, work
+
+
+@pytest.mark.slow
+def test_grid_repair_on_a_metric_the_qp_would_truncate_is_the_closest_curve(monkeypatch):
+    """A 200-knot P-spline whose grid metric loses a direction to the rank cut, floored."""
+    from superglm.constraints import _jacobi_scale
+    from superglm.solvers.rank import _symmetric_part, decompose_gram
+
+    H, certificate, work = _near_zero_weight_repair("skewed", "increasing", 200, monkeypatch)
+    scale = _jacobi_scale(H)
+    decomposition = decompose_gram(_symmetric_part(H * scale[:, None] * scale[None, :]))
+    assert decomposition.rank < decomposition.width
+    # Measured in the caller's unfloored metric.
+    assert certificate.minimum_derivative >= -1e-10
+    assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
+    assert work["flat"] > 0, work
+    # The QP is given the floored metric, which it does not truncate.
+    assert work["truncated"] == 0, work
+    assert work["iterations"] <= FLOORED_GRID_ITERATIONS, work
+
+
+# The flat Poisson fixture of the review sweep. Its grid weights fall to 1e-5 of
+# the rest in the sparse tail, so the grid metric's cond(H) passes 1 / u, and an
+# unscaled solve certified on some OpenBLAS kernels and cycled on others. The
+# public repairer still projects in that metric when called without one; the full
+# call projects in the penalized Hessian, whose Gram goes through BLAS as well.
+_KERNEL_FIXTURE = """
+import sys, warnings, zlib
+import numpy as np, pandas as pd
+from superglm import Constraint, Spline, SuperGLM
+warnings.simplefilter("ignore")
+key = ("flat", "decreasing", "poisson", "bs5", sorted(dict(kind="bs", n_knots=6, degree=5).items()))
+rng = np.random.default_rng(zlib.crc32(repr(key).encode()) + 7)
+x = rng.uniform(0, 1, 4000) if zlib.crc32(b"flat") % 2 else rng.beta(1.2, 2.5, 4000)
+y = rng.poisson(np.exp(0.3), 4000).astype(float)
+X = pd.DataFrame({"x": x})
+spline = Spline(kind="bs", n_knots=6, degree=5, constraint=Constraint.postfit.decreasing)
+model = SuperGLM(family="poisson", selection_penalty=0.0, features={"x": spline}).fit_reml(X, y)
+from superglm.constraints import MonotoneRepairer
+from superglm.model import shape_ops
+spec, groups = model._specs["x"], [g for g in model._groups if g.feature_name == "x"]
+weights = shape_ops._grid_weights(spec, x, np.asarray(model._fit_weights, dtype=float), 500)
+try:
+    grid = MonotoneRepairer("decreasing").repair(spec, model.result.beta, groups, weights=weights)
+except RuntimeError as exc:
+    print("refused", exc)
+else:
+    print("published", " ".join(repr(float(v)) for v in grid.repaired_log_effect))
+try:
+    model.apply_shape_postfit(X)
+except RuntimeError as exc:
+    print("refused", exc)
+else:
+    print("published", " ".join(repr(float(v)) for v in model._shape_repairs["x"].repaired_log_effect))
+"""
+
+#: How a process ends when it runs an instruction its CPU lacks: killed by SIGILL on
+#: POSIX, ``STATUS_ILLEGAL_INSTRUCTION`` on Windows.
+_ILLEGAL_INSTRUCTION_EXITS = {-4, 0xC000001D}
+
+#: The x86 instruction set each forced OpenBLAS kernel needs, as NumPy's CPU feature table
+#: names it. On Windows a kernel forced past the CPU can also die of an access violation
+#: (``0xC0000005``), which a real crash gives too, so such a kernel is left out before it
+#: runs. A host whose table lacks the name (ARM64) ignores x86 kernel names anyway.
+_KERNEL_INSTRUCTIONS = {
+    "SkylakeX": "AVX512F",
+    "Haswell": "AVX2",
+    "Zen": "AVX2",
+    "Sandybridge": "AVX",
+}
+
+
+def _cpu_lacks(kernel):
+    from numpy._core._multiarray_umath import __cpu_features__
+
+    needed = _KERNEL_INSTRUCTIONS.get(kernel)
+    return needed is not None and __cpu_features__.get(needed) is False
+
+
+def _kernel_outcomes(script, kernels):
+    """Each OpenBLAS kernel's output lines of ``script``, split into words.
+
+    A kernel forced past the host CPU's instruction set (SkylakeX's AVX-512 on an AVX2
+    runner) dies of an illegal instruction: it cannot run here, so it is reported
+    and left out. Any other failure fails the test.
+    """
+    import os
+    import subprocess
+    import warnings
+
+    outcomes, not_run = {}, {}
+    for kernel in kernels:
+        if _cpu_lacks(kernel):
+            not_run[kernel] = f"the CPU lacks {_KERNEL_INSTRUCTIONS[kernel]}"
+            continue
+        environment = {**os.environ, "OPENBLAS_CORETYPE": kernel, "OPENBLAS_NUM_THREADS": "1"}
+        run = subprocess.run(
+            [sys.executable, "-c", script],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=300,
+        )
+        if run.returncode in _ILLEGAL_INSTRUCTION_EXITS:
+            not_run[kernel] = f"illegal instruction (exit {run.returncode}): the CPU lacks it"
+            continue
+        assert run.returncode == 0, (kernel, run.returncode, run.stderr[-4000:])
+        outcomes[kernel] = [line.split() for line in run.stdout.splitlines()]
+
+    if not_run:
+        warnings.warn(f"OpenBLAS kernels this CPU cannot run, left out: {not_run}", stacklevel=2)
+    if len(outcomes) < 2:
+        pytest.skip(f"fewer than two OpenBLAS kernels run on this CPU; left out {not_run}")
+    return outcomes
+
+
+@pytest.mark.slow
+def test_repair_decision_is_the_same_on_every_blas_kernel():
+    """Publish or refuse, and the repaired curve, agree across OpenBLAS microkernels.
+
+    Each kernel runs the grid-metric repairer and the full call, in that order.
+    """
+    outcomes = _kernel_outcomes(_KERNEL_FIXTURE, ("Haswell", "Zen", "SkylakeX", "Sandybridge"))
+    for metric in (0, 1):
+        decisions = {kernel: lines[metric][0] for kernel, lines in outcomes.items()}
+        assert set(decisions.values()) == {"published"}, (metric, decisions)
+        curves = [np.asarray([float(v) for v in lines[metric][1:]]) for lines in outcomes.values()]
+        for curve in curves[1:]:
+            np.testing.assert_allclose(curve, curves[0], rtol=0.0, atol=1e-9)
+
+
+# The quartic P-spline of _quartic_noise_fit, through the public grid repairer. On an
+# AVX-512 host's Prescott and Nehalem kernels its bracket's outer relaxation does not
+# certify either, so the bracket stops at its incumbent and discloses the gap; on
+# SkylakeX, Haswell and Sandybridge it closes. On macOS ARM64 the bracket used to end
+# with no feasible point, and the repair raised.
+_BRACKET_KERNEL_FIXTURE = """
+import warnings
+import numpy as np, pandas as pd
+from superglm import PSpline, SuperGLM
+from superglm.constraints import MonotoneRepairer
+rng = np.random.default_rng(4)
+x = np.sort(rng.uniform(size=200))
+y = rng.normal(size=200)
+feature = PSpline(n_knots=10, degree=4, m=2)
+model = SuperGLM(
+    family="gaussian", selection_penalty=0.0, spline_penalty=0.2, features={"x": feature}
+).fit(pd.DataFrame({"x": x}), y)
+spec, groups = model._specs["x"], [g for g in model._groups if g.feature_name == "x"]
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    try:
+        repair = MonotoneRepairer().repair(spec, model.result.beta, groups)
+    except RuntimeError as exc:
+        print("refused", exc)
+        raise SystemExit
+gap = any("stopped before it certified" in str(w.message) for w in caught)
+print("published", "disclosed" if gap else "certified")
+print(" ".join(repr(float(v)) for v in repair.repaired_log_effect))
+print(" ".join(repr(float(v)) for g in groups for v in repair.repaired_beta_reparam[g.sl]))
+"""
+
+
+@pytest.mark.slow
+def test_bracket_repair_publishes_on_every_blas_kernel():
+    """Every OpenBLAS kernel publishes the bracketed repair, increasing everywhere.
+
+    A kernel whose bracket closes publishes a curve within the bracket's objective gap
+    of the closest one, so those curves agree in the caller's metric: the distance from
+    the fitted curve, in units of the zero term's. Their values can differ by more, along
+    directions the near-singular grid metric barely weighs.
+    One whose bracket does not close discloses that, and publishes its best feasible point.
+    """
+    import warnings
+
+    from superglm.constraints import _OBJECTIVE_GAP, MonotoneRepairer
+    from tests._shape_projection_oracle import grid_metric, projection_certificate
+
+    model, _ = _quartic_noise_fit()
+    spec, groups = model._specs["x"], _x_groups(model)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        local = MonotoneRepairer().repair(spec, model.result.beta, groups)
+    H, g = grid_metric(spec, local.grid, local.original_log_effect, np.ones(local.grid.size))
+    fitted = _term_beta(model.result.beta, groups)
+    outcomes = _kernel_outcomes(
+        _BRACKET_KERNEL_FIXTURE, ("Prescott", "Nehalem", "Sandybridge", "Haswell", "SkylakeX")
+    )
+    decisions = {kernel: lines[0] for kernel, lines in outcomes.items()}
+    assert all(decision[0] == "published" for decision in decisions.values()), decisions
+    certified = []
+    for kernel, ((_, status), curve, beta) in outcomes.items():
+        coefficients = np.asarray([float(v) for v in beta])
+        certificate = projection_certificate(spec, "increasing", coefficients, H, g, fitted)
+        assert certificate.minimum_derivative >= -1e-10, (kernel, certificate)
+        if status == "certified":
+            certified.append(coefficients)
+    # Two points each within _OBJECTIVE_GAP of the optimum in the scaled objective, where
+    # the zero term's distance is one, lie within twice that of each other; the rest is
+    # the rounding of forming the distances here.
+    zero = 0.5 * float(fitted @ H @ fitted)
+    # A host whose kernels all disclose, such as ARM64, where the x86 kernel names select
+    # nothing, has no two certified points to compare.
+    gaps = [0.5 * float((b - fitted) @ H @ (b - fitted)) / zero for b in certified]
+    if len(gaps) >= 2:
+        assert max(gaps) - min(gaps) <= 2.0 * _OBJECTIVE_GAP + 2.0**-40, gaps
 
 
 def test_select_convex_repair_certifies_each_polynomial_span():
@@ -870,8 +1930,8 @@ def test_invalid_curvature_repair_is_rejected_before_publication(monkeypatch):
     original_predictions = model.predict(X)
 
     class InvalidRepairer:
-        def repair(self, spec, beta, groups, *, weights, n_grid):
-            del groups, weights
+        def repair(self, spec, beta, groups, *, weights, n_grid, metric):
+            del groups, weights, metric
             grid = np.linspace(spec._lo, spec._hi, n_grid)
             invalid_beta = np.full_like(beta, 1e100)
             invalid_curve = np.full(n_grid, 1e100)
@@ -899,11 +1959,8 @@ def test_invalid_curvature_repair_is_rejected_before_publication(monkeypatch):
     np.testing.assert_array_equal(model.predict(X), original_predictions)
 
 
-def test_failed_curvature_optimizer_rolls_back_fitted_state(monkeypatch):
-    from types import SimpleNamespace
-
-    import scipy.optimize
-
+def test_qp_that_never_certifies_a_curvature_projection_is_disclosed(monkeypatch):
+    """No QP solve certifies a convex repair: published convex everywhere, with a warning."""
     rng = np.random.default_rng(3)
     x = np.linspace(0.0, 1.0, 120)
     X = pd.DataFrame({"x": x})
@@ -913,29 +1970,15 @@ def test_failed_curvature_optimizer_rolls_back_fitted_state(monkeypatch):
         selection_penalty=0.0,
         features={"x": PSpline(n_knots=10, constraint=Constraint.postfit.convex)},
     ).fit(X, y)
-    original_dict = model.__dict__
-    original_result = model.result
-    original_beta = model.result.beta.copy()
-    original_predictions = model.predict(X)
+    _never_certifying_qp(monkeypatch, nnls_stops=False)
 
-    monkeypatch.setattr(
-        scipy.optimize,
-        "minimize",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            success=False,
-            status=9,
-            message="injected iteration limit",
-        ),
-    )
-
-    with pytest.raises(RuntimeError, match="Curvature projection failed to converge"):
+    with pytest.warns(RuntimeWarning, match="stopped before it certified the closest convex"):
         model.apply_shape_postfit(X)
 
-    assert model.__dict__ is original_dict
-    assert model.result is original_result
-    assert not hasattr(model, "_shape_repairs")
-    np.testing.assert_array_equal(model.result.beta, original_beta)
-    np.testing.assert_array_equal(model.predict(X), original_predictions)
+    beta = _term_beta(model._shape_repairs["x"].repaired_beta_reparam, _x_groups(model))
+    assert _minimum_signed_derivative(model._specs["x"], beta, "convex") >= -1e-12 * float(
+        np.linalg.norm(beta)
+    )
 
 
 def test_infeasible_monotone_repair_is_rejected_atomically(monkeypatch):
@@ -953,8 +1996,8 @@ def test_infeasible_monotone_repair_is_rejected_atomically(monkeypatch):
     original_predictions = model.predict(X)
 
     class FalselyCertifiedRepairer:
-        def repair(self, spec, beta, groups, *, weights, n_grid):
-            del groups, weights
+        def repair(self, spec, beta, groups, *, weights, n_grid, metric):
+            del groups, weights, metric
             reconstruction = spec.reconstruct(beta, n_points=n_grid)
             return MonotoneRepairResult(
                 feature_name="",
@@ -999,8 +2042,8 @@ def test_publication_rejects_sub_grid_scaled_derivative_violation(monkeypatch):
     assert -2e-9 < certificate.minimum_scaled_slack < -1e-10
 
     class SubGridInfeasibleRepairer:
-        def repair(self, _spec, beta, groups, *, weights, n_grid):
-            del groups, weights
+        def repair(self, _spec, beta, groups, *, weights, n_grid, metric):
+            del groups, weights, metric
             reconstruction = _spec.reconstruct(beta, n_points=n_grid)
             grid = reconstruction["x"]
             repaired = _spec.transform(grid) @ term_beta
@@ -1024,6 +2067,91 @@ def test_publication_rejects_sub_grid_scaled_derivative_violation(monkeypatch):
 
     with pytest.raises(RuntimeError, match="infeasible monotonicity"):
         model.apply_shape_postfit(X)
+
+
+def _off_rule_by(monkeypatch, model, allowance):
+    """Repair ``model``, its projection moved off the rule by ``allowance(certified, held)``.
+
+    The stub runs the real repairer and pushes its projection outward along the unit row
+    where it touches zero, so the least slack becomes ``-allowance`` to rounding. A
+    U-shaped curve on an exponential axis is about three times as large in the repairer's
+    scale, the curve's weighted RMS, as in ``held``, the larger of the fitted and repaired
+    coefficients' norms, at which publication judged the rule before.
+    """
+    real = shape_ops._repairer("increasing")
+    spec = model._specs["x"]
+    (group,) = [group for group in model._groups if group.feature_name == "x"]
+    fitted_norm = float(np.linalg.norm(model.result.beta[group.sl]))
+    stub = {}
+
+    class OffRuleRepairer:
+        def repair(self, spec_, beta, groups, *, weights, **options):
+            result = real.repair(spec_, beta, groups, weights=weights, **options)
+            term = result.repaired_beta_reparam[group.sl]
+            target = result.original_log_effect
+            certified = float(np.sqrt(weights @ target**2 / np.sum(weights)))
+            held = max(fitted_norm, float(np.linalg.norm(term)))
+            assert certified > 2.0 * held
+            touch = shape_constraint_certificate(spec_, term, "increasing").worst_x
+            row = shape_derivative_matrix(spec_, np.asarray([touch]), 1)[0]
+            off = term - allowance(certified, held) * row / np.linalg.norm(row)
+            result.repaired_beta_reparam = result.repaired_beta_reparam.copy()
+            result.repaired_beta_reparam[group.sl] = off
+            stub.update(term=off, certified=certified, held=held)
+            return result
+
+    monkeypatch.setattr(shape_ops, "_repairer", lambda _kind: OffRuleRepairer())
+    return spec, group, stub
+
+
+def _u_shape_on_a_skewed_axis():
+    x = np.random.default_rng(1).exponential(1.0, 3000)
+    X = pd.DataFrame({"x": x})
+    y = (x - 1.0) ** 2 + 0.01 * np.random.default_rng(2).normal(size=x.size)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=12, constraint=Constraint.postfit.increasing)},
+    ).fit(X, y)
+    return model, X
+
+
+def test_projection_off_its_rule_by_its_certified_rounding_is_published(monkeypatch):
+    model, X = _u_shape_on_a_skewed_axis()
+    unit = gamma(_SLACK_STEPS * model._specs["x"].transform(np.zeros(1)).shape[1])
+    # Between the rounding at the fitted scale and the rounding the repairer certified.
+    spec, group, stub = _off_rule_by(
+        monkeypatch, model, lambda certified, held: unit * float(np.sqrt(certified * held))
+    )
+
+    model.apply_shape_postfit(X)
+
+    slack = shape_constraint_certificate(spec, stub["term"], "increasing").minimum_scaled_slack
+    # The repairer's own acceptance rule held, and the old reading at ``held`` would not.
+    assert -shape_slack_tolerance(stub["term"], stub["certified"]) <= slack
+    assert slack < -shape_slack_tolerance(stub["term"], stub["held"])
+    published = model.result.beta[group.sl]
+    assert shape_constraint_is_roundoff_feasible(spec, published, "increasing")
+    grid = np.linspace(spec._lo, spec._hi, 400)
+    moved = spec.transform(grid) @ (published - stub["term"])
+    # The curve moves by a rounding over the inside ray's slack: below the fit's own ``tol``.
+    assert np.max(np.abs(moved)) <= 1e-6 * stub["certified"]
+    # Obeying its rule at its own scale, the published term needs no second repair.
+    revised = model.result.beta.copy()
+    model.apply_shape_postfit(X)
+    np.testing.assert_array_equal(model.result.beta, revised)
+
+
+def test_projection_off_its_rule_beyond_its_certified_rounding_is_refused(monkeypatch):
+    model, X = _u_shape_on_a_skewed_axis()
+    unit = gamma(_SLACK_STEPS * model._specs["x"].transform(np.zeros(1)).shape[1])
+    _off_rule_by(monkeypatch, model, lambda certified, held: 4.0 * unit * certified)
+    original_beta = model.result.beta.copy()
+
+    with pytest.raises(RuntimeError, match="infeasible monotonicity"):
+        model.apply_shape_postfit(X)
+
+    np.testing.assert_array_equal(model.result.beta, original_beta)
 
 
 def test_select_spline_curvature_repair_preserves_public_solver_intercept_relation():
@@ -2012,8 +3140,10 @@ def _repairer_with_fault(monkeypatch, mutate):
         delegate = real_repairer(kind)
 
         class Faulty:
-            def repair(self, spec, beta, groups, *, weights, n_grid):
-                result = delegate.repair(spec, beta, groups, weights=weights, n_grid=n_grid)
+            def repair(self, spec, beta, groups, *, weights, n_grid, metric):
+                result = delegate.repair(
+                    spec, beta, groups, weights=weights, n_grid=n_grid, metric=metric
+                )
                 mutate(result, spec, groups)
                 return result
 
@@ -2049,10 +3179,6 @@ def _fault_worse_than_zero_term(result, spec, groups):
         (_fault_non_finite_coefficients, "invalid coefficients"),
         (_fault_wrong_coefficient_shape, "invalid coefficients"),
         (_fault_degenerate_grid, "invalid repair grid"),
-        (
-            _fault_worse_than_zero_term,
-            "candidate objective is worse than the feasible zero-term fallback",
-        ),
     ],
 )
 def test_faulty_repair_result_is_refused_and_nothing_is_published(monkeypatch, fault, message):
@@ -2064,6 +3190,411 @@ def test_faulty_repair_result_is_refused_and_nothing_is_published(monkeypatch, f
         model.apply_shape_postfit(X)
 
     _assert_nothing_published(model, X, snapshot)
+
+
+FLAT = "could not improve on dropping the term, so the term is published flat"
+
+
+def _assert_published_flat(model, X, kind):
+    """The term published flat: zero coefficients, the record of the zero curve, and the
+    intercept the dropped term's profile, here the weighted mean of a Gaussian response."""
+    spec, groups = model._specs["x"], _x_groups(model)
+    zero = np.zeros(sum(group.size for group in groups))
+    np.testing.assert_array_equal(_term_beta(model.result.beta, groups), zero)
+    record = model._shape_repairs["x"]
+    assert record.flat and record.max_violation_after == 0.0
+    assert record.certificate == shape_constraint_certificate(spec, zero, kind)
+    np.testing.assert_array_equal(record.repaired_log_effect, 0.0)
+    np.testing.assert_array_equal(_term_beta(record.repaired_beta_reparam, groups), zero)
+    y, weights = model._fit_y_ref, model._fit_weights
+    np.testing.assert_allclose(
+        model.predict(X), np.average(y, weights=weights), rtol=0, atol=1e-12 * np.max(np.abs(y))
+    )
+
+
+def test_a_projection_worse_than_the_dropped_term_whose_continuation_is_too_is_published_flat(
+    monkeypatch,
+):
+    """Every projection, continued ones included, scaled by 1e3: each stays in the convex cone
+    and loses to the dropped term, so the term is published flat and the warning says so."""
+    model, X = _fitted_for_publication_refusal()
+    _repairer_with_fault(monkeypatch, _fault_worse_than_zero_term)
+
+    with pytest.warns(RuntimeWarning, match=f"term 'x' {FLAT}.*Constraint.fit.convex"):
+        model.apply_shape_postfit(X)
+
+    _assert_published_flat(model, X, "convex")
+
+
+def _settle_inside_the_rule(result, spec, groups):
+    """1e-8 of the projection, pushed off the convex rule by far less than the rounding it
+    was certified at and far more than its own: publication moves it inside the rule."""
+    (group,) = groups
+    block = np.asarray(result.repaired_beta_reparam, dtype=np.float64)[group.sl]
+    row = shape_derivative_matrix(spec, [0.5 * (spec._lo + spec._hi)], 2)[0]
+    pushed = 1e-8 * block - 1e-14 * np.linalg.norm(block) * row / np.linalg.norm(row)
+    result.repaired_beta_reparam = result.repaired_beta_reparam.copy()
+    result.repaired_beta_reparam[group.sl] = pushed
+    result.certificate = shape_constraint_certificate(spec, pushed, "convex")
+
+
+@pytest.mark.parametrize("how", ["moved_inside_the_rule", "continued"])
+def test_a_published_repair_carries_the_certificate_of_its_published_coefficients(monkeypatch, how):
+    """``MonotoneRepairResult.certificate`` describes the coefficients published.
+
+    At 1984d54f3 it stayed the projection's where publication moved the projection inside
+    its rule or continued it: a stale certificate of other coefficients.
+    """
+    if how == "continued":
+        model, X, _ = _sweep_case(12, False, "uniform", "bump", "poisson", "increasing")
+        kind = "increasing"
+        continued = []
+        real = shape_ops._continued_repair
+        monkeypatch.setattr(
+            shape_ops,
+            "_continued_repair",
+            lambda *args, **kwargs: (continued.append(1), real(*args, **kwargs))[1],
+        )
+    else:
+        model, X = _fitted_for_publication_refusal()
+        kind = "convex"
+        _repairer_with_fault(monkeypatch, _settle_inside_the_rule)
+    projected = []
+    real_validate = shape_ops._validate_repair_for_publication
+
+    def validated(model, *, repair_result, **kwargs):
+        projected.append(_term_beta(repair_result.repaired_beta_reparam, kwargs["groups"]))
+        return real_validate(model, repair_result=repair_result, **kwargs)
+
+    monkeypatch.setattr(shape_ops, "_validate_repair_for_publication", validated)
+
+    model.apply_shape_postfit(X)
+
+    published = _term_beta(model.result.beta, _x_groups(model))
+    assert not np.array_equal(published, projected[0])
+    record = model._shape_repairs["x"]
+    assert record.certificate == shape_constraint_certificate(model._specs["x"], published, kind)
+    if how == "continued":
+        assert continued
+
+
+def test_continued_repair_is_judged_by_the_same_rule(monkeypatch):
+    """The rule judges a continued repair as it judged the candidate it continues.
+
+    The first projection, scaled by 1e3, stays in the cone and loses to the zero term,
+    so the repair is continued; the continuation's result, scaled by 1e3 too, loses as
+    well, so the term is published flat. At 77cc83001 the repair was refused.
+    """
+    model, X = _fitted_for_publication_refusal()
+    projections, continued = [], []
+
+    def first_scaled(result, spec, groups):
+        if not projections:
+            _fault_worse_than_zero_term(result, spec, groups)
+        projections.append(None)
+
+    _repairer_with_fault(monkeypatch, first_scaled)
+    real_continued = shape_ops._continued_repair
+
+    def scaled_continuation(*args, **kwargs):
+        result = real_continued(*args, **kwargs)
+        continued.append(result)
+        _fault_worse_than_zero_term(result[0], kwargs["spec"], kwargs["groups"])
+        return result
+
+    monkeypatch.setattr(shape_ops, "_continued_repair", scaled_continuation)
+
+    with pytest.warns(RuntimeWarning, match=FLAT):
+        model.apply_shape_postfit(X)
+
+    assert len(continued) == 1 and continued[0] is not None
+    _assert_published_flat(model, X, "convex")
+
+
+def _pushed_continuation(monkeypatch, push):
+    """Route every continued projection through ``push(spec, grid, scales)``, the block it
+    returns, where ``scales`` lists each projection's certified curve scale, the first's first."""
+    import dataclasses
+
+    real = shape_ops._repairer
+    scales = []
+
+    class Pushed:
+        def __init__(self, kind):
+            self.inner = real(kind)
+
+        def repair(self, spec, beta, groups, **kwargs):
+            result = self.inner.repair(spec, beta, groups, **kwargs)
+            weights = np.asarray(kwargs["weights"], dtype=np.float64)
+            scales.append(shape_ops._certified_curve_scale(result.original_log_effect, weights))
+            if len(scales) == 1:
+                return result
+            block = push(spec, np.asarray(result.grid, dtype=np.float64), scales)
+            full = np.array(result.repaired_beta_reparam, dtype=np.float64, copy=True)
+            offset = 0
+            for group in groups:
+                full[group.sl] = block[offset : offset + group.size]
+                offset += group.size
+            # the repair's certificate is of the block it returned, not of this one
+            return dataclasses.replace(result, repaired_beta_reparam=full, certificate=None)
+
+    monkeypatch.setattr(shape_ops, "_repairer", Pushed)
+    return scales
+
+
+def test_a_continued_projection_is_judged_at_the_scale_it_was_certified_at(monkeypatch):
+    """A continued repair is read at the scale its projection certified it at.
+
+    The continuation projects the merit's Newton target, whose curve is 2.77 in weighted RMS
+    against the fitted curve's 0.79, and reaches the zero curve, which the repairer certifies
+    to the rounding at the larger scale. At 1984d54f3 publication read the result at the
+    fitted curve's scale. Forced: each continued projection is replaced by the zero curve
+    moved along one row of the rule, by more than the fitted term's rounding and less than
+    the target's. That was refused as breaking the rule; it is zero to the rounding it was
+    certified at, and is published as the zero curve.
+    """
+    model, X, _ = _sweep_case(25, True, "lognormal", "abs", "gamma", "decreasing")
+    fitted = _term_beta(model.result.beta, _x_groups(model))
+    rounding = float(gamma(_SLACK_STEPS * fitted.size))
+    sent = []
+
+    def push(spec, grid, scales):
+        row = shape_derivative_matrix(spec, [np.median(grid)], 1)[0]
+        size = rounding * np.sqrt(np.linalg.norm(fitted) * scales[-1])
+        sent.append((size * row / np.linalg.norm(row), scales[0], scales[-1]))
+        return sent[-1][0]  # rising there, so it breaks the decreasing rule
+
+    _pushed_continuation(monkeypatch, push)
+    model.apply_shape_postfit(X)
+
+    block, first, last = sent[-1]
+    certificate = shape_constraint_certificate(model._specs["x"], block, "decreasing")
+    assert certificate.minimum_scaled_slack < -rounding * first
+    assert rounding * np.linalg.norm(fitted) < np.linalg.norm(block) < rounding * last
+    assert "x" in model._shape_repairs
+    published = _term_beta(model.result.beta, _x_groups(model))
+    assert not np.any(published)
+    assert model._shape_repairs["x"].certificate == shape_constraint_certificate(
+        model._specs["x"], published, "decreasing"
+    )
+
+
+def test_a_continued_repair_reads_no_curvature_from_rows_a_clamp_holds():
+    """Sol's case on #626: a Poisson identity-link fit whose repair leaves rows' means below
+    zero, where ``clip_mu`` holds them. Their scored deviance is flat, but at ddda43d45 the
+    continuation kept their score and Fisher weights, up to 1e50, so its Newton target rounded
+    back to the current coefficients and the repair was refused as worse than the dropped
+    term, which master publishes. It is published, increasing, with a deviance below the
+    dropped term's, the intercept profiled by SciPy.
+    """
+    from scipy.optimize import minimize_scalar
+
+    x = np.linspace(0.0, 1.0, 100)
+    offset = 0.1 + 2.0 * x
+    y = np.random.default_rng(18).poisson(np.maximum(offset + 0.8 * np.sin(12.0 * x), 0.01))
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="poisson",
+        link="identity",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=6, constraint=Constraint.postfit.increasing)},
+    ).fit(X, y, offset=offset)
+    assert model.result.converged
+
+    model.apply_shape_postfit(X, offset=offset)
+
+    assert "x" in model._shape_repairs
+    mu = np.asarray(model.predict(X, offset=offset), dtype=np.float64)
+    assert np.all(np.diff(mu - offset) >= -1e-12 * np.max(np.abs(mu)))
+
+    def deviance(mean):
+        return float(np.sum(Poisson().deviance_unit(y.astype(np.float64), mean)))
+
+    dropped = minimize_scalar(
+        lambda c: deviance(offset + c),
+        bounds=(-0.1 + 1e-9, 5.0),
+        method="bounded",
+        options={"xatol": 1e-12},
+    )
+    assert deviance(mu) < dropped.fun - 1e-3
+
+
+def test_a_repair_holding_counts_at_the_mean_floor_is_judged_beside_the_dropped_term():
+    """A Poisson identity-link repair can hold rows of positive count at clip_mu's floor, 1e-50,
+    where each unit deviance is about 230 y. The comparison with the dropped term allowed each
+    such row its residual's rounding times its slope in the mean, y / 1e-50, and the bound
+    reached 1e40: a continued repair at deviance 10995 was published beside the dropped
+    term's 228 (mutation check: dropping the clamped rows' exclusion from that bound). A
+    clamped mean is the clamp's own constant and keeps no rounding from the predictor; the
+    repair published is below the dropped term, its intercept profiled by SciPy.
+    """
+    from scipy.optimize import minimize_scalar
+
+    rng = np.random.default_rng(19)
+    x = np.linspace(0.0, 1.0, 200)
+    offset = 0.1 + 2.0 * x
+    bump = np.exp(-(((x - 0.3) / 0.12) ** 2)) - 0.4
+    y = rng.poisson(np.maximum(offset + 0.8 * bump, 0.01)).astype(np.float64)
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="poisson",
+        link="identity",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=6, constraint=Constraint.postfit.increasing)},
+    ).fit(X, y, offset=offset)
+
+    model.apply_shape_postfit(X, offset=offset)
+
+    assert "x" in model._shape_repairs
+    term = _term_beta(model.result.beta, _x_groups(model))
+    assert shape_constraint_is_roundoff_feasible(model._specs["x"], term, "increasing")
+    mu = np.asarray(model.predict(X, offset=offset), dtype=np.float64)
+
+    def deviance(mean):
+        return float(np.sum(Poisson().deviance_unit(y, np.maximum(mean, 1e-50))))
+
+    dropped = minimize_scalar(
+        lambda c: deviance(offset + c),
+        bounds=(-0.1 + 1e-9, 5.0),
+        method="bounded",
+        options={"xatol": 1e-12},
+    )
+    assert deviance(mu) < dropped.fun
+
+
+def test_a_continued_repair_leads_rows_a_clamp_holds_at_their_worst_back_inside():
+    """A binomial identity-link repair whose projection holds rows at clip_mu's cap of 1 - 1e-7
+    with zero responses, each at its worst there, deviance 488.1 against the dropped term's
+    239.7. With no derivative from a held row the continuation stalls at 485.3, where the
+    deviance scored is flat in them, and was refused (1039a4c5d) where ddda43d45 and master
+    publish; refused so, it is continued again with those rows' own derivatives, which lead
+    them back inside, and is published below the dropped term, intercept profiled by SciPy.
+    """
+    from scipy.optimize import minimize_scalar
+
+    from superglm.distributions import Binomial
+
+    rng = np.random.default_rng(19)
+    x = np.linspace(0.0, 1.0, 200)
+    offset = 0.92 - 0.6 * x
+    bump = np.exp(-(((x - 0.3) / 0.12) ** 2)) - 0.4
+    y = rng.binomial(1, np.clip(offset + 0.3 * bump, 1e-3, 1.0 - 1e-3)).astype(np.float64)
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="binomial",
+        link="identity",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=10, constraint=Constraint.postfit.concave)},
+    ).fit(X, y, offset=offset)
+
+    model.apply_shape_postfit(X, offset=offset)
+
+    assert "x" in model._shape_repairs
+    mu = np.asarray(model.predict(X, offset=offset), dtype=np.float64)
+    assert curvature_violation(mu - offset, "concave") <= 1e-9
+
+    def deviance(mean):
+        return float(np.sum(Binomial().deviance_unit(y, np.clip(mean, 1e-7, 1.0 - 1e-7))))
+
+    dropped = minimize_scalar(
+        lambda c: deviance(offset + c),
+        bounds=(-1.0, 1.0),
+        method="bounded",
+        options={"xatol": 1e-12},
+    )
+    assert deviance(mu) < dropped.fun - 1.0
+
+
+def _sweep_case(n_knots, select, axis, shape, family, kind):
+    """One repair of the post-fit sweep: n = 2500, drawn in the sweep's order."""
+    rng = np.random.default_rng(7)
+    x = {
+        "uniform": lambda: rng.uniform(0.0, 1.0, 2500),
+        "exponential": lambda: rng.exponential(1.0, 2500),
+        "lognormal": lambda: rng.lognormal(0.0, 0.8, 2500),
+    }[axis]()
+    if shape == "bump":
+        f = 0.5 * np.exp(-(((x - np.quantile(x, 0.3)) / np.std(x)) ** 2))
+    else:
+        f = 0.5 * np.abs(x - np.median(x)) / np.std(x)
+    rng.normal(size=x.size)
+    counts = rng.poisson(np.exp(f)).astype(np.float64)
+    y = counts if family == "poisson" else rng.gamma(2.0, np.exp(f) / 2.0)
+    X = pd.DataFrame({"x": x})
+    feature = PSpline(n_knots=n_knots, select=select, constraint=getattr(Constraint.postfit, kind))
+    model = SuperGLM(family=family, selection_penalty=0.0, features={"x": feature})
+    return model.fit(X, y), X, y
+
+
+def _log_link_merit(model, X, y):
+    """The rule's merit of a one-term log-link Poisson or Gamma fit, formed without its code.
+
+    ``b'Sb`` takes ``S`` from the fit's posterior precision less its data part, and the
+    deviance the intercept's closed form: ``log(sum y / sum e^eta)`` for Poisson and
+    ``log(mean(y e^-eta))`` for Gamma. Returns ``b -> (merit, gradient, Hessian)``, the
+    last two of half the merit in its Fisher form, all with the intercept profiled.
+    """
+    poisson = model._distribution.__class__.__name__ == "Poisson"
+    basis = np.asarray(model._specs["x"].transform(X["x"].to_numpy()), dtype=np.float64)
+
+    def data_part(weights):
+        cross = basis.T @ weights
+        return basis.T @ (basis * weights[:, None]) - np.outer(cross, cross) / weights.sum()
+
+    precision, _ = _posterior_metric(model)
+    fitted_mean = model.predict(X)
+    S = precision - data_part(fitted_mean if poisson else np.ones_like(y))
+
+    def at(b):
+        eta = basis @ b
+        if poisson:
+            mu = np.exp(eta) * y.sum() / np.exp(eta).sum()
+            units = 2.0 * (np.where(y > 0, y * np.log(np.where(y > 0, y, 1.0) / mu), 0.0) - y + mu)
+            residual, weights = y - mu, mu
+        else:
+            mu = np.exp(eta) * np.mean(y * np.exp(-eta))
+            units = 2.0 * (np.log(mu / y) + (y - mu) / mu)
+            residual, weights = (y - mu) / mu, np.ones_like(y)
+        return units.sum() + b @ S @ b, S @ b - basis.T @ residual, data_part(weights) + S
+
+    return at
+
+
+@pytest.mark.parametrize(
+    ("n_knots", "select", "axis", "shape", "family", "kind"),
+    [
+        (12, False, "uniform", "bump", "poisson", "increasing"),
+        (25, True, "uniform", "bump", "poisson", "increasing"),
+        (25, True, "exponential", "abs", "gamma", "decreasing"),
+    ],
+)
+def test_projection_the_zero_term_beats_is_continued_to_the_constrained_fit(
+    n_knots, select, axis, shape, family, kind
+):
+    """Repairs master publishes, which the one-step projection left worse than the zero term.
+
+    The projection in the penalized Hessian is exact for a quadratic merit only; far from
+    a log-link fit it lost to the zero term in true merit, by 0.0085 to 0.064, and the
+    rule refused it. Continued to the constrained fit, the repair publishes the true
+    merit's minimiser over the cone, no worse than the zero term master published.
+    """
+    from tests._shape_projection_oracle import projection_certificate
+
+    model, X, y = _sweep_case(n_knots, select, axis, shape, family, kind)
+    merit = _log_link_merit(model, X, y)
+    fitted = _term_beta(model.result.beta, _x_groups(model))
+    zero_merit = merit(np.zeros_like(fitted))[0]
+
+    model.apply_shape_postfit(X)
+
+    beta = _term_beta(model.result.beta, _x_groups(model))
+    published, gradient, hessian = merit(beta)
+    assert published <= zero_merit * (1.0 + 1e-12)
+    certificate = projection_certificate(
+        model._specs["x"], kind, beta, hessian, hessian @ beta - gradient, fitted
+    )
+    assert certificate.minimum_derivative >= -1e-10
+    assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
 
 
 def test_non_finite_repair_curve_is_refused_and_nothing_is_published(monkeypatch):
@@ -2114,6 +3645,7 @@ def test_repair_that_moves_the_fitted_mean_is_refused_and_nothing_is_published(m
 
 
 def test_intercept_search_that_cannot_converge_is_refused_and_nothing_is_published(monkeypatch):
+    # Every search fails, the dropped term's own too, so not even the flat curve is published.
     model, X = _fitted_for_publication_refusal(family="poisson")
     snapshot = _publication_snapshot(model, X)
 
@@ -2130,6 +3662,53 @@ def test_intercept_search_that_cannot_converge_is_refused_and_nothing_is_publish
         model.apply_shape_postfit(X)
 
     _assert_nothing_published(model, X, snapshot)
+
+
+def test_a_repair_whose_intercept_has_no_minimum_is_published_flat_as_master_publishes_it():
+    """A stress case master publishes: a concave rule on a bump under the binomial's log link.
+
+    With the projected curve, the deviance falls as the intercept rises until a row's mean
+    reaches one, so its intercept has no minimum; with the term dropped it has. The term is
+    published flat with the dropped term's intercept, the minimum of the deviance in closed
+    form (scipy's bounded Brent). At 77cc83001 the repair was refused. Master publishes a
+    concave curve here that fits better; the test pins the publication, not its optimality.
+    """
+    from scipy import optimize
+
+    rng = np.random.default_rng(18)
+    x = np.linspace(0.0, 1.0, 200)
+    offset = -0.05 - 1.2 * x
+    bump = np.exp(-(((x - 0.3) / 0.12) ** 2)) - 0.4
+    y = rng.binomial(1, np.exp(np.minimum(offset + 0.6 * bump, -1e-3))).astype(np.float64)
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=6, constraint=Constraint.postfit.concave)},
+    ).fit(X, y, offset=offset)
+
+    with pytest.warns(RuntimeWarning, match=f"term 'x' {FLAT}.*Constraint.fit.concave"):
+        model.apply_shape_postfit(X, offset=offset)
+
+    spec, groups = model._specs["x"], _x_groups(model)
+    zero = np.zeros(sum(group.size for group in groups))
+    np.testing.assert_array_equal(_term_beta(model.result.beta, groups), zero)
+    record = model._shape_repairs["x"]
+    assert record.flat and record.max_violation_after == 0.0
+    assert record.certificate == shape_constraint_certificate(spec, zero, "concave")
+
+    def deviance(intercept):
+        mu = np.exp(offset + intercept)
+        return -2.0 * float(np.sum(y * np.log(mu) + (1.0 - y) * np.log1p(-mu)))
+
+    oracle = optimize.minimize_scalar(
+        deviance, bounds=(-2.0, 0.05), method="bounded", options={"xatol": 1e-12}
+    )
+    published = np.log(model.predict(X, offset=offset)) - offset
+    assert np.ptp(published) <= 1e-14
+    assert abs(published[0] - oracle.x) <= 1e-6
+    assert deviance(published[0]) <= oracle.fun + 1e-9
 
 
 def test_repair_without_retained_response_is_refused_and_nothing_is_published():
@@ -2215,8 +3794,8 @@ def _profiled_eta_with_fault(monkeypatch, mutate):
     real = shape_ops._profile_repaired_intercept
 
     def profiled(*args, **kwargs):
-        eta, shift, rounding = real(*args, **kwargs)
-        return mutate(eta), shift, rounding
+        eta, shift, rounding, deviance = real(*args, **kwargs)
+        return mutate(eta), shift, rounding, deviance
 
     monkeypatch.setattr(shape_ops, "_profile_repaired_intercept", profiled)
 
@@ -2354,74 +3933,94 @@ def _non_finite_solution(x, spec):
 
 
 @pytest.mark.parametrize(
-    ("solution", "span_search", "message"),
+    ("solution", "message"),
     [
-        (
-            _scaled_solution,
-            "real",
-            "Curvature projection failed its feasible-zero objective certificate",
-        ),
-        (
-            _strictly_concave_solution,
-            "blind",
-            "Curvature projection returned an infeasible fitted state",
-        ),
-        (_non_finite_solution, "blind", "Curvature projection returned non-finite fitted state"),
-        (
-            None,
-            "stuck_on_a_known_point",
-            "Curvature projection could not certify a constrained derivative span",
-        ),
-        (
-            None,
-            "endless_new_points",
-            "Curvature projection exhausted its derivative-span refinements",
-        ),
+        (_scaled_solution, "Curvature projection failed its feasible-zero objective certificate"),
+        (_strictly_concave_solution, "Curvature projection returned an infeasible fitted state"),
+        (_non_finite_solution, "Curvature projection returned non-finite fitted state"),
     ],
 )
 @pytest.mark.parametrize("scale", [1.0, 1e-12])
 def test_faulty_projection_is_refused_and_nothing_is_published(
-    monkeypatch, solution, span_search, message, scale
+    monkeypatch, solution, message, scale
 ):
     """Each certificate of the cone projection refuses its own fault; the model is untouched."""
-    from types import SimpleNamespace
-
-    import scipy.optimize
-
     from superglm import constraints
 
     model, X = _fitted_for_publication_refusal(scale=scale)
     snapshot = _publication_snapshot(model, X)
-    real_minimize = scipy.optimize.minimize
-    real_violations = constraints._violating_shape_constraint_points
-    emitted = 0
+    real_projection = constraints._cone_projection
 
-    def minimize_with_fault(*args, **kwargs):
-        result = real_minimize(*args, **kwargs)
-        if solution is None:
-            return result
-        return SimpleNamespace(
-            success=True, status=0, message="", x=solution(result.x, model._specs["x"])
-        )
+    def projection_with_fault(spec, H, g, kind, label, **kwargs):
+        return solution(real_projection(spec, H, g, kind, label, **kwargs), spec)
 
-    def violations_with_fault(spec, beta, kind, tolerance):
-        nonlocal emitted
-        if span_search == "real":
-            return real_violations(spec, beta, kind, tolerance)
-        if span_search == "blind":
-            return np.empty(0)
-        if span_search == "stuck_on_a_known_point":
-            return np.asarray([spec._lo])
-        emitted += 1
-        return np.asarray([spec._lo + 1e-3 * emitted * (spec._hi - spec._lo)])
-
-    monkeypatch.setattr(scipy.optimize, "minimize", minimize_with_fault)
-    monkeypatch.setattr(constraints, "_violating_shape_constraint_points", violations_with_fault)
+    monkeypatch.setattr(constraints, "_cone_projection", projection_with_fault)
 
     with pytest.raises(RuntimeError, match=message):
         model.apply_shape_postfit(X)
 
     _assert_nothing_published(model, X, snapshot)
+
+
+def _never_certifying_qp(monkeypatch, nnls_stops):
+    """Every QP start stops uncertified at the apex; ``nnls_stops``: so does NNLS's KKT check."""
+    import scipy.optimize
+
+    import superglm.solvers.constrained_qp as constrained_qp
+
+    monkeypatch.setattr(
+        constrained_qp,
+        "solve_constrained_qp",
+        lambda H, *_args, **_kwargs: constrained_qp.QPResult(
+            beta=np.zeros(H.shape[0]), n_iter=200, converged=False
+        ),
+    )
+    if nnls_stops:
+
+        def nnls_at_its_limit(*_args, **_kwargs):
+            raise RuntimeError("Maximum number of iterations reached.")
+
+        monkeypatch.setattr(scipy.optimize, "nnls", nnls_at_its_limit)
+
+
+@pytest.mark.parametrize("nnls_stops", [False, True])
+def test_qp_that_never_certifies_a_monotone_projection_is_disclosed(monkeypatch, nnls_stops):
+    """No QP solve certifies: the repair is a feasible point no solve was needed for, disclosed.
+
+    The bracket's incumbent is the best multiple of its inner solve's start, which
+    the cone holds, so the term is published monotone everywhere with a warning that
+    it is not the closest such curve. That holds when NNLS stops at its iteration
+    limit inside the uncertified point's KKT check, too.
+    """
+    model, X = _wiggly_monotone_fit("cr", 8)
+    _never_certifying_qp(monkeypatch, nnls_stops)
+
+    with pytest.warns(RuntimeWarning, match="stopped before it certified the closest increasing"):
+        model.apply_shape_postfit(X)
+
+    repair = model._shape_repairs["x"]
+    beta = _term_beta(repair.repaired_beta_reparam, _x_groups(model))
+    assert np.linalg.norm(beta) > 0.0
+    assert _minimum_signed_derivative(model._specs["x"], beta, "increasing") >= -1e-12 * float(
+        np.linalg.norm(beta)
+    )
+
+
+def test_projection_that_runs_out_of_steps_publishes_the_inner_cone_repair(monkeypatch):
+    """Forced out of steps, the repair is still monotone everywhere, and says so."""
+    from superglm import constraints
+
+    model, X = _wiggly_monotone_fit("cr", 8)
+    monkeypatch.setattr(constraints, "_PROJECTION_STEPS", 0)
+    monkeypatch.setattr(constraints, "_BRACKET_STEPS", 1)
+
+    with pytest.warns(RuntimeWarning, match="increasing everywhere"):
+        model.apply_shape_postfit(X)
+
+    repair = model._shape_repairs["x"]
+    spec = model._specs["x"]
+    beta = np.concatenate([repair.repaired_beta_reparam[group.sl] for group in _x_groups(model)])
+    assert _minimum_signed_derivative(spec, beta, "increasing") >= -1e-12 * np.linalg.norm(beta)
 
 
 # -- the repair's tolerances follow the response's units ------------------------------------
@@ -2437,14 +4036,27 @@ def _candidate_equal_to_the_fallback(result, _spec, groups):
     result.repaired_beta_reparam = flat
 
 
+def _spied_continuation(monkeypatch):
+    """The calls of ``_continued_repair``: the rule's finding that a candidate lost."""
+    calls, real = [], shape_ops._continued_repair
+    monkeypatch.setattr(
+        shape_ops,
+        "_continued_repair",
+        lambda *args, **kwargs: (calls.append(1), real(*args, **kwargs))[1],
+    )
+    return calls
+
+
 @pytest.mark.parametrize("scale", RESPONSE_UNITS)
 @pytest.mark.parametrize("excess", [1e-6, 1e-10])
-def test_candidate_worse_than_the_fallback_by_a_relative_excess_is_refused_in_any_units(
+def test_candidate_worse_than_the_fallback_by_a_relative_excess_is_beaten_in_any_units(
     monkeypatch, scale, excess
 ):
+    """The rule finds the candidate worse, continues it, and publishes the term flat, at
+    every response unit."""
     model, X = _fitted_for_publication_refusal(scale=scale)
-    snapshot = _publication_snapshot(model, X)
     _repairer_with_fault(monkeypatch, _candidate_equal_to_the_fallback)
+    continued = _spied_continuation(monkeypatch)
     real_objective = shape_ops._shape_candidate_objective
     scored = []
 
@@ -2459,15 +4071,17 @@ def test_candidate_worse_than_the_fallback_by_a_relative_excess_is_refused_in_an
 
     monkeypatch.setattr(shape_ops, "_shape_candidate_objective", candidate_scored_first_and_worse)
 
-    with pytest.raises(RuntimeError, match="Unsafe shape repair rejected.*worse than the feasible"):
+    with pytest.warns(RuntimeWarning, match=FLAT):
         model.apply_shape_postfit(X)
 
-    _assert_nothing_published(model, X, snapshot)
+    assert continued
+    _assert_published_flat(model, X, "convex")
 
 
 def test_candidate_within_the_rounding_of_its_sum_is_not_worse_than_the_fallback(monkeypatch):
     model, X = _fitted_for_publication_refusal(scale=1e-9)
     _repairer_with_fault(monkeypatch, _candidate_equal_to_the_fallback)
+    continued = _spied_continuation(monkeypatch)
     real_objective = shape_ops._shape_candidate_objective
     scored = []
 
@@ -2480,9 +4094,11 @@ def test_candidate_within_the_rounding_of_its_sum_is_not_worse_than_the_fallback
 
     monkeypatch.setattr(shape_ops, "_shape_candidate_objective", candidate_a_few_ulps_up)
 
-    model.apply_shape_postfit(X)
+    with pytest.warns(RuntimeWarning, match=FLAT):
+        model.apply_shape_postfit(X)
 
-    assert "x" in model._shape_repairs
+    assert not continued
+    _assert_published_flat(model, X, "convex")
 
 
 @pytest.mark.parametrize("scale", RESPONSE_UNITS)
@@ -2533,17 +4149,17 @@ def test_a_relative_violation_is_not_roundoff_when_the_coefficients_are_tiny(sca
 def test_post_fit_projection_is_equivariant_to_the_response_units(monkeypatch, kind, scale):
     from superglm import constraints
 
-    real_violations = constraints._violating_shape_constraint_points
-    tolerances = []
+    real_projection = constraints._cone_projection
+    problems = []
 
-    def spy(spec, beta, shape_kind, tolerance):
-        tolerances.append(tolerance)
-        return real_violations(spec, beta, shape_kind, tolerance)
+    def spy(spec, H, g, shape_kind, label, inside=None, **options):
+        problems.append((H.copy(), g.copy(), inside.copy()))
+        return real_projection(spec, H, g, shape_kind, label, inside=inside, **options)
 
-    monkeypatch.setattr(constraints, "_violating_shape_constraint_points", spy)
+    monkeypatch.setattr(constraints, "_cone_projection", spy)
 
     def repaired_predictions(unit):
-        tolerances.clear()
+        problems.clear()
         rng = np.random.default_rng(20261030)
         x = np.sort(rng.uniform(0.0, 1.0, 400))
         shape = (
@@ -2555,17 +4171,106 @@ def test_post_fit_projection_is_equivariant_to_the_response_units(monkeypatch, k
             features={"x": PSpline(n_knots=9, constraint=getattr(Constraint.postfit, kind))},
         ).fit(pd.DataFrame({"x": x}), unit * shape)
         model.apply_shape_postfit(pd.DataFrame({"x": x}))
-        return model.predict(pd.DataFrame({"x": x})) / unit, np.array(tolerances) / unit
+        return model.predict(pd.DataFrame({"x": x})) / unit, problems[0]
 
-    reference, reference_tolerances = repaired_predictions(1.0)
-    rescaled, rescaled_tolerances = repaired_predictions(scale)
+    reference, (reference_H, reference_g, reference_ray) = repaired_predictions(1.0)
+    rescaled, (rescaled_H, rescaled_g, rescaled_ray) = repaired_predictions(scale)
 
-    # The same scale-free problem solved twice agrees to the optimizer's own tolerance
-    # (ftol = 1e-12 of the zero loss), with headroom for a diverging path.
+    # The same scale-free problem solved twice agrees to the projection's own
+    # tolerance, with headroom for a diverging path.
     np.testing.assert_allclose(rescaled, reference, rtol=0.0, atol=1e-9 * np.max(np.abs(reference)))
-    # The slack carries the response's units, so its tolerance does too. Only the
-    # first solve's is compared: how many span refinements follow is a trajectory.
-    assert rescaled_tolerances[0] == pytest.approx(reference_tolerances[0], rel=1e-6)
+    # The cone projection is posed in units of the target's weighted RMS, so the
+    # problem it solves, and with it every tolerance inside it, is the same in any units.
+    np.testing.assert_allclose(rescaled_H, reference_H, rtol=1e-9, atol=0.0)
+    np.testing.assert_allclose(rescaled_g, reference_g, rtol=1e-6, atol=1e-12)
+    # The ray its solves start along depends on the predictor alone.
+    np.testing.assert_allclose(rescaled_ray, reference_ray, rtol=1e-9, atol=0.0)
+
+
+#: Power of two that lifts sample weights near 1e-310 to near 1e-9.
+_WEIGHT_LIFT = 1000
+
+
+def _rise_fit_at_weights(weights, n_knots, degree):
+    """An unpenalized Gaussian fit of a wiggly rise at ``weights``, repaired increasing."""
+    x = np.linspace(0.0, 1.0, weights.size)
+    X = pd.DataFrame({"x": x})
+    feature = PSpline(
+        n_knots=n_knots,
+        degree=degree,
+        m=1,
+        penalty="none",
+        constraint=Constraint.postfit.increasing,
+    )
+    model = SuperGLM(
+        family="gaussian", selection_penalty=0.0, spline_penalty=0.0, features={"x": feature}
+    ).fit(X, 0.9 * x + 0.25 * np.sin(12 * x), sample_weight=weights)
+    return model, X
+
+
+@pytest.mark.parametrize(("n_knots", "degree"), [(6, 3), (10, 4)])
+def test_repair_at_subnormal_sample_weights_is_the_repair_at_lifted_weights(n_knots, degree):
+    """Weights of 1e-310 make the term's metric subnormal; the repair is still published.
+
+    It was published wrong (cubic) or raised ``LinAlgError`` (quartic). The weights
+    lifted by a power of two pose the same projection in normal numbers. The exact
+    projections are nonexpansive in the metric, so they differ by no more than the fits
+    do, which carry the fit's own subnormal rounding. Each repair is certified to its
+    projection within an objective gap of ``_OBJECTIVE_GAP`` on a problem scaled so the
+    fitted term has unit norm in the metric, so by strong convexity within
+    ``sqrt(2 * _OBJECTIVE_GAP)`` of that norm: two such points, posed in different
+    numbers, can sit anywhere in that region. At 1984d54f3 a slack of 2**-40 of the fit
+    failed with numpy 2.4.2 on the SkylakeX and Sandybridge kernels (1.85e-11 apart).
+    """
+    from superglm.constraints import _OBJECTIVE_GAP
+
+    def fitted_and_repaired(model, X):
+        fitted = _term_beta(model.result.beta, _x_groups(model))
+        model.apply_shape_postfit(X)
+        repaired = model._shape_repairs["x"].repaired_beta_reparam
+        return fitted, _term_beta(repaired, _x_groups(model))
+
+    weights = 1e-310 * np.random.default_rng(0).uniform(0.5, 1.5, 100)
+    tiny_fit, tiny_repair = fitted_and_repaired(*_rise_fit_at_weights(weights, n_knots, degree))
+    lifted, X = _rise_fit_at_weights(np.ldexp(weights, _WEIGHT_LIFT), n_knots, degree)
+    # The lifted fit's metric, in normal numbers.
+    H, _ = _posterior_metric(lifted)
+    fit, repair = fitted_and_repaired(lifted, X)
+
+    def norm(v):
+        return float(np.sqrt(v @ H @ v))
+
+    certified = 2.0 * np.sqrt(2.0 * _OBJECTIVE_GAP) * norm(fit)
+    assert norm(tiny_repair - repair) <= norm(tiny_fit - fit) + certified
+
+
+def test_repair_is_unchanged_by_a_power_of_two_scale_of_its_metric_and_weights():
+    """A metric and grid weights scaled into the subnormal range give the same repair, bit for bit."""
+    from superglm.constraints import MonotoneRepairer
+
+    model, X = _rise_fit_at_weights(np.random.default_rng(0).uniform(0.5, 1.5, 100), 6, 3)
+    spec, groups = model._specs["x"], _x_groups(model)
+    H, _ = _posterior_metric(model)
+    weights = shape_ops._grid_weights(
+        spec, X["x"].to_numpy(), np.asarray(model._fit_weights, dtype=np.float64), 500
+    )
+    # Exponents that put the largest entries near 2**-1030, at about 43 bits; each value
+    # is first rounded to that grid, so the scale back up is exact.
+    down_H = 1030 + int(np.frexp(np.max(np.abs(H)))[1])
+    down_w = 1030 + int(np.frexp(np.max(weights))[1])
+    tiny_H, tiny_w = np.ldexp(H, -down_H), np.ldexp(weights, -down_w)
+    normal = MonotoneRepairer().repair(
+        spec,
+        model.result.beta,
+        groups,
+        weights=np.ldexp(tiny_w, down_w),
+        metric=np.ldexp(tiny_H, down_H),
+    )
+    subnormal = MonotoneRepairer().repair(
+        spec, model.result.beta, groups, weights=tiny_w, metric=tiny_H
+    )
+
+    np.testing.assert_array_equal(subnormal.repaired_beta_reparam, normal.repaired_beta_reparam)
 
 
 def test_a_repair_that_collapses_a_term_is_feasible_at_the_scale_of_the_term(monkeypatch):
@@ -2614,7 +4319,9 @@ def test_intercept_profile_takes_the_same_steps_in_any_units(monkeypatch):
             return real_weights(**kwargs)
 
         monkeypatch.setattr(shape_ops, "fisher_working_weights", record)
-        profiled_eta, _, _ = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+        profiled_eta, _, _, _ = shape_ops._profile_repaired_intercept(
+            model, eta, y=y, weights=weights
+        )
         path[scale] = evaluated
         mu = np.exp(profiled_eta)
         score_rows = weights * (y - mu) * mu
@@ -2643,7 +4350,7 @@ def test_intercept_profile_passes_over_the_rows_once_per_shift(monkeypatch):
         lambda **kwargs: (shifts.append(1), information(**kwargs))[1],
     )
 
-    profiled_eta, _, rounding = shape_ops._profile_repaired_intercept(
+    profiled_eta, _, rounding, _ = shape_ops._profile_repaired_intercept(
         model, eta, y=y, weights=weights
     )
 
@@ -2680,6 +4387,45 @@ def test_repair_publication_reuses_the_profiled_deviance_rounding(monkeypatch):
     assert recomputed == []
 
 
+def test_repair_publication_reads_the_profiled_deviance_as_it_would_form_it(monkeypatch):
+    """The deviance an intercept profile holds is the one publication would form at the
+    profiled predictor, to the bit, so publication reads it instead of a pass of its own.
+
+    Mutation: the search's deviance formed at another shift, or publication forming its own.
+    """
+    from superglm.model.fit_state import fitted_penalty
+
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=8, constraint=Constraint.postfit.increasing)},
+    )
+    rng = np.random.default_rng(241)
+    x = np.sort(rng.uniform(0.0, 1.0, 240))
+    y = rng.poisson(np.exp(0.5 + np.sin(4.0 * x))).astype(np.float64)
+    model.fit(pd.DataFrame({"x": x}), y)
+    weights = np.where(np.arange(y.size) % 9 == 0, 0.0, 1.0)
+    eta = np.log(model.predict(pd.DataFrame({"x": x}))) + 0.3
+    objective = {
+        "y": y,
+        "weights": weights,
+        "smooth_penalty_terms": shape_ops._build_smooth_penalty_terms(model),
+        "selection_penalty": fitted_penalty(model),
+    }
+    beta = np.asarray(model.result.beta)
+
+    profiled_eta, _, _, deviance = shape_ops._profile_repaired_intercept(
+        model, eta, y=y, weights=weights
+    )
+    formed = shape_ops._shape_candidate_objective(model, beta, eta=profiled_eta, **objective)
+    monkeypatch.setattr(model._distribution, "deviance_unit", None)
+    read = shape_ops._shape_candidate_objective(
+        model, beta, eta=profiled_eta, deviance=deviance, **objective
+    )
+
+    assert read == formed
+
+
 def test_gaussian_intercept_is_profiled_when_the_residuals_are_tiny():
     rng = np.random.default_rng(20261032)
     n = 240
@@ -2687,7 +4433,7 @@ def test_gaussian_intercept_is_profiled_when_the_residuals_are_tiny():
     y = 1e-17 * (1.0 + 0.1 * rng.normal(size=n))
     model = SimpleNamespace(_distribution=Gaussian(), _link=IdentityLink())
 
-    profiled_eta, _, _ = shape_ops._profile_repaired_intercept(
+    profiled_eta, _, _, _ = shape_ops._profile_repaired_intercept(
         model, np.zeros(n), y=y, weights=weights
     )
 
@@ -2707,7 +4453,7 @@ def test_intercept_profile_of_a_perfect_fit_stops_at_its_rounding(scale):
     eta = np.log(y)
     model = SimpleNamespace(_distribution=Gamma(), _link=LogLink())
 
-    _, shift, _ = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+    _, shift, _, _ = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
 
     # The predictor of a perfect fit, to within the rounding of the predictor.
     assert abs(shift) <= gamma(_ROW_STEPS) * (2.0 + np.max(np.abs(eta)))
@@ -2742,9 +4488,460 @@ def test_intercept_profile_reaches_a_perfect_fit_from_a_shifted_start(family, of
     distribution = Gamma() if family == "gamma" else Poisson()
     model = SimpleNamespace(_distribution=distribution, _link=LogLink())
 
-    _, shift, _ = shape_ops._profile_repaired_intercept(model, eta + offset, y=y, weights=weights)
+    _, shift, _, _ = shape_ops._profile_repaired_intercept(
+        model, eta + offset, y=y, weights=weights
+    )
 
     assert abs(shift + offset) <= gamma(_ROW_STEPS) * (2.0 + np.max(np.abs(eta)))
+
+
+@pytest.mark.parametrize("family", ["poisson", "gamma"])
+def test_intercept_profile_whose_first_step_passes_the_link_clamp_converges(family, monkeypatch):
+    """A Fisher step far past the log link's clamp is bracketed, then bisected to the intercept.
+
+    The first step from the fitted shift is about exp(29.5). Halving it ran out of
+    halvings long before it returned inside the clamp, and where the clamp holds every
+    row the Gamma deviance is flat, so unit steps were accepted that went nowhere: both
+    refused the intercept, which is closed-form for these two families under the log link.
+    """
+    rng = np.random.default_rng(20261112)
+    n = 240
+    weights = rng.uniform(0.5, 2.0, n)
+    eta = 0.5 + 0.1 * rng.normal(size=n)
+    y = np.exp(30.0) * rng.gamma(2.0, 0.5, size=n)
+    distribution = Gamma() if family == "gamma" else Poisson()
+    model = SimpleNamespace(_distribution=distribution, _link=LogLink())
+    evaluations = []
+    inverse = model._link.inverse
+    monkeypatch.setattr(model._link, "inverse", lambda e: (evaluations.append(1), inverse(e))[1])
+
+    _, shift, _, _ = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+
+    # The score is sum w (y - mu) for the Poisson and sum w (y / mu - 1) for the Gamma.
+    if family == "poisson":
+        expected = np.log(np.sum(weights * y)) - np.log(np.sum(weights * np.exp(eta)))
+    else:
+        expected = np.log(np.sum(weights * y * np.exp(-eta))) - np.log(np.sum(weights))
+    assert shift == pytest.approx(expected, rel=1e-10, abs=0.0)
+    # The first trial sits at the clamp's edge, not past it: bisecting back from the
+    # overshoot instead takes over fifty evaluations.
+    assert len(evaluations) <= 24
+
+
+def test_intercept_profile_takes_no_trial_the_familys_clamp_moves(monkeypatch):
+    """A trial whose mean ``clip_mu`` moves is outside the search's domain, and is not taken.
+
+    The binomial clamp holds means within 1e-7 of 0 and 1, inside the logit's clamp of
+    the predictor at 20, so the first step's trial at the link's edge has every mean
+    clamped: its deviance is flat and its score is not the deviance's slope.
+    """
+    from superglm.distributions import Binomial, clip_mu
+    from superglm.links import LogitLink
+
+    rng = np.random.default_rng(20261113)
+    n = 240
+    weights = rng.uniform(0.5, 2.0, n)
+    y = rng.uniform(0.2, 0.8, n)
+    eta = np.full(n, -15.0)
+    model = SimpleNamespace(_distribution=Binomial(), _link=LogitLink())
+    taken = []
+    information = shape_ops.fisher_working_weights
+
+    def record(**kwargs):
+        mean = model._link.inverse(kwargs["eta"])
+        taken.append(bool(np.any(clip_mu(mean, model._distribution) != mean)))
+        return information(**kwargs)
+
+    monkeypatch.setattr(shape_ops, "fisher_working_weights", record)
+
+    _, shift, _, _ = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+
+    mean = np.sum(weights * y) / np.sum(weights)
+    assert shift == pytest.approx(np.log(mean / (1.0 - mean)) + 15.0, rel=1e-10, abs=0.0)
+    assert taken and not any(taken)
+
+
+def _convex_pairings():
+    return [
+        (family, link)
+        for family, links in shape_ops._CONVEX_DEVIANCE_LINKS.items()
+        for link in links
+    ]
+
+
+@pytest.mark.parametrize(
+    ("family", "link"),
+    _convex_pairings(),
+    ids=[f"{family.__name__}-{link.__name__}" for family, link in _convex_pairings()],
+)
+def test_each_pairing_the_intercept_search_takes_as_convex_is_convex(family, link):
+    """The search compares no root of the score with its start under these pairings, so each
+    unit deviance must be convex in the predictor whatever the response: its second
+    differences on a grid of predictors, for responses across the support, are never
+    negative beyond their rounding. Mutation: listing the Gaussian under the log link, or
+    the Poisson under the square-root link, fails here.
+    """
+    from superglm.distributions import Binomial, NegativeBinomial, Tweedie
+    from superglm.links import CloglogLink, IdentityLink, InverseLink, LogLink
+
+    distribution = {
+        Binomial: Binomial(),
+        NegativeBinomial: NegativeBinomial(theta=2.0),
+        Tweedie: Tweedie(p=1.5),
+    }.get(family) or family()
+    responses = {Binomial: [0.0, 0.25, 0.5, 1.0], Gamma: [0.01, 0.5, 1.0, 3.0, 10.0]}.get(
+        family, [0.0, 0.5, 1.0, 3.0, 10.0]
+    )
+    if link is LogLink:
+        eta = np.linspace(-6.0, -0.05, 400) if family is Binomial else np.linspace(-5.0, 5.0, 400)
+    elif link is CloglogLink:
+        eta = np.linspace(-4.0, 2.0, 400)
+    elif link in (IdentityLink, InverseLink):
+        eta = np.linspace(0.05, 5.0, 400)
+    else:
+        eta = np.linspace(-3.0, 3.0, 400)  # either side of zero, not on it
+    mu = link().inverse(eta)
+    for response in responses:
+        units = distribution.deviance_unit(np.full(eta.size, response), mu)
+        assert np.all(np.isfinite(units))
+        second = units[2:] - 2.0 * units[1:-1] + units[:-2]
+        rounding = (
+            256.0
+            * np.finfo(np.float64).eps
+            * (np.abs(units[2:]) + 2.0 * np.abs(units[1:-1]) + np.abs(units[:-2]))
+        )
+        assert np.all(second >= -rounding), (response, float(np.min(second)))
+
+
+@pytest.mark.parametrize(("link", "deviances"), [("log", 1), ("sqrt", 2)])
+def test_intercept_profile_forms_the_start_deviance_only_where_its_root_can_climb(link, deviances):
+    """Under a pairing whose deviance is convex in the predictor, with no row held by a clamp,
+    the root of the score is the minimum: the profile forms one deviance, at the root, which
+    publication reads. Under the square-root link it forms the start's as well, to compare.
+
+    Mutation: comparing every root with its start forms two under the log link.
+    """
+    from superglm.links import SqrtLink
+
+    rng = np.random.default_rng(20261114)
+    n = 240
+    eta = 0.5 + 0.3 * rng.normal(size=n)
+    model = SimpleNamespace(_distribution=Poisson(), _link=LogLink())
+    if link == "sqrt":
+        model._link, eta = SqrtLink(), 1.5 + 0.3 * rng.normal(size=n)
+    y = rng.poisson(model._link.inverse(eta + 0.4)).astype(np.float64)
+    weights = rng.uniform(0.5, 2.0, n)
+    formed = []
+    real = Poisson.deviance_unit
+    model._distribution.deviance_unit = lambda *rows: (formed.append(1), real(Poisson(), *rows))[1]
+
+    shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+
+    assert len(formed) == deviances
+
+
+def _square_root_branch_minimum(eta, y, weights, shift):
+    """SciPy's minimum of the Poisson deviance under the square-root link over the shifts
+    between the poles either side of ``shift``, where a row of positive response has a zero
+    predictor; between them every row's unit deviance is convex in the shift."""
+    from scipy.optimize import minimize_scalar
+
+    poles = -eta[(y > 0.0) & (weights > 0.0)]
+    lower = np.max(poles[poles < shift], initial=shift - 1e3)
+    upper = np.min(poles[poles > shift], initial=shift + 1e3)
+
+    def deviance(t):
+        return float(np.sum(weights * Poisson().deviance_unit(y, (eta + t) ** 2)))
+
+    width = upper - lower
+    found = minimize_scalar(
+        deviance,
+        bounds=(lower + 1e-12 * width, upper - 1e-12 * width),
+        method="bounded",
+        options={"xatol": 1e-12 * width},
+    )
+    return float(found.x), deviance
+
+
+def test_intercept_profile_under_the_square_root_link_takes_no_step_up_across_a_pole():
+    """Sol's case on #626: the deviance in the shift has a pole wherever a row's predictor
+    crosses zero, here at -3 and 0.03. The first Fisher step from 0 lands at -8.8, past the
+    pole at -3, where the deviance is far higher; at 1984d54f3 the search took it on the
+    score's sign alone and converged to -3.7154 on the far branch, raising the deviance from
+    17.44 to 26.41. It is refused for its deviance, and the search reaches master's -1.12106,
+    the start's branch's minimum, deviance 0.171.
+    """
+    from superglm.links import SqrtLink
+
+    model = SimpleNamespace(_distribution=Poisson(), _link=SqrtLink())
+    eta, y, weights = np.array([-0.03, 3.0]), np.array([1.0, 3.0]), np.ones(2)
+
+    _, shift, _, _ = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+
+    expected, deviance = _square_root_branch_minimum(eta, y, weights, 0.0)
+    assert shift == pytest.approx(expected, abs=1e-8)
+    assert deviance(shift) == pytest.approx(0.171157, abs=1e-6)
+
+
+@pytest.mark.parametrize("family", ["poisson", "gamma", "negative_binomial"])
+def test_intercept_profile_under_the_square_root_link_ends_no_higher_than_it_starts(family):
+    """Under the square-root link the deviance in the shift need not be unimodal, so a step
+    on the score's sign can climb. Sixty signed predictors per family; at 1984d54f3 one to
+    four of them ended above their start, in every family. Each converges, no higher.
+    """
+    from superglm.distributions import NegativeBinomial, clip_mu
+    from superglm.links import SqrtLink
+
+    distribution = {
+        "poisson": Poisson(),
+        "gamma": Gamma(),
+        "negative_binomial": NegativeBinomial(theta=2.0),
+    }[family]
+    model = SimpleNamespace(_distribution=distribution, _link=SqrtLink())
+    rng = np.random.default_rng(20261112)
+    for _ in range(60):
+        n = int(rng.integers(2, 40))
+        eta = rng.choice([-1.0, 1.0], n) * rng.uniform(0.05, 3.0, n)
+        mean = (eta + rng.normal()) ** 2
+        if family == "gamma":
+            y = rng.gamma(2.0, mean / 2.0) + 1e-3
+        else:
+            y = rng.poisson(mean).astype(np.float64)
+        weights = rng.uniform(0.5, 2.0, n)
+
+        def deviance(t, eta=eta, y=y, weights=weights):
+            mu = clip_mu((eta + t) ** 2, distribution)
+            return float(np.sum(weights * distribution.deviance_unit(y, mu)))
+
+        _, shift, _, _ = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+
+        assert deviance(shift) <= deviance(0.0) * (1.0 + 1e-12)
+
+
+def test_intercept_profile_with_rows_a_clamp_holds_ends_at_the_scored_minimum():
+    """Under the identity link a Poisson row whose predictor is below zero has its mean held at
+    ``clip_mu``'s floor, 1e-50, and its scored deviance is flat in the shift. The first run
+    keeps the row's score, (y - mu) / mu, -1 for a zero count, which is not the scored
+    deviance's slope: at ddda43d45, with two such rows, the profile kept shift 0, deviance
+    231.004, where SciPy's minimum is 226.830 at 0.07688. The rerun, which reads the deviance
+    scored, ends there.
+    """
+    from scipy.optimize import minimize_scalar
+
+    from superglm.distributions import clip_mu
+
+    rng = np.random.default_rng(18)
+    eta = np.linspace(-0.02, 2.0, 200)
+    y = rng.poisson(np.maximum(eta + 0.3 * np.sin(12.0 * eta), 0.01)).astype(np.float64)
+    y[eta < 0.0] = 0.0
+    weights = np.ones_like(y)
+    model = SimpleNamespace(_distribution=Poisson(), _link=IdentityLink())
+
+    def deviance(t):
+        mean = clip_mu(eta + t, model._distribution)
+        return float(np.sum(weights * model._distribution.deviance_unit(y, mean)))
+
+    _, shift, _, published = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+
+    found = minimize_scalar(
+        deviance, bounds=(-1.0, 1.0), method="bounded", options={"xatol": 1e-12}
+    )
+    assert np.sum(eta < 0.0) == 2  # the rows held at the start
+    assert shift == pytest.approx(found.x, abs=1e-7)
+    assert published == pytest.approx(deviance(shift), rel=1e-12)
+    assert published <= found.fun * (1.0 + 1e-12)
+
+
+def test_intercept_profile_started_at_a_stationary_maximum_ends_at_a_minimum():
+    """Under the identity link the gamma deviance is concave in the mean beyond twice the
+    response, so two rows that want shifts 28 apart make the profile's minima at 0.09 and 28.03
+    with a maximum at 18.59 between, where the Fisher information is still positive. Started
+    there, at ddda43d45 both runs stopped at once and published the maximum, shift 0. A
+    stationary shift is now a minimum only with positive curvature; here none is, and the
+    derivative-free search ends at a minimum, SciPy's on the side it reaches.
+    """
+    from scipy.optimize import brentq, minimize_scalar
+
+    distribution = Gamma()
+    model = SimpleNamespace(_distribution=distribution, _link=IdentityLink())
+    y, base, weights = np.array([1.0, 1050.0]), np.array([1.0, 1000.0]), np.array([1.0, 1600.0])
+
+    def deviance(t, eta=base):
+        return float(np.sum(weights * distribution.deviance_unit(y, eta + t)))
+
+    def score(t):
+        return float(np.sum(weights * (y - (base + t)) / (base + t) ** 2))
+
+    peak = brentq(score, 15.0, 22.0, xtol=1e-15, rtol=8.9e-16)
+    eta = base + peak
+    assert deviance(1.0, eta) < deviance(0.0, eta) > deviance(-1.0, eta)  # a maximum
+
+    _, shift, _, published = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+
+    bounds = (1e-9, 200.0) if shift > 0.0 else (-eta.min() + 1e-9, -1e-9)
+    found = minimize_scalar(
+        lambda t: deviance(t, eta), bounds=bounds, method="bounded", options={"xatol": 1e-12}
+    )
+    assert shift == pytest.approx(found.x, rel=1e-6)
+    assert published == pytest.approx(deviance(shift, eta), rel=1e-12)
+    assert published < deviance(0.0, eta) - 1e-3
+
+
+def test_intercept_profile_beside_a_pole_compares_deviances_to_their_means_rounding():
+    """A row whose mean sits next to its pole makes the residual's rounding bound vast, about
+    2e5 here against a deviance of 0.104: a search comparing deviances to that bound takes any
+    step, and like 1984d54f3 climbs 140-fold onto a far branch. The deviance is evaluated
+    without cancellation given its mean, so two are compared to their means' rounding.
+    """
+    from superglm.links import SqrtLink
+
+    model = SimpleNamespace(_distribution=Poisson(), _link=SqrtLink())
+    eta = np.array([1e-13, -0.2, 3.0, -1.0])
+    y, weights = np.array([1e-3, 0.04, 9.0, 1.0]), np.ones(4)
+
+    _, shift, _, _ = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+
+    expected, deviance = _square_root_branch_minimum(eta, y, weights, shift)
+    assert deviance(shift) <= deviance(0.0)
+    assert deviance(shift) <= deviance(expected) * (1.0 + 1e-12)
+
+
+def test_a_square_root_link_repair_profiles_each_intercept_to_a_minimum_below_its_start(
+    monkeypatch,
+):
+    """Sol's fit on #626: 40 Poisson rows under the square-root link, offsets of either sign.
+    At 1984d54f3 two intercept profiles of the call climbed from 232.18 to 258.34, and the
+    repair was published at that intercept. Each profile now ends at the minimum of the
+    branch it ends on, by SciPy, no higher than where it started, and the repair is published.
+    """
+    rng = np.random.default_rng(30)
+    x = np.sort(rng.uniform(0.0, 1.0, 40))
+    offset = rng.choice([-1.0, 1.0], 40) * rng.uniform(0.5, 3.0, 40)
+    y = rng.poisson((offset + 0.6 * np.sin(6.0 * x) * np.sign(offset)) ** 2).astype(np.float64)
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="poisson",
+        link="sqrt",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=6, constraint=Constraint.postfit.increasing)},
+    ).fit(X, y, offset=offset)
+    assert model.result.converged
+    profiles = []
+    real = shape_ops._searched_intercept
+
+    def recorded(model, eta, *, y, weights):
+        found = real(model, eta, y=y, weights=weights)
+        profiles.append((np.array(eta), np.array(y), np.array(weights), found[1]))
+        return found
+
+    monkeypatch.setattr(shape_ops, "_searched_intercept", recorded)
+    model.apply_shape_postfit(X, offset=offset)
+
+    assert "x" in model._shape_repairs
+    assert profiles
+    for eta, response, weights, shift in profiles:
+        expected, deviance = _square_root_branch_minimum(eta, response, weights, shift)
+        assert deviance(shift) <= deviance(0.0)
+        assert deviance(shift) <= deviance(expected) * (1.0 + 1e-12)
+
+
+@pytest.mark.parametrize(("link", "seed"), [("logit", 0), ("probit", 100)])
+def test_a_binomial_repair_whose_intercept_moves_rows_into_the_mean_cap_is_published(
+    monkeypatch, link, seed
+):
+    """Opus's case on #626: a binomial spline strong enough to separate part of the range.
+    ``clip_mu`` holds the mean within 1e-7 of 1, at logit 16.1, inside the link's band, and
+    the profiled intercept moves rows of response 1 past it. At 1984d54f3 the search's
+    domain ended at the first free row's cap, so it did not converge and the repair was
+    refused; master and 582328a15 publish. Each profile now ends at SciPy's minimum of the
+    clamped deviance publication scores, no higher than where it started.
+    """
+    from scipy.optimize import minimize_scalar
+    from scipy.special import expit, ndtr
+
+    from superglm.distributions import clip_mu
+    from superglm.links import stabilize_eta
+
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(0.0, 1.0, 3000)
+    if link == "logit":
+        y = rng.binomial(1, expit(-8.0 + 26.0 * x + 3.0 * np.sin(12.0 * x)))
+    else:
+        y = rng.binomial(1, ndtr(-2.0 + 7.5 * x + np.sin(12.0 * x)))
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="binomial",
+        link=link,
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=8, constraint=Constraint.postfit.increasing)},
+    ).fit(X, y.astype(np.float64))
+    profiles = []
+    real = shape_ops._searched_intercept
+
+    def recorded(model, eta, *, y, weights):
+        found = real(model, eta, y=y, weights=weights)
+        profiles.append((model, np.array(eta), np.array(y), np.array(weights), found[1]))
+        return found
+
+    monkeypatch.setattr(shape_ops, "_searched_intercept", recorded)
+    model.apply_shape_postfit(X)
+
+    assert "x" in model._shape_repairs
+    for profiled, eta, response, weights, shift in profiles:
+
+        def deviance(t, profiled=profiled, eta=eta, response=response, weights=weights):
+            link_ = profiled._link
+            mu = clip_mu(link_.inverse(stabilize_eta(eta + t, link_)), profiled._distribution)
+            return float(np.sum(weights * profiled._distribution.deviance_unit(response, mu)))
+
+        least = minimize_scalar(
+            deviance, bounds=(shift - 2.0, shift + 2.0), method="bounded", options={"xatol": 1e-10}
+        )
+        assert deviance(shift) <= deviance(0.0)
+        assert deviance(shift) <= least.fun * (1.0 + 1e-12)
+
+
+def test_intercept_profile_enters_no_clamp_that_holds_a_row_at_its_worst():
+    """Under the inverse-squared link a predictor below 1e-12 is held there, with the mean at
+    1e6. A row of small response that a shift pushes into that clamp has its deviance capped
+    at its worst, about 1e6: past the cap, the capped deviance has minima the model does not
+    have. Thirty-one Poisson rows, some of response near 1e6, which the first run cannot
+    profile: a rerun crossing such a clamp stopped at deviance 1.09e7, beside a minimum of
+    51 within half a unit. The rerun enters no such clamp, so it either reaches a minimum
+    no higher than SciPy's nearby one or is refused.
+    """
+    from scipy.optimize import minimize_scalar
+
+    from superglm.distributions import clip_mu
+    from superglm.links import InverseSquaredLink, stabilize_eta
+
+    rng = np.random.default_rng(7007)
+    n = int(rng.integers(2, 60))
+    eta = rng.uniform(0.05, 4.0, n)
+    link = InverseSquaredLink()
+    truth = eta + rng.normal(0.0, 0.3)
+    mean = clip_mu(link.inverse(stabilize_eta(truth, link)), Poisson())
+    y = rng.poisson(np.minimum(mean, 1e6)).astype(np.float64)
+    weights = rng.uniform(0.5, 2.0, n)
+    model = SimpleNamespace(_distribution=Poisson(), _link=link)
+
+    def deviance(t):
+        mu = clip_mu(link.inverse(stabilize_eta(eta + t, link)), Poisson())
+        return float(np.sum(weights * Poisson().deviance_unit(y, mu)))
+
+    try:
+        _, shift, _, _ = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+    except RuntimeError as refused:
+        assert "did not converge" in str(refused)
+        return
+    span = 1.0 + abs(shift)
+    least = minimize_scalar(
+        deviance,
+        bounds=(shift - 0.5 * span, shift + 0.5 * span),
+        method="bounded",
+        options={"xatol": 1e-12 * span},
+    )
+    assert deviance(shift) <= least.fun * (1.0 + 1e-9)
 
 
 def test_curvature_repair_of_a_noise_free_log_linear_response_is_published():
@@ -2791,3 +4988,25 @@ def test_a_repair_made_under_an_open_editor_session_marks_its_results_stale():
     )
     if hasattr(InForce, "token"):  # #623's page token changes wherever ``describes`` does
         assert in_force.token != InForce.of(session).token
+
+
+def test_a_response_far_below_one_is_repaired_rather_than_refused():
+    # The metric's quadratic forms and the target's scale are taken in units of a power of
+    # two near their largest entries, so at 1e-165, where ``fitted @ H @ fitted`` and
+    # ``target @ target`` underflow, the repair completes with a curve that obeys its rule.
+    # (At that scale the deviances the publication rule compares are themselves below
+    # float64's resolution, so which candidate it keeps is not asserted.)
+    x = np.linspace(0.0, 1.0, 200)
+    X = pd.DataFrame({"x": x})
+    y = 1e-165 * (0.9 * x + 0.25 * np.sin(12.0 * x))
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=9, constraint=Constraint.postfit.increasing)},
+    ).fit(X, y)
+
+    model.apply_shape_postfit(X)
+
+    curve = np.asarray(model._shape_repairs["x"].repaired_log_effect)
+    assert np.all(np.isfinite(curve))
+    assert np.all(np.diff(curve) >= -1e-12 * max(float(np.max(np.abs(curve))), 1e-300))

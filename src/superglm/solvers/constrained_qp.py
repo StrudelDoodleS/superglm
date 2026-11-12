@@ -10,9 +10,10 @@ warm-starts the working set from a previous solve.
 
 from __future__ import annotations
 
+import functools
 import math
 from dataclasses import dataclass, field
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import numpy as np
 import scipy.linalg
@@ -30,6 +31,17 @@ from superglm.solvers.rank import (
     decompose_factor,
     decompose_gram,
 )
+
+# SciPy's type stubs do not declare its LAPACK wrappers (``dsyequb``, ``dgetrf``,
+# ``dgetrs``); reaching them through ``Any`` keeps the checker off names that exist.
+_LAPACK: Any = scipy.linalg.lapack
+# SciPy's batch decorator (``scipy._lib._util._apply_over_batch``) converts each array to its
+# namespace and, given no batch dimension, returns the routine it wraps called on them, so the
+# small unbatched float64 updates and solves here call that routine itself.
+_LINALG: Any = scipy.linalg
+_qr_insert = getattr(_LINALG.qr_insert, "__wrapped__", _LINALG.qr_insert)
+_qr_delete = getattr(_LINALG.qr_delete, "__wrapped__", _LINALG.qr_delete)
+_solve_triangular = getattr(_LINALG.solve_triangular, "__wrapped__", _LINALG.solve_triangular)
 
 # Safety factor on the spectral consistency floor (see ``_consistency_floor``).
 # Kept separate from ``SHARED_RANK_POLICY.certification_band`` and from the
@@ -49,6 +61,20 @@ _SPECTRAL_DIMENSION_SLACK = 512.0
 # Independent of the spectral slack, though the values coincide.
 _STRUCTURAL_NORM_ROUNDING_SLACK = 32.0
 _STRUCTURAL_CONSISTENCY_FLOOR = _STRUCTURAL_NORM_ROUNDING_SLACK * _EPS
+
+# Row actions past these, or tiny but nonzero, take the scaled path in ``_constraint_actions``.
+_HUGE_ACTION = np.finfo(np.float64).max / 4
+_TINY_ACTION = np.finfo(np.float64).tiny
+
+
+def _maximum(values: NDArray, initial: float) -> float:
+    """``np.max(values, initial=initial)``, without its dispatch."""
+    return np.maximum.reduce(values, axis=None, initial=initial)
+
+
+def _minimum(values: NDArray, initial: float) -> float:
+    """``np.min(values, initial=initial)``, without its dispatch."""
+    return np.minimum.reduce(values, axis=None, initial=initial)
 
 
 @dataclass
@@ -142,20 +168,6 @@ def _consistency_floor(decomposition: RankDecomposition) -> float:
     )
 
 
-def _constraint_products(
-    A: NDArray, beta: NDArray, abs_A: NDArray | None = None
-) -> tuple[NDArray, NDArray]:
-    """Ordinary binary64 row actions; callers scale exceptional rows below."""
-    A = np.asarray(A, dtype=float)
-    beta = np.asarray(beta, dtype=float)
-    abs_A = np.abs(A) if abs_A is None else np.asarray(abs_A, dtype=float)
-    magnitude_beta = np.abs(beta)
-    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-        products = A @ beta
-        magnitude = abs_A @ magnitude_beta
-    return products, magnitude
-
-
 def _constraint_actions(A, beta, b, abs_A=None, step=None, *, common=False):
     """Use a common power of two for each exceptional row's action and RHS.
 
@@ -167,19 +179,33 @@ def _constraint_actions(A, beta, b, abs_A=None, step=None, *, common=False):
     common exponent across all rows to preserve multiplier units.
     """
     A, beta, b = np.asarray(A, float), np.asarray(beta, float), np.asarray(b, float)
-    products, magnitude = _constraint_products(A, beta, abs_A)
-    action, motion = (
-        _constraint_products(A, step, abs_A)
-        if step is not None
-        else (np.zeros_like(b), np.zeros_like(b))
-    )
+    abs_A = np.abs(A) if abs_A is None else np.asarray(abs_A, dtype=float)
+    # Ordinary binary64 row actions of ``beta`` and ``step``, as (vector, signed, absolute);
+    # exceptional rows are scaled below. With no direction no caller reads its action.
+    action = motion = None
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        products = A @ beta
+        magnitude = abs_A @ np.abs(beta)
+        vectors = [(beta, products, magnitude)]
+        if step is not None:
+            step = np.asarray(step, dtype=float)
+            action = A @ step
+            motion = abs_A @ np.abs(step)
+            vectors.append((step, action, motion))
+    # Every row is normal when no |b| or action passes the range or falls below it; the
+    # caller then reads ``b`` as the bounds, unscaled.
+    if _maximum(np.abs(b), 0.0) <= _HUGE_ACTION and all(
+        _maximum(absolute, 0.0) <= _HUGE_ACTION and _minimum(absolute, np.inf) >= _TINY_ACTION
+        for _, _, absolute in vectors
+    ):
+        return products, magnitude, b, action, motion
     bound = b.copy()
-    unsafe = np.abs(b) > np.finfo(float).max / 4
-    for vector, absolute in ((beta, magnitude), (step, motion)):
-        if vector is None:
-            continue
-        unsafe |= ~np.isfinite(absolute) | (absolute > np.finfo(float).max / 4)
-        unsafe |= (absolute < np.finfo(float).tiny) & np.any((A != 0) & (vector != 0), axis=1)
+    unsafe = np.abs(b) > _HUGE_ACTION
+    for vector, _, absolute in vectors:
+        unsafe |= ~np.isfinite(absolute) | (absolute > _HUGE_ACTION)
+        small = absolute < _TINY_ACTION
+        if np.any(small):
+            unsafe[small] |= np.any((A[small] != 0) & (vector != 0), axis=1)
     if not np.any(unsafe):
         return products, magnitude, bound, action, motion
     if common:
@@ -188,9 +214,7 @@ def _constraint_actions(A, beta, b, abs_A=None, step=None, *, common=False):
     terms = []
     exponents = np.frexp(b[unsafe])[1]
     exponents = np.where(b[unsafe] != 0, exponents, -10000)
-    for vector in (beta, step):
-        if vector is None:
-            continue
+    for vector, _, _ in vectors:
         mantissa, exponent = np.frexp(vector)
         value = coefficients * mantissa
         exponent = np.where(value != 0, powers + exponent, -10000)
@@ -198,9 +222,7 @@ def _constraint_actions(A, beta, b, abs_A=None, step=None, *, common=False):
         terms.append((value, exponent))
     if common:
         exponents[:] = np.max(exponents)
-    for (value, exponent), signed, absolute in zip(
-        terms, (products, action), (magnitude, motion), strict=False
-    ):
+    for (value, exponent), (_, signed, absolute) in zip(terms, vectors, strict=True):
         normalized = np.ldexp(value, exponent - exponents[:, None])
         signed[unsafe] = np.sum(normalized, axis=1)
         absolute[unsafe] = np.sum(np.abs(normalized), axis=1)
@@ -249,6 +271,7 @@ def _feasibility_scale(
     return np.maximum(np.abs(b) if abs_b is None else abs_b, magnitude)
 
 
+@functools.lru_cache(maxsize=256)
 def _roundoff_tolerance(width: int) -> float:
     """A dot-product allowance in relative action units, with no magnitude floor."""
     if (width + 2) * UNIT_ROUNDOFF >= 1.0:
@@ -257,14 +280,14 @@ def _roundoff_tolerance(width: int) -> float:
 
 
 def _scaled_constraint_step(
-    A: NDArray, beta: NDArray, step: NDArray, b: NDArray, abs_A: NDArray
-) -> tuple[NDArray, NDArray]:
-    """Normalize a directional action, including motion off an exact zero row."""
-    products, magnitude, bounds, action, step_magnitude = _constraint_actions(
-        A, beta, b, abs_A, step
-    )
-    scale = np.maximum(_feasibility_scale(products, bounds, abs_products=magnitude), step_magnitude)
-    return np.divide(action, scale, out=np.zeros_like(action), where=scale > 0.0), scale
+    products: NDArray, magnitude: NDArray, bounds: NDArray, action: NDArray, motion: NDArray
+) -> NDArray:
+    """Normalize a directional action, including motion off an exact zero row.
+
+    The arguments are ``_constraint_actions(A, beta, b, abs_A, step)``.
+    """
+    scale = np.maximum(_feasibility_scale(products, bounds, abs_products=magnitude), motion)
+    return np.divide(action, scale, out=np.zeros_like(action), where=scale > 0.0)
 
 
 def _stationarity_certificate(
@@ -273,6 +296,7 @@ def _stationarity_certificate(
     beta: NDArray,
     active_matrix: NDArray,
     tol: float,
+    objective: tuple | None = None,
 ) -> tuple[bool, int | None, NDArray]:
     """Certify a nonnegative dual force in homogeneous stationarity units.
 
@@ -287,17 +311,21 @@ def _stationarity_certificate(
     Res. Notes Math. 380, 1998, Lemma 4.2, Theorem 3.2).
     """
     active_matrix = np.asarray(active_matrix, dtype=float)
-    products, h_action, g_values, _, _ = _constraint_actions(H, beta, g, common=True)
+    products, h_action, g_values = (
+        _objective_actions(H, beta, g) if objective is None else objective
+    )
     g_action = np.abs(g_values)
-    objective_scale = max(np.max(h_action, initial=0.0), np.max(g_action, initial=0.0))
+    objective_scale = max(_maximum(h_action, 0.0), _maximum(g_action, 0.0))
     if objective_scale == 0.0:
         return True, None, np.zeros(len(active_matrix))
     if not np.isfinite(objective_scale):
         return False, None, np.zeros(len(active_matrix))
-    residual = np.asarray((products - g_values) / objective_scale, dtype=float)
-    h_action = np.asarray(h_action / objective_scale, dtype=float)
-    g_action = np.asarray(g_action / objective_scale, dtype=float)
-    row_scale = np.max(np.abs(active_matrix), axis=1, initial=0.0)
+    residual = (products - g_values) / objective_scale
+    h_action = h_action / objective_scale
+    g_action = g_action / objective_scale
+    own = np.maximum(h_action, g_action)
+    objective_action = h_action + g_action
+    row_scale = np.maximum.reduce(np.abs(active_matrix), axis=1, initial=0.0)
     rows = np.divide(
         active_matrix,
         row_scale[:, None],
@@ -313,38 +341,47 @@ def _stationarity_certificate(
         # Weights stay at most 1 / sqrt(TINY), so the weighted rows and any
         # product of two of them are finite (the square-root safe range of
         # LAPACK's la_constants; Anderson, ACM TOMS 44, 2017).
-        own = np.maximum(h_action, g_action)
         weight = 1.0 / np.where(own > 0.0, np.maximum(own, _SQRT_TINY), 1.0)
         rank = np.linalg.matrix_rank(rows.T)
         weighted = rows.T * weight[:, None]
-        order = np.argsort(-np.max(np.abs(weighted), axis=1, initial=0.0), kind="stable")
+        order = np.argsort(-np.maximum.reduce(np.abs(weighted), axis=1, initial=0.0), kind="stable")
         q, r, pivots = scipy.linalg.qr(weighted[order], mode="economic", pivoting=True)
-        basic = scipy.linalg.solve_triangular(r[:rank, :rank], q[:, :rank].T)
+        basic = _solve_triangular(r[:rank, :rank], q[:, :rank].T)
         inverse_action = np.zeros((len(rows), len(beta)))
         inverse_action[np.ix_(pivots[:rank], order)] = basic * weight[order]
         multipliers = inverse_action @ residual
-        dual_action = np.abs(rows.T) @ np.abs(multipliers)
-        score_scale = np.maximum(np.maximum(h_action, g_action), dual_action)
-        score_error = arithmetic * (h_action + g_action + dual_action)
+        abs_rows_t = np.abs(rows.T)
+        dual_action = abs_rows_t @ np.abs(multipliers)
+        score_scale = np.maximum(own, dual_action)
+        score_error = arithmetic * (objective_action + dual_action)
         multiplier_allowance = np.abs(inverse_action) @ (tol * score_scale + score_error)
         multiplier_allowance += arithmetic * np.abs(multipliers)
-        if not np.all(np.isfinite(multipliers)) or not np.all(np.isfinite(multiplier_allowance)):
+        if not np.isfinite(multipliers).all() or not np.isfinite(multiplier_allowance).all():
             return False, None, multipliers
         violating = multipliers < -multiplier_allowance
-        if np.any(violating):
+        if violating.any():
             worst = int(np.argmin(np.where(violating, multipliers, np.inf)))
             return False, worst, multipliers
         multipliers = np.maximum(multipliers, 0.0)
         dual = rows.T @ multipliers
-        dual_action = np.abs(rows.T) @ multipliers
+        dual_action = abs_rows_t @ multipliers
     else:
         multipliers = np.empty(0)
         dual = np.zeros_like(residual)
         dual_action = np.zeros_like(residual)
-    score_scale = np.maximum(np.maximum(h_action, g_action), dual_action)
-    allowance = tol * score_scale + arithmetic * (h_action + g_action + dual_action)
-    stationary = bool(np.all(np.abs(residual - dual) <= allowance))
+    score_scale = np.maximum(own, dual_action)
+    allowance = tol * score_scale + arithmetic * (objective_action + dual_action)
+    stationary = bool((np.abs(residual - dual) <= allowance).all())
     return stationary, None, multipliers
+
+
+def _objective_actions(H: NDArray, beta: NDArray, g: NDArray) -> tuple[NDArray, NDArray, NDArray]:
+    """``H beta``, ``|H||beta|`` and ``g`` in one common power of two: both certificates' units.
+
+    The stationarity and complementarity certificates of one point take it as ``objective``.
+    """
+    products, h_action, g_values, _, _ = _constraint_actions(H, beta, g, common=True)
+    return products, h_action, g_values
 
 
 def _certifies_kkt_point(
@@ -356,6 +393,8 @@ def _certifies_kkt_point(
     active: list[int],
     tol: float,
     abs_A: NDArray,
+    *,
+    feasible: bool = False,
 ) -> tuple[bool, int | None]:
     """Whether ``beta`` passes the complete KKT certificate on ``active``, and the row to release.
 
@@ -364,13 +403,21 @@ def _certifies_kkt_point(
     branch of ``solve_constrained_qp`` converges on, read without repairing
     ``beta``. A multiplier below its allowance names the working position
     the face must release, as the small-step branch releases it.
+    ``feasible`` says ``_is_feasible`` has already passed this ``beta``.
     """
-    if not _is_feasible(A, beta, b, tol, abs_A=abs_A):
+    if not feasible and not _is_feasible(A, beta, b, tol, abs_A=abs_A):
         return False, None
-    stationary, drop_idx, multipliers = _stationarity_certificate(H, g, beta, A[active], tol)
+    objective = _objective_actions(H, beta, g)
+    working = A[active]
+    stationary, drop_idx, multipliers = _stationarity_certificate(
+        H, g, beta, working, tol, objective
+    )
     if not stationary or drop_idx is not None:
         return False, drop_idx
-    return _complementarity_certificate(H, g, beta, A[active], b[active], multipliers, tol), None
+    certified = _complementarity_certificate(
+        H, g, beta, working, b[active], multipliers, tol, objective
+    )
+    return certified, None
 
 
 def _is_feasible(
@@ -384,11 +431,8 @@ def _is_feasible(
     constraint system two to three times per IRLS iteration plus once per
     line-search halving.
     """
-    return bool(
-        np.all(
-            _feasibility_slack(A, beta, b, abs_A=abs_A) >= -tol - _roundoff_tolerance(A.shape[1])
-        )
-    )
+    slack = _feasibility_slack(A, beta, b, abs_A=abs_A)
+    return bool((slack >= -tol - _roundoff_tolerance(A.shape[1])).all())
 
 
 def _complementarity_certificate(
@@ -399,13 +443,15 @@ def _complementarity_certificate(
     active_bounds: NDArray,
     multipliers: NDArray,
     tol: float,
+    objective: tuple | None = None,
 ) -> bool:
     """Measure dual-weighted slack against the represented objective actions.
 
     Complementarity has objective units. A positive rounding residue on a
     binding coordinate need not have small *relative primal slack*: its dual
     product must instead be small relative to the quadratic and linear actions.
-    The multipliers use the normalized units of _stationarity_certificate.
+    The multipliers use the normalized units of _stationarity_certificate,
+    and ``objective`` is that certificate's ``_objective_actions``, when held.
     """
     if not len(multipliers):
         return True
@@ -415,7 +461,7 @@ def _complementarity_certificate(
     row_scale = np.where(row_scale > 0.0, row_scale, 1.0)
     rows = rows / row_scale[:, None]
     dual = np.asarray(multipliers, dtype=float)
-    _, h_action, score, _, _ = _constraint_actions(H, x, g, common=True)
+    _, h_action, score = _objective_actions(H, x, g) if objective is None else objective
     objective_scale = max(np.max(h_action, initial=0.0), np.max(np.abs(score), initial=0.0))
     if objective_scale == 0.0:
         return bool(np.all(dual == 0.0))
@@ -456,7 +502,7 @@ def _solve_saddle_direct(KKT: NDArray, rhs: NDArray) -> NDArray:
     form (a zero row, or ``|K|`` sums past the binary64 range) leaves the raw
     solve, and a singular one the caller's least-squares fallback.
     """
-    scale, _, _, info = scipy.linalg.lapack.dsyequb(KKT)
+    scale, _, _, info = _LAPACK.dsyequb(KKT)
     if info != 0 or not np.all(np.isfinite(scale) & (scale > 0.0)):
         return np.linalg.solve(KKT, rhs)
     return np.linalg.solve(KKT * scale[:, None] * scale[None, :], rhs * scale) * scale
@@ -479,6 +525,124 @@ def _solve_saddle_least_squares(KKT: NDArray, rhs: NDArray) -> NDArray:
     scale = np.where(nonzero, 1.0 / np.sqrt(np.where(nonzero, row_norm, 1.0)), 1.0)
     equilibrated = KKT * scale[:, None] * scale[None, :]
     return np.linalg.lstsq(equilibrated, rhs * scale, rcond=None)[0] * scale
+
+
+# A saddle system at least this large, in a solve that has already taken this many
+# direct saddle solves, is solved from one factorization updated by Schur complement.
+_UPDATE_MIN_SIZE = 128
+_UPDATE_AFTER = 32
+# Working-set changes one base factorization carries before it is refactored.
+_UPDATE_LIMIT = 32
+
+
+class _SaddleUpdates:
+    """Saddle solves on a changing working set from one equilibrated LU, by Schur complement.
+
+    ``K0``, the saddle matrix of the working set at the last factorization, is
+    equilibrated as in ``_solve_saddle_direct`` and LU-factored once. A row added
+    since borders ``K0`` with its constraint row and column; a base row dropped
+    borders it with a unit row and column that free its equation and hold its
+    multiplier at zero. The bordered system is solved through its Schur complement
+    (Gill, Murray, Saunders and Wright, SIAM J. Sci. Stat. Comput. 5(3), 1984,
+    section 3.6.2). ``K0`` is refactored on the working set after ``_UPDATE_LIMIT``
+    changes, and wherever an updated step fails its check (``step``), as SQIC does
+    (Gill and Wong, UCSD CCoM 14-03, 2014, section 7). Owner and lifetime: one solve.
+    """
+
+    def __init__(self, H: NDArray, rows: NDArray, tol: float) -> None:
+        self.H, self.rows, self.p, self.tol = H, rows, H.shape[0], tol
+        self.lu: NDArray | None = None
+        self.size = 0
+        self.usable = True
+
+    def _factor(self, active: list[int]) -> bool:
+        p, k = self.p, len(active)
+        K = np.zeros((p + k, p + k))
+        K[:p, :p] = self.H
+        K[:p, p:] = -self.rows[active].T
+        K[p:, :p] = self.rows[active]
+        scale, _, _, info = _LAPACK.dsyequb(K)
+        if info != 0 or not np.all(np.isfinite(scale) & (scale > 0.0)):
+            scale = np.ones(p + k)
+        lu, pivots, info = _LAPACK.dgetrf(K * scale[:, None] * scale[None, :])
+        if info != 0:
+            self.usable = False
+            return False
+        self.lu, self.pivots, self.scale, self.size = lu, pivots, scale, p + k
+        self.base = {row: p + position for position, row in enumerate(active)}
+        self.borders: dict[tuple[int, bool], tuple[NDArray, NDArray]] = {}
+        return True
+
+    def _solve(self, rhs: NDArray) -> NDArray:
+        return _LAPACK.dgetrs(self.lu, self.pivots, rhs)[0]
+
+    def _border(self, row: int, added: bool) -> tuple[NDArray, NDArray]:
+        """The scaled border row of ``row``, and ``K0`` solved against its scaled column."""
+        if (row, added) not in self.borders:
+            column, border = np.zeros(self.size), np.zeros(self.size)
+            if added:
+                column[: self.p], border[: self.p] = -self.rows[row], self.rows[row]
+            else:
+                column[self.base[row]] = border[self.base[row]] = 1.0
+            self.borders[row, added] = (border * self.scale, self._solve(column * self.scale))
+        return self.borders[row, added]
+
+    def step(self, active: list[int], rhs: NDArray) -> NDArray | None:
+        """The step of the saddle system on ``active``; ``None`` where only a direct solve can give it.
+
+        ``K0``'s own solve is LU's, as the direct path's. An updated step is kept when the
+        complement is not singular to working precision (a condition estimate below
+        ``1 / u``) and the step meets the working rows to ``tol`` of their own magnitudes,
+        ``|A_w||s| + |r|``. Its error shows there: ``K0``'s backward error times the
+        bordered multipliers, large where the complement is ill-conditioned, which in the
+        gradient rows is small beside those multipliers' own terms.
+        """
+        if self.lu is not None:
+            added = [j for j, row in enumerate(active) if row not in self.base]
+            dropped = sorted(set(self.base) - set(active))
+            if len(added) + len(dropped) <= _UPDATE_LIMIT:
+                step = self._bordered(active, rhs, added, dropped)
+                unchanged = not (added or dropped)
+                if step is not None and (unchanged or self._holds(active, rhs, step)):
+                    return step
+        if not self.usable or not self._factor(active):
+            return None
+        return self._bordered(active, rhs, [], [])
+
+    def _holds(self, active: list[int], rhs: NDArray, step: NDArray) -> bool:
+        """Whether ``step`` meets the working rows to ``tol`` of their own magnitudes."""
+        rows, target = self.rows[active], rhs[self.p :]
+        magnitude = np.abs(rows) @ np.abs(step) + np.abs(target)
+        bound = (self.tol + _roundoff_tolerance(self.p)) * magnitude
+        return bool(np.all(np.abs(rows @ step - target) <= bound))
+
+    def _bordered(
+        self, active: list[int], rhs: NDArray, added: list[int], dropped: list[int]
+    ) -> NDArray | None:
+        """``K0`` bordered by ``added`` and ``dropped``, solved; ``None`` past working precision."""
+        p = self.p
+        base_rhs = np.zeros(self.size)
+        base_rhs[:p] = rhs[:p]
+        for j, row in enumerate(active):
+            if row in self.base:
+                base_rhs[self.base[row]] = rhs[p + j]
+        solution = self._solve(self.scale * base_rhs)
+        borders = [self._border(active[j], True) for j in added]
+        borders += [self._border(row, False) for row in dropped]
+        if borders:
+            rows = np.column_stack([border for border, _ in borders])
+            solved = np.column_stack([column for _, column in borders])
+            target = np.concatenate([rhs[p + np.asarray(added, dtype=int)], np.zeros(len(dropped))])
+            complement = -(rows.T @ solved)
+            lu, pivots, info = _LAPACK.dgetrf(complement)
+            if info != 0:
+                return None
+            rcond, _ = _LAPACK.dgecon(lu, float(np.abs(complement).sum(axis=0).max()))
+            if not rcond > UNIT_ROUNDOFF:
+                return None
+            solution = solution - solved @ _LAPACK.dgetrs(lu, pivots, target - rows.T @ solution)[0]
+        step = (self.scale * solution)[:p]
+        return step if np.all(np.isfinite(step)) else None
 
 
 def _project_feasible(
@@ -531,11 +695,13 @@ class _ConstraintBlocks(NamedTuple):
 
     ``columns[j]`` holds block ``j``'s coefficients and ``width[j]`` their
     count; ``row_label[i]`` is row ``i``'s block, ``-1`` for a zero row.
+    ``least_width`` is the smallest count, 0 with no block.
     """
 
     columns: list[NDArray]
     row_label: NDArray
     width: NDArray
+    least_width: int
 
 
 def _constraint_blocks(A: NDArray) -> _ConstraintBlocks:
@@ -547,6 +713,15 @@ def _constraint_blocks(A: NDArray) -> _ConstraintBlocks:
     working rows constrain only that block's coefficients.
     """
     m, p = A.shape
+    support = A != 0
+    if p and np.any(np.all(support, axis=1)):
+        # A row touching every coefficient joins them, and every nonzero row, in one block.
+        return _ConstraintBlocks(
+            columns=[np.arange(p)],
+            row_label=np.where(np.any(support, axis=1), 0, -1).astype(np.intp),
+            width=np.array([p]),
+            least_width=p,
+        )
     rows, cols = np.nonzero(A)
     # ``np.nonzero`` lists entries row by row, so the row nodes' adjacency is
     # already in CSR order; the column nodes have no stored entries.
@@ -562,10 +737,12 @@ def _constraint_blocks(A: NDArray) -> _ConstraintBlocks:
     block_of = np.full(count, -1, dtype=np.intp)
     block_of[components] = np.arange(components.size)
     column_label = block_of[column_component]
+    width = np.bincount(column_label[column_label >= 0], minlength=components.size)
     return _ConstraintBlocks(
         columns=[np.flatnonzero(column_label == j) for j in range(components.size)],
         row_label=block_of[row_component],
-        width=np.bincount(column_label[column_label >= 0], minlength=components.size),
+        width=width,
+        least_width=int(width.min()) if width.size else 0,
     )
 
 
@@ -689,7 +866,7 @@ class _WorkingBasis:
 
     def insert(self, row: int) -> None:
         """Append row ``row`` of ``A`` to the working rows."""
-        self.q, self.r = scipy.linalg.qr_insert(
+        self.q, self.r = _qr_insert(
             self.q, self.r, self.rows[row], self.q.shape[1], which="col", check_finite=False
         )
 
@@ -702,7 +879,7 @@ class _WorkingBasis:
         leading ``k`` columns of ``q`` and rows of ``r``, the rest of ``r``
         being zero.
         """
-        q, r = scipy.linalg.qr_delete(self.q, self.r, position, which="col", check_finite=False)
+        q, r = _qr_delete(self.q, self.r, position, which="col", check_finite=False)
         k = r.shape[1]
         self.q, self.r = q[:, :k], r[:k]
 
@@ -725,6 +902,9 @@ def _zero_block_faces(
     decision by row tuple, and only blocks with at least as many working rows as coefficients
     are examined.
     """
+    if len(active) < blocks.least_width:
+        # No block has as many working rows as coefficients.
+        return beta
     labels = blocks.row_label[active]
     counts = np.bincount(labels[labels >= 0], minlength=blocks.width.size)
     for j in np.flatnonzero(counts >= blocks.width):
@@ -832,6 +1012,7 @@ def solve_constrained_qp(
     beta_start: NDArray | None = None,
     _trace_run: TraceRun | None = None,
     _structure: _ConstraintStructure | None = None,
+    _decomposition: RankDecomposition | None = None,
 ) -> QPResult:
     """Solve a convex quadratic subject to A @ beta >= b.
 
@@ -863,6 +1044,7 @@ def solve_constrained_qp(
     rows. A beta_start that does not meet them is ignored. The optional _trace_run emits blocking decisions
     only when explicitly enabled. _structure is _constraint_structure(A), for a
     caller that solves on one A repeatedly; without it each solve builds it.
+    _decomposition is likewise decompose_gram of H's symmetric part.
     Result rank metadata describes the shared H decomposition; no ridge is
     added.
     """
@@ -893,7 +1075,7 @@ def solve_constrained_qp(
     # One decomposition by the shared rank policy serves every pure-H solve;
     # a singular H is rank-truncated rather than raising LinAlgError.
     try:
-        decomposition = decompose_gram(H_sym)
+        decomposition = decompose_gram(H_sym) if _decomposition is None else _decomposition
     except ValueError as exc:
         raise ValueError(f"solve_constrained_qp requires a usable PSD H: {exc}") from exc
 
@@ -954,15 +1136,12 @@ def solve_constrained_qp(
                 "example add a ridge term) or drop the aliased columns."
             )
 
-    unconstrained_stationary, _, _ = _stationarity_certificate(
-        H_sym, g, beta_unc, np.empty((0, p)), tol
-    )
-    if m == 0:
-        # No constraints: the unconstrained solve above is already the answer.
-        return _result(beta_unc, [], 0, converged=unconstrained_stationary)
-
     abs_A = None if _structure is None else _structure.abs_entries
-    if _is_feasible(A, beta_unc, b, tol, abs_A=abs_A):
+    # No constraints, or none the unconstrained solve breaks: it is the answer.
+    if m == 0 or _is_feasible(A, beta_unc, b, tol, abs_A=abs_A):
+        unconstrained_stationary, _, _ = _stationarity_certificate(
+            H_sym, g, beta_unc, np.empty((0, p)), tol
+        )
         return _result(beta_unc, [], 0, converged=unconstrained_stationary)
 
     structure = _constraint_structure(A) if _structure is None else _structure
@@ -997,6 +1176,9 @@ def solve_constrained_qp(
     kkt_may_be_singular = decomposition.rank < decomposition.width
 
     zero_face_cache: dict[tuple[int, ...], bool] = {}
+    # Saddle solves of a long solve on a large system (_SaddleUpdates).
+    updates = None if kkt_may_be_singular else _SaddleUpdates(H_sym, structure.scaled_rows, tol)
+    direct_solves = 0
     blocks = structure.blocks
     block_zero_face: dict[tuple[int, ...], bool] = {}
     # Whether ``beta`` minimizes on the current face (previous iteration took
@@ -1012,8 +1194,11 @@ def solve_constrained_qp(
             # Read before the next saddle solve, whose step a pass discards.
             # A negative multiplier releases its row (Nocedal and Wright 2006,
             # Algorithm 16.3): re-solving the same face repeats the same step.
+            # Only a full step that passed ``_is_feasible`` sets the flag.
             at_face_minimum = False
-            certified, release = _certifies_kkt_point(H_sym, g, beta, A, b, active, tol, abs_A)
+            certified, release = _certifies_kkt_point(
+                H_sym, g, beta, A, b, active, tol, abs_A, feasible=True
+            )
             if certified:
                 return _result(beta, active, it + 1, converged=True)
             if release is not None:
@@ -1054,39 +1239,49 @@ def solve_constrained_qp(
                 # Solve KKT system:
                 # [H    -A_eq^T] [step  ] = [g - H @ beta]
                 # [A_eq  0     ] [lambda] = [b_eq - A_eq @ beta]
-                KKT = np.zeros((p + n_eq, p + n_eq))
-                KKT[:p, :p] = H_sym
-                KKT[:p, p:] = -A_eq.T
-                KKT[p:, :p] = A_eq
-
                 rhs = np.zeros(p + n_eq)
                 rhs[:p] = g - H_sym @ beta
                 rhs[p:] = b_eq - A_eq @ beta
 
-                if kkt_may_be_singular:
-                    # A truncated H can leave a constraint-tangent null
-                    # direction on which np.linalg.solve succeeds and drifts,
-                    # so take the minimum-norm solution directly.
-                    sol = _solve_saddle_least_squares(KKT, rhs)
-                else:
-                    try:
-                        sol = _solve_saddle_direct(KKT, rhs)
-                    except np.linalg.LinAlgError:
-                        # Singular KKT: the same equilibrated least-squares
-                        # solve as the branch above.
+                step = None
+                if (
+                    updates is not None
+                    and p + n_eq >= _UPDATE_MIN_SIZE
+                    and direct_solves >= _UPDATE_AFTER
+                ):
+                    # A long solve on a large system: reuse one factorization.
+                    step = updates.step(active, rhs)
+                if step is None:
+                    KKT = np.zeros((p + n_eq, p + n_eq))
+                    KKT[:p, :p] = H_sym
+                    KKT[:p, p:] = -A_eq.T
+                    KKT[p:, :p] = A_eq
+                    if kkt_may_be_singular:
+                        # A truncated H can leave a constraint-tangent null
+                        # direction on which np.linalg.solve succeeds and drifts,
+                        # so take the minimum-norm solution directly.
                         sol = _solve_saddle_least_squares(KKT, rhs)
-
-                step = sol[:p]
+                    else:
+                        direct_solves += 1
+                        try:
+                            sol = _solve_saddle_direct(KKT, rhs)
+                        except np.linalg.LinAlgError:
+                            # Singular KKT: the same equilibrated least-squares
+                            # solve as the branch above.
+                            sol = _solve_saddle_least_squares(KKT, rhs)
+                    step = sol[:p]
 
         # --- Check step feasibility ---
         # Judge movement per coordinate, relative to ``max(1, |beta_i|)``: an
         # absolute threshold is not scale-invariant, and at an active-boundary
         # KKT point cancellation in ``g - H @ beta`` leaves O(eps |beta|) steps.
         relative_step = step / np.maximum(1.0, np.abs(beta))
-        small_step = bool(np.linalg.norm(relative_step) < tol)
+        # ``np.linalg.norm``'s own formula for a vector, without its dispatch.
+        small_step = math.sqrt(relative_step.dot(relative_step)) < tol
         if small_step:
+            objective = _objective_actions(H_sym, beta, g)
             stationary, drop_idx, multipliers = _stationarity_certificate(
-                H_sym, g, beta, A[active], tol
+                H_sym, g, beta, A[active], tol, objective
             )
             if drop_idx is not None:
                 active.pop(drop_idx)
@@ -1098,15 +1293,16 @@ def solve_constrained_qp(
                 feasible = _is_feasible(A, beta, b, tol, abs_A=abs_A)
                 # A repair is a new candidate: recheck its full dual and
                 # stationarity certificate before assigning convergence.
+                objective = _objective_actions(H_sym, beta, g)
                 stationary, drop_idx, multipliers = _stationarity_certificate(
-                    H_sym, g, beta, A[active], tol
+                    H_sym, g, beta, A[active], tol, objective
                 )
                 if drop_idx is not None:
                     active.pop(drop_idx)
                     basis.delete(drop_idx)
                     continue
             complementary = _complementarity_certificate(
-                H_sym, g, beta, A[active], b[active], multipliers, tol
+                H_sym, g, beta, A[active], b[active], multipliers, tol, objective
             )
             if feasible and stationary and complementary:
                 return _result(beta, active, it + 1, converged=True)
@@ -1129,10 +1325,11 @@ def solve_constrained_qp(
             alpha_min = 1.0
             blocking = -1
 
-            products, _, bounds, raw_step, _ = _constraint_actions(A, beta, b, abs_A, step)
+            actions = _constraint_actions(A, beta, b, abs_A, step)
+            products, _, bounds, raw_step, _ = actions
             # Same scale ``_is_feasible`` uses, which is what makes "does this
             # step move the row" agree with "is this row satisfied".
-            scaled_step, _ = _scaled_constraint_step(A, beta, step, b, abs_A)
+            scaled_step = _scaled_constraint_step(*actions)
             # Gate on the scaled derivative, as _is_feasible does; take the
             # ratio from the raw pair, which rounds once.
             gated = scaled_step < -tol
@@ -1174,8 +1371,9 @@ def solve_constrained_qp(
                 active.append(blocking)
                 basis.insert(blocking)
             else:
+                # The full step breaks a row no blocking candidate could hold, so
+                # it cannot certify: the next iteration solves the face again.
                 beta = beta_new
-                at_face_minimum = True
 
     # Exhaustion is non-convergence even at a feasible point: the KKT
     # certificate was never completed.
