@@ -375,3 +375,9 @@ def test_an_additive_edit_in_tiny_units_reaches_the_model():
     np.testing.assert_allclose(
         session.to_model().predict(row)[0], model.predict(row)[0] + moved, rtol=1e-9
     )
+    # The Cross-validation tab draws the same edit.
+    curves = {0: fold_log_curves(model, session.terms)}
+    view = capture_cv_view(session, run=None, final_fit=None)
+    (item,) = fold_term_items(session.terms, curves, display=view.display)
+    assert item["edited"] is not None
+    np.testing.assert_allclose(item["edited"], session_payload(session)["g"]["y"], rtol=1e-12)
