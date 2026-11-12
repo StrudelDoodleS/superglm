@@ -533,8 +533,14 @@ def _searched_intercept(
             score_rows = weights_arr * (y_arr - mu) * dmu_deta / variance
             residual_rounding = _residual_rounding(y_arr, mu, eta_safe, dmu_deta)
             score_rounding = np.abs(weights_arr * dmu_deta / variance) * residual_rounding
-            # ``_deviance_rounding`` from this pass's rows, over the carried rows.
-            deviance_rows = np.abs(weights_arr * (y_arr - mu) / variance)[carried]
+            # ``_deviance_rounding`` from this pass's rows, over the carried rows. A row a clamp
+            # holds has its mean at the clamp's own constant, which keeps nothing from the
+            # predictor's rounding: its unit deviance's rounding is the sum's alone. (Its slope
+            # in the mean, beside a floor of 1e-50, would make the bound 1e40 and every
+            # comparison a tie.)
+            deviance_rows = np.where(clamped, 0.0, np.abs(weights_arr * (y_arr - mu) / variance))[
+                carried
+            ]
             deviance_rounding = 2.0 * float(
                 np.sum(deviance_rows * residual_rounding[carried], dtype=np.float64)
             )

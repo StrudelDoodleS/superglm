@@ -3369,6 +3369,49 @@ def test_a_continued_repair_reads_no_curvature_from_rows_a_clamp_holds():
     assert deviance(mu) < dropped.fun - 1e-3
 
 
+def test_a_repair_holding_counts_at_the_mean_floor_is_judged_beside_the_dropped_term():
+    """A Poisson identity-link repair can hold rows of positive count at clip_mu's floor, 1e-50,
+    where each unit deviance is about 230 y. The comparison with the dropped term allowed each
+    such row its residual's rounding times its slope in the mean, y / 1e-50, and the bound
+    reached 1e40: a continued repair at deviance 10995 was published beside the dropped
+    term's 228 (mutation check: dropping the clamped rows' exclusion from that bound). A
+    clamped mean is the clamp's own constant and keeps no rounding from the predictor; the
+    repair published is below the dropped term, its intercept profiled by SciPy.
+    """
+    from scipy.optimize import minimize_scalar
+
+    rng = np.random.default_rng(19)
+    x = np.linspace(0.0, 1.0, 200)
+    offset = 0.1 + 2.0 * x
+    bump = np.exp(-(((x - 0.3) / 0.12) ** 2)) - 0.4
+    y = rng.poisson(np.maximum(offset + 0.8 * bump, 0.01)).astype(np.float64)
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="poisson",
+        link="identity",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=6, constraint=Constraint.postfit.increasing)},
+    ).fit(X, y, offset=offset)
+
+    model.apply_shape_postfit(X, offset=offset)
+
+    assert "x" in model._shape_repairs
+    term = _term_beta(model.result.beta, _x_groups(model))
+    assert shape_constraint_is_roundoff_feasible(model._specs["x"], term, "increasing")
+    mu = np.asarray(model.predict(X, offset=offset), dtype=np.float64)
+
+    def deviance(mean):
+        return float(np.sum(Poisson().deviance_unit(y, np.maximum(mean, 1e-50))))
+
+    dropped = minimize_scalar(
+        lambda c: deviance(offset + c),
+        bounds=(-0.1 + 1e-9, 5.0),
+        method="bounded",
+        options={"xatol": 1e-12},
+    )
+    assert deviance(mu) < dropped.fun
+
+
 def _sweep_case(n_knots, select, axis, shape, family, kind):
     """One repair of the post-fit sweep: n = 2500, drawn in the sweep's order."""
     rng = np.random.default_rng(7)
