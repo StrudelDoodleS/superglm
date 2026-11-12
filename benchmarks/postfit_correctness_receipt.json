@@ -1,0 +1,435 @@
+{
+  "baseline": "1ad4d8f18a044c74b97fdf1bc6b136a79d542150",
+  "book_models": {
+    "frequency": {
+      "data": "Full corrected freMTPL2 frequency book; ClaimNb recounted from severity file.",
+      "family": "Poisson/log",
+      "features": [
+        "BonusMalus BS10 postfit.decreasing",
+        "DrivAge CR8",
+        "VehAge CR12",
+        "log1p(Density) numeric",
+        "VehBrand categorical",
+        "Region categorical"
+      ],
+      "response": "ClaimNb / max(Exposure, 0.01)",
+      "selection_penalty": 0,
+      "weights": "max(Exposure, 0.01)"
+    },
+    "severity": {
+      "data": "All uncapped positive severity rows joined to frequency by IDpol",
+      "family": "GammaLS with default links",
+      "mean": [
+        "DrivAge BS8 postfit.increasing",
+        "VehAge CR8",
+        "BonusMalus CR8",
+        "log1p(Density) numeric",
+        "VehBrand categorical",
+        "Region categorical"
+      ],
+      "response": "ClaimAmount / 1000",
+      "rows": 26444,
+      "scale": [
+        "DrivAge BS6 postfit.increasing",
+        "VehAge CR6",
+        "log1p(Density) numeric"
+      ]
+    }
+  },
+  "book_peak_process_rss_mib": 1037.94921875,
+  "book_timings": [
+    {
+      "baseline": {
+        "backend": "gram",
+        "coefficients_hash": "5a35a8f767deb4bb21f973470abf5b213a135825bb2b09565e7658b4d58cb8af",
+        "converged": false,
+        "deviance": 170631.54687267193,
+        "edf": 55.61632264246792,
+        "first_to_last_control_drift_fraction": -0.2214403909270738,
+        "prediction_hash": "362d45a6e61bb76db2c44076e98881e5064a10bdd7541348df5bc814a0ef1208",
+        "rss_after_mib": 769.56640625,
+        "seconds": 6.5968215288594365,
+        "times": [
+          7.122040299233049,
+          6.849341505672783,
+          5.7968133091926575,
+          6.5968215288594365,
+          5.544932911172509
+        ],
+        "warnings": [
+          "The post-fit repair of the term 'BonusMalus' could not improve on dropping the term, so the term is published flat: its curve is zero, which obeys the 'decreasing' rule. Constraint.fit.decreasing chooses the smoothing under the rule and finds the constrained optimum; refit with it for a curve with the shape."
+        ]
+      },
+      "case": "fremtpl2/poisson/six-term/reml/postfit-decreasing",
+      "head": {
+        "backend": "gram",
+        "coefficients_hash": "5a35a8f767deb4bb21f973470abf5b213a135825bb2b09565e7658b4d58cb8af",
+        "converged": false,
+        "deviance": 170631.54687267193,
+        "edf": 55.61632264246792,
+        "first_to_last_control_drift_fraction": -0.14176124900241327,
+        "prediction_hash": "362d45a6e61bb76db2c44076e98881e5064a10bdd7541348df5bc814a0ef1208",
+        "rss_after_mib": 765.57421875,
+        "seconds": 6.0529705211520195,
+        "times": [
+          6.412105807103217,
+          6.604084136895835,
+          5.635774732101709,
+          6.0529705211520195,
+          5.503117679152638
+        ],
+        "warnings": [
+          "The post-fit repair of the term 'BonusMalus' could not improve on dropping the term, so the term is published flat: its curve is zero, which obeys the 'decreasing' rule. Constraint.fit.decreasing chooses the smoothing under the rule and finds the constrained optimum; refit with it for a curve with the shape."
+        ]
+      },
+      "max_coefficient_change": 0.0
+    },
+    {
+      "baseline": {
+        "backend": "gram",
+        "coefficients_hash": "5a35a8f767deb4bb21f973470abf5b213a135825bb2b09565e7658b4d58cb8af",
+        "converged": false,
+        "deviance": 170631.54687267193,
+        "edf": 55.61632264246792,
+        "first_to_last_control_drift_fraction": 0.10431570240408372,
+        "prediction_hash": "362d45a6e61bb76db2c44076e98881e5064a10bdd7541348df5bc814a0ef1208",
+        "rss_after_mib": 858.6875,
+        "seconds": 0.8898897613398731,
+        "times": [
+          0.8693142030388117,
+          0.9118043798953295,
+          0.8898897613398731,
+          0.8752671726979315,
+          0.9599973247386515
+        ],
+        "warnings": [
+          "The post-fit repair of the term 'BonusMalus' could not improve on dropping the term, so the term is published flat: its curve is zero, which obeys the 'decreasing' rule. Constraint.fit.decreasing chooses the smoothing under the rule and finds the constrained optimum; refit with it for a curve with the shape."
+        ]
+      },
+      "case": "fremtpl2/poisson/six-term/apply-only",
+      "head": {
+        "backend": "gram",
+        "coefficients_hash": "5a35a8f767deb4bb21f973470abf5b213a135825bb2b09565e7658b4d58cb8af",
+        "converged": false,
+        "deviance": 170631.54687267193,
+        "edf": 55.61632264246792,
+        "first_to_last_control_drift_fraction": -0.0539877844183313,
+        "prediction_hash": "362d45a6e61bb76db2c44076e98881e5064a10bdd7541348df5bc814a0ef1208",
+        "rss_after_mib": 856.6875,
+        "seconds": 0.8814860079437494,
+        "times": [
+          0.8919063918292522,
+          0.8814860079437494,
+          1.0009884480386972,
+          0.8744415109977126,
+          0.8437543418258429
+        ],
+        "warnings": [
+          "The post-fit repair of the term 'BonusMalus' could not improve on dropping the term, so the term is published flat: its curve is zero, which obeys the 'decreasing' rule. Constraint.fit.decreasing chooses the smoothing under the rule and finds the constrained optimum; refit with it for a curve with the shape."
+        ]
+      },
+      "max_coefficient_change": 0.0
+    },
+    {
+      "baseline": {
+        "backend": "dense",
+        "chunk_size": null,
+        "coefficients_hash": "062c31602c8c575449b7ebcd4f2a3b581c37507ad7e9f03f6a6d275de63f740e",
+        "converged": true,
+        "curvature_source": "observed",
+        "first_to_last_control_drift_fraction": 0.13582975631507233,
+        "independent_merit": 46010.2967358761,
+        "iterations": 0,
+        "mean_intercept_relative_score": 0.06742311741929682,
+        "prediction_hash": "2585ee73ad5d48f06c2782766b66837dda08e840c8ff8442ede9904b8a6762ad",
+        "repaired_terms": [
+          "mean:DrivAge",
+          "scale:DrivAge"
+        ],
+        "rss_after_mib": 870.3984375,
+        "scale_intercept_relative_score": 1.7683266470473212e-11,
+        "seconds": 17.502907861955464,
+        "times": [
+          17.832787222228944,
+          16.599907205905765,
+          17.198845203965902,
+          17.502907861955464,
+          20.255010365042835
+        ],
+        "warnings": [
+          "The post-fit repair of the term 'scale:DrivAge' could not improve on dropping the term, so the term is published flat: its curve is zero, which obeys the 'increasing' rule. Constraint.fit.increasing chooses the smoothing under the rule and finds the constrained optimum; refit with it for a curve with the shape."
+        ]
+      },
+      "case": "fremtpl2/gamma/mean-and-scale/reml/two-repairs",
+      "head": {
+        "backend": "dense",
+        "chunk_size": null,
+        "coefficients_hash": "bbf3882485cf2e88e305a8ee4d624a4214cb3c8e17ba012559cd01e7894adfcf",
+        "converged": true,
+        "curvature_source": "observed",
+        "first_to_last_control_drift_fraction": 0.12279049406760345,
+        "independent_merit": 45970.52593027934,
+        "iterations": 0,
+        "mean_intercept_relative_score": 2.121284216982266e-12,
+        "prediction_hash": "2a45cb250a1045984ecb7814d233d4438eb4b71493cabfe40e3777eb40b802e6",
+        "repaired_terms": [
+          "mean:DrivAge",
+          "scale:DrivAge"
+        ],
+        "rss_after_mib": 870.3984375,
+        "scale_intercept_relative_score": 1.4752131477279577e-12,
+        "seconds": 16.693739825859666,
+        "times": [
+          16.693739825859666,
+          16.000732401385903,
+          16.08334738528356,
+          17.276127147022635,
+          18.743572386913
+        ],
+        "warnings": [
+          "The post-fit repair of the term 'scale:DrivAge' could not improve on dropping the term, so the term is published flat: its curve is zero, which obeys the 'increasing' rule. Constraint.fit.increasing chooses the smoothing under the rule and finds the constrained optimum; refit with it for a curve with the shape."
+        ]
+      },
+      "max_coefficient_change": 0.06412638923060632,
+      "rows": 26444,
+      "rules": {
+        "mean": "increasing",
+        "scale": "increasing"
+      }
+    },
+    {
+      "baseline": {
+        "backend": "dense",
+        "chunk_size": null,
+        "coefficients_hash": "062c31602c8c575449b7ebcd4f2a3b581c37507ad7e9f03f6a6d275de63f740e",
+        "converged": true,
+        "curvature_source": "observed",
+        "first_to_last_control_drift_fraction": 0.054439998541402135,
+        "independent_merit": 46010.2967358761,
+        "iterations": 0,
+        "mean_intercept_relative_score": 0.06742311741929682,
+        "prediction_hash": "2585ee73ad5d48f06c2782766b66837dda08e840c8ff8442ede9904b8a6762ad",
+        "repaired_terms": [
+          "mean:DrivAge",
+          "scale:DrivAge"
+        ],
+        "rss_after_mib": 952.953125,
+        "scale_intercept_relative_score": 1.7683266470473212e-11,
+        "seconds": 0.14530000369995832,
+        "times": [
+          0.139870994258672,
+          0.14530000369995832,
+          0.13950457982718945,
+          0.14537291694432497,
+          0.14748557098209858
+        ],
+        "warnings": [
+          "The post-fit repair of the term 'scale:DrivAge' could not improve on dropping the term, so the term is published flat: its curve is zero, which obeys the 'increasing' rule. Constraint.fit.increasing chooses the smoothing under the rule and finds the constrained optimum; refit with it for a curve with the shape."
+        ]
+      },
+      "case": "fremtpl2/gamma/mean-and-scale/apply-only",
+      "head": {
+        "backend": "dense",
+        "chunk_size": null,
+        "coefficients_hash": "bbf3882485cf2e88e305a8ee4d624a4214cb3c8e17ba012559cd01e7894adfcf",
+        "converged": true,
+        "curvature_source": "observed",
+        "first_to_last_control_drift_fraction": 0.10906037680780578,
+        "independent_merit": 45970.52593027934,
+        "iterations": 0,
+        "mean_intercept_relative_score": 2.121284216982266e-12,
+        "prediction_hash": "2a45cb250a1045984ecb7814d233d4438eb4b71493cabfe40e3777eb40b802e6",
+        "repaired_terms": [
+          "mean:DrivAge",
+          "scale:DrivAge"
+        ],
+        "rss_after_mib": 952.953125,
+        "scale_intercept_relative_score": 1.4752131477279577e-12,
+        "seconds": 0.16244612680748105,
+        "times": [
+          0.15782162500545382,
+          0.16244612680748105,
+          0.1520016542635858,
+          0.18174180062487721,
+          0.17503371089696884
+        ],
+        "warnings": [
+          "The post-fit repair of the term 'scale:DrivAge' could not improve on dropping the term, so the term is published flat: its curve is zero, which obeys the 'increasing' rule. Constraint.fit.increasing chooses the smoothing under the rule and finds the constrained optimum; refit with it for a curve with the shape."
+        ]
+      },
+      "max_coefficient_change": 0.06412638923060632,
+      "rows": 26444,
+      "rules": {
+        "mean": "increasing",
+        "scale": "increasing"
+      }
+    }
+  ],
+  "deliverable": "PR #626 follow-ups 2--6: post-fit publication and metric correctness",
+  "environment": {
+    "datasets": {
+      "freMTPL2freq.parquet": "d691f9a0b53719381467d8b1d3487814e546a9c7cd59f9a56e70ff5100dc14bf",
+      "freMTPL2sev.parquet": "101c58e726eae9fe25eadbd57736cbdf34e43adcbe9bbeeee6ea27c8834e39df"
+    },
+    "machine": "x86_64",
+    "numpy": "2.5.2",
+    "python": "3.13.14",
+    "sources": {
+      "src/superglm/constraints.py": "1d79ce29e1aa4008e681ec362804a51706a28cb3e54ef0a9cf9cb35384a419eb",
+      "src/superglm/distributional/shape_repair.py": "dad0b9f6db0ceca078ad06585db8199728fe9e376db2287a9a659f518130b17a",
+      "src/superglm/model/shape_ops.py": "68c1be0bcf3350e5114220640eb271b4d26ebd4feca91039cb91e2650762f736"
+    },
+    "system": "Linux",
+    "threads": {
+      "MKL_NUM_THREADS": "1",
+      "NUMBA_NUM_THREADS": "1",
+      "NUMEXPR_NUM_THREADS": "1",
+      "OMP_NUM_THREADS": "1",
+      "OPENBLAS_NUM_THREADS": "1",
+      "POLARS_MAX_THREADS": "1",
+      "SUPERGLM_BLAS_THREADS": "1",
+      "SUPERGLM_N_JOBS": "1"
+    }
+  },
+  "glm648_timing": {
+    "baseline": {
+      "median_seconds": 0.01297437958419323,
+      "sum_seconds": 9.586356760933995
+    },
+    "cases": 648,
+    "coefficient_vectors_identical": 648,
+    "head": {
+      "median_seconds": 0.01306849136017263,
+      "sum_seconds": 9.564451632089913
+    },
+    "measured_head": "db45abd5b8026d0865ddf63667a219de1cc54001",
+    "new_joint_or_metric_warnings": 0,
+    "peak_process_rss_mib": 388.265625
+  },
+  "lss58_timing": {
+    "baseline": {
+      "median_seconds": 0.013148261234164238,
+      "sum_seconds": 0.9761138209141791
+    },
+    "cases": 58,
+    "coefficient_vectors_identical": 53,
+    "head": {
+      "median_seconds": 0.013267366914078593,
+      "sum_seconds": 1.0049693076871336
+    },
+    "measured_head": "db45abd5b8026d0865ddf63667a219de1cc54001",
+    "new_joint_or_metric_warnings": 0,
+    "peak_process_rss_mib": 351.125
+  },
+  "measured_head": "db45abd5b8026d0865ddf63667a219de1cc54001",
+  "outside_scope": [
+    "Item 7 Gamma/inverse clamp local minima",
+    "Item 8 fit-solver subnormal weights",
+    "Item 9 apex SIP rate; SOCP needs owner approval",
+    "Item 13 group-lasso curvature and sequential multi-term reweighting"
+  ],
+  "release_advice": {
+    "impact": "patch",
+    "rationale": "Correct existing post-fit repairs and disclose uncertified closestness; no public API or version changes."
+  },
+  "remaining_cost": "The two-parameter Gamma repair still performs additional conditional-likelihood work: apply-only median 0.145300 -> 0.162446 s. Complete fit+repair medians are below the same-session baseline; shorter-call totals and raw drift are disclosed rather than claimed as improvements.",
+  "review": {
+    "effort": "xhigh",
+    "findings": 3,
+    "findings_addressed": [
+      "Smooth optimum beyond a zero-count corner",
+      "Stored curvature must replay at fitted coefficients",
+      "Joint intercept shift must be charged once per parameter"
+    ],
+    "model": "Claude Opus 5.5",
+    "performance_followup": "Measured warning counts and removed repeated predictor formation as requested."
+  },
+  "runtime_details": {
+    "logical_cpus": 16,
+    "lock_sha256": "a809e67c42f272a2c633907d3ea89fe371b95608827a3e34a0bd61b62f324e93",
+    "packages": {
+      "numba": "0.68.0",
+      "numpy": "2.5.2",
+      "pandas": "3.0.5",
+      "scipy": "1.18.0"
+    }
+  },
+  "schema": 1,
+  "timing_protocol": {
+    "arms": "Same process, same seeded inputs and environment; alternate baseline/head order. Only the three changed post-fit modules differ.",
+    "book_fits": "One warm-up per arm, then median of five alternating complete fit_reml + apply_shape_postfit calls on fresh models. Separate median-of-five complete apply_shape_postfit calls on fresh copies.",
+    "cache": "No new retained numerical cache. Joint eta is owned by the settling call, updated with each actual coefficient shift and discarded at return.",
+    "control_drift": "Raw samples and first-to-last control drift are retained below. Clock drift prevents attributing the complete-fit median differences to a fit-kernel speedup.",
+    "lease": "benchboard run-timed postfit-final-ab 15",
+    "lss_sample": "58 evenly spaced fixtures among the 204 published models of the 276-fit corpus, including coupled repairs.",
+    "profiling": "Work counts and cProfile were collected in separate benchboard heavy runs and are not reported as wall-time evidence.",
+    "repair_calls": "One untimed warm-up per arm, then minimum of three complete calls on fresh deep copies. Copy time excluded."
+  },
+  "validation": {
+    "binomial432": {
+      "coefficient_vectors_identical_to_baseline": 432,
+      "published": 432
+    },
+    "clamp288": {
+      "baseline_published": 272,
+      "head_published": 288,
+      "new_refusals": 0,
+      "reported_binomial_deviances": [
+        [
+          237.42604507637324,
+          207.6534693
+        ],
+        [
+          219.22094172727157,
+          214.5617331
+        ]
+      ]
+    },
+    "dependency_consistency": "pass",
+    "duration_source_run": 43251834958,
+    "duration_source_url": "https://github.com/StrudelDoodleS/superglm/actions/runs/43251834958",
+    "focused_tests": 426,
+    "format": "1088 files pass",
+    "full_suite": {
+      "initial_failure": "Only test_duration_manifest_covers_the_non_browser_suite failed: 260 of 24549 nodes lacked recorded CI times.",
+      "non_strict_xpass": 1,
+      "parallel_passed": 24336,
+      "resolution": "Added 236 previously missing measured entries from merged PR #631 CI; all 53 CI contracts then passed. Existing duration values were preserved.",
+      "skipped": 118,
+      "threaded_passed": 56,
+      "xfail": 43
+    },
+    "glm648": {
+      "coefficient_vectors_identical_to_baseline": 648,
+      "published": 648
+    },
+    "lock": "pass",
+    "lss276": {
+      "already_obeyed": 72,
+      "coupled_published_vectors_corrected": 21,
+      "intercept_reprofiles_exceeding_1e_minus6": 0,
+      "new_refusals": 0,
+      "new_warnings": 0,
+      "published": 204,
+      "vectors_changed_by_performance_reuse": 0,
+      "warnings_on_each_arm": 3
+    },
+    "mutation_checks": {
+      "carried_predictor": "Removing the eta-column update fails the independent Gamma joint-score regression.",
+      "stored_metric_replay": "The exact reviewed pre-fix function fails the corrected independent-metric regression; fixed code passes."
+    },
+    "new_regression_cases": 24,
+    "poisson_identity_random_profiles": {
+      "cases": 300,
+      "refusals": 0
+    },
+    "release_constraint_differential": {
+      "baseline_release": "v0.43.0",
+      "baseline_unsupported": 1,
+      "flags": 0,
+      "selected": 190
+    },
+    "ruff": "pass",
+    "smoke": "END-TO-END COMPLETE"
+  }
+}

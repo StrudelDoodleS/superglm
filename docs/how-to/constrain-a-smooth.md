@@ -397,6 +397,11 @@ The basis keeps the fit's centring, so the term's mean over the training rows
 does not move. The parameter's intercept is then re-estimated on the joint
 likelihood, with every term and every other parameter held.
 
+When repairs change more than one parameter, their intercepts are re-estimated
+together with all repaired curves held. A later parameter's repair can move an
+earlier parameter's conditional optimum. If the intercepts do not settle, the
+last valid repair is returned with a warning.
+
 The penalized objective is the negative log-likelihood plus the fit's
 smoothing penalty, at the fit's smoothing parameters. Far from the fit, as
 after a large edit, the closest curve can score worse on it than dropping the
@@ -463,8 +468,11 @@ holds and the closest one, and on some curves it stops with the gap open. The
 curve it publishes still obeys the rule everywhere, and a `RuntimeWarning`
 says it may not be the closest one and bounds how much farther from the fit it
 is. A step spline's monotone repair and a piecewise-linear spline's convex or
-concave repair are one solve each; if it does not converge, the repair raises
-`RuntimeError`, and the model is unchanged. Prefer
+concave repair are one solve each. If that solve does not certify the closest
+curve, it publishes a feasible curve and discloses its distance bound too. A
+public repairer called without a metric on a grid with fewer points than
+coefficients warns that its regularized projection may not be the closest
+curve in the original grid metric. Prefer
 `Constraint.fit` where you need the fit itself to obey the rule.
 
 ## Linear Predictor Semantics
@@ -727,12 +735,16 @@ projection (Liao and Meyer, *Journal of Statistical Software* 89(5), 2019,
 section 1.2). Dropping the term always has the shape, so that curve is never
 worse.
 
+If the projected curve has no conditional intercept minimum, the search starts
+from the dropped term's profiled intercept instead. Poisson models with an
+identity link also include intercept minima at the boundary where a zero-count
+row's mean reaches zero.
+
 If this search stops short and its curve still fits worse than dropping the
 term, the term is published flat: its curve is zero, which has every shape,
 and the intercept is re-estimated without it. The same happens when no closest
-curve can be formed (the fit's curvature gives the term no weight), or when
-the intercept cannot be re-estimated with the repaired curve but can with the
-term dropped. A `RuntimeWarning` names the term, as it does when the closest
+curve can be formed (the fit's curvature gives the term no weight).
+A `RuntimeWarning` names the term, as it does when the closest
 curve with the shape is itself the zero curve. A flat term often means the
 data run against the rule at the fit's smoothing: `Constraint.fit` chooses the
 smoothing under the rule and finds the constrained optimum.

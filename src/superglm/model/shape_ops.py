@@ -503,6 +503,10 @@ def _searched_intercept(
     # Fisher information is still positive: a search's stationary shift is then a minimum only
     # where the deviance's own curvature there is positive (``_deviance_curvature``).
     nonconvex = checked
+    # Only a Poisson/identity profile that both ordinary searches fail retries
+    # with its observed curvature. In particular a zero-count row contributes
+    # no curvature, although its Fisher information diverges beside mean zero.
+    observed_poisson = False
 
     def evaluate(
         shift: float, compared: bool, clamps: bool = False, origin=None
@@ -554,6 +558,8 @@ def _searched_intercept(
                 dmu_deta=dmu_deta,
                 variance=variance,
             )
+            if observed_poisson:
+                information_rows *= y_arr / mu
             if clamps and origin is not None:
                 # A row's score is minus half its deviance's slope, so a step enters the
                 # row's clamp rising where the two have opposite signs.
@@ -731,6 +737,14 @@ def _searched_intercept(
         # A run stopped on a maximum, where the Fisher step is null and neither run can leave:
         # the derivative-free search decides, as SuperLSS's does.
         found = _derivative_free_intercept(eta_base[carried], evaluate)
+    if found is None and type(model._distribution) is Poisson and type(model._link) is IdentityLink:
+        found = _poisson_identity_boundary(eta_base, y_arr, weights_arr, evaluate)
+        if found is None:
+            # Between zero-row corners the score is smooth and decreasing, with
+            # curvature sum(w*y/mu**2). Reuse the safeguarded Newton search with
+            # that curvature: Fisher steps can stall just short of this root.
+            observed_poisson = True
+            found = search(rerun=True)
     if found is None:
         from superglm.constraints import _InterceptSearchError
 
@@ -740,6 +754,44 @@ def _searched_intercept(
         )
     shift, state = found
     return eta_base + shift, shift, state.deviance_rounding, state.deviance
+
+
+def _poisson_identity_boundary(eta, y, weights, evaluate):
+    """A zero-count corner whose one-sided scores bracket zero, or ``None``.
+
+    With positive-count means inside their domain, Poisson/identity deviance is
+    convex. A zero count contributes ``2 w max(eta + shift, 0)``: at its corner
+    the score drops by ``w``. Optimality is a nonnegative left score and a
+    nonpositive right score, rather than a smooth zero (Boyd and Vandenberghe,
+    Convex Optimization, 2004, section 4.2.3). The ordinary Fisher search can
+    stall there because its information diverges although this row's deviance
+    is linear. This exceptional search bisects the ordered zero-row corners.
+    """
+    carried = weights != 0.0
+    positive = carried & (y > 0.0)
+    corners = np.unique(-eta[carried & (y == 0.0)])
+    # No positive-count row may enter its lower clamp: the constant deviance
+    # beyond it is not the Poisson likelihood's continuation through mean zero.
+    lower = float(np.max(-eta[positive], initial=-np.inf))
+    corners = corners[corners > lower]
+    low, high = 0, corners.size
+    while low < high:
+        middle = (low + high) // 2
+        shift = float(corners[middle])
+        state = evaluate(shift, True, True)
+        if state is None or np.any(state.clamped[positive]):
+            return None
+        touch = carried & (y == 0.0) & (eta + shift == 0.0)
+        left = state.score
+        right = left - float(np.sum(weights[touch], dtype=np.float64))
+        tolerance = 1e-11 * state.score_scale + state.score_rounding
+        if left >= -tolerance and right <= tolerance:
+            return shift, state
+        if right > tolerance:
+            low = middle + 1
+        else:
+            high = middle
+    return None
 
 
 #: Evaluations each run of the conditional intercept search takes at most: bisection
@@ -1154,6 +1206,7 @@ def _continued_repair(
 
     from superglm.constraints import (
         _fitted_basis,
+        _InterceptSearchError,
         shape_constraint_certificate,
         shape_sum_tolerance,
     )
@@ -1184,7 +1237,14 @@ def _continued_repair(
         return merit, eta, shape_sum_tolerance(abs(merit), len(y)) + rounding
 
     beta = np.asarray(repair_result.repaired_beta_reparam, dtype=np.float64)
-    merit, eta, tolerance = scored(beta)
+    try:
+        merit, eta, tolerance = scored(beta)
+    except _InterceptSearchError:
+        # A failed candidate profile says nothing about the cone's other curves.
+        # Its apex is feasible; continue from its profiled intercept instead.
+        beta = beta.copy()
+        beta[indices] = 0.0
+        merit, eta, tolerance = scored(beta)
     certified = _certified_curve_scale(repair_result.original_log_effect, grid_weights)
     moved = False
     for _ in range(_CONTINUED_STEPS):
@@ -1312,9 +1372,7 @@ def _publishable_repair(model, repair_result, n_grid, scoring):
         return _validate_repair_for_publication(
             model, repair_result=repair_result, **scoring
         ), repair_result
-    except _InterceptSearchError:
-        return None
-    except _WorseThanFallbackError:
+    except (_InterceptSearchError, _WorseThanFallbackError):
         pass
     worst: list[bool] = []
     # Continued on the deviance scored; where that is still refused and it met rows a clamp
