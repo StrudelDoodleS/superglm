@@ -698,8 +698,13 @@ def _validate_repair_for_publication(
     smooth_penalty_terms,
     selection_penalty,
     current_eta,
+    certified_scale=None,
 ) -> tuple[np.ndarray, np.ndarray, float]:
-    """Certify fitted geometry and objective quality before changing private state."""
+    """Certify fitted geometry and objective quality before changing private state.
+
+    ``certified_scale`` is the scale a continued repair's result is certified at; by
+    default the curve it repaired (``_certified_curve_scale``), as for a projection.
+    """
     from superglm.constraints import _fitted_basis, shape_slack_tolerance, shape_sum_tolerance
 
     current_beta = np.asarray(model.result.beta, dtype=np.float64)
@@ -713,9 +718,12 @@ def _validate_repair_for_publication(
     term_beta = np.concatenate([candidate_beta[group.sl] for group in groups])
     current_term_beta = np.concatenate([current_beta[group.sl] for group in groups])
     fitted_scale = float(np.linalg.norm(current_term_beta))
-    # A term within the slack's rounding of zero at the fitted term's scale is
-    # the zero term, and is published as exactly that: a later call sees only
-    # the published term, and would judge the rounding at its own scale.
+    if certified_scale is not None:
+        fitted_scale = max(fitted_scale, certified_scale)
+    # A term within the slack's rounding of zero at the fitted term's scale, or the larger
+    # one a continued repair was certified at, is the zero term, and is published as
+    # exactly that: a later call sees only the published term, and would judge the
+    # rounding at its own scale.
     if float(np.linalg.norm(term_beta)) <= shape_slack_tolerance(term_beta, fitted_scale):
         candidate_beta = candidate_beta.copy()
         for group in groups:
@@ -737,7 +745,8 @@ def _validate_repair_for_publication(
 
         # Judged at the scale the repairer certified at, as SuperLSS's repair judges it.
         weights = np.asarray(grid_weights, dtype=np.float64)
-        certified_scale = _certified_curve_scale(repair_result.original_log_effect, weights)
+        if certified_scale is None:
+            certified_scale = _certified_curve_scale(repair_result.original_log_effect, weights)
         settled = _settled_on_rule(
             spec, kind, term_beta, grid, weights / float(np.sum(weights)), certified_scale
         )
@@ -872,11 +881,13 @@ def _continued_repair(
     selection_penalty,
     current_eta,
 ):
-    """The refused repair continued towards the constrained penalized fit, or ``None``.
+    """The refused repair continued towards the constrained penalized fit, and the scale it is
+    certified at; or ``None``.
 
     Starts from the refused candidate and stops where the model's predicted decrease or a
     step's actual decrease is within the merit's rounding, or a step finds no decrease.
-    ``None`` when no step is taken; the publication rule judges the result as before.
+    ``None`` when no step is taken; the publication rule judges the result as before, at
+    the scale returned (``_continued_scale``).
     """
     from dataclasses import replace
 
@@ -908,6 +919,7 @@ def _continued_repair(
 
     beta = np.asarray(repair_result.repaired_beta_reparam, dtype=np.float64)
     merit, eta, tolerance = scored(beta)
+    certified = _certified_curve_scale(repair_result.original_log_effect, grid_weights)
     moved = False
     for _ in range(_CONTINUED_STEPS):
         eta_safe = stabilize_eta(eta, model._link)
@@ -963,6 +975,7 @@ def _continued_repair(
         else:
             break
         decrease = merit - trial_merit
+        certified = _continued_scale(certified, term, cone_point, projected, grid_weights)
         beta, merit, eta, tolerance = trial, trial_merit, trial_eta, trial_tolerance
         moved = True
         if decrease <= tolerance:
@@ -970,11 +983,29 @@ def _continued_repair(
     if not moved:
         return None
     curve = _fitted_basis(spec, repair_result.grid) @ beta[indices]
-    return replace(
+    continued = replace(
         repair_result,
         repaired_beta_reparam=beta,
         repaired_log_effect=curve,
         projection_residual=float(np.max(np.abs(curve - repair_result.original_log_effect))),
+    )
+    return continued, certified
+
+
+def _continued_scale(certified, current, cone_point, projected, grid_weights) -> float:
+    """The scale a continued step's iterate is certified at, from ``certified``, its start's.
+
+    The iterate lies on the segment from ``current`` to ``cone_point``, which the repairer
+    certified at the scale of the curve it projected (``projected.original_log_effect``,
+    ``_certified_curve_scale``). The least slack is superadditive in the coefficients, so
+    the iterate breaks its rule by no more than the larger of its ends' violations: it is
+    certified at the largest of their scales and norms, at least the start's.
+    """
+    return max(
+        certified,
+        float(np.linalg.norm(current)),
+        float(np.linalg.norm(cone_point)),
+        _certified_curve_scale(projected.original_log_effect, grid_weights),
     )
 
 
@@ -1325,9 +1356,12 @@ def _apply_shape_postfit(model, X, sample_weight, offset, *, n_grid: int):
             )
             if continued is None:
                 raise
-            repair_result = continued
+            repair_result, certified_scale = continued
             candidate_beta, current_eta, intercept_shift = _validate_repair_for_publication(
-                work_model, repair_result=repair_result, **scoring
+                work_model,
+                repair_result=repair_result,
+                certified_scale=certified_scale,
+                **scoring,
             )
         # Recorded only if this term's coefficients actually moved.  The early exit
         # above concerns the whole model: once any term binds the loop runs for every

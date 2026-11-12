@@ -3195,7 +3195,7 @@ def test_continued_repair_is_judged_by_the_same_rule(monkeypatch):
     def scaled_continuation(*args, **kwargs):
         result = real_continued(*args, **kwargs)
         continued.append(result)
-        _fault_worse_than_zero_term(result, kwargs["spec"], kwargs["groups"])
+        _fault_worse_than_zero_term(result[0], kwargs["spec"], kwargs["groups"])
         return result
 
     monkeypatch.setattr(shape_ops, "_continued_repair", scaled_continuation)
@@ -3207,10 +3207,78 @@ def test_continued_repair_is_judged_by_the_same_rule(monkeypatch):
     _assert_nothing_published(model, X, snapshot)
 
 
+def _pushed_continuation(monkeypatch, push):
+    """Route every continued projection through ``push(spec, grid, scales)``, the block it
+    returns, where ``scales`` lists each projection's certified curve scale, the first's first."""
+    import dataclasses
+
+    real = shape_ops._repairer
+    scales = []
+
+    class Pushed:
+        def __init__(self, kind):
+            self.inner = real(kind)
+
+        def repair(self, spec, beta, groups, **kwargs):
+            result = self.inner.repair(spec, beta, groups, **kwargs)
+            weights = np.asarray(kwargs["weights"], dtype=np.float64)
+            scales.append(shape_ops._certified_curve_scale(result.original_log_effect, weights))
+            if len(scales) == 1:
+                return result
+            block = push(spec, np.asarray(result.grid, dtype=np.float64), scales)
+            full = np.array(result.repaired_beta_reparam, dtype=np.float64, copy=True)
+            offset = 0
+            for group in groups:
+                full[group.sl] = block[offset : offset + group.size]
+                offset += group.size
+            # the repair's certificate is of the block it returned, not of this one
+            return dataclasses.replace(result, repaired_beta_reparam=full, certificate=None)
+
+    monkeypatch.setattr(shape_ops, "_repairer", Pushed)
+    return scales
+
+
+def test_a_continued_projection_is_judged_at_the_scale_it_was_certified_at(monkeypatch):
+    """A continued repair is read at the scale its projection certified it at.
+
+    The continuation projects the merit's Newton target, whose curve is 2.77 in weighted RMS
+    against the fitted curve's 0.79, and reaches the zero curve, which the repairer certifies
+    to the rounding at the larger scale. At 1984d54f3 publication read the result at the
+    fitted curve's scale. Forced: each continued projection is replaced by the zero curve
+    moved along one row of the rule, by more than the fitted term's rounding and less than
+    the target's. That was refused as breaking the rule; it is zero to the rounding it was
+    certified at, and is published as the zero curve.
+    """
+    model, X, _ = _sweep_case(25, True, "lognormal", "abs", "gamma", "decreasing")
+    fitted = _term_beta(model.result.beta, _x_groups(model))
+    rounding = float(gamma(_SLACK_STEPS * fitted.size))
+    sent = []
+
+    def push(spec, grid, scales):
+        row = shape_derivative_matrix(spec, [np.median(grid)], 1)[0]
+        size = rounding * np.sqrt(np.linalg.norm(fitted) * scales[-1])
+        sent.append((size * row / np.linalg.norm(row), scales[0], scales[-1]))
+        return sent[-1][0]  # rising there, so it breaks the decreasing rule
+
+    _pushed_continuation(monkeypatch, push)
+    model.apply_shape_postfit(X)
+
+    block, first, last = sent[-1]
+    certificate = shape_constraint_certificate(model._specs["x"], block, "decreasing")
+    assert certificate.minimum_scaled_slack < -rounding * first
+    assert rounding * np.linalg.norm(fitted) < np.linalg.norm(block) < rounding * last
+    assert "x" in model._shape_repairs
+    assert not np.any(_term_beta(model.result.beta, _x_groups(model)))
+
+
 def _sweep_case(n_knots, select, axis, shape, family, kind):
     """One repair of the post-fit sweep: n = 2500, drawn in the sweep's order."""
     rng = np.random.default_rng(7)
-    x = rng.uniform(0.0, 1.0, 2500) if axis == "uniform" else rng.exponential(1.0, 2500)
+    x = {
+        "uniform": lambda: rng.uniform(0.0, 1.0, 2500),
+        "exponential": lambda: rng.exponential(1.0, 2500),
+        "lognormal": lambda: rng.lognormal(0.0, 0.8, 2500),
+    }[axis]()
     if shape == "bump":
         f = 0.5 * np.exp(-(((x - np.quantile(x, 0.3)) / np.std(x)) ** 2))
     else:

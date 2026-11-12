@@ -627,14 +627,16 @@ def _settled(
     repair: Any,
     fitted_coefficients: NDArray[np.float64],
     grid_weights: NDArray[np.float64],
+    certified_scale: float | None = None,
 ) -> NDArray[np.float64]:
     """The repaired coefficients, certified as ``postfit_status`` reads them, or a refusal.
 
-    The projection certifies its result at the scale of the curve it repaired; the rule's
-    state is read at the repaired curve's own. A result zero to the first scale's rounding is
-    the zero curve, and is published as one. A result that breaks its rule at the second
-    scale by no more than the rounding certified at the first is moved strictly inside the
-    cone by that rounding, and published. Any other result that breaks it is refused.
+    The repair certifies its result at ``certified_scale`` (a continued repair's), by default
+    the scale of the curve it repaired; the rule's state is read at the repaired curve's own.
+    A result zero to the rounding of the fitted term, or of a continued repair's scale, is the
+    zero curve, and is published as one. A result that breaks its rule at the second scale by
+    no more than the rounding certified at the first is moved strictly inside the cone by that
+    rounding, and published. Any other result that breaks it is refused.
     """
     from superglm.constraints import (
         _inside_ray,
@@ -645,7 +647,10 @@ def _settled(
 
     spec, kind = term.curve_spec, term.kind
     repaired = np.array(repair.repaired_beta_reparam[term.columns], dtype=np.float64)
-    apex = shape_slack_tolerance(repaired, float(np.linalg.norm(fitted_coefficients)))
+    zero_scale = float(np.linalg.norm(fitted_coefficients))
+    if certified_scale is not None:
+        zero_scale = max(zero_scale, certified_scale)
+    apex = shape_slack_tolerance(repaired, zero_scale)
     certificate = repair.certificate
     if float(np.linalg.norm(repaired)) <= apex:
         repaired, certificate = np.zeros_like(repaired), None
@@ -657,13 +662,16 @@ def _settled(
     obeyed = slack >= -shape_slack_tolerance(repaired)
     if not obeyed:
         violation = -slack
-        # The scale the projection certified at: the weighted RMS of the curve it repaired.
         grid = np.asarray(repair.grid, dtype=np.float64)
         share = np.asarray(grid_weights, dtype=np.float64) / float(np.sum(grid_weights))
-        target = np.asarray(repair.original_log_effect, dtype=np.float64)
-        largest = float(np.max(np.abs(target), initial=0.0))
-        scale = largest * float(np.sqrt(share @ (target / largest) ** 2)) if largest else 0.0
-        if violation <= shape_slack_tolerance(repaired, scale):
+        if certified_scale is None:
+            # The scale the projection certified at: the weighted RMS of the curve it repaired.
+            target = np.asarray(repair.original_log_effect, dtype=np.float64)
+            largest = float(np.max(np.abs(target), initial=0.0))
+            certified_scale = (
+                largest * float(np.sqrt(share @ (target / largest) ** 2)) if largest else 0.0
+            )
+        if violation <= shape_slack_tolerance(repaired, certified_scale):
             # Along the repairer's own inside ray, by twice the violation: the least slack,
             # a unit row times the coefficients minimised over the range, is superadditive
             # in them, so every slack is then at least the violation.
@@ -851,17 +859,25 @@ def _continued_repair(
     grid_weights: NDArray[np.float64],
     n_grid: int,
 ) -> Any:
-    """The refused repair continued towards the constrained penalized fit, or ``None``.
+    """The refused repair continued towards the constrained penalized fit, and the scale it is
+    certified at (``model.shape_ops._continued_scale``); or ``None``.
 
     ``start`` is the refused candidate with its intercept re-estimated, ``merit`` its merit.
     Stops where the model's predicted decrease or a step's actual decrease is within the
     merit's rounding, or a step finds no decrease; ``None`` when no step is taken. The
-    publication rule judges the result as it judged the projection.
+    publication rule judges the result as it judged the projection, at the scale returned.
     """
     from dataclasses import replace
 
     from superglm.constraints import shape_constraint_certificate, shape_sum_tolerance
-    from superglm.model.shape_ops import _ARMIJO, _CONTINUED_STEPS, _STEP_HALVINGS, _repairer
+    from superglm.model.shape_ops import (
+        _ARMIJO,
+        _CONTINUED_STEPS,
+        _STEP_HALVINGS,
+        _certified_curve_scale,
+        _continued_scale,
+        _repairer,
+    )
 
     columns, spec = term.columns, term.curve_spec
     intercept = fitted.layout.predictor(term.parameter).intercept_index
@@ -869,6 +885,7 @@ def _continued_repair(
     reach = float(repair.projection_residual)
     repairer = _repairer(term.kind)
     beta, moved = start, False
+    certified = _certified_curve_scale(repair.original_log_effect, grid_weights)
     for _ in range(_CONTINUED_STEPS):
         tolerance = shape_sum_tolerance(abs(merit), len(rows.response))
         local = curvature_at(beta)
@@ -911,6 +928,7 @@ def _continued_repair(
         if intercept is not None:
             trial[intercept] += shift
         decrease = merit - trial_merit
+        certified = _continued_scale(certified, current, cone_point, projected, grid_weights)
         beta, merit, moved = trial, trial_merit, True
         if decrease <= tolerance:
             break
@@ -921,7 +939,7 @@ def _continued_repair(
     full = np.array(repair.repaired_beta_reparam, dtype=np.float64, copy=True)
     full[columns] = block
     curve = np.asarray(spec.transform(repair.grid), dtype=np.float64) @ block
-    return replace(
+    continued = replace(
         repair,
         repaired_beta_reparam=full,
         repaired_log_effect=curve,
@@ -929,6 +947,7 @@ def _continued_repair(
         max_violation_after=certificate.violation,
         certificate=certificate,
     )
+    return continued, certified
 
 
 def repaired_model(
@@ -1027,8 +1046,10 @@ def repaired_model(
                 fitted, rows, frame, term, repair, start, merit, curvature_at, grid_weights, n_grid
             )
             if continued is not None:
-                repair = continued
-                repaired = _settled(term, repair, coefficients[term.columns], grid_weights)
+                repair, certified = continued
+                repaired = _settled(
+                    term, repair, coefficients[term.columns], grid_weights, certified
+                )
                 reach = float(repair.projection_residual)
                 candidate, shift, merit = _candidate(
                     fitted, rows, frame, coefficients, term, repaired, reach

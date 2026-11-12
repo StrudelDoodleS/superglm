@@ -1415,11 +1415,10 @@ def test_a_session_follows_a_repair_only_under_the_widget_lock_and_its_getters_c
     assert owned == [True] and session.model_revision > revision
 
 
-def test_the_intercept_is_re_estimated_where_valid_shifts_are_a_narrow_interval():
-    # Sol's case: a generalized gamma whose scale rows are valid over a narrow band of shifts
-    # of the scale intercept. At c3c56d40a the bounded search probed only invalid shifts and
-    # kept the held intercept; an independent SciPy profile finds +4.55323, lowering the
-    # negative log-likelihood from 1035.04 to 808.92.
+def _narrow_interval_revision():
+    """A generalized gamma whose scale rows are valid over a narrow band of shifts of the scale
+    intercept, its fitted terms replaced by a rule-breaking wave on the scale: the model, the
+    revision, its frame, response and coefficients."""
     x = np.linspace(0.0, 1.0, 200)
     X = pd.DataFrame({"x": x, "off": -35.0 + 30.0 * x})
     y = 1.0 + 0.005 * np.random.default_rng(0).normal(size=200)
@@ -1449,6 +1448,17 @@ def test_the_intercept_is_re_estimated_where_valid_shifts_are_a_narrow_interval(
         revised = model._with_revised_coefficients(
             beta, edited_terms=["mean:x", "scale:x", "shape:x"]
         )
+    return model, revised, X, y, beta
+
+
+def test_the_intercept_is_re_estimated_where_valid_shifts_are_a_narrow_interval():
+    # Sol's case: a generalized gamma whose scale rows are valid over a narrow band of shifts
+    # of the scale intercept. At c3c56d40a the bounded search probed only invalid shifts and
+    # kept the held intercept; an independent SciPy profile finds +4.55323, lowering the
+    # negative log-likelihood from 1035.04 to 808.92.
+    model, revised, X, y, beta = _narrow_interval_revision()
+    fitted = model._model
+    layout = fitted.layout
     assert revised.predict_parameters(X)["scale"].max() < 0.017
 
     # At 13d432654 the projection, in the fit's curvature, where the scale term's penalty
@@ -1477,6 +1487,52 @@ def test_the_intercept_is_re_estimated_where_valid_shifts_are_a_narrow_interval(
     (record,) = revised._model.fit_state.hand_edit.repairs
     assert record.intercept_shift == pytest.approx(4.55323, abs=1e-4)
     assert revised.predict_parameters(X)["scale"].max() == pytest.approx(0.64969, abs=1e-4)
+
+
+def test_a_continued_projection_is_published_at_the_scale_it_was_certified_at(monkeypatch):
+    # Sol's case on #626: on OpenBLAS's Haswell kernels the narrow band's continued projection
+    # broke its rule by 8.59e-12, within the 6.74e-11 its repairer certified at the Newton
+    # target's scale, 7.4, but publication read it at the fitted curve's, 0.14, and refused
+    # it; other kernels reach the zero curve exactly and publish. Forced on any kernel: each
+    # continued projection is replaced by the zero curve moved along one row of the rule, by
+    # more than the fitted term's rounding and less than the target's. At 1984d54f3 it was
+    # refused; it is zero to the rounding it was certified at, so it is published as the zero
+    # curve, with the narrow band's intercept.
+    from superglm._roundoff import gamma
+    from superglm.constraints import (
+        _SLACK_STEPS,
+        shape_constraint_certificate,
+        shape_derivative_matrix,
+    )
+    from tests.test_shape_postfit import _pushed_continuation
+
+    model, revised, _, _, beta = _narrow_interval_revision()
+    columns = model._model.layout.term_slices["scale:x"]
+    fitted = beta[columns]
+    rounding = float(gamma(_SLACK_STEPS * fitted.size))
+    sent = []
+
+    def push(spec, grid, scales):
+        row = shape_derivative_matrix(spec, [np.median(grid)], 1)[0]
+        size = rounding * np.sqrt(np.linalg.norm(fitted) * scales[-1])
+        sent.append((-size * row / np.linalg.norm(row), scales[0], scales[-1]))
+        return sent[-1][0]  # falling there, so it breaks the increasing rule
+
+    _pushed_continuation(monkeypatch, push)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        revised.apply_shape_postfit()
+
+    block, first, last = sent[-1]
+    spec = _term_of(model._model, "scale")
+    certificate = shape_constraint_certificate(spec, block, "increasing")
+    assert certificate.minimum_scaled_slack < -rounding * first
+    assert rounding * np.linalg.norm(fitted) < np.linalg.norm(block) < rounding * last
+    (status,) = postfit_status(revised._model)
+    assert status.state is PostfitState.REPAIRED
+    assert not np.any(np.asarray(revised._model.coefficients)[columns])
+    (record,) = revised._model.fit_state.hand_edit.repairs
+    assert record.intercept_shift == pytest.approx(4.55323, abs=1e-4)
 
 
 def test_a_session_follows_a_refit_in_place_that_changed_a_categorical_reference():
