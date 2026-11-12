@@ -4533,6 +4533,105 @@ def test_a_square_root_link_repair_profiles_each_intercept_to_a_minimum_below_it
         assert deviance(shift) <= deviance(expected) * (1.0 + 1e-12)
 
 
+@pytest.mark.parametrize(("link", "seed"), [("logit", 0), ("probit", 100)])
+def test_a_binomial_repair_whose_intercept_moves_rows_into_the_mean_cap_is_published(
+    monkeypatch, link, seed
+):
+    """Opus's case on #626: a binomial spline strong enough to separate part of the range.
+    ``clip_mu`` holds the mean within 1e-7 of 1, at logit 16.1, inside the link's band, and
+    the profiled intercept moves rows of response 1 past it. At 1984d54f3 the search's
+    domain ended at the first free row's cap, so it did not converge and the repair was
+    refused; master and 582328a15 publish. Each profile now ends at SciPy's minimum of the
+    clamped deviance publication scores, no higher than where it started.
+    """
+    from scipy.optimize import minimize_scalar
+    from scipy.special import expit, ndtr
+
+    from superglm.distributions import clip_mu
+    from superglm.links import stabilize_eta
+
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(0.0, 1.0, 3000)
+    if link == "logit":
+        y = rng.binomial(1, expit(-8.0 + 26.0 * x + 3.0 * np.sin(12.0 * x)))
+    else:
+        y = rng.binomial(1, ndtr(-2.0 + 7.5 * x + np.sin(12.0 * x)))
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="binomial",
+        link=link,
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=8, constraint=Constraint.postfit.increasing)},
+    ).fit(X, y.astype(np.float64))
+    profiles = []
+    real = shape_ops._searched_intercept
+
+    def recorded(model, eta, *, y, weights):
+        found = real(model, eta, y=y, weights=weights)
+        profiles.append((model, np.array(eta), np.array(y), np.array(weights), found[1]))
+        return found
+
+    monkeypatch.setattr(shape_ops, "_searched_intercept", recorded)
+    model.apply_shape_postfit(X)
+
+    assert "x" in model._shape_repairs
+    for profiled, eta, response, weights, shift in profiles:
+
+        def deviance(t, profiled=profiled, eta=eta, response=response, weights=weights):
+            link_ = profiled._link
+            mu = clip_mu(link_.inverse(stabilize_eta(eta + t, link_)), profiled._distribution)
+            return float(np.sum(weights * profiled._distribution.deviance_unit(response, mu)))
+
+        least = minimize_scalar(
+            deviance, bounds=(shift - 2.0, shift + 2.0), method="bounded", options={"xatol": 1e-10}
+        )
+        assert deviance(shift) <= deviance(0.0)
+        assert deviance(shift) <= least.fun * (1.0 + 1e-12)
+
+
+def test_intercept_profile_enters_no_clamp_that_holds_a_row_at_its_worst():
+    """Under the inverse-squared link a predictor below 1e-12 is held there, with the mean at
+    1e6. A row of small response that a shift pushes into that clamp has its deviance capped
+    at its worst, about 1e6: past the cap, the capped deviance has minima the model does not
+    have. Thirty-one Poisson rows, some of response near 1e6, which the first run cannot
+    profile: a rerun crossing such a clamp stopped at deviance 1.09e7, beside a minimum of
+    51 within half a unit. The rerun enters no such clamp, so it either reaches a minimum
+    no higher than SciPy's nearby one or is refused.
+    """
+    from scipy.optimize import minimize_scalar
+
+    from superglm.distributions import clip_mu
+    from superglm.links import InverseSquaredLink, stabilize_eta
+
+    rng = np.random.default_rng(7007)
+    n = int(rng.integers(2, 60))
+    eta = rng.uniform(0.05, 4.0, n)
+    link = InverseSquaredLink()
+    truth = eta + rng.normal(0.0, 0.3)
+    mean = clip_mu(link.inverse(stabilize_eta(truth, link)), Poisson())
+    y = rng.poisson(np.minimum(mean, 1e6)).astype(np.float64)
+    weights = rng.uniform(0.5, 2.0, n)
+    model = SimpleNamespace(_distribution=Poisson(), _link=link)
+
+    def deviance(t):
+        mu = clip_mu(link.inverse(stabilize_eta(eta + t, link)), Poisson())
+        return float(np.sum(weights * Poisson().deviance_unit(y, mu)))
+
+    try:
+        _, shift, _, _ = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+    except RuntimeError as refused:
+        assert "did not converge" in str(refused)
+        return
+    span = 1.0 + abs(shift)
+    least = minimize_scalar(
+        deviance,
+        bounds=(shift - 0.5 * span, shift + 0.5 * span),
+        method="bounded",
+        options={"xatol": 1e-12 * span},
+    )
+    assert deviance(shift) <= least.fun * (1.0 + 1e-9)
+
+
 def test_curvature_repair_of_a_noise_free_log_linear_response_is_published():
     rng = np.random.default_rng(240)
     x = np.sort(rng.uniform(0.0, 1.0, 240))

@@ -379,6 +379,8 @@ class _InterceptState(NamedTuple):
     score_scale: float
     score_rounding: float
     information: float
+    #: The rows a clamp holds there, where a rerun reads them (``_searched_intercept``).
+    clamped: NDArray | None = None
 
 
 def _profile_repaired_intercept(
@@ -478,15 +480,24 @@ def _searched_intercept(
 
     carried = weights_arr != 0.0
     # The rows the link's clamp (``stabilize_eta``) or the family's (``clip_mu``) holds at
-    # the fitted shift, read by its evaluation. A trial that clamps any other row is outside
-    # the search's domain: there the clamp flattens the deviance, which no longer has the
-    # score's slope.
+    # the fitted shift, read by its evaluation. To the first run, a trial that clamps any
+    # other row is outside the search's domain: there the clamp flattens the deviance, which
+    # no longer has the score's slope. The rerun (``clamps``) searches the deviance the rule
+    # scores, clamps and all: a clamped row's slope is that deviance's, zero, and a trial may
+    # enter a clamp where the row's own deviance still falls (a separated binomial row, whose
+    # cap only understates the fall), but not where it rises: there the cap would hold the
+    # row at its worst, and a minimum past it is the cap's. (Its unclamped slope instead,
+    # beside a floored variance, is vast and meaningless.)
     held: NDArray | None = None
     # Whether a search's root is compared with its start (below): not where every row's
     # deviance is convex in its predictor and no row is held.
     checked = type(model._link) not in _CONVEX_DEVIANCE_LINKS.get(type(model._distribution), ())
 
-    def evaluate(shift: float, compared: bool) -> _InterceptState | None:
+    def evaluate(
+        shift: float, compared: bool, clamps: bool = False, origin=None
+    ) -> _InterceptState | None:
+        """The state at ``shift``, or ``None`` outside the run's domain. ``origin``, the shift
+        a rerun steps from and the rows clamped there, decides which clamps it may enter."""
         nonlocal held
         trial_eta = eta_base + shift
         eta_safe = stabilize_eta(trial_eta, model._link)
@@ -502,7 +513,7 @@ def _searched_intercept(
             clamped &= carried
             if held is None:
                 held = clamped
-            elif np.any(clamped & ~held):
+            elif not clamps and np.any(clamped & ~held):
                 return None
             variance = np.maximum(
                 np.asarray(model._distribution.variance(mu), dtype=np.float64),
@@ -526,6 +537,16 @@ def _searched_intercept(
                 dmu_deta=dmu_deta,
                 variance=variance,
             )
+            if clamps and origin is not None:
+                # A row's score is minus half its deviance's slope, so a step enters the
+                # row's clamp rising where the two have opposite signs.
+                entering = clamped & ~origin[1]
+                if np.any(entering & (score_rows * (shift - origin[0]) < 0.0)):
+                    return None
+            if clamps:
+                score_rows[clamped] = 0.0
+                score_rounding[clamped] = 0.0
+                information_rows = np.where(clamped, 0.0, information_rows)
             score = float(np.sum(score_rows, dtype=np.float64))
             information = float(np.sum(information_rows, dtype=np.float64))
             score_scale = float(np.sum(np.abs(score_rows), dtype=np.float64))
@@ -541,14 +562,19 @@ def _searched_intercept(
                 deviance = weighted_row_sum(
                     weights_arr, model._distribution.deviance_unit, y_arr, mu
                 )
-                if checked:
+                if compared or checked:
                     mean_terms = (np.abs(mu) + np.abs(dmu_deta * eta_safe))[carried]
                     mean_rounding = (
                         2.0
                         * row_gamma
                         * float(np.sum(deviance_rows * mean_terms, dtype=np.float64))
                     )
-        if not (np.isfinite(score) and np.isfinite(information) and information > 0.0):
+        # Where a clamp holds every row the rerun's deviance is flat: no information.
+        if not (
+            np.isfinite(score)
+            and np.isfinite(information)
+            and (information > 0.0 or (clamps and information == 0.0))
+        ):
             raise RuntimeError(
                 "Unsafe shape repair rejected before publication: invalid profiled intercept"
             )
@@ -560,6 +586,7 @@ def _searched_intercept(
             score_scale=score_scale,
             score_rounding=score_rounding_sum,
             information=information,
+            clamped=clamped if clamps else None,
         )
 
     def stationary(state: _InterceptState, relative: float) -> bool:
@@ -580,6 +607,8 @@ def _searched_intercept(
     eta_floor, eta_ceiling = stabilize_eta(np.array([-np.inf, np.inf]), model._link)
     lower = float(eta_floor - np.min(eta_base, where=free, initial=np.inf))
     upper = float(eta_ceiling - np.max(eta_base, where=free, initial=-np.inf))
+    plateau_low = float(eta_floor - np.max(eta_base, where=carried, initial=-np.inf))
+    plateau_high = float(eta_ceiling - np.min(eta_base, where=carried, initial=np.inf))
     del free
 
     def higher(state: _InterceptState, than: _InterceptState) -> bool:
@@ -591,34 +620,37 @@ def _searched_intercept(
             + than.mean_rounding
         )
 
-    def search(by_deviance: bool) -> tuple[float, _InterceptState] | None:
-        """The stationary shift the search reaches, or ``None``."""
-        shift, state = 0.0, start
+    def search(rerun: bool) -> tuple[float, _InterceptState] | None:
+        """The stationary shift a run reaches, or ``None``."""
+        shift, state = 0.0, (evaluate(0.0, True, True) if rerun else start)
+        assert state is not None
+        # Beyond these the link's clamp holds every row, and the deviance is flat.
+        low, high = (plateau_low, plateau_high) if rerun else (lower, upper)
         below, above = -np.inf, np.inf
         last = before_last = np.inf
         for _ in range(_INTERCEPT_STEPS):
-            if stationary(state, 1e-11):
+            if state.information > 0.0 and stationary(state, 1e-11):
                 return shift, state
             if state.score > 0.0:
                 below = shift
             else:
                 above = shift
-            step = state.score / state.information
+            step = state.score / state.information if state.information > 0.0 else np.nan
             proposal = shift + step
             if not (below < proposal < above) or abs(2.0 * step) > abs(before_last):
                 if np.isfinite(below) and np.isfinite(above):
                     proposal = below + 0.5 * (above - below)
-            proposal = min(max(proposal, lower), upper)
+            proposal = min(max(proposal, low), high)
             if not np.isfinite(proposal) or proposal == shift:
                 break
-            trial = evaluate(proposal, by_deviance)
-            if trial is None or (by_deviance and higher(trial, state)):
-                # Past a clamp, or higher: a minimum lies short of this trial.
+            trial = evaluate(proposal, rerun, rerun, (shift, state.clamped) if rerun else None)
+            if trial is None or (rerun and (trial.information == 0.0 or higher(trial, state))):
+                # Past a clamp, flat or higher: a minimum lies short of this trial.
                 below, above = (below, proposal) if proposal > shift else (proposal, above)
                 continue
             before_last, last = last, proposal - shift
             shift, state = proposal, trial
-        if not stationary(state, 1e-9):
+        if not (state.information > 0.0 and stationary(state, 1e-9)):
             return None
         if np.isnan(state.deviance):
             state = evaluate(shift, True)  # stationary only to the looser test
@@ -633,22 +665,21 @@ def _searched_intercept(
     # leaves open is bounded by the link's clamp, and a trial past either clamp bounds it.
     # Where the deviance is not convex in the shift (a square-root link's branches meet at a
     # pole), a root of the score can lie higher than the start; where it is, and no row is
-    # held, no row is clamped between them, so the root is the minimum. Elsewhere, where the
-    # root lies higher than the start or is not reached, the search runs again keeping the
-    # bracket by deviances, as Brent's search with derivatives keeps it (Press et al.,
-    # Numerical Recipes in Fortran 77, 2nd ed., 1992, section 10.3, dbrent): the shift held is
-    # the lowest found and a trial no lower ends its side, so the bracket holds a minimum no
-    # higher than the start.
-    found = search(by_deviance=False)
-    if checked and (
-        found is None
-        or (
-            np.isfinite(start.deviance)
-            and np.isfinite(found[1].deviance)
-            and higher(found[1], start)
-        )
+    # held, no row is clamped between them, so the root is the minimum. Where the root lies
+    # higher than the start, or is not reached (a minimum past a row's clamp), the search runs
+    # again on the deviance the rule scores, clamped rows and all, keeping the bracket by
+    # deviances as Brent's search with derivatives keeps it (Press et al., Numerical Recipes
+    # in Fortran 77, 2nd ed., 1992, section 10.3, dbrent): the shift held is the lowest found
+    # and a trial no lower ends its side, so the bracket holds a minimum no higher than the
+    # start.
+    found = search(rerun=False)
+    if found is None or (
+        checked
+        and np.isfinite(start.deviance)
+        and np.isfinite(found[1].deviance)
+        and higher(found[1], start)
     ):
-        found = search(by_deviance=True)
+        found = search(rerun=True)
     if found is None:
         raise RuntimeError(
             "Unsafe shape repair rejected before publication: conditional intercept "
