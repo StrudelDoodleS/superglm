@@ -28,7 +28,10 @@ def discretize_column(
     The equal-width bins are kept when they already follow those pieces and
     no bin is crowded: with ``m`` spans, every span that holds a row has a
     width share of at least ``b_min = max(1, n_bins // (2 * m))`` bins, and no
-    bin holds more than ``8 / n_bins`` of the rows.
+    bin holds more than ``8 / n_bins`` of the rows. A budget below four keeps
+    them too: the knot half of the grid below (``n_w``) would be one cell,
+    which cannot separate the minimum from the maximum, so every row could be
+    read at one point where the equal-width bins read at least two.
 
     Otherwise the bins follow the knots and the data, within the same budget.
     ``n_w = n_bins // 2`` cells come from the knots: every span that holds a
@@ -56,6 +59,11 @@ def discretize_column(
     and cells hold rows depends only on the values present, and the
     equal-width bins themselves never read the weights.
 
+    The width shares are formed on the column scaled by a power of two to
+    magnitude at most one, which is exact and changes no share of a column
+    whose widths are finite, so a column near the float64 limit allocates its
+    cells without overflow.
+
     Returns the support points (sorted) and each row's index into them.
     """
     x = np.asarray(x, dtype=np.float64).ravel()
@@ -73,15 +81,16 @@ def discretize_column(
     bin_of_value = np.clip(np.searchsorted(edges, unique_vals, side="right") - 1, 0, n_bins - 1)
     bin_idx = bin_of_value[inverse]
     bin_centers = 0.5 * (edges[:-1] + edges[1:])
-    if knots is None:
+    if knots is None or n_bins < 4:
         return bin_centers, bin_idx
 
     mass = _value_mass(inverse, unique_vals.size, weights, x.size)
     total = float(mass.sum())
     span_edges, occupied = _row_spans(unique_vals, lo, hi, knots)
-    widths = np.diff(span_edges)
+    scaled = _unit_scaled(span_edges)
+    widths = np.diff(scaled)
     b_min = _min_cells_per_span(n_bins, occupied.size)
-    resolves = np.all(n_bins * widths[occupied] / (hi - lo) >= b_min)
+    resolves = np.all(n_bins * widths[occupied] / (scaled[-1] - scaled[0]) >= b_min)
     bin_mass = np.bincount(bin_of_value, weights=mass, minlength=n_bins)
     crowded = bin_mass.max() * n_bins > _CROWDED_SHARE * total
     if resolves and not crowded:
@@ -128,6 +137,19 @@ def _lower_quantile_values(mass: NDArray, total: float, unique_vals: NDArray, n_
     return unique_vals[np.minimum(position, unique_vals.size - 1)]
 
 
+def _unit_scaled(edges: NDArray) -> NDArray:
+    """``edges`` times the power of two that brings their largest magnitude into ``[0.5, 1)``.
+
+    Exact unless an edge is far enough below the largest to become subnormal,
+    which moves it by at most ``2**-1075`` against a scaled range of at least
+    one half. Differences of the scaled edges are then at most two, so width
+    shares formed from them cannot overflow, and they are the unscaled shares
+    bit for bit wherever those were finite.
+    """
+    _, exponent = np.frexp(np.max(np.abs(edges)))
+    return np.ldexp(edges, -int(exponent))
+
+
 def _min_cells_per_span(n_cells: int, n_spans: int) -> int:
     return max(1, n_cells // (2 * n_spans))
 
@@ -148,7 +170,7 @@ def _row_spans(
 
 def _knot_aligned_left_edges(span_edges: NDArray, occupied: NDArray, n_cells: int) -> NDArray:
     """Left edges of ``n_cells`` cells that follow the knots (``discretize_column``)."""
-    widths = np.diff(span_edges)
+    widths = np.diff(_unit_scaled(span_edges))
     b_min = _min_cells_per_span(n_cells, occupied.size)
     n_occupied = int(occupied.sum())
     if b_min * n_occupied > n_cells:
@@ -214,7 +236,8 @@ def _adaptive_bins(
     ]
     last = unique_vals[np.searchsorted(cell_of_value, cells, side="right") - 1]
     right = np.append(left[1:], hi)
-    midpoint = 0.5 * (left + right)
+    # Halved before the sum, which cannot then overflow; halving is exact.
+    midpoint = 0.5 * left + 0.5 * right
     read_at = np.where(cell_mass > 0.0, mean, midpoint)
     support = np.where(held, np.clip(read_at, first, last), midpoint)
     return support, cell_of_value[inverse].astype(np.intp)

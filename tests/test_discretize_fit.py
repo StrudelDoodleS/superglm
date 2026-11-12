@@ -1929,7 +1929,7 @@ def test_binned_support_never_exceeds_n_bins():
             knots = np.quantile(x, rng.uniform(size=n_knots))
         else:
             knots = rng.uniform(lo - 1.0, hi + 1.0, n_knots)
-        n_bins = int(rng.choice([1, 2, 8, 32, 64, 256]))
+        n_bins = int(rng.choice([1, 2, 3, 4, 8, 32, 64, 256]))
         if trial % 5 == 1:
             x[rng.uniform(size=n) < 0.3] = x.max()
         if trial % 5 == 2:
@@ -1939,16 +1939,76 @@ def test_binned_support_never_exceeds_n_bins():
         assert np.all(np.diff(support) > 0)
         assert index.shape == x.shape
         assert index.min() >= 0 and index.max() < len(support)
+        # Nor below: like the equal-width bins, the grid never reads the
+        # minimum and the maximum at one point.
+        occupied = np.unique(index).size
+        assert occupied >= min(n_bins, 2)
         # The adaptive grid reads every row inside its own knot span, whenever
         # its n_bins // 2 knot cells can give every span that holds rows one.
         inner = np.unique(knots[(knots > lo) & (knots < hi)])
         span = np.searchsorted(inner, x, side="right")
         equal_width = _equal_width_bins(x, n_bins)[0]
         adaptive = len(support) != len(equal_width) or np.any(support != equal_width)
+        if adaptive:
+            # Each distinct lower quantile j / n_q (the smallest row with at
+            # least ceil(j n / n_q) rows at or below it) starts an occupied
+            # cell, as the minimum does.
+            n_q = n_bins - n_bins // 2
+            j = np.arange(1, n_q)
+            quantiles = np.sort(x)[(j * n + n_q - 1) // n_q - 1]
+            assert occupied >= np.unique(np.append(quantiles, lo)).size
         if adaptive and np.unique(span).size <= max(n_bins // 2, 1):
             np.testing.assert_array_equal(
                 np.searchsorted(inner, support[index], side="right"), span
             )
+
+
+def test_a_budget_below_four_keeps_the_equal_width_bins():
+    """A knot half of one cell would read every row at one point.
+
+    With ``n_bins=2`` the adaptive grid had one knot cell and no quantile
+    edge, so the fit below read all ten rows at one support point and
+    predicted their mean, 4.5, everywhere.
+    """
+    x = np.arange(10.0)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        discrete=True,
+        n_bins=2,
+        features={"x": Spline(kind="ps", k=8)},
+    )
+    model.fit(pd.DataFrame({"x": x}), x)
+    knots = model._specs["x"]._knots
+    for n_bins in (2, 3):
+        _assert_bins_unchanged(x, n_bins, knots)
+    np.testing.assert_array_equal(model._dm.group_matrices[0].bin_idx, _equal_width_bins(x, 2)[1])
+    # The two bins, centred at 2.25 and 6.75, hold rows averaging 2 and 7.
+    centres = model.predict(pd.DataFrame({"x": [2.25, 6.75]}))
+    np.testing.assert_allclose(centres, [2.0, 7.0], rtol=0, atol=1e-2)
+
+
+def test_a_column_near_the_float64_limit_bins_without_overflow():
+    """The width shares of a column near ``1e308`` are formed without overflow.
+
+    ``remaining * widths`` overflowed to infinity for the wide span, and the
+    cast to a cell count made ``np.linspace`` refuse a negative count, in
+    ``discretize_column`` and in the fit.
+    """
+    x = np.linspace(0.0, 1e307, 1000)
+    knots = np.array([1e300])
+    support, index = discretize_column(x, 256, knots)
+    assert len(support) < 256  # the adaptive grid: the span [0, 1e300) has no bin
+    # Scaling by a power of two is exact, so the column gets the bins its
+    # scaled-down twin gets, scaled back.
+    twin_support, twin_index = discretize_column(np.ldexp(x, -1000), 256, np.ldexp(knots, -1000))
+    np.testing.assert_array_equal(support, np.ldexp(twin_support, 1000))
+    np.testing.assert_array_equal(index, twin_index)
+    model = SuperGLM(
+        family="gaussian", discrete=True, features={"x": Spline(kind="ps", knots=[1e300])}
+    )
+    model.fit(pd.DataFrame({"x": x}), x / 1e307)
+    np.testing.assert_allclose(model.predict(pd.DataFrame({"x": x})), x / 1e307, atol=1e-3)
 
 
 # A frequency weight stands for that many literal rows, so the rule counts each
