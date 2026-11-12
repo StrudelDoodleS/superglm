@@ -641,18 +641,21 @@ class DenseDistributionalModel:
     def parameters_from_eta(self, eta: NDArray[np.float64]) -> NDArray[np.float64]:
         """Apply each parameter's inverse link to its linear predictor column."""
         theta = np.empty_like(eta)
-        for parameter_index, state in enumerate(self.layout.predictors):
-            # Overflow is refused by the support check immediately below.
-            with np.errstate(over="ignore", invalid="ignore"):
-                values = np.asarray(state.link.inverse(eta[:, parameter_index]), dtype=np.float64)
-            if values.shape != (len(eta),):
-                raise ValueError(f"inverse link for {state.name!r} returned an invalid shape")
-            if not np.all(self.family.parameters[parameter_index].support.contains(values)):
-                raise ValueError(
-                    f"prediction parameter {state.name!r} is outside its finite support"
-                )
-            theta[:, parameter_index] = values
+        for parameter_index in range(len(self.layout.predictors)):
+            theta[:, parameter_index] = self.parameter_from_eta(eta, parameter_index)
         return _readonly(theta)
+
+    def parameter_from_eta(self, eta: NDArray[np.float64], parameter_index: int) -> NDArray:
+        """One parameter's column of ``parameters_from_eta(eta)``, by the same operations."""
+        state = self.layout.predictors[parameter_index]
+        # Overflow is refused by the support check immediately below.
+        with np.errstate(over="ignore", invalid="ignore"):
+            values = np.asarray(state.link.inverse(eta[:, parameter_index]), dtype=np.float64)
+        if values.shape != (len(eta),):
+            raise ValueError(f"inverse link for {state.name!r} returned an invalid shape")
+        if not np.all(self.family.parameters[parameter_index].support.contains(values)):
+            raise ValueError(f"prediction parameter {state.name!r} is outside its finite support")
+        return values
 
     def predict(
         self,

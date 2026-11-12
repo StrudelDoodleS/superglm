@@ -193,6 +193,72 @@ def test_the_repair_re_estimates_the_intercept_on_the_likelihood():
     assert abs(slope) <= 1e-4 * abs(held)
 
 
+def test_the_intercept_search_reads_each_shift_once_and_forms_the_held_parameters_once():
+    # Work, not time. A probe of the intercept search moves only the repaired parameter's
+    # column of eta. At 771d1330a each probe formed every parameter again, the held
+    # intercept's rows were read twice (the held merit, then Brent's centre), and the
+    # publication check certified the same repaired coefficients twice.
+    from superglm import constraints
+    from superglm.distributional import shape_repair
+    from superglm.links import LogLink
+
+    model = _fit("mean", Constraint.postfit.increasing, kind="bs", k=8)
+    runs: list[dict] = []
+    real_merit, real_evaluate, real_inverse = (
+        shape_repair._profiled_merit,
+        GammaLS.evaluate_natural,
+        LogLink.inverse,
+    )
+
+    def merit(*args, **kwargs):
+        runs.append({"shifts": [], "inverses": 0})
+        try:
+            return real_merit(*args, **kwargs)
+        finally:
+            runs[-1]["done"] = True
+
+    def evaluate(self, response, theta, *args, **kwargs):
+        if runs and "done" not in runs[-1]:
+            runs[-1]["shifts"].append(np.asarray(theta)[:, 0].tobytes())
+        return real_evaluate(self, response, theta, *args, **kwargs)
+
+    def inverse(self, eta):
+        if runs and "done" not in runs[-1]:
+            runs[-1]["inverses"] += 1
+        return real_inverse(self, eta)
+
+    settling = {"active": False, "certificates": 0}
+    real_settled, real_certificate = shape_repair._settled, constraints.shape_constraint_certificate
+
+    def settled(*args, **kwargs):
+        settling["active"] = True
+        try:
+            return real_settled(*args, **kwargs)
+        finally:
+            settling["active"] = False
+
+    def certificate(*args, **kwargs):
+        settling["certificates"] += settling["active"]
+        return real_certificate(*args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(shape_repair, "_profiled_merit", merit)
+        patch.setattr(shape_repair, "_settled", settled)
+        patch.setattr(constraints, "shape_constraint_certificate", certificate)
+        patch.setattr(GammaLS, "evaluate_natural", evaluate)
+        patch.setattr(LogLink, "inverse", inverse)
+        model.apply_shape_postfit()
+
+    assert len(runs) == 2  # the repair, and the term dropped
+    for run in runs:
+        reads, distinct = len(run["shifts"]), len(set(run["shifts"]))
+        assert distinct == reads, f"{reads} likelihood reads of {distinct} shifts"
+        # the mean once per probe, and the held scale once
+        assert run["inverses"] == reads + 1, f"{run['inverses']} inverse links for {reads} reads"
+    # the repair obeys its rule as projected: one certificate
+    assert settling["certificates"] == 1, settling
+
+
 @pytest.mark.parametrize("level", [-5.0, 5.0])
 def test_the_intercept_is_re_estimated_however_far_an_edit_moved_the_level(level):
     # An editor edit can move the term's level far beyond what the projection moves the curve;
@@ -560,8 +626,8 @@ def test_the_repair_is_refused_when_no_intercept_shift_leaves_every_row_valid():
         with pytest.raises(RuntimeError, match="rejected before publication"):
             revised.apply_shape_postfit()
     assert revised._model is before
-    # the held intercept, 122 probes, the held shift again and the gap search's budget
-    assert len(evaluations) <= 1 + 122 + 1 + 256 + 4
+    # the held intercept, 122 probes and the gap search's budget
+    assert len(evaluations) <= 1 + 122 + 256 + 4
 
 
 def _gaussian_in_units(unit: float) -> SuperLSS:

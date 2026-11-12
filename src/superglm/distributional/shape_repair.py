@@ -233,15 +233,32 @@ def _profiled_merit(
     column = [predictor.name for predictor in fitted.layout.predictors].index(parameter)
     eta = fitted._predict_eta_resolved(coefficients, frame, rows.offsets)
     penalty = 0.5 * float(coefficients @ np.asarray(fitted.result.penalty) @ coefficients)
+    # A probe moves only this parameter's column of eta, so every other parameter is formed
+    # once, from the same column by the same operations as ``parameters_from_eta``; one with
+    # no finite valid value refuses every probe, as it would refuse each.
+    fixed = np.empty_like(eta)
+    try:
+        for index in range(eta.shape[1]):
+            if index != column:
+                fixed[:, index] = fitted.parameter_from_eta(eta, index)
+        steady = bool(np.all(np.isfinite(np.delete(fixed, column, axis=1))))
+    except (ValueError, FloatingPointError, OverflowError):
+        steady = False
 
     def rows_at(shift: float) -> NDArray[np.float64] | None:
         """Each row's log-likelihood, ``-inf`` where its parameters are not valid."""
+        if not steady:
+            return None
         shifted = np.array(eta, dtype=np.float64, copy=True)
         shifted[:, column] += shift
         # A probe is a value-only trial of the fit's likelihood, refused as the solver refuses
         # one: parameters or a likelihood with no float64 value make the probe invalid.
         try:
-            theta = fitted.parameters_from_eta(shifted)
+            theta = fixed.copy()
+            theta[:, column] = fitted.parameter_from_eta(shifted, column)
+            if not np.all(np.isfinite(theta[:, column])):
+                return None
+            theta.setflags(write=False)
             evaluation = family.evaluate_natural(rows.response, theta, plan, derivative_order=0)
         except (ValueError, FloatingPointError, OverflowError):
             return None
@@ -251,23 +268,19 @@ def _profiled_merit(
         values[~np.isfinite(values)] = -np.inf
         return values
 
-    def negative_log_likelihood(shift: float) -> float:
-        values = rows_at(shift)
-        if values is None or not np.all(np.isfinite(values)):
-            return np.inf
-        return -float(np.sum(values, dtype=np.float64))
-
-    def invalid_rows(shift: float) -> int | None:
-        values = rows_at(shift)
-        return None if values is None else int(np.count_nonzero(~np.isfinite(values)))
-
-    held = negative_log_likelihood(0.0)
+    # The held intercept's rows, read once: the search below starts from them.
+    at_zero = rows_at(0.0)
+    zero_failed = None if at_zero is None else ~np.isfinite(at_zero)
+    held = np.inf
+    if at_zero is not None and zero_failed is not None and not zero_failed.any():
+        held = -float(np.sum(at_zero, dtype=np.float64))
+    zero_invalid = None if zero_failed is None else int(np.count_nonzero(zero_failed))
     if state.intercept_index is None:
-        return 0.0, held + penalty, invalid_rows(0.0)
+        return 0.0, held + penalty, zero_invalid
     unit = _intercept_scale(eta[:, column], reach)
 
-    values: dict[float, float] = {}
-    invalid: dict[float, NDArray[np.bool_] | None] = {}
+    values: dict[float, float] = {0.0: held}
+    invalid: dict[float, NDArray[np.bool_] | None] = {0.0: zero_failed}
 
     def objective(t: float) -> float:
         # Memoised: the bracket and the walls' bisection revisit their end points.
@@ -285,7 +298,7 @@ def _profiled_merit(
 
     start = 0.0 if np.isfinite(held) else _finite_start(objective, invalid_at)
     if start is None:
-        return 0.0, held + penalty, invalid_rows(0.0)
+        return 0.0, held + penalty, zero_invalid
     lower = _finite_reach(objective, start, start - _INTERCEPT_SEARCH)
     upper = _finite_reach(objective, start, start + _INTERCEPT_SEARCH)
     best = _brent(objective, lower, upper, centre=start)
@@ -490,9 +503,12 @@ def _settled(
     apex = shape_slack_tolerance(repaired, float(np.linalg.norm(fitted_coefficients)))
     if float(np.linalg.norm(repaired)) <= apex:
         repaired = np.zeros_like(repaired)
-    # ``postfit_term_feasible``'s own check, on the term's block.
-    if not shape_constraint_is_roundoff_feasible(spec, repaired, kind):
-        violation = -shape_constraint_certificate(spec, repaired, kind).minimum_scaled_slack
+    # ``postfit_term_feasible``'s own check, on the term's block; formed again only for
+    # coefficients moved below.
+    slack = shape_constraint_certificate(spec, repaired, kind).minimum_scaled_slack
+    obeyed = slack >= -shape_slack_tolerance(repaired)
+    if not obeyed:
+        violation = -slack
         # The scale the projection certified at: the weighted RMS of the curve it repaired.
         grid = np.asarray(repair.grid, dtype=np.float64)
         share = np.asarray(grid_weights, dtype=np.float64) / float(np.sum(grid_weights))
@@ -507,7 +523,8 @@ def _settled(
             ray_slack = shape_constraint_certificate(spec, ray, kind).minimum_scaled_slack
             if ray_slack > 0.0:
                 repaired = repaired + (2.0 * violation / ray_slack) * ray
-    if not shape_constraint_is_roundoff_feasible(spec, repaired, kind):
+                obeyed = shape_constraint_is_roundoff_feasible(spec, repaired, kind)
+    if not obeyed:
         raise RuntimeError(
             f"Shape repair of {term.term} rejected before publication: the projection could "
             "not be certified to obey the rule at its own scale. Fit the rule instead "
