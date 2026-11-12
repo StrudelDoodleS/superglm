@@ -3768,6 +3768,85 @@ def test_post_fit_projection_is_equivariant_to_the_response_units(monkeypatch, k
     np.testing.assert_allclose(rescaled_ray, reference_ray, rtol=1e-9, atol=0.0)
 
 
+#: Power of two that lifts sample weights near 1e-310 to near 1e-9.
+_WEIGHT_LIFT = 1000
+
+
+def _rise_fit_at_weights(weights, n_knots, degree):
+    """An unpenalized Gaussian fit of a wiggly rise at ``weights``, repaired increasing."""
+    x = np.linspace(0.0, 1.0, weights.size)
+    X = pd.DataFrame({"x": x})
+    feature = PSpline(
+        n_knots=n_knots,
+        degree=degree,
+        m=1,
+        penalty="none",
+        constraint=Constraint.postfit.increasing,
+    )
+    model = SuperGLM(
+        family="gaussian", selection_penalty=0.0, spline_penalty=0.0, features={"x": feature}
+    ).fit(X, 0.9 * x + 0.25 * np.sin(12 * x), sample_weight=weights)
+    return model, X
+
+
+@pytest.mark.parametrize(("n_knots", "degree"), [(6, 3), (10, 4)])
+def test_repair_at_subnormal_sample_weights_is_the_repair_at_lifted_weights(n_knots, degree):
+    """Weights of 1e-310 make the term's metric subnormal; the repair is still published.
+
+    It was published wrong (cubic) or raised ``LinAlgError`` (quartic). The weights
+    lifted by a power of two pose the same projection in normal numbers. The repair
+    is a projection, nonexpansive in its metric, so it differs between the two by no
+    more than the fits themselves do, which carry the fit's own subnormal rounding.
+    """
+
+    def fitted_and_repaired(model, X):
+        fitted = _term_beta(model.result.beta, _x_groups(model))
+        model.apply_shape_postfit(X)
+        repaired = model._shape_repairs["x"].repaired_beta_reparam
+        return fitted, _term_beta(repaired, _x_groups(model))
+
+    weights = 1e-310 * np.random.default_rng(0).uniform(0.5, 1.5, 100)
+    tiny_fit, tiny_repair = fitted_and_repaired(*_rise_fit_at_weights(weights, n_knots, degree))
+    lifted, X = _rise_fit_at_weights(np.ldexp(weights, _WEIGHT_LIFT), n_knots, degree)
+    # The lifted fit's metric, in normal numbers.
+    H, _ = _posterior_metric(lifted)
+    fit, repair = fitted_and_repaired(lifted, X)
+
+    def norm(v):
+        return float(np.sqrt(v @ H @ v))
+
+    assert norm(tiny_repair - repair) <= norm(tiny_fit - fit) + 2.0**-40 * norm(fit)
+
+
+def test_repair_is_unchanged_by_a_power_of_two_scale_of_its_metric_and_weights():
+    """A metric and grid weights scaled into the subnormal range give the same repair, bit for bit."""
+    from superglm.constraints import MonotoneRepairer
+
+    model, X = _rise_fit_at_weights(np.random.default_rng(0).uniform(0.5, 1.5, 100), 6, 3)
+    spec, groups = model._specs["x"], _x_groups(model)
+    H, _ = _posterior_metric(model)
+    weights = shape_ops._grid_weights(
+        spec, X["x"].to_numpy(), np.asarray(model._fit_weights, dtype=np.float64), 500
+    )
+    # Exponents that put the largest entries near 2**-1030, at about 43 bits; each value
+    # is first rounded to that grid, so the scale back up is exact.
+    down_H = 1030 + int(np.frexp(np.max(np.abs(H)))[1])
+    down_w = 1030 + int(np.frexp(np.max(weights))[1])
+    tiny_H, tiny_w = np.ldexp(H, -down_H), np.ldexp(weights, -down_w)
+    normal = MonotoneRepairer().repair(
+        spec,
+        model.result.beta,
+        groups,
+        weights=np.ldexp(tiny_w, down_w),
+        metric=np.ldexp(tiny_H, down_H),
+    )
+    subnormal = MonotoneRepairer().repair(
+        spec, model.result.beta, groups, weights=tiny_w, metric=tiny_H
+    )
+
+    np.testing.assert_array_equal(subnormal.repaired_beta_reparam, normal.repaired_beta_reparam)
+
+
 def test_a_repair_that_collapses_a_term_is_feasible_at_the_scale_of_the_term(monkeypatch):
     model, X = _fitted_for_publication_refusal()
 

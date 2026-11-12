@@ -1360,6 +1360,19 @@ def _cone_projection(
     return best
 
 
+def _in_binary_units(values: NDArray) -> NDArray:
+    """``values`` times the power of two that brings their largest magnitude into [1/2, 1).
+
+    A power-of-two scale rounds nothing short of overflow or underflow, and this one
+    puts the largest entry mid-range, so subnormal entries come back normal and normal
+    ones exactly scaled. Zero, non-finite and empty arrays come back unchanged.
+    """
+    largest = float(np.max(np.abs(values))) if values.size else 0.0
+    if not (np.isfinite(largest) and largest > 0.0):
+        return values
+    return np.ldexp(values, -int(np.frexp(largest)[1]))
+
+
 def _project_shape_in_fitted_basis(
     spec: _SplineBase,
     x_grid: NDArray,
@@ -1392,6 +1405,11 @@ def _project_shape_in_fitted_basis(
     if not np.all(np.isfinite(fitted_basis)) or not np.all(np.isfinite(target)):
         raise RuntimeError(f"{label} projection requires finite fitted-basis geometry")
 
+    # The weights, and below the metric, enter the projection only through ratios, so
+    # each is taken in binary units: sample weights small enough to make them subnormal
+    # would otherwise leave their quadratic forms and factorizations with few digits, or
+    # overflow the scale that normalizes them.
+    w = _in_binary_units(w)
     total_weight = float(np.sum(w))
     # The optimizer works in units of the target's weighted RMS, so its
     # tolerances and step control do not depend on the response's units.
@@ -1422,7 +1440,7 @@ def _project_shape_in_fitted_basis(
         # The fitted coefficients' distance in the penalized Hessian: the second-order
         # model of the penalized objective the publication rule judges.
         unresolved = False
-        H = np.asarray(metric[0], dtype=np.float64)
+        H = _in_binary_units(np.asarray(metric[0], dtype=np.float64))
         fitted = np.asarray(metric[1], dtype=np.float64)
         # The quadratic forms are taken on the coefficients in units of a power of two near
         # their largest entry: exact to rescale, and normal for a response of any size, where
