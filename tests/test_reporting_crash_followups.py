@@ -1,4 +1,4 @@
-"""Reporting regressions from the #626 follow-up handoff (items 14–15)."""
+"""Term labels and grouped level tables follow the fitted coefficient blocks."""
 
 from contextlib import nullcontext
 
@@ -6,47 +6,58 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, Numeric, SuperGLM, collapse_levels
+from superglm import Categorical, GammaLS, Numeric, SuperGLM, collapse_levels
 from superglm.distributional import Predictor
 from superglm.distributional import terms as lss_terms
 from superglm.distributional.families.gaussian import GaussianLS
+from superglm.editor import edit
+from superglm.editor.lss.apply import lss_model_with_edits
 from tests.bound_predictor_fixtures import model_from_templates
 
 
-def _interaction_model(second="special"):
+def _interaction_model(second="special", *, family=None):
     rng = np.random.default_rng(20261112)
     x = rng.uniform(-1, 1, 180)
     z = rng.normal(size=len(x))
     frame = pd.DataFrame({"x": x, second: z})
-    y = 0.3 + 0.7 * x - 0.2 * z + 0.5 * x * z + rng.normal(scale=0.2, size=len(x))
+    eta = 0.3 + 0.7 * x - 0.2 * z + 0.5 * x * z
+    family = GaussianLS() if family is None else family
+    parameter = "mean" if isinstance(family, GammaLS) else "location"
+    y = (
+        rng.gamma(4, np.exp(eta) / 4)
+        if isinstance(family, GammaLS)
+        else eta + rng.normal(scale=0.2, size=len(x))
+    )
     model = model_from_templates(
-        family=GaussianLS(),
+        family=family,
         predictors=[
             Predictor(
-                "location", {"x": Numeric(), second: Numeric()}, interactions=(("x", second),)
+                parameter, {"x": Numeric(), second: Numeric()}, interactions=(("x", second),)
             ),
             Predictor("scale", {}),
         ],
     ).fit(frame, y)
-    return model, frame
+    return model, frame, y
 
 
 def test_lss_summary_keeps_an_interaction_named_special():
-    model, frame = _interaction_model()
-    reference, _ = _interaction_model(second="z")
+    model, frame, _ = _interaction_model()
+    reference, _, _ = _interaction_model(second="z")
     actual = model.summary()
     expected = reference.summary()
     expected["term"] = expected["term"].replace({"z": "special", "x:z": "x:special"})
     pd.testing.assert_frame_equal(actual, expected)
     assert "x:special" in set(actual.term)
     assert "x (special level)" not in set(actual.term)
-    np.testing.assert_array_equal(
-        model.predict(frame), reference.predict(frame.rename(columns={"special": "z"}))
+    predicted = reference.predict(frame.rename(columns={"special": "z"}))
+    u = np.finfo(np.float64).eps / 2
+    np.testing.assert_allclose(
+        model.predict(frame), predicted, rtol=128 * u, atol=128 * u * np.abs(predicted).max()
     )
 
 
 def test_lss_numeric_effect_does_not_absorb_a_special_named_interaction(monkeypatch):
-    model, frame = _interaction_model()
+    model, frame, _ = _interaction_model()
     fitted = model._require_fitted()
     effect = model.term_inference("location", "x", simultaneous=False)
     block = fitted.layout.term_slices["location:x"]
@@ -76,6 +87,33 @@ def test_lss_summary_keeps_a_main_column_named_special():
     table = model.summary()
     assert "x:special" in set(table.term)
     assert "x (special level)" not in set(table.term)
+
+
+def test_lss_editor_reads_only_the_main_terms_coefficients_and_reference():
+    model, frame, y = _interaction_model(family=GammaLS())
+    session = edit(model, terms=["mean:x"], with_se=False, train_data=(frame, y))
+    fitted = model._require_fitted()
+    block = fitted.layout.term_slices["mean:x"]
+    expected = fitted.coefficients[block]
+    np.testing.assert_array_equal(session.model.term_coefficients("mean:x"), expected)
+    assert session.model.reference_log_effect("mean:x") == pytest.approx(
+        expected[0] * np.median(frame.x), rel=1e-12, abs=1e-14
+    )
+
+
+def test_lss_editor_can_edit_a_main_term_beside_a_special_named_interaction():
+    model, frame, y = _interaction_model(family=GammaLS())
+    session = edit(model, terms=["mean:x"], with_se=False, train_data=(frame, y))
+    editable = session.terms["mean:x"]
+    editable.edited_log_effect = editable.original_log_effect + 0.125 * editable.x
+    revised = lss_model_with_edits(session.model, session.terms)
+    moved = revised.predict_link(frame)["mean"] - model.predict_link(frame)["mean"]
+    np.testing.assert_allclose(moved, 0.125 * frame.x, rtol=1e-12, atol=1e-14)
+    fitted = model._require_fitted()
+    interaction = fitted.layout.term_slices["mean:x:special"]
+    np.testing.assert_array_equal(
+        revised._require_fitted().coefficients[interaction], fitted.coefficients[interaction]
+    )
 
 
 @pytest.mark.parametrize("with_se", [False, True])

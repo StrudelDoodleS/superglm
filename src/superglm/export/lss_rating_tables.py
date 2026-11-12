@@ -34,6 +34,7 @@ from superglm.distributional.terms import (
     _coefficient_columns,
     _compiled_predictor,
     _feature_label,
+    _free_level_slice,
     _prepare_term_effect,
     _reference_design,
     _term_kind,
@@ -251,7 +252,7 @@ def _parameter_table(
         spec = compiled.specs[name]
         kind = _term_kind(spec)
         qualified = fitted.layout.term_slices[f"{parameter}:{name}"]
-        special = fitted.layout.term_slices.get(f"{parameter}:{name}:special")
+        special = _free_level_slice(fitted, parameter, name)
         blocks = (qualified,) if special is None else (qualified, special)
         column = _feature_label(fitted, parameter, name)
         if getattr(spec, "_grouping", None) is not None:

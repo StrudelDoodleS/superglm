@@ -604,8 +604,8 @@ covers by construction.
 When an unbound grouping is reused on a training subset, `term_inference()`
 expands the groups present in that fit. It keeps every original member of a
 fitted group, even a member absent from the subset, and omits groups with no
-fitted level. Use `levels=` or `bind_levels()` to retain an absent group in
-the fitted universe; its members then report the pinned zero contribution.
+fitted level. Use `levels=` or `bind_levels(book)` to retain an absent group
+in the fitted universe; its members then report the base level's value.
 
 #### Where a merged group sits on an ordered axis
 

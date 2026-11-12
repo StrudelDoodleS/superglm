@@ -407,6 +407,14 @@ def _free_level_parent(fitted: Any, parameter: str, term: Hashable) -> str | Non
     return None
 
 
+def _free_level_slice(fitted: Any, parameter: str, term: Hashable) -> slice | None:
+    """The free-level block belonging to ``term``, if the compiler declared one."""
+    special = f"{term}{_SPECIAL_SUFFIX}"
+    if _free_level_parent(fitted, parameter, special) != str(term):
+        return None
+    return fitted.layout.term_slices.get(f"{parameter}:{special}")
+
+
 def _interaction_on(fitted: Any, parameter: str, feature: Hashable) -> str | None:
     """Name the predictor's first interaction built on ``feature``, if any."""
     compiled = _compiled_predictor(fitted, parameter).compiled
@@ -914,11 +922,7 @@ def _prepare_term_effect(
     frame = as_eager_frame(X_train)
     evaluation, grid, levels = _sweep(fitted, frame, parameter, term, points)
     special_name = f"{qualified}{_SPECIAL_SUFFIX}"
-    special_slice = (
-        fitted.layout.term_slices.get(special_name)
-        if _free_level_parent(fitted, parameter, f"{term}{_SPECIAL_SUFFIX}") == str(term)
-        else None
-    )
+    special_slice = _free_level_slice(fitted, parameter, term)
     blocks = (term_slice,) if special_slice is None else (term_slice, special_slice)
     names = (qualified,) if special_slice is None else (qualified, special_name)
     spec = _compiled_spec(fitted, parameter, term)

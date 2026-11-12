@@ -35,7 +35,12 @@ from numpy.typing import NDArray
 
 from superglm._roundoff import gamma
 from superglm.distributional.api import SuperLSS
-from superglm.distributional.terms import _level_domain, _resolve_term, _term_design
+from superglm.distributional.terms import (
+    _free_level_slice,
+    _level_domain,
+    _resolve_term,
+    _term_design,
+)
 from superglm.editor import apply as editor_apply
 from superglm.editor._types import EditableTerm
 from superglm.editor.errors import EditorValueError
@@ -47,8 +52,6 @@ from superglm.solvers.irls_direct._qp import (
     _QP_FEASIBILITY_TOL,
     _solve_constrained_qp_with_cold_retry,
 )
-
-_SPECIAL_SUFFIX = ":special"
 
 
 def lss_model_with_edits(
@@ -122,8 +125,8 @@ def _editable_slice(view: LSSModelView, term: EditableTerm) -> tuple[str, Any, s
     """The term's column, predictor state and coefficient slice, refusing a term none is written to."""
     parameter, label = split_key(term.name)
     fitted = view._fitted
-    qualified, state, term_slice = _resolve_term(fitted, parameter, label)
-    if f"{qualified}{_SPECIAL_SUFFIX}" in fitted.layout.term_slices:
+    _, state, term_slice = _resolve_term(fitted, parameter, label)
+    if _free_level_slice(fitted, parameter, label) is not None:
         raise EditorValueError(
             f"{term.name!r} has special levels, whose coefficients the editor does not write yet. "
             "Edit a term without specials, or refit with the change."
