@@ -1226,6 +1226,26 @@ def test_repair_after_summary_publishes_what_it_publishes_before(n_knots, degree
     np.testing.assert_allclose(summarised.predict(X), model.predict(X), rtol=0.0, atol=1e-12)
 
 
+def test_repair_under_a_large_smoothing_parameter_is_the_projection_in_the_fits_hessian():
+    """The metric's penalty block is formed as the fit forms it, from a transported root.
+
+    At lambda 1e14 the congruence ``R' Omega R`` left rounding on the penalty's null space
+    that lambda turned into up to 2% of the data's curvature there, and the repair was the
+    projection in another metric: a KKT residual of 7e-5 in the posterior's.
+    """
+    x = np.linspace(0.0, 1.0, 200)
+    X = pd.DataFrame({"x": x})
+    feature = PSpline(n_knots=9, m=3, constraint=Constraint.postfit.increasing)
+    model = SuperGLM(
+        family="gaussian", selection_penalty=0.0, spline_penalty=1e14, features={"x": feature}
+    ).fit(X, (x - 0.4) ** 2)
+
+    certificate = _certified_repair(model, X, "increasing")
+
+    assert certificate.minimum_derivative >= -1e-10
+    assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
+
+
 @pytest.mark.parametrize("scale", [1e165, 1e-150])
 def test_monotone_repair_in_extreme_predictor_units_matches_unit_units(scale):
     """Derivative rows that would under- or overflow are normalized range-safely."""

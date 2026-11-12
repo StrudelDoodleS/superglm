@@ -71,6 +71,8 @@ def _term_penalty_block(terms, indices: NDArray, width: int) -> NDArray:
             product = total_penalty_matvec(unit, terms.lambdas, own, list(terms.group_matrices))
             block[:, column] = product[indices]
         return 0.5 * (block + block.T)
+    from superglm.reml.penalty_algebra import ssp_penalty_matrix
+
     block = np.zeros((indices.size, indices.size))
     for group_slice, lam, omega, raw_projection in terms:
         where = np.flatnonzero((indices >= group_slice.start) & (indices < group_slice.stop))
@@ -78,8 +80,10 @@ def _term_penalty_block(terms, indices: NDArray, width: int) -> NDArray:
             continue
         omega_arr = np.asarray(omega, dtype=np.float64)
         if raw_projection is not None:
-            R = np.asarray(raw_projection, dtype=np.float64)
-            omega_arr = R.T @ omega_arr @ R
+            # Formed as the fit forms it (``build_penalty_matrix``): the Gram of a
+            # transported root keeps the penalty's null space, where the congruence
+            # ``R' Omega R`` leaves rounding that a large lambda makes curvature.
+            omega_arr = ssp_penalty_matrix(raw_projection, omega_arr)
         local = indices[where] - group_slice.start
         block[np.ix_(where, where)] += lam * omega_arr[np.ix_(local, local)]
     return block
