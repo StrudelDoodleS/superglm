@@ -3412,6 +3412,49 @@ def test_a_repair_holding_counts_at_the_mean_floor_is_judged_beside_the_dropped_
     assert deviance(mu) < dropped.fun
 
 
+def test_a_continued_repair_leads_rows_a_clamp_holds_at_their_worst_back_inside():
+    """A binomial identity-link repair whose projection holds rows at clip_mu's cap of 1 - 1e-7
+    with zero responses, each at its worst there, deviance 488.1 against the dropped term's
+    239.7. With no derivative from a held row the continuation stalls at 485.3, where the
+    deviance scored is flat in them, and was refused (1039a4c5d) where ddda43d45 and master
+    publish; refused so, it is continued again with those rows' own derivatives, which lead
+    them back inside, and is published below the dropped term, intercept profiled by SciPy.
+    """
+    from scipy.optimize import minimize_scalar
+
+    from superglm.distributions import Binomial
+
+    rng = np.random.default_rng(19)
+    x = np.linspace(0.0, 1.0, 200)
+    offset = 0.92 - 0.6 * x
+    bump = np.exp(-(((x - 0.3) / 0.12) ** 2)) - 0.4
+    y = rng.binomial(1, np.clip(offset + 0.3 * bump, 1e-3, 1.0 - 1e-3)).astype(np.float64)
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="binomial",
+        link="identity",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=10, constraint=Constraint.postfit.concave)},
+    ).fit(X, y, offset=offset)
+
+    model.apply_shape_postfit(X, offset=offset)
+
+    assert "x" in model._shape_repairs
+    mu = np.asarray(model.predict(X, offset=offset), dtype=np.float64)
+    assert curvature_violation(mu - offset, "concave") <= 1e-9
+
+    def deviance(mean):
+        return float(np.sum(Binomial().deviance_unit(y, np.clip(mean, 1e-7, 1.0 - 1e-7))))
+
+    dropped = minimize_scalar(
+        lambda c: deviance(offset + c),
+        bounds=(-1.0, 1.0),
+        method="bounded",
+        options={"xatol": 1e-12},
+    )
+    assert deviance(mu) < dropped.fun - 1.0
+
+
 def _sweep_case(n_knots, select, axis, shape, family, kind):
     """One repair of the post-fit sweep: n = 2500, drawn in the sweep's order."""
     rng = np.random.default_rng(7)

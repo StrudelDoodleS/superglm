@@ -1133,6 +1133,8 @@ def _continued_repair(
     smooth_penalty_terms,
     selection_penalty,
     current_eta,
+    inward=False,
+    worst=None,
 ):
     """The refused repair continued towards the constrained penalized fit, and the scale it is
     certified at; or ``None``.
@@ -1140,7 +1142,9 @@ def _continued_repair(
     Starts from the refused candidate and stops where the model's predicted decrease or a
     step's actual decrease is within the merit's rounding, or a step finds no decrease.
     ``None`` when no step is taken; the publication rule judges the result as before, at
-    the scale returned (``_continued_scale``).
+    the scale returned (``_continued_scale``). The model reads no derivative from a row a
+    clamp holds, or with ``inward``, only from one held at its worst (see the loop); a step
+    that meets such a row appends to ``worst``, a list, where one is given.
     """
     from dataclasses import replace
 
@@ -1184,15 +1188,32 @@ def _continued_repair(
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
             unclipped = model._link.inverse(eta_safe)
             mu = clip_mu(unclipped, model._distribution)
-            # The derivatives of the deviance scored: flat on a row a clamp holds, as in the
-            # intercept's search, where the clamped mean's Fisher weight can be vast.
-            held = (eta_safe != eta) | (mu != unclipped)
             variance = np.maximum(
                 np.asarray(model._distribution.variance(mu), dtype=np.float64),
                 _VARIANCE_FLOOR,
             )
             dmu_deta = np.asarray(model._link.deriv_inverse(eta_safe), dtype=np.float64)
-            score = np.where(held, 0.0, scoring_weights * (y - mu) * dmu_deta / variance)
+            score = scoring_weights * (y - mu) * dmu_deta / variance
+            # The deviance scored is flat on a row a clamp holds, so the model reads no
+            # derivative there: its Fisher weight can be vast (1e50 under the identity link at
+            # clip_mu's floor), and its target then rounds back to the current coefficients.
+            # A row held at its worst, though, whose deviance falls on leaving the clamp, has
+            # no slope to lead it back inside; with ``inward`` it keeps its own derivatives,
+            # which do (the line search still judges each step on the merit scored).
+            flat = (eta_safe != eta) | (mu != unclipped)
+            if np.any(flat):
+                back = np.where(
+                    eta_safe != eta,
+                    np.sign(eta_safe - eta),
+                    np.sign(mu - unclipped) * np.sign(dmu_deta),
+                )
+                at_worst = flat & (score * back > 0.0)
+                if np.any(at_worst):
+                    if worst is not None:
+                        worst.append(True)
+                    if inward:
+                        flat = flat & ~at_worst
+            score = np.where(flat, 0.0, score)
         W = fisher_working_weights(
             distribution=model._distribution,
             link=model._link,
@@ -1202,7 +1223,7 @@ def _continued_repair(
             dmu_deta=dmu_deta,
             variance=variance,
         )
-        W = np.where(held, 0.0, W)
+        W = np.where(flat, 0.0, W)
         if not np.sum(W) > 0.0:
             break  # a clamp holds every row: the scored deviance is flat
         term = beta[indices]
@@ -1616,19 +1637,38 @@ def _apply_shape_postfit(model, X, sample_weight, offset, *, n_grid: int):
             candidate_beta, current_eta, intercept_shift = _validate_repair_for_publication(
                 work_model, repair_result=repair_result, **scoring
             )
-        except _WorseThanFallbackError:
-            continued = _continued_repair(
-                work_model, repair_result=repair_result, n_grid=n_grid, **scoring
-            )
-            if continued is None:
-                raise
-            repair_result, certified_scale = continued
-            candidate_beta, current_eta, intercept_shift = _validate_repair_for_publication(
-                work_model,
-                repair_result=repair_result,
-                certified_scale=certified_scale,
-                **scoring,
-            )
+        except _WorseThanFallbackError as first:
+            refusal, published, worst = first, False, []
+            # Continued on the deviance scored; where that is still refused and it met rows a
+            # clamp holds at their worst, once more with them led back inside
+            # (``_continued_repair``).
+            for inward in (False, True):
+                if inward and not worst:
+                    break
+                continued = _continued_repair(
+                    work_model,
+                    repair_result=repair_result,
+                    n_grid=n_grid,
+                    inward=inward,
+                    worst=worst,
+                    **scoring,
+                )
+                if continued is None:
+                    continue
+                try:
+                    candidate_beta, current_eta, intercept_shift = _validate_repair_for_publication(
+                        work_model,
+                        repair_result=continued[0],
+                        certified_scale=continued[1],
+                        **scoring,
+                    )
+                except _WorseThanFallbackError as again:
+                    refusal = again
+                    continue
+                repair_result, published = continued[0], True
+                break
+            if not published:
+                raise refusal
         # Recorded only if this term's coefficients actually moved.  The early exit
         # above concerns the whole model: once any term binds the loop runs for every
         # pending term, and an already-feasible term comes back unchanged.  Recording it
