@@ -1507,19 +1507,57 @@ def test_one_qp_curvature_repair_takes_few_iterations(monkeypatch):
     assert count["iterations"] <= ONE_QP_ITERATIONS, count
 
 
-#: Active-set iterations of a grid repair at near-zero weights, below. Most spans of
-#: these projections come out flat, and a flat span's lowest point was its rounding:
-#: cuts there made the QPs degenerate, and its curvature took each exchange step past
-#: the rank cut. At ee78e8bb1 the four took 249, 13,977, 2,974 and 468 iterations, the
-#: second ending uncertified; with no minimum on a flat span, 102 to 134.
-NEAR_ZERO_GRID_ITERATIONS = 200
-#: The same at 200 knots, where the grid metric's smallest eigenvalue falls under the
-#: rank cut: 8,697 iterations at ee78e8bb1, 3,030 unfloored, about 700 floored.
-FLOORED_GRID_ITERATIONS = 1500
+# A grid repair at near-zero weights, below. Most spans of these projections come out
+# flat, and a flat span's lowest point was its rounding: cuts there made the QPs
+# degenerate, so starts ran their whole budgets, and its curvature took each exchange
+# step past the rank cut, where the QP refused it. Iteration totals on this
+# near-singular metric turn on the BLAS kernel's rounding (the 200-knot repair takes
+# 279 to 1,134 single-threaded across this host's OpenBLAS kernels, and 1,585 on Linux
+# ARM64), so the tests assert what the fix makes structural: the flat-span rule
+# fires, every cone QP certifies, and at 200 knots the QP is given the floored,
+# full-rank metric. The counts are a backstop well above every kernel's and below the
+# unfixed code's: at 721150d40 the four 120-knot repairs took 249, 14,977, 2,974 and
+# 468 iterations, and the 200-knot one 8,697.
+NEAR_ZERO_GRID_ITERATIONS = 1_000
+FLOORED_GRID_ITERATIONS = 4_000
+
+
+def _repair_work(monkeypatch):
+    """Spies on a repair's work: QP iterations and ranks, cone solves, flat spans skipped."""
+    import superglm.solvers.constrained_qp as constrained_qp
+    from superglm import constraints
+
+    work = {"iterations": 0, "truncated": 0, "uncertified": 0, "flat": 0}
+    real_qp = constrained_qp.solve_constrained_qp
+    real_cone = constraints._solve_cone_qp
+    real_minimum = constraints._piece_minimum
+
+    def qp(*args, **kwargs):
+        result = real_qp(*args, **kwargs)
+        work["iterations"] += result.n_iter
+        work["truncated"] += result.rank < result.width
+        return result
+
+    def cone(*args, **kwargs):
+        result = real_cone(*args, **kwargs)
+        work["uncertified"] += result is None
+        return result
+
+    def minimum(piece, p, beta, skip_flat=False):
+        if not skip_flat:
+            return real_minimum(piece, p, beta)
+        found = real_minimum(piece, p, beta, skip_flat)
+        work["flat"] += found is None and real_minimum(piece, p, beta) is not None
+        return found
+
+    monkeypatch.setattr(constrained_qp, "solve_constrained_qp", qp)
+    monkeypatch.setattr(constraints, "_solve_cone_qp", cone)
+    monkeypatch.setattr(constraints, "_piece_minimum", minimum)
+    return work
 
 
 def _near_zero_weight_repair(data, direction, knots, monkeypatch):
-    """A ``ps`` repair on the grid at raw frequencies plus 1e-12: the grid metric and its count."""
+    """A ``ps`` repair on the grid at raw frequencies plus 1e-12: the grid metric and its work."""
     import warnings
 
     from superglm import Spline
@@ -1540,7 +1578,7 @@ def _near_zero_weight_repair(data, direction, knots, monkeypatch):
     spec, groups = model._specs["x"], _x_groups(model)
     counts = np.histogram(x, bins=500)[0]
     weights = counts / counts.sum() + 1e-12
-    count = _qp_iterations(monkeypatch)
+    work = _repair_work(monkeypatch)
 
     with warnings.catch_warnings():
         warnings.simplefilter("error", RuntimeWarning)
@@ -1551,7 +1589,7 @@ def _near_zero_weight_repair(data, direction, knots, monkeypatch):
     H, g = grid_metric(spec, repair.grid, repair.original_log_effect, weights)
     repaired = _term_beta(repair.repaired_beta_reparam, groups)
     fitted = _term_beta(model.result.beta, groups)
-    return H, projection_certificate(spec, direction, repaired, H, g, fitted), count
+    return H, projection_certificate(spec, direction, repaired, H, g, fitted), work
 
 
 @pytest.mark.slow
@@ -1561,10 +1599,13 @@ def test_grid_repair_with_near_zero_weights_on_a_large_basis_is_the_closest_curv
     data, direction, monkeypatch
 ):
     """120-knot P-splines on data with a gap or a long tail, at the grid's raw frequencies."""
-    _, certificate, count = _near_zero_weight_repair(data, direction, 120, monkeypatch)
+    _, certificate, work = _near_zero_weight_repair(data, direction, 120, monkeypatch)
     assert certificate.minimum_derivative >= -1e-10
     assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
-    assert count["iterations"] <= NEAR_ZERO_GRID_ITERATIONS, count
+    assert work["flat"] > 0, work
+    # No exchange step's QP is left uncertified, nor a curvature step refused at the rank cut.
+    assert work["uncertified"] == 0, work
+    assert work["iterations"] <= NEAR_ZERO_GRID_ITERATIONS, work
 
 
 @pytest.mark.slow
@@ -1573,14 +1614,17 @@ def test_grid_repair_on_a_metric_the_qp_would_truncate_is_the_closest_curve(monk
     from superglm.constraints import _jacobi_scale
     from superglm.solvers.rank import _symmetric_part, decompose_gram
 
-    H, certificate, count = _near_zero_weight_repair("skewed", "increasing", 200, monkeypatch)
+    H, certificate, work = _near_zero_weight_repair("skewed", "increasing", 200, monkeypatch)
     scale = _jacobi_scale(H)
     decomposition = decompose_gram(_symmetric_part(H * scale[:, None] * scale[None, :]))
     assert decomposition.rank < decomposition.width
     # Measured in the caller's unfloored metric.
     assert certificate.minimum_derivative >= -1e-10
     assert certificate.kkt_residual <= CLOSEST_REPAIR_KKT
-    assert count["iterations"] <= FLOORED_GRID_ITERATIONS, count
+    assert work["flat"] > 0, work
+    # The QP is given the floored metric, which it does not truncate.
+    assert work["truncated"] == 0, work
+    assert work["iterations"] <= FLOORED_GRID_ITERATIONS, work
 
 
 # The flat Poisson fixture of the review sweep. Its grid weights fall to 1e-5 of
