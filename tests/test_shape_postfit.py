@@ -3329,6 +3329,46 @@ def test_a_continued_projection_is_judged_at_the_scale_it_was_certified_at(monke
     )
 
 
+def test_a_continued_repair_reads_no_curvature_from_rows_a_clamp_holds():
+    """Sol's case on #626: a Poisson identity-link fit whose repair leaves rows' means below
+    zero, where ``clip_mu`` holds them. Their scored deviance is flat, but at ddda43d45 the
+    continuation kept their score and Fisher weights, up to 1e50, so its Newton target rounded
+    back to the current coefficients and the repair was refused as worse than the dropped
+    term, which master publishes. It is published, increasing, with a deviance below the
+    dropped term's, the intercept profiled by SciPy.
+    """
+    from scipy.optimize import minimize_scalar
+
+    x = np.linspace(0.0, 1.0, 100)
+    offset = 0.1 + 2.0 * x
+    y = np.random.default_rng(18).poisson(np.maximum(offset + 0.8 * np.sin(12.0 * x), 0.01))
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="poisson",
+        link="identity",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=6, constraint=Constraint.postfit.increasing)},
+    ).fit(X, y, offset=offset)
+    assert model.result.converged
+
+    model.apply_shape_postfit(X, offset=offset)
+
+    assert "x" in model._shape_repairs
+    mu = np.asarray(model.predict(X, offset=offset), dtype=np.float64)
+    assert np.all(np.diff(mu - offset) >= -1e-12 * np.max(np.abs(mu)))
+
+    def deviance(mean):
+        return float(np.sum(Poisson().deviance_unit(y.astype(np.float64), mean)))
+
+    dropped = minimize_scalar(
+        lambda c: deviance(offset + c),
+        bounds=(-0.1 + 1e-9, 5.0),
+        method="bounded",
+        options={"xatol": 1e-12},
+    )
+    assert deviance(mu) < dropped.fun - 1e-3
+
+
 def _sweep_case(n_knots, select, axis, shape, family, kind):
     """One repair of the post-fit sweep: n = 2500, drawn in the sweep's order."""
     rng = np.random.default_rng(7)

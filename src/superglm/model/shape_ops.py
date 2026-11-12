@@ -1143,13 +1143,17 @@ def _continued_repair(
     for _ in range(_CONTINUED_STEPS):
         eta_safe = stabilize_eta(eta, model._link)
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-            mu = clip_mu(model._link.inverse(eta_safe), model._distribution)
+            unclipped = model._link.inverse(eta_safe)
+            mu = clip_mu(unclipped, model._distribution)
+            # The derivatives of the deviance scored: flat on a row a clamp holds, as in the
+            # intercept's search, where the clamped mean's Fisher weight can be vast.
+            held = (eta_safe != eta) | (mu != unclipped)
             variance = np.maximum(
                 np.asarray(model._distribution.variance(mu), dtype=np.float64),
                 _VARIANCE_FLOOR,
             )
             dmu_deta = np.asarray(model._link.deriv_inverse(eta_safe), dtype=np.float64)
-            score = scoring_weights * (y - mu) * dmu_deta / variance
+            score = np.where(held, 0.0, scoring_weights * (y - mu) * dmu_deta / variance)
         W = fisher_working_weights(
             distribution=model._distribution,
             link=model._link,
@@ -1159,6 +1163,9 @@ def _continued_repair(
             dmu_deta=dmu_deta,
             variance=variance,
         )
+        W = np.where(held, 0.0, W)
+        if not np.sum(W) > 0.0:
+            break  # a clamp holds every row: the scored deviance is flat
         term = beta[indices]
         H = _term_data_hessian(model, groups, W) + penalty
         # Half the merit's gradient with the intercept profiled: the Schur complement's.
