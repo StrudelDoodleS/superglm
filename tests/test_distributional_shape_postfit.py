@@ -1574,6 +1574,54 @@ def test_a_continued_projection_is_published_at_the_scale_it_was_certified_at(mo
     assert record.intercept_shift == pytest.approx(4.55323, abs=1e-4)
 
 
+def test_a_continued_projection_at_the_apex_to_rounding_is_published_as_the_zero_curve(
+    monkeypatch,
+):
+    # Sol's case on #626: under NumPy 2.4.2's OpenBLAS the narrow band's continuation reached
+    # the cone's apex only to rounding, at coefficients of norm 1.7e-10 whose curve is within
+    # 3.1e-11 of zero, inside the 6.7e-11 they were certified at. Moved inside the cone, they
+    # cost 1.6e-9 of merit, 7 times the merit's rounding, and the repair was refused, "625.118
+    # against 625.118", where NumPy 2.5.2's reaches the apex exactly and publishes. Forced on
+    # any kernel: each continued projection is replaced by coefficients along the direction
+    # the curve barely sees, which break the rule by less than the rounding they are certified
+    # at and are longer than it, with a curve shorter than it. At ddda43d45 that was refused; it
+    # is the zero curve to its rounding, and is published as the zero curve.
+    from superglm._roundoff import gamma
+    from superglm.constraints import _SLACK_STEPS, shape_constraint_certificate
+    from tests.test_shape_postfit import _pushed_continuation
+
+    model, revised, _, _, beta = _narrow_interval_revision()
+    columns = model._model.layout.term_slices["scale:x"]
+    spec = _term_of(model._model, "scale")
+    rounding = float(gamma(_SLACK_STEPS * (columns.stop - columns.start)))
+    sent = []
+
+    def push(spec, grid, scales):
+        basis = np.asarray(spec.transform(grid), dtype=np.float64)
+        unseen = np.linalg.svd(basis, full_matrices=False)[2][-1]
+        if shape_constraint_certificate(spec, unseen, "increasing").minimum_scaled_slack > 0.0:
+            unseen = -unseen
+        block = 4.0 * rounding * scales[-1] * unseen
+        sent.append((block, basis, scales[-1]))
+        return block
+
+    _pushed_continuation(monkeypatch, push)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        revised.apply_shape_postfit()
+
+    block, basis, last = sent[-1]
+    apex = rounding * last
+    violation = -shape_constraint_certificate(spec, block, "increasing").minimum_scaled_slack
+    assert rounding * np.linalg.norm(block) < violation < apex < np.linalg.norm(block)
+    assert np.max(np.abs(basis @ block)) < apex
+    (status,) = postfit_status(revised._model)
+    assert status.state is PostfitState.REPAIRED
+    assert not np.any(np.asarray(revised._model.coefficients)[columns])
+    (record,) = revised._model.fit_state.hand_edit.repairs
+    assert record.intercept_shift == pytest.approx(4.55323, abs=1e-4)
+
+
 def test_a_session_follows_a_refit_in_place_that_changed_a_categorical_reference():
     # Sol's case: frequency weights make A the reference level of the first fit and B of the
     # refit. At 19a6ab028 the session kept the first fit's compiled specs, so an edit to C was

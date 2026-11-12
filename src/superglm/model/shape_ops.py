@@ -913,6 +913,7 @@ def _validate_repair_for_publication(
     default the curve it repaired (``_certified_curve_scale``), as for a projection.
     """
     from superglm.constraints import _fitted_basis, shape_slack_tolerance, shape_sum_tolerance
+    from superglm.distributional.shape_repair import _zero_to_rounding
 
     current_beta = np.asarray(model.result.beta, dtype=np.float64)
     candidate_beta = np.asarray(repair_result.repaired_beta_reparam, dtype=np.float64)
@@ -927,20 +928,22 @@ def _validate_repair_for_publication(
     fitted_scale = float(np.linalg.norm(current_term_beta))
     if certified_scale is not None:
         fitted_scale = max(fitted_scale, certified_scale)
-    # A term within the slack's rounding of zero at the fitted term's scale, or the larger
-    # one a continued repair was certified at, is the zero term, and is published as
-    # exactly that: a later call sees only the published term, and would judge the
-    # rounding at its own scale.
-    if float(np.linalg.norm(term_beta)) <= shape_slack_tolerance(term_beta, fitted_scale):
-        candidate_beta = candidate_beta.copy()
-        for group in groups:
-            candidate_beta[group.sl] = 0.0
-        term_beta = np.zeros_like(term_beta)
     fitted_basis = _fitted_basis(spec, grid)
     if fitted_basis.shape != (grid.size, term_beta.size):
         raise RuntimeError(
             "Unsafe shape repair rejected before publication: incoherent fitted-basis geometry"
         )
+    # A term within the slack's rounding of zero at the fitted term's scale, or the larger
+    # one a continued repair was certified at, in its coefficients or along its curve, is
+    # the zero term, and is published as exactly that: a later call sees only the published
+    # term, and would judge the rounding at its own scale (``_zero_to_rounding``).
+    if _zero_to_rounding(
+        term_beta, lambda: fitted_basis, shape_slack_tolerance(term_beta, fitted_scale)
+    ):
+        candidate_beta = candidate_beta.copy()
+        for group in groups:
+            candidate_beta[group.sl] = 0.0
+        term_beta = np.zeros_like(term_beta)
     repaired_curve = fitted_basis @ term_beta
     if not np.all(np.isfinite(repaired_curve)):
         raise RuntimeError(

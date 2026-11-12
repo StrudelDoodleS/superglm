@@ -626,6 +626,22 @@ def _intercept_scale(eta: NDArray[np.float64], reach: float) -> float:
     return 1.0
 
 
+def _zero_to_rounding(coefficients: NDArray, basis: Callable[[], NDArray], apex: float) -> bool:
+    """Whether a repair's result is the zero curve to ``apex``, the rounding it is certified
+    at: its coefficients' norm, or its curve's largest value on the repair's grid (``basis()``,
+    the fitted basis there, formed only where the norm is not), within it.
+
+    A projection meets the cone's apex only to rounding, there in either measure; the zero
+    curve is the exact point it approximates. Read as anything else, its decision against the
+    dropped term would be that rounding's: beside the apex a move inside the cone costs merit
+    at first order, by far more than the merit's own rounding where the merit is steep.
+    """
+    if float(np.linalg.norm(coefficients)) <= apex:
+        return True
+    values = np.asarray(basis(), dtype=np.float64) @ np.asarray(coefficients, dtype=np.float64)
+    return values.size > 0 and float(np.max(np.abs(values))) <= apex
+
+
 def _settled(
     term: PostfitTerm,
     repair: Any,
@@ -637,8 +653,9 @@ def _settled(
 
     The repair certifies its result at ``certified_scale`` (a continued repair's), by default
     the scale of the curve it repaired; the rule's state is read at the repaired curve's own.
-    A result zero to the rounding of the fitted term, or of a continued repair's scale, is the
-    zero curve, and is published as one. A result that breaks its rule at the second scale by
+    A result zero to the rounding of the fitted term, or of a continued repair's scale, in its
+    coefficients or along its curve (``_zero_to_rounding``), is the zero curve, and is
+    published as one. A result that breaks its rule at the second scale by
     no more than the rounding certified at the first is moved strictly inside the cone by that
     rounding, and published. Any other result that breaks it is refused.
     """
@@ -656,7 +673,7 @@ def _settled(
         zero_scale = max(zero_scale, certified_scale)
     apex = shape_slack_tolerance(repaired, zero_scale)
     certificate = repair.certificate
-    if float(np.linalg.norm(repaired)) <= apex:
+    if _zero_to_rounding(repaired, lambda: spec.transform(repair.grid), apex):
         repaired, certificate = np.zeros_like(repaired), None
     # ``postfit_term_feasible``'s own check, on the term's block: the repair's certificate of
     # these coefficients where it formed one, formed here only for coefficients moved here.
