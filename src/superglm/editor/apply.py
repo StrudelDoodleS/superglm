@@ -10,6 +10,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._utils import weighted_row_sum
+from superglm.editor.display import display_for, is_edited
 from superglm.editor.errors import EditorValueError
 from superglm.editor.lss.view import is_lss
 from superglm.editor.terms import native_log_effect_values
@@ -165,13 +166,8 @@ def apply_edits_to_model_copy_with_data(
         return lss_model_with_edits(model, terms, keep_pinned=keep_pinned)
     changed_terms = [
         term
-        for term in terms.values()
-        if not np.allclose(
-            term.edited_log_effect,
-            term.original_log_effect,
-            rtol=0.0,
-            atol=1e-14,
-        )
+        for name, term in terms.items()
+        if is_edited(display_for(model, name), term.original_log_effect, term.edited_log_effect)
     ]
     has_explicit_rows = X is not None or y is not None
     has_retained_rows = (

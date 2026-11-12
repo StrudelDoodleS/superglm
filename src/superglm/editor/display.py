@@ -104,14 +104,18 @@ ADDITIVE = DisplayTransform("additive", "identity")
 _LINK_PROBE = np.linspace(-1.5, 1.5, 7)
 
 
-def _inverse_is(link: Link, expected: NDArray[np.float64]) -> bool:
-    """Whether ``link`` maps the probe points to ``expected``, to well inside float64 noise."""
+# The unit roundoff of float64.
+_U = 2.0**-53
+
+
+def _inverse_is(link: Link, expected: NDArray[np.float64], rtol: float = 1.0e-10) -> bool:
+    """Whether ``link`` maps the probe points to ``expected`` within ``rtol``."""
     try:
         values = np.asarray(link.inverse(_LINK_PROBE), dtype=np.float64)
     except (AttributeError, TypeError, ValueError, FloatingPointError):
         return False
     return values.shape == _LINK_PROBE.shape and bool(
-        np.allclose(values, expected, rtol=1.0e-10, atol=0.0)
+        np.allclose(values, expected, rtol=rtol, atol=0.0)
     )
 
 
@@ -124,7 +128,8 @@ def link_name(link: Link) -> str:
     """
     # The probe crosses eta = 0, where an inverse link divides by zero.
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-        if _inverse_is(link, np.exp(_LINK_PROBE)):
+        # Within four roundings of exp, so a floor however small reads as a floored log.
+        if _inverse_is(link, np.exp(_LINK_PROBE), rtol=4.0 * _U):
             return "log"
         if _is_shifted_log_link(link):
             return "floored_log"
@@ -270,6 +275,27 @@ def _fitted_link(lss: SuperLSS, parameter: str) -> Link:
         if state.name == parameter:
             return state.link
     raise EditorKeyError(f"The fit has no predictor for parameter {parameter!r}.")
+
+
+# The least change of a relativity's effect that counts as an edit; it keeps a no-op edit
+# bit for bit.
+EDIT_TOLERANCE = 1.0e-14
+
+
+def is_edited(transform: DisplayTransform, original: ArrayLike, edited: ArrayLike) -> bool:
+    """Whether ``edited`` differs from ``original`` by an edit, on ``transform``'s curve.
+
+    A relativity's effect counts as edited past ``EDIT_TOLERANCE``. A curve that adds an
+    amount is in its parameter's own units, which can lie far below 1, so its threshold is
+    the smaller of ``EDIT_TOLERANCE`` and four roundings of the curve's largest value.
+    """
+    before = np.asarray(original, dtype=np.float64)
+    after = np.asarray(edited, dtype=np.float64)
+    tolerance = EDIT_TOLERANCE
+    if transform.kind == "additive":
+        scale = max(np.max(np.abs(before), initial=0.0), np.max(np.abs(after), initial=0.0))
+        tolerance = min(EDIT_TOLERANCE, 4.0 * _U * float(scale))
+    return not np.allclose(after, before, rtol=0.0, atol=tolerance)
 
 
 def display_for(model: Any, key: str) -> DisplayTransform:

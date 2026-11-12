@@ -1419,14 +1419,13 @@ class EditorSession:
     # link-scale factors and are removed from the refitted feature set.
     def edited_terms(self) -> list[str]:
         """Names of terms whose edited values differ from the source fit."""
+        from superglm.editor.display import display_for, is_edited
+
         return [
             name
             for name, term in self.terms.items()
-            if not np.allclose(
-                term.edited_log_effect,
-                term.original_log_effect,
-                rtol=0.0,
-                atol=1e-14,
+            if is_edited(
+                display_for(self.model, name), term.original_log_effect, term.edited_log_effect
             )
         ]
 

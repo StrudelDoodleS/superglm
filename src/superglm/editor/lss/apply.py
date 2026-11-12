@@ -43,6 +43,7 @@ from superglm.distributional.terms import (
 )
 from superglm.editor import apply as editor_apply
 from superglm.editor._types import EditableTerm
+from superglm.editor.display import display_for, is_edited
 from superglm.editor.errors import EditorValueError
 from superglm.editor.lss.rules import TermRows, term_rows
 from superglm.editor.lss.view import LSSModelView, split_key
@@ -67,7 +68,7 @@ def lss_model_with_edits(
     another fit, where a level that fit never saw keeps its pin and the rest of
     the term is edited.
     """
-    changed = [term for term in terms.values() if _is_edited(term)]
+    changed = [term for name, term in terms.items() if _is_edited(view, name, term)]
     if not changed:
         return view.lss
     coefficients = np.array(view._fitted.coefficients, dtype=np.float64)
@@ -78,8 +79,8 @@ def lss_model_with_edits(
     )
 
 
-def _is_edited(term: EditableTerm) -> bool:
-    return not np.allclose(term.edited_log_effect, term.original_log_effect, rtol=0.0, atol=1e-14)
+def _is_edited(view: LSSModelView, name: str, term: EditableTerm) -> bool:
+    return is_edited(display_for(view, name), term.original_log_effect, term.edited_log_effect)
 
 
 def _write_term(

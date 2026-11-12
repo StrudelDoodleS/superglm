@@ -12,12 +12,15 @@ from superglm.distributional.families import LomaxLSS
 from superglm.distributional.families._links import BoundedLogitLink
 from superglm.distributional.families.gaussian import LowerBoundedLogLink
 from superglm.distributional.families.tweedie import BoundedPowerLink
-from superglm.editor import EditorSession
+from superglm.editor import EditorSession, edit
 from superglm.editor.cv import capture_cv_view, fold_log_curves, fold_term_items
 from superglm.editor.display import (
     ADDITIVE,
+    RELATIVITY,
     average_parameter,
     display_for,
+    is_edited,
+    link_name,
     transform_for_link,
 )
 from superglm.editor.payloads import session_payload
@@ -334,3 +337,41 @@ def test_a_link_subclass_that_changes_its_mapping_is_not_read_as_its_parent():
     # Its relativity would be exp(2 f), so exp(f) drawn as one would be wrong.
     assert transform_for_link(_DoubledLogLink()).kind == "additive"
     assert transform_for_link(LogLink()).kind == "relativity"
+
+
+def test_a_small_floor_reads_as_a_floored_log_not_a_plain_one():
+    # Within 1e-10 of exp, a 1e-12 floor was read as a plain log, so θ took the reciprocal display.
+    link = LowerBoundedLogLink(1e-12)
+    assert link_name(link) == "floored_log"
+    assert transform_for_link(link, reciprocal=True).kind == "relativity"
+
+
+def test_an_edit_counts_in_the_units_of_its_curve():
+    original, edited = [2.0e-14, 4.0e-14], [2.0e-14, 4.15e-14]
+    # A relativity keeps its absolute 1e-14; an added amount is measured against its own size.
+    assert not is_edited(RELATIVITY, original, edited)
+    assert is_edited(ADDITIVE, original, edited)
+    # Rounding of an added amount is no edit.
+    assert not is_edited(ADDITIVE, [1.0, 2.0], [1.0, np.nextafter(2.0, 3.0)])
+
+
+def test_an_additive_edit_in_tiny_units_reaches_the_model():
+    rng = np.random.default_rng(3)
+    n = 200
+    groups = np.where(np.arange(n) % 2 == 0, "A", "B")
+    y = np.where(groups == "A", 2e-14, 4e-14) * (1.0 + 0.01 * rng.standard_normal(n))
+    X = pd.DataFrame({"g": groups})
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"g": Categorical()})
+    model.fit(X, y)
+    session = edit(model, train_data=(X, y))
+    term = session.terms["g"]
+    b = term.levels.index("B")
+    session.select_indices("g", [b])
+    session.shift("g", session.additive_step("g"))
+    moved = session.terms["g"].edited_log_effect[b] - term.original_log_effect[b]
+    assert moved > 0
+    assert session.edited_terms() == ["g"]
+    row = X.iloc[[1]]
+    np.testing.assert_allclose(
+        session.to_model().predict(row)[0], model.predict(row)[0] + moved, rtol=1e-9
+    )
