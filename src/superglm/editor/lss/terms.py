@@ -27,9 +27,9 @@ class LSSTermInference:
     """The fields ``term_from_inference`` reads, for one term of one predictor.
 
     ``log_relativity`` is the link-scale effect. The interval is stored as
-    ``exp`` of its link-scale ends, which ``term_from_inference`` reads back,
-    and as the ends themselves, which the editable term keeps: ``exp`` clips an
-    end beyond the float64 range, as a native effect far from zero can be.
+    ``exp`` of its link-scale ends, as a SuperGLM's is, and as the ends
+    themselves, which ``term_from_inference`` keeps: ``exp`` clips an end beyond
+    the float64 range, as a native effect far from zero can be.
     """
 
     name: str
@@ -115,8 +115,6 @@ def lss_editable_terms(
     for key in keys:
         inference = view.term_inference(key, with_se=with_se, n_points=n_points)
         term = term_from_inference(inference)
-        term.ci_lower_log_effect = inference.ci_lower_log_effect
-        term.ci_upper_log_effect = inference.ci_upper_log_effect
         term.metadata["term_type"] = term_type_from_spec(view._specs[key])
         if term.metadata["term_type"] == "piecewise":
             # A carried edit reads whether the term holds flat or continues its end slopes.

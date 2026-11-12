@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from scipy.stats import norm
 
 from superglm import GammaLS, GaussianLS, SuperGLM
 from superglm.distributional.families import LomaxLSS
@@ -28,6 +29,7 @@ from superglm.links import (
     ProbitLink,
     SqrtLink,
 )
+from tests._lss_editor_fixtures import EPS
 from tests.test_editor import _editor_features, editor_frame, editor_model  # noqa: F401
 
 
@@ -265,3 +267,29 @@ def test_additive_step_reads_a_superlss_parameters_eta():
     assert session.additive_step("scale:age") == pytest.approx(
         0.05 * np.mean(np.abs(eta)), rel=1e-6
     )
+
+
+def test_an_identity_band_beyond_500_is_the_effect_plus_or_minus_z_se(editor_frame):  # noqa: F811
+    X, signal = editor_frame
+    noise = np.random.default_rng(20261112).normal(0.0, 100.0, len(X))
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.1,
+        features=_editor_features(),
+    )
+    model.fit(X, 3000.0 + 6000.0 * (signal - 0.6) + noise)
+    session = EditorSession.from_model(model, terms=["x_spline", "band"])
+    payload = session_payload(session)
+    beyond = False
+    for name in ("x_spline", "band"):
+        reference = model.term_inference(name, with_se=True, n_points=200, centering="native")
+        z = norm.ppf(1.0 - reference.alpha / 2.0)
+        effect, se = reference.log_relativity, reference.se_log_relativity
+        lower, upper = payload[name]["ci_lower_y"], payload[name]["ci_upper_y"]
+        scale = 1.0 + np.max(np.abs(effect) + z * se)
+        np.testing.assert_allclose(lower, effect - z * se, rtol=0.0, atol=64 * EPS * scale)
+        np.testing.assert_allclose(upper, effect + z * se, rtol=0.0, atol=64 * EPS * scale)
+        beyond |= bool(np.any(np.abs(np.concatenate([lower, upper])) > 500.0))
+    # The band leaves the range a relativity's exponential is clipped to.
+    assert beyond
