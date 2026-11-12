@@ -17,13 +17,14 @@ from superglm.distributional.families import BoundedLogitLink, LomaxLSS
 from superglm.editor import edit, notebook
 from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.editor.lss.apply import lss_model_with_edits
-from superglm.editor.lss.panel import distribution_panel_payload, fast_path, link_spec
+from superglm.editor.lss.panel import _parameters, distribution_panel_payload, fast_path, link_spec
 from superglm.editor.payloads import session_payload
 from superglm.editor.server import create_editor_app
 from superglm.links import IdentityLink, InverseLink, LogitLink
 from tests._lss_editor_fixtures import (
     EPS,
     FitCase,
+    _nb_rows,
     gamma_case,
     lognormal_case,
     nb_case,
@@ -629,3 +630,21 @@ def test_a_declared_level_absent_from_the_rows_is_read_as_its_own_value():
     row = [row["label"] for row in payload["rows"]].index("3")
     own_value = model.predict_link(X.iloc[:1].assign(grade=3)).to_numpy()[0]
     np.testing.assert_allclose(payload["eta"]["fitted"]["rows"][row], own_value, rtol=1e-12)
+
+
+def test_a_theta_on_a_floored_link_is_named_theta_not_overdispersion():
+    """Only a plain log link shows the overdispersion 1/θ; on a floored link θ itself is shown."""
+    from superglm import NegativeBinomialLS, s
+    from superglm.distributional.families import LowerBoundedLogLink
+
+    X, y, offsets = _nb_rows(20261105, 400)
+    family = NegativeBinomialLS()
+    model = SuperLSS(
+        family,
+        family.mean(s("age", k=6), offset=offsets["mean"]),
+        family.theta(s("age", k=5), link=LowerBoundedLogLink(0.1)),
+    ).fit_reml(X, y)
+    session = edit(model, train_data=(X, y, None, offsets))
+    theta = next(p for p in _parameters(session.model) if p["name"] == "theta")
+    assert theta["display"]["kind"] == "relativity"
+    assert theta["value_label"] == "theta"

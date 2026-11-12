@@ -158,7 +158,13 @@ def not_drawn_yet(view: LSSModelView) -> str:
 
 def _value_label(spec: ParameterSpec, label: str, transform: DisplayTransform) -> str:
     """What the Explain tab's walk gives the value of: the quantity the link acts on (the
-    log-normal's σ, not its CV), else the parameter's label; an overdispersion is its own label."""
+    log-normal's σ, not its CV), else the parameter's label; an overdispersion is its own label.
+
+    A ``size`` parameter's declared quantity is its reciprocal's, which only a reciprocal
+    display shows; on any other link the value is the parameter itself, named by its name.
+    """
+    if spec.role == "size" and transform.kind != "inverse_theta":
+        return spec.name
     if transform.kind == "inverse_theta" or not spec.quantity:
         return label
     return spec.quantity
