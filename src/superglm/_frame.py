@@ -226,7 +226,9 @@ class EagerFrame:
 
     def _pandas_digest(self, columns: tuple[object, ...] | None, include_index: bool) -> bytes:
         native = cast(pd.DataFrame, self.native)
-        guarded = native if columns is None else _select_pandas_columns(native, columns)
+        # Every column in native order selects the frame itself, which hashes as the selection.
+        whole = columns is None or tuple(columns) == tuple(native.columns)
+        guarded = native if whole else _select_pandas_columns(native, cast(tuple, columns))
         digest = hashlib.blake2b(digest_size=16, person=b"superglm-fit-v1")
         metadata = tuple((repr(name), str(dtype)) for name, dtype in guarded.dtypes.items())
         digest.update(repr((guarded.shape, metadata)).encode("utf-8"))

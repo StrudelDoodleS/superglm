@@ -1333,6 +1333,8 @@ def _apply_shape_postfit(model, X, sample_weight, offset, *, n_grid: int):
         offset=scoring_offset,
         use_fitted_design=True,
         frame=frame,
+        # Formed once the repaired scale is (_refresh_repaired_scale_and_statistics).
+        statistics=False,
     )
     _refresh_repaired_geometry(work_model, prior_working_weights, prior_selected_names)
     _refresh_repaired_scale_and_statistics(work_model)

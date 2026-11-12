@@ -598,8 +598,12 @@ def _refresh_fit_statistics(
     offset=None,
     use_fitted_design: bool = False,
     frame: EagerFrame | None = None,
+    statistics: bool = True,
 ) -> None:
-    """Refresh fitted means and statistics; ``frame`` is the caller's adapter of ``X``."""
+    """Refresh fitted means and statistics; ``frame`` is the caller's adapter of ``X``.
+
+    ``statistics=False`` leaves ``_fit_stats`` empty, for a caller that forms them itself.
+    """
     from superglm.distributions import clip_mu
     from superglm.links import stabilize_eta
     from superglm.model.fit_ops import (
@@ -731,16 +735,20 @@ def _refresh_fit_statistics(
         weight_semantics=model_weight_semantics(model),
     )
     deviance = weighted_row_sum(weights, model._distribution.deviance_unit, y_arr, mu)
-    model._fit_stats = _compute_fit_stats(
-        y_arr,
-        mu,
-        weights,
-        offset_arr,
-        model._distribution,
-        model._link,
-        model.result.phi,
-        null_mu=null_mu,
-        weight_semantics=model_weight_semantics(model),
+    model._fit_stats = (
+        _compute_fit_stats(
+            y_arr,
+            mu,
+            weights,
+            offset_arr,
+            model._distribution,
+            model._link,
+            model.result.phi,
+            null_mu=null_mu,
+            weight_semantics=model_weight_semantics(model),
+        )
+        if statistics
+        else None
     )
     for result_name in ("_result", "_solver_result"):
         result = getattr(model, result_name, None)
