@@ -1047,8 +1047,10 @@ class SuperLSS:
         profiled (its posterior precision), and the parameter's intercept is then re-estimated
         on the joint likelihood with everything else held. A repair whose penalized objective
         (the negative log-likelihood plus the fit's smoothing penalty) is worse than with the
-        term dropped is refused, as is one that leaves a training row without valid
-        parameters, and nothing is published.
+        term dropped is continued towards the constrained fit, and where no curve the rule
+        allows beats the dropped term, the term is published flat with a ``RuntimeWarning``.
+        A repair that leaves a training row without valid parameters is refused, and nothing
+        is published.
 
         Predictions, curves, ``coef_`` and rating tables follow the repair; ``result_`` and
         the covariance keep describing the fit. A repaired term reports its EDF, and its

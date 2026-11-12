@@ -15,7 +15,7 @@ from numpy.typing import NDArray
 from superglm._roundoff import gamma
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Sequence
 
     from superglm.features.spline import _SplineBase
     from superglm.types import GroupSlice
@@ -96,11 +96,23 @@ class MonotoneRepairResult:
     projection_residual: float  # maximum curve change induced by coefficient projection
     # The shape certificate of the repaired coefficients, as the repair formed it.
     certificate: ShapeConstraintCertificate | None = None
+    # Whether the repair published the term flat: the zero curve, the term dropped, which no
+    # curve the rule allows beat (``_flat_repair``).
+    flat: bool = False
 
     @property
     def kind(self) -> str:
         """Canonical shape token for compatibility with generalized postfit repair."""
         return self.direction
+
+
+class _IndefiniteMetricError(RuntimeError):
+    """A projection's metric gives the fitted coefficients no positive length, so no curve is
+    closer to them than the zero curve is."""
+
+
+class _InterceptSearchError(RuntimeError):
+    """A repair's intercept could not be re-estimated with its term's curve held."""
 
 
 @dataclass(frozen=True)
@@ -548,6 +560,52 @@ def _repair_shape(
         max_violation_after=viol_after,
         projection_residual=proj_residual,
         certificate=certificate_after,
+    )
+
+
+def _flat_repair(
+    shape: str,
+    spec: Any,
+    beta_reparam: NDArray,
+    groups: Sequence[Any],
+    n_grid: int,
+    before: MonotoneRepairResult | None = None,
+    certificate: ShapeConstraintCertificate | None = None,
+) -> MonotoneRepairResult:
+    """The zero curve as the repair of the term in ``groups``: the term dropped, which has
+    every shape. A post-fit repair publishes it where no curve the rule allows beats it.
+
+    ``before``, a repair of the same coefficients, gives the grid, the fitted curve and its
+    violation; without one they are formed as ``_repair_shape`` forms them, ``certificate``
+    being the fitted coefficients' where the caller has formed it. ``spec`` is a spline and
+    each group has the ``sl`` and ``size`` of a ``GroupSlice``.
+    """
+    if before is None:
+        fitted = np.concatenate([beta_reparam[g.sl] for g in groups])
+        recon = spec.reconstruct(fitted, n_points=n_grid)
+        grid, original = recon["x"], np.array(recon["log_relativity"], dtype=np.float64)
+        if certificate is None:
+            certificate = shape_constraint_certificate(spec, fitted, shape)
+        violation, name = certificate.violation, ""
+    else:
+        grid, original = before.grid, before.original_log_effect
+        violation, name = before.max_violation_before, before.feature_name
+    zeroed = np.array(beta_reparam, dtype=np.float64, copy=True)
+    for g in groups:
+        zeroed[g.sl] = 0.0
+    zero = np.zeros(sum(g.size for g in groups))
+    return MonotoneRepairResult(
+        feature_name=name,
+        direction=shape,
+        grid=grid,
+        original_log_effect=original,
+        repaired_log_effect=np.zeros_like(original),
+        repaired_beta_reparam=zeroed,
+        max_violation_before=violation,
+        max_violation_after=0.0,
+        projection_residual=float(np.max(np.abs(original), initial=0.0)),
+        certificate=shape_constraint_certificate(spec, zero, shape),
+        flat=True,
     )
 
 
@@ -1536,7 +1594,7 @@ def _project_shape_in_fitted_basis(
         g_unit = H @ (fitted / unit)
         zero_unit = float((fitted / unit) @ g_unit)
         if not np.all(np.isfinite(H)) or not np.isfinite(zero_unit) or zero_unit <= 0.0:
-            raise RuntimeError(f"{label} projection requires a positive definite metric")
+            raise _IndefiniteMetricError(f"{label} projection requires a positive definite metric")
         # Scaled, as on the grid, so the dropped term's objective is 0 and the fitted
         # one's is -1/2.
         H_scaled = H * ((curve_scale / unit) ** 2 / zero_unit)

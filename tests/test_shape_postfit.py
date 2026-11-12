@@ -3158,10 +3158,6 @@ def _fault_worse_than_zero_term(result, spec, groups):
         (_fault_non_finite_coefficients, "invalid coefficients"),
         (_fault_wrong_coefficient_shape, "invalid coefficients"),
         (_fault_degenerate_grid, "invalid repair grid"),
-        (
-            _fault_worse_than_zero_term,
-            "candidate objective is worse than the feasible zero-term fallback",
-        ),
     ],
 )
 def test_faulty_repair_result_is_refused_and_nothing_is_published(monkeypatch, fault, message):
@@ -3173,6 +3169,40 @@ def test_faulty_repair_result_is_refused_and_nothing_is_published(monkeypatch, f
         model.apply_shape_postfit(X)
 
     _assert_nothing_published(model, X, snapshot)
+
+
+FLAT = "could not improve on dropping the term, so the term is published flat"
+
+
+def _assert_published_flat(model, X, kind):
+    """The term published flat: zero coefficients, the record of the zero curve, and the
+    intercept the dropped term's profile, here the weighted mean of a Gaussian response."""
+    spec, groups = model._specs["x"], _x_groups(model)
+    zero = np.zeros(sum(group.size for group in groups))
+    np.testing.assert_array_equal(_term_beta(model.result.beta, groups), zero)
+    record = model._shape_repairs["x"]
+    assert record.flat and record.max_violation_after == 0.0
+    assert record.certificate == shape_constraint_certificate(spec, zero, kind)
+    np.testing.assert_array_equal(record.repaired_log_effect, 0.0)
+    np.testing.assert_array_equal(_term_beta(record.repaired_beta_reparam, groups), zero)
+    y, weights = model._fit_y_ref, model._fit_weights
+    np.testing.assert_allclose(
+        model.predict(X), np.average(y, weights=weights), rtol=0, atol=1e-12 * np.max(np.abs(y))
+    )
+
+
+def test_a_projection_worse_than_the_dropped_term_whose_continuation_is_too_is_published_flat(
+    monkeypatch,
+):
+    """Every projection, continued ones included, scaled by 1e3: each stays in the convex cone
+    and loses to the dropped term, so the term is published flat and the warning says so."""
+    model, X = _fitted_for_publication_refusal()
+    _repairer_with_fault(monkeypatch, _fault_worse_than_zero_term)
+
+    with pytest.warns(RuntimeWarning, match=f"term 'x' {FLAT}.*Constraint.fit.convex"):
+        model.apply_shape_postfit(X)
+
+    _assert_published_flat(model, X, "convex")
 
 
 def _settle_inside_the_rule(result, spec, groups):
@@ -3232,10 +3262,9 @@ def test_continued_repair_is_judged_by_the_same_rule(monkeypatch):
 
     The first projection, scaled by 1e3, stays in the cone and loses to the zero term,
     so the repair is continued; the continuation's result, scaled by 1e3 too, loses as
-    well, is refused, and nothing is published.
+    well, so the term is published flat. At 77cc83001 the repair was refused.
     """
     model, X = _fitted_for_publication_refusal()
-    snapshot = _publication_snapshot(model, X)
     projections, continued = [], []
 
     def first_scaled(result, spec, groups):
@@ -3254,11 +3283,11 @@ def test_continued_repair_is_judged_by_the_same_rule(monkeypatch):
 
     monkeypatch.setattr(shape_ops, "_continued_repair", scaled_continuation)
 
-    with pytest.raises(RuntimeError, match="Unsafe shape repair rejected.*worse than the feasible"):
+    with pytest.warns(RuntimeWarning, match=FLAT):
         model.apply_shape_postfit(X)
 
     assert len(continued) == 1 and continued[0] is not None
-    _assert_nothing_published(model, X, snapshot)
+    _assert_published_flat(model, X, "convex")
 
 
 def _pushed_continuation(monkeypatch, push):
@@ -3595,6 +3624,7 @@ def test_repair_that_moves_the_fitted_mean_is_refused_and_nothing_is_published(m
 
 
 def test_intercept_search_that_cannot_converge_is_refused_and_nothing_is_published(monkeypatch):
+    # Every search fails, the dropped term's own too, so not even the flat curve is published.
     model, X = _fitted_for_publication_refusal(family="poisson")
     snapshot = _publication_snapshot(model, X)
 
@@ -3611,6 +3641,53 @@ def test_intercept_search_that_cannot_converge_is_refused_and_nothing_is_publish
         model.apply_shape_postfit(X)
 
     _assert_nothing_published(model, X, snapshot)
+
+
+def test_a_repair_whose_intercept_has_no_minimum_is_published_flat_as_master_publishes_it():
+    """A stress case master publishes: a concave rule on a bump under the binomial's log link.
+
+    With the projected curve, the deviance falls as the intercept rises until a row's mean
+    reaches one, so its intercept has no minimum; with the term dropped it has. The term is
+    published flat with the dropped term's intercept, the minimum of the deviance in closed
+    form (scipy's bounded Brent). At 77cc83001 the repair was refused. Master publishes a
+    concave curve here that fits better; the test pins the publication, not its optimality.
+    """
+    from scipy import optimize
+
+    rng = np.random.default_rng(18)
+    x = np.linspace(0.0, 1.0, 200)
+    offset = -0.05 - 1.2 * x
+    bump = np.exp(-(((x - 0.3) / 0.12) ** 2)) - 0.4
+    y = rng.binomial(1, np.exp(np.minimum(offset + 0.6 * bump, -1e-3))).astype(np.float64)
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=6, constraint=Constraint.postfit.concave)},
+    ).fit(X, y, offset=offset)
+
+    with pytest.warns(RuntimeWarning, match=f"term 'x' {FLAT}.*Constraint.fit.concave"):
+        model.apply_shape_postfit(X, offset=offset)
+
+    spec, groups = model._specs["x"], _x_groups(model)
+    zero = np.zeros(sum(group.size for group in groups))
+    np.testing.assert_array_equal(_term_beta(model.result.beta, groups), zero)
+    record = model._shape_repairs["x"]
+    assert record.flat and record.max_violation_after == 0.0
+    assert record.certificate == shape_constraint_certificate(spec, zero, "concave")
+
+    def deviance(intercept):
+        mu = np.exp(offset + intercept)
+        return -2.0 * float(np.sum(y * np.log(mu) + (1.0 - y) * np.log1p(-mu)))
+
+    oracle = optimize.minimize_scalar(
+        deviance, bounds=(-2.0, 0.05), method="bounded", options={"xatol": 1e-12}
+    )
+    published = np.log(model.predict(X, offset=offset)) - offset
+    assert np.ptp(published) <= 1e-14
+    assert abs(published[0] - oracle.x) <= 1e-6
+    assert deviance(published[0]) <= oracle.fun + 1e-9
 
 
 def test_repair_without_retained_response_is_refused_and_nothing_is_published():
@@ -3938,14 +4015,27 @@ def _candidate_equal_to_the_fallback(result, _spec, groups):
     result.repaired_beta_reparam = flat
 
 
+def _spied_continuation(monkeypatch):
+    """The calls of ``_continued_repair``: the rule's finding that a candidate lost."""
+    calls, real = [], shape_ops._continued_repair
+    monkeypatch.setattr(
+        shape_ops,
+        "_continued_repair",
+        lambda *args, **kwargs: (calls.append(1), real(*args, **kwargs))[1],
+    )
+    return calls
+
+
 @pytest.mark.parametrize("scale", RESPONSE_UNITS)
 @pytest.mark.parametrize("excess", [1e-6, 1e-10])
-def test_candidate_worse_than_the_fallback_by_a_relative_excess_is_refused_in_any_units(
+def test_candidate_worse_than_the_fallback_by_a_relative_excess_is_beaten_in_any_units(
     monkeypatch, scale, excess
 ):
+    """The rule finds the candidate worse, continues it, and publishes the term flat, at
+    every response unit."""
     model, X = _fitted_for_publication_refusal(scale=scale)
-    snapshot = _publication_snapshot(model, X)
     _repairer_with_fault(monkeypatch, _candidate_equal_to_the_fallback)
+    continued = _spied_continuation(monkeypatch)
     real_objective = shape_ops._shape_candidate_objective
     scored = []
 
@@ -3960,15 +4050,17 @@ def test_candidate_worse_than_the_fallback_by_a_relative_excess_is_refused_in_an
 
     monkeypatch.setattr(shape_ops, "_shape_candidate_objective", candidate_scored_first_and_worse)
 
-    with pytest.raises(RuntimeError, match="Unsafe shape repair rejected.*worse than the feasible"):
+    with pytest.warns(RuntimeWarning, match=FLAT):
         model.apply_shape_postfit(X)
 
-    _assert_nothing_published(model, X, snapshot)
+    assert continued
+    _assert_published_flat(model, X, "convex")
 
 
 def test_candidate_within_the_rounding_of_its_sum_is_not_worse_than_the_fallback(monkeypatch):
     model, X = _fitted_for_publication_refusal(scale=1e-9)
     _repairer_with_fault(monkeypatch, _candidate_equal_to_the_fallback)
+    continued = _spied_continuation(monkeypatch)
     real_objective = shape_ops._shape_candidate_objective
     scored = []
 
@@ -3981,9 +4073,11 @@ def test_candidate_within_the_rounding_of_its_sum_is_not_worse_than_the_fallback
 
     monkeypatch.setattr(shape_ops, "_shape_candidate_objective", candidate_a_few_ulps_up)
 
-    model.apply_shape_postfit(X)
+    with pytest.warns(RuntimeWarning, match=FLAT):
+        model.apply_shape_postfit(X)
 
-    assert "x" in model._shape_repairs
+    assert not continued
+    _assert_published_flat(model, X, "convex")
 
 
 @pytest.mark.parametrize("scale", RESPONSE_UNITS)

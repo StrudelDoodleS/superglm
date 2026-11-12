@@ -13,6 +13,7 @@ from __future__ import annotations
 import copy
 import pickle
 import warnings
+import zlib
 
 import numpy as np
 import pandas as pd
@@ -558,41 +559,149 @@ def test_the_repair_of_an_edit_projects_in_the_curvature_at_the_edit():
     assert certificate.kkt_residual <= _PROJECTION_KKT
 
 
-def test_a_continuation_still_worse_than_the_dropped_term_is_refused(monkeypatch):
-    # Forced: the edit is eight times the fitted term, whose projection loses to the dropped
-    # term by thousands, and the continuation is held to one step. The step lowers the merit
-    # the refusal quotes, and the result still loses, so the rule refuses it and nothing is
-    # published. At 13d432654 nothing continued: both refusals quoted the projection.
-    import re
+FLAT = "could not improve on dropping the term, so the term is published flat"
 
+
+def _assert_published_flat(model: SuperLSS) -> None:
+    """The mean term published flat: zero coefficients, a flat record with no violation left,
+    and the mean the dropped term's profile, which with the CV held constant is the response's
+    mean in closed form (the Gamma score in the log mean is ``a (y / mu - 1)``)."""
+    fitted = model._model
+    _, columns = _term(model, "mean")
+    np.testing.assert_array_equal(np.asarray(fitted.coefficients)[columns], 0.0)
+    (record,) = fitted.fit_state.hand_edit.repairs
+    assert record.flat and record.violation_after == 0.0
+    assert [status.state for status in postfit_status(fitted)] == [PostfitState.REPAIRED]
+    X, y = _data("mean")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ShapeRepairedWarning)
+        mean = model.predict_parameters(X)["mean"].to_numpy()
+    np.testing.assert_allclose(mean, np.mean(y), rtol=1e-9)
+
+
+def test_a_continuation_still_worse_than_the_dropped_term_is_published_flat(monkeypatch):
+    # Forced: the edit is eight times the fitted term, whose projection loses to the dropped
+    # term by thousands, and the continuation is held to one step. The step lowers the merit,
+    # and the result still loses, so the term is published flat with the dropped term's
+    # intercept. At 13d432654 nothing continued; at 77cc83001 the repair was refused.
+    from superglm.distributional import shape_repair
     from superglm.model import shape_ops
 
     model = _fit("mean", Constraint.postfit.increasing, kind="bs", k=8)
-    revised, _ = _edited(model, times=8.0)
-    quoted = {}
+    real_candidate, real_merit = shape_repair._candidate, shape_repair._profiled_merit
+    merits, dropped = {}, []
+
+    def merit_of_dropped(*args, **kwargs):
+        found = real_merit(*args, **kwargs)
+        if kwargs.get("dropped") is not None:
+            dropped.append(found[1])
+        return found
+
+    monkeypatch.setattr(shape_repair, "_profiled_merit", merit_of_dropped)
     for steps in (0, 1):
+        revised, _ = _edited(model, times=8.0)
         monkeypatch.setattr(shape_ops, "_CONTINUED_STEPS", steps)
-        before = revised._model
-        with warnings.catch_warnings(), pytest.raises(RuntimeError) as refused:
-            warnings.simplefilter("ignore")
-            revised.apply_shape_postfit()
-        assert revised._model is before
-        found = re.search(r"is (\S+) against (\S+) with the term dropped", str(refused.value))
-        quoted[steps], dropped = float(found.group(1)), float(found.group(2))
-    assert dropped < quoted[1] < quoted[0]
+
+        def candidate(*args, steps=steps, **kwargs):
+            found = real_candidate(*args, **kwargs)
+            merits.setdefault(steps, []).append(found[2])
+            return found
+
+        monkeypatch.setattr(shape_repair, "_candidate", candidate)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ShapeRepairedWarning)
+            with pytest.warns(RuntimeWarning, match=FLAT):
+                revised.apply_shape_postfit()
+        _assert_published_flat(revised)
+    # the projection's merit, then the continued step's, both above the dropped term's
+    assert len(merits[0]) == 1 and merits[1][0] == merits[0][0]
+    assert dropped[0] == dropped[1] < merits[1][1] < merits[1][0]
 
 
-def test_a_repair_that_fits_worse_than_no_term_is_refused_and_nothing_is_published(monkeypatch):
-    # Forced: twenty times the projection obeys the rule but fits far worse than no term, and
-    # the refusal says which objective it compared.
+def test_a_repair_that_fits_worse_than_no_term_is_published_flat(monkeypatch):
+    # Forced: twenty times every projection obeys the rule but fits far worse than no term, so
+    # the term is published flat, and the warning and diagnose() say so and what to fit instead.
     model = _fit("mean", Constraint.postfit.increasing, kind="bs", k=8)
     _perturbed_repairer(monkeypatch, lambda fitted, repaired: 20.0 * repaired)
-    before = model._model
-    with pytest.raises(RuntimeError, match="penalized objective.*smoothing penalty") as refused:
+    with pytest.warns(RuntimeWarning, match=f"term 'mean:x' {FLAT}.*Constraint.fit.increasing"):
         model.apply_shape_postfit()
-    assert "fits worse" not in str(refused.value)
-    assert "Constraint.fit.increasing" in str(refused.value)
-    assert model._model is before
+    _assert_published_flat(model)
+    (finding,) = [f for f in model.diagnose().findings if f.code == "shape.repair"]
+    assert "the term is published flat" in finding.headline
+
+
+def test_a_saturated_edit_master_publishes_is_published_flat():
+    # A stress case master publishes: the CV term of a Gamma fit under the cloglog link,
+    # edited to a falling curve with the intercept 40 above the fit's, where the CV is 1 on
+    # every row and the likelihood flat in the intercept. Every curve the rule allows, the
+    # continued one too, loses to the dropped term by the penalty, so the term is published
+    # flat, its log score the best over the intercept (scipy's bounded Brent on the public
+    # scores). At 77cc83001 the repair was refused.
+    rng = np.random.default_rng(zlib.crc32(b"GammaLS/scale/cloglog"))
+    x = rng.uniform(0.0, 1.0, 300)
+    shape = 2.0 + 6.0 * x
+    y = rng.gamma(shape, np.exp(0.5 - 0.8 * x + 0.25 * np.sin(12.0 * x)) / shape)
+    X = pd.DataFrame({"x": x})
+    family = GammaLS()
+    term = s("x", kind="bs", k=6, constraint=Constraint.postfit.increasing)
+    model = SuperLSS(family, family.mean(), family.scale(term, link="cloglog"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y, lambdas={"scale:x#wiggle": 1.0})
+    spec, columns = _term(model, "scale")
+    index = model._model.layout.predictor("scale").intercept_index
+    edited = np.array(model._model.coefficients, dtype=np.float64)
+    falling = -0.3 * (x - 0.5) + 0.03 * np.sin(12.0 * x)
+    edited[columns] = np.linalg.lstsq(spec.transform(x), falling, rcond=None)[0]
+    edited[index] += 40.0
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", EditedCoefficientsWarning)
+        revised = model._with_revised_coefficients(edited, edited_terms=["scale:x"])
+
+    with pytest.warns(RuntimeWarning, match=f"term 'scale:x' {FLAT}.*Constraint.fit.increasing"):
+        revised.apply_shape_postfit()
+
+    published = np.array(revised._model.coefficients, dtype=np.float64)
+    np.testing.assert_array_equal(published[columns], 0.0)
+    others = np.ones(published.size, dtype=bool)
+    others[columns], others[index] = False, False
+    np.testing.assert_array_equal(published[others], edited[others])
+    (record,) = revised._model.fit_state.hand_edit.repairs
+    assert record.flat and record.violation_after == 0.0
+    assert record.intercept_shift == published[index] - edited[index]
+    assert [status.state for status in postfit_status(revised._model)] == [PostfitState.REPAIRED]
+
+    def negative_log_score(shift: float) -> float:
+        moved = published.copy()
+        moved[index] += shift
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            there = model._with_revised_coefficients(moved, edited_terms=["scale:x"])
+            return -float(there.scores(X, y, which=("log",))["log"].sum())
+
+    best = optimize.minimize_scalar(
+        negative_log_score, bounds=(-0.5, 0.5), method="bounded", options={"xatol": 1e-10}
+    )
+    held = negative_log_score(0.0)
+    assert held <= best.fun + 1e-12 * abs(best.fun)
+
+
+def test_a_projection_with_no_metric_is_published_flat(monkeypatch):
+    # Forced: the term's curvature gives the fitted term no length, so the repairer forms no
+    # projection (a saturated link's, where the curvature rounds to zero). The term is
+    # published flat with the dropped term's intercept. At 77cc83001 the repair was refused.
+    from superglm.distributional import shape_repair
+
+    model = _fit("mean", Constraint.postfit.increasing, kind="bs", k=8)
+    width = _term(model, "mean")[1].stop - _term(model, "mean")[1].start
+    monkeypatch.setattr(
+        shape_repair, "_term_precision", lambda fitted, term, curvature=None: np.zeros((width,) * 2)
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ShapeRepairedWarning)
+        with pytest.warns(RuntimeWarning, match=f"term 'mean:x' {FLAT}"):
+            model.apply_shape_postfit()
+    _assert_published_flat(model)
 
 
 def _profile_optimum(

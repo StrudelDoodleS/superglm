@@ -17,13 +17,15 @@ repaired, the fit's own at the fit, on the term, with that parameter's intercept
 the term's training mean on that scale; the parameter's intercept is then re-estimated on the
 joint likelihood of the retained rows with every term and every other parameter held. A
 projection the dropped term beats is continued as SuperGLM continues one
-(``_continued_repair``). The result is published as a revision of the fit (``revision.py``):
+(``_continued_repair``), and where no curve the rule allows beats it, the term is published
+flat, with a warning. The result is published as a revision of the fit (``revision.py``):
 predictions, curves and rating tables follow it, while ``result_`` and the covariance keep
 describing the fit.
 """
 
 from __future__ import annotations
 
+import warnings
 from collections import deque
 from collections.abc import Callable, Hashable
 from dataclasses import dataclass
@@ -366,7 +368,9 @@ def _profiled_merit(
     if best is None:
         best = _derivative_free_minimum(objective, start, unit)
     if best is None:
-        raise RuntimeError(
+        from superglm.constraints import _InterceptSearchError
+
+        raise _InterceptSearchError(
             f"Shape repair rejected before publication: the {parameter} intercept could "
             "not be re-estimated, since the likelihood still improves where the shift "
             "leaves float64's range on its link scale. Check the model's specification, "
@@ -842,19 +846,29 @@ def _candidate(
     candidate = coefficients.copy()
     candidate[term.columns] = block
     shift, merit, invalid = _profiled_merit(fitted, rows, frame, candidate, term.parameter, reach)
-    if not np.isfinite(merit):
-        where = (
-            "the model's parameters or likelihood cannot be evaluated on the training rows"
-            if invalid is None
-            else f"{invalid} of the {len(rows.response)} training rows have no valid "
-            "parameters there (the family's likelihood is not finite)"
-        )
-        raise RuntimeError(
-            f"Unsafe shape repair of {term.term} rejected before publication: with the "
-            f"repaired curve, {where}. Fit the rule instead (Constraint.fit.{term.kind}), "
-            "which keeps every row valid, or drop the term."
-        )
+    _require_valid(term, rows, merit, invalid)
     return candidate, shift, merit
+
+
+def _require_valid(
+    term: PostfitTerm, rows: Any, merit: float, invalid: int | None, *, dropped: bool = False
+) -> None:
+    """Refuse to publish the repaired curve, or with ``dropped`` the term dropped, where a
+    retained row has no valid parameters with it (``_profiled_merit``'s ``merit``, ``invalid``)."""
+    if np.isfinite(merit):
+        return
+    where = (
+        "the model's parameters or likelihood cannot be evaluated on the training rows"
+        if invalid is None
+        else f"{invalid} of the {len(rows.response)} training rows have no valid "
+        "parameters there (the family's likelihood is not finite)"
+    )
+    raise RuntimeError(
+        f"Unsafe shape repair of {term.term} rejected before publication: with "
+        f"{'the term dropped' if dropped else 'the repaired curve'}, {where}. Fit the rule "
+        f"instead (Constraint.fit.{term.kind}), which keeps every row valid"
+        f"{'' if dropped else ', or drop the term'}."
+    )
 
 
 # A repair's projection is the first step of the constrained penalized fit at the fit's
@@ -982,16 +996,26 @@ def repaired_model(
     A term whose curve already obeys its rule is left exactly as it is, and a model with no
     term to repair is returned unchanged, so a second call repairs nothing. As in SuperGLM, a
     projection whose penalized likelihood is worse than dropping the term altogether is
-    continued towards the constrained fit, and refused before anything is published if that
-    is still worse.
+    continued towards the constrained fit; where that is still worse, or no projection or
+    intercept can be formed, the term is published flat, the term dropped, with a
+    ``RuntimeWarning``. A repair is refused, and nothing published, only where a retained row
+    would have no valid parameters, or the dropped term's own intercept cannot be re-estimated.
     """
     from superglm.constraints import (
+        _flat_repair,
+        _IndefiniteMetricError,
+        _InterceptSearchError,
         shape_constraint_certificate,
         shape_slack_tolerance,
         shape_sum_tolerance,
     )
     from superglm.distributional.revision import NO_TRAINING_FRAME, _rows_of_the_fit, revised_model
-    from superglm.model.shape_ops import _curve_spec, _grid_weights, _repairer
+    from superglm.model.shape_ops import (
+        _curve_spec,
+        _grid_weights,
+        _repairer,
+        flat_publication_message,
+    )
 
     terms = postfit_terms(fitted)
     for term in terms:
@@ -1031,35 +1055,53 @@ def repaired_model(
         curvature = None if local is None else local[1]
 
     records: list[ShapeRepairRecord] = []
+    flat: list[str] = []  # one warning per term published flat, once the revision is formed
     for term in pending:
         x, on_axis = _axis(term, frame)
         width = term.columns.stop - term.columns.start
         block = SimpleNamespace(sl=term.columns, size=width)
         grid_weights = _grid_weights(term.curve_spec, x, weights[on_axis], n_grid)
-        repair = _repairer(term.kind).repair(
-            term.curve_spec,
-            coefficients,
-            [block],
-            weights=grid_weights,
-            n_grid=n_grid,
-            metric=_term_precision(fitted, term, curvature),
-            certificate=certificates[term.term],
-        )
-        repaired = _settled(term, repair, coefficients[term.columns], grid_weights)
+        # The repaired coefficients other than the zero curve, where they are formed.
+        candidate, shift, merit = None, 0.0, np.inf
+        try:
+            repair = _repairer(term.kind).repair(
+                term.curve_spec,
+                coefficients,
+                [block],
+                weights=grid_weights,
+                n_grid=n_grid,
+                metric=_term_precision(fitted, term, curvature),
+                certificate=certificates[term.term],
+            )
+            repaired = _settled(term, repair, coefficients[term.columns], grid_weights)
+        except _IndefiniteMetricError:
+            repair = _flat_repair(
+                term.kind,
+                term.curve_spec,
+                coefficients,
+                [block],
+                n_grid,
+                certificate=certificates[term.term],
+            )
+            repaired = np.zeros(width)
         if np.array_equal(repaired, coefficients[term.columns]):
             continue
         reach = float(repair.projection_residual)
-        candidate, shift, merit = _candidate(
-            fitted, rows, frame, coefficients, term, repaired, reach
-        )
+        if not repair.flat:
+            try:
+                candidate, shift, merit = _candidate(
+                    fitted, rows, frame, coefficients, term, repaired, reach
+                )
+            except _InterceptSearchError:
+                pass  # the dropped term's own profile decides
         fallback = coefficients.copy()
         fallback[term.columns] = 0.0
-        fallback_shift, fallback_merit, _ = _profiled_merit(
+        fallback_shift, fallback_merit, fallback_invalid = _profiled_merit(
             fitted, rows, frame, fallback, term.parameter, reach, dropped=term.label
         )
         bar = fallback_merit + shape_sum_tolerance(abs(fallback_merit), len(rows.response))
         state = fitted.layout.predictor(term.parameter)
-        if merit > bar:
+        if candidate is not None and merit > bar:
             start = candidate.copy()
             if state.intercept_index is not None:
                 start[state.intercept_index] += shift
@@ -1072,42 +1114,50 @@ def repaired_model(
                     term, repair, coefficients[term.columns], grid_weights, certified
                 )
                 reach = float(repair.projection_residual)
+                # At the zero curve the dropped term is published, below.
+                candidate = None
                 if np.any(repaired):
-                    candidate, shift, merit = _candidate(
-                        fitted, rows, frame, coefficients, term, repaired, reach
-                    )
-                else:
-                    # The zero curve is the dropped term, whose intercept is profiled above. A
-                    # profile from a scale of the continued repair's could end elsewhere where
-                    # the likelihood is flat in the intercept (a saturated link's), and refuse
-                    # a tie.
-                    candidate, shift, merit = fallback.copy(), fallback_shift, fallback_merit
-        if merit > bar:
-            raise RuntimeError(
-                f"Unsafe shape repair of {term.term} rejected before publication: its penalized "
-                "objective, the negative log-likelihood plus the fit's smoothing penalty at the "
-                f"fit's smoothing parameters, is {merit:.6g} against {fallback_merit:.6g} with "
-                "the term dropped. Fit the rule instead "
-                f"(Constraint.fit.{term.kind}), which chooses the smoothing under the rule, or "
-                "drop the term."
-            )
+                    try:
+                        candidate, shift, merit = _candidate(
+                            fitted, rows, frame, coefficients, term, repaired, reach
+                        )
+                    except _InterceptSearchError:
+                        pass
+        if candidate is None or merit > bar:
+            # No curve the rule allows beats the dropped term, so the term is published flat,
+            # with the dropped term's intercept profiled above: a profile from another scale
+            # could end elsewhere where the likelihood is flat in the intercept (a saturated
+            # link's). It is refused where a retained row has no valid parameters there.
+            _require_valid(term, rows, fallback_merit, fallback_invalid, dropped=True)
+            candidate, shift = fallback.copy(), fallback_shift
         if state.intercept_index is not None:
             candidate[state.intercept_index] += shift
         coefficients = candidate
+        published_flat = not np.any(coefficients[term.columns])
+        if published_flat:
+            flat.append(flat_publication_message(repr(term.term), term.kind))
         records.append(
             ShapeRepairRecord(
                 term=term.term,
                 kind=term.kind,
                 violation_before=float(repair.max_violation_before),
-                violation_after=float(repair.max_violation_after),
-                largest_change=reach,
+                violation_after=0.0 if published_flat else float(repair.max_violation_after),
+                largest_change=(
+                    float(np.max(np.abs(repair.original_log_effect), initial=0.0))
+                    if published_flat
+                    else reach
+                ),
                 log_scale=_is_shifted_log_link(state.link),
                 intercept_shift=shift,
+                flat=published_flat,
             )
         )
     if not records:
         return fitted
-    return revised_model(fitted, coefficients, (), frame, repairs=records)
+    revised = revised_model(fitted, coefficients, (), frame, repairs=records)
+    for message in flat:
+        warnings.warn(message, RuntimeWarning, stacklevel=3)
+    return revised
 
 
 __all__ = [

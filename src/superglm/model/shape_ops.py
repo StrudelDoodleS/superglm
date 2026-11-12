@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -731,7 +732,9 @@ def _searched_intercept(
         # the derivative-free search decides, as SuperLSS's does.
         found = _derivative_free_intercept(eta_base[carried], evaluate)
     if found is None:
-        raise RuntimeError(
+        from superglm.constraints import _InterceptSearchError
+
+        raise _InterceptSearchError(
             "Unsafe shape repair rejected before publication: conditional intercept "
             "optimization did not converge"
         )
@@ -925,7 +928,8 @@ def _settled_on_rule(spec, kind, beta, grid, share, certified_scale) -> NDArray 
 
 
 class _WorseThanFallbackError(RuntimeError):
-    """The rule's refusal of a candidate that the feasible zero term beats in its merit."""
+    """The rule's finding that the feasible zero term beats a candidate in its merit: the
+    candidate is continued, and the term published flat where that is beaten too."""
 
 
 def _validate_repair_for_publication(
@@ -1296,6 +1300,52 @@ def _continued_scale(certified, current, cone_point, projected, grid_weights) ->
     )
 
 
+def _publishable_repair(model, repair_result, n_grid, scoring):
+    """The publication of ``repair_result`` (``_validate_repair_for_publication``'s values) and
+    the record it publishes, its continuation's where the rule refuses it as worse than the
+    dropped term; ``None`` where no curve the rule allows beats the dropped term, or the
+    intercept with the curve held cannot be re-estimated.
+    """
+    from superglm.constraints import _InterceptSearchError
+
+    try:
+        return _validate_repair_for_publication(
+            model, repair_result=repair_result, **scoring
+        ), repair_result
+    except _InterceptSearchError:
+        return None
+    except _WorseThanFallbackError:
+        pass
+    worst: list[bool] = []
+    # Continued on the deviance scored; where that is still refused and it met rows a clamp
+    # holds at their worst, once more with them led back inside (``_continued_repair``).
+    for inward in (False, True):
+        if inward and not worst:
+            break
+        continued = _continued_repair(
+            model, repair_result=repair_result, n_grid=n_grid, inward=inward, worst=worst, **scoring
+        )
+        if continued is None:
+            continue
+        try:
+            return _validate_repair_for_publication(
+                model, repair_result=continued[0], certified_scale=continued[1], **scoring
+            ), continued[0]
+        except (_WorseThanFallbackError, _InterceptSearchError):
+            continue
+    return None
+
+
+def flat_publication_message(term: str, kind: str) -> str:
+    """The warning of a post-fit repair that publishes ``term`` flat, on SuperGLM and SuperLSS."""
+    return (
+        f"The post-fit repair of the term {term} could not improve on dropping the term, so "
+        f"the term is published flat: its curve is zero, which obeys the {kind!r} rule. "
+        f"Constraint.fit.{kind} chooses the smoothing under the rule and finds the "
+        "constrained optimum; refit with it for a curve with the shape."
+    )
+
+
 @dataclass
 class _PendingRepair:
     """One term whose declared post-fit shape has to be projected.
@@ -1599,6 +1649,9 @@ def _apply_shape_postfit(model, X, sample_weight, offset, *, n_grid: int):
     # block leaves the fitted mean alone (`_validate_repair_for_publication` refuses
     # repairs that move it).  Building the block over all rows would break this
     # silently.
+    from superglm.constraints import _flat_repair, _IndefiniteMetricError
+
+    flat: list[str] = []  # one warning per term published flat, once the revision commits
     for pending in pending_repairs:
         name, kind, groups = pending.name, pending.kind, pending.groups
         curve_spec = pending.curve_spec
@@ -1610,16 +1663,19 @@ def _apply_shape_postfit(model, X, sample_weight, offset, *, n_grid: int):
         axis_weights = scoring_weights_arr if axis_rows.all() else scoring_weights_arr[axis_rows]
         grid_weights = _grid_weights(curve_spec, x_col, axis_weights, n_grid)
 
-        repair_result = _repairer(kind).repair(
-            curve_spec,
-            beta,
-            groups,
-            weights=grid_weights,
-            n_grid=n_grid,
-            metric=_term_penalized_hessian(
-                work_model, groups, smooth_penalty_terms, prior_working_weights
-            ),
-        )
+        try:
+            repair_result = _repairer(kind).repair(
+                curve_spec,
+                beta,
+                groups,
+                weights=grid_weights,
+                n_grid=n_grid,
+                metric=_term_penalized_hessian(
+                    work_model, groups, smooth_penalty_terms, prior_working_weights
+                ),
+            )
+        except _IndefiniteMetricError:
+            repair_result = _flat_repair(kind, curve_spec, beta, groups, n_grid)
         repair_result.feature_name = name
 
         scoring = dict(
@@ -1633,42 +1689,19 @@ def _apply_shape_postfit(model, X, sample_weight, offset, *, n_grid: int):
             selection_penalty=selection_penalty,
             current_eta=current_eta,
         )
-        try:
-            candidate_beta, current_eta, intercept_shift = _validate_repair_for_publication(
-                work_model, repair_result=repair_result, **scoring
+        published = _publishable_repair(work_model, repair_result, n_grid, scoring)
+        if published is None:
+            # No curve the rule allows beats the dropped term, so the term is published flat,
+            # its intercept the dropped term's profile, which the rule has formed; it is
+            # refused where that profile cannot be formed or its likelihood is not finite.
+            repair_result = _flat_repair(kind, curve_spec, beta, groups, n_grid, repair_result)
+            published = (
+                _validate_repair_for_publication(
+                    work_model, repair_result=repair_result, **scoring
+                ),
+                repair_result,
             )
-        except _WorseThanFallbackError as first:
-            refusal, published, worst = first, False, []
-            # Continued on the deviance scored; where that is still refused and it met rows a
-            # clamp holds at their worst, once more with them led back inside
-            # (``_continued_repair``).
-            for inward in (False, True):
-                if inward and not worst:
-                    break
-                continued = _continued_repair(
-                    work_model,
-                    repair_result=repair_result,
-                    n_grid=n_grid,
-                    inward=inward,
-                    worst=worst,
-                    **scoring,
-                )
-                if continued is None:
-                    continue
-                try:
-                    candidate_beta, current_eta, intercept_shift = _validate_repair_for_publication(
-                        work_model,
-                        repair_result=continued[0],
-                        certified_scale=continued[1],
-                        **scoring,
-                    )
-                except _WorseThanFallbackError as again:
-                    refusal = again
-                    continue
-                repair_result, published = continued[0], True
-                break
-            if not published:
-                raise refusal
+        (candidate_beta, current_eta, intercept_shift), repair_result = published
         # Recorded only if this term's coefficients actually moved.  The early exit
         # above concerns the whole model: once any term binds the loop runs for every
         # pending term, and an already-feasible term comes back unchanged.  Recording it
@@ -1678,6 +1711,13 @@ def _apply_shape_postfit(model, X, sample_weight, offset, *, n_grid: int):
         _replace_result_beta(work_model, candidate_beta)
         move_public_intercept(work_model, intercept_shift)
         if projected:
+            if not np.any(candidate_beta[_term_indices(groups)]):
+                # The zero curve, however it was reached: disclosed, its record the flat one's.
+                repair_result.flat = True
+                repair_result.projection_residual = float(
+                    np.max(np.abs(repair_result.original_log_effect), initial=0.0)
+                )
+                flat.append(flat_publication_message(repr(name), kind))
             work_model._shape_repairs[name] = repair_result
             if kind in {"increasing", "decreasing"}:
                 work_model._monotone_repairs[name] = repair_result
@@ -1702,4 +1742,7 @@ def _apply_shape_postfit(model, X, sample_weight, offset, *, n_grid: int):
     del frame, checked
     _refresh_repaired_geometry(work_model, prior_working_weights, prior_selected_names)
     _refresh_repaired_scale_and_statistics(work_model)
-    return revision.commit()
+    committed = revision.commit()
+    for message in flat:
+        warnings.warn(message, RuntimeWarning, stacklevel=4)
+    return committed

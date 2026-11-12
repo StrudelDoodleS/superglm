@@ -405,12 +405,15 @@ minimises the penalized objective itself, by iteratively re-weighted cone
 projection, re-estimating the intercept at each step. Dropping the term always
 has the shape, so that curve is never worse. It is the curve the rule allows
 that fits best, so an edit the closest curve could not keep is not kept.
-Three repairs are refused, and nothing changes: one whose search stops short
-with a curve still worse than with the term dropped, one that leaves a
-training row without valid parameters even after the intercept is
-re-estimated, and one whose curve the repairer cannot certify to obey the
-rule. When a repair is refused as worse, fit the rule instead
-(`Constraint.fit`), which chooses the smoothing under the rule.
+When the search stops short with a curve still worse than with the term
+dropped, the term is published flat, as on `SuperGLM`: its curve is zero, and
+the parameter's intercept is re-estimated without it. A `RuntimeWarning` names
+the term, and `diagnose()` reports it as published flat. Fit the rule instead
+(`Constraint.fit`), which chooses the smoothing under the rule and finds the
+constrained optimum. Three repairs are refused, and nothing changes: one that
+leaves a training row without valid parameters even after the intercept is
+re-estimated, one where even the term dropped leaves the intercept with no
+estimate, and one whose curve the repairer cannot certify to obey the rule.
 
 What you get afterwards:
 
@@ -722,12 +725,24 @@ goes on to the curve with the shape that minimises the penalized objective
 itself, at the fit's smoothing parameters, by iteratively re-weighted cone
 projection (Liao and Meyer, *Journal of Statistical Software* 89(5), 2019,
 section 1.2). Dropping the term always has the shape, so that curve is never
-worse. Only if this search stops short and its curve still fits worse than
-dropping the term does `apply_shape_postfit` raise `RuntimeError` and leave
-the model unchanged. If the repair cannot confirm
-that its curve is the closest one, it still publishes a curve with the shape
-everywhere, and a `RuntimeWarning` says how much further from the fitted curve
-it may be.
+worse.
+
+If this search stops short and its curve still fits worse than dropping the
+term, the term is published flat: its curve is zero, which has every shape,
+and the intercept is re-estimated without it. The same happens when no closest
+curve can be formed (the fit's curvature gives the term no weight), or when
+the intercept cannot be re-estimated with the repaired curve but can with the
+term dropped. A `RuntimeWarning` names the term, as it does when the closest
+curve with the shape is itself the zero curve. A flat term often means the
+data run against the rule at the fit's smoothing: `Constraint.fit` chooses the
+smoothing under the rule and finds the constrained optimum.
+`apply_shape_postfit` still raises `RuntimeError`, and leaves the model
+unchanged, where the repaired curve or the term dropped leaves the deviance
+not finite, or where even the term dropped has no intercept estimate.
+
+If the repair cannot confirm that its curve is the closest one, it still
+publishes a curve with the shape everywhere, and a `RuntimeWarning` says how
+much further from the fitted curve it may be.
 
 ### Inference after a repair is withheld, not reported
 
