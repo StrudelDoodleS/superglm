@@ -10,6 +10,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._utils import weighted_row_sum
+from superglm.editor.display import display_for, is_edited, transform_for_link, unit_tolerance
 from superglm.editor.errors import EditorValueError
 from superglm.editor.lss.view import is_lss
 from superglm.editor.terms import native_log_effect_values
@@ -165,13 +166,8 @@ def apply_edits_to_model_copy_with_data(
         return lss_model_with_edits(model, terms, keep_pinned=keep_pinned)
     changed_terms = [
         term
-        for term in terms.values()
-        if not np.allclose(
-            term.edited_log_effect,
-            term.original_log_effect,
-            rtol=0.0,
-            atol=1e-14,
-        )
+        for name, term in terms.items()
+        if is_edited(display_for(model, name), term.original_log_effect, term.edited_log_effect)
     ]
     has_explicit_rows = X is not None or y is not None
     has_retained_rows = (
@@ -311,7 +307,7 @@ def _apply_projected_term(
         target,
         weights,
     )
-    _adjust_intercept(model, intercept_delta)
+    _adjust_intercept(model, intercept_delta, term)
     _patch_beta_block(model, groups, beta_new)
 
 
@@ -370,7 +366,7 @@ def _apply_ordered_spline_term(
     base_shift = _ordered_spline_base_shift(model, spec, groups)
     if not spec.has_specials:
         _apply_projected_term(model, spec, groups, term, x_values)
-        _adjust_intercept(model, base_shift)
+        _adjust_intercept(model, base_shift, term)
         return
 
     B = _as_dense(spec.transform(x_values))
@@ -417,7 +413,7 @@ def _apply_ordered_spline_term(
         weights[smooth_rows],
     )
     special_beta = targets[special_rows] - intercept_delta
-    _adjust_intercept(model, intercept_delta + base_shift)
+    _adjust_intercept(model, intercept_delta + base_shift, term)
     _patch_beta_block(model, groups, np.concatenate([spline_beta, special_beta]))
 
 
@@ -451,7 +447,7 @@ def _apply_categorical_term(
         [float(target[str(level)]) - base_value for level in spec._non_base],
         dtype=np.float64,
     )
-    _adjust_intercept(model, base_value)
+    _adjust_intercept(model, base_value, term)
     _patch_beta_block(model, groups, beta_new)
 
 
@@ -478,7 +474,7 @@ def _apply_piecewise_term(
         )
     base_value = float(target[spec._base_index])
     beta_new = np.asarray(target[spec._non_base_indices] - base_value, dtype=np.float64)
-    _adjust_intercept(model, base_value)
+    _adjust_intercept(model, base_value, term)
     _patch_beta_block(model, groups, beta_new)
 
 
@@ -566,14 +562,18 @@ def _patch_beta_block(model, groups: list[GroupSlice], beta_new: NDArray) -> Non
             offset += group.size
 
 
-def _adjust_intercept(model, delta: float) -> None:
+def _adjust_intercept(model, delta: float, term: EditableTerm) -> None:
     # The solver's intercepts are read from the published ones when the revision is published
     # (``publish_revised_coefficients``). The skip is absolute: a term counts as edited when it
     # moves by more than 1e-14 (``edited_terms``), and a least-squares intercept below 1e-15 is
     # the projection's rounding. A relative form would swallow a real 0.1 change at an offset of
     # 1e16 (#447) and need the projection's conditioning; skipping keeps no-op edits bit for bit
-    # (#449).
-    if abs(delta) < 1e-15:
+    # (#449). A curve that adds an amount in units below 1 scales both down with its values
+    # (``unit_tolerance``), so an edit there still moves the intercept it needs.
+    skip = unit_tolerance(
+        transform_for_link(model._link), 1e-15, term.original_log_effect, term.edited_log_effect
+    )
+    if abs(delta) < skip:
         return
     move_public_intercept(model, delta)
 

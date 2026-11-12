@@ -112,6 +112,32 @@ def test_a_spline_line_is_the_refit_with_its_smoothing_off_and_every_other_held(
     assert line["note"] is None
 
 
+def test_an_identity_link_line_is_the_refits_added_effect():
+    """On an identity link the line is drawn as the curve is, the amount added, not exp of it."""
+    x = np.linspace(0.0, 1.0, 160)
+    X = pd.DataFrame({"x": x})
+    y = 3000.0 + 100.0 * (x - 0.5)
+
+    def fitted(penalty: float) -> SuperGLM:
+        return SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            spline_penalty={"x": penalty},
+            features={"x": Spline(n_knots=4)},
+        ).fit(X, y)
+
+    session = EditorSession.from_model(fitted(0.1), train_data=(X, y, None))
+    line = unsmoothed_job(session, "x")()
+    inference = fitted(0.0).term_inference(
+        "x", with_se=False, n_points=session.n_points, centering=session.centering
+    )
+    effect = np.asarray(inference.log_relativity)
+    # Both are one least-squares solve on the same rows: they agree to its
+    # rounding, far inside 1e-6 of the line's size.
+    scale = 1.0 + np.max(np.abs(effect))
+    np.testing.assert_allclose(line["y"], effect, rtol=0, atol=1e-6 * scale)
+
+
 def test_the_line_is_kept_through_a_hand_edit_and_dropped_by_a_refit(spline_book, monkeypatch):
     fitted = _counted_fits(monkeypatch)
     model, X, y, w = spline_book

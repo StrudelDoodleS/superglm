@@ -349,6 +349,37 @@ def test_free_levels_are_a_plain_categorical_fit_and_flag_the_level_the_smooth_o
     assert free["shrunk"] is False
 
 
+def test_free_levels_on_an_identity_link_are_the_amounts_added_the_reference_at_0():
+    """On an identity link the free levels are drawn as the curve is: the amount each adds."""
+    X, _, w = _book()
+    index = np.array([BANDS.index(band) for band in X["band"]])
+    noise = np.random.default_rng(20261112).normal(0.0, 5.0, len(X))
+    y = 3000.0 - 15.0 * index + 40.0 * (X["band"] == BUMP).to_numpy() + noise
+    band = OrderedCategorical(order=BANDS, basis=Spline(kind="ps", n_knots=6))
+    model = SuperGLM(
+        family="gaussian", features={"band": band, "area": Categorical()}, spline_penalty=20.0
+    ).fit(X, y, sample_weight=w)
+    free = free_level_comparison(EditorSession.from_model(model, train_data=(X, y, w)), "band")
+    reference = model._specs["band"]._base_level
+    direct = SuperGLM(
+        family="gaussian",
+        features={"band": Categorical(base=reference), "area": Categorical()},
+        spline_penalty=20.0,
+    ).fit(X, y, sample_weight=w)
+    inference = direct.term_inference("band")
+    expected = dict(zip(inference.levels, inference.log_relativity, strict=True))
+    se = dict(zip(inference.levels, inference.se_log_relativity, strict=True))
+    at = free["levels"].index(reference)
+    assert free["y"][at] == free["lower"][at] == free["upper"][at] == 0.0
+    # A Gaussian identity fit is one weighted least-squares solve: both agree
+    # to the solve's rounding, far inside 1e-6 of the effects' size.
+    scale = 1.0 + max(abs(value) for value in expected.values())
+    wanted = [expected[level] for level in BANDS]
+    np.testing.assert_allclose(free["y"], wanted, rtol=0, atol=1e-6 * scale)
+    half = (np.asarray(free["upper"]) - np.asarray(free["lower"])) / 2
+    np.testing.assert_allclose(half, [norm.ppf(0.975) * se[level] for level in BANDS], rtol=1e-6)
+
+
 def _fitted_free_models(monkeypatch) -> list:
     """Record each model the comparison fits."""
     fitted = []

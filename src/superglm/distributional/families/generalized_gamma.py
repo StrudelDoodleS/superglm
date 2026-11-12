@@ -40,6 +40,7 @@ from superglm.distributional.families._response_bounds import (
 )
 from superglm.distributional.families.gaussian import LowerBoundedLogLink
 from superglm.distributional.family import (
+    _MEAN_DESCRIPTION,
     COMPLETE_OBSERVATION,
     FamilyCapabilities,
     FamilyLikelihoodPlan,
@@ -272,10 +273,24 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
     @property
     def parameters(self) -> tuple[ParameterSpec, ...]:
         first = (
-            ParameterSpec("mean", LogLink(), "mean", ParameterSupport(lower=0.0), "observed")
+            ParameterSpec(
+                "mean",
+                LogLink(),
+                "mean",
+                ParameterSupport(lower=0.0),
+                "observed",
+                label="Mean",
+                description=_MEAN_DESCRIPTION,
+            )
             if self.parametrisation == "mean"
             else ParameterSpec(
-                "location", IdentityLink(), "location", ParameterSupport(), "observed"
+                "location",
+                IdentityLink(),
+                "location",
+                ParameterSupport(),
+                "observed",
+                label="Location",
+                description="Location (μ): where the log response is centred.",
             )
         )
         return (
@@ -286,8 +301,21 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
                 "scale",
                 ParameterSupport(lower=self.scale_floor),
                 "observed",
+                label="σ",
+                description="σ: how widely the log response spreads around its location.",
+                quantity="σ",
             ),
-            ParameterSpec("shape", IdentityLink(), "shape", ParameterSupport(), "observed"),
+            ParameterSpec(
+                "shape",
+                IdentityLink(),
+                "shape",
+                ParameterSupport(),
+                "observed",
+                label="Shape",
+                description=(
+                    "Shape (Q): 0 gives the log-normal, 1 the Weibull and Q = σ the gamma."
+                ),
+            ),
         )
 
     @property

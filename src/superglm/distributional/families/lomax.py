@@ -31,8 +31,19 @@ _SPEC = DeclaredScalarSpec(
     schema_version=1,
     kernel_module="superglm.distributional.kernels.lomax",
     parameters=tuple(
-        ParameterSpec(name, LogLink(), name, ParameterSupport(lower=0.0), "observed")
-        for name in ("scale", "shape")
+        ParameterSpec(
+            name,
+            LogLink(),
+            name,
+            ParameterSupport(lower=0.0),
+            "observed",
+            label=name.capitalize(),
+            description=description,
+        )
+        for name, description in (
+            ("scale", "Scale: stretches every response by the same factor."),
+            ("shape", "Shape: the larger it is, the lighter the tail."),
+        )
     ),
     response_lower=0.0,
     response_lower_inclusive=True,

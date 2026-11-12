@@ -108,6 +108,16 @@ test("the line takes part in the range up to the curve's own range again on each
   assert.deepEqual(unsmoothedRange(0.8, 1.2, [null]), [0.8, 1.2]);
 });
 
+test("on a curve that adds an amount the reach is the curve's own, not a relativity's 0.1", () => {
+  // A ±3e-4 curve: a wild line stretches the range by the curve's span, not to ±0.1.
+  const [low, high] = unsmoothedRange(-3e-4, 3e-4, [-5, 5], true);
+  assert.ok(Math.abs(low + 9e-4) < 1e-15 && Math.abs(high - 9e-4) < 1e-15, String([low, high]));
+  // A flat curve at 2000 leaves the line 5% of its value.
+  assert.deepEqual(unsmoothedRange(2000, 2000, [0, 4000], true), [1900, 2100]);
+  // Zero throughout leaves 0.05.
+  assert.deepEqual(unsmoothedRange(0, 0, [-1, 1], true), [-0.05, 0.05]);
+});
+
 test("the toggle's hover text and Help say the same", () => {
   const html = readFileSync(
     new URL("../../src/superglm/editor/app/index.html", import.meta.url), "utf8"

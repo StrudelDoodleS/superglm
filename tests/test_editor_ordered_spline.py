@@ -163,15 +163,14 @@ def test_spline_view_reproduces_the_fitted_level_effects(fixture, request):
     assert len(view["x"]) == steps * (len(SMOOTH) - 1) + 1
     assert view["x"][::steps] == [float(i) for i in range(len(SMOOTH))]
     assert view["level_indices"] == list(range(len(SMOOTH)))
-    # exp(curve) at each level against exp(level effect): the curve is within
-    # the curve bound of the effect, and each exp rounds within 2u (numpy's exp
-    # is within one ulp), so by the mean value theorem the relativities differ
-    # by at most exp(e) (2 bound + 8u) while the bound is far below 1.
-    expected = np.exp(effects)
-    tolerance = expected * (2.0 * _curve_bound(basis, base_row, weights, p) + 8.0 * U)
+    # The fit is gaussian/identity, so the view draws effects: at each level the
+    # curve is within the curve bound of the level effect.
+    tolerance = _curve_bound(basis, base_row, weights, p) + 8.0 * U * np.maximum(
+        1.0, np.abs(effects)
+    )
     for curve in (view["y"], view["original_y"]):
         at_levels = np.asarray(curve)[::steps]
-        np.testing.assert_array_less(np.abs(at_levels - expected), tolerance + U)
+        np.testing.assert_array_less(np.abs(at_levels - effects), tolerance)
 
 
 def test_moving_a_handle_sets_every_smooth_level_to_the_spline(wide):

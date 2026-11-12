@@ -27,6 +27,15 @@ from superglm import (
     cat,
     s,
 )
+from superglm.distributional.families import (
+    GaussianLS,
+    GeneralizedGammaLSS,
+    GeneralizedParetoLSS,
+    LogLogisticLSS,
+    LomaxLSS,
+    TwoPieceLogNormalLSS,
+    TwoPieceNormalLSS,
+)
 from superglm.editor import EditorSession, edit
 from superglm.editor.evaluation import EvaluationDataset
 
@@ -193,6 +202,83 @@ def tweedie_case() -> FitCase:
     return FitCase(model, X, y, None, None)
 
 
+def _negative_binomial_draws(rng: np.random.Generator, natural: np.ndarray) -> np.ndarray:
+    """Counts with mean ``natural[:, 0]`` and size ``natural[:, 1]``; the family has no quantile."""
+    size = natural[:, 1]
+    return rng.negative_binomial(size, size / (size + natural[:, 0])).astype(np.float64)
+
+
+# The example table: one entry per exported scalar SuperLSS family, each the natural
+# parameters, in the family's declared order, of the intercept-only law its rows are
+# drawn from (the first two vary with age, and the first with region when asked). A
+# family without ``quantile`` brings a sampler ``(rng, natural) -> y``.
+_SCALAR_LAWS = {
+    "GaussianLS": (GaussianLS, {}, (50.0, 200.0), None),
+    "GeneralizedGammaLSS": (GeneralizedGammaLSS, {}, (1000.0, 0.6, 1.0), None),
+    "GeneralizedParetoLSS": (GeneralizedParetoLSS, {}, (1000.0, 0.3), None),
+    "LogLogisticLSS": (LogLogisticLSS, {}, (1000.0, 3.0), None),
+    "LomaxLSS": (LomaxLSS, {}, (1000.0, 3.0), None),
+    "TwoPieceLogNormalLSS": (TwoPieceLogNormalLSS, {}, (1000.0, 0.5, 0.2), None),
+    "TwoPieceNormalLSS": (TwoPieceNormalLSS, {}, (50.0, 200.0, 0.2), None),
+    "LogNormalLS-location": (LogNormalLS, {"parametrisation": "location"}, (7.0, 0.5), None),
+    "LogNormalLS": (LogNormalLS, {}, (1000.0, 0.6), None),
+    "GammaLS": (GammaLS, {}, (1000.0, 0.6), None),
+    "NegativeBinomialLS": (NegativeBinomialLS, {}, (3.0, 2.0), _negative_binomial_draws),
+    "TweedieLSS": (TweedieLSS, {}, (100.0, 2.0, 1.5), None),
+}
+EXAMPLE_FAMILIES = tuple(_SCALAR_LAWS)
+# The browser draws these four in the distribution panel and Explain tab.
+_DRAWN_IN_THE_BROWSER = frozenset({"LogNormalLS", "GammaLS", "NegativeBinomialLS", "TweedieLSS"})
+SCALAR_FAMILIES = tuple(name for name in _SCALAR_LAWS if name not in _DRAWN_IN_THE_BROWSER)
+EXAMPLE_FAMILY_CLASSES = frozenset(law[0].__name__ for law in _SCALAR_LAWS.values())
+
+
+@functools.cache
+def scalar_family_case(
+    name: str, links: tuple[str | None, ...] = (), *, levels: bool = False, third: bool = False
+) -> FitCase:
+    """400 rows of one of ``EXAMPLE_FAMILIES``, drawn from its own ``quantile``.
+
+    The first parameter has ``s("age", k=5)``, and ``cat("region")`` too with
+    ``levels``; the second has ``s("age", k=4)``, and so does the third with
+    ``third``; any other is an intercept. ``links`` overrides the parameters'
+    links in order.
+    """
+    cls, options, natural, sampler = _SCALAR_LAWS[name]
+    family = cls(**options)
+    rng = np.random.default_rng(20261112)
+    n = 400
+    X = pd.DataFrame({"age": rng.uniform(18.0, 90.0, n)})
+    wave = np.sin(np.pi * (X["age"].to_numpy() - 18.0) / 72.0)
+    theta = np.tile(np.asarray(natural, dtype=np.float64), (n, 1))
+    theta[:, 0] *= np.exp(0.3 * wave)
+    theta[:, 1] *= np.exp(0.2 * wave)
+    if levels:
+        # Drawn from a stream of their own, so the rows without levels stay as they were.
+        region = np.random.default_rng(20261113).choice(len(REGIONS), size=n, p=_REGION_FREQUENCIES)
+        X["region"] = np.array(REGIONS)[region]
+        theta[:, 0] *= np.exp(0.5 * _REGION_LOCATION[region])
+    if sampler is None:
+        y = np.asarray(family.quantile(rng.uniform(0.005, 0.995, n), theta), dtype=np.float64)
+    else:
+        y = sampler(rng, theta)
+    terms = (
+        (s("age", k=5), cat("region")) if levels else (s("age", k=5),),
+        (s("age", k=4),),
+        *(((s("age", k=4),),) if third else ()),
+    )
+    # A family may name its predictor helpers apart from its parameters (Tweedie's ``mu``).
+    helpers = getattr(family, "_predictor_helpers", {})
+    predictors = [
+        getattr(family, helpers.get(spec.name, spec.name))(
+            *(terms[i] if i < len(terms) else ()), link=links[i] if i < len(links) else None
+        )
+        for i, spec in enumerate(family.parameters)
+    ]
+    model = SuperLSS(family, *predictors).fit_reml(X, y, outer="efs+newton")
+    return FitCase(model, X, y, None, None)
+
+
 _ROW_DRAWS = {
     LogNormalLS: _lognormal_rows,
     GammaLS: _gamma_rows,
@@ -242,6 +328,8 @@ def assert_cv_tab_draws_the_editor_curves(session, items) -> None:
             assert not np.allclose(edited, fit, rtol=0.0, atol=1e-14)
             np.testing.assert_allclose(item["edited"], edited, rtol=1e-12, atol=0.0)
         assert item["value_label"] == term["y_label"]
+        # The chart's no-effect line follows the curve's own unit.
+        assert item["display"]["kind"] == term.get("display", {"kind": "relativity"})["kind"]
         weights = np.asarray(item["weights"], dtype=np.float64)
         anchor = np.log(edited if item["held"] else fit)
         for fold in item["folds"]:

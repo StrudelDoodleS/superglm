@@ -37,6 +37,33 @@ The standard iframe is 1180 by 720 pixels. At narrower notebook widths the inspe
 drawer; in a short window the workspace scrolls instead of shrinking the plot into an unusable
 strip.
 
+### Which models open, and what a curve shows
+
+The editor opens every fitted SuperGLM, whatever its family and link, and every SuperLSS
+family except `DirichletLSS`, whose response is a set of shares rather than one number. A
+SuperLSS parameter can be on any link, its default or one you chose.
+
+Each curve is the term's contribution to one linear predictor, and what the chart draws follows
+the link that predictor was fitted on:
+
+| The term's link | The curve shows | No effect | An edit changes |
+| --- | --- | --- | --- |
+| log | the relativity: the factor the term multiplies its parameter by | 1.00 | the relativity |
+| log with a floor (the log-normal's σ) | the relativity of the parameter above its floor | 1.00 | the relativity |
+| logit | the relativity of the odds | 1.00 | the odds relativity |
+| identity | the amount the term adds, in the parameter's units | 0 | the amount added |
+| any other (inverse, probit, cloglog, square root, a power or a bounded link) | the effect on the link scale | 0 | the effect on the link scale |
+
+The negative binomial's θ is the one exception: its curve is the relativity of the
+overdispersion, 1/θ, so it rises where overdispersion rises. The axis label says which
+quantity a curve shows, for example *relativity of the CV*, *effect on the mean* or *effect on
+the probit scale of the mean*, and the Cross-validation tab draws the same values.
+
+The Explain tab draws log-normal (mean form), gamma, negative binomial and Tweedie models on
+their usual links, and the distribution panel the same families except the negative binomial,
+whose counts it does not draw; for other families they say so, and the rest of the editor works. The rating table and its preview multiply factors, so they hold the terms on a
+log link.
+
 ### On Databricks and other hosted notebooks
 
 `session.widget()` normally serves the editor from a small web server on the machine that runs
@@ -147,7 +174,10 @@ ordered term, **Free levels** does this job instead: see
 
 The floating palette acts on the current selection:
 
-- Increase or decrease moves the selected relativities by five percent.
+- Increase or decrease moves the selected relativities by five percent. On a curve of added
+  effects (identity and other links) the step is five percent of the size of the linear
+  predictor on an average training row, so on an identity link it moves an average row by about
+  what five percent would.
 - Smooth reduces local variation while respecting adjacent unselected values.
 - **Straighten selection** interpolates the selected relativities between their first and last
   points.
@@ -852,11 +882,12 @@ scored by log score, CRPS, Gini and actual over expected; a family with neither 
 nor a distribution function has no CRPS, and its Validation and Final Fit tabs leave that column
 out. Its `offset` is a dict by parameter, and its fold curves are listed under **Mean** and then
 **CV** (**Overdispersion** for a negative binomial, **Dispersion** for a Tweedie), the least stable
-first in each. Every curve, on this tab and on the Editor tab, is a relativity of its parameter and the two tabs
-agree: the heading names the parameter and what the curve is a relativity of, for example
+first in each. Every curve on this tab is drawn as the Editor tab draws it, by its link (see
+[Which models open, and what a curve shows](#which-models-open-and-what-a-curve-shows)), and
+the two tabs agree: the heading names the parameter and what the curve shows, for example
 *Area · CV · relativity of the CV* (*relativity of σ* for a log-normal, *relativity of the
-overdispersion* for a negative binomial, *relativity of the dispersion* for a Tweedie), and higher
-always means more variation. The parameters and their labels are in
+overdispersion* for a negative binomial, *relativity of the dispersion* for a Tweedie), and on
+those four families higher always means more variation. The parameters and their labels are in
 [What the editor calls each parameter](../how-to/fit-a-distributional-model.md#what-the-editor-calls-each-parameter).
 See also
 [Check a distributional fit](../how-to/check-a-distributional-fit.md#5-how-do-candidates-compare).
@@ -883,7 +914,9 @@ still works: its report is shown on the Validation tab.
 
 ## Explain Risks (SuperLSS)
 
-A SuperLSS session has an **Explain** tab. It reads the model for single risks. Each row at the top
+A SuperLSS session has an **Explain** tab. It reads the model for single risks. It draws
+log-normal (mean form), gamma, negative binomial and Tweedie models; for other families it says
+so in place of the plots. Each row at the top
 is a risk: a value for every feature, starting at the reference risk, which has every number at its
 training median and every level at its most frequent. Every offset is at zero.
 

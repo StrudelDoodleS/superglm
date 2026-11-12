@@ -7,7 +7,7 @@
  * read the payload's ``spline_view`` the same way.
  */
 
-import { shiftDisplay } from "./display.js";
+import { reachableDisplay, shiftDisplay } from "./display.js";
 
 /** @typedef {import('../api/contracts.js').TermPayload} TermPayload */
 /** @typedef {import('../api/contracts.js').DisplaySpec} DisplaySpec */
@@ -62,7 +62,7 @@ export function contributionX(term) {
 /**
  * The drawn spline after one coefficient moves by ``deltaLog``: each grid
  * value moves by ``row * deltaLog`` on the effect scale (a relativity scales
- * by ``exp(row * deltaLog)``), the same rule the drag preview applies to the
+ * by ``exp(row * deltaLog)``, an additive curve adds it), the same rule the drag preview applies to the
  * level dots.
  *
  * @param {number[]} baseCurve display values on the grid before the drag
@@ -73,6 +73,6 @@ export function contributionX(term) {
  */
 export function shiftedCurve(baseCurve, gridRow, deltaLog, spec) {
   return baseCurve.map((value, index) =>
-    Math.max(1e-12, shiftDisplay(spec, value, Number(gridRow[index]) || 0, deltaLog))
+    reachableDisplay(spec, shiftDisplay(spec, value, Number(gridRow[index]) || 0, deltaLog))
   );
 }

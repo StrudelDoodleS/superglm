@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { fmt, fmtAdded } from "../../src/superglm/editor/app/format.js";
 import {
   FALLBACK_CHART_SIZE,
+  axisSpan,
   categoricalTickIndices,
   chartSize,
   fitMeasuredLabel,
@@ -392,6 +394,29 @@ test("a curve that stays at zero or above is never padded below zero", () => {
   assert.deepEqual(paddedYRange(1, 1), [0.95, 1.05]);
 });
 
+test("an additive curve is padded below zero, where its values can go", () => {
+  const [low, high] = paddedYRange(0, 3, false);
+  assert.ok(low < 0 && high > 3);
+  assert.equal(low, -3 * 0.12);
+  assert.equal(high, 3 + 3 * 0.12);
+  assert.equal(paddedYRange(1, 12, false)[0], 1 - (12 - 1) * 0.12);
+});
+
+test("a small additive curve fills the plot, padded by its own span", () => {
+  // A Gamma/inverse effect of +-3e-4: a 0.05 pad would draw it flat.
+  const [low, high] = paddedYRange(-3e-4, 3e-4, false);
+  assert.ok((6e-4) / (high - low) > 0.75, `${low}, ${high}`);
+  assert.ok(low < -3e-4 && high > 3e-4);
+  // A flat curve still gets a range: a share of its value, or a fixed pad at zero.
+  const [flatLow, flatHigh] = paddedYRange(2e-3, 2e-3, false);
+  assert.ok(flatLow < 2e-3 && flatHigh > 2e-3);
+  assert.ok(Math.abs(flatHigh - flatLow - 2e-4) < 1e-12, `${flatLow}, ${flatHigh}`);
+  const [zeroLow, zeroHigh] = paddedYRange(0, 0, false);
+  assert.ok(zeroLow < 0 && zeroHigh > 0);
+  // A relativity keeps its 0.05 floor.
+  assert.deepEqual(paddedYRange(1, 1), [0.95, 1.05]);
+});
+
 test("ticks sit at 1, 2 or 5 times a power of ten, inside the range", () => {
   for (const [min, max, n] of [[0, 12.5, 5], [0.83, 1.21, 5], [18, 90, 6], [0, 126036.5, 4], [-0.2, 3.1, 5]]) {
     const ticks = roundTicks(min, max, n);
@@ -405,4 +430,22 @@ test("ticks sit at 1, 2 or 5 times a power of ten, inside the range", () => {
   assert.deepEqual(roundTicks(0, 12.5, 8), [0, 2, 4, 6, 8, 10, 12]);
   assert.deepEqual(roundTicks(1, 1, 5), [1]);
   assert.deepEqual(roundTicks(Number.NaN, 2, 5), [0]);
+});
+
+test("drawing a value and reading it back from the pointer are inverses on a tiny axis", () => {
+  // A curve spanning 2e-13 used to draw against a floor of 1e-12 and read back against its span.
+  const [yMin, yMax, top, innerH] = [-2.4e-14, 2.24e-13, 10, 300];
+  const sy = (/** @type {number} */ v) => top + innerH - ((v - yMin) / axisSpan(yMin, yMax)) * innerH;
+  const back = (/** @type {number} */ py) => yMax - ((py - top) / innerH) * axisSpan(yMin, yMax);
+  for (const value of [0, 1e-13, 2e-13]) {
+    assert.ok(Math.abs(back(sy(value)) - value) <= 1e-12 * axisSpan(yMin, yMax), String(value));
+  }
+  assert.equal(axisSpan(0, 2e-13), 2e-13);
+  assert.equal(axisSpan(1, 1), 1e-12);
+});
+
+test("a value on a curve that adds an amount keeps significant figures below 0.001", () => {
+  assert.equal(fmtAdded(-1e-7), "-1.00e-7");
+  assert.equal(fmtAdded(4.153e-14), "4.15e-14");
+  for (const value of [0, 0.25, 12.3, -4, 1234.5]) assert.equal(fmtAdded(value), fmt(value));
 });

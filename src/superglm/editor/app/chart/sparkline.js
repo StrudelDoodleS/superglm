@@ -1,5 +1,7 @@
 // @ts-check
 
+import { noEffect } from "./display.js";
+
 /** @typedef {import('../api/contracts.js').TermPayload} TermPayload */
 /** @typedef {{x:number, y:number, w:number, h:number, reference:boolean}} Bar */
 /** @typedef {{x:number, y:number}} LineMark */
@@ -16,7 +18,8 @@ const REFERENCE_BAR = 3;
 
 /**
  * A feature's effect as a mini curve: a line for a curve over a numeric
- * axis, bars for categorical levels, measured from relativity 1 (no effect).
+ * axis, bars for categorical levels, measured from no effect (relativity 1, or 0 on
+ * an additive curve).
  * A level too close
  * to it for a bar is a short mark centred on it, and the reference level is
  * flagged. An ordered categorical reads as a trend, so it is a line with a
@@ -50,7 +53,7 @@ function lineSparkline(term, { width, height }) {
 
 /** @param {Pick<TermPayload, 'y'> & Partial<TermPayload>} term @param {{width:number, height:number}} size @returns {Sparkline} */
 function barSparkline(term, { width, height }) {
-  const baseline = 1;
+  const baseline = noEffect(term.display);
   const values = term.y.map((value) => (Number.isFinite(value) ? value : baseline));
   const up = scale([...values, baseline], height - PAD, PAD);
   const zero = up(baseline);

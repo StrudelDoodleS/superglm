@@ -285,9 +285,9 @@ export function riskModel(reply, state, selected) {
       table: tableOf(counts, countColumns(reply, state.style), null), spreadNote: null,
     };
   }
-  if (!reply.amount_axis || !risks.length) {
+  if (reply.kind === "unavailable" || !reply.amount_axis || !risks.length) {
     return {
-      empty: "This model has no distribution to draw.",
+      empty: reply.reason ?? "This model has no distribution to draw.",
       curves: [], counts: null, selected: chosen, line: lineModel(reply, state), axis: null, unit,
       table: { unit, columns: [], rows: [] }, spreadNote: null,
     };

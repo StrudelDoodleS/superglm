@@ -1,6 +1,7 @@
 // @ts-check
 
-import { escapeHTML, fmt } from "../format.js";
+import { isAdditive, noEffect } from "../chart/display.js";
+import { escapeHTML, fmt, fmtAdded } from "../format.js";
 
 /** @typedef {import('../api/contracts.js').CVReportPayload} CVReportPayload */
 /** @typedef {import('../api/contracts.js').CVResultPayload} CVResultPayload */
@@ -677,6 +678,14 @@ export function termListMarkup(terms, current, query) {
 }
 
 /**
+ * How a term's values print: a curve that adds an amount keeps significant figures below 0.001.
+ * @param {CVTermItem} term
+ */
+function valueFormat(term) {
+  return isAdditive(term.display) ? fmtAdded : fmt;
+}
+
+/**
  * @param {CVTermItem} term
  * @param {(value:number)=>number} y
  * @param {number[]} ticks
@@ -685,8 +694,8 @@ function frameMarkup(term, y, ticks) {
   const { width, left, right } = CHART;
   return ticks.map((tick) => `<line class="cv-grid" x1="${left}" x2="${width - right}"
       y1="${px(y(tick))}" y2="${px(y(tick))}"></line>
-    <text class="cv-tick" x="${left - 6}" y="${px(y(tick) + 4)}" text-anchor="end">${escapeHTML(fmt(tick))}</text>`).join("")
-    + `<line class="zero" x1="${left}" x2="${width - right}" y1="${px(y(1))}" y2="${px(y(1))}"></line>`
+    <text class="cv-tick" x="${left - 6}" y="${px(y(tick) + 4)}" text-anchor="end">${escapeHTML(valueFormat(term)(tick))}</text>`).join("")
+    + `<line class="zero" x1="${left}" x2="${width - right}" y1="${px(y(noEffect(term.display)))}" y2="${px(y(noEffect(term.display)))}"></line>`
     + `<text class="cv-axis-title" x="${left}" y="16">${escapeHTML(termLabel(term))} · ${escapeHTML(term.value_label ?? "relativity")}</text>`;
 }
 
@@ -718,8 +727,10 @@ function yScale(term) {
   const { height, top, bottom } = CHART;
   const values = [...term.folds.flatMap((fold) => fold.values), ...term.fit, ...(term.edited ?? [])]
     .filter(isNumber);
-  const lo = Math.min(...values, 1);
-  const hi = Math.max(...values, 1);
+  // The no-effect line is always in view: 1 on a relativity, 0 on an added effect.
+  const none = noEffect(term.display);
+  const lo = Math.min(...values, none);
+  const hi = Math.max(...values, none);
   const pad = (hi - lo) * 0.1 || 0.05;
   const domain = [lo - pad, hi + pad];
   const y = (/** @type {number} */ value) =>
@@ -774,7 +785,7 @@ export function levelChartMarkup(term) {
     return fold.values.map((value, index) => (isNumber(value)
       ? `<circle class="cv-fold-dot" data-fold="${number}" data-level="${index}"
       cx="${px(x(index) + offset)}" cy="${px(y(value))}" r="3.6" style="${foldMarkStyle(number)}">
-      <title>${escapeHTML(`${fold.label} · ${levels[index]}: ${fmt(value)}`)}</title></circle>`
+      <title>${escapeHTML(`${fold.label} · ${levels[index]}: ${valueFormat(term)(value)}`)}</title></circle>`
       : ""));
   }).join("");
   /** @param {Array<number|null>} values @param {string} kind */
@@ -789,7 +800,7 @@ export function levelChartMarkup(term) {
       text-anchor="${rotate ? "end" : "middle"}"${rotate ? ` transform="rotate(-40 ${px(x(index))} ${base + 16})"` : ""}>
       ${escapeHTML(level.length > 14 ? `${level.slice(0, 13)}…` : level)}<title>${escapeHTML(level)}</title></text>`).join("");
   return `${legendMarkup(term)}<svg class="cv-chart-svg" viewBox="0 0 ${width} ${height}" role="img"
-      aria-label="${escapeHTML(`${termLabel(term)} relativities by fold`)}">
+      aria-label="${escapeHTML(`${termLabel(term)} · ${term.value_label ?? "relativity"} by fold`)}">
     ${frameMarkup(term, y, ticks)}${bars}${whiskers}${dots}${levelTicks(term.fit, "cv-fit")}
     ${term.edited ? levelTicks(term.edited, "cv-edited") : ""}${labels}</svg>`;
 }
@@ -883,7 +894,7 @@ export function curveChartMarkup(term) {
   const xTicks = niceTicks(first, last, 6).map((tick) => `<text class="cv-tick" x="${px(x(tick))}"
       y="${base + 16}" text-anchor="middle">${escapeHTML(fmt(tick))}</text>`).join("");
   return `${legendMarkup(term)}<svg class="cv-chart-svg" viewBox="0 0 ${width} ${height}" role="img"
-      aria-label="${escapeHTML(`${termLabel(term)} relativities by fold`)}">
+      aria-label="${escapeHTML(`${termLabel(term)} · ${term.value_label ?? "relativity"} by fold`)}">
     ${frameMarkup(term, y, ticks)}<path class="exposure-density" d="${exposure}Z"></path>
     <path class="cv-envelope" d="${band}"></path>${lines}
     <path class="cv-fit-line" d="${line(term.fit)}"></path>

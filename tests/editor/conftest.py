@@ -13,16 +13,8 @@ from superglm import Categorical, OrderedCategorical, Spline, SuperGLM
 from superglm.editor import EditorSession
 
 
-@pytest.fixture(scope="session")
-def editor_browser_model() -> SuperGLM:
-    """The model behind every browser editor page.
-
-    Poisson on a log link, not gaussian: one of these tests drives the export
-    dialog, and the rating-table export it reaches is multiplicative -- base
-    times one relativity per block -- so it accepts log-link models only.  The
-    same signal is carried through ``exp`` into a count, so the terms, the
-    level labels and the shape of every curve the page draws are unchanged.
-    """
+def _browser_rows():
+    """The browser book's rows, its signal on the linear predictor, and its generator."""
     rng = np.random.default_rng(20260711)
     territory_levels = [f"T{i:02d}" for i in range(1, 11)]
     age_band_levels = ["18-24", "25-34", "35-44", "45-54", "55-64", "65+"]
@@ -49,7 +41,6 @@ def editor_browser_model() -> SuperGLM:
         + 0.03 * np.array([territory_levels.index(value) for value in territory])
         + 0.08 * np.array([age_band_levels.index(value) for value in age_band])
     )
-    y = rng.poisson(np.exp(eta)).astype(np.float64)
     frame = pd.DataFrame(
         {
             "curve": curve,
@@ -58,8 +49,12 @@ def editor_browser_model() -> SuperGLM:
             "long_category": long_category,
         }
     )
+    return rng, frame, eta, age_band_levels
+
+
+def _browser_model(family: str, frame: pd.DataFrame, y: np.ndarray, age_band_levels) -> SuperGLM:
     model = SuperGLM(
-        family="poisson",
+        family=family,
         selection_penalty=0.0,
         spline_penalty=0.1,
         features={
@@ -75,6 +70,32 @@ def editor_browser_model() -> SuperGLM:
     )
     model.fit(frame, y)
     return model
+
+
+@pytest.fixture(scope="session")
+def editor_browser_model() -> SuperGLM:
+    """The model behind every browser editor page.
+
+    Poisson on a log link, not gaussian: one of these tests drives the export
+    dialog, and the rating-table export it reaches is multiplicative -- base
+    times one relativity per block -- so it accepts log-link models only.  The
+    same signal is carried through ``exp`` into a count, so the terms, the
+    level labels and the shape of every curve the page draws are unchanged.
+    """
+    rng, frame, eta, age_band_levels = _browser_rows()
+    y = rng.poisson(np.exp(eta)).astype(np.float64)
+    return _browser_model("poisson", frame, y, age_band_levels)
+
+
+@pytest.fixture(scope="session")
+def editor_identity_model() -> SuperGLM:
+    """The same book fitted as a gaussian on the identity link, a response in the thousands.
+
+    Its curves are additive: each term's effect is drawn as an amount around zero.
+    """
+    rng, frame, eta, age_band_levels = _browser_rows()
+    y = 1000.0 * eta + rng.normal(0.0, 20.0, len(frame))
+    return _browser_model("gaussian", frame, y, age_band_levels)
 
 
 @pytest.fixture(scope="session")
@@ -163,12 +184,13 @@ def open_editor_page(chromium_browser, editor_browser_model):
         n_points: int = 200,
         collapsed_levels: tuple[str, tuple[str, ...]] | None = None,
         prepare: Callable[[object], None] | None = None,
+        model: SuperGLM | None = None,
     ) -> Iterator[tuple[object, EditorSession]]:
         resources = ExitStack()
         opened.append(resources)
         try:
             session = EditorSession.from_model(
-                editor_browser_model,
+                editor_browser_model if model is None else model,
                 terms=["curve", "territory", "age_band", "long_category"],
                 n_points=n_points,
             )

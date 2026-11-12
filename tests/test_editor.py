@@ -2142,10 +2142,37 @@ def test_offset_labels_use_native_values_for_mean_centered_terms(editor_model):
     session.shift("x_spline", 0.35)
 
     label = offset_label_payload(session, ["x_spline"])[0]
-    actual = np.asarray([row["log_offset"] for row in label["values"]], dtype=np.float64)
+    # The model is Gaussian/identity, so each value is the amount the term adds.
+    actual = np.asarray([row["effect"] for row in label["values"]], dtype=np.float64)
     expected = native_log_effect_values(session.terms["x_spline"])
 
     np.testing.assert_allclose(actual, expected)
+
+
+@pytest.mark.parametrize(
+    ("fixture", "scale", "shown"),
+    [
+        ("editor_model", "edited added amount", "effect"),
+        ("editor_log_link_model", "log edited relativity", "relativity"),
+    ],
+)
+def test_offset_labels_follow_the_terms_display(fixture, scale, shown, request):
+    from superglm.editor.summaries import offset_label_payload
+    from superglm.editor.terms import native_log_effect_values
+
+    model = request.getfixturevalue(fixture)
+    session = EditorSession.from_model(model, terms=["region"], with_se=False)
+    session.select_indices("region", [1])
+    session.shift("region", 0.35)
+
+    label = offset_label_payload(session, ["region"])[0]
+    effect = native_log_effect_values(session.terms["region"])
+    values = np.asarray([row[shown] for row in label["values"]], dtype=np.float64)
+    # A Gaussian/identity term adds its effect to the mean; a log-link term multiplies it.
+    expected = effect if shown == "effect" else np.exp(effect)
+    assert label["scale"] == scale
+    np.testing.assert_allclose(values, expected, rtol=1e-15, atol=0.0)
+    assert all(("relativity" in row) == (shown == "relativity") for row in label["values"])
 
 
 def test_to_model_marks_edited_copy_inference_stale(editor_model):
@@ -3037,7 +3064,7 @@ def test_ungroup_preserves_symbolic_base_policy_to_avoid_display_uplift():
     assert refit.features["territory"].base == "most_exposed"
     assert refit.features["territory"]._base_level == model.features["territory"]._base_level
     payload = session_payload(session)["territory"]
-    assert payload["impact"]["weighted_mean_relativity"] == pytest.approx(1.0, abs=0.03)
+    assert payload["impact"]["weighted_mean_link_delta"] == pytest.approx(0.0, abs=0.03)
     assert payload["impact"]["max_abs_link_delta"] < 0.08
 
 
@@ -3068,7 +3095,7 @@ def test_ungroup_last_collapsed_levels_removes_identity_grouping():
     payload = session_payload(session)["territory"]
     assert payload["level_groups"] == []
     np.testing.assert_allclose(payload["y"], payload["original_y"])
-    assert payload["impact"]["weighted_mean_relativity"] == pytest.approx(1.0)
+    assert payload["impact"]["weighted_mean_link_delta"] == pytest.approx(0.0, abs=1e-12)
 
 
 def test_ungroup_pre_collapsed_model_refits_without_history():
@@ -3847,9 +3874,12 @@ def test_reset_level_order_restores_model_order_after_visual_reorder(editor_mode
     assert session.selection("region").tolist() == [2]
 
 
-def test_session_payload_compares_in_force_against_reference_model_after_collapse(editor_model):
+def test_session_payload_compares_in_force_against_reference_model_after_collapse(
+    editor_log_link_model,
+):
     from superglm.editor.payloads import session_payload
 
+    editor_model = editor_log_link_model
     session = EditorSession.from_model(editor_model, terms=["region"])
     session.select_levels("region", ["B", "C"])
     session.replace_with_collapsed_levels("region", method="fit")
@@ -3887,10 +3917,10 @@ def test_session_payload_omits_previous_y_without_term_history(editor_model):
     assert payload["previous_y"] is None
 
 
-def test_session_payload_previous_y_uses_latest_edit_for_that_term(editor_model):
+def test_session_payload_previous_y_uses_latest_edit_for_that_term(editor_log_link_model):
     from superglm.editor.payloads import session_payload
 
-    session = EditorSession.from_model(editor_model, terms=["x_spline", "x_num"])
+    session = EditorSession.from_model(editor_log_link_model, terms=["x_spline", "x_num"])
     spline = session.terms["x_spline"]
     previous_spline = spline.edited_log_effect.copy()
 
@@ -4029,12 +4059,14 @@ def test_session_payload_adds_collapsed_group_display_for_ordered_levels(
 
 
 def test_session_payload_group_display_projects_previous_y_for_collapsed_levels(
-    editor_model, editor_frame
+    editor_log_link_model, editor_log_link_frame
 ):
     from superglm.editor.payloads import session_payload
 
-    X, y = editor_frame
-    session = EditorSession.from_model(editor_model, terms=["band"], train_data=(X, y, None))
+    X, y = editor_log_link_frame
+    session = EditorSession.from_model(
+        editor_log_link_model, terms=["band"], train_data=(X, y, None)
+    )
     session.select_levels("band", ["medium", "high"])
     session.replace_with_collapsed_levels("band", method="fit")
     session.select_levels("band", ["medium", "high"])
@@ -4133,8 +4165,8 @@ def test_session_uses_fit_sample_weight_for_term_weights():
     np.testing.assert_allclose(session.terms["region"].weights, [3.0, 2.0, 7.0])
 
 
-def test_widget_state_exposes_ci_bands_and_single_point_centering(editor_model):
-    session = EditorSession.from_model(editor_model, terms=["x_num", "x_spline"])
+def test_widget_state_exposes_ci_bands_and_single_point_centering(editor_log_link_model):
+    session = EditorSession.from_model(editor_log_link_model, terms=["x_num", "x_spline"])
     widget = session.widget()
     try:
         state = _get_json(f"{widget.url}/state")
@@ -4666,8 +4698,8 @@ def test_widget_favicon_does_not_emit_browser_404(editor_model):
         widget.close()
 
 
-def test_widget_http_selection_and_average_updates_session(editor_model):
-    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+def test_widget_http_selection_and_average_updates_session(editor_log_link_model):
+    session = EditorSession.from_model(editor_log_link_model, terms=["x_spline"])
     widget = session.widget()
     try:
         term = session.terms["x_spline"]
@@ -4710,8 +4742,8 @@ def test_widget_http_selection_and_average_updates_session(editor_model):
         widget.close()
 
 
-def test_widget_average_falls_back_when_selected_exposure_is_zero(editor_model):
-    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+def test_widget_average_falls_back_when_selected_exposure_is_zero(editor_log_link_model):
+    session = EditorSession.from_model(editor_log_link_model, terms=["x_spline"])
     widget = session.widget()
     try:
         term = session.terms["x_spline"]
@@ -4728,8 +4760,8 @@ def test_widget_average_falls_back_when_selected_exposure_is_zero(editor_model):
         widget.close()
 
 
-def test_widget_average_expands_collapsed_level_groups_before_weighting(editor_model):
-    session = EditorSession.from_model(editor_model, terms=["region"])
+def test_widget_average_expands_collapsed_level_groups_before_weighting(editor_log_link_model):
+    session = EditorSession.from_model(editor_log_link_model, terms=["region"])
     session.select_levels("region", ["B", "C"])
     session.replace_with_collapsed_levels("region", method="fit")
     widget = session.widget()
@@ -5046,8 +5078,8 @@ def test_widget_http_selected_summary_uses_in_force_without_model_selector(edito
         widget.close()
 
 
-def test_widget_http_drag_and_reset_updates_session(editor_model):
-    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+def test_widget_http_drag_and_reset_updates_session(editor_log_link_model):
+    session = EditorSession.from_model(editor_log_link_model, terms=["x_spline"])
     widget = session.widget()
     try:
         term = session.terms["x_spline"]
@@ -5116,8 +5148,8 @@ def test_widget_http_control_handle_updates_session(editor_model):
         widget.close()
 
 
-def test_widget_http_select_all_and_impact_updates_session(editor_model):
-    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+def test_widget_http_select_all_and_impact_updates_session(editor_log_link_model):
+    session = EditorSession.from_model(editor_log_link_model, terms=["x_spline"])
     widget = session.widget()
     try:
         term = session.terms["x_spline"]
@@ -5537,7 +5569,7 @@ def test_widget_http_summary_and_fixed_offset_refit(editor_model):
         assert refit["compact"]["rows"]
         assert all("sig_class" in row for row in refit["compact"]["rows"])
         assert refit["offset_labels"][0]["term"] == "region"
-        assert refit["offset_labels"][0]["scale"] == "log edited relativity"
+        assert refit["offset_labels"][0]["scale"] == "edited added amount"
         assert any(item["label"] == "B" for item in refit["offset_labels"][0]["values"])
 
         after_refit = _post_json(f"{widget.url}/summary", {"source": "refit"})
@@ -6448,7 +6480,9 @@ def test_widget_undo_takes_the_latest_edit_and_reset_the_shown_term(editor_model
         # One timeline: Undo takes the latest edit, on region, though x_spline is shown.
         _post_json(f"{widget.url}/op", {"operation": "undo"})
         np.testing.assert_array_equal(region.edited_log_effect, region_original)
-        assert spline.edited_log_effect[4] == pytest.approx(spline_original[4] + np.log(1.05))
+        assert spline.edited_log_effect[4] == pytest.approx(
+            spline_original[4] + session.additive_step("x_spline")
+        )
 
         _post_json(f"{widget.url}/op", {"operation": "shift_up"})
         _post_json(f"{widget.url}/term", {"term": "region"})

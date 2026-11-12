@@ -1,5 +1,5 @@
-import { showsRelativity } from "./chart/display.js";
-import { fmt, fmtCount } from "./format.js";
+import { isAdditive, noEffect, showsRelativity } from "./chart/display.js";
+import { fmt, fmtAdded, fmtCount } from "./format.js";
 import {
   anchorMarks,
   anchorMarksIn,
@@ -21,6 +21,7 @@ import {
 import {
   chartSize,
   categoricalTickIndices,
+  axisSpan,
   paddedYRange,
   planCategoricalAxis,
   roundTicks,
@@ -187,13 +188,15 @@ export function drawChart(term, selection, context) {
   const unsmoothedLine = buildActive ? null : (context.unsmoothed?.() ?? null);
   const unsmoothed = unsmoothedSeries(unsmoothedLine);
   const [yMinRaw, yMaxRaw] = unsmoothed
-    ? unsmoothedRange(curveMin, curveMax, unsmoothed.y)
+    ? unsmoothedRange(curveMin, curveMax, unsmoothed.y, isAdditive(term.display))
     : [curveMin, curveMax];
-  const [baseYMin, baseYMax] = paddedYRange(yMinRaw, yMaxRaw);
+  const [baseYMin, baseYMax] = paddedYRange(yMinRaw, yMaxRaw, !isAdditive(term.display));
   const yMin = zoom ? zoom.yMin : baseYMin;
   const yMax = zoom ? zoom.yMax : baseYMax;
-  const sx = (v) => margin.left + ((v - xMin) / Math.max(xMax - xMin, 1e-12)) * innerW;
-  const sy = (v) => margin.top + innerH - ((v - yMin) / Math.max(yMax - yMin, 1e-12)) * innerH;
+  const sx = (v) => margin.left + ((v - xMin) / axisSpan(xMin, xMax)) * innerW;
+  const sy = (v) => margin.top + innerH - ((v - yMin) / axisSpan(yMin, yMax)) * innerH;
+  // A curve that adds an amount can be in units far below 1; its labels keep significant figures.
+  const fmtY = isAdditive(term.display) ? fmtAdded : fmt;
   const scaleKey = [xMin, xMax, yMin, yMax, margin.left, margin.top, innerW, innerH].join();
 
   // Draw back-to-front: exposure context, axes/grid, reference intervals, then
@@ -204,7 +207,7 @@ export function drawChart(term, selection, context) {
   const yTicks = scene.appendChild(el("g", { class: "y-ticks" }));
   for (const tick of roundTicks(yMin, yMax, tickCount(innerH, 70))) {
     line(yTicks, margin.left, sy(tick), margin.left + innerW, sy(tick), "grid");
-    text(yTicks, margin.left - 8, sy(tick) + 4, fmt(tick), "tick-label", "end");
+    text(yTicks, margin.left - 8, sy(tick) + 4, fmtY(tick), "tick-label", "end");
   }
   if (categoricalLayout) {
     for (const tick of categoricalLayout.ticks) {
@@ -237,9 +240,9 @@ export function drawChart(term, selection, context) {
       text(xTicks, tickX, tickY, tick.label, "tick-label", "middle");
     }
   }
-  // The baseline, where the term's own effect is zero (relativity one): the level
-  // an edit is judged against.
-  const baseline = Math.min(Math.max(1, yMin), yMax);
+  // The baseline, where the term's own effect is zero (relativity one, or zero on an
+  // additive curve): the level an edit is judged against.
+  const baseline = Math.min(Math.max(noEffect(term.display), yMin), yMax);
   line(scene, margin.left, sy(baseline), margin.left + innerW, sy(baseline), "zero");
   line(scene, margin.left, margin.top + innerH, margin.left + innerW, margin.top + innerH, "axis");
 
@@ -285,7 +288,7 @@ export function drawChart(term, selection, context) {
   }
   if (freeMarks.length) {
     drawFreeLevels(scene, freeMarks, freeLevelLine(freeLevels, view), {
-      sx, sy, yMin, yMax, intervals: context.showCi()
+      sx, sy, yMin, yMax, intervals: context.showCi(), fmtY
     });
   }
   if (!buildActive) drawTermLines(scene, { x, y, original, previous, spline, sx, sy, scaleKey });
@@ -694,7 +697,7 @@ function pointTooltipLines(term, i) {
     label,
     showsRelativity(term)
       ? `Relativity: ${fmt(term.y[i])}`
-      : `${yTooltipLabel(term)}: ${fmt(term.y[i])}`,
+      : `${yTooltipLabel(term)}: ${(isAdditive(term.display) ? fmtAdded : fmt)(term.y[i])}`,
     `Exposure: ${fmtCount(exposure)}`
   ];
 }
@@ -1489,7 +1492,7 @@ function band(svg, x, lower, upper, sx, sy, cls, scaleKey) {
 // level's interval against the reference shows with Reference CI. The whole
 // series steps DODGE right of the levels, beside the curve's own intervals.
 // The comparison never rescales the chart; a level off it sits at its edge.
-function drawFreeLevels(svg, marks, joined, { sx, sy, yMin, yMax, intervals }) {
+function drawFreeLevels(svg, marks, joined, { sx, sy, yMin, yMax, intervals, fmtY = fmt }) {
   const layer = el("g", { class: "free-levels" });
   svg.appendChild(layer);
   // The overlay never rescales the chart: what lies past it is drawn at its edge.
@@ -1508,15 +1511,15 @@ function drawFreeLevels(svg, marks, joined, { sx, sy, yMin, yMax, intervals }) {
       );
       const said = el("title", {});
       said.textContent = `${mark.level} fitted free: 95% interval against the reference, `
-        + `${fmt(mark.lower)} to ${fmt(mark.upper)}`;
+        + `${fmtY(mark.lower)} to ${fmtY(mark.upper)}`;
       whisker.appendChild(said);
     }
     const py = inside(mark.y);
     const node = el("path", { d: diamond(px, py, 4.5), class: `free-level${flagged}` });
     node.setAttribute("data-level", mark.level);
     const title = el("title", {});
-    title.textContent = `${mark.level} fitted free: ${fmt(mark.y)} (${fmt(mark.lower)} to `
-      + `${fmt(mark.upper)})${mark.flagged ? "; the smoothing overrides it" : ""}`;
+    title.textContent = `${mark.level} fitted free: ${fmtY(mark.y)} (${fmtY(mark.lower)} to `
+      + `${fmtY(mark.upper)})${mark.flagged ? "; the smoothing overrides it" : ""}`;
     node.appendChild(title);
     layer.appendChild(node);
   }

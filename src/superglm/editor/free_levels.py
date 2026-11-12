@@ -33,8 +33,10 @@ weight moves no other level's gap or flag. Measured from the reference
 instead, every gap would carry the curve's misfit at the reference itself.
 
 What is drawn is the free fit as a categorical's output reads: each level's
-relativity to the reference, the reference at 1 where the chart is drawn from
-it, with its pointwise interval against the reference. The flag is judged on
+effect against the reference, shown as the term's curve is (a relativity, the
+reference at 1, or on a link with no factor the amount added, the reference at
+0, where the chart is drawn from it), with its pointwise interval against the
+reference. The flag is judged on
 the centred gap above, so a level is marked whether or not its drawn interval
 reaches the curve. Where the reference has no free value, the levels are
 drawn by their centred gap from the curve instead, and a note says so. A level whose every response
@@ -56,6 +58,7 @@ from superglm._roundoff import UNIT_ROUNDOFF
 from superglm.diagnostics.separation import _separated_flags, response_boundaries
 from superglm.distributions import clip_mu
 from superglm.editor.collapse import _require_not_interaction_parent
+from superglm.editor.display import DisplayTransform, display_for
 from superglm.editor.errors import EditorClientError, EditorTypeError, EditorValueError
 from superglm.editor.lss.availability import require_available
 from superglm.editor.refit import fit_refit_model
@@ -63,7 +66,6 @@ from superglm.features.categorical import Categorical, _grouping_labels
 from superglm.features.grouping import LevelGrouping
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.rebuild import clone_with_replaced_features, special_labels
-from superglm.inference._term_types import _safe_exp
 from superglm.inference.covariance import covariance_selected_block
 from superglm.links import stabilize_eta
 from superglm.model.explain_ops import _shape_repaired
@@ -231,7 +233,14 @@ def free_level_comparison(session, name: str) -> dict[str, Any]:
     reference = str(spec._base_level)
     relative = _from_reference(free_model, name, gaps.labels, reference)
     payload = _comparison(
-        term, spec, gaps, relative, reference, shrunk=shrunk, judge=not unconverged
+        term,
+        spec,
+        gaps,
+        relative,
+        reference,
+        shrunk=shrunk,
+        judge=not unconverged,
+        display=display_for(session.model, name),
     )
     notes = [
         _SEPARATED.format(
@@ -845,13 +854,14 @@ def _comparison(
     *,
     shrunk: bool,
     judge: bool = True,
+    display: DisplayTransform,
 ) -> dict[str, Any]:
     """Each level's free relativity to the reference, flagged on its centred gap from the curve.
 
     ``relative`` is each compared level's free log-relativity to the
     ``reference`` and its variance: a level is drawn there, on the chart's
     scale, with its pointwise interval, the reference where the chart puts
-    it. Without it, a level is drawn its centred gap from the curve, with the
+    it, each shown as ``display`` shows the curve. Without it, a level is drawn its centred gap from the curve, with the
     free estimate's own interval. ``gaps`` in the payload are the levels on
     the curve with no free value, where the line joining the diamonds breaks.
     """
@@ -912,9 +922,9 @@ def _comparison(
                 "level": level,
                 # A level with almost no weight has an interval past what
                 # float64 holds; its ends stay finite, as the chart's own do.
-                "y": float(_safe_exp(drawn + shift)),
-                "lower": float(_safe_exp(drawn + shift - half)),
-                "upper": float(_safe_exp(drawn + shift + half)),
+                "y": float(display.to_bounded_display(drawn + shift)),
+                "lower": float(display.to_bounded_display(drawn + shift - half)),
+                "upper": float(display.to_bounded_display(drawn + shift + half)),
                 # Judged on the centred gap from the fit in force: hand
                 # edits move the drawn line, not this.
                 "flagged": bool(judge and judged and abs(gap) > z * float(np.sqrt(gap_var))),

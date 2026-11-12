@@ -44,11 +44,11 @@ from superglm.editor.diagnose import (
     supplied_fold_traces,
     worst_rows,
 )
+from superglm.editor.display import FoldTermDisplay, fold_chart_display, is_edited
 from superglm.editor.errors import EditorClientError, EditorValueError
 from superglm.editor.evaluation import EvaluationDataset, training_export_dataset
 from superglm.editor.jobs import JobCancelledError
 from superglm.editor.lss.availability import session_refit_reason
-from superglm.editor.lss.display import FoldTermDisplay, fold_chart_display
 from superglm.editor.lss.validation import (
     LSS_METRIC_LABELS,
     lss_dataset_metrics,
@@ -725,7 +725,7 @@ def _term_item(
         weights = np.ones(grid.order.size, dtype=np.float64)
     fit = term.original_log_effect[grid.order]
     edited = term.edited_log_effect[grid.order]
-    changed = not np.allclose(edited, fit, rtol=0.0, atol=1e-14)
+    changed = is_edited(shown.transform, fit, edited)
     # The in-force curve is drawn as the Editor tab draws the term. A held term's
     # folds carry its edit, so they follow the edited curve; every other fold
     # follows the fit.
@@ -773,6 +773,7 @@ def _term_item(
         "group": shown.group,
         "role": shown.role,
         "value_label": shown.value,
+        "display": shown.transform.to_payload(),
         "kind": grid.kind,
         "x": None if grid.kind == "levels" else grid.points,
         "levels": grid.labels,
@@ -875,8 +876,8 @@ def _replayed_scores(cv: CrossValidationResult, model) -> tuple[str, ...]:
 
 
 def _term_display(model) -> Callable[[str], FoldTermDisplay]:
-    """How the tab shows a term of ``model``."""
-    return partial(fold_chart_display, family=model.family) if is_lss(model) else _plain_display
+    """How the tab shows a term of ``model``: as the Editor tab draws it, by its fitted link."""
+    return partial(fold_chart_display, model=model)
 
 
 def cv_report_payload(widget, *, request_sequence: int | None = None) -> dict[str, Any]:

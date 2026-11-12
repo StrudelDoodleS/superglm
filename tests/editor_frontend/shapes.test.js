@@ -248,3 +248,12 @@ test("every structural icon's help says the change waits for Refit", () => {
   assert.equal(STRUCTURE_HELP.refit_pending.title, "Refit");
   assert.equal(STRUCTURE_HELP.refit_pending.shortcut, "R");
 });
+
+test("Increase and Decrease say what they move on a curve of added amounts too", () => {
+  for (const key of ["shift_up", "shift_down"]) {
+    const { body } = OPERATION_HELP[key];
+    assert.match(body, /relativit\w+ by 5%/);
+    // An added-effect curve moves by 5% of an average row's value, not by a factor.
+    assert.match(body, /5% of an average row's value/);
+  }
+});

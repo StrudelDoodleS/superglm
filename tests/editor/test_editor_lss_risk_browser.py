@@ -8,10 +8,12 @@ from contextlib import ExitStack
 from urllib.parse import urlsplit
 
 import pytest
-from tests._lss_editor_fixtures import nb_case, open_case
+from tests._lss_editor_fixtures import nb_case, open_case, scalar_family_case
 from tests.editor._chart_layout import wait_for_chart_to_fit
 from tests.editor._editor_waits import wait_for_editor_idle, wait_for_interception
 from tests.editor.conftest import _open_session_page
+
+from superglm.editor.lss.panel import NOT_DRAWN_YET
 
 pytest.importorskip("playwright.sync_api")
 pytestmark = pytest.mark.browser
@@ -452,3 +454,25 @@ def test_a_risk_that_is_loading_offers_no_retry(open_lss_editor_page):
         answer[0].continue_()
         page.locator("#riskPanel .risk-table tbody tr").first.wait_for()
         assert note.is_hidden()
+
+
+def test_a_family_without_browser_maths_says_so_in_the_panel_and_in_explain(chromium_browser):
+    session = open_case(scalar_family_case("GaussianLS"))
+    reason = NOT_DRAWN_YET.format(family="GaussianLS")
+    shows = "([root, text]) => document.querySelector(root)?.textContent.includes(text)"
+    with ExitStack() as resources:
+        errors: list = []
+        page = _open_session_page(
+            resources,
+            chromium_browser,
+            session,
+            viewport={"width": 1400, "height": 900},
+            prepare=lambda page: page.on("pageerror", lambda error: errors.append(error)),
+            first_term="location:age",
+            selected_term="location:age",
+        )
+        page.locator("#distributionPanel").scroll_into_view_if_needed()
+        page.wait_for_function(shows, arg=["#distributionPanel", reason])
+        page.get_by_role("tab", name="Explain", exact=True).click()
+        page.wait_for_function(shows, arg=["#riskPanel", reason])
+        assert errors == []

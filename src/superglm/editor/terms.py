@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
+from scipy.stats import norm
 
 from superglm._frame import as_eager_frame
 from superglm.editor._types import EditableTerm
@@ -40,6 +41,7 @@ def term_from_inference(ti) -> EditableTerm:
             "x": np.asarray(ti.smooth_curve.x, dtype=np.float64).tolist(),
             "log_relativity": np.asarray(ti.smooth_curve.log_relativity, dtype=np.float64).tolist(),
         }
+    lower, upper = _link_scale_band(ti, log_effect)
     return EditableTerm(
         name=ti.name,
         kind=ti.kind,
@@ -48,8 +50,8 @@ def term_from_inference(ti) -> EditableTerm:
         original_log_effect=log_effect.copy(),
         edited_log_effect=log_effect.copy(),
         weights=np.ones_like(log_effect, dtype=np.float64),
-        ci_lower_log_effect=_ci_to_log_effect(ti.ci_lower, log_effect),
-        ci_upper_log_effect=_ci_to_log_effect(ti.ci_upper, log_effect),
+        ci_lower_log_effect=lower,
+        ci_upper_log_effect=upper,
         metadata=metadata,
     )
 
@@ -288,14 +290,23 @@ def grid_edges(x: NDArray) -> NDArray:
     return np.concatenate([[left], mids, [right]]).astype(np.float64)
 
 
-def _ci_to_log_effect(values, log_effect: NDArray) -> NDArray | None:
-    # Term inference may provide intervals on relativity or link scale depending
-    # on source path. Store them on the same log-effect scale as edits.
-    if values is None:
-        return None
-    arr = np.asarray(values, dtype=np.float64).ravel()
-    if arr.shape != log_effect.shape:
-        return None
-    if np.all(arr > 0):
-        return np.log(arr)
-    return arr
+def _link_scale_band(ti, log_effect: NDArray) -> tuple[NDArray | None, NDArray | None]:
+    """The confidence band's ends on the link scale, where every edit is stored.
+
+    A SuperGLM term inference carries the link-scale standard error, so the ends
+    are ``effect -/+ z se`` at its own ``alpha``: its ``ci_lower`` and ``ci_upper``
+    are exponentials clipped at +-500 on the link scale, which no link but a log
+    reads back. A SuperLSS term carries its link-scale ends. A term with neither
+    has no band.
+    """
+    se = getattr(ti, "se_log_relativity", None)
+    if se is not None:
+        se = np.asarray(se, dtype=np.float64).ravel()
+        if se.shape != log_effect.shape:
+            return None, None
+        z = float(norm.ppf(1.0 - ti.alpha / 2.0))
+        return log_effect - z * se, log_effect + z * se
+    ends = getattr(ti, "ci_lower_log_effect", None), getattr(ti, "ci_upper_log_effect", None)
+    if ends[0] is None or ends[1] is None:
+        return None, None
+    return tuple(np.asarray(end, dtype=np.float64).ravel() for end in ends)

@@ -255,13 +255,23 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
     @property
     def parameters(self) -> tuple[ParameterSpec, ...]:
         return (
-            ParameterSpec("scale", LogLink(), "scale", ParameterSupport(lower=0.0), "observed"),
+            ParameterSpec(
+                "scale",
+                LogLink(),
+                "scale",
+                ParameterSupport(lower=0.0),
+                "observed",
+                label="Scale",
+                description="Scale: how far the excesses over the threshold reach.",
+            ),
             ParameterSpec(
                 "shape",
                 BoundedLogitLink(self.shape_lower, self.shape_upper),
                 "shape",
                 ParameterSupport(lower=self.shape_lower, upper=self.shape_upper),
                 "observed",
+                label="Tail index",
+                description="Tail index (ξ): the larger it is, the heavier the tail.",
             ),
         )
 

@@ -55,11 +55,13 @@ const KEEPS_REFERENCE = "With Keep the reference level on in Settings, the refer
 export const OPERATION_HELP = Object.freeze({
   shift_up: Object.freeze({
     title: "Increase selection",
-    body: "Increase selected relativities by 5%.",
+    body: "Increase selected relativities by 5%. On a curve that adds an amount, raise the "
+      + "selected points by 5% of an average row's value.",
   }),
   shift_down: Object.freeze({
     title: "Decrease selection",
-    body: "Decrease selected relativities by 5%.",
+    body: "Decrease selected relativities by 5%. On a curve that adds an amount, lower the "
+      + "selected points by 5% of an average row's value.",
   }),
   smooth: Object.freeze({
     title: "Smooth selection",
@@ -280,8 +282,10 @@ export const HELP_SECTIONS = Object.freeze([
   Object.freeze({
     title: "SuperLSS models",
     items: Object.freeze([
-      "A SuperLSS model has more than one curve per feature. The feature list groups them by the parameter they describe: the mean (blue), and the CV or overdispersion (orange). The CV is the coefficient of variation, standard deviation ÷ mean; overdispersion is 1/θ, where variance = mean + mean²/θ. A feature that acts in both appears in both groups, with a small curve of its effect on each row.",
-      "Every curve is a relativity: the factor the feature multiplies its parameter by, read as in any other model, and 1.00 is no effect. A mean curve is the relativity of the mean; a CV curve (gamma) is the relativity of the CV; a log-normal scale curve is the relativity of σ above its floor; an overdispersion curve (negative binomial) is the relativity of the overdispersion 1/θ, so it rises where overdispersion rises; a Tweedie dispersion curve is the relativity of the dispersion. Moving a point sets the relativity to the value you drag to. No curve is read at a reference row, so editing one curve never moves another, and the Cross-validation tab draws these same values.",
+      "The editor opens every SuperGLM, whatever its family and link, and every SuperLSS family except Dirichlet, whose response is a set of shares.",
+      "A curve shows what the term's link makes of it. On a log link it is a relativity, the factor the term multiplies by, and 1.00 is no effect; on a logit link it is the relativity of the odds. On an identity link it is the amount the term adds, in the parameter's units, and on any other link (inverse, probit, cloglog, square root, a power or a bounded link) the effect on the link scale; on both, 0 is no effect, and the axis label names which. On a curve of added effects, Increase and Decrease move the selection by 5% of the linear predictor on an average training row.",
+      "A SuperLSS model has more than one curve per feature. The feature list groups them by the parameter they describe: the mean, or the parameter the family leads with (blue), and the others, such as the CV or overdispersion (orange). The CV is the coefficient of variation, standard deviation ÷ mean; overdispersion is 1/θ, where variance = mean + mean²/θ. A feature that acts in both appears in both groups, with a small curve of its effect on each row.",
+      "On their usual links the log-normal, gamma, negative binomial and Tweedie draw every curve as a relativity: the factor the feature multiplies its parameter by, and 1.00 is no effect. A mean curve is the relativity of the mean; a CV curve (gamma) is the relativity of the CV; a log-normal scale curve is the relativity of σ above its floor; an overdispersion curve (negative binomial) is the relativity of the overdispersion 1/θ, so it rises where overdispersion rises; a Tweedie dispersion curve is the relativity of the dispersion. Moving a point sets the relativity to the value you drag to. No curve is read at a reference row, so editing one curve never moves another, and the Cross-validation tab draws these same values.",
       "On a CV or overdispersion curve, Increase and Decrease move the selected points by about 5% of the value shown, and Make increasing, Make decreasing and the snaps act on the curve as drawn: on an overdispersion curve, Increase raises overdispersion.",
       "Refit keeps the hand edits made in this session. A model exported with hand edits and opened again holds those edits in its coefficients, and Refit estimates those terms again from the data.",
       "History marks each step with the parameter it acted in. Undo, Redo, Revert and Refit cover both parameters in one history.",
@@ -295,7 +299,7 @@ export const HELP_SECTIONS = Object.freeze([
     title: "Distribution panel",
     items: Object.freeze([
       "Under a SuperLSS chart, the distribution panel draws the distribution of the response at each value or level of the feature, with every other feature fixed at the reference row its caption names: a numeric feature at its median, any other at its most frequent level, and every offset at zero. A categorical feature shows its 12 levels with the most exposure, and the caption says when there are more.",
-      "A count model draws no distribution in this panel yet; the panel says so in place of the chart.",
+      "The panel draws log-normal, gamma and Tweedie models. A count model, and a family the panel cannot draw, show a sentence saying so in place of the chart; the rest of the editor works.",
       "The line marks an amount or a percentile. Drag it, use the slider, or type in its box: an amount such as 25k, €25,000 or 1.5m, or a percentile such as 99.5th or 1 in 200. Each row then reads the chance of a value above the amount, or the amount at the percentile.",
       "A comma is always a thousands separator, so 1,5m reads as 15,000,000. Write a decimal with a point, as in 1.5m.",
       "When the line cannot be drawn where you asked, a note under it says why. An amount off the amount axis is drawn at the axis edge and the readouts keep your amount; a gamma CV above 20 is drawn at 20, the largest the panel computes.",
@@ -308,7 +312,7 @@ export const HELP_SECTIONS = Object.freeze([
   Object.freeze({
     title: "Explain tab",
     items: Object.freeze([
-      "A SuperLSS session has an Explain tab. Each row at the top is a risk: a value for every feature, starting at the reference risk, which has every number at its training median and every level at its most frequent. The plus button adds a risk, a training row drawn at random, up to eight; each keeps its letter and colour until it is removed.",
+      "A SuperLSS session has an Explain tab. It draws log-normal, gamma, negative binomial and Tweedie models; for other families it says so in place of the plots. Each row at the top is a risk: a value for every feature, starting at the reference risk, which has every number at its training median and every level at its most frequent. The plus button adds a risk, a training row drawn at random, up to eight; each keeps its letter and colour until it is removed.",
       "Click a risk's letter, or work in its row, to select it. On the selected row, the icons take the values of another training row drawn at random, put the risk back at the reference risk, add a copy of it to change one value and compare, or remove it. At eight risks the plus button and the copy icon are off.",
       "A number outside the range of the training rows is accepted, and its box turns orange: the model has no data there and extrapolates. The box's hover text gives the range.",
       "The upper plot shows how likely each amount is, as a density over the amount axis, and the lower one the chance of an amount above each value, down to 1 in 10,000. The selected risk is filled and marked at its median, a dot, and its mean, a diamond.",

@@ -1,6 +1,6 @@
 // @ts-check
 
-import { fmt, fmtEdf, fmtPercent } from "../format.js";
+import { fmt, fmtAdded, fmtEdf, fmtPercent, fmtSigned } from "../format.js";
 import { STRUCTURE_HELP } from "./help_content.js";
 
 /** @typedef {import('../api/contracts.js').TermPayload} TermPayload */
@@ -15,12 +15,17 @@ const REFERENCE_POLICY = Object.freeze({
 });
 
 /**
- * The average-edit readout; only a relativity term has one.
+ * The average-edit readout: a factor on a relativity term, a signed amount on an
+ * additive one; an overdispersion term has none.
  * @param {TermPayload} term
- * @param {{weighted_mean_relativity?: number}} impact
+ * @param {{weighted_mean_relativity?: number, weighted_mean_display?: number}} impact
  */
 function averageEdit(term, impact) {
   const kind = term.display ? term.display.kind : "relativity";
+  if (kind === "additive") {
+    const value = impact.weighted_mean_display || 0;
+    return ` · average edit ${value > 0 ? `+${fmtAdded(value)}` : value < 0 ? fmtAdded(value) : "0"}`;
+  }
   return kind === "relativity"
     ? ` · average edit relativity ${fmt(impact.weighted_mean_relativity || 1)}x`
     : "";

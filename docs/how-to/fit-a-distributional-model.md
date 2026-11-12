@@ -162,8 +162,9 @@ first additive predictor describes.
 
 ## What the editor calls each parameter
 
-The model editor opens `GammaLS`, `LogNormalLS`, `NegativeBinomialLS` and
-`TweedieLSS`, and labels each parameter by its name alone:
+The model editor opens every SuperLSS family except `DirichletLSS`, and labels
+each parameter with the name its family declares. The four families the
+distribution panel and the Explain tab draw are labelled:
 
 | Parameter | Families | Editor label | What it is |
 | --- | --- | --- | --- |
@@ -173,11 +174,16 @@ The model editor opens `GammaLS`, `LogNormalLS`, `NegativeBinomialLS` and
 | `dispersion` | `TweedieLSS` | **Dispersion** | dispersion (φ): the variance is φ times the mean to the power p |
 | `power` | `TweedieLSS` | **Power** | power (p): the variance is the dispersion times the mean to the power p |
 
-Every term curve in the editor is a relativity: the factor the term multiplies
-its parameter by, `exp(effect)` on the link scale, with 1.00 for no effect. No
-curve is read at a reference row, so editing one curve never moves another, and
-the Cross-validation tab draws each term's curve exactly as the Editor tab does.
-The axis says what the relativity is of:
+A term curve shows what its parameter's fitted link makes of it. On a log
+link (each of these four on its default links) it is a relativity: the factor
+the term multiplies its parameter by, `exp(effect)` on the link scale, with
+1.00 for no effect. On an identity link it is the amount the term adds, and on
+any other link the effect on the link scale, both with 0 for no effect; the
+table in
+[Which models open, and what a curve shows](../tutorials/edit-a-model-in-the-browser.md#which-models-open-and-what-a-curve-shows)
+has every case. No curve is read at a reference row, so editing one curve
+never moves another, and the Cross-validation tab draws each term's curve
+exactly as the Editor tab does. The axis says what the curve is of:
 
 | Parameter | Axis label | The curve multiplies |
 | --- | --- | --- |
@@ -187,7 +193,8 @@ The axis says what the relativity is of:
 | `theta` | relativity of the overdispersion | 1/θ, so the curve rises where overdispersion rises (θ is the NB2 size) |
 | `dispersion` | relativity of the dispersion | φ, which is in units of the amount to the power 2 − p |
 
-The power is one constant for the model and has no curves.
+The power is usually one constant for the model and has no curves; terms on
+the power show their effect on its bounded scale.
 A term with a `Constraint.fit` rule names it in the term bar, and every edit
 keeps to it; see
 [Editing a constrained SuperLSS term](constrain-a-smooth.md#editing-a-constrained-superlss-term).

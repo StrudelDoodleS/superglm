@@ -38,6 +38,7 @@ from superglm.editor.cv import (
     run_cv,
     run_final_fit,
 )
+from superglm.editor.display import directed_operation, display_for
 from superglm.editor.errors import EditorClientError, EditorKeyError, EditorValueError
 from superglm.editor.evaluation import (
     default_metrics_dataset,
@@ -54,13 +55,12 @@ from superglm.editor.evaluation_cache import (
 from superglm.editor.evidence import EvidenceCoordinator, EvidenceKey
 from superglm.editor.io import jsonable
 from superglm.editor.jobs import JobContext, JobRunner
-from superglm.editor.lss import display_for, is_lss
+from superglm.editor.lss import is_lss
 from superglm.editor.lss.availability import (
     require_available,
     session_availability,
     unavailable_evidence,
 )
-from superglm.editor.lss.display import directed_operation
 from superglm.editor.lss.panel import NOT_SUPERLSS, distribution_panel_payload
 from superglm.editor.lss.risk import risk_payload, risk_row
 from superglm.editor.metrics import metric_comparison_payload, metrics_payload
@@ -364,10 +364,8 @@ class EditorWidget:
                 self._select_term(term)
             target = self.selected_term
             operation, sign = directed_operation(self.session.model, target, operation)
-            if operation == "shift_up":
-                self.session.shift(target, sign * float(np.log(1.05)))
-            elif operation == "shift_down":
-                self.session.shift(target, sign * float(np.log(0.95)))
+            if operation in {"shift_up", "shift_down"}:
+                self.session.shift(target, sign * self._step(target, operation == "shift_up"))
             elif operation in {"isotonic_increasing", "increasing"}:
                 self.session.isotonic(target, "increasing")
             elif operation in {"isotonic_decreasing", "decreasing"}:
@@ -455,6 +453,14 @@ class EditorWidget:
             self.control_counts[term] = int(controls["x"].size)
             self._chart_generation += 1
             return self._state()
+
+    def _step(self, term: str, up: bool) -> float:
+        """Increase's or Decrease's change to ``term``'s effect: x1.05 or x0.95 on a
+        relativity, plus or minus ``additive_step`` on a curve of the effect itself."""
+        if display_for(self.session.model, term).kind == "additive":
+            step = self.session.additive_step(term)
+            return step if up else -step
+        return float(np.log(1.05 if up else 0.95))
 
     def _average_relativity(self, term: str) -> None:
         # Average on the displayed relativity scale. This matches analyst

@@ -17,9 +17,10 @@ from superglm.editor.controls import (
     ordered_control_points,
     spline_fits_levels,
 )
+from superglm.editor.display import DisplayTransform, display_for, y_label_for
 from superglm.editor.group_display import build_group_display
 from superglm.editor.knots import knots_payload, pending_knots
-from superglm.editor.lss import DisplayTransform, display_for, is_lss, lss_term_fields
+from superglm.editor.lss import is_lss, lss_term_fields
 from superglm.editor.lss.availability import lss_availability
 from superglm.editor.lss.display import lss_history_fields
 from superglm.editor.lss.rules import rule_payload
@@ -94,9 +95,12 @@ def session_payload(
             "effective_df": _finite_float(term.metadata.get("edf")),
             "edited": name in edited,
             "x_label": name,
-            "y_label": "relativity",
+            "y_label": y_label_for(display, "mean"),
             "title": name,
         }
+        if not lss and display.kind != "relativity":
+            # A relativity is what a term without ``display`` shows.
+            term_payload["display"] = display.to_payload()
         if lss:
             term_payload.update(lss_term_fields(session.model, name))
             term_payload = lss_availability(term_payload)
@@ -408,8 +412,12 @@ def _ci_payload(
         return None, None
     ci_lower = np.asarray(term.ci_lower_log_effect, dtype=np.float64) + edit_delta
     ci_upper = np.asarray(term.ci_upper_log_effect, dtype=np.float64) + edit_delta
-    # A display that falls as the effect rises (1/theta) swaps the ends.
-    shown = display.to_display(ci_lower), display.to_display(ci_upper)
+    # A display that falls as the effect rises (1/theta) swaps the ends. A
+    # relativity's ends are held where its exponential is finite; an added
+    # amount that is not finite has no band to draw.
+    shown = display.to_bounded_display(ci_lower), display.to_bounded_display(ci_upper)
+    if not (np.all(np.isfinite(shown[0])) and np.all(np.isfinite(shown[1]))):
+        return None, None
     return [float(v) for v in np.minimum(*shown)], [float(v) for v in np.maximum(*shown)]
 
 
@@ -584,10 +592,14 @@ def _impact_payload(
     selected = np.zeros(term.size, dtype=bool)
     if selection.size:
         selected[np.asarray(selection, dtype=np.intp)] = True
-    return {
+    impact = {
         "total_weight": total,
         "weighted_mean_link_delta": float(np.average(delta, weights=w)),
         "weighted_mean_relativity": float(np.average(display.to_display(delta), weights=w)),
         "max_abs_link_delta": float(np.max(np.abs(delta))) if delta.size else 0.0,
         "selected_weight_share": float(np.sum(w[selected]) / total) if total > 0 else 0.0,
     }
+    if display.kind == "additive":
+        # The mean amount the edits add, in the curve's own units; no relativity exists.
+        impact["weighted_mean_display"] = impact["weighted_mean_relativity"]
+    return impact

@@ -57,6 +57,7 @@ import {
 /** @typedef {import('../api/contracts.js').DistributionPanelResponse} DistributionPanel */
 /** @typedef {import('../api/contracts.js').DistributionLink} DistributionLink */
 /** @typedef {import('../distribution/families.js').Law} Law */
+/** @typedef {import('../distribution/families.js').LinkSpec} LinkSpec */
 /** @typedef {import('../chart/fan.js').FanModel} FanModel */
 /** @typedef {import('../chart/fan.js').FanColumn} FanColumn */
 /** @typedef {import('../chart/fan.js').RGB} RGB */
@@ -169,8 +170,10 @@ export function clampedLaw(panel, inputs, eta) {
   const picked = inputs.order.map((at) => eta[at]);
   const spreadPinned = panel.family === "gamma" && picked[1] > ETA_CV_MAX;
   if (spreadPinned) picked[1] = ETA_CV_MAX;
+  // The server names a family here only where its fitted links are the ones this maths reads.
   const family = /** @type {"lognormal_mean" | "gamma" | "tweedie"} */ (panel.family);
-  return { law: lawOf(family, picked, inputs.links), spreadPinned };
+  const links = /** @type {readonly LinkSpec[]} */ (inputs.links);
+  return { law: lawOf(family, picked, links), spreadPinned };
 }
 
 /**

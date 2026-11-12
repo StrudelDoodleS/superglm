@@ -157,3 +157,18 @@ test("a curve with no levels has no reference mark", () => {
   if (curve.kind !== "line") return;
   assert.equal(curve.reference, undefined);
 });
+
+test("an additive sparkline's bars stand on zero", () => {
+  const term = {
+    kind: "categorical", term_type: "categorical", x: [0, 1, 2], levels: ["a", "b", "c"],
+    display: { kind: "additive", link: "identity" },
+  };
+  const [up, level, down] = sparkline({ ...term, y: [3, 0, -3] }, SIZE).bars;
+  const zero = up.y + up.h;
+  assert.ok(Math.abs(down.y - zero) < 1e-9);
+  assert.ok(Math.abs(up.h - down.h) < 1e-9);
+  assert.ok(level.h < up.h && Math.abs(level.y + level.h / 2 - zero) < 1e-9);
+  // A level at 1 has a real effect on an additive curve, so it is a bar above zero.
+  const [one, nil] = sparkline({ ...term, levels: ["a", "b"], x: [0, 1], y: [1, 0] }, SIZE).bars;
+  assert.ok(Math.abs(one.y + one.h - (nil.y + nil.h / 2)) < 1e-9);
+});

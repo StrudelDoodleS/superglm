@@ -75,7 +75,7 @@ from superglm.editor.lss.open import open_lss, refuse_unopenable_fit
 from superglm.editor.lss.refit import lss_refit_with_drafts
 from superglm.editor.lss.rules import holds_rules
 from superglm.editor.lss.terms import lss_editable_terms
-from superglm.editor.lss.view import LSSModelView, is_lss
+from superglm.editor.lss.view import LSSModelView, is_lss, predictor_of
 from superglm.editor.operations import (
     anchored_smooth_values,
     monotone_clamp_values,
@@ -126,6 +126,32 @@ def _edit_span(term: EditableTerm, indices: NDArray[np.intp]) -> dict[str, Any]:
         return {}
     x = np.asarray(term.x, dtype=np.float64)[indices]
     return {"lo": float(x.min()), "hi": float(x.max())}
+
+
+def _mean_abs_eta(model, parameter: str | None) -> float:
+    """The weighted mean of ``|eta|`` over the rows ``model``'s fit kept, 0 when it kept none.
+
+    ``eta`` is the linear predictor of ``parameter`` (a SuperLSS view), or of the mean (a
+    SuperGLM, ``parameter`` None), read from what the fit stored, so nothing is predicted.
+    """
+    if parameter is None:
+        mu = getattr(model, "_fit_mu", None)
+        if mu is None:
+            return 0.0
+        eta = model._link.link(np.asarray(mu, dtype=np.float64))
+        weights = getattr(model, "_fit_weights", None)
+    else:
+        fitted = model.lss._require_fitted()
+        rows = fitted.fit_state.retained_rows
+        if rows is None:
+            return 0.0
+        names = [state.name for state in fitted.layout.predictors]
+        eta = rows.fitted_eta[:, names.index(parameter)]
+        weights = rows.likelihood_weights.values
+    size = np.abs(np.asarray(eta, dtype=np.float64))
+    if weights is None or not float(np.sum(weights)) > 0.0:
+        return float(np.mean(size)) if size.size else 0.0
+    return float(np.average(size, weights=np.asarray(weights, dtype=np.float64)))
 
 
 def _fits_again(replacement, fitted) -> bool:
@@ -376,6 +402,8 @@ class EditorSession:
         self._edit_epoch = 0
         self._materialized_edit_model = None
         self._materialized_edit_epoch: int | None = None
+        # Each predictor's mean |eta| (``additive_step``), with the fit identity it was read on.
+        self._eta_sizes: dict[str | None, tuple[Any, float]] = {}
 
     @classmethod
     def from_model(
@@ -827,6 +855,27 @@ class EditorSession:
             self.pending_redo.clear()
             self._advance_model_revision()
         return self
+
+    def additive_step(self, term: str) -> float:
+        """What Increase adds to ``term``'s effect on a curve that shows the effect itself.
+
+        5% of the weighted mean of ``|eta|``, the linear predictor ``term`` adds to, over
+        the fit's training rows, so on an identity link it moves an average row by about
+        what x1.05 moves it on a log link. Where that mean is 0, or the fit kept no rows,
+        5% of the range of the term's fitted curve, and 0.05 when that is 0 too. The mean
+        is read once per fit (``_fit_identity``).
+        """
+        editable = self._require_term(term)
+        parameter = predictor_of(self.model, term)
+        fit = self._fit_identity(self.model)
+        read = self._eta_sizes.get(parameter)
+        if read is None or read[0] is not fit:
+            read = (fit, _mean_abs_eta(self.model, parameter))
+            self._eta_sizes[parameter] = read
+        size = read[1]
+        if not size > 0.0:
+            size = float(np.ptp(editable.original_log_effect)) if editable.size else 0.0
+        return 0.05 * size if size > 0.0 else 0.05
 
     def shift(self, term: str, delta: float) -> EditorSession:
         """Add a link-scale delta to the selected values."""
@@ -1370,14 +1419,13 @@ class EditorSession:
     # link-scale factors and are removed from the refitted feature set.
     def edited_terms(self) -> list[str]:
         """Names of terms whose edited values differ from the source fit."""
+        from superglm.editor.display import display_for, is_edited
+
         return [
             name
             for name, term in self.terms.items()
-            if not np.allclose(
-                term.edited_log_effect,
-                term.original_log_effect,
-                rtol=0.0,
-                atol=1e-14,
+            if is_edited(
+                display_for(self.model, name), term.original_log_effect, term.edited_log_effect
             )
         ]
 
