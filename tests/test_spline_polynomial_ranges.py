@@ -726,6 +726,39 @@ def test_a_binned_range_keeps_the_support_point_at_the_column_maximum():
     assert np.all(np.isfinite(model.predict(frame)))
 
 
+def _upper_edge_fit():
+    # A line on [1, 2] with rows at exactly 1 and 2 and none between: its two support
+    # points are its edges. Sixty-four equal-width bins carry it.
+    x = np.r_[np.linspace(0.0, 0.9, 1000), 1.0, 2.0, np.linspace(2.1, 10.0, 1000)]
+    y = np.cos(x) + np.random.default_rng(7).normal(0.0, 0.05, x.size)
+    spline = Spline(kind="bs", n_knots=0, polynomial_ranges=[PolynomialRange(1.0, 2.0, 1, "kink")])
+    model = SuperGLM(
+        family="gaussian", selection_penalty=0.0, discrete=True, n_bins=64, features={"x": spline}
+    )
+    model.fit(pd.DataFrame({"x": x}), y)
+    return model
+
+
+def test_a_binned_range_keeps_the_support_point_on_its_upper_edge():
+    # The row at 2 sits on the range's upper edge, a knot, so it is read with the rows
+    # above it unless the next value up is a cut as well. Without that cut the range had
+    # one support point and the fit was refused.
+    model = _upper_edge_fit()
+    assert not model._specs["x"]._bins_equal_width
+
+
+def test_a_ranged_fit_the_equal_width_bins_carry_is_never_refused(monkeypatch):
+    # With the ranges' cuts taken away, the bins that follow the knots leave [1, 2] one
+    # support point. The equal-width bins give it two, so the spline keeps those, at
+    # every site, and the fit goes through as it did before bins followed the knots.
+    from superglm.features import _spline_runtime
+
+    monkeypatch.setattr(_spline_runtime, "determining_cuts", lambda *a, **k: np.empty(0))
+    model = _upper_edge_fit()
+    assert model._specs["x"]._bins_equal_width
+    assert _spline_runtime.bin_knots(model._specs["x"], np.zeros(1)) is None
+
+
 @pytest.mark.parametrize("join", ["kink", "tangent"])
 def test_ppform_export_reproduces_a_ranged_spline(join):
     model = _fit("bs", [PolynomialRange(30.0, 45.0, 1, join)])

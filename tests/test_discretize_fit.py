@@ -1896,16 +1896,18 @@ def test_adaptive_cells_follow_the_rule():
     # a width share of 0.8 of the 8 equal-width bins, under b_min = 8 // 4 = 2.
     x = np.array([0.0] * 10 + [1.0, 2.0, 3.0, 3.0, 3.0, 7.0, 8.0, 8.5, 9.5, 10.0])
     support, index = discretize_column(x, 8, np.array([1.0]))
-    # n_w = 4 cells on the knots: b_min = 4 // 4 = 1 per span, the other 2 by
-    # width 1:9 (0.2, 1.8 -> 0, 1, then the larger remainder to [1, 10]), so
-    # 1 and 3 cells: left edges 0, 1, 4, 7. n_q = 4: the lower quartiles are
-    # the 5th, 10th and 15th smallest rows, 0, 0 and 3; 0 is the minimum and
-    # is dropped. Cells [0, 1), [1, 3), [3, 4), [4, 7), [7, 10].
-    np.testing.assert_allclose(support, [0.0, 1.5, 3.0, 5.5, 8.6], rtol=0, atol=1e-14)
-    assert support[0] == 0.0 and support[2] == 3.0
+    # n_q = 4: the lower quartiles are the 5th, 10th and 15th smallest rows, 0, 0
+    # and 3; 0 is the minimum and is dropped, so one quantile edge, 3, remains and
+    # the knots get the other 7 cells: b_min = 7 // 4 = 1 per span, the other 5 by
+    # width 1:9 (0.5, 4.5 -> 0, 4, the tie's leftover to the left span), so 2 and
+    # 5 cells with left edges 0, 0.5 and 1, 2.8, 4.6, 6.4, 8.2. Cells [0, 0.5),
+    # [0.5, 1), [1, 2.8), [2.8, 3), [3, 4.6), [4.6, 6.4), [6.4, 8.2), [8.2, 10].
+    expected = [0.0, 0.75, 1.5, 2.9, 3.0, 5.5, 7.5, 28.0 / 3.0]
+    np.testing.assert_allclose(support, expected, rtol=0, atol=1e-14)
+    assert support[0] == 0.0 and support[4] == 3.0
     # The pile is read at its own value, the rows on the quantile edge 3 belong
-    # to the cell on its right, and the empty cell [4, 7) keeps its midpoint.
-    np.testing.assert_array_equal(index, [0] * 10 + [1, 1, 2, 2, 2, 4, 4, 4, 4, 4])
+    # to the cell on its right, and the empty cells keep their midpoints.
+    np.testing.assert_array_equal(index, [0] * 10 + [2, 2, 4, 4, 4, 6, 6, 7, 7, 7])
     # A crowded equal-width bin with no knot inside the column: n_w = 8
     # equal-width cells plus the row quantiles, so the pile's cell holds it alone.
     crowded = np.concatenate([np.zeros(60), np.linspace(2.0, 10.0, 40)])
@@ -1914,6 +1916,36 @@ def test_adaptive_cells_follow_the_rule():
     assert support[0] == 0.0 and np.all(index[:60] == 0)
     # Neither condition fails: the equal-width bins are kept.
     _assert_bins_unchanged(np.linspace(0.0, 10.0, 100), 16, np.array([5.0]))
+
+
+def test_a_pile_that_repeats_the_quantiles_leaves_the_budget_to_the_knot_cells():
+    """A pile holding nearly every row makes all the row quantiles one value.
+
+    They then cut nothing, and with half the budget set aside for them the grid
+    had 128 cells where the equal-width bins have 256: the rows at 0.03 to 0.05
+    joined the pile's cell, three occupied support points became two, and a
+    quadratic the equal-width bins identify was read at 0.87 instead of 0.0016
+    at x = 0.04. The cells repeated quantiles do not use go to the knot cells.
+    """
+    x = np.r_[np.zeros(60000), np.linspace(0.03, 0.05, 300), 10.0]
+    support, index = discretize_column(x, 256, np.array([-1.0, 11.0]))
+    assert np.unique(index).size >= np.unique(_equal_width_bins(x, 256)[1]).size == 3
+    assert support[0] < 1e-3  # the pile's cell is read where its rows are, not at a midpoint
+    y = x * x
+    frame = pd.DataFrame({"x": x})
+    fits = {}
+    for discrete in (False, True):
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            spline_penalty=1.0,
+            discrete=discrete,
+            n_bins=256,
+            features={"x": Spline(kind="ps", n_knots=0, m=3)},
+        )
+        model.fit(frame, y)
+        fits[discrete] = float(model.predict(pd.DataFrame({"x": [0.04]}))[0])
+    assert abs(fits[True] - fits[False]) < 0.01
 
 
 def test_binned_support_never_exceeds_n_bins():
@@ -1977,10 +2009,10 @@ def test_more_spans_than_the_knot_half_get_one_cell_each_and_keep_the_resolution
     x = np.linspace(0.0, 10.0, 20001)
     knots = np.sort(np.append(np.linspace(0.0, 10.0, 41)[1:-1], 5.01))
     support, index = discretize_column(x, 64, knots)
-    # 41 knot cells and 23 quantile cells less the one starting at the
-    # minimum: the grid uses n_bins - 1 cells, against the 64 the equal-width
-    # bins occupy.
-    assert np.unique(index).size == 63
+    # 22 distinct quantile edges above the minimum and the knots' 42 cells, one
+    # for each of the 41 spans and one more: the whole budget, as many as the 64
+    # the equal-width bins occupy.
+    assert np.unique(index).size == 64
     inner = knots[(knots > 0.0) & (knots < 10.0)]
     np.testing.assert_array_equal(
         np.searchsorted(inner, support[index], side="right"),
@@ -2038,7 +2070,8 @@ def test_a_column_near_the_float64_limit_bins_without_overflow():
     x = np.linspace(0.0, 1e307, 1000)
     knots = np.array([1e300])
     support, index = discretize_column(x, 256, knots)
-    assert len(support) < 256  # the adaptive grid: the span [0, 1e300) has no bin
+    # The adaptive grid: the span [0, 1e300) has no equal-width bin of its own.
+    assert not np.array_equal(support, _equal_width_bins(x, 256)[0])
     # Scaling by a power of two is exact, so the column gets the bins its
     # scaled-down twin gets, scaled back.
     twin_support, twin_index = discretize_column(np.ldexp(x, -1000), 256, np.ldexp(knots, -1000))

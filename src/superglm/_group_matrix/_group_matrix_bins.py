@@ -41,9 +41,11 @@ def discretize_column(
     and spans without rows get none. When more spans hold rows than that,
     ``n_w`` is their number and each gets exactly one cell. The other ``n_q
     = n_bins - n_w`` come from the rows: the lower ``j / n_q`` quantiles, ``j
-    = 1 .. n_q - 1``, are observed values and become cell edges too. A row on
-    an edge belongs to the cell on its right and the maximum to the last
-    cell, so there are at most ``n_w + n_q - 1 = n_bins - 1`` cells. Each
+    = 1 .. n_q - 1``, are observed values and become cell edges too. Those
+    that repeat, or equal the minimum, cut nothing, and the cells they leave
+    unused go to the knots' share, so a pile of equal values does not halve
+    the grid. A row on an edge belongs to the cell on its right and the
+    maximum to the last cell, so there are at most ``n_bins`` cells. Each
     cell is represented by the mean of its rows, a cell without rows by its
     midpoint.
 
@@ -222,11 +224,14 @@ def _adaptive_bins(
         n_w = n_occupied
     n_q = n_bins - n_w
     lo, hi = float(span_edges[0]), float(span_edges[-1])
-    width_edges = _knot_aligned_left_edges(span_edges, occupied, n_w)
 
     # Lower (inverted-CDF) quantiles of the row mass, so every edge is an observed value.
     quantile_edges = _lower_quantile_values(mass, total, unique_vals, n_q)
-    left = np.unique(np.concatenate([width_edges, quantile_edges[quantile_edges > lo]]))
+    quantile_edges = np.unique(quantile_edges[quantile_edges > lo])
+    # Quantiles that repeat (a pile of equal values) cut nothing, so the cells they
+    # would have made go to the knot-aligned part: the budget is used in full.
+    width_edges = _knot_aligned_left_edges(span_edges, occupied, n_bins - quantile_edges.size)
+    left = np.unique(np.concatenate([width_edges, quantile_edges]))
 
     # A row on an edge belongs to the cell on its right; the maximum to the last.
     cell_of_value = np.searchsorted(left, unique_vals, side="right") - 1

@@ -273,24 +273,28 @@ def determining_cuts(
     ``floor(j n / need)``-th smallest for ``j = 0 .. need - 1``, and a piece
     with fewer keeps them all; the cuts are the midpoints between consecutive
     kept values, so each kept value has a run of its own. A range counts its
-    values from its lower edge up to below its upper one, a stretch those
-    strictly inside it or from an end of the axis, and the piece that reaches
-    the top of the axis counts the column maximum too. As bin knots
+    values from its lower edge to its upper one, both included as
+    certification includes them; a stretch counts those strictly inside it,
+    or from an end of the axis. A value on a range's upper edge is a knot's
+    and would be read with the rows above it, so the next value above is a
+    cut too and those rows keep a cell of their own. As bin knots
     (``discretize_column``), the cuts give each such run a cell of its own on
     the adaptive grid.
     """
     v = np.unique(np.asarray(values, dtype=np.float64))
     top = float(v[-1]) if v.size else np.inf
     starts, ends, needed = _stretch_needs(ranges, lo, hi, order)
-    pieces = [(float(r.lo), float(r.hi), r.degree + 1, False) for r in ranges]
+    pieces = [(float(r.lo), float(r.hi), r.degree + 1, False, True) for r in ranges]
     pieces += [
-        (float(a), float(b), int(n), i > 0)
+        (float(a), float(b), int(n), i > 0, False)
         for i, (a, b, n) in enumerate(zip(starts, ends, needed, strict=True))
     ]
     cuts = [np.empty(0)]
-    for start, end, need, open_start in pieces:
-        below_end = (v <= end) if end >= top else (v < end)
+    for start, end, need, open_start, is_range in pieces:
+        below_end = (v <= end) if (is_range or end >= top) else (v < end)
         inside = v[((v > start) if open_start else (v >= start)) & below_end]
+        if is_range and end < top and inside.size and inside[-1] == end:
+            cuts.append(v[v > end][:1])
         if need < 2 or inside.size < 2:
             continue
         n = inside.size

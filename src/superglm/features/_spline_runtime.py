@@ -11,6 +11,7 @@ from scipy.interpolate import BSpline as BSpl
 from superglm._group_matrix._group_matrix_bins import discretize_column
 from superglm.features import _basis_kernels, _spline_extrapolation, _spline_knots
 from superglm.features._spline_ranges import (
+    RangeError,
     certify_determined,
     determining_cuts,
     merged_interior_knots,
@@ -169,6 +170,7 @@ def place_knots(
     if certify:
         _certify_ranges(spec, x, ranges, n_bins, sample_weight)
     else:
+        spec._bins_equal_width = False
         spec._polynomial_ranges = ranges
 
 
@@ -191,7 +193,7 @@ def fit_support(
     return centres[np.unique(index)]
 
 
-def bin_knots(spec: Any, x: NDArray, weights: NDArray | None = None) -> NDArray:
+def bin_knots(spec: Any, x: NDArray, weights: NDArray | None = None) -> NDArray | None:
     """The knots a binned fit's bins follow: the spline's, plus its ranges' cuts.
 
     A spline with polynomial ranges adds ``determining_cuts`` on the rows of
@@ -202,6 +204,8 @@ def bin_knots(spec: Any, x: NDArray, weights: NDArray | None = None) -> NDArray:
     """
     if not spec._polynomial_ranges:
         return spec._knots
+    if getattr(spec, "_bins_equal_width", False):
+        return None
     # Sorted along the axis, as certification reads them: the declared order may differ.
     ranges = validate_ranges(spec._polynomial_ranges, spec.degree, spec._lo, spec._hi)
     values, _ = _spline_knots.knot_geometry_data(x, weights)
@@ -220,8 +224,23 @@ def _certify_ranges(
     """
     note = "" if n_bins is None else f" once binned to {n_bins} bins"
     order = max(spec._m_orders)
-    support = fit_support(x, n_bins, bin_knots(spec, x, weights), weights)
-    certify_determined(ranges, support, spec._lo, spec._hi, order, note)
+    spec._bins_equal_width = False
+    try:
+        support = fit_support(x, n_bins, bin_knots(spec, x, weights), weights)
+        certify_determined(ranges, support, spec._lo, spec._hi, order, note)
+    except RangeError as short:
+        if n_bins is None:
+            raise
+        # A ranged fit the equal-width bins carry is not refused: where the bins that
+        # follow the knots leave a range or stretch short and the equal-width ones do
+        # not, this spline keeps the equal-width bins at every site (``bin_knots``).
+        try:
+            certify_determined(
+                ranges, fit_support(x, n_bins, None, weights), spec._lo, spec._hi, order, note
+            )
+        except RangeError:
+            raise short from None
+        spec._bins_equal_width = True
     spec._polynomial_ranges = ranges
 
 

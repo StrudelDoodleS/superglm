@@ -76,14 +76,16 @@ Otherwise, as with a skewed column or a pile of equal values, the bins follow
 the knots and the data instead, within the same `n_bins`: half of them divide
 the pieces of the curve that hold rows (one bin each when more pieces than
 that hold rows, the rows then getting the rest), the others cut the rows into
-groups of equal size, and each bin is represented by the average of its rows.
+groups of equal size (bins a pile of equal values would leave unused go back
+to the pieces), and each bin is represented by the average of its rows.
 A pile of equal values is then seen at its own value, and every row inside
 its own piece of the curve. Without that, the fit would read many rows at one
 value, and `predict` would read the curve at values the fit did not check. On
 a spline with polynomial ranges, each range and each stretch beside one is
-also split at its own values into as many pieces as it needs values, so these
-bins give it enough whenever its rows below the column's largest value have
-them.
+also split between its own values into as many pieces as it needs values, so
+these bins give it enough whenever its rows have them. Should they still leave
+a range short where the equal-width bins would not, that spline keeps the
+equal-width bins, so a ranged fit those carry is never refused.
 
 Rows count by their frequency weight, so a fit with positive integer weights
 gets the same bins as the replicated rows it stands for; under prior weights
