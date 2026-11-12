@@ -932,3 +932,21 @@ test("an added-effect term's no-effect line sits at 0, a relativity's at 1", () 
     assert.equal(zero, ticks.get("1"));
   }
 });
+
+test("an added-effect term in small units keeps its digits on the axis and in the tooltips", () => {
+  const tiny = {
+    ...age,
+    kind: "levels",
+    x: null,
+    levels: ["A", "B"],
+    weights: [1, 1],
+    display: { kind: "additive", link: "inverse" },
+    folds: [{ label: "Fold 1", values: [0, 3e-7] }],
+    fit: [0, 2e-7],
+    edited: null,
+  };
+  const markup = levelChartMarkup(tiny);
+  const { ticks } = frameHeights(markup);
+  assert.ok([...ticks.keys()].some((label) => Number(label) !== 0), [...ticks.keys()].join(","));
+  assert.match(markup, /Fold 1 · B: 3\.00e-7/);
+});

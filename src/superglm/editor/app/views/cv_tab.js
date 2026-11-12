@@ -1,7 +1,7 @@
 // @ts-check
 
-import { noEffect } from "../chart/display.js";
-import { escapeHTML, fmt } from "../format.js";
+import { isAdditive, noEffect } from "../chart/display.js";
+import { escapeHTML, fmt, fmtAdded } from "../format.js";
 
 /** @typedef {import('../api/contracts.js').CVReportPayload} CVReportPayload */
 /** @typedef {import('../api/contracts.js').CVResultPayload} CVResultPayload */
@@ -678,6 +678,14 @@ export function termListMarkup(terms, current, query) {
 }
 
 /**
+ * How a term's values print: a curve that adds an amount keeps significant figures below 0.001.
+ * @param {CVTermItem} term
+ */
+function valueFormat(term) {
+  return isAdditive(term.display) ? fmtAdded : fmt;
+}
+
+/**
  * @param {CVTermItem} term
  * @param {(value:number)=>number} y
  * @param {number[]} ticks
@@ -686,7 +694,7 @@ function frameMarkup(term, y, ticks) {
   const { width, left, right } = CHART;
   return ticks.map((tick) => `<line class="cv-grid" x1="${left}" x2="${width - right}"
       y1="${px(y(tick))}" y2="${px(y(tick))}"></line>
-    <text class="cv-tick" x="${left - 6}" y="${px(y(tick) + 4)}" text-anchor="end">${escapeHTML(fmt(tick))}</text>`).join("")
+    <text class="cv-tick" x="${left - 6}" y="${px(y(tick) + 4)}" text-anchor="end">${escapeHTML(valueFormat(term)(tick))}</text>`).join("")
     + `<line class="zero" x1="${left}" x2="${width - right}" y1="${px(y(noEffect(term.display)))}" y2="${px(y(noEffect(term.display)))}"></line>`
     + `<text class="cv-axis-title" x="${left}" y="16">${escapeHTML(termLabel(term))} · ${escapeHTML(term.value_label ?? "relativity")}</text>`;
 }
@@ -777,7 +785,7 @@ export function levelChartMarkup(term) {
     return fold.values.map((value, index) => (isNumber(value)
       ? `<circle class="cv-fold-dot" data-fold="${number}" data-level="${index}"
       cx="${px(x(index) + offset)}" cy="${px(y(value))}" r="3.6" style="${foldMarkStyle(number)}">
-      <title>${escapeHTML(`${fold.label} · ${levels[index]}: ${fmt(value)}`)}</title></circle>`
+      <title>${escapeHTML(`${fold.label} · ${levels[index]}: ${valueFormat(term)(value)}`)}</title></circle>`
       : ""));
   }).join("");
   /** @param {Array<number|null>} values @param {string} kind */
