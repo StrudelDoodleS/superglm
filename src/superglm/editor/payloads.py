@@ -412,8 +412,12 @@ def _ci_payload(
         return None, None
     ci_lower = np.asarray(term.ci_lower_log_effect, dtype=np.float64) + edit_delta
     ci_upper = np.asarray(term.ci_upper_log_effect, dtype=np.float64) + edit_delta
-    # A display that falls as the effect rises (1/theta) swaps the ends.
-    shown = display.to_display(ci_lower), display.to_display(ci_upper)
+    # A display that falls as the effect rises (1/theta) swaps the ends. A
+    # relativity's ends are held where its exponential is finite; an added
+    # amount that is not finite has no band to draw.
+    shown = display.to_bounded_display(ci_lower), display.to_bounded_display(ci_upper)
+    if not (np.all(np.isfinite(shown[0])) and np.all(np.isfinite(shown[1]))):
+        return None, None
     return [float(v) for v in np.minimum(*shown)], [float(v) for v in np.maximum(*shown)]
 
 

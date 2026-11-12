@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 from scipy.stats import norm
 
-from superglm import GammaLS, GaussianLS, SuperGLM
+from superglm import Categorical, GammaLS, GaussianLS, SuperGLM
 from superglm.distributional.families import LomaxLSS
 from superglm.distributional.families._links import BoundedLogitLink
 from superglm.distributional.families.gaussian import LowerBoundedLogLink
@@ -293,3 +294,26 @@ def test_an_identity_band_beyond_500_is_the_effect_plus_or_minus_z_se(editor_fra
         beyond |= bool(np.any(np.abs(np.concatenate([lower, upper])) > 500.0))
     # The band leaves the range a relativity's exponential is clipped to.
     assert beyond
+
+
+def test_a_log_link_band_wider_than_float64_holds_is_drawn_finite_and_ordered():
+    """A level the rows barely fix has link-scale band ends no exponential holds.
+
+    Its ends are held at +-500 on the link scale before the relativity is
+    drawn, so the band stays finite and ordered around the curve.
+    """
+    X = pd.DataFrame({"level": ["A"] * 10 + ["B"] * 10})
+    y = np.array([-9.0, 11.0] * 5 + [-9.999, 10.001] * 5)
+    model = SuperGLM(
+        family="gaussian",
+        link="log",
+        selection_penalty=0.0,
+        tol=1e-12,
+        features={"level": Categorical(base="first")},
+    ).fit(X, y)
+    assert model.result.converged
+    term = session_payload(EditorSession.from_model(model))["level"]
+    lower, curve, upper = (np.asarray(term[k]) for k in ("ci_lower_y", "y", "ci_upper_y"))
+    assert np.all(np.isfinite(lower)) and np.all(np.isfinite(upper))
+    assert np.all(lower <= curve) and np.all(curve <= upper)
+    assert lower[1] < upper[1]
