@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { fmt, fmtAdded } from "../../src/superglm/editor/app/format.js";
 import {
   FALLBACK_CHART_SIZE,
+  axisSpan,
   categoricalTickIndices,
   chartSize,
   fitMeasuredLabel,
@@ -428,4 +430,22 @@ test("ticks sit at 1, 2 or 5 times a power of ten, inside the range", () => {
   assert.deepEqual(roundTicks(0, 12.5, 8), [0, 2, 4, 6, 8, 10, 12]);
   assert.deepEqual(roundTicks(1, 1, 5), [1]);
   assert.deepEqual(roundTicks(Number.NaN, 2, 5), [0]);
+});
+
+test("drawing a value and reading it back from the pointer are inverses on a tiny axis", () => {
+  // A curve spanning 2e-13 used to draw against a floor of 1e-12 and read back against its span.
+  const [yMin, yMax, top, innerH] = [-2.4e-14, 2.24e-13, 10, 300];
+  const sy = (/** @type {number} */ v) => top + innerH - ((v - yMin) / axisSpan(yMin, yMax)) * innerH;
+  const back = (/** @type {number} */ py) => yMax - ((py - top) / innerH) * axisSpan(yMin, yMax);
+  for (const value of [0, 1e-13, 2e-13]) {
+    assert.ok(Math.abs(back(sy(value)) - value) <= 1e-12 * axisSpan(yMin, yMax), String(value));
+  }
+  assert.equal(axisSpan(0, 2e-13), 2e-13);
+  assert.equal(axisSpan(1, 1), 1e-12);
+});
+
+test("a value on a curve that adds an amount keeps significant figures below 0.001", () => {
+  assert.equal(fmtAdded(-1e-7), "-1.00e-7");
+  assert.equal(fmtAdded(4.153e-14), "4.15e-14");
+  for (const value of [0, 0.25, 12.3, -4, 1234.5]) assert.equal(fmtAdded(value), fmt(value));
 });

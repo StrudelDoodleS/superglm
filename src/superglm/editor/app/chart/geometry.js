@@ -362,6 +362,15 @@ function assertNonnegativeInteger(name, value) {
 }
 
 /**
+ * The width an axis maps onto its pixels: its range, or 1e-12 when it has none. Drawing a value
+ * and reading one back from the pointer both use it, so they are inverses at every scale.
+ * @param {number} low @param {number} high
+ */
+export function axisSpan(low, high) {
+  return high > low ? high - low : 1e-12;
+}
+
+/**
  * The y range a curve is drawn in: its own range with 12% padding each side. A
  * positive curve (every relativity, CV and overdispersion is one) is padded by at
  * least 0.05, 5% of no effect, and one that stays at zero or above is never padded

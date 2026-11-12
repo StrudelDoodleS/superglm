@@ -1,6 +1,6 @@
 // @ts-check
 
-import { fmt, fmtEdf, fmtPercent, fmtSigned } from "../format.js";
+import { fmt, fmtAdded, fmtEdf, fmtPercent, fmtSigned } from "../format.js";
 import { STRUCTURE_HELP } from "./help_content.js";
 
 /** @typedef {import('../api/contracts.js').TermPayload} TermPayload */
@@ -22,7 +22,10 @@ const REFERENCE_POLICY = Object.freeze({
  */
 function averageEdit(term, impact) {
   const kind = term.display ? term.display.kind : "relativity";
-  if (kind === "additive") return ` · average edit ${fmtSigned(impact.weighted_mean_display || 0)}`;
+  if (kind === "additive") {
+    const value = impact.weighted_mean_display || 0;
+    return ` · average edit ${value > 0 ? `+${fmtAdded(value)}` : value < 0 ? fmtAdded(value) : "0"}`;
+  }
   return kind === "relativity"
     ? ` · average edit relativity ${fmt(impact.weighted_mean_relativity || 1)}x`
     : "";

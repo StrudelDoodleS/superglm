@@ -291,4 +291,6 @@ test("an additive context readout adds", () => {
   assert.equal(additive(12.3), "2 of 10 selected · average edit +12.3 · selected exposure 25%");
   assert.equal(additive(-4), "2 of 10 selected · average edit -4 · selected exposure 25%");
   assert.equal(additive(0), "2 of 10 selected · average edit 0 · selected exposure 25%");
+  // A curve in units far below 1 keeps significant figures rather than rounding to zero.
+  assert.equal(additive(1.5e-15), "2 of 10 selected · average edit +1.50e-15 · selected exposure 25%");
 });

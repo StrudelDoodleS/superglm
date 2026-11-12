@@ -15,6 +15,17 @@ export function fmt(value) {
 }
 
 /**
+ * A value on a curve that adds an amount, whose units can lie far below 1: as `fmt`, but a
+ * value below 0.001 keeps three significant figures (-1.00e-7) rather than rounding to zero.
+ * @param {number} value
+ */
+export function fmtAdded(value) {
+  if (!Number.isFinite(value)) return "";
+  const abs = Math.abs(value);
+  return abs > 0 && abs < 0.001 ? value.toPrecision(3) : fmt(value);
+}
+
+/**
  * An exposure or a count: thousands separators and no decimals once it is a
  * hundred or more (126,037, not 126036.5), `fmt` below that.
  * @param {number} value

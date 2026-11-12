@@ -1,4 +1,5 @@
 import { fromDisplay, reachableDisplay, shiftDisplay } from "./chart/display.js";
+import { axisSpan } from "./chart/geometry.js";
 import { shiftedCurve } from "./chart/ordered_spline.js";
 
 // A press that moves no further than this many SVG units in x and in y is a
@@ -817,14 +818,14 @@ function yFromPoint(context, point) {
   const term = context.currentTerm();
   return reachableDisplay(
     term && term.display,
-    yMax - ((point.y - margin.top) / Math.max(innerH, 1e-12)) * (yMax - yMin)
+    yMax - ((point.y - margin.top) / Math.max(innerH, 1e-12)) * axisSpan(yMin, yMax)
   );
 }
 
 function dataFromPoint(context, point) {
   const { xMin, xMax, yMin, yMax, margin, innerW, innerH } = context.svg._scale;
-  const x = xMin + ((point.x - margin.left) / Math.max(innerW, 1e-12)) * (xMax - xMin);
-  const y = yMax - ((point.y - margin.top) / Math.max(innerH, 1e-12)) * (yMax - yMin);
+  const x = xMin + ((point.x - margin.left) / Math.max(innerW, 1e-12)) * axisSpan(xMin, xMax);
+  const y = yMax - ((point.y - margin.top) / Math.max(innerH, 1e-12)) * axisSpan(yMin, yMax);
   return { x, y };
 }
 
