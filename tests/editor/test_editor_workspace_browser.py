@@ -1559,7 +1559,8 @@ def test_analyst_can_discover_edit_undo_redo_help_and_export(open_editor_page):
         tooltip.wait_for(state="visible")
         assert tooltip.locator("[data-popover-heading]").inner_text() == "Increase selection"
         assert tooltip.locator("[data-popover-description]").inner_text() == (
-            "Increase selected relativities by 5%."
+            "Increase selected relativities by 5%. On a curve that adds an amount, raise the "
+            "selected points by 5% of an average row's value."
         )
 
         with page.expect_response(
