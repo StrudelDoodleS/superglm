@@ -238,6 +238,8 @@ def _profiled_merit(
     parameter: str,
     reach: float,
     dropped: Hashable | None = None,
+    *,
+    eta_base: NDArray[np.float64] | None = None,
 ) -> tuple[float, float, int | None]:
     """The intercept shift that maximizes the joint log-likelihood, and the penalized merit there.
 
@@ -256,8 +258,15 @@ def _profiled_merit(
     state = fitted.layout.predictor(parameter)
     link = state.link
     column = [predictor.name for predictor in fitted.layout.predictors].index(parameter)
-    eta = fitted._predict_eta_resolved(
-        coefficients, frame, rows.offsets, dropped=None if dropped is None else (parameter, dropped)
+    eta = (
+        fitted._predict_eta_resolved(
+            coefficients,
+            frame,
+            rows.offsets,
+            dropped=None if dropped is None else (parameter, dropped),
+        )
+        if eta_base is None
+        else eta_base
     )
     penalty = 0.5 * float(coefficients @ np.asarray(fitted.result.penalty) @ coefficients)
     unit = _intercept_scale(eta[:, column], reach)
@@ -1214,9 +1223,15 @@ def repaired_model(
                 pass  # the dropped term's own profile decides
         fallback = coefficients.copy()
         fallback[term.columns] = 0.0
-        fallback_shift, fallback_merit, fallback_invalid = _profiled_merit(
-            fitted, rows, frame, fallback, term.parameter, reach, dropped=term.label
-        )
+        if candidate is not None and not np.any(repaired):
+            # The candidate is already the dropped term. Its valid profile has
+            # just been computed; scoring the zero contribution again changes
+            # neither the predictor nor its objective.
+            fallback_shift, fallback_merit, fallback_invalid = shift, merit, 0
+        else:
+            fallback_shift, fallback_merit, fallback_invalid = _profiled_merit(
+                fitted, rows, frame, fallback, term.parameter, reach, dropped=term.label
+            )
         bar = fallback_merit + shape_sum_tolerance(abs(fallback_merit), len(rows.response))
         state = fitted.layout.predictor(term.parameter)
         if not repair.flat and (candidate is None or merit > bar):
@@ -1328,6 +1343,10 @@ def _settled_intercepts(fitted, rows, frame, coefficients, parameters):
     from superglm.constraints import _InterceptSearchError
 
     beta = coefficients.copy()
+    # Curves, rows and offsets are held throughout this numerical iteration.
+    # Keep their predictor for this call only, and update precisely the column
+    # whose intercept changed, rather than rebuilding every term each profile.
+    eta = np.array(fitted._predict_eta_resolved(beta, frame, rows.offsets), copy=True)
     for _ in range(_NEWTON_STEPS):
         changed = False
         for parameter in parameters:
@@ -1335,12 +1354,18 @@ def _settled_intercepts(fitted, rows, frame, coefficients, parameters):
             if index is None:
                 continue
             try:
-                shift, _, _ = _profiled_merit(fitted, rows, frame, beta, parameter, 0.0)
+                shift, _, _ = _profiled_merit(
+                    fitted, rows, frame, beta, parameter, 0.0, eta_base=eta
+                )
             except _InterceptSearchError:
                 break
             if shift != 0.0:
+                before = beta[index]
                 beta[index] += shift
-                changed = True
+                actual_shift = beta[index] - before
+                column = fitted.layout.predictor(parameter).parameter_index
+                eta[:, column] += actual_shift
+                changed |= actual_shift != 0.0
         else:
             if not changed:
                 return beta

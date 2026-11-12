@@ -243,13 +243,19 @@ def test_joint_intercept_settling_discloses_exhaustion_and_keeps_its_last_estima
 
     fitted = SimpleNamespace(
         layout=SimpleNamespace(
-            predictor=lambda name: SimpleNamespace(intercept_index={"mean": 0, "scale": 1}[name])
-        )
+            predictor=lambda name: SimpleNamespace(
+                intercept_index={"mean": 0, "scale": 1}[name],
+                parameter_index={"mean": 0, "scale": 1}[name],
+            )
+        ),
+        _predict_eta_resolved=lambda *a: np.zeros((1, 2)),
     )
     monkeypatch.setattr(shape_repair, "_NEWTON_STEPS", 2)
-    monkeypatch.setattr(shape_repair, "_profiled_merit", lambda *a: (0.1, 1.0, 0))
+    monkeypatch.setattr(shape_repair, "_profiled_merit", lambda *a, **kw: (0.1, 1.0, 0))
     with pytest.warns(RuntimeWarning, match="did not settle jointly.*published"):
-        beta = shape_repair._settled_intercepts(fitted, None, None, np.zeros(2), ("mean", "scale"))
+        beta = shape_repair._settled_intercepts(
+            fitted, SimpleNamespace(offsets=None), None, np.zeros(2), ("mean", "scale")
+        )
     np.testing.assert_allclose(beta, [0.2, 0.2])
 
 
