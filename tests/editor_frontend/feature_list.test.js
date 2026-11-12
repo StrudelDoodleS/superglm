@@ -138,11 +138,19 @@ globalThis.Element = FakeElement;
 globalThis.HTMLElement = FakeElement;
 
 const TERMS = {
-  age: { kind: "spline", term_type: "spline", effective_df: 4.2137 },
-  mileage: { kind: "spline", term_type: "spline", effective_df: 2.5 },
-  region: { kind: "categorical", term_type: "categorical", effective_df: 3 },
-  territory: { kind: "categorical", term_type: "categorical", effective_df: null },
+  age: { kind: "spline", term_type: "spline", effective_df: 4.2137, x: [18, 40, 90], y: [1.3, 0.9, 1.1], levels: null },
+  mileage: { kind: "spline", term_type: "spline", effective_df: 2.5, x: [0, 1, 2], y: [0.8, 1, 1.2], levels: null },
+  region: {
+    kind: "categorical", term_type: "categorical", effective_df: 3, x: [0, 1, 2], y: [1, 1.2, 0.9],
+    levels: ["N", "S", "W"],
+  },
+  territory: {
+    kind: "categorical", term_type: "categorical", effective_df: null, x: [0, 1], y: [1, 1.05],
+    levels: ["A", "B"],
+  },
 };
+// A row's parts other than its mini curve, which the SuperGLM and SuperLSS tests check apart.
+const textParts = (row) => row.children.filter((part) => part.tagName !== "SVG");
 const GROUPS = [["spline", ["age", "mileage"]], ["categorical", ["region", "territory"]]];
 
 function fixture() {
@@ -197,7 +205,7 @@ test("rows carry name, kind and EDF under group headings; the active row is curr
   const sections = nodes.rows.children;
   assert.deepEqual(sections.map((section) => section.children[0].textContent), ["spline", "categorical"]);
   assert.deepEqual(
-    rows().map((row) => row.children.map((part) => part.textContent)),
+    rows().map((row) => textParts(row).map((part) => part.textContent)),
     [
       ["age", "spline", "EDF 4.21"],
       ["mileage", "spline", "EDF 2.50"],
@@ -374,16 +382,16 @@ test("a term with a change waiting for refit carries a dot on its row; the other
   assert.equal(dots[2][0].getAttribute("aria-label"), "Waiting for refit");
 
   render();
-  assert.ok(rows().every((row) => row.children.length === 3));
+  assert.ok(rows().every((row) => textParts(row).length === 3));
 });
 
-test("the waiting dot sits right after the term's name, ahead of its kind and EDF", () => {
+test("the waiting dot sits right after the term's name, ahead of its mini curve, kind and EDF", () => {
   const { render, rows } = fixture();
   render({ waiting: new Set(["region"]) });
   const row = rows()[2];
   assert.deepEqual(
-    row.children.map((part) => part.className),
-    ["feature-row-name", "feature-row-waiting", "feature-row-kind", "feature-row-edf"],
+    row.children.map((part) => part.className || part.getAttribute("class")),
+    ["feature-row-name", "feature-row-waiting", "mini-curve", "feature-row-kind", "feature-row-edf"],
   );
   const name = row.children.find((part) => part.className === "feature-row-name");
   assert.equal(row.children[row.children.indexOf(name) + 1].className, "feature-row-waiting");
@@ -449,9 +457,18 @@ test("the search matches the bare feature name, not the parameter prefix of its 
   assert.equal(nodes.rows.children[0].dataset.role, "spread");
 });
 
-test("a SuperGLM list draws no mini curves and no role", () => {
+test("a SuperGLM list draws every row's mini curve, a line for a curve and bars for levels, and no role", () => {
   const { nodes, render, rows } = fixture();
   render();
-  assert.ok(rows().every((row) => row.children.every((part) => part.tagName !== "SVG")));
+  const curves = rows().map((row) => row.children.filter((part) => part.tagName === "SVG"));
+  assert.ok(curves.every((found) => found.length === 1));
+  for (const [curve] of curves) {
+    assert.match(curve.getAttribute("class"), /\bmini-curve\b/);
+    assert.equal(curve.getAttribute("aria-hidden"), "true");
+  }
+  assert.deepEqual(
+    curves.map(([curve]) => curve.children.map((node) => node.tagName)),
+    [["PATH"], ["PATH"], ["RECT", "RECT", "RECT"], ["RECT", "RECT"]],
+  );
   assert.ok(nodes.rows.children.every((section) => section.dataset.role === undefined));
 });

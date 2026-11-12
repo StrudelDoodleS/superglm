@@ -2600,3 +2600,34 @@ def test_feature_list_opens_by_default_only_where_the_chart_keeps_its_width(
         assert feature_list.get_attribute("data-open") == (
             "true" if expected_open == "false" else "false"
         )
+
+
+def test_superglm_feature_rows_draw_mini_curves_that_follow_an_edit(open_editor_page):
+    with open_editor_page(viewport={"width": 1280, "height": 720}) as (page, session):
+        rows = page.locator("#featureList [data-term]")
+        assert rows.count() == len(session.terms)
+        assert page.locator("#featureList [data-term] svg.mini-curve").count() == rows.count()
+        # A SuperGLM term's curve is of the mean, so it takes the mean's colour.
+        stroke, mean_colour = page.evaluate(
+            """() => {
+                const path = document.querySelector('#featureList [data-term="curve"] svg.mini-curve path');
+                const probe = document.createElement("span");
+                probe.style.color = "var(--param-average)";
+                document.body.append(probe);
+                const colour = getComputedStyle(probe).color;
+                probe.remove();
+                return [getComputedStyle(path).stroke, colour];
+            }"""
+        )
+        assert stroke == mean_colour
+
+        curve = page.locator('#featureList [data-term="curve"] svg.mini-curve path')
+        before = curve.get_attribute("d")
+        page.locator('#chart circle.point[data-index="2"]').click()
+        page.get_by_role("button", name="Increase selection", exact=True).click()
+        page.wait_for_function("() => !document.querySelector('#undoAction').disabled")
+        page.wait_for_function(
+            """(before) => document.querySelector(
+                '#featureList [data-term="curve"] svg.mini-curve path')?.getAttribute("d") !== before""",
+            arg=before,
+        )

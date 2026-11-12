@@ -204,7 +204,7 @@ function featureRow(doc, name, { terms, activeTerm, tabStop, waiting }) {
   if (name === activeTerm) row.setAttribute("aria-current", "true");
   row.append(span(doc, "feature-row-name", term.term_label ?? name));
   if (waiting.has(name)) row.append(waitingDot(doc));
-  if (term.parameter_role !== undefined) row.append(miniCurve(doc, term));
+  row.append(miniCurve(doc, term));
   row.append(
     span(doc, "feature-row-kind", term.term_type || term.kind || "term"),
     span(doc, "feature-row-edf", edfLabel(term.effective_df)),
@@ -223,7 +223,8 @@ function stripLabel(term, name) {
 }
 
 /**
- * The feature's effect drawn small, in its parameter's colour. It repeats what
+ * The feature's effect drawn small, in its parameter's colour; a SuperGLM
+ * term's curve is of the mean and takes the mean's colour. It repeats what
  * the row's name and kind already say, so it is hidden from assistive tech.
  * @param {Document} doc @param {TermPayload} term
  */
