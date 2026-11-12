@@ -3140,6 +3140,159 @@ def test_feasible_start_with_nonhomogeneous_rows():
     assert _homogeneous_feasible_start(beta * -1.0, cap[:1], np.array([1.0]), 1e-12) is None
 
 
+class TestDegenerateFaceRecovery:
+    """A rounded face minimum must not repeat the same unsuccessful saddle solve."""
+
+    def test_a_feasible_face_minimum_with_a_residual_tangent_score_is_recovered(self, monkeypatch):
+        """Force a failed face certificate without ever violating a row."""
+        import superglm.solvers.constrained_qp as qp
+
+        original = qp._solve_saddle_direct
+
+        def rounded_saddle(matrix, rhs):
+            solved = original(matrix, rhs)
+            solved[1] += 2.0**-20
+            return solved
+
+        monkeypatch.setattr(qp, "_solve_saddle_direct", rounded_saddle)
+        result = qp.solve_constrained_qp(
+            np.eye(2),
+            np.array([-1.0, 2.0]),
+            np.array([[1.0, 0.0]]),
+            np.zeros(1),
+            active_set_init=[0],
+            beta_start=np.zeros(2),
+            max_iter=12,
+        )
+
+        assert result.converged
+        np.testing.assert_allclose(result.beta, [0.0, 2.0], rtol=1e-12, atol=1e-12)
+
+    def test_a_small_step_recovers_a_residual_infeasibility_before_projecting_again(
+        self, monkeypatch
+    ):
+        """A phase-one rounding residue near the apex must not prevent certification."""
+        import superglm.solvers.constrained_qp as qp
+
+        residue = np.full(2, -(2.0**-50))
+        monkeypatch.setattr(qp, "_project_feasible", lambda *a, **k: residue.copy())
+        result = qp.solve_constrained_qp(
+            np.eye(2),
+            -np.ones(2),
+            np.ones((1, 2)),
+            np.zeros(1),
+            active_set_init=[0],
+            max_iter=12,
+        )
+
+        assert result.converged
+        np.testing.assert_allclose(result.beta, np.zeros(2), atol=1e-14)
+
+    def test_a_changed_working_set_tries_its_ordinary_solve_before_recovery(self, monkeypatch):
+        """A recovered face must not replace later Schur updates with full QR solves."""
+        import superglm.solvers.constrained_qp as qp
+
+        original = qp._solve_saddle_direct
+        recover = qp._coordinate_face_minimum
+        recovered_widths = []
+
+        def rounded_first_face(matrix, rhs):
+            solved = original(matrix, rhs)
+            if len(rhs) == 4:
+                solved[1] += 2.0
+            return solved
+
+        def counted_recovery(H, g, rows, bounds):
+            recovered_widths.append(len(rows))
+            return recover(H, g, rows, bounds)
+
+        monkeypatch.setattr(qp, "_solve_saddle_direct", rounded_first_face)
+        monkeypatch.setattr(qp, "_coordinate_face_minimum", counted_recovery)
+        result = qp.solve_constrained_qp(
+            np.eye(3),
+            np.array([-1.0, -1.0, 2.0]),
+            np.eye(3)[:2],
+            np.zeros(2),
+            active_set_init=[0],
+            beta_start=np.zeros(3),
+            max_iter=12,
+        )
+
+        assert result.converged
+        np.testing.assert_allclose(result.beta, [0.0, 0.0, 2.0], atol=1e-12)
+        assert recovered_widths == [1]
+
+    @pytest.mark.parametrize("affine", [False, True])
+    @pytest.mark.parametrize("powers", [(0, 0), (-500, 500), (500, -500)])
+    def test_roundoff_off_the_working_face_does_not_exhaust_the_budget(
+        self, monkeypatch, affine, powers
+    ):
+        """Force the off-face step seen beside nearly dependent derivative cuts.
+
+        The optimum and positive multipliers are planted independently. Every
+        saddle solve receives a small normal error, so repeating it cannot
+        repair the point. The unfixed loop exhausts its budget on that same
+        working set. This forces the event on every LAPACK implementation.
+        """
+        import superglm.solvers.constrained_qp as qp
+
+        H = np.diag([2.0, 3.0, 4.0])
+        if affine:
+            A = np.array([[1.0, 1.0, 0.0], [0.0, 1.0, 1.0]])
+            expected = np.array([1.0, 2.0, 3.0])
+        else:
+            delta = 2.0**-20
+            A = np.array([[1.0, delta, -delta], [1.0, -delta, delta]])
+            expected = np.array([0.0, 1.0, 1.0])
+        b = A @ expected
+        g = H @ expected - A.T @ np.array([1.0, 2.0])
+        row_power, objective_power = powers
+        A, b = np.ldexp(A, row_power), np.ldexp(b, row_power)
+        H, g = np.ldexp(H, objective_power), np.ldexp(g, objective_power)
+        original = qp._solve_saddle_direct
+
+        def rounded_saddle(matrix, rhs):
+            solved = original(matrix, rhs)
+            solved[0 if affine else 1] -= 1e-8
+            return solved
+
+        monkeypatch.setattr(qp, "_solve_saddle_direct", rounded_saddle)
+        result = qp.solve_constrained_qp(
+            H, g, A, b, active_set_init=[0, 1], beta_start=expected, max_iter=12
+        )
+
+        assert result.converged
+        np.testing.assert_allclose(result.beta, expected, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(
+            np.ldexp(A @ result.beta, -row_power), np.ldexp(b, -row_power), rtol=1e-12, atol=1e-12
+        )
+
+    @pytest.mark.parametrize("case", ["concave", "monotone"])
+    @pytest.mark.parametrize("order", ["C", "F"])
+    def test_captured_postfit_faces_certify_against_the_independent_dual(self, case, order):
+        """Replay #626's scaled QPs; the forced-rounding test pins the failure mechanism."""
+        path = Path(__file__).parent / "fixtures" / "qp_postfit_degenerate_faces.npz"
+        with np.load(path) as fixture:
+            H, g, A, b = (
+                np.array(fixture[f"{case}_{key}"], order=order) for key in ("H", "g", "A", "b")
+            )
+            start = fixture[f"{case}_start"]
+            active = fixture[f"{case}_active"].tolist()
+        result = solve_constrained_qp(H, g, A, b, active_set_init=active, beta_start=start)
+
+        assert result.converged
+        assert _is_feasible(A, result.beta, b, 1e-12)
+        # The NNLS oracle supplies a dual-feasible lower bound, even when
+        # its reconstructed primal point is inaccurate beside dependent cuts.
+        dual_beta, _ = TestDegenerateVertex._dual_oracle(H, g, A)
+        primal_value = 0.5 * result.beta @ H @ result.beta - g @ result.beta
+        dual_value = -0.5 * dual_beta @ H @ dual_beta
+        scale = np.abs(result.beta) @ (np.abs(H) @ np.abs(result.beta) + np.abs(g))
+        # The independent Cholesky solve's forward error scales with cond(H).
+        allowance = 64 * (len(g) + len(A)) * np.finfo(float).eps * np.linalg.cond(H) * scale
+        assert abs(primal_value - dual_value) <= allowance
+
+
 class TestSaddleUpdates:
     """A long solve on a large saddle system reuses one factorization, by Schur complement."""
 
