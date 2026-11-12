@@ -234,7 +234,7 @@ def _build_spline_metadata(spec) -> SplineMetadata:
 def _expand_grouped_term(
     ti: TermInference, grouping, original_level_values: dict[str, float] | None = None
 ) -> TermInference:
-    """Expand a grouped TermInference back to all original levels.
+    """Expand a grouped TermInference to the original members of its fitted levels.
 
     Each original level gets its group's relativity, SE and CI (uncorrected for multiple
     comparison). The display curve (``x``, ``log_relativity``, ``relativity``,
@@ -254,7 +254,15 @@ def _expand_grouped_term(
     # directly raises KeyError on the first level whose spellings differ.
     group_idx = {str(lev): i for i, lev in enumerate(grouped_levels)}
 
-    expanded_levels = grouping.all_original_levels
+    # A book's grouping may be reused on a subset whose inferred universe has
+    # no rows for an entire group. Keep every member of each fitted group,
+    # including absent members, without inventing an effect for an unfitted
+    # group. Explicitly bound, pinned groups remain in ti.levels and expand.
+    expanded_levels = [
+        lev
+        for lev in grouping.all_original_levels
+        if str(grouping.original_to_group[lev]) in group_idx
+    ]
     indices = [group_idx[str(grouping.original_to_group[lev])] for lev in expanded_levels]
 
     log_rel = np.asarray(ti.log_relativity)[indices]

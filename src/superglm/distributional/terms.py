@@ -355,11 +355,12 @@ def repair_covering(fitted: Any, qualified: str) -> str | None:
     repaired = repaired_terms(fitted)
     if qualified in repaired:
         return qualified
-    parent = qualified.removesuffix(_SPECIAL_SUFFIX)
-    if parent == qualified or parent not in repaired:
+    if not repaired:
         return None
     parameter, _, label = qualified.partition(":")
-    return None if label in _compiled_predictor(fitted, parameter).compiled.specs else parent
+    parent = _free_level_parent(fitted, parameter, label)
+    qualified_parent = f"{parameter}:{parent}"
+    return qualified_parent if parent is not None and qualified_parent in repaired else None
 
 
 def _inference_withheld(fitted: Any, qualified: str) -> bool:
@@ -390,6 +391,20 @@ def _compiled_spec(fitted: Any, parameter: str, term: Hashable) -> Any:
     """Return the compiled feature spec of a term, or ``None`` for an interaction."""
     specs = _compiled_predictor(fitted, parameter).compiled.specs
     return specs.get(_feature_label(fitted, parameter, term))
+
+
+def _free_level_parent(fitted: Any, parameter: str, term: Hashable) -> str | None:
+    """A free block's owning feature, as declared by the compiler.
+
+    Main columns and interactions can also end in ``:special``. Their names
+    alone do not make them a free-level block of another term.
+    """
+    if not isinstance(term, str) or not term.endswith(_SPECIAL_SUFFIX):
+        return None
+    for group in _compiled_predictor(fitted, parameter).compiled.groups:
+        if group.name == term and group.subgroup_type == "special":
+            return str(group.feature_name)
+    return None
 
 
 def _interaction_on(fitted: Any, parameter: str, feature: Hashable) -> str | None:
@@ -899,7 +914,11 @@ def _prepare_term_effect(
     frame = as_eager_frame(X_train)
     evaluation, grid, levels = _sweep(fitted, frame, parameter, term, points)
     special_name = f"{qualified}{_SPECIAL_SUFFIX}"
-    special_slice = fitted.layout.term_slices.get(special_name)
+    special_slice = (
+        fitted.layout.term_slices.get(special_name)
+        if _free_level_parent(fitted, parameter, f"{term}{_SPECIAL_SUFFIX}") == str(term)
+        else None
+    )
     blocks = (term_slice,) if special_slice is None else (term_slice, special_slice)
     names = (qualified,) if special_slice is None else (qualified, special_name)
     spec = _compiled_spec(fitted, parameter, term)
@@ -1066,8 +1085,8 @@ def _prepare_term_test(
     beta = np.asarray(fitted.fitted_result.coefficients, dtype=np.float64)[term_slice]
     edf = float(fitted.inference.term_edf[qualified])
 
-    parent = term.removesuffix(_SPECIAL_SUFFIX) if isinstance(term, str) else term
-    spec = _compiled_spec(fitted, parameter, parent)
+    parent = _free_level_parent(fitted, parameter, term)
+    spec = _compiled_spec(fitted, parameter, term if parent is None else parent)
     level_term = spec is not None and _level_domain(spec) is not None
     design: NDArray[np.float64] | None = None
     if not level_term:
@@ -1163,10 +1182,10 @@ def _intercept_row(
     }
 
 
-def _summary_label(term: str) -> str:
+def _summary_label(term: str, *, special_parent: str | None = None) -> str:
     """The row label of a term: a free level block says so instead of its suffix."""
-    if term.endswith(_SPECIAL_SUFFIX):
-        return f"{term[: -len(_SPECIAL_SUFFIX)]} (special level)"
+    if special_parent is not None:
+        return f"{special_parent} (special level)"
     return term
 
 
@@ -1324,7 +1343,9 @@ def summary_table(
             rows.append(
                 {
                     "parameter": state.name,
-                    "term": _summary_label(term),
+                    "term": _summary_label(
+                        term, special_parent=_free_level_parent(fitted, state.name, term)
+                    ),
                     "edf": outcome.edf,
                     "lambda": (
                         float(next(iter(lambdas.values()))) if len(lambdas) == 1 else float("nan")

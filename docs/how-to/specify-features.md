@@ -601,6 +601,12 @@ level quietly falling through to itself is the silent identity mapping the
 declaration exists to prevent. A grouping built from the full column, as above,
 covers by construction.
 
+When an unbound grouping is reused on a training subset, `term_inference()`
+expands the groups present in that fit. It keeps every original member of a
+fitted group, even a member absent from the subset, and omits groups with no
+fitted level. Use `levels=` or `bind_levels()` to retain an absent group in
+the fitted universe; its members then report the pinned zero contribution.
+
 #### Where a merged group sits on an ordered axis
 
 `OrderedCategorical` puts every level at a numeric coordinate — the `values=`
