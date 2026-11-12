@@ -10,6 +10,7 @@ warm-starts the working set from a previous solve.
 
 from __future__ import annotations
 
+import functools
 import math
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
@@ -34,6 +35,13 @@ from superglm.solvers.rank import (
 # SciPy's type stubs do not declare its LAPACK wrappers (``dsyequb``, ``dgetrf``,
 # ``dgetrs``); reaching them through ``Any`` keeps the checker off names that exist.
 _LAPACK: Any = scipy.linalg.lapack
+# SciPy's batch decorator (``scipy._lib._util._apply_over_batch``) converts each array to its
+# namespace and, given no batch dimension, returns the routine it wraps called on them, so the
+# small unbatched float64 updates and solves here call that routine itself.
+_LINALG: Any = scipy.linalg
+_qr_insert = getattr(_LINALG.qr_insert, "__wrapped__", _LINALG.qr_insert)
+_qr_delete = getattr(_LINALG.qr_delete, "__wrapped__", _LINALG.qr_delete)
+_solve_triangular = getattr(_LINALG.solve_triangular, "__wrapped__", _LINALG.solve_triangular)
 
 # Safety factor on the spectral consistency floor (see ``_consistency_floor``).
 # Kept separate from ``SHARED_RANK_POLICY.certification_band`` and from the
@@ -57,6 +65,16 @@ _STRUCTURAL_CONSISTENCY_FLOOR = _STRUCTURAL_NORM_ROUNDING_SLACK * _EPS
 # Row actions past these, or tiny but nonzero, take the scaled path in ``_constraint_actions``.
 _HUGE_ACTION = np.finfo(np.float64).max / 4
 _TINY_ACTION = np.finfo(np.float64).tiny
+
+
+def _maximum(values: NDArray, initial: float) -> float:
+    """``np.max(values, initial=initial)``, without its dispatch."""
+    return np.maximum.reduce(values, axis=None, initial=initial)
+
+
+def _minimum(values: NDArray, initial: float) -> float:
+    """``np.min(values, initial=initial)``, without its dispatch."""
+    return np.minimum.reduce(values, axis=None, initial=initial)
 
 
 @dataclass
@@ -150,20 +168,6 @@ def _consistency_floor(decomposition: RankDecomposition) -> float:
     )
 
 
-def _constraint_products(
-    A: NDArray, beta: NDArray, abs_A: NDArray | None = None
-) -> tuple[NDArray, NDArray]:
-    """Ordinary binary64 row actions; callers scale exceptional rows below."""
-    A = np.asarray(A, dtype=float)
-    beta = np.asarray(beta, dtype=float)
-    abs_A = np.abs(A) if abs_A is None else np.asarray(abs_A, dtype=float)
-    magnitude_beta = np.abs(beta)
-    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-        products = A @ beta
-        magnitude = abs_A @ magnitude_beta
-    return products, magnitude
-
-
 def _constraint_actions(A, beta, b, abs_A=None, step=None, *, common=False):
     """Use a common power of two for each exceptional row's action and RHS.
 
@@ -175,24 +179,29 @@ def _constraint_actions(A, beta, b, abs_A=None, step=None, *, common=False):
     common exponent across all rows to preserve multiplier units.
     """
     A, beta, b = np.asarray(A, float), np.asarray(beta, float), np.asarray(b, float)
-    abs_A = np.abs(A) if abs_A is None else abs_A
-    products, magnitude = _constraint_products(A, beta, abs_A)
-    action, motion = (
-        _constraint_products(A, step, abs_A)
-        if step is not None
-        else (np.zeros_like(b), np.zeros_like(b))
-    )
-    bound = b.copy()
-    vectors = ((beta, magnitude),) if step is None else ((beta, magnitude), (step, motion))
-    # Every row is normal when no |b| or action passes the range or falls below it.
-    if np.max(np.abs(b), initial=0.0) <= _HUGE_ACTION and all(
-        np.max(absolute, initial=0.0) <= _HUGE_ACTION
-        and np.min(absolute, initial=np.inf) >= _TINY_ACTION
-        for _, absolute in vectors
+    abs_A = np.abs(A) if abs_A is None else np.asarray(abs_A, dtype=float)
+    # Ordinary binary64 row actions of ``beta`` and ``step``, as (vector, signed, absolute);
+    # exceptional rows are scaled below. With no direction no caller reads its action.
+    action = motion = None
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        products = A @ beta
+        magnitude = abs_A @ np.abs(beta)
+        vectors = [(beta, products, magnitude)]
+        if step is not None:
+            step = np.asarray(step, dtype=float)
+            action = A @ step
+            motion = abs_A @ np.abs(step)
+            vectors.append((step, action, motion))
+    # Every row is normal when no |b| or action passes the range or falls below it; the
+    # caller then reads ``b`` as the bounds, unscaled.
+    if _maximum(np.abs(b), 0.0) <= _HUGE_ACTION and all(
+        _maximum(absolute, 0.0) <= _HUGE_ACTION and _minimum(absolute, np.inf) >= _TINY_ACTION
+        for _, _, absolute in vectors
     ):
-        return products, magnitude, bound, action, motion
+        return products, magnitude, b, action, motion
+    bound = b.copy()
     unsafe = np.abs(b) > _HUGE_ACTION
-    for vector, absolute in vectors:
+    for vector, _, absolute in vectors:
         unsafe |= ~np.isfinite(absolute) | (absolute > _HUGE_ACTION)
         small = absolute < _TINY_ACTION
         if np.any(small):
@@ -205,9 +214,7 @@ def _constraint_actions(A, beta, b, abs_A=None, step=None, *, common=False):
     terms = []
     exponents = np.frexp(b[unsafe])[1]
     exponents = np.where(b[unsafe] != 0, exponents, -10000)
-    for vector in (beta, step):
-        if vector is None:
-            continue
+    for vector, _, _ in vectors:
         mantissa, exponent = np.frexp(vector)
         value = coefficients * mantissa
         exponent = np.where(value != 0, powers + exponent, -10000)
@@ -215,9 +222,7 @@ def _constraint_actions(A, beta, b, abs_A=None, step=None, *, common=False):
         terms.append((value, exponent))
     if common:
         exponents[:] = np.max(exponents)
-    for (value, exponent), signed, absolute in zip(
-        terms, (products, action), (magnitude, motion), strict=False
-    ):
+    for (value, exponent), (_, signed, absolute) in zip(terms, vectors, strict=True):
         normalized = np.ldexp(value, exponent - exponents[:, None])
         signed[unsafe] = np.sum(normalized, axis=1)
         absolute[unsafe] = np.sum(np.abs(normalized), axis=1)
@@ -266,6 +271,7 @@ def _feasibility_scale(
     return np.maximum(np.abs(b) if abs_b is None else abs_b, magnitude)
 
 
+@functools.lru_cache(maxsize=256)
 def _roundoff_tolerance(width: int) -> float:
     """A dot-product allowance in relative action units, with no magnitude floor."""
     if (width + 2) * UNIT_ROUNDOFF >= 1.0:
@@ -290,6 +296,7 @@ def _stationarity_certificate(
     beta: NDArray,
     active_matrix: NDArray,
     tol: float,
+    objective: tuple | None = None,
 ) -> tuple[bool, int | None, NDArray]:
     """Certify a nonnegative dual force in homogeneous stationarity units.
 
@@ -304,9 +311,11 @@ def _stationarity_certificate(
     Res. Notes Math. 380, 1998, Lemma 4.2, Theorem 3.2).
     """
     active_matrix = np.asarray(active_matrix, dtype=float)
-    products, h_action, g_values, _, _ = _constraint_actions(H, beta, g, common=True)
+    products, h_action, g_values = (
+        _objective_actions(H, beta, g) if objective is None else objective
+    )
     g_action = np.abs(g_values)
-    objective_scale = max(np.max(h_action, initial=0.0), np.max(g_action, initial=0.0))
+    objective_scale = max(_maximum(h_action, 0.0), _maximum(g_action, 0.0))
     if objective_scale == 0.0:
         return True, None, np.zeros(len(active_matrix))
     if not np.isfinite(objective_scale):
@@ -316,7 +325,7 @@ def _stationarity_certificate(
     g_action = g_action / objective_scale
     own = np.maximum(h_action, g_action)
     objective_action = h_action + g_action
-    row_scale = np.max(np.abs(active_matrix), axis=1, initial=0.0)
+    row_scale = np.maximum.reduce(np.abs(active_matrix), axis=1, initial=0.0)
     rows = np.divide(
         active_matrix,
         row_scale[:, None],
@@ -335,9 +344,9 @@ def _stationarity_certificate(
         weight = 1.0 / np.where(own > 0.0, np.maximum(own, _SQRT_TINY), 1.0)
         rank = np.linalg.matrix_rank(rows.T)
         weighted = rows.T * weight[:, None]
-        order = np.argsort(-np.max(np.abs(weighted), axis=1, initial=0.0), kind="stable")
+        order = np.argsort(-np.maximum.reduce(np.abs(weighted), axis=1, initial=0.0), kind="stable")
         q, r, pivots = scipy.linalg.qr(weighted[order], mode="economic", pivoting=True)
-        basic = scipy.linalg.solve_triangular(r[:rank, :rank], q[:, :rank].T)
+        basic = _solve_triangular(r[:rank, :rank], q[:, :rank].T)
         inverse_action = np.zeros((len(rows), len(beta)))
         inverse_action[np.ix_(pivots[:rank], order)] = basic * weight[order]
         multipliers = inverse_action @ residual
@@ -347,10 +356,10 @@ def _stationarity_certificate(
         score_error = arithmetic * (objective_action + dual_action)
         multiplier_allowance = np.abs(inverse_action) @ (tol * score_scale + score_error)
         multiplier_allowance += arithmetic * np.abs(multipliers)
-        if not np.all(np.isfinite(multipliers)) or not np.all(np.isfinite(multiplier_allowance)):
+        if not np.isfinite(multipliers).all() or not np.isfinite(multiplier_allowance).all():
             return False, None, multipliers
         violating = multipliers < -multiplier_allowance
-        if np.any(violating):
+        if violating.any():
             worst = int(np.argmin(np.where(violating, multipliers, np.inf)))
             return False, worst, multipliers
         multipliers = np.maximum(multipliers, 0.0)
@@ -362,8 +371,17 @@ def _stationarity_certificate(
         dual_action = np.zeros_like(residual)
     score_scale = np.maximum(own, dual_action)
     allowance = tol * score_scale + arithmetic * (objective_action + dual_action)
-    stationary = bool(np.all(np.abs(residual - dual) <= allowance))
+    stationary = bool((np.abs(residual - dual) <= allowance).all())
     return stationary, None, multipliers
+
+
+def _objective_actions(H: NDArray, beta: NDArray, g: NDArray) -> tuple[NDArray, NDArray, NDArray]:
+    """``H beta``, ``|H||beta|`` and ``g`` in one common power of two: both certificates' units.
+
+    The stationarity and complementarity certificates of one point take it as ``objective``.
+    """
+    products, h_action, g_values, _, _ = _constraint_actions(H, beta, g, common=True)
+    return products, h_action, g_values
 
 
 def _certifies_kkt_point(
@@ -389,10 +407,17 @@ def _certifies_kkt_point(
     """
     if not feasible and not _is_feasible(A, beta, b, tol, abs_A=abs_A):
         return False, None
-    stationary, drop_idx, multipliers = _stationarity_certificate(H, g, beta, A[active], tol)
+    objective = _objective_actions(H, beta, g)
+    working = A[active]
+    stationary, drop_idx, multipliers = _stationarity_certificate(
+        H, g, beta, working, tol, objective
+    )
     if not stationary or drop_idx is not None:
         return False, drop_idx
-    return _complementarity_certificate(H, g, beta, A[active], b[active], multipliers, tol), None
+    certified = _complementarity_certificate(
+        H, g, beta, working, b[active], multipliers, tol, objective
+    )
+    return certified, None
 
 
 def _is_feasible(
@@ -406,11 +431,8 @@ def _is_feasible(
     constraint system two to three times per IRLS iteration plus once per
     line-search halving.
     """
-    return bool(
-        np.all(
-            _feasibility_slack(A, beta, b, abs_A=abs_A) >= -tol - _roundoff_tolerance(A.shape[1])
-        )
-    )
+    slack = _feasibility_slack(A, beta, b, abs_A=abs_A)
+    return bool((slack >= -tol - _roundoff_tolerance(A.shape[1])).all())
 
 
 def _complementarity_certificate(
@@ -421,13 +443,15 @@ def _complementarity_certificate(
     active_bounds: NDArray,
     multipliers: NDArray,
     tol: float,
+    objective: tuple | None = None,
 ) -> bool:
     """Measure dual-weighted slack against the represented objective actions.
 
     Complementarity has objective units. A positive rounding residue on a
     binding coordinate need not have small *relative primal slack*: its dual
     product must instead be small relative to the quadratic and linear actions.
-    The multipliers use the normalized units of _stationarity_certificate.
+    The multipliers use the normalized units of _stationarity_certificate,
+    and ``objective`` is that certificate's ``_objective_actions``, when held.
     """
     if not len(multipliers):
         return True
@@ -437,7 +461,7 @@ def _complementarity_certificate(
     row_scale = np.where(row_scale > 0.0, row_scale, 1.0)
     rows = rows / row_scale[:, None]
     dual = np.asarray(multipliers, dtype=float)
-    _, h_action, score, _, _ = _constraint_actions(H, x, g, common=True)
+    _, h_action, score = _objective_actions(H, x, g) if objective is None else objective
     objective_scale = max(np.max(h_action, initial=0.0), np.max(np.abs(score), initial=0.0))
     if objective_scale == 0.0:
         return bool(np.all(dual == 0.0))
@@ -671,11 +695,13 @@ class _ConstraintBlocks(NamedTuple):
 
     ``columns[j]`` holds block ``j``'s coefficients and ``width[j]`` their
     count; ``row_label[i]`` is row ``i``'s block, ``-1`` for a zero row.
+    ``least_width`` is the smallest count, 0 with no block.
     """
 
     columns: list[NDArray]
     row_label: NDArray
     width: NDArray
+    least_width: int
 
 
 def _constraint_blocks(A: NDArray) -> _ConstraintBlocks:
@@ -694,6 +720,7 @@ def _constraint_blocks(A: NDArray) -> _ConstraintBlocks:
             columns=[np.arange(p)],
             row_label=np.where(np.any(support, axis=1), 0, -1).astype(np.intp),
             width=np.array([p]),
+            least_width=p,
         )
     rows, cols = np.nonzero(A)
     # ``np.nonzero`` lists entries row by row, so the row nodes' adjacency is
@@ -710,10 +737,12 @@ def _constraint_blocks(A: NDArray) -> _ConstraintBlocks:
     block_of = np.full(count, -1, dtype=np.intp)
     block_of[components] = np.arange(components.size)
     column_label = block_of[column_component]
+    width = np.bincount(column_label[column_label >= 0], minlength=components.size)
     return _ConstraintBlocks(
         columns=[np.flatnonzero(column_label == j) for j in range(components.size)],
         row_label=block_of[row_component],
-        width=np.bincount(column_label[column_label >= 0], minlength=components.size),
+        width=width,
+        least_width=int(width.min()) if width.size else 0,
     )
 
 
@@ -837,7 +866,7 @@ class _WorkingBasis:
 
     def insert(self, row: int) -> None:
         """Append row ``row`` of ``A`` to the working rows."""
-        self.q, self.r = scipy.linalg.qr_insert(
+        self.q, self.r = _qr_insert(
             self.q, self.r, self.rows[row], self.q.shape[1], which="col", check_finite=False
         )
 
@@ -850,7 +879,7 @@ class _WorkingBasis:
         leading ``k`` columns of ``q`` and rows of ``r``, the rest of ``r``
         being zero.
         """
-        q, r = scipy.linalg.qr_delete(self.q, self.r, position, which="col", check_finite=False)
+        q, r = _qr_delete(self.q, self.r, position, which="col", check_finite=False)
         k = r.shape[1]
         self.q, self.r = q[:, :k], r[:k]
 
@@ -873,6 +902,9 @@ def _zero_block_faces(
     decision by row tuple, and only blocks with at least as many working rows as coefficients
     are examined.
     """
+    if len(active) < blocks.least_width:
+        # No block has as many working rows as coefficients.
+        return beta
     labels = blocks.row_label[active]
     counts = np.bincount(labels[labels >= 0], minlength=blocks.width.size)
     for j in np.flatnonzero(counts >= blocks.width):
@@ -1244,10 +1276,12 @@ def solve_constrained_qp(
         # absolute threshold is not scale-invariant, and at an active-boundary
         # KKT point cancellation in ``g - H @ beta`` leaves O(eps |beta|) steps.
         relative_step = step / np.maximum(1.0, np.abs(beta))
-        small_step = bool(np.linalg.norm(relative_step) < tol)
+        # ``np.linalg.norm``'s own formula for a vector, without its dispatch.
+        small_step = math.sqrt(relative_step.dot(relative_step)) < tol
         if small_step:
+            objective = _objective_actions(H_sym, beta, g)
             stationary, drop_idx, multipliers = _stationarity_certificate(
-                H_sym, g, beta, A[active], tol
+                H_sym, g, beta, A[active], tol, objective
             )
             if drop_idx is not None:
                 active.pop(drop_idx)
@@ -1259,15 +1293,16 @@ def solve_constrained_qp(
                 feasible = _is_feasible(A, beta, b, tol, abs_A=abs_A)
                 # A repair is a new candidate: recheck its full dual and
                 # stationarity certificate before assigning convergence.
+                objective = _objective_actions(H_sym, beta, g)
                 stationary, drop_idx, multipliers = _stationarity_certificate(
-                    H_sym, g, beta, A[active], tol
+                    H_sym, g, beta, A[active], tol, objective
                 )
                 if drop_idx is not None:
                     active.pop(drop_idx)
                     basis.delete(drop_idx)
                     continue
             complementary = _complementarity_certificate(
-                H_sym, g, beta, A[active], b[active], multipliers, tol
+                H_sym, g, beta, A[active], b[active], multipliers, tol, objective
             )
             if feasible and stationary and complementary:
                 return _result(beta, active, it + 1, converged=True)
