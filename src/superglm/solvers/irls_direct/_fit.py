@@ -857,14 +857,9 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             raise ValueError("weights must match the design row count")
         if not np.all(np.isfinite(weights)) or np.any(weights < 0.0):
             raise ValueError("weights must be finite and non-negative")
-        w_max = float(np.max(weights, initial=0.0))
-        if w_max == 0.0:
-            raise ValueError("weights must contain at least one positive value")
-        self._physical_weights = weights
-        self.weight_exponent = 0
         # REML and moment-reuse callers retain their existing units. Only the
         # ordinary model fit opts in, and it discards the returned inverse.
-        if (
+        use_weight_unit = (
             self._weight_unit
             and self.cache_out is None
             and not self.return_xtwx
@@ -873,7 +868,17 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             and self._deviance_init is None
             and self._initial_data_reuse is None
             and self._fisher_data_reuse is None
-        ):
+        )
+        if use_weight_unit:
+            w_max = float(np.max(weights, initial=0.0))
+            has_positive_weight = w_max > 0.0
+        else:
+            has_positive_weight = bool(np.any(weights > 0.0))
+        if not has_positive_weight:
+            raise ValueError("weights must contain at least one positive value")
+        self._physical_weights = weights
+        self.weight_exponent = 0
+        if use_weight_unit:
             self.weight_exponent = objective_weight_exponent(
                 w_max, gms, groups, self.lambda2, self.reml_penalties
             )

@@ -173,7 +173,7 @@ def _legacy_rank_state(model, solver, W: NDArray):
         penalty=fitted_penalty(model),
     )
     design, active_groups, _ = _grouped_active_state(model, selected_names)
-    lam2 = scale_penalties(fitted_lambda2(model), solver.weight_exponent)
+    lam2 = scale_penalties(fitted_lambda2(model), getattr(solver, "weight_exponent", 0))
     curvature = np.array(
         _active_penalty_matrix(
             model._dm.group_matrices,

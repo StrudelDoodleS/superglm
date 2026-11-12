@@ -191,7 +191,7 @@ def _per_obs_log_likelihood(
     y = np.asarray(y, dtype=float)
     family = getattr(model, "_distribution")
     result = model.result
-    if result.weight_exponent and result.solver_phi is not None:
+    if getattr(result, "weight_exponent", 0) and getattr(result, "solver_phi", None) is not None:
         from superglm._weight_units import unit_prior_log_density
 
         weights = (

@@ -66,19 +66,21 @@ def scale_penalties(lambda2, exponent):
 
 def solver_weights(weights, result):
     """Read physical prior weights in the retained geometry's objective unit."""
-    exponent = result.weight_exponent
+    exponent = getattr(result, "weight_exponent", 0)
     return np.ldexp(weights, exponent) if exponent else weights
 
 
 def solver_dispersion(result):
     """The dispersion paired with a retained inverse, before root scaling."""
-    return result.phi if result.solver_phi is None else result.solver_phi
+    phi = getattr(result, "solver_phi", None)
+    return result.phi if phi is None else phi
 
 
 def covariance_exponent(result):
     """An estimated dispersion cancels the unit; a known dispersion does not."""
-    geometry = getattr(result, "_geometry_weight_exponent", result.weight_exponent)
-    return geometry if result.solver_phi is None else geometry - result.weight_exponent
+    exponent = getattr(result, "weight_exponent", 0)
+    geometry = getattr(result, "_geometry_weight_exponent", exponent)
+    return geometry if getattr(result, "solver_phi", None) is None else geometry - exponent
 
 
 def coefficient_covariance(inverse, result, *, known_scale=False):
@@ -87,11 +89,11 @@ def coefficient_covariance(inverse, result, *, known_scale=False):
     # its fitted-family tables explicitly choose the known dispersion instead.
     scale = 1.0 if known_scale else solver_dispersion(result)
     exponent = (
-        getattr(result, "_geometry_weight_exponent", result.weight_exponent)
+        getattr(result, "_geometry_weight_exponent", getattr(result, "weight_exponent", 0))
         if known_scale
         else covariance_exponent(result)
     )
-    if result.weight_exponent and scale > 0.0:
+    if getattr(result, "weight_exponent", 0) and scale > 0.0:
         # Leave the even part of dispersion's exponent out of the matrix too:
         # phi' * H'^-1 can overflow while its standard errors still fit.
         scale_exponent = math.frexp(scale)[1]
@@ -110,10 +112,12 @@ def standard_errors(variance, result, *, raw=False, known_scale=False):
     """Change units after the square root, avoiding an overflowing variance."""
     if raw or known_scale:
         scale = 1.0
-        exponent = getattr(result, "_geometry_weight_exponent", result.weight_exponent)
+        exponent = getattr(
+            result, "_geometry_weight_exponent", getattr(result, "weight_exponent", 0)
+        )
     else:
         scale, exponent = solver_dispersion(result), covariance_exponent(result)
-    if result.weight_exponent:
+    if getattr(result, "weight_exponent", 0):
         return scaled_standard_errors(variance, scale, exponent)
     errors = np.sqrt(np.maximum(scale * variance, 0.0))
     return np.ldexp(errors, exponent // 2) if exponent else errors
@@ -135,7 +139,7 @@ def physical_variance(variance, result):
     """Publish variance entries; their standard errors can have greater range."""
     scale = solver_dispersion(result)
     exponent = covariance_exponent(result)
-    if result.weight_exponent:
+    if getattr(result, "weight_exponent", 0):
         mantissa, powers = np.frexp(variance)
         phi_mantissa, phi_power = math.frexp(scale)
         with np.errstate(over="ignore"):
@@ -150,7 +154,11 @@ def unit_prior_log_density(family, y, mu, weights, result):
     from superglm.distributions import Gamma, Gaussian, Tweedie, prior_weight_log_density
 
     phi = solver_dispersion(result)
-    exponent = result.weight_exponent if result.solver_phi is not None else 0
+    exponent = (
+        getattr(result, "weight_exponent", 0)
+        if getattr(result, "solver_phi", None) is not None
+        else 0
+    )
     if not exponent:
         return prior_weight_log_density(family, y, mu, weights, phi)
     if phi <= 0.0:
@@ -212,7 +220,7 @@ def unit_log_likelihood(family, y, mu, weights, result, *, weight_semantics, rep
     """
     from superglm.distributions import Gamma, Gaussian, Tweedie, weighted_log_likelihood
 
-    if not result.weight_exponent or result.solver_phi is None:
+    if not getattr(result, "weight_exponent", 0) or getattr(result, "solver_phi", None) is None:
         return weighted_log_likelihood(
             family,
             y,

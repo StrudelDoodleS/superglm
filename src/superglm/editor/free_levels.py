@@ -454,13 +454,13 @@ def _gap_variances(
     """
     from superglm._weight_units import covariance_exponent, solver_dispersion
 
-    free_solver = free_model._solver_pirls_result()
+    free_solver = free_model.result
     phi = float(solver_dispersion(free_solver))
     if not phi > 0.0 or _term_covariance(free_model, name) is None:
         # No dispersion, or a selection penalty that cannot be lifted removed
         # the free term: there is no free variance to judge by.
         return np.zeros(len(free_rows)), None
-    if not float(solver_dispersion(model._solver_pirls_result())) > 0.0:
+    if not float(solver_dispersion(model.result)) > 0.0:
         curve_rows = None
     if curve_rows is not None:
         fingerprints = [getattr(fit, "_fit_geometry_guard", None) for fit in (free_model, model)]
@@ -486,7 +486,9 @@ def _gap_variances(
             return None, _UNMEASURED
         # The curve's influence goes onto the free fit's rows by this ratio.
         curve_side, ratio = found, free_side.spread / found.spread
-        exponent = model.result.weight_exponent - free_solver.weight_exponent
+        exponent = getattr(model.result, "weight_exponent", 0) - getattr(
+            free_solver, "weight_exponent", 0
+        )
         if exponent:
             ratio = np.ldexp(ratio, exponent)
     informative = free_side.fisher > 0.0
