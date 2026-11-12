@@ -856,6 +856,37 @@ def test_a_superlss_tensor_on_a_ranged_parent_keeps_the_ranges(kind, override):
         assert np.max(np.abs(np.diff(eta, 2))) <= tolerance
 
 
+def test_a_binned_tensor_margin_at_its_own_knot_count_certifies_its_ranges_on_its_bins():
+    """A margin rebuilt for an n_knots override is certified on the support it is binned to.
+
+    The clone's ranges were certified on the raw rows, then the margin was
+    binned on its own knots, which leave one support point in the range where
+    the parent's bins leave five. The fit lost a rank (347 of 348, against
+    348 on master) with no message, and published a finite standard error at
+    a point the terminal rank marks non-estimable. It now refuses by name, as
+    a ranged spline binned too coarsely does.
+    """
+    from superglm import GaussianLS, SuperLSS, s, term, ti
+    from superglm.features._spline_ranges import UndeterminedRangeError
+
+    x = np.linspace(0.0, 10.0, 20001)
+    rng = np.random.default_rng(81)
+    z = rng.uniform(-1.0, 1.0, x.size)
+    y = np.sin(x) * (1.0 + z / 3.0) + rng.normal(0.0, 0.2, x.size)
+    ranged = Spline(kind="bs", k=8, polynomial_ranges=[PolynomialRange(3.98, 4.46, 3, "kink")])
+    family = GaussianLS()
+    model = SuperLSS(
+        family,
+        family.location(term("x", ranged), s("z", k=6), ti("x", "z", n_knots=(40, 4))),
+        family.scale(),
+        discrete=True,
+        n_bins=64,
+    )
+    names = ("x#wiggle", "x:z#margin_x", "x:z#margin_z", "z#wiggle")
+    with pytest.raises(UndeterminedRangeError, match=r"\[3\.98, 4\.46\].*once binned to 64 bins"):
+        model.fit(pd.DataFrame({"x": x, "z": z}), y, lambdas={f"location:{n}": 1.0 for n in names})
+
+
 @pytest.mark.parametrize("kind", ["bs", "cr"])
 def test_a_superlss_spline_categorical_on_a_ranged_parent_keeps_the_ranges(kind):
     """The varying-coefficient route (``_varying_coefficient_spline_spec``) keeps them too.

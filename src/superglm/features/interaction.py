@@ -2217,8 +2217,14 @@ class TensorInteraction:
         *,
         geometry_weight: NDArray | None = None,
         keep_ranges: bool = True,
+        n_bins: int | None = None,
     ) -> tuple[Any, bool]:
-        """The spec a margin is built from, with its knots placed, and whether it is cardinal."""
+        """The spec a margin is built from, with its knots placed, and whether it is cardinal.
+
+        ``n_bins`` is the margin's bin count in a binned build: a clone placed
+        for a knot-count override certifies its ranges on the support that
+        build bins it to, on its own knots, as the parent certified its own.
+        """
         # Reject unsupported parent configs before cloning
         reasons: list[str] = []
         if getattr(spec, "select", False):
@@ -2268,7 +2274,7 @@ class TensorInteraction:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", SplineOptionWarning)
                 clone = type(spec)(**kwargs)
-            clone._place_knots(x, geometry_weight)
+            clone._place_knots(x, geometry_weight, n_bins)
             return clone, False
         return spec, False
 
@@ -2370,12 +2376,13 @@ class TensorInteraction:
         margins = []
         bins = []
         for axis, (spec, x, nk) in enumerate(((spec1, x1, nk1), (spec2, x2, nk2))):
-            candidate, cardinal = self._marginal_spec(spec, x, nk, geometry_weight=geometry_weight)
+            n_bins = None if discrete_n_bins is None else int(discrete_n_bins[axis])
+            candidate, cardinal = self._marginal_spec(
+                spec, x, nk, geometry_weight=geometry_weight, n_bins=n_bins
+            )
             support = counts = None
-            if discrete_n_bins is not None:
-                support, idx = _discretize_column(
-                    x, int(discrete_n_bins[axis]), candidate._knots, geometry_weight
-                )
+            if n_bins is not None:
+                support, idx = _discretize_column(x, n_bins, candidate._knots, geometry_weight)
                 counts = np.bincount(idx, weights=geometry_weight, minlength=len(support))
                 bins.append((support, idx))
             info = self._marginal_ingredients(
