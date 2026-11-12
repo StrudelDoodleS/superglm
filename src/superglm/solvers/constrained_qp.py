@@ -527,6 +527,47 @@ def _solve_saddle_least_squares(KKT: NDArray, rhs: NDArray) -> NDArray:
     return np.linalg.lstsq(equilibrated, rhs * scale, rcond=None)[0] * scale
 
 
+def _coordinate_face_minimum(H: NDArray, g: NDArray, A: NDArray, b: NDArray) -> NDArray | None:
+    """The same equality subproblem in coordinate null-space form, for a stalled face.
+
+    Pivoted QR chooses basic columns ``C`` of the independent working rows;
+    ``C x_basic + F x_free = b`` gives ``x = x0 + Z x_free``. The reduced
+    positive-definite system is ``Z' H Z x_free = Z' (g - H x0)`` (Gill,
+    Murray, Saunders and Wright 1991, sections 2.3 and 6.1). Reconstructing
+    the basic coordinates from their equations avoids both the saddle
+    system's squared constraint condition and cancellation in ``beta + step``.
+    No rank is truncated here: only a full-rank H reaches this recovery.
+    The caller still requires the original primal, dual and gap certificate.
+    """
+    k, p = A.shape
+    if not 0 < k <= p:
+        return None
+    try:
+        with np.errstate(over="ignore", invalid="ignore"):
+            q, r, pivots = scipy.linalg.qr(A, mode="economic", pivoting=True, check_finite=False)
+            triangular = r[:, :k]
+            particular = np.zeros(p)
+            particular[pivots[:k]] = _solve_triangular(triangular, q.T @ b, check_finite=False)
+            candidate = particular.copy()
+            if k < p:
+                null = np.zeros((p, p - k))
+                null[pivots[:k]] = -_solve_triangular(triangular, r[:, k:], check_finite=False)
+                null[pivots[k:]] = np.eye(p - k)
+                reduced = _symmetric_part(null.T @ H @ null)
+                score = null.T @ (g - H @ particular)
+                if not np.isfinite(reduced).all() or not np.isfinite(score).all():
+                    return None
+                factor = scipy.linalg.cho_factor(reduced, check_finite=False)
+                free = scipy.linalg.cho_solve(factor, score, check_finite=False)
+                candidate[pivots[k:]] = free
+                candidate[pivots[:k]] = _solve_triangular(
+                    triangular, q.T @ (b - A[:, pivots[k:]] @ free), check_finite=False
+                )
+    except (np.linalg.LinAlgError, ValueError):
+        return None
+    return candidate if np.isfinite(candidate).all() else None
+
+
 # A saddle system at least this large, in a solve that has already taken this many
 # direct saddle solves, is solved from one factorization updated by Schur complement.
 _UPDATE_MIN_SIZE = 128
@@ -1036,6 +1077,11 @@ def solve_constrained_qp(
     zero point (_zero_block_faces), and the certificate's multipliers are
     fitted in the certificate's own units (_stationarity_certificate).
 
+    A failed face certificate or an infeasible step with no independent
+    blocker switches the equality subproblem to coordinate null-space form.
+    Each working face tries that recovery once, then permits ordinary saddle
+    refinement. The complete original certificate still decides convergence.
+
     active_set_init supplies a warm active set; a row dependent on those
     before it is left out. beta_start is a point the caller knows meets the
     rows: the loop starts from it, as the primal active-set method assumes
@@ -1188,6 +1234,11 @@ def solve_constrained_qp(
     # ``tol`` step gate, so the loop certifies directly instead. Full-rank H
     # only: on a rank-deficient one a face minimum is a flat set.
     at_face_minimum = False
+    # Switch factorizations only after the ordinary face solve fails. Bland
+    # tie-breaking or EXPAND cannot repair a step off an unchanged working
+    # face: no independent row can block its numerical normal component.
+    coordinate_face = False
+    recovered_face: tuple[int, ...] | None = None
 
     for it in range(max_iter):
         if at_face_minimum and not kkt_may_be_singular:
@@ -1205,7 +1256,9 @@ def solve_constrained_qp(
                 active.pop(release)
                 basis.delete(release)
                 continue
+            coordinate_face = True
         at_face_minimum = False
+        face_candidate = None
         # --- Equality-constrained subproblem on active set ---
         if len(active) == 0:
             # No active constraints — unconstrained step.  beta_unc is the same
@@ -1244,8 +1297,17 @@ def solve_constrained_qp(
                 rhs[p:] = b_eq - A_eq @ beta
 
                 step = None
+                if coordinate_face and tuple(active) != recovered_face:
+                    recovered_face = tuple(active)
+                    face_candidate = _coordinate_face_minimum(H_sym, g, A_eq, b_eq)
+                    if face_candidate is not None:
+                        face_candidate = _zero_block_faces(
+                            face_candidate, A_eq, b, active, blocks, block_zero_face
+                        )
+                        step = face_candidate - beta
                 if (
-                    updates is not None
+                    step is None
+                    and updates is not None
                     and p + n_eq >= _UPDATE_MIN_SIZE
                     and direct_solves >= _UPDATE_AFTER
                 ):
@@ -1279,6 +1341,8 @@ def solve_constrained_qp(
         # ``np.linalg.norm``'s own formula for a vector, without its dispatch.
         small_step = math.sqrt(relative_step.dot(relative_step)) < tol
         if small_step:
+            if face_candidate is not None and _is_feasible(A, face_candidate, b, tol, abs_A=abs_A):
+                beta = face_candidate
             objective = _objective_actions(H_sym, beta, g)
             stationary, drop_idx, multipliers = _stationarity_certificate(
                 H_sym, g, beta, A[active], tol, objective
@@ -1289,6 +1353,9 @@ def solve_constrained_qp(
                 continue
             feasible = _is_feasible(A, beta, b, tol, abs_A=abs_A)
             if not feasible:
+                if active and not kkt_may_be_singular and not coordinate_face:
+                    coordinate_face = True
+                    continue
                 beta = _project_feasible(beta, A, b, tol, structure=structure)
                 feasible = _is_feasible(A, beta, b, tol, abs_A=abs_A)
                 # A repair is a new candidate: recheck its full dual and
@@ -1301,11 +1368,21 @@ def solve_constrained_qp(
                     active.pop(drop_idx)
                     basis.delete(drop_idx)
                     continue
+                if face_candidate is not None:
+                    # Projection changed the start, so its direction to the
+                    # face minimum changed too. An exactly zero old step must
+                    # not hide an inactive row the restored start can hit.
+                    step = face_candidate - beta
             complementary = _complementarity_certificate(
                 H_sym, g, beta, A[active], b[active], multipliers, tol, objective
             )
             if feasible and stationary and complementary:
                 return _result(beta, active, it + 1, converged=True)
+            if feasible and face_candidate is not None:
+                # A recovered face may still need ordinary saddle refinement.
+                # Try that next, rather than repeat this factorization or
+                # refuse it solely because its recomputed step is exactly 0.
+                continue
             if not feasible or not np.any(step != 0.0):
                 return _result(beta, active, it + 1, converged=False)
             # A small but uncertified direction can still encounter a
@@ -1314,7 +1391,7 @@ def solve_constrained_qp(
         # --- Step ratio: find blocking constraint ---
         # Both tests use the per-row scale of the convergence test, so a row
         # ``_is_feasible`` accepts is never treated as violated.
-        beta_new = beta + step
+        beta_new = beta + step if face_candidate is None else face_candidate
 
         if _is_feasible(A, beta_new, b, tol, abs_A=abs_A):
             # Full step is feasible
@@ -1371,6 +1448,9 @@ def solve_constrained_qp(
                 active.append(blocking)
                 basis.insert(blocking)
             else:
+                if active and not kkt_may_be_singular and not coordinate_face:
+                    coordinate_face = True
+                    continue
                 # The full step breaks a row no blocking candidate could hold, so
                 # it cannot certify: the next iteration solves the face again.
                 beta = beta_new
