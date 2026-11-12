@@ -1948,6 +1948,39 @@ def test_a_pile_that_repeats_the_quantiles_leaves_the_budget_to_the_knot_cells()
     assert abs(fits[True] - fits[False]) < 0.01
 
 
+def test_a_grid_of_under_four_cells_keeps_every_point_the_equal_width_bins_have():
+    """A wide span's cells are wider than the equal-width bins when a narrow span takes its minimum.
+
+    A pile at 0, a cluster just under the maximum and the maximum, with a knot at
+    1: the span [1, 10] gets 179 cells of 9 / 179 against bins of 10 / 256, so the
+    cluster and the maximum shared a cell, three support points became two, and a
+    quadratic the equal-width bins identify was read at 82 instead of 25 at x = 5.
+    """
+    width = 10.0 / 256
+    x = np.r_[np.zeros(60000), np.linspace(10.0 - 1.25 * width, 10.0 - 1.05 * width, 300), 10.0]
+    _assert_bins_unchanged(x, 256, np.array([1.0]))
+    # With the knot at 2 the wide span's cells keep the three points apart, and
+    # the grid that follows the knots reads each where its rows are.
+    support, index = discretize_column(x, 256, np.array([2.0]))
+    assert np.unique(index).size == 3 and support[index[0]] == 0.0
+    y = x * x
+    frame = pd.DataFrame({"x": x})
+    fits = {}
+    for discrete in (False, True):
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            spline_penalty=1.0,
+            discrete=discrete,
+            n_bins=256,
+            features={"x": Spline(kind="bs", knots=[1.0], m=3)},
+        )
+        model.fit(frame, y)
+        fits[discrete] = float(model.predict(pd.DataFrame({"x": [5.0]}))[0])
+    # 17.7 on the equal-width bins' three points against 25.0 exact; 82.0 on two.
+    assert abs(fits[True] - fits[False]) < 10.0
+
+
 def test_binned_support_never_exceeds_n_bins():
     rng = np.random.default_rng(11)
     for trial in range(200):
