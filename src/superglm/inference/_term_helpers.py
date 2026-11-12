@@ -185,6 +185,21 @@ def _spline_se(
         map's own column means, as ``reference_x`` does against one reference row.
     """
     n_out = len(x_eval) if x_eval is not None else n_points
+    from superglm.inference.covariance import BinaryScaledCovariance
+
+    if isinstance(Cov_active, BinaryScaledCovariance):
+        se = _spline_se(
+            spline_spec,
+            name,
+            feature_groups,
+            active_groups,
+            Cov_active.base,
+            n_points=n_points,
+            x_eval=x_eval,
+            reference_x=reference_x,
+            center=center,
+        )
+        return np.ldexp(se, Cov_active.exponent // 2)
     active_subs = [ag for ag in active_groups if ag.feature_name == name]
     if not active_subs:
         return np.zeros(n_out)

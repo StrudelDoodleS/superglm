@@ -82,6 +82,28 @@ class _SelectedBlockAccess:
         return values.astype(dtype, copy=False) if dtype is not None else values
 
 
+class BinaryScaledCovariance(_SelectedBlockAccess):
+    """A covariance whose standard errors fit binary64 but entries may not.
+
+    The fitted model's existing covariance view owns this pair for the same
+    lifetime as its retained factor. ``base`` uses the solver unit. Consumers
+    taking square roots read the pair before materializing physical entries.
+    """
+
+    def __init__(self, base, exponent: int):
+        self.base = base
+        self.exponent = exponent
+        self.shape = base.shape
+
+    def selected_block(self, indices):
+        with np.errstate(over="ignore"):
+            return np.ldexp(covariance_selected_block(self.base, indices), self.exponent)
+
+    def selected_diagonal(self, indices):
+        with np.errstate(over="ignore"):
+            return np.ldexp(covariance_selected_diagonal(self.base, indices), self.exponent)
+
+
 class StructuredSlopeCovarianceAccessor(_SelectedBlockAccess):
     """Selected access to a compact profiled slope covariance."""
 
@@ -97,6 +119,9 @@ class StructuredSlopeCovarianceAccessor(_SelectedBlockAccess):
         self.scale = float(scale)
         self.shape = factor.shape
         self.ndim = 2
+
+    def scaled(self, scale: float) -> StructuredSlopeCovarianceAccessor:
+        return StructuredSlopeCovarianceAccessor(self.factor, scale=self.scale * float(scale))
 
     def selected_block(self, indices: NDArray) -> NDArray:
         selected = np.asarray(indices, dtype=np.intp)
@@ -307,6 +332,10 @@ def covariance_factor_smooth_raw_level_block(
 
 def covariance_quadratic_form(covariance, contrast: NDArray) -> float:
     """Evaluate one dense or compact covariance quadratic form."""
+    if isinstance(covariance, BinaryScaledCovariance):
+        value = covariance_quadratic_form(covariance.base, contrast)
+        with np.errstate(over="ignore"):
+            return float(np.ldexp(value, covariance.exponent))
     values = np.asarray(contrast, dtype=np.float64)
     if hasattr(covariance, "quadratic_form"):
         return float(covariance.quadratic_form(values))
@@ -315,9 +344,30 @@ def covariance_quadratic_form(covariance, contrast: NDArray) -> float:
 
 def covariance_slope_view(covariance, *, scale: float = 1.0):
     """Return a phi-scaled slope covariance without forcing materialization."""
+    if isinstance(covariance, BinaryScaledCovariance):
+        return BinaryScaledCovariance(
+            covariance_slope_view(covariance.base, scale=scale), covariance.exponent
+        )
     if isinstance(covariance, StructuredCovarianceAccessor):
         return covariance.scaled(scale).slopes
     return float(scale) * np.asarray(covariance)[1:, 1:]
+
+
+def covariance_wald_statistic(beta, covariance):
+    """Form b' V^-1 b before an overflowing covariance is materialized."""
+    if isinstance(covariance, BinaryScaledCovariance):
+        beta = np.ldexp(beta, -(covariance.exponent // 2))
+        covariance = covariance.base
+    return float(beta @ np.linalg.solve(covariance, beta))
+
+
+def covariance_contrast_se(covariance, contrast):
+    """Standard error of a contrast, changing units after its square root."""
+    exponent = 0
+    if isinstance(covariance, BinaryScaledCovariance):
+        covariance, exponent = covariance.base, covariance.exponent
+    se = np.sqrt(max(covariance_quadratic_form(covariance, contrast), 0.0))
+    return float(np.ldexp(se, exponent // 2)) if exponent else float(se)
 
 
 def _second_diff_penalty(p: int) -> NDArray:

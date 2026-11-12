@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -707,6 +708,11 @@ def term_inference(
 
         se = ci_lo = ci_hi = None
         knot_cov = None
+        from superglm.inference.covariance import BinaryScaledCovariance
+
+        exponent = 0
+        if isinstance(Cov_active, BinaryScaledCovariance):
+            Cov_active, exponent = Cov_active.base, Cov_active.exponent
         if with_se and active and Cov_active is not None:
             assert active_groups_cov is not None
             # The full per-knot covariance, not just its diagonal: plotting
@@ -726,7 +732,7 @@ def term_inference(
             ci_lo = _safe_exp(log_rel - z_alpha * se)
             ci_hi = _safe_exp(log_rel + z_alpha * se)
 
-        return _recenter_term(
+        inference = _recenter_term(
             TermInference(
                 name=name,
                 kind="piecewise",
@@ -762,6 +768,18 @@ def term_inference(
             ),
             centering,
         )
+        if exponent and inference.se_log_relativity is not None:
+            errors = np.ldexp(inference.se_log_relativity, exponent // 2)
+            with np.errstate(over="ignore"):
+                knot_cov = np.ldexp(inference.knot_covariance, exponent)
+            inference = replace(
+                inference,
+                se_log_relativity=errors,
+                knot_covariance=knot_cov,
+                ci_lower=_safe_exp(inference.log_relativity - z_alpha * errors),
+                ci_upper=_safe_exp(inference.log_relativity + z_alpha * errors),
+            )
+        return inference
 
     else:
         raise TypeError(f"Unknown feature type: {type(spec).__name__}")

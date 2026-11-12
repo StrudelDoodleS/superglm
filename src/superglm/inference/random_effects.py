@@ -317,8 +317,20 @@ def random_effect_result(
         raise RuntimeError("random_effects() requires a fitted model")
     group, spec = _resolve_random_effect(model, name)
     lambda_value = _lambda_for_group(model, group)
+    from superglm._weight_units import physical_variance, scale_penalties, standard_errors
+
+    solver = model._solver_pirls_result()
     phi = float(model.result.phi)
-    tau_squared = float(np.inf if lambda_value == 0.0 else phi / lambda_value)
+    solver_lambda = scale_penalties(lambda_value, solver.weight_exponent)
+    tau_squared = float(
+        np.inf
+        if lambda_value == 0.0
+        else (
+            physical_variance(1.0 / solver_lambda, solver)
+            if solver.weight_exponent
+            else phi / lambda_value
+        )
+    )
     at_lower_boundary = lambda_value <= _LAMBDA_LOWER_BOUND * (1.0 + 1.0e-8)
     at_upper_boundary = lambda_value >= _LAMBDA_UPPER_BOUND * (1.0 - 1.0e-8)
     collapsed = at_upper_boundary
@@ -403,14 +415,14 @@ def random_effect_result(
         1 + active_group.end,
         dtype=np.intp,
     )
-    posterior_variance = phi * covariance_selected_diagonal(
+    inverse_diagonal = covariance_selected_diagonal(
         inference["XtWX_inv_aug"],
         augmented_indices,
     )
-    posterior_se = np.sqrt(np.maximum(posterior_variance, 0.0))
+    posterior_se = standard_errors(inverse_diagonal, solver)
 
     information = np.asarray(support.information, dtype=np.float64)
-    credibility = information / (information + lambda_value)
+    credibility = information / (information + solver_lambda)
     credibility_violation = bool(
         np.any(credibility < -1.0e-10) or np.any(credibility > 1.0 + 1.0e-10)
     )
@@ -461,7 +473,11 @@ def random_effect_result(
         lambda_value=lambda_value,
         phi=phi,
         tau_squared=tau_squared,
-        standard_deviation=float(np.sqrt(tau_squared)),
+        standard_deviation=float(
+            standard_errors(1.0 / solver_lambda, solver)
+            if solver.weight_exponent and lambda_value
+            else np.sqrt(tau_squared)
+        ),
         effective_df=float(group_edf.get(group.name, np.nan)),
         collapsed=collapsed,
         at_lower_boundary=at_lower_boundary,

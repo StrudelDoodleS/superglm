@@ -728,13 +728,24 @@ def _refresh_fit_statistics(
 
     null_mu = _compute_null_mu(
         y_arr,
-        weights,
+        np.ldexp(weights, model.result.weight_exponent)
+        if model.result.weight_exponent
+        else weights,
         offset_arr,
         model._distribution,
         model._link,
         weight_semantics=model_weight_semantics(model),
     )
-    deviance = weighted_row_sum(weights, model._distribution.deviance_unit, y_arr, mu)
+    if model.result.weight_exponent:
+        unit_weights = np.ldexp(weights, model.result.weight_exponent)
+        deviance = float(
+            np.ldexp(
+                weighted_row_sum(unit_weights, model._distribution.deviance_unit, y_arr, mu),
+                -model.result.weight_exponent,
+            )
+        )
+    else:
+        deviance = weighted_row_sum(weights, model._distribution.deviance_unit, y_arr, mu)
     model._fit_stats = (
         _compute_fit_stats(
             y_arr,
@@ -746,6 +757,7 @@ def _refresh_fit_statistics(
             model.result.phi,
             null_mu=null_mu,
             weight_semantics=model_weight_semantics(model),
+            solver_result=model.result,
         )
         if statistics
         else None

@@ -418,9 +418,14 @@ def _compute_fit_stats(
     null_mu: NDArray | None = None,
     *,
     weight_semantics: str,
+    solver_result=None,
 ) -> FitStats:
     """Compute scalar fit statistics from training arrays."""
 
+    physical_weights = weights
+    exponent = 0 if solver_result is None else solver_result.weight_exponent
+    if exponent:
+        weights = np.ldexp(weights, exponent)
     if null_mu is None:
         null_mu = _compute_null_mu(
             y,
@@ -431,7 +436,26 @@ def _compute_fit_stats(
             weight_semantics=weight_semantics,
         )
 
-    if isinstance(distribution, Tweedie):
+    if exponent:
+        from superglm._weight_units import unit_log_likelihood
+
+        ll = unit_log_likelihood(
+            distribution,
+            y,
+            mu,
+            physical_weights,
+            solver_result,
+            weight_semantics=weight_semantics,
+        )
+        null_ll = unit_log_likelihood(
+            distribution,
+            y,
+            null_mu,
+            physical_weights,
+            solver_result,
+            weight_semantics=weight_semantics,
+        )
+    elif isinstance(distribution, Tweedie):
         from superglm._tweedie import tweedie_logpdf_pair
 
         # Prior weights enter the compound-Poisson density; frequency weights
@@ -468,15 +492,15 @@ def _compute_fit_stats(
     return FitStats(
         log_likelihood=ll,
         null_log_likelihood=null_ll,
-        null_deviance=null_dev,
+        null_deviance=float(np.ldexp(null_dev, -exponent)) if exponent else null_dev,
         explained_deviance=expl_dev,
-        pearson_chi2=pearson,
+        pearson_chi2=float(np.ldexp(pearson, -exponent)) if exponent else pearson,
         n_obs=len(y),
         likelihood_size=dispersion_likelihood_size(
-            weights,
+            physical_weights,
             weight_semantics=weight_semantics,
         ),
-        weighted=bool(not np.all(weights == 1.0)),
+        weighted=bool(not np.all(physical_weights == 1.0)),
     )
 
 
@@ -997,9 +1021,11 @@ def _publish_fit_statistics(
     """Publish the fit statistics of ``model._result`` and prime the fit-data caches."""
     eta = stabilize_eta(linear_predictor(model._dm, model._result, offset), model._link)
     mu = clip_mu(model._link.inverse(eta), model._distribution)
+    from superglm._weight_units import solver_weights
+
     null_mu = _compute_null_mu(
         y,
-        sample_weight,
+        solver_weights(sample_weight, model._result),
         offset,
         model._distribution,
         model._link,
@@ -1015,6 +1041,7 @@ def _publish_fit_statistics(
         model._result.phi,
         null_mu=null_mu,
         weight_semantics=model_weight_semantics(model),
+        solver_result=model._result,
     )
     model._solver_result = model._result
     _prime_fit_caches(
@@ -1040,12 +1067,12 @@ def _maybe_release_fit_state(model) -> None:
     inf = model._fit_inference_info
     model.__dict__["_group_edf"] = dict(inf["group_edf_map"])
     augmented = inf["XtWX_inv_aug"]
-    if hasattr(augmented, "scaled") and hasattr(augmented, "slopes"):
-        coefficient_covariance = augmented.scaled(model.result.phi).slopes
-    else:
-        coefficient_covariance = model.result.phi * augmented[1:, 1:]
+    from superglm._weight_units import coefficient_covariance
+
+    slopes = augmented.slopes if hasattr(augmented, "slopes") else augmented[1:, 1:]
+    covariance = coefficient_covariance(slopes, model._solver_pirls_result())
     model.__dict__["_coef_covariance"] = (
-        coefficient_covariance,
+        covariance,
         inf["active_groups"],
     )
     inf["W"] = np.empty(0, dtype=np.float64)
@@ -1389,6 +1416,7 @@ def _solve_coefficients(
     intercept_init=None,
     reml_penalties=None,
     compute_rank_info=True,
+    _weight_unit=True,
 ):
     """Apply the ordinary fit policy for selecting the coefficient solver.
 
@@ -1418,6 +1446,7 @@ def _solve_coefficients(
             weight_semantics=model_weight_semantics(model),
             reml_penalties=reml_penalties,
             compute_rank_info=compute_rank_info,
+            _weight_unit=_weight_unit,
         )
         return result
 
@@ -2009,6 +2038,7 @@ def _fit_reml_in_workspace(
             max_iter=max_pirls_iter,
             record_diagnostics=False,
             convergence=model._convergence,
+            _weight_unit=False,
         )
         _publish_fit_statistics(
             model,

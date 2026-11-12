@@ -416,7 +416,10 @@ def _replace_dataclass_preserving_dynamic_attributes(instance, **changes):
 
 def _replace_pirls_phi(result, phi):
     """Return a phi-adjusted PIRLS result with all runtime metadata intact."""
-    return _replace_dataclass_preserving_dynamic_attributes(result, phi=float(phi))
+    changes = {"phi": float(phi)}
+    if result.weight_exponent:
+        changes["solver_phi"] = float(np.ldexp(phi, result.weight_exponent))
+    return _replace_dataclass_preserving_dynamic_attributes(result, **changes)
 
 
 def _reprofile_published_dispersion(result, y_arr, weights, mu) -> None:

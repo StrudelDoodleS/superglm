@@ -8,13 +8,17 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._weight_units import coefficient_covariance, standard_errors
 from superglm.features.constraint import rules_of
 from superglm.inference._metrics_design import MetricsDesign, factor_from_gram, weighted_moments
 from superglm.inference.covariance import (
+    BinaryScaledCovariance,
+    covariance_contrast_se,
     covariance_quadratic_form,
     covariance_selected_block,
     covariance_selected_diagonal,
     covariance_slope_view,
+    covariance_wald_statistic,
 )
 from superglm.inference.summary import (
     _THIN_LEVEL_ROWS,
@@ -84,7 +88,7 @@ def _ordered_piecewise_structural_rows(
         if structural.kind == "slope_change":
             contrast = structural.contrast
             estimate = float(contrast @ b_main)
-            se_val = float(np.sqrt(max(float(contrast @ V_b_main @ contrast), 0.0)))
+            se_val = covariance_contrast_se(V_b_main, contrast)
             z, p, ci_lo, ci_hi = _compute_coef_stats(estimate, se_val, alpha)
             rows.append(
                 _CoefRow(
@@ -104,7 +108,9 @@ def _ordered_piecewise_structural_rows(
         indices = np.asarray(structural.column_indices, dtype=np.intp)
         if indices.size == 1:
             coef_val = float(b_main[indices[0]])
-            se_val = float(np.sqrt(max(float(V_b_main[indices[0], indices[0]]), 0.0)))
+            contrast = np.zeros(len(b_main))
+            contrast[indices[0]] = 1.0
+            se_val = covariance_contrast_se(V_b_main, contrast)
             z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
             rows.append(
                 _CoefRow(
@@ -120,11 +126,16 @@ def _ordered_piecewise_structural_rows(
             )
             continue
         b_family = b_main[indices]
-        V_family = V_b_main[np.ix_(indices, indices)]
+        if isinstance(V_b_main, BinaryScaledCovariance):
+            V_family = BinaryScaledCovariance(
+                V_b_main.base[np.ix_(indices, indices)], V_b_main.exponent
+            )
+        else:
+            V_family = V_b_main[np.ix_(indices, indices)]
         stat = float("nan")
         p_val = float("nan")
         try:
-            stat = float(b_family @ np.linalg.solve(V_family, b_family))
+            stat = covariance_wald_statistic(b_family, V_family)
             p_val = 1.0 - chi2_dist.cdf(stat, float(indices.size))
         except np.linalg.LinAlgError:
             pass
@@ -256,7 +267,6 @@ def build_coef_rows(
                 _level_diag[g.name] = {
                     i: (int(n_per[i]), float(exp_share[i]), bool(thin[i])) for i in range(K)
                 }
-    phi = result.phi
 
     def _wood_residual_df(edf: NDArray) -> float:
         if known_scale:
@@ -290,17 +300,16 @@ def build_coef_rows(
             if ag is None:
                 se_dict[g.name] = np.zeros(g.size)
             else:
-                scale = 1.0 if known_scale else phi
                 augmented_indices = np.arange(
                     1 + ag.start,
                     1 + ag.end,
                     dtype=np.intp,
                 )
-                var_diag = scale * covariance_selected_diagonal(
+                var_diag = covariance_selected_diagonal(
                     XtWX_inv_aug,
                     augmented_indices,
                 )
-                se_dict[g.name] = np.sqrt(np.maximum(var_diag, 0.0))
+                se_dict[g.name] = standard_errors(var_diag, result)
         if g.name in selected_names:
             se_dict[g.name] = se_dict[g.name].astype(float, copy=True)
             se_dict[g.name][~coefficient_estimable[g.sl]] = np.nan
@@ -333,8 +342,7 @@ def build_coef_rows(
         XtWX_inv_aug,
         augmented_reference_contrast,
     )
-    scale = 1.0 if known_scale else max(phi, 0.0)
-    icpt_se = float(np.sqrt(max(scale * icpt_var, 0.0)))
+    icpt_se = float(standard_errors(icpt_var, result))
 
     rows: list[_CoefRow] = []
 
@@ -402,9 +410,8 @@ def build_coef_rows(
 
     def _curve_se_range(feature_name):
         """Compute curve SE min/max for a spline feature."""
-        scale = phi if not known_scale else 1.0
         # Use the feature block of the augmented inverse for correct marginal SEs
-        Cov_active = covariance_slope_view(XtWX_inv_aug, scale=scale)
+        Cov_active = coefficient_covariance(covariance_slope_view(XtWX_inv_aug), result)
         se_curve = feature_se_from_cov(
             feature_name, Cov_active, active_groups, result, groups, specs, interaction_specs
         )
@@ -429,7 +436,7 @@ def build_coef_rows(
             XtWX_inv_aug,
             augmented_indices,
         )
-        return covariance if known_scale else phi * covariance
+        return coefficient_covariance(covariance, result)
 
     def _spline_enrichment(g_name, spec):
         d = spline_group_enrichment(g_name, spec, _get_group_edf_map(), reml_lambdas, lambda2)
@@ -520,8 +527,7 @@ def build_coef_rows(
                 else 0.0
             )
 
-            scale = 1.0 if known_scale else phi
-            Cov_active = covariance_slope_view(XtWX_inv_aug, scale=scale)
+            Cov_active = coefficient_covariance(covariance_slope_view(XtWX_inv_aug), result)
             se_levels = feature_se_from_cov(
                 g.feature_name,
                 Cov_active,
@@ -562,9 +568,9 @@ def build_coef_rows(
                         [np.arange(ag.start, ag.end) for _, ag in active_pairs]
                     )
                     augmented_indices = active_indices + 1
-                    V_b_j = scale * covariance_selected_block(
-                        XtWX_inv_aug,
-                        augmented_indices,
+                    V_b_j = coefficient_covariance(
+                        covariance_selected_block(XtWX_inv_aug, augmented_indices),
+                        result,
                     )
                     R_a = _get_R_factor()
                     edf, edf1 = _get_influence_edf()
@@ -640,7 +646,7 @@ def build_coef_rows(
                         from scipy.stats import chi2 as chi2_dist
 
                         try:
-                            stat = float(b_main @ np.linalg.solve(V_b_main, b_main))
+                            stat = covariance_wald_statistic(b_main, V_b_main)
                             p_val = 1.0 - chi2_dist.cdf(stat, ref_df)
                         except np.linalg.LinAlgError:
                             pass
@@ -765,7 +771,7 @@ def build_coef_rows(
                     from scipy.stats import chi2 as chi2_dist
 
                     try:
-                        stat = float(b_g @ np.linalg.solve(V_b_j, b_g))
+                        stat = covariance_wald_statistic(b_g, V_b_j)
                         ref_df = float(g.size)
                         p_val = 1.0 - chi2_dist.cdf(stat, ref_df)
                     except np.linalg.LinAlgError:
@@ -958,7 +964,7 @@ def build_coef_rows(
                 from scipy.stats import chi2 as chi2_dist
 
                 try:
-                    stat = float(b_g @ np.linalg.solve(V_b_j, b_g))
+                    stat = covariance_wald_statistic(b_g, V_b_j)
                     p_val = 1.0 - chi2_dist.cdf(stat, ref_df)
                 except np.linalg.LinAlgError:
                     pass
@@ -1051,7 +1057,7 @@ def build_coef_rows(
                 from scipy.stats import chi2 as chi2_dist
 
                 try:
-                    stat = float(b_g @ np.linalg.solve(V_b_j, b_g))
+                    stat = covariance_wald_statistic(b_g, V_b_j)
                     p_val = 1.0 - chi2_dist.cdf(stat, ref_df)
                 except np.linalg.LinAlgError:
                     pass
@@ -1205,7 +1211,7 @@ def build_coef_rows(
                 ag = next(a for a in active_groups if a.name == g.name)
                 V_b_j = _augmented_group_block(ag)
                 try:
-                    stat = float(b_g @ np.linalg.solve(V_b_j, b_g))
+                    stat = covariance_wald_statistic(b_g, V_b_j)
                     p_val = 1.0 - chi2_dist.cdf(stat, ref_df)
                 except np.linalg.LinAlgError:
                     pass
@@ -1306,7 +1312,6 @@ def build_basis_detail(
     from superglm.features.spline import _SplineBase
 
     beta = result.beta
-    phi = result.phi
     selected_names = (
         selected_group_name_set(result, groups)
         if selected_group_names is None
@@ -1338,17 +1343,16 @@ def build_basis_detail(
         if ag is None:
             continue
 
-        scale = 1.0 if known_scale else phi
         augmented_indices = np.arange(
             1 + ag.start,
             1 + ag.end,
             dtype=np.intp,
         )
-        var_diag = scale * covariance_selected_diagonal(
+        var_diag = covariance_selected_diagonal(
             XtWX_inv_aug,
             augmented_indices,
         )
-        se_arr = np.sqrt(np.maximum(var_diag, 0.0))
+        se_arr = standard_errors(var_diag, result)
         se_arr[~coefficient_estimable[g.sl]] = np.nan
 
         rows = []

@@ -246,9 +246,19 @@ def factor_smooth_result(
         _component_suffix(group.name, component.name): float(fitted_lambdas[component.name])
         for component in penalties
     }
+    from superglm._weight_units import physical_variance, scale_penalties, standard_errors
+
+    solver = model._solver_pirls_result()
     phi = float(model.result.phi)
+    solver_lambdas = scale_penalties(fitted_lambdas, solver.weight_exponent)
     variance_components = {
-        component: float(np.inf if value == 0.0 else phi / value)
+        component: float(
+            np.inf
+            if value == 0.0
+            else physical_variance(1.0 / scale_penalties(value, solver.weight_exponent), solver)
+            if solver.weight_exponent
+            else phi / value
+        )
         for component, value in lambdas.items()
     }
     at_lower_boundary = {
@@ -359,7 +369,7 @@ def factor_smooth_result(
     if spec.basis == "fs":
         local_penalty = np.zeros((spec.k, spec.k), dtype=np.float64)
         for component, omega in component_omegas:
-            local_penalty += float(fitted_lambdas[component.name]) * omega
+            local_penalty += float(solver_lambdas[component.name]) * omega
         local_penalized = support.information + local_penalty[None, :, :]
         local_credibility = np.empty(n_levels, dtype=np.float64)
         for level_index in range(n_levels):
@@ -403,7 +413,7 @@ def factor_smooth_result(
                 1 + local_start + spec.k,
                 dtype=np.intp,
             )
-            covariance = phi * covariance_selected_block(
+            covariance = covariance_selected_block(
                 inference["XtWX_inv_aug"],
                 augmented_indices,
             )
@@ -415,7 +425,7 @@ def factor_smooth_result(
                 basis,
                 optimize=True,
             )
-            posterior_se = np.sqrt(np.maximum(variance, 0.0))
+            posterior_se = standard_errors(variance, solver)
             curve_frames.append(
                 pd.DataFrame(
                     {
@@ -466,7 +476,7 @@ def factor_smooth_result(
             [
                 base_level_df
                 - sum(
-                    float(fitted_lambdas[component.name])
+                    float(solver_lambdas[component.name])
                     * float(np.trace(raw_inverse_blocks[level_index] @ omega))
                     for component, omega in component_omegas
                 )
@@ -511,7 +521,7 @@ def factor_smooth_result(
 
         curve_frames = []
         for level_index in selected_level_indices:
-            covariance = phi * level_covariances[int(level_index)]
+            covariance = level_covariances[int(level_index)]
             effect = basis @ deviations[int(level_index)]
             variance = np.einsum(
                 "ij,jk,ik->i",
@@ -520,7 +530,7 @@ def factor_smooth_result(
                 basis,
                 optimize=True,
             )
-            posterior_se = np.sqrt(np.maximum(variance, 0.0))
+            posterior_se = standard_errors(variance, solver)
             curve_frames.append(
                 pd.DataFrame(
                     {

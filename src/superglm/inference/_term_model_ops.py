@@ -288,7 +288,10 @@ def drop1(
     dev_full = model._result.deviance
     edf_full = model._result.effective_df
     n = len(y)
-    phi = model._result.phi
+    from superglm._weight_units import solver_dispersion
+
+    phi = solver_dispersion(model._result)
+    exponent = model._result.weight_exponent
     # A known-scale family's chi-square reference is its unit dispersion, not the
     # result's: fit() pins phi to 1.0 but fit_path() publishes Pearson dispersion.
     chisq_scale = 1.0 if getattr(model._distribution, "scale_known", True) else phi
@@ -307,6 +310,20 @@ def drop1(
         else:
             diagnostic_weights = np.asarray(sample_weight, dtype=np.float64)
 
+    def deviance_in_units(fitted):
+        if not exponent:
+            return fitted.result.deviance
+        from superglm._utils import weighted_row_sum
+
+        # Re-form from the retained fitting means: lifting a rounded subnormal
+        # deviance afterwards cannot recover the digits its ratio needs.
+        mu = fitted._fit_mu
+        return weighted_row_sum(
+            np.ldexp(diagnostic_weights, exponent), fitted._distribution.deviance_unit, y, mu
+        )
+
+    if exponent:
+        dev_full = deviance_in_units(model)
     rows = []
     for name in model._feature_order:
         drop_set = {name}
@@ -319,7 +336,7 @@ def drop1(
         reduced = model._clone_without_features(drop_set)
         reduced_X = _drop1_reduced_frame(reduced, X)
         reduced.fit(reduced_X, y, sample_weight=sample_weight, offset=offset)
-        dev_reduced = reduced.result.deviance
+        dev_reduced = deviance_in_units(reduced)
         edf_reduced = reduced.result.effective_df
         delta_dev = dev_reduced - dev_full
         delta_df = max(edf_full - edf_reduced, 1e-4)
@@ -344,6 +361,8 @@ def drop1(
             )
 
             stat = (delta_dev / delta_df) / phi
+            if exponent and getattr(model._distribution, "scale_known", True):
+                stat = float(np.ldexp(stat, -exponent))
             resid_df = pearson_residual_degrees_of_freedom(
                 diagnostic_weights,
                 edf_full,
@@ -352,14 +371,18 @@ def drop1(
             p_value = float(f_dist.sf(stat, delta_df, resid_df))
         else:
             stat = delta_dev / chisq_scale
+            if exponent and getattr(model._distribution, "scale_known", True):
+                stat = float(np.ldexp(stat, -exponent))
             p_value = float(chi2.sf(stat, delta_df))
 
         rows.append(
             {
                 "feature": name,
-                "deviance_full": dev_full,
-                "deviance_reduced": dev_reduced,
-                "delta_deviance": delta_dev,
+                "deviance_full": float(np.ldexp(dev_full, -exponent)) if exponent else dev_full,
+                "deviance_reduced": float(np.ldexp(dev_reduced, -exponent))
+                if exponent
+                else dev_reduced,
+                "delta_deviance": float(np.ldexp(delta_dev, -exponent)) if exponent else delta_dev,
                 "delta_df": delta_df,
                 "statistic": stat,
                 "p_value": p_value,

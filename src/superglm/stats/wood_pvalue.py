@@ -191,6 +191,11 @@ def wood_test_smooth(
     res_df: float = -1.0,
 ) -> tuple[float, float, float]:
     """Smooth-term significance test from Wood (2013)."""
+    from superglm.inference.covariance import BinaryScaledCovariance
+
+    if isinstance(V_b_j, BinaryScaledCovariance):
+        beta_j = np.ldexp(beta_j, -(V_b_j.exponent // 2))
+        V_b_j = V_b_j.base
     p_g = len(beta_j)
     target_rank = _clip_target_rank(edf1_j, p_g)
     if target_rank < 1e-6:
