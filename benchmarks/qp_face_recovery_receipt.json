@@ -1,0 +1,655 @@
+{
+  "schema": 1,
+  "baseline_commit": "0fbf84073880340e6d08874680632d872152a089",
+  "measured_candidate_commit": "f654e61eafe41d30bdc0b52daa2b8d5e4ea068ea",
+  "only_production_diff": [
+    "src/superglm/solvers/constrained_qp.py"
+  ],
+  "source_sha256": "11dd986e19e59b69564b4c8ca713a20f7565bcb9a9b123ddc8c9d5c1179cad62",
+  "benchboard_timing_label": "codex626-paired-final",
+  "protocol": {
+    "machine_lease": "exclusive benchboard run-timed",
+    "repair_calls": "648 original seed-7 cases; one common fit per case, fresh deepcopy per arm; one warmup then three timed complete apply_shape_postfit calls, alternating arms per repetition and case; report best of three per case",
+    "book_fits": "complete corrected freMTPL2 frequency book, exposure floor 0.01; fresh six-term Poisson REML model per fit; one 3000-row, two-REML-iteration warmup, then five alternating complete fits per arm; report median of five",
+    "comparison": "same process and environment; switch only the QP module at the recorded baseline and candidate commits; every other production source file is identical",
+    "clock_scope": "complete public method call, data preparation and deepcopy/model declaration outside the clock; prediction and diagnostics outside the clock",
+    "raw_source_tree_control": "three earlier alternating separate-source-tree rounds at b49d7696cfecda909e9237a0211701f16ed7c934; kept below to disclose clock drift; the paired final-head control determines the gate"
+  },
+  "environment": {
+    "python": "3.13.14",
+    "system": "Linux",
+    "machine": "x86_64",
+    "cpu": "AMD EPYC 9645 96-Core Processor",
+    "logical_cpus": 16,
+    "packages": {
+      "numpy": "2.5.2",
+      "scipy": "1.18.0",
+      "numba": "0.68.0",
+      "pandas": "3.0.5",
+      "tabmat": "4.2.1",
+      "threadpoolctl": "3.6.0"
+    },
+    "threadpools": [
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 1,
+        "prefix": "libscipy_openblas",
+        "version": "0.3.34.0.0",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      }
+    ],
+    "pinned_threads": {
+      "OMP_NUM_THREADS": "1",
+      "OPENBLAS_NUM_THREADS": "1",
+      "MKL_NUM_THREADS": "1",
+      "NUMEXPR_NUM_THREADS": "1",
+      "NUMBA_NUM_THREADS": "1",
+      "POLARS_MAX_THREADS": "1",
+      "SUPERGLM_BLAS_THREADS": "1",
+      "SUPERGLM_N_JOBS": "1"
+    }
+  },
+  "public_data_sha256": {
+    "freMTPL2freq.parquet": "d691f9a0b53719381467d8b1d3487814e546a9c7cd59f9a56e70ff5100dc14bf",
+    "freMTPL2sev.parquet": "101c58e726eae9fe25eadbd57736cbdf34e43adcbe9bbeeee6ea27c8834e39df"
+  },
+  "repair_summary": {
+    "master": {
+      "sum_seconds": 11.582297565415502,
+      "median_seconds": 0.015213006176054478,
+      "published": 648
+    },
+    "head": {
+      "sum_seconds": 11.208881663624197,
+      "median_seconds": 0.015127973398193717,
+      "published": 648
+    }
+  },
+  "raw_repair_records_sha256": "5e140eba9b88c64954f7055ae0ec79e52de521e904a2d1cf8e0a3a9149b54a63",
+  "selected_repair_cases": [
+    {
+      "case": "ps25sel/unif/u/gaussian/concave",
+      "master": {
+        "status": "ok",
+        "seconds": 0.05178913101553917,
+        "times": [
+          0.057129872031509876,
+          0.05178913101553917,
+          0.06485722726210952
+        ]
+      },
+      "head": {
+        "status": "ok",
+        "seconds": 0.017323541920632124,
+        "times": [
+          0.018309613689780235,
+          0.017323541920632124,
+          0.018486390355974436
+        ]
+      },
+      "max_coefficient_difference": 8.137050912797761e-15
+    },
+    {
+      "case": "ps25sel/unif/u/poisson/concave",
+      "master": {
+        "status": "ok",
+        "seconds": 0.0501334723085165,
+        "times": [
+          0.0501334723085165,
+          0.06214946275576949,
+          0.06600165599957108
+        ]
+      },
+      "head": {
+        "status": "ok",
+        "seconds": 0.01891280570998788,
+        "times": [
+          0.01891280570998788,
+          0.01994941895827651,
+          0.02449983498081565
+        ]
+      },
+      "max_coefficient_difference": 7.19212710898311e-15
+    },
+    {
+      "case": "ps25sel/unif/abs/gamma/concave",
+      "master": {
+        "status": "ok",
+        "seconds": 0.0767238549888134,
+        "times": [
+          0.0767238549888134,
+          0.0971596036106348,
+          0.10971538815647364
+        ]
+      },
+      "head": {
+        "status": "ok",
+        "seconds": 0.018661403562873602,
+        "times": [
+          0.019819794688373804,
+          0.018661403562873602,
+          0.021988186985254288
+        ]
+      },
+      "max_coefficient_difference": 1.3967091272301976e-14
+    },
+    {
+      "case": "ps25sel/unif/bump/poisson/increasing",
+      "master": {
+        "status": "ok",
+        "seconds": 0.23469346575438976,
+        "times": [
+          0.2633735272102058,
+          0.23469346575438976,
+          0.240395023021847
+        ]
+      },
+      "head": {
+        "status": "ok",
+        "seconds": 0.17211400158703327,
+        "times": [
+          0.22149710915982723,
+          0.17211400158703327,
+          0.20197681104764342
+        ]
+      },
+      "max_coefficient_difference": 1.9338762362319795e-13
+    },
+    {
+      "case": "cr10/exp/bump/poisson/decreasing",
+      "master": {
+        "status": "ok",
+        "seconds": 0.07183260470628738,
+        "times": [
+          0.08512052521109581,
+          0.07904062792658806,
+          0.07183260470628738
+        ]
+      },
+      "head": {
+        "status": "ok",
+        "seconds": 0.058507957961410284,
+        "times": [
+          0.06617121305316687,
+          0.06842899229377508,
+          0.058507957961410284
+        ]
+      },
+      "max_coefficient_difference": 3.214095656289828e-14
+    }
+  ],
+  "book_fits": {
+    "bs": {
+      "timings": {
+        "master": {
+          "seconds": [
+            7.653989105951041,
+            6.442637201864272,
+            6.794936934951693,
+            6.635001467075199,
+            5.848764379974455
+          ],
+          "median_seconds": 6.635001467075199,
+          "minimum_seconds": 5.848764379974455,
+          "maximum_seconds": 7.653989105951041
+        },
+        "head": {
+          "seconds": [
+            6.199295452795923,
+            6.255500859115273,
+            5.959734932053834,
+            5.938035307917744,
+            6.203714907169342
+          ],
+          "median_seconds": 6.199295452795923,
+          "minimum_seconds": 5.938035307917744,
+          "maximum_seconds": 6.255500859115273
+        }
+      },
+      "all_numerical_outputs_bit_identical": true,
+      "backend": [
+        "gram"
+      ],
+      "edf": 52.58997474710399,
+      "deviance": 162561.11308943143,
+      "prediction_sha256": "4add0cc336166dbb735ab973dfe56f985ea14c3ee5b334bf9fd08aa87a83ba38",
+      "coefficient_sha256": "7ebe1948f9b78cbfe8b08278394e6774d06d423d0d6b45df5d9ef0a8895f4099",
+      "runs": [
+        {
+          "arm": "master",
+          "rep": 0,
+          "seconds": 7.653989105951041,
+          "backend": "gram",
+          "warnings": []
+        },
+        {
+          "arm": "head",
+          "rep": 0,
+          "seconds": 6.199295452795923,
+          "backend": "gram",
+          "warnings": []
+        },
+        {
+          "arm": "head",
+          "rep": 1,
+          "seconds": 6.255500859115273,
+          "backend": "gram",
+          "warnings": []
+        },
+        {
+          "arm": "master",
+          "rep": 1,
+          "seconds": 6.442637201864272,
+          "backend": "gram",
+          "warnings": []
+        },
+        {
+          "arm": "master",
+          "rep": 2,
+          "seconds": 6.794936934951693,
+          "backend": "gram",
+          "warnings": []
+        },
+        {
+          "arm": "head",
+          "rep": 2,
+          "seconds": 5.959734932053834,
+          "backend": "gram",
+          "warnings": []
+        },
+        {
+          "arm": "head",
+          "rep": 3,
+          "seconds": 5.938035307917744,
+          "backend": "gram",
+          "warnings": []
+        },
+        {
+          "arm": "master",
+          "rep": 3,
+          "seconds": 6.635001467075199,
+          "backend": "gram",
+          "warnings": []
+        },
+        {
+          "arm": "master",
+          "rep": 4,
+          "seconds": 5.848764379974455,
+          "backend": "gram",
+          "warnings": []
+        },
+        {
+          "arm": "head",
+          "rep": 4,
+          "seconds": 6.203714907169342,
+          "backend": "gram",
+          "warnings": []
+        }
+      ]
+    },
+    "ps": {
+      "timings": {
+        "master": {
+          "seconds": [
+            7.1304021049290895,
+            6.677315776236355,
+            6.143465233966708,
+            6.400052033830434,
+            6.558786950074136
+          ],
+          "median_seconds": 6.558786950074136,
+          "minimum_seconds": 6.143465233966708,
+          "maximum_seconds": 7.1304021049290895
+        },
+        "head": {
+          "seconds": [
+            7.5783433970063925,
+            7.1028344626538455,
+            5.907003771048039,
+            6.229604199994355,
+            6.436211001127958
+          ],
+          "median_seconds": 6.436211001127958,
+          "minimum_seconds": 5.907003771048039,
+          "maximum_seconds": 7.5783433970063925
+        }
+      },
+      "all_numerical_outputs_bit_identical": true,
+      "backend": [
+        "gram"
+      ],
+      "edf": 52.834767006572456,
+      "deviance": 162529.82211700265,
+      "prediction_sha256": "8ea22998d3d49948fccbdf17b66d0342c5d8b4b265c3b7d59b1322f59cdd2076",
+      "coefficient_sha256": "07d0eff02b2b9c724f8d6c9889bda076d6765f5b8f0f7cfdb84b5094f4991e3f",
+      "runs": [
+        {
+          "arm": "master",
+          "rep": 0,
+          "seconds": 7.1304021049290895,
+          "backend": "gram",
+          "warnings": []
+        },
+        {
+          "arm": "head",
+          "rep": 0,
+          "seconds": 7.5783433970063925,
+          "backend": "gram",
+          "warnings": []
+        },
+        {
+          "arm": "head",
+          "rep": 1,
+          "seconds": 7.1028344626538455,
+          "backend": "gram",
+          "warnings": []
+        },
+        {
+          "arm": "master",
+          "rep": 1,
+          "seconds": 6.677315776236355,
+          "backend": "gram",
+          "warnings": []
+        },
+        {
+          "arm": "master",
+          "rep": 2,
+          "seconds": 6.143465233966708,
+          "backend": "gram",
+          "warnings": []
+        },
+        {
+          "arm": "head",
+          "rep": 2,
+          "seconds": 5.907003771048039,
+          "backend": "gram",
+          "warnings": []
+        },
+        {
+          "arm": "head",
+          "rep": 3,
+          "seconds": 6.229604199994355,
+          "backend": "gram",
+          "warnings": []
+        },
+        {
+          "arm": "master",
+          "rep": 3,
+          "seconds": 6.400052033830434,
+          "backend": "gram",
+          "warnings": []
+        },
+        {
+          "arm": "master",
+          "rep": 4,
+          "seconds": 6.558786950074136,
+          "backend": "gram",
+          "warnings": []
+        },
+        {
+          "arm": "head",
+          "rep": 4,
+          "seconds": 6.436211001127958,
+          "backend": "gram",
+          "warnings": []
+        }
+      ]
+    }
+  },
+  "source_tree_control_at_b49": {
+    "repairs": {
+      "master": {
+        "round_sums": [
+          10.699773772619665,
+          10.900746362749487,
+          10.59304214315489
+        ],
+        "sum_median": 10.579308286309242,
+        "median_ms": 13.522152556106448,
+        "sum_best": 9.395613935776055,
+        "best_median_ms": 12.202668469399214,
+        "statuses": [
+          "ok"
+        ]
+      },
+      "head": {
+        "round_sums": [
+          11.821436554193497,
+          10.507256091106683,
+          9.848451912403107
+        ],
+        "sum_median": 10.502347297035158,
+        "median_ms": 13.910460053011775,
+        "sum_best": 9.156094991136342,
+        "best_median_ms": 12.275372399017215,
+        "statuses": [
+          "ok"
+        ]
+      }
+    },
+    "books": {
+      "bs": {
+        "master": {
+          "seconds": [
+            5.610571508761495,
+            6.472869500983506,
+            6.372364816721529
+          ],
+          "median": 6.372364816721529,
+          "best": 5.610571508761495,
+          "peak_rss_mib": [
+            1029.31640625,
+            995.67578125,
+            1001.03515625
+          ],
+          "backend": [
+            "gram",
+            "gram",
+            "gram"
+          ]
+        },
+        "head": {
+          "seconds": [
+            7.283060233108699,
+            5.69343919493258,
+            6.610522993374616
+          ],
+          "median": 6.610522993374616,
+          "best": 5.69343919493258,
+          "peak_rss_mib": [
+            1000.99609375,
+            1000.8515625,
+            1000.7421875
+          ],
+          "backend": [
+            "gram",
+            "gram",
+            "gram"
+          ]
+        },
+        "identical": true,
+        "max_prediction_difference": 0.0
+      },
+      "ps": {
+        "master": {
+          "seconds": [
+            6.0951506909914315,
+            6.15248472802341,
+            6.415790506172925
+          ],
+          "median": 6.15248472802341,
+          "best": 6.0951506909914315,
+          "peak_rss_mib": [
+            998.3359375,
+            1000.98046875,
+            995.484375
+          ],
+          "backend": [
+            "gram",
+            "gram",
+            "gram"
+          ]
+        },
+        "head": {
+          "seconds": [
+            7.880976434331387,
+            5.459725502412766,
+            6.6456966660916805
+          ],
+          "median": 6.6456966660916805,
+          "best": 5.459725502412766,
+          "peak_rss_mib": [
+            995.59765625,
+            1000.41796875,
+            1000.76171875
+          ],
+          "backend": [
+            "gram",
+            "gram",
+            "gram"
+          ]
+        },
+        "identical": true,
+        "max_prediction_difference": 0.0
+      }
+    },
+    "outliers": [
+      {
+        "case": "ps25sel/unif/bump/poisson/increasing",
+        "master": {
+          "rounds_ms": [
+            194.39171813428402,
+            175.2685629762709,
+            204.666827339679
+          ],
+          "median_ms": 194.39171813428402,
+          "best_ms": 175.2685629762709
+        },
+        "head": {
+          "rounds_ms": [
+            277.00890274718404,
+            194.9161421507597,
+            185.089108068496
+          ],
+          "median_ms": 194.9161421507597,
+          "best_ms": 185.089108068496
+        }
+      },
+      {
+        "case": "ps25sel/unif/u/gaussian/concave",
+        "master": {
+          "rounds_ms": [
+            57.72721208631992,
+            46.09527811408043,
+            50.888103898614645
+          ],
+          "median_ms": 50.888103898614645,
+          "best_ms": 46.09527811408043
+        },
+        "head": {
+          "rounds_ms": [
+            14.938052278012037,
+            16.2755842320621,
+            18.957227934151888
+          ],
+          "median_ms": 16.2755842320621,
+          "best_ms": 14.938052278012037
+        }
+      },
+      {
+        "case": "ps25sel/unif/u/poisson/concave",
+        "master": {
+          "rounds_ms": [
+            71.88982283696532,
+            57.12993675842881,
+            41.46137135103345
+          ],
+          "median_ms": 57.12993675842881,
+          "best_ms": 41.46137135103345
+        },
+        "head": {
+          "rounds_ms": [
+            21.013733930885792,
+            15.898773912340403,
+            19.627985078841448
+          ],
+          "median_ms": 19.627985078841448,
+          "best_ms": 15.898773912340403
+        }
+      },
+      {
+        "case": "ps25sel/unif/abs/gamma/concave",
+        "master": {
+          "rounds_ms": [
+            94.82930693775415,
+            86.97295701131225,
+            84.8846910521388
+          ],
+          "median_ms": 86.97295701131225,
+          "best_ms": 84.8846910521388
+        },
+        "head": {
+          "rounds_ms": [
+            21.42232283949852,
+            23.0942671187222,
+            15.565111767500639
+          ],
+          "median_ms": 21.42232283949852,
+          "best_ms": 15.565111767500639
+        }
+      },
+      {
+        "case": "cr10/exp/bump/poisson/decreasing",
+        "master": {
+          "rounds_ms": [
+            50.75197294354439,
+            70.59754710644484,
+            71.38782273977995
+          ],
+          "median_ms": 70.59754710644484,
+          "best_ms": 50.75197294354439
+        },
+        "head": {
+          "rounds_ms": [
+            66.75752392038703,
+            50.982984248548746,
+            57.158519979566336
+          ],
+          "median_ms": 57.158519979566336,
+          "best_ms": 50.982984248548746
+        }
+      }
+    ]
+  },
+  "qp_replay": {
+    "total": 4045,
+    "bit_identical": 3975,
+    "recovery_used": 73,
+    "changes_without_recovery": 0,
+    "lost_convergence": 0,
+    "newly_certified": 6
+  },
+  "review_regressions": {
+    "focused_tests_passed": 1254,
+    "disabled_trigger_pytest_exit_codes": {
+      "head": 0,
+      "no_face_certificate_trigger": 1,
+      "no_small_step_trigger": 1,
+      "no_blocker_trigger": 1
+    },
+    "large_qp_coordinate_calls_before": 352,
+    "large_qp_coordinate_calls_after": 5,
+    "dead_assignment_removal_replay_identical": 73
+  },
+  "memory_and_work_control": {
+    "memory_protocol": "separate-process complete-fit peak RSS in the earlier source-tree control; no numerical cache is added",
+    "work_control_candidate_commit": "b49d7696cfecda909e9237a0211701f16ed7c934",
+    "bs_qp_solves": 2,
+    "bs_qp_iterations": 9,
+    "bs_uncertified_qps": 0,
+    "bs_backend": "gram",
+    "baseline_and_candidate_work_identical": true
+  }
+}
