@@ -269,16 +269,18 @@ def determining_cuts(
 
     ``values`` are the column's values. A range needs ``degree + 1`` support
     points and a free stretch what ``certify_determined`` asks of it. A piece
-    with ``n >= need`` distinct values below the column maximum is cut at
-    ``need`` of them, the ``floor(j n / need)``-th smallest for ``j = 0 ..
-    need - 1``, so each cut starts a run holding a value of the piece; a piece
-    with fewer is cut at all of them. A range counts its values from its lower
-    edge up to below its upper one, and a stretch those strictly inside it,
-    or from an end of the axis. As bin knots (``discretize_column``), the
-    cuts give each such run a cell of its own on the adaptive grid.
+    with ``n >= need`` distinct values keeps ``need`` of them, the
+    ``floor(j n / need)``-th smallest for ``j = 0 .. need - 1``, and a piece
+    with fewer keeps them all; the cuts are the midpoints between consecutive
+    kept values, so each kept value has a run of its own. A range counts its
+    values from its lower edge up to below its upper one, a stretch those
+    strictly inside it or from an end of the axis, and the piece that reaches
+    the top of the axis counts the column maximum too. As bin knots
+    (``discretize_column``), the cuts give each such run a cell of its own on
+    the adaptive grid.
     """
     v = np.unique(np.asarray(values, dtype=np.float64))
-    v = v[v < v[-1]] if v.size else v
+    top = float(v[-1]) if v.size else np.inf
     starts, ends, needed = _stretch_needs(ranges, lo, hi, order)
     pieces = [(float(r.lo), float(r.hi), r.degree + 1, False) for r in ranges]
     pieces += [
@@ -287,11 +289,13 @@ def determining_cuts(
     ]
     cuts = [np.empty(0)]
     for start, end, need, open_start in pieces:
-        inside = v[((v > start) if open_start else (v >= start)) & (v < end)]
-        if need < 1 or inside.size == 0:
+        below_end = (v <= end) if end >= top else (v < end)
+        inside = v[((v > start) if open_start else (v >= start)) & below_end]
+        if need < 2 or inside.size < 2:
             continue
         n = inside.size
-        cuts.append(inside if n < need else inside[(np.arange(need) * n) // need])
+        kept = inside if n < need else inside[(np.arange(need) * n) // need]
+        cuts.append(0.5 * (kept[:-1] + kept[1:]))
     return np.unique(np.concatenate(cuts))
 
 

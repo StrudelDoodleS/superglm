@@ -710,6 +710,22 @@ def test_a_binned_fit_does_not_depend_on_the_order_its_ranges_are_declared_in():
     np.testing.assert_allclose(fitted[1], fitted[0], rtol=0.0, atol=1e-9)
 
 
+def test_a_binned_range_keeps_the_support_point_at_the_column_maximum():
+    # A cubic on [5, 10] needs four support points and its rows hold exactly four values,
+    # the last of them the column maximum. The bins' cuts must keep 8.5 and 10 apart: read
+    # as one cell they left the range three points and the fit was refused, though
+    # eight equal-width bins carry it.
+    x = np.r_[np.linspace(0.0, 4.8, 101), 6.0, 7.2, 8.5, 10.0]
+    y = np.cos(x) + np.random.default_rng(5).normal(0.0, 0.05, x.size)
+    frame = pd.DataFrame({"x": x})
+    spline = Spline(kind="bs", n_knots=4, polynomial_ranges=[PolynomialRange(5.0, 10.0, 3, "kink")])
+    model = SuperGLM(
+        family="gaussian", selection_penalty=0.0, discrete=True, n_bins=8, features={"x": spline}
+    )
+    model.fit(frame, y)
+    assert np.all(np.isfinite(model.predict(frame)))
+
+
 @pytest.mark.parametrize("join", ["kink", "tangent"])
 def test_ppform_export_reproduces_a_ranged_spline(join):
     model = _fit("bs", [PolynomialRange(30.0, 45.0, 1, join)])
