@@ -1797,12 +1797,15 @@ print(" ".join(repr(float(v)) for g in groups for v in repair.repaired_beta_repa
 def test_bracket_repair_publishes_on_every_blas_kernel():
     """Every OpenBLAS kernel publishes the bracketed repair, increasing everywhere.
 
-    A kernel whose bracket closes publishes the closest curve, and those curves agree;
-    one whose bracket does not discloses that, and publishes its best feasible point.
+    A kernel whose bracket closes publishes a curve within the bracket's objective gap
+    of the closest one, so those curves agree in the caller's metric: the distance from
+    the fitted curve, in units of the zero term's. Their values can differ by more, along
+    directions the near-singular grid metric barely weighs.
+    One whose bracket does not close discloses that, and publishes its best feasible point.
     """
     import warnings
 
-    from superglm.constraints import MonotoneRepairer
+    from superglm.constraints import _OBJECTIVE_GAP, MonotoneRepairer
     from tests._shape_projection_oracle import grid_metric, projection_certificate
 
     model, _ = _quartic_noise_fit()
@@ -1823,9 +1826,14 @@ def test_bracket_repair_publishes_on_every_blas_kernel():
         certificate = projection_certificate(spec, "increasing", coefficients, H, g, fitted)
         assert certificate.minimum_derivative >= -1e-10, (kernel, certificate)
         if status == "certified":
-            certified.append(np.asarray([float(v) for v in curve]))
-    for curve in certified[1:]:
-        np.testing.assert_allclose(curve, certified[0], rtol=0.0, atol=1e-9)
+            certified.append(coefficients)
+    # Two points each within _OBJECTIVE_GAP of the optimum in the scaled objective, where
+    # the zero term's distance is one, lie within twice that of each other; the rest is
+    # the rounding of forming the distances here.
+    zero = 0.5 * float(fitted @ H @ fitted)
+    gaps = [0.5 * float((b - fitted) @ H @ (b - fitted)) / zero for b in certified]
+    assert len(gaps) >= 2, decisions
+    assert max(gaps) - min(gaps) <= 2.0 * _OBJECTIVE_GAP + 2.0**-40, gaps
 
 
 def test_select_convex_repair_certifies_each_polynomial_span():
