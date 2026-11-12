@@ -393,8 +393,10 @@ def _newton_minimum(
 
     ``probe(t)`` is the objective at ``t``, infinite where a row is invalid, and where every row
     is valid its slope, curvature and the sum of its ``rows`` terms' magnitudes (else ``None``).
-    ``None`` comes back where a point it moves to has no slope, where the open bracket would
-    leave float64's range in ``unit``s, or after ``_NEWTON_STEPS``.
+    ``None`` comes back where a point it moves to has no slope, where its slope is zero and its
+    curvature is not positive, where the open bracket would leave float64's range in ``unit``s,
+    or after ``_NEWTON_STEPS``. Every other stop is a minimum: a positive curvature with a
+    decrement within rounding, or a bracket closed on the best point.
     """
     x = start
     value, derivatives = probe(x)
@@ -406,8 +408,10 @@ def _newton_minimum(
         if derivatives is None:
             return None
         slope, curvature, size = derivatives
+        # A zero slope is a minimum only where the curvature is positive. Elsewhere it is a
+        # maximum or an inflection (a square-root link's, where the mean is zero on every row).
         if slope == 0.0:
-            return x
+            return x if curvature > 0.0 else None
         if slope < 0.0:
             lower = x
         else:

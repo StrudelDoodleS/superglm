@@ -4477,6 +4477,41 @@ def test_intercept_profile_under_the_square_root_link_ends_no_higher_than_it_sta
         assert deviance(shift) <= deviance(0.0) * (1.0 + 1e-12)
 
 
+def test_intercept_profile_started_at_a_stationary_maximum_ends_at_a_minimum():
+    """Under the identity link the gamma deviance is concave in the mean beyond twice the
+    response, so two rows that want shifts 28 apart make the profile's minima at 0.09 and 28.03
+    with a maximum at 18.59 between, where the Fisher information is still positive. Started
+    there, at ddda43d45 both runs stopped at once and published the maximum, shift 0. A
+    stationary shift is now a minimum only with positive curvature; here none is, and the
+    derivative-free search ends at a minimum, SciPy's on the side it reaches.
+    """
+    from scipy.optimize import brentq, minimize_scalar
+
+    distribution = Gamma()
+    model = SimpleNamespace(_distribution=distribution, _link=IdentityLink())
+    y, base, weights = np.array([1.0, 1050.0]), np.array([1.0, 1000.0]), np.array([1.0, 1600.0])
+
+    def deviance(t, eta=base):
+        return float(np.sum(weights * distribution.deviance_unit(y, eta + t)))
+
+    def score(t):
+        return float(np.sum(weights * (y - (base + t)) / (base + t) ** 2))
+
+    peak = brentq(score, 15.0, 22.0, xtol=1e-15, rtol=8.9e-16)
+    eta = base + peak
+    assert deviance(1.0, eta) < deviance(0.0, eta) > deviance(-1.0, eta)  # a maximum
+
+    _, shift, _, published = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+
+    bounds = (1e-9, 200.0) if shift > 0.0 else (-eta.min() + 1e-9, -1e-9)
+    found = minimize_scalar(
+        lambda t: deviance(t, eta), bounds=bounds, method="bounded", options={"xatol": 1e-12}
+    )
+    assert shift == pytest.approx(found.x, rel=1e-6)
+    assert published == pytest.approx(deviance(shift, eta), rel=1e-12)
+    assert published < deviance(0.0, eta) - 1e-3
+
+
 def test_intercept_profile_beside_a_pole_compares_deviances_to_their_means_rounding():
     """A row whose mean sits next to its pole makes the residual's rounding bound vast, about
     2e5 here against a deviance of 0.104: a search comparing deviances to that bound takes any

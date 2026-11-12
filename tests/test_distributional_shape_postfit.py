@@ -885,6 +885,45 @@ def test_the_intercept_is_re_estimated_however_far_a_revision_moved_it_in_scale_
     assert abs(np.sum(precision * residual) / np.sum(precision)) <= 1e-6 * 1e-9
 
 
+def test_the_intercept_search_takes_no_stationary_maximum_for_a_minimum():
+    # Sol's case on #626: a Gaussian location under the square-root link, its intercept edited
+    # to zero. The repair flattens the falling term, so every row's location is 0, where the
+    # likelihood's slope in the intercept is zero and its curvature negative: a maximum. At
+    # ddda43d45 Newton's search stopped there on the zero slope and published location 0 on
+    # every row; master published 2.33503725467. A zero slope is now a minimum only with
+    # positive curvature, and the derivative-free search finds the location that, with the
+    # scale held constant, maximises the likelihood: the response's mean.
+    from superglm import GaussianLS
+
+    x = np.linspace(0.0, 1.0, 100)
+    y = (2.0 - x) ** 2 + 0.03 * np.sin(31.0 * x)
+    X = pd.DataFrame({"x": x})
+    family = GaussianLS(scale_floor=0.0)
+    model = SuperLSS(
+        family,
+        family.location(
+            s("x", kind="bs", k=6, constraint=Constraint.postfit.increasing), link="sqrt"
+        ),
+        family.scale(),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y, lambdas={"location:x#wiggle": 1.0})
+        fitted = model._model
+        beta = np.array(fitted.coefficients, dtype=np.float64)
+        beta[fitted.layout.predictor("location").intercept_index] = 0.0
+        revised = model._with_revised_coefficients(beta, edited_terms=["location:x"])
+        revised.apply_shape_postfit()
+
+    (status,) = postfit_status(revised._model)
+    assert status.state is PostfitState.REPAIRED
+    assert not np.any(
+        np.asarray(revised._model.coefficients)[fitted.layout.term_slices["location:x"]]
+    )
+    location = revised.predict_parameters(X)["location"].to_numpy()
+    np.testing.assert_allclose(location, y.mean(), rtol=1e-7)
+
+
 def test_a_probe_whose_likelihood_overflows_is_a_wall_of_the_intercept_search():
     # Sol's case: the scale's offset runs from -100 to 0, so a trial shift of the scale
     # intercept far enough down overflows the Gaussian likelihood. At 19a6ab028 that raised

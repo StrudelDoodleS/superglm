@@ -381,6 +381,9 @@ class _InterceptState(NamedTuple):
     information: float
     #: The rows a clamp holds there, where a rerun reads them (``_searched_intercept``).
     clamped: NDArray | None = None
+    #: Half the scored deviance's second derivative in the shift, where it is formed: near a
+    #: stationary shift of a pairing whose deviance is not convex (``_searched_intercept``).
+    curvature: float = np.nan
 
 
 def _profile_repaired_intercept(
@@ -492,6 +495,10 @@ def _searched_intercept(
     # Whether a search's root is compared with its start (below): not where every row's
     # deviance is convex in its predictor and no row is held.
     checked = type(model._link) not in _CONVEX_DEVIANCE_LINKS.get(type(model._distribution), ())
+    # Where the deviance is not convex, a stationary shift can be a maximum, at which the
+    # Fisher information is still positive: a search's stationary shift is then a minimum only
+    # where the deviance's own curvature there is positive (``_deviance_curvature``).
+    nonconvex = checked
 
     def evaluate(
         shift: float, compared: bool, clamps: bool = False, origin=None
@@ -551,6 +558,11 @@ def _searched_intercept(
             information = float(np.sum(information_rows, dtype=np.float64))
             score_scale = float(np.sum(np.abs(score_rows), dtype=np.float64))
             score_rounding_sum = float(np.sum(score_rounding, dtype=np.float64))
+            curvature = np.nan
+            if nonconvex and abs(score) <= 1e-9 * score_scale + score_rounding_sum:
+                curvature = _deviance_curvature(
+                    model, y_arr, mu, eta_safe, dmu_deta, variance, weights_arr, clamped
+                )
             # The deviance only where it is read: every trial a bracket is kept by, a start
             # compared, and the stationary shift a search returns, which publication reads.
             # Where compared, with what it keeps from the mean alone: each unit deviance is
@@ -587,12 +599,15 @@ def _searched_intercept(
             score_rounding=score_rounding_sum,
             information=information,
             clamped=clamped if clamps else None,
+            curvature=curvature,
         )
 
     def stationary(state: _InterceptState, relative: float) -> bool:
         # Relative to the scores' own size, and never tighter than the rounding
-        # their residuals carry.
-        return abs(state.score) <= relative * state.score_scale + state.score_rounding
+        # their residuals carry; a minimum, where the deviance is not convex.
+        return abs(state.score) <= relative * state.score_scale + state.score_rounding and (
+            not nonconvex or state.curvature > 0.0
+        )
 
     start = evaluate(0.0, checked)
     assert start is not None and held is not None  # the first evaluation holds its rows
@@ -680,6 +695,10 @@ def _searched_intercept(
         and higher(found[1], start)
     ):
         found = search(rerun=True)
+    if found is None and nonconvex:
+        # Neither run reached a stationary minimum (one may have met a maximum, where the
+        # Fisher step is null): the derivative-free search decides, as SuperLSS's does.
+        found = _derivative_free_intercept(eta_base[carried], evaluate)
     if found is None:
         raise RuntimeError(
             "Unsafe shape repair rejected before publication: conditional intercept "
@@ -692,6 +711,62 @@ def _searched_intercept(
 #: Evaluations each run of the conditional intercept search takes at most: bisection
 #: resolves a bracket as wide as the log link's clamp to the last bit in about 60.
 _INTERCEPT_STEPS = 100
+
+
+def _deviance_curvature(model, y, mu, eta, dmu_deta, variance, weights, clamped) -> float:
+    """Half the weighted deviance's second derivative in the intercept, on the rows no clamp
+    holds; NaN where the family or link gives no second derivative.
+
+    A row's score, ``w (y - mu) mu' / V``, is minus half its deviance's slope, so half the
+    curvature is minus the score's derivative, ``w (mu'^2 - (y - mu) (mu'' - mu'^2 V' / V)) / V``:
+    the Fisher information's term less the residual's, which the expectation drops. ``V'`` is
+    zero where the variance floor holds.
+    """
+    from superglm.distributions import _VARIANCE_FLOOR
+
+    second = getattr(model._link, "deriv2_inverse", None)
+    slope = getattr(model._distribution, "variance_derivative", None)
+    if not (callable(second) and callable(slope)):
+        return np.nan
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        d2mu = np.asarray(second(eta), dtype=np.float64)
+        dvariance = np.where(
+            variance > _VARIANCE_FLOOR, np.asarray(slope(mu), dtype=np.float64), 0.0
+        )
+        rows = (
+            weights
+            * (dmu_deta * dmu_deta - (y - mu) * (d2mu - dmu_deta * dmu_deta * dvariance / variance))
+            / variance
+        )
+        rows = np.where(clamped | (weights == 0.0), 0.0, rows)
+        return float(np.sum(rows, dtype=np.float64))
+
+
+def _derivative_free_intercept(eta, evaluate) -> tuple[float, _InterceptState] | None:
+    """The shift minimising the deviance the rule scores, clamps and all, by bracketing and
+    Brent alone (``distributional.shape_repair._derivative_free_minimum``), in units of the
+    carried rows' predictor ``eta``; ``None`` when it still falls where the shift overflows.
+
+    ``evaluate`` is ``_searched_intercept``'s; a shift it refuses is infinitely high.
+    """
+    from superglm.distributional.shape_repair import _derivative_free_minimum, _intercept_scale
+
+    unit = _intercept_scale(eta, 0.0)
+    values: dict[float, float] = {}
+
+    def objective(t: float) -> float:
+        if t not in values:
+            try:
+                deviance = evaluate(unit * t, True, True).deviance
+            except RuntimeError:
+                deviance = np.inf
+            values[t] = deviance if np.isfinite(deviance) else np.inf
+        return values[t]
+
+    best = _derivative_free_minimum(objective, 0.0, unit)
+    if best is None or not np.isfinite(objective(best)):
+        return None
+    return unit * best, evaluate(unit * best, True, True)
 
 
 def _shape_candidate_objective(
