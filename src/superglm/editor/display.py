@@ -282,19 +282,25 @@ def _fitted_link(lss: SuperLSS, parameter: str) -> Link:
 EDIT_TOLERANCE = 1.0e-14
 
 
-def is_edited(transform: DisplayTransform, original: ArrayLike, edited: ArrayLike) -> bool:
-    """Whether ``edited`` differs from ``original`` by an edit, on ``transform``'s curve.
+def unit_tolerance(transform: DisplayTransform, tolerance: float, *values: ArrayLike) -> float:
+    """``tolerance`` in the units of ``transform``'s curve.
 
-    A relativity's effect counts as edited past ``EDIT_TOLERANCE``. A curve that adds an
-    amount is in its parameter's own units, which can lie far below 1, so its threshold is
-    the smaller of ``EDIT_TOLERANCE`` and four roundings of the curve's largest value.
+    On a relativity it is ``tolerance``. A curve that adds an amount is in its parameter's
+    own units, which can lie far below 1, so there it scales down with the largest of
+    ``values`` when that is below 1; at 1 or above it is ``tolerance``.
     """
+    if transform.kind != "additive":
+        return tolerance
+    scale = max((float(np.max(np.abs(v), initial=0.0)) for v in values), default=0.0)
+    return tolerance * min(1.0, scale)
+
+
+def is_edited(transform: DisplayTransform, original: ArrayLike, edited: ArrayLike) -> bool:
+    """Whether ``edited`` differs from ``original`` by more than ``EDIT_TOLERANCE`` in the
+    units of ``transform``'s curve (``unit_tolerance``)."""
     before = np.asarray(original, dtype=np.float64)
     after = np.asarray(edited, dtype=np.float64)
-    tolerance = EDIT_TOLERANCE
-    if transform.kind == "additive":
-        scale = max(np.max(np.abs(before), initial=0.0), np.max(np.abs(after), initial=0.0))
-        tolerance = min(EDIT_TOLERANCE, 4.0 * _U * float(scale))
+    tolerance = unit_tolerance(transform, EDIT_TOLERANCE, before, after)
     return not np.allclose(after, before, rtol=0.0, atol=tolerance)
 
 

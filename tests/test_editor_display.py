@@ -381,3 +381,23 @@ def test_an_additive_edit_in_tiny_units_reaches_the_model():
     (item,) = fold_term_items(session.terms, curves, display=view.display)
     assert item["edited"] is not None
     np.testing.assert_allclose(item["edited"], session_payload(session)["g"]["y"], rtol=1e-12)
+
+
+def test_an_additive_edit_of_the_reference_level_in_tiny_units_moves_only_that_level():
+    """Raising the reference level re-bases the term: every other level falls by the edit and
+    the intercept rises by it, which a 1e-15 skip on the intercept used to drop."""
+    rng = np.random.default_rng(5)
+    n = 200
+    groups = np.where(np.arange(n) % 2 == 0, "A", "B")
+    y = np.where(groups == "A", 1e-14, 2e-14) * (1.0 + 0.01 * rng.standard_normal(n))
+    X = pd.DataFrame({"g": groups})
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"g": Categorical()})
+    model.fit(X, y)
+    session = edit(model, train_data=(X, y))
+    a = session.terms["g"].levels.index("A")
+    session.select_indices("g", [a])
+    session.shift("g", 5e-16)
+    rows = X.iloc[[0, 1]]
+    change = session.to_model().predict(rows) - model.predict(rows)
+    np.testing.assert_allclose(change[0], 5e-16, rtol=1e-6)
+    assert abs(change[1]) <= 1e-6 * 5e-16
