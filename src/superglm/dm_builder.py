@@ -284,7 +284,8 @@ def _discretize_spline_column(
 ) -> tuple[NDArray, NDArray]:
     """Discretize on the positive-frequency support and map every fit row.
 
-    ``knots`` are the spline's knots, so the bins resolve its pieces
+    ``knots`` are the knots the bins follow (``bin_knots``: the spline's,
+    plus its ranges' cuts), so the bins resolve its pieces
     (``discretize_column``), and the active rows count by their geometry
     weight, as they do for the knots. Zero-frequency rows keep a valid bin index (the
     design keeps its physical row count) but do not shape the support: they

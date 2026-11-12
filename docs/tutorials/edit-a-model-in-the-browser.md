@@ -401,7 +401,8 @@ the shape and its edges.
   selection holds too few, the icon is disabled and says so on hover.
 - A binned fit (`discrete=True`) sees only one value for each occupied bin, so those are the
   values it counts. Values that share a bin count once, so four distinct values may not be enough
-  for a Cubic.
+  for a Cubic. The count the palette shows is on the fitted bins, but a refit bins again on the
+  new range's own knots, so it can carry a shape the palette greys out, or refuse one it allows.
 - The curve outside the ranges needs values too. If a range would leave too few between it and
   the end of the axis, or the next shaped range, SuperGLM refuses it and says so. Widen the range
   to reach the end or that range.

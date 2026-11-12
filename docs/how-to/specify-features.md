@@ -237,10 +237,15 @@ Spline(kind="bs", k=12, polynomial_ranges=[
   it.
 - A binned fit (`discrete=True`) sees one value for each bin, so a range
   counts those, not the raw values. The bins are equal-width when those
-  already follow the pieces of the curve and none is crowded; otherwise they
-  follow the knots and the data, each represented by the average of its rows
-  (counted by their frequency weight).
-  A range's edges are knots, so a range with rows in it gets bins of its own.
+  already follow the pieces of the curve and none is crowded, when `n_bins`
+  is below four, or when at least `n_bins` pieces of the curve hold rows;
+  otherwise they follow the knots and the data, each represented by the
+  average of its rows (counted by their frequency weight; see
+  [Choosing a fitting path](choose-a-fitting-path.md)). On those bins a range,
+  and each stretch beside one, is split at its own values into as many
+  pieces as it needs values, so it has enough whenever its rows below the
+  column's largest value do. Equal-width bins promise no such thing: a
+  narrow range can hold no bin centre at all.
 - The stretches outside the ranges need data too. A fit that would leave one
   of them undetermined is refused by name.
 - The penalty leaves the pinned ranges alone, so a pinned quadratic is not

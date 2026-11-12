@@ -25,39 +25,45 @@ def discretize_column(
 
     ``knots`` are the knots of the spline the column feeds; those strictly
     inside ``[min, max]`` cut the column into spans, the pieces of the curve.
-    The equal-width bins are kept when they already follow those pieces and
-    no bin is crowded: with ``m`` spans, every span that holds a row has a
-    width share of at least ``b_min = max(1, n_bins // (2 * m))`` bins, and no
-    bin holds more than ``8 / n_bins`` of the rows. A budget below four keeps
-    them too: the knot half of the grid below (``n_w``) would be one cell,
-    which cannot separate the minimum from the maximum, so every row could be
-    read at one point where the equal-width bins read at least two.
+    The equal-width bins are kept in three cases. First, when they already
+    follow those pieces and no bin is crowded: with ``m`` spans, every span
+    that holds a row has a width share of at least ``b_min = max(1, n_bins //
+    (2 * m))`` bins, and no bin holds more than ``8 / n_bins`` of the rows.
+    Second, when the budget is below four: the knot half of the grid below
+    (``n_w``) would be one cell, which cannot separate the minimum from the
+    maximum. Third, when at least ``n_bins`` spans hold rows: no grid within
+    the budget gives each of them a cell.
 
     Otherwise the bins follow the knots and the data, within the same budget.
     ``n_w = n_bins // 2`` cells come from the knots: every span that holds a
     row gets ``b_min`` equal-width cells (``b_min`` computed from ``n_w``)
     plus a share of the rest in proportion to its width (largest remainder),
-    spans without rows get none, and ``n_w`` equal-width cells are used when
-    more spans hold rows than there are cells. The other ``n_q = n_bins -
-    n_w`` come from the rows: the lower ``j / n_q`` quantiles, ``j = 1 ..
-    n_q - 1``, are observed values and become cell edges too. A row on an
-    edge belongs to the cell on its right and the maximum to the last cell,
-    so there are at most ``n_w + n_q - 1`` cells. Each cell is represented by
-    the mean of its rows, a cell without rows by its midpoint.
+    and spans without rows get none. When more spans hold rows than that,
+    ``n_w`` is their number and each gets exactly one cell. The other ``n_q
+    = n_bins - n_w`` come from the rows: the lower ``j / n_q`` quantiles, ``j
+    = 1 .. n_q - 1``, are observed values and become cell edges too. A row on
+    an edge belongs to the cell on its right and the maximum to the last
+    cell, so there are at most ``n_w + n_q - 1 = n_bins - 1`` cells. Each
+    cell is represented by the mean of its rows, a cell without rows by its
+    midpoint.
 
-    So each cell lies inside one piece of the curve, holds at most ``1 / n_q``
-    of the rows unless it is a single pile of equal values, and is read where
-    its rows actually are: a pile is read at its own value. The support points
-    are sorted, and each lies within its own rows' range, so none crosses a
-    knot away from its rows.
+    So on this grid each cell lies inside one piece of the curve, holds at
+    most ``1 / n_q`` of the rows unless it is a single pile of equal values,
+    and is read where its rows actually are: a pile is read at its own value.
+    The support points are sorted, and each lies within its own rows' range,
+    so every row is read inside its own span. The equal-width bins promise
+    none of this.
 
     ``weights`` are the rows' frequency weights (nonnegative; ``None`` counts
     every row once). Wherever a rule here counts rows (the crowding test, the
-    quantiles, the means), a row counts by its weight, so a weighted column
-    and its literally replicated twin get the same bins; a cell whose rows all
-    weigh zero is read at its midpoint, clipped into their range. Which spans
-    and cells hold rows depends only on the values present, and the
-    equal-width bins themselves never read the weights.
+    quantiles, the means), a row counts by its weight, so a column with
+    positive integer weights and its literally replicated twin get the same
+    bins; a cell whose rows all weigh zero is read at its midpoint, clipped
+    into their range. Which spans and cells hold rows depends only on the
+    values present, zero-weight rows included, and the equal-width bins
+    themselves never read the weights. A caller that should not let
+    zero-weight rows shape the support leaves them out (the main-effect site
+    of a binned fit does; the interaction sites bin every row).
 
     The width shares are formed on the column scaled by a power of two to
     magnitude at most one, which is exact and changes no share of a column
