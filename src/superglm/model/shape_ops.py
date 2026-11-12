@@ -368,9 +368,8 @@ def _deviance_rounding(model, eta, *, y, weights) -> float:
 
 
 class _InterceptState(NamedTuple):
-    """The profiled deviance and score at one intercept shift."""
+    """The score at one intercept shift, and the rounding the deviance keeps there."""
 
-    deviance: float
     deviance_rounding: float
     score: float
     score_scale: float
@@ -388,14 +387,34 @@ def _profile_repaired_intercept(
     """Minimize deviance over the unpenalized intercept for fixed coefficients.
 
     Returns the profiled predictor, its shift and the deviance's rounding there
-    (``_deviance_rounding``), which each evaluation already holds.
+    (``_deviance_rounding``), which each evaluation already holds. A repair call
+    reads a profile it has formed from its memo (``constraints.reuse_repair_evidence``):
+    the zero-term fallback's in a second publication check, a continued repair's start.
     """
-    from superglm.distributions import _VARIANCE_FLOOR, Gaussian, clip_mu
-    from superglm.links import IdentityLink, stabilize_eta
+    from superglm.constraints import _fingerprint, _reused
 
     eta_base = np.asarray(eta, dtype=np.float64)
     y_arr = np.asarray(y, dtype=np.float64)
     weights_arr = np.asarray(weights, dtype=np.float64)
+
+    def compute() -> tuple[float, float]:
+        _, shift, rounding = _searched_intercept(model, eta_base, y=y_arr, weights=weights_arr)
+        return shift, rounding
+
+    # The memo holds the shift, not a predictor of the rows: ``eta_base + shift`` is the
+    # profiled predictor the search returns, formed by the same operation.
+    key = ("intercept", _fingerprint(eta_base, y_arr, weights_arr))
+    shift, rounding = _reused(model, key, compute)
+    return eta_base + shift, shift, rounding
+
+
+def _searched_intercept(
+    model, eta_base: NDArray, *, y: NDArray, weights: NDArray
+) -> tuple[np.ndarray, float, float]:
+    from superglm.distributions import _VARIANCE_FLOOR, Gaussian, clip_mu
+    from superglm.links import IdentityLink, stabilize_eta
+
+    y_arr, weights_arr = y, weights
     if eta_base.shape != y_arr.shape or weights_arr.shape != y_arr.shape:
         raise RuntimeError(
             "Unsafe shape repair rejected before publication: incoherent intercept geometry"
@@ -470,20 +489,15 @@ def _profile_repaired_intercept(
                 dmu_deta=dmu_deta,
                 variance=variance,
             )
-            deviance = weighted_row_sum(weights_arr, model._distribution.deviance_unit, y_arr, mu)
             score = float(np.sum(score_rows, dtype=np.float64))
             information = float(np.sum(information_rows, dtype=np.float64))
-        if not (
-            np.isfinite(deviance)
-            and np.isfinite(score)
-            and np.isfinite(information)
-            and information > 0.0
-        ):
+        # The search reads the score's sign and size, never the deviance itself, which the
+        # publication rule forms once at the profiled shift.
+        if not (np.isfinite(score) and np.isfinite(information) and information > 0.0):
             raise RuntimeError(
                 "Unsafe shape repair rejected before publication: invalid profiled intercept"
             )
         return _InterceptState(
-            deviance=deviance,
             deviance_rounding=deviance_rounding,
             score=score,
             score_scale=float(np.sum(np.abs(score_rows), dtype=np.float64)),
