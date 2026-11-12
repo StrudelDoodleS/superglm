@@ -164,8 +164,9 @@
   fill: var(--param-spread);
 }
 
-/* The reference level sets the zero, so it is not in its parameter's colour. */
-.feature-group .mini-curve rect.mini-reference {
+/* The reference level sets the zero, so it is not in its parameter's colour: a bar
+   among levels, or a dot on an ordered factor's line. */
+.feature-group .mini-curve .mini-reference {
   fill: var(--text);
 }
 

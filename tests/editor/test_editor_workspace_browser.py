@@ -2620,6 +2620,12 @@ def test_superglm_feature_rows_draw_mini_curves_that_follow_an_edit(open_editor_
             }"""
         )
         assert stroke == mean_colour
+        # An ordered factor's line marks its reference level with a dot that is drawn.
+        dot = page.locator(
+            '#featureList [data-term="age_band"] svg.mini-curve circle.mini-reference'
+        )
+        assert dot.count() == 1
+        assert dot.evaluate("el => getComputedStyle(el).fill") not in ("none", "")
 
         curve = page.locator('#featureList [data-term="curve"] svg.mini-curve path')
         before = curve.get_attribute("d")
