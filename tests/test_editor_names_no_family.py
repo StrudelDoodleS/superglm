@@ -126,7 +126,9 @@ def _python_findings(text: str) -> list[tuple[int, str]]:
     return found
 
 
-_JS_LITERAL = re.compile(r"""(["'`])((?:\\.|(?!\1).)*)\1""")
+# One branch takes an escaped character, the other any other character but a backslash, so no
+# string can be read two ways and the match stays linear in its length.
+_JS_LITERAL = re.compile(r"""(["'`])((?:\\.|(?!\1)[^\\])*)\1""")
 _JS_COMMENT = re.compile(r"^\s*(//|/\*|\*)")
 
 
@@ -190,4 +192,13 @@ def test_the_rule_sees_every_exported_family():
     ]
     assert _js_findings('if (reply.family === "gamma") {}\n// a "gamma" comment\n') == [
         (1, '"gamma"')
+    ]
+
+
+def test_the_js_literal_reader_reads_escaped_quotes_inside_a_literal():
+    text = r"""const a = "say \"gamma\"" + 'it\'s' + `x\\`;"""
+    assert [m.group(2) for m in _JS_LITERAL.finditer(text)] == [
+        r"say \"gamma\"",
+        r"it\'s",
+        r"x\\",
     ]
