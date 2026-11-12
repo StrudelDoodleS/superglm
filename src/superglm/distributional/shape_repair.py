@@ -861,9 +861,11 @@ def _term_precision(
     (``model.shape_ops``): the curvature the fit accepts, ``-H(l) + S``, never a covariance
     inverted back.
     """
+    coefficients = None
     if curvature is None:
         curvature = fitted.result.terminal_penalized_curvature
-    return _profiled_curvature(fitted, term, curvature, source=source)[0]
+        coefficients = getattr(fitted.result, "coefficients", None)
+    return _profiled_curvature(fitted, term, curvature, coefficients=coefficients, source=source)[0]
 
 
 def _curvature_at(
@@ -1295,20 +1297,20 @@ def repaired_model(
     if len(parameters) > 1:
         from dataclasses import replace
 
+        before_settling = coefficients
         coefficients = _settled_intercepts(fitted, rows, frame, coefficients, parameters)
         parameter_of = {term.term: term.parameter for term in pending}
-        records = [
-            replace(
-                record,
-                intercept_shift=(
-                    float(coefficients[index] - fitted.coefficients[index])
-                    if (index := fitted.layout.predictor(parameter_of[record.term]).intercept_index)
-                    is not None
-                    else 0.0
-                ),
-            )
-            for record in records
-        ]
+        last_record = {parameter_of[record.term]: i for i, record in enumerate(records)}
+        for parameter, i in last_record.items():
+            index = fitted.layout.predictor(parameter).intercept_index
+            if index is not None:
+                # Keep each repair's own step; charge the joint settling step
+                # once, to this parameter's last record, so their shifts add up.
+                records[i] = replace(
+                    records[i],
+                    intercept_shift=records[i].intercept_shift
+                    + float(coefficients[index] - before_settling[index]),
+                )
     revised = revised_model(fitted, coefficients, (), frame, repairs=records)
     for message in flat:
         warnings.warn(message, RuntimeWarning, stacklevel=3)

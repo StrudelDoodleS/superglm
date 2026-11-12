@@ -44,11 +44,12 @@ def test_a_poisson_identity_intercept_can_minimize_at_a_zero_count_boundary(zero
 
 
 @pytest.mark.parametrize("kind", ["increasing", "decreasing", "convex", "concave"])
-def test_a_poisson_identity_step_repair_publishes_its_boundary_intercept(kind):
+@pytest.mark.parametrize(("seed", "origin", "slope"), [(18, 0.1, 2.0), (9, 0.05, 1.5)])
+def test_a_poisson_identity_step_repair_publishes_its_boundary_intercept(kind, seed, origin, slope):
     x = np.linspace(0.0, 1.0, 200)
-    X, offset = pd.DataFrame({"x": x}), 0.1 + 2.0 * x
+    X, offset = pd.DataFrame({"x": x}), origin + slope * x
     mean = np.maximum(offset + 0.8 * np.tanh((x - 0.5) / 0.05), 0.01)
-    y = np.random.default_rng(18).poisson(mean).astype(np.float64)
+    y = np.random.default_rng(seed).poisson(mean).astype(np.float64)
     model = SuperGLM(
         family="poisson",
         link="identity",
@@ -65,6 +66,19 @@ def test_a_poisson_identity_step_repair_publishes_its_boundary_intercept(kind):
     assert "x" in model._shape_repairs
     for h in (-1e-5, 1e-5):
         assert _deviance(model, eta + h, y) >= published - 1e-10 * abs(published)
+
+
+def test_a_poisson_identity_intercept_can_minimize_just_beyond_a_zero_count_corner():
+    # The zero row has information ~1/.0011 at the minimum, but its actual
+    # deviance curvature is zero. Fisher scoring exhausts its steps at 93e82a.
+    model = SimpleNamespace(_distribution=Poisson(), _link=IdentityLink())
+    eta, y = np.array([0.1, 1.5989]), np.array([0.0, 3.0])
+    profiled, shift, _, deviance = shape_ops._profile_repaired_intercept(
+        model, eta, y=y, weights=np.ones(2)
+    )
+    assert shift == pytest.approx(-0.0989, abs=1e-11)
+    np.testing.assert_allclose(profiled, [0.0011, 1.5], atol=1e-11)
+    assert deviance == pytest.approx(0.0022 + 6.0 * np.log(2.0) - 3.0, rel=1e-11)
 
 
 @pytest.mark.parametrize(("link", "shape"), [("log", "bump"), ("identity", "sin")])
@@ -282,3 +296,79 @@ def test_centered_lss_curvature_follows_the_requested_source_at_revised_coeffici
     )
 
     np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12 * np.linalg.norm(expected))
+
+
+def test_a_stored_lss_metric_is_replayed_at_the_fit_after_a_hand_edit(monkeypatch):
+    from superglm.distributional import shape_repair
+
+    x = np.linspace(0.0, 1.0, 100)
+    X = pd.DataFrame({"x": x})
+    y = np.random.default_rng(4).gamma(2.0, np.exp(0.5 + 0.4 * np.sin(12 * x)) / 2.0)
+    family = GammaLS()
+    model = SuperLSS(
+        family,
+        family.mean(s("x", kind="bs", k=6, constraint=Constraint.postfit.increasing)),
+        family.scale(),
+    ).fit(X, y, lambdas={"mean:x#wiggle": 1.0})
+    theta = model.predict_parameters(X)
+    information = y / theta["mean"].to_numpy() / theta["scale"].to_numpy() ** 2
+    fitted = model._model
+    (term,) = shape_repair.postfit_terms(fitted)
+    basis = term.curve_spec.transform(x)
+    centered = basis - (information @ basis) / information.sum()
+    expected = centered.T @ (information[:, None] * centered)
+    expected += fitted.result.penalty[term.columns, term.columns]
+    beta = fitted.coefficients.copy()
+    beta[fitted.layout.predictor("mean").intercept_index] += 0.4
+    revised = model._with_revised_coefficients(beta, edited_terms=["mean:x"])
+    # Force cancellation on every platform, as concentrated weights do. This
+    # is the default metric used when curvature_at rejects an edited state.
+    monkeypatch.setattr(shape_repair, "_profile_cancels", lambda *a: True)
+
+    actual = shape_repair._term_precision(revised._model, term)
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12 * np.linalg.norm(expected))
+
+
+def test_joint_intercept_settling_records_each_parameters_extra_shift_once(monkeypatch):
+    from superglm.distributional import shape_repair
+
+    rng = np.random.default_rng(27)
+    x, z = rng.uniform(size=(2, 200))
+    X = pd.DataFrame({"x": x, "z": z})
+    y = rng.gamma(3.0, np.exp(1.0 - x - z) / 3.0)
+    family = GammaLS()
+    model = SuperLSS(
+        family,
+        family.mean(
+            s("x", kind="bs", k=6, constraint=Constraint.postfit.increasing),
+            s("z", kind="bs", k=6, constraint=Constraint.postfit.increasing),
+        ),
+        family.scale(s("x", kind="bs", k=6, constraint=Constraint.postfit.increasing)),
+    ).fit(X, y, lambdas={"mean:x#wiggle": 1.0, "mean:z#wiggle": 1.0, "scale:x#wiggle": 1.0})
+    fitted = model._model
+    beta = fitted.coefficients.copy()
+    for term in shape_repair.postfit_terms(fitted):
+        values = X[term.label].to_numpy()
+        beta[term.columns] = np.linalg.lstsq(
+            term.curve_spec.transform(values), 0.5 - values, rcond=None
+        )[0]
+    revised = model._with_revised_coefficients(beta, edited_terms=["mean:x", "mean:z", "scale:x"])
+
+    def extra_shift(fitted, rows, frame, coefficients, parameters):
+        result = coefficients.copy()
+        for parameter in parameters:
+            result[fitted.layout.predictor(parameter).intercept_index] += 0.1
+        return result
+
+    monkeypatch.setattr(shape_repair, "_settled_intercepts", extra_shift)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        revised.apply_shape_postfit()
+
+    records = revised._model.fit_state.hand_edit.repairs
+    assert len(records) == 3
+    for parameter in ("mean", "scale"):
+        index = fitted.layout.predictor(parameter).intercept_index
+        total = sum(r.intercept_shift for r in records if r.term.startswith(parameter + ":"))
+        assert total == pytest.approx(revised._model.coefficients[index] - beta[index], abs=1e-12)

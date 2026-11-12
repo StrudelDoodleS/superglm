@@ -503,6 +503,10 @@ def _searched_intercept(
     # Fisher information is still positive: a search's stationary shift is then a minimum only
     # where the deviance's own curvature there is positive (``_deviance_curvature``).
     nonconvex = checked
+    # Only a Poisson/identity profile that both ordinary searches fail retries
+    # with its observed curvature. In particular a zero-count row contributes
+    # no curvature, although its Fisher information diverges beside mean zero.
+    observed_poisson = False
 
     def evaluate(
         shift: float, compared: bool, clamps: bool = False, origin=None
@@ -554,6 +558,8 @@ def _searched_intercept(
                 dmu_deta=dmu_deta,
                 variance=variance,
             )
+            if observed_poisson:
+                information_rows *= y_arr / mu
             if clamps and origin is not None:
                 # A row's score is minus half its deviance's slope, so a step enters the
                 # row's clamp rising where the two have opposite signs.
@@ -733,6 +739,12 @@ def _searched_intercept(
         found = _derivative_free_intercept(eta_base[carried], evaluate)
     if found is None and type(model._distribution) is Poisson and type(model._link) is IdentityLink:
         found = _poisson_identity_boundary(eta_base, y_arr, weights_arr, evaluate)
+        if found is None:
+            # Between zero-row corners the score is smooth and decreasing, with
+            # curvature sum(w*y/mu**2). Reuse the safeguarded Newton search with
+            # that curvature: Fisher steps can stall just short of this root.
+            observed_poisson = True
+            found = search(rerun=True)
     if found is None:
         from superglm.constraints import _InterceptSearchError
 
