@@ -384,6 +384,9 @@ class _InterceptState(NamedTuple):
     #: Half the scored deviance's second derivative in the shift, where it is formed: near a
     #: stationary shift of a pairing whose deviance is not convex (``_searched_intercept``).
     curvature: float = np.nan
+    #: Whether the scored deviance's own slope, flat on the rows a clamp holds, is stationary
+    #: there to the looser test, where the first run keeps those rows' scores.
+    scored: bool = True
 
 
 def _profile_repaired_intercept(
@@ -558,11 +561,17 @@ def _searched_intercept(
             information = float(np.sum(information_rows, dtype=np.float64))
             score_scale = float(np.sum(np.abs(score_rows), dtype=np.float64))
             score_rounding_sum = float(np.sum(score_rounding, dtype=np.float64))
-            curvature = np.nan
-            if nonconvex and abs(score) <= 1e-9 * score_scale + score_rounding_sum:
-                curvature = _deviance_curvature(
-                    model, y_arr, mu, eta_safe, dmu_deta, variance, weights_arr, clamped
-                )
+            curvature, scored = np.nan, True
+            if abs(score) <= 1e-9 * score_scale + score_rounding_sum:
+                if nonconvex:
+                    curvature = _deviance_curvature(
+                        model, y_arr, mu, eta_safe, dmu_deta, variance, weights_arr, clamped
+                    )
+                if not clamps and np.any(clamped):
+                    free = ~clamped
+                    scored = abs(float(np.sum(score_rows[free], dtype=np.float64))) <= 1e-9 * float(
+                        np.sum(np.abs(score_rows[free]), dtype=np.float64)
+                    ) + float(np.sum(score_rounding[free], dtype=np.float64))
             # The deviance only where it is read: every trial a bracket is kept by, a start
             # compared, and the stationary shift a search returns, which publication reads.
             # Where compared, with what it keeps from the mean alone: each unit deviance is
@@ -600,6 +609,7 @@ def _searched_intercept(
             information=information,
             clamped=clamped if clamps else None,
             curvature=curvature,
+            scored=scored,
         )
 
     def stationary(state: _InterceptState, relative: float) -> bool:
@@ -688,14 +698,21 @@ def _searched_intercept(
     # and a trial no lower ends its side, so the bracket holds a minimum no higher than the
     # start.
     found = search(rerun=False)
-    if found is None or (
-        checked
-        and np.isfinite(start.deviance)
-        and np.isfinite(found[1].deviance)
-        and higher(found[1], start)
+    if (
+        found is None
+        or not found[1].scored
+        or (
+            checked
+            and np.isfinite(start.deviance)
+            and np.isfinite(found[1].deviance)
+            and higher(found[1], start)
+        )
     ):
+        # The first run's root is a held row's balance, not the scored deviance's minimum,
+        # where that row's kept score is not small beside the others (under the identity link
+        # a clamped mean's is (y - mu) / mu): the rerun reads the deviance scored.
         found = search(rerun=True)
-    if found is None and nonconvex:
+    if found is None:
         # Neither run reached a stationary minimum (one may have met a maximum, where the
         # Fisher step is null): the derivative-free search decides, as SuperLSS's does.
         found = _derivative_free_intercept(eta_base[carried], evaluate)

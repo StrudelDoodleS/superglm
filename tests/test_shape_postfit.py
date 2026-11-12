@@ -4517,6 +4517,40 @@ def test_intercept_profile_under_the_square_root_link_ends_no_higher_than_it_sta
         assert deviance(shift) <= deviance(0.0) * (1.0 + 1e-12)
 
 
+def test_intercept_profile_with_rows_a_clamp_holds_ends_at_the_scored_minimum():
+    """Under the identity link a Poisson row whose predictor is below zero has its mean held at
+    ``clip_mu``'s floor, 1e-50, and its scored deviance is flat in the shift. The first run
+    keeps the row's score, (y - mu) / mu, -1 for a zero count, which is not the scored
+    deviance's slope: at ddda43d45, with two such rows, the profile kept shift 0, deviance
+    231.004, where SciPy's minimum is 226.830 at 0.07688. The rerun, which reads the deviance
+    scored, ends there.
+    """
+    from scipy.optimize import minimize_scalar
+
+    from superglm.distributions import clip_mu
+
+    rng = np.random.default_rng(18)
+    eta = np.linspace(-0.02, 2.0, 200)
+    y = rng.poisson(np.maximum(eta + 0.3 * np.sin(12.0 * eta), 0.01)).astype(np.float64)
+    y[eta < 0.0] = 0.0
+    weights = np.ones_like(y)
+    model = SimpleNamespace(_distribution=Poisson(), _link=IdentityLink())
+
+    def deviance(t):
+        mean = clip_mu(eta + t, model._distribution)
+        return float(np.sum(weights * model._distribution.deviance_unit(y, mean)))
+
+    _, shift, _, published = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+
+    found = minimize_scalar(
+        deviance, bounds=(-1.0, 1.0), method="bounded", options={"xatol": 1e-12}
+    )
+    assert np.sum(eta < 0.0) == 2  # the rows held at the start
+    assert shift == pytest.approx(found.x, abs=1e-7)
+    assert published == pytest.approx(deviance(shift), rel=1e-12)
+    assert published <= found.fun * (1.0 + 1e-12)
+
+
 def test_intercept_profile_started_at_a_stationary_maximum_ends_at_a_minimum():
     """Under the identity link the gamma deviance is concave in the mean beyond twice the
     response, so two rows that want shifts 28 apart make the profile's minima at 0.09 and 28.03
