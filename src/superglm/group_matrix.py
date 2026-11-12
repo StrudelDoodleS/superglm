@@ -73,9 +73,14 @@ SupportCompressedSplineCategoricalGroupMatrix.__module__ = __name__
 DiscretizedTensorGroupMatrix.__module__ = __name__
 
 
-def _discretize_column(x: NDArray, n_bins: int = 256) -> tuple[NDArray, NDArray]:
+def _discretize_column(
+    x: NDArray,
+    n_bins: int = 256,
+    knots: NDArray | None = None,
+    weights: NDArray | None = None,
+) -> tuple[NDArray, NDArray]:
     """Compatibility wrapper for the private discretization helper."""
-    return cast(tuple[NDArray, NDArray], discretize_column(x, n_bins))
+    return cast(tuple[NDArray, NDArray], discretize_column(x, n_bins, knots, weights))
 
 
 GroupMatrix = (

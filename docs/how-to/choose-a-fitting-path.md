@@ -66,6 +66,35 @@ This is the preferred production path for large spline-heavy frequency models.
 `RandomEffect` and `FactorSmooth` retain their exact factor levels on this
 path; only the continuous spline support is binned.
 
+A column with more distinct values than `n_bins` is binned. The fit sees each
+row at the centre of an equal-width bin between the column's smallest and
+largest value when those bins already follow the pieces of the curve between
+the spline's knots and no bin holds more than eight times its share of the
+rows. It does so too when `n_bins` is below four, or when at least `n_bins`
+pieces hold rows, since no `n_bins` bins could then give each piece one.
+Otherwise, as with a skewed column or a pile of equal values, the bins follow
+the knots and the data instead, within the same `n_bins`: half of them divide
+the pieces of the curve that hold rows (one bin each when more pieces than
+that hold rows, the rows then getting the rest), the others cut the rows into
+groups of equal size (bins a pile of equal values would leave unused go back
+to the pieces), and each bin is represented by the average of its rows.
+A pile of equal values is then seen at its own value, and every row inside
+its own piece of the curve. Without that, the fit would read many rows at one
+value, and `predict` would read the curve at values the fit did not check. On
+a spline with polynomial ranges, each range and each stretch beside one is
+also split between its own values into as many pieces as it needs values, so
+these bins give it enough whenever its rows have them. Should they still leave
+a range short where the equal-width bins would not, that spline keeps the
+equal-width bins, so a ranged fit those carry is never refused.
+
+Rows count by their frequency weight, so a fit with positive integer weights
+gets the same bins as the replicated rows it stands for; under prior weights
+each row with a positive weight counts once. Rows of zero weight are left out
+of a main effect's bins. In a tensor interaction, a spline by a factor or a
+factor smooth they still help place the bins, as they did before, so there
+integer weights that include zeros do not give the replicated rows' bins. A
+column with at most `n_bins` distinct values is used exactly.
+
 An exact fit (`discrete=False`, the default) that will be slow says so
 before it starts, with a `SlowFitWarning`. It fires when rows x coefficients
 squared reaches 1e11, because every coefficient update forms a weighted

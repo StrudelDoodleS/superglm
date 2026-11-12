@@ -362,14 +362,14 @@ def _book(n=6_000, seed=5):
     return pd.DataFrame({"age": age}), y, exposure
 
 
-def _fit(kind, ranges, *, discrete=False, book=None):
+def _fit(kind, ranges, *, discrete=False, book=None, n_bins=512):
     X, y, w = _book() if book is None else book
     model = SuperGLM(
         family="poisson",
         selection_penalty=0.0,
         features={"age": Spline(kind=kind, k=12, polynomial_ranges=ranges)},
         discrete=discrete,
-        n_bins=512,
+        n_bins=n_bins,
     )
     model.fit_reml(X, y, sample_weight=w)
     return model
@@ -661,23 +661,102 @@ def test_too_few_distinct_values_in_a_range_are_refused_by_name(discrete):
 
 
 def test_a_binned_fit_certifies_its_ranges_on_the_bin_centres():
-    # 512 bins of width ~0.121 on the 18-80 axis: [40, 40.2] holds a dozen
-    # distinct ages but at most two bin centres, which cannot fix a quadratic.
+    # [40, 40.2] holds a dozen distinct ages. Its edges are knots, and two of
+    # its ages cut it into three runs (``bin_knots``), so 512 bins, and 16 bins
+    # over the 13 spans those make, give it three cells of its own. Eight bins
+    # cannot give each span a cell, so they stay equal-width, 7.75 wide with
+    # centres at 21.9, 29.6, 37.4, 45.1, ...: none in the range.
     narrow = [PolynomialRange(40.0, 40.2, 2)]
     _fit("bs", narrow)
-    with pytest.raises(ValueError, match=r"needs at least 3 distinct values .* once binned to 512"):
-        _fit("bs", narrow, discrete=True)
+    _fit("bs", narrow, discrete=True)
+    _fit("bs", narrow, discrete=True, n_bins=16)
+    with pytest.raises(ValueError, match=r"needs at least 3 distinct values .* once binned to 8"):
+        _fit("bs", narrow, discrete=True, n_bins=8)
 
 
 def test_a_binned_fit_refuses_an_end_stretch_no_bin_centre_reaches():
-    # The first bin centre sits half a bin (~0.06) above the youngest age, so
-    # the stretch below a range starting 0.03 above it holds none: its slope
-    # would be set by nothing. The exact fit sees the youngest age itself.
+    # The stretch below a range starting 0.03 above the youngest age is a knot
+    # span with rows, so binned fits that can give every span a cell put one in
+    # it. Four bins cannot (eight spans hold rows), so they stay equal-width:
+    # the first centre sits 7.75 above the youngest age and the stretch's
+    # slope would be set by nothing.
     book = _book()
     sliver = [PolynomialRange(float(book[0]["age"].min()) + 0.03, 50.0, 1, "kink")]
     _fit("bs", sliver, book=book)
-    with pytest.raises(ValueError, match=r"outside the polynomial ranges.*once binned to 512"):
-        _fit("bs", sliver, discrete=True, book=book)
+    _fit("bs", sliver, discrete=True, book=book)
+    with pytest.raises(ValueError, match=r"outside the polynomial ranges.*once binned to 4"):
+        _fit("bs", sliver, discrete=True, book=book, n_bins=4)
+
+
+def test_a_binned_fit_does_not_depend_on_the_order_its_ranges_are_declared_in():
+    # The bins' cuts come from the ranges sorted along the axis (``bin_knots``). Read in
+    # declared order, [8, 9] before [1, 2] took its free stretches from the wrong
+    # neighbours and the fit was refused, though the same ranges in axis order fit.
+    x = np.linspace(0.0, 10.0, 10001)
+    y = np.sin(x) + np.random.default_rng(3).normal(0.0, 0.1, x.size)
+    frame = pd.DataFrame({"x": x})
+    axis_order = [PolynomialRange(1.0, 2.0, 1, "kink"), PolynomialRange(8.0, 9.0, 1, "kink")]
+    fitted = []
+    for declared in (axis_order, axis_order[::-1]):
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            discrete=True,
+            n_bins=20,
+            features={"x": Spline(kind="bs", n_knots=0, m=3, polynomial_ranges=declared)},
+        )
+        model.fit(frame, y)
+        fitted.append(np.asarray(model.predict(frame), dtype=np.float64))
+    np.testing.assert_allclose(fitted[1], fitted[0], rtol=0.0, atol=1e-9)
+
+
+def test_a_binned_range_keeps_the_support_point_at_the_column_maximum():
+    # A cubic on [5, 10] needs four support points and its rows hold exactly four values,
+    # the last of them the column maximum. The bins' cuts must keep 8.5 and 10 apart: read
+    # as one cell they left the range three points and the fit was refused, though
+    # eight equal-width bins carry it.
+    x = np.r_[np.linspace(0.0, 4.8, 101), 6.0, 7.2, 8.5, 10.0]
+    y = np.cos(x) + np.random.default_rng(5).normal(0.0, 0.05, x.size)
+    frame = pd.DataFrame({"x": x})
+    spline = Spline(kind="bs", n_knots=4, polynomial_ranges=[PolynomialRange(5.0, 10.0, 3, "kink")])
+    model = SuperGLM(
+        family="gaussian", selection_penalty=0.0, discrete=True, n_bins=8, features={"x": spline}
+    )
+    model.fit(frame, y)
+    assert np.all(np.isfinite(model.predict(frame)))
+
+
+def _upper_edge_fit():
+    # A line on [1, 2] with rows at exactly 1 and 2 and none between: its two support
+    # points are its edges. Sixty-four equal-width bins carry it.
+    x = np.r_[np.linspace(0.0, 0.9, 1000), 1.0, 2.0, np.linspace(2.1, 10.0, 1000)]
+    y = np.cos(x) + np.random.default_rng(7).normal(0.0, 0.05, x.size)
+    spline = Spline(kind="bs", n_knots=0, polynomial_ranges=[PolynomialRange(1.0, 2.0, 1, "kink")])
+    model = SuperGLM(
+        family="gaussian", selection_penalty=0.0, discrete=True, n_bins=64, features={"x": spline}
+    )
+    model.fit(pd.DataFrame({"x": x}), y)
+    return model
+
+
+def test_a_binned_range_keeps_the_support_point_on_its_upper_edge():
+    # The row at 2 sits on the range's upper edge, a knot, so it is read with the rows
+    # above it unless the next value up is a cut as well. Without that cut the range had
+    # one support point and the fit was refused.
+    model = _upper_edge_fit()
+    assert not model._specs["x"]._bins_equal_width
+
+
+def test_a_ranged_fit_the_equal_width_bins_carry_is_never_refused(monkeypatch):
+    # With the ranges' cuts taken away, the bins that follow the knots leave [1, 2] one
+    # support point. The equal-width bins give it two, so the spline keeps those, at
+    # every site, and the fit goes through as it did before bins followed the knots.
+    from superglm.features import _spline_runtime
+
+    monkeypatch.setattr(_spline_runtime, "determining_cuts", lambda *a, **k: np.empty(0))
+    model = _upper_edge_fit()
+    assert model._specs["x"]._bins_equal_width
+    assert _spline_runtime.bin_knots(model._specs["x"], np.zeros(1)) is None
 
 
 @pytest.mark.parametrize("join", ["kink", "tangent"])
@@ -849,6 +928,48 @@ def test_a_superlss_tensor_on_a_ranged_parent_keeps_the_ranges(kind, override):
         # multiple of u * max|eta|; a second difference triples that.
         tolerance = 1.0e3 * np.finfo(np.float64).eps * np.max(np.abs(eta))
         assert np.max(np.abs(np.diff(eta, 2))) <= tolerance
+
+
+def test_a_binned_tensor_margin_at_its_own_knot_count_certifies_its_ranges_on_its_bins():
+    """A margin rebuilt for an n_knots override is certified on the support it is binned to.
+
+    The clone's ranges used to be certified on the raw rows and the margin then
+    binned on its own knots, so a margin binned too coarsely lost a rank with
+    no message. At 64 bins its 41 knot spans each get a cell and the range's
+    cuts give it four (``bin_knots``), so the fit is accepted at full rank, as
+    on equal-width bins (standard error 0.030 at the point below). At 32 bins
+    the clone's spans outnumber the bins, so its bins stay equal-width and
+    leave the range one support point: the margin is refused by name, while
+    the main effect alone, at 32 bins on its own few knots, is accepted.
+    """
+    from superglm import GaussianLS, SuperLSS, s, term, ti
+    from superglm.distributional.posterior import link_standard_errors
+    from superglm.features._spline_ranges import UndeterminedRangeError
+
+    x = np.linspace(0.0, 10.0, 20001)
+    rng = np.random.default_rng(81)
+    z = rng.uniform(-1.0, 1.0, x.size)
+    y = np.sin(x) * (1.0 + z / 3.0) + rng.normal(0.0, 0.2, x.size)
+    frame = pd.DataFrame({"x": x, "z": z})
+    names = ("x#wiggle", "x:z#margin_x", "x:z#margin_z", "z#wiggle")
+    lambdas = {f"location:{n}": 1.0 for n in names}
+
+    def model(n_bins, *interactions):
+        ranged = Spline(kind="bs", k=8, polynomial_ranges=[PolynomialRange(3.98, 4.46, 3, "kink")])
+        family = GaussianLS()
+        location = family.location(term("x", ranged), s("z", k=6), *interactions)
+        return SuperLSS(family, location, family.scale(), discrete=True, n_bins=n_bins)
+
+    fitted = model(64, ti("x", "z", n_knots=(40, 4)))
+    fitted.fit(frame, y, lambdas=lambdas)
+    rank = fitted._require_fitted().fit_state.solver_result.terminal_rank
+    assert rank.rank == rank.width
+    se = link_standard_errors(fitted._require_fitted(), pd.DataFrame({"x": [4.1], "z": [0.2]}))
+    assert 0.02 < se[0, 0] < 0.04  # 0.029
+
+    with pytest.raises(UndeterminedRangeError, match=r"\[3\.98, 4\.46\].*once binned to 32 bins"):
+        model(32, ti("x", "z", n_knots=(40, 4))).fit(frame, y, lambdas=lambdas)
+    model(32).fit(frame, y, lambdas={f"location:{n}": 1.0 for n in ("x#wiggle", "z#wiggle")})
 
 
 @pytest.mark.parametrize("kind", ["bs", "cr"])

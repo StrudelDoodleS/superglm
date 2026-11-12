@@ -1015,7 +1015,7 @@ def test_a_range_leaving_too_few_values_beside_it_says_to_widen_it(aged, discret
     assert _ranges(session.model._specs["age"]) == [(30.0, 90.0, 0)]
 
 
-def test_a_binned_term_refuses_a_shape_its_bin_centres_cannot_carry():
+def test_a_binned_term_refit_gives_a_new_range_bins_of_its_own():
     # The demo's settings: 512 bins, a 260-point grid and a pile of exposure
     # at the youngest age. The first two grid points snap to [18, 18.3],
     # which holds two bin centres: enough for a Line, not for a Cubic, whose
@@ -1036,16 +1036,15 @@ def test_a_binned_term_refuses_a_shape_its_bin_centres_cannot_carry():
     model.fit_reml(X, y, sample_weight=exposure)
     session = EditorSession.from_model(model, terms=["age"], n_points=260)
     grid = session.terms["age"].x
-    # The palette's count for a run is the one the library certifies with, so
-    # its icons disable exactly the shapes the refit would refuse.
+    # The palette counts the fitted term's bins. The refit adds the range's
+    # edges as knots and its bins follow them (``discretize_column``), so it
+    # gives [18, 18.3] cells of its own and carries the Cubic the palette
+    # counted two values for: the palette is conservative there.
     support = session_payload(session)["age"]["shape"]["support"]
     assert support["through"][1] - support["below"][0] == 2
     assert support["through"][2] - support["below"][0] == 4
-    with pytest.raises(EditorValueError) as caught:
-        session.replace_with_shaped_range("age", lo=grid[0], hi=grid[1], degree=3, method="fit")
-    assert str(caught.value) == _SHAPE_REFUSED
-    assert "it has 2 once binned to 512" in str(caught.value.__cause__)
-    assert session.model is model and session.structure_history == []
+    session.replace_with_shaped_range("age", lo=grid[0], hi=grid[1], degree=3, method="fit")
+    assert session.model is not model and len(session.structure_history) == 1
     session.replace_with_shaped_range("age", lo=grid[0], hi=grid[1], degree=1, method="fit")
     assert _ranges(session.model._specs["age"]) == [(18.0, 18.3, 1)]
     session.undo()

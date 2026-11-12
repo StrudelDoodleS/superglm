@@ -8,6 +8,7 @@ import pytest
 
 from superglm import SuperGLM
 from superglm._group_matrix import _group_matrix_algebra as algebra
+from superglm._group_matrix._group_matrix_bins import discretize_column
 from superglm.features import interaction as interaction_module
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
@@ -1720,3 +1721,452 @@ def test_a_loaded_design_rebuilds_its_pattern_plan():
     rebuilt = centered._pattern_plan(loaded)
     np.testing.assert_array_equal(rebuilt.unique_codes, plan.unique_codes)
     np.testing.assert_array_equal(rebuilt.row_patterns, plan.row_patterns)
+
+
+# ── Bins that resolve the knots and the rows ───────────────────────────────
+# A spline's binned fit evaluates its basis at the bins' support points and
+# predict at the rows' own values. A bin wider than a knot span hides the
+# pieces of the curve inside it from the fit, and a bin holding most of the
+# rows reads them all at one value, so there the bins follow the knots and the
+# rows and each is read at its rows' mean (``discretize_column``). The noise sd
+# is 0.3 throughout; 0.05 is a sixth of it.
+
+
+def _equal_width_bins(x, n_bins):
+    """``discretize_column`` as it was before it read knots: the reference for bit-identity."""
+    x = np.asarray(x, dtype=np.float64).ravel()
+    unique_vals, inverse = np.unique(x, return_inverse=True)
+    if len(unique_vals) <= n_bins:
+        return unique_vals.astype(np.float64), inverse.astype(np.intp)
+    lo, hi = float(x.min()), float(x.max())
+    if lo == hi:
+        return np.array([lo]), np.zeros(len(x), dtype=np.intp)
+    edges = np.linspace(lo, hi, n_bins + 1)
+    bin_idx = np.clip(np.searchsorted(edges, x, side="right") - 1, 0, n_bins - 1)
+    return 0.5 * (edges[:-1] + edges[1:]), bin_idx
+
+
+def _fit_design_eta(model):
+    """The linear predictor on the fit's own (binned) design."""
+    beta = np.asarray(model.result.beta, dtype=np.float64)
+    return float(model.result.intercept) + np.asarray(model._dm.toarray(), dtype=np.float64) @ beta
+
+
+def _rmse(a, b):
+    return float(np.sqrt(np.mean((np.asarray(a) - np.asarray(b)) ** 2)))
+
+
+def _lognormal_frame(n=10_000, seed=0):
+    """85% of rows in the first of 256 equal-width bins, which holds several quantile knots."""
+    rng = np.random.default_rng(seed)
+    x = rng.lognormal(0.0, 1.5, n)
+    y = np.sin(2.0 * np.log1p(x)) + rng.normal(0.0, 0.3, n)
+    return pd.DataFrame({"x": x}), y
+
+
+def _gaussian_spline_fit(X, y, knot_strategy, **kwargs):
+    model = SuperGLM(
+        family="gaussian",
+        features={"x": Spline(kind="ps", k=12, knot_strategy=knot_strategy)},
+        **kwargs,
+    )
+    model.fit_reml(X, y)
+    return model
+
+
+@pytest.mark.parametrize("knot_strategy", ["quantile", "quantile_tempered"])
+def test_binned_fit_predicts_what_it_fitted_on_a_skewed_column(knot_strategy):
+    X, y = _lognormal_frame()
+    exact = _gaussian_spline_fit(X, y, knot_strategy)
+    binned = _gaussian_spline_fit(X, y, knot_strategy, discrete=True, n_bins=256)
+    prediction = np.asarray(binned.predict(X), dtype=np.float64)
+    assert _rmse(prediction, _fit_design_eta(binned)) < 0.05
+    assert _rmse(prediction, np.asarray(exact.predict(X), dtype=np.float64)) < 0.01
+
+
+@pytest.fixture(scope="module")
+def lognormal_uniform_fits():
+    """Uniform knots on the skewed column: every span is wide, but 85% of the rows
+    share the first equal-width bin. 50,000 rows, where those bins misread the
+    fit by an rmse of about 0.25 and the maximum row by about 40."""
+    X, y = _lognormal_frame(n=50_000)
+    exact = _gaussian_spline_fit(X, y, "uniform")
+    binned = _gaussian_spline_fit(X, y, "uniform", discrete=True, n_bins=256)
+    return X, exact, binned
+
+
+def test_binned_fit_predicts_what_it_fitted_when_one_bin_holds_most_rows(lognormal_uniform_fits):
+    X, exact, binned = lognormal_uniform_fits
+    prediction = np.asarray(binned.predict(X), dtype=np.float64)
+    assert _rmse(prediction, _fit_design_eta(binned)) < 0.05
+    assert _rmse(prediction, np.asarray(exact.predict(X), dtype=np.float64)) < 0.01
+
+
+def test_binned_fit_predicts_what_it_fitted_at_the_column_maximum(lognormal_uniform_fits):
+    X, _, binned = lognormal_uniform_fits
+    row = int(np.argmax(X["x"].to_numpy()))
+    prediction = np.asarray(binned.predict(X.iloc[[row]]), dtype=np.float64)[0]
+    assert abs(prediction - _fit_design_eta(binned)[row]) < 0.05
+
+
+def test_binned_fit_predicts_what_it_fitted_beside_piles_of_equal_values():
+    """69% zeros, 2% ones and a tail towards 1 that clusters the tempered knots below 1."""
+    rng = np.random.default_rng(1)
+    n = 10_000
+    u = rng.uniform(size=n)
+    tail = np.clip(1.0 - rng.exponential(0.003, n), 0.0, 1.0)
+    x = np.where(u < 0.69, 0.0, np.where(u < 0.71, 1.0, tail))
+    f = np.where(x == 0.0, 0.0, np.sin(2.0 * np.log1p((1.0 - x) / 0.003)))
+    y = f + rng.normal(0.0, 0.3, n)
+    X = pd.DataFrame({"x": x})
+    model = _gaussian_spline_fit(X, y, "quantile_tempered", discrete=True, n_bins=256)
+    prediction = np.asarray(model.predict(X), dtype=np.float64)
+    eta = _fit_design_eta(model)
+    knotted = x > 0.0
+    # Every knot sits below 1, inside one equal-width bin: the rows there are
+    # the ones a fit on equal-width bins misreads (by about 77 at the pile of ones).
+    assert _rmse(prediction[knotted], eta[knotted]) < 0.1
+    assert np.max(np.abs(prediction[x == 1.0] - eta[x == 1.0])) < 0.05
+    # The pile at 0 sits on its cell's edge; it is read at its own value.
+    assert np.max(np.abs(prediction[x == 0.0] - eta[x == 0.0])) < 0.02
+    assert _rmse(prediction, eta) < 0.05
+    exact = _gaussian_spline_fit(X, y, "quantile_tempered")
+    assert _rmse(prediction, np.asarray(exact.predict(X), dtype=np.float64)) < 0.02
+
+
+def test_binned_tensor_of_skewed_columns_matches_the_exact_fit():
+    rng = np.random.default_rng(2)
+    n = 10_000
+    a = rng.lognormal(0.0, 1.5, n)
+    b = rng.lognormal(0.0, 1.2, n)
+    f = (
+        np.sin(2.0 * np.log1p(a))
+        + 0.5 * np.cos(2.0 * np.log1p(b))
+        + 0.3 * np.sin(np.log1p(a)) * np.cos(np.log1p(b))
+    )
+    y = f + rng.normal(0.0, 0.3, n)
+    X = pd.DataFrame({"a": a, "b": b})
+    fits = {}
+    for discrete in (False, True):
+        model = SuperGLM(
+            family="gaussian",
+            features={name: Spline(kind="ps", k=10, knot_strategy="quantile") for name in "ab"},
+            interactions=[("a", "b")],
+            discrete=discrete,
+            n_bins=256,
+        )
+        model.fit_reml(X, y)
+        fits[discrete] = model
+    prediction = np.asarray(fits[True].predict(X), dtype=np.float64)
+    assert _rmse(prediction, _fit_design_eta(fits[True])) < 0.05
+    assert _rmse(prediction, np.asarray(fits[False].predict(X), dtype=np.float64)) < 0.05
+
+
+def _assert_bins_unchanged(x, n_bins, knots):
+    support, index = discretize_column(x, n_bins, knots)
+    old_support, old_index = _equal_width_bins(x, n_bins)
+    np.testing.assert_array_equal(support, old_support)
+    np.testing.assert_array_equal(index, old_index)
+
+
+def test_bins_that_already_resolve_the_knots_are_unchanged(poisson_data):
+    rng = np.random.default_rng(5)
+    x = rng.uniform(0.0, 10.0, 5000)
+    _assert_bins_unchanged(x, 256, np.linspace(0.0, 10.0, 12))
+    _assert_bins_unchanged(x, 64, np.linspace(0.0, 10.0, 12))
+    # An existing fixture, through the fit's own design.
+    X, y = poisson_data
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0,
+        discrete=True,
+        n_bins=64,
+        features={"x1": Spline(n_knots=10, penalty="ssp"), "x2": Numeric()},
+    )
+    model.fit(X, y)
+    gm = model._dm.group_matrices[0]
+    assert isinstance(gm, DiscretizedSSPGroupMatrix)
+    old_support, old_index = _equal_width_bins(X["x1"].to_numpy(), 64)
+    np.testing.assert_array_equal(gm.bin_idx, old_index)
+    np.testing.assert_array_equal(gm.B_unique, model._specs["x1"]._raw_basis_matrix(old_support))
+
+
+def test_adaptive_cells_follow_the_rule():
+    # Ten zeros and ten other rows on [0, 10] with a knot at 1: span [0, 1) has
+    # a width share of 0.8 of the 8 equal-width bins, under b_min = 8 // 4 = 2.
+    x = np.array([0.0] * 10 + [1.0, 2.0, 3.0, 3.0, 3.0, 7.0, 8.0, 8.5, 9.5, 10.0])
+    support, index = discretize_column(x, 8, np.array([1.0]))
+    # n_q = 4: the lower quartiles are the 5th, 10th and 15th smallest rows, 0, 0
+    # and 3; 0 is the minimum and is dropped, so one quantile edge, 3, remains and
+    # the knots get the other 7 cells: b_min = 7 // 4 = 1 per span, the other 5 by
+    # width 1:9 (0.5, 4.5 -> 0, 4, the tie's leftover to the left span), so 2 and
+    # 5 cells with left edges 0, 0.5 and 1, 2.8, 4.6, 6.4, 8.2. Cells [0, 0.5),
+    # [0.5, 1), [1, 2.8), [2.8, 3), [3, 4.6), [4.6, 6.4), [6.4, 8.2), [8.2, 10].
+    expected = [0.0, 0.75, 1.5, 2.9, 3.0, 5.5, 7.5, 28.0 / 3.0]
+    np.testing.assert_allclose(support, expected, rtol=0, atol=1e-14)
+    assert support[0] == 0.0 and support[4] == 3.0
+    # The pile is read at its own value, the rows on the quantile edge 3 belong
+    # to the cell on its right, and the empty cells keep their midpoints.
+    np.testing.assert_array_equal(index, [0] * 10 + [2, 2, 4, 4, 4, 6, 6, 7, 7, 7])
+    # A crowded equal-width bin with no knot inside the column: n_w = 8
+    # equal-width cells plus the row quantiles, so the pile's cell holds it alone.
+    crowded = np.concatenate([np.zeros(60), np.linspace(2.0, 10.0, 40)])
+    support, index = discretize_column(crowded, 16, np.array([-1.0, 11.0]))
+    assert len(support) <= 16
+    assert support[0] == 0.0 and np.all(index[:60] == 0)
+    # Neither condition fails: the equal-width bins are kept.
+    _assert_bins_unchanged(np.linspace(0.0, 10.0, 100), 16, np.array([5.0]))
+
+
+def test_a_pile_that_repeats_the_quantiles_leaves_the_budget_to_the_knot_cells():
+    """A pile holding nearly every row makes all the row quantiles one value.
+
+    They then cut nothing, and with half the budget set aside for them the grid
+    had 128 cells where the equal-width bins have 256: the rows at 0.03 to 0.05
+    joined the pile's cell, three occupied support points became two, and a
+    quadratic the equal-width bins identify was read at 0.87 instead of 0.0016
+    at x = 0.04. The cells repeated quantiles do not use go to the knot cells.
+    """
+    x = np.r_[np.zeros(60000), np.linspace(0.03, 0.05, 300), 10.0]
+    support, index = discretize_column(x, 256, np.array([-1.0, 11.0]))
+    assert np.unique(index).size >= np.unique(_equal_width_bins(x, 256)[1]).size == 3
+    assert support[0] < 1e-3  # the pile's cell is read where its rows are, not at a midpoint
+    y = x * x
+    frame = pd.DataFrame({"x": x})
+    fits = {}
+    for discrete in (False, True):
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            spline_penalty=1.0,
+            discrete=discrete,
+            n_bins=256,
+            features={"x": Spline(kind="ps", n_knots=0, m=3)},
+        )
+        model.fit(frame, y)
+        fits[discrete] = float(model.predict(pd.DataFrame({"x": [0.04]}))[0])
+    assert abs(fits[True] - fits[False]) < 0.01
+
+
+def test_a_grid_of_under_four_cells_keeps_every_point_the_equal_width_bins_have():
+    """A wide span's cells are wider than the equal-width bins when a narrow span takes its minimum.
+
+    A pile at 0, a cluster just under the maximum and the maximum, with a knot at
+    1: the span [1, 10] gets 179 cells of 9 / 179 against bins of 10 / 256, so the
+    cluster and the maximum shared a cell, three support points became two, and a
+    quadratic the equal-width bins identify was read at 82 instead of 25 at x = 5.
+    """
+    width = 10.0 / 256
+    x = np.r_[np.zeros(60000), np.linspace(10.0 - 1.25 * width, 10.0 - 1.05 * width, 300), 10.0]
+    _assert_bins_unchanged(x, 256, np.array([1.0]))
+    # With the knot at 2 the wide span's cells keep the three points apart, and
+    # the grid that follows the knots reads each where its rows are.
+    support, index = discretize_column(x, 256, np.array([2.0]))
+    assert np.unique(index).size == 3 and support[index[0]] == 0.0
+    y = x * x
+    frame = pd.DataFrame({"x": x})
+    fits = {}
+    for discrete in (False, True):
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            spline_penalty=1.0,
+            discrete=discrete,
+            n_bins=256,
+            features={"x": Spline(kind="bs", knots=[1.0], m=3)},
+        )
+        model.fit(frame, y)
+        fits[discrete] = float(model.predict(pd.DataFrame({"x": [5.0]}))[0])
+    # 17.7 on the equal-width bins' three points against 25.0 exact; 82.0 on two.
+    assert abs(fits[True] - fits[False]) < 10.0
+
+
+def test_binned_support_never_exceeds_n_bins():
+    rng = np.random.default_rng(11)
+    for trial in range(200):
+        n = int(rng.integers(50, 3000))
+        x = rng.lognormal(0.0, float(rng.uniform(0.1, 3.0)), n)
+        if trial % 3 == 0:
+            x[rng.uniform(size=n) < 0.5] = x.min()
+        lo, hi = float(x.min()), float(x.max())
+        n_knots = int(rng.integers(0, 400))
+        if trial % 2:
+            knots = np.quantile(x, rng.uniform(size=n_knots))
+        else:
+            knots = rng.uniform(lo - 1.0, hi + 1.0, n_knots)
+        n_bins = int(rng.choice([1, 2, 3, 4, 8, 32, 64, 256]))
+        if trial % 5 == 1:
+            x[rng.uniform(size=n) < 0.3] = x.max()
+        if trial % 5 == 2:
+            x[rng.uniform(size=n) < 0.4] = np.median(x)
+        support, index = discretize_column(x, n_bins, knots)
+        assert len(support) <= n_bins
+        assert np.all(np.diff(support) > 0)
+        assert index.shape == x.shape
+        assert index.min() >= 0 and index.max() < len(support)
+        # Nor below: like the equal-width bins, the grid never reads the
+        # minimum and the maximum at one point.
+        occupied = np.unique(index).size
+        assert occupied >= min(n_bins, 2)
+        inner = np.unique(knots[(knots > lo) & (knots < hi)])
+        span = np.searchsorted(inner, x, side="right")
+        n_spans = np.unique(span).size
+        equal_width = _equal_width_bins(x, n_bins)[0]
+        adaptive = len(support) != len(equal_width) or np.any(support != equal_width)
+        if not adaptive:
+            continue
+        # The adaptive grid gives every span that holds rows a cell, so it is
+        # used only when there are fewer such spans than bins, and it reads
+        # every row inside its own knot span.
+        assert n_spans < n_bins
+        np.testing.assert_array_equal(np.searchsorted(inner, support[index], side="right"), span)
+        # Each distinct lower quantile j / n_q (the smallest row with at least
+        # ceil(j n / n_q) rows at or below it) starts an occupied cell, as the
+        # minimum does; n_q is half the budget, or what one cell per span leaves.
+        n_q = n_bins - n_bins // 2 if n_spans <= n_bins // 2 else n_bins - n_spans
+        j = np.arange(1, n_q)
+        quantiles = np.sort(x)[(j * n + n_q - 1) // n_q - 1]
+        assert occupied >= np.unique(np.append(quantiles, lo)).size
+
+
+def test_more_spans_than_the_knot_half_get_one_cell_each_and_keep_the_resolution():
+    """One cell per span that holds rows, and the rows' quantiles for the rest of the budget.
+
+    39 uniform knots and one at 5.01 make 41 spans on a regular column: the
+    narrow span [5, 5.01) fails the equal-width test, and 41 spans are more
+    than the 32 cells of the knot half. Those 32 cells used to be equal-width,
+    and the quantiles of a regular column land on the same edges, so the fit
+    saw 32 support points where the equal-width bins it replaced give 64, and
+    misread the exact fit by an rmse of 0.030 against 0.008.
+    """
+    x = np.linspace(0.0, 10.0, 20001)
+    knots = np.sort(np.append(np.linspace(0.0, 10.0, 41)[1:-1], 5.01))
+    support, index = discretize_column(x, 64, knots)
+    # 22 distinct quantile edges above the minimum and the knots' 42 cells, one
+    # for each of the 41 spans and one more: the whole budget, as many as the 64
+    # the equal-width bins occupy.
+    assert np.unique(index).size == 64
+    inner = knots[(knots > 0.0) & (knots < 10.0)]
+    np.testing.assert_array_equal(
+        np.searchsorted(inner, support[index], side="right"),
+        np.searchsorted(inner, x, side="right"),
+    )
+    rng = np.random.default_rng(7)
+    y = np.sin(3.0 * x) + rng.normal(0.0, 0.3, x.size)
+    X = pd.DataFrame({"x": x})
+    predictions = []
+    for discrete in (False, True):
+        model = SuperGLM(
+            family="gaussian",
+            features={"x": Spline(kind="bs", knots=knots)},
+            discrete=discrete,
+            n_bins=64,
+        )
+        model.fit_reml(X, y)
+        predictions.append(np.asarray(model.predict(X), dtype=np.float64))
+    # 0.015 here; a twentieth of the noise sd bounds it.
+    assert _rmse(predictions[1], predictions[0]) < 0.02
+
+
+def test_a_budget_below_four_keeps_the_equal_width_bins():
+    """A knot half of one cell would read every row at one point.
+
+    With ``n_bins=2`` the adaptive grid had one knot cell and no quantile
+    edge, so the fit below read all ten rows at one support point and
+    predicted their mean, 4.5, everywhere.
+    """
+    x = np.arange(10.0)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        discrete=True,
+        n_bins=2,
+        features={"x": Spline(kind="ps", k=8)},
+    )
+    model.fit(pd.DataFrame({"x": x}), x)
+    knots = model._specs["x"]._knots
+    for n_bins in (2, 3):
+        _assert_bins_unchanged(x, n_bins, knots)
+    np.testing.assert_array_equal(model._dm.group_matrices[0].bin_idx, _equal_width_bins(x, 2)[1])
+    # The two bins, centred at 2.25 and 6.75, hold rows averaging 2 and 7.
+    centres = model.predict(pd.DataFrame({"x": [2.25, 6.75]}))
+    np.testing.assert_allclose(centres, [2.0, 7.0], rtol=0, atol=1e-2)
+
+
+def test_a_column_near_the_float64_limit_bins_without_overflow():
+    """The width shares of a column near ``1e308`` are formed without overflow.
+
+    ``remaining * widths`` overflowed to infinity for the wide span, and the
+    cast to a cell count made ``np.linspace`` refuse a negative count, in
+    ``discretize_column`` and in the fit.
+    """
+    x = np.linspace(0.0, 1e307, 1000)
+    knots = np.array([1e300])
+    support, index = discretize_column(x, 256, knots)
+    # The adaptive grid: the span [0, 1e300) has no equal-width bin of its own.
+    assert not np.array_equal(support, _equal_width_bins(x, 256)[0])
+    # Scaling by a power of two is exact, so the column gets the bins its
+    # scaled-down twin gets, scaled back.
+    twin_support, twin_index = discretize_column(np.ldexp(x, -1000), 256, np.ldexp(knots, -1000))
+    np.testing.assert_array_equal(support, np.ldexp(twin_support, 1000))
+    np.testing.assert_array_equal(index, twin_index)
+    model = SuperGLM(
+        family="gaussian", discrete=True, features={"x": Spline(kind="ps", knots=[1e300])}
+    )
+    model.fit(pd.DataFrame({"x": x}), x / 1e307)
+    np.testing.assert_allclose(model.predict(pd.DataFrame({"x": x})), x / 1e307, atol=1e-3)
+
+
+# A frequency weight stands for that many literal rows, so the rule counts each
+# row by its weight: the crowding test, the quantile edges and the cell means.
+
+
+def _assert_weighted_bins_match_replication(x, weights, n_bins, knots):
+    replicas = np.repeat(np.arange(x.size), weights.astype(np.intp))
+    support, index = discretize_column(x, n_bins, knots, weights)
+    replicated_support, replicated_index = discretize_column(x[replicas], n_bins, knots)
+    np.testing.assert_array_equal(support, replicated_support)
+    np.testing.assert_array_equal(index[replicas], replicated_index)
+    equal_width = _equal_width_bins(x, n_bins)[0]
+    assert len(support) != len(equal_width) or np.any(support != equal_width)
+    # Counting each row once instead gives other bins.
+    unweighted = discretize_column(x, n_bins, knots)[0]
+    assert len(unweighted) != len(support) or np.any(unweighted != support)
+
+
+def test_integer_weights_bin_like_their_replicated_rows():
+    rng = np.random.default_rng(21)
+    x = rng.lognormal(0.0, 1.5, 4000)
+    weights = rng.integers(1, 7, x.size).astype(np.float64)
+    knots = np.quantile(x, np.linspace(0.0, 1.0, 12))
+    _assert_weighted_bins_match_replication(x, weights, 64, knots)
+    # A pile of zeros that is crowded only once the rows count by weight: the
+    # equal-width bins resolve the uniform knots and each holds about 1/64 of
+    # the rows, until the zeros, a tenth of the rows, weigh 30 each.
+    x = np.where(rng.uniform(size=x.size) < 0.1, 0.0, rng.uniform(0.0, 1.0, x.size))
+    weights = np.where(x == 0.0, 30.0, rng.integers(1, 3, x.size).astype(np.float64))
+    knots = np.linspace(0.0, 1.0, 8)
+    _assert_bins_unchanged(x, 64, knots)
+    _assert_weighted_bins_match_replication(x, weights, 64, knots)
+
+
+def test_fractional_weights_read_each_cell_at_its_weighted_mean():
+    rng = np.random.default_rng(22)
+    x = rng.lognormal(0.0, 1.5, 5000)
+    weights = rng.gamma(0.5, 2.0, x.size) + 1e-3
+    knots = np.quantile(x, np.linspace(0.0, 1.0, 12))
+    support, index = discretize_column(x, 64, knots, weights)
+    assert len(support) <= 64
+    assert np.all(np.diff(support) > 0)
+    for cell in np.unique(index):
+        rows = index == cell
+        expected = np.sum(weights[rows] * x[rows]) / np.sum(weights[rows])
+        np.testing.assert_allclose(support[cell], expected, rtol=1e-12, atol=0.0)
+    # Rows of zero weight still have a support point inside their own range,
+    # and a cell holding only such rows is not read at a 0/0 mean.
+    weights[x > np.quantile(x, 0.995)] = 0.0
+    support, index = discretize_column(x, 64, knots, weights)
+    assert np.all(np.isfinite(support)) and np.all(np.diff(support) > 0)
+    for cell in np.unique(index):
+        rows = x[index == cell]
+        assert rows.min() <= support[cell] <= rows.max()

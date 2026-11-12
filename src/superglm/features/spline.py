@@ -87,8 +87,8 @@ class _SplineBase:
         ``knot_strategy`` are ignored. Use this for reproducibility
         across refits with different data.
     discrete : bool or None
-        If True, discretize the covariate into ``n_bins`` equal-width bins
-        at fit time, reducing matrix algebra from O(n) to O(n_bins).
+        If True, discretize the covariate into at most ``n_bins`` bins that
+        follow its knots and rows at fit time: O(n) algebra becomes O(n_bins).
         If None (default), defers to the model-level ``discrete`` setting.
     n_bins : int or None
         Number of bins for discretization. Only used when

@@ -11,7 +11,9 @@ from scipy.interpolate import BSpline as BSpl
 from superglm._group_matrix._group_matrix_bins import discretize_column
 from superglm.features import _basis_kernels, _spline_extrapolation, _spline_knots
 from superglm.features._spline_ranges import (
+    RangeError,
     certify_determined,
+    determining_cuts,
     merged_interior_knots,
     validate_ranges,
 )
@@ -112,11 +114,14 @@ def place_knots(
     x: NDArray,
     sample_weight: NDArray | None = None,
     n_bins: int | None = None,
+    *,
+    certify: bool = True,
 ) -> None:
     """Place interior knots and build the full knot vector.
 
     ``n_bins`` is the bin count of a discretised fit, which sees the feature
-    only at bin centres; polynomial ranges are certified against those.
+    only at bin centres; polynomial ranges are certified against those unless
+    ``certify`` is False (a caller that only needs the knot vector).
     """
     named = getattr(spec, "_named_knots", None)
     if named is not None:
@@ -153,36 +158,90 @@ def place_knots(
         sample_weight=sample_weight,
     )
     spec._base_interior_knots = np.array(interior, dtype=np.float64)
-    if spec._polynomial_ranges:
-        interior = _ranged_interior(spec, x, interior, n_bins)
-    spec._assemble_knot_vector(interior)
+    if not spec._polynomial_ranges:
+        spec._assemble_knot_vector(interior)
+        return
+    # The ranges' edge knots go in first: a binned fit's bins follow the
+    # assembled knots, so the ranges are certified on that support.
+    ranges = validate_ranges(spec._polynomial_ranges, spec.degree, spec._lo, spec._hi)
+    spec._assemble_knot_vector(
+        merged_interior_knots(interior, ranges, spec.degree, spec._lo, spec._hi)
+    )
+    if certify:
+        _certify_ranges(spec, x, ranges, n_bins, sample_weight)
+    else:
+        spec._bins_equal_width = False
+        spec._polynomial_ranges = ranges
 
 
-def fit_support(x: NDArray, n_bins: int | None = None) -> NDArray:
+def fit_support(
+    x: NDArray,
+    n_bins: int | None = None,
+    knots: NDArray | None = None,
+    weights: NDArray | None = None,
+) -> NDArray:
     """The sorted distinct values a fit evaluates the basis at, from positive-weight rows.
 
     An exact fit sees the distinct values themselves; a discretised one sees
-    the centres of the occupied bins of ``discretize_column``, the placement
-    its design is built on.
+    the support points of the occupied bins of ``discretize_column`` on the
+    spline's ``knots``, with the rows counted by their geometry ``weights``:
+    the placement its design is built on.
     """
     if n_bins is None:
         return np.unique(x)
-    centres, index = discretize_column(x, n_bins)
+    centres, index = discretize_column(x, n_bins, knots, weights)
     return centres[np.unique(index)]
 
 
-def _ranged_interior(spec: Any, x: NDArray, interior: NDArray, n_bins: int | None) -> NDArray:
-    """Certify the spec's ranges against the support the fit sees and insert their edge knots.
+def bin_knots(spec: Any, x: NDArray, weights: NDArray | None = None) -> NDArray | None:
+    """The knots a binned fit's bins follow: the spline's, plus its ranges' cuts.
+
+    A spline with polynomial ranges adds ``determining_cuts`` on the rows of
+    positive ``weights``, so the adaptive grid of ``discretize_column`` gives
+    each range and free stretch the support points certification asks of it
+    wherever its rows have them. Every site that bins a spline's column, and
+    the certification, reads its knots here.
+    """
+    if not spec._polynomial_ranges:
+        return spec._knots
+    if getattr(spec, "_bins_equal_width", False):
+        return None
+    # Sorted along the axis, as certification reads them: the declared order may differ.
+    ranges = validate_ranges(spec._polynomial_ranges, spec.degree, spec._lo, spec._hi)
+    values, _ = _spline_knots.knot_geometry_data(x, weights)
+    order = max(spec._m_orders)
+    cuts = determining_cuts(ranges, values, spec._lo, spec._hi, order)
+    return np.concatenate([spec._knots, cuts])
+
+
+def _certify_ranges(
+    spec: Any, x: NDArray, ranges: Any, n_bins: int | None, weights: NDArray | None
+) -> None:
+    """Certify the spec's ranges against the support the fit sees on its assembled knots.
 
     The highest penalty order is the one certified: REML may take the lower
     orders' smoothing parameters towards zero.
     """
-    ranges = validate_ranges(spec._polynomial_ranges, spec.degree, spec._lo, spec._hi)
-    note = "" if n_bins is None else f" once binned to {n_bins} equal-width bins"
+    note = "" if n_bins is None else f" once binned to {n_bins} bins"
     order = max(spec._m_orders)
-    certify_determined(ranges, fit_support(x, n_bins), spec._lo, spec._hi, order, note)
+    spec._bins_equal_width = False
+    try:
+        support = fit_support(x, n_bins, bin_knots(spec, x, weights), weights)
+        certify_determined(ranges, support, spec._lo, spec._hi, order, note)
+    except RangeError as short:
+        if n_bins is None:
+            raise
+        # A ranged fit the equal-width bins carry is not refused: where the bins that
+        # follow the knots leave a range or stretch short and the equal-width ones do
+        # not, this spline keeps the equal-width bins at every site (``bin_knots``).
+        try:
+            certify_determined(
+                ranges, fit_support(x, n_bins, None, weights), spec._lo, spec._hi, order, note
+            )
+        except RangeError:
+            raise short from None
+        spec._bins_equal_width = True
     spec._polynomial_ranges = ranges
-    return merged_interior_knots(interior, ranges, spec.degree, spec._lo, spec._hi)
 
 
 def assemble_clamped_knot_vector(spec: Any, interior: NDArray) -> None:

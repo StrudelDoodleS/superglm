@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import math
 from numbers import Integral, Real
 from typing import Any
@@ -10,12 +11,12 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
-from superglm.dm_builder import resolve_discrete_n_bins, should_discretize
+from superglm.dm_builder import knot_geometry_weight, resolve_discrete_n_bins, should_discretize
 from superglm.editor.errors import EditorValueError
 from superglm.editor.knots import placed_geometry
 from superglm.editor.lss.view import column_of, interaction_users
 from superglm.features._spline_ranges import NARROWEST_GAP, SHAPE_NAMES, PolynomialRange
-from superglm.features._spline_runtime import fit_support
+from superglm.features._spline_runtime import bin_knots, fit_support, place_knots
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.rebuild import (
     RESHAPE_USED_BY_INTERACTION,
@@ -240,19 +241,29 @@ def _refit_support(model, name: str, spec, X, sample_weight) -> NDArray:
     """The sorted values a numeric term's refit evaluates its basis at.
 
     The distinct positive-weight values, or the occupied bin centres when the
-    refit bins: the support the library certifies a range against.
+    refit bins: the support the library certifies a range against. The bins
+    follow the knots, the fitted ones for a fitted spec and otherwise those the
+    refit will place; a shape painted on a fitted term adds its edge knots in
+    the refit, so its counts there are the fitted bins'.
     """
     # Rows without weight are left out before the values are read as numbers: the fit
     # never read them, so they may hold anything.
     column = np.asarray(as_eager_frame(X).column_array(column_of(model, name)))
+    weights = None
     if sample_weight is not None:
-        column = column[np.asarray(sample_weight, dtype=np.float64) > 0.0]
+        positive = np.asarray(sample_weight, dtype=np.float64) > 0.0
+        column = column[positive]
+        weights = np.asarray(sample_weight, dtype=np.float64)[positive]
     x = np.asarray(column, dtype=np.float64)
-    binned = should_discretize(spec, model._discrete)
-    n_bins = (
-        resolve_discrete_n_bins(column_of(model, name), spec, model._n_bins) if binned else None
-    )
-    return fit_support(x, n_bins)
+    if not should_discretize(spec, model._discrete):
+        return fit_support(x)
+    n_bins = resolve_discrete_n_bins(column_of(model, name), spec, model._n_bins)
+    geometry = knot_geometry_weight(weights, model._weight_semantics)
+    if spec.fitted_boundary is not None:
+        return fit_support(x, n_bins, bin_knots(spec, x, geometry), geometry)
+    probe = copy.deepcopy(spec)
+    place_knots(probe, x, geometry, n_bins, certify=False)
+    return fit_support(x, n_bins, bin_knots(probe, x, geometry), geometry)
 
 
 def _piece_support(model, name: str, spec, basis, X, sample_weight):
