@@ -87,11 +87,8 @@ class _SplineBase:
         ``knot_strategy`` are ignored. Use this for reproducibility
         across refits with different data.
     discrete : bool or None
-        If True, discretize the covariate into at most ``n_bins`` bins at
-        fit time, reducing matrix algebra from O(n) to O(n_bins). The bins
-        are equal-width unless those would hide a knot span or crowd the
-        rows; then they follow the knots and the rows
-        (``superglm._group_matrix._group_matrix_bins.discretize_column``).
+        If True, discretize the covariate into at most ``n_bins`` bins that
+        follow its knots and rows at fit time: O(n) algebra becomes O(n_bins).
         If None (default), defers to the model-level ``discrete`` setting.
     n_bins : int or None
         Number of bins for discretization. Only used when
