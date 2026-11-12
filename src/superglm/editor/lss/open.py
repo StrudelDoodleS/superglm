@@ -16,18 +16,19 @@ from typing import Any
 
 import numpy as np
 
-from superglm.distributional.families import LogNormalLS, TweedieLSS
+from superglm.distributional.families import GammaLS, LogNormalLS, NegativeBinomialLS, TweedieLSS
 from superglm.distributional.prediction_design import _required_columns
 from superglm.distributional.predictor import resolve_predictor_link
 from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.editor.evaluation import coerce_dataset, coerce_evaluation_data
-from superglm.editor.lss.display import SPREAD_FAMILIES
 from superglm.editor.lss.terms import lss_editable_terms
 from superglm.editor.lss.view import NATIVE_ONLY, LSSModelView
 
 _OPENS = (
     "The editor opens LogNormalLS (mean form), GammaLS, NegativeBinomialLS and TweedieLSS models"
 )
+# The families the editor opens.
+SPREAD_FAMILIES: tuple[type, ...] = (LogNormalLS, GammaLS, NegativeBinomialLS, TweedieLSS)
 _NEEDS_ROWS = (
     "Opening a SuperLSS model needs its training rows: pass "
     "train_data=(X, y, sample_weight, offsets), with offsets a dict keyed by parameter name, "

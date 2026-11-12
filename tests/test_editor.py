@@ -3037,7 +3037,7 @@ def test_ungroup_preserves_symbolic_base_policy_to_avoid_display_uplift():
     assert refit.features["territory"].base == "most_exposed"
     assert refit.features["territory"]._base_level == model.features["territory"]._base_level
     payload = session_payload(session)["territory"]
-    assert payload["impact"]["weighted_mean_relativity"] == pytest.approx(1.0, abs=0.03)
+    assert payload["impact"]["weighted_mean_link_delta"] == pytest.approx(0.0, abs=0.03)
     assert payload["impact"]["max_abs_link_delta"] < 0.08
 
 
@@ -3068,7 +3068,7 @@ def test_ungroup_last_collapsed_levels_removes_identity_grouping():
     payload = session_payload(session)["territory"]
     assert payload["level_groups"] == []
     np.testing.assert_allclose(payload["y"], payload["original_y"])
-    assert payload["impact"]["weighted_mean_relativity"] == pytest.approx(1.0)
+    assert payload["impact"]["weighted_mean_link_delta"] == pytest.approx(0.0, abs=1e-12)
 
 
 def test_ungroup_pre_collapsed_model_refits_without_history():
@@ -3847,9 +3847,12 @@ def test_reset_level_order_restores_model_order_after_visual_reorder(editor_mode
     assert session.selection("region").tolist() == [2]
 
 
-def test_session_payload_compares_in_force_against_reference_model_after_collapse(editor_model):
+def test_session_payload_compares_in_force_against_reference_model_after_collapse(
+    editor_log_link_model,
+):
     from superglm.editor.payloads import session_payload
 
+    editor_model = editor_log_link_model
     session = EditorSession.from_model(editor_model, terms=["region"])
     session.select_levels("region", ["B", "C"])
     session.replace_with_collapsed_levels("region", method="fit")
@@ -3887,10 +3890,10 @@ def test_session_payload_omits_previous_y_without_term_history(editor_model):
     assert payload["previous_y"] is None
 
 
-def test_session_payload_previous_y_uses_latest_edit_for_that_term(editor_model):
+def test_session_payload_previous_y_uses_latest_edit_for_that_term(editor_log_link_model):
     from superglm.editor.payloads import session_payload
 
-    session = EditorSession.from_model(editor_model, terms=["x_spline", "x_num"])
+    session = EditorSession.from_model(editor_log_link_model, terms=["x_spline", "x_num"])
     spline = session.terms["x_spline"]
     previous_spline = spline.edited_log_effect.copy()
 
@@ -4029,12 +4032,14 @@ def test_session_payload_adds_collapsed_group_display_for_ordered_levels(
 
 
 def test_session_payload_group_display_projects_previous_y_for_collapsed_levels(
-    editor_model, editor_frame
+    editor_log_link_model, editor_log_link_frame
 ):
     from superglm.editor.payloads import session_payload
 
-    X, y = editor_frame
-    session = EditorSession.from_model(editor_model, terms=["band"], train_data=(X, y, None))
+    X, y = editor_log_link_frame
+    session = EditorSession.from_model(
+        editor_log_link_model, terms=["band"], train_data=(X, y, None)
+    )
     session.select_levels("band", ["medium", "high"])
     session.replace_with_collapsed_levels("band", method="fit")
     session.select_levels("band", ["medium", "high"])
@@ -4133,8 +4138,8 @@ def test_session_uses_fit_sample_weight_for_term_weights():
     np.testing.assert_allclose(session.terms["region"].weights, [3.0, 2.0, 7.0])
 
 
-def test_widget_state_exposes_ci_bands_and_single_point_centering(editor_model):
-    session = EditorSession.from_model(editor_model, terms=["x_num", "x_spline"])
+def test_widget_state_exposes_ci_bands_and_single_point_centering(editor_log_link_model):
+    session = EditorSession.from_model(editor_log_link_model, terms=["x_num", "x_spline"])
     widget = session.widget()
     try:
         state = _get_json(f"{widget.url}/state")
@@ -4666,8 +4671,8 @@ def test_widget_favicon_does_not_emit_browser_404(editor_model):
         widget.close()
 
 
-def test_widget_http_selection_and_average_updates_session(editor_model):
-    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+def test_widget_http_selection_and_average_updates_session(editor_log_link_model):
+    session = EditorSession.from_model(editor_log_link_model, terms=["x_spline"])
     widget = session.widget()
     try:
         term = session.terms["x_spline"]
@@ -4710,8 +4715,8 @@ def test_widget_http_selection_and_average_updates_session(editor_model):
         widget.close()
 
 
-def test_widget_average_falls_back_when_selected_exposure_is_zero(editor_model):
-    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+def test_widget_average_falls_back_when_selected_exposure_is_zero(editor_log_link_model):
+    session = EditorSession.from_model(editor_log_link_model, terms=["x_spline"])
     widget = session.widget()
     try:
         term = session.terms["x_spline"]
@@ -4728,8 +4733,8 @@ def test_widget_average_falls_back_when_selected_exposure_is_zero(editor_model):
         widget.close()
 
 
-def test_widget_average_expands_collapsed_level_groups_before_weighting(editor_model):
-    session = EditorSession.from_model(editor_model, terms=["region"])
+def test_widget_average_expands_collapsed_level_groups_before_weighting(editor_log_link_model):
+    session = EditorSession.from_model(editor_log_link_model, terms=["region"])
     session.select_levels("region", ["B", "C"])
     session.replace_with_collapsed_levels("region", method="fit")
     widget = session.widget()
@@ -5046,8 +5051,8 @@ def test_widget_http_selected_summary_uses_in_force_without_model_selector(edito
         widget.close()
 
 
-def test_widget_http_drag_and_reset_updates_session(editor_model):
-    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+def test_widget_http_drag_and_reset_updates_session(editor_log_link_model):
+    session = EditorSession.from_model(editor_log_link_model, terms=["x_spline"])
     widget = session.widget()
     try:
         term = session.terms["x_spline"]
@@ -5116,8 +5121,8 @@ def test_widget_http_control_handle_updates_session(editor_model):
         widget.close()
 
 
-def test_widget_http_select_all_and_impact_updates_session(editor_model):
-    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+def test_widget_http_select_all_and_impact_updates_session(editor_log_link_model):
+    session = EditorSession.from_model(editor_log_link_model, terms=["x_spline"])
     widget = session.widget()
     try:
         term = session.terms["x_spline"]

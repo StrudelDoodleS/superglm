@@ -17,9 +17,10 @@ from superglm.editor.controls import (
     ordered_control_points,
     spline_fits_levels,
 )
+from superglm.editor.display import DisplayTransform, display_for, y_label_for
 from superglm.editor.group_display import build_group_display
 from superglm.editor.knots import knots_payload, pending_knots
-from superglm.editor.lss import DisplayTransform, display_for, is_lss, lss_term_fields
+from superglm.editor.lss import is_lss, lss_term_fields
 from superglm.editor.lss.availability import lss_availability
 from superglm.editor.lss.display import lss_history_fields
 from superglm.editor.lss.rules import rule_payload
@@ -94,9 +95,12 @@ def session_payload(
             "effective_df": _finite_float(term.metadata.get("edf")),
             "edited": name in edited,
             "x_label": name,
-            "y_label": "relativity",
+            "y_label": y_label_for(display, "mean"),
             "title": name,
         }
+        if not lss and display.kind != "relativity":
+            # A relativity is what a term without ``display`` shows.
+            term_payload["display"] = display.to_payload()
         if lss:
             term_payload.update(lss_term_fields(session.model, name))
             term_payload = lss_availability(term_payload)

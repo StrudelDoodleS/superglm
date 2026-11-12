@@ -38,6 +38,7 @@ from superglm.editor.cv import (
     run_cv,
     run_final_fit,
 )
+from superglm.editor.display import directed_operation, display_for
 from superglm.editor.errors import EditorClientError, EditorKeyError, EditorValueError
 from superglm.editor.evaluation import (
     default_metrics_dataset,
@@ -54,13 +55,12 @@ from superglm.editor.evaluation_cache import (
 from superglm.editor.evidence import EvidenceCoordinator, EvidenceKey
 from superglm.editor.io import jsonable
 from superglm.editor.jobs import JobContext, JobRunner
-from superglm.editor.lss import display_for, is_lss
+from superglm.editor.lss import is_lss
 from superglm.editor.lss.availability import (
     require_available,
     session_availability,
     unavailable_evidence,
 )
-from superglm.editor.lss.display import directed_operation
 from superglm.editor.lss.panel import NOT_SUPERLSS, distribution_panel_payload
 from superglm.editor.lss.risk import risk_payload, risk_row
 from superglm.editor.metrics import metric_comparison_payload, metrics_payload

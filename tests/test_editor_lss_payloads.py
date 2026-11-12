@@ -15,6 +15,7 @@ from superglm import GammaLS, Numeric, OrderedCategorical, Spline, SuperLSS, ter
 from superglm.distributional.terms import _resolve_term, _term_design
 from superglm.editor import EditorSession, edit
 from superglm.editor.cv import fold_log_curves, fold_term_items
+from superglm.editor.display import ADDITIVE
 from superglm.editor.lss import INVERSE_THETA, RELATIVITY, display_for
 from superglm.editor.lss.apply import lss_model_with_edits
 from superglm.editor.lss.display import fold_chart_display
@@ -29,7 +30,12 @@ from tests._lss_editor_fixtures import (
     open_case,
     tweedie_case,
 )
-from tests.test_editor import editor_frame, editor_model  # noqa: F401
+from tests.test_editor import (  # noqa: F401
+    editor_frame,
+    editor_log_link_frame,
+    editor_log_link_model,
+    editor_model,
+)
 from tests.test_lss_terms import mixed_band_fit, scale_ratio_to_reference
 
 FIXTURE = Path(__file__).parent / "editor_frontend" / "fixtures" / "display_transforms.json"
@@ -73,7 +79,7 @@ def test_lognormal_scale_is_the_relativity_of_sigma_above_its_floor():
     np.testing.assert_allclose(_ratios(term["y"]), _ratios(sigma - floor), rtol=64 * TOLERANCE)
     np.testing.assert_array_equal(term["y"], np.exp(session.terms["scale:age"].edited_log_effect))
     assert term["y_label"] == "relativity of σ"
-    assert term["display"] == {"kind": "relativity"}
+    assert term["display"] == {"kind": "relativity", "link": "floored_log"}
 
 
 def test_gamma_scale_is_the_relativity_of_its_cv():
@@ -143,7 +149,7 @@ def test_a_linear_term_reads_the_same_on_the_editor_cv_and_explain_tabs():
     (item,) = fold_term_items(
         {"scale:x": session.terms["scale:x"]},
         curves,
-        display=partial(fold_chart_display, family=model.family),
+        display=partial(fold_chart_display, model=model),
     )
     np.testing.assert_allclose(item["fit"], curve, rtol=1e-12, atol=0.0)
     np.testing.assert_allclose(item["folds"][0]["values"], curve, rtol=1e-9, atol=0.0)
@@ -350,8 +356,8 @@ def test_lss_tool_payloads_follow_the_tools_a_superlss_offers():
     assert payload["mean:region"]["knots"]["available"] is False
 
 
-def test_glm_payload_has_no_parameter_fields(editor_model):  # noqa: F811
-    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+def test_glm_payload_has_no_parameter_fields(editor_log_link_model):  # noqa: F811
+    session = EditorSession.from_model(editor_log_link_model, terms=["x_spline"])
     term = session_payload(session)["x_spline"]
     assert not (LSS_FIELDS | {"y_format", "baseline"}) & set(term)
     assert set(term) == GLM_TERM_KEYS
@@ -365,12 +371,12 @@ _EFFECTS = [-6.0, -1.5, -0.25, 0.0, 0.25, 1.5, 3.0]
 
 def _fixture_content() -> dict:
     out = {}
-    for transform in _transforms():
+    for transform in [*_transforms(), ADDITIVE]:
         values = transform.to_display(_EFFECTS)
         # Values at and past what a relativity can take convert to a finite effect.
         probes = [-3.0, -1.0, -0.3, 0.0, 1e-9, 0.01, 0.5, 1.0, 2.0]
         out[transform.kind] = {
-            **transform.to_payload(),
+            "kind": transform.kind,
             "effects": _EFFECTS,
             "display": [float(v) for v in values],
             "probes": probes,

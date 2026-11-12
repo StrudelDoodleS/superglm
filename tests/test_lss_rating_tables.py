@@ -508,7 +508,7 @@ def _summary_sheet(path):
 
 
 def test_the_summary_names_each_parameter_as_the_editor_does_with_its_code_name_beside(tmp_path):
-    from superglm.editor.lss.display import parameter_display
+    from superglm.editor.display import parameter_display
     from superglm.export.lss_rating_tables import parameter_label
 
     model, X, offsets = negative_binomial()
@@ -519,8 +519,9 @@ def test_the_summary_names_each_parameter_as_the_editor_does_with_its_code_name_
         ("Overdispersion", "theta", "Overdispersion"),
     ]
     # The names are the editor's own, so the workbook and the editor read alike.
-    for parameter in ("mean", "scale", "theta", "dispersion", "power"):
-        assert parameter_label(parameter) == parameter_display(parameter).label
+    for family in (LogNormalLS(), GammaLS(), NegativeBinomialLS(), TweedieLSS()):
+        for spec in family.parameters:
+            assert parameter_label(spec.name) == parameter_display(spec, average=False).label
 
 
 def test_the_summary_has_a_floor_column_only_when_a_parameter_has_a_floor(tmp_path):

@@ -8,8 +8,8 @@ from typing import Any
 
 from superglm.editor.cv import FINAL_NOT_RUN, cv_report_payload, diagnose_report_payload
 from superglm.editor.diagnose import fit_trace
+from superglm.editor.display import fold_chart_display
 from superglm.editor.evaluation import evaluation_datasets
-from superglm.editor.lss.display import fold_chart_display
 from superglm.editor.lss.validation import LSS_METRIC_LABELS, lss_split_reason
 from superglm.editor.lss.view import is_lss
 from superglm.editor.metrics import METRIC_LABELS, compute_dataset_metrics
@@ -157,10 +157,7 @@ def _final_fit_section(widget, final_fit, stale: bool | None = None) -> dict[str
         "stale": _final_fit_stale(widget, final_fit) if stale is None else stale,
         "n_rows": final_fit.n_rows,
         "splits": list(final_fit.splits),
-        "carried": [
-            fold_chart_display(name).label if is_lss(final_fit.model) else name
-            for name in final_fit.carried
-        ],
+        "carried": [fold_chart_display(name, final_fit.model).label for name in final_fit.carried],
         # Waiting changes are never in a Final fit, and staging or undoing one
         # leaves the model revision alone, so the count is the one waiting now.
         "pending": len(widget.session.pending),

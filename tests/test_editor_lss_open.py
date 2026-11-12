@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import re
 
@@ -12,8 +13,9 @@ import pytest
 
 import superglm
 from superglm import GammaLS, LogNormalLS, Numeric, SuperLSS, TweedieLSS, s, ti
-from superglm.distributional.families import LomaxLSS
+from superglm.distributional.families import LomaxLSS, NegativeBinomialLS
 from superglm.editor import edit
+from superglm.editor.display import ADDITIVE, average_parameter, parameter_spec
 from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.editor.lss import (
     INVERSE_THETA,
@@ -402,7 +404,8 @@ def test_glm_open_is_unchanged(editor_model):  # noqa: F811
     assert predictor_of(session.model, "x_spline") is None
     assert predictor_of(session.model, None) is None
     assert column_of(session.model, "x_spline") == "x_spline"
-    assert display_for(session.model, "x_spline") is RELATIVITY
+    # editor_model is gaussian/identity: its curves are added amounts.
+    assert display_for(session.model, "x_spline") is ADDITIVE
 
 
 def test_keys_split_and_join():
@@ -455,47 +458,21 @@ def test_reference_row_is_the_training_centre_and_survives_mutation():
 
 
 @pytest.mark.parametrize(
-    ("parameter", "label", "chip", "role", "colour", "full_name"),
+    ("family", "parameter", "label", "chip", "role", "colour"),
     [
-        ("mean", "Mean", "Mean", "average", "blue", "the mean: the expected value of the response"),
-        (
-            "scale",
-            "CV",
-            "CV",
-            "spread",
-            "orange",
-            "coefficient of variation (CV): standard deviation ÷ mean",
-        ),
-        (
-            "theta",
-            "Overdispersion",
-            "1/θ",
-            "spread",
-            "orange",
-            "overdispersion (1/θ): variance = mean + mean²/θ",
-        ),
-        (
-            "dispersion",
-            "Dispersion",
-            "Dispersion",
-            "spread",
-            "orange",
-            "dispersion (φ): the variance is φ times the mean to the power p",
-        ),
-        (
-            "power",
-            "Power",
-            "Power",
-            "shape",
-            "orange",
-            "power (p): the variance is the dispersion times the mean to the power p",
-        ),
+        (GammaLS(), "mean", "Mean", "Mean", "average", "blue"),
+        (GammaLS(), "scale", "CV", "CV", "spread", "orange"),
+        (NegativeBinomialLS(), "theta", "Overdispersion", "1/θ", "spread", "orange"),
+        (TweedieLSS(), "dispersion", "Dispersion", "Dispersion", "spread", "orange"),
+        (TweedieLSS(), "power", "Power", "Power", "spread", "orange"),
     ],
+    ids=lambda value: value if isinstance(value, str) else type(value).__name__,
 )
-def test_parameter_display_names_a_parameter_by_its_name(
-    parameter, label, chip, role, colour, full_name
+def test_parameter_display_names_a_parameter_by_its_family_s_label(
+    family, parameter, label, chip, role, colour
 ):
-    display = parameter_display(parameter)
+    spec = parameter_spec(family, parameter)
+    display = parameter_display(spec, average=parameter == average_parameter(family))
     assert (display.name, display.label, display.chip, display.role, display.colour) == (
         parameter,
         label,
@@ -503,12 +480,13 @@ def test_parameter_display_names_a_parameter_by_its_name(
         role,
         colour,
     )
-    assert display.full_name == full_name
+    assert display.full_name == spec.description
 
 
-def test_parameter_display_refuses_what_it_does_not_name():
-    with pytest.raises(EditorValueError, match="'location'"):
-        parameter_display("location")
+def test_an_unlabelled_parameter_shows_its_name_capitalised():
+    spec = dataclasses.replace(parameter_spec(GammaLS(), "scale"), label=None, description=None)
+    shown = parameter_display(spec, average=False)
+    assert (shown.label, shown.chip, shown.full_name) == ("Scale", "Scale", "Scale")
 
 
 @pytest.mark.parametrize(
@@ -524,7 +502,7 @@ def test_a_term_is_the_relativity_its_parameter_moves_by(make, transform):
     session = open_case(case)
     second = case.model.parameter_names_[1]
     key = f"{second}:age"
-    assert display_for(session.model, key) is transform
+    assert display_for(session.model, key) == transform
     assert display_for(session.model, "mean:age") is RELATIVITY
     term = session.terms[key]
     picks = np.arange(0, term.x.size, 40)
@@ -544,13 +522,15 @@ def test_a_term_is_the_relativity_its_parameter_moves_by(make, transform):
 
 
 def test_the_display_transforms_name_their_direction_and_payload():
-    assert RELATIVITY.to_payload() == {"kind": "relativity"} and RELATIVITY.increasing
-    assert INVERSE_THETA.to_payload() == {"kind": "inverse_theta"} and not INVERSE_THETA.increasing
-    assert y_label_for("mean") == "relativity"
-    assert y_label_for("scale", GammaLS()) == "relativity of the CV"
-    assert y_label_for("scale", LogNormalLS()) == "relativity of σ"
-    assert y_label_for("theta") == "relativity of the overdispersion"
-    assert y_label_for("dispersion") == "relativity of the dispersion"
+    assert RELATIVITY.to_payload() == {"kind": "relativity", "link": "log"}
+    assert RELATIVITY.increasing
+    assert INVERSE_THETA.to_payload() == {"kind": "inverse_theta", "link": "log"}
+    assert not INVERSE_THETA.increasing
+    assert y_label_for(RELATIVITY, "mean") == "relativity"
+    assert y_label_for(RELATIVITY, "CV") == "relativity of the CV"
+    assert y_label_for(RELATIVITY, "σ") == "relativity of σ"
+    assert y_label_for(INVERSE_THETA, "overdispersion") == "relativity of the overdispersion"
+    assert y_label_for(RELATIVITY, "dispersion") == "relativity of the dispersion"
 
 
 @pytest.mark.parametrize("transform", [RELATIVITY, INVERSE_THETA], ids=lambda t: t.kind)

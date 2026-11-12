@@ -39,9 +39,9 @@ from superglm.distributional.families import (
 )
 from superglm.distributional.families.tweedie import BoundedPowerLink
 from superglm.editor._types import EditableTerm
+from superglm.editor.display import parameter_display_for, parameter_spec
 from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.editor.lss.apply import _native_levels
-from superglm.editor.lss.display import parameter_display
 from superglm.editor.lss.view import LSSModelView, lss_key
 from superglm.links import Link, LogLink
 
@@ -98,12 +98,14 @@ def _family_name(family: object) -> str:
 def _parameters(view: LSSModelView) -> list[dict[str, Any]]:
     parameters = []
     for state in view._fitted.layout.predictors:
-        shown = parameter_display(state.name)
+        shown = parameter_display_for(view, state.name)
+        # The browser's Tweedie law reads its power by the role "shape".
+        power = parameter_spec(view.family, state.name).role == "power"
         parameters.append(
             {
                 "name": state.name,
                 "label": shown.label,
-                "role": shown.role,
+                "role": "shape" if power else shown.role,
                 "link": link_spec(state.name, state.link),
             }
         )

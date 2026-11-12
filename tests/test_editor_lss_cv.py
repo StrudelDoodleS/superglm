@@ -3,19 +3,17 @@
 from __future__ import annotations
 
 import dataclasses
+from functools import partial
 
 import numpy as np
 import pytest
 from sklearn.model_selection import KFold
 
 from superglm import (
-    GammaLS,
     LogNormalLS,
-    NegativeBinomialLS,
     OrderedCategorical,
     Spline,
     SuperLSS,
-    TweedieLSS,
     cat,
     cross_validate,
     s,
@@ -115,7 +113,7 @@ def test_a_tweedie_cv_tab_names_the_dispersion_curves_and_run_cv_repeats_the_sco
 
 
 def test_a_tweedie_dispersion_curve_is_drawn_as_a_relativity():
-    shown = fold_chart_display("dispersion:age", TweedieLSS())
+    shown = fold_chart_display("dispersion:age", tweedie_case().model)
     assert (shown.label, shown.group, shown.role, shown.transform) == (
         "age · Dispersion",
         "Dispersion",
@@ -214,7 +212,7 @@ def test_mean_terms_stay_first_even_when_a_theta_term_moves_most(nb_cv):
         }
         for fold in range(3)
     }
-    items = fold_term_items(terms, curves, display=fold_chart_display)
+    items = fold_term_items(terms, curves, display=partial(fold_chart_display, model=session.model))
     assert items[0]["fold_gap"] < items[1]["fold_gap"]
     assert [item["name"] for item in items] == ["mean:age", "theta:age"]
     # Without a display there are no groups, and the order is by stability alone.
@@ -520,18 +518,17 @@ def test_offsets_are_taken_by_rows_whatever_their_shape():
 
 
 @pytest.mark.parametrize(
-    ("family", "key", "value"),
+    ("make", "key", "value"),
     [
-        (GammaLS(), "mean:age", "relativity"),
-        (GammaLS(), "scale:age", "relativity of the CV"),
-        (LogNormalLS(), "scale:age", "relativity of σ"),
-        (NegativeBinomialLS(), "theta:age", "relativity of the overdispersion"),
-        (TweedieLSS(), "dispersion:age", "relativity of the dispersion"),
-        (None, "scale:age", "relativity of the CV"),
+        (gamma_case, "mean:age", "relativity"),
+        (gamma_case, "scale:age", "relativity of the CV"),
+        (lognormal_case, "scale:age", "relativity of σ"),
+        (nb_case, "theta:age", "relativity of the overdispersion"),
+        (tweedie_case, "dispersion:age", "relativity of the dispersion"),
     ],
 )
-def test_a_fold_curve_says_what_it_is_a_relativity_of(family, key, value):
-    assert fold_chart_display(key, family=family).value == value
+def test_a_fold_curve_says_what_it_is_a_relativity_of(make, key, value):
+    assert fold_chart_display(key, make().model).value == value
 
 
 def test_run_cv_reads_no_label_of_a_row_of_zero_weight():
