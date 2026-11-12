@@ -200,9 +200,10 @@ def bin_knots(spec: Any, x: NDArray, weights: NDArray | None = None) -> NDArray:
     wherever its rows have them. Every site that bins a spline's column, and
     the certification, reads its knots here.
     """
-    ranges = spec._polynomial_ranges
-    if not ranges:
+    if not spec._polynomial_ranges:
         return spec._knots
+    # Sorted along the axis, as certification reads them: the declared order may differ.
+    ranges = validate_ranges(spec._polynomial_ranges, spec.degree, spec._lo, spec._hi)
     values, _ = _spline_knots.knot_geometry_data(x, weights)
     order = max(spec._m_orders)
     cuts = determining_cuts(ranges, values, spec._lo, spec._hi, order)

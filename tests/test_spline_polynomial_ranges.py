@@ -688,6 +688,28 @@ def test_a_binned_fit_refuses_an_end_stretch_no_bin_centre_reaches():
         _fit("bs", sliver, discrete=True, book=book, n_bins=4)
 
 
+def test_a_binned_fit_does_not_depend_on_the_order_its_ranges_are_declared_in():
+    # The bins' cuts come from the ranges sorted along the axis (``bin_knots``). Read in
+    # declared order, [8, 9] before [1, 2] took its free stretches from the wrong
+    # neighbours and the fit was refused, though the same ranges in axis order fit.
+    x = np.linspace(0.0, 10.0, 10001)
+    y = np.sin(x) + np.random.default_rng(3).normal(0.0, 0.1, x.size)
+    frame = pd.DataFrame({"x": x})
+    axis_order = [PolynomialRange(1.0, 2.0, 1, "kink"), PolynomialRange(8.0, 9.0, 1, "kink")]
+    fitted = []
+    for declared in (axis_order, axis_order[::-1]):
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            discrete=True,
+            n_bins=20,
+            features={"x": Spline(kind="bs", n_knots=0, m=3, polynomial_ranges=declared)},
+        )
+        model.fit(frame, y)
+        fitted.append(np.asarray(model.predict(frame), dtype=np.float64))
+    np.testing.assert_allclose(fitted[1], fitted[0], rtol=0.0, atol=1e-9)
+
+
 @pytest.mark.parametrize("join", ["kink", "tangent"])
 def test_ppform_export_reproduces_a_ranged_spline(join):
     model = _fit("bs", [PolynomialRange(30.0, 45.0, 1, join)])
