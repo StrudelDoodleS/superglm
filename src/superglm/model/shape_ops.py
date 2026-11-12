@@ -11,7 +11,7 @@ from numpy.typing import NDArray
 from superglm._frame import as_eager_frame
 from superglm._utils import weighted_row_sum
 from superglm.features.constraint import rules_of
-from superglm.group_matrix import GroupMatrix, _cross_gram
+from superglm.group_matrix import DesignMatrix, GroupMatrix
 from superglm.model.fit_state import (
     FittedStateRevision,
     canonical_intercept_shift,
@@ -127,25 +127,24 @@ def _term_rmatvec(model, groups, rows: NDArray) -> NDArray:
 
 
 def _term_data_hessian(model, groups, W: NDArray) -> NDArray:
-    """``X_j' W X_j`` over the fitted rows at the fit's working weights ``W``, intercept profiled."""
+    """``X_j' W X_j`` over the fitted rows at the fit's working weights ``W``, intercept profiled.
+
+    Without the fit's kept Gram, it is formed as inference forms it: from the columns
+    centred at their weighted means (``build_centered_system``). The Schur complement
+    ``X'WX - (X'W1)(1'WX) / 1'W`` cancels catastrophically where a term's curvature is
+    small beside its raw moments, as the textbook variance formula does (Chan, Golub &
+    LeVeque 1983).
+    """
     kept = _kept_data_gram(model, _term_indices(groups), W)
     if kept is not None:
         return kept
-    mats = _term_group_matrices(model, groups)
-    widths = [g.size for g in groups]
-    starts = np.concatenate([[0], np.cumsum(widths)])
-    gram = np.zeros((int(starts[-1]), int(starts[-1])))
-    cross = np.zeros(int(starts[-1]))
-    for a, gm in enumerate(mats):
-        sa = slice(starts[a], starts[a + 1])
-        gram[sa, sa] = np.asarray(gm.gram(W), dtype=np.float64)
-        cross[sa] = np.asarray(gm.rmatvec(W), dtype=np.float64)
-        for b in range(a + 1, len(mats)):
-            sb = slice(starts[b], starts[b + 1])
-            gram[sa, sb] = np.asarray(_cross_gram(gm, mats[b], W), dtype=np.float64)
-            gram[sb, sa] = gram[sa, sb].T
-    # The Schur complement of the constant column: the intercept moves freely.
-    return 0.5 * (gram + gram.T) - np.outer(cross, cross) / float(np.sum(W))
+    from superglm.model.state_ops import _rank_centered_data_gram
+
+    design = DesignMatrix(
+        _term_group_matrices(model, groups), n=model._dm.n, p=sum(g.size for g in groups)
+    )
+    gram = _rank_centered_data_gram(design, np.asarray(W, dtype=np.float64))
+    return 0.5 * (gram + gram.T)
 
 
 def _term_penalized_hessian(model, groups, smooth_penalty_terms, working_weights) -> NDArray:

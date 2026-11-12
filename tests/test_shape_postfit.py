@@ -1192,6 +1192,40 @@ def test_two_group_term_metric_holds_its_cross_blocks():
     np.testing.assert_array_less(np.abs(metric - expected), gamma(n + 2) * 4.0 * magnitude + 1e-300)
 
 
+@pytest.mark.parametrize(("n_knots", "degree"), [(0, 1), (6, 3)])
+def test_repair_after_summary_publishes_what_it_publishes_before(n_knots, degree):
+    """``summary()`` takes the fit's kept Gram, so the repair forms its metric again.
+
+    One row carries unit weight and the rest 1e-20, so the term's curvature, about 7e-19,
+    is far below the rounding of its raw moments. Profiled as ``X'WX - (X'W1)(1'WX) / 1'W``
+    it came out -6e-17, and the repair refused the metric as not positive definite. Formed
+    from centred columns, as the fit forms it, the repair publishes the same curve.
+    """
+    x = np.linspace(0.0, 1.0, 100)
+    X = pd.DataFrame({"x": x})
+    weights = np.full(x.size, 1e-20)
+    weights[-1] = 1.0
+    feature = PSpline(
+        n_knots=n_knots,
+        degree=degree,
+        m=1,
+        penalty="none",
+        constraint=Constraint.postfit.increasing,
+    )
+    model = SuperGLM(
+        family="gaussian", selection_penalty=0.0, spline_penalty=0.0, features={"x": feature}
+    ).fit(X, 1.0 - x, sample_weight=weights)
+    summarised = copy.deepcopy(model)
+    summarised.summary()
+    assert summarised._solver_result.rank_info.data_gram is None
+
+    model.apply_shape_postfit(X)
+    summarised.apply_shape_postfit(X)
+
+    assert "x" in model._shape_repairs and "x" in summarised._shape_repairs
+    np.testing.assert_allclose(summarised.predict(X), model.predict(X), rtol=0.0, atol=1e-12)
+
+
 @pytest.mark.parametrize("scale", [1e165, 1e-150])
 def test_monotone_repair_in_extreme_predictor_units_matches_unit_units(scale):
     """Derivative rows that would under- or overflow are normalized range-safely."""
