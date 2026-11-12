@@ -1,4 +1,4 @@
-import { showsRelativity } from "./chart/display.js";
+import { isAdditive, noEffect, showsRelativity } from "./chart/display.js";
 import { fmt, fmtCount } from "./format.js";
 import {
   anchorMarks,
@@ -189,7 +189,7 @@ export function drawChart(term, selection, context) {
   const [yMinRaw, yMaxRaw] = unsmoothed
     ? unsmoothedRange(curveMin, curveMax, unsmoothed.y)
     : [curveMin, curveMax];
-  const [baseYMin, baseYMax] = paddedYRange(yMinRaw, yMaxRaw);
+  const [baseYMin, baseYMax] = paddedYRange(yMinRaw, yMaxRaw, !isAdditive(term.display));
   const yMin = zoom ? zoom.yMin : baseYMin;
   const yMax = zoom ? zoom.yMax : baseYMax;
   const sx = (v) => margin.left + ((v - xMin) / Math.max(xMax - xMin, 1e-12)) * innerW;
@@ -237,9 +237,9 @@ export function drawChart(term, selection, context) {
       text(xTicks, tickX, tickY, tick.label, "tick-label", "middle");
     }
   }
-  // The baseline, where the term's own effect is zero (relativity one): the level
-  // an edit is judged against.
-  const baseline = Math.min(Math.max(1, yMin), yMax);
+  // The baseline, where the term's own effect is zero (relativity one, or zero on an
+  // additive curve): the level an edit is judged against.
+  const baseline = Math.min(Math.max(noEffect(term.display), yMin), yMax);
   line(scene, margin.left, sy(baseline), margin.left + innerW, sy(baseline), "zero");
   line(scene, margin.left, margin.top + innerH, margin.left + innerW, margin.top + innerH, "axis");
 

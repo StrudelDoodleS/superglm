@@ -32,7 +32,10 @@ def current_feature(page) -> str | None:
 
 
 @pytest.fixture
-def browser_editor_widget():
+def browser_editor_widget(request):
+    # A gaussian on its identity link draws additive curves; a test parametrised
+    # with "log" gets the same model on a log link, whose curves are relativities.
+    link = getattr(request, "param", None)
     rng = np.random.default_rng(20260711)
     n = 120
     X = pd.DataFrame(
@@ -44,6 +47,7 @@ def browser_editor_widget():
     y = 0.3 + 0.01 * X["age"].to_numpy() + 0.2 * (X["region"] == "B")
     model = SuperGLM(
         family="gaussian",
+        link=link,
         selection_penalty=0.0,
         features={"age": Spline(kind="ps", n_knots=7), "region": Categorical(base="first")},
     )
@@ -415,6 +419,8 @@ def test_editor_browser_cancel_before_first_move_restores_confirmed_selection(
 
 
 @pytest.mark.browser
+# Zoom keeps the handles only beside the Contrib view, which a relativity curve has.
+@pytest.mark.parametrize("browser_editor_widget", ["log"], indirect=True)
 def test_editor_browser_zoom_preserves_handle_visuals(browser_editor_widget):
     with sync_playwright() as runtime:
         browser = runtime.chromium.launch(headless=True)

@@ -52,6 +52,7 @@
 /**
  * @typedef {Object} ImpactPayload
  * @property {number} [weighted_mean_relativity]
+ * @property {number} [weighted_mean_display] additive terms only: the weighted mean edit, an amount
  * @property {number} [total_weight]
  * @property {number} [selected_weight_share]
  */
@@ -288,11 +289,13 @@
  * @property {boolean} fits_levels
  */
 /**
- * How a SuperLSS term's effect on the linear predictor is shown and edited: a
- * relativity, `exp(effect)`, or for an overdispersion term the relativity of
- * 1/theta, `exp(-effect)`.
+ * How a term's effect on the linear predictor is shown and edited, decided by the
+ * fitted link: a relativity, `exp(effect)`; for an overdispersion term the
+ * relativity of 1/theta, `exp(-effect)`; or on an identity or other non-log link
+ * the effect itself (`additive`).
  * @typedef {Object} DisplaySpec
- * @property {'relativity'|'inverse_theta'} kind
+ * @property {'relativity'|'inverse_theta'|'additive'} kind
+ * @property {string} [link] the fitted link's name, e.g. "log", "identity", "floored_log"
  */
 /**
  * @typedef {Object} TermPayload
@@ -321,7 +324,7 @@
  * @property {TermKnots|null} [knots] the term's knots and the Knots tool's state
  * @property {boolean} [unsmoothed] whether the term has smoothing the Unsmoothed
  *   toggle can switch off: a spline
- * @property {DisplaySpec} [display] SuperLSS terms only: the unit of `y`; absent means relativity
+ * @property {DisplaySpec} [display] the unit of `y`; absent means relativity
  * @property {string} [y_label]
  * @property {string} [x_label]
  * @property {string} [title]

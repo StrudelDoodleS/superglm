@@ -945,7 +945,9 @@ function previewControlCurve(term, drag, value) {
   if (!drag.basis || !drag.baseY || drag.basis.length !== drag.baseY.length) return;
   const deltaLog = fromDisplay(term.display, value) - fromDisplay(term.display, drag.startValue);
   for (let i = 0; i < term.y.length; i++) {
-    term.y[i] = Math.max(1e-12, shiftDisplay(term.display, drag.baseY[i], drag.basis[i], deltaLog));
+    term.y[i] = reachableDisplay(
+      term.display, shiftDisplay(term.display, drag.baseY[i], drag.basis[i], deltaLog)
+    );
   }
   if (term.spline_view && drag.gridBasis && drag.baseCurve &&
       drag.gridBasis.length === drag.baseCurve.length) {

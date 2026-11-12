@@ -271,3 +271,24 @@ test("the rule chip names a term's rules and says whether edits keep to them", (
   assert.equal(chip.hidden, true);
   assert.equal(chip.textContent, "");
 });
+
+test("an additive context readout adds", () => {
+  const additive = (weighted_mean_display) => {
+    const n = {
+      kindNode: new FakeNode(),
+      edfNode: new FakeNode(),
+      referenceNode: new FakeNode(),
+      statusNode: new FakeNode(),
+    };
+    const term = {
+      ...TERM,
+      display: { kind: "additive", link: "identity" },
+      impact: { weighted_mean_relativity: weighted_mean_display, weighted_mean_display, selected_weight_share: 0.25 },
+    };
+    renderContextBar(n, { name: "territory", term, selectionSize: 2 });
+    return n.statusNode.textContent;
+  };
+  assert.equal(additive(12.3), "2 of 10 selected · average edit +12.3 · selected exposure 25%");
+  assert.equal(additive(-4), "2 of 10 selected · average edit -4 · selected exposure 25%");
+  assert.equal(additive(0), "2 of 10 selected · average edit 0 · selected exposure 25%");
+});

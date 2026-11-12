@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   canShowContributions,
   fromDisplay,
+  noEffect,
   showsRelativity,
   reachableDisplay,
   shiftDisplay,
@@ -21,6 +22,7 @@ const FIXTURE = JSON.parse(
 const EPS = Number.EPSILON;
 
 const THETA = { kind: "inverse_theta" };
+const ADDITIVE = { kind: "additive", link: "identity" };
 
 test("relativity is exp/log with the 1e-12 floor, bit for bit", () => {
   for (const e of [-3, -0.2, 0, 0.7, 4]) assert.equal(toDisplay(undefined, e), Math.exp(e));
@@ -61,6 +63,24 @@ test("a value at or below zero clamps to the smallest relativity, never to its m
     for (const v of [-3, -1, -0.3]) assert.equal(reachableDisplay(spec, v), 1e-12, `${spec.kind} ${v}`);
     assert.ok(toDisplay(spec, fromDisplay(spec, -1)) > 0);
   }
+});
+
+test("additive maps are identity and unclamped", () => {
+  const row = FIXTURE.additive;
+  row.effects.forEach((e, i) => assert.equal(toDisplay(ADDITIVE, e), row.display[i], `toDisplay(${e})`));
+  row.probes.forEach((v, i) => assert.equal(fromDisplay(ADDITIVE, v), row.effects_from_probes[i], `fromDisplay(${v})`));
+  for (const v of [-3, -1e-9, 0, 2.5]) assert.equal(reachableDisplay(ADDITIVE, v), v);
+  assert.equal(shiftDisplay(ADDITIVE, -2, 0.5, -3), -3.5);
+  const moved = shiftedCurve([-1, 0, 2], [1, 0.5, 0], -4, ADDITIVE);
+  assert.deepEqual(moved, [-5, -2, 2]);
+});
+
+test("no effect is 1 on a multiplicative curve and 0 on an additive one", () => {
+  assert.equal(noEffect(undefined), 1);
+  assert.equal(noEffect({ kind: "relativity", link: "floored_log" }), 1);
+  assert.equal(noEffect(THETA), 1);
+  assert.equal(noEffect(ADDITIVE), 0);
+  for (const spec of [undefined, THETA, ADDITIVE]) assert.equal(toDisplay(spec, 0), noEffect(spec));
 });
 
 test("a reachable value is one the transform can return", () => {
@@ -109,6 +129,8 @@ test("only a relativity curve gets the overlays that exponentiate basis terms", 
   assert.equal(showsRelativity({}), true);
   assert.equal(showsRelativity({ display: { kind: "relativity" } }), true);
   assert.equal(showsRelativity({ display: THETA }), false);
+  assert.equal(showsRelativity({ display: ADDITIVE }), false);
+  assert.equal(canShowContributions({ controls: { basis: [[1]], build_basis: [[1]] }, display: ADDITIVE }), false);
 });
 
 test("fmtCount groups thousands and drops stray decimals, and reads small numbers as fmt does", () => {

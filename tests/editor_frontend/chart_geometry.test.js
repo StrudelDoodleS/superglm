@@ -392,6 +392,14 @@ test("a curve that stays at zero or above is never padded below zero", () => {
   assert.deepEqual(paddedYRange(1, 1), [0.95, 1.05]);
 });
 
+test("an additive curve is padded below zero, where its values can go", () => {
+  const [low, high] = paddedYRange(0, 3, false);
+  assert.ok(low < 0 && high > 3);
+  assert.equal(low, -3 * 0.12);
+  assert.equal(high, 3 + 3 * 0.12);
+  assert.equal(paddedYRange(1, 12, false)[0], 1 - (12 - 1) * 0.12);
+});
+
 test("ticks sit at 1, 2 or 5 times a power of ten, inside the range", () => {
   for (const [min, max, n] of [[0, 12.5, 5], [0.83, 1.21, 5], [18, 90, 6], [0, 126036.5, 4], [-0.2, 3.1, 5]]) {
     const ticks = roundTicks(min, max, n);

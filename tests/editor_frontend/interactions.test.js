@@ -67,7 +67,7 @@ function selectionHarness({ displayIsCollapsed, displayToSourceIndices = undefin
   };
 }
 
-function moveHarness({ mutationResult, levelGroups = [], mode = "move" }) {
+function moveHarness({ mutationResult, levelGroups = [], mode = "move", display = undefined, yMin = 0, yMax = 10 }) {
   const listeners = new Map();
   const previews = [];
   const mutations = [];
@@ -76,8 +76,8 @@ function moveHarness({ mutationResult, levelGroups = [], mode = "move" }) {
   const svg = {
     _scale: {
       displayIsCollapsed: false,
-      yMin: 0,
-      yMax: 10,
+      yMin,
+      yMax,
       margin: { top: 0 },
       innerH: 100,
     },
@@ -94,6 +94,7 @@ function moveHarness({ mutationResult, levelGroups = [], mode = "move" }) {
     level_groups: levelGroups,
     y: [2, 2, 4, 5],
     controls: mode === "handles" ? { y: [2], count: 1, basis: null } : null,
+    ...(display ? { display } : {}),
   };
   const context = {
     svg,
@@ -478,4 +479,23 @@ test("a dragged level of an ordered spline is joined, not drawn on the stale spl
 
   assert.equal(harness.previews[0].preview.spline_view.fits_levels, false);
   assert.equal(harness.term.spline_view.fits_levels, true);
+});
+
+test("additive drag keeps negative values", async () => {
+  const display = { kind: "additive", link: "identity" };
+  // The plot runs from -5 to 5 over 100 px, so a pointer at y = 80 reads -3.
+  const point = moveHarness({ mutationResult: { ok: true }, display, yMin: -5, yMax: 5 });
+  await point.drag(0, 80);
+  assert.equal(point.previews.at(-1).preview.y[0], -3);
+  assert.deepEqual(point.mutations.at(-1).payload.values, [-3]);
+
+  const handle = moveHarness({ mutationResult: { ok: true }, mode: "handles", display, yMin: -5, yMax: 5 });
+  handle.term.controls = { y: [2], log_effect: [2], count: 1, basis: [[1, 0.5, 0, 0]] };
+  await handle.drag(0, 80);
+  const { preview } = handle.previews.at(-1);
+  assert.equal(preview.controls.y[0], -3);
+  assert.equal(preview.controls.log_effect[0], -3);
+  // The handle moved by -5 on the effect scale, so each level moves by its basis weight times -5.
+  assert.deepEqual(preview.y, [2 - 5, 2 - 2.5, 4, 5]);
+  assert.equal(handle.mutations.at(-1).payload.value, -3);
 });

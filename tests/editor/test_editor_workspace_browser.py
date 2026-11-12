@@ -2637,3 +2637,68 @@ def test_superglm_feature_rows_draw_mini_curves_that_follow_an_edit(open_editor_
                 '#featureList [data-term="curve"] svg.mini-curve path')?.getAttribute("d") !== before""",
             arg=before,
         )
+
+
+def test_identity_link_chart_draws_effects_around_zero(open_editor_page, editor_identity_model):
+    with open_editor_page(selected_term="territory", model=editor_identity_model) as (
+        page,
+        session,
+    ):
+        last = len(session.terms["territory"].levels) - 1
+        chart = page.evaluate(
+            """last => {
+                const svg = document.querySelector('#chart');
+                const scale = svg._scale;
+                const target = scale.yMin / 2;
+                const point = svg.createSVGPoint();
+                point.x = scale.sx(scale.x[last]);
+                point.y = scale.sy(target);
+                const client = point.matrixTransform(svg.getScreenCTM());
+                return {
+                    yMin: scale.yMin,
+                    yMax: scale.yMax,
+                    zeroY: Number(svg.querySelector('line.zero').getAttribute('y1')),
+                    sy0: scale.sy(0),
+                    title: svg.querySelector('text.label:not(.x-axis-title)').textContent,
+                    target,
+                    pixel: (scale.yMax - scale.yMin) / scale.innerH,
+                    client: { x: client.x, y: client.y },
+                };
+            }""",
+            last,
+        )
+        # The base level sits at 0, and the axis is padded below it, where an effect can go.
+        assert chart["yMin"] < 0 < chart["yMax"]
+        assert chart["zeroY"] == pytest.approx(chart["sy0"], abs=1e-9)
+        assert chart["title"] == "effect on the mean"
+
+        select_chart_tool(page, "Move")
+        point = page.locator(f'#chart circle.point[data-index="{last}"]')
+        box = point.bounding_box()
+        assert box is not None
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        page.mouse.down()
+        page.mouse.move(chart["client"]["x"], chart["client"]["y"])
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST"
+                and response.url.split("?", maxsplit=1)[0].endswith("/drag")
+            )
+        ) as drag_info:
+            page.mouse.up()
+
+        (posted,) = drag_info.value.request.post_data_json["values"]
+        assert posted < 0
+        assert posted == pytest.approx(chart["target"], abs=2 * chart["pixel"])
+        # On the identity link the effect is the value drawn, and a value below zero holds.
+        effect = session.terms["territory"].edited_log_effect[last]
+        assert effect == pytest.approx(posted, abs=1e-9 * max(1.0, abs(posted)))
+        page.wait_for_function(
+            """last => {
+                const svg = document.querySelector('#chart');
+                const point = svg.querySelector(`circle.point[data-index="${last}"]`);
+                const zero = svg.querySelector('line.zero');
+                return point && zero && Number(point.getAttribute('cy')) > Number(zero.getAttribute('y1'));
+            }""",
+            arg=last,
+        )
