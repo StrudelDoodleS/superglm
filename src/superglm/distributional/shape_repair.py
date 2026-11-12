@@ -11,13 +11,15 @@ fit's (Meyer and Woodroofe, *Ann. Statist.* 28(4), 2000; Meyer, *Ann. Appl. Stat
 *Biometrika* 96(3), 2009, Proposition 1).
 
 SuperLSS runs the same repairer on the same fitted basis, for a term of any parameter, on that
-parameter's link scale, in the same metric: the fit's penalized curvature on the term, with that
-parameter's intercept profiled (``_term_precision``). The basis carries the fit's centring, so a
-repair keeps the term's
-training mean on that scale; the parameter's intercept is then re-estimated on the joint
-likelihood of the retained rows with every term and every other parameter held. The result is
-published as a revision of the fit (``revision.py``): predictions, curves and rating tables
-follow it, while ``result_`` and the covariance keep describing the fit.
+parameter's link scale, in the same metric: the penalized curvature at the coefficients being
+repaired, the fit's own at the fit, on the term, with that parameter's intercept profiled
+(``_term_precision``, ``_curvature_at``). The basis carries the fit's centring, so a repair keeps
+the term's training mean on that scale; the parameter's intercept is then re-estimated on the
+joint likelihood of the retained rows with every term and every other parameter held. A
+projection the dropped term beats is continued as SuperGLM continues one
+(``_continued_repair``). The result is published as a revision of the fit (``revision.py``):
+predictions, curves and rating tables follow it, while ``result_`` and the covariance keep
+describing the fit.
 """
 
 from __future__ import annotations
@@ -679,23 +681,20 @@ def _settled(
     return repaired
 
 
-def _term_precision(fitted: Any, term: PostfitTerm) -> NDArray[np.float64]:
-    """The metric the term's repair projects in: the fit's penalized curvature on the term's
-    coefficients, every other coefficient held and the term's parameter's intercept profiled.
-
-    It is the second-order model, at the fit, of the merit the publication rule judges
-    (``_profiled_merit``), as SuperGLM's ``X'WX + S_lambda`` is (``model.shape_ops``): the
-    curvature the fit accepted, ``-H(l) + S``, which its inference reads, never a covariance
-    inverted back.
-    """
+def _profiled_curvature(
+    fitted: Any, term: PostfitTerm, curvature: NDArray[np.float64]
+) -> tuple[NDArray[np.float64], NDArray[np.float64] | None]:
+    """``curvature`` on the term's coefficients with its parameter's intercept profiled, and
+    the intercept's coupling over its own curvature (``None`` where nothing is profiled), which
+    profiles a gradient in the same way: ``g_t - ratio * g_a``."""
     # Minimising a semidefinite quadratic over the intercept leaves the generalized Schur
     # complement H_tt - h h' H_aa^+ (Boyd and Vandenberghe, Convex Optimization, 2004,
     # appendix A.5.5; Gallier, The Schur complement and symmetric positive semidefinite
     # matrices, 2019, theorem 4.3). An intercept curvature at the block's rounding is zero
     # there, as a pseudo-inverse takes it, and semidefiniteness then makes h zero too.
-    curvature = fitted.result.terminal_penalized_curvature
     columns = np.arange(term.columns.start, term.columns.stop)
     block = np.array(curvature[np.ix_(columns, columns)], dtype=np.float64)
+    ratio = None
     intercept = fitted.layout.predictor(term.parameter).intercept_index
     if intercept is not None:
         coupling = np.asarray(curvature[columns, intercept], dtype=np.float64)
@@ -703,7 +702,233 @@ def _term_precision(fitted: Any, term: PostfitTerm) -> NDArray[np.float64]:
         scale = max(float(np.max(np.abs(np.diag(block)), initial=0.0)), abs(own))
         if own > (columns.size + 1) * _UNIT_ROUNDOFF * scale:
             block -= np.outer(coupling, coupling) / own
-    return 0.5 * (block + block.T)
+            ratio = coupling / own
+    return 0.5 * (block + block.T), ratio
+
+
+def _term_precision(
+    fitted: Any, term: PostfitTerm, curvature: NDArray[np.float64] | None = None
+) -> NDArray[np.float64]:
+    """The metric the term's repair projects in: the penalized curvature at the coefficients
+    being repaired on the term's coefficients, every other coefficient held and the term's
+    parameter's intercept profiled; ``curvature`` is the fit's terminal one by default.
+
+    It is the second-order model, there, of the merit the publication rule judges
+    (``_profiled_merit``), as SuperGLM's ``X'WX + S_lambda`` at a revision's working weights is
+    (``model.shape_ops``): the curvature the fit accepts, ``-H(l) + S``, never a covariance
+    inverted back.
+    """
+    if curvature is None:
+        curvature = fitted.result.terminal_penalized_curvature
+    return _profiled_curvature(fitted, term, curvature)[0]
+
+
+def _curvature_at(
+    fitted: Any, rows: Any
+) -> Callable[[NDArray[np.float64]], tuple[NDArray[np.float64], NDArray[np.float64]] | None]:
+    """The penalized score and curvature at given coefficients, as the fit forms its terminal
+    ones (``solver.solver``), on the fit's backend and smoothing parameters: the observed
+    curvature unless it is materially indefinite, then the expected (Fisher), then the nearest
+    semidefinite (``resolve_curvature``). The fit's retry, a further Newton run, would move the
+    coefficients, so it is not taken. ``None`` where they cannot be evaluated or no curvature
+    is accepted. The context, and its design matrices, are formed on the first call.
+    """
+    from superglm.distributional.solver import solver as _solver
+    from superglm.distributional.solver.curvature import resolve_curvature
+
+    context: list[Any] = []
+
+    def at(
+        coefficients: NDArray[np.float64],
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]] | None:
+        if not context:
+            plan = fitted.family.bind_likelihood(
+                rows.response, rows.likelihood_weights, rows.observation
+            )
+            context.append(
+                _solver._validated_context(
+                    fitted.family,
+                    fitted.layout,
+                    rows.response,
+                    plan,
+                    fitted.result.penalty,
+                    coefficient_curvature="observed",
+                    chunk_size=fitted.result.resolved_chunk_size,
+                    coefficient_face=fitted.result.coefficient_face,
+                )
+            )
+        (solver_context,) = context
+        try:
+            state = _solver._evaluate_state(solver_context, coefficients)
+            if state is None:
+                return None
+            observed = _solver._measured_geometry(solver_context, state, "observed", None)
+            decision = resolve_curvature(
+                "observed",
+                _solver._policy_curvature(solver_context, observed.penalized_curvature),
+                matrix_kind="penalized",
+            )
+            accepted = observed
+            if decision.retry_required:
+                found: dict[str, Any] = {}
+
+                def measured(source: Any) -> Any:
+                    found[source] = _solver._measured_geometry(solver_context, state, source, None)
+                    return _solver._policy_curvature(
+                        solver_context, found[source].penalized_curvature
+                    )
+
+                fisher = None if solver_context.fisher_family is None else measured("fisher")
+                decision = resolve_curvature(
+                    "observed",
+                    _solver._policy_curvature(solver_context, observed.penalized_curvature),
+                    fisher_matrix=fisher,
+                    semidefinite_fallback=lambda: measured("nearest_semidefinite"),
+                    state=decision.state,
+                    matrix_kind="penalized",
+                )
+                accepted = found[decision.telemetry.actual_source]
+        # A curvature no policy accepts is a ValueError, as a family's refusal to evaluate is.
+        except (ValueError, FloatingPointError, OverflowError, np.linalg.LinAlgError):
+            return None
+        return (
+            np.asarray(observed.score_penalized, dtype=np.float64),
+            np.asarray(accepted.penalized_curvature, dtype=np.float64),
+        )
+
+    return at
+
+
+def _candidate(
+    fitted: Any,
+    rows: Any,
+    frame: EagerFrame,
+    coefficients: NDArray[np.float64],
+    term: PostfitTerm,
+    block: NDArray[np.float64],
+    reach: float,
+) -> tuple[NDArray[np.float64], float, float]:
+    """``coefficients`` with the term's block replaced, its intercept shift and penalized
+    merit (``_profiled_merit``); refused where a retained row has no valid parameters."""
+    candidate = coefficients.copy()
+    candidate[term.columns] = block
+    shift, merit, invalid = _profiled_merit(fitted, rows, frame, candidate, term.parameter, reach)
+    if not np.isfinite(merit):
+        where = (
+            "the model's parameters or likelihood cannot be evaluated on the training rows"
+            if invalid is None
+            else f"{invalid} of the {len(rows.response)} training rows have no valid "
+            "parameters there (the family's likelihood is not finite)"
+        )
+        raise RuntimeError(
+            f"Unsafe shape repair of {term.term} rejected before publication: with the "
+            f"repaired curve, {where}. Fit the rule instead (Constraint.fit.{term.kind}), "
+            "which keeps every row valid, or drop the term."
+        )
+    return candidate, shift, merit
+
+
+# A repair's projection is the first step of the constrained penalized fit at the fit's
+# smoothing parameters, exact only where the merit is quadratic. A projection the zero term
+# beats is continued as SuperGLM continues one (``model.shape_ops._continued_repair``), by
+# iteratively re-weighted cone projection (Liao & Meyer, J. Stat. Softw. 89(5), 2019, section
+# 1.2), the SQP of the merit over a polyhedral cone (Masselot et al., arXiv:2509.18406, 2025,
+# supplement B): at each feasible iterate the merit's second-order model in the penalized
+# curvature there (``_curvature_at``), intercept profiled, is minimised over the cone by the
+# same repairer, and the next iterate lies on the segment back to the current one, which the
+# cone holds, at Armijo's sufficient decrease by halving (Nocedal & Wright, Numerical
+# Optimization, 2nd ed., 2006, section 3.1), each trial's intercept re-estimated. The zero term
+# is feasible, so where the merit is convex the iterates approach a curve no worse than it.
+def _continued_repair(
+    fitted: Any,
+    rows: Any,
+    frame: EagerFrame,
+    term: PostfitTerm,
+    repair: Any,
+    start: NDArray[np.float64],
+    merit: float,
+    curvature_at: Callable[..., Any],
+    grid_weights: NDArray[np.float64],
+    n_grid: int,
+) -> Any:
+    """The refused repair continued towards the constrained penalized fit, or ``None``.
+
+    ``start`` is the refused candidate with its intercept re-estimated, ``merit`` its merit.
+    Stops where the model's predicted decrease or a step's actual decrease is within the
+    merit's rounding, or a step finds no decrease; ``None`` when no step is taken. The
+    publication rule judges the result as it judged the projection.
+    """
+    from dataclasses import replace
+
+    from superglm.constraints import shape_constraint_certificate, shape_sum_tolerance
+    from superglm.model.shape_ops import _ARMIJO, _CONTINUED_STEPS, _STEP_HALVINGS, _repairer
+
+    columns, spec = term.columns, term.curve_spec
+    intercept = fitted.layout.predictor(term.parameter).intercept_index
+    groups = [SimpleNamespace(sl=columns, size=columns.stop - columns.start)]
+    reach = float(repair.projection_residual)
+    repairer = _repairer(term.kind)
+    beta, moved = start, False
+    for _ in range(_CONTINUED_STEPS):
+        tolerance = shape_sum_tolerance(abs(merit), len(rows.response))
+        local = curvature_at(beta)
+        if local is None:
+            break
+        score, curvature = local
+        H, ratio = _profiled_curvature(fitted, term, curvature)
+        # The merit's gradient is the penalized score's negative, profiled as its curvature is.
+        gradient = -score[columns] if ratio is None else ratio * score[intercept] - score[columns]
+        current = beta[columns]
+        target = beta.copy()
+        try:
+            target[columns] = current - np.linalg.solve(H, gradient)
+            projected = repairer.repair(
+                spec, target, groups, weights=grid_weights, n_grid=n_grid, metric=H
+            )
+        except (np.linalg.LinAlgError, RuntimeError):
+            break
+        cone_point = np.asarray(projected.repaired_beta_reparam, dtype=np.float64)[columns]
+        step = cone_point - current
+        slope = float(gradient @ step)
+        if not slope < 0.0 or -(slope + 0.5 * float(step @ H @ step)) <= tolerance:
+            break
+        length = 1.0
+        for _ in range(_STEP_HALVINGS):
+            trial = beta.copy()
+            # On the segment, exact at its ends.
+            trial[columns] = (1.0 - length) * current + length * cone_point
+            try:
+                shift, trial_merit, _ = _profiled_merit(
+                    fitted, rows, frame, trial, term.parameter, reach
+                )
+            except RuntimeError:
+                trial_merit = np.inf
+            if trial_merit <= merit + _ARMIJO * length * slope:
+                break
+            length *= 0.5
+        else:
+            break
+        if intercept is not None:
+            trial[intercept] += shift
+        decrease = merit - trial_merit
+        beta, merit, moved = trial, trial_merit, True
+        if decrease <= tolerance:
+            break
+    if not moved:
+        return None
+    block = beta[columns]
+    certificate = shape_constraint_certificate(spec, block, term.kind)
+    full = np.array(repair.repaired_beta_reparam, dtype=np.float64, copy=True)
+    full[columns] = block
+    curve = np.asarray(spec.transform(repair.grid), dtype=np.float64) @ block
+    return replace(
+        repair,
+        repaired_beta_reparam=full,
+        repaired_log_effect=curve,
+        projection_residual=float(np.max(np.abs(curve - repair.original_log_effect))),
+        max_violation_after=certificate.violation,
+        certificate=certificate,
+    )
 
 
 def repaired_model(
@@ -716,8 +941,9 @@ def repaired_model(
 
     A term whose curve already obeys its rule is left exactly as it is, and a model with no
     term to repair is returned unchanged, so a second call repairs nothing. As in SuperGLM, a
-    repair whose penalized likelihood is worse than dropping the term altogether is refused
-    before anything is published.
+    projection whose penalized likelihood is worse than dropping the term altogether is
+    continued towards the constrained fit, and refused before anything is published if that
+    is still worse.
     """
     from superglm.constraints import (
         shape_constraint_certificate,
@@ -755,6 +981,14 @@ def repaired_model(
     # The frame given to the fit, or the rows it kept: weights and likelihood read the kept rows.
     frame = _rows_of_the_fit(as_eager_frame(X_train), rows)
     weights = np.asarray(rows.likelihood_weights.values, dtype=np.float64)
+    curvature_at = _curvature_at(fitted, rows)
+    # The metric follows a revision, as SuperGLM's follows its working weights: the fit's own
+    # terminal curvature at the fit's coefficients, else the curvature at the coefficients being
+    # repaired, formed as the fit forms it, or the fit's where none is accepted there.
+    curvature = None
+    if not np.array_equal(coefficients, fitted.result.coefficients):
+        local = curvature_at(coefficients)
+        curvature = None if local is None else local[1]
 
     records: list[ShapeRepairRecord] = []
     for term in pending:
@@ -768,36 +1002,38 @@ def repaired_model(
             [block],
             weights=grid_weights,
             n_grid=n_grid,
-            metric=_term_precision(fitted, term),
+            metric=_term_precision(fitted, term, curvature),
             certificate=certificates[term.term],
         )
         repaired = _settled(term, repair, coefficients[term.columns], grid_weights)
         if np.array_equal(repaired, coefficients[term.columns]):
             continue
-        candidate = coefficients.copy()
-        candidate[term.columns] = repaired
+        reach = float(repair.projection_residual)
+        candidate, shift, merit = _candidate(
+            fitted, rows, frame, coefficients, term, repaired, reach
+        )
         fallback = coefficients.copy()
         fallback[term.columns] = 0.0
-        reach = float(repair.projection_residual)
-        shift, merit, invalid = _profiled_merit(
-            fitted, rows, frame, candidate, term.parameter, reach
-        )
-        if not np.isfinite(merit):
-            where = (
-                "the model's parameters or likelihood cannot be evaluated on the training rows"
-                if invalid is None
-                else f"{invalid} of the {len(rows.response)} training rows have no valid "
-                "parameters there (the family's likelihood is not finite)"
-            )
-            raise RuntimeError(
-                f"Unsafe shape repair of {term.term} rejected before publication: with the "
-                f"repaired curve, {where}. Fit the rule instead (Constraint.fit.{term.kind}), "
-                "which keeps every row valid, or drop the term."
-            )
         _, fallback_merit, _ = _profiled_merit(
             fitted, rows, frame, fallback, term.parameter, reach, dropped=term.label
         )
-        if merit > fallback_merit + shape_sum_tolerance(abs(fallback_merit), len(rows.response)):
+        bar = fallback_merit + shape_sum_tolerance(abs(fallback_merit), len(rows.response))
+        state = fitted.layout.predictor(term.parameter)
+        if merit > bar:
+            start = candidate.copy()
+            if state.intercept_index is not None:
+                start[state.intercept_index] += shift
+            continued = _continued_repair(
+                fitted, rows, frame, term, repair, start, merit, curvature_at, grid_weights, n_grid
+            )
+            if continued is not None:
+                repair = continued
+                repaired = _settled(term, repair, coefficients[term.columns], grid_weights)
+                reach = float(repair.projection_residual)
+                candidate, shift, merit = _candidate(
+                    fitted, rows, frame, coefficients, term, repaired, reach
+                )
+        if merit > bar:
             raise RuntimeError(
                 f"Unsafe shape repair of {term.term} rejected before publication: its penalized "
                 "objective, the negative log-likelihood plus the fit's smoothing penalty at the "
@@ -806,7 +1042,6 @@ def repaired_model(
                 f"(Constraint.fit.{term.kind}), which chooses the smoothing under the rule, or "
                 "drop the term."
             )
-        state = fitted.layout.predictor(term.parameter)
         if state.intercept_index is not None:
             candidate[state.intercept_index] += shift
         coefficients = candidate

@@ -471,6 +471,117 @@ def test_a_repair_the_grid_metric_lost_to_the_dropped_term_is_published():
     assert _gamma_merit(model, repaired) < _gamma_merit(model, dropped)
 
 
+def _edited(model: SuperLSS, *, times: float = 1.0, bump: float = 0.0):
+    """A revision of the mean term: the fitted curve times ``times``, plus a centred bump
+    ``bump * exp(-((x - 3) / 0.6)**2)`` fitted in the term's basis, with a constant, on 200 grid
+    points. Returns the revised model and its coefficients."""
+    spec, columns = _term(model, "mean")
+    grid = np.linspace(spec._lo, spec._hi, 200)
+    design = np.column_stack([spec.transform(grid), np.ones(grid.size)])
+    beta = np.array(model._model.coefficients, dtype=np.float64)
+    beta[columns] *= times
+    beta[columns] += np.linalg.lstsq(design, bump * np.exp(-(((grid - 3.0) / 0.6) ** 2)))[0][:-1]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", EditedCoefficientsWarning)
+        return model._with_revised_coefficients(beta, edited_terms=["mean:x"]), beta
+
+
+def _gamma_merit_gradient(model: SuperLSS) -> np.ndarray:
+    """The gradient of ``_gamma_merit`` in the mean term's coefficients at the model, in closed
+    form: the Gamma score ``a (y / mu - 1)`` on the log mean through the term's basis, centred
+    as ``_profiled_precision`` centres it (the mean's intercept profiled), plus the penalty's."""
+    X, y = _data("mean")
+    link = model.predict_link(X)
+    mu, a = np.exp(link["mean"].to_numpy()), np.exp(-2.0 * link["scale"].to_numpy())
+    spec, columns = _term(model, "mean")
+    basis = spec.transform(X["x"].to_numpy())
+    information = a * y / mu
+    basis = basis - (information @ basis) / np.sum(information)
+    beta = np.asarray(model._model.coefficients, dtype=np.float64)
+    return -basis.T @ (a * (y / mu - 1.0)) + np.asarray(model._model.result.penalty)[columns] @ beta
+
+
+def test_an_edit_whose_projection_loses_to_the_dropped_term_is_continued_and_published():
+    # Opus's case on #626: the fitted mean term plus a bump, then the repair the diagnosis asks
+    # for. Master's grid projection published it. At 13d432654 the projection, in the fit's
+    # curvature rather than the edit's, scored 1105.97 against 526.841 with the term dropped
+    # and was refused. Continued as SuperGLM continues one, it reaches the constrained
+    # penalized fit at the fit's smoothing: increasing, better than no term on scipy's Gamma
+    # likelihood, and stationary on the cone in that likelihood's closed-form derivatives.
+    model = _fit("mean", Constraint.postfit.increasing, kind="bs", k=8)
+    revised, edited = _edited(model, bump=1.0)
+    spec, columns = _term(model, "mean")
+    dropped = edited.copy()
+    dropped[columns] = 0.0
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        revised.apply_shape_postfit()
+    (status,) = postfit_status(revised._model)
+    assert status.state is PostfitState.REPAIRED
+    assert monotonicity_violation(_curve(revised, "mean"), "increasing") == 0.0
+    published = np.array(revised._model.coefficients, dtype=np.float64)
+    assert _gamma_merit(model, published) < _gamma_merit(model, dropped)
+    # The KKT conditions of the constrained fit: the merit's gradient is a nonnegative
+    # combination of the rule's rows where the derivative touches zero.
+    # The search stops once a step lowers the merit by no more than its rounding, about
+    # 4 n u |merit|, so the gradient's Newton decrement g'H^-1 g is then within twice that and
+    # |g| within sqrt(2 * 4 n u |merit| * lambda_max(H)), relative to the target's norm.
+    precision = _profiled_precision(revised, "mean")
+    block = published[columns]
+    target = precision @ block - _gamma_merit_gradient(revised)
+    certificate = projection_certificate(spec, "increasing", block, precision, target, block)
+    assert certificate.minimum_derivative >= -1e-10
+    rounding = 4.0 * len(_data("mean")[1]) * np.finfo(np.float64).eps / 2.0
+    rounding *= abs(_gamma_merit(model, published))
+    largest = float(np.linalg.eigvalsh(precision)[-1])
+    assert certificate.kkt_residual <= np.sqrt(2.0 * rounding * largest) / np.linalg.norm(target)
+
+
+def test_the_repair_of_an_edit_projects_in_the_curvature_at_the_edit():
+    # The metric follows the revision, as SuperGLM's follows its working weights. At
+    # 13d432654 an edit was projected in the fit's curvature. A small bump keeps the projection
+    # better than no term, so nothing continues: it is the closest curve to the edit in the
+    # Gamma likelihood's closed-form information at the edit, by the KKT oracle.
+    model = _fit("mean", Constraint.postfit.increasing, kind="bs", k=8)
+    revised, edited = _edited(model, bump=0.3)
+    spec, columns = _term(model, "mean")
+    precision = _profiled_precision(revised, "mean")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        revised.apply_shape_postfit()
+    repaired = np.asarray(revised._model.coefficients)[columns]
+    block = edited[columns]
+    certificate = projection_certificate(
+        spec, "increasing", repaired, precision, precision @ block, block
+    )
+    assert certificate.minimum_derivative >= -1e-10
+    assert certificate.kkt_residual <= _PROJECTION_KKT
+
+
+def test_a_continuation_still_worse_than_the_dropped_term_is_refused(monkeypatch):
+    # Forced: the edit is eight times the fitted term, whose projection loses to the dropped
+    # term by thousands, and the continuation is held to one step. The step lowers the merit
+    # the refusal quotes, and the result still loses, so the rule refuses it and nothing is
+    # published. At 13d432654 nothing continued: both refusals quoted the projection.
+    import re
+
+    from superglm.model import shape_ops
+
+    model = _fit("mean", Constraint.postfit.increasing, kind="bs", k=8)
+    revised, _ = _edited(model, times=8.0)
+    quoted = {}
+    for steps in (0, 1):
+        monkeypatch.setattr(shape_ops, "_CONTINUED_STEPS", steps)
+        before = revised._model
+        with warnings.catch_warnings(), pytest.raises(RuntimeError) as refused:
+            warnings.simplefilter("ignore")
+            revised.apply_shape_postfit()
+        assert revised._model is before
+        found = re.search(r"is (\S+) against (\S+) with the term dropped", str(refused.value))
+        quoted[steps], dropped = float(found.group(1)), float(found.group(2))
+    assert dropped < quoted[1] < quoted[0]
+
+
 def test_a_repair_that_fits_worse_than_no_term_is_refused_and_nothing_is_published(monkeypatch):
     # Forced: twenty times the projection obeys the rule but fits far worse than no term, and
     # the refusal says which objective it compared.
@@ -507,6 +618,38 @@ def _profile_optimum(
         log_score, bounds=bounds, method="bounded", options={"xatol": xatol}
     )
     return float(search.x)
+
+
+def _profiled_log_score(model: SuperLSS, beta, parameter: str, X, y, edited, shifts) -> float:
+    """The model's own log score plus half the fit's penalty quadratic at ``beta``, least over
+    a shift of ``parameter``'s intercept: on the grid ``shifts``, then by SciPy's bounded Brent
+    between the best point's neighbours. A shift leaving a row without a density scores 1e300.
+    ``[0.0]`` reads ``beta`` as it is."""
+    fitted = model._model
+    index = fitted.layout.predictor(parameter).intercept_index
+    penalty = 0.5 * float(beta @ np.asarray(fitted.result.penalty) @ beta)
+
+    def objective(shift: float) -> float:
+        moved = np.array(beta, dtype=np.float64, copy=True)
+        moved[index] += shift
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            there = model._with_revised_coefficients(moved, edited_terms=edited)
+            try:
+                value = float(there.scores(X, y, which=("log",))["log"].sum())
+            except ValueError:  # a row without a density
+                return 1e300
+        return value + penalty if np.isfinite(value) else 1e300
+
+    values = [objective(shift) for shift in shifts]
+    best = int(np.argmin(values))
+    if len(shifts) == 1:
+        return values[0]
+    bounds = (shifts[max(best - 1, 0)], shifts[min(best + 1, len(shifts) - 1)])
+    search = optimize.minimize_scalar(
+        objective, bounds=bounds, method="bounded", options={"xatol": 1e-9}
+    )
+    return min(values[best], float(search.fun))
 
 
 def _generalized_gamma_beside_its_mean_wall():
@@ -796,22 +939,6 @@ def _perturbed_repairer(monkeypatch, block):
             return dataclasses.replace(result, repaired_beta_reparam=beta, certificate=None)
 
     monkeypatch.setattr(shape_ops, "_repairer", Perturbed)
-
-
-def _grid_repairer(monkeypatch):
-    """Make the shared repairer project the curve on its grid, as it does given no metric."""
-    from superglm.model import shape_ops
-
-    real = shape_ops._repairer
-
-    class OnTheGrid:
-        def __init__(self, kind):
-            self.inner = real(kind)
-
-        def repair(self, spec, coefficients, groups, *, metric=None, **kwargs):
-            return self.inner.repair(spec, coefficients, groups, **kwargs)
-
-    monkeypatch.setattr(shape_ops, "_repairer", OnTheGrid)
 
 
 def test_a_projection_onto_the_apex_is_published_as_the_zero_curve(monkeypatch):
@@ -1288,7 +1415,7 @@ def test_a_session_follows_a_repair_only_under_the_widget_lock_and_its_getters_c
     assert owned == [True] and session.model_revision > revision
 
 
-def test_the_intercept_is_re_estimated_where_valid_shifts_are_a_narrow_interval(monkeypatch):
+def test_the_intercept_is_re_estimated_where_valid_shifts_are_a_narrow_interval():
     # Sol's case: a generalized gamma whose scale rows are valid over a narrow band of shifts
     # of the scale intercept. At c3c56d40a the bounded search probed only invalid shifts and
     # kept the held intercept; an independent SciPy profile finds +4.55323, lowering the
@@ -1324,17 +1451,29 @@ def test_the_intercept_is_re_estimated_where_valid_shifts_are_a_narrow_interval(
         )
     assert revised.predict_parameters(X)["scale"].max() < 0.017
 
-    # In the fit's curvature, where the scale term's penalty dominates, the projection adds the
-    # slope the penalty leaves free, which on this likelihood is far worse than no term.
-    with warnings.catch_warnings(), pytest.raises(RuntimeError, match="penalized objective"):
-        warnings.simplefilter("ignore")
-        revised.apply_shape_postfit()
-    # The grid's projection, about the zero curve, ties the dropped term and is published:
-    # forced, so that the intercept's search is what is tested.
-    _grid_repairer(monkeypatch)
+    # At 13d432654 the projection, in the fit's curvature, where the scale term's penalty
+    # dominates, added the slope the penalty leaves free, far worse on this likelihood than no
+    # term, and was refused where master's grid projection published. In the curvature at the
+    # revision, continued where the dropped term beats it, it is published: increasing, and no
+    # worse than the dropped term on the model's own log score, to the rounding of two sums of
+    # its rows. It reaches the zero curve, as the grid's projection did, so its intercept is
+    # the one the narrow band holds.
+    edited = ["mean:x", "scale:x", "shape:x"]
+    columns = layout.term_slices["scale:x"]
+    dropped = beta.copy()
+    dropped[columns] = 0.0
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         revised.apply_shape_postfit()
+    (status,) = postfit_status(revised._model)
+    assert status.state is PostfitState.REPAIRED
+    published = np.array(revised._model.coefficients, dtype=np.float64)
+    curve = _term_of(fitted, "scale").transform(np.linspace(0.0, 1.0, 2000)) @ published[columns]
+    assert monotonicity_violation(curve, "increasing") <= 1e-9 * max(np.ptp(curve), 1e-300)
+    shifts = np.linspace(-2.0, 10.0, 121)
+    least = _profiled_log_score(model, dropped, "scale", X, y, edited, shifts)
+    rounding = 4.0 * len(y) * np.finfo(np.float64).eps / 2.0 * abs(least)
+    assert _profiled_log_score(model, published, "scale", X, y, edited, [0.0]) <= least + rounding
     (record,) = revised._model.fit_state.hand_edit.repairs
     assert record.intercept_shift == pytest.approx(4.55323, abs=1e-4)
     assert revised.predict_parameters(X)["scale"].max() == pytest.approx(0.64969, abs=1e-4)
