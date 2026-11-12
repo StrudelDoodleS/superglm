@@ -81,10 +81,16 @@ def covariance_exponent(result):
     return geometry if result.solver_phi is None else geometry - result.weight_exponent
 
 
-def coefficient_covariance(inverse, result):
+def coefficient_covariance(inverse, result, *, known_scale=False):
     """Pair the inverse and dispersion before changing their common unit."""
-    scale = solver_dispersion(result)
-    exponent = covariance_exponent(result)
+    # Legacy fit_path results carry Pearson phi even for a known-scale family;
+    # its fitted-family tables explicitly choose the known dispersion instead.
+    scale = 1.0 if known_scale else solver_dispersion(result)
+    exponent = (
+        getattr(result, "_geometry_weight_exponent", result.weight_exponent)
+        if known_scale
+        else covariance_exponent(result)
+    )
     if result.weight_exponent and scale > 0.0:
         # Leave the even part of dispersion's exponent out of the matrix too:
         # phi' * H'^-1 can overflow while its standard errors still fit.
@@ -100,9 +106,9 @@ def coefficient_covariance(inverse, result):
     return covariance
 
 
-def standard_errors(variance, result, *, raw=False):
+def standard_errors(variance, result, *, raw=False, known_scale=False):
     """Change units after the square root, avoiding an overflowing variance."""
-    if raw:
+    if raw or known_scale:
         scale = 1.0
         exponent = getattr(result, "_geometry_weight_exponent", result.weight_exponent)
     else:

@@ -310,20 +310,23 @@ def drop1(
         else:
             diagnostic_weights = np.asarray(sample_weight, dtype=np.float64)
 
-    def deviance_in_units(fitted):
+    def deviance_in_units(fitted, frame):
         if not exponent:
             return fitted.result.deviance
         from superglm._utils import weighted_row_sum
 
-        # Re-form from the retained fitting means: lifting a rounded subnormal
-        # deviance afterwards cannot recover the digits its ratio needs.
+        # Re-form from the fitting means, predicting on the supplied frame
+        # after row retirement. Lifting a rounded subnormal deviance afterwards
+        # cannot recover the digits its ratio needs.
         mu = fitted._fit_mu
+        if mu is None:
+            mu = fitted.predict(frame, offset=offset)
         return weighted_row_sum(
             np.ldexp(diagnostic_weights, exponent), fitted._distribution.deviance_unit, y, mu
         )
 
     if exponent:
-        dev_full = deviance_in_units(model)
+        dev_full = deviance_in_units(model, X)
     rows = []
     for name in model._feature_order:
         drop_set = {name}
@@ -336,7 +339,7 @@ def drop1(
         reduced = model._clone_without_features(drop_set)
         reduced_X = _drop1_reduced_frame(reduced, X)
         reduced.fit(reduced_X, y, sample_weight=sample_weight, offset=offset)
-        dev_reduced = deviance_in_units(reduced)
+        dev_reduced = deviance_in_units(reduced, reduced_X)
         edf_reduced = reduced.result.effective_df
         delta_dev = dev_reduced - dev_full
         delta_df = max(edf_full - edf_reduced, 1e-4)

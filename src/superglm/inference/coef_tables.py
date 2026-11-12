@@ -309,7 +309,7 @@ def build_coef_rows(
                     XtWX_inv_aug,
                     augmented_indices,
                 )
-                se_dict[g.name] = standard_errors(var_diag, result)
+                se_dict[g.name] = standard_errors(var_diag, result, known_scale=known_scale)
         if g.name in selected_names:
             se_dict[g.name] = se_dict[g.name].astype(float, copy=True)
             se_dict[g.name][~coefficient_estimable[g.sl]] = np.nan
@@ -342,7 +342,7 @@ def build_coef_rows(
         XtWX_inv_aug,
         augmented_reference_contrast,
     )
-    icpt_se = float(standard_errors(icpt_var, result))
+    icpt_se = float(standard_errors(icpt_var, result, known_scale=known_scale))
 
     rows: list[_CoefRow] = []
 
@@ -411,7 +411,9 @@ def build_coef_rows(
     def _curve_se_range(feature_name):
         """Compute curve SE min/max for a spline feature."""
         # Use the feature block of the augmented inverse for correct marginal SEs
-        Cov_active = coefficient_covariance(covariance_slope_view(XtWX_inv_aug), result)
+        Cov_active = coefficient_covariance(
+            covariance_slope_view(XtWX_inv_aug), result, known_scale=known_scale
+        )
         se_curve = feature_se_from_cov(
             feature_name, Cov_active, active_groups, result, groups, specs, interaction_specs
         )
@@ -436,7 +438,7 @@ def build_coef_rows(
             XtWX_inv_aug,
             augmented_indices,
         )
-        return coefficient_covariance(covariance, result)
+        return coefficient_covariance(covariance, result, known_scale=known_scale)
 
     def _spline_enrichment(g_name, spec):
         d = spline_group_enrichment(g_name, spec, _get_group_edf_map(), reml_lambdas, lambda2)
@@ -527,7 +529,9 @@ def build_coef_rows(
                 else 0.0
             )
 
-            Cov_active = coefficient_covariance(covariance_slope_view(XtWX_inv_aug), result)
+            Cov_active = coefficient_covariance(
+                covariance_slope_view(XtWX_inv_aug), result, known_scale=known_scale
+            )
             se_levels = feature_se_from_cov(
                 g.feature_name,
                 Cov_active,
@@ -571,6 +575,7 @@ def build_coef_rows(
                     V_b_j = coefficient_covariance(
                         covariance_selected_block(XtWX_inv_aug, augmented_indices),
                         result,
+                        known_scale=known_scale,
                     )
                     R_a = _get_R_factor()
                     edf, edf1 = _get_influence_edf()
@@ -1352,7 +1357,7 @@ def build_basis_detail(
             XtWX_inv_aug,
             augmented_indices,
         )
-        se_arr = standard_errors(var_diag, result)
+        se_arr = standard_errors(var_diag, result, known_scale=known_scale)
         se_arr[~coefficient_estimable[g.sl]] = np.nan
 
         rows = []

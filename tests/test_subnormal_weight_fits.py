@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Constraint, Numeric, Piecewise, PSpline, SuperGLM, Tweedie
+from superglm import Categorical, Constraint, Numeric, Piecewise, PSpline, SuperGLM, Tweedie
 
 U = np.finfo(np.float64).eps / 2
 
@@ -343,3 +343,49 @@ def test_evaluation_weights_can_use_a_different_unit_from_the_fitted_geometry():
     perfect = model.metrics(frame, model.predict(frame))
     expected_ll = -0.5 * len(x) * (np.log(2 * np.pi * phi) - 1064 * np.log(2.0))
     assert perfect.log_likelihood == pytest.approx(expected_ll, rel=2e-12)
+
+
+def test_known_scale_path_tables_use_unit_dispersion():
+    from superglm.inference.covariance import covariance_selected_diagonal
+
+    rng = np.random.default_rng(3)
+    x = rng.uniform(-1, 1, 400)
+    z = rng.choice(list("abcd"), len(x))
+    frame = pd.DataFrame({"x": x, "z": z})
+    mu = np.exp(0.3 + 0.6 * x + (z == "b") * 0.4)
+    y = rng.negative_binomial(2, 2 / (2 + mu)).astype(float)
+    model = SuperGLM(family="poisson", features={"x": PSpline(n_knots=8), "z": Categorical()})
+    model.fit_path(frame, y, n_lambda=5)
+    # Path results retain Pearson dispersion for quasi-likelihood diagnostics.
+    # A fitted-family coefficient table still uses the known unit dispersion.
+    assert model.result.phi > 1.5
+    inference = model._fit_inference_info
+    augmented = inference["XtWX_inv_aug"]
+    categorical = next(g for g in inference["active_groups"] if g.feature_name == "z")
+    indices = np.r_[0, np.arange(categorical.start, categorical.end) + 1]
+    expected = np.sqrt(covariance_selected_diagonal(augmented, indices))
+    labels = ["Intercept", *[f"z[{level}]" for level in model._specs["z"]._non_base]]
+    for rows in (model.summary()._coef_rows, model.metrics(frame, y)._build_coef_rows()):
+        actual = {row.name: row.se for row in rows}
+        np.testing.assert_allclose([actual[label] for label in labels], expected, rtol=2e-12)
+
+
+@pytest.mark.parametrize("retain", [True, False])
+def test_subnormal_drop1_keeps_its_table_after_releasing_fit_rows(retain):
+    x = np.linspace(-1, 1, 80)
+    frame = pd.DataFrame({"x": x, "u": np.cos(5 * x)})
+    y = 0.4 + 0.2 * x + 0.1 * np.cos(13 * x)
+    weights = np.full(len(x), 1e-320)
+
+    def table(w):
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0,
+            retain_fit_state=retain,
+            features={"x": Numeric(), "u": Numeric()},
+        ).fit(frame, y, sample_weight=w)
+        return model.drop1(frame, y, sample_weight=w).set_index("feature").sort_index()
+
+    actual, expected = table(weights), table(np.ldexp(weights, 1064))
+    np.testing.assert_allclose(actual["statistic"], expected["statistic"], rtol=2e-10)
+    np.testing.assert_allclose(actual["p_value"], expected["p_value"], rtol=2e-9, atol=0)

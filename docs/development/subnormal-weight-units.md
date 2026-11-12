@@ -31,6 +31,10 @@ iteration weight/deviance diagnostics use physical units. Likelihood sizes
 and frequency counts always use physical weights. Old saved results have
 class defaults `K = 0`, `solver_phi = None`.
 
+Legacy `fit_path` results keep their Pearson dispersion for quasi-likelihood
+diagnostics. Known-scale coefficient tables continue to use unit dispersion
+for those results as well.
+
 Inference pairs dispersion with its inverse before changing units. When a
 covariance entry exceeds binary64's range, a covariance view carries its
 base and even exponent until a standard error or test statistic is formed.
@@ -70,3 +74,11 @@ their existing units. Extending the lift to REML requires matching units for
 log smoothing parameters, cached moments and criterion derivatives. This
 change also leaves penalty dominance beyond binary64's range and working
 weights that underflow because of the fitted mean to their existing routes.
+
+Two additional limits remain follow-ups. At subnormal prior weights,
+Tweedie `estimate_p` reaches the existing overflow in its dispersion-profile
+search, on both the original and revised code. Its eventual repair will need
+to carry dispersion units through profile publication as well. Some
+discretization diagnostics still materialize physical covariance entries;
+they need the same root-before-rescaling treatment to preserve finite
+standard errors when variance entries overflow.
