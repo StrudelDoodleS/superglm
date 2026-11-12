@@ -1710,6 +1710,24 @@ else:
 #: POSIX, ``STATUS_ILLEGAL_INSTRUCTION`` on Windows.
 _ILLEGAL_INSTRUCTION_EXITS = {-4, 0xC000001D}
 
+#: The x86 instruction set each forced OpenBLAS kernel needs, as NumPy's CPU feature table
+#: names it. On Windows a kernel forced past the CPU can also die of an access violation
+#: (``0xC0000005``), which a real crash gives too, so such a kernel is left out before it
+#: runs. A host whose table lacks the name (ARM64) ignores x86 kernel names anyway.
+_KERNEL_INSTRUCTIONS = {
+    "SkylakeX": "AVX512F",
+    "Haswell": "AVX2",
+    "Zen": "AVX2",
+    "Sandybridge": "AVX",
+}
+
+
+def _cpu_lacks(kernel):
+    from numpy._core._multiarray_umath import __cpu_features__
+
+    needed = _KERNEL_INSTRUCTIONS.get(kernel)
+    return needed is not None and __cpu_features__.get(needed) is False
+
 
 def _kernel_outcomes(script, kernels):
     """Each OpenBLAS kernel's output lines of ``script``, split into words.
@@ -1724,6 +1742,9 @@ def _kernel_outcomes(script, kernels):
 
     outcomes, not_run = {}, {}
     for kernel in kernels:
+        if _cpu_lacks(kernel):
+            not_run[kernel] = f"the CPU lacks {_KERNEL_INSTRUCTIONS[kernel]}"
+            continue
         environment = {**os.environ, "OPENBLAS_CORETYPE": kernel, "OPENBLAS_NUM_THREADS": "1"}
         run = subprocess.run(
             [sys.executable, "-c", script],
