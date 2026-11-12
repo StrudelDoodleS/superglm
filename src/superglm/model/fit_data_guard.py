@@ -283,11 +283,15 @@ class FitDataGuard:
         return True
 
 
-def require_unchanged_fit_data(model, X, y) -> None:
-    """Reject use of retained caller data that changed after fitting."""
+def require_unchanged_fit_data(model, X, y, *, frame: EagerFrame | None = None) -> None:
+    """Reject use of retained caller data that changed after fitting.
+
+    ``frame`` is the caller's adapter of ``X``, whose digest its later checks reuse.
+    """
     guard = getattr(model, "_fit_data_guard", None)
     own_frame = X is getattr(model, "_fit_X_ref", None)
-    if guard is None or not guard.matches_retained_values(X, y, own_frame=own_frame):
+    checked = X if frame is None else frame
+    if guard is None or not guard.matches_retained_values(checked, y, own_frame=own_frame):
         raise RuntimeError(
             "retained fit data were mutated after fitting or cannot be verified; "
             "refit before refreshing fitted state"

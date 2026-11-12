@@ -614,6 +614,7 @@ def _settled_on_rule(spec, kind, beta, grid, share, certified_scale) -> NDArray 
     certified. ``share`` is the grid's weights, summing to one.
     """
     from superglm.constraints import (
+        _fitted_basis,
         _inside_ray,
         shape_constraint_certificate,
         shape_slack_tolerance,
@@ -624,7 +625,7 @@ def _settled_on_rule(spec, kind, beta, grid, share, certified_scale) -> NDArray 
         return beta
     if violation > shape_slack_tolerance(beta, certified_scale):
         return None
-    ray = _inside_ray(np.asarray(spec.transform(grid), dtype=np.float64), grid, share, kind)
+    ray = _inside_ray(_fitted_basis(spec, grid), grid, share, kind)
     ray_slack = shape_constraint_certificate(spec, ray, kind).minimum_scaled_slack
     return beta + (2.0 * violation / ray_slack) * ray if ray_slack > 0.0 else beta
 
@@ -648,7 +649,7 @@ def _validate_repair_for_publication(
     current_eta,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Certify fitted geometry and objective quality before changing private state."""
-    from superglm.constraints import shape_slack_tolerance, shape_sum_tolerance
+    from superglm.constraints import _fitted_basis, shape_slack_tolerance, shape_sum_tolerance
 
     current_beta = np.asarray(model.result.beta, dtype=np.float64)
     candidate_beta = np.asarray(repair_result.repaired_beta_reparam, dtype=np.float64)
@@ -669,7 +670,7 @@ def _validate_repair_for_publication(
         for group in groups:
             candidate_beta[group.sl] = 0.0
         term_beta = np.zeros_like(term_beta)
-    fitted_basis = np.asarray(spec.transform(grid), dtype=np.float64)
+    fitted_basis = _fitted_basis(spec, grid)
     if fitted_basis.shape != (grid.size, term_beta.size):
         raise RuntimeError(
             "Unsafe shape repair rejected before publication: incoherent fitted-basis geometry"
@@ -828,7 +829,7 @@ def _continued_repair(
     """
     from dataclasses import replace
 
-    from superglm.constraints import shape_sum_tolerance
+    from superglm.constraints import _fitted_basis, shape_sum_tolerance
     from superglm.distributions import _VARIANCE_FLOOR, clip_mu
     from superglm.links import stabilize_eta
 
@@ -917,7 +918,7 @@ def _continued_repair(
             break
     if not moved:
         return None
-    curve = np.asarray(spec.transform(repair_result.grid), dtype=np.float64) @ beta[indices]
+    curve = _fitted_basis(spec, repair_result.grid) @ beta[indices]
     return replace(
         repair_result,
         repaired_beta_reparam=beta,
@@ -1133,7 +1134,13 @@ def _refresh_repaired_scale_and_statistics(model) -> None:
 
 def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: int = 500):
     """Repair the shapes of a fitted model's smooths after the fit."""
+    from superglm.constraints import reuse_repair_evidence
 
+    with reuse_repair_evidence():
+        return _apply_shape_postfit(model, X, sample_weight, offset, n_grid=n_grid)
+
+
+def _apply_shape_postfit(model, X, sample_weight, offset, *, n_grid: int):
     if model._result is None:
         raise RuntimeError("Model must be fitted before calling apply_shape_postfit().")
     if not getattr(model, "_retain_fit_state", True):
@@ -1151,11 +1158,17 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
         raise RuntimeError("Post-fit shape repair requires retained fit features and response.")
     from superglm.model.fit_data_guard import require_unchanged_fit_data
 
-    require_unchanged_fit_data(model, X, y_ref)
-    frame = as_eager_frame(X)
+    # One adapter for every check of ``X`` in this call, so its digest is formed once; an
+    # ``X`` it cannot read is refused by the guard, as before.
+    try:
+        checked = as_eager_frame(X)
+    except (TypeError, ValueError):
+        checked = None
+    require_unchanged_fit_data(model, X, y_ref, frame=checked)
+    frame = as_eager_frame(X) if checked is None else checked
     fit_data_guard = model._fit_data_guard
     if not fit_data_guard.matches(
-        X,
+        frame,
         y_ref,
         sample_weight,
         offset,
@@ -1289,6 +1302,7 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
         sample_weight=scoring_weight,
         offset=scoring_offset,
         use_fitted_design=True,
+        frame=frame,
     )
     _refresh_repaired_geometry(work_model, prior_working_weights, prior_selected_names)
     _refresh_repaired_scale_and_statistics(work_model)

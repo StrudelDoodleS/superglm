@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import warnings
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -12,8 +15,70 @@ from numpy.typing import NDArray
 from superglm._roundoff import gamma
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
     from superglm.features.spline import _SplineBase
     from superglm.types import GroupSlice
+
+
+# What one post-fit repair forms more than once: the certificate of the same coefficients,
+# the fitted basis on the same grid, which its early exit, its repairer and its publication
+# rule each read, and the QP solves and Hessian decompositions its exchange repeats on the
+# same inputs. Owner: the call that opens ``reuse_repair_evidence``; lifetime: that call. A
+# key holds the owner (a spec, or the solver) and a 128-bit digest of every array input's
+# dtype, shape and bytes, and nothing a repair reads changes inside it, so a hit is the
+# value the computation returns and nothing needs invalidating. Each entry keeps its owner
+# alive, so the owner's id is not reused while the memo lives.
+_REPAIR_EVIDENCE: ContextVar[dict[tuple, tuple[object, Any]] | None] = ContextVar(
+    "superglm_repair_evidence", default=None
+)
+
+
+@contextmanager
+def reuse_repair_evidence() -> Iterator[None]:
+    """Reuse the certificates, bases and solves formed inside this context (``_REPAIR_EVIDENCE``)."""
+    token = _REPAIR_EVIDENCE.set({})
+    try:
+        yield
+    finally:
+        _REPAIR_EVIDENCE.reset(token)
+
+
+def _fingerprint(*arrays: NDArray | None) -> bytes:
+    """A 128-bit digest of the arrays' dtypes, shapes and bytes; ``None`` counts as absent."""
+    digest = hashlib.blake2b(digest_size=16)
+    for array in arrays:
+        if array is None:
+            digest.update(b"none")
+            continue
+        values = np.ascontiguousarray(array)
+        digest.update(repr((values.dtype.str, values.shape)).encode("ascii"))
+        digest.update(values.data)
+    return digest.digest()
+
+
+def _reused(owner: object, key: tuple, compute: Callable[[], Any]) -> Any:
+    memo = _REPAIR_EVIDENCE.get()
+    if memo is None:
+        return compute()
+    key = (id(owner), *key)
+    if key not in memo:
+        memo[key] = (owner, compute())
+    return memo[key][1]
+
+
+def _fitted_basis(spec: _SplineBase, grid: NDArray) -> NDArray:
+    """``spec.transform(grid)`` in float64; read-only where a repair shares it."""
+    points = np.asarray(grid, dtype=np.float64)
+
+    def compute() -> NDArray:
+        basis = np.array(spec.transform(points), dtype=np.float64)
+        basis.setflags(write=False)
+        return basis
+
+    if _REPAIR_EVIDENCE.get() is None:
+        return np.asarray(spec.transform(points), dtype=np.float64)
+    return _reused(spec, ("basis", _fingerprint(points)), compute)
 
 
 @dataclass
@@ -320,6 +385,16 @@ def shape_constraint_certificate(
 ) -> ShapeConstraintCertificate:
     """Certify derivative sign continuously on every polynomial knot span."""
     beta_arr = np.asarray(beta, dtype=np.float64)
+    return _reused(
+        spec,
+        ("certificate", kind, _fingerprint(beta_arr)),
+        lambda: _shape_constraint_certificate(spec, beta_arr, kind),
+    )
+
+
+def _shape_constraint_certificate(
+    spec: _SplineBase, beta_arr: NDArray, kind: str
+) -> ShapeConstraintCertificate:
     candidates = _certificate_candidates(spec, beta_arr, kind)
     rows = _shape_constraint_rows(spec, candidates, kind)
     normalized_rows, row_norms, keep = _normalized_nonzero_shape_rows(rows)
@@ -943,6 +1018,8 @@ def _solve_cone_qp(
     of ``start``, which the cone holds): a bound, not an optimum. ``regular`` returns
     ``None`` at once where the QP would truncate ``H``'s rank.
     """
+    from functools import partial
+
     from scipy.optimize import nnls
 
     from superglm.solvers.constrained_qp import QPResult, solve_constrained_qp
@@ -971,9 +1048,14 @@ def _solve_cone_qp(
             attempts.append(_ScaledResult(ray, scale))
     truncated = False
     for ridged in (False, True):
+        hessian = problem[0]
         try:
             # One decomposition of the round's Hessian serves every start's solve.
-            decomposition = decompose_gram(_symmetric_part(problem[0]))
+            decomposition = _reused(
+                _solve_cone_qp,
+                ("decomposition", _fingerprint(hessian)),
+                lambda: decompose_gram(_symmetric_part(hessian)),
+            )
         except ValueError:
             return _least_feasible(H, g, rows, attempts) if feasible else None
         truncated = truncated or decomposition.rank < decomposition.width
@@ -981,12 +1063,17 @@ def _solve_cone_qp(
             return None
         for point, working, steps in starts:
             try:
-                solved = solve_constrained_qp(
-                    *problem,
-                    active_set_init=working,
-                    max_iter=steps,
-                    beta_start=point,
-                    _decomposition=decomposition,
+                solved = _reused(
+                    _solve_cone_qp,
+                    ("solve", _fingerprint(*problem, point), tuple(working or ()), steps),
+                    partial(
+                        solve_constrained_qp,
+                        *problem,
+                        active_set_init=working,
+                        max_iter=steps,
+                        beta_start=point,
+                        _decomposition=decomposition,
+                    ),
                 )
             except ValueError:
                 return _least_feasible(H, g, rows, attempts) if feasible else None
@@ -1394,7 +1481,7 @@ def _project_shape_in_fitted_basis(
     """
     label = "Curvature" if kind in {"convex", "concave"} else "Monotone"
 
-    fitted_basis = np.asarray(spec.transform(x_grid), dtype=np.float64)
+    fitted_basis = _fitted_basis(spec, x_grid)
     target = np.asarray(original_curve, dtype=np.float64)
     w = np.asarray(weights, dtype=np.float64)
     if fitted_basis.ndim != 2 or fitted_basis.shape[0] != target.size:

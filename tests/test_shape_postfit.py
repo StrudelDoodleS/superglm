@@ -125,6 +125,50 @@ def test_apply_shape_postfit_installs_one_synchronized_revision_without_row_copi
         model.result.deviance = 0.0
 
 
+def test_a_repair_forms_its_frame_digest_certificates_and_grid_basis_once(monkeypatch):
+    # The retained-data guard, the scoring guard and the guard the repair stores each read
+    # the frame's digest; the early exit and the repairer certify the fitted coefficients,
+    # and the repairer and the publication rule the repaired ones; the projection and the
+    # publication rule evaluate the fitted basis on the grid. Each is formed once a call.
+    import superglm.constraints as constraints
+
+    rng = np.random.default_rng(20260718)
+    x = np.linspace(0.0, 1.0, 240)
+    y = -((x - 0.4) ** 2) + 0.03 * rng.normal(size=x.size)
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=10, constraint=Constraint.postfit.convex)},
+    ).fit(X, y)
+    spec, n_grid = model._specs["x"], 500
+    counts = {"digests": 0, "certificates": 0, "grid bases": 0}
+    real_hash, real_certificate = pd.util.hash_pandas_object, constraints._certificate_candidates
+    real_transform = spec.transform
+
+    def counted_hash(frame, *args, **kwargs):
+        counts["digests"] += isinstance(frame, pd.DataFrame)
+        return real_hash(frame, *args, **kwargs)
+
+    def counted_certificate(*args, **kwargs):
+        counts["certificates"] += 1
+        return real_certificate(*args, **kwargs)
+
+    def counted_transform(points):
+        counts["grid bases"] += np.size(points) == n_grid
+        return real_transform(points)
+
+    monkeypatch.setattr(pd.util, "hash_pandas_object", counted_hash)
+    monkeypatch.setattr(constraints, "_certificate_candidates", counted_certificate)
+    monkeypatch.setattr(spec, "transform", counted_transform)
+    revision = model._fit_revision
+
+    model.apply_shape_postfit(X, n_grid=n_grid)
+
+    assert model._fit_revision == revision + 1
+    assert counts == {"digests": 1, "certificates": 2, "grid bases": 1}
+
+
 def test_gaussian_shape_repair_refreshes_dispersion_after_final_edf() -> None:
     """Coefficient repair must not leave covariance and likelihood on the old scale."""
     rng = np.random.default_rng(20260718)
