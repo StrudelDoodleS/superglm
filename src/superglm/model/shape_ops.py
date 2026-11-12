@@ -618,12 +618,18 @@ def _searched_intercept(
             scored=scored,
         )
 
-    def stationary(state: _InterceptState, relative: float) -> bool:
+    # The shifts at which a run stopped on a stationary point that is not a minimum.
+    maxima: list[float] = []
+
+    def stationary(state: _InterceptState, relative: float, shift: float) -> bool:
         # Relative to the scores' own size, and never tighter than the rounding
         # their residuals carry; a minimum, where the deviance is not convex.
-        return abs(state.score) <= relative * state.score_scale + state.score_rounding and (
-            not nonconvex or state.curvature > 0.0
-        )
+        if not abs(state.score) <= relative * state.score_scale + state.score_rounding:
+            return False
+        if nonconvex and state.information > 0.0 and not state.curvature > 0.0:
+            maxima.append(shift)
+            return False
+        return True
 
     start = evaluate(0.0, checked)
     assert start is not None and held is not None  # the first evaluation holds its rows
@@ -660,8 +666,10 @@ def _searched_intercept(
         below, above = -np.inf, np.inf
         last = before_last = np.inf
         for _ in range(_INTERCEPT_STEPS):
-            if state.information > 0.0 and stationary(state, 1e-11):
+            if state.information > 0.0 and stationary(state, 1e-11, shift):
                 return shift, state
+            if maxima and maxima[-1] == shift:
+                return None  # a maximum, where the Fisher step is null
             if state.score > 0.0:
                 below = shift
             else:
@@ -681,7 +689,7 @@ def _searched_intercept(
                 continue
             before_last, last = last, proposal - shift
             shift, state = proposal, trial
-        if not (state.information > 0.0 and stationary(state, 1e-9)):
+        if not (state.information > 0.0 and stationary(state, 1e-9, shift)):
             return None
         if np.isnan(state.deviance):
             state = evaluate(shift, True)  # stationary only to the looser test
@@ -718,9 +726,9 @@ def _searched_intercept(
         # where that row's kept score is not small beside the others (under the identity link
         # a clamped mean's is (y - mu) / mu): the rerun reads the deviance scored.
         found = search(rerun=True)
-    if found is None:
-        # Neither run reached a stationary minimum (one may have met a maximum, where the
-        # Fisher step is null): the derivative-free search decides, as SuperLSS's does.
+    if found is None and maxima:
+        # A run stopped on a maximum, where the Fisher step is null and neither run can leave:
+        # the derivative-free search decides, as SuperLSS's does.
         found = _derivative_free_intercept(eta_base[carried], evaluate)
     if found is None:
         raise RuntimeError(
@@ -766,11 +774,13 @@ def _deviance_curvature(model, y, mu, eta, dmu_deta, variance, weights, clamped)
 
 
 def _derivative_free_intercept(eta, evaluate) -> tuple[float, _InterceptState] | None:
-    """The shift minimising the deviance the rule scores, clamps and all, by bracketing and
-    Brent alone (``distributional.shape_repair._derivative_free_minimum``), in units of the
-    carried rows' predictor ``eta``; ``None`` when it still falls where the shift overflows.
+    """The shift minimising the deviance the rule scores by bracketing and Brent alone
+    (``distributional.shape_repair._derivative_free_minimum``), in units of the carried rows'
+    predictor ``eta``; ``None`` when it still falls where the shift overflows.
 
-    ``evaluate`` is ``_searched_intercept``'s; a shift it refuses is infinitely high.
+    ``evaluate`` is ``_searched_intercept``'s, read on its first run's domain: a shift that
+    clamps a row the start does not hold is infinitely high, since past a clamp holding a row
+    at its worst the capped deviance has minima the model does not have.
     """
     from superglm.distributional.shape_repair import _derivative_free_minimum, _intercept_scale
 
@@ -780,16 +790,19 @@ def _derivative_free_intercept(eta, evaluate) -> tuple[float, _InterceptState] |
     def objective(t: float) -> float:
         if t not in values:
             try:
-                deviance = evaluate(unit * t, True, True).deviance
+                state = evaluate(unit * t, True)
             except RuntimeError:
-                deviance = np.inf
+                state = None
+            deviance = np.inf if state is None else state.deviance
             values[t] = deviance if np.isfinite(deviance) else np.inf
         return values[t]
 
     best = _derivative_free_minimum(objective, 0.0, unit)
     if best is None or not np.isfinite(objective(best)):
         return None
-    return unit * best, evaluate(unit * best, True, True)
+    state = evaluate(unit * best, True)
+    assert state is not None  # a shift whose deviance was formed
+    return unit * best, state
 
 
 def _shape_candidate_objective(
