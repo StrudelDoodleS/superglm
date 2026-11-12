@@ -55,11 +55,13 @@ const KEEPS_REFERENCE = "With Keep the reference level on in Settings, the refer
 export const OPERATION_HELP = Object.freeze({
   shift_up: Object.freeze({
     title: "Increase selection",
-    body: "Increase selected relativities by 5%.",
+    body: "Increase selected relativities by 5%. On a curve that adds an amount, raise the "
+      + "selected points by 5% of an average row's value.",
   }),
   shift_down: Object.freeze({
     title: "Decrease selection",
-    body: "Decrease selected relativities by 5%.",
+    body: "Decrease selected relativities by 5%. On a curve that adds an amount, lower the "
+      + "selected points by 5% of an average row's value.",
   }),
   smooth: Object.freeze({
     title: "Smooth selection",
