@@ -22,12 +22,14 @@ from sklearn.model_selection import KFold
 
 import superglm.distributional.families as lss_families
 import superglm.distributions as glm_distributions
-from superglm import Categorical, Spline, SuperGLM, SuperLSS, cross_validate
+from superglm import Categorical, OrderedCategorical, Spline, SuperGLM, SuperLSS, cross_validate
 from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
 from superglm.editor import edit
 from superglm.editor.cv import capture_cv_view, fold_log_curves, fold_term_items
 from superglm.editor.display import display_for
+from superglm.editor.free_levels import free_level_comparison
 from superglm.editor.payloads import session_payload
+from superglm.editor.unsmoothed import unsmoothed_job
 from tests._lss_editor_fixtures import (
     EXAMPLE_FAMILIES,
     EXAMPLE_FAMILY_CLASSES,
@@ -154,17 +156,22 @@ def glm_rows():
     return X, effect
 
 
-def _glm_case(name, link, glm_rows):
+def _glm_case(name, link, glm_rows, *, ordered: bool = False):
     X, effect = glm_rows
     example = GLM_EXAMPLES[name]
     mu = example.mean * np.exp(effect)
     y = np.asarray(example.sample(np.random.default_rng(7), mu), dtype=np.float64)
+    g = (
+        OrderedCategorical(order=list(LEVELS), basis=Spline(kind="ps", n_knots=2))
+        if ordered
+        else Categorical(base="first")
+    )
     model = SuperGLM(
         family=example.make(),
         link=link,
         selection_penalty=0.0,
         spline_penalty=0.1,
-        features={"x": Spline(n_knots=3), "g": Categorical(base="first")},
+        features={"x": Spline(n_knots=3), "g": g},
     )
     model.fit(X, y)
     return model, X, y
@@ -267,3 +274,46 @@ def test_superlss_family_works_in_the_editor(name):
     assert list(session.terms) == [f"{first}:age", f"{first}:region", f"{second}:age"]
     cv_rows = (case.model, case.X, case.y) if ("lss", name, None) in CV_CASES else None
     _walk(session, lss=True, cv_rows=cv_rows)
+
+
+@pytest.mark.parametrize(
+    ("name", "link"), GLM_CASES, ids=[f"{n}-{link or 'default'}" for n, link in GLM_CASES]
+)
+def test_unsmoothed_and_free_levels_draw_on_the_curves_own_scale(name, link, glm_rows):
+    """Both overlays are refits shown as the curve is: near it, and with no effect where it is."""
+    model, X, y = _glm_case(name, link, glm_rows, ordered=True)
+    session = edit(model, train_data=(X, y))
+    for key in ("x", "g"):
+        display = display_for(model, key)
+        curve = session.terms[key].edited_log_effect
+        size = np.ptp(curve) + 1e-9
+        if key == "x":
+            line = np.asarray(unsmoothed_job(session, key)()["y"], dtype=np.float64)
+            drawn = [line]
+        else:
+            free = free_level_comparison(session, key)
+            drawn = [np.asarray(free[end], dtype=np.float64) for end in ("y", "lower", "upper")]
+            # The reference is where the term has no effect: 1 on a relativity, 0 on an amount.
+            at = free["levels"].index(str(model._specs[key]._base_level))
+            assert free["y"][at] == pytest.approx(display.no_effect, abs=1e-12)
+            assert np.all(drawn[1] <= drawn[0]) and np.all(drawn[0] <= drawn[2])
+            drawn = drawn[:1]
+        for values in drawn:
+            assert np.all(np.isfinite(values)), (key, values)
+            assert display.kind == "additive" or np.all(values > 0.0), (key, values)
+            # Read back on the link scale, a refit sits within a few curve heights of the curve.
+            effect = display.from_display(values)
+            assert np.ptp(effect) <= 10.0 * size, (key, np.ptp(effect), size)
+            assert abs(np.mean(effect) - np.mean(curve)) <= 10.0 * size, key
+
+
+@pytest.mark.parametrize("name", ["TweedieLSS", "GeneralizedGammaLSS"])
+def test_a_term_on_a_power_or_shape_parameter_opens_edits_and_draws(name):
+    case = scalar_family_case(name, third=True)
+    session = open_case(case)
+    third = case.model.parameter_names_[2]
+    key = f"{third}:age"
+    assert key in session.terms
+    _walk(session, lss=True)
+    payload = session_payload(session)
+    assert np.all(np.isfinite(payload[key]["y"])) and payload[key]["y_label"]

@@ -235,13 +235,14 @@ EXAMPLE_FAMILY_CLASSES = frozenset(law[0].__name__ for law in _SCALAR_LAWS.value
 
 @functools.cache
 def scalar_family_case(
-    name: str, links: tuple[str | None, ...] = (), *, levels: bool = False
+    name: str, links: tuple[str | None, ...] = (), *, levels: bool = False, third: bool = False
 ) -> FitCase:
     """400 rows of one of ``EXAMPLE_FAMILIES``, drawn from its own ``quantile``.
 
     The first parameter has ``s("age", k=5)``, and ``cat("region")`` too with
-    ``levels``; the second has ``s("age", k=4)``, any other is an intercept;
-    ``links`` overrides the parameters' links in order.
+    ``levels``; the second has ``s("age", k=4)``, and so does the third with
+    ``third``; any other is an intercept. ``links`` overrides the parameters'
+    links in order.
     """
     cls, options, natural, sampler = _SCALAR_LAWS[name]
     family = cls(**options)
@@ -264,12 +265,13 @@ def scalar_family_case(
     terms = (
         (s("age", k=5), cat("region")) if levels else (s("age", k=5),),
         (s("age", k=4),),
+        *(((s("age", k=4),),) if third else ()),
     )
     # A family may name its predictor helpers apart from its parameters (Tweedie's ``mu``).
     helpers = getattr(family, "_predictor_helpers", {})
     predictors = [
         getattr(family, helpers.get(spec.name, spec.name))(
-            *(terms[i] if i < 2 else ()), link=links[i] if i < len(links) else None
+            *(terms[i] if i < len(terms) else ()), link=links[i] if i < len(links) else None
         )
         for i, spec in enumerate(family.parameters)
     ]
