@@ -30,6 +30,7 @@ from superglm.distributional.revision import ShapeRepairedWarning
 from superglm.distributional.terms import (
     _coefficient_columns,
     _compiled_predictor,
+    _free_level_slice,
     _reference_design,
     _reference_value,
     _resolve_term,
@@ -41,7 +42,6 @@ from superglm.editor.lss.terms import LSSTermInference, lss_term_inference
 from superglm.features.rebuild import interaction_users as glm_interaction_users
 
 NATIVE_ONLY = "SuperLSS terms open on their native scale; pass centering='native'."
-_SPECIAL_SUFFIX = ":special"
 
 
 def lss_key(parameter: str, term: str) -> str:
@@ -400,8 +400,8 @@ class LSSModelView:
     def term_coefficients(self, key: str) -> NDArray[np.float64]:
         """The fitted coefficients of the term ``key`` names, as its spec scores them."""
         parameter, term = split_key(key)
-        qualified, _state, term_slice = _resolve_term(self._fitted, parameter, term)
-        special = self._fitted.layout.term_slices.get(f"{qualified}{_SPECIAL_SUFFIX}")
+        _, _state, term_slice = _resolve_term(self._fitted, parameter, term)
+        special = _free_level_slice(self._fitted, parameter, term)
         blocks = (term_slice,) if special is None else (term_slice, special)
         return np.asarray(self._fitted.coefficients, dtype=np.float64)[
             _coefficient_columns(*blocks)
@@ -471,8 +471,8 @@ class LSSModelView:
     def _term_blocks(self, key: str) -> tuple[Any, tuple[slice, ...]]:
         """The term's predictor state and its coefficient blocks, its free levels' last."""
         parameter, term = split_key(key)
-        qualified, state, term_slice = _resolve_term(self._fitted, parameter, term)
-        special = self._fitted.layout.term_slices.get(f"{qualified}{_SPECIAL_SUFFIX}")
+        _, state, term_slice = _resolve_term(self._fitted, parameter, term)
+        special = _free_level_slice(self._fitted, parameter, term)
         return state, (term_slice,) if special is None else (term_slice, special)
 
     def reference_design(self, key: str) -> NDArray[np.float64]:

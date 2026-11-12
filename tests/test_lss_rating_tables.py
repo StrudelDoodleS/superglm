@@ -35,7 +35,7 @@ from superglm import (
     term,
     ti,
 )
-from superglm.features.interaction import CategoricalInteraction
+from superglm.features.interaction import CategoricalInteraction, NumericInteraction
 from superglm.features.piecewise import Piecewise
 from superglm.terms import interaction
 
@@ -194,6 +194,50 @@ def check(table, X, offsets, model):
     )
     assert error <= 16 * (factors + 2) * U, (table.parameter, error)
     return error
+
+
+def _special_named_interaction_case(*, categorical):
+    rng = np.random.default_rng(2)
+    if categorical:
+        n = 1200
+        X = pd.DataFrame(
+            {"x": rng.choice(list("abc"), n), "special": rng.choice(["p", "q"], n, p=[0.3, 0.7])}
+        )
+        eta = (
+            0.5
+            + 0.3 * (X.x == "b")
+            - 0.2 * (X.x == "c")
+            + 0.25 * (X.special == "q")
+            + 0.4 * ((X.x == "b") & (X.special == "q"))
+        )
+        mains = (cat("x", base="a"), cat("special", base="p"))
+        ispec = CategoricalInteraction("x", "special")
+    else:
+        n = 400
+        X = pd.DataFrame({"x": rng.uniform(-1, 1, n), "special": rng.normal(size=n)})
+        eta = 0.5 + 0.4 * X.x - 0.2 * X.special + 0.3 * X.x * X.special
+        mains = (term("x", Numeric()), term("special", Numeric()))
+        ispec = NumericInteraction("x", "special")
+    y = rng.gamma(4, np.exp(eta) / 4)
+    family = GammaLS()
+    model = SuperLSS(family, family.mean(*mains, interaction(ispec)), family.scale()).fit(X, y)
+    return model, X
+
+
+def test_numeric_special_named_interaction_keeps_the_export_omission_reason():
+    model, X = _special_named_interaction_case(categorical=False)
+    payload = model.rating_table_payload(X)
+    reason = payload.omitted["mean"]
+    assert "its interaction 'x:special'" in reason
+    assert "has no exact rating table yet" in reason
+
+
+def test_categorical_special_named_interaction_tables_reproduce_predictions():
+    model, X = _special_named_interaction_case(categorical=True)
+    payload = model.rating_table_payload(X)
+    assert payload.omitted == {}
+    for table in payload.parameters:
+        check(table, X, None, model)
 
 
 def test_lognormal_mean_and_sigma_reproduce_predict_parameters():
