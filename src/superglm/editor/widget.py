@@ -364,10 +364,8 @@ class EditorWidget:
                 self._select_term(term)
             target = self.selected_term
             operation, sign = directed_operation(self.session.model, target, operation)
-            if operation == "shift_up":
-                self.session.shift(target, sign * float(np.log(1.05)))
-            elif operation == "shift_down":
-                self.session.shift(target, sign * float(np.log(0.95)))
+            if operation in {"shift_up", "shift_down"}:
+                self.session.shift(target, sign * self._step(target, operation == "shift_up"))
             elif operation in {"isotonic_increasing", "increasing"}:
                 self.session.isotonic(target, "increasing")
             elif operation in {"isotonic_decreasing", "decreasing"}:
@@ -455,6 +453,14 @@ class EditorWidget:
             self.control_counts[term] = int(controls["x"].size)
             self._chart_generation += 1
             return self._state()
+
+    def _step(self, term: str, up: bool) -> float:
+        """Increase's or Decrease's change to ``term``'s effect: x1.05 or x0.95 on a
+        relativity, plus or minus ``additive_step`` on a curve of the effect itself."""
+        if display_for(self.session.model, term).kind == "additive":
+            step = self.session.additive_step(term)
+            return step if up else -step
+        return float(np.log(1.05 if up else 0.95))
 
     def _average_relativity(self, term: str) -> None:
         # Average on the displayed relativity scale. This matches analyst

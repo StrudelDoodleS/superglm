@@ -6453,7 +6453,9 @@ def test_widget_undo_takes_the_latest_edit_and_reset_the_shown_term(editor_model
         # One timeline: Undo takes the latest edit, on region, though x_spline is shown.
         _post_json(f"{widget.url}/op", {"operation": "undo"})
         np.testing.assert_array_equal(region.edited_log_effect, region_original)
-        assert spline.edited_log_effect[4] == pytest.approx(spline_original[4] + np.log(1.05))
+        assert spline.edited_log_effect[4] == pytest.approx(
+            spline_original[4] + session.additive_step("x_spline")
+        )
 
         _post_json(f"{widget.url}/op", {"operation": "shift_up"})
         _post_json(f"{widget.url}/term", {"term": "region"})

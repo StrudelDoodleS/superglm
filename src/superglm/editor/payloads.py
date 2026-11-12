@@ -588,10 +588,14 @@ def _impact_payload(
     selected = np.zeros(term.size, dtype=bool)
     if selection.size:
         selected[np.asarray(selection, dtype=np.intp)] = True
-    return {
+    impact = {
         "total_weight": total,
         "weighted_mean_link_delta": float(np.average(delta, weights=w)),
         "weighted_mean_relativity": float(np.average(display.to_display(delta), weights=w)),
         "max_abs_link_delta": float(np.max(np.abs(delta))) if delta.size else 0.0,
         "selected_weight_share": float(np.sum(w[selected]) / total) if total > 0 else 0.0,
     }
+    if display.kind == "additive":
+        # The mean amount the edits add, in the curve's own units; no relativity exists.
+        impact["weighted_mean_display"] = impact["weighted_mean_relativity"]
+    return impact

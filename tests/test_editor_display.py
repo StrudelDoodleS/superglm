@@ -132,3 +132,136 @@ def test_cv_fold_items_follow_the_glm_link(editor_model):  # noqa: F811
     np.testing.assert_allclose(item["fit"], shown["original_y"], rtol=0.0, atol=1e-12)
     np.testing.assert_allclose(item["fit"], session.terms["x_spline"].original_log_effect)
     assert item["value_label"] == "effect on the mean"
+
+
+@pytest.fixture
+def thousands_session(editor_frame):  # noqa: F811
+    """A Gaussian/identity SuperGLM on a response near 3000, with exposure weights."""
+    X, signal = editor_frame
+    rng = np.random.default_rng(20261112)
+    weights = rng.uniform(0.5, 2.0, len(X))
+    y = 3000.0 + 400.0 * (signal - 0.6) + rng.normal(0.0, 20.0, len(X))
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.1,
+        features=_editor_features(),
+    )
+    model.fit(X, y, sample_weight=weights)
+    return EditorSession.from_model(model, terms=["x_spline", "region", "band"]), X, weights
+
+
+def test_additive_increase_moves_an_average_row_by_about_five_percent(thousands_session):
+    session, X, weights = thousands_session
+    expected = 0.05 * np.average(np.abs(session.model.predict(X)), weights=weights)
+    step = session.additive_step("x_spline")
+    assert step == pytest.approx(expected, rel=0.01)
+    widget = session.widget()
+    try:
+        effect = session.terms["x_spline"].edited_log_effect
+        before = effect[5]
+        widget._select("x_spline", [5])
+        widget._operate("shift_up", "x_spline")
+        assert session.terms["x_spline"].edited_log_effect[5] - before == pytest.approx(step)
+        widget._operate("shift_down", "x_spline")
+        assert session.terms["x_spline"].edited_log_effect[5] == pytest.approx(before)
+    finally:
+        widget.close()
+
+
+def test_additive_step_is_read_once_per_fit(thousands_session, monkeypatch):
+    import superglm.editor.session as session_module
+
+    session, _, _ = thousands_session
+    calls = []
+    read = session_module._mean_abs_eta
+
+    def counted(model, parameter):
+        calls.append(parameter)
+        return read(model, parameter)
+
+    monkeypatch.setattr(session_module, "_mean_abs_eta", counted)
+    first = session.additive_step("x_spline")
+    assert session.additive_step("region") == first
+    assert calls == [None]
+
+
+def test_log_increase_is_unchanged(editor_frame):  # noqa: F811
+    _, signal = editor_frame
+    y = np.random.default_rng(20261112).poisson(np.exp(signal - 0.6)).astype(np.float64)
+    session = _glm("poisson", editor_frame, y)
+    widget = session.widget()
+    try:
+        before = session.terms["x_spline"].edited_log_effect[5]
+        widget._select("x_spline", [5])
+        widget._operate("shift_up", "x_spline")
+        moved = session.terms["x_spline"].edited_log_effect[5] - before
+        assert moved == pytest.approx(np.log(1.05), rel=1e-12)
+        widget._operate("shift_down", "x_spline")
+        moved = session.terms["x_spline"].edited_log_effect[5] - before
+        assert moved == pytest.approx(np.log(1.05) + np.log(0.95), abs=1e-12)
+        assert "weighted_mean_display" not in session_payload(session)["x_spline"]["impact"]
+    finally:
+        widget.close()
+
+
+def _shows_its_effect(session, name):
+    term = session_payload(session)[name]
+    effect = session.terms[name].edited_log_effect
+    assert np.all(np.isfinite(effect))
+    np.testing.assert_allclose(term["y"], effect, rtol=0.0, atol=1e-12)
+    return term
+
+
+def test_every_tool_runs_on_an_additive_curve(thousands_session):
+    session, _, _ = thousands_session
+    widget = session.widget()
+    try:
+        for name, indices in (("x_spline", [3, 4, 5, 6, 7, 8]), ("region", [0, 1, 2])):
+            for operation in (
+                "average",
+                "linearise",
+                "smooth",
+                "increasing",
+                "decreasing",
+                "snap_highest",
+                "snap_lowest",
+            ):
+                before = session.terms[name].edited_log_effect.copy()
+                widget._select(name, indices)
+                widget._operate(operation, name)
+                _shows_its_effect(session, name)
+                widget._operate("undo")
+                np.testing.assert_array_equal(session.terms[name].edited_log_effect, before)
+
+        reference = session.terms["x_spline"].original_log_effect
+        widget._drag("x_spline", [3], values=[-50.0])
+        assert session.terms["x_spline"].edited_log_effect[3] == -50.0
+        term = _shows_its_effect(session, "x_spline")
+        delta = session.terms["x_spline"].edited_log_effect - reference
+        assert term["impact"]["weighted_mean_display"] == pytest.approx(
+            np.average(delta, weights=term["weights"])
+        )
+
+        widget._control("x_spline", 1, -50.0)
+        assert np.min(_shows_its_effect(session, "x_spline")["y"]) < -10.0
+        widget._control("band", 1, -50.0)
+        assert np.min(_shows_its_effect(session, "band")["y"]) < -10.0
+        for _ in range(3):
+            widget._operate("undo")
+        np.testing.assert_array_equal(session.terms["x_spline"].edited_log_effect, reference)
+    finally:
+        widget.close()
+
+
+def test_additive_step_reads_a_superlss_parameters_eta():
+    from tests._lss_editor_fixtures import gamma_case, open_case
+
+    case = gamma_case()
+    session = open_case(case)
+    fitted = case.model._require_fitted()
+    (state,) = [p for p in fitted.layout.predictors if p.name == "scale"]
+    eta = state.link.link(case.model.predict_parameters(case.X)["scale"].to_numpy())
+    assert session.additive_step("scale:age") == pytest.approx(
+        0.05 * np.mean(np.abs(eta)), rel=1e-6
+    )
