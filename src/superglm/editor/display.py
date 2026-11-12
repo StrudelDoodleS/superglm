@@ -28,7 +28,7 @@ import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 from superglm.distributional.api import SuperLSS
-from superglm.distributional.families.gaussian import LowerBoundedLogLink
+from superglm.distributional.families import LowerBoundedLogLink
 from superglm.distributional.family import ParameterSpec
 from superglm.editor.errors import EditorKeyError
 from superglm.links import IdentityLink, Link, LogitLink, LogLink, _is_shifted_log_link
