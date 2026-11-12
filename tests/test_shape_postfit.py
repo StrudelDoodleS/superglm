@@ -3914,10 +3914,16 @@ def test_repair_at_subnormal_sample_weights_is_the_repair_at_lifted_weights(n_kn
     """Weights of 1e-310 make the term's metric subnormal; the repair is still published.
 
     It was published wrong (cubic) or raised ``LinAlgError`` (quartic). The weights
-    lifted by a power of two pose the same projection in normal numbers. The repair
-    is a projection, nonexpansive in its metric, so it differs between the two by no
-    more than the fits themselves do, which carry the fit's own subnormal rounding.
+    lifted by a power of two pose the same projection in normal numbers. The exact
+    projections are nonexpansive in the metric, so they differ by no more than the fits
+    do, which carry the fit's own subnormal rounding. Each repair is certified to its
+    projection within an objective gap of ``_OBJECTIVE_GAP`` on a problem scaled so the
+    fitted term has unit norm in the metric, so by strong convexity within
+    ``sqrt(2 * _OBJECTIVE_GAP)`` of that norm: two such points, posed in different
+    numbers, can sit anywhere in that region. At 1984d54f3 a slack of 2**-40 of the fit
+    failed with numpy 2.4.2 on the SkylakeX and Sandybridge kernels (1.85e-11 apart).
     """
+    from superglm.constraints import _OBJECTIVE_GAP
 
     def fitted_and_repaired(model, X):
         fitted = _term_beta(model.result.beta, _x_groups(model))
@@ -3935,7 +3941,8 @@ def test_repair_at_subnormal_sample_weights_is_the_repair_at_lifted_weights(n_kn
     def norm(v):
         return float(np.sqrt(v @ H @ v))
 
-    assert norm(tiny_repair - repair) <= norm(tiny_fit - fit) + 2.0**-40 * norm(fit)
+    certified = 2.0 * np.sqrt(2.0 * _OBJECTIVE_GAP) * norm(fit)
+    assert norm(tiny_repair - repair) <= norm(tiny_fit - fit) + certified
 
 
 def test_repair_is_unchanged_by_a_power_of_two_scale_of_its_metric_and_weights():
