@@ -430,11 +430,24 @@ def _profile_repaired_intercept(
         )
 
     carried = weights_arr != 0.0
+    # The rows the link's clamp (``stabilize_eta``) or the family's (``clip_mu``) holds at
+    # the fitted shift, read by its evaluation. A trial that clamps any other row is outside
+    # the search's domain: there the clamp flattens the deviance, which no longer has the
+    # score's slope.
+    held: NDArray | None = None
 
-    def evaluate(shift: float) -> _InterceptState:
-        eta_safe = stabilize_eta(eta_base + shift, model._link)
+    def evaluate(shift: float) -> _InterceptState | None:
+        nonlocal held
+        trial_eta = eta_base + shift
+        eta_safe = stabilize_eta(trial_eta, model._link)
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-            mu = clip_mu(model._link.inverse(eta_safe), model._distribution)
+            unclipped = model._link.inverse(eta_safe)
+            mu = clip_mu(unclipped, model._distribution)
+            clamped = carried & ((eta_safe != trial_eta) | (mu != unclipped))
+            if held is None:
+                held = clamped
+            elif np.any(clamped & ~held):
+                return None
             variance = np.maximum(
                 np.asarray(model._distribution.variance(mu), dtype=np.float64),
                 _VARIANCE_FLOOR,
@@ -485,31 +498,43 @@ def _profile_repaired_intercept(
 
     shift = 0.0
     state = evaluate(shift)
-    for _ in range(50):
+    assert state is not None and held is not None  # the first evaluation holds its rows
+    # The shifts the link's clamp leaves the rows it does not hold.
+    free_eta = eta_base[carried & ~held]
+    eta_floor, eta_ceiling = stabilize_eta(np.array([-np.inf, np.inf]), model._link)
+    lower = float(eta_floor - np.min(free_eta)) if free_eta.size else -np.inf
+    upper = float(eta_ceiling - np.max(free_eta)) if free_eta.size else np.inf
+    # The score is minus half the deviance's slope in the shift, so a shift whose score is
+    # positive lies below a minimum and one whose score is negative above it. The search is
+    # Newton's method kept inside the bracket those signs give, bisecting where Newton would
+    # leave it or does not halve its step every two steps (Press et al., Numerical Recipes,
+    # 3rd ed., 2007, section 9.4, rtsafe), with Fisher scoring's step. A side the bracket
+    # leaves open is bounded by the link's clamp, and a trial past either clamp bounds it.
+    below, above = -np.inf, np.inf
+    last = before_last = np.inf
+    for _ in range(_INTERCEPT_STEPS):
         if stationary(state, 1e-11):
             return eta_base + shift, shift, state.deviance_rounding
-
-        proposal = state.score / state.information
-        if not np.isfinite(proposal):
+        if state.score > 0.0:
+            below = shift
+        else:
+            above = shift
+        step = state.score / state.information
+        proposal = shift + step
+        if not (below < proposal < above) or abs(2.0 * step) > abs(before_last):
+            if np.isfinite(below) and np.isfinite(above):
+                proposal = below + 0.5 * (above - below)
+        proposal = min(max(proposal, lower), upper)
+        if not np.isfinite(proposal) or proposal == shift:
             break
-
-        accepted = False
-        for halving in range(21):
-            trial_shift = shift + proposal * (2.0**-halving)
-            trial = evaluate(trial_shift)
-            # Two deviances' rounding: relative to each sum, and what each keeps
-            # from its residuals.
-            roundoff = (
-                64.0 * np.finfo(np.float64).eps * max(abs(state.deviance), abs(trial.deviance))
-                + state.deviance_rounding
-                + trial.deviance_rounding
-            )
-            if trial.deviance <= state.deviance + roundoff:
-                shift, state = trial_shift, trial
-                accepted = True
-                break
-        if not accepted:
-            break
+        trial = evaluate(proposal)
+        if trial is None:
+            # Past a clamp: the root inside the domain lies short of this trial, so the
+            # next step bisects towards it.
+            below, above = (below, proposal) if proposal > shift else (proposal, above)
+            continue
+        before_last, last = last, proposal - shift
+        shift, state = proposal, trial
 
     if not stationary(state, 1e-9):
         raise RuntimeError(
@@ -517,6 +542,11 @@ def _profile_repaired_intercept(
             "optimization did not converge"
         )
     return eta_base + shift, shift, state.deviance_rounding
+
+
+#: Evaluations the conditional intercept search takes at most: bisection resolves a
+#: bracket as wide as the log link's clamp to the last bit in about 60.
+_INTERCEPT_STEPS = 100
 
 
 def _shape_candidate_objective(

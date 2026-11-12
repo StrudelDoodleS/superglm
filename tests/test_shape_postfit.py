@@ -4070,6 +4070,72 @@ def test_intercept_profile_reaches_a_perfect_fit_from_a_shifted_start(family, of
     assert abs(shift + offset) <= gamma(_ROW_STEPS) * (2.0 + np.max(np.abs(eta)))
 
 
+@pytest.mark.parametrize("family", ["poisson", "gamma"])
+def test_intercept_profile_whose_first_step_passes_the_link_clamp_converges(family, monkeypatch):
+    """A Fisher step far past the log link's clamp is bracketed, then bisected to the intercept.
+
+    The first step from the fitted shift is about exp(29.5). Halving it ran out of
+    halvings long before it returned inside the clamp, and where the clamp holds every
+    row the Gamma deviance is flat, so unit steps were accepted that went nowhere: both
+    refused the intercept, which is closed-form for these two families under the log link.
+    """
+    rng = np.random.default_rng(20261112)
+    n = 240
+    weights = rng.uniform(0.5, 2.0, n)
+    eta = 0.5 + 0.1 * rng.normal(size=n)
+    y = np.exp(30.0) * rng.gamma(2.0, 0.5, size=n)
+    distribution = Gamma() if family == "gamma" else Poisson()
+    model = SimpleNamespace(_distribution=distribution, _link=LogLink())
+    evaluations = []
+    inverse = model._link.inverse
+    monkeypatch.setattr(model._link, "inverse", lambda e: (evaluations.append(1), inverse(e))[1])
+
+    _, shift, _ = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+
+    # The score is sum w (y - mu) for the Poisson and sum w (y / mu - 1) for the Gamma.
+    if family == "poisson":
+        expected = np.log(np.sum(weights * y)) - np.log(np.sum(weights * np.exp(eta)))
+    else:
+        expected = np.log(np.sum(weights * y * np.exp(-eta))) - np.log(np.sum(weights))
+    assert shift == pytest.approx(expected, rel=1e-10, abs=0.0)
+    # The first trial sits at the clamp's edge, not past it: bisecting back from the
+    # overshoot instead takes over fifty evaluations.
+    assert len(evaluations) <= 24
+
+
+def test_intercept_profile_takes_no_trial_the_familys_clamp_moves(monkeypatch):
+    """A trial whose mean ``clip_mu`` moves is outside the search's domain, and is not taken.
+
+    The binomial clamp holds means within 1e-7 of 0 and 1, inside the logit's clamp of
+    the predictor at 20, so the first step's trial at the link's edge has every mean
+    clamped: its deviance is flat and its score is not the deviance's slope.
+    """
+    from superglm.distributions import Binomial, clip_mu
+    from superglm.links import LogitLink
+
+    rng = np.random.default_rng(20261113)
+    n = 240
+    weights = rng.uniform(0.5, 2.0, n)
+    y = rng.uniform(0.2, 0.8, n)
+    eta = np.full(n, -15.0)
+    model = SimpleNamespace(_distribution=Binomial(), _link=LogitLink())
+    taken = []
+    information = shape_ops.fisher_working_weights
+
+    def record(**kwargs):
+        mean = model._link.inverse(kwargs["eta"])
+        taken.append(bool(np.any(clip_mu(mean, model._distribution) != mean)))
+        return information(**kwargs)
+
+    monkeypatch.setattr(shape_ops, "fisher_working_weights", record)
+
+    _, shift, _ = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+
+    mean = np.sum(weights * y) / np.sum(weights)
+    assert shift == pytest.approx(np.log(mean / (1.0 - mean)) + 15.0, rel=1e-10, abs=0.0)
+    assert taken and not any(taken)
+
+
 def test_curvature_repair_of_a_noise_free_log_linear_response_is_published():
     rng = np.random.default_rng(240)
     x = np.sort(rng.uniform(0.0, 1.0, 240))
