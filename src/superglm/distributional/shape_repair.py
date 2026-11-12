@@ -35,6 +35,7 @@ from scipy.optimize import minimize_scalar
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.distributional.results.shape import ShapeRepairRecord
+from superglm.distributional.solver.packing import packed_pairs
 from superglm.features.constraint import rules_of
 from superglm.links import _is_shifted_log_link
 
@@ -43,20 +44,28 @@ REPAIR_NEEDS_THE_ROWS = (
     "intercept on them; refit with retain_rows=True before calling apply_shape_postfit()."
 )
 # The search for the re-estimated intercept runs in units of the parameter's own scale on its
-# link (``_intercept_scale``), so that the response's units do not change it: bracket, then
-# Brent (Brent, *Algorithms for Minimization without Derivatives*, 1973, ch. 5; Press et al.,
-# *Numerical Recipes*, 3rd ed., section 10.1). Brent first runs within ``_INTERCEPT_SEARCH``
-# of those units of the held intercept. Where its result is no lower than an end, the bracket
-# walks downhill from that end, each step growing by ``_INTERCEPT_GROWTH``, until the
-# objective rises, a row turns invalid, or the shift leaves float64's range. No count limits
-# it, so an optimum any number of units away is bracketed in steps logarithmic in its distance.
+# link (``_intercept_scale``), so that the response's units do not change it. It is Newton's
+# method on the likelihood's slope in the shift, kept inside a bracket (``_newton_minimum``).
+# Where the family or link gives no derivatives there, a derivative-free search decides
+# (``_derivative_free_minimum``): bracket, then Brent (Brent, *Algorithms for Minimization
+# without Derivatives*, 1973, ch. 5; Press et al., *Numerical Recipes*, 3rd ed., section 10.1).
+# Brent first runs within ``_INTERCEPT_SEARCH`` of those units of the held intercept. Where its
+# result is no lower than an end, the bracket walks downhill from that end, each step growing
+# by ``_INTERCEPT_GROWTH``, until the objective rises, a row turns invalid, or the shift leaves
+# float64's range. No count limits it, so an optimum any number of units away is bracketed in
+# steps logarithmic in its distance.
 _INTERCEPT_SEARCH = 4.0
 # Each downhill step is the golden ratio times the last, ``mnbrak``'s default growth.
 _INTERCEPT_GROWTH = (1.0 + np.sqrt(5.0)) / 2.0
 _UNIT_ROUNDOFF = np.finfo(np.float64).eps / 2.0
 # A smooth minimum is located to about sqrt(u) of its scale, since the objective is flat to
-# rounding within that distance of it (Press et al., section 10.1); Brent stops there.
+# rounding within that distance of it (Press et al., section 10.1); Brent stops there, and
+# Newton's method once its step is that short.
 _INTERCEPT_XATOL = float(np.sqrt(_UNIT_ROUNDOFF))
+# Newton's method converges quadratically to a minimum of positive curvature, and its bracket
+# halves at least every other step, so this many steps hold any search that is not walking out
+# toward a distant minimum; beyond them the derivative-free search decides.
+_NEWTON_STEPS = 100
 # Where the held intercept leaves rows invalid, the search starts from the nearest valid shift
 # among doublings both ways, from 2**-60 of ``_INTERCEPT_WIDEST`` units up to it.
 _INTERCEPT_WIDEST = 2.0**20
@@ -208,6 +217,15 @@ def _axis(term: PostfitTerm, frame: EagerFrame) -> tuple[NDArray, NDArray[np.boo
     return _repair_axis_column(SimpleNamespace(spec=term.spec, name=term.label), frame)
 
 
+def _row_log_likelihoods(evaluation: Any) -> NDArray[np.float64]:
+    """Each row's log-likelihood, ``-inf`` where the family marks it invalid or it is not finite."""
+    values = np.array(evaluation.optimizing_log_likelihood, dtype=np.float64, copy=True)
+    if evaluation.valid is not None:
+        values[~np.asarray(evaluation.valid, dtype=np.bool_)] = -np.inf
+    values[~np.isfinite(values)] = -np.inf
+    return values
+
+
 def _profiled_merit(
     fitted: Any,
     rows: Any,
@@ -230,9 +248,11 @@ def _profiled_merit(
     family = fitted.family
     plan = family.bind_likelihood(rows.response, rows.likelihood_weights, rows.observation)
     state = fitted.layout.predictor(parameter)
+    link = state.link
     column = [predictor.name for predictor in fitted.layout.predictors].index(parameter)
     eta = fitted._predict_eta_resolved(coefficients, frame, rows.offsets)
     penalty = 0.5 * float(coefficients @ np.asarray(fitted.result.penalty) @ coefficients)
+    unit = _intercept_scale(eta[:, column], reach)
     # A probe moves only this parameter's column of eta, so every other parameter is formed
     # once, from the same column by the same operations as ``parameters_from_eta``; one with
     # no finite valid value refuses every probe, as it would refuse each.
@@ -244,61 +264,189 @@ def _profiled_merit(
         steady = bool(np.all(np.isfinite(np.delete(fixed, column, axis=1))))
     except (ValueError, FloatingPointError, OverflowError):
         steady = False
+    # Newton's method reads the inverse link's second derivative, which a link may lack.
+    newton = state.intercept_index is not None and callable(getattr(link, "deriv2_inverse", None))
+    diagonal = packed_pairs(eta.shape[1]).index((column, column))
 
-    def rows_at(shift: float) -> NDArray[np.float64] | None:
-        """Each row's log-likelihood, ``-inf`` where its parameters are not valid."""
+    def slope_at(evaluation: Any, moved: NDArray[np.float64]) -> tuple[float, float] | None:
+        """The log-likelihood's slope and curvature in the shift, where both are finite: the
+        family's natural derivatives through the inverse link, as
+        ``transform_natural_derivatives`` forms them, on this parameter's column."""
+        with np.errstate(over="ignore", invalid="ignore"):
+            first = np.asarray(link.deriv_inverse(moved), dtype=np.float64)
+            second = np.asarray(link.deriv2_inverse(moved), dtype=np.float64)
+            score = np.asarray(evaluation.score, dtype=np.float64)[:, column]
+            hessian = np.asarray(evaluation.hessian_packed, dtype=np.float64)[:, diagonal]
+            slope = float(np.sum(score * first, dtype=np.float64))
+            curvature = float(np.sum(hessian * first * first + score * second, dtype=np.float64))
+        return (slope, curvature) if np.isfinite(slope) and np.isfinite(curvature) else None
+
+    def rows_at(
+        shift: float, derivatives: bool
+    ) -> tuple[NDArray[np.float64] | None, tuple[float, float] | None]:
+        """Each row's log-likelihood, ``-inf`` where its parameters are not valid, and where
+        ``derivatives`` asks and every row is valid, the slope and curvature in ``shift``."""
         if not steady:
-            return None
+            return None, None
         shifted = np.array(eta, dtype=np.float64, copy=True)
         shifted[:, column] += shift
-        # A probe is a value-only trial of the fit's likelihood, refused as the solver refuses
-        # one: parameters or a likelihood with no float64 value make the probe invalid.
+        # A probe is a trial of the fit's likelihood, refused as the solver refuses one:
+        # parameters or a likelihood with no float64 value make the probe invalid.
         try:
             theta = fixed.copy()
             theta[:, column] = fitted.parameter_from_eta(shifted, column)
             if not np.all(np.isfinite(theta[:, column])):
-                return None
+                return None, None
             theta.setflags(write=False)
+            if derivatives:
+                try:
+                    full = family.evaluate_natural(rows.response, theta, plan, derivative_order=2)
+                except (ValueError, FloatingPointError, OverflowError):
+                    full = None
+                if full is not None and full.hessian_packed is not None:
+                    values = _row_log_likelihoods(full)
+                    if np.all(np.isfinite(values)):
+                        return values, slope_at(full, shifted[:, column])
+            # The value-only evaluation says which rows are valid: it refuses no row whose
+            # derivatives are valid, and may keep one whose derivatives are not.
             evaluation = family.evaluate_natural(rows.response, theta, plan, derivative_order=0)
         except (ValueError, FloatingPointError, OverflowError):
-            return None
-        values = np.array(evaluation.optimizing_log_likelihood, dtype=np.float64, copy=True)
-        if evaluation.valid is not None:
-            values[~np.asarray(evaluation.valid, dtype=np.bool_)] = -np.inf
-        values[~np.isfinite(values)] = -np.inf
-        return values
+            return None, None
+        return _row_log_likelihoods(evaluation), None
 
-    # The held intercept's rows, read once: the search below starts from them.
-    at_zero = rows_at(0.0)
-    zero_failed = None if at_zero is None else ~np.isfinite(at_zero)
-    held = np.inf
-    if at_zero is not None and zero_failed is not None and not zero_failed.any():
-        held = -float(np.sum(at_zero, dtype=np.float64))
-    zero_invalid = None if zero_failed is None else int(np.count_nonzero(zero_failed))
-    if state.intercept_index is None:
-        return 0.0, held + penalty, zero_invalid
-    unit = _intercept_scale(eta[:, column], reach)
+    values: dict[float, float] = {}
+    invalid: dict[float, NDArray[np.bool_] | None] = {}
+    # Each shift's slope and curvature in the search's units, and the sum of its rows' absolute
+    # log-likelihoods (the objective's resolution), where they were asked for.
+    slopes: dict[float, tuple[float, float, float] | None] = {}
 
-    values: dict[float, float] = {0.0: held}
-    invalid: dict[float, NDArray[np.bool_] | None] = {0.0: zero_failed}
-
-    def objective(t: float) -> float:
-        # Memoised: the bracket and the walls' bisection revisit their end points.
-        if t not in values:
-            found = rows_at(unit * t)
+    def probe(t: float, derivatives: bool) -> float:
+        # Memoised: the bracket and the walls' bisection revisit their end points. A shift read
+        # for its value alone is read again only where its derivatives are asked for.
+        if t not in values or (derivatives and t not in slopes):
+            found, local = rows_at(unit * t, derivatives)
             failed = None if found is None else ~np.isfinite(found)
             invalid[t] = failed
             whole = found is not None and failed is not None and not failed.any()
             values[t] = -float(np.sum(found, dtype=np.float64)) if whole else np.inf
+            if derivatives:
+                moved = None if local is None else (-unit * local[0], -unit * (unit * local[1]))
+                finite = moved is not None and np.isfinite(moved[0]) and np.isfinite(moved[1])
+                size = float(np.sum(np.abs(found), dtype=np.float64)) if finite else 0.0
+                slopes[t] = (*moved, size) if finite and moved is not None else None
         return values[t]
+
+    def objective(t: float) -> float:
+        return probe(t, False)
 
     def invalid_at(t: float) -> NDArray[np.bool_] | None:
         objective(t)
         return invalid[t]
 
+    def derivatives_at(t: float) -> tuple[float, tuple[float, float, float] | None]:
+        return probe(t, True), slopes[t]
+
+    held = probe(0.0, newton)
+    zero_invalid = None if invalid[0.0] is None else int(np.count_nonzero(invalid[0.0]))
+    if state.intercept_index is None:
+        return 0.0, held + penalty, zero_invalid
     start = 0.0 if np.isfinite(held) else _finite_start(objective, invalid_at)
     if start is None:
         return 0.0, held + penalty, zero_invalid
+    best = _newton_minimum(derivatives_at, start, unit, len(rows.response)) if newton else None
+    if best is None:
+        best = _derivative_free_minimum(objective, start, unit)
+    if best is None:
+        raise RuntimeError(
+            f"Shape repair rejected before publication: the {parameter} intercept could "
+            "not be re-estimated, since the likelihood still improves where the shift "
+            "leaves float64's range on its link scale. Check the model's specification, "
+            "or fit the rule instead (Constraint.fit)."
+        )
+    best_value = objective(best)
+    # Where the held intercept leaves rows invalid, any finite optimum is the re-estimate.
+    # Otherwise two sums of one size: the rounding either can carry (Higham, section 3.1).
+    tolerance = 4.0 * len(rows.response) * _UNIT_ROUNDOFF * abs(held)
+    if np.isfinite(held) and not best_value < held - tolerance:
+        return 0.0, held + penalty, 0
+    return unit * best, best_value + penalty, 0
+
+
+def _newton_minimum(
+    probe: Callable[[float], tuple[float, tuple[float, float, float] | None]],
+    start: float,
+    unit: float,
+    rows: int,
+) -> float | None:
+    """A minimum of the objective from ``start``, by Newton's method on its slope kept inside
+    a bracket of the minimum; ``None`` where it cannot say, and the derivative-free search
+    decides.
+
+    ``probe(t)`` is the objective at ``t``, infinite where a row is invalid, and where every row
+    is valid its slope, its curvature and the sum of its ``rows`` terms' magnitudes (else
+    ``None``). The minimum lies above a point of negative slope, below one of positive slope,
+    and on the best point's side of a point no lower than it or invalid. A Newton step that
+    leaves that bracket, or is not half the step two before it, is replaced by bisection (Press
+    et al., section 9.4, ``rtsafe``; Hager, *Comput. Math. Appl.* 18(9), 1989), or while the
+    bracket is open downhill by a step that grows as ``_bracket``'s walk does. It stops where the
+    decrease Newton's model predicts (the Newton decrement: Boyd and Vandenberghe, *Convex
+    Optimization*, 2004, section 9.5) is below the objective's last place, or its step is
+    within the location tolerance and that decrease within the sum's rounding; or where the
+    bracket closes to the tolerance on a wall of invalid rows. ``None``: a point it moves to has
+    no slope, the open bracket would leave float64's range in ``unit``s, or ``_NEWTON_STEPS``
+    pass.
+    """
+    x = start
+    value, derivatives = probe(x)
+    lower, upper = -np.inf, np.inf
+    before = last = np.inf  # the last two step lengths, as rtsafe keeps them
+    for _ in range(_NEWTON_STEPS):
+        if derivatives is None:
+            return None
+        slope, curvature, size = derivatives
+        if slope == 0.0:
+            return x
+        if slope < 0.0:
+            lower = x
+        else:
+            upper = x
+        far = upper if slope < 0.0 else lower
+        tolerance = _INTERCEPT_XATOL * (1.0 + abs(x - start))
+        step = -slope / curvature if curvature > 0.0 else np.nan
+        # A short step alone says nothing beside a wall, where the curvature can be vast.
+        decrease = -0.5 * slope * step
+        rounding = 4.0 * rows * _UNIT_ROUNDOFF * size
+        if decrease <= _UNIT_ROUNDOFF * size or (abs(step) <= tolerance and decrease <= rounding):
+            return x
+        if abs(far - x) <= tolerance:
+            return x
+        trial = x + step
+        # No step (NaN), one that overflows, or one too short to move x is not taken.
+        newton = bool(np.isfinite(unit * trial)) and trial != x
+        if not (newton and lower < trial < upper and abs(step) <= 0.5 * before):
+            if np.isfinite(far):
+                trial = 0.5 * (x + far)
+            else:
+                grown = max(_INTERCEPT_SEARCH, _INTERCEPT_GROWTH * last if last < np.inf else 0.0)
+                trial = x + float(np.copysign(max(grown, abs(step)) if newton else grown, -slope))
+                if not np.isfinite(unit * trial):
+                    return None
+        before, last = last, abs(trial - x)
+        trial_value, trial_derivatives = probe(trial)
+        if trial_value < value:
+            x, value, derivatives = trial, trial_value, trial_derivatives
+        elif trial > x:
+            upper = trial
+        else:
+            lower = trial
+    return None
+
+
+def _derivative_free_minimum(
+    objective: Callable[[float], float], start: float, unit: float
+) -> float | None:
+    """A minimum of ``objective`` from ``start`` by bracketing and Brent alone, or ``None``
+    when the objective still falls where ``unit`` times the shift overflows."""
     lower = _finite_reach(objective, start, start - _INTERCEPT_SEARCH)
     upper = _finite_reach(objective, start, start + _INTERCEPT_SEARCH)
     best = _brent(objective, lower, upper, centre=start)
@@ -308,30 +456,19 @@ def _profiled_merit(
     open_end = next(
         (end for end, edge in edges if end == edge and objective(end) <= objective(best)), None
     )
-    if open_end is not None:
-        bracket = _bracket(objective, start, open_end, unit)
-        if bracket is None:
-            raise RuntimeError(
-                f"Shape repair rejected before publication: the {parameter} intercept could "
-                "not be re-estimated, since the likelihood still improves where the shift "
-                "leaves float64's range on its link scale. Check the model's specification, "
-                "or fit the rule instead (Constraint.fit)."
-            )
-        best = _brent(objective, *bracket, centre=start)
-        # Brent's tolerance grows with the distance from ``centre``, so the optimum is
-        # polished in coordinates centred on it. SciPy's bounded Brent stops with the
-        # minimum within 4 * (sqrt(eps) |d| + xatol / 3) of its result.
-        polish = 4.0 * (np.sqrt(np.finfo(np.float64).eps) * abs(best - start) + _INTERCEPT_XATOL)
-        lower = _finite_reach(objective, best, best - polish)
-        upper = _finite_reach(objective, best, best + polish)
-        best = _brent(objective, lower, upper, centre=best)
-    best_value = objective(best)
-    # Where the held intercept leaves rows invalid, any finite optimum is the re-estimate.
-    # Otherwise two sums of one size: the rounding either can carry (Higham, section 3.1).
-    tolerance = 4.0 * len(rows.response) * _UNIT_ROUNDOFF * abs(held)
-    if np.isfinite(held) and not best_value < held - tolerance:
-        return 0.0, held + penalty, 0
-    return unit * best, best_value + penalty, 0
+    if open_end is None:
+        return best
+    bracket = _bracket(objective, start, open_end, unit)
+    if bracket is None:
+        return None
+    best = _brent(objective, *bracket, centre=start)
+    # Brent's tolerance grows with the distance from ``centre``, so the optimum is
+    # polished in coordinates centred on it. SciPy's bounded Brent stops with the
+    # minimum within 4 * (sqrt(eps) |d| + xatol / 3) of its result.
+    polish = 4.0 * (np.sqrt(np.finfo(np.float64).eps) * abs(best - start) + _INTERCEPT_XATOL)
+    lower = _finite_reach(objective, best, best - polish)
+    upper = _finite_reach(objective, best, best + polish)
+    return _brent(objective, lower, upper, centre=best)
 
 
 def _finite_start(

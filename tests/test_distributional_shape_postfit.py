@@ -197,7 +197,9 @@ def test_the_intercept_search_reads_each_shift_once_and_forms_the_held_parameter
     # Work, not time. A probe of the intercept search moves only the repaired parameter's
     # column of eta. At 771d1330a each probe formed every parameter again, the held
     # intercept's rows were read twice (the held merit, then Brent's centre), and the
-    # publication check certified the same repaired coefficients twice.
+    # publication check certified the same repaired coefficients twice. At 582328a15 the
+    # bracket and Brent read 18 shifts in each search here; Newton's method on the slope,
+    # converging quadratically from the held intercept, reads 3 and 4.
     from superglm import constraints
     from superglm.distributional import shape_repair
     from superglm.links import LogLink
@@ -253,6 +255,7 @@ def test_the_intercept_search_reads_each_shift_once_and_forms_the_held_parameter
     for run in runs:
         reads, distinct = len(run["shifts"]), len(set(run["shifts"]))
         assert distinct == reads, f"{reads} likelihood reads of {distinct} shifts"
+        assert reads <= 5, f"{reads} likelihood reads in one intercept search"
         # the mean once per probe, and the held scale once
         assert run["inverses"] == reads + 1, f"{run['inverses']} inverse links for {reads} reads"
     # the repair obeys its rule as projected: one certificate
@@ -475,9 +478,11 @@ def test_a_repair_that_fits_worse_than_no_term_is_refused_and_nothing_is_publish
     assert model._model is before
 
 
-def _profile_optimum(model: SuperLSS, parameter: str, X, y) -> float:
+def _profile_optimum(
+    model: SuperLSS, parameter: str, X, y, bounds=(-0.5, 0.5), xatol: float = 1e-9
+) -> float:
     """The further shift of ``parameter``'s intercept that minimizes the model's own log score,
-    found by SciPy's bounded Brent on the public scoring path."""
+    found by SciPy's bounded Brent within ``bounds`` on the public scoring path."""
     fitted = model._model
     index = fitted.layout.predictor(parameter).intercept_index
     beta = np.array(fitted.coefficients, dtype=np.float64)
@@ -493,18 +498,14 @@ def _profile_optimum(model: SuperLSS, parameter: str, X, y) -> float:
         return value if np.isfinite(value) else 1e300
 
     search = optimize.minimize_scalar(
-        log_score, bounds=(-0.5, 0.5), method="bounded", options={"xatol": 1e-9}
+        log_score, bounds=bounds, method="bounded", options={"xatol": xatol}
     )
     return float(search.x)
 
 
-def test_a_repair_that_needs_its_intercept_to_keep_every_row_valid_is_published():
-    # Mean-form generalized gamma has a finite mean only where scale * |shape| < 1 for a
-    # negative shape. Every row has one at this revision. The decreasing repair of the shape
-    # flattens it to about -0.6, which at the held intercept leaves the rows of largest scale
-    # without one; the re-estimated intercept gives every row one again, so the repair is
-    # published. At b7cc25f0c it was refused: the comparison with the held, infinite
-    # likelihood was NaN and threw the re-estimate away.
+def _generalized_gamma_beside_its_mean_wall():
+    """A mean-form generalized gamma revision whose decreasing shape repair, at the held
+    intercept, leaves the rows of largest scale without a mean."""
     x = np.linspace(0.0, 1.0, 200)
     X = pd.DataFrame({"x": x})
     family = GeneralizedGammaLSS()
@@ -529,6 +530,18 @@ def test_a_repair_that_needs_its_intercept_to_keep_every_row_valid_is_published(
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", EditedCoefficientsWarning)
         revised = model._with_revised_coefficients(beta, edited_terms=["scale:x", "shape:x"])
+    return revised, X, y
+
+
+def test_a_repair_that_needs_its_intercept_to_keep_every_row_valid_is_published():
+    # Mean-form generalized gamma has a finite mean only where scale * |shape| < 1 for a
+    # negative shape. Every row has one at this revision. The decreasing repair of the shape
+    # flattens it to about -0.6, which at the held intercept leaves the rows of largest scale
+    # without one; the re-estimated intercept gives every row one again, so the repair is
+    # published. At b7cc25f0c it was refused: the comparison with the held, infinite
+    # likelihood was NaN and threw the re-estimate away.
+    revised, X, y = _generalized_gamma_beside_its_mean_wall()
+    x = X["x"].to_numpy()
     theta = revised.predict_parameters(X)
     assert mean_exists(theta["scale"].to_numpy(), theta["shape"].to_numpy()).all()
 
@@ -552,6 +565,35 @@ def test_a_repair_that_needs_its_intercept_to_keep_every_row_valid_is_published(
         theta = revised._with_revised_coefficients(held, edited_terms=["shape:x"])
         theta = theta.predict_parameters(X)
     assert not mean_exists(theta["scale"].to_numpy(), theta["shape"].to_numpy()).all()
+
+
+def test_newtons_search_beside_a_wall_of_invalid_rows_reaches_the_profiles_optimum():
+    # The search starts at the valid shift nearest the held intercept, beside the wall where
+    # rows lose their mean. There the curvature is about 1e30 against a slope of about -1e15:
+    # Newton's step is 1e-15 of a unit while the optimum lies 2.7 units away, and a stop on the
+    # step's length alone published the start (a shift of 0.1). The published intercept is
+    # SciPy's bounded minimum of the model's own log score from the held intercept, the wall
+    # inside its bracket, and Newton's method found it: the derivative-free search never ran.
+    from superglm.distributional import shape_repair
+
+    revised, X, y = _generalized_gamma_beside_its_mean_wall()
+    searches: list[float] = []
+    real = shape_repair._derivative_free_minimum
+
+    def derivative_free(objective, start, unit):
+        searches.append(start)
+        return real(objective, start, unit)
+
+    with warnings.catch_warnings(), pytest.MonkeyPatch.context() as patch:
+        warnings.simplefilter("ignore")
+        patch.setattr(shape_repair, "_derivative_free_minimum", derivative_free)
+        revised.apply_shape_postfit()
+    assert searches == []
+    (record,) = revised._model.fit_state.hand_edit.repairs
+    reference = _profile_optimum(
+        revised, "shape", X, y, bounds=(-record.intercept_shift, 0.5), xatol=1e-12
+    )
+    assert abs(reference) <= 2e-7
 
 
 def _generalized_gamma_with_a_narrow_band(spread: float):
