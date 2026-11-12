@@ -275,9 +275,9 @@ model.fit(df, y)
   [QP-Backed Shape Fits](#qp-backed-shape-fits).
 - `Constraint.postfit` takes only a single shape over the whole range.
   Combinations, stretches and caps are fit-time only.
-- `Constraint.postfit` is not applied by `SuperLSS`, which has no post-fit
-  repair: it warns and fits the term unconstrained. `Constraint.fit` rules are
-  enforced there; see [Rules On A Distributional Model](#rules-on-a-distributional-model).
+- `Constraint.postfit` is applied after the fit on `SuperLSS` as on
+  `SuperGLM`, by `apply_shape_postfit()`; see
+  [Post-fit rules on a distributional model](#post-fit-rules-on-a-distributional-model).
 - `fit_path()` does not enforce shapes, caps or step limits either. It warns
   once, naming every term whose rules it ignores, and fits those terms
   unconstrained; refit with `fit()` or `fit_reml()` to enforce the rules. The
@@ -385,22 +385,31 @@ model.fit_reml(X, y)
 model.apply_shape_postfit()
 ```
 
-The repair is SuperGLM's: the fitted curve is replaced by the closest curve
-in the term's own basis, on its parameter's link scale, that has the shape
-everywhere on the fitted range. "Closest" is measured as the fit scores a
-change to the term: how far it raises the fit's penalized objective, to second
-order, with every other term and parameter held and the parameter's intercept
-free. The basis keeps the fit's centring, so the
-term's mean over the training rows does not move. The parameter's intercept
-is then re-estimated on the joint likelihood, with every term and every other
-parameter held. Three repairs are refused, and nothing changes: one whose
-penalized objective (the negative log-likelihood plus the fit's smoothing
-penalty, at the fit's smoothing parameters) is worse than with the term
-dropped, one that leaves a training row without valid parameters even after
-the intercept is re-estimated, and one whose curve the repairer cannot
-certify to obey the rule. A
-repaired curve can fit the data better than no term and still lose on the
-penalty, when it needs large coefficients; then fit the rule instead
+The repair is SuperGLM's: the curve is replaced by the closest curve in the
+term's own basis, on its parameter's link scale, that has the shape everywhere
+on the fitted range. "Closest" is measured as the fit scores a change to the
+term: how far it raises the fit's penalized objective, to second order, with
+every other term and parameter held and the parameter's intercept free. The
+second order is taken where the coefficients are: on a fitted model, from the
+fit's own curvature; after a hand edit, from the curvature at the edit, formed
+as the fit forms its own, as SuperGLM's follows the edit's working weights.
+The basis keeps the fit's centring, so the term's mean over the training rows
+does not move. The parameter's intercept is then re-estimated on the joint
+likelihood, with every term and every other parameter held.
+
+The penalized objective is the negative log-likelihood plus the fit's
+smoothing penalty, at the fit's smoothing parameters. Far from the fit, as
+after a large edit, the closest curve can score worse on it than dropping the
+term. The repair then goes on, as on SuperGLM, to the curve with the shape that
+minimises the penalized objective itself, by iteratively re-weighted cone
+projection, re-estimating the intercept at each step. Dropping the term always
+has the shape, so that curve is never worse. It is the curve the rule allows
+that fits best, so an edit the closest curve could not keep is not kept.
+Three repairs are refused, and nothing changes: one whose search stops short
+with a curve still worse than with the term dropped, one that leaves a
+training row without valid parameters even after the intercept is
+re-estimated, and one whose curve the repairer cannot certify to obey the
+rule. When a repair is refused as worse, fit the rule instead
 (`Constraint.fit`), which chooses the smoothing under the rule.
 
 What you get afterwards:
