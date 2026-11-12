@@ -31,6 +31,7 @@ from superglm.distributional.api import SuperLSS
 from superglm.distributional.families import LowerBoundedLogLink
 from superglm.distributional.family import ParameterSpec
 from superglm.editor.errors import EditorKeyError
+from superglm.inference._term_types import _MAX_LOG_REL
 from superglm.links import IdentityLink, Link, LogitLink, LogLink, _is_shifted_log_link
 
 Role = Literal["average", "spread"]
@@ -65,6 +66,15 @@ class DisplayTransform:
         if self.kind == "additive":
             return np.array(effect, dtype=np.float64)
         return np.exp(self._direction * np.asarray(effect, dtype=np.float64))
+
+    def to_bounded_display(self, effect: ArrayLike) -> NDArray[np.float64]:
+        """``to_display`` of ``effect`` that stays finite: a relativity's effect is held within
+        +-500 first, as a band end or a refit line no float64 exponential holds is drawn at that
+        edge. An added amount is drawn as it is."""
+        if self.kind == "additive":
+            return self.to_display(effect)
+        bounded = np.clip(np.asarray(effect, dtype=np.float64), -_MAX_LOG_REL, _MAX_LOG_REL)
+        return self.to_display(bounded)
 
     def from_display(self, values: ArrayLike) -> NDArray[np.float64]:
         v = np.asarray(values, dtype=np.float64)

@@ -11,7 +11,8 @@ fails and the line is refused, by the refit's own rank decision on its
 penalised system. A selection penalty is lifted from the term, as Free levels
 lifts it, so the line is not shrunk.
 
-The line is drawn under the same centring rule as the curve. Hand edits are
+The line is drawn under the same centring rule as the curve, and shown as
+the curve is (``display_for``). Hand edits are
 not part of it: it is a fit. An ordered term's levels fitted free, joined by
 a line, are Free levels' (:mod:`superglm.editor.free_levels`).
 """
@@ -23,6 +24,7 @@ from typing import Any
 
 import numpy as np
 
+from superglm.editor.display import display_for
 from superglm.editor.errors import EditorClientError, EditorTypeError, EditorValueError
 from superglm.editor.free_levels import _lift_selection
 from superglm.editor.lss.availability import require_available
@@ -30,7 +32,6 @@ from superglm.editor.refit import fit_refit_model
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.rebuild import clone_with_replaced_features
 from superglm.features.spline import _SplineBase
-from superglm.inference._term_types import _safe_exp
 from superglm.model.fit_state import fitted_lambda2
 
 _NOT_SMOOTHED = "Unsmoothed is for a spline term: {term!r} has no smoothing to switch off."
@@ -103,6 +104,7 @@ def _spline_job(session, name: str, term) -> Callable[[], dict[str, Any]]:
     shrunk = _lift_selection(refit, source, name)
     grid = np.asarray(term.x, dtype=np.float64)
     n_points, centering = session.n_points, session.centering
+    display = display_for(source, name)
 
     def run() -> dict[str, Any]:
         try:
@@ -137,7 +139,7 @@ def _spline_job(session, name: str, term) -> Callable[[], dict[str, Any]]:
         return {
             "term": name,
             "x": grid.tolist(),
-            "y": [float(value) for value in np.asarray(_safe_exp(values))],
+            "y": [float(value) for value in display.to_bounded_display(values)],
             "note": " ".join(notes) or None,
         }
 
