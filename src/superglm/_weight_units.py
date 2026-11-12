@@ -149,6 +149,24 @@ def physical_variance(variance, result):
         return np.ldexp(value, exponent) if exponent else value
 
 
+def dispersion_standard_deviation(weights, result):
+    """sqrt(phi / w), without forming either an overflowing w lift or phi/w."""
+    phi_mantissa, phi_power = math.frexp(solver_dispersion(result))
+    weight_mantissa, weight_power = np.frexp(weights)
+    exponent = phi_power - weight_power
+    if getattr(result, "solver_phi", None) is not None:
+        exponent = exponent - result.weight_exponent
+    mantissa = np.divide(
+        phi_mantissa,
+        weight_mantissa,
+        out=np.full_like(weight_mantissa, np.inf),
+        where=weight_mantissa > 0.0,
+    )
+    odd = exponent & 1
+    with np.errstate(over="ignore"):
+        return np.ldexp(np.sqrt(np.ldexp(mantissa, odd)), (exponent - odd) // 2)
+
+
 def unit_prior_log_density(family, y, mu, weights, result):
     """The row's density, retaining dispersion digits after scalar underflow."""
     from superglm.distributions import Gamma, Gaussian, Tweedie, prior_weight_log_density
@@ -235,10 +253,7 @@ def unit_log_likelihood(family, y, mu, weights, result, *, weight_semantics, rep
         density = unit_prior_log_density(family, y, mu, weights, result)
         if density is not None:
             return float(np.sum(density))
-    lifted = solver_weights(weights, result)
     if phi > 0.0 and isinstance(family, Gaussian | Gamma | Tweedie):
-        from superglm._utils import weighted_row_sum
-
         log_phi = math.log(phi) - result.weight_exponent * math.log(2.0)
         positive = weights > 0.0
         mass = weights[positive]
@@ -258,8 +273,18 @@ def unit_log_likelihood(family, y, mu, weights, result, *, weight_semantics, rep
 
             rows = TweedieRows.prepare(y, weights, family.p, frequency=True)
             saturated = float(rows.count @ rows.row_saturated(phi, _log_phi=log_phi)[0])
-        deviance = weighted_row_sum(lifted, family.deviance_unit, y, mu)
-        return saturated - deviance / (2.0 * phi)
+        # Each physical w*d/(2*phi) can fit even when lifting w alone would
+        # overflow. Combine normal mantissas before applying the net exponent.
+        weight_mantissa, weight_power = np.frexp(mass)
+        deviance_mantissa, deviance_power = np.frexp(
+            family.deviance_unit(y[positive], mu[positive])
+        )
+        phi_mantissa, phi_power = math.frexp(phi)
+        mantissa = weight_mantissa * deviance_mantissa / phi_mantissa
+        exponent = weight_power + deviance_power - phi_power + result.weight_exponent - 1
+        with np.errstate(over="ignore"):
+            half_deviance = float(np.sum(np.ldexp(mantissa, exponent)))
+        return saturated - half_deviance
     return weighted_log_likelihood(
         family,
         y,

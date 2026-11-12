@@ -11,7 +11,12 @@ from numpy.typing import NDArray
 from scipy.special import gammaln
 
 from superglm._utils import weighted_row_sum
-from superglm._weight_units import scale_penalties, solver_dispersion, unit_log_likelihood
+from superglm._weight_units import (
+    dispersion_standard_deviation,
+    scale_penalties,
+    solver_dispersion,
+    unit_log_likelihood,
+)
 from superglm.group_matrix import DesignMatrix
 from superglm.inference._metrics_design import (
     EvaluationDesign,
@@ -844,9 +849,15 @@ class ModelMetrics:
         # weight is part of the distribution (Gaussian variance, Gamma shape, count lattice).
         prior = self._weight_semantics == "prior"
         phi = self.phi
-        if prior and self._result.solver_phi is not None:
-            w = np.ldexp(w, self._result.weight_exponent)
-            phi = self._result.solver_phi
+        unit_phi = self._result.solver_phi
+
+        def normal_cdf(residual, root):
+            with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+                standardized = residual / root
+            # The zero-dispersion limit at the mean, without a 0/0 intermediate.
+            standardized = np.where((root == 0.0) & (residual == 0.0), 0.0, standardized)
+            return norm.cdf(standardized)
+
         if isinstance(self._family, Binomial):
             # Binomial is contract-invariant here by necessity. The prior construction
             # `w Y ~ Binomial(w, mu)` lives on {0, 1/w, ..., 1}, but y is pinned to {0, 1}, so the
@@ -872,66 +883,84 @@ class ModelMetrics:
             b = nbinom.cdf(count, n=n_param, p=p_nb)
             u = rng.uniform(a, b)
         elif isinstance(self._family, Gamma):
-            if (
-                not prior
-                and self._result.solver_phi is not None
-                and np.log(self._result.solver_phi) - self._result.weight_exponent * np.log(2.0)
-                < -512 * np.log(2.0)
-            ):
+            if unit_phi is not None:
+                root = dispersion_standard_deviation(w if prior else np.ones_like(w), self._result)
+                normal = root < 2.0**-256
+                u = np.empty_like(y)
                 # At shape > 2**512 the normal-limit CDF's O(sqrt(phi))
                 # correction is far below binary64 rounding, including at mu.
-                standardized = (y - mu) / mu / np.sqrt(self._result.solver_phi)
-                u = norm.cdf(np.ldexp(standardized, self._result.weight_exponent // 2))
+                u[normal] = normal_cdf((y[normal] - mu[normal]) / mu[normal], root[normal])
+                other = ~normal
+                if np.any(other):
+                    shape = (1.0 / root[other]) ** 2
+                    u[other] = gamma_dist.cdf(y[other] / mu[other] * shape, a=shape)
             else:
                 shape = (w if prior else 1.0) / phi
                 scale = mu * phi / (w if prior else 1.0)
                 u = gamma_dist.cdf(y, a=shape, scale=scale)
         elif isinstance(self._family, Gaussian):
-            if not prior and self._result.solver_phi is not None:
-                sigma = np.ldexp(
-                    np.sqrt(self._result.solver_phi), -(self._result.weight_exponent // 2)
-                )
+            if unit_phi is not None:
+                sigma = dispersion_standard_deviation(w if prior else np.ones_like(w), self._result)
+                u = normal_cdf(y - mu, sigma)
             else:
                 variance = phi / w if prior else np.full_like(y, phi)
                 sigma = np.sqrt(variance)
-            u = norm.cdf(y, loc=mu, scale=sigma)
+                u = norm.cdf(y, loc=mu, scale=sigma)
         elif isinstance(self._family, Tweedie):
             # Tweedie p in (1,2): compound Poisson-Gamma.
             # With weights: lambda and scale both depend on w.
             p_tw = self._family.p
-            if not prior and self._result.solver_phi is not None:
-                log_relative_variance = (
-                    np.log(self._result.solver_phi)
-                    - self._result.weight_exponent * np.log(2.0)
-                    + (p_tw - 2.0) * np.log(mu)
-                )
-                if np.all(log_relative_variance < -512 * np.log(2.0)):
-                    # The EDM normal limit's O(sqrt(relative dispersion))
-                    # correction is below binary64 rounding in this range.
-                    standardized = (y - mu) / np.sqrt(
-                        self._result.solver_phi * self._family.variance(mu)
+            normal_rows = None
+            u = np.empty_like(y)
+            if unit_phi is not None:
+                w_eff = w if prior else np.ones_like(w)
+                with np.errstate(divide="ignore"):
+                    log_row_phi = (
+                        np.log(unit_phi)
+                        - self._result.weight_exponent * np.log(2.0)
+                        - np.log(w_eff)
                     )
-                    u = norm.cdf(np.ldexp(standardized, self._result.weight_exponent // 2))
-                    return norm.ppf(np.clip(u, 1e-10, 1.0 - 1e-10))
+                log_relative_variance = log_row_phi + (p_tw - 2.0) * np.log(mu)
+                normal_rows = log_relative_variance < -512 * np.log(2.0)
+                root = dispersion_standard_deviation(w_eff, self._result)
+                u[normal_rows] = normal_cdf(
+                    y[normal_rows] - mu[normal_rows],
+                    root[normal_rows] * np.power(mu[normal_rows], p_tw / 2.0),
+                )
+                # Evaluate the existing compound parameters in logarithmic
+                # units where no common physical phi/w can be represented.
+                other = ~normal_rows
+                lam = np.zeros_like(mu)
+                scale_tw = np.ones_like(mu)
+                with np.errstate(over="ignore"):
+                    lam[other] = np.exp(
+                        (2.0 - p_tw) * np.log(mu[other]) - np.log(2.0 - p_tw) - log_row_phi[other]
+                    )
+                    scale_tw[other] = np.exp(
+                        log_row_phi[other] + np.log(p_tw - 1.0) + (p_tw - 1.0) * np.log(mu[other])
+                    )
 
             # Weight-adjusted Poisson rate and compound Gamma parameters.  A
             # replicated row's marginal is the unit-weight one, so the
             # frequency contract evaluates the compound distribution at w = 1.
-            w_eff = w if prior else np.ones_like(w)
-            lam = w_eff * np.power(mu, 2 - p_tw) / ((2 - p_tw) * phi)
+            else:
+                w_eff = w if prior else np.ones_like(w)
+                lam = w_eff * np.power(mu, 2 - p_tw) / ((2 - p_tw) * phi)
+                scale_tw = phi * (p_tw - 1) * np.power(mu, p_tw - 1) / w_eff
             p_zero = np.exp(-lam)
             alpha_tw = (2 - p_tw) / (p_tw - 1)  # Gamma shape per claim
-            scale_tw = phi * (p_tw - 1) * np.power(mu, p_tw - 1) / w_eff
-
-            u = np.empty_like(y)
 
             # y = 0: jitter in [0, P(Y=0)]
             zero_mask = y == 0
+            if normal_rows is not None:
+                zero_mask = zero_mask & ~normal_rows
             if np.any(zero_mask):
                 u[zero_mask] = rng.uniform(0.0, p_zero[zero_mask])
 
             # y > 0: F(y) = P(Y=0) + sum_k P(N=k) * Gamma_CDF(y; k*alpha, scale)
             pos_mask = ~zero_mask
+            if normal_rows is not None:
+                pos_mask = pos_mask & ~normal_rows
             if np.any(pos_mask):
                 y_p = y[pos_mask]
                 lam_p = lam[pos_mask]

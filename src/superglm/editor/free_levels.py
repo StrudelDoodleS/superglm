@@ -746,9 +746,15 @@ def _influence(model, name: str) -> _Influence | str:
         curvature, data_gram = fisher, None
         covariance, active = model._coef_covariance
         X, _active, _columns = _grouped_active_state(model, {group.name for group in active})
-        if isinstance(covariance, BinaryScaledCovariance):
-            covariance = covariance.base
         scale = float(solver_dispersion(solver))
+        if isinstance(covariance, BinaryScaledCovariance):
+            from superglm._weight_units import covariance_exponent
+
+            # The wrapper can carry part of phi as well as the objective unit.
+            # Divide its base by the same dispersion mantissa, not all of phi.
+            dispersion_exponent = covariance.exponent - covariance_exponent(solver)
+            scale = float(np.ldexp(scale, -dispersion_exponent))
+            covariance = covariance.base
         if getattr(solver.rank_info, "face", None) is not None:
             # The response moves the fit along its binding rows' face, so the
             # influence takes the face fit's inverse (``RankInfo.augmented_inverse``);

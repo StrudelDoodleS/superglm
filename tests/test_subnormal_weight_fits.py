@@ -389,3 +389,76 @@ def test_subnormal_drop1_keeps_its_table_after_releasing_fit_rows(retain):
     actual, expected = table(weights), table(np.ldexp(weights, 1064))
     np.testing.assert_allclose(actual["statistic"], expected["statistic"], rtol=2e-10)
     np.testing.assert_allclose(actual["p_value"], expected["p_value"], rtol=2e-9, atol=0)
+
+
+@pytest.mark.parametrize("unit", [1e-315, 1e-320])
+def test_editor_response_influence_keeps_the_dispersion_exponent(unit):
+    from superglm.editor.free_levels import _gap_variances
+
+    x = np.linspace(-1, 1, 60)
+    frame = pd.DataFrame({"x": x})
+    y = 0.4 + 0.2 * x + 0.1 * np.cos(13 * x)
+    weights = np.full(len(x), unit)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        features={"x": Numeric()},
+    ).fit(frame, y, sample_weight=weights)
+    actual, note = _gap_variances(model, np.ones((1, 1)), model, None, "x", frame)
+    assert note is None
+    lifted = np.ldexp(weights, 1064)
+    design = np.column_stack([np.ones(len(x)), x])
+    beta = np.linalg.lstsq(np.sqrt(lifted)[:, None] * design, np.sqrt(lifted) * y, rcond=None)[0]
+    phi = np.sum(lifted * (y - design @ beta) ** 2) / (len(x) - 2)
+    expected = phi * np.linalg.inv(design.T @ (lifted[:, None] * design))[1, 1]
+    np.testing.assert_allclose(actual, [expected], rtol=2e-11)
+
+
+@pytest.mark.parametrize("family", ["gaussian", "gamma", "tweedie"])
+@pytest.mark.parametrize("unit", [1e-315, 1e-320])
+def test_quantile_residuals_keep_finite_row_scales_on_other_weights(family, unit):
+    from scipy.stats import norm
+
+    x = np.linspace(-1, 1, 60)
+    frame = pd.DataFrame({"x": x})
+    y = np.exp(0.4 + 0.2 * x + 0.1 * np.cos(13 * x))
+    model = SuperGLM(
+        family=Tweedie(p=1.5) if family == "tweedie" else family,
+        selection_penalty=0,
+        features={"x": Numeric()},
+    ).fit(frame, y, sample_weight=np.full(len(x), unit))
+    response = model.predict(frame).copy()
+    response[1::3] = np.nextafter(response[1::3], np.inf)
+    response[2::3] = np.nextafter(response[2::3], -np.inf)
+    actual = model.metrics(frame, response).residuals("quantile")
+    # At these physical dispersions even one ulp of the mean is far beyond
+    # the existing probability clipping endpoints. At the mean the normal
+    # limit's skewness correction is far below u for Gamma/Tweedie as well.
+    expected = np.zeros(len(x))
+    expected[1::3] = norm.ppf(1 - 1e-10)
+    expected[2::3] = norm.ppf(1e-10)
+    np.testing.assert_allclose(actual, expected, rtol=0, atol=2e-12)
+
+
+@pytest.mark.parametrize("family", ["gaussian", "gamma", "tweedie"])
+@pytest.mark.parametrize("unit", [1e-315, 1e-320])
+def test_frequency_likelihood_at_the_mean_is_finite_on_other_weights(family, unit):
+    x = np.linspace(-1, 1, 60)
+    frame = pd.DataFrame({"x": x})
+    y = np.exp(0.4 + 0.2 * x + 0.1 * np.cos(13 * x))
+    model = SuperGLM(
+        family=Tweedie(p=1.5) if family == "tweedie" else family,
+        selection_penalty=0,
+        weight_semantics="frequency",
+        features={"x": Numeric()},
+    ).fit(frame, y, sample_weight=np.full(len(x), unit))
+    mu = model.predict(frame)
+    result = model.result
+    log_phi = np.log(result.solver_phi) - result.weight_exponent * np.log(2.0)
+    power = {"gaussian": 0.0, "gamma": 2.0, "tweedie": 1.5}[family]
+    # The Gaussian normalizer is exact. At these scales the Gamma Stirling
+    # and Tweedie saturated-density corrections are far below rounding.
+    expected = float(np.sum(-0.5 * (np.log(2 * np.pi) + log_phi + power * np.log(mu))))
+    actual = model.metrics(frame, mu).log_likelihood
+    assert np.isfinite(actual)
+    assert actual == pytest.approx(expected, rel=2e-12)

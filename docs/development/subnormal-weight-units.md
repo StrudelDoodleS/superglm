@@ -39,6 +39,9 @@ Inference pairs dispersion with its inverse before changing units. When a
 covariance entry exceeds binary64's range, a covariance view carries its
 base and even exponent until a standard error or test statistic is formed.
 A physical variance can overflow while its standard error remains finite.
+A view may also carry an even part of dispersion's exponent. Recovering a
+response influence from its base must divide by the matching dispersion
+mantissa, preserving both parts of the covariance's unit.
 Evaluation geometry may use a different unit from the fit; its dispersion
 and inverse are paired accordingly. Post-fit repair uses the same unit for
 its weights and smoothing penalties, and refreshes both dispersion readings
@@ -59,6 +62,11 @@ normalizer uses `log(phi_solver) - K log(2)`, while the deviance ratio uses
 solver units. The Tweedie calculation reuses its existing saturated series
 and corrected saddlepoint; it accepts the logarithmic dispersion on this
 range path.
+
+Evaluation weights can be much larger than fitting weights. Row standard
+deviations and frequency deviance ratios combine normal mantissas and their
+net exponents before restoring units; they never require an overflowing
+common lift of the evaluation weights.
 
 Gamma and Tweedie quantile residuals at relative dispersion below `2**-512`
 use their normal limit. The standardized skewness is at most

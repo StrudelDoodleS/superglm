@@ -10,6 +10,7 @@ repository under [`notes/`](https://github.com/StrudelDoodleS/superglm/tree/mast
 releases
 cost-and-timing
 benchmark-baselines
+subnormal-weight-units
 work-ledger
 migrations/group-pricing-rank
 migrations/weight-semantics-prior
