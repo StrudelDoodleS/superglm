@@ -38,6 +38,7 @@ from superglm.distributional.families._response_bounds import (
 )
 from superglm.distributional.families._variance import _variance_product
 from superglm.distributional.family import (
+    _MEAN_DESCRIPTION,
     COMPLETE_OBSERVATION,
     FamilyCapabilities,
     FamilyLikelihoodPlan,
@@ -273,8 +274,24 @@ class GammaLS(MeanPredictor, ScalePredictor):
     @property
     def parameters(self) -> tuple[ParameterSpec, ...]:
         return (
-            ParameterSpec("mean", LogLink(), "mean", ParameterSupport(lower=0.0), "fisher"),
-            ParameterSpec("scale", LogLink(), "scale", ParameterSupport(lower=0.0), "fisher"),
+            ParameterSpec(
+                "mean",
+                LogLink(),
+                "mean",
+                ParameterSupport(lower=0.0),
+                "fisher",
+                label="Mean",
+                description=_MEAN_DESCRIPTION,
+            ),
+            ParameterSpec(
+                "scale",
+                LogLink(),
+                "scale",
+                ParameterSupport(lower=0.0),
+                "fisher",
+                label="CV",
+                description="Coefficient of variation (CV): standard deviation ÷ mean.",
+            ),
         )
 
     @property

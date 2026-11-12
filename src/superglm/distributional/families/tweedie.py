@@ -34,6 +34,7 @@ from superglm.distributional.families._response_bounds import (
     refuse_bounded,
 )
 from superglm.distributional.family import (
+    _MEAN_DESCRIPTION,
     COMPLETE_OBSERVATION,
     FamilyCapabilities,
     FamilyLikelihoodPlan,
@@ -686,6 +687,8 @@ class TweedieLSS(TweediePredictors):
                 "mean",
                 ParameterSupport(lower=0.0),
                 "observed",
+                label="Mean",
+                description=_MEAN_DESCRIPTION,
             ),
             ParameterSpec(
                 "dispersion",
@@ -693,6 +696,8 @@ class TweedieLSS(TweediePredictors):
                 "dispersion",
                 ParameterSupport(lower=0.0),
                 "observed",
+                label="Dispersion",
+                description="Dispersion (φ): the variance is φ times the mean to the power p.",
             ),
             ParameterSpec(
                 "power",
@@ -700,6 +705,10 @@ class TweedieLSS(TweediePredictors):
                 "power",
                 ParameterSupport(lower=self.power_lower, upper=self.power_upper),
                 "observed",
+                label="Power",
+                description=(
+                    "Power (p): the variance is the dispersion times the mean to the power p."
+                ),
             ),
         )
 

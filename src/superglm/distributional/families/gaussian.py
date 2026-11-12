@@ -462,6 +462,8 @@ class GaussianLS(LocationPredictor, ScalePredictor):
                 role="location",
                 support=ParameterSupport(),
                 curvature="fisher",
+                label="Location",
+                description="Location: the mean of the response.",
             ),
             ParameterSpec(
                 name="scale",
@@ -469,6 +471,9 @@ class GaussianLS(LocationPredictor, ScalePredictor):
                 role="scale",
                 support=ParameterSupport(lower=self.scale_floor),
                 curvature="fisher",
+                label="Standard deviation",
+                description="Standard deviation (σ): how widely the response spreads.",
+                quantity="σ",
             ),
         )
 

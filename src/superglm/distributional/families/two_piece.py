@@ -39,6 +39,7 @@ from superglm.distributional.families._response_bounds import (
 )
 from superglm.distributional.families.gaussian import LowerBoundedLogLink
 from superglm.distributional.family import (
+    _MEAN_DESCRIPTION,
     FamilyCapabilities,
     FamilyLikelihoodPlan,
     InitialParameterState,
@@ -592,6 +593,9 @@ def _scale_and_skew_specs(scale_floor: float, skew_bound: float) -> tuple[Parame
             "scale",
             ParameterSupport(lower=scale_floor),
             "observed",
+            label="Scale",
+            description="Scale (σ): how widely the two pieces spread around the location.",
+            quantity="σ",
         ),
         ParameterSpec(
             "skew",
@@ -599,6 +603,8 @@ def _scale_and_skew_specs(scale_floor: float, skew_bound: float) -> tuple[Parame
             "shape",
             ParameterSupport(lower=-skew_bound, upper=skew_bound),
             "observed",
+            label="Skew",
+            description="Skew: above zero the right piece is the wider, a heavier right tail.",
         ),
     )
 
@@ -649,10 +655,24 @@ class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, Ske
     @property
     def parameters(self) -> tuple[ParameterSpec, ...]:
         first = (
-            ParameterSpec("mean", LogLink(), "mean", ParameterSupport(lower=0.0), "observed")
+            ParameterSpec(
+                "mean",
+                LogLink(),
+                "mean",
+                ParameterSupport(lower=0.0),
+                "observed",
+                label="Mean",
+                description=_MEAN_DESCRIPTION,
+            )
             if self.parametrisation == "mean"
             else ParameterSpec(
-                "location", IdentityLink(), "location", ParameterSupport(), "observed"
+                "location",
+                IdentityLink(),
+                "location",
+                ParameterSupport(),
+                "observed",
+                label="Location",
+                description="Location (μ): where the log response is centred.",
             )
         )
         return (first, *_scale_and_skew_specs(self.scale_floor, self.skew_bound))
@@ -1052,7 +1072,15 @@ class TwoPieceNormalLSS(LocationPredictor, ScalePredictor, SkewPredictor):
     @property
     def parameters(self) -> tuple[ParameterSpec, ...]:
         return (
-            ParameterSpec("location", IdentityLink(), "location", ParameterSupport(), "observed"),
+            ParameterSpec(
+                "location",
+                IdentityLink(),
+                "location",
+                ParameterSupport(),
+                "observed",
+                label="Location",
+                description="Location: where the response is centred.",
+            ),
             *_scale_and_skew_specs(self.scale_floor, self.skew_bound),
         )
 

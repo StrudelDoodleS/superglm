@@ -29,6 +29,7 @@ from superglm.distributional.families._response_bounds import (
     refuse_bounded,
 )
 from superglm.distributional.family import (
+    _MEAN_DESCRIPTION,
     COMPLETE_OBSERVATION,
     FamilyCapabilities,
     FamilyLikelihoodPlan,
@@ -292,8 +293,25 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
     @property
     def parameters(self) -> tuple[ParameterSpec, ...]:
         return (
-            ParameterSpec("mean", LogLink(), "mean", ParameterSupport(lower=0.0), "observed"),
-            ParameterSpec("theta", LogLink(), "size", ParameterSupport(lower=0.0), "observed"),
+            ParameterSpec(
+                "mean",
+                LogLink(),
+                "mean",
+                ParameterSupport(lower=0.0),
+                "observed",
+                label="Mean",
+                description=_MEAN_DESCRIPTION,
+            ),
+            ParameterSpec(
+                "theta",
+                LogLink(),
+                "size",
+                ParameterSupport(lower=0.0),
+                "observed",
+                label="Overdispersion",
+                description="Overdispersion (1/θ): variance = mean + mean²/θ.",
+                quantity="overdispersion",
+            ),
         )
 
     def to_config(self) -> dict[str, object]:

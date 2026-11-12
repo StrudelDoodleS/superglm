@@ -44,6 +44,7 @@ from superglm.distributional.families.gaussian import (
     _normal_censored_recession,
 )
 from superglm.distributional.family import (
+    _MEAN_DESCRIPTION,
     COMPLETE_OBSERVATION,
     FamilyCapabilities,
     FamilyLikelihoodPlan,
@@ -271,10 +272,24 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
     @property
     def parameters(self) -> tuple[ParameterSpec, ...]:
         first = (
-            ParameterSpec("mean", LogLink(), "mean", ParameterSupport(lower=0.0), "observed")
+            ParameterSpec(
+                "mean",
+                LogLink(),
+                "mean",
+                ParameterSupport(lower=0.0),
+                "observed",
+                label="Mean",
+                description=_MEAN_DESCRIPTION,
+            )
             if self.parametrisation == "mean"
             else ParameterSpec(
-                "location", IdentityLink(), "location", ParameterSupport(), "observed"
+                "location",
+                IdentityLink(),
+                "location",
+                ParameterSupport(),
+                "observed",
+                label="Location",
+                description="Location (μ): the mean of the log response.",
             )
         )
         return (
@@ -285,6 +300,9 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
                 "scale",
                 ParameterSupport(lower=self.scale_floor),
                 "observed",
+                label="CV",
+                description="Coefficient of variation (CV): standard deviation ÷ mean.",
+                quantity="σ",
             ),
         )
 

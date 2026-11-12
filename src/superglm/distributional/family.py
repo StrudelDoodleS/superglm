@@ -235,15 +235,28 @@ class ParameterSupport:
         return valid
 
 
+# The sentence every family with a mean parameter declares for it.
+_MEAN_DESCRIPTION = "The mean: the expected value of the response."
+
+
 @dataclass(frozen=True)
 class ParameterSpec:
-    """Ordered metadata for one family-defined natural parameter."""
+    """Ordered metadata for one family-defined natural parameter.
+
+    ``label`` is the name a user reads, ``description`` one sentence saying what the
+    parameter is, and ``quantity`` what the link acts on when that is not the label
+    (the log-normal's scale reads "CV" and its link acts on σ). Each is ``None`` or
+    non-empty text; a model pickled before they existed loads with the defaults.
+    """
 
     name: str
     default_link: str | Link
     role: str
     support: ParameterSupport
     curvature: CurvatureKind = "observed"
+    label: str | None = None
+    description: str | None = None
+    quantity: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -258,6 +271,10 @@ class ParameterSpec:
             raise TypeError("support must be a ParameterSupport")
         if self.curvature not in ("observed", "fisher", "hybrid"):
             raise ValueError(f"invalid curvature declaration: {self.curvature!r}")
+        for field in ("label", "description", "quantity"):
+            text = getattr(self, field)
+            if text is not None and (not isinstance(text, str) or not text.strip()):
+                raise ValueError(f"parameter {field} must be None or a non-empty string")
         if isinstance(self.default_link, str):
             if not self.default_link.strip():
                 raise ValueError("default_link string must not be empty")

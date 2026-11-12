@@ -131,7 +131,15 @@ class DirichletLSS:
     @property
     def parameters(self) -> tuple[ParameterSpec, ...]:
         return tuple(
-            ParameterSpec(f"alpha_{j}", LogLink(), component, ParameterSupport(lower=0.0), "fisher")
+            ParameterSpec(
+                f"alpha_{j}",
+                LogLink(),
+                component,
+                ParameterSupport(lower=0.0),
+                "fisher",
+                label=component,
+                description=f"The concentration of the {component} share.",
+            )
             for j, component in enumerate(self.components)
         )
 

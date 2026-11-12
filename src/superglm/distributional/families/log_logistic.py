@@ -30,8 +30,19 @@ _SPEC = DeclaredScalarSpec(
     schema_version=1,
     kernel_module="superglm.distributional.kernels.log_logistic",
     parameters=tuple(
-        ParameterSpec(name, LogLink(), name, ParameterSupport(lower=0.0), "observed")
-        for name in ("scale", "shape")
+        ParameterSpec(
+            name,
+            LogLink(),
+            name,
+            ParameterSupport(lower=0.0),
+            "observed",
+            label=name.capitalize(),
+            description=description,
+        )
+        for name, description in (
+            ("scale", "Scale: the median of the response."),
+            ("shape", "Shape: the larger it is, the tighter the response around its median."),
+        )
     ),
     response_lower=0.0,
     response_lower_inclusive=False,
