@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from itertools import groupby
@@ -219,12 +219,15 @@ def _eta_tasks(
     coefficients: NDArray[np.float64],
     spans: Sequence[slice] | None = None,
     labels: Mapping[tuple[str, str], NDArray] | None = None,
+    dropped: Hashable | None = None,
 ) -> list[_EtaTask]:
     """The scoring tasks of one predictor, in the order its terms are added to eta.
 
     ``spans`` splits each term made of numeric covariates alone (``ROW_INDEPENDENT_TERMS``), and
     each label term read from the frame's codes, into row ranges that can be scored on any thread;
-    every other term is one task over the frame.
+    every other term is one task over the frame. ``dropped`` names a feature that gets no task
+    where its coefficients are all zero, which changes no bit of eta: its rows would add zeros
+    to a sum that starts at +0, and such a sum never holds -0.
     """
     state = layout.predictors[predictor.parameter_index]
     intercept_width = int(state.intercept_index is not None)
@@ -238,6 +241,9 @@ def _eta_tasks(
 
     for name in predictor.compiled.feature_order:
         indices = _term_indices(predictor.compiled.groups, name)
+        if name == dropped and not np.any(slopes[indices]):
+            assigned[indices] = True
+            continue
         spec = predictor.compiled.specs[name]
         column, beta = frame.column_array(name), slopes[indices]
         coded = None if labels is None else labels.get((predictor.name, name))
@@ -351,6 +357,13 @@ def _assemble_eta(
     return _readonly(eta)
 
 
+def _dropped_in(
+    predictor: CompiledPredictor, dropped: tuple[str, Hashable] | None
+) -> Hashable | None:
+    """The feature of ``predictor`` that ``dropped`` names, if it names one of this predictor's."""
+    return dropped[1] if dropped is not None and dropped[0] == predictor.name else None
+
+
 def _predict_one_eta(
     frame: EagerFrame,
     predictor: CompiledPredictor,
@@ -358,8 +371,9 @@ def _predict_one_eta(
     coefficients: NDArray[np.float64],
     offset: NDArray,
     named: list[str] | None = None,
+    dropped: Hashable | None = None,
 ) -> NDArray[np.float64]:
-    tasks = _eta_tasks(frame, predictor, layout, coefficients)
+    tasks = _eta_tasks(frame, predictor, layout, coefficients, dropped=dropped)
     results = [task.run() for task in tasks]
     return _assemble_eta(predictor, layout, coefficients, offset, tasks, results, len(frame), named)
 
@@ -376,6 +390,7 @@ def _predict_eta_pooled(
     coefficients: NDArray[np.float64],
     offsets: Mapping[str, NDArray],
     named: list[str],
+    dropped: tuple[str, Hashable] | None = None,
 ) -> NDArray[np.float64]:
     """Every predictor's eta, a block of rows at a time on ``superglm``'s pool.
 
@@ -394,7 +409,8 @@ def _predict_eta_pooled(
         [
             list(tasks)
             for _, tasks in groupby(
-                _eta_tasks(frame, p, layout, coefficients, spans, labels), key=lambda t: t.term
+                _eta_tasks(frame, p, layout, coefficients, spans, labels, _dropped_in(p, dropped)),
+                key=lambda t: t.term,
             )
         ]
         for p in predictors
@@ -585,8 +601,14 @@ class DenseDistributionalModel:
             self._predict_eta_resolved(self.prediction_coefficients, X, offsets)
         )
 
-    def _predict_eta_resolved(self, coefficients, X, offsets) -> NDArray[np.float64]:
-        """Internal path for retained rows and scoring; never resolve declarations twice."""
+    def _predict_eta_resolved(
+        self, coefficients, X, offsets, *, dropped: tuple[str, Hashable] | None = None
+    ) -> NDArray[np.float64]:
+        """Internal path for retained rows and scoring; never resolve declarations twice.
+
+        ``dropped``, a predictor's name and one of its features, leaves that feature unscored
+        where its coefficients are all zero (``_eta_tasks``): the same eta, without its basis.
+        """
         frame = as_eager_frame(X)
         predictor_names = tuple(predictor.name for predictor in self.compiled_predictors)
         resolved_offsets = _prediction_offsets(offsets, predictor_names, len(frame))
@@ -610,7 +632,13 @@ class DenseDistributionalModel:
         named: list[str] = []
         if len(frame) >= POOLED_PREDICTION_ROWS:
             eta = _predict_eta_pooled(
-                frame, self.compiled_predictors, self.layout, coefficients, resolved_offsets, named
+                frame,
+                self.compiled_predictors,
+                self.layout,
+                coefficients,
+                resolved_offsets,
+                named,
+                dropped,
             )
         else:
             eta = np.column_stack(
@@ -622,6 +650,7 @@ class DenseDistributionalModel:
                         coefficients,
                         resolved_offsets[predictor.name],
                         named,
+                        _dropped_in(predictor, dropped),
                     )
                     for predictor in self.compiled_predictors
                 )

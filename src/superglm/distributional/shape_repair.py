@@ -233,6 +233,7 @@ def _profiled_merit(
     coefficients: NDArray[np.float64],
     parameter: str,
     reach: float,
+    dropped: Hashable | None = None,
 ) -> tuple[float, float, int | None]:
     """The intercept shift that maximizes the joint log-likelihood, and the penalized merit there.
 
@@ -240,7 +241,8 @@ def _profiled_merit(
     negative log-likelihood on the retained rows plus half its penalty quadratic. A shift no
     better than rounding, or for a parameter with no intercept, is not taken. The merit is
     infinite where a retained row has no valid parameters; the third value counts those rows
-    (``None`` where the parameters or the likelihood cannot be evaluated at all).
+    (``None`` where the parameters or the likelihood cannot be evaluated at all). ``dropped``
+    names a term of ``parameter`` whose coefficients are zero, so that its basis is not scored.
 
     Raises ``RuntimeError`` when the likelihood still improves where the shift leaves
     float64's range, so that no intercept could be re-estimated.
@@ -250,7 +252,9 @@ def _profiled_merit(
     state = fitted.layout.predictor(parameter)
     link = state.link
     column = [predictor.name for predictor in fitted.layout.predictors].index(parameter)
-    eta = fitted._predict_eta_resolved(coefficients, frame, rows.offsets)
+    eta = fitted._predict_eta_resolved(
+        coefficients, frame, rows.offsets, dropped=None if dropped is None else (parameter, dropped)
+    )
     penalty = 0.5 * float(coefficients @ np.asarray(fitted.result.penalty) @ coefficients)
     unit = _intercept_scale(eta[:, column], reach)
     # A probe moves only this parameter's column of eta, so every other parameter is formed
@@ -330,10 +334,12 @@ def _profiled_merit(
             whole = found is not None and failed is not None and not failed.any()
             values[t] = -float(np.sum(found, dtype=np.float64)) if whole else np.inf
             if derivatives:
-                moved = None if local is None else (-unit * local[0], -unit * (unit * local[1]))
-                finite = moved is not None and np.isfinite(moved[0]) and np.isfinite(moved[1])
-                size = float(np.sum(np.abs(found), dtype=np.float64)) if finite else 0.0
-                slopes[t] = (*moved, size) if finite and moved is not None else None
+                slopes[t] = None
+                if found is not None and local is not None:
+                    slope, curvature = -unit * local[0], -unit * (unit * local[1])
+                    if np.isfinite(slope) and np.isfinite(curvature):
+                        size = float(np.sum(np.abs(found), dtype=np.float64))
+                        slopes[t] = (slope, curvature, size)
         return values[t]
 
     def objective(t: float) -> float:
@@ -347,7 +353,8 @@ def _profiled_merit(
         return probe(t, True), slopes[t]
 
     held = probe(0.0, newton)
-    zero_invalid = None if invalid[0.0] is None else int(np.count_nonzero(invalid[0.0]))
+    zero_failed = invalid[0.0]
+    zero_invalid = None if zero_failed is None else int(np.count_nonzero(zero_failed))
     if state.intercept_index is None:
         return 0.0, held + penalty, zero_invalid
     start = 0.0 if np.isfinite(held) else _finite_start(objective, invalid_at)
@@ -638,11 +645,14 @@ def _settled(
     spec, kind = term.curve_spec, term.kind
     repaired = np.array(repair.repaired_beta_reparam[term.columns], dtype=np.float64)
     apex = shape_slack_tolerance(repaired, float(np.linalg.norm(fitted_coefficients)))
+    certificate = repair.certificate
     if float(np.linalg.norm(repaired)) <= apex:
-        repaired = np.zeros_like(repaired)
-    # ``postfit_term_feasible``'s own check, on the term's block; formed again only for
-    # coefficients moved below.
-    slack = shape_constraint_certificate(spec, repaired, kind).minimum_scaled_slack
+        repaired, certificate = np.zeros_like(repaired), None
+    # ``postfit_term_feasible``'s own check, on the term's block: the repair's certificate of
+    # these coefficients where it formed one, formed here only for coefficients moved here.
+    if certificate is None:
+        certificate = shape_constraint_certificate(spec, repaired, kind)
+    slack = certificate.minimum_scaled_slack
     obeyed = slack >= -shape_slack_tolerance(repaired)
     if not obeyed:
         violation = -slack
@@ -710,7 +720,11 @@ def repaired_model(
     repair whose penalized likelihood is worse than dropping the term altogether is refused
     before anything is published.
     """
-    from superglm.constraints import shape_sum_tolerance
+    from superglm.constraints import (
+        shape_constraint_certificate,
+        shape_slack_tolerance,
+        shape_sum_tolerance,
+    )
     from superglm.distributional.revision import NO_TRAINING_FRAME, _rows_of_the_fit, revised_model
     from superglm.model.shape_ops import _curve_spec, _grid_weights, _repairer
 
@@ -719,7 +733,19 @@ def repaired_model(
         if term.curve_spec is None:
             _curve_spec(term.term, term.spec)  # refuses by name, as SuperGLM's repair does
     coefficients = np.array(fitted.coefficients, dtype=np.float64, copy=True)
-    pending = [term for term in terms if not postfit_term_feasible(term, coefficients)]
+    # ``postfit_term_feasible``'s check, keeping each certificate for the term's repair.
+    certificates = {
+        term.term: shape_constraint_certificate(
+            term.curve_spec, coefficients[term.columns], term.kind
+        )
+        for term in terms
+    }
+    pending = [
+        term
+        for term in terms
+        if certificates[term.term].minimum_scaled_slack
+        < -shape_slack_tolerance(coefficients[term.columns])
+    ]
     if not pending:
         return fitted
     rows = fitted.fit_state.retained_rows
@@ -744,6 +770,7 @@ def repaired_model(
             weights=grid_weights,
             n_grid=n_grid,
             metric=_term_precision(fitted, term),
+            certificate=certificates[term.term],
         )
         repaired = _settled(term, repair, coefficients[term.columns], grid_weights)
         if np.array_equal(repaired, coefficients[term.columns]):
@@ -768,7 +795,9 @@ def repaired_model(
                 f"repaired curve, {where}. Fit the rule instead (Constraint.fit.{term.kind}), "
                 "which keeps every row valid, or drop the term."
             )
-        _, fallback_merit, _ = _profiled_merit(fitted, rows, frame, fallback, term.parameter, reach)
+        _, fallback_merit, _ = _profiled_merit(
+            fitted, rows, frame, fallback, term.parameter, reach, dropped=term.label
+        )
         if merit > fallback_merit + shape_sum_tolerance(abs(fallback_merit), len(rows.response)):
             raise RuntimeError(
                 f"Unsafe shape repair of {term.term} rejected before publication: its penalized "

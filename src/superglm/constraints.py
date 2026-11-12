@@ -29,6 +29,8 @@ class MonotoneRepairResult:
     max_violation_before: float
     max_violation_after: float
     projection_residual: float  # maximum curve change induced by coefficient projection
+    # The shape certificate of the repaired coefficients, as the repair formed it.
+    certificate: ShapeConstraintCertificate | None = None
 
     @property
     def kind(self) -> str:
@@ -405,18 +407,25 @@ def _repair_shape(
     weights: NDArray | None,
     n_grid: int,
     metric: NDArray | None = None,
+    certificate: ShapeConstraintCertificate | None = None,
 ) -> MonotoneRepairResult:
     """Project a fitted spline curve onto the ``shape`` cone, in the fitted basis.
 
     The body behind ``MonotoneRepairer.repair`` and ``CurvatureRepairer.repair``.
     ``metric``, when given, is the term's penalized Hessian in its fitted
     coefficients, and the projection is taken in it rather than on the grid.
+    ``certificate``, when given, is the fitted coefficients' shape certificate,
+    which the caller has already formed.
     """
     beta_combined = np.concatenate([beta_reparam[g.sl] for g in groups])
     recon = spec.reconstruct(beta_combined, n_points=n_grid)
     x_grid = recon["x"]
     log_rels = recon["log_relativity"]
-    certificate_before = shape_constraint_certificate(spec, beta_combined, shape)
+    certificate_before = (
+        shape_constraint_certificate(spec, beta_combined, shape)
+        if certificate is None
+        else certificate
+    )
     viol_before = certificate_before.violation
 
     if certificate_before.minimum_scaled_slack >= -shape_slack_tolerance(beta_combined):
@@ -430,6 +439,7 @@ def _repair_shape(
             max_violation_before=viol_before,
             max_violation_after=0.0,
             projection_residual=0.0,
+            certificate=certificate_before,
         )
 
     w_grid = np.ones(n_grid) if weights is None else weights
@@ -462,6 +472,7 @@ def _repair_shape(
         max_violation_before=viol_before,
         max_violation_after=viol_after,
         projection_residual=proj_residual,
+        certificate=certificate_after,
     )
 
 
@@ -481,6 +492,7 @@ class MonotoneRepairer:
         weights: NDArray | None = None,
         n_grid: int = 500,
         metric: NDArray | None = None,
+        certificate: ShapeConstraintCertificate | None = None,
     ) -> MonotoneRepairResult:
         """Project the fitted spline curve onto the requested monotone cone.
 
@@ -503,12 +515,17 @@ class MonotoneRepairer:
             ``apply_shape_postfit`` passes it: the fitted coefficients are
             projected in it. If None, the curve is projected on the grid,
             weighted by ``weights``.
+        certificate : ShapeConstraintCertificate or None
+            The fitted coefficients' shape certificate, where the caller has
+            formed it; formed here if None.
 
         Returns
         -------
         MonotoneRepairResult
         """
-        return _repair_shape(self.direction, spec, beta_reparam, groups, weights, n_grid, metric)
+        return _repair_shape(
+            self.direction, spec, beta_reparam, groups, weights, n_grid, metric, certificate
+        )
 
 
 #: Local-reduction steps the cone projection takes before it brackets instead.
@@ -1451,5 +1468,8 @@ class CurvatureRepairer:
         weights: NDArray | None = None,
         n_grid: int = 500,
         metric: NDArray | None = None,
+        certificate: ShapeConstraintCertificate | None = None,
     ) -> MonotoneRepairResult:
-        return _repair_shape(self.kind, spec, beta_reparam, groups, weights, n_grid, metric)
+        return _repair_shape(
+            self.kind, spec, beta_reparam, groups, weights, n_grid, metric, certificate
+        )

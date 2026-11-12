@@ -199,12 +199,16 @@ def test_the_intercept_search_reads_each_shift_once_and_forms_the_held_parameter
     # intercept's rows were read twice (the held merit, then Brent's centre), and the
     # publication check certified the same repaired coefficients twice. At 582328a15 the
     # bracket and Brent read 18 shifts in each search here; Newton's method on the slope,
-    # converging quadratically from the held intercept, reads 3 and 4.
+    # converging quadratically from the held intercept, reads 3 and 4. There, too, the merit
+    # with the term dropped scored the term's basis, and the fit's and the projection's
+    # certificates were each formed twice.
     from superglm import constraints
+    from superglm.distributional import model as distributional_model
     from superglm.distributional import shape_repair
     from superglm.links import LogLink
 
     model = _fit("mean", Constraint.postfit.increasing, kind="bs", k=8)
+    spec = _term_of(model._model, "mean")
     runs: list[dict] = []
     real_merit, real_evaluate, real_inverse = (
         shape_repair._profiled_merit,
@@ -213,7 +217,7 @@ def test_the_intercept_search_reads_each_shift_once_and_forms_the_held_parameter
     )
 
     def merit(*args, **kwargs):
-        runs.append({"shifts": [], "inverses": 0})
+        runs.append({"shifts": [], "inverses": 0, "scored": 0})
         try:
             return real_merit(*args, **kwargs)
         finally:
@@ -229,24 +233,24 @@ def test_the_intercept_search_reads_each_shift_once_and_forms_the_held_parameter
             runs[-1]["inverses"] += 1
         return real_inverse(self, eta)
 
-    settling = {"active": False, "certificates": 0}
-    real_settled, real_certificate = shape_repair._settled, constraints.shape_constraint_certificate
+    real_score = distributional_model._score_feature
 
-    def settled(*args, **kwargs):
-        settling["active"] = True
-        try:
-            return real_settled(*args, **kwargs)
-        finally:
-            settling["active"] = False
+    def score(feature, *args, **kwargs):
+        if runs and "done" not in runs[-1] and feature is spec:
+            runs[-1]["scored"] += 1
+        return real_score(feature, *args, **kwargs)
 
-    def certificate(*args, **kwargs):
-        settling["certificates"] += settling["active"]
-        return real_certificate(*args, **kwargs)
+    certified: list[bytes] = []
+    real_certificate = constraints.shape_constraint_certificate
+
+    def certificate(feature, beta, kind):
+        certified.append(np.asarray(beta, dtype=np.float64).tobytes())
+        return real_certificate(feature, beta, kind)
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(shape_repair, "_profiled_merit", merit)
-        patch.setattr(shape_repair, "_settled", settled)
         patch.setattr(constraints, "shape_constraint_certificate", certificate)
+        patch.setattr(distributional_model, "_score_feature", score)
         patch.setattr(GammaLS, "evaluate_natural", evaluate)
         patch.setattr(LogLink, "inverse", inverse)
         model.apply_shape_postfit()
@@ -258,8 +262,10 @@ def test_the_intercept_search_reads_each_shift_once_and_forms_the_held_parameter
         assert reads <= 5, f"{reads} likelihood reads in one intercept search"
         # the mean once per probe, and the held scale once
         assert run["inverses"] == reads + 1, f"{run['inverses']} inverse links for {reads} reads"
-    # the repair obeys its rule as projected: one certificate
-    assert settling["certificates"] == 1, settling
+    # the term's basis is scored for the repair's merit, not for the term dropped
+    assert [run["scored"] for run in runs] == [1, 0]
+    # each certified block once: the fit's, and the projection's
+    assert len(certified) == len(set(certified)), f"{len(certified)} certificates"
 
 
 @pytest.mark.parametrize("level", [-5.0, 5.0])
@@ -786,7 +792,8 @@ def _perturbed_repairer(monkeypatch, block):
             beta[columns] = block(
                 np.asarray(coefficients, dtype=np.float64)[columns], beta[columns]
             )
-            return dataclasses.replace(result, repaired_beta_reparam=beta)
+            # the repair's certificate is of the block it returned, not of this one
+            return dataclasses.replace(result, repaired_beta_reparam=beta, certificate=None)
 
     monkeypatch.setattr(shape_ops, "_repairer", Perturbed)
 
