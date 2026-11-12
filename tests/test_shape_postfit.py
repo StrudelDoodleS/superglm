@@ -3512,8 +3512,8 @@ def _profiled_eta_with_fault(monkeypatch, mutate):
     real = shape_ops._profile_repaired_intercept
 
     def profiled(*args, **kwargs):
-        eta, shift, rounding = real(*args, **kwargs)
-        return mutate(eta), shift, rounding
+        eta, shift, rounding, deviance = real(*args, **kwargs)
+        return mutate(eta), shift, rounding, deviance
 
     monkeypatch.setattr(shape_ops, "_profile_repaired_intercept", profiled)
 
@@ -4013,7 +4013,9 @@ def test_intercept_profile_takes_the_same_steps_in_any_units(monkeypatch):
             return real_weights(**kwargs)
 
         monkeypatch.setattr(shape_ops, "fisher_working_weights", record)
-        profiled_eta, _, _ = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+        profiled_eta, _, _, _ = shape_ops._profile_repaired_intercept(
+            model, eta, y=y, weights=weights
+        )
         path[scale] = evaluated
         mu = np.exp(profiled_eta)
         score_rows = weights * (y - mu) * mu
@@ -4042,7 +4044,7 @@ def test_intercept_profile_passes_over_the_rows_once_per_shift(monkeypatch):
         lambda **kwargs: (shifts.append(1), information(**kwargs))[1],
     )
 
-    profiled_eta, _, rounding = shape_ops._profile_repaired_intercept(
+    profiled_eta, _, rounding, _ = shape_ops._profile_repaired_intercept(
         model, eta, y=y, weights=weights
     )
 
@@ -4079,6 +4081,45 @@ def test_repair_publication_reuses_the_profiled_deviance_rounding(monkeypatch):
     assert recomputed == []
 
 
+def test_repair_publication_reads_the_profiled_deviance_as_it_would_form_it(monkeypatch):
+    """The deviance an intercept profile holds is the one publication would form at the
+    profiled predictor, to the bit, so publication reads it instead of a pass of its own.
+
+    Mutation: the search's deviance formed at another shift, or publication forming its own.
+    """
+    from superglm.model.fit_state import fitted_penalty
+
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=8, constraint=Constraint.postfit.increasing)},
+    )
+    rng = np.random.default_rng(241)
+    x = np.sort(rng.uniform(0.0, 1.0, 240))
+    y = rng.poisson(np.exp(0.5 + np.sin(4.0 * x))).astype(np.float64)
+    model.fit(pd.DataFrame({"x": x}), y)
+    weights = np.where(np.arange(y.size) % 9 == 0, 0.0, 1.0)
+    eta = np.log(model.predict(pd.DataFrame({"x": x}))) + 0.3
+    objective = {
+        "y": y,
+        "weights": weights,
+        "smooth_penalty_terms": shape_ops._build_smooth_penalty_terms(model),
+        "selection_penalty": fitted_penalty(model),
+    }
+    beta = np.asarray(model.result.beta)
+
+    profiled_eta, _, _, deviance = shape_ops._profile_repaired_intercept(
+        model, eta, y=y, weights=weights
+    )
+    formed = shape_ops._shape_candidate_objective(model, beta, eta=profiled_eta, **objective)
+    monkeypatch.setattr(model._distribution, "deviance_unit", None)
+    read = shape_ops._shape_candidate_objective(
+        model, beta, eta=profiled_eta, deviance=deviance, **objective
+    )
+
+    assert read == formed
+
+
 def test_gaussian_intercept_is_profiled_when_the_residuals_are_tiny():
     rng = np.random.default_rng(20261032)
     n = 240
@@ -4086,7 +4127,7 @@ def test_gaussian_intercept_is_profiled_when_the_residuals_are_tiny():
     y = 1e-17 * (1.0 + 0.1 * rng.normal(size=n))
     model = SimpleNamespace(_distribution=Gaussian(), _link=IdentityLink())
 
-    profiled_eta, _, _ = shape_ops._profile_repaired_intercept(
+    profiled_eta, _, _, _ = shape_ops._profile_repaired_intercept(
         model, np.zeros(n), y=y, weights=weights
     )
 
@@ -4106,7 +4147,7 @@ def test_intercept_profile_of_a_perfect_fit_stops_at_its_rounding(scale):
     eta = np.log(y)
     model = SimpleNamespace(_distribution=Gamma(), _link=LogLink())
 
-    _, shift, _ = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+    _, shift, _, _ = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
 
     # The predictor of a perfect fit, to within the rounding of the predictor.
     assert abs(shift) <= gamma(_ROW_STEPS) * (2.0 + np.max(np.abs(eta)))
@@ -4141,7 +4182,9 @@ def test_intercept_profile_reaches_a_perfect_fit_from_a_shifted_start(family, of
     distribution = Gamma() if family == "gamma" else Poisson()
     model = SimpleNamespace(_distribution=distribution, _link=LogLink())
 
-    _, shift, _ = shape_ops._profile_repaired_intercept(model, eta + offset, y=y, weights=weights)
+    _, shift, _, _ = shape_ops._profile_repaired_intercept(
+        model, eta + offset, y=y, weights=weights
+    )
 
     assert abs(shift + offset) <= gamma(_ROW_STEPS) * (2.0 + np.max(np.abs(eta)))
 
@@ -4166,7 +4209,7 @@ def test_intercept_profile_whose_first_step_passes_the_link_clamp_converges(fami
     inverse = model._link.inverse
     monkeypatch.setattr(model._link, "inverse", lambda e: (evaluations.append(1), inverse(e))[1])
 
-    _, shift, _ = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+    _, shift, _, _ = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
 
     # The score is sum w (y - mu) for the Poisson and sum w (y / mu - 1) for the Gamma.
     if family == "poisson":
@@ -4205,11 +4248,226 @@ def test_intercept_profile_takes_no_trial_the_familys_clamp_moves(monkeypatch):
 
     monkeypatch.setattr(shape_ops, "fisher_working_weights", record)
 
-    _, shift, _ = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+    _, shift, _, _ = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
 
     mean = np.sum(weights * y) / np.sum(weights)
     assert shift == pytest.approx(np.log(mean / (1.0 - mean)) + 15.0, rel=1e-10, abs=0.0)
     assert taken and not any(taken)
+
+
+def _convex_pairings():
+    return [
+        (family, link)
+        for family, links in shape_ops._CONVEX_DEVIANCE_LINKS.items()
+        for link in links
+    ]
+
+
+@pytest.mark.parametrize(
+    ("family", "link"),
+    _convex_pairings(),
+    ids=[f"{family.__name__}-{link.__name__}" for family, link in _convex_pairings()],
+)
+def test_each_pairing_the_intercept_search_takes_as_convex_is_convex(family, link):
+    """The search compares no root of the score with its start under these pairings, so each
+    unit deviance must be convex in the predictor whatever the response: its second
+    differences on a grid of predictors, for responses across the support, are never
+    negative beyond their rounding. Mutation: listing the Gaussian under the log link, or
+    the Poisson under the square-root link, fails here.
+    """
+    from superglm.distributions import Binomial, NegativeBinomial, Tweedie
+    from superglm.links import CloglogLink, IdentityLink, InverseLink, LogLink
+
+    distribution = {
+        Binomial: Binomial(),
+        NegativeBinomial: NegativeBinomial(theta=2.0),
+        Tweedie: Tweedie(p=1.5),
+    }.get(family) or family()
+    responses = {Binomial: [0.0, 0.25, 0.5, 1.0], Gamma: [0.01, 0.5, 1.0, 3.0, 10.0]}.get(
+        family, [0.0, 0.5, 1.0, 3.0, 10.0]
+    )
+    if link is LogLink:
+        eta = np.linspace(-6.0, -0.05, 400) if family is Binomial else np.linspace(-5.0, 5.0, 400)
+    elif link is CloglogLink:
+        eta = np.linspace(-4.0, 2.0, 400)
+    elif link in (IdentityLink, InverseLink):
+        eta = np.linspace(0.05, 5.0, 400)
+    else:
+        eta = np.linspace(-3.0, 3.0, 400)  # either side of zero, not on it
+    mu = link().inverse(eta)
+    for response in responses:
+        units = distribution.deviance_unit(np.full(eta.size, response), mu)
+        assert np.all(np.isfinite(units))
+        second = units[2:] - 2.0 * units[1:-1] + units[:-2]
+        rounding = (
+            256.0
+            * np.finfo(np.float64).eps
+            * (np.abs(units[2:]) + 2.0 * np.abs(units[1:-1]) + np.abs(units[:-2]))
+        )
+        assert np.all(second >= -rounding), (response, float(np.min(second)))
+
+
+@pytest.mark.parametrize(("link", "deviances"), [("log", 1), ("sqrt", 2)])
+def test_intercept_profile_forms_the_start_deviance_only_where_its_root_can_climb(link, deviances):
+    """Under a pairing whose deviance is convex in the predictor, with no row held by a clamp,
+    the root of the score is the minimum: the profile forms one deviance, at the root, which
+    publication reads. Under the square-root link it forms the start's as well, to compare.
+
+    Mutation: comparing every root with its start forms two under the log link.
+    """
+    from superglm.links import SqrtLink
+
+    rng = np.random.default_rng(20261114)
+    n = 240
+    eta = 0.5 + 0.3 * rng.normal(size=n)
+    model = SimpleNamespace(_distribution=Poisson(), _link=LogLink())
+    if link == "sqrt":
+        model._link, eta = SqrtLink(), 1.5 + 0.3 * rng.normal(size=n)
+    y = rng.poisson(model._link.inverse(eta + 0.4)).astype(np.float64)
+    weights = rng.uniform(0.5, 2.0, n)
+    formed = []
+    real = Poisson.deviance_unit
+    model._distribution.deviance_unit = lambda *rows: (formed.append(1), real(Poisson(), *rows))[1]
+
+    shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+
+    assert len(formed) == deviances
+
+
+def _square_root_branch_minimum(eta, y, weights, shift):
+    """SciPy's minimum of the Poisson deviance under the square-root link over the shifts
+    between the poles either side of ``shift``, where a row of positive response has a zero
+    predictor; between them every row's unit deviance is convex in the shift."""
+    from scipy.optimize import minimize_scalar
+
+    poles = -eta[(y > 0.0) & (weights > 0.0)]
+    lower = np.max(poles[poles < shift], initial=shift - 1e3)
+    upper = np.min(poles[poles > shift], initial=shift + 1e3)
+
+    def deviance(t):
+        return float(np.sum(weights * Poisson().deviance_unit(y, (eta + t) ** 2)))
+
+    width = upper - lower
+    found = minimize_scalar(
+        deviance,
+        bounds=(lower + 1e-12 * width, upper - 1e-12 * width),
+        method="bounded",
+        options={"xatol": 1e-12 * width},
+    )
+    return float(found.x), deviance
+
+
+def test_intercept_profile_under_the_square_root_link_takes_no_step_up_across_a_pole():
+    """Sol's case on #626: the deviance in the shift has a pole wherever a row's predictor
+    crosses zero, here at -3 and 0.03. The first Fisher step from 0 lands at -8.8, past the
+    pole at -3, where the deviance is far higher; at 1984d54f3 the search took it on the
+    score's sign alone and converged to -3.7154 on the far branch, raising the deviance from
+    17.44 to 26.41. It is refused for its deviance, and the search reaches master's -1.12106,
+    the start's branch's minimum, deviance 0.171.
+    """
+    from superglm.links import SqrtLink
+
+    model = SimpleNamespace(_distribution=Poisson(), _link=SqrtLink())
+    eta, y, weights = np.array([-0.03, 3.0]), np.array([1.0, 3.0]), np.ones(2)
+
+    _, shift, _, _ = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+
+    expected, deviance = _square_root_branch_minimum(eta, y, weights, 0.0)
+    assert shift == pytest.approx(expected, abs=1e-8)
+    assert deviance(shift) == pytest.approx(0.171157, abs=1e-6)
+
+
+@pytest.mark.parametrize("family", ["poisson", "gamma", "negative_binomial"])
+def test_intercept_profile_under_the_square_root_link_ends_no_higher_than_it_starts(family):
+    """Under the square-root link the deviance in the shift need not be unimodal, so a step
+    on the score's sign can climb. Sixty signed predictors per family; at 1984d54f3 one to
+    four of them ended above their start, in every family. Each converges, no higher.
+    """
+    from superglm.distributions import NegativeBinomial, clip_mu
+    from superglm.links import SqrtLink
+
+    distribution = {
+        "poisson": Poisson(),
+        "gamma": Gamma(),
+        "negative_binomial": NegativeBinomial(theta=2.0),
+    }[family]
+    model = SimpleNamespace(_distribution=distribution, _link=SqrtLink())
+    rng = np.random.default_rng(20261112)
+    for _ in range(60):
+        n = int(rng.integers(2, 40))
+        eta = rng.choice([-1.0, 1.0], n) * rng.uniform(0.05, 3.0, n)
+        mean = (eta + rng.normal()) ** 2
+        if family == "gamma":
+            y = rng.gamma(2.0, mean / 2.0) + 1e-3
+        else:
+            y = rng.poisson(mean).astype(np.float64)
+        weights = rng.uniform(0.5, 2.0, n)
+
+        def deviance(t, eta=eta, y=y, weights=weights):
+            mu = clip_mu((eta + t) ** 2, distribution)
+            return float(np.sum(weights * distribution.deviance_unit(y, mu)))
+
+        _, shift, _, _ = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+
+        assert deviance(shift) <= deviance(0.0) * (1.0 + 1e-12)
+
+
+def test_intercept_profile_beside_a_pole_compares_deviances_to_their_means_rounding():
+    """A row whose mean sits next to its pole makes the residual's rounding bound vast, about
+    2e5 here against a deviance of 0.104: a search comparing deviances to that bound takes any
+    step, and like 1984d54f3 climbs 140-fold onto a far branch. The deviance is evaluated
+    without cancellation given its mean, so two are compared to their means' rounding.
+    """
+    from superglm.links import SqrtLink
+
+    model = SimpleNamespace(_distribution=Poisson(), _link=SqrtLink())
+    eta = np.array([1e-13, -0.2, 3.0, -1.0])
+    y, weights = np.array([1e-3, 0.04, 9.0, 1.0]), np.ones(4)
+
+    _, shift, _, _ = shape_ops._profile_repaired_intercept(model, eta, y=y, weights=weights)
+
+    expected, deviance = _square_root_branch_minimum(eta, y, weights, shift)
+    assert deviance(shift) <= deviance(0.0)
+    assert deviance(shift) <= deviance(expected) * (1.0 + 1e-12)
+
+
+def test_a_square_root_link_repair_profiles_each_intercept_to_a_minimum_below_its_start(
+    monkeypatch,
+):
+    """Sol's fit on #626: 40 Poisson rows under the square-root link, offsets of either sign.
+    At 1984d54f3 two intercept profiles of the call climbed from 232.18 to 258.34, and the
+    repair was published at that intercept. Each profile now ends at the minimum of the
+    branch it ends on, by SciPy, no higher than where it started, and the repair is published.
+    """
+    rng = np.random.default_rng(30)
+    x = np.sort(rng.uniform(0.0, 1.0, 40))
+    offset = rng.choice([-1.0, 1.0], 40) * rng.uniform(0.5, 3.0, 40)
+    y = rng.poisson((offset + 0.6 * np.sin(6.0 * x) * np.sign(offset)) ** 2).astype(np.float64)
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="poisson",
+        link="sqrt",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=6, constraint=Constraint.postfit.increasing)},
+    ).fit(X, y, offset=offset)
+    assert model.result.converged
+    profiles = []
+    real = shape_ops._searched_intercept
+
+    def recorded(model, eta, *, y, weights):
+        found = real(model, eta, y=y, weights=weights)
+        profiles.append((np.array(eta), np.array(y), np.array(weights), found[1]))
+        return found
+
+    monkeypatch.setattr(shape_ops, "_searched_intercept", recorded)
+    model.apply_shape_postfit(X, offset=offset)
+
+    assert "x" in model._shape_repairs
+    assert profiles
+    for eta, response, weights, shift in profiles:
+        expected, deviance = _square_root_branch_minimum(eta, response, weights, shift)
+        assert deviance(shift) <= deviance(0.0)
+        assert deviance(shift) <= deviance(expected) * (1.0 + 1e-12)
 
 
 def test_curvature_repair_of_a_noise_free_log_linear_response_is_published():

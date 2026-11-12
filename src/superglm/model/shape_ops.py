@@ -10,8 +10,10 @@ from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
 from superglm._utils import weighted_row_sum
+from superglm.distributions import Binomial, Gamma, NegativeBinomial, Poisson, Tweedie
 from superglm.features.constraint import rules_of
 from superglm.group_matrix import DesignMatrix, GroupMatrix
+from superglm.links import CloglogLink, IdentityLink, InverseLink, LogitLink, LogLink, ProbitLink
 from superglm.model.fit_state import (
     FittedStateRevision,
     canonical_intercept_shift,
@@ -368,8 +370,10 @@ def _deviance_rounding(model, eta, *, y, weights) -> float:
 
 
 class _InterceptState(NamedTuple):
-    """The score at one intercept shift, and the rounding the deviance keeps there."""
+    """The deviance and score at one intercept shift, and the rounding the deviance keeps there."""
 
+    deviance: float
+    mean_rounding: float
     deviance_rounding: float
     score: float
     score_scale: float
@@ -383,12 +387,13 @@ def _profile_repaired_intercept(
     *,
     y,
     weights,
-) -> tuple[np.ndarray, float, float]:
+) -> tuple[np.ndarray, float, float, float | None]:
     """Minimize deviance over the unpenalized intercept for fixed coefficients.
 
-    Returns the profiled predictor, its shift and the deviance's rounding there
-    (``_deviance_rounding``), which each evaluation already holds. A repair call
-    reads a profile it has formed from its memo (``constraints.reuse_repair_evidence``):
+    Returns the profiled predictor, its shift, the deviance's rounding there
+    (``_deviance_rounding``) and the weighted deviance there, which the search holds
+    (``None`` for the closed form), as ``_shape_candidate_objective`` forms it. A repair
+    call reads a profile it has formed from its memo (``constraints.reuse_repair_evidence``):
     the zero-term fallback's in a second publication check, a continued repair's start.
     """
     from superglm.constraints import _fingerprint, _reused
@@ -397,24 +402,46 @@ def _profile_repaired_intercept(
     y_arr = np.asarray(y, dtype=np.float64)
     weights_arr = np.asarray(weights, dtype=np.float64)
 
-    def compute() -> tuple[float, float]:
-        _, shift, rounding = _searched_intercept(model, eta_base, y=y_arr, weights=weights_arr)
-        return shift, rounding
+    def compute() -> tuple[float, float, float | None]:
+        _, shift, rounding, deviance = _searched_intercept(
+            model, eta_base, y=y_arr, weights=weights_arr
+        )
+        return shift, rounding, deviance
 
     # The memo holds the shift, not a predictor of the rows: ``eta_base + shift`` is the
     # profiled predictor the search returns, formed by the same operation.
     key = ("intercept", _fingerprint(eta_base, y_arr, weights_arr))
-    shift, rounding = _reused(model, key, compute)
-    return eta_base + shift, shift, rounding
+    shift, rounding, deviance = _reused(model, key, compute)
+    return eta_base + shift, shift, rounding, deviance
+
+
+#: The links under which each family's unit deviance is convex in the linear predictor,
+#: whatever the response, so that a root of the intercept's score is the profile's minimum:
+#: a canonical link, where it is twice the convex cumulant less a linear term, and those
+#: whose second derivative in the predictor is positive by hand: the Poisson's under the
+#: identity link (2y/eta**2), the gamma's and the Tweedie's (1 < p < 2) under the log link,
+#: the negative binomial's under the log link (2(y+t)t e**eta/(t+e**eta)**2), and the
+#: binomial's under the probit, cloglog and log links, whose probabilities and complements
+#: are log-concave. Any other pairing, or a subclass, is not taken to be convex.
+_CONVEX_DEVIANCE_LINKS: dict[type, tuple[type, ...]] = {
+    Poisson: (LogLink, IdentityLink),
+    Gamma: (InverseLink, LogLink),
+    NegativeBinomial: (LogLink,),
+    Tweedie: (LogLink,),
+    Binomial: (LogitLink, ProbitLink, CloglogLink, LogLink),
+}
 
 
 def _searched_intercept(
     model, eta_base: NDArray, *, y: NDArray, weights: NDArray
-) -> tuple[np.ndarray, float, float]:
+) -> tuple[np.ndarray, float, float, float | None]:
+    from superglm._roundoff import gamma
+    from superglm.constraints import _ROW_STEPS, shape_sum_tolerance
     from superglm.distributions import _VARIANCE_FLOOR, Gaussian, clip_mu
     from superglm.links import IdentityLink, stabilize_eta
 
     y_arr, weights_arr = y, weights
+    row_gamma = float(gamma(_ROW_STEPS))
     if eta_base.shape != y_arr.shape or weights_arr.shape != y_arr.shape:
         raise RuntimeError(
             "Unsafe shape repair rejected before publication: incoherent intercept geometry"
@@ -446,6 +473,7 @@ def _searched_intercept(
             profiled_eta,
             shift,
             _deviance_rounding(model, profiled_eta, y=y_arr, weights=weights_arr),
+            None,
         )
 
     carried = weights_arr != 0.0
@@ -454,8 +482,11 @@ def _searched_intercept(
     # the search's domain: there the clamp flattens the deviance, which no longer has the
     # score's slope.
     held: NDArray | None = None
+    # Whether a search's root is compared with its start (below): not where every row's
+    # deviance is convex in its predictor and no row is held.
+    checked = type(model._link) not in _CONVEX_DEVIANCE_LINKS.get(type(model._distribution), ())
 
-    def evaluate(shift: float) -> _InterceptState | None:
+    def evaluate(shift: float, compared: bool) -> _InterceptState | None:
         nonlocal held
         trial_eta = eta_base + shift
         eta_safe = stabilize_eta(trial_eta, model._link)
@@ -497,17 +528,37 @@ def _searched_intercept(
             )
             score = float(np.sum(score_rows, dtype=np.float64))
             information = float(np.sum(information_rows, dtype=np.float64))
-        # The search reads the score's sign and size, never the deviance itself, which the
-        # publication rule forms once at the profiled shift.
+            score_scale = float(np.sum(np.abs(score_rows), dtype=np.float64))
+            score_rounding_sum = float(np.sum(score_rounding, dtype=np.float64))
+            # The deviance only where it is read: every trial a bracket is kept by, a start
+            # compared, and the stationary shift a search returns, which publication reads.
+            # Where compared, with what it keeps from the mean alone: each unit deviance is
+            # evaluated without cancellation given the mean (``_deviance_rounding``), so the
+            # residual's cancellation does not enter it, while beside a pole it would be vast.
+            # One that is not finite is publication's to refuse.
+            deviance = mean_rounding = np.nan
+            if compared or abs(score) <= 1e-11 * score_scale + score_rounding_sum:
+                deviance = weighted_row_sum(
+                    weights_arr, model._distribution.deviance_unit, y_arr, mu
+                )
+                if checked:
+                    mean_terms = (np.abs(mu) + np.abs(dmu_deta * eta_safe))[carried]
+                    mean_rounding = (
+                        2.0
+                        * row_gamma
+                        * float(np.sum(deviance_rows * mean_terms, dtype=np.float64))
+                    )
         if not (np.isfinite(score) and np.isfinite(information) and information > 0.0):
             raise RuntimeError(
                 "Unsafe shape repair rejected before publication: invalid profiled intercept"
             )
         return _InterceptState(
+            deviance=deviance,
+            mean_rounding=mean_rounding,
             deviance_rounding=deviance_rounding,
             score=score,
-            score_scale=float(np.sum(np.abs(score_rows), dtype=np.float64)),
-            score_rounding=float(np.sum(score_rounding, dtype=np.float64)),
+            score_scale=score_scale,
+            score_rounding=score_rounding_sum,
             information=information,
         )
 
@@ -516,57 +567,99 @@ def _searched_intercept(
         # their residuals carry.
         return abs(state.score) <= relative * state.score_scale + state.score_rounding
 
-    shift = 0.0
-    state = evaluate(shift)
-    assert state is not None and held is not None  # the first evaluation holds its rows
+    start = evaluate(0.0, checked)
+    assert start is not None and held is not None  # the first evaluation holds its rows
+    if not checked and held.any():
+        # A held row's deviance is flat in the shift until it leaves the clamp, so the
+        # profile can bend there: its root is compared with the start after all.
+        checked = True
+        start = evaluate(0.0, True)
+        assert start is not None
     # The shifts the link's clamp leaves the rows it does not hold (none held: unbounded).
     free = carried & ~held
     eta_floor, eta_ceiling = stabilize_eta(np.array([-np.inf, np.inf]), model._link)
     lower = float(eta_floor - np.min(eta_base, where=free, initial=np.inf))
     upper = float(eta_ceiling - np.max(eta_base, where=free, initial=-np.inf))
     del free
-    # The score is minus half the deviance's slope in the shift, so a shift whose score is
-    # positive lies below a minimum and one whose score is negative above it. The search is
+
+    def higher(state: _InterceptState, than: _InterceptState) -> bool:
+        # Beyond the two deviances' rounding: of each sum (Higham, section 3.1) and what each
+        # keeps from its mean. One not formed is no lower.
+        return not state.deviance <= than.deviance + (
+            shape_sum_tolerance(max(state.deviance, than.deviance), len(y_arr))
+            + state.mean_rounding
+            + than.mean_rounding
+        )
+
+    def search(by_deviance: bool) -> tuple[float, _InterceptState] | None:
+        """The stationary shift the search reaches, or ``None``."""
+        shift, state = 0.0, start
+        below, above = -np.inf, np.inf
+        last = before_last = np.inf
+        for _ in range(_INTERCEPT_STEPS):
+            if stationary(state, 1e-11):
+                return shift, state
+            if state.score > 0.0:
+                below = shift
+            else:
+                above = shift
+            step = state.score / state.information
+            proposal = shift + step
+            if not (below < proposal < above) or abs(2.0 * step) > abs(before_last):
+                if np.isfinite(below) and np.isfinite(above):
+                    proposal = below + 0.5 * (above - below)
+            proposal = min(max(proposal, lower), upper)
+            if not np.isfinite(proposal) or proposal == shift:
+                break
+            trial = evaluate(proposal, by_deviance)
+            if trial is None or (by_deviance and higher(trial, state)):
+                # Past a clamp, or higher: a minimum lies short of this trial.
+                below, above = (below, proposal) if proposal > shift else (proposal, above)
+                continue
+            before_last, last = last, proposal - shift
+            shift, state = proposal, trial
+        if not stationary(state, 1e-9):
+            return None
+        if np.isnan(state.deviance):
+            state = evaluate(shift, True)  # stationary only to the looser test
+            assert state is not None  # a shift the search has held
+        return shift, state
+
+    # The score is minus half the deviance's slope in the shift, so a minimum lies above a
+    # shift whose score is positive and below one whose score is negative. The search is
     # Newton's method kept inside the bracket those signs give, bisecting where Newton would
     # leave it or does not halve its step every two steps (Press et al., Numerical Recipes,
     # 3rd ed., 2007, section 9.4, rtsafe), with Fisher scoring's step. A side the bracket
     # leaves open is bounded by the link's clamp, and a trial past either clamp bounds it.
-    below, above = -np.inf, np.inf
-    last = before_last = np.inf
-    for _ in range(_INTERCEPT_STEPS):
-        if stationary(state, 1e-11):
-            return eta_base + shift, shift, state.deviance_rounding
-        if state.score > 0.0:
-            below = shift
-        else:
-            above = shift
-        step = state.score / state.information
-        proposal = shift + step
-        if not (below < proposal < above) or abs(2.0 * step) > abs(before_last):
-            if np.isfinite(below) and np.isfinite(above):
-                proposal = below + 0.5 * (above - below)
-        proposal = min(max(proposal, lower), upper)
-        if not np.isfinite(proposal) or proposal == shift:
-            break
-        trial = evaluate(proposal)
-        if trial is None:
-            # Past a clamp: the root inside the domain lies short of this trial, so the
-            # next step bisects towards it.
-            below, above = (below, proposal) if proposal > shift else (proposal, above)
-            continue
-        before_last, last = last, proposal - shift
-        shift, state = proposal, trial
-
-    if not stationary(state, 1e-9):
+    # Where the deviance is not convex in the shift (a square-root link's branches meet at a
+    # pole), a root of the score can lie higher than the start; where it is, and no row is
+    # held, no row is clamped between them, so the root is the minimum. Elsewhere, where the
+    # root lies higher than the start or is not reached, the search runs again keeping the
+    # bracket by deviances, as Brent's search with derivatives keeps it (Press et al.,
+    # Numerical Recipes in Fortran 77, 2nd ed., 1992, section 10.3, dbrent): the shift held is
+    # the lowest found and a trial no lower ends its side, so the bracket holds a minimum no
+    # higher than the start.
+    found = search(by_deviance=False)
+    if checked and (
+        found is None
+        or (
+            np.isfinite(start.deviance)
+            and np.isfinite(found[1].deviance)
+            and higher(found[1], start)
+        )
+    ):
+        found = search(by_deviance=True)
+    if found is None:
         raise RuntimeError(
             "Unsafe shape repair rejected before publication: conditional intercept "
             "optimization did not converge"
         )
-    return eta_base + shift, shift, state.deviance_rounding
+    shift, state = found
+    return eta_base + shift, shift, state.deviance_rounding, state.deviance
 
 
-#: Evaluations the conditional intercept search takes at most: bisection resolves a
-#: bracket as wide as the log link's clamp to the last bit in about 60.
+#: Evaluations each run of the conditional intercept search takes at most: bisection
+#: resolves a bracket as wide as the log link's clamp to the last bit in about 60.
 _INTERCEPT_STEPS = 100
 
 
@@ -579,8 +672,13 @@ def _shape_candidate_objective(
     weights,
     smooth_penalty_terms,
     selection_penalty,
+    deviance=None,
 ) -> tuple[float, float]:
-    """Return weighted deviance and the fitted penalized merit for a coefficient state."""
+    """Return weighted deviance and the fitted penalized merit for a coefficient state.
+
+    ``deviance``, where given, is the weighted deviance at ``eta`` as the intercept profile
+    formed it (``_profile_repaired_intercept``), by the operations below; it is not formed again.
+    """
     beta_arr = np.asarray(beta, dtype=np.float64)
     if beta_arr.shape != model.result.beta.shape or not np.all(np.isfinite(beta_arr)):
         raise RuntimeError("Unsafe shape repair rejected before publication: invalid coefficients")
@@ -595,17 +693,20 @@ def _shape_candidate_objective(
     from superglm.distributions import clip_mu
     from superglm.links import stabilize_eta
 
-    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-        eta_safe = stabilize_eta(eta, model._link)
-        mu = clip_mu(model._link.inverse(eta_safe), model._distribution)
-        deviance_units = np.asarray(model._distribution.deviance_unit(y, mu), dtype=np.float64)
-    carried = np.asarray(weights, dtype=np.float64) != 0.0
-    if not np.all(np.isfinite(mu)) or not np.all(np.isfinite(deviance_units[carried])):
+    if deviance is None:
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            eta_safe = stabilize_eta(eta, model._link)
+            mu = clip_mu(model._link.inverse(eta_safe), model._distribution)
+            deviance_units = np.asarray(model._distribution.deviance_unit(y, mu), dtype=np.float64)
+        carried = np.asarray(weights, dtype=np.float64) != 0.0
+        if not np.all(np.isfinite(mu)) or not np.all(np.isfinite(deviance_units[carried])):
+            deviance = np.nan
+        else:
+            deviance = weighted_row_sum(weights, lambda units: units, deviance_units)
+    if not np.isfinite(deviance):
         raise RuntimeError(
             "Unsafe shape repair rejected before publication: invalid link-domain predictions"
         )
-
-    deviance = weighted_row_sum(weights, lambda units: units, deviance_units)
     smooth_value = _smooth_penalty_value(beta_arr, smooth_penalty_terms)
     selection_value = 2.0 * float(selection_penalty.eval(beta_arr, model._groups))
     merit = deviance + smooth_value + selection_value
@@ -797,13 +898,15 @@ def _validate_repair_for_publication(
         fallback_beta,
         groups,
     )
-    candidate_eta, candidate_intercept_shift, candidate_rounding = _profile_repaired_intercept(
-        model,
-        np.asarray(current_eta, dtype=np.float64) + candidate_eta_delta,
-        y=y,
-        weights=scoring_weights,
+    candidate_eta, candidate_intercept_shift, candidate_rounding, candidate_profiled = (
+        _profile_repaired_intercept(
+            model,
+            np.asarray(current_eta, dtype=np.float64) + candidate_eta_delta,
+            y=y,
+            weights=scoring_weights,
+        )
     )
-    fallback_eta, _, fallback_rounding = _profile_repaired_intercept(
+    fallback_eta, _, fallback_rounding, fallback_profiled = _profile_repaired_intercept(
         model,
         np.asarray(current_eta, dtype=np.float64) + fallback_eta_delta,
         y=y,
@@ -817,6 +920,7 @@ def _validate_repair_for_publication(
         weights=scoring_weights,
         smooth_penalty_terms=smooth_penalty_terms,
         selection_penalty=selection_penalty,
+        deviance=candidate_profiled,
     )
     fallback_deviance, fallback_merit = _shape_candidate_objective(
         model,
@@ -826,6 +930,7 @@ def _validate_repair_for_publication(
         weights=scoring_weights,
         smooth_penalty_terms=smooth_penalty_terms,
         selection_penalty=selection_penalty,
+        deviance=fallback_profiled,
     )
     deviance_rounding = candidate_rounding + fallback_rounding
     deviance_tolerance = shape_sum_tolerance(abs(fallback_deviance), len(y)) + deviance_rounding
@@ -903,7 +1008,7 @@ def _continued_repair(
 
     def scored(beta):
         delta = _shape_term_eta_delta(model, current_beta, beta, groups)
-        eta, _, rounding = _profile_repaired_intercept(
+        eta, _, rounding, deviance = _profile_repaired_intercept(
             model, base_eta + delta, y=y, weights=scoring_weights
         )
         _, merit = _shape_candidate_objective(
@@ -914,6 +1019,7 @@ def _continued_repair(
             weights=scoring_weights,
             smooth_penalty_terms=smooth_penalty_terms,
             selection_penalty=selection_penalty,
+            deviance=deviance,
         )
         return merit, eta, shape_sum_tolerance(abs(merit), len(y)) + rounding
 
