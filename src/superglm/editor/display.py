@@ -28,11 +28,10 @@ import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 from superglm.distributional.api import SuperLSS
-from superglm.distributional.families import LowerBoundedLogLink
 from superglm.distributional.family import ParameterSpec
 from superglm.editor.errors import EditorKeyError
 from superglm.inference._term_types import _MAX_LOG_REL
-from superglm.links import IdentityLink, Link, LogitLink, LogLink, _is_shifted_log_link
+from superglm.links import Link, _is_shifted_log_link
 
 Role = Literal["average", "spread"]
 Colour = Literal["blue", "orange"]
@@ -101,22 +100,38 @@ INVERSE_THETA = DisplayTransform("inverse_theta", "log")
 ADDITIVE = DisplayTransform("additive", "identity")
 
 
+# Link-scale points at which a link's inverse is compared with the standard inverses.
+_LINK_PROBE = np.linspace(-1.5, 1.5, 7)
+
+
+def _inverse_is(link: Link, expected: NDArray[np.float64]) -> bool:
+    """Whether ``link`` maps the probe points to ``expected``, to well inside float64 noise."""
+    try:
+        values = np.asarray(link.inverse(_LINK_PROBE), dtype=np.float64)
+    except (AttributeError, TypeError, ValueError, FloatingPointError):
+        return False
+    return values.shape == _LINK_PROBE.shape and bool(
+        np.allclose(values, expected, rtol=1.0e-10, atol=0.0)
+    )
+
+
 def link_name(link: Link) -> str:
     """The short name of ``link`` that labels read: ``log``, ``floored_log``, ``logit``,
-    ``identity``, else the class name without ``Link`` in snake case."""
-    if isinstance(link, LogLink):
-        return "log"
-    if isinstance(link, LowerBoundedLogLink):
-        return "floored_log"
-    if isinstance(link, LogitLink):
-        return "logit"
-    if isinstance(link, IdentityLink):
-        return "identity"
+    ``identity``, else the class name without ``Link`` in snake case.
+
+    A link is named by what its inverse does, never by its class, so a subclass that
+    changes the mapping is not read as its parent.
+    """
     # The probe crosses eta = 0, where an inverse link divides by zero.
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-        shifted_log = _is_shifted_log_link(link)
-    if shifted_log:
-        return "floored_log"
+        if _inverse_is(link, np.exp(_LINK_PROBE)):
+            return "log"
+        if _is_shifted_log_link(link):
+            return "floored_log"
+        if _inverse_is(link, 1.0 / (1.0 + np.exp(-_LINK_PROBE))):
+            return "logit"
+        if _inverse_is(link, _LINK_PROBE):
+            return "identity"
     stem = type(link).__name__.removesuffix("Link") or type(link).__name__
     return re.sub(r"(?<!^)(?=[A-Z])", "_", stem).lower()
 

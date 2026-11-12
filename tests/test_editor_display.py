@@ -318,3 +318,19 @@ def test_a_log_link_band_wider_than_float64_holds_is_drawn_finite_and_ordered():
     assert np.all(np.isfinite(lower)) and np.all(np.isfinite(upper))
     assert np.all(lower <= curve) and np.all(curve <= upper)
     assert lower[1] < upper[1]
+
+
+class _DoubledLogLink(LogLink):
+    """A log-link subclass whose inverse is ``exp(2 eta)``: a factor, but not ``exp`` of the effect."""
+
+    def inverse(self, eta):
+        return np.exp(2.0 * np.asarray(eta, dtype=np.float64))
+
+    def deriv_inverse(self, eta):
+        return 2.0 * np.exp(2.0 * np.asarray(eta, dtype=np.float64))
+
+
+def test_a_link_subclass_that_changes_its_mapping_is_not_read_as_its_parent():
+    # Its relativity would be exp(2 f), so exp(f) drawn as one would be wrong.
+    assert transform_for_link(_DoubledLogLink()).kind == "additive"
+    assert transform_for_link(LogLink()).kind == "relativity"
