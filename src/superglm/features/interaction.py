@@ -29,6 +29,7 @@ from numpy.typing import NDArray
 from superglm.features import _basis_kernels
 from superglm.features._spline_config import SplineOptionWarning
 from superglm.features._spline_penalties import _gapped_rank, structural_penalty_ranks
+from superglm.features._spline_runtime import bin_knots
 from superglm.features._spline_select import _certified_range, _null_mask
 from superglm.features.categorical import (
     _UNSEEN_POLICIES,
@@ -587,7 +588,7 @@ class SplineCategorical:
         )
 
         support, bin_idx = _discretize_column(
-            x_spline, int(n_bins), spline_spec._knots, sample_weight
+            x_spline, int(n_bins), bin_knots(spline_spec, x_spline, sample_weight), sample_weight
         )
         B_unique = np.asarray(spline_spec._raw_basis_matrix(support), dtype=np.float64)
 
@@ -2382,7 +2383,9 @@ class TensorInteraction:
             )
             support = counts = None
             if n_bins is not None:
-                support, idx = _discretize_column(x, n_bins, candidate._knots, geometry_weight)
+                support, idx = _discretize_column(
+                    x, n_bins, bin_knots(candidate, x, geometry_weight), geometry_weight
+                )
                 counts = np.bincount(idx, weights=geometry_weight, minlength=len(support))
                 bins.append((support, idx))
             info = self._marginal_ingredients(

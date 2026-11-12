@@ -93,7 +93,8 @@ def discretize_column(
     resolves = np.all(n_bins * widths[occupied] / (scaled[-1] - scaled[0]) >= b_min)
     bin_mass = np.bincount(bin_of_value, weights=mass, minlength=n_bins)
     crowded = bin_mass.max() * n_bins > _CROWDED_SHARE * total
-    if resolves and not crowded:
+    # With a span holding rows for every bin, no grid gives each one a cell.
+    if (resolves and not crowded) or int(occupied.sum()) >= n_bins:
         return bin_centers, bin_idx
     return _adaptive_bins(mass, total, unique_vals, inverse, span_edges, occupied, n_bins)
 
@@ -169,13 +170,14 @@ def _row_spans(
 
 
 def _knot_aligned_left_edges(span_edges: NDArray, occupied: NDArray, n_cells: int) -> NDArray:
-    """Left edges of ``n_cells`` cells that follow the knots (``discretize_column``)."""
+    """Left edges of ``n_cells`` cells that follow the knots (``discretize_column``).
+
+    ``n_cells`` is at least the number of spans holding rows, so each of them
+    gets ``b_min >= 1`` cells.
+    """
     widths = np.diff(_unit_scaled(span_edges))
     b_min = _min_cells_per_span(n_cells, occupied.size)
     n_occupied = int(occupied.sum())
-    if b_min * n_occupied > n_cells:
-        return np.linspace(span_edges[0], span_edges[-1], n_cells + 1)[:-1]
-
     remaining = n_cells - b_min * n_occupied
     share = remaining * widths[occupied] / widths[occupied].sum()
     extra = np.floor(share).astype(np.intp)
@@ -208,9 +210,13 @@ def _adaptive_bins(
     its sum.
     """
     n_w = n_bins // 2
+    n_occupied = int(occupied.sum())
+    if _min_cells_per_span(n_w, occupied.size) * n_occupied > n_w:
+        # One cell for each span that holds rows; the rows get the rest.
+        n_w = n_occupied
     n_q = n_bins - n_w
     lo, hi = float(span_edges[0]), float(span_edges[-1])
-    width_edges = _knot_aligned_left_edges(span_edges, occupied, max(n_w, 1))
+    width_edges = _knot_aligned_left_edges(span_edges, occupied, n_w)
 
     # Lower (inverted-CDF) quantiles of the row mass, so every edge is an observed value.
     quantile_edges = _lower_quantile_values(mass, total, unique_vals, n_q)

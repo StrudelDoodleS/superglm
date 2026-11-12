@@ -12,6 +12,7 @@ from superglm._group_matrix._group_matrix_bins import discretize_column
 from superglm.features import _basis_kernels, _spline_extrapolation, _spline_knots
 from superglm.features._spline_ranges import (
     certify_determined,
+    determining_cuts,
     merged_interior_knots,
     validate_ranges,
 )
@@ -190,6 +191,24 @@ def fit_support(
     return centres[np.unique(index)]
 
 
+def bin_knots(spec: Any, x: NDArray, weights: NDArray | None = None) -> NDArray:
+    """The knots a binned fit's bins follow: the spline's, plus its ranges' cuts.
+
+    A spline with polynomial ranges adds ``determining_cuts`` on the rows of
+    positive ``weights``, so the adaptive grid of ``discretize_column`` gives
+    each range and free stretch the support points certification asks of it
+    wherever its rows have them. Every site that bins a spline's column, and
+    the certification, reads its knots here.
+    """
+    ranges = spec._polynomial_ranges
+    if not ranges:
+        return spec._knots
+    values, _ = _spline_knots.knot_geometry_data(x, weights)
+    order = max(spec._m_orders)
+    cuts = determining_cuts(ranges, values, spec._lo, spec._hi, order)
+    return np.concatenate([spec._knots, cuts])
+
+
 def _certify_ranges(
     spec: Any, x: NDArray, ranges: Any, n_bins: int | None, weights: NDArray | None
 ) -> None:
@@ -200,7 +219,7 @@ def _certify_ranges(
     """
     note = "" if n_bins is None else f" once binned to {n_bins} bins"
     order = max(spec._m_orders)
-    support = fit_support(x, n_bins, spec._knots, weights)
+    support = fit_support(x, n_bins, bin_knots(spec, x, weights), weights)
     certify_determined(ranges, support, spec._lo, spec._hi, order, note)
     spec._polynomial_ranges = ranges
 

@@ -23,6 +23,7 @@ from superglm._frame import EagerFrame
 from superglm._parallel import pooled_map
 from superglm.features._spline_build import qp_geometry, shape_engine
 from superglm.features._spline_penalties import structural_penalty_ranks
+from superglm.features._spline_runtime import bin_knots
 from superglm.features.categorical import Categorical
 from superglm.features.factor_smooth import FactorSmooth
 from superglm.features.interaction import (
@@ -312,7 +313,7 @@ def compile_predictor_design(
                 x_col,
                 n_bins_feat,
                 feature_build_weight,
-                spec._knots,
+                bin_knots(spec, x_col, feature_build_weight),
             )
             B_unique = spec._raw_basis_matrix(bin_centers)
             exposure_agg = np.bincount(bin_idx, weights=sample_weight, minlength=len(bin_centers))

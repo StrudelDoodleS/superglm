@@ -661,22 +661,25 @@ def test_too_few_distinct_values_in_a_range_are_refused_by_name(discrete):
 
 
 def test_a_binned_fit_certifies_its_ranges_on_the_bin_centres():
-    # [40, 40.2] holds a dozen distinct ages. Its edges are knots, so 512 bins
-    # follow them and give it cells of its own (``discretize_column``); 16 bins
-    # over about 15 knot spans give each span one cell, which cannot fix a quadratic.
+    # [40, 40.2] holds a dozen distinct ages. Its edges are knots, and two of
+    # its ages cut it into three runs (``bin_knots``), so 512 bins, and 16 bins
+    # over the 13 spans those make, give it three cells of its own. Eight bins
+    # cannot give each span a cell, so they stay equal-width, 7.75 wide with
+    # centres at 21.9, 29.6, 37.4, 45.1, ...: none in the range.
     narrow = [PolynomialRange(40.0, 40.2, 2)]
     _fit("bs", narrow)
     _fit("bs", narrow, discrete=True)
-    with pytest.raises(ValueError, match=r"needs at least 3 distinct values .* once binned to 16"):
-        _fit("bs", narrow, discrete=True, n_bins=16)
+    _fit("bs", narrow, discrete=True, n_bins=16)
+    with pytest.raises(ValueError, match=r"needs at least 3 distinct values .* once binned to 8"):
+        _fit("bs", narrow, discrete=True, n_bins=8)
 
 
 def test_a_binned_fit_refuses_an_end_stretch_no_bin_centre_reaches():
     # The stretch below a range starting 0.03 above the youngest age is a knot
     # span with rows, so binned fits that can give every span a cell put one in
-    # it. Four bins cannot (the range leaves about six spans, all holding rows),
-    # so they stay equal-width: the first centre sits about 7.75 above the
-    # youngest age and the stretch's slope would be set by nothing.
+    # it. Four bins cannot (eight spans hold rows), so they stay equal-width:
+    # the first centre sits 7.75 above the youngest age and the stretch's
+    # slope would be set by nothing.
     book = _book()
     sliver = [PolynomialRange(float(book[0]["age"].min()) + 0.03, 50.0, 1, "kink")]
     _fit("bs", sliver, book=book)
@@ -859,32 +862,43 @@ def test_a_superlss_tensor_on_a_ranged_parent_keeps_the_ranges(kind, override):
 def test_a_binned_tensor_margin_at_its_own_knot_count_certifies_its_ranges_on_its_bins():
     """A margin rebuilt for an n_knots override is certified on the support it is binned to.
 
-    The clone's ranges were certified on the raw rows, then the margin was
-    binned on its own knots, which leave one support point in the range where
-    the parent's bins leave five. The fit lost a rank (347 of 348, against
-    348 on master) with no message, and published a finite standard error at
-    a point the terminal rank marks non-estimable. It now refuses by name, as
-    a ranged spline binned too coarsely does.
+    The clone's ranges used to be certified on the raw rows and the margin then
+    binned on its own knots, so a margin binned too coarsely lost a rank with
+    no message. At 64 bins its 41 knot spans each get a cell and the range's
+    cuts give it four (``bin_knots``), so the fit is accepted at full rank, as
+    on equal-width bins (standard error 0.030 at the point below). At 32 bins
+    the clone's spans outnumber the bins, so its bins stay equal-width and
+    leave the range one support point: the margin is refused by name, while
+    the main effect alone, at 32 bins on its own few knots, is accepted.
     """
     from superglm import GaussianLS, SuperLSS, s, term, ti
+    from superglm.distributional.posterior import link_standard_errors
     from superglm.features._spline_ranges import UndeterminedRangeError
 
     x = np.linspace(0.0, 10.0, 20001)
     rng = np.random.default_rng(81)
     z = rng.uniform(-1.0, 1.0, x.size)
     y = np.sin(x) * (1.0 + z / 3.0) + rng.normal(0.0, 0.2, x.size)
-    ranged = Spline(kind="bs", k=8, polynomial_ranges=[PolynomialRange(3.98, 4.46, 3, "kink")])
-    family = GaussianLS()
-    model = SuperLSS(
-        family,
-        family.location(term("x", ranged), s("z", k=6), ti("x", "z", n_knots=(40, 4))),
-        family.scale(),
-        discrete=True,
-        n_bins=64,
-    )
+    frame = pd.DataFrame({"x": x, "z": z})
     names = ("x#wiggle", "x:z#margin_x", "x:z#margin_z", "z#wiggle")
-    with pytest.raises(UndeterminedRangeError, match=r"\[3\.98, 4\.46\].*once binned to 64 bins"):
-        model.fit(pd.DataFrame({"x": x, "z": z}), y, lambdas={f"location:{n}": 1.0 for n in names})
+    lambdas = {f"location:{n}": 1.0 for n in names}
+
+    def model(n_bins, *interactions):
+        ranged = Spline(kind="bs", k=8, polynomial_ranges=[PolynomialRange(3.98, 4.46, 3, "kink")])
+        family = GaussianLS()
+        location = family.location(term("x", ranged), s("z", k=6), *interactions)
+        return SuperLSS(family, location, family.scale(), discrete=True, n_bins=n_bins)
+
+    fitted = model(64, ti("x", "z", n_knots=(40, 4)))
+    fitted.fit(frame, y, lambdas=lambdas)
+    rank = fitted._require_fitted().fit_state.solver_result.terminal_rank
+    assert rank.rank == rank.width
+    se = link_standard_errors(fitted._require_fitted(), pd.DataFrame({"x": [4.1], "z": [0.2]}))
+    assert 0.02 < se[0, 0] < 0.04  # 0.029
+
+    with pytest.raises(UndeterminedRangeError, match=r"\[3\.98, 4\.46\].*once binned to 32 bins"):
+        model(32, ti("x", "z", n_knots=(40, 4))).fit(frame, y, lambdas=lambdas)
+    model(32).fit(frame, y, lambdas={f"location:{n}": 1.0 for n in ("x#wiggle", "z#wiggle")})
 
 
 @pytest.mark.parametrize("kind", ["bs", "cr"])

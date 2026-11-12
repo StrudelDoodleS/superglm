@@ -233,16 +233,13 @@ def certify_determined(
             f"PolynomialRange [{r.lo:g}, {r.hi:g}] needs at least {r.degree + 1} distinct "
             f"values of the feature inside it; it has {found}{note}."
         )
-    carried = {"kink": 1, "tangent": 2}
-    edge = np.array([min(order, carried.get(r.join, order)) for r in ranges])
-    starts, ends = np.append(lo, highs), np.append(lows, hi)
+    starts, ends, needed = _stretch_needs(ranges, lo, hi, order)
     # A stretch is closed at an end of the axis and open at a range edge,
     # whose value the range already fixes.
     first = np.searchsorted(support, starts, side="right")
     first[0] = np.searchsorted(support, lo)
     last = np.searchsorted(support, ends)
     last[-1] = np.searchsorted(support, hi, side="right")
-    needed = order - np.append(0, edge) - np.append(edge, 0)
     undetermined = np.flatnonzero((starts < ends) & (last - first < needed))
     if undetermined.size:
         i = undetermined[0]
@@ -251,6 +248,51 @@ def certify_determined(
             f"ranges, needs at least {needed[i]} distinct values of the feature there to "
             f"be determined; it has {last[i] - first[i]}{note}."
         )
+
+
+def _stretch_needs(
+    ranges: Sequence[PolynomialRange], lo: float, hi: float, order: int
+) -> tuple[NDArray, NDArray, NDArray]:
+    """Each free stretch's start, end and the support points it needs (``certify_determined``)."""
+    carried = {"kink": 1, "tangent": 2}
+    edge = np.array([min(order, carried.get(r.join, order)) for r in ranges], dtype=np.intp)
+    lows = np.array([float(r.lo) for r in ranges])
+    highs = np.array([float(r.hi) for r in ranges])
+    needed = order - np.append(0, edge) - np.append(edge, 0)
+    return np.append(lo, highs), np.append(lows, hi), needed
+
+
+def determining_cuts(
+    ranges: Sequence[PolynomialRange], values: NDArray, lo: float, hi: float, order: int
+) -> NDArray:
+    """Cuts that split each range and free stretch into as many pieces as it needs support points.
+
+    ``values`` are the column's values. A range needs ``degree + 1`` support
+    points and a free stretch what ``certify_determined`` asks of it. A piece
+    with ``n >= need`` distinct values below the column maximum is cut at
+    ``need`` of them, the ``floor(j n / need)``-th smallest for ``j = 0 ..
+    need - 1``, so each cut starts a run holding a value of the piece; a piece
+    with fewer is cut at all of them. A range counts its values from its lower
+    edge up to below its upper one, and a stretch those strictly inside it,
+    or from an end of the axis. As bin knots (``discretize_column``), the
+    cuts give each such run a cell of its own on the adaptive grid.
+    """
+    v = np.unique(np.asarray(values, dtype=np.float64))
+    v = v[v < v[-1]] if v.size else v
+    starts, ends, needed = _stretch_needs(ranges, lo, hi, order)
+    pieces = [(float(r.lo), float(r.hi), r.degree + 1, False) for r in ranges]
+    pieces += [
+        (float(a), float(b), int(n), i > 0)
+        for i, (a, b, n) in enumerate(zip(starts, ends, needed, strict=True))
+    ]
+    cuts = [np.empty(0)]
+    for start, end, need, open_start in pieces:
+        inside = v[((v > start) if open_start else (v >= start)) & (v < end)]
+        if need < 1 or inside.size == 0:
+            continue
+        n = inside.size
+        cuts.append(inside if n < need else inside[(np.arange(need) * n) // need])
+    return np.unique(np.concatenate(cuts))
 
 
 def pinned_intervals(

@@ -16,7 +16,7 @@ from superglm.editor.errors import EditorValueError
 from superglm.editor.knots import placed_geometry
 from superglm.editor.lss.view import column_of, interaction_users
 from superglm.features._spline_ranges import NARROWEST_GAP, SHAPE_NAMES, PolynomialRange
-from superglm.features._spline_runtime import fit_support, place_knots
+from superglm.features._spline_runtime import bin_knots, fit_support, place_knots
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.rebuild import (
     RESHAPE_USED_BY_INTERACTION,
@@ -260,10 +260,10 @@ def _refit_support(model, name: str, spec, X, sample_weight) -> NDArray:
     n_bins = resolve_discrete_n_bins(column_of(model, name), spec, model._n_bins)
     geometry = knot_geometry_weight(weights, model._weight_semantics)
     if spec.fitted_boundary is not None:
-        return fit_support(x, n_bins, spec._knots, geometry)
+        return fit_support(x, n_bins, bin_knots(spec, x, geometry), geometry)
     probe = copy.deepcopy(spec)
     place_knots(probe, x, geometry, n_bins, certify=False)
-    return fit_support(x, n_bins, probe._knots, geometry)
+    return fit_support(x, n_bins, bin_knots(probe, x, geometry), geometry)
 
 
 def _piece_support(model, name: str, spec, basis, X, sample_weight):

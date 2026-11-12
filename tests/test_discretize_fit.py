@@ -1943,24 +1943,64 @@ def test_binned_support_never_exceeds_n_bins():
         # minimum and the maximum at one point.
         occupied = np.unique(index).size
         assert occupied >= min(n_bins, 2)
-        # The adaptive grid reads every row inside its own knot span, whenever
-        # its n_bins // 2 knot cells can give every span that holds rows one.
         inner = np.unique(knots[(knots > lo) & (knots < hi)])
         span = np.searchsorted(inner, x, side="right")
+        n_spans = np.unique(span).size
         equal_width = _equal_width_bins(x, n_bins)[0]
         adaptive = len(support) != len(equal_width) or np.any(support != equal_width)
-        if adaptive:
-            # Each distinct lower quantile j / n_q (the smallest row with at
-            # least ceil(j n / n_q) rows at or below it) starts an occupied
-            # cell, as the minimum does.
-            n_q = n_bins - n_bins // 2
-            j = np.arange(1, n_q)
-            quantiles = np.sort(x)[(j * n + n_q - 1) // n_q - 1]
-            assert occupied >= np.unique(np.append(quantiles, lo)).size
-        if adaptive and np.unique(span).size <= max(n_bins // 2, 1):
-            np.testing.assert_array_equal(
-                np.searchsorted(inner, support[index], side="right"), span
-            )
+        if not adaptive:
+            continue
+        # The adaptive grid gives every span that holds rows a cell, so it is
+        # used only when there are fewer such spans than bins, and it reads
+        # every row inside its own knot span.
+        assert n_spans < n_bins
+        np.testing.assert_array_equal(np.searchsorted(inner, support[index], side="right"), span)
+        # Each distinct lower quantile j / n_q (the smallest row with at least
+        # ceil(j n / n_q) rows at or below it) starts an occupied cell, as the
+        # minimum does; n_q is half the budget, or what one cell per span leaves.
+        n_q = n_bins - n_bins // 2 if n_spans <= n_bins // 2 else n_bins - n_spans
+        j = np.arange(1, n_q)
+        quantiles = np.sort(x)[(j * n + n_q - 1) // n_q - 1]
+        assert occupied >= np.unique(np.append(quantiles, lo)).size
+
+
+def test_more_spans_than_the_knot_half_get_one_cell_each_and_keep_the_resolution():
+    """One cell per span that holds rows, and the rows' quantiles for the rest of the budget.
+
+    39 uniform knots and one at 5.01 make 41 spans on a regular column: the
+    narrow span [5, 5.01) fails the equal-width test, and 41 spans are more
+    than the 32 cells of the knot half. Those 32 cells used to be equal-width,
+    and the quantiles of a regular column land on the same edges, so the fit
+    saw 32 support points where the equal-width bins it replaced give 64, and
+    misread the exact fit by an rmse of 0.030 against 0.008.
+    """
+    x = np.linspace(0.0, 10.0, 20001)
+    knots = np.sort(np.append(np.linspace(0.0, 10.0, 41)[1:-1], 5.01))
+    support, index = discretize_column(x, 64, knots)
+    # 41 knot cells and 23 quantile cells less the one starting at the
+    # minimum: the grid uses n_bins - 1 cells, against the 64 the equal-width
+    # bins occupy.
+    assert np.unique(index).size == 63
+    inner = knots[(knots > 0.0) & (knots < 10.0)]
+    np.testing.assert_array_equal(
+        np.searchsorted(inner, support[index], side="right"),
+        np.searchsorted(inner, x, side="right"),
+    )
+    rng = np.random.default_rng(7)
+    y = np.sin(3.0 * x) + rng.normal(0.0, 0.3, x.size)
+    X = pd.DataFrame({"x": x})
+    predictions = []
+    for discrete in (False, True):
+        model = SuperGLM(
+            family="gaussian",
+            features={"x": Spline(kind="bs", knots=knots)},
+            discrete=discrete,
+            n_bins=64,
+        )
+        model.fit_reml(X, y)
+        predictions.append(np.asarray(model.predict(X), dtype=np.float64))
+    # 0.015 here; a twentieth of the noise sd bounds it.
+    assert _rmse(predictions[1], predictions[0]) < 0.02
 
 
 def test_a_budget_below_four_keeps_the_equal_width_bins():
