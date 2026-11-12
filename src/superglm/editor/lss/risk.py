@@ -7,6 +7,9 @@ predictors, for the fitted model and for the model in force, in
 ``parameter_names_`` order with every offset at zero, so the browser rebuilds
 the risk's distribution from them, as it does for the distribution panel.
 
+A model the browser has no maths for (``panel.fast_path``) is ``unavailable``,
+with the reason, and still carries every risk's predictors and moves.
+
 It also carries what explains each risk: the predictors of the reference risk,
 and how far each feature moves them when it alone takes the risk's value
 (Baseline Shapley with the reference row as baseline: Sundararajan and Najmi,
@@ -35,8 +38,9 @@ from superglm.editor.lss.panel import (
     NOT_SUPERLSS,
     _amount_axis,
     _eta_of_frame,
-    _family_name,
     _parameters,
+    _view_fast_path,
+    not_drawn_yet,
 )
 from superglm.editor.lss.view import LSSModelView, lss_key
 from superglm.features.numeric import _numeric_values
@@ -201,12 +205,14 @@ def risk_payload(session: Any, risks: list[Mapping], *, edited: Any) -> dict[str
     def effects(eta: np.ndarray) -> np.ndarray:
         return (eta[1 + n :] - eta[0]).reshape(n, len(columns), eta.shape[1])
 
-    counts = _family_name(view.family) == "negative_binomial"
+    path = _view_fast_path(view)
+    kind = "unavailable" if path is None else "counts" if path.counts else "risk"
     return {
-        "family": _family_name(view.family),
+        "family": None if path is None else path.name,
         "parameters": _parameters(view),
         "amount_unit": view.amount_unit,
-        "kind": "counts" if counts else "risk",
+        "kind": kind,
+        "reason": not_drawn_yet(view) if path is None else None,
         "features": list(features.values()),
         "reference": {"fitted": fitted[0].tolist(), "edited": edited_eta[0].tolist()},
         "risks": [
@@ -224,9 +230,9 @@ def risk_payload(session: Any, risks: list[Mapping], *, edited: Any) -> dict[str
                 strict=True,
             )
         ],
-        "amount_axis": None
-        if counts
-        else _amount_axis(view, np.vstack([fitted[own], edited_eta[own]])),
+        "amount_axis": _amount_axis(view, np.vstack([fitted[own], edited_eta[own]]))
+        if kind == "risk"
+        else None,
     }
 
 

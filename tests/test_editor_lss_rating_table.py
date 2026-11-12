@@ -27,6 +27,7 @@ from tests._lss_editor_fixtures import (
     lognormal_case,
     nb_case,
     open_case,
+    scalar_family_case,
 )
 
 KNOTS = {"count": 5, "strategy": "uniform"}
@@ -276,3 +277,21 @@ def test_a_model_with_no_table_at_all_says_why_in_the_librarys_sentences():
         assert "Parameter 'mean' was left out" in text
         assert "Parameter 'scale' was left out" in text
     assert preview["available"] is False and preview["rows"] == []
+
+
+def test_rating_table_of_an_additive_parameter_gives_the_library_s_reason():
+    case = scalar_family_case("GaussianLS")
+    session = open_case(case)
+    widget = session.widget()
+    try:
+        location = widget._rating_table("location:age")
+        scale = widget._rating_table("scale:age")
+    finally:
+        widget.close()
+
+    library = lss_rating_tables.build_lss_rating_table_payload(case.model, case.X, None)
+    assert location["available"] is False and location["rows"] == []
+    assert location["reason"] == library.omitted["location"]
+    assert "identity link" in location["reason"]
+    # The scale, on a floored log link, keeps its table.
+    assert scale["available"] is True and scale["rows"]

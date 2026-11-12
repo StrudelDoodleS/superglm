@@ -27,6 +27,15 @@ from superglm import (
     cat,
     s,
 )
+from superglm.distributional.families import (
+    GaussianLS,
+    GeneralizedGammaLSS,
+    GeneralizedParetoLSS,
+    LogLogisticLSS,
+    LomaxLSS,
+    TwoPieceLogNormalLSS,
+    TwoPieceNormalLSS,
+)
 from superglm.editor import EditorSession, edit
 from superglm.editor.evaluation import EvaluationDataset
 
@@ -190,6 +199,49 @@ def tweedie_case() -> FitCase:
         family.phi(s("age", k=6), cat("region")),
         family.p(),
     ).fit_reml(X, y, outer="efs+newton")
+    return FitCase(model, X, y, None, None)
+
+
+# Natural parameters, in each family's declared order, of the intercept-only law the
+# scalar-family cases are drawn from; the first two vary with age.
+_SCALAR_LAWS = {
+    "GaussianLS": (GaussianLS, {}, (50.0, 200.0)),
+    "GeneralizedGammaLSS": (GeneralizedGammaLSS, {}, (1000.0, 0.6, 1.0)),
+    "GeneralizedParetoLSS": (GeneralizedParetoLSS, {}, (1000.0, 0.3)),
+    "LogLogisticLSS": (LogLogisticLSS, {}, (1000.0, 3.0)),
+    "LomaxLSS": (LomaxLSS, {}, (1000.0, 3.0)),
+    "TwoPieceLogNormalLSS": (TwoPieceLogNormalLSS, {}, (1000.0, 0.5, 0.2)),
+    "TwoPieceNormalLSS": (TwoPieceNormalLSS, {}, (50.0, 200.0, 0.2)),
+    "LogNormalLS-location": (LogNormalLS, {"parametrisation": "location"}, (7.0, 0.5)),
+}
+SCALAR_FAMILIES = tuple(_SCALAR_LAWS)
+
+
+@functools.cache
+def scalar_family_case(name: str, links: tuple[str | None, ...] = ()) -> FitCase:
+    """400 rows of one of ``SCALAR_FAMILIES``, drawn from its own ``quantile``.
+
+    The first parameter has ``s("age", k=5)``, the second ``s("age", k=4)``, any
+    other is an intercept; ``links`` overrides the parameters' links in order.
+    """
+    cls, options, natural = _SCALAR_LAWS[name]
+    family = cls(**options)
+    rng = np.random.default_rng(20261112)
+    n = 400
+    X = pd.DataFrame({"age": rng.uniform(18.0, 90.0, n)})
+    wave = np.sin(np.pi * (X["age"].to_numpy() - 18.0) / 72.0)
+    theta = np.tile(np.asarray(natural, dtype=np.float64), (n, 1))
+    theta[:, 0] *= np.exp(0.3 * wave)
+    theta[:, 1] *= np.exp(0.2 * wave)
+    y = np.asarray(family.quantile(rng.uniform(0.005, 0.995, n), theta), dtype=np.float64)
+    terms = ((s("age", k=5),), (s("age", k=4),))
+    predictors = [
+        getattr(family, spec.name)(
+            *(terms[i] if i < 2 else ()), link=links[i] if i < len(links) else None
+        )
+        for i, spec in enumerate(family.parameters)
+    ]
+    model = SuperLSS(family, *predictors).fit_reml(X, y, outer="efs+newton")
     return FitCase(model, X, y, None, None)
 
 

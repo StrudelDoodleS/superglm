@@ -655,13 +655,13 @@ test("a step the session's edits moved says what it was under the original model
   assert.equal(model.start.values[1].was, null);
 });
 
-test("theta is read as the overdispersion 1/theta, and a log-normal's scale as its CV", () => {
+test("theta is read as the overdispersion 1/theta, and a log-normal's scale as its sigma", () => {
   const counts = /** @type {RiskResponse} */ ({
     ...walked([{ values: { age: 22, region: "R0" }, fitted: [[0, LN(2)], [0, 0]] }]),
     family: "negative_binomial",
     parameters: [
       { name: "mean", label: "Mean", role: "average", link: LOG },
-      { name: "theta", label: "Overdispersion", role: "spread", link: LOG }
+      { name: "theta", label: "Overdispersion", role: "spread", link: LOG, display: { kind: "inverse_theta", link: "log" } }
     ],
     features: [{ ...reply().features[0], terms: { mean: "mean:age", theta: "theta:age" } }, reply().features[1]]
   });
@@ -676,7 +676,7 @@ test("theta is read as the overdispersion 1/theta, and a log-normal's scale as i
     family: "lognormal_mean",
     parameters: [
       { name: "mean", label: "Mean", role: "average", link: LOG },
-      { name: "scale", label: "CV", role: "spread", link: floored }
+      { name: "scale", label: "CV", role: "spread", link: floored, value_label: "σ" }
     ]
   });
   // A log-normal's walk is in sigma, the quantity its steps multiply above the floor, not in the
@@ -692,6 +692,32 @@ test("theta is read as the overdispersion 1/theta, and a log-normal's scale as i
   assert.deepEqual(moved.columns, ["Mean", "σ"]);
   const [start, end] = [moved.start.values[1].text, moved.end.values[1].text];
   assert.deepEqual([moved.rows[0].steps[1].text, start, end], ["×2.00", "1.01", "2.01"]);
+});
+
+test("an additive parameter's step reads as the amount added, and an uninverted link leaves its value blank", () => {
+  const base = walked([{ values: { age: 22, region: "R0" }, fitted: [[150, 0.2], [0, 0]] }]);
+  const gaussian = /** @type {RiskResponse} */ ({
+    ...base,
+    family: null,
+    kind: "unavailable",
+    reason: "Not drawn yet.",
+    amount_axis: null,
+    parameters: [
+      { name: "location", label: "Location", role: "average", link: { kind: "identity" }, display: { kind: "additive", link: "identity" } },
+      { name: "scale", label: "Scale", role: "spread", link: { kind: "other" }, display: { kind: "additive", link: "inverse" } }
+    ],
+    features: [{ ...reply().features[0], terms: { location: "location:age", scale: "scale:age" } }, reply().features[1]],
+    reference: { fitted: [1000, 1], edited: [1000, 1] },
+    risks: [{ ...base.risks[0], eta: { fitted: [1150, 1.2], edited: [1150, 1.2] },
+      effects: { fitted: [[150, 0.2], [0, 0]], edited: [[150, 0.2], [0, 0]] } }]
+  });
+  assert.equal(parameterValue(gaussian, 0, 1150), 1150);
+  assert.ok(Number.isNaN(parameterValue(gaussian, 1, 1.2)));
+  const model = driversModel(gaussian);
+  assert.deepEqual(model.rows[0].steps.map((step) => [step.text, step.move]), [["+150", 150], ["+0.200", 0.2]]);
+  assert.deepEqual(model.end.values.map((value) => value.text), ["€1,150", ""]);
+  // An unavailable reply says why the view draws no distribution.
+  assert.equal(riskModel(gaussian, { mode: "amount", value: 100, style: "percent" }).empty, "Not drawn yet.");
 });
 
 // ---------------------------------------------------------------------------------------------

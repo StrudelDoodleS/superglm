@@ -12,14 +12,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, GammaLS, LogNormalLS, SuperLSS, cat, term
+from superglm import Categorical, GammaLS, LogNormalLS, SuperLSS, TweedieLSS, cat, term
+from superglm.distributional.families import BoundedLogitLink, LomaxLSS
 from superglm.editor import edit, notebook
 from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.editor.lss.apply import lss_model_with_edits
-from superglm.editor.lss.panel import distribution_panel_payload, link_spec
+from superglm.editor.lss.panel import distribution_panel_payload, fast_path, link_spec
 from superglm.editor.payloads import session_payload
 from superglm.editor.server import create_editor_app
-from superglm.links import IdentityLink
+from superglm.links import IdentityLink, InverseLink, LogitLink
 from tests._lss_editor_fixtures import (
     EPS,
     FitCase,
@@ -121,12 +122,16 @@ def test_parameters_carry_their_labels_roles_and_links():
             "label": "Mean",
             "role": "average",
             "link": {"kind": "log"},
+            "display": {"kind": "relativity", "link": "log"},
+            "value_label": "Mean",
         },
         {
             "name": "scale",
             "label": "CV",
             "role": "spread",
             "link": {"kind": "floored_log", "floor": LogNormalLS().scale_floor},
+            "display": {"kind": "relativity", "link": "floored_log"},
+            "value_label": "σ",
         },
     ]
     gamma = _panel(open_case(gamma_case()), "age")
@@ -140,13 +145,29 @@ def test_a_tweedie_panel_names_three_parameters_and_draws_no_power_curve():
     low, high = case.model.family.power_lower, case.model.family.power_upper
     assert panel["family"] == "tweedie"
     assert panel["parameters"] == [
-        {"name": "mean", "label": "Mean", "role": "average", "link": {"kind": "log"}},
-        {"name": "dispersion", "label": "Dispersion", "role": "spread", "link": {"kind": "log"}},
+        {
+            "name": "mean",
+            "label": "Mean",
+            "role": "average",
+            "link": {"kind": "log"},
+            "display": {"kind": "relativity", "link": "log"},
+            "value_label": "Mean",
+        },
+        {
+            "name": "dispersion",
+            "label": "Dispersion",
+            "role": "spread",
+            "link": {"kind": "log"},
+            "display": {"kind": "relativity", "link": "log"},
+            "value_label": "Dispersion",
+        },
         {
             "name": "power",
             "label": "Power",
             "role": "shape",
             "link": {"kind": "bounded_logit", "lower": low, "upper": high},
+            "display": {"kind": "additive", "link": "bounded_power"},
+            "value_label": "Power",
         },
     ]
     assert panel["term_keys"] == {"mean": "mean:age", "dispersion": "dispersion:age"}
@@ -161,9 +182,36 @@ def test_a_tweedie_panel_names_three_parameters_and_draws_no_power_curve():
     )
 
 
-def test_a_link_the_browser_cannot_draw_is_refused():
-    with pytest.raises(EditorValueError, match="IdentityLink"):
-        link_spec("scale", IdentityLink())
+def test_every_link_has_a_spec_and_one_the_browser_cannot_invert_is_other():
+    assert link_spec(IdentityLink()) == {"kind": "identity"}
+    assert link_spec(LogitLink()) == {"kind": "logit"}
+    assert link_spec(BoundedLogitLink(lower=-0.9, upper=0.9)) == {
+        "kind": "bounded_logit",
+        "lower": -0.9,
+        "upper": 0.9,
+    }
+    assert link_spec(InverseLink()) == {"kind": "other"}
+
+
+def test_an_overdispersion_is_walked_as_its_reciprocal():
+    theta = _panel(open_case(nb_case()), "age")["parameters"][1]
+    assert theta["display"] == {"kind": "inverse_theta", "link": "log"}
+    assert theta["value_label"] == "Overdispersion"
+
+
+@pytest.mark.parametrize(
+    ("family", "drawn"),
+    [
+        (LogNormalLS(), "lognormal_mean"),
+        (LogNormalLS(parametrisation="location"), None),
+        (GammaLS(), "gamma"),
+        (TweedieLSS(), "tweedie"),
+        (LomaxLSS(), None),
+    ],
+    ids=lambda value: value if isinstance(value, str | None) else type(value).__name__,
+)
+def test_the_fast_path_table_names_only_the_browser_s_families(family, drawn):
+    assert fast_path(family) == drawn
 
 
 def test_levels_are_capped_at_twelve_by_exposure():

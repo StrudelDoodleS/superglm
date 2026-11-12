@@ -388,10 +388,12 @@
  * @property {number} model_revision
  */
 /**
- * A parameter's link as the browser inverts it: exp(eta), floor + exp(eta), or for a power bounded
- * between two walls lower + (upper - lower) / (1 + exp(-eta)).
+ * A parameter's link as the browser inverts it: exp(eta), floor + exp(eta), eta itself, the
+ * logistic 1 / (1 + exp(-eta)), or for a parameter bounded between two walls
+ * lower + (upper - lower) / (1 + exp(-eta)). An "other" link is not inverted in the browser.
  * @typedef {{kind:"log"} | {kind:"floored_log", floor:number} |
- *   {kind:"bounded_logit", lower:number, upper:number}} DistributionLink
+ *   {kind:"bounded_logit", lower:number, upper:number} | {kind:"identity"} | {kind:"logit"} |
+ *   {kind:"other"}} DistributionLink
  */
 /**
  * @typedef {Object} DistributionParameter
@@ -399,6 +401,10 @@
  * @property {string} label
  * @property {"average"|"spread"|"shape"} role
  * @property {DistributionLink} link
+ * @property {DisplaySpec} [display] how its terms are shown: a relativity, the relativity of
+ *   1/theta, or an added amount; a relativity where absent
+ * @property {string} [value_label] what the Explain tab's walk gives the value of; the label
+ *   where absent
  */
 /**
  * Link-scale predictors, one row per panel row or fan column, in `parameters` order.
@@ -412,7 +418,8 @@
  * model revision is `{status:"superseded", model_revision}` instead.
  * @typedef {Object} DistributionPanelResponse
  * @property {string} feature
- * @property {"lognormal_mean"|"gamma"|"tweedie"|"negative_binomial"} family
+ * @property {"lognormal_mean"|"gamma"|"tweedie"|"negative_binomial"|null} family the browser
+ *   maths that draws it, null where it has none and the panel is empty
  * @property {"numeric"|"levels"|"empty"} kind
  * @property {string|null} empty_reason
  * @property {Array<{label:string, x:number|null, level:string|null}>} rows
@@ -452,15 +459,17 @@
  * The /risk response (SuperLSS sessions only): each risk asked for, completed with the reference
  * row's values, and its link-scale predictors under the fitted and the edited model, in
  * `parameters` order and with every offset at zero. `kind` is "counts" for a negative binomial,
- * which has no amount axis.
+ * which has no amount axis, and "unavailable", with its `reason`, where the browser has no maths
+ * for the family (`family` null).
  * `reference` is the reference risk's predictors, and a risk's `effects` how far each feature,
  * in `features` order, moves them when it alone takes the risk's value.
  * A reply overtaken by a newer model revision is `{status:"superseded", model_revision}` instead.
  * @typedef {Object} RiskResponse
- * @property {"lognormal_mean"|"gamma"|"tweedie"|"negative_binomial"} family
+ * @property {"lognormal_mean"|"gamma"|"tweedie"|"negative_binomial"|null} family
  * @property {DistributionParameter[]} parameters
  * @property {string|null} amount_unit
- * @property {"risk"|"counts"} kind
+ * @property {"risk"|"counts"|"unavailable"} kind
+ * @property {string|null} [reason] why an "unavailable" reply draws no distribution
  * @property {RiskFeature[]} features
  * @property {{fitted:number[], edited:number[]}} reference
  * @property {Array<{id?:RiskId, values:RiskValues, eta:{fitted:number[], edited:number[]},

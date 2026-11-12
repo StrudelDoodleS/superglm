@@ -1,4 +1,4 @@
-"""Opening a SuperLSS model in the editor: composite keys, display mapping, refusals."""
+"""Opening a SuperLSS model of any scalar family in the editor: keys, display, refusals."""
 
 from __future__ import annotations
 
@@ -15,7 +15,13 @@ import superglm
 from superglm import GammaLS, LogNormalLS, Numeric, SuperLSS, TweedieLSS, s, ti
 from superglm.distributional.families import LomaxLSS, NegativeBinomialLS
 from superglm.editor import edit
-from superglm.editor.display import ADDITIVE, average_parameter, parameter_spec
+from superglm.editor.display import (
+    ADDITIVE,
+    average_parameter,
+    parameter_display_for,
+    parameter_spec,
+    term_y_label,
+)
 from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.editor.lss import (
     INVERSE_THETA,
@@ -31,12 +37,18 @@ from superglm.editor.lss import (
 )
 from superglm.editor.lss.apply import lss_model_with_edits
 from superglm.editor.lss.display import y_label_for
+from superglm.editor.lss.panel import NOT_DRAWN_YET, distribution_panel_payload
+from superglm.editor.lss.risk import risk_payload
+from superglm.editor.lss.validation import lss_dataset_metrics
+from superglm.editor.payloads import session_payload
 from tests._lss_editor_fixtures import (
     EPS,
+    SCALAR_FAMILIES,
     gamma_case,
     lognormal_case,
     nb_case,
     open_case,
+    scalar_family_case,
     tweedie_case,
 )
 from tests.test_editor import editor_frame, editor_model  # noqa: F401
@@ -91,21 +103,6 @@ def _unnamed_column_model(label):
     family = GammaLS()
     model = SuperLSS(family, family.mean(superglm.term(label, Numeric())), family.scale())
     return model.fit_reml(X, y), X, y
-
-
-def _unfitted_other_family():
-    family = LomaxLSS()
-    return SuperLSS(family, family.scale(), family.shape())
-
-
-def _unfitted_tweedie_with_power_terms():
-    family = TweedieLSS()
-    return SuperLSS(family, family.mu(), family.phi(), family.p(s("age"), s("power")))
-
-
-def _unfitted_location_form():
-    family = LogNormalLS(parametrisation="location")
-    return SuperLSS(family, family.location(), family.scale())
 
 
 def _unfitted_mean_form():
@@ -224,25 +221,6 @@ def _refusal(case_id):
     case = lognormal_case()
     names = "mean, scale"
     rows = (case.X, case.y, None, None)
-    if case_id == "family":
-        message = (
-            "The editor opens LogNormalLS (mean form), GammaLS, NegativeBinomialLS and "
-            "TweedieLSS models; this model is LomaxLSS."
-        )
-        return _unfitted_other_family(), {}, EditorValueError, message
-    if case_id == "tweedie-power-terms":
-        message = (
-            "The editor shows a Tweedie model whose power is a constant; this model's power has "
-            "terms (age, power). Refit it with the power as an intercept only, family.p(), to "
-            "open it in the editor."
-        )
-        return _unfitted_tweedie_with_power_terms(), {}, EditorValueError, message
-    if case_id == "location-form":
-        message = (
-            "The editor opens LogNormalLS models in mean form; this one uses "
-            "parametrisation='location'."
-        )
-        return _unfitted_location_form(), {}, EditorValueError, message
     if case_id == "unfitted":
         message = "Model must be fitted before creating an editor session."
         return _unfitted_mean_form(), {"train_data": rows}, RuntimeError, message
@@ -260,14 +238,6 @@ def _refusal(case_id):
             "The editor names each SuperLSS term '<parameter>:<column>', so it opens models "
             f"whose columns are named by strings; this model reads column {label!r}. Rename the "
             "column to a string and refit to open it in the editor."
-        )
-        return model, {"train_data": (X, y)}, EditorValueError, message
-    if case_id == "link":
-        model, X, y = _linked_model("logit")
-        message = (
-            "The editor draws every parameter through its family's default link; this model "
-            "fits 'scale' on another link. Refit it without link= on 'scale' to open it in "
-            "the editor."
         )
         return model, {"train_data": (X, y)}, EditorValueError, message
     if case_id == "no-train-data":
@@ -304,14 +274,10 @@ def _refusal(case_id):
 @pytest.mark.parametrize(
     "case_id",
     [
-        "family",
-        "tweedie-power-terms",
-        "location-form",
         "unfitted",
         "truncated",
         "column-name",
         "column-name-none",
-        "link",
         "no-train-data",
         "centering",
         "offsets-array",
@@ -326,6 +292,88 @@ def test_refusals(case_id, request):
         model = request.getfixturevalue("editor_model")
     with pytest.raises(error, match=f"^{re.escape(message)}$"):
         edit(model, **keywords)
+
+
+@pytest.mark.parametrize("name", SCALAR_FAMILIES)
+def test_every_scalar_family_opens(name):
+    case = scalar_family_case(name)
+    session = open_case(case)
+    first, second, *_ = case.model.parameter_names_
+    assert list(session.terms) == [f"{first}:age", f"{second}:age"]
+    payload = session_payload(session)
+    for key in session.terms:
+        assert payload[key]["y_label"] == term_y_label(session.model, key)
+        assert np.all(np.isfinite(payload[key]["y"]))
+    reason = NOT_DRAWN_YET.format(family=type(case.model.family).__name__)
+    panel = distribution_panel_payload(session, "age", edited=session.model)
+    assert (panel["kind"], panel["family"], panel["empty_reason"]) == ("empty", None, reason)
+    assert [p["name"] for p in panel["parameters"]] == list(case.model.parameter_names_)
+    risk = risk_payload(session, [{"age": 30.0}], edited=session.model)
+    assert (risk["kind"], risk["reason"], risk["amount_axis"]) == ("unavailable", reason, None)
+    assert [feature["column"] for feature in risk["features"]] == ["age"]
+    assert [p["name"] for p in risk["parameters"]] == list(case.model.parameter_names_)
+    # The validation tab scores any response, a real-line one included.
+    scores = lss_dataset_metrics(session.model, session._evaluation_data["train"])
+    assert np.isfinite(scores["log_score"])
+    assert np.isfinite(scores["actual_expected"])
+
+
+def test_overridden_link_draws_by_the_fitted_link():
+    gaussian = open_case(scalar_family_case("GaussianLS", ("log",)))
+    # A log link on a location that defaults to identity draws a relativity.
+    assert display_for(gaussian.model, "location:age") == RELATIVITY
+    assert term_y_label(gaussian.model, "location:age") == "relativity of the location"
+    model, X, y = _linked_model("logit")
+    gamma = edit(model, train_data=(X, y))
+    # A CV fitted on a logit link draws the relativity of its odds, and the browser's gamma
+    # maths, which reads a log CV, is not used for it.
+    shown = display_for(gamma.model, "mean:age"), display_for(gamma.model, "scale:age")
+    assert [transform.to_payload() for transform in shown] == [
+        {"kind": "relativity", "link": "log"},
+        {"kind": "relativity", "link": "logit"},
+    ]
+    panel = distribution_panel_payload(gamma, "age", edited=gamma.model)
+    assert (panel["kind"], panel["family"]) == ("empty", None)
+    assert panel["parameters"][1]["link"] == {"kind": "logit"}
+
+
+def test_tweedie_power_terms_open_and_draw():
+    case = tweedie_case()
+    family = TweedieLSS()
+    model = SuperLSS(
+        family, family.mu(s("age", k=5)), family.phi(s("age", k=4)), family.p(s("age", k=4))
+    ).fit_reml(case.X, case.y, outer="efs+newton")
+    session = edit(model, train_data=(case.X, case.y))
+    assert list(session.terms) == ["mean:age", "dispersion:age", "power:age"]
+    power = display_for(session.model, "power:age")
+    assert power.to_payload() == {"kind": "additive", "link": "bounded_power"}
+    assert (
+        term_y_label(session.model, "power:age") == "effect on the bounded power scale of the power"
+    )
+    panel = distribution_panel_payload(session, "age", edited=session.model)
+    assert (panel["kind"], panel["family"]) == ("numeric", "tweedie")
+    # The browser's Tweedie law reads the power of each row from its own predictor.
+    assert panel["term_keys"]["power"] == "power:age"
+    powers = np.asarray(panel["eta"]["fitted"]["rows"])[:, 2]
+    assert np.ptp(powers) > 0.0
+    assert panel["amount_axis"]["min_log10"] < panel["amount_axis"]["max_log10"]
+
+
+def test_gaussian_location_is_blue_and_additive():
+    session = open_case(scalar_family_case("GaussianLS"))
+    shown = parameter_display_for(session.model, "location")
+    assert (shown.role, shown.colour) == ("average", "blue")
+    assert display_for(session.model, "location:age") is ADDITIVE
+    assert term_y_label(session.model, "location:age") == "effect on the location"
+    assert parameter_display_for(session.model, "scale").role == "spread"
+
+
+def test_lomax_scale_is_the_average_parameter():
+    session = open_case(scalar_family_case("LomaxLSS"))
+    assert average_parameter(session.model.family) == "scale"
+    assert parameter_display_for(session.model, "scale").colour == "blue"
+    assert parameter_display_for(session.model, "shape").colour == "orange"
+    assert display_for(session.model, "scale:age") is RELATIVITY
 
 
 def test_a_link_named_but_equal_to_the_default_still_opens():
@@ -345,12 +393,10 @@ def test_refusals_follow_the_documented_order():
         edit(case.model, centering="mean")
     with pytest.raises(EditorValueError, match="native scale"):
         edit(case.model, centering="mean", train_data=(case.X, case.y, None, np.zeros(len(case.y))))
-    # An unsupported family is named before the model is found unfitted.
-    with pytest.raises(EditorValueError, match="this model is LomaxLSS"):
-        edit(_unfitted_other_family(), centering="mean")
-    # Terms in the Tweedie power are named before the model is found unfitted.
-    with pytest.raises(EditorValueError, match="whose power is a constant"):
-        edit(_unfitted_tweedie_with_power_terms(), centering="mean")
+    # No family, form or link is refused: an unfitted model of any family is found unfitted.
+    family = LomaxLSS()
+    with pytest.raises(RuntimeError, match="must be fitted"):
+        edit(SuperLSS(family, family.scale(), family.shape()), centering="mean")
 
 
 def test_offsets_are_stored_by_parameter_name():

@@ -12,7 +12,10 @@ and its fan columns are those rows.
 The payload carries each parameter's link-scale predictor, for the fitted model
 and for the edited one, in ``parameter_names_`` order, together with the link
 that maps it to the family's natural parameter. The browser rebuilds every law
-from those, so a dragged curve redraws without a request.
+from those, so a dragged curve redraws without a request. It has that maths for
+a few families on their default links, the fast paths (``_FAST_PATHS``, the only
+place the editor names a family); any other model's panel says, in
+``NOT_DRAWN_YET``, that it is not drawn yet.
 
 The amount axis covers the 0.001 to 0.999 quantiles of the fitted and the edited
 rows, capped at ``MAX_AXIS_DECADES`` below its upper end; ``clipped_below`` says
@@ -22,6 +25,8 @@ when the cap raised the lower end.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -31,6 +36,7 @@ from numpy.typing import NDArray
 from superglm._frame import as_eager_frame
 from superglm.distributional.api import SuperLSS
 from superglm.distributional.families import (
+    BoundedLogitLink,
     GammaLS,
     LogNormalLS,
     LowerBoundedLogLink,
@@ -38,12 +44,18 @@ from superglm.distributional.families import (
     TweedieLSS,
 )
 from superglm.distributional.families.tweedie import BoundedPowerLink
+from superglm.distributional.family import AtomFamily, ParameterSpec
 from superglm.editor._types import EditableTerm
-from superglm.editor.display import parameter_display_for, parameter_spec
+from superglm.editor.display import (
+    DisplayTransform,
+    parameter_display_for,
+    parameter_spec,
+    transform_for_link,
+)
 from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.editor.lss.apply import _native_levels
 from superglm.editor.lss.view import LSSModelView, lss_key
-from superglm.links import Link, LogLink
+from superglm.links import IdentityLink, Link, LogitLink, LogLink
 
 N_ROWS = 8
 N_COLUMNS = 96
@@ -63,50 +75,111 @@ NO_SWEEP = (
     "not draw its distribution."
 )
 
-_FAMILIES = {
-    LogNormalLS: "lognormal_mean",
-    GammaLS: "gamma",
-    NegativeBinomialLS: "negative_binomial",
-    TweedieLSS: "tweedie",
+NOT_DRAWN_YET = (
+    "The distribution panel does not draw {family} models yet; the rest of the editor works "
+    "for them."
+)
+
+
+@dataclass(frozen=True)
+class _FastPath:
+    """Browser maths for one family: its name there, the link kinds it reads by parameter,
+    and whether its response is a count, which the panel does not draw."""
+
+    name: str
+    links: tuple[tuple[str, ...], ...]
+    applies: Callable[[Any], bool] = lambda family: True
+    counts: bool = False
+
+
+# The families the browser rebuilds laws for (app/distribution/), on the links its maths reads.
+_FAST_PATHS: dict[type, _FastPath] = {
+    LogNormalLS: _FastPath(
+        "lognormal_mean",
+        (("log",), ("log", "floored_log")),
+        lambda family: family.parametrisation == "mean",
+    ),
+    GammaLS: _FastPath("gamma", (("log",), ("log",))),
+    NegativeBinomialLS: _FastPath("negative_binomial", (("log",), ("log",)), counts=True),
+    TweedieLSS: _FastPath("tweedie", (("log",), ("log",), ("bounded_logit",))),
 }
 
 
-def link_spec(parameter: str, link: Link) -> dict[str, Any]:
-    """``link`` as the browser reads it: ``log``, ``floored_log`` with its floor, or ``bounded_logit``.
+def fast_path(family: Any, links: Sequence[Link] | None = None) -> str | None:
+    """The browser's name for ``family``'s law, or ``None`` where it has no maths for it.
 
-    A ``bounded_logit`` maps ``eta`` to ``lower + (upper - lower) / (1 + exp(-eta))``.
+    With ``links``, the fitted links in parameter order, a family fitted on links the
+    maths does not read has none either.
+    """
+    path = _fast_path(family, links)
+    return None if path is None else path.name
+
+
+def _fast_path(family: Any, links: Sequence[Link] | None) -> _FastPath | None:
+    path = _FAST_PATHS.get(type(family))
+    if path is None or not path.applies(family):
+        return None
+    if links is not None:
+        kinds = [link_spec(link)["kind"] for link in links]
+        if any(kind not in read for kind, read in zip(kinds, path.links, strict=True)):
+            return None
+    return path
+
+
+def link_spec(link: Link) -> dict[str, Any]:
+    """``link`` as the browser reads it: ``log``, ``floored_log`` with its floor, ``identity``,
+    ``logit``, ``bounded_logit`` with its walls, else ``other``.
+
+    A ``bounded_logit`` maps ``eta`` to ``lower + (upper - lower) / (1 + exp(-eta))``; the
+    browser inverts no ``other`` link.
     """
     if type(link) is LogLink:
         return {"kind": "log"}
     if type(link) is LowerBoundedLogLink:
         return {"kind": "floored_log", "floor": float(link.floor)}
-    if type(link) is BoundedPowerLink:
+    if type(link) in (BoundedPowerLink, BoundedLogitLink):
         return {"kind": "bounded_logit", "lower": float(link.lower), "upper": float(link.upper)}
-    raise EditorValueError(
-        f"The distribution panel draws parameters with a log link, a shifted log link or a bounded "
-        f"logit; the "
-        f"{parameter!r} parameter uses {type(link).__name__}. Refit it with a log link to see "
-        "its distribution here."
-    )
+    if type(link) is IdentityLink:
+        return {"kind": "identity"}
+    if type(link) is LogitLink:
+        return {"kind": "logit"}
+    return {"kind": "other"}
 
 
-def _family_name(family: object) -> str:
-    """The panel's name for ``family``; the editor opens only the families it names."""
-    return next(name for cls, name in _FAMILIES.items() if isinstance(family, cls))
+def _view_fast_path(view: LSSModelView) -> _FastPath | None:
+    """The fast path that draws ``view``'s fitted model, on the links it was fitted on."""
+    return _fast_path(view.family, [state.link for state in view._fitted.layout.predictors])
+
+
+def not_drawn_yet(view: LSSModelView) -> str:
+    """``NOT_DRAWN_YET`` for ``view``'s family."""
+    return NOT_DRAWN_YET.format(family=type(view.family).__name__)
+
+
+def _value_label(spec: ParameterSpec, label: str, transform: DisplayTransform) -> str:
+    """What the Explain tab's walk gives the value of: the quantity the link acts on (the
+    log-normal's σ, not its CV), else the parameter's label; an overdispersion is its own label."""
+    if transform.kind == "inverse_theta" or not spec.quantity:
+        return label
+    return spec.quantity
 
 
 def _parameters(view: LSSModelView) -> list[dict[str, Any]]:
     parameters = []
     for state in view._fitted.layout.predictors:
         shown = parameter_display_for(view, state.name)
+        spec = parameter_spec(view.family, state.name)
+        transform = transform_for_link(state.link, reciprocal=spec.role == "size")
         # The browser's Tweedie law reads its power by the role "shape".
-        power = parameter_spec(view.family, state.name).role == "power"
+        power = spec.role == "power"
         parameters.append(
             {
                 "name": state.name,
                 "label": shown.label,
                 "role": "shape" if power else shown.role,
-                "link": link_spec(state.name, state.link),
+                "link": link_spec(state.link),
+                "display": transform.to_payload(),
+                "value_label": _value_label(spec, shown.label, transform),
             }
         )
     return parameters
@@ -199,8 +272,8 @@ def _amount_axis(view: LSSModelView, rows: NDArray) -> dict[str, Any]:
     """
     theta = view._fitted.parameters_from_eta(rows)
     zero = np.zeros(len(theta))
-    if isinstance(view.family, TweedieLSS):
-        zero = view.family.cdf(zero, theta)
+    if isinstance(view.family, AtomFamily):
+        zero = view.family.cdf(zero, theta) - view.family.cdf_left_limit(zero, theta)
     levels = (
         zero + AXIS_QUANTILES[0] * (1.0 - zero),
         np.where(
@@ -266,17 +339,19 @@ def distribution_panel_payload(
     view = session.model
     if not isinstance(view, LSSModelView):
         raise EditorValueError(NOT_SUPERLSS)
-    family = _family_name(view.family)
+    path = _view_fast_path(view)
     column, keys = _feature_terms(session, view, feature)
     terms = [session.terms[key] for key in keys.values()]
     head = {
         "feature": column,
-        "family": family,
+        "family": None if path is None else path.name,
         "parameters": _parameters(view),
         "term_keys": keys,
         "amount_unit": view.amount_unit,
         "empty_reason": None,
     }
+    if path is None:
+        return {**head, **_empty_panel(), "empty_reason": not_drawn_yet(view)}
     kind = _kind(terms)
     if kind is None:
         return {**head, **_empty_panel(), "empty_reason": NO_SWEEP}
@@ -295,7 +370,7 @@ def distribution_panel_payload(
         }
         for name, eta in (("fitted", fitted), ("edited", edited_eta))
     }
-    counts = family == "negative_binomial"
+    counts = path.counts
     shown_rows = np.vstack([fitted[:n_rows], edited_eta[:n_rows]])
     return {
         **head,

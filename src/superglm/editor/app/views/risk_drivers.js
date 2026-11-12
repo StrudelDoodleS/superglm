@@ -3,8 +3,9 @@
  * What explains a risk on the Explain tab: a walk to the selected risk, one feature at a time. It
  * starts at risk A, the first risk held, or at the reference risk when risk A is the one selected.
  * A step is how far its feature alone moves a parameter's link predictor, read as the multiplier
- * that puts on the parameter. What the features add only together, through the model's
- * interactions, is a step of its own.
+ * that puts on the parameter ("×"), or, where the parameter's terms are shown as added amounts,
+ * as the amount added on its link scale ("+"). What the features add only together, through the
+ * model's interactions, is a step of its own.
  *
  * `driversModel` is pure and holds every number the walk shows; `renderDrivers` draws it.
  */
@@ -19,8 +20,9 @@ import { fmtSignificant } from "../format.js";
  * @typedef {{text: string, was: string | null}} DriverValue
  */
 /**
- * A step's multiplier. `move` is the step in the log of the quantity shown, which a bar draws;
- * `text` is empty where the feature does not act on the parameter.
+ * A step's multiplier, or its added amount. `move` is the step on the parameter's link scale (the
+ * log of the quantity shown, for a multiplier), which a bar draws; `text` is empty where the
+ * feature does not act on the parameter.
  * @typedef {DriverValue & {move: number}} DriverStep
  */
 /**
@@ -54,30 +56,45 @@ export const shownValue = (value) =>
 
 /** @param {number} move */
 const times = (move) => `×${fmtSignificant(Math.exp(move), 3)}`;
-const UNMOVED = times(0);
+/** @param {number} move */
+const plus = (move) => `${move < 0 ? "−" : "+"}${fmtSignificant(Math.abs(move), 3)}`;
+
+/** @param {RiskResponse["parameters"][number]} parameter */
+const isAdditive = (parameter) => parameter.display?.kind === "additive";
 
 /**
- * The quantity the walk shows for a parameter at a link value, the one its steps multiply: the
- * mean; a gamma's coefficient of variation; a log-normal's sigma, whose steps multiply it above
- * its floor; a negative binomial's overdispersion 1/theta; a Tweedie's dispersion, or its power
- * between the link's walls.
+ * The quantity the walk shows for a parameter at a link value, the one its steps act on: the
+ * natural parameter through its link (above its floor for a floored log, between the walls for a
+ * bounded logit), or for an overdispersion 1/theta. A link the browser does not invert gives NaN,
+ * which the walk leaves blank.
  * @param {RiskResponse} reply @param {number} index the parameter's place in `parameters`
  * @param {number} eta
  */
 export function parameterValue(reply, index, eta) {
-  const { name, link } = reply.parameters[index];
-  if (link.kind === "bounded_logit") return link.lower + (link.upper - link.lower) / (1 + Math.exp(-eta));
-  if (name === "theta") return Math.exp(-eta);
-  return (link.kind === "floored_log" ? link.floor : 0) + Math.exp(eta);
+  const { link, display } = reply.parameters[index];
+  if (display?.kind === "inverse_theta") return Math.exp(-eta);
+  switch (link.kind) {
+    case "bounded_logit":
+      return link.lower + (link.upper - link.lower) / (1 + Math.exp(-eta));
+    case "logit":
+      return 1 / (1 + Math.exp(-eta));
+    case "identity":
+      return eta;
+    case "floored_log":
+      return link.floor + Math.exp(eta);
+    case "log":
+      return Math.exp(eta);
+    default:
+      return Number.NaN;
+  }
 }
 
 /**
- * A walk column's heading: the parameter's label, except a log-normal's CV, whose steps multiply
- * sigma, the standard deviation of the log amount, so the column is sigma.
- * @param {RiskResponse} reply @param {RiskResponse["parameters"][number]} parameter
+ * A walk column's heading: what its figures are the value of, which for a log-normal's CV is
+ * sigma, the standard deviation of the log amount its steps multiply.
+ * @param {RiskResponse["parameters"][number]} parameter
  */
-const columnLabel = (reply, parameter) =>
-  reply.family === "lognormal_mean" && parameter.role === "spread" ? "σ" : parameter.label;
+const columnLabel = (parameter) => parameter.value_label ?? parameter.label;
 
 /**
  * What the walk says where no feature differs from its start.
@@ -108,7 +125,9 @@ export function driversModel(reply, selected) {
   /** @param {RiskResponse["risks"][number]} risk */
   const letter = (risk) => (risk.id ?? "a").toUpperCase();
   // A higher theta is less overdispersion, so its steps turn over with the 1/theta shown.
-  const signs = parameters.map((parameter) => (parameter.name === "theta" ? -1 : 1));
+  const signs = parameters.map((parameter) => (parameter.display?.kind === "inverse_theta" ? -1 : 1));
+  /** @param {number} p @param {number} move */
+  const stepText = (p, move) => (isAdditive(parameters[p]) ? plus(move) : times(move));
   /** @param {'fitted' | 'edited'} which the model the walk is read under */
   const walk = (which) => {
     const from = at.map((p) => (base ? base.eta[which] : reply.reference[which])[p]);
@@ -127,6 +146,7 @@ export function driversModel(reply, selected) {
   /** @param {number} p @param {number} eta */
   const figure = (p, eta) => {
     const value = parameterValue(reply, at[p], eta);
+    if (!Number.isFinite(value)) return "";
     return parameters[p].role === "average" ? formatAmount(value, reply.amount_unit) : fmtSignificant(value, 3);
   };
   /** @param {string} text @param {string} was @returns {DriverValue} */
@@ -138,8 +158,8 @@ export function driversModel(reply, selected) {
     parameters.map((_p, p) => ({
       move: signs[p] * now[p],
       ...moved(
-        acts(p) || now[p] !== 0 ? times(signs[p] * now[p]) : "",
-        acts(p) || before[p] !== 0 ? times(signs[p] * before[p]) : ""
+        acts(p) || now[p] !== 0 ? stepText(p, signs[p] * now[p]) : "",
+        acts(p) || before[p] !== 0 ? stepText(p, signs[p] * before[p]) : ""
       ),
     }));
 
@@ -154,7 +174,7 @@ export function driversModel(reply, selected) {
     }];
   });
   const jointly = steps(inForce.together, original.together, () => true);
-  const together = jointly.some((step) => step.text !== UNMOVED || step.was !== null)
+  const together = jointly.some((step, p) => step.text !== stepText(p, 0) || step.was !== null)
     ? { label: "Together", detail: "interactions", steps: jointly }
     : null;
   const drawn = [...rows, ...(together ? [together] : [])];
@@ -167,7 +187,7 @@ export function driversModel(reply, selected) {
   return {
     title: `${base ? letter(base) : "Reference"} → ${letter(last)}`,
     id,
-    columns: parameters.map((parameter) => columnLabel(reply, parameter)),
+    columns: parameters.map(columnLabel),
     start,
     rows,
     together,
