@@ -187,7 +187,7 @@ export function drawChart(term, selection, context) {
   const unsmoothedLine = buildActive ? null : (context.unsmoothed?.() ?? null);
   const unsmoothed = unsmoothedSeries(unsmoothedLine);
   const [yMinRaw, yMaxRaw] = unsmoothed
-    ? unsmoothedRange(curveMin, curveMax, unsmoothed.y)
+    ? unsmoothedRange(curveMin, curveMax, unsmoothed.y, isAdditive(term.display))
     : [curveMin, curveMax];
   const [baseYMin, baseYMax] = paddedYRange(yMinRaw, yMaxRaw, !isAdditive(term.display));
   const yMin = zoom ? zoom.yMin : baseYMin;

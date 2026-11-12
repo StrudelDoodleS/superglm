@@ -792,7 +792,7 @@ export function levelChartMarkup(term) {
       text-anchor="${rotate ? "end" : "middle"}"${rotate ? ` transform="rotate(-40 ${px(x(index))} ${base + 16})"` : ""}>
       ${escapeHTML(level.length > 14 ? `${level.slice(0, 13)}…` : level)}<title>${escapeHTML(level)}</title></text>`).join("");
   return `${legendMarkup(term)}<svg class="cv-chart-svg" viewBox="0 0 ${width} ${height}" role="img"
-      aria-label="${escapeHTML(`${termLabel(term)} relativities by fold`)}">
+      aria-label="${escapeHTML(`${termLabel(term)} · ${term.value_label ?? "relativity"} by fold`)}">
     ${frameMarkup(term, y, ticks)}${bars}${whiskers}${dots}${levelTicks(term.fit, "cv-fit")}
     ${term.edited ? levelTicks(term.edited, "cv-edited") : ""}${labels}</svg>`;
 }
@@ -886,7 +886,7 @@ export function curveChartMarkup(term) {
   const xTicks = niceTicks(first, last, 6).map((tick) => `<text class="cv-tick" x="${px(x(tick))}"
       y="${base + 16}" text-anchor="middle">${escapeHTML(fmt(tick))}</text>`).join("");
   return `${legendMarkup(term)}<svg class="cv-chart-svg" viewBox="0 0 ${width} ${height}" role="img"
-      aria-label="${escapeHTML(`${termLabel(term)} relativities by fold`)}">
+      aria-label="${escapeHTML(`${termLabel(term)} · ${term.value_label ?? "relativity"} by fold`)}">
     ${frameMarkup(term, y, ticks)}<path class="exposure-density" d="${exposure}Z"></path>
     <path class="cv-envelope" d="${band}"></path>${lines}
     <path class="cv-fit-line" d="${line(term.fit)}"></path>

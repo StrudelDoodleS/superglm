@@ -17,7 +17,7 @@ export const UNSMOOTHED_HELP =
   + "knots, and every other term stays as fitted. One fit per term, kept until the model changes.";
 export const UNSMOOTHED_BUSY = "Fitting the model with this term's smoothing switched off.";
 // The line may stretch the y range by the curve's own range on each side, so
-// to three times it, and by at least the 0.1 a flat curve's chart is tall.
+// to three times it, and by at least the 0.1 a flat relativity curve's chart is tall.
 const MIN_REACH = 0.1;
 
 /**
@@ -111,14 +111,18 @@ export function unsmoothedRuns(series) {
  * The y range with the line in it, as the chart takes any other series, but
  * stretched past the curve's own range ``[low, high]`` by at most that range
  * again on each side: a wild unsmoothed spline cannot flatten the curve, and
- * runs off the plot instead.
+ * runs off the plot instead. The least reach is 0.1 on a relativity; a curve
+ * that adds an amount has its own units, so its least reach is 5% of its
+ * largest value (0.05 when it is zero throughout).
  * @param {number} low @param {number} high @param {Array<number|null>} values
+ * @param {boolean} [additive]
  * @returns {[number, number]}
  */
-export function unsmoothedRange(low, high, values) {
+export function unsmoothedRange(low, high, values, additive = false) {
   const finite = /** @type {number[]} */ (values.filter((value) => typeof value === "number" && Number.isFinite(value)));
   if (!finite.length) return [low, high];
-  const reach = Math.max(high - low, MIN_REACH);
+  const least = additive ? 0.05 * Math.max(Math.abs(low), Math.abs(high)) || 0.05 : MIN_REACH;
+  const reach = Math.max(high - low, least);
   return [
     Math.max(Math.min(low, ...finite), low - reach),
     Math.min(Math.max(high, ...finite), high + reach)

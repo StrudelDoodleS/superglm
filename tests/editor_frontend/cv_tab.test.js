@@ -910,6 +910,7 @@ test("an added-effect term's no-effect line sits at 0, a relativity's at 1", () 
   const additive = {
     ...age,
     display: { kind: "additive", link: "identity" },
+    value_label: "effect on the mean",
     folds: [
       { label: "Fold 1", values: [-0.16, 0.02, 0.2, 0.31] },
       { label: "Fold 2", values: [-0.14, 0.0, 0.18, 0.29] }
@@ -920,6 +921,9 @@ test("an added-effect term's no-effect line sits at 0, a relativity's at 1", () 
   for (const markup of [curveChartMarkup(additive), levelChartMarkup({ ...additive, kind: "levels", x: null, levels: ["B1", "B2", "B10", "B11"] })]) {
     const { ticks, zero } = frameHeights(markup);
     assert.equal(zero, ticks.get("0"));
+    // The chart names what it draws: an added amount, not a relativity.
+    assert.match(markup, /aria-label="[^"]*effect on the mean by fold"/);
+    assert.doesNotMatch(markup, /relativities by fold/);
     // The range is the curve's own: 1, no effect on a relativity, is not forced in.
     assert.ok(![...ticks.keys()].some((label) => Number(label) >= 0.5), [...ticks.keys()].join(","));
   }
