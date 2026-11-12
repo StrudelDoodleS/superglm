@@ -620,10 +620,9 @@ class ModelMetrics:
     @cached_property
     def _geometry_weight_exponent(self) -> int:
         """Unit of this evaluation's geometry, which can differ from the fit's."""
-        exponent = self._result.weight_exponent
-        if exponent and np.max(self._weights, initial=0.0) > np.ldexp(2.0**960, -exponent):
-            return 0
-        return exponent
+        from superglm._weight_units import evaluation_weight_exponent
+
+        return evaluation_weight_exponent(self._weights, self._result)
 
     @cached_property
     def _geometry_prior_weights(self):
@@ -1384,6 +1383,8 @@ class ModelMetrics:
         """
         h = self._hat_diag
         if self._result.weight_exponent:
+            if solver_dispersion(self._result) <= 0.0:
+                return np.zeros_like(h)
             return (
                 self.std_pearson_residuals**2 * h / (self.effective_df * np.maximum(1.0 - h, 1e-10))
             )

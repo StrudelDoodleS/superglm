@@ -880,7 +880,13 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         self.weight_exponent = 0
         if use_weight_unit:
             self.weight_exponent = objective_weight_exponent(
-                w_max, gms, groups, self.lambda2, self.reml_penalties
+                w_max,
+                gms,
+                groups,
+                self.lambda2,
+                self.reml_penalties,
+                response=self.y,
+                offset=offset,
             )
             if self.weight_exponent:
                 weights = np.ldexp(weights, self.weight_exponent)

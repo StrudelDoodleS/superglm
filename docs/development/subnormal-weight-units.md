@@ -17,7 +17,13 @@ The chosen exponent puts the largest weight in `[1, 4)` unless an active
 penalty limits it. The range check reads the existing penalty components and
 leaves their sum below `2**960`; it also keeps each active lambda representable
 before penalty assembly. Configured penalties absent from the objective do
-not limit the lift. If no positive lift fits, the fit keeps its original
+not limit the lift. The same range check caps centred data moments using the
+row count and the largest column, response and offset magnitudes. It reads
+stored dense/sparse columns and basis factors; a generic matrix generates
+one column at a time. These scans run only when a lift is needed, and retain
+no columns or cache. This prevents normalizing a tiny weight from overflowing
+an otherwise representable large numeric column's weighted Gram.
+If no positive lift fits, the fit keeps its original
 unit and its existing behavior. No penalty target, rank tolerance, solver,
 or convergence refusal is added.
 
@@ -67,6 +73,10 @@ Evaluation weights can be much larger than fitting weights. Row standard
 deviations and frequency deviance ratios combine normal mantissas and their
 net exponents before restoring units; they never require an overflowing
 common lift of the evaluation weights.
+Editor exports also choose their evaluation moment unit separately from the
+fit's retained geometry and dispersion. An exactly zero retained dispersion
+keeps the existing zero Cook's-distance convention; a positive dispersion
+that underflows only in its published physical unit is still standardized.
 
 Gamma and Tweedie quantile residuals at relative dispersion below `2**-512`
 use their normal limit. The standardized skewness is at most

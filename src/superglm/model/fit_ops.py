@@ -423,7 +423,10 @@ def _compute_fit_stats(
     """Compute scalar fit statistics from training arrays."""
 
     physical_weights = weights
-    exponent = 0 if solver_result is None else solver_result.weight_exponent
+    from superglm._weight_units import evaluation_weight_exponent
+
+    fit_exponent = 0 if solver_result is None else solver_result.weight_exponent
+    exponent = 0 if solver_result is None else evaluation_weight_exponent(weights, solver_result)
     if exponent:
         weights = np.ldexp(weights, exponent)
     if null_mu is None:
@@ -436,7 +439,7 @@ def _compute_fit_stats(
             weight_semantics=weight_semantics,
         )
 
-    if exponent:
+    if fit_exponent:
         from superglm._weight_units import unit_log_likelihood
 
         ll = unit_log_likelihood(

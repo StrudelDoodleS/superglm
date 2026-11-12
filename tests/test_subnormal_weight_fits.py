@@ -462,3 +462,61 @@ def test_frequency_likelihood_at_the_mean_is_finite_on_other_weights(family, uni
     actual = model.metrics(frame, mu).log_likelihood
     assert np.isfinite(actual)
     assert actual == pytest.approx(expected, rel=2e-12)
+
+
+@pytest.mark.parametrize("unit", [1e-315, 1e-320])
+@pytest.mark.parametrize("at_mean", [False, True])
+def test_editor_export_refreshes_statistics_in_the_evaluation_weight_unit(unit, at_mean):
+    from superglm.editor import EditorSession
+
+    x = np.linspace(-1, 1, 60)
+    frame = pd.DataFrame({"x": x})
+    y = 0.4 + 0.2 * x + 0.1 * np.cos(13 * x)
+    model = SuperGLM(family="gaussian", selection_penalty=0, features={"x": Numeric()}).fit(
+        frame, y, sample_weight=np.full(len(x), unit)
+    )
+    response = model.predict(frame) if at_mean else y
+    edited = EditorSession.from_model(model, terms=["x"]).to_model(X=frame, y=response)
+    mu = edited.predict(frame)
+    deviance = float(np.sum((response - mu) ** 2))
+    null_deviance = float(np.sum((response - np.mean(response)) ** 2))
+    assert np.isfinite(edited.result.deviance)
+    assert edited.result.deviance == pytest.approx(deviance, rel=2e-12, abs=1e-28)
+    assert edited._fit_stats.null_deviance == pytest.approx(null_deviance, rel=2e-12)
+    assert edited._fit_stats.pearson_chi2 == pytest.approx(deviance, rel=2e-12, abs=1e-28)
+    assert edited._fit_stats.explained_deviance == pytest.approx(1 - deviance / null_deviance)
+    if at_mean:
+        result = model.result
+        log_phi = np.log(result.solver_phi) - result.weight_exponent * np.log(2.0)
+        expected_ll = -0.5 * len(x) * (np.log(2 * np.pi) + log_phi)
+        assert edited._fit_stats.log_likelihood == pytest.approx(expected_ll, rel=2e-12)
+
+
+@pytest.mark.parametrize("unit", [1e-160, 1e-315, 1e-320])
+def test_weight_lift_preserves_headroom_for_large_numeric_columns(unit):
+    t = np.linspace(-1, 1, 60)
+    frame = pd.DataFrame({"x": 1e154 * t})
+    y = 0.4 + 0.2 * t + 0.1 * np.cos(13 * t)
+    model = SuperGLM(family="gaussian", selection_penalty=0, features={"x": Numeric()}).fit(
+        frame, y, sample_weight=np.full(len(t), unit)
+    )
+    # The independent rectangular problem is expressed in a safe column unit.
+    design = np.column_stack([np.ones(len(t)), t])
+    beta = np.linalg.lstsq(design, y, rcond=None)[0]
+    expected = design @ beta
+    bound = 128 * U * np.linalg.cond(design) * np.max(np.abs(expected))
+    assert model.result.converged
+    np.testing.assert_allclose(model.predict(frame), expected, rtol=0, atol=bound)
+    assert model.result.effective_df == pytest.approx(2.0, rel=128 * U)
+
+
+@pytest.mark.parametrize("unit", [1.0, 1e-315, 1e-320])
+def test_exact_gaussian_fit_keeps_zero_cooks_distance(unit):
+    x = np.linspace(-1, 1, 60)
+    frame = pd.DataFrame({"x": x})
+    y = np.zeros(len(x))
+    weights = np.full(len(x), unit)
+    model = SuperGLM(family="gaussian", selection_penalty=0, features={"x": Numeric()}).fit(
+        frame, y, sample_weight=weights
+    )
+    np.testing.assert_array_equal(model.metrics(frame, y, sample_weight=weights).cooks_distance, 0)

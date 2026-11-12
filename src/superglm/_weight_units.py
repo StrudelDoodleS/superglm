@@ -14,7 +14,9 @@ import math
 import numpy as np
 
 
-def objective_weight_exponent(w_max, group_matrices, groups, lambda2, reml_penalties):
+def objective_weight_exponent(
+    w_max, group_matrices, groups, lambda2, reml_penalties, *, response=None, offset=None
+):
     """Choose an even lift, leaving headroom for the unchanged penalty target.
 
     This is a range test, not a numerical tolerance. Ordinary fits do not
@@ -41,7 +43,63 @@ def objective_weight_exponent(w_max, group_matrices, groups, lambda2, reml_penal
         # Each product is below 2**power; allow for their sum without forming
         # a possibly subnormal lambda * Omega first.
         exponent = min(exponent, 960 - max(powers) - (len(powers) - 1).bit_length())
+    if exponent > 0:
+        # Bound centred data moments by 4*n*w_max*max(1, |X|, |y|, |offset|)^2.
+        # Work with exponents: neither a large square nor its tiny weight is
+        # formed first. This scan belongs only to the exceptional lift path.
+        magnitude_power = _data_magnitude_power(group_matrices, response, offset)
+        n = group_matrices[0].shape[0] if group_matrices else len(response)
+        exponent = min(
+            exponent,
+            960 - math.frexp(w_max)[1] - 2 * magnitude_power - (max(n, 1) - 1).bit_length() - 2,
+        )
     return max(0, exponent - (exponent & 1))
+
+
+def _data_magnitude_power(group_matrices, response, offset):
+    """A power bounding represented columns, without a dense full design."""
+    from scipy import sparse
+
+    from superglm.group_matrix import (
+        CategoricalGroupMatrix,
+        DenseGroupMatrix,
+        RandomEffectGroupMatrix,
+        SparseGroupMatrix,
+    )
+
+    def power(values):
+        if values is None:
+            return 0
+        if sparse.issparse(values):
+            values = values.data
+        maximum = max(float(np.max(values, initial=0.0)), -float(np.min(values, initial=0.0)))
+        # An unsafe unweighted factor evaluation declines the lift, retaining
+        # the original solve. It need not reject an otherwise valid fit.
+        return math.frexp(maximum)[1] if np.isfinite(maximum) else 2048
+
+    largest = max(1, power(response), power(offset))
+    for matrix in group_matrices:
+        if type(matrix) in (CategoricalGroupMatrix, RandomEffectGroupMatrix):
+            continue
+        if type(matrix) in (DenseGroupMatrix, SparseGroupMatrix):
+            largest = max(largest, power(matrix.M))
+        elif hasattr(matrix, "R_inv") and (hasattr(matrix, "B_unique") or hasattr(matrix, "B")):
+            basis = matrix.B_unique if hasattr(matrix, "B_unique") else matrix.B
+            # |B R|_max <= q |B|_max |R|_max; inspect stored factors only.
+            largest = max(
+                largest,
+                power(basis) + power(matrix.R_inv) + (max(basis.shape[1], 1) - 1).bit_length(),
+            )
+        else:
+            # The generic bounded-memory path mirrors the matrix algebra's
+            # column fallback and retains no generated column or new cache.
+            unit = np.zeros(matrix.shape[1])
+            with np.errstate(over="ignore", invalid="ignore"):
+                for column in range(matrix.shape[1]):
+                    unit[column] = 1.0
+                    largest = max(largest, power(matrix.matvec(unit)))
+                    unit[column] = 0.0
+    return largest
 
 
 def scale_penalties(lambda2, exponent):
@@ -68,6 +126,14 @@ def solver_weights(weights, result):
     """Read physical prior weights in the retained geometry's objective unit."""
     exponent = getattr(result, "weight_exponent", 0)
     return np.ldexp(weights, exponent) if exponent else weights
+
+
+def evaluation_weight_exponent(weights, result):
+    """An evaluation's moment unit, independent of the retained fit geometry."""
+    exponent = getattr(result, "weight_exponent", 0)
+    if exponent and np.max(weights, initial=0.0) > np.ldexp(2.0**960, -exponent):
+        return 0
+    return exponent
 
 
 def solver_dispersion(result):
