@@ -1224,7 +1224,7 @@ def optimize_direct_reml(
                 estimated_mask,
                 group_names,
                 box,
-                bar=_tol * (1.0 + abs(float(obj))),
+                bar=max(_tol, FLAT_DIRECTION_FREEZE_FLOOR) * (1.0 + abs(float(obj))),
             )
 
         lambda_history.append(cand_lambdas.copy())

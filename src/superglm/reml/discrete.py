@@ -1151,7 +1151,12 @@ def optimize_discrete_reml_cached_w(
         )
         score_scale_d = candidate_convergence.score_scale
         last_bound_pressure = bound_pressure(
-            grad, rho_clipped, estimated_mask, group_names, box, bar=_tol * score_scale_d
+            grad,
+            rho_clipped,
+            estimated_mask,
+            group_names,
+            box,
+            bar=max(_tol, FLAT_DIRECTION_FREEZE_FLOOR) * score_scale_d,
         )
         proj_grad_norm = candidate_convergence.projected_gradient_norm
         obj_change = candidate_convergence.objective_change

@@ -111,7 +111,9 @@ def bound_pressure(
     ``gradient`` is that of the minimised criterion in ``rho = log lambda``.
     A component within ``bound_window`` (``project_reml_gradient``'s) of a
     bound is held back when its gradient points out of the box by at least
-    ``bar``, the stop rule's gradient bar: the search would have moved it on.
+    ``bar``: the stop rule's gradient bar, raised to the flat-direction freeze
+    bar, below which a smoothing parameter at a bound is a legitimate working
+    infinity or zero (Wood, Pya & Saefken 2016, sec. 3.1, step 4(b)).
     """
     held = []
     for name, score, log_lambda, free in zip(names, gradient, rho, estimated_mask, strict=True):

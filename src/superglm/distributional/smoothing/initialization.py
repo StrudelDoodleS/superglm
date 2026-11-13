@@ -149,6 +149,11 @@ def prepare_distributional_initialization(
     provider = expected_information_provider(family, likelihood_plan)
     calibrate = bool(automatic) and getattr(family, "information_scaled_start", True)
     if provider is None or not (calibrate or (config.relative_box and estimated)):
+        if config.relative_box:
+            for name in estimated:
+                resolved[name] = float(
+                    np.clip(resolved[name], config.minimum_lambda, config.maximum_lambda)
+                )
         return resolved, initial, ()
     matrices = (
         reuse_session.dense_matrices(layout, phase_recorder=phase_recorder)

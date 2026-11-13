@@ -271,10 +271,16 @@ def initialize_distributional_lambdas(
             value = float(fixed_value)
         else:
             value = float(values.get(component.name, config.initial_lambda))
-            if not config.lower(component.name) <= value <= config.upper(component.name):
+            # A relative box is known only once the data's units are; the start
+            # is then clipped into it (``prepare_distributional_initialization``).
+            if not config.relative_box and not (
+                config.lower(component.name) <= value <= config.upper(component.name)
+            ):
                 raise ValueError(
                     f"initial lambda for {component.name!r} lies outside configured bounds"
                 )
+            if config.relative_box and not value > 0.0:
+                raise ValueError(f"initial lambda for {component.name!r} must be positive")
         if not math.isfinite(value) or value < 0.0:
             raise ValueError(f"lambda for {component.name!r} must be finite and non-negative")
         resolved[component.name] = value
