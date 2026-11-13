@@ -24,9 +24,35 @@ from superglm.distributional.families.two_piece import (
 )
 from superglm.distributional.posterior import resolve_quantity
 from tests._generalized_gamma_lss_oracles import mp_expected_shortfall
+from tests._oracle_store import OracleStore
 
 _EPS = np.finfo(np.float64).eps
 _DECIMAL_PI = Decimal("3.1415926535897932384626433832795028841971693993751")
+
+
+def _expected_shortfall_reference(p, mu, sigma, shape):
+    """``mp_expected_shortfall``'s pair at its own 30 digits, rounded to float64."""
+    import mpmath as mp
+
+    # The oracle works at the larger of 30 digits and the global precision,
+    # which other test modules raise; the stored answers are its own 30.
+    with mp.workdps(15):
+        return tuple(float(v) for v in mp_expected_shortfall(p, mu, sigma, shape))
+
+
+# The density-quadrature oracle's answers are stored (``tests/_oracle_store.py``):
+# its ``mp.quad`` and Newton solve were nearly all of the near-zero-shape tests' time.
+EXPECTED_SHORTFALL_REFERENCE = OracleStore(
+    "generalized_gamma_expected_shortfall",
+    _expected_shortfall_reference,
+    depends=(mp_expected_shortfall,),
+    module="tests/test_lss_expected_shortfall.py",
+)
+
+
+def test_the_stored_oracle_answers_are_current():
+    pytest.importorskip("mpmath")
+    EXPECTED_SHORTFALL_REFERENCE.verify()
 
 
 def _gamma_shape_plus_one_tail_ratio_oracle(shape: float, p: float) -> float:
@@ -433,7 +459,7 @@ def test_generalized_gamma_expected_shortfall_reads_the_fitted_law_near_zero_sha
     sigma = np.array([row[1] for row in rows])
     q = np.full(len(rows), shape)
     reference = np.array(
-        [[float(v) for v in mp_expected_shortfall(*row[:1], mu, row[1], shape)] for row in rows]
+        [EXPECTED_SHORTFALL_REFERENCE(row[0], mu, row[1], float(shape)) for row in rows]
     )
 
     location = GeneralizedGammaLSS(parametrisation="location")
@@ -456,7 +482,7 @@ def test_generalized_gamma_resolves_an_extreme_negative_near_zero_tail():
     quantile = family.quantile(np.array([p]), theta)[0]
     assert quantile == pytest.approx(763.0580930009103, rel=64.0 * _EPS)
     pytest.importorskip("mpmath")
-    want = float(mp_expected_shortfall(p, 0.2, 0.8, -1.0e-6)[0])
+    want = EXPECTED_SHORTFALL_REFERENCE(p, 0.2, 0.8, -1.0e-6)[0]
 
     got = family.expected_shortfall(np.array([p]), theta)[0]
 
@@ -489,7 +515,7 @@ def test_generalized_gamma_reads_an_unrepresented_shape_increment_through_the_un
     shift = sigma / shape
     assert (kappa + shift) - kappa != shift
     pytest.importorskip("mpmath")
-    want = float(mp_expected_shortfall(0.9, 0.0, sigma, shape)[1])
+    want = EXPECTED_SHORTFALL_REFERENCE(0.9, 0.0, sigma, shape)[1]
 
     got = family.expected_shortfall(np.array([0.9]), np.array([[1.0, sigma, shape]]))[0]
 
