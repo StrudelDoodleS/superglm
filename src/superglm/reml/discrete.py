@@ -443,10 +443,10 @@ def bootstrap_seed_lambdas(
       constant; 1e-4 when the intercept-only fit has no valid mode.
 
     ``warm_lambdas`` replaces the seed of each component it names, and
-    fixed-policy components start at their fixed value. The cold constants are
-    in ``box``'s units.
+    fixed-policy components start at their fixed value; every seed is clipped
+    to ``box``.
     """
-    seeds = {pc.name: (1.0 if ":" in pc.group_name else 1e-4) * box.unit for pc in penalties}
+    seeds = {pc.name: box.clip(1.0 if ":" in pc.group_name else 1e-4) for pc in penalties}
     cold_random_effects = [
         pc
         for index, pc in enumerate(penalties)
@@ -851,7 +851,7 @@ def optimize_discrete_reml_cached_w(
         trace_term = as_hessian_factor(boot_inv).trace_inverse_penalty(pc)
         r_j = pc.rank if pc.rank > 0 else (penalty_ranks[pc.name] if penalty_ranks else 0.0)
         denom = boot_inv_phi * quad + trace_term
-        lam_fp = r_j / denom if denom * box.unit > 1e-12 else box.unit
+        lam_fp = r_j / denom if denom * box.unit > 1e-12 else box.clip(1.0)
         lam_fp_clipped = box.clip(lam_fp)
         _bootstrap_component_stats.append(
             {
@@ -881,8 +881,7 @@ def optimize_discrete_reml_cached_w(
             and boot_inv_phi * quad < 0.1 * trace_term
         ):
             lam_fp = np.exp(log_hi)
-        # the incoming value is a start, read in the box's units
-        lam_prev = max(float(lambdas.get(pc.name, 1e-4)) * box.unit, box.floor)
+        lam_prev = max(float(lambdas.get(pc.name, 1e-4)), box.floor)
         log_prev = np.log(lam_prev)
         log_target = np.log(max(lam_fp, box.floor))
         if ":" in pc.group_name:

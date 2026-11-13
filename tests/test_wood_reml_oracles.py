@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from superglm._lambda_box import LambdaBox
 from superglm.distributions import Gamma, Poisson
 from superglm.links import IdentityLink, LogLink
 from superglm.reml.objective import reml_laml_objective
@@ -420,6 +421,8 @@ def test_direct_reml_retains_an_accepted_trial_on_the_final_outer_iteration(
         verbose=False,
         reml_penalties=[penalty],
         weight_semantics="frequency",
+        # the stand-in family has no null fit to read a unit from
+        lambda_box=LambdaBox(),
     )
 
     assert len(fit_lambdas) == 3

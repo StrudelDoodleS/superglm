@@ -360,6 +360,7 @@ def test_bound_smooth_interaction_compilation_and_fit_forwarding(discrete, reml,
                 initial_lambda=None,
                 practical_convergence=True,
                 outer="efs+finish",
+                relative_box=True,
             )
             if reml
             else None

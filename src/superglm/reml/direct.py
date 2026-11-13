@@ -730,7 +730,7 @@ def optimize_direct_reml(
         trace_term = as_hessian_factor(boot_inv).trace_inverse_penalty(pc)
         r_j = pc.rank if pc.rank > 0 else (penalty_ranks[pc.name] if penalty_ranks else 0.0)
         denom = boot_inv_phi * quad + trace_term
-        lam_fp = r_j / denom if denom * box.unit > 1e-12 else box.unit
+        lam_fp = r_j / denom if denom * box.unit > 1e-12 else box.clip(1.0)
         # Snap degenerate select=True null-space penalties to the upper bound:
         # with quad << trace any lambda is nearly a fixed point.
         if (
@@ -740,8 +740,7 @@ def optimize_direct_reml(
             and boot_inv_phi * quad < 0.1 * trace_term
         ):
             lam_fp = np.exp(log_hi)
-        # the incoming value is a start, read in the box's units
-        lam_prev = max(float(lambdas.get(pc.name, 1e-4)) * box.unit, box.floor)
+        lam_prev = max(float(lambdas.get(pc.name, 1e-4)), box.floor)
         log_prev = np.log(lam_prev)
         log_target = np.log(max(lam_fp, box.floor))
         if ":" in pc.group_name:
