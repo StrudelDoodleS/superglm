@@ -488,7 +488,7 @@ def _try_joint_exact_face(
     candidate_names = tuple(
         name
         for name in layout.penalty_names
-        if name in estimated and name not in active and lambdas[name] == efs_config.maximum_lambda
+        if name in estimated and name not in active and lambdas[name] == efs_config.upper(name)
     )
     nominated_names = tuple(name for name in candidate_names if name in positive_pressure)
     if not nominated_names or len(candidate_names) < 2:
@@ -579,7 +579,7 @@ def _try_exact_face(
         lambdas,
         component_name=component_name,
         finite_face=current_face,
-        maximum_lambda=efs_config.maximum_lambda,
+        config=efs_config,
     )
     attempt = _check_face_direction(
         family,
@@ -673,7 +673,7 @@ def _recheck_exact_face(
                 lambdas,
                 component_name=component_name,
                 finite_face=finite_face,
-                maximum_lambda=efs_config.maximum_lambda,
+                config=efs_config,
             )
             attempt = _check_face_direction(
                 family,

@@ -21,7 +21,7 @@ from numpy.typing import NDArray
 from superglm._blas_threads import solver_blas_threads
 from superglm._fit_gate import fit_record
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
-from superglm._lambda_box import LAMBDA_CEILING
+from superglm._lambda_box import LAMBDA_CEILING, bound_warning_message
 from superglm._parallel import fit_pool
 from superglm.diagnostics.convergence import (
     ConvergenceWarning,
@@ -633,6 +633,15 @@ class SuperLSS:
             efs_config is not None or lss_ill_conditioned_note(fitted_result)
         ):
             warnings.warn(message, ConvergenceWarning, stacklevel=3)
+        if smoothing is not None:
+            bounds = bound_warning_message(
+                [
+                    (name, side, float(smoothing.lambdas[name]), smoothing.config.unit(name))
+                    for name, side in smoothing.bound_pressure()
+                ]
+            )
+            if bounds is not None:
+                warnings.warn(bounds, ConvergenceWarning, stacklevel=3)
         return self
 
     def fit(
@@ -737,7 +746,7 @@ class SuperLSS:
         max_reml_iter: int = 100,
         reml_tol: float = 1.0e-6,
         max_log_step: float = 5.0,
-        max_lambda: float = LAMBDA_CEILING,
+        max_lambda: float | None = None,
         initial_lambda: float | None = None,
         max_inner_iter: int = 100,
         inner_tol: float = 1.0e-7,
@@ -800,6 +809,16 @@ class SuperLSS:
         ``lambdas`` override it, and fixed penalty policies take precedence over
         both. The smoothing result retains the numeric starts for replay.
         Stops can depend on the starting values, so vary them when comparing fits.
+
+        With ``max_lambda=None`` the search keeps each smoothing parameter
+        between ``1e-6`` and ``1e10`` times its term's information unit: the
+        mean expected information per row of the term's parameter at the
+        start, rounded to a power of two. Rescaling the response or the
+        weights moves the optimum and these limits together. Families without
+        expected information keep a unit of one. A number caps every smoothing
+        parameter at that value, with the floor at ``1e-6``, whatever the
+        data's scale. A fit whose search still pointed past a limit warns,
+        naming the term.
         """
         if outer is None:
             # Resolved before the fit record reads the arguments, so it names what ran.
@@ -831,9 +850,15 @@ class SuperLSS:
                     max_iterations=max_reml_iter,
                     tolerance=reml_tol,
                     max_log_step=max_log_step,
-                    maximum_lambda=max_lambda,
+                    maximum_lambda=LAMBDA_CEILING if max_lambda is None else max_lambda,
+                    relative_box=max_lambda is None,
                     initial_lambda=(
-                        None if initial_lambda is None else min(float(initial_lambda), max_lambda)
+                        None
+                        if initial_lambda is None
+                        else min(
+                            float(initial_lambda),
+                            LAMBDA_CEILING if max_lambda is None else max_lambda,
+                        )
                     ),
                     acceleration=acceleration,
                     acceleration_history=acceleration_history,

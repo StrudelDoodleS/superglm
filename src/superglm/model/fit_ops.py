@@ -1907,7 +1907,7 @@ def fit_reml(
 
 
 def warn_published_reml_nonconvergence(model) -> None:
-    """Warn once that a published fit_reml fit stopped unconverged.
+    """Warn once that a published fit_reml fit stopped unconverged or held at a bound.
 
     Called after the state it describes is public, by ``fit_reml`` and the
     REML publication refits of ``estimate_p`` and ``estimate_theta``.
@@ -1918,12 +1918,14 @@ def warn_published_reml_nonconvergence(model) -> None:
         return
     from superglm.diagnostics.convergence import (
         warn_coefficient_nonconvergence,
+        warn_reml_bounds,
         warn_reml_nonconvergence,
     )
 
     reml_result = getattr(model, "_reml_result", None)
     if reml_result is not None:
         warn_reml_nonconvergence(reml_result)
+        warn_reml_bounds(reml_result)
     else:
         # No REML-eligible groups: fit_reml fell back to the plain coefficient
         # fit, whose own convergence must not go unreported.

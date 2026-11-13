@@ -67,6 +67,12 @@ class REMLResult:
     # The search's fit-invariant Tweedie saturated-density cache, reused by the
     # terminal REML evaluations. A memo, so excluded from equality and repr.
     tweedie_scale_data: object | None = field(default=None, repr=False, compare=False)
+    # The search box (``_lambda_box.LambdaBox``) in the fit's own units; None
+    # on a result saved before the box was relative, whose box is the unit one.
+    lambda_box: object | None = None
+    # ``(component, "floor" | "ceiling")`` for each component that box held
+    # back at the returned smoothing parameters (``_lambda_box.bound_pressure``).
+    bound_pressure: tuple = ()
 
 
 def _map_beta_between_bases(

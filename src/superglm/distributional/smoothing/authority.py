@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
@@ -27,6 +28,9 @@ from superglm.distributional.solver.solver import (
 )
 from superglm.distributional.timing import FitPhaseRecorder, measure_phase
 from superglm.solvers.rank import RankDecomposition
+
+if TYPE_CHECKING:
+    from superglm.distributional.results.iteration import DistributionalEFSConfig
 
 
 def _fit_fixed_state(
@@ -95,13 +99,13 @@ def _is_sole_cap_outside_face(
     *,
     component_name: str,
     finite_face: PenaltyFace | None,
-    maximum_lambda: float,
+    config: DistributionalEFSConfig,
 ) -> bool:
     finite_names = frozenset(() if finite_face is None else finite_face.component_names)
     capped_outside = tuple(
         name
         for name in layout.penalty_names
-        if name not in finite_names and lambdas[name] == maximum_lambda
+        if name not in finite_names and lambdas[name] == config.upper(name)
     )
     return capped_outside == (component_name,)
 

@@ -282,7 +282,7 @@ def _terminal_lambda_evidence(
     return _evidence_set(
         _SMOOTHING_HISTORY,
         ("terminal_lambda", float(smoothing.lambdas[name])),
-        ("configured_maximum_lambda", float(smoothing.config.maximum_lambda)),
+        ("configured_maximum_lambda", float(smoothing.config.upper(name))),
     )
 
 
@@ -971,7 +971,8 @@ def _analyze_lambda_caps(context: _LSSDiagnosticContext) -> tuple[DiagnosticFind
                 ),
                 observed=(
                     f"Its smoothing parameter is {smoothing.lambdas[name]:.3g}, the maximum "
-                    f"(max_lambda) is {smoothing.config.maximum_lambda:.3g}, and the fit lists "
+                    f"(max_lambda times its information unit) is "
+                    f"{smoothing.config.upper(name):.3g}, and the fit lists "
                     "this term as unresolved at the maximum."
                 ),
                 interpretation=(
@@ -1001,7 +1002,7 @@ def _analyze_smoothing_state(context: _LSSDiagnosticContext) -> tuple[Diagnostic
         return ()
     findings: list[DiagnosticFinding] = []
     for name, terminal_lambda in smoothing.lambdas.items():
-        if terminal_lambda != smoothing.config.maximum_lambda:
+        if terminal_lambda != smoothing.config.upper(name):
             continue
         findings.append(
             _finding(
@@ -1016,8 +1017,8 @@ def _analyze_smoothing_state(context: _LSSDiagnosticContext) -> tuple[Diagnostic
                     "the search allows."
                 ),
                 observed=(
-                    f"Its final smoothing parameter, {smoothing.lambdas[name]:.3g}, equals the "
-                    "maximum (max_lambda)."
+                    f"Its final smoothing parameter, {smoothing.lambdas[name]:.3g}, equals its "
+                    "maximum (max_lambda times its information unit)."
                 ),
                 interpretation="The search ran into the edge of the range it may try.",
                 caveats=(
@@ -1260,7 +1261,7 @@ def _build_profile(
         coefficient_fits = 1
         outer_iterations = 0
         unresolved: set[str] = set()
-        maximum_lambda = None
+        config = None
     else:
         ordinary_iterations = tuple(
             item for item in smoothing.history if not _is_face_assessment(item)
@@ -1270,7 +1271,7 @@ def _build_profile(
         coefficient_fits = len(smoothing.coefficient_fits)
         outer_iterations = smoothing.iterations
         unresolved = set(smoothing.unresolved_upper_bound)
-        maximum_lambda = smoothing.config.maximum_lambda
+        config = smoothing.config
 
     exact_faces = set(context.exact_face_components)
     smoothing_components: list[SmoothingComponentProfile] = []
@@ -1301,7 +1302,7 @@ def _build_profile(
             outcome = "exact_face"
         elif name in unresolved:
             outcome = "unresolved_cap"
-        elif maximum_lambda is not None and final_lambda == maximum_lambda:
+        elif config is not None and final_lambda == config.upper(name):
             outcome = "upper_bound"
         else:
             outcome = "finite"
@@ -1316,8 +1317,8 @@ def _build_profile(
         )
         upper_bound_iterations = (
             0
-            if fixed or maximum_lambda is None
-            else sum(item.lambdas_after[name] == maximum_lambda for item in ordinary_iterations)
+            if fixed or config is None
+            else sum(item.lambdas_after[name] == config.upper(name) for item in ordinary_iterations)
         )
         smoothing_components.append(
             SmoothingComponentProfile(

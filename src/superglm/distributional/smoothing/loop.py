@@ -7,6 +7,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import replace
 
+import numpy as np
 from numpy.typing import NDArray
 
 from superglm.distributional.family import DistributionalFamily, FamilyLikelihoodPlan
@@ -241,7 +242,7 @@ def fit_distributional_efs(
     penalty_memo = _PenaltyEvaluationMemo()
 
     with measure_phase(phase_recorder, "layout_penalty_assembly"):
-        current_lambdas, initial = prepare_distributional_initialization(
+        current_lambdas, initial, lambda_units = prepare_distributional_initialization(
             family,
             layout,
             y,
@@ -254,6 +255,8 @@ def fit_distributional_efs(
             reuse_session=reuse_session,
             phase_recorder=phase_recorder,
         )
+        if lambda_units:
+            outer_config = replace(outer_config, lambda_units=lambda_units)
         initial_penalty = layout.penalty_matrix(current_lambdas)
     initial_lambdas = dict(current_lambdas)
     initial_fit = fit_dense_fixed_lambda(
@@ -603,9 +606,7 @@ def fit_distributional_efs(
         current_objective = release.objective
         terminal_fit_index = indices[-1]
         terminal_evidence = evidence
-        maximum_lambda_conditioning = outer_config.maximum_lambda_conditioning
-        assert maximum_lambda_conditioning is not None
-        beyond_cap[release.name] = maximum_lambda_conditioning
+        beyond_cap[release.name] = outer_config.conditioning_limit(release.name)
 
     def _record_bracket_attempt(attempt: BracketAttempt) -> None:
         """Record a search that found no root as one rejected bracket iteration."""
@@ -645,8 +646,6 @@ def fit_distributional_efs(
         if outer_config.acceleration == "multisecant"
         else None
     )
-    minimum_log_lambda = math.log(outer_config.minimum_lambda)
-    maximum_log_lambda = math.log(outer_config.maximum_lambda)
     while True:
         compact_coefficient_history(
             coefficient_fits, history, terminal_fit_index=terminal_fit_index, config=outer_config
@@ -1175,8 +1174,12 @@ def fit_distributional_efs(
                     )
                     decision = accelerator.propose(
                         max_log_step=outer_config.max_log_step,
-                        minimum_log_lambda=minimum_log_lambda,
-                        maximum_log_lambda=maximum_log_lambda,
+                        minimum_log_lambda=np.array(
+                            [math.log(outer_config.lower(name)) for name in estimated_names]
+                        ),
+                        maximum_log_lambda=np.array(
+                            [math.log(outer_config.upper(name)) for name in estimated_names]
+                        ),
                     )
                 accelerated_proposal = decision.proposal
                 if accelerated_proposal is None:

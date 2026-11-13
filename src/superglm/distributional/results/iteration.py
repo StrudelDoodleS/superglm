@@ -89,6 +89,31 @@ class DistributionalEFSConfig:
     # itself the conditioning limit rather than a configuration error.
     maximum_lambda_conditioning: float | None = None
     retain_history_rows: bool = False
+    # ``relative_box``: the bounds are in each component's information unit
+    # (``_lambda_box``), which the fit records in ``lambda_units`` as
+    # ``(name, unit)`` pairs. A component's bounds are ``minimum_lambda``,
+    # ``maximum_lambda`` and ``maximum_lambda_conditioning`` times its unit; a
+    # name not listed has unit 1.
+    relative_box: bool = False
+    lambda_units: tuple[tuple[str, float], ...] = ()
+
+    def unit(self, name: str) -> float:
+        """Component ``name``'s information unit."""
+        # A config pickled before the units existed has none.
+        return dict(getattr(self, "lambda_units", ())).get(name, 1.0)
+
+    def lower(self, name: str) -> float:
+        """The smallest smoothing parameter component ``name`` may take."""
+        return self.minimum_lambda * self.unit(name)
+
+    def upper(self, name: str) -> float:
+        """The largest smoothing parameter component ``name`` may take before a release."""
+        return self.maximum_lambda * self.unit(name)
+
+    def conditioning_limit(self, name: str) -> float:
+        """The largest smoothing parameter a release beyond ``upper`` may reach."""
+        assert self.maximum_lambda_conditioning is not None
+        return self.maximum_lambda_conditioning * self.unit(name)
 
     def __post_init__(self) -> None:
         if not isinstance(self.retain_history_rows, bool):
@@ -139,6 +164,14 @@ class DistributionalEFSConfig:
                 name="practical_parameter_tolerance",
             ),
         )
+        if not isinstance(self.relative_box, bool):
+            raise TypeError("relative_box must be bool")
+        units = tuple((str(name), float(unit)) for name, unit in self.lambda_units)
+        if any(not (math.isfinite(unit) and unit > 0.0) for _, unit in units):
+            raise ValueError("lambda_units must be finite and positive")
+        if units and not self.relative_box:
+            raise ValueError("lambda_units needs relative_box=True")
+        object.__setattr__(self, "lambda_units", units)
         if self.maximum_lambda < self.minimum_lambda:
             raise ValueError("maximum_lambda must not be smaller than minimum_lambda")
         if self.initial_lambda is not None and not (

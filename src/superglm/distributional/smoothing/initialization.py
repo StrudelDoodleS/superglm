@@ -8,6 +8,7 @@ from dataclasses import replace
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._lambda_box import information_unit
 from superglm.distributional.family import (
     DistributionalFamily,
     FamilyLikelihoodPlan,
@@ -114,28 +115,41 @@ def prepare_distributional_initialization(
     chunk_size: ChunkSize | None,
     reuse_session: _DenseObservedReuseSession,
     phase_recorder: FitPhaseRecorder | None,
-) -> tuple[dict[str, float], NDArray | None]:
+) -> tuple[dict[str, float], NDArray | None, tuple[tuple[str, float], ...]]:
     """Resolve overrides, then calibrate missing starts at admitted coefficients.
 
     Families without expected information, families that set
     ``information_scaled_start = False``, and blocks with unresolved numerical
     rank retain the previous 0.1 start, clipped to the requested bounds.
+
+    The third value, under ``config.relative_box``, is each penalty's
+    information unit (``_lambda_box``): the mean expected information of its
+    predictor at the starting coefficients, one row at a time. Families without
+    expected information have none, and every component then keeps the unit
+    box. Estimated starts are clipped to their component's box, and the
+    starting coefficients that pass computes are returned for the first fit.
     """
     if config.initial_lambda is not None:
-        return initialize_distributional_lambdas(layout, supplied, config), initial
-    fallback = float(np.clip(0.1, config.minimum_lambda, config.maximum_lambda))
-    resolved = initialize_distributional_lambdas(
-        layout, supplied, replace(config, initial_lambda=fallback)
-    )
-    automatic = {
+        resolved = initialize_distributional_lambdas(layout, supplied, config)
+    else:
+        fallback = float(np.clip(0.1, config.minimum_lambda, config.maximum_lambda))
+        resolved = initialize_distributional_lambdas(
+            layout, supplied, replace(config, initial_lambda=fallback)
+        )
+    estimated = {
         component.name
         for component in layout.penalties
-        if (supplied is None or component.name not in supplied)
-        and (component.lambda_policy is None or component.lambda_policy.mode != "fixed")
+        if component.lambda_policy is None or component.lambda_policy.mode != "fixed"
+    }
+    automatic = {
+        name
+        for name in estimated
+        if config.initial_lambda is None and (supplied is None or name not in supplied)
     }
     provider = expected_information_provider(family, likelihood_plan)
-    if not automatic or provider is None or not getattr(family, "information_scaled_start", True):
-        return resolved, initial
+    calibrate = bool(automatic) and getattr(family, "information_scaled_start", True)
+    if provider is None or not (calibrate or (config.relative_box and estimated)):
+        return resolved, initial, ()
     matrices = (
         reuse_session.dense_matrices(layout, phase_recorder=phase_recorder)
         if chunk_size is None
@@ -178,11 +192,23 @@ def prepare_distributional_initialization(
         for packed_index, (left, right) in enumerate(packed_pairs(len(layout.predictors)))
         if left == right
     }
+    size = float(context.likelihood_plan.weights.likelihood_count)
+    units: list[tuple[str, float]] = []
     for state in layout.predictors:
         weights = information[:, diagonal[state.parameter_index]]
+        unit = information_unit(weights, size) if config.relative_box else 1.0
         grams: dict[int, NDArray] = {}
         for component in state.penalties:
-            if component.name not in automatic:
+            units.append((component.name, unit))
+            if component.name in estimated and config.relative_box:
+                resolved[component.name] = float(
+                    np.clip(
+                        resolved[component.name],
+                        config.minimum_lambda * unit,
+                        config.maximum_lambda * unit,
+                    )
+                )
+            if not calibrate or component.name not in automatic:
                 continue
             if component.group_index not in grams:
                 grams[component.group_index] = state.design.group_matrices[
@@ -195,6 +221,6 @@ def prepare_distributional_initialization(
             )
             if value is not None:
                 resolved[component.name] = float(
-                    np.clip(value, config.minimum_lambda, config.maximum_lambda)
+                    np.clip(value, config.minimum_lambda * unit, config.maximum_lambda * unit)
                 )
-    return resolved, coefficients
+    return resolved, coefficients, tuple(units) if config.relative_box else ()

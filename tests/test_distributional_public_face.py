@@ -174,6 +174,8 @@ def test_public_gamma_reml_exposes_an_exact_face_at_the_default_lambda_cap(
         reml_tol=1.0e-3,
         max_inner_iter=150,
         inner_tol=1.0e-9,
+        # the start sits on this absolute cap, whatever the data's information unit
+        max_lambda=default_cap,
     )
 
     fitted = model._require_fitted()

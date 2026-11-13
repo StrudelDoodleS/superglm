@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from superglm._lambda_box import LAMBDA_CEILING, LAMBDA_FLOOR
+from superglm._lambda_box import fitted_lambda_box
 from superglm._reporting_state import ReportingSupportState
 from superglm.features.factor_smooth import FactorSmooth
 from superglm.group_matrix import FactorSmoothGroupMatrix
@@ -25,9 +25,6 @@ from superglm.solvers._structured.state import (
     StructuredLinearSystemState,
 )
 from superglm.types import GroupSlice, PenaltyComponent
-
-_LAMBDA_LOWER_BOUND = LAMBDA_FLOOR
-_LAMBDA_UPPER_BOUND = LAMBDA_CEILING
 
 
 @dataclass(frozen=True)
@@ -261,13 +258,12 @@ def factor_smooth_result(
         )
         for component, value in lambdas.items()
     }
+    box = fitted_lambda_box(model)
     at_lower_boundary = {
-        component: value <= _LAMBDA_LOWER_BOUND * (1.0 + 1.0e-8)
-        for component, value in lambdas.items()
+        component: box.side(value) == "floor" for component, value in lambdas.items()
     }
     at_upper_boundary = {
-        component: value >= _LAMBDA_UPPER_BOUND * (1.0 - 1.0e-8)
-        for component, value in lambdas.items()
+        component: box.side(value) == "ceiling" for component, value in lambdas.items()
     }
     collapsed: bool | None = (
         bool(at_upper_boundary and all(at_upper_boundary.values())) if spec.basis == "fs" else None
@@ -360,8 +356,8 @@ def factor_smooth_result(
             _component_suffix(group.name, component.name): component.name
             for component, _omega in component_omegas
         },
-        "lambda_lower_bound": _LAMBDA_LOWER_BOUND,
-        "lambda_upper_bound": _LAMBDA_UPPER_BOUND,
+        "lambda_lower_bound": box.floor,
+        "lambda_upper_bound": box.ceiling,
         "backend": getattr(model.result, "direct_backend", None),
         "fallback_reason": getattr(model.result, "direct_fallback_reason", None),
     }

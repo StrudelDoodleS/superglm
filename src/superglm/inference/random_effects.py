@@ -12,7 +12,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
-from superglm._lambda_box import LAMBDA_CEILING, LAMBDA_FLOOR
+from superglm._lambda_box import fitted_lambda_box
 from superglm._reporting_state import ReportingSupportState
 from superglm.distributions import _VARIANCE_FLOOR, Poisson, clip_mu
 from superglm.features.random_effect import RandomEffect
@@ -28,9 +28,6 @@ from superglm.solvers._structured.state import (
 )
 from superglm.solvers.working_rows import fisher_working_weights
 from superglm.types import GroupSlice
-
-_LAMBDA_LOWER_BOUND = LAMBDA_FLOOR
-_LAMBDA_UPPER_BOUND = LAMBDA_CEILING
 
 
 @dataclass(frozen=True)
@@ -331,8 +328,9 @@ def random_effect_result(
             else phi / lambda_value
         )
     )
-    at_lower_boundary = lambda_value <= _LAMBDA_LOWER_BOUND * (1.0 + 1.0e-8)
-    at_upper_boundary = lambda_value >= _LAMBDA_UPPER_BOUND * (1.0 - 1.0e-8)
+    box = fitted_lambda_box(model)
+    at_lower_boundary = box.side(lambda_value) == "floor"
+    at_upper_boundary = box.side(lambda_value) == "ceiling"
     collapsed = at_upper_boundary
     if collapsed:
         warnings.warn(
@@ -462,8 +460,8 @@ def random_effect_result(
         "credibility_out_of_bounds": credibility_violation,
         "unpooled_finite": bool(np.all(np.isfinite(unpooled))),
         "n_levels_without_information": int(np.count_nonzero(~has_information)),
-        "lambda_lower_bound": _LAMBDA_LOWER_BOUND,
-        "lambda_upper_bound": _LAMBDA_UPPER_BOUND,
+        "lambda_lower_bound": box.floor,
+        "lambda_upper_bound": box.ceiling,
         "backend": getattr(model.result, "direct_backend", None),
         "fallback_reason": getattr(model.result, "direct_fallback_reason", None),
         "row_source": "fit",

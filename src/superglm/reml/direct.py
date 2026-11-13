@@ -19,7 +19,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._fit_trace import TraceRun
-from superglm._lambda_box import LAMBDA_CEILING, LAMBDA_FLOOR
+from superglm._lambda_box import LambdaBox, bound_pressure, glm_lambda_box
 from superglm._roundoff import NEWTON_EIGENVALUE_FLOOR
 from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
 from superglm.group_matrix import DesignMatrix
@@ -277,6 +277,7 @@ def optimize_direct_reml(
     trace_run: TraceRun | None = None,
     warm_lambdas: Mapping[str, float] | None = None,
     presolve: bool | None = None,
+    lambda_box: LambdaBox | None = None,
 ) -> REMLResult:
     """Optimize the direct REML objective via damped Newton (Wood 2011).
 
@@ -289,6 +290,9 @@ def optimize_direct_reml(
     point, as mgcv's ``outerPIsteps`` initialize the outer iteration, and the
     exact loop starts from its smoothing parameters and coefficients.
     ``presolve`` overrides the rule for tests only.
+
+    ``lambda_box`` is the search box (``_lambda_box``); None reads it from
+    the data, as every fit does.
 
     ``discrete=False`` runs W(rho)-corrected direct REML; ``discrete=True``
     delegates to ``optimize_discrete_reml_cached_w``, the bam-style cached-W
@@ -305,6 +309,18 @@ def optimize_direct_reml(
         penalty_caches=penalty_caches,
     )
     w_correction_order = validate_w_correction_order(w_correction_order)
+    box = (
+        lambda_box
+        if lambda_box is not None
+        else glm_lambda_box(
+            distribution=distribution,
+            link=link,
+            y=y,
+            sample_weight=sample_weight,
+            offset=offset_arr,
+            weight_semantics=weight_semantics,
+        )
+    )
     if discrete:
         # The cached-W branch holds W fixed within a step (no dW/drho term), so
         # it does not reach the exact optimum; its curvature follows
@@ -335,6 +351,7 @@ def optimize_direct_reml(
             debug_recorder=debug_recorder,
             trace_run=trace_run,
             warm_lambdas=warm_lambdas,
+            lambda_box=box,
         )
 
     scale_known = getattr(distribution, "scale_known", True)
@@ -389,7 +406,7 @@ def optimize_direct_reml(
         estimated_mask = np.array([pc.name in estimated_names for pc in penalties])
     else:
         estimated_mask = np.ones(m, dtype=bool)
-    log_lo, log_hi = np.log(LAMBDA_FLOOR), np.log(LAMBDA_CEILING)
+    log_lo, log_hi = box.log_floor, box.log_ceiling
     max_newton_step = 5.0
     _tol = reml_tol
     # Every PIRLS the criterion reads certifies its mode at the bar this
@@ -425,6 +442,7 @@ def optimize_direct_reml(
     best_obj = np.inf
     best_lambdas = lambdas.copy()
     best_pirls = None
+    best_bound_pressure: tuple[tuple[str, str], ...] = ()
     # In-loop fits skip rank metadata (the O(p) geometry summary suffices;
     # the terminal refit publishes); diagnostic runs keep it for the trace.
     loop_fit_statistics = trace_run is not None or debug_recorder is not None
@@ -515,6 +533,7 @@ def optimize_direct_reml(
             warm_lambdas=warm_lambdas,
             start_out=presolve_start,
             start_objective_tol=_PRESOLVE_OBJECTIVE_TOL,
+            lambda_box=box,
         )
         warm_lambdas = {
             **(warm_lambdas or {}),
@@ -570,6 +589,7 @@ def optimize_direct_reml(
         sample_weight=sample_weight,
         offset=offset_arr,
         weight_semantics=weight_semantics,
+        box=box,
     )
     # After the pre-solve the first candidate starts from its mode; no bootstrap.
     skip_bootstrap = presolve_beta is not None
@@ -686,7 +706,7 @@ def optimize_direct_reml(
     bootstrap_log_step_cap = 4.0
 
     # Store original fixed lambda values so they can be restored exactly
-    # after the exp(rho)->clip round-trip (which would clamp 0.0 to LAMBDA_FLOOR).
+    # after the exp(rho)->clip round-trip (which would clamp 0.0 to the floor).
     fixed_lambdas: dict[str, float] = {}
     for i, pc in enumerate(penalties):
         if not estimated_mask[i]:
@@ -696,7 +716,7 @@ def optimize_direct_reml(
     for i, pc in enumerate(penalties):
         if not estimated_mask[i]:
             fixed_val = fixed_lambdas[pc.name]
-            rho[i] = np.clip(np.log(max(fixed_val, LAMBDA_FLOOR)), log_lo, log_hi)
+            rho[i] = np.clip(np.log(max(fixed_val, box.floor)), log_lo, log_hi)
             continue
         if warm_lambdas and pc.name in warm_lambdas:
             # The warm start is the iterate; no Fellner-Schall step from it.
@@ -710,19 +730,20 @@ def optimize_direct_reml(
         trace_term = as_hessian_factor(boot_inv).trace_inverse_penalty(pc)
         r_j = pc.rank if pc.rank > 0 else (penalty_ranks[pc.name] if penalty_ranks else 0.0)
         denom = boot_inv_phi * quad + trace_term
-        lam_fp = r_j / denom if denom > 1e-12 else 1.0
+        lam_fp = r_j / denom if denom * box.unit > 1e-12 else box.unit
         # Snap degenerate select=True null-space penalties to the upper bound:
         # with quad << trace any lambda is nearly a fixed point.
         if (
             select_snap
             and pc.component_type == "selection"
-            and trace_term > 1e-12
+            and trace_term * box.unit > 1e-12
             and boot_inv_phi * quad < 0.1 * trace_term
         ):
             lam_fp = np.exp(log_hi)
-        lam_prev = max(float(lambdas.get(pc.name, 1e-4)), LAMBDA_FLOOR)
+        # the incoming value is a start, read in the box's units
+        lam_prev = max(float(lambdas.get(pc.name, 1e-4)) * box.unit, box.floor)
         log_prev = np.log(lam_prev)
-        log_target = np.log(max(lam_fp, LAMBDA_FLOOR))
+        log_target = np.log(max(lam_fp, box.floor))
         if ":" in pc.group_name:
             log_target = np.clip(
                 log_target,
@@ -830,8 +851,8 @@ def optimize_direct_reml(
 
         cand_lambdas = lambdas.copy()
         for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
-            cand_lambdas[name] = float(np.clip(val, LAMBDA_FLOOR, LAMBDA_CEILING))
-        # Restore exact fixed values (exp->clip would clamp 0.0 to LAMBDA_FLOOR)
+            cand_lambdas[name] = box.clip(val)
+        # Restore exact fixed values (exp->clip would clamp 0.0 to the floor)
         cand_lambdas.update(fixed_lambdas)
 
         if _carry_forward is not None and _carry_forward[0] == cand_lambdas:
@@ -877,7 +898,7 @@ def optimize_direct_reml(
             n_mean_space_restorations += 1
             cand_lambdas = lambdas.copy()
             for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
-                cand_lambdas[name] = float(np.clip(val, LAMBDA_FLOOR, LAMBDA_CEILING))
+                cand_lambdas[name] = box.clip(val)
             cand_lambdas.update(fixed_lambdas)
             pirls_result, XtWX_S_inv, XtWX, S_cand, cand_dense = fit_candidate(
                 cand_lambdas, None, None, n_iter
@@ -1197,6 +1218,14 @@ def optimize_direct_reml(
             best_obj = obj
             best_lambdas = cand_lambdas.copy()
             best_pirls = pirls_result
+            best_bound_pressure = bound_pressure(
+                grad,
+                rho_clipped,
+                estimated_mask,
+                group_names,
+                box,
+                bar=_tol * (1.0 + abs(float(obj))),
+            )
 
         lambda_history.append(cand_lambdas.copy())
 
@@ -1554,7 +1583,7 @@ def optimize_direct_reml(
             had_feasible_trial = True
             trial_lambdas = lambdas.copy()
             for name, val in zip(group_names, np.exp(rho_trial), strict=False):
-                trial_lambdas[name] = float(np.clip(val, LAMBDA_FLOOR, LAMBDA_CEILING))
+                trial_lambdas[name] = box.clip(val)
             trial_lambdas.update(fixed_lambdas)
 
             _n_linesearch_fits += 1
@@ -2035,4 +2064,6 @@ def optimize_direct_reml(
         termination_reason=termination_reason,
         tweedie_scale_data=tweedie_scale_data,
         mean_space_restorations=n_mean_space_restorations,
+        lambda_box=box,
+        bound_pressure=best_bound_pressure,
     )

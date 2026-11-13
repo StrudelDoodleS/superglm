@@ -53,18 +53,19 @@ def _acceleration_provenance(
     )
 
 
-def _snap_to_bounds(value: float, config: DistributionalEFSConfig) -> float:
-    """Return the exact configured bound when ``value`` is within round-off of it.
+def _snap_to_bounds(value: float, config: DistributionalEFSConfig, name: str) -> float:
+    """Return component ``name``'s exact bound when ``value`` is within round-off of it.
 
     Bound detection elsewhere is an exact float comparison against
-    ``config.maximum_lambda`` / ``config.minimum_lambda``; a proposal that
-    lands one ulp inside the bound would otherwise be invisible to it.
+    ``config.upper(name)`` / ``config.lower(name)``; a proposal that lands one
+    ulp inside the bound would otherwise be invisible to it.
     """
     eps = np.finfo(np.float64).eps
-    if value >= config.maximum_lambda * (1.0 - 8.0 * eps):
-        return float(config.maximum_lambda)
-    if value <= config.minimum_lambda * (1.0 + 8.0 * eps):
-        return float(config.minimum_lambda)
+    upper, lower = config.upper(name), config.lower(name)
+    if value >= upper * (1.0 - 8.0 * eps):
+        return float(upper)
+    if value <= lower * (1.0 + 8.0 * eps):
+        return float(lower)
     return float(value)
 
 
@@ -86,8 +87,9 @@ def _scaled_proposal(
         step = float(scale * steps[name])
         proposed = old_value * math.exp(step)
         proposed = _snap_to_bounds(
-            float(np.clip(proposed, config.minimum_lambda, config.maximum_lambda)),
+            float(np.clip(proposed, config.lower(name), config.upper(name))),
             config,
+            name,
         )
         lambdas[name] = proposed
         log_steps[name] = math.log(proposed) - math.log(old_value)
@@ -103,8 +105,6 @@ def _accelerated_proposal(
 ) -> tuple[dict[str, float], dict[str, float]] | None:
     named_log_lambdas = _named_steps(estimated_names, log_lambdas)
     named_log_steps = _named_steps(estimated_names, log_steps)
-    minimum_log_lambda = math.log(config.minimum_lambda)
-    maximum_log_lambda = math.log(config.maximum_lambda)
     lambdas: dict[str, float] = {}
     steps: dict[str, float] = {}
     for name, old_value in current.items():
@@ -113,21 +113,19 @@ def _accelerated_proposal(
             steps[name] = 0.0
             continue
         log_value = named_log_lambdas[name]
+        lower, upper = config.lower(name), config.upper(name)
+        minimum_log_lambda, maximum_log_lambda = math.log(lower), math.log(upper)
         if log_value == minimum_log_lambda:
-            proposed = config.minimum_lambda
+            proposed = lower
         elif log_value == maximum_log_lambda:
-            proposed = config.maximum_lambda
+            proposed = upper
         elif not minimum_log_lambda < log_value < maximum_log_lambda:
             return None
         else:
             proposed = math.exp(log_value)
-            if (
-                not math.isfinite(proposed)
-                or proposed < config.minimum_lambda
-                or proposed > config.maximum_lambda
-            ):
+            if not math.isfinite(proposed) or proposed < lower or proposed > upper:
                 return None
-            proposed = _snap_to_bounds(proposed, config)
+            proposed = _snap_to_bounds(proposed, config, name)
         lambdas[name] = proposed
         steps[name] = named_log_steps[name]
     return lambdas, steps

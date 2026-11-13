@@ -90,13 +90,13 @@ def _practical_outward_window(
             # Fixed penalties have no raw pressure, including fixed zero and
             # cap-valued penalties. They neither supply nor obstruct a probe.
             continue
-        if terminal_lambda == config.minimum_lambda and raw_step < -config.tolerance:
+        if terminal_lambda == config.lower(name) and raw_step < -config.tolerance:
             return False
         # Reconstruct movement from accepted penalties, never from proposed or
         # clipped raw steps. A duplicate or reversal cannot count as a probe.
         steps = [math.log(item.lambdas_after[name] / item.lambdas_before[name]) for item in window]
         shrinking = all(abs(after) <= abs(before) for before, after in zip(steps, steps[1:]))
-        at_upper = terminal_lambda == config.maximum_lambda
+        at_upper = terminal_lambda == config.upper(name)
         if not at_upper and (shrinking or abs(raw_step) <= config.tolerance):
             continue
         if raw_step <= 0.0 or any(step <= 0.0 for step in steps):
@@ -171,6 +171,30 @@ class DistributionalEFSResult:
         """The projected-gradient bar of the Newton endgame at this objective."""
 
         return self.config.tolerance * (1.0 + abs(self.objective))
+
+    def bound_pressure(self) -> tuple[tuple[str, str], ...]:
+        """``(name, "floor" | "ceiling")`` for each component a bound held back.
+
+        At the ceiling: an unresolved cap, or a cap the endgame's gradient
+        still pushes outward. At the floor: the endgame's gradient, or else the
+        terminal Fellner--Schall step, pointing below it by more than the bar.
+        """
+        held: list[tuple[str, str]] = []
+        gradient = self.terminal_gradient or {}
+        raw_steps = self.terminal_raw_log_steps or {}
+        bar = self.stationarity_bar
+        for name, value in self.lambdas.items():
+            if name in self.unresolved_upper_bound or (
+                value == self.config.upper(name) and gradient.get(name, 0.0) < -bar
+            ):
+                held.append((name, "ceiling"))
+            elif value == self.config.lower(name) and (
+                gradient[name] > bar
+                if name in gradient
+                else raw_steps.get(name, 0.0) < -self.config.tolerance
+            ):
+                held.append((name, "floor"))
+        return tuple(held)
 
     def __post_init__(self) -> None:
         for name in ("initial_objective", "objective"):
@@ -317,7 +341,7 @@ class DistributionalEFSResult:
             and not (
                 self.convergence_reason == "stationary"
                 and any(
-                    value == self.config.maximum_lambda
+                    value == self.config.upper(name)
                     for name, value in self.lambdas.items()
                     if name not in face_names
                 )

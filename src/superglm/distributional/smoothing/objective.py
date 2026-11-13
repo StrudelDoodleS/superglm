@@ -271,7 +271,7 @@ def initialize_distributional_lambdas(
             value = float(fixed_value)
         else:
             value = float(values.get(component.name, config.initial_lambda))
-            if not config.minimum_lambda <= value <= config.maximum_lambda:
+            if not config.lower(component.name) <= value <= config.upper(component.name):
                 raise ValueError(
                     f"initial lambda for {component.name!r} lies outside configured bounds"
                 )

@@ -40,9 +40,11 @@ follow-ups):
 - the nested per-level cross traces multiply two weight-sized quantities
   (``_operator_pair``, ``_rho ** 4``): the Hessian is finite and wrong from
   about ``2^506`` and not finite from ``2^512`` or below ``2^-520`` (those
-  cases pass every other check and expect only ``_NonFiniteHessianError``);
-- ``fit_reml``'s bootstrap PIRLS runs at absolute lambdas even when every
-  lambda is fixed, and at ``2^520`` the ``fs`` factor refuses it.
+  cases pass every other check and expect only ``_NonFiniteHessianError``).
+
+``fit_reml``'s bootstrap PIRLS seeds its smoothing parameters in the fit's
+information unit (``_lambda_box``), so at ``2^520`` the ``fs`` level
+intercepts stay penalized against the data and its factor accepts the fit.
 
 The ``sz`` main-effect spline is unpenalized: the terminal design rebuild
 absorbs a fixed smoothing parameter into the SSP basis in absolute units
@@ -107,7 +109,7 @@ from superglm.solvers._structured.block_leaves import (
 from superglm.solvers._structured.nested import (
     ProfiledNestedSchurFactor,
 )
-from superglm.solvers.irls_direct import StructuredSolverError, fit_irls_direct
+from superglm.solvers.irls_direct import fit_irls_direct
 
 EPS = float(np.finfo(np.float64).eps)
 _U = EPS / 2.0
@@ -499,13 +501,6 @@ _NESTED_TRACES = (
     ),
     pytest.mark.filterwarnings("ignore::RuntimeWarning"),
 )
-_BOOTSTRAP = _xfail(
-    "fit_reml's bootstrap PIRLS runs at absolute lambdas (1.0 and 1e-4) with every "
-    "lambda fixed; at prior weights 2^520 they leave the fs level intercepts "
-    "unpenalized against the data and the fs factor refuses the super-root pivot "
-    "(gram fits)",
-    StructuredSolverError,
-)
 _NESTED = ("nested-lone", "nested-chain")
 
 
@@ -548,14 +543,16 @@ def test_route_factor_is_invariant_under_weight_rescaling(
         *(_case(route, k) for route in (*_NESTED, "sz") for k in (-600, 520)),
         _case("fs", -600),
         _case("fs", 48),
-        _case("fs", 520, marks=_BOOTSTRAP),
+        _case("fs", 520),
     ],
 )
 def test_route_fit_is_invariant_under_weight_rescaling(route: str, exponent: int) -> None:
     """``fit_reml`` with weights and fixed lambdas times ``2^exponent``: the same fit.
 
     Mutation: an absolute floor in a route's pivot or rank decision refuses
-    the fit or stops it unconverged at ``2^-600``.
+    the fit or stops it unconverged at ``2^-600``; bootstrap seeds in absolute
+    units (``discrete.bootstrap_seed_lambdas`` without the box's unit) make the
+    ``fs`` factor refuse the fit at ``2^520``.
     """
     scale = math.ldexp(1.0, exponent)
     _assert_complete_fit(_reference(route), _fit(route, exponent), route, scale)
