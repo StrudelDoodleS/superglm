@@ -2559,11 +2559,20 @@ def test_error_mode_ppform_scores_the_boundary_through_the_consumer():
 _REGION_LEVELS = ["A", "B", "C", "D"]
 
 
+#: Rows of the smaller ``_spline_categorical_fit`` that the exact-banding bookkeeping tests use.
+_SMALL_N = 600
+
+
 @cache
-def _spline_categorical_fit(unseen: str = "error"):
-    """``age`` spline crossed with a four-level ``region``, two levels with their own curve."""
+def _spline_categorical_fit(unseen: str = "error", n: int = 1500):
+    """``age`` spline crossed with a four-level ``region``, two levels with their own curve.
+
+    ``n`` rows, each a distinct ``age``.  Exact banding's work grows with the
+    number of distinct values (Bellman's recursion over each band's start),
+    so the tests whose claim is about the bands' bookkeeping, not their
+    accuracy at scale, take ``_SMALL_N`` rows.
+    """
     rng = np.random.default_rng(20261021)
-    n = 1500
     X = pd.DataFrame(
         {
             "age": rng.uniform(18.0, 80.0, n),
@@ -2683,9 +2692,10 @@ def test_the_sheet_measures_the_spline_categorical_workbook(bin_strategy, contin
 
     A row of the sheet for ``age:region``, and the joint maximum on it equal to
     the reconstruction's own, under every banding strategy -- ``"exact"``
-    bands the interaction's levels with the main effect.
+    bands the interaction's levels with the main effect.  The equality does
+    not depend on the row count, so the smaller fit carries it.
     """
-    model, X, y, sample_weight = _spline_categorical_fit()
+    model, X, y, sample_weight = _spline_categorical_fit(n=_SMALL_N)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         payload = build_rating_table_payload(
@@ -3174,7 +3184,7 @@ def test_with_an_exact_main_effect_the_bands_hold_the_deviations_within_their_li
 
 
 def test_a_cap_too_small_for_the_shared_bands_widens_them_once():
-    model, X, y, sample_weight = _spline_categorical_fit()
+    model, X, y, sample_weight = _spline_categorical_fit(n=_SMALL_N)
     payload, widened = _exact_workbook(model, X, y, sample_weight, n_bins=6, impact_bins=())
     assert len(widened) == 1
     message = str(widened[0].message)
@@ -3207,7 +3217,7 @@ def test_a_cap_too_small_for_the_shared_bands_widens_them_once():
 
 
 def test_the_sheet_reports_the_shared_limit_on_the_interaction_row():
-    model, X, y, sample_weight = _spline_categorical_fit()
+    model, X, y, sample_weight = _spline_categorical_fit(n=_SMALL_N)
     payload, _ = _exact_workbook(model, X, y, sample_weight, n_bins=12, impact_bins=(8,))
     sheet = payload.discretization_impact
     for n_bins, rows in sheet.groupby("n_bins"):
