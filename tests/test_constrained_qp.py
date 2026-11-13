@@ -3491,6 +3491,39 @@ class TestDegenerateCycle:
         scale = np.max(np.abs(cold.beta))
         assert np.max(np.abs(result.beta - cold.beta)) <= 1e-9 * scale
 
+    def test_a_working_set_met_again_after_the_objective_rose_is_not_a_cycle(self):
+        """A warm set whose rows are slack at the start lets the objective rise.
+
+        From ``beta_start = 0`` with rows 2 and 4 slack in the warm set, the loop meets a
+        working set again at a higher objective. That is no cycle: a cycle leaves the
+        objective unchanged. Switching to least-index releases on it made row 1 release and
+        re-block for the whole budget (unconverged at 200 and at 1,000 iterations), where
+        master certifies in 10. The warm solve must reach the cold solve's optimum.
+        """
+        H = np.array(
+            [
+                [35.0, -10.0, -8.0, -9.0],
+                [-10.0, 10.0, -6.0, 6.0],
+                [-8.0, -6.0, 46.0, 5.0],
+                [-9.0, 6.0, 5.0, 16.0],
+            ]
+        )
+        g = np.array([2.0, 2.0, -5.0, 5.0])
+        A = np.array(
+            [
+                [0.0, -2.0, -2.0, -2.0],
+                [3.0, 3.0, 2.0, -3.0],
+                [1.0, 1.0, 3.0, -1.0],
+                [-3.0, 2.0, 1.0, 3.0],
+                [-3.0, 0.0, -1.0, 0.0],
+            ]
+        )
+        b = np.array([0.0, -2.0, -3.0, -1.0, -3.0])
+        warm = solve_constrained_qp(H, g, A, b, active_set_init=[4, 2, 1], beta_start=np.zeros(4))
+        cold = solve_constrained_qp(H, g, A, b, beta_start=np.zeros(4))
+        assert cold.converged and warm.converged
+        assert np.max(np.abs(warm.beta - cold.beta)) <= 1e-9 * np.max(np.abs(cold.beta))
+
     def test_the_cycle_check_holds_a_finite_problem_near_the_exponent_range(self):
         """The guard compares objectives in powers of two scaled out of the problem.
 

@@ -1044,12 +1044,14 @@ class _CycleGuard:
         key = frozenset(active)
         earlier = self.visited.get(key)
         self.visited[key] = beta
-        if earlier is not None and not self._fell(earlier, beta):
+        if earlier is not None and self._tied(earlier, beta):
             self.least_index = True
 
-    def _fell(self, earlier: NDArray, beta: NDArray) -> bool:
-        """Whether the objective at ``beta`` is below that at ``earlier`` by more than twice
-        either's rounding bound (Higham 2002, section 3.1), both in one power of two."""
+    def _tied(self, earlier: NDArray, beta: NDArray) -> bool:
+        """Whether the objectives at ``earlier`` and ``beta`` agree within twice either's
+        rounding bound (Higham 2002, section 3.1), both in one power of two. A cycle leaves the
+        objective unchanged; a working set met again after the objective rose (a warm start
+        whose rows were not tight) is not one."""
         x_exponent = max(_exponent(earlier), _exponent(beta))
         quadratic = 2 * x_exponent + self.h_exponent
         linear = x_exponent + self.g_exponent
@@ -1066,7 +1068,7 @@ class _CycleGuard:
                 + np.ldexp(float(np.abs(self.g) @ np.abs(x)), linear - top)
             )
         rounding = 2.0 * gamma(len(beta) + 2) * max(magnitudes)
-        return bool(values[1] < values[0] - rounding)
+        return bool(abs(values[1] - values[0]) <= rounding)
 
 
 def _exponent(values: NDArray) -> int:
