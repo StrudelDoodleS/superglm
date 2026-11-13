@@ -839,7 +839,12 @@ def _derivative_free_intercept(eta, evaluate) -> tuple[float, _InterceptState] |
     ``evaluate`` is ``_searched_intercept``'s, read on its first run's domain: a shift that
     clamps a row the start does not hold is infinitely high, since past a clamp holding a row
     at its worst the capped deviance has minima the model does not have.
+
+    Where the deviance is flat in the shift to its rounding at the start (a saturated link's
+    plateau), the side the search leaves by is decided by differences beyond that rounding
+    (``shape_repair._off_the_plateau``), never by the last bits of a flat deviance.
     """
+    from superglm.constraints import shape_sum_tolerance
     from superglm.distributional.shape_repair import _derivative_free_minimum, _intercept_scale
 
     unit = _intercept_scale(eta, 0.0)
@@ -855,7 +860,14 @@ def _derivative_free_intercept(eta, evaluate) -> tuple[float, _InterceptState] |
             values[t] = deviance if np.isfinite(deviance) else np.inf
         return values[t]
 
-    best = _derivative_free_minimum(objective, 0.0, unit)
+    # The deviance's rounding at the start, as ``higher`` reads it in ``_searched_intercept``:
+    # of the sum (Higham, section 3.1) and what it keeps from its mean.
+    start = evaluate(0.0, True)
+    rounding = None
+    if start is not None and np.isfinite(start.deviance) and np.isfinite(start.mean_rounding):
+        values[0.0] = start.deviance
+        rounding = shape_sum_tolerance(abs(start.deviance), eta.size) + start.mean_rounding
+    best = _derivative_free_minimum(objective, 0.0, unit, rounding=rounding)
     if best is None or not np.isfinite(objective(best)):
         return None
     state = evaluate(unit * best, True)

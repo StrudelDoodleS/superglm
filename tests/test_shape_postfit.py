@@ -4786,6 +4786,44 @@ def test_intercept_profile_started_at_a_stationary_maximum_ends_at_a_minimum():
     assert published < deviance(0.0, eta) - 1e-3
 
 
+@pytest.mark.parametrize("lowest", ["start", "upper"])
+def test_the_derivative_free_intercept_leaves_a_plateau_by_more_than_its_rounding(lowest):
+    """A saturated link holds the deviance flat in the intercept, so every probe in Brent's
+    first window differs from the start only in its last bits. At 723040c70 SuperGLM's search
+    let those bits decide, as SuperLSS's did before #642: where the start's last bit was
+    lowest the start was published, and where the upper side's was the walk went up the side
+    that stays flat forever. Forced: the plateau's last bit favours the start or the upper
+    side; below -30 units the deviance is a parabola with its minimum at -40.
+    """
+    level = 100.0
+    bit = np.spacing(level)
+
+    def deviance(t: float) -> float:
+        if t < -30.0:
+            return level + (t + 40.0) ** 2 / 10.0 - 10.0
+        if lowest == "start":
+            return level if t == 0.0 else level + bit
+        return level - bit if t > 0.0 else level
+
+    def evaluate(shift, compared):
+        assert compared
+        return shape_ops._InterceptState(
+            deviance=deviance(shift),
+            mean_rounding=0.0,
+            deviance_rounding=0.0,
+            score=0.0,
+            score_scale=1.0,
+            score_rounding=0.0,
+            information=1.0,
+        )
+
+    # Two rows one unit apart: the search's unit is one shift.
+    found = shape_ops._derivative_free_intercept(np.array([0.0, 1.0]), evaluate)
+
+    assert found is not None
+    assert found[0] == pytest.approx(-40.0, abs=1e-6)
+
+
 def test_intercept_profile_beside_a_pole_compares_deviances_to_their_means_rounding():
     """A row whose mean sits next to its pole makes the residual's rounding bound vast, about
     2e5 here against a deviance of 0.104: a search comparing deviances to that bound takes any
