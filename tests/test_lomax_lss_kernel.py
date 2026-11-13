@@ -67,13 +67,21 @@ def kernel():
     return import_module(name)
 
 
+def _quantile(scale, shape, p, *, upper=False):
+    """The Lomax quantile at lower (or ``upper``) tail probability ``p``, rounded once to float64."""
+    with mp.workdps(50):
+        log_survival = mp.log(p) if upper else mp.log1p(-mp.mpf(p))
+        return float(scale * mp.expm1(-log_survival / shape))
+
+
 def test_lomax_law_and_all_mixed_jets(kernel):
     for s, a in product((1e-6, 1.0, 1e6), (0.25, 0.75, 1.0, 1.25, 2.0, 5.0, 25.0)):
         law = lomax(c=a, scale=s)
-        points = [(law.ppf(p), True) for p in (0.001, 0.1, 0.5, 0.9, 0.999)]
-        points += [(law.ppf(p), False) for p in (1e-12, 1e-30, 1e-100)]
-        with np.errstate(over="ignore"):
-            points += [(law.isf(p), False) for p in (1e-12, 1e-30, 1e-100)]
+        # Quantiles ``s expm1(-log(S)/a)`` rounded once from 50 digits: the same float
+        # on every platform (and so the stored oracle's key), where scipy's may differ.
+        points = [(_quantile(s, a, p), True) for p in (0.001, 0.1, 0.5, 0.9, 0.999)]
+        points += [(_quantile(s, a, p), False) for p in (1e-12, 1e-30, 1e-100)]
+        points += [(_quantile(s, a, p, upper=True), False) for p in (1e-12, 1e-30, 1e-100)]
         for y, body in points:
             if not np.isfinite(y):
                 # An unrepresentable quantile is a labelled range case, not an oracle point.
@@ -81,7 +89,7 @@ def test_lomax_law_and_all_mixed_jets(kernel):
                 continue
             out = kernel.density_jets(np.array([y]), np.array([[s, a]]), np.ones(1), order=4)
             assert out.valid.all(), (s, a, y)
-            reference = DENSITY_REFERENCE(float(y), s, a)
+            reference = DENSITY_REFERENCE(y, s, a)
             actual = (out.jets[0] + out.carrier, *out.jets[1:])
             assert_scaled_jets(actual, reference, (s, a))
             if body:
@@ -91,7 +99,9 @@ def test_lomax_law_and_all_mixed_jets(kernel):
             natural_h = out.jets[2][0]
             predictor_h = natural_h * np.array([s * s, s * a, a * a])
             predictor_h[[0, 2]] += out.jets[1][0] * [s, a]
-            ref_eta = PREDICTOR_HESSIAN_REFERENCE(float(y), float(np.log(s)), float(np.log(a)))
+            with mp.workdps(50):
+                log_s, log_a = float(mp.log(s)), float(mp.log(a))
+            ref_eta = PREDICTOR_HESSIAN_REFERENCE(y, log_s, log_a)
             np.testing.assert_allclose(
                 predictor_h, ref_eta, rtol=1024 * 2.0**-53, atol=1024 * 2.0**-53 * max(1, a)
             )

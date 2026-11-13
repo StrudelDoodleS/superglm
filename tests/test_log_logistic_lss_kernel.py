@@ -55,14 +55,19 @@ def kernel():
 def test_log_logistic_law_and_all_mixed_jets(kernel):
     for s, a in product((1e-6, 1.0, 1e6), (0.6, 1.0, 1.5, 2.0, 4.0, 12.0)):
         law = fisk(c=a, scale=s)
-        # Independent inverse in log space; scipy.ppf cancels at 1e-100.
+        # Independent inverse in log space; scipy.ppf cancels at 1e-100.  Each point is
+        # the quantile rounded once from 50 digits, the same float on every platform
+        # (and so the stored oracle's key), where float64 libm calls may differ.
         ps = (0.001, 0.1, 0.5, 0.9, 0.999, 1e-12, 1e-30, 1e-100)
-        points = [s * np.exp((np.log(p) - np.log1p(-p)) / a) for p in ps]
-        points += [s * np.exp((np.log1p(-p) - np.log(p)) / a) for p in (1e-12, 1e-30, 1e-100)]
+        with mp.workdps(50):
+            points = [float(s * mp.exp((mp.log(p) - mp.log1p(-p)) / a)) for p in ps]
+            points += [
+                float(s * mp.exp((mp.log1p(-p) - mp.log(p)) / a)) for p in (1e-12, 1e-30, 1e-100)
+            ]
         for index, y in enumerate(points):
             actual = kernel.density_jets(np.array([y]), np.array([[s, a]]), np.ones(1), order=4)
             assert actual.valid.all()
-            ref = DENSITY_REFERENCE(float(y), s, a)
+            ref = DENSITY_REFERENCE(y, s, a)
             assert_scaled_jets(
                 (actual.jets[0] + actual.carrier, *actual.jets[1:]), ref, (s, a), factor=2048
             )
