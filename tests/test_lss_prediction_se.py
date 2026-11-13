@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime
 import threading
 import warnings
+from functools import cache
 
 import numpy as np
 import pandas as pd
@@ -141,7 +142,14 @@ def _terms() -> dict[str, tuple[dict, dict]]:
     }
 
 
+@cache
 def _fit(case: str, *, discrete: bool) -> SuperLSS:
+    """The fit of ``case``, made once per process and shared.
+
+    Every caller only predicts from it (standard errors, draws, blocks, work
+    counts of the prediction path); none edits, refits or repairs it, so a
+    shared fit is the fresh one each test would have made.
+    """
     features, interactions = _terms()[case]
     frame, y = _frame(500, 1)
     model = model_from_templates(
