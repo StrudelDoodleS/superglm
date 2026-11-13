@@ -3293,6 +3293,42 @@ class TestDegenerateFaceRecovery:
         assert abs(primal_value - dual_value) <= allowance
 
 
+class TestStalledPostfitFaces:
+    """Captured repair QPs that exhausted their budget on an optimal or stationary face.
+
+    ``degenerate``: the face holds an extra row whose multiplier is negative inside its sign
+    band; clipping it breaks stationarity, so the face neither certified nor released.
+    ``unresolved``: a clearly negative multiplier was never read, because the full step broke
+    a row no candidate could block and stayed above the step gate. ``vertex``: the exact optimum
+    ``beta = 0`` failed stationarity from the explicit inverse's rounding of its multipliers.
+    Each fails against the unfixed solver; the optima are 60-digit KKT solves (provenance inside).
+    """
+
+    @pytest.mark.parametrize("case", ["degenerate", "unresolved", "vertex"])
+    def test_a_captured_stall_certifies_the_exact_optimum_within_its_budget(self, case):
+        path = Path(__file__).parent / "fixtures" / "qp_postfit_stalled_faces.npz"
+        with np.load(path) as fixture:
+            H, g, A, b, start, optimum, rows = (
+                np.array(fixture[f"{case}_{key}"])
+                for key in ("H", "g", "A", "b", "start", "optimum", "optimal_rows")
+            )
+            active = fixture[f"{case}_active"].tolist()
+            max_iter = int(fixture[f"{case}_max_iter"])
+        result = solve_constrained_qp(
+            H, g, A, b, active_set_init=active, beta_start=start, max_iter=max_iter
+        )
+
+        assert result.converged
+        assert result.n_iter < max_iter
+        assert _is_feasible(A, result.beta, b, 1e-12)
+        # Forward error on the optimal face: rounding times the reduced Hessian's condition.
+        null = np.linalg.svd(A[rows])[2][len(rows) :].T
+        condition = np.linalg.cond(null.T @ H @ null) if null.shape[1] else 1.0
+        unit = np.finfo(np.float64).eps / 2
+        bound = 64 * len(g) * unit * condition * np.max(np.abs(optimum))
+        assert np.max(np.abs(result.beta - optimum)) <= bound
+
+
 class TestSaddleUpdates:
     """A long solve on a large saddle system reuses one factorization, by Schur complement."""
 

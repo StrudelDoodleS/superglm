@@ -350,6 +350,12 @@ def _stationarity_certificate(
         inverse_action = np.zeros((len(rows), len(beta)))
         inverse_action[np.ix_(pivots[:rank], order)] = basic * weight[order]
         multipliers = inverse_action @ residual
+        # ``inverse_action`` is an explicit inverse, and an inverse applied to a vector is not
+        # backward stable (Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed.,
+        # 2002, section 14.1). One step of fixed-precision iterative refinement restores
+        # componentwise backward stability (Skeel 1980; Higham, Theorem 12.3), so a vertex
+        # whose multipliers reproduce ``g`` exactly is not refused for the inverse's rounding.
+        multipliers = multipliers + inverse_action @ (residual - rows.T @ multipliers)
         abs_rows_t = np.abs(rows.T)
         dual_action = abs_rows_t @ np.abs(multipliers)
         score_scale = np.maximum(own, dual_action)
@@ -362,6 +368,7 @@ def _stationarity_certificate(
         if violating.any():
             worst = int(np.argmin(np.where(violating, multipliers, np.inf)))
             return False, worst, multipliers
+        signed = multipliers
         multipliers = np.maximum(multipliers, 0.0)
         dual = rows.T @ multipliers
         dual_action = abs_rows_t @ multipliers
@@ -372,6 +379,17 @@ def _stationarity_certificate(
     score_scale = np.maximum(own, dual_action)
     allowance = tol * score_scale + arithmetic * (objective_action + dual_action)
     stationary = bool((np.abs(residual - dual) <= allowance).all())
+    if not stationary and len(rows) and signed.min() < 0.0:
+        # The sign band can be wider than the residual stationarity admits, so clipping a
+        # negative multiplier inside it can break a face that the signed multipliers hold.
+        # That face is stationary with a negative multiplier: release the most negative
+        # (Nocedal and Wright 2006, Algorithm 16.3) rather than neither release nor certify.
+        signed_action = abs_rows_t @ np.abs(signed)
+        signed_allowance = tol * np.maximum(own, signed_action) + arithmetic * (
+            objective_action + signed_action
+        )
+        if bool((np.abs(residual - rows.T @ signed) <= signed_allowance).all()):
+            return False, int(np.argmin(signed)), multipliers
     return stationary, None, multipliers
 
 
@@ -1451,6 +1469,17 @@ def solve_constrained_qp(
                 if active and not kkt_may_be_singular and coordinate_face != tuple(active):
                     coordinate_face = tuple(active)
                     continue
+                # No row resolves the step, yet it breaks one: once the face's recovery has
+                # run, the step is below every row's resolution, so ``beta`` is the face's
+                # minimum to working accuracy and the step test cannot see it (Gill and Wong,
+                # UCSD CCoM 14-03, 2014, Definition 2.1, read on the reduced gradient). Read
+                # the multipliers there, as Algorithm 16.3 does at a zero step.
+                if active:
+                    _, release, _ = _stationarity_certificate(H_sym, g, beta, A[active], tol)
+                    if release is not None:
+                        active.pop(release)
+                        basis.delete(release)
+                        continue
                 # The full step breaks a row no blocking candidate could hold, so
                 # it cannot certify: the next iteration solves the face again.
                 beta = beta_new
