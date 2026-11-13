@@ -69,6 +69,7 @@ from superglm.distributional.kernels._incomplete_gamma import (  # noqa: E402
     output_size,
 )
 from tests._incomplete_gamma_entry import log_gamma_tail, log_gamma_tail_jets  # noqa: E402
+from tests._oracle_store import OracleStore  # noqa: E402
 
 _DIGITS = 60
 _TOLERANCE = (1e-12, 1e-12, 1e-12, 1e-11, 1e-10)
@@ -160,6 +161,20 @@ def _oracle(a: float, x: float) -> dict[bool, list]:
         return result
 
 
+# The oracle's answers are stored (``tests/_oracle_store.py``): its 60-digit
+# ``mp.diffs`` and ``mp.diff`` were nearly all of this module's time.
+_ORACLE = OracleStore(
+    "incomplete_gamma_engine",
+    _oracle,
+    depends=(_DIGITS, MAX_ORDER, _times),
+    module="tests/test_incomplete_gamma_engine.py",
+)
+
+
+def test_the_stored_oracle_answers_are_current() -> None:
+    _ORACLE.verify()
+
+
 def _along_ratio(plain: list, a: float, x: float) -> np.ndarray:
     """Fixed-``x`` plain partials to Taylor coefficients along fixed ``x/a``."""
     with mp.workdps(_DIGITS):
@@ -222,7 +237,7 @@ def test_small_shapes_meet_the_oracle_beside_the_series(a: float) -> None:
 def _oracle_failures(a: float, points: dict[str, float]) -> list[str]:
     failures = []
     for label, x in points.items():
-        oracle = _oracle(a, x)
+        oracle = _ORACLE(a, x)
         for upper in (False, True):
             reference = np.array([float(v) for v in oracle[upper]])
             work = np.empty(WORK_SIZE)
