@@ -160,12 +160,21 @@ def prepare_distributional_initialization(
         if chunk_size is None
         else None
     )
+    # The starting coefficients are solved under the starts clipped to the unit box, as
+    # before the box was relative: a finite start far outside it (1e308) would overflow
+    # its penalty before the information units that place it are known.
+    unit_starts = {
+        name: float(np.clip(value, config.minimum_lambda, config.maximum_lambda))
+        if name in estimated
+        else value
+        for name, value in resolved.items()
+    }
     context = _validated_context(
         family,
         layout,
         y,
         likelihood_plan,
-        layout.penalty_matrix(resolved),
+        layout.penalty_matrix(unit_starts),
         coefficient_curvature=solver_config.coefficient_curvature,
         chunk_size=chunk_size,
         coefficient_face=None,

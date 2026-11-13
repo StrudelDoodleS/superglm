@@ -244,6 +244,17 @@ def test_a_scalar_initial_lambda_meets_the_relative_box_like_a_named_one(respons
     assert scalar.lambdas[name] == named.lambdas[name]
 
 
+def test_a_finite_start_far_above_the_box_is_clipped_not_refused():
+    # 1e308 times a penalty overflows. The start must reach the box's clip before
+    # any penalty is formed from it, as it did when the box was absolute.
+    x = np.linspace(0.0, 1.0, 160)
+    y = np.sin(6.0 * x) + 0.3 * np.random.default_rng(8).normal(size=160)
+    name = "location:x#wiggle"
+    smoothing = _small_gaussian_lss(y, initial_lambda=1.0e308)
+    assert smoothing.initial_lambdas[name] == smoothing.config.upper(name)
+    assert np.isfinite(smoothing.lambdas[name])
+
+
 def test_a_predictor_at_its_link_floor_keeps_the_absolute_ceiling():
     # A generalized gamma whose scale offset holds it on its link's floor
     # (``scale_floor + exp(eta)``, eta near -35): its rows carry about 2**-38
