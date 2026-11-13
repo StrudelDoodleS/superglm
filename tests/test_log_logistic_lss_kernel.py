@@ -7,6 +7,42 @@ import pytest
 from scipy.stats import fisk
 
 from tests._declared_scalar_oracles import assert_scaled_jets, jets, log_density, log_window
+from tests._oracle_store import OracleStore
+
+
+def _density_reference(y, scale, shape):
+    """The 100-digit ``mp.diff`` jets of the log density in ``(scale, shape)`` to order 4."""
+    return jets(lambda x, b: log_density("log_logistic", mp.mpf(y), x, b), (scale, shape), 4)
+
+
+def _window_reference(lower, upper, scale, shape):
+    """The 100-digit ``mp.diff`` jets of the log window probability to order 4."""
+    return jets(
+        lambda s, a: log_window("log_logistic", mp.mpf(lower), mp.mpf(upper), s, a),
+        (scale, shape),
+        4,
+    )
+
+
+# The mpmath jets' answers are stored (``tests/_oracle_store.py``): their
+# ``mp.diff`` stencils were nearly all of this module's time.
+DENSITY_REFERENCE = OracleStore(
+    "log_logistic_density_jets",
+    _density_reference,
+    depends=(jets, log_density),
+    module="tests/test_log_logistic_lss_kernel.py",
+)
+WINDOW_REFERENCE = OracleStore(
+    "log_logistic_window_jets",
+    _window_reference,
+    depends=(jets, log_window),
+    module="tests/test_log_logistic_lss_kernel.py",
+)
+
+
+def test_the_stored_oracle_answers_are_current():
+    DENSITY_REFERENCE.verify()
+    WINDOW_REFERENCE.verify()
 
 
 @pytest.fixture(scope="module")
@@ -26,7 +62,7 @@ def test_log_logistic_law_and_all_mixed_jets(kernel):
         for index, y in enumerate(points):
             actual = kernel.density_jets(np.array([y]), np.array([[s, a]]), np.ones(1), order=4)
             assert actual.valid.all()
-            ref = jets(lambda x, b: log_density("log_logistic", mp.mpf(y), x, b), (s, a), 4)
+            ref = DENSITY_REFERENCE(float(y), s, a)
             assert_scaled_jets(
                 (actual.jets[0] + actual.carrier, *actual.jets[1:]), ref, (s, a), factor=2048
             )
@@ -51,9 +87,7 @@ def test_log_logistic_windows_and_moment_boundaries(kernel):
         t = (2.0, 0.6)
         actual, valid = kernel.window_jets(np.array([lo]), np.array([hi]), np.array([t]), order=4)
         assert valid.all()
-        reference = jets(
-            lambda s, a: log_window("log_logistic", mp.mpf(lo), mp.mpf(hi), s, a), t, 4
-        )
+        reference = WINDOW_REFERENCE(float(lo), float(hi), *t)
         assert_scaled_jets(actual, reference, t, factor=8192)
     for a in (
         0.6,
