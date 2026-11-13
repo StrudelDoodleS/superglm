@@ -100,6 +100,33 @@ jobs:
           print('float64', np.finfo(np.float64));
           print('longdouble', np.finfo(np.longdouble))"
 
+      # Numba writes each compiled kernel beside its source (``__pycache__/*.nbi``
+      # and ``*.nbc``) and reuses it while that source file's content and the CPU it
+      # was compiled for are unchanged, so a fresh checkout recompiles every kernel a
+      # shard reaches. Numba does not notice a change to a kernel's callee in another
+      # file, so the key holds every package source file and the lock, with no
+      # partial (restore-keys) match: a hit means byte-identical sources and
+      # dependencies. The host CPU and its features are in the key because a
+      # kernel compiled for one CPU is not reused on another, and the shard is too,
+      # since each shard compiles what its own tests reach.
+      - name: Name the host CPU for the numba kernel cache
+        id: numba-host
+        shell: bash
+        run: >-
+          uv run python -c "import hashlib, llvmlite.binding as ll;
+          features = ll.get_host_cpu_features().flatten();
+          print('cpu=' + ll.get_host_cpu_name() + '-' + hashlib.sha256(features.encode()).hexdigest()[:12])"
+          >> "$GITHUB_OUTPUT"
+
+      - name: Restore numba's compiled kernels for identical sources
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            src/superglm/**/__pycache__/*.nbi
+            src/superglm/**/__pycache__/*.nbc
+          key: >-
+            numba-${{ runner.os }}-${{ runner.arch }}-py${{ matrix.runtime.python-version }}-${{ steps.numba-host.outputs.cpu }}-shard${{ matrix.group }}-${{ hashFiles('uv.lock', 'src/superglm/**/*.py') }}
+
       # The runner mirrors local runs: a parallel pass with one BLAS/numba thread per
       # worker, then the few `threads` tests serially with the default pools.
       - name: Run duration-balanced regression shard
