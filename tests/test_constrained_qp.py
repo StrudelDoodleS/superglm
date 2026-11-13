@@ -3719,6 +3719,229 @@ class TestNonbindingWarmRows:
         np.testing.assert_allclose(warm.beta, cold.beta, rtol=1e-12)
 
 
+class TestNearlyDependentBlockers:
+    """A row the rank cutoff calls dependent still blocks when the step breaks it.
+
+    ``_raises_rank`` calls a row within about ``sqrt(eps)`` of the working rows' span
+    dependent, yet in exact arithmetic it is independent, and a long step can break it. It
+    replaces a working row (qpOASES's exchange, Ferreau et al. 2014, section 2.2, step 6(b)),
+    or joins them where none may leave and ``matrix_rank`` counts it independent. A warm row
+    that does not bind stops a step that would reach beyond return at the objective's minimum
+    along it (Gill and Wong 2015, section 3). A solve those moves lose is solved again on the
+    plain path (qpOASES's fallback, section 3.12). The search cases in ``qp_warm_exchange_cases.npz`` come from a
+    random search of warm-started problems (nearly parallel rows, column scaling over twelve
+    decades, data near the exponent range); each holds the exact optimum, found by
+    enumerating working sets in 400-digit arithmetic.
+    """
+
+    @staticmethod
+    def _search_case(name):
+        path = Path(__file__).parent / "fixtures" / "qp_warm_exchange_cases.npz"
+        with np.load(path) as data:
+            case = {key[len(name) + 1 :]: data[key] for key in data.files if key.startswith(name)}
+        warm = solve_constrained_qp(
+            case["H"],
+            case["g"],
+            case["A"],
+            case["b"],
+            active_set_init=case["active"].tolist(),
+            beta_start=case["start"],
+        )
+        return case, warm
+
+    @staticmethod
+    def _assert_optimal(case, result):
+        """The objective matches the exact one within rounding of its terms, and the rows hold
+        in ``_is_feasible``'s band: observables that stay stable at any conditioning of H."""
+        H, g, A, b, beta = case["H"], case["g"], case["A"], case["b"], result.beta
+        objective = 0.5 * beta @ H @ beta - g @ beta
+        magnitude = np.abs(beta) @ np.abs(H) @ np.abs(beta) + np.abs(g) @ np.abs(beta)
+        assert result.converged
+        assert abs(objective - case["objective"]) <= 1e-10 * magnitude
+        scale = np.maximum(np.abs(b), np.abs(A) @ np.abs(beta))
+        assert np.all((A @ beta - b) >= -1e-10 * scale)
+
+    @pytest.mark.parametrize("active, start", [([0, 1], [1e-8, 1.0]), (None, [1.0, 1.0])])
+    def test_a_row_nearly_parallel_to_a_working_row_blocks_it(self, active, start):
+        """``x_0 >= 0`` and ``x_0 + 1e-8 x_1 >= 2e-8`` are parallel to within the rank cutoff,
+        and the optimum ``(0, 3)`` lies on the first. With the second in the working set, the
+        step along it breaks the first at ``x_1 = 2``; that row cannot raise the working rank,
+        so it was skipped and the solve exhausted its budget at ``(0, 4)``, warm (from the
+        slack set ``{0, 1}``, after the second had replaced row 0) on 42cbb8434 and cold from
+        ``(1, 1)`` on master as well. Mutation: neither exchange nor join for such a row
+        (and no plain re-solve), and both are unconverged again.
+        """
+        A = np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 1e-8]])
+        b = np.array([0.0, -1.0, 2e-8])
+        result = solve_constrained_qp(
+            np.eye(2),
+            np.array([-1e8, 3.0]),
+            A,
+            b,
+            active_set_init=active,
+            beta_start=np.array(start),
+        )
+        assert result.converged
+        np.testing.assert_allclose(result.beta, [0.0, 3.0], rtol=1e-12, atol=1e-14)
+        assert result.active_set == [0]
+
+    def test_a_nearly_parallel_blocker_replaces_a_binding_row(self):
+        """Search case ``parallel``: rows 1 and 4 lie 7.7e-13 apart as unit vectors. The step
+        on a face holding row 4 breaks row 1, which replaces it; 42cbb8434 skipped it and
+        exhausted its budget. Mutation: neither exchange nor join for such a row (and no
+        plain re-solve), and it is unconverged again.
+        """
+        case, warm = self._search_case("parallel")
+        self._assert_optimal(case, warm)
+        np.testing.assert_allclose(warm.beta, case["beta"], rtol=1e-10)
+
+    def test_a_warm_row_far_from_its_bound_stops_the_step_at_the_line_minimum(self):
+        """Search case ``far_warm``: H is of order 1e95 and the warm row's bound lies 1e130
+        away in its units. The face's step heads there with the objective rising all the way,
+        and the way back lost every digit: 42cbb8434 ended unconverged at an infeasible
+        point. A step reaching that far past the minimum along it (``u`` times the reach
+        above ``tol``) now stops there, here at once, and the warm row, which does not bind,
+        leaves the working set. Mutation: the full step (and no plain re-solve), and it is
+        unconverged again.
+        """
+        case, warm = self._search_case("far_warm")
+        self._assert_optimal(case, warm)
+        np.testing.assert_allclose(warm.beta, case["beta"], rtol=1e-10)
+
+    def test_a_blocker_no_working_row_can_make_room_for_joins_them(self):
+        """Search case ``slab``: columns scaled over twelve decades leave every unit row within
+        1e-8 of one axis, some facing the other way (a thin slab). Row 5, which the step
+        breaks, is ``-0.08`` and ``-0.92`` times the two working rows, so neither may leave
+        for it, and it joins them; 42cbb8434 exhausted its budget. Mutation: no join (and no
+        plain re-solve), and it is unconverged again.
+        """
+        case, warm = self._search_case("slab")
+        self._assert_optimal(case, warm)
+
+    def test_a_binding_row_is_replaced_again_only_after_the_objective_falls(self):
+        """Search case ``descent``: rows 1 and 4, 2.5e-9 from the span of the others, would
+        replace each other at zero steps for the whole budget. A second exchange of a binding
+        row needs the objective to have fallen past its rounding since the first, so row 1
+        joins instead. Mutation: exchanges without that test (and no plain re-solve), and it
+        is unconverged at 200 iterations.
+        """
+        case, warm = self._search_case("descent")
+        self._assert_optimal(case, warm)
+
+    def test_a_blocker_below_the_rank_margin_joins_where_matrix_rank_counts_it(self):
+        """Sol's review: the blocker lies 2e-14 from the working rows, below the 1024-times
+        margin that shows independence without an SVD, yet ``matrix_rank`` counts it. Rejected
+        on the margin alone, the solve cycled at zero; below the margin the SVD now decides.
+        Mutation: the margin as the final word (and no plain re-solve), and it is unconverged.
+        """
+        H, g = np.diag([1e12, 1e8, 1e-16]), np.array([0.0, 2e11, -0.5])
+        A = np.array([[-0.9, -1.0, 0.0], [-1.0, 0.0, 1e-14], [-1.0, -0.004, 3e-14]])
+        result = solve_constrained_qp(
+            H, g, A, np.zeros(3), active_set_init=[2, 1], beta_start=np.zeros(3)
+        )
+        assert result.converged
+        np.testing.assert_allclose(
+            result.beta, [-15.1177631, 13.6059868, -5.02111305e14], rtol=1e-8
+        )
+
+        from superglm.solvers.constrained_qp import _RANK_CUTOFF_MARGIN, _WorkingBasis
+
+        # Forced: a unit row 1e-13 from the span of e0 and e1, below the margin's floor.
+        rows = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 1e-13]])
+        basis = _WorkingBasis(rows / np.linalg.norm(rows, axis=1)[:, None])
+        basis.start([0, 1])
+        floor = _RANK_CUTOFF_MARGIN * 3 * np.finfo(np.float64).eps
+        assert basis.distance(2) < floor
+        assert np.linalg.matrix_rank(rows) == 3
+        assert basis.rank_counts(2, floor)
+
+    def test_a_coordinate_the_step_leaves_alone_cannot_hide_its_reach(self):
+        """Sol's review: case ``far_warm`` with a fifth, unconstrained coordinate at 1e140,
+        which the step does not move. Over every coordinate the reach read 1 and the step ran
+        to 1e130 in the constrained block, as on 42cbb8434; over the moved ones it is caught.
+        Mutation: the maximum over every coordinate (and no plain re-solve), and it is
+        unconverged again.
+        """
+        from superglm.solvers.constrained_qp import _beyond_return
+
+        assert _beyond_return(np.array([0.1, 1e140]), np.array([1e130, 0.0]), 0.0, 1e-12)
+        assert not _beyond_return(np.array([0.1, 1e140]), np.array([0.2, 0.0]), 0.5, 1e-12)
+        case = dict(self._search_case("far_warm")[0])
+        H = np.zeros((5, 5))
+        H[:4, :4], H[4, 4] = case["H"], 1.0
+        A = np.c_[case["A"], np.zeros(len(case["b"]))]
+        result = solve_constrained_qp(
+            H,
+            np.r_[case["g"], 1e140],
+            A,
+            case["b"],
+            active_set_init=case["active"].tolist(),
+            beta_start=np.r_[case["start"], 1e140],
+        )
+        block = result.beta[:4]
+        assert result.converged
+        objective = 0.5 * block @ case["H"] @ block - case["g"] @ block
+        np.testing.assert_allclose(objective, case["objective"], rtol=1e-10)
+
+    def test_the_line_minimum_cannot_overflow_near_the_exponent_range(self):
+        """Sol's review: the line minimum is ``2**-280``, but slope over curvature reads
+        ``2**1029`` before its exponent is applied. Under ``over='raise'`` the overflow escaped
+        the solve, past the plain re-solve. The mantissas' quotient now carries the exponent.
+        Mutation: the full quotient, and the solve raises ``FloatingPointError``.
+        """
+        H, g = np.diag([2.0**-1020, 2.0**10]), np.full(2, 2.0**-900)
+        A, b = np.array([[-1.0, 0.0], [0.0, 1.0]]), np.array([-(2.0**400), 2.0**-909])
+        with np.errstate(over="raise"):
+            result = solve_constrained_qp(
+                H, g, A, b, active_set_init=[0], beta_start=np.array([0.0, 2.0**-909])
+            )
+        assert result.converged
+        np.testing.assert_allclose(result.beta, [2.0**120, 2.0**-909], rtol=1e-12)
+
+    def test_a_warm_solve_those_moves_lose_is_solved_again_on_the_plain_path(self):
+        """Search case ``plain``, from Sol's review: seven coefficients, H's diagonal from 3e-14
+        to 6e15 (condition 1e28), and the warm path (on 42cbb8434 too) exhausts its budget
+        where master certifies in 13 iterations. The plain loop then solves from the same
+        start, and the result reports both attempts' iterations. Mutation: no second solve,
+        and it is unconverged.
+        """
+        case, warm = self._search_case("plain")
+        self._assert_optimal(case, warm)
+
+    def test_the_plain_solve_runs_only_after_a_departed_solve_fails(self, monkeypatch):
+        """Forced: a first attempt that left the plain path and failed is solved again with
+        those moves off; one that certified, or never left the path, is returned as it is."""
+        import superglm.solvers.constrained_qp as constrained_qp
+
+        real, calls = constrained_qp._solve_qp, []
+
+        def first_fails(*args, conservative, departed):
+            calls.append(conservative)
+            result = real(*args, conservative=conservative, departed=departed)
+            if conservative:
+                return result
+            departed.append(True)
+            return constrained_qp.QPResult(beta=result.beta, n_iter=7, converged=False)
+
+        monkeypatch.setattr(constrained_qp, "_solve_qp", first_fails)
+        H, g, A, b = np.eye(2), np.array([1.0, 1.0]), np.array([[-1.0, 0.0]]), np.array([-0.5])
+        result = solve_constrained_qp(H, g, A, b)
+        assert calls == [False, True]
+        assert result.converged
+        np.testing.assert_allclose(result.beta, [0.5, 1.0], rtol=1e-12)
+        assert result.n_iter > 7
+
+        def first_certifies(*args, conservative, departed):
+            calls.append(conservative)
+            departed.append(True)
+            return real(*args, conservative=conservative, departed=departed)
+
+        calls.clear()
+        monkeypatch.setattr(constrained_qp, "_solve_qp", first_certifies)
+        assert solve_constrained_qp(H, g, A, b).converged
+        assert calls == [False]
+
+
 class TestCertificateRank:
     """The certificate decides full rank from its own inverse, and its SVD only otherwise."""
 
