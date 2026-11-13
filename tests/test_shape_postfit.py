@@ -5009,3 +5009,61 @@ def test_a_response_far_below_one_is_repaired_rather_than_refused():
     curve = np.asarray(model._shape_repairs["x"].repaired_log_effect)
     assert np.all(np.isfinite(curve))
     assert np.all(np.diff(curve) >= -1e-12 * max(float(np.max(np.abs(curve))), 1e-300))
+
+
+def test_each_continued_projection_starts_from_the_last_ones_working_set(monkeypatch):
+    """A continued repair projects onto one cone at every step, so each step starts warm.
+
+    The repair of a P-spline with selection, 25 knots, on a bump fitted by a Poisson log
+    link and declared increasing is refused as worse than the dropped term and continued:
+    four cone projections, each a local-reduction SQP of several QPs. Started from the
+    previous projection's working set and cuts, the continuation takes 23 QPs and 170 to 200
+    iterations (the count moves with the BLAS's rounding) where cold starts take 31 and
+    about 277 (Ferreau et al., Math. Prog. Comp. 6, 2014, section 3.12). Every QP still certifies itself, so the published curve is the
+    cold one's to the projection's tolerance. The cold arm ignores every write to the
+    warm start; against master, which has none, the import fails.
+    """
+    import superglm.constraints as constraints
+    import superglm.solvers.constrained_qp as qp
+
+    rng = np.random.default_rng(7)
+    x = rng.uniform(0, 1, 2500)
+    f = 0.5 * np.exp(-(((x - np.quantile(x, 0.3)) / np.std(x)) ** 2))
+    rng.normal(size=x.size)  # the draw the sweep this case comes from takes first
+    y = rng.poisson(np.exp(f)).astype(float)
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=25, constraint=Constraint.postfit.increasing, select=True)},
+    ).fit(X, y)
+
+    real = qp.solve_constrained_qp
+
+    def repaired(warm: bool):
+        work = []
+
+        def counted(*args, **kwargs):
+            result = real(*args, **kwargs)
+            work.append((result.n_iter, result.converged))
+            return result
+
+        class Cold(constraints._ConeWarmStart):
+            def __setattr__(self, name, value):
+                pass
+
+        with monkeypatch.context() as patch:
+            patch.setattr(qp, "solve_constrained_qp", counted)
+            if not warm:
+                patch.setattr(constraints, "_ConeWarmStart", Cold)
+            fitted = copy.deepcopy(model)
+            fitted.apply_shape_postfit(X)
+        return np.asarray(fitted.predict(X)), work
+
+    warm_prediction, warm_work = repaired(True)
+    cold_prediction, cold_work = repaired(False)
+
+    assert all(converged for _, converged in warm_work + cold_work)
+    assert sum(n for n, _ in warm_work) < sum(n for n, _ in cold_work)
+    assert len(warm_work) < len(cold_work)
+    np.testing.assert_allclose(warm_prediction, cold_prediction, rtol=1e-7)

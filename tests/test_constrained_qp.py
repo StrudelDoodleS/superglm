@@ -18,6 +18,7 @@ from superglm.solvers.constrained_qp import (
     _constraint_structure,
     _feasibility_scale,
     _feasibility_slack,
+    _full_column_rank,
     _homogeneous_feasible_start,
     _is_feasible,
     _null_space_mass,
@@ -3454,3 +3455,134 @@ class TestSaddleUpdates:
         KKT = np.block([[H, -A[active].T], [A[active], np.zeros((len(active),) * 2)]])
         direct = constrained_qp._solve_saddle_direct(KKT, rhs)[:p]
         np.testing.assert_allclose(step, direct, rtol=0.0, atol=1e-12 * np.max(np.abs(direct)))
+
+
+class TestDegenerateCycle:
+    """A release a zero step undoes is a cycle; Bland's rule breaks it."""
+
+    def test_a_release_re_blocked_at_one_point_certifies_within_the_warm_budget(self):
+        """A captured repair QP whose working set cycled until it exhausted its budget.
+
+        ``qp_postfit_degenerate_cycle.npz`` is the warm attempt of one continued post-fit
+        repair (P-spline, 25 knots with selection, exponential axis, bump, Poisson,
+        decreasing; 2,500 rows, seed 7): 28 coefficients, 42 homogeneous rows, a warm set
+        of 28 and a budget of 50. The most negative multiplier releases row 23, the next
+        step re-blocks it at a zero step, and the objective never moves, so master reports
+        it unconverged at 50 iterations and the repair re-solves from a cold start (34
+        iterations). Once the guard sees a working set recur, releases follow the least
+        index, and the warm attempt certifies the cold start's optimum. Mutation: with the
+        guard never switching rules, the solve is unconverged at its budget again.
+        """
+        path = Path(__file__).parent / "fixtures" / "qp_postfit_degenerate_cycle.npz"
+        with np.load(path) as fixture:
+            H, g, A, b, start = (np.array(fixture[key]) for key in ("H", "g", "A", "b", "start"))
+            active = fixture["active"].tolist()
+            max_iter = int(fixture["max_iter"])
+        result = solve_constrained_qp(
+            H, g, A, b, active_set_init=active, beta_start=start, max_iter=max_iter
+        )
+        cold = solve_constrained_qp(H, g, A, b, beta_start=np.zeros_like(g))
+
+        assert cold.converged
+        assert result.converged
+        assert result.n_iter < max_iter
+        assert _is_feasible(A, result.beta, b, 1e-12)
+        # The certified optimum is unique (H is positive definite): both solves reach it.
+        scale = np.max(np.abs(cold.beta))
+        assert np.max(np.abs(result.beta - cold.beta)) <= 1e-9 * scale
+
+
+class TestCertificateRank:
+    """The certificate decides full rank from its own inverse, and its SVD only otherwise."""
+
+    @staticmethod
+    def _count_rank(monkeypatch):
+        calls = []
+        real = np.linalg.matrix_rank
+
+        def counted(*args, **kwargs):
+            calls.append(1)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(np.linalg, "matrix_rank", counted)
+        return calls
+
+    def test_independent_rows_need_no_svd_and_dependent_ones_still_get_it(self, monkeypatch):
+        """Working rows are independent, so the SVD is skipped where the inverse shows it.
+
+        Five independent rows on eight coefficients certify full rank from the left
+        inverse the certificate builds anyway; a repeated row cannot, and its rank is
+        then ``matrix_rank``'s, as before. Against master, which takes the SVD on every
+        call, the first count is 1.
+        """
+        rng = np.random.default_rng(3)
+        M = rng.standard_normal((8, 8))
+        H = M @ M.T + 8 * np.eye(8)
+        g = rng.standard_normal(8)
+        beta = rng.standard_normal(8)
+        rows = rng.standard_normal((5, 8))
+        calls = self._count_rank(monkeypatch)
+        _, _, independent = _stationarity_certificate(H, g, beta, rows, 1e-12)
+        assert calls == []
+        _, _, repeated = _stationarity_certificate(H, g, beta, np.vstack([rows, rows[:1]]), 1e-12)
+        assert calls == [1]
+        assert np.all(np.isfinite(independent)) and np.all(np.isfinite(repeated))
+
+    def test_the_bound_agrees_with_matrix_rank(self):
+        """``_full_column_rank`` claims full rank only where ``matrix_rank`` finds it.
+
+        Columns at angles from 1 down to 1e-17: the bound shows full rank on the
+        clearly independent pairs and declines the nearly parallel ones, never the
+        reverse. A left inverse from ``pinv`` stands in for the certificate's.
+        """
+        for angle in (1.0, 1e-4, 1e-8, 1e-12, 1e-14, 1e-17):
+            M = np.array([[1.0, np.cos(angle)], [0.0, np.sin(angle)], [0.0, 0.0]])
+            shown = _full_column_rank(np.linalg.pinv(M), M)
+            if shown:
+                assert np.linalg.matrix_rank(M) == 2
+            if angle >= 1e-8:
+                assert shown
+        assert not _full_column_rank(np.zeros((2, 3)), np.ones((3, 2)))
+
+
+class TestWarmBasisFactorization:
+    """A warm working set is factored in one QR up to its first dependent row."""
+
+    def test_a_warm_set_longer_than_the_coefficients_needs_no_row_by_row_inserts(self, monkeypatch):
+        """Thirteen warm rows on eight coefficients: the leading eight span them all.
+
+        One QR decides the eight; the five after them are dependent once the basis
+        spans every coefficient. A row repeated inside the leading block stops the QR's
+        prefix there, and the rows after it are decided one at a time. Either way the
+        rows kept are the sequential decision's. Against master, which inserts every
+        row of a set longer than the coefficients one at a time, the first count is 8.
+        """
+        import superglm.solvers.constrained_qp as qp
+
+        rng = np.random.default_rng(5)
+        A = rng.standard_normal((13, 8))
+        unit_rows = _constraint_structure(A).unit_rows
+        inserts = []
+        real = qp._qr_insert
+
+        def counted(*args, **kwargs):
+            inserts.append(1)
+            return real(*args, **kwargs)
+
+        def sequential(working):
+            basis, kept = _WorkingBasis(unit_rows), []
+            for row in working:
+                if basis.raises_rank(row):
+                    basis.insert(row)
+                    kept.append(row)
+            return kept
+
+        everything = list(range(13))
+        expected = sequential(everything)
+        repeated = [0, 1, 2, 1, 3, 4, 5, 6, 7, 8]
+        expected_repeated = sequential(repeated)
+        monkeypatch.setattr(qp, "_qr_insert", counted)
+        assert _WorkingBasis(unit_rows).start(everything) == expected == list(range(8))
+        assert inserts == []
+        assert _WorkingBasis(unit_rows).start(repeated) == expected_repeated
+        assert len(inserts) == len(expected_repeated) - 3

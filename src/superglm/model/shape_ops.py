@@ -1208,10 +1208,12 @@ def _continued_repair(
     from dataclasses import replace
 
     from superglm.constraints import (
+        _ConeWarmStart,
         _fitted_basis,
         _InterceptSearchError,
         shape_constraint_certificate,
         shape_sum_tolerance,
+        warm_started_projections,
     )
     from superglm.distributions import _VARIANCE_FLOOR, clip_mu
     from superglm.links import stabilize_eta
@@ -1250,6 +1252,8 @@ def _continued_repair(
         merit, eta, tolerance = scored(beta)
     certified = _certified_curve_scale(repair_result.original_log_effect, grid_weights)
     moved = False
+    # Each step projects onto the same cone, so each starts from the last one's working set.
+    warm_start = _ConeWarmStart()
     for _ in range(_CONTINUED_STEPS):
         eta_safe = stabilize_eta(eta, model._link)
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
@@ -1303,9 +1307,10 @@ def _continued_repair(
         target = beta.copy()
         try:
             target[indices] = term - np.linalg.solve(H, gradient)
-            projected = repairer.repair(
-                spec, target, groups, weights=grid_weights, n_grid=n_grid, metric=H
-            )
+            with warm_started_projections(warm_start):
+                projected = repairer.repair(
+                    spec, target, groups, weights=grid_weights, n_grid=n_grid, metric=H
+                )
         except (np.linalg.LinAlgError, RuntimeError):
             break
         cone_point = np.asarray(projected.repaired_beta_reparam, dtype=np.float64)[indices]

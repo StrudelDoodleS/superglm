@@ -1026,7 +1026,12 @@ def _continued_repair(
     """
     from dataclasses import replace
 
-    from superglm.constraints import shape_constraint_certificate, shape_sum_tolerance
+    from superglm.constraints import (
+        _ConeWarmStart,
+        shape_constraint_certificate,
+        shape_sum_tolerance,
+        warm_started_projections,
+    )
     from superglm.model.shape_ops import (
         _ARMIJO,
         _CONTINUED_STEPS,
@@ -1043,6 +1048,8 @@ def _continued_repair(
     repairer = _repairer(term.kind)
     beta, moved = start, False
     certified = _certified_curve_scale(repair.original_log_effect, grid_weights)
+    # Each step projects onto the same cone, so each starts from the last one's working set.
+    warm_start = _ConeWarmStart()
     for _ in range(_CONTINUED_STEPS):
         tolerance = shape_sum_tolerance(abs(merit), len(rows.response))
         local = curvature_at(beta)
@@ -1056,9 +1063,10 @@ def _continued_repair(
         target = beta.copy()
         try:
             target[columns] = current - np.linalg.solve(H, gradient)
-            projected = repairer.repair(
-                spec, target, groups, weights=grid_weights, n_grid=n_grid, metric=H
-            )
+            with warm_started_projections(warm_start):
+                projected = repairer.repair(
+                    spec, target, groups, weights=grid_weights, n_grid=n_grid, metric=H
+                )
         except (np.linalg.LinAlgError, RuntimeError):
             break
         cone_point = np.asarray(projected.repaired_beta_reparam, dtype=np.float64)[columns]
