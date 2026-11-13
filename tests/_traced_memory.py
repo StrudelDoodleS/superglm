@@ -13,7 +13,10 @@ def own_traced_peak(call: Callable[..., Any], *args: Any) -> tuple[int, Any]:
     tracemalloc's peak is the process's: another thread's allocations (an
     xdist worker's receiver thread answering a steal request builds a set of
     the stolen indices and a new queue) add to it and never subtract, so the
-    least of three calls is the call's own. A call that changes state each
+    least of three calls is the call's own. The first call in a process also
+    pays one-off costs that scale with no input: interpreter and library caches
+    and, under coverage.py's trace-function core (branch coverage on Python
+    3.12), the arc records for every line it runs for the first time. A call that changes state each
     measurement depends on is passed as a closure that sets that state first.
     """
     peaks = []

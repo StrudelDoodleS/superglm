@@ -14,6 +14,8 @@ from superglm._group_matrix._group_matrix_support import (
     plan_row_support,
 )
 
+from ._traced_memory import own_traced_peak
+
 
 def _repeated_basis(n=20_000, n_support=60, p_b=9, nnz_row=4, seed=0):
     """A B-spline-shaped basis: locally supported rows drawn from a small support."""
@@ -1999,8 +2001,6 @@ def test_mixed_pairing_peak_stays_inside_the_two_budgets_it_maintains(monkeypatc
     Measured 3.11x before the chunk weighting was fixed and 1.73x after, so
     this discriminates on BEHAVIOUR rather than on the presence of a helper.
     """
-    import tracemalloc
-
     from superglm._group_matrix import _group_matrix_algebra as algebra
 
     gen = np.random.default_rng(4)
@@ -2015,18 +2015,13 @@ def test_mixed_pairing_peak_stays_inside_the_two_budgets_it_maintains(monkeypatc
 
     expected = b_unique[support_idx].T @ (dense_csr.toarray() * weights[:, None])
 
-    tracemalloc.start()
-    try:
-        baseline = tracemalloc.get_traced_memory()[0]
-        tracemalloc.reset_peak()
-        actual = algebra._support_csr_raw_cross(b_unique, support_idx, dense_csr, weights)
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
+    peak, actual = own_traced_peak(
+        algebra._support_csr_raw_cross, b_unique, support_idx, dense_csr, weights
+    )
 
     np.testing.assert_allclose(actual, expected, rtol=1e-9, atol=1e-9)
 
-    ratio = (peak - baseline) / budget
+    ratio = peak / budget
     assert ratio <= 2.0, (
         f"mixed pairing peaked at {ratio:.2f}x the {budget}-byte budget; the two "
         f"budgets it maintains (dense expansion, sparse payload) sum to 2x"
