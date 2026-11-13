@@ -86,6 +86,7 @@ from superglm.distributional.observation import (  # noqa: E402
     RIGHT_CENSORED,
     ResponseBounds,
 )
+from tests._oracle_store import OracleStore  # noqa: E402
 
 _U = 2.0**-53
 _TINY = 64 * 2.0**-1074
@@ -182,8 +183,19 @@ def _law(name: str) -> _Law:
     return _Law((a, b), _WEIBULL, s, cdf, sf, density, dps=450, to_y=mp.exp, from_y=mp.log)
 
 
+def _rounded_log(x: float) -> float:
+    """``log(x)`` rounded once to binary64 from 40 digits.
+
+    The stored oracle answers are keyed by the window ends and fingerprinted by
+    the law's parameters, so these are the same on every platform's libm.
+    """
+    with mp.workdps(40):
+        return float(mp.log(x))
+
+
 _NORMAL = (0.3, 1.7)
-_WEIBULL = (0.4, math.log(1.5))
+_WEIBULL = (0.4, _rounded_log(1.5))
+_WEIBULL_RATE = 1.5  # exp(_WEIBULL[1])
 
 
 def _normal_point(z: float) -> float:
@@ -191,7 +203,7 @@ def _normal_point(z: float) -> float:
 
 
 def _weibull_point(w: float) -> float:
-    return _WEIBULL[0] + w / math.exp(_WEIBULL[1])
+    return _WEIBULL[0] + w / _WEIBULL_RATE
 
 
 def _rounded(exact) -> tuple[np.ndarray, ...]:
@@ -348,7 +360,7 @@ _WINDOWS = [
     ("weibull", "body, lower tail", _W(-0.7), _W(0.3), "lower"),
     ("weibull", "body, upper tail", _W(-0.7), _W(0.3), "upper"),
     ("weibull", "far left tail", _W(-701.0), _W(-700.0), "lower"),
-    ("weibull", "far right tail", _W(math.log(700.0)), _W(math.log(705.0)), "upper"),
+    ("weibull", "far right tail", _W(_rounded_log(700.0)), _W(_rounded_log(705.0)), "upper"),
     ("weibull", "width 0.05", _W(0.10), _W(0.13), "upper"),
     ("weibull", "lower one-sided", -np.inf, _W(0.2), "lower"),
     ("weibull", "upper one-sided", _W(0.5), np.inf, "upper"),
@@ -356,7 +368,7 @@ _WINDOWS = [
 ]
 
 
-def _window_inputs(law_name, lo, hi, reading):
+def _live_window_inputs(law_name, lo, hi, reading):
     law = _law(law_name)
     near_point, far_point = (hi, lo) if reading == "lower" else (lo, hi)
     near_exact = law.evaluate(law.tail[reading], near_point)
@@ -366,6 +378,18 @@ def _window_inputs(law_name, lo, hi, reading):
     else:
         far, oracle = _absent(), near_exact
     return _rounded(near_exact), far, oracle
+
+
+# The SymPy derivatives and their 80- and 450-digit evaluations take nearly all
+# of these tests' time and depend only on their arguments, so their answers are
+# stored (``tests/_oracle_store.py``); every comparison with the engine still runs.
+_LAW_SOURCES = (_law, _Law, _jet_functions, _tuples, _NORMAL, _WEIBULL, _ORDER, _K, _rounded_log)
+_window_inputs = OracleStore(
+    "response_window_jets_window_inputs",
+    _live_window_inputs,
+    depends=(*_LAW_SOURCES, _rounded, _absent),
+    module="tests/test_response_window_jets.py",
+)
 
 
 @pytest.mark.parametrize(
@@ -437,12 +461,16 @@ _NARROW = [
     ("normal", "body", 0.37, 1.0, "upper"),
     ("normal", "left tail", -9.0, 9.0, "lower"),
     ("weibull", "body", 0.2, 1.33, "upper"),
-    ("weibull", "right tail", math.log(50.0), 75.0, "upper"),
+    ("weibull", "right tail", _rounded_log(50.0), 75.0, "upper"),
 ]
 
 
-def _narrow_inputs(law_name, where, scale, width, reading):
-    """A window ``width`` wide on the density's own scale, ``scale`` its log-density slope there."""
+def _live_narrow_inputs(law_name, where, scale, width, reading):
+    """A window ``width`` wide on the density's own scale, ``scale`` its log-density slope there.
+
+    Its half width, the rounded density jets at the quadrature nodes by their
+    fraction of the window, and the window's exact jet.
+    """
     law = _law(law_name)
     if law_name == "normal":
         lo = _normal_point(where)
@@ -461,6 +489,31 @@ def _narrow_inputs(law_name, where, scale, width, reading):
 
     nodes = {float(0.5 * (1.0 + t)): node(float(0.5 * (1.0 + t))) for t in _LEGENDRE_NODES}
     oracle = law.evaluate(law.window[reading], lo, hi)
+    return half_width, nodes, oracle
+
+
+_NARROW_INPUTS = OracleStore(
+    "response_window_jets_narrow_inputs",
+    _live_narrow_inputs,
+    depends=(
+        *_LAW_SOURCES,
+        _rounded,
+        _normal_point,
+        _weibull_point,
+        _WEIBULL_RATE,
+        _LEGENDRE_NODES.tolist(),
+    ),
+    module="tests/test_response_window_jets.py",
+)
+
+
+def test_the_stored_oracle_answers_are_current():
+    _window_inputs.verify()
+    _NARROW_INPUTS.verify()
+
+
+def _narrow_inputs(law_name, where, scale, width, reading):
+    half_width, nodes, oracle = _NARROW_INPUTS(law_name, where, scale, width, reading)
     return np.array([half_width]), (lambda fraction: nodes[fraction]), list(nodes.values()), oracle
 
 
