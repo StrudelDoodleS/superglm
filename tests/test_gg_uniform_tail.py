@@ -64,6 +64,7 @@ from superglm.distributional.kernels import _gg_uniform_tail as engine  # noqa: 
 from superglm.distributional.kernels._severity_primitives import (  # noqa: E402
     log_ndtr_01234,
 )
+from tests._oracle_store import OracleStore  # noqa: E402
 
 U = 2.0**-53
 ORDER = 4
@@ -354,6 +355,40 @@ def reference(w, q):
     return gammainc_reference(w, q)
 
 
+# The grid's reference answers are stored (``tests/_oracle_store.py``): the
+# 90-digit gammainc stencil and the 70-digit q-expansion were nearly all of the
+# grid test's time.  ``reference`` itself stays live for the modules importing it.
+STORED_REFERENCE = OracleStore(
+    "gg_uniform_tail_reference",
+    reference,
+    depends=(
+        expansion_reference,
+        _expansion_reference,
+        q_expansion,
+        _gaussian_operator,
+        _poly_add,
+        _poly_mul,
+        _series_exp,
+        _evaluate,
+        _jet_mul,
+        _jet_log,
+        gammainc_reference,
+        _stencil_inverse,
+        _univariate_log,
+        _tails,
+        _density_taylor_in_w,
+        ORDER,
+        KEYS,
+        EXPANSION_TERMS,
+    ),
+    module="tests/test_gg_uniform_tail.py",
+)
+
+
+def test_the_stored_oracle_answers_are_current():
+    STORED_REFERENCE.verify()
+
+
 def plain_partials(jet):
     return np.array([float(jet[(i, j)] * math.factorial(i) * math.factorial(j)) for i, j in KEYS])
 
@@ -545,7 +580,7 @@ def test_the_two_references_agree():
 def test_log_tails_match_the_references_to_order_four(q):
     failures = []
     for w in grid_points(q):
-        failures += row_failures(w, q, *reference(w, q))
+        failures += row_failures(w, q, *STORED_REFERENCE(w, q))
     assert not failures, "\n".join(failures)
 
 
