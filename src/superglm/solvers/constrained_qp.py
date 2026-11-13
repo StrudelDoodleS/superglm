@@ -1070,7 +1070,7 @@ class _WorkingBasis:
             self.r, self.q.T @ self.rows[row], check_finite=False
         )
         dual = scipy.linalg.solve_triangular(self.r, np.eye(self.r.shape[0]), check_finite=False)
-        distance = coefficients[positions] / np.linalg.norm(dual[positions], axis=1)
+        distance = coefficients[positions] / _row_norms(dual[positions])
         best = int(np.argmax(distance))
         return int(positions[best]) if _raises_rank(distance[best]) else None
 
@@ -1092,6 +1092,14 @@ class _WorkingBasis:
         q, r = _qr_delete(self.q, self.r, position, which="col", check_finite=False)
         k = r.shape[1]
         self.q, self.r = q[:, :k], r[:k]
+
+
+def _row_norms(matrix: NDArray) -> NDArray:
+    """The Euclidean norm of each row of ``matrix``, scaled by a power of two first, as LAPACK's
+    ``xNRM2`` scales, so a finite row whose squares overflow keeps its finite norm."""
+    exponent = np.frexp(np.max(np.abs(matrix), axis=1, initial=0.0))[1]
+    scaled = np.ldexp(matrix, -exponent[:, None])
+    return np.ldexp(np.sqrt(np.einsum("ij,ij->i", scaled, scaled)), exponent)
 
 
 class _CycleGuard:

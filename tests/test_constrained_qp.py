@@ -3941,6 +3941,35 @@ class TestNearlyDependentBlockers:
         assert solve_constrained_qp(H, g, A, b).converged
         assert calls == [False]
 
+    def test_an_exchange_whose_dual_rows_overflow_when_squared_still_certifies(self):
+        """The exchange measures each dual row of the working basis; entries near 1e161 are
+        finite but their squares are not. Formed without scaling, that norm raised under
+        ``over='raise'`` before the plain re-solve could run. Whether the warm solve then
+        certifies the unique optimum ``[-0.5] * 24 + [1e146]`` depends on the BLAS kernel, on
+        master too (certified under SkylakeX, unconverged under Haswell and SandyBridge), so the
+        claim is the one every kernel shares: no overflow, and a result that is either that
+        optimum or disclosed as unconverged. The cold solve certifies it on every kernel."""
+        p = 24
+        W = 1e-7 * np.eye(p)
+        W[0, 0] = 1.0
+        W[np.arange(1, p), np.arange(p - 1)] = 1.0
+        H = np.eye(p + 1)
+        g = np.r_[-np.ones(p), 1e146]
+        A = np.c_[np.vstack([W, np.ones(p), -np.ones(p)]), np.zeros(p + 2)]
+        b = np.r_[-W @ np.ones(p), -12.0, -12.0]
+        start = np.r_[np.zeros(p), np.nextafter(1e146, 0.0)]
+        with np.errstate(over="raise", invalid="raise"):
+            result = solve_constrained_qp(
+                H, g, A, b, active_set_init=list(range(p)), beta_start=start
+            )
+            cold = solve_constrained_qp(H, g, A, b, beta_start=start)
+        optimum = np.r_[np.full(p, -0.5), 1e146]
+        assert cold.converged
+        assert np.max(np.abs(cold.beta[:p] - optimum[:p])) <= 1e-9
+        if result.converged:
+            assert np.max(np.abs(result.beta[:p] - optimum[:p])) <= 1e-9
+            assert result.beta[p] == pytest.approx(optimum[p], rel=1e-15)
+
 
 class TestCertificateRank:
     """The certificate decides full rank from its own inverse, and its SVD only otherwise."""
