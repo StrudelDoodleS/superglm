@@ -6,9 +6,10 @@ in families whose variance is a power of the mean, the response by ``a``)
 rescales ``W`` and the optimal ``lambda`` together, while the predictions and
 EDF stay put (Wood, Pya & Saefken 2016, JASA 111, sec. 3.1; Reiss & Ogden
 2009, JRSSB 71, sec. 2). An absolute box breaks that equivariance, so the box
-is ``[LAMBDA_FLOOR, LAMBDA_CEILING]`` times the fit's *information unit*: the
-mean expected (Fisher) information per likelihood row at the intercept-only
-fit, rounded to a power of two. The rounding makes a rescaling by ``2**k``
+holds ``[LAMBDA_FLOOR, LAMBDA_CEILING]`` times the fit's *information unit*:
+the mean expected (Fisher) information per likelihood row at the intercept-only
+fit, rounded to a power of two, with its ceiling never below
+``LAMBDA_CEILING`` (``relative_bounds``). The rounding makes a rescaling by ``2**k``
 move the bounds exactly, as LAPACK's balancing (``xGEBAL``; Parlett &
 Reinsch 1969) scales by powers of the radix, and keeps the old box exactly for
 data whose unit rounds to one (an unweighted Gaussian or log-link gamma fit).
@@ -35,6 +36,22 @@ _UNIT_EXPONENT_RANGE = (-950, 950)
 _ON_BOUND = 1.0e-8
 
 
+def relative_bounds(lower: float, upper: float, unit: float) -> tuple[float, float]:
+    """``[lower, upper] * unit``, its ceiling never below ``upper``.
+
+    A rescaling moves the optimum with the unit, and the relative box keeps it
+    inside. The ceiling is a working infinity (Wood, Pya & Saefken 2016, sec.
+    3.1, step 4(b)): a predictor whose rows carry almost no information, such
+    as a parameter held at its link's floor (unit ``2**-38``), has a REML
+    criterion flat in its smoothing parameter, and a ceiling of ``upper *
+    unit`` there stopped the search far below the working infinity the fixed
+    box reached, unconverged. The floor stays relative: below ``lower * unit``
+    a penalty is lost in the rounding of the data's curvature, and a start
+    clipped up to it keeps a term's penalty in force at extreme weights.
+    """
+    return lower * unit, max(upper, upper * unit)
+
+
 def information_unit(information: NDArray, size: float) -> float:
     """``2**k`` nearest the mean of ``information`` over ``size`` likelihood rows.
 
@@ -54,17 +71,17 @@ def information_unit(information: NDArray, size: float) -> float:
 
 @dataclass(frozen=True)
 class LambdaBox:
-    """``[LAMBDA_FLOOR, LAMBDA_CEILING] * unit``, the search box of one fit."""
+    """``relative_bounds(LAMBDA_FLOOR, LAMBDA_CEILING, unit)``, the search box of one fit."""
 
     unit: float = 1.0
 
     @property
     def floor(self) -> float:
-        return LAMBDA_FLOOR * self.unit
+        return relative_bounds(LAMBDA_FLOOR, LAMBDA_CEILING, self.unit)[0]
 
     @property
     def ceiling(self) -> float:
-        return LAMBDA_CEILING * self.unit
+        return relative_bounds(LAMBDA_FLOOR, LAMBDA_CEILING, self.unit)[1]
 
     @property
     def log_floor(self) -> float:
@@ -166,35 +183,57 @@ def glm_lambda_box(
     return LambdaBox(information_unit(information, size))
 
 
-def bound_warning_message(hits: Sequence[tuple[str, str, float, float]]) -> str | None:
+def bound_warning_message(
+    hits: Sequence[tuple[str, str, float, float, float | None]],
+) -> str | None:
     """One warning naming each term whose smoothing a bound held back.
 
-    ``hits`` holds ``(term, side, lambda, unit)``, ``side`` being ``"floor"``
-    or ``"ceiling"``: terms whose REML score still pointed past the bound when
-    the search stopped.
+    ``hits`` holds ``(term, side, lambda, bound, unit)``, ``side`` being
+    ``"floor"`` or ``"ceiling"``: terms whose REML score still pointed past
+    ``bound`` when the search stopped. ``unit`` is the term's information unit
+    in a relative box, and None in an absolute one (an explicit ``max_lambda``),
+    whose bounds say nothing about the term's own information.
     """
     if not hits:
         return None
     parts = []
-    for term, side, value, unit in hits:
-        relative = LAMBDA_FLOOR if side == "floor" else LAMBDA_CEILING
+    for term, side, value, bound, unit in hits:
         which = "smallest" if side == "floor" else "largest"
+        if unit is not None and (side == "floor" or unit >= 1.0):
+            relative = LAMBDA_FLOOR if side == "floor" else LAMBDA_CEILING
+            where = f"{relative:.0e} times this fit's information per row, {unit:.3g}"
+        elif unit is not None:
+            where = (
+                f"the fixed limit {LAMBDA_CEILING:.0e}, kept although this fit's "
+                f"information per row is {unit:.3g}"
+            )
+        elif side == "ceiling":
+            where = f"the max_lambda cap set for this fit, {bound:.3g}"
+        else:
+            where = f"the fixed floor {bound:.3g} that applies with an explicit max_lambda"
         parts.append(
             f"{term!r} at the {which} smoothing parameter the search allows "
-            f"(lambda = {value:.3g}, {relative:.0e} times this fit's information "
-            f"per row, {unit:.3g})"
+            f"(lambda = {value:.3g}, {where})"
         )
+    relative_sides = {side for _, side, _, _, unit in hits if unit is not None}
+    absolute = any(unit is None for *_, unit in hits)
     advice = []
-    if any(side == "floor" for _, side, _, _ in hits):
+    if "floor" in relative_sides:
         advice.append(
             "A term at the smallest value is nearly unpenalized and can follow noise: "
             "give it fewer basis functions, or fix its smoothing parameter."
         )
-    if any(side == "ceiling" for _, side, _, _ in hits):
+    if "ceiling" in relative_sides:
         advice.append(
             "A term at the largest value is close to its unpenalized part (a straight "
             "line for a spline): if that shape is expected, use that simpler term; "
             "otherwise check the term's data."
+        )
+    if absolute:
+        advice.append(
+            "An explicit max_lambda sets absolute limits that do not follow the data's "
+            "scale: raise it, or leave it unset so each term's limits are relative to "
+            "its own information."
         )
     return (
         "Smoothing-parameter selection stopped with the REML score still asking for "

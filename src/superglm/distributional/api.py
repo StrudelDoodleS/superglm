@@ -634,9 +634,17 @@ class SuperLSS:
         ):
             warnings.warn(message, ConvergenceWarning, stacklevel=3)
         if smoothing is not None:
+            box = smoothing.config
+            relative = bool(getattr(box, "relative_box", False))
             bounds = bound_warning_message(
                 [
-                    (name, side, float(smoothing.lambdas[name]), smoothing.config.unit(name))
+                    (
+                        name,
+                        side,
+                        float(smoothing.lambdas[name]),
+                        box.lower(name) if side == "floor" else box.upper(name),
+                        box.unit(name) if relative else None,
+                    )
                     for name, side in smoothing.bound_pressure()
                 ]
             )
@@ -811,10 +819,11 @@ class SuperLSS:
         Stops can depend on the starting values, so vary them when comparing fits.
 
         With ``max_lambda=None`` the search keeps each smoothing parameter
-        between ``1e-6`` and ``1e10`` times its term's information unit: the
+        between ``1e-6`` and ``1e10`` times its term's information unit (the
         mean expected information per row of the term's parameter at the
-        start, rounded to a power of two. Rescaling the response or the
-        weights moves the optimum and these limits together. Families without
+        start, rounded to a power of two), with the upper limit never below
+        ``1e10``. Rescaling the response or the weights moves the optimum and
+        the relative limits together. Families without
         expected information keep a unit of one. A number caps every smoothing
         parameter at that value, with the floor at ``1e-6``, whatever the
         data's scale. A fit whose search still pointed past a limit warns,
@@ -852,13 +861,14 @@ class SuperLSS:
                     max_log_step=max_log_step,
                     maximum_lambda=LAMBDA_CEILING if max_lambda is None else max_lambda,
                     relative_box=max_lambda is None,
+                    # Under the relative box the start is clipped into each
+                    # component's box once its unit is known.
                     initial_lambda=(
                         None
                         if initial_lambda is None
-                        else min(
-                            float(initial_lambda),
-                            LAMBDA_CEILING if max_lambda is None else max_lambda,
-                        )
+                        else float(initial_lambda)
+                        if max_lambda is None
+                        else min(float(initial_lambda), max_lambda)
                     ),
                     acceleration=acceleration,
                     acceleration_history=acceleration_history,

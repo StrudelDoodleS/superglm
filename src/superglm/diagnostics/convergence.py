@@ -431,7 +431,13 @@ def reml_bound_message(reml_result: Any) -> str | None:
     lambdas = reml_result.lambdas
     return bound_warning_message(
         [
-            (name, side, float(lambdas[name]), box.unit)
+            (
+                name,
+                side,
+                float(lambdas[name]),
+                box.floor if side == "floor" else box.ceiling,
+                box.unit,
+            )
             for name, side in getattr(reml_result, "bound_pressure", ()) or ()
             if name in lambdas
         ]

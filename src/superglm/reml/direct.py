@@ -1217,6 +1217,11 @@ def optimize_direct_reml(
             best_obj = obj
             best_lambdas = cand_lambdas.copy()
             best_pirls = pirls_result
+        # The pressure is read wherever the gradient at the returned point is
+        # known: at a new best, and at an accepted trial carried forward as the
+        # next candidate, whose objective equals ``best_obj`` and so is no
+        # strict improvement.
+        if cand_lambdas == best_lambdas:
             best_bound_pressure = bound_pressure(
                 grad,
                 rho_clipped,
@@ -1931,6 +1936,8 @@ def optimize_direct_reml(
                     best_obj = float(trial_obj)
                     best_lambdas = trial_lambdas.copy()
                     best_pirls = trial_result
+                    # Its gradient is read when it is next a candidate.
+                    best_bound_pressure = ()
                     if outer == max_reml_iter - 1:
                         lambda_history.append(trial_lambdas.copy())
                         objective_history.append(float(trial_obj))

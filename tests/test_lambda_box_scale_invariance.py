@@ -190,3 +190,89 @@ def test_a_superlss_term_held_at_its_cap_is_named():
     model = SuperLSS(family, family.location(s("x", k=12)), family.scale())
     with pytest.warns(UserWarning, match="'location:x#wiggle' at the largest smoothing parameter"):
         model.fit_reml(X, y, max_lambda=1.0e-3, initial_lambda=1.0e-4, outer="efs")
+
+
+def test_a_term_reaching_the_floor_through_an_accepted_line_search_step_is_named():
+    # A response with almost no noise asks for less smoothing than the floor
+    # allows. The search reaches the floor through an accepted line-search
+    # trial, whose carried-forward evaluation is no strict improvement on it;
+    # the bound pressure must still be read there.
+    x = np.linspace(0.0, 1.0, 500)
+    y = 2.0 + np.sin(4.0 * np.pi * x) + 1.0e-4 * np.random.default_rng(12).normal(size=500)
+    model = SuperGLM(family="gaussian", features={"x": PSpline(n_knots=30)})
+    with pytest.warns(UserWarning, match="'x' at the smallest smoothing parameter"):
+        model.fit_reml(pd.DataFrame({"x": x}), y)
+    assert model._reml_result.lambdas["x"] == pytest.approx(lambda_box.LAMBDA_FLOOR)
+    assert model._reml_result.bound_pressure == (("x", "floor"),)
+
+
+def test_an_explicit_max_lambda_is_described_as_the_cap_set_for_the_fit():
+    X, eta, _, rng = _rows()
+    y = eta + rng.normal(0.0, 0.3, len(eta))
+    family = GaussianLS(scale_floor=0.0)
+    model = SuperLSS(family, family.location(s("x", k=12)), family.scale())
+    with pytest.warns(UserWarning, match="'location:x#wiggle' at the largest") as record:
+        model.fit_reml(X, y, max_lambda=1.0e-3, initial_lambda=1.0e-4, outer="efs")
+    message = next(str(r.message) for r in record if "'location:x#wiggle' at the" in str(r.message))
+    assert "the max_lambda cap set for this fit, 0.001" in message
+    assert "information per row" not in message
+    assert "unpenalized part" not in message
+
+
+def _small_gaussian_lss(y, **kwargs):
+    family = GaussianLS(scale_floor=0.0)
+    model = SuperLSS(family, family.location(s("x", k=8)), family.scale())
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(pd.DataFrame({"x": np.linspace(0.0, 1.0, len(y))}), y, **kwargs)
+    return model._model.smoothing
+
+
+@pytest.mark.parametrize(("response_scale", "start"), [(32.0, 1.0e-8), (2.0**-14, 1.0e12)])
+def test_a_scalar_initial_lambda_meets_the_relative_box_like_a_named_one(response_scale, start):
+    # Each start lies inside the location's relative box but outside the
+    # absolute [1e-6, 1e10]: below it on a response in large units, above it
+    # on one in small units.
+    x = np.linspace(0.0, 1.0, 160)
+    y = response_scale * (np.sin(6.0 * x) + 0.3 * np.random.default_rng(8).normal(size=160))
+    name = "location:x#wiggle"
+    scalar = _small_gaussian_lss(y, initial_lambda=start)
+    named = _small_gaussian_lss(y, lambdas={name: start})
+    lower, upper = scalar.config.lower(name), scalar.config.upper(name)
+    assert lower < start < upper
+    assert scalar.initial_lambdas[name] == named.initial_lambdas[name] == start
+    assert scalar.lambdas[name] == named.lambdas[name]
+
+
+def test_a_predictor_at_its_link_floor_keeps_the_absolute_ceiling():
+    # A generalized gamma whose scale offset holds it on its link's floor
+    # (``scale_floor + exp(eta)``, eta near -35): its rows carry about 2**-38
+    # of information each, and the REML criterion is flat in its smoothing
+    # parameter. A box of 1e10 times that unit put the ceiling at 0.036, far
+    # below the 7.2e4 the absolute box reached, and the search stopped there
+    # unconverged ('endpoint_revalidation_failed'); the post-fit repairs
+    # started from that fit, whose scale penalty no longer dominated.
+    from superglm import Constraint
+    from superglm.distributional.families import GeneralizedGammaLSS
+
+    x = np.linspace(0.0, 1.0, 200)
+    X = pd.DataFrame({"x": x, "off": -35.0 + 30.0 * x})
+    y = 1.0 + 0.005 * np.random.default_rng(0).normal(size=200)
+    family = GeneralizedGammaLSS()
+    model = SuperLSS(
+        family,
+        family.mean(s("x", kind="bs", k=6)),
+        family.scale(
+            s("x", kind="bs", k=6, constraint=Constraint.postfit.increasing), offset="off"
+        ),
+        family.shape(s("x", kind="bs", k=6)),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(X, y)
+    smoothing = model._model.smoothing
+    name = "scale:x#wiggle"
+    assert smoothing.config.unit(name) < 2.0**-30
+    assert smoothing.config.upper(name) == lambda_box.LAMBDA_CEILING
+    assert smoothing.converged
+    assert smoothing.lambdas[name] > 1.0e3

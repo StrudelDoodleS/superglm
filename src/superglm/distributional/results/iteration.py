@@ -10,7 +10,7 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._lambda_box import LAMBDA_CEILING, LAMBDA_FLOOR
+from superglm._lambda_box import LAMBDA_CEILING, LAMBDA_FLOOR, relative_bounds
 from superglm.distributional._common import frozen_float_mapping
 from superglm.distributional.results.endpoint_evidence import (
     EFSAccelerationOutcome,
@@ -104,16 +104,17 @@ class DistributionalEFSConfig:
 
     def lower(self, name: str) -> float:
         """The smallest smoothing parameter component ``name`` may take."""
-        return self.minimum_lambda * self.unit(name)
+        return relative_bounds(self.minimum_lambda, self.maximum_lambda, self.unit(name))[0]
 
     def upper(self, name: str) -> float:
         """The largest smoothing parameter component ``name`` may take before a release."""
-        return self.maximum_lambda * self.unit(name)
+        return relative_bounds(self.minimum_lambda, self.maximum_lambda, self.unit(name))[1]
 
     def conditioning_limit(self, name: str) -> float:
         """The largest smoothing parameter a release beyond ``upper`` may reach."""
         assert self.maximum_lambda_conditioning is not None
-        return self.maximum_lambda_conditioning * self.unit(name)
+        limit = self.maximum_lambda_conditioning
+        return relative_bounds(limit, limit, self.unit(name))[1]
 
     def __post_init__(self) -> None:
         if not isinstance(self.retain_history_rows, bool):
@@ -174,8 +175,12 @@ class DistributionalEFSConfig:
         object.__setattr__(self, "lambda_units", units)
         if self.maximum_lambda < self.minimum_lambda:
             raise ValueError("maximum_lambda must not be smaller than minimum_lambda")
-        if self.initial_lambda is not None and not (
-            self.minimum_lambda <= self.initial_lambda <= self.maximum_lambda
+        # A relative box's bounds are known only once the data's units are; a
+        # start is then clipped into its component's box at initialization.
+        if (
+            self.initial_lambda is not None
+            and not self.relative_box
+            and not (self.minimum_lambda <= self.initial_lambda <= self.maximum_lambda)
         ):
             raise ValueError("initial_lambda must lie inside the configured lambda bounds")
         if not math.isfinite(self.backtrack_factor) or not 0.0 < self.backtrack_factor < 1.0:

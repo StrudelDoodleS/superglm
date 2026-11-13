@@ -1056,9 +1056,10 @@ duplicated in `lambdas`. Every other penalty component needs a supplied value fo
 `fit_reml()` estimates every component whose policy is `LambdaPolicy.estimate()`
 by minimising the negative Laplace-approximate marginal likelihood (LAML) in
 log λ over a box. By default (`max_lambda=None`) each component's box is
-`[1e-6, 1e10]` times its term's information unit: the mean expected information
-per row of that term's parameter at the start, rounded to a power of two, so
-rescaling the response or the weights moves the optimum and the box together. A
+`[1e-6, 1e10]` times its term's information unit (the mean expected information
+per row of that term's parameter at the start, rounded to a power of two), with
+the upper limit never below `1e10`, so rescaling the response or the weights
+moves the optimum and the relative limits together. A
 number for `max_lambda` gives the absolute box `[1e-6, max_lambda]`. A fit whose
 search still points past a bound warns and names the term. `outer="efs"` uses the generalised
 Fellner–Schall fixed-point iteration alone, safeguarded by objective
@@ -1171,8 +1172,8 @@ is assessed at the exact face: the endpoint LAML derivative at τ = 1/λ = 0
 decides whether the optimum is infinite (the term is linear and becomes an
 exact face, `exact_face_components_`, `converged=True`) or finite. A finite
 verdict with the cap still under pressure starts a bracketed search on
-dF/dτ between the cap and the conditioning limit (`1e14`, times the
-information unit under the default box); a root there
+dF/dτ between the cap and the conditioning limit (`1e14`, or `1e14` times the
+information unit under the default box when that is larger); a root there
 releases the component above `max_lambda` (`beyond_cap_components` on the
 smoothing result) and the endgame resumes. A cap never certifies an infinite
 optimum: without a root or an endpoint certificate the fit reports

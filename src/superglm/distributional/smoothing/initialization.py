@@ -8,7 +8,7 @@ from dataclasses import replace
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._lambda_box import information_unit
+from superglm._lambda_box import information_unit, relative_bounds
 from superglm.distributional.family import (
     DistributionalFamily,
     FamilyLikelihoodPlan,
@@ -202,17 +202,12 @@ def prepare_distributional_initialization(
     for state in layout.predictors:
         weights = information[:, diagonal[state.parameter_index]]
         unit = information_unit(weights, size) if config.relative_box else 1.0
+        bounds = relative_bounds(config.minimum_lambda, config.maximum_lambda, unit)
         grams: dict[int, NDArray] = {}
         for component in state.penalties:
             units.append((component.name, unit))
             if component.name in estimated and config.relative_box:
-                resolved[component.name] = float(
-                    np.clip(
-                        resolved[component.name],
-                        config.minimum_lambda * unit,
-                        config.maximum_lambda * unit,
-                    )
-                )
+                resolved[component.name] = float(np.clip(resolved[component.name], *bounds))
             if not calibrate or component.name not in automatic:
                 continue
             if component.group_index not in grams:
@@ -225,7 +220,5 @@ def prepare_distributional_initialization(
                 component.rank,
             )
             if value is not None:
-                resolved[component.name] = float(
-                    np.clip(value, config.minimum_lambda * unit, config.maximum_lambda * unit)
-                )
+                resolved[component.name] = float(np.clip(value, *bounds))
     return resolved, coefficients, tuple(units) if config.relative_box else ()
