@@ -93,3 +93,13 @@ def test_verify_recomputes_the_sample_and_catches_a_wrong_answer(store_directory
     path.write_text(json.dumps(data))
     with pytest.raises(AssertionError, match="no longer reproduces"):
         OracleStore("sample", _oracle, module="tests/test_oracle_store.py").verify()
+
+
+def test_an_mpmath_answer_may_differ_below_its_working_precision_only():
+    """An oracle step left at the caller's precision moves a 70-digit answer by ~1e-73."""
+    from tests._oracle_store import _agree
+
+    with mp.workdps(70):
+        exact = mp.mpf(2) / 3
+        assert _agree({"a": exact}, {"a": exact * (1 + mp.mpf(10) ** -60)})
+        assert not _agree({"a": exact}, {"a": exact * (1 + mp.mpf(10) ** -20)})

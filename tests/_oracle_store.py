@@ -57,6 +57,10 @@ _REFRESH_COMMAND = "SUPERGLM_REFRESH_ORACLES=1 uv run --with mpmath pytest {modu
 # change to the oracle moves its answers by far more.  The allowance only
 # covers a platform's libm in an oracle's float64 pre- or post-processing.
 _SAMPLE_RTOL = 1e-13
+# The same for an ``mpmath`` answer: an oracle can round a step at the caller's
+# working precision outside its own ``workdps`` (seen at 1e-73 of a 70-digit
+# answer), which no float64 comparison can see; a changed oracle moves far more.
+_SAMPLE_MPF_RTOL = 1e-30
 
 
 def _encode(value: Any) -> Any:
@@ -151,6 +155,9 @@ def _agree(stored: Any, live: Any) -> bool:
             if np.isnan(a) and np.isnan(b):
                 continue
             if not (a == b or abs(a - b) <= _SAMPLE_RTOL * max(abs(a), abs(b))):
+                return False
+        elif hasattr(a, "_mpf_") and hasattr(b, "_mpf_"):
+            if not (a == b or abs(a - b) <= _SAMPLE_MPF_RTOL * max(abs(a), abs(b))):
                 return False
         elif type(a) is not type(b) or a != b:
             return False
