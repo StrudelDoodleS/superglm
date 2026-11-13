@@ -1161,8 +1161,6 @@ def test_support_cross_peak_memory_is_its_byte_budget():
     were live together, about three budgets. Accumulated in place, the traced
     peak is one aggregate of at most ``max_bytes``, the p x p output and one
     pass's slice of it."""
-    import tracemalloc
-
     from superglm._group_matrix import _group_matrix_algebra as algebra
 
     gen = np.random.default_rng(46)
@@ -1176,12 +1174,11 @@ def test_support_cross_peak_memory_is_its_byte_budget():
     assert step < p  # several column passes
     small = slice(None, 8)
     algebra._support_support_raw_cross(b_i, idx_i[small], b_j, idx_j[small], weights[small])
-    tracemalloc.start()
-    try:
-        algebra._support_support_raw_cross(b_i, idx_i, b_j, idx_j, weights, max_bytes=budget)
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
+    peak, _ = own_traced_peak(
+        lambda: algebra._support_support_raw_cross(
+            b_i, idx_i, b_j, idx_j, weights, max_bytes=budget
+        )
+    )
     assert peak <= budget + 8 * (p * p + step * p)
 
 
@@ -1959,8 +1956,6 @@ def test_mixed_chunk_peak_bytes_stay_inside_the_budget_the_sizing_assumes(monkey
     ``.multiply`` in the loop) would pin today's implementation rather than the
     property; a byte count survives a rewrite.
     """
-    import tracemalloc
-
     from superglm._group_matrix import _group_matrix_algebra as algebra
 
     gen = np.random.default_rng(4)
@@ -1969,16 +1964,9 @@ def test_mixed_chunk_peak_bytes_stay_inside_the_budget_the_sizing_assumes(monkey
     weights = np.abs(gen.normal(1.0, 0.2, n_rows))
     nnz = int(dense_csr.nnz)
 
-    tracemalloc.start()
-    try:
-        baseline = tracemalloc.get_traced_memory()[0]
-        tracemalloc.reset_peak()
-        chunk = algebra._weighted_row_chunk(dense_csr, weights, 0, n_rows)
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
+    peak, chunk = own_traced_peak(algebra._weighted_row_chunk, dense_csr, weights, 0, n_rows)
 
-    bytes_per_entry = (peak - baseline) / nnz
+    bytes_per_entry = peak / nnz
     assert bytes_per_entry <= 12.0, (
         f"weighting the chunk peaked at {bytes_per_entry:.1f} bytes per stored "
         f"entry against the {12} the chunk budget assumes"
