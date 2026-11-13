@@ -3082,9 +3082,23 @@ def _exact_workbook(model, X, y, sample_weight, **kwargs):
     return payload, [w for w in caught if "could not keep" in str(w.message)]
 
 
+@cache
+def _shared_exact_workbook(fit: str):
+    """``_exact_workbook`` at its defaults on ``_spline_categorical_fit`` or ``_two_interaction_fit``.
+
+    Built once per process: the tests that take it only read its tables and
+    warnings, and the exact banding behind it is most of each one's time.
+    """
+    if fit == "spline categorical":
+        model, X, y, sample_weight = _spline_categorical_fit()
+    else:
+        (model, X, y), sample_weight = _two_interaction_fit(), None
+    return _exact_workbook(model, X, y, sample_weight)
+
+
 def test_under_exact_the_main_block_and_the_interaction_carry_the_same_intervals():
     model, X, y, sample_weight = _spline_categorical_fit()
-    payload, widened = _exact_workbook(model, X, y, sample_weight)
+    payload, widened = _shared_exact_workbook("spline categorical")
     assert not widened
 
     main = next(b for b in payload.main_effects if b.name == "age")
@@ -3104,7 +3118,7 @@ def test_exact_bands_hold_every_levels_total_relativity_within_its_limit():
     curve is the main effect.
     """
     model, X, y, sample_weight = _spline_categorical_fit()
-    payload, widened = _exact_workbook(model, X, y, sample_weight)
+    payload, widened = _shared_exact_workbook("spline categorical")
     assert not widened
 
     age = X["age"].to_numpy()
@@ -3122,7 +3136,7 @@ def test_exact_bands_hold_every_levels_total_relativity_within_its_limit():
 
 def test_a_cell_is_the_bands_weighted_mean_of_the_levels_deviation():
     model, X, y, sample_weight = _spline_categorical_fit()
-    payload, _ = _exact_workbook(model, X, y, sample_weight)
+    payload, _ = _shared_exact_workbook("spline categorical")
     (block,) = payload.interactions
 
     ispec = model._interaction_specs["age:region"]
@@ -3292,7 +3306,7 @@ def _two_interaction_fit():
 def test_every_spline_categorical_on_a_covariate_joins_its_bands():
     model, X, y = _two_interaction_fit()
     assert banding_companions(model) == {"age": ["age:region", "age:fuel"]}
-    payload, widened = _exact_workbook(model, X, y, None)
+    payload, widened = _shared_exact_workbook("two interactions")
     assert not widened
 
     main = next(b for b in payload.main_effects if b.name == "age")
@@ -3351,7 +3365,7 @@ def _combination_se(
 def test_a_row_in_a_level_of_each_of_two_interactions_holds_its_own_limit():
     """``main + f_C + g_P`` is bounded by ``min(SE of that sum, log 1.1)``, not by the limits' sum."""
     model, X, y = _two_interaction_fit()
-    payload, widened = _exact_workbook(model, X, y, None)
+    payload, widened = _shared_exact_workbook("two interactions")
     assert not widened
 
     age = X["age"].to_numpy()
