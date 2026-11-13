@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from functools import cache, cached_property, partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -76,6 +76,7 @@ from superglm.solvers.working_rows import fisher_working_weights, pearson_chi2
 from superglm.types import GroupSlice
 
 if TYPE_CHECKING:
+    from superglm._frame import EagerFrame, FrameLike
     from superglm.model import SuperGLM
 
 
@@ -631,7 +632,9 @@ class ModelMetrics:
         # Read its existing bounded chunks only on the exceptional unit path;
         # no observation-level matrix or transformed columns are retained.
         columns = np.arange(len(self._result.beta), dtype=np.intp)
-        design = EvaluationDesign(self._model, self._X, columns)
+        # This non-compact evaluation's frame was validated by predict().
+        frame = cast("FrameLike | EagerFrame", self._X)
+        design = EvaluationDesign(self._model, frame, columns)
         eta, mu = self._working_eta_mu
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
             moment_weights = fisher_working_weights(
