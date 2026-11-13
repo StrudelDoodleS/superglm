@@ -106,6 +106,8 @@ def _fit_public_gamma_joint_face(
         max_inner_iter=150,
         inner_tol=1.0e-9,
         outer="efs",
+        # the starts sit on this absolute cap, whatever the data's information unit
+        max_lambda=maximum_lambda,
     )
 
 

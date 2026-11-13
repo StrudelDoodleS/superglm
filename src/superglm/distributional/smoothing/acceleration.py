@@ -228,9 +228,10 @@ def _common_scaled_step(
     *,
     max_log_step: float,
     max_amplification: float,
-    lower: float,
-    upper: float,
+    lower: float | NDArray,
+    upper: float | NDArray,
 ) -> NDArray[np.float64] | None:
+    """``lower`` and ``upper`` bound each coordinate, scalars or one per coordinate."""
     work_dtype = np.result_type(current.dtype, step.dtype, raw_residual.dtype, np.float64)
     current_values = np.asarray(current, dtype=work_dtype)
     step_values = np.asarray(step, dtype=work_dtype)
@@ -246,9 +247,9 @@ def _common_scaled_step(
         or max_log_step <= 0.0
         or not np.isfinite(max_amplification)
         or max_amplification <= 0.0
-        or not np.isfinite(lower)
-        or not np.isfinite(upper)
-        or lower > upper
+        or not np.all(np.isfinite(lower))
+        or not np.all(np.isfinite(upper))
+        or np.any(np.greater(lower, upper))
     ):
         return None
     if current_values.size == 0:
@@ -269,17 +270,21 @@ def _common_scaled_step(
     if not np.isfinite(trust_scale) or trust_scale <= 0.0:
         return None
 
+    lowers = np.broadcast_to(np.asarray(lower, dtype=work_dtype), current_values.shape)
+    uppers = np.broadcast_to(np.asarray(upper, dtype=work_dtype), current_values.shape)
     box_scale = 1.0
-    for value, direction in zip(current_values, step_values, strict=True):
+    for value, direction, low, high in zip(
+        current_values, step_values, lowers, uppers, strict=True
+    ):
         if direction > 0.0:
-            room = upper - value
+            room = high - value
             if room <= 0.0:
                 return None
             with np.errstate(over="ignore", invalid="ignore"):
                 coordinate_scale = room / direction
             box_scale = min(box_scale, float(coordinate_scale))
         elif direction < 0.0:
-            room = lower - value
+            room = low - value
             if room >= 0.0:
                 return None
             with np.errstate(over="ignore", invalid="ignore"):
@@ -412,15 +417,16 @@ class WindowedTypeIIAnderson:
         self,
         *,
         max_log_step: float,
-        minimum_log_lambda: float,
-        maximum_log_lambda: float,
+        minimum_log_lambda: float | NDArray,
+        maximum_log_lambda: float | NDArray,
     ) -> MultisecantDecision:
+        """The bounds are scalars or one per estimated component."""
         if not np.isfinite(max_log_step) or max_log_step <= 0.0:
             raise ValueError("max_log_step must be finite and positive")
         if (
-            not np.isfinite(minimum_log_lambda)
-            or not np.isfinite(maximum_log_lambda)
-            or minimum_log_lambda > maximum_log_lambda
+            not np.all(np.isfinite(minimum_log_lambda))
+            or not np.all(np.isfinite(maximum_log_lambda))
+            or np.any(np.greater(minimum_log_lambda, maximum_log_lambda))
         ):
             raise ValueError("log-lambda bounds must be finite and ordered")
         if len(self._pairs) < 2:

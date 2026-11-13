@@ -419,3 +419,34 @@ def warn_reml_nonconvergence(reml_result: Any) -> str | None:
     if message is not None:
         warnings.warn(message, ConvergenceWarning, skip_file_prefixes=(_PACKAGE_PREFIX,))
     return message
+
+
+def reml_bound_message(reml_result: Any) -> str | None:
+    """The terms whose smoothing a search bound held back, or None."""
+    from superglm._lambda_box import LambdaBox, bound_warning_message
+
+    box = getattr(reml_result, "lambda_box", None)
+    if not isinstance(box, LambdaBox):
+        return None
+    lambdas = reml_result.lambdas
+    return bound_warning_message(
+        [
+            (
+                name,
+                side,
+                float(lambdas[name]),
+                box.floor if side == "floor" else box.ceiling,
+                box.unit,
+            )
+            for name, side in getattr(reml_result, "bound_pressure", ()) or ()
+            if name in lambdas
+        ]
+    )
+
+
+def warn_reml_bounds(reml_result: Any) -> str | None:
+    """Emit ``reml_bound_message`` as a ConvergenceWarning; return it."""
+    message = reml_bound_message(reml_result)
+    if message is not None:
+        warnings.warn(message, ConvergenceWarning, skip_file_prefixes=(_PACKAGE_PREFIX,))
+    return message

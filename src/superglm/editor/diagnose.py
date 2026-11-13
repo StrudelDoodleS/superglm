@@ -15,7 +15,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
-from superglm._lambda_box import LAMBDA_CEILING
+from superglm._lambda_box import LambdaBox, fitted_lambda_box
 from superglm.diagnostics.convergence import (
     coefficient_nonconvergence_message,
     lss_nonconvergence_message,
@@ -240,7 +240,12 @@ def _glm_penalties(model) -> list[tuple[Any, float]] | None:
 
 
 def _glm_cell(
-    edf: float, width: int, penalties: Sequence[tuple[Any, float]], *, searched: bool
+    edf: float,
+    width: int,
+    penalties: Sequence[tuple[Any, float]],
+    *,
+    searched: bool,
+    box: LambdaBox | None = None,
 ) -> dict[str, Any]:
     """A SuperGLM term's cell. Several penalties claim no simplest shape, as on a SuperLSS."""
     if not penalties:
@@ -250,7 +255,7 @@ def _glm_cell(
         edf,
         lam,
         width - round(penalties[0][0].rank) if len(penalties) == 1 else 0,
-        at_limit=searched and lam >= LAMBDA_CEILING,
+        at_limit=searched and (box or LambdaBox()).side(lam) == "ceiling",
     )
 
 
@@ -278,8 +283,9 @@ def _glm_terms(model, *, searched: bool) -> dict[Hashable, dict[str, Any]]:
     penalties: dict[Hashable, list[tuple[Any, float]]] = {}
     for penalty, value in recorded:
         penalties.setdefault(owner[penalty.group_name], []).append((penalty, value))
+    box = fitted_lambda_box(model)
     return {
-        name: _glm_cell(edf[name], width[name], penalties.get(name, ()), searched=searched)
+        name: _glm_cell(edf[name], width[name], penalties.get(name, ()), searched=searched, box=box)
         for name in width
     }
 

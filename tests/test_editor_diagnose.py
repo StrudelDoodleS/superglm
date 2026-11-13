@@ -12,7 +12,7 @@ import pytest
 from sklearn.model_selection import KFold
 
 from superglm import GammaLS, SuperGLM, SuperLSS, cat, cross_validate, re, s
-from superglm._lambda_box import LAMBDA_CEILING
+from superglm._lambda_box import fitted_lambda_box
 from superglm.editor import edit
 from superglm.editor.cv import capture_cv_run, run_cv
 from superglm.editor.diagnose import (
@@ -193,7 +193,7 @@ def test_a_searched_term_s_shape_reads_its_own_penalty_s_null_space(monkeypatch)
 def test_a_superglm_limit_is_the_search_s_own_ceiling(monkeypatch):
     model, _, _ = _glm()
     reml = model._reml_result
-    capped = {**reml.lambdas, "age": LAMBDA_CEILING, "size": 1e6}
+    capped = {**reml.lambdas, "age": fitted_lambda_box(model).ceiling, "size": 1e6}
     monkeypatch.setattr(model, "_reml_result", dataclasses.replace(reml, lambdas=capped))
     terms = fit_trace(model, fit_id="model", label="All rows")["terms"]
     assert terms["age"]["at_limit"] is True

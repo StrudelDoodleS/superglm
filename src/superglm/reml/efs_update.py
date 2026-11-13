@@ -39,7 +39,7 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._lambda_box import LAMBDA_CEILING, LAMBDA_FLOOR
+from superglm._lambda_box import LAMBDA_CEILING, LAMBDA_FLOOR, relative_bounds
 from superglm._roundoff import EPS
 from superglm._roundoff import gamma as _gamma
 from superglm.types import LambdaPolicy
@@ -257,8 +257,13 @@ def wood_fasiolo_update(
     max_log_step: float | None = 5.0,
     minimum_lambda: float = LAMBDA_FLOOR,
     maximum_lambda: float = LAMBDA_CEILING,
+    units: Mapping[str, float] | None = None,
 ) -> EFSUpdateResult:
-    """Return bounded generalized Fellner--Schall proposals."""
+    """Return bounded generalized Fellner--Schall proposals.
+
+    A component's bounds are ``minimum_lambda`` and ``maximum_lambda`` times
+    its entry in ``units`` (``_lambda_box``), one where it has none.
+    """
     component_tuple = tuple(components)
     if not component_tuple:
         raise ValueError("at least one EFS component is required")
@@ -370,12 +375,14 @@ def wood_fasiolo_update(
                 # map remains a safe directional fallback under backtracking.
                 raw_log_step = stationarity_log_residual
 
+            unit = 1.0 if units is None else float(units.get(name, 1.0))
+            low, high = relative_bounds(lower, upper, unit)
             proposed, log_step = _bounded_lambda_from_raw_log_step(
                 component.lambda_value,
                 raw_log_step,
                 max_log_step=step_bound,
-                lower=lower,
-                upper=upper,
+                lower=low,
+                upper=high,
             )
 
         lambdas[name] = proposed

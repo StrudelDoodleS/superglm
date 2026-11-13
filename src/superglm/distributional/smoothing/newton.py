@@ -650,11 +650,11 @@ def _lambda_from_log(
     lower_log: float,
     upper_log: float,
     upper_lambda: float,
-    config: DistributionalEFSConfig,
+    lower_lambda: float,
 ) -> float:
     """``exp(value)`` with the bounds landed on exactly."""
     if value <= lower_log:
-        return config.minimum_lambda
+        return lower_lambda
     if value >= upper_log:
         return upper_lambda
     return float(math.exp(value))
@@ -700,7 +700,6 @@ def run_newton_endgame(
     config = efs_config
     tolerance = float(config.tolerance)
     cap_bar = tolerance if cap_tolerance is None else float(cap_tolerance)
-    lower_log = math.log(config.minimum_lambda)
     released = {} if upper_bounds is None else dict(upper_bounds)
     if budget is not None:
         remaining = int(budget)
@@ -773,7 +772,7 @@ def run_newton_endgame(
         )
 
     def upper_lambda(name: str) -> float:
-        return float(released.get(name, config.maximum_lambda))
+        return float(released.get(name, config.upper(name)))
 
     def derivative_pass(want_hessian: bool, workspace: LamlDerivativeWorkspace) -> LamlDerivatives:
         with measure_phase(phase_recorder, _ENDGAME_PHASE):
@@ -810,6 +809,7 @@ def run_newton_endgame(
         count = len(names)
         rho = np.array([math.log(current.lambdas[name]) for name in names])
         upper_logs = np.array([math.log(upper_lambda(name)) for name in names])
+        lower_logs = np.array([math.log(config.lower(name)) for name in names])
         if previous is not None and derivatives.provenance != previous.provenance:
             consecutive_provenance_changes += 1
             inverse_memory = None
@@ -849,7 +849,7 @@ def run_newton_endgame(
             gradient,
             rho,
             estimated_mask,
-            log_lower=lower_log,
+            log_lower=lower_logs,
             log_upper=upper_logs,
             bound_window=0.0,
         )
@@ -1041,13 +1041,13 @@ def run_newton_endgame(
             descent = float(gradient @ step)
             proposed_lambdas = dict(current.lambdas)
             for k, name in enumerate(names):
-                value = float(np.clip(rho[k] + step[k], lower_log, upper_logs[k]))
+                value = float(np.clip(rho[k] + step[k], lower_logs[k], upper_logs[k]))
                 proposed_lambdas[name] = _lambda_from_log(
                     value,
-                    lower_log=lower_log,
+                    lower_log=lower_logs[k],
                     upper_log=upper_logs[k],
                     upper_lambda=upper_lambda(name),
-                    config=config,
+                    lower_lambda=config.lower(name),
                 )
             fit_indices: list[int] = []
             tolerances: list[float] = []
@@ -1059,13 +1059,13 @@ def run_newton_endgame(
                 scale = config.backtrack_factor**backtrack
                 trial_lambdas = dict(current.lambdas)
                 for k, name in enumerate(names):
-                    value = float(np.clip(rho[k] + scale * step[k], lower_log, upper_logs[k]))
+                    value = float(np.clip(rho[k] + scale * step[k], lower_logs[k], upper_logs[k]))
                     trial_lambdas[name] = _lambda_from_log(
                         value,
-                        lower_log=lower_log,
+                        lower_log=lower_logs[k],
                         upper_log=upper_logs[k],
                         upper_lambda=upper_lambda(name),
-                        config=config,
+                        lower_lambda=config.lower(name),
                     )
                 if all(trial_lambdas[name] == current.lambdas[name] for name in names):
                     break
@@ -1240,9 +1240,7 @@ def bracket_refused_component(
     index = derivatives.names.index(name)
     cap = float(state.lambdas[name])
     phi_at_cap = -float(derivatives.gradient[index]) * cap
-    maximum_lambda_conditioning = efs_config.maximum_lambda_conditioning
-    assert maximum_lambda_conditioning is not None
-    log_span = math.log(maximum_lambda_conditioning) - math.log(cap)
+    log_span = math.log(efs_config.conditioning_limit(name)) - math.log(cap)
     if log_span <= 0.0:
         return None
     fitter = _TrialFitter(

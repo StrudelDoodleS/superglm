@@ -71,6 +71,7 @@ def _fresh_raw_evidence(
         max_log_step=config.max_log_step,
         minimum_lambda=config.minimum_lambda,
         maximum_lambda=config.maximum_lambda,
+        units=dict(config.lambda_units),
     )
     update, stable_raw_names = _stable_isolated_gfs_update(
         components,
@@ -83,7 +84,7 @@ def _fresh_raw_evidence(
         name for name in estimated_names if update.proposal_kinds[name] == "working_infinity"
     )
     capped_names = frozenset(
-        name for name in estimated_names if lambdas[name] == config.maximum_lambda
+        name for name in estimated_names if lambdas[name] == config.upper(name)
     )
     # Normalized fixed-point stationarity is the finite convergence
     # certificate.  The raw GFS quotient is cancellation-amplified near a
@@ -129,5 +130,5 @@ def _lower_bound_pressure(
     return tuple(
         name
         for name in evidence.estimated_names
-        if lambdas[name] == config.minimum_lambda and raw_log_steps[name] < -config.tolerance
+        if lambdas[name] == config.lower(name) and raw_log_steps[name] < -config.tolerance
     )
