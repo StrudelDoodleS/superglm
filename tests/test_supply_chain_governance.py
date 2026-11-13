@@ -453,7 +453,9 @@ _COOLDOWN_DAYS = 7
 # window, with the advisories it fixes.  Each gets a fixed cutoff just after the fixing
 # release's upload in pyproject's ``exclude-newer-package``; drop it (and its entry
 # here) at the first lock bump after the window has passed that release.
-_COOLDOWN_EXEMPTIONS: dict[str, str] = {}
+_COOLDOWN_EXEMPTIONS: dict[str, str] = {
+    "tornado": "6.6.1 fixes GHSA-5cjw-f85j-cv6r (6.6 is flagged); via ipykernel and jupyter-client",
+}
 # Packages a lock change may move below the base lock, each with its reason.
 _LOCK_DOWNGRADE_EXEMPTIONS: dict[str, str] = {}
 _LOCK_BASELINE = "tests/fixtures/uv_lock_baseline.json"
