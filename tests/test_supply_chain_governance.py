@@ -453,9 +453,7 @@ _COOLDOWN_DAYS = 7
 # window, with the advisories it fixes.  Each gets a fixed cutoff just after the fixing
 # release's upload in pyproject's ``exclude-newer-package``; drop it (and its entry
 # here) at the first lock bump after the window has passed that release.
-_COOLDOWN_EXEMPTIONS = {
-    "virtualenv": "21.14.13 fixes GHSA-4f8h-vr72-p32c and GHSA-cx6f-vjhg-g3cc",
-}
+_COOLDOWN_EXEMPTIONS: dict[str, str] = {}
 # Packages a lock change may move below the base lock, each with its reason.
 _LOCK_DOWNGRADE_EXEMPTIONS: dict[str, str] = {}
 _LOCK_BASELINE = "tests/fixtures/uv_lock_baseline.json"
