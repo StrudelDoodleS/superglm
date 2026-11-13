@@ -290,6 +290,32 @@ def _scaled_constraint_step(
     return np.divide(action, scale, out=np.zeros_like(action), where=scale > 0.0)
 
 
+# A full-rank bound this many times ``matrix_rank``'s cutoff decides as its SVD does.
+_RANK_CUTOFF_MARGIN = 2.0**10
+
+
+def _full_column_rank(left_inverse: NDArray, matrix: NDArray) -> bool:
+    """Whether ``np.linalg.matrix_rank(matrix)`` is the column count, shown by a left inverse.
+
+    With ``X M = I + E``, ``||x|| <= ||X|| ||M x|| + ||E|| ||x||``, so ``sigma_min(M) >=
+    (1 - ||E||_2) / ||X||_2``; Frobenius norms bound both 2-norms, and the computed ``E`` is
+    within ``gamma_p |X| |M|`` of the exact one (Higham, *Accuracy and Stability of Numerical
+    Algorithms*, 2nd ed., 2002, section 3.5). ``matrix_rank`` counts the singular values above
+    ``sigma_max max(p, k) eps``, and LAPACK's SVD computes each within a modest multiple of
+    ``eps sigma_max`` (LAPACK Users' Guide, 3rd ed., 1999, section 4.9), so a bound
+    ``_RANK_CUTOFF_MARGIN`` times that cutoff is the decision ``matrix_rank`` makes, without
+    its SVD. ``False`` says only that this bound does not show it.
+    """
+    p, k = matrix.shape
+    with np.errstate(over="ignore", invalid="ignore"):
+        defect = left_inverse @ matrix
+        defect[np.diag_indices(k)] -= 1.0
+        rounding = gamma(p) * np.linalg.norm(np.abs(left_inverse) @ np.abs(matrix))
+        shortfall = 1.0 - (np.linalg.norm(defect) + rounding)
+        cutoff = _RANK_CUTOFF_MARGIN * max(p, k) * _EPS * np.linalg.norm(matrix)
+        return bool(shortfall > cutoff * np.linalg.norm(left_inverse))
+
+
 def _stationarity_certificate(
     H: NDArray,
     g: NDArray,
@@ -297,6 +323,7 @@ def _stationarity_certificate(
     active_matrix: NDArray,
     tol: float,
     objective: tuple | None = None,
+    keys: NDArray | None = None,  # the working rows' indices, for Bland's rule (_released)
 ) -> tuple[bool, int | None, NDArray]:
     """Certify a nonnegative dual force in homogeneous stationarity units.
 
@@ -342,13 +369,28 @@ def _stationarity_certificate(
         # product of two of them are finite (the square-root safe range of
         # LAPACK's la_constants; Anderson, ACM TOMS 44, 2017).
         weight = 1.0 / np.where(own > 0.0, np.maximum(own, _SQRT_TINY), 1.0)
-        rank = np.linalg.matrix_rank(rows.T)
         weighted = rows.T * weight[:, None]
         order = np.argsort(-np.maximum.reduce(np.abs(weighted), axis=1, initial=0.0), kind="stable")
         q, r, pivots = scipy.linalg.qr(weighted[order], mode="economic", pivoting=True)
-        basic = _solve_triangular(r[:rank, :rank], q[:, :rank].T)
-        inverse_action = np.zeros((len(rows), len(beta)))
-        inverse_action[np.ix_(pivots[:rank], order)] = basic * weight[order]
+
+        def basic_inverse(rank: int) -> NDArray:
+            basic = _solve_triangular(r[:rank, :rank], q[:, :rank].T)
+            inverse = np.zeros((len(rows), len(beta)))
+            inverse[np.ix_(pivots[:rank], order)] = basic * weight[order]
+            return inverse
+
+        # Working rows are kept independent, so full rank is tried first and shown from
+        # the inverse it gives; ``matrix_rank``'s SVD decides only where that fails.
+        inverse_action = None
+        if len(rows) <= len(beta):
+            try:
+                inverse_action = basic_inverse(len(rows))
+            except np.linalg.LinAlgError:
+                pass
+        if inverse_action is None or not _full_column_rank(inverse_action, rows.T):
+            rank = int(np.linalg.matrix_rank(rows.T))
+            if inverse_action is None or rank < len(rows):
+                inverse_action = basic_inverse(rank)
         multipliers = inverse_action @ residual
         # ``inverse_action`` is an explicit inverse, and an inverse applied to a vector is not
         # backward stable (Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed.,
@@ -366,8 +408,7 @@ def _stationarity_certificate(
             return False, None, multipliers
         violating = multipliers < -multiplier_allowance
         if violating.any():
-            worst = int(np.argmin(np.where(violating, multipliers, np.inf)))
-            return False, worst, multipliers
+            return False, _released(multipliers, violating, keys), multipliers
         signed = multipliers
         multipliers = np.maximum(multipliers, 0.0)
         dual = rows.T @ multipliers
@@ -389,8 +430,18 @@ def _stationarity_certificate(
             objective_action + signed_action
         )
         if bool((np.abs(residual - rows.T @ signed) <= signed_allowance).all()):
-            return False, int(np.argmin(signed)), multipliers
+            return False, _released(signed, signed < 0.0, keys), multipliers
     return stationary, None, multipliers
+
+
+def _released(multipliers: NDArray, eligible: NDArray, keys: NDArray | None) -> int:
+    """The working position to release: the most negative eligible multiplier, or, given the
+    working rows' indices as ``keys``, the eligible row of least index (Bland's rule,
+    ``_CycleGuard``)."""
+    if keys is None:
+        return int(np.argmin(np.where(eligible, multipliers, np.inf)))
+    candidates = np.flatnonzero(eligible)
+    return int(candidates[np.argmin(np.asarray(keys)[candidates])])
 
 
 def _objective_actions(H: NDArray, beta: NDArray, g: NDArray) -> tuple[NDArray, NDArray, NDArray]:
@@ -413,6 +464,7 @@ def _certifies_kkt_point(
     abs_A: NDArray,
     *,
     feasible: bool = False,
+    least_index: bool = False,
 ) -> tuple[bool, int | None]:
     """Whether ``beta`` passes the complete KKT certificate on ``active``, and the row to release.
 
@@ -421,14 +473,15 @@ def _certifies_kkt_point(
     branch of ``solve_constrained_qp`` converges on, read without repairing
     ``beta``. A multiplier below its allowance names the working position
     the face must release, as the small-step branch releases it.
-    ``feasible`` says ``_is_feasible`` has already passed this ``beta``.
+    ``feasible`` says ``_is_feasible`` has already passed this ``beta``, and
+    ``least_index`` releases by Bland's rule (``_stationarity_certificate``).
     """
     if not feasible and not _is_feasible(A, beta, b, tol, abs_A=abs_A):
         return False, None
     objective = _objective_actions(H, beta, g)
     working = A[active]
     stationary, drop_idx, multipliers = _stationarity_certificate(
-        H, g, beta, working, tol, objective
+        H, g, beta, working, tol, objective, np.asarray(active) if least_index else None
     )
     if not stationary or drop_idx is not None:
         return False, drop_idx
@@ -899,18 +952,31 @@ class _WorkingBasis:
         """Factor a warm working set; rows dependent on those before them are left out.
 
         In unpivoted QR, ``|r_jj|`` is column ``j``'s distance from the span
-        of the columns before it, so one factorization decides an independent
-        set, as a previous solve returns. A set it cannot certify is built one
-        row at a time instead.
+        of the columns before it, so one factorization of the leading rows
+        decides them up to the first that does not raise the rank: the thin
+        factors of that prefix are the leading columns of ``q`` and block of
+        ``r``. The rows from there are decided one at a time, and once the rows
+        kept span every coefficient, every later row is dependent.
         """
-        k = len(working)
-        if 0 < k <= self.q.shape[0]:
-            q, r = scipy.linalg.qr(self.rows[working].T, mode="economic", check_finite=False)
-            if np.all(_raises_rank(np.abs(np.diag(r)))):
-                self.q, self.r = q, r
-                return list(working)
+        p = self.q.shape[0]
+        lead = min(len(working), p)
         kept: list[int] = []
-        for row in working:
+        if lead:
+            q, r = scipy.linalg.qr(self.rows[working[:lead]].T, mode="economic", check_finite=False)
+            independent = _raises_rank(np.abs(np.diag(r)))
+            prefix = lead if np.all(independent) else int(np.argmin(independent))
+            self.q, self.r = q[:, :prefix], r[:prefix, :prefix]
+            kept = list(working[:prefix])
+            if prefix < lead:
+                kept += self._extend(working[prefix + 1 :])
+        return kept
+
+    def _extend(self, rows: list[int]) -> list[int]:
+        """Insert each of ``rows`` that raises the rank of those before it; return them."""
+        kept: list[int] = []
+        for row in rows:
+            if self.q.shape[1] == self.q.shape[0]:
+                break
             if self.raises_rank(row):
                 self.insert(row)
                 kept.append(row)
@@ -941,6 +1007,87 @@ class _WorkingBasis:
         q, r = _qr_delete(self.q, self.r, position, which="col", check_finite=False)
         k = r.shape[1]
         self.q, self.r = q[:, :k], r[:k]
+
+
+class _CycleGuard:
+    """Anti-cycling for the active-set loop: Bland's rule once a degenerate cycle shows.
+
+    A release undone by a zero step that re-blocks its row makes the working sets cycle with
+    the objective fixed. A working set met again at a feasible point, the objective unchanged
+    past its rounding, is that cycle. From then on a release takes the eligible row of least
+    index, as the ratio test breaks its ties (Bland, Math. Oper. Res. 2(2), 1977; for
+    active-set QP, Forsgren, Gill and Wong, Math. Program. 159, 2016, section 5.4). The rule
+    assumes every working row binds (Nocedal and Wright 2006, Algorithm 16.3, ``W_0`` within
+    the rows active at ``x_0``); a warm set may hold rows that do not, so the switch keeps
+    only the binding ones. Owner and lifetime: one solve.
+    """
+
+    def __init__(
+        self, H: NDArray, g: NDArray, A: NDArray, b: NDArray, tol: float, abs_A: NDArray
+    ) -> None:
+        self.A, self.b, self.tol, self.abs_A = A, b, tol, abs_A
+        # The objective's two terms are compared in powers of two scaled out of H, g and the
+        # points, so a finite problem near the exponent range cannot overflow the comparison.
+        self.h_exponent = _exponent(H)
+        self.g_exponent = _exponent(g)
+        self.H = np.ldexp(H, -self.h_exponent)
+        self.g = np.ldexp(g, -self.g_exponent)
+        self.least_index = False
+        # Each working set met, as the order-free set of its rows, with the point it was met at.
+        self.visited: dict[frozenset[int], NDArray] = {}
+
+    def keys(self, active: list[int]) -> NDArray | None:
+        """The working rows' indices where releases follow Bland's rule; ``None`` before."""
+        return np.asarray(active) if self.least_index else None
+
+    def note(self, active: list[int], beta: NDArray, basis: _WorkingBasis) -> None:
+        """Record the working set ``active`` at ``beta``, after the loop changes it; on the
+        switch, leave out of ``active`` and ``basis`` the rows that do not bind at ``beta``."""
+        if self.least_index:
+            return
+        key = frozenset(active)
+        earlier = self.visited.get(key)
+        self.visited[key] = beta
+        if earlier is None or not self._tied(earlier, beta):
+            return
+        if not _is_feasible(self.A, beta, self.b, self.tol, abs_A=self.abs_A):
+            return
+        self.least_index = True
+        # Binding is the feasibility test's band read from above: slack within ``tol``
+        # plus the dot product's rounding, in the same relative units.
+        slack = _feasibility_slack(self.A[active], beta, self.b[active], abs_A=self.abs_A[active])
+        loose = np.flatnonzero(slack > self.tol + _roundoff_tolerance(len(beta)))
+        for position in loose[::-1].tolist():
+            active.pop(position)
+            basis.delete(position)
+
+    def _tied(self, earlier: NDArray, beta: NDArray) -> bool:
+        """Whether the objectives at ``earlier`` and ``beta`` agree within twice either's
+        rounding bound (Higham 2002, section 3.1), both in one power of two. A cycle leaves the
+        objective unchanged; a working set met again after the objective rose (a warm start
+        whose rows were not tight) is not one."""
+        x_exponent = max(_exponent(earlier), _exponent(beta))
+        quadratic = 2 * x_exponent + self.h_exponent
+        linear = x_exponent + self.g_exponent
+        top = max(quadratic, linear)
+        values, magnitudes = [], []
+        for point in (earlier, beta):
+            x = np.ldexp(point, -x_exponent)
+            values.append(
+                np.ldexp(0.5 * float(x @ (self.H @ x)), quadratic - top)
+                - np.ldexp(float(self.g @ x), linear - top)
+            )
+            magnitudes.append(
+                np.ldexp(0.5 * float(np.abs(x) @ (np.abs(self.H) @ np.abs(x))), quadratic - top)
+                + np.ldexp(float(np.abs(self.g) @ np.abs(x)), linear - top)
+            )
+        rounding = 2.0 * gamma(len(beta) + 2) * max(magnitudes)
+        return bool(abs(values[1] - values[0]) <= rounding)
+
+
+def _exponent(values: NDArray) -> int:
+    """The power of two that scales ``values``' largest magnitude into [0.5, 1)."""
+    return int(np.frexp(float(np.max(np.abs(values), initial=0.0)))[1])
 
 
 def _zero_block_faces(
@@ -1258,6 +1405,7 @@ def solve_constrained_qp(
     # face: no independent row can block its numerical normal component.
     coordinate_face: tuple[int, ...] | None = None
     recovered_face: tuple[int, ...] | None = None
+    cycles = _CycleGuard(H_sym, g, A, b, tol, abs_A)
 
     for it in range(max_iter):
         if at_face_minimum and not kkt_may_be_singular:
@@ -1267,13 +1415,23 @@ def solve_constrained_qp(
             # Only a full step that passed ``_is_feasible`` sets the flag.
             at_face_minimum = False
             certified, release = _certifies_kkt_point(
-                H_sym, g, beta, A, b, active, tol, abs_A, feasible=True
+                H_sym,
+                g,
+                beta,
+                A,
+                b,
+                active,
+                tol,
+                abs_A,
+                feasible=True,
+                least_index=cycles.least_index,
             )
             if certified:
                 return _result(beta, active, it + 1, converged=True)
             if release is not None:
                 active.pop(release)
                 basis.delete(release)
+                cycles.note(active, beta, basis)
                 continue
             coordinate_face = tuple(active)
         at_face_minimum = False
@@ -1368,11 +1526,12 @@ def solve_constrained_qp(
                 beta = face_candidate
             objective = _objective_actions(H_sym, beta, g)
             stationary, drop_idx, multipliers = _stationarity_certificate(
-                H_sym, g, beta, A[active], tol, objective
+                H_sym, g, beta, A[active], tol, objective, cycles.keys(active)
             )
             if drop_idx is not None:
                 active.pop(drop_idx)
                 basis.delete(drop_idx)
+                cycles.note(active, beta, basis)
                 continue
             feasible = _is_feasible(A, beta, b, tol, abs_A=abs_A)
             if not feasible:
@@ -1385,11 +1544,12 @@ def solve_constrained_qp(
                 # stationarity certificate before assigning convergence.
                 objective = _objective_actions(H_sym, beta, g)
                 stationary, drop_idx, multipliers = _stationarity_certificate(
-                    H_sym, g, beta, A[active], tol, objective
+                    H_sym, g, beta, A[active], tol, objective, cycles.keys(active)
                 )
                 if drop_idx is not None:
                     active.pop(drop_idx)
                     basis.delete(drop_idx)
+                    cycles.note(active, beta, basis)
                     continue
             complementary = _complementarity_certificate(
                 H_sym, g, beta, A[active], b[active], multipliers, tol, objective
@@ -1465,6 +1625,7 @@ def solve_constrained_qp(
                 beta = beta + alpha_min * step
                 active.append(blocking)
                 basis.insert(blocking)
+                cycles.note(active, beta, basis)
             else:
                 if active and not kkt_may_be_singular and coordinate_face != tuple(active):
                     coordinate_face = tuple(active)
@@ -1475,10 +1636,13 @@ def solve_constrained_qp(
                 # UCSD CCoM 14-03, 2014, Definition 2.1, read on the reduced gradient). Read
                 # the multipliers there, as Algorithm 16.3 does at a zero step.
                 if active:
-                    _, release, _ = _stationarity_certificate(H_sym, g, beta, A[active], tol)
+                    _, release, _ = _stationarity_certificate(
+                        H_sym, g, beta, A[active], tol, keys=cycles.keys(active)
+                    )
                     if release is not None:
                         active.pop(release)
                         basis.delete(release)
+                        cycles.note(active, beta, basis)
                         continue
                 # The full step breaks a row no blocking candidate could hold, so
                 # it cannot certify: the next iteration solves the face again.

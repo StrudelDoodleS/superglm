@@ -18,6 +18,7 @@ from superglm.solvers.constrained_qp import (
     _constraint_structure,
     _feasibility_scale,
     _feasibility_slack,
+    _full_column_rank,
     _homogeneous_feasible_start,
     _is_feasible,
     _null_space_mass,
@@ -3454,3 +3455,302 @@ class TestSaddleUpdates:
         KKT = np.block([[H, -A[active].T], [A[active], np.zeros((len(active),) * 2)]])
         direct = constrained_qp._solve_saddle_direct(KKT, rhs)[:p]
         np.testing.assert_allclose(step, direct, rtol=0.0, atol=1e-12 * np.max(np.abs(direct)))
+
+
+class TestDegenerateCycle:
+    """A release a zero step undoes is a cycle; Bland's rule breaks it."""
+
+    def test_a_release_re_blocked_at_one_point_certifies_within_the_warm_budget(self):
+        """A captured repair QP whose working set cycled until it exhausted its budget.
+
+        ``qp_postfit_degenerate_cycle.npz`` is the warm attempt of one continued post-fit
+        repair (P-spline, 25 knots with selection, exponential axis, bump, Poisson,
+        decreasing; 2,500 rows, seed 7): 28 coefficients, 42 homogeneous rows, a warm set
+        of 28 and a budget of 50. The most negative multiplier releases row 23, the next
+        step re-blocks it at a zero step, and the objective never moves, so master reports
+        it unconverged at 50 iterations and the repair re-solves from a cold start (34
+        iterations). Once the guard sees a working set recur at one objective, the working
+        set keeps only its binding rows and releases follow the least index, and the warm
+        attempt certifies the cold start's optimum. Mutation: with the guard never switching
+        rules, the solve is unconverged at its budget again.
+        """
+        path = Path(__file__).parent / "fixtures" / "qp_postfit_degenerate_cycle.npz"
+        with np.load(path) as fixture:
+            H, g, A, b, start = (np.array(fixture[key]) for key in ("H", "g", "A", "b", "start"))
+            active = fixture["active"].tolist()
+            max_iter = int(fixture["max_iter"])
+        result = solve_constrained_qp(
+            H, g, A, b, active_set_init=active, beta_start=start, max_iter=max_iter
+        )
+        cold = solve_constrained_qp(H, g, A, b, beta_start=np.zeros_like(g))
+
+        assert cold.converged
+        assert result.converged
+        assert result.n_iter < max_iter
+        assert _is_feasible(A, result.beta, b, 1e-12)
+        # The certified optimum is unique (H is positive definite): both solves reach it.
+        scale = np.max(np.abs(cold.beta))
+        assert np.max(np.abs(result.beta - cold.beta)) <= 1e-9 * scale
+
+    def test_a_working_set_met_again_after_the_objective_rose_is_not_a_cycle(self):
+        """A warm set whose rows are slack at the start lets the objective rise.
+
+        From ``beta_start = 0`` with rows 2 and 4 slack in the warm set, the loop meets a
+        working set again at a higher objective. That is no cycle: a cycle leaves the
+        objective unchanged. Switching to least-index releases on it made row 1 release and
+        re-block for the whole budget (unconverged at 200 and at 1,000 iterations), where
+        master certifies in 10. The warm solve must reach the cold solve's optimum.
+        """
+        H = np.array(
+            [
+                [35.0, -10.0, -8.0, -9.0],
+                [-10.0, 10.0, -6.0, 6.0],
+                [-8.0, -6.0, 46.0, 5.0],
+                [-9.0, 6.0, 5.0, 16.0],
+            ]
+        )
+        g = np.array([2.0, 2.0, -5.0, 5.0])
+        A = np.array(
+            [
+                [0.0, -2.0, -2.0, -2.0],
+                [3.0, 3.0, 2.0, -3.0],
+                [1.0, 1.0, 3.0, -1.0],
+                [-3.0, 2.0, 1.0, 3.0],
+                [-3.0, 0.0, -1.0, 0.0],
+            ]
+        )
+        b = np.array([0.0, -2.0, -3.0, -1.0, -3.0])
+        warm = solve_constrained_qp(H, g, A, b, active_set_init=[4, 2, 1], beta_start=np.zeros(4))
+        cold = solve_constrained_qp(H, g, A, b, beta_start=np.zeros(4))
+        assert cold.converged and warm.converged
+        assert np.max(np.abs(warm.beta - cold.beta)) <= 1e-9 * np.max(np.abs(cold.beta))
+
+    def test_a_working_set_met_again_at_an_infeasible_point_is_not_a_cycle(self):
+        """Bland's rule needs a feasible iterate, so a recurrence off the feasible set keeps
+        the most negative multiplier.
+
+        The warm set ``{0, 3, 4, 5}`` spans all four coefficients with rows 3 to 5 slack at
+        the start, so its step goes to their vertex. No row can block that step, because
+        none raises the working rank, and the vertex breaks rows 1 and 2. There every step is
+        zero and ``{3, 4}`` recurs at one objective. Switching to least-index releases at
+        that point alternated ``{4, 5}`` and ``{5}`` for the whole budget (unconverged at
+        200), where master certifies in 20. The warm solve must reach the cold optimum.
+        """
+        H = np.array(
+            [
+                [4.704204961924791, -2.1668326988343445, 1.4305922331709306, -0.6157765094921662],
+                [-2.1668326988343445, 11.747618394735717, -3.575449125951901, 5.5492243223561095],
+                [1.4305922331709306, -3.575449125951901, 2.7288050182256334, -1.5337439682963547],
+                [-0.6157765094921662, 5.5492243223561095, -1.5337439682963547, 2.965964565453327],
+            ]
+        )
+        g = np.array(
+            [2.1393127432145826, -0.3263846106621498, -1.5141860534853333, -2.974730509506798]
+        )
+        A = np.array(
+            [
+                [0.7970436659581418, -1.3459689518194633, -0.3466738914851225, -0.7666375952538457],
+                [
+                    -0.33661417075312594,
+                    -1.1616840864571083,
+                    -0.20523229542811142,
+                    -0.4326622278343266,
+                ],
+                [-1.862564772316009, 0.234822205321499, -0.19945346458701843, -0.6015767844794636],
+                [-0.3935333026523445, 0.7459098940153647, -1.6960776063261989, 0.3529980719152415],
+                [
+                    0.18230451324936425,
+                    -0.40552301007670943,
+                    -0.07306946942809887,
+                    -0.013248528973330918,
+                ],
+                [-0.7224139668079244, -0.614991329647574, 2.3494339336113836, 0.23242644903863155],
+            ]
+        )
+        b = np.array(
+            [
+                0.40068158300971424,
+                -0.06457766023075551,
+                0.011737351076779826,
+                -1.1305963982582847,
+                0.06771481942169114,
+                -2.2018687609993783,
+            ]
+        )
+        start = np.array(
+            [-0.07673587618315648, -0.3880921615499818, 0.10239106955436739, 0.032636362261246096]
+        )
+        warm = solve_constrained_qp(H, g, A, b, active_set_init=[0, 3, 4, 5], beta_start=start)
+        cold = solve_constrained_qp(H, g, A, b, beta_start=start)
+        assert cold.converged and warm.converged
+        assert np.max(np.abs(warm.beta - cold.beta)) <= 1e-9 * np.max(np.abs(cold.beta))
+
+    def test_the_switch_leaves_out_the_working_rows_that_do_not_bind(self):
+        """Bland's rule assumes every working row binds, so the switch keeps only those that do.
+
+        Rows 0 and 1 of the warm set are slack at the start (0.89 and 0.60 relative), and
+        rows 0 and 4 share one normal. The face's step heads for rows 0 and 1, so binding row
+        3 blocks it at a zero step, and releasing row 3 gives the same step again. Master
+        goes round that until its budget (unconverged at 200). Least-index releases with
+        row 1 kept in the set cycle as well, between ``{1, 3, 4, 5}`` and ``{1, 4, 5}``
+        (unconverged at 200). Left with the binding rows ``{3, 5}``, the loop moves and
+        certifies in 7 iterations.
+        """
+        H = np.array(
+            [
+                [6.519326504394573, -2.2233675716636534, -1.6698268719439393, 2.237082105214462],
+                [-2.2233675716636534, 3.874658058404873, 1.1249545473273665, -1.3093368407264854],
+                [-1.6698268719439393, 1.1249545473273665, 1.1840078683426603, -0.4153037356120347],
+                [2.237082105214462, -1.3093368407264854, -0.4153037356120347, 1.1953239497990815],
+            ]
+        )
+        g = np.array(
+            [0.639324684817228, -1.8370118903233374, 1.8835466834907044, -0.7881950019588705]
+        )
+        normal = [1.2179530838044796, -0.7662420583121464, -1.122483642037905, 0.8828382332783097]
+        A = np.array(
+            [
+                normal,
+                [0.2011586773794434, 0.3915272257643113, 0.558467352752357, 1.9223007366059035],
+                [-0.5224616914968726, 1.096229063686409, -1.4760588323019659, 0.81479448716741],
+                [0.2215445345645556, 0.606293411006732, 1.1406074879582937, 2.1973533259563784],
+                normal,
+                [0.3200441583987149, 0.39837639581045725, -1.129590167716258, -0.2284222950198743],
+            ]
+        )
+        b = np.array(
+            [
+                -1.195873678460709,
+                -1.6822223228311892,
+                0.772540359763651,
+                -0.6940378487596185,
+                0.6923859152733784,
+                0.727835398396044,
+            ]
+        )
+        start = np.array(
+            [0.15533183600670944, 0.0810513855795039, -0.5588415831725093, -0.06379165020744285]
+        )
+        warm = solve_constrained_qp(H, g, A, b, active_set_init=[0, 1, 4, 5], beta_start=start)
+        cold = solve_constrained_qp(H, g, A, b, beta_start=start)
+        assert cold.converged and warm.converged
+        assert np.max(np.abs(warm.beta - cold.beta)) <= 1e-9 * np.max(np.abs(cold.beta))
+
+    def test_the_cycle_check_holds_a_finite_problem_near_the_exponent_range(self):
+        """The guard compares objectives in powers of two scaled out of the problem.
+
+        ``H`` near 2**400 and ``g`` near 2**800 put ``beta' H beta`` past the float64 range
+        although every input and the optimum are finite. Master certifies this solve; the
+        guard's unscaled objective overflowed at the first release. The optimum scales as
+        ``beta(s) = s beta(1)``, so the solve at ``s`` must reach the scaled solve at 1.
+        """
+        A = np.array([[3.0, 3.0], [1.0, -1.0], [1.0, -1.0]])
+
+        def solve(s):
+            H = s * np.array([[2.0, 1.0], [1.0, 3.0]])
+            g = s * s * np.array([-3.0, -1.0])
+            b = s * np.array([-4.0, -2.0, 0.0])
+            return solve_constrained_qp(H, g, A, b, active_set_init=[1], beta_start=np.zeros(2))
+
+        s = 2.0**400
+        with np.errstate(over="raise", invalid="raise"):
+            result = solve(s)
+        unit = solve(1.0)
+        assert result.converged and unit.converged
+        assert np.max(np.abs(result.beta / s - unit.beta)) <= 1e-12 * np.max(np.abs(unit.beta))
+
+
+class TestCertificateRank:
+    """The certificate decides full rank from its own inverse, and its SVD only otherwise."""
+
+    @staticmethod
+    def _count_rank(monkeypatch):
+        calls = []
+        real = np.linalg.matrix_rank
+
+        def counted(*args, **kwargs):
+            calls.append(1)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(np.linalg, "matrix_rank", counted)
+        return calls
+
+    def test_independent_rows_need_no_svd_and_dependent_ones_still_get_it(self, monkeypatch):
+        """Working rows are independent, so the SVD is skipped where the inverse shows it.
+
+        Five independent rows on eight coefficients certify full rank from the left
+        inverse the certificate builds anyway; a repeated row cannot, and its rank is
+        then ``matrix_rank``'s, as before. Against master, which takes the SVD on every
+        call, the first count is 1.
+        """
+        rng = np.random.default_rng(3)
+        M = rng.standard_normal((8, 8))
+        H = M @ M.T + 8 * np.eye(8)
+        g = rng.standard_normal(8)
+        beta = rng.standard_normal(8)
+        rows = rng.standard_normal((5, 8))
+        calls = self._count_rank(monkeypatch)
+        _, _, independent = _stationarity_certificate(H, g, beta, rows, 1e-12)
+        assert calls == []
+        _, _, repeated = _stationarity_certificate(H, g, beta, np.vstack([rows, rows[:1]]), 1e-12)
+        assert calls == [1]
+        assert np.all(np.isfinite(independent)) and np.all(np.isfinite(repeated))
+
+    def test_the_bound_agrees_with_matrix_rank(self):
+        """``_full_column_rank`` claims full rank only where ``matrix_rank`` finds it.
+
+        Columns at angles from 1 down to 1e-17: the bound shows full rank on the
+        clearly independent pairs and declines the nearly parallel ones, never the
+        reverse. A left inverse from ``pinv`` stands in for the certificate's.
+        """
+        for angle in (1.0, 1e-4, 1e-8, 1e-12, 1e-14, 1e-17):
+            M = np.array([[1.0, np.cos(angle)], [0.0, np.sin(angle)], [0.0, 0.0]])
+            shown = _full_column_rank(np.linalg.pinv(M), M)
+            if shown:
+                assert np.linalg.matrix_rank(M) == 2
+            if angle >= 1e-8:
+                assert shown
+        assert not _full_column_rank(np.zeros((2, 3)), np.ones((3, 2)))
+
+
+class TestWarmBasisFactorization:
+    """A warm working set is factored in one QR up to its first dependent row."""
+
+    def test_a_warm_set_longer_than_the_coefficients_needs_no_row_by_row_inserts(self, monkeypatch):
+        """Thirteen warm rows on eight coefficients: the leading eight span them all.
+
+        One QR decides the eight; the five after them are dependent once the basis
+        spans every coefficient. A row repeated inside the leading block stops the QR's
+        prefix there, and the rows after it are decided one at a time. Either way the
+        rows kept are the sequential decision's. Against master, which inserts every
+        row of a set longer than the coefficients one at a time, the first count is 8.
+        """
+        import superglm.solvers.constrained_qp as qp
+
+        rng = np.random.default_rng(5)
+        A = rng.standard_normal((13, 8))
+        unit_rows = _constraint_structure(A).unit_rows
+        inserts = []
+        real = qp._qr_insert
+
+        def counted(*args, **kwargs):
+            inserts.append(1)
+            return real(*args, **kwargs)
+
+        def sequential(working):
+            basis, kept = _WorkingBasis(unit_rows), []
+            for row in working:
+                if basis.raises_rank(row):
+                    basis.insert(row)
+                    kept.append(row)
+            return kept
+
+        everything = list(range(13))
+        expected = sequential(everything)
+        repeated = [0, 1, 2, 1, 3, 4, 5, 6, 7, 8]
+        expected_repeated = sequential(repeated)
+        monkeypatch.setattr(qp, "_qr_insert", counted)
+        assert _WorkingBasis(unit_rows).start(everything) == expected == list(range(8))
+        assert inserts == []
+        assert _WorkingBasis(unit_rows).start(repeated) == expected_repeated
+        assert len(inserts) == len(expected_repeated) - 3

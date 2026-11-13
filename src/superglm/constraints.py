@@ -1319,6 +1319,42 @@ def _bracketed_projection(
     return best, upper - lower
 
 
+@dataclass
+class _ConeWarmStart:
+    """Where the last cone projection of a sequence ended, to start the next from.
+
+    A continued repair projects a new target in a new metric onto the same cone at each
+    step, and the working set changes little between steps. As in a warm-started sequence
+    of QPs whose data change (Ferreau, Kirches, Potschka, Bock and Diehl, Math. Prog. Comp.
+    6, 2014, section 3.12), each projection starts from the last one's working set:
+    ``active``, the rows its QP held on a cone of span-end rows (``rows`` of them), or
+    ``held`` and ``checkpoints``, the rows and cuts its last local-reduction step held. A
+    guess only: every QP still certifies its own result, and a wrong one costs iterations.
+    ``_cone_projection`` reads it where it describes the same rows and writes it after each
+    QP. Owner and lifetime: the continuation that opens ``warm_started_projections`` on it.
+    """
+
+    active: list[int] | None = None
+    rows: int = -1
+    held: set | None = None
+    checkpoints: list[list[float]] | None = None
+
+
+_CONE_WARM_START: ContextVar[_ConeWarmStart | None] = ContextVar(
+    "superglm_cone_warm_start", default=None
+)
+
+
+@contextmanager
+def warm_started_projections(state: _ConeWarmStart) -> Iterator[None]:
+    """Start the cone projections inside this block from ``state``, and leave theirs in it."""
+    token = _CONE_WARM_START.set(state)
+    try:
+        yield
+    finally:
+        _CONE_WARM_START.reset(token)
+
+
 # The monotone or curvature cone a repair projects onto. A derivative of degree
 # p <= 1 on each span is non-negative exactly when its span-end values are, so one
 # QP is exact. A higher degree makes the cone semi-infinite (Papp & Alizadeh 2014:
@@ -1361,15 +1397,22 @@ def _cone_projection(
     Exact on spans whose derivative is at most linear; elsewhere a local-reduction SQP
     places the cuts. The comment above gives the method and its sources. ``inside`` is
     a ray strictly inside the cone, from which each solve's start is found;
-    ``skip_flat`` gives a flat span no minimum.
+    ``skip_flat`` gives a flat span no minimum. Inside ``warm_started_projections`` the
+    first QP starts from the previous projection's working set.
     """
+    warm_start = _CONE_WARM_START.get()
     # The unconstrained optimum is the fitted curve itself; the rows it breaks are
     # the first working set, and the first cuts sit where it breaks the rule.
     beta = np.linalg.lstsq(H, g, rcond=None)[0]
     if _uses_span_jump_constraints(spec, kind):
         rows, _ = _distinct_unit_rows(_shape_constraint_rows(spec, _shape_breakpoints(spec), kind))
         start = _shifted_start(rows, beta, inside)
-        result = _solve_cone_qp(H, g, rows, _broken_rows(rows, beta), start)
+        working = _broken_rows(rows, beta)
+        if warm_start is not None and warm_start.rows == rows.shape[0]:
+            working = list(warm_start.active or ())
+        result = _solve_cone_qp(H, g, rows, working, start)
+        if result is not None and warm_start is not None:
+            warm_start.active, warm_start.rows = list(result.active_set), rows.shape[0]
         if result is None:
             # These cones are polyhedral, but a feasible QP can still exhaust
             # certification. Keep the bracket path's disclose-and-publish rule:
@@ -1394,6 +1437,10 @@ def _cone_projection(
         [] if minimum is None or minimum[1] @ beta >= 0.0 else [minimum[0]]
         for minimum in _lowest_minima(pieces, p, beta, skip_flat)
     ]
+    if warm_start is not None and warm_start.checkpoints is not None:
+        if len(warm_start.checkpoints) == len(pieces):
+            held = set(warm_start.held or ())
+            checkpoints = [list(points) for points in warm_start.checkpoints]
     curvature = np.zeros_like(H)
     # Whether the QP truncates H itself, read off the first step, whose curvature is 0.
     truncated = None
@@ -1423,6 +1470,9 @@ def _cone_projection(
             row if row < end_rows.shape[0] else owners[row - end_rows.shape[0]]
             for row in result.active_set
         }
+        if warm_start is not None:
+            warm_start.held = set(held)
+            warm_start.checkpoints = [list(points) for points in checkpoints]
         corrected = curvature.any()
         previous, beta = beta, np.asarray(result.beta, dtype=np.float64)
         minima = _lowest_minima(pieces, p, beta, skip_flat)
