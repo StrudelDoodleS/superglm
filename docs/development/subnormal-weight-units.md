@@ -23,6 +23,11 @@ stored dense/sparse columns and basis factors; a generic matrix generates
 one column at a time. These scans run only when a lift is needed, and retain
 no columns or cache. This prevents normalizing a tiny weight from overflowing
 an otherwise representable large numeric column's weighted Gram.
+The cap also includes an upper bound on Fisher-weight amplification over the
+built-in link's entire stabilized domain. Exact family/link reductions are
+used where available; otherwise the inverse derivative maximum and existing
+variance floor bound the weights. Custom links without such a domain bound
+retain their original units.
 If no positive lift fits, the fit keeps its original
 unit and its existing behavior. No penalty target, rank tolerance, solver,
 or convergence refusal is added.
@@ -45,6 +50,9 @@ Inference pairs dispersion with its inverse before changing units. When a
 covariance entry exceeds binary64's range, a covariance view carries its
 base and even exponent until a standard error or test statistic is formed.
 A physical variance can overflow while its standard error remains finite.
+Evaluation coefficient and feature standard errors likewise normalize the
+dispersion before multiplying covariance entries, and restore its exponent
+after taking the square root.
 A view may also carry an even part of dispersion's exponent. Recovering a
 response influence from its base must divide by the matching dispersion
 mantissa, preserving both parts of the covariance's unit.
@@ -68,6 +76,10 @@ normalizer uses `log(phi_solver) - K log(2)`, while the deviance ratio uses
 solver units. The Tweedie calculation reuses its existing saturated series
 and corrected saddlepoint; it accepts the logarithmic dispersion on this
 range path.
+Gaussian frequency densities normalize the residual difference before
+squaring and carry its exponent through dispersion and frequency mass, so
+neither a large raw square nor an overflowing difference loses a finite
+standardized quadratic.
 
 Evaluation weights can be much larger than fitting weights. Row standard
 deviations and frequency deviance ratios combine normal mantissas and their

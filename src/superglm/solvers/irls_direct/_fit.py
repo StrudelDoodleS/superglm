@@ -887,6 +887,8 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                 self.reml_penalties,
                 response=self.y,
                 offset=offset,
+                family=family,
+                link=link,
             )
             if self.weight_exponent:
                 weights = np.ldexp(weights, self.weight_exponent)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from functools import cache, cached_property, partial
 from typing import TYPE_CHECKING, Any, cast
@@ -14,6 +15,7 @@ from superglm._utils import weighted_row_sum
 from superglm._weight_units import (
     dispersion_standard_deviation,
     scale_penalties,
+    scaled_standard_errors,
     solver_dispersion,
     unit_log_likelihood,
 )
@@ -1520,6 +1522,13 @@ class ModelMetrics:
         exponent = self._se_unit_exponent(scaled)
         return np.ldexp(errors, exponent // 2) if exponent else errors
 
+    def _variance_standard_errors(self, variance, *, scaled):
+        dispersion = self._coefficient_dispersion if scaled else 1.0
+        if self._result.weight_exponent:
+            return scaled_standard_errors(variance, dispersion, self._se_unit_exponent(scaled))
+        value = dispersion * variance if scaled else variance
+        return self._restore_se_unit(np.sqrt(np.maximum(value, 0.0)), scaled)
+
     @cached_property
     def coefficient_se(self) -> dict[str, NDArray]:
         """Per-group quasi-likelihood coefficient standard errors.
@@ -1562,7 +1571,6 @@ class ModelMetrics:
     def _group_standard_errors(self, *, scaled: bool) -> dict[str, NDArray]:
         """Per-group SEs of the augmented covariance, times the dispersion when ``scaled``."""
         _, _, _, XtWX_inv_aug, active_groups = self._active_info
-        dispersion = self._coefficient_dispersion if scaled else None
         selected_names = selected_group_name_set(
             self._result,
             self._groups,
@@ -1584,10 +1592,7 @@ class ModelMetrics:
                     XtWX_inv_aug,
                     augmented_indices,
                 )
-                if dispersion is not None:
-                    var_diag = dispersion * var_diag
-                values = np.sqrt(np.maximum(var_diag, 0.0))
-                values = self._restore_se_unit(values, scaled)
+                values = self._variance_standard_errors(var_diag, scaled=scaled)
                 values[~self._current_coefficient_estimable[g.sl]] = np.nan
                 result[g.name] = values
         return result
@@ -1606,7 +1611,7 @@ class ModelMetrics:
         icpt_var = float(XtWX_inv_aug[0, 0])
         if icpt_var <= 0:
             return 0.0
-        return float(self._restore_se_unit(np.sqrt(self._coefficient_dispersion * icpt_var), True))
+        return float(self._variance_standard_errors(icpt_var, scaled=True))
 
     @cached_property
     def intercept_se_raw(self) -> float:
@@ -1637,6 +1642,14 @@ class ModelMetrics:
             Feature name (e.g. "DrivAge"); a ``select=True`` spline's subgroups are gathered.
         """
         exponent = self._se_unit_exponent(phi_scale)
+        phi_unit = None
+        if self._result.weight_exponent:
+            phi_unit = self._coefficient_dispersion if phi_scale else 1.0
+            if phi_unit > 0.0:
+                phi_power = math.frexp(phi_unit)[1]
+                phi_power -= phi_power & 1
+                phi_unit = math.ldexp(phi_unit, -phi_power)
+                exponent += phi_power
         if exponent and _restore_units:
             values = self._feature_se_impl(
                 name, n_points, phi_scale=phi_scale, _restore_units=False
@@ -1664,7 +1677,11 @@ class ModelMetrics:
         )
         if isinstance(spec, OrderedCategorical) and spec.basis == "spline":
             _, _, _, XtWX_inv_aug, active_groups = self._active_info
-            phi = self._coefficient_dispersion if phi_scale else 1.0
+            phi = (
+                phi_unit
+                if phi_unit is not None
+                else (self._coefficient_dispersion if phi_scale else 1.0)
+            )
             se = feature_se_from_cov(
                 name,
                 covariance_slope_view(XtWX_inv_aug, scale=phi),
@@ -1701,7 +1718,11 @@ class ModelMetrics:
 
         # Gather covariance from all active subgroups (use augmented inverse)
         _, _, _, XtWX_inv_aug, active_groups = self._active_info
-        phi = self._coefficient_dispersion if phi_scale else 1.0
+        phi = (
+            phi_unit
+            if phi_unit is not None
+            else (self._coefficient_dispersion if phi_scale else 1.0)
+        )
         active_subs = [ag for ag in active_groups if ag.feature_name == name]
         if not active_subs:
             if isinstance(spec, _SplineBase):

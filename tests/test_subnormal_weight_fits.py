@@ -617,3 +617,90 @@ def test_editor_evaluation_unit_includes_extrapolated_means():
     )
     assert np.isfinite(edited.result.deviance)
     assert edited.result.deviance == pytest.approx(expected, rel=2e-12, abs=0)
+
+
+@pytest.mark.parametrize("x_scale", [1e-20, 1e-100])
+def test_evaluation_standard_errors_restore_dispersion_after_the_root(x_scale):
+    t = np.linspace(-1, 1, 60)
+    frame = pd.DataFrame({"x": x_scale * t})
+    response = 0.4 + 0.2 * t + 0.1 * np.cos(13 * t)
+    y_scale, unit = 1e140, 1e-160
+    y = y_scale * response
+    model = SuperGLM(family="gaussian", selection_penalty=0, features={"x": Numeric()}).fit(
+        frame, y, sample_weight=np.full(len(t), unit)
+    )
+    metrics = model.metrics(frame, y)
+    design = np.column_stack([np.ones(len(t)), t])
+    beta = np.linalg.lstsq(design, response, rcond=None)[0]
+    phi = np.sum((response - design @ beta) ** 2) / (len(t) - 2)
+    expected = np.sqrt(phi * np.diag(np.linalg.inv(design.T @ design))) * y_scale * np.sqrt(unit)
+    np.testing.assert_allclose(metrics.intercept_se, expected[0], rtol=2e-10, atol=0)
+    np.testing.assert_allclose(
+        metrics.coefficient_se["x"], [expected[1] / x_scale], rtol=2e-10, atol=0
+    )
+    np.testing.assert_allclose(
+        metrics.feature_se("x")["se_coef"], expected[1] / x_scale, rtol=2e-10, atol=0
+    )
+
+
+@pytest.mark.parametrize(
+    ("response", "evaluation_unit", "offset"),
+    [(1e160, 1.0, 0.0), (1e308, 1e-320, 0.0), (1e308, 1e-320, -1e308)],
+)
+def test_frequency_gaussian_likelihood_scales_residuals_before_squaring(
+    response, evaluation_unit, offset
+):
+    t = np.linspace(-1, 1, 60)
+    frame = pd.DataFrame({"x": t})
+    y = 1e140 * (0.4 + 0.2 * t + 0.1 * np.cos(13 * t))
+    weights = np.full(len(t), 1e-160)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        weight_semantics="frequency",
+        features={"x": Numeric()},
+    ).fit(frame, y, sample_weight=weights)
+    offsets = np.full(len(t), offset)
+    mean = model.predict(frame, offset=offsets)
+    design = np.column_stack([np.ones(len(t)), t])
+    beta = np.linalg.lstsq(design, y / 1e140, rcond=None)[0]
+    phi = float(np.sum((y / 1e140 - design @ beta) ** 2)) * 1e280 * weights[0]
+    root = np.sqrt(evaluation_unit) / np.sqrt(phi)
+    residual = response * root - mean * root
+    expected = float(
+        np.sum(-0.5 * (evaluation_unit * (np.log(2 * np.pi) + np.log(phi)) + residual**2))
+    )
+    actual = model.metrics(
+        frame,
+        np.full(len(t), response),
+        sample_weight=np.full(len(t), evaluation_unit),
+        offset=offsets,
+    ).log_likelihood
+    assert np.isfinite(actual)
+    assert actual == pytest.approx(expected, rel=2e-10, abs=0)
+
+
+@pytest.mark.parametrize("custom", [False, True])
+def test_training_weight_unit_preserves_nonidentity_working_moment_range(custom):
+    from superglm.links import LogLink
+
+    class CustomLog(LogLink):
+        pass
+
+    t = np.linspace(-1, 1, 60)
+    frame = pd.DataFrame({"x": 1e140 * t})
+    y = np.exp(0.4 + 0.2 * t + 0.1 * np.cos(13 * t))
+    weights = np.full(len(t), 1e-160)
+    offset = 40 * t
+    model = SuperGLM(
+        family="gaussian",
+        link=CustomLog() if custom else "log",
+        selection_penalty=0,
+        features={"x": Numeric()},
+    ).fit(frame, y, sample_weight=weights, offset=offset)
+    mu = model.predict(frame, offset=offset)
+    assert np.all(np.isfinite(mu))
+    assert np.all(np.isfinite(model.result.beta))
+    assert np.isfinite(model.result.phi)
+    residual = np.sqrt(weights) * (y - mu)
+    assert model.result.deviance == pytest.approx(float(residual @ residual), rel=2e-10, abs=0)

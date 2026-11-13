@@ -15,7 +15,16 @@ import numpy as np
 
 
 def objective_weight_exponent(
-    w_max, group_matrices, groups, lambda2, reml_penalties, *, response=None, offset=None
+    w_max,
+    group_matrices,
+    groups,
+    lambda2,
+    reml_penalties,
+    *,
+    response=None,
+    offset=None,
+    family=None,
+    link=None,
 ):
     """Choose an even lift, leaving headroom for the unchanged penalty target.
 
@@ -24,6 +33,9 @@ def objective_weight_exponent(
     DLASCL, scaling precedes the products that would lose exponent range.
     """
     if w_max >= 2.0**-512:
+        return 0
+    fisher_power = 0 if family is None else _fisher_weight_power_bound(family, link)
+    if fisher_power is None:
         return 0
     from superglm.inference.covariance import _active_penalty_components
 
@@ -49,8 +61,69 @@ def objective_weight_exponent(
         # formed first. This scan belongs only to the exceptional lift path.
         magnitude_power = _data_magnitude_power(group_matrices, response, offset)
         n = group_matrices[0].shape[0] if group_matrices else len(response)
-        exponent = min(exponent, _moment_exponent_limit(w_max, n, magnitude_power))
+        exponent = min(exponent, _moment_exponent_limit(w_max, n, magnitude_power) - fisher_power)
     return max(0, exponent - (exponent & 1))
+
+
+def _fisher_weight_power_bound(family, link):
+    """Bound W/prior_W over the built-in link's entire stabilized domain.
+
+    Built-in inverse derivatives have their absolute maximum at a domain
+    endpoint or zero (the binary-link density's mode). Unknown links retain
+    their original units rather than assuming a bound for a custom derivative.
+    """
+    from superglm.distributions import (
+        _VARIANCE_FLOOR,
+        Gamma,
+        Gaussian,
+        NegativeBinomial,
+        Poisson,
+        Tweedie,
+        clip_mu,
+    )
+    from superglm.links import (
+        _STABILIZE_ETA_BY_LINK_TYPE,
+        IdentityLink,
+        LogLink,
+        SqrtLink,
+        stabilize_eta,
+    )
+    from superglm.solvers.working_rows import fisher_working_weights
+
+    if (type(family) is Gaussian and type(link) is IdentityLink) or (
+        type(family) is Gamma and type(link) is LogLink
+    ):
+        return 0
+    if type(family) is Poisson and type(link) is SqrtLink:
+        return 2
+    if type(link) not in _STABILIZE_ETA_BY_LINK_TYPE:
+        return None
+    limit = np.finfo(np.float64).max
+    eta = stabilize_eta(np.array([-limit, 0.0, limit]), link)
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        if type(link) is LogLink and type(family) in (
+            Gaussian,
+            Gamma,
+            Poisson,
+            NegativeBinomial,
+            Tweedie,
+        ):
+            # These exact reductions are monotone powers of mu, or the
+            # monotone NB mu*theta/(mu+theta). Endpoints bound every IRLS row.
+            mu = clip_mu(link.inverse(eta), family)
+            factors = fisher_working_weights(
+                distribution=family, link=link, mu=mu, eta=eta, sample_weight=np.ones(3)
+            )
+            maximum = float(np.max(factors))
+            return max(0, math.frexp(maximum)[1] + 1) if np.isfinite(maximum) else None
+        derivative = float(np.max(np.abs(link.deriv_inverse(eta))))
+    if not np.isfinite(derivative):
+        return None
+    power = 2 * math.frexp(derivative)[1] + 1
+    if type(family) is not Gaussian:
+        # Generic Fisher rows use V >= _VARIANCE_FLOOR. Gaussian's V is 1.
+        power += 1 - math.frexp(_VARIANCE_FLOOR)[1]
+    return max(0, power)
 
 
 def _moment_exponent_limit(w_max, n, magnitude_power):
@@ -356,7 +429,32 @@ def unit_log_likelihood(family, y, mu, weights, result, *, weight_semantics, rep
         positive = weights > 0.0
         mass = weights[positive]
         if isinstance(family, Gaussian):
-            saturated = float(np.sum(mass)) * (-0.5 * (math.log(2 * math.pi) + log_phi))
+            # Normalize the difference before squaring. A raw square (or even
+            # y-mu) may overflow while the weighted, standardized square fits.
+            response, mean = y[positive], mu[positive]
+            power = np.maximum(np.frexp(response)[1], np.frexp(mean)[1])
+            residual = np.ldexp(response, -power) - np.ldexp(mean, -power)
+            phi_mantissa, phi_power = math.frexp(phi)
+            mantissa = residual**2 / phi_mantissa
+            exponent = 2 * power - phi_power + result.weight_exponent - 1
+            normalizer = -0.5 * (math.log(2 * math.pi) + log_phi)
+            with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+                half = np.ldexp(mantissa, exponent)
+                regular = np.isfinite(half) & (
+                    (half >= np.finfo(np.float64).tiny) | (mantissa == 0.0)
+                )
+                density = mass * (normalizer - half)
+                if not np.all(regular):
+                    weight_mantissa, weight_power = np.frexp(mass[~regular])
+                    weighted_half = np.ldexp(
+                        weight_mantissa * mantissa[~regular], exponent[~regular] + weight_power
+                    )
+                    density[~regular] = np.where(
+                        np.isinf(weighted_half),
+                        -np.inf,
+                        mass[~regular] * normalizer - weighted_half,
+                    )
+            return float(np.sum(density))
         elif isinstance(family, Gamma):
             from superglm.distributional.kernels.gamma import _gamma_log_normalizer
 
