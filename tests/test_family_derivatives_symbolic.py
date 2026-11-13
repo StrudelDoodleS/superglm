@@ -85,8 +85,9 @@ def _link_spec(link):
     return type(link).__name__, bounds
 
 
-def _link_expression(spec, eta):
-    name, bounds = spec
+def _link_expression(link, eta):
+    """``link``'s inverse at ``eta`` symbolically; ``link`` is a link or its ``_link_spec``."""
+    name, bounds = link if isinstance(link, tuple) else _link_spec(link)
     bounds = dict(bounds)
     if name == "LogLink":
         return sp.exp(eta)
@@ -340,8 +341,11 @@ def _plan(family, y):
     return family.bind_likelihood(np.asarray(y, dtype=float), resolved, COMPLETE_OBSERVATION)
 
 
-def _row_oracles(name, y_value, theta, symbols, eta_symbols, link_specs, *, fourth=False):
-    """(natural, predictor) evaluators for one row of a closed-form family."""
+def _row_oracles(name, y_value, theta, symbols, eta_symbols, links, *, fourth=False):
+    """(natural, predictor) evaluators for one row of a closed-form family.
+
+    ``links`` are link objects or their ``_link_spec``s.
+    """
     density = _densities()[name][0]
     if callable(density):  # two-piece: the piece is fixed by the residual's sign
         location = theta[0]
@@ -352,8 +356,7 @@ def _row_oracles(name, y_value, theta, symbols, eta_symbols, link_specs, *, four
     expression = density.subs(_Y, sp.Float(y_value, _DIGITS))
     natural = _SymbolicRow(expression, symbols) if not fourth else None
     substitution = {
-        s: _link_expression(spec, e)
-        for s, spec, e in zip(symbols, link_specs, eta_symbols, strict=True)
+        s: _link_expression(link, e) for s, link, e in zip(symbols, links, eta_symbols, strict=True)
     }
     return natural, _SymbolicRow(expression.subs(substitution), eta_symbols, fourth=fourth)
 
@@ -728,6 +731,7 @@ _ORACLE = OracleStore(
         _TweedieRow,
         _partitions,
         _link_expression,
+        _link_spec,
         _mpf,
         _DIGITS,
         two_piece_location_of_mean,
@@ -1141,9 +1145,7 @@ def test_log_normal_mean_direction_is_within_its_stated_bound() -> None:
     direction = np.array([[0.9, -1.7]])
     for y_value, eta in _LOG_NORMAL_DIRECTION_ROWS:
         theta = tuple(float(link.inverse(np.array([e]))[0]) for link, e in zip(links, eta))
-        _, predictor = _row_oracles(
-            "lognormal_mean", y_value, theta, symbols, eta_symbols, [_link_spec(x) for x in links]
-        )
+        _, predictor = _row_oracles("lognormal_mean", y_value, theta, symbols, eta_symbols, links)
         third = predictor.evaluate(eta)[2]
         computed = mean_curvature_directional(
             np.array([y_value]), np.array([eta]), direction, np.ones(1), scale_floor=floor
