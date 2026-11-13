@@ -64,6 +64,7 @@ from superglm.distributional.kernels.two_piece import (  # noqa: E402
     location_of_mean as two_piece_location_of_mean,
 )
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights  # noqa: E402
+from tests._oracle_store import OracleStore  # noqa: E402
 
 _U = 2.0**-53
 _MARGIN = 4
@@ -74,16 +75,27 @@ def _mpf(value: float):
     return mp.mpf(float(value))
 
 
-def _link_expression(link, eta):
-    name = type(link).__name__
+def _link_spec(link):
+    """A link as plain data: its class name and the bounds ``_link_expression`` reads."""
+    bounds = tuple(
+        (name, float(getattr(link, name)))
+        for name in ("floor", "lower", "upper")
+        if hasattr(link, name)
+    )
+    return type(link).__name__, bounds
+
+
+def _link_expression(spec, eta):
+    name, bounds = spec
+    bounds = dict(bounds)
     if name == "LogLink":
         return sp.exp(eta)
     if name == "IdentityLink":
         return eta
     if name == "LowerBoundedLogLink":
-        return sp.Float(link.floor, _DIGITS) + sp.exp(eta)
+        return sp.Float(bounds["floor"], _DIGITS) + sp.exp(eta)
     if name in ("BoundedLogitLink", "BoundedPowerLink"):
-        lower, upper = sp.Float(link.lower, _DIGITS), sp.Float(link.upper, _DIGITS)
+        lower, upper = sp.Float(bounds["lower"], _DIGITS), sp.Float(bounds["upper"], _DIGITS)
         return lower + (upper - lower) / (1 + sp.exp(-eta))
     raise AssertionError(name)
 
@@ -328,7 +340,7 @@ def _plan(family, y):
     return family.bind_likelihood(np.asarray(y, dtype=float), resolved, COMPLETE_OBSERVATION)
 
 
-def _row_oracles(name, y_value, theta, symbols, eta_symbols, links, *, fourth=False):
+def _row_oracles(name, y_value, theta, symbols, eta_symbols, link_specs, *, fourth=False):
     """(natural, predictor) evaluators for one row of a closed-form family."""
     density = _densities()[name][0]
     if callable(density):  # two-piece: the piece is fixed by the residual's sign
@@ -340,7 +352,8 @@ def _row_oracles(name, y_value, theta, symbols, eta_symbols, links, *, fourth=Fa
     expression = density.subs(_Y, sp.Float(y_value, _DIGITS))
     natural = _SymbolicRow(expression, symbols) if not fourth else None
     substitution = {
-        s: _link_expression(link, e) for s, link, e in zip(symbols, links, eta_symbols, strict=True)
+        s: _link_expression(spec, e)
+        for s, spec, e in zip(symbols, link_specs, eta_symbols, strict=True)
     }
     return natural, _SymbolicRow(expression.subs(substitution), eta_symbols, fourth=fourth)
 
@@ -376,10 +389,14 @@ def _measure(family, rows, oracles) -> list[float]:
 
 def _closed_form_check(name: str):
     family, rows = _LSS_CASES[name]
-    symbols = _densities()[name][1]
-    eta_symbols = sp.symbols(f"e0:{len(symbols)}", real=True)
     links = tuple(spec.default_link for spec in family.parameters)
-    oracles = [_row_oracles(name, y, theta, symbols, eta_symbols, links) for y, theta in rows]
+    oracles = [
+        (
+            _StoredRow("closed", name, y, theta, links, natural=True),
+            _StoredRow("closed", name, y, theta, links),
+        )
+        for y, theta in rows
+    ]
     return _measure(family, rows, oracles)
 
 
@@ -439,13 +456,8 @@ def _measure_fourth(family, rows, oracles) -> float:
 
 def _closed_form_fourth_check(name: str) -> float:
     family, rows = _LSS_CASES[name]
-    symbols = _densities()[name][1]
-    eta_symbols = sp.symbols(f"e0:{len(symbols)}", real=True)
     links = tuple(spec.default_link for spec in family.parameters)
-    oracles = [
-        _row_oracles(name, y, theta, symbols, eta_symbols, links, fourth=True)[1]
-        for y, theta in rows
-    ]
+    oracles = [_StoredRow("closed", name, y, theta, links) for y, theta in rows]
     return _measure_fourth(family, rows, oracles)
 
 
@@ -644,12 +656,15 @@ _TWEEDIE_ROWS = {
 
 def _tweedie_check(name: str):
     family = TweedieLSS()
-    natural = sp.symbols("mu phi p", positive=True)
-    eta = sp.symbols("e0:3", real=True)
     links = tuple(spec.default_link for spec in family.parameters)
-    mapped = [_link_expression(link, e) for link, e in zip(links, eta, strict=True)]
     rows = _TWEEDIE_ROWS[name]
-    oracles = [(_TweedieRow(y, natural, *natural), _TweedieRow(y, eta, *mapped)) for y, _ in rows]
+    oracles = [
+        (
+            _StoredRow("tweedie", name, y, theta, links, natural=True),
+            _StoredRow("tweedie", name, y, theta, links),
+        )
+        for y, theta in rows
+    ]
     return _measure(family, rows, oracles)
 
 
@@ -660,11 +675,9 @@ def test_tweedie_derivatives_match_the_symbolic_series_oracle(name: str) -> None
 
 def _tweedie_fourth_check(name: str) -> float:
     family = TweedieLSS()
-    eta = sp.symbols("e0:3", real=True)
     links = tuple(spec.default_link for spec in family.parameters)
-    mapped = [_link_expression(link, e) for link, e in zip(links, eta, strict=True)]
     rows = _TWEEDIE_ROWS[name]
-    oracles = [_TweedieRow(y, eta, *mapped, fourth=True) for y, _ in rows]
+    oracles = [_StoredRow("tweedie", name, y, theta, links) for y, theta in rows]
     return _measure_fourth(family, rows, oracles)
 
 
@@ -673,6 +686,72 @@ def test_tweedie_fourth_derivatives_match_the_symbolic_series_oracle(name: str) 
     """The series' fourth cumulants, against term derivatives summed at 50 digits."""
     error = _tweedie_fourth_check(name)
     assert error <= _MARGIN * max(_MEASURED_FOURTH.get(name, 1.0), 1.0), (name, error)
+
+
+# ---------------------------------------------------------------- stored oracle answers
+
+
+def _oracle_row(kind, name, y_value, theta, link_specs, natural, method, point):
+    """One oracle row's derivatives at ``point``: ``evaluate`` or ``evaluate_fourth``.
+
+    ``kind`` is ``"closed"`` for a closed-form family (``_row_oracles``) or
+    ``"tweedie"`` for the series row; ``natural`` picks the natural parameters
+    over the predictors through ``link_specs``.
+    """
+    fourth = method == "evaluate_fourth"
+    if kind == "closed":
+        symbols = _densities()[name][1]
+        eta_symbols = sp.symbols(f"e0:{len(symbols)}", real=True)
+        rows = _row_oracles(name, y_value, theta, symbols, eta_symbols, link_specs, fourth=fourth)
+        row = rows[0] if natural else rows[1]
+    elif natural:
+        coordinates = sp.symbols("mu phi p", positive=True)
+        row = _TweedieRow(y_value, coordinates, *coordinates, fourth=fourth)
+    else:
+        eta = sp.symbols("e0:3", real=True)
+        mapped = [_link_expression(spec, e) for spec, e in zip(link_specs, eta, strict=True)]
+        row = _TweedieRow(y_value, eta, *mapped, fourth=fourth)
+    return getattr(row, method)(point)
+
+
+# The family-level checks read the oracle's answers from a store
+# (``tests/_oracle_store.py``): building and differentiating the symbolic rows
+# took about 4.5 minutes of the module's 5, and the answers depend only on the
+# code named here.  ``two_piece_location_of_mean`` picks a two-piece row's piece.
+_ORACLE = OracleStore(
+    "family_derivatives_symbolic",
+    _oracle_row,
+    depends=(
+        _row_oracles,
+        _densities,
+        _SymbolicRow,
+        _TweedieRow,
+        _partitions,
+        _link_expression,
+        _mpf,
+        _DIGITS,
+        two_piece_location_of_mean,
+    ),
+    module="tests/test_family_derivatives_symbolic.py",
+)
+
+
+class _StoredRow:
+    """A row oracle that reads ``_oracle_row``'s answers from the store."""
+
+    def __init__(self, kind, name, y_value, theta, links, *, natural=False):
+        specs = tuple(_link_spec(link) for link in links)
+        self.arguments = (kind, name, float(y_value), tuple(map(float, theta)), specs, natural)
+
+    def evaluate(self, point):
+        return _ORACLE(*self.arguments, "evaluate", tuple(float(v) for v in point))
+
+    def evaluate_fourth(self, point):
+        return _ORACLE(*self.arguments, "evaluate_fourth", tuple(float(v) for v in point))
+
+
+def test_the_stored_oracle_answers_are_current() -> None:
+    _ORACLE.verify()
 
 
 # ---------------------------------------------------------------- certified NB2 bound
@@ -1062,7 +1141,9 @@ def test_log_normal_mean_direction_is_within_its_stated_bound() -> None:
     direction = np.array([[0.9, -1.7]])
     for y_value, eta in _LOG_NORMAL_DIRECTION_ROWS:
         theta = tuple(float(link.inverse(np.array([e]))[0]) for link, e in zip(links, eta))
-        _, predictor = _row_oracles("lognormal_mean", y_value, theta, symbols, eta_symbols, links)
+        _, predictor = _row_oracles(
+            "lognormal_mean", y_value, theta, symbols, eta_symbols, [_link_spec(x) for x in links]
+        )
         third = predictor.evaluate(eta)[2]
         computed = mean_curvature_directional(
             np.array([y_value]), np.array([eta]), direction, np.ones(1), scale_floor=floor
