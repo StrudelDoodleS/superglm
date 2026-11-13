@@ -39,7 +39,6 @@ errors measured on this grid (x86-64 Linux) are 22, 180, 462, 2.0e3 and 8.2e3
 
 from __future__ import annotations
 
-import functools
 import itertools
 import math
 import warnings
@@ -76,6 +75,8 @@ from superglm.links import IdentityLink
 
 mp = pytest.importorskip("mpmath")
 
+from tests import test_gg_uniform_tail  # noqa: E402
+from tests._oracle_store import OracleStore  # noqa: E402
 from tests.test_gg_uniform_tail import expansion_reference, reference  # noqa: E402
 
 _U = 2.0**-53
@@ -263,20 +264,27 @@ def test_at_zero_shape_the_bounded_law_is_the_log_normal():
 
 # -- bounded channels against the mpmath oracle -------------------------------
 
+
 # (y, lower, upper, side, mu, sigma, Q): censored rows at Q = 0 on both sides;
 # both sides of the uniform tail's edge |Q| = 0.2887; the body between the
 # engines (0.2887 < |Q| < 0.5) near the diagonal, both signs; a far tail at
 # small Q outside the uniform domain; Q = 1.5; complete rows truncated on two
 # ends and on one; narrow windows on both routes (a truncation window and a
 # censored row's observed window).
+def _exp(x: float) -> float:
+    """``exp(x)`` rounded once to binary64 from 40 digits: the same row on every platform's libm."""
+    with mp.workdps(40):
+        return float(mp.exp(x))
+
+
 _ORACLE_ROWS = (
     (2.0, -_INF, _INF, 1, 0.3, 0.7, 0.0),
     (1.0, -_INF, 4.0, -1, 0.3, 0.7, 0.0),
     (1.6, -_INF, _INF, 1, 0.3, 0.7, 0.2887),
     (1.6, 0.5, _INF, 1, 0.3, 0.7, 0.2888),
-    (math.exp(0.3 + 0.7 * 0.3), -_INF, _INF, 1, 0.3, 0.7, 0.4),
-    (math.exp(0.3 - 0.7 * 0.5), 0.5, _INF, -1, 0.3, 0.7, -0.45),
-    (math.exp(0.3 + 0.7 * 6.0), -_INF, _INF, 1, 0.3, 0.7, 0.15),
+    (_exp(0.3 + 0.7 * 0.3), -_INF, _INF, 1, 0.3, 0.7, 0.4),
+    (_exp(0.3 - 0.7 * 0.5), 0.5, _INF, -1, 0.3, 0.7, -0.45),
+    (_exp(0.3 + 0.7 * 6.0), -_INF, _INF, 1, 0.3, 0.7, 0.15),
     (3.0, -_INF, _INF, 1, 0.3, 0.6, 1.5),
     (1.2, 0.3, 4.0, 0, 0.2, 0.9, 0.6),
     (2.5, 1.0, _INF, 0, 0.4, 0.5, -1.2),
@@ -481,18 +489,64 @@ def _plain(series: dict, order: int) -> list:
     return out
 
 
-@functools.cache
+def _row_oracle(form, row):
+    """One row's bounded log-likelihood partials and term scale per order."""
+    with mp.workdps(50):
+        terms = _terms(form, row)
+        total = _plus(*((1, t) for t in terms))
+        partials = [_plain(total, k) for k in range(5)]
+        scales = [max(abs(v) for t in terms for v in _plain(t, k)) for k in range(5)]
+        return partials, scales
+
+
+# The mpmath oracle takes nearly all of the channel tests' time and depends only
+# on its arguments, so its answers are stored (``tests/_oracle_store.py``); every
+# engine-against-oracle comparison still runs.
+ROW_ORACLE = OracleStore(
+    "generalized_gamma_response_bounds_row_oracle",
+    _row_oracle,
+    depends=(
+        _terms,
+        _plain,
+        _density_series,
+        _window_series,
+        _log_tail_series,
+        _coordinates,
+        _log_loading,
+        _exp_series,
+        _log_series,
+        _plus,
+        _powers,
+        _times,
+        _KEYS,
+        _INF,
+        test_gg_uniform_tail,
+    ),
+    module="tests/test_generalized_gamma_response_bounds.py",
+)
+
+
+def _log_cdf_near_zero_shape(w, q):
+    """The exact ``log F(w)`` of the standardised law at a near-zero shape ``q``."""
+    return expansion_reference(w, q)[0][(0, 0)]
+
+
+LOG_CDF_NEAR_ZERO_SHAPE = OracleStore(
+    "generalized_gamma_response_bounds_log_cdf_near_zero_shape",
+    _log_cdf_near_zero_shape,
+    depends=(test_gg_uniform_tail,),
+    module="tests/test_generalized_gamma_response_bounds.py",
+)
+
+
+def test_the_stored_oracle_answers_are_current():
+    ROW_ORACLE.verify()
+    LOG_CDF_NEAR_ZERO_SHAPE.verify()
+
+
 def _oracle(form):
     """Per row, the bounded log-likelihood's partials and term scale per order."""
-    rows = []
-    with mp.workdps(50):
-        for row in _ORACLE_ROWS:
-            terms = _terms(form, row)
-            total = _plus(*((1, t) for t in terms))
-            partials = [_plain(total, k) for k in range(5)]
-            scales = [max(abs(v) for t in terms for v in _plain(t, k)) for k in range(5)]
-            rows.append((partials, scales))
-    return tuple(rows)
+    return tuple(ROW_ORACLE(form, row) for row in _ORACLE_ROWS)
 
 
 def _channel_errors(form: str, semantics: str) -> list[list[float]]:
@@ -665,8 +719,9 @@ def test_predictions_near_zero_shape_read_the_fitted_law():
     for q in (5e-9, -5e-9, 0.0):
         shape = np.full(len(w), q)
         cdf = generalized_gamma_cdf(np.exp(w), np.zeros(len(w)), np.ones(len(w)), shape)
-        log_exact = np.array([float(expansion_reference(v, q)[0][(0, 0)]) for v in w])
-        exact = np.array([float(mp.exp(expansion_reference(v, q)[0][(0, 0)])) for v in w])
+        log_cdf = [LOG_CDF_NEAR_ZERO_SHAPE(float(v), q) for v in w]
+        log_exact = np.array([float(v) for v in log_cdf])
+        exact = np.array([float(mp.exp(v)) for v in log_cdf])
         # The cdf is exp(log F): an absolute error of a few u |log F| in log F becomes
         # the same relative error in F, so the tolerance scales with |log F|.
         unit_roundoff = np.finfo(np.float64).eps / 2
