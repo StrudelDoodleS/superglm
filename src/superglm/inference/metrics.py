@@ -622,7 +622,34 @@ class ModelMetrics:
         """Unit of this evaluation's geometry, which can differ from the fit's."""
         from superglm._weight_units import evaluation_weight_exponent
 
-        return evaluation_weight_exponent(self._weights, self._result)
+        exponent = self._result.weight_exponent
+        if not exponent or self._fit_geometry_matches:
+            return exponent
+        if np.max(self._weights, initial=0.0) >= 2.0**-512:
+            return 0
+        # A new evaluation may extrapolate far beyond the fit's columns.
+        # Read its existing bounded chunks only on the exceptional unit path;
+        # no observation-level matrix or transformed columns are retained.
+        columns = np.arange(len(self._result.beta), dtype=np.intp)
+        design = EvaluationDesign(self._model, self._X, columns)
+        eta, mu = self._working_eta_mu
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            moment_weights = fisher_working_weights(
+                distribution=self._family,
+                link=self._link,
+                mu=mu,
+                eta=eta,
+                sample_weight=self._weights,
+            )
+        return evaluation_weight_exponent(
+            self._weights,
+            self._result,
+            group_matrices=(design,),
+            response=self._y,
+            offset=self._offset,
+            mean=mu,
+            moment_weights=moment_weights,
+        )
 
     @cached_property
     def _geometry_prior_weights(self):

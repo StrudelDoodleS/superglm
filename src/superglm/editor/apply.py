@@ -728,7 +728,9 @@ def _refresh_fit_statistics(
 
     from superglm._weight_units import evaluation_weight_exponent
 
-    exponent = evaluation_weight_exponent(weights, model.result)
+    exponent = evaluation_weight_exponent(
+        weights, model.result, response=y_arr, offset=offset_arr, mean=mu
+    )
     unit_weights = np.ldexp(weights, exponent) if exponent else weights
     null_mu = _compute_null_mu(
         y_arr,

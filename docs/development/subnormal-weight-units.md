@@ -74,7 +74,12 @@ deviations and frequency deviance ratios combine normal mantissas and their
 net exponents before restoring units; they never require an overflowing
 common lift of the evaluation weights.
 Editor exports also choose their evaluation moment unit separately from the
-fit's retained geometry and dispersion. An exactly zero retained dispersion
+fit's retained geometry and dispersion. Alternate rows and weights use at
+most their own normalizing exponent. Their moment cap includes the evaluation
+design and row count, Fisher-weight amplification, and predicted means. The
+existing bounded design chunks provide the range scan on this exceptional
+path; no transformed columns survive it. Ordinary evaluation weights retain
+their physical unit. An exactly zero retained dispersion
 keeps the existing zero Cook's-distance convention; a positive dispersion
 that underflows only in its published physical unit is still standardized.
 

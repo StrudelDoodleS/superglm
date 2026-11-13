@@ -426,7 +426,11 @@ def _compute_fit_stats(
     from superglm._weight_units import evaluation_weight_exponent
 
     fit_exponent = 0 if solver_result is None else solver_result.weight_exponent
-    exponent = 0 if solver_result is None else evaluation_weight_exponent(weights, solver_result)
+    exponent = (
+        0
+        if solver_result is None
+        else evaluation_weight_exponent(weights, solver_result, response=y, offset=offset, mean=mu)
+    )
     if exponent:
         weights = np.ldexp(weights, exponent)
     if null_mu is None:

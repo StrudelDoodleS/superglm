@@ -49,14 +49,16 @@ def objective_weight_exponent(
         # formed first. This scan belongs only to the exceptional lift path.
         magnitude_power = _data_magnitude_power(group_matrices, response, offset)
         n = group_matrices[0].shape[0] if group_matrices else len(response)
-        exponent = min(
-            exponent,
-            960 - math.frexp(w_max)[1] - 2 * magnitude_power - (max(n, 1) - 1).bit_length() - 2,
-        )
+        exponent = min(exponent, _moment_exponent_limit(w_max, n, magnitude_power))
     return max(0, exponent - (exponent & 1))
 
 
-def _data_magnitude_power(group_matrices, response, offset):
+def _moment_exponent_limit(w_max, n, magnitude_power):
+    """Keep 4*n*w_max*max_magnitude**2 below the moment range ceiling."""
+    return 960 - math.frexp(w_max)[1] - 2 * magnitude_power - (max(n, 1) - 1).bit_length() - 2
+
+
+def _data_magnitude_power(group_matrices, response, offset, *, mean=None):
     """A power bounding represented columns, without a dense full design."""
     from scipy import sparse
 
@@ -77,12 +79,15 @@ def _data_magnitude_power(group_matrices, response, offset):
         # the original solve. It need not reject an otherwise valid fit.
         return math.frexp(maximum)[1] if np.isfinite(maximum) else 2048
 
-    largest = max(1, power(response), power(offset))
+    largest = max(1, power(response), power(offset), power(mean))
     for matrix in group_matrices:
         if type(matrix) in (CategoricalGroupMatrix, RandomEffectGroupMatrix):
             continue
         if type(matrix) in (DenseGroupMatrix, SparseGroupMatrix):
             largest = max(largest, power(matrix.M))
+        elif hasattr(matrix, "iter_dense_chunks"):
+            for _, _, block in matrix.iter_dense_chunks():
+                largest = max(largest, power(block))
         elif hasattr(matrix, "R_inv") and (hasattr(matrix, "B_unique") or hasattr(matrix, "B")):
             basis = matrix.B_unique if hasattr(matrix, "B_unique") else matrix.B
             # |B R|_max <= q |B|_max |R|_max; inspect stored factors only.
@@ -128,12 +133,39 @@ def solver_weights(weights, result):
     return np.ldexp(weights, exponent) if exponent else weights
 
 
-def evaluation_weight_exponent(weights, result):
+def evaluation_weight_exponent(
+    weights,
+    result,
+    *,
+    group_matrices=(),
+    response=None,
+    offset=None,
+    mean=None,
+    moment_weights=None,
+):
     """An evaluation's moment unit, independent of the retained fit geometry."""
     exponent = getattr(result, "weight_exponent", 0)
-    if exponent and np.max(weights, initial=0.0) > np.ldexp(2.0**960, -exponent):
+    if not exponent:
         return 0
-    return exponent
+    w_max = float(np.max(weights, initial=0.0))
+    if w_max == 0.0 or w_max >= 2.0**-512:
+        return 0
+    # Never lift evaluation weights above their own normalized unit. For
+    # tiny evaluation weights, apply the same centred-data headroom cap as
+    # the fit, on these rows rather than on the training design.
+    normalized = 1 - math.frexp(w_max)[1]
+    normalized += normalized & 1
+    moment_max = w_max
+    if moment_weights is not None:
+        working_max = float(np.max(moment_weights, initial=0.0))
+        if not np.isfinite(working_max):
+            return 0
+        moment_max = max(moment_max, working_max)
+    magnitude_power = _data_magnitude_power(group_matrices, response, offset, mean=mean)
+    exponent = min(
+        exponent, normalized, _moment_exponent_limit(moment_max, len(weights), magnitude_power)
+    )
+    return max(0, exponent - (exponent & 1))
 
 
 def solver_dispersion(result):

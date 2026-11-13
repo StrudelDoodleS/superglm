@@ -520,3 +520,100 @@ def test_exact_gaussian_fit_keeps_zero_cooks_distance(unit):
         frame, y, sample_weight=weights
     )
     np.testing.assert_array_equal(model.metrics(frame, y, sample_weight=weights).cooks_distance, 0)
+
+
+@pytest.mark.parametrize(
+    ("fit_scale", "evaluation_scale", "fit_unit", "evaluation_unit"),
+    [
+        (1e12, 1e12, 1e-160, 1e128),
+        (1.0, 1e154, 1e-160, 1e-160),
+        (1e12, 1e12, 1e-320, 1e-160),
+        (1e154, 1e154, 1e-160, 1e-100),
+    ],
+)
+def test_evaluation_lift_keeps_headroom_for_its_own_design(
+    fit_scale, evaluation_scale, fit_unit, evaluation_unit
+):
+    t = np.linspace(-1, 1, 60)
+    training = pd.DataFrame({"x": fit_scale * t})
+    evaluation = pd.DataFrame({"x": evaluation_scale * t})
+    y = 0.4 + 0.2 * t + 0.1 * np.cos(13 * t)
+    model = SuperGLM(family="gaussian", selection_penalty=0, features={"x": Numeric()}).fit(
+        training, y, sample_weight=np.full(len(t), fit_unit)
+    )
+    metrics = model.metrics(evaluation, y, sample_weight=np.full(len(t), evaluation_unit))
+
+    # Rectangular least squares in a safe column unit supplies dispersion.
+    # Carry both weight units through their square roots so the reference
+    # never forms an underflowing variance or an overflowing squared column.
+    design = np.column_stack([np.ones(len(t)), t])
+    beta = np.linalg.lstsq(design, y, rcond=None)[0]
+    phi_per_unit = np.sum((y - design @ beta) ** 2) / (len(t) - 2)
+    inverse = np.linalg.inv(design.T @ design)
+    expected = np.sqrt(phi_per_unit * np.diag(inverse)) * (
+        np.sqrt(fit_unit) / np.sqrt(evaluation_unit)
+    )
+    actual = [metrics.intercept_se, metrics.coefficient_se["x"][0]]
+    np.testing.assert_allclose(
+        actual, [expected[0], expected[1] / evaluation_scale], rtol=2e-10, atol=0
+    )
+    leverage = np.einsum("ij,jk,ik->i", design, inverse, design)
+    np.testing.assert_allclose(metrics.leverage, leverage, rtol=2e-12, atol=2e-14)
+
+
+def test_evaluation_headroom_includes_fisher_weight_amplification():
+    t = np.linspace(-1, 1, 60)
+    training = pd.DataFrame({"x": t})
+    evaluation_scale = 1e154
+    evaluation = pd.DataFrame({"x": evaluation_scale * t})
+    y = np.random.default_rng(12).poisson(np.exp(0.4 + 0.7 * t))
+    unit = 1e-320
+    model = SuperGLM(family="poisson", selection_penalty=0, features={"x": Numeric()}).fit(
+        training, y, sample_weight=np.full(len(t), unit)
+    )
+    metrics = model.metrics(evaluation, y, sample_weight=np.full(len(t), unit))
+    # Poisson/log Fisher information is w*mu. Form its independent inverse
+    # in safe column and weight units, without squaring the large x column.
+    mu = model.predict(evaluation)
+    maximum = np.max(mu)
+    relative = mu / maximum
+    design = np.column_stack([np.ones(len(t)), t])
+    inverse = np.linalg.inv(design.T @ (relative[:, None] * design))
+    expected = np.sqrt(np.diag(inverse)) / (np.sqrt(unit) * np.sqrt(maximum))
+    np.testing.assert_allclose(
+        [metrics.intercept_se_raw, metrics.coefficient_se_raw["x"][0]],
+        [expected[0], expected[1] / evaluation_scale],
+        rtol=2e-10,
+        atol=0,
+    )
+    quasi = unit * np.sum((y - mu) ** 2 / mu) / (len(t) - 2)
+    np.testing.assert_allclose(
+        [metrics.intercept_se, metrics.coefficient_se["x"][0]],
+        np.sqrt(quasi) * np.array([expected[0], expected[1] / evaluation_scale]),
+        rtol=2e-10,
+        atol=0,
+    )
+    leverage = relative * np.einsum("ij,jk,ik->i", design, inverse, design)
+    np.testing.assert_allclose(metrics.leverage, leverage, rtol=2e-11, atol=2e-14)
+
+
+def test_editor_evaluation_unit_includes_extrapolated_means():
+    from superglm.editor import EditorSession
+
+    t = np.linspace(-1, 1, 60)
+    training = pd.DataFrame({"x": t})
+    evaluation = pd.DataFrame({"x": 5e154 * t})
+    y = 0.4 + 0.2 * t + 0.1 * np.cos(13 * t)
+    weights = np.full(len(t), 1e-320)
+    model = SuperGLM(family="gaussian", selection_penalty=0, features={"x": Numeric()}).fit(
+        training, y, sample_weight=weights
+    )
+    # Scale the residual before squaring in the independent physical-deviance
+    # reference; the unweighted sum of squares is outside binary64's range.
+    residual = np.sqrt(weights) * (y - model.predict(evaluation))
+    expected = float(residual @ residual)
+    edited = EditorSession.from_model(model, terms=["x"]).to_model(
+        X=evaluation, y=y, sample_weight=weights
+    )
+    assert np.isfinite(edited.result.deviance)
+    assert edited.result.deviance == pytest.approx(expected, rel=2e-12, abs=0)
