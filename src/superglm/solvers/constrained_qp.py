@@ -1014,15 +1014,25 @@ class _CycleGuard:
 
     At a degenerate point a release can be undone by a zero step, its row the next to block,
     so the loop goes round a cycle of working sets with the objective fixed until it exhausts
-    its budget. A working set met again without the objective falling past its rounding since
-    the last visit is that cycle; from then on a release takes the eligible row of least
+    its budget. A working set met again at a feasible point with the objective unchanged
+    past its rounding is that cycle. From then on a release takes the eligible row of least
     index, as the ratio test already breaks its ties, which is Bland's rule (Bland, Math.
     Oper. Res. 2(2), 1977). Least-index selection carries over to active-set QP methods
     (Forsgren, Gill and Wong, Math. Program. 159, 2016, section 5.4). Until a cycle shows,
     each release names the most negative multiplier as before. Owner and lifetime: one solve.
+
+    That rule assumes a feasible iterate whose working rows all bind, the setting of a
+    degenerate vertex (Nocedal and Wright 2006, Algorithm 16.3, ``W_0`` a subset of the
+    constraints active at ``x_0``). A warm set may hold rows that do not bind, so at the
+    switch the working set keeps only the rows that bind there. A recurrence at an
+    infeasible point, or after the objective moved, is no degenerate cycle and switches
+    nothing.
     """
 
-    def __init__(self, H: NDArray, g: NDArray) -> None:
+    def __init__(
+        self, H: NDArray, g: NDArray, A: NDArray, b: NDArray, tol: float, abs_A: NDArray
+    ) -> None:
+        self.A, self.b, self.tol, self.abs_A = A, b, tol, abs_A
         # The objective's two terms are compared in powers of two scaled out of H, g and the
         # points, so a finite problem near the exponent range cannot overflow the comparison.
         self.h_exponent = _exponent(H)
@@ -1037,15 +1047,26 @@ class _CycleGuard:
         """The working rows' indices where releases follow Bland's rule; ``None`` before."""
         return np.asarray(active) if self.least_index else None
 
-    def note(self, active: list[int], beta: NDArray) -> None:
-        """Record the working set ``active`` at ``beta``, after the loop changes it."""
+    def note(self, active: list[int], beta: NDArray, basis: _WorkingBasis) -> None:
+        """Record the working set ``active`` at ``beta``, after the loop changes it; on the
+        switch, leave out of ``active`` and ``basis`` the rows that do not bind at ``beta``."""
         if self.least_index:
             return
         key = frozenset(active)
         earlier = self.visited.get(key)
         self.visited[key] = beta
-        if earlier is not None and self._tied(earlier, beta):
-            self.least_index = True
+        if earlier is None or not self._tied(earlier, beta):
+            return
+        if not _is_feasible(self.A, beta, self.b, self.tol, abs_A=self.abs_A):
+            return
+        self.least_index = True
+        # Binding is the feasibility test's band read from above: slack within ``tol``
+        # plus the dot product's rounding, in the same relative units.
+        slack = _feasibility_slack(self.A[active], beta, self.b[active], abs_A=self.abs_A[active])
+        loose = np.flatnonzero(slack > self.tol + _roundoff_tolerance(len(beta)))
+        for position in loose[::-1].tolist():
+            active.pop(position)
+            basis.delete(position)
 
     def _tied(self, earlier: NDArray, beta: NDArray) -> bool:
         """Whether the objectives at ``earlier`` and ``beta`` agree within twice either's
@@ -1391,7 +1412,7 @@ def solve_constrained_qp(
     # face: no independent row can block its numerical normal component.
     coordinate_face: tuple[int, ...] | None = None
     recovered_face: tuple[int, ...] | None = None
-    cycles = _CycleGuard(H_sym, g)
+    cycles = _CycleGuard(H_sym, g, A, b, tol, abs_A)
 
     for it in range(max_iter):
         if at_face_minimum and not kkt_may_be_singular:
@@ -1417,7 +1438,7 @@ def solve_constrained_qp(
             if release is not None:
                 active.pop(release)
                 basis.delete(release)
-                cycles.note(active, beta)
+                cycles.note(active, beta, basis)
                 continue
             coordinate_face = tuple(active)
         at_face_minimum = False
@@ -1517,7 +1538,7 @@ def solve_constrained_qp(
             if drop_idx is not None:
                 active.pop(drop_idx)
                 basis.delete(drop_idx)
-                cycles.note(active, beta)
+                cycles.note(active, beta, basis)
                 continue
             feasible = _is_feasible(A, beta, b, tol, abs_A=abs_A)
             if not feasible:
@@ -1535,7 +1556,7 @@ def solve_constrained_qp(
                 if drop_idx is not None:
                     active.pop(drop_idx)
                     basis.delete(drop_idx)
-                    cycles.note(active, beta)
+                    cycles.note(active, beta, basis)
                     continue
             complementary = _complementarity_certificate(
                 H_sym, g, beta, A[active], b[active], multipliers, tol, objective
@@ -1611,7 +1632,7 @@ def solve_constrained_qp(
                 beta = beta + alpha_min * step
                 active.append(blocking)
                 basis.insert(blocking)
-                cycles.note(active, beta)
+                cycles.note(active, beta, basis)
             else:
                 if active and not kkt_may_be_singular and coordinate_face != tuple(active):
                     coordinate_face = tuple(active)
@@ -1628,7 +1649,7 @@ def solve_constrained_qp(
                     if release is not None:
                         active.pop(release)
                         basis.delete(release)
-                        cycles.note(active, beta)
+                        cycles.note(active, beta, basis)
                         continue
                 # The full step breaks a row no blocking candidate could hold, so
                 # it cannot certify: the next iteration solves the face again.
