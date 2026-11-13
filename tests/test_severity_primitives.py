@@ -61,6 +61,7 @@ import pytest
 mp = pytest.importorskip("mpmath")
 
 from superglm.distributional.kernels import _severity_primitives as prims  # noqa: E402
+from tests._oracle_store import OracleStore  # noqa: E402
 
 U = 2.0**-53
 C = 16.0
@@ -249,6 +250,26 @@ def _mp_log_ndtr(x):
     return mp.log(mp.ncdf(x)) if x < 0 else mp.log1p(-mp.ncdf(-x))
 
 
+def _log_ndtr_derivatives(x):
+    """``log Phi`` and its first five derivatives at ``x``, by ``mp.diffs`` at 50 digits."""
+    with mp.workdps(50):
+        return list(mp.diffs(_mp_log_ndtr, mp.mpf(x), 5))
+
+
+# The derivatives' answers are stored (``tests/_oracle_store.py``): ``mp.diffs``
+# at 50 digits was nearly all of the log-ndtr tests' time.
+LOG_NDTR_DERIVATIVES = OracleStore(
+    "severity_primitives_log_ndtr",
+    _log_ndtr_derivatives,
+    depends=(_mp_log_ndtr,),
+    module="tests/test_severity_primitives.py",
+)
+
+
+def test_the_stored_oracle_answers_are_current() -> None:
+    LOG_NDTR_DERIVATIVES.verify()
+
+
 _NDTR_POINTS = sorted(
     {
         *np.linspace(-38.5, 12.0, 205).tolist(),
@@ -275,7 +296,7 @@ def test_log_ndtr_jet_holds_its_conditioned_error_form(order: int) -> None:
     worst = [0.0] * len(bound)
     for x in _NDTR_POINTS:
         got = prims.log_ndtr_01234(x, order)
-        exact = list(mp.diffs(_mp_log_ndtr, mp.mpf(x), 5))
+        exact = LOG_NDTR_DERIVATIVES(float(x))
         for k in range(len(bound)):
             scale = abs(exact[k]) + abs(x * exact[k + 1])
             worst[k] = max(worst[k], float(abs(got[k] - exact[k]) / scale) / U)
