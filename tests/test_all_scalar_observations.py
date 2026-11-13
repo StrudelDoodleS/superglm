@@ -9,6 +9,7 @@ and the natural/predictor coordinate maps. No refusal counts as a passing cell.
 
 from dataclasses import dataclass
 
+import mpmath as mp
 import numpy as np
 import pandas as pd
 import pytest
@@ -35,7 +36,67 @@ from superglm.distributional.weights import (
     WeightContract,
     resolve_likelihood_weights,
 )
+from tests import (
+    _scalar_observation_oracle,
+    _tweedie_window_oracle,
+    _two_piece_observation_oracle,
+)
+from tests._oracle_store import OracleStore
 from tests._scalar_observation_oracle import contribution, inverse_links, jet
+
+
+def _predictors(theta, maps):
+    """The predictors of ``theta`` under ``maps``, rounded once to binary64 from 60 digits.
+
+    The engine's links give the same point to within an ulp or two, far inside
+    the 1e-10 outcome allowance; computing it here keeps the stored answers'
+    arguments the same on every platform's libm.
+    """
+    with mp.workdps(60):
+        point = []
+        for x, (kind, lower, upper) in zip(map(mp.mpf, theta), maps, strict=True):
+            if kind == "identity":
+                point.append(x)
+            elif kind == "log":
+                point.append(mp.log(x - lower))
+            else:
+                point.append(mp.log((x - lower) / (upper - x)))
+        return tuple(float(v) for v in point)
+
+
+def _row_jet(law, form, y, lo, hi, side, theta, prior=1, mass=1, maps=None):
+    """The oracle jet of ``mass`` times one row's contribution.
+
+    ``maps`` None: in the natural parameters at ``theta``; otherwise in the
+    predictors, at ``_predictors(theta, maps)``, mapped back by ``inverse_links``.
+    """
+
+    def law_at(*point):
+        return mass * contribution(law, form, y, lo, hi, side, point, prior)
+
+    if maps is None:
+        return jet(law_at, theta)
+    return jet(lambda *e: law_at(*inverse_links(e, maps)), _predictors(theta, maps))
+
+
+# The 60-digit jets take most of these tests' time and depend only on their
+# arguments, so their answers are stored (``tests/_oracle_store.py``); every
+# engine-against-oracle comparison below still runs.
+ROW_JET = OracleStore(
+    "all_scalar_observations_row_jet",
+    _row_jet,
+    depends=(
+        _predictors,
+        _scalar_observation_oracle,
+        _tweedie_window_oracle,
+        _two_piece_observation_oracle,
+    ),
+    module="tests/test_all_scalar_observations.py",
+)
+
+
+def test_the_stored_oracle_answers_are_current():
+    ROW_JET.verify()
 
 
 @dataclass(frozen=True)
@@ -155,23 +216,26 @@ def test_all_observation_cells_natural_and_linked_orders(case):
     natural = family.evaluate_natural(y, theta, plan)
     assert np.all(natural.valid), "every ordinary-domain support cell must actually execute"
     links = [p.default_link for p in family.parameters]
-    eta = np.column_stack([link.link(theta[:, i]) for i, link in enumerate(links)])
+    # The engine and the oracle read the same predictors, rounded from 60 digits
+    # (``_predictors``); the family's own links agree with them to the last bits.
+    eta = np.tile(_predictors(case.theta, case.maps), (len(y), 1))
+    engine_eta = np.column_stack([link.link(theta[:, i]) for i, link in enumerate(links)])
+    np.testing.assert_allclose(engine_eta, eta, rtol=1e-14, atol=1e-15)
     linked = transform_natural_derivatives(natural, eta, links)
     for row in range(len(y)):
-
-        def law(*point):
-            return mass[row] * contribution(
-                case.law,
-                case.form,
-                y[row],
-                bounds.lower[row],
-                bounds.upper[row],
-                int(bounds.side[row]),
-                point,
-            )
-
-        assert_channels(tuple(c[row] for c in channels(natural)), jet(law, case.theta))
-        expected = jet(lambda *e: law(*inverse_links(e, case.maps)), eta[row])
+        cell = (
+            case.law,
+            case.form,
+            float(y[row]),
+            float(bounds.lower[row]),
+            float(bounds.upper[row]),
+            int(bounds.side[row]),
+        )
+        assert_channels(
+            tuple(c[row] for c in channels(natural)),
+            ROW_JET(*cell, case.theta, mass=int(mass[row])),
+        )
+        expected = ROW_JET(*cell, case.theta, mass=int(mass[row]), maps=case.maps)
         assert_channels(
             (
                 linked.reported_log_likelihood[row],
@@ -220,18 +284,15 @@ def test_weight_laws_replication_and_unit_prior(case):
     actual = family.evaluate_natural(y, theta, plan)
     assert np.all(actual.valid)
     for row in range(len(y)):
-        expected = jet(
-            lambda *t: contribution(
-                case.law,
-                case.form,
-                y[row],
-                bounds.lower[row],
-                bounds.upper[row],
-                int(bounds.side[row]),
-                t,
-                prior=2,
-            ),
+        expected = ROW_JET(
+            case.law,
+            case.form,
+            float(y[row]),
+            float(bounds.lower[row]),
+            float(bounds.upper[row]),
+            int(bounds.side[row]),
             case.theta,
+            prior=2,
         )
         assert_channels(tuple(c[row] for c in channels(actual)), expected)
 
@@ -435,14 +496,16 @@ def test_atoms_keep_exact_left_right_and_open_lower_events_distinct(law, semanti
     assert actual.valid.all()
     prior, mass = (2, 1) if semantics == "prior" else (1, 2)
     for row in range(4):
-        expected = jet(
-            lambda *t: (
-                mass
-                * contribution(
-                    law, case.form, response[row], lower[row], upper[row], int(side[row]), t, prior
-                )
-            ),
+        expected = ROW_JET(
+            law,
+            case.form,
+            float(response[row]),
+            float(lower[row]),
+            float(upper[row]),
+            int(side[row]),
             case.theta,
+            prior=prior,
+            mass=mass,
         )
         assert_channels(tuple(c[row] for c in channels(actual)), expected)
     np.testing.assert_allclose(
