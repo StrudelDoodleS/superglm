@@ -1,0 +1,9 @@
+{
+  "generator_sha256": "3755bc8d2244ecc68cd04e635789a7db79b4ef8527397867f59458bc9f1ed3dd",
+  "output_sha256": "94dfd057670ec60498fdf6535ea203284de57f7d483f0c697493ae031f821c6a",
+  "environments": [
+    "python 3.12, sympy 1.14.0, mpmath 1.3.0, python ground types",
+    "python 3.13, sympy 1.14.0, mpmath 1.3.0, python ground types",
+    "python 3.14, sympy 1.14.0, mpmath 1.3.0, python ground types"
+  ]
+}

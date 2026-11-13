@@ -10,7 +10,9 @@ arrays or on scalars inside Numba.  Every special function a family needs
 computed by the family kernel's stable routines; this module holds only what
 the chain and product rules produce, plus the generalized gamma series table
 (coefficients and ``np.exp`` closed forms).  The generator also stamps a
-digest of its output into ``_tweedie_numba.py`` (see ``stamped_kernel``).
+digest of its output into ``_tweedie_numba.py`` (see ``stamped_kernel``), and
+records each render it writes in ``tests/fixtures/fourth_generated_record.json``
+(see ``RECORD``).
 
 Floor-stable forms.  A link ``sigma = floor + e^b`` makes the predictor
 derivatives polynomials in ``u = e^b/sigma`` whose constant terms cancel as
@@ -26,6 +28,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import itertools
+import json
 import re
 import sys
 from pathlib import Path
@@ -862,6 +865,38 @@ def stamped_kernel(text: str) -> str:
     return _DIGEST_LINE.sub(f'_FOURTH_GENERATED_DIGEST = "{digest(text)}"', kernel)
 
 
+# The renders this generator has written: the digest of its source, of the
+# module it rendered, and each environment that rendered exactly that module.
+# ``render`` reads nothing but this file and SymPy, so where the source and
+# the environment match a recorded render, a test can compare the committed
+# module with that render's digest instead of rendering again.
+RECORD = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "fourth_generated_record.json"
+
+
+def environment() -> str:
+    """What ``render`` depends on besides this file: the interpreter and SymPy's arithmetic."""
+    import mpmath
+    from sympy.external.gmpy import GROUND_TYPES
+
+    version = f"{sys.version_info.major}.{sys.version_info.minor}"
+    return f"python {version}, sympy {sp.__version__}, mpmath {mpmath.__version__}, {GROUND_TYPES} ground types"
+
+
+def source_digest() -> str:
+    return digest(Path(__file__).read_text(encoding="utf-8"))
+
+
+def recorded(text: str) -> dict:
+    """The record once this environment has rendered ``text`` from this source."""
+    record = {"generator_sha256": source_digest(), "output_sha256": digest(text)}
+    environments = {environment()}
+    if RECORD.exists():
+        previous = json.loads(RECORD.read_text(encoding="utf-8"))
+        if all(previous.get(key) == value for key, value in record.items()):
+            environments.update(previous["environments"])
+    return {**record, "environments": sorted(environments)}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--check", action="store_true", help="exit 1 if the module is stale")
@@ -876,6 +911,7 @@ def main() -> int:
         return 0
     OUTPUT.write_text(text)
     TWEEDIE_KERNEL.write_text(kernel)
+    RECORD.write_text(json.dumps(recorded(text), indent=2) + "\n", encoding="utf-8")
     print(f"wrote {OUTPUT}")
     return 0
 

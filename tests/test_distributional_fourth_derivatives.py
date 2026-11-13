@@ -359,15 +359,41 @@ def test_the_tweedie_kernel_carries_the_generated_digest() -> None:
 
 @pytest.mark.slow
 def test_the_generated_module_is_current() -> None:
-    """``tools/generate_lss_fourth_derivatives.py --check`` regenerates the committed module."""
+    """``tools/generate_lss_fourth_derivatives.py`` regenerates the committed module.
+
+    Rendering takes SymPy half a minute, and its output depends on nothing but
+    the generator's source and the environment ``environment()`` names. When
+    both match a render the generator recorded (``RECORD``), the committed
+    module must be that render, digest for digest, and the Tweedie kernel must
+    carry its stamp. Otherwise the test renders again (``--check``).
+    """
+    import importlib.util
+    import json
     import subprocess
     import sys
     from pathlib import Path
 
     pytest.importorskip("sympy")
     root = Path(__file__).resolve().parents[1]
+    path = root / "tools" / "generate_lss_fourth_derivatives.py"
+    spec = importlib.util.spec_from_file_location("_generate_lss_fourth_derivatives", path)
+    generator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generator)
+    record = json.loads(generator.RECORD.read_text(encoding="utf-8"))
+    if (
+        record["generator_sha256"] == generator.source_digest()
+        and generator.environment() in record["environments"]
+    ):
+        text = generator.OUTPUT.read_text(encoding="utf-8")
+        assert generator.digest(text) == record["output_sha256"], (
+            f"{generator.OUTPUT} is stale; rerun the generator"
+        )
+        assert generator.TWEEDIE_KERNEL.read_text() == generator.stamped_kernel(text), (
+            f"{generator.TWEEDIE_KERNEL} carries a stale digest; rerun the generator"
+        )
+        return
     completed = subprocess.run(
-        [sys.executable, str(root / "tools" / "generate_lss_fourth_derivatives.py"), "--check"],
+        [sys.executable, str(path), "--check"],
         capture_output=True,
         text=True,
         timeout=1800,
