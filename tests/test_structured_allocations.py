@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 import pytest
 import scipy.sparse as sp
@@ -260,11 +262,12 @@ def test_large_dominant_builder_never_requests_full_p_by_p_storage(monkeypatch):
 _WIDE = dict(K=400, Q=60, n=2400, k=5)
 
 
-@pytest.fixture(scope="module", params=["poisson", "tweedie"])
-def _wide_border_fs_fit(request):
+@functools.cache
+def _wide_border_fs_model(family_name: str):
     """A REML fit (smoothing parameters held) of an fs term beside a 60-level categorical.
 
-    The Tweedie fit's observed REML geometry builds signed leaf systems.
+    The Tweedie fit's observed REML geometry builds signed leaf systems.  One
+    fit per family and process: the fixture and the warmup test share it.
     """
     import warnings
 
@@ -286,7 +289,7 @@ def _wide_border_fs_fit(request):
         }
     )
     mu = np.exp(0.3 + np.sin(3 * x) + rng.normal(0, 0.4, K)[g] + rng.normal(0, 0.3, Q)[c])
-    if request.param == "poisson":
+    if family_name == "poisson":
         family, y = "poisson", rng.poisson(mu).astype(float)
     else:
         family = families.tweedie(p=1.5)
@@ -305,6 +308,18 @@ def _wide_border_fs_fit(request):
     system = model._linear_system_state.system
     p = k + len(system.operator.small_indices) + 2
     return model, p
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _release_wide_border_fs_models():
+    """The fits live as long as this module's tests, as a module fixture's would."""
+    yield
+    _wide_border_fs_model.cache_clear()
+
+
+@pytest.fixture(scope="module", params=["poisson", "tweedie"])
+def _wide_border_fs_fit(request):
+    return _wide_border_fs_model(request.param)
 
 
 def _largest_reachable_array(root) -> int:
@@ -490,13 +505,15 @@ def test_the_fs_build_after_a_compile_frees_the_stack_the_compile_pinned(
     assert len(collections) == 1
 
 
-def test_the_first_build_after_warmup_does_not_collect(_wide_border_fs_fit) -> None:
+def test_the_first_build_after_warmup_does_not_collect() -> None:
     """``superglm.warmup()`` compiles outside any fit, so the next build does not collect (#432).
 
     A warmup that compiles marks a compile, and the process then paid one
     full collection on its first fit: 0.15 s on a 30,000-row ``sz`` sentinel.
     The frames warmup's compiles keep hold no fit's arrays, so it drops its
-    mark (``forget_compiles``).  Fails without it: one collection.
+    mark (``forget_compiles``).  Fails without it: one collection.  Each
+    family's build follows its own marked compile and warmup; one test runs
+    both, so the process compiles warmup's kernels once.
     """
     import gc
 
@@ -507,35 +524,37 @@ def test_the_first_build_after_warmup_does_not_collect(_wide_border_fs_fit) -> N
         get_structured_layout,
     )
 
-    model, _ = _wide_border_fs_fit
-    system = model._linear_system_state.system
-    layout = get_structured_layout(
-        model._dm, model._groups, dominant_group_index=system.dominant_group_index
-    )
-    n = model._dm.n
-    rng = np.random.default_rng(9)
-    layout_cache = model._dm._structured_layout_cache
-    collections = []
-
-    def count(phase, info):
-        if phase == "start" and info["generation"] == 2:
-            collections.append(phase)
-
-    block_leaves.release_leaf_memo(layout_cache)
-    _numba_compile._compiled[0] = True  # a compile inside warmup
-    superglm.warmup()
-    thresholds = gc.get_threshold()
-    gc.set_threshold(0)  # no automatic collection; the collector stays enabled
-    gc.callbacks.append(count)
-    try:
-        block_leaves.build_factor_smooth_leaf_system(
-            layout, rng.uniform(0.5, 1.5, n), rng.normal(size=n), signed=True
+    collections = {}
+    for family_name in ("poisson", "tweedie"):
+        model, _ = _wide_border_fs_model(family_name)
+        system = model._linear_system_state.system
+        layout = get_structured_layout(
+            model._dm, model._groups, dominant_group_index=system.dominant_group_index
         )
-    finally:
-        gc.callbacks.remove(count)
-        gc.set_threshold(*thresholds)
+        n = model._dm.n
+        rng = np.random.default_rng(9)
+        layout_cache = model._dm._structured_layout_cache
+        collected = collections[family_name] = []
+
+        def count(phase, info, collected=collected):
+            if phase == "start" and info["generation"] == 2:
+                collected.append(phase)
+
         block_leaves.release_leaf_memo(layout_cache)
-    assert not collections
+        _numba_compile._compiled[0] = True  # a compile inside warmup
+        superglm.warmup()
+        thresholds = gc.get_threshold()
+        gc.set_threshold(0)  # no automatic collection; the collector stays enabled
+        gc.callbacks.append(count)
+        try:
+            block_leaves.build_factor_smooth_leaf_system(
+                layout, rng.uniform(0.5, 1.5, n), rng.normal(size=n), signed=True
+            )
+        finally:
+            gc.callbacks.remove(count)
+            gc.set_threshold(*thresholds)
+            block_leaves.release_leaf_memo(layout_cache)
+    assert collections == {"poisson": [], "tweedie": []}
 
 
 @pytest.fixture(scope="module")
