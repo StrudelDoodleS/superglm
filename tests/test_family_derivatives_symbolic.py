@@ -361,6 +361,32 @@ def _row_oracles(name, y_value, theta, symbols, eta_symbols, links, *, fourth=Fa
     return natural, _SymbolicRow(expression.subs(substitution), eta_symbols, fourth=fourth)
 
 
+def _eta(links, theta):
+    """``theta``'s predictors, each link's exact value at 50 digits rounded once to float.
+
+    The stored oracle answers are keyed by these points, so they must be the same
+    floats on every platform; ``np.log`` and friends differ in the last bit between
+    builds.  Every link here is a log or a logit of exact differences.
+    """
+    predictors = []
+    with mp.workdps(_DIGITS):
+        for link, value in zip(links, theta, strict=True):
+            name, bounds = _link_spec(link)
+            bounds, x = dict(bounds), _mpf(value)
+            if name == "LogLink":
+                eta = mp.log(x)
+            elif name == "IdentityLink":
+                eta = x
+            elif name == "LowerBoundedLogLink":
+                eta = mp.log(x - _mpf(bounds["floor"]))
+            elif name in ("BoundedLogitLink", "BoundedPowerLink"):
+                eta = mp.log(x - _mpf(bounds["lower"])) - mp.log(_mpf(bounds["upper"]) - x)
+            else:
+                raise AssertionError(name)
+            predictors.append(float(eta))
+    return np.array([predictors])
+
+
 def _measure(family, rows, oracles) -> list[float]:
     """Worst error in u of the score, Hessian and curvature directions over ``rows``."""
     links = tuple(spec.default_link for spec in family.parameters)
@@ -375,9 +401,7 @@ def _measure(family, rows, oracles) -> list[float]:
         worst[1] = max(
             worst[1], _error_in_u(evaluated.hessian_packed[0], [second[p] for p in pairs])
         )
-        eta = np.array(
-            [[float(link.link(np.array([v]))[0]) for link, v in zip(links, theta, strict=True)]]
-        )
+        eta = _eta(links, theta)
         _, _, third = predictor.evaluate(eta[0])
         for axis in range(len(theta)):
             direction = np.zeros_like(eta)
@@ -439,9 +463,7 @@ def _measure_fourth(family, rows, oracles) -> float:
     for (y_value, theta), oracle in zip(rows, oracles, strict=True):
         y = np.array([y_value])
         plan = _plan(family, y)
-        eta = np.array(
-            [[float(link.link(np.array([v]))[0]) for link, v in zip(links, theta, strict=True)]]
-        )
+        eta = _eta(links, theta)
         fourth = oracle.evaluate_fourth(eta[0])
         scale = max(abs(value) for value in fourth.values())
         k = len(theta)

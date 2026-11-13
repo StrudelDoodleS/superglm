@@ -118,6 +118,16 @@ def _key(args: tuple, kwargs: dict) -> str:
     return json.dumps(_encode((args, tuple(sorted(kwargs.items())))), separators=(",", ":"))
 
 
+def dump(header: dict[str, str], entries: dict[str, Any]) -> str:
+    """The store file: the header's fields, then one line per entry, sorted by key."""
+    lines = [f"{json.dumps(key)}: {json.dumps(header[key])}," for key in header]
+    rows = [
+        f"{json.dumps(key)}: {json.dumps(value, separators=(',', ':'))}"
+        for key, value in sorted(entries.items())
+    ]
+    return "{\n" + "\n".join(lines) + '\n"entries": {\n' + ",\n".join(rows) + "\n}\n}\n"
+
+
 def _flatten(value: Any) -> Iterable[Any]:
     """The scalars of a decoded value, in a fixed order."""
     if isinstance(value, np.ndarray):
@@ -259,12 +269,11 @@ class OracleStore:
                 if data["fingerprint"] == self.fingerprint:
                     entries = data["entries"]
             entries.update(self._computed)
-            payload = {
+            header = {
                 "oracle": f"{self.oracle.__module__}.{self.oracle.__qualname__}",
                 "refresh": self._refresh_hint(),
                 "fingerprint": self.fingerprint,
-                "entries": dict(sorted(entries.items())),
             }
-            self.path.write_text(json.dumps(payload, indent=0) + "\n")
+            self.path.write_text(dump(header, entries))
         finally:
             os.remove(lock)
