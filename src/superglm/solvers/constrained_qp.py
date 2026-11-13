@@ -1010,23 +1010,16 @@ class _WorkingBasis:
 
 
 class _CycleGuard:
-    """Anti-cycling for the active-set loop: least-index releases once a working set recurs.
+    """Anti-cycling for the active-set loop: Bland's rule once a degenerate cycle shows.
 
-    At a degenerate point a release can be undone by a zero step, its row the next to block,
-    so the loop goes round a cycle of working sets with the objective fixed until it exhausts
-    its budget. A working set met again at a feasible point with the objective unchanged
-    past its rounding is that cycle. From then on a release takes the eligible row of least
-    index, as the ratio test already breaks its ties, which is Bland's rule (Bland, Math.
-    Oper. Res. 2(2), 1977). Least-index selection carries over to active-set QP methods
-    (Forsgren, Gill and Wong, Math. Program. 159, 2016, section 5.4). Until a cycle shows,
-    each release names the most negative multiplier as before. Owner and lifetime: one solve.
-
-    That rule assumes a feasible iterate whose working rows all bind, the setting of a
-    degenerate vertex (Nocedal and Wright 2006, Algorithm 16.3, ``W_0`` a subset of the
-    constraints active at ``x_0``). A warm set may hold rows that do not bind, so at the
-    switch the working set keeps only the rows that bind there. A recurrence at an
-    infeasible point, or after the objective moved, is no degenerate cycle and switches
-    nothing.
+    A release undone by a zero step that re-blocks its row makes the working sets cycle with
+    the objective fixed. A working set met again at a feasible point, the objective unchanged
+    past its rounding, is that cycle. From then on a release takes the eligible row of least
+    index, as the ratio test breaks its ties (Bland, Math. Oper. Res. 2(2), 1977; for
+    active-set QP, Forsgren, Gill and Wong, Math. Program. 159, 2016, section 5.4). The rule
+    assumes every working row binds (Nocedal and Wright 2006, Algorithm 16.3, ``W_0`` within
+    the rows active at ``x_0``); a warm set may hold rows that do not, so the switch keeps
+    only the binding ones. Owner and lifetime: one solve.
     """
 
     def __init__(
