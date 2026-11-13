@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import functools
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -269,6 +269,59 @@ def _feasibility_scale(
     """
     magnitude = np.abs(products) if abs_products is None else abs_products
     return np.maximum(np.abs(b) if abs_b is None else abs_b, magnitude)
+
+
+def _loose_rows(
+    A: NDArray, beta: NDArray, b: NDArray, active: list[int], abs_A: NDArray, tol: float
+) -> NDArray:
+    """Positions in ``active`` of the working rows that do not bind at ``beta``.
+
+    Binding is the feasibility test's band read from above: slack within ``tol`` plus the dot
+    product's rounding, in the same relative units.
+    """
+    slack = _feasibility_slack(A[active], beta, b[active], abs_A=abs_A[active])
+    return np.flatnonzero(slack > tol + _roundoff_tolerance(beta.size))
+
+
+def _still_nonbinding(
+    A: NDArray,
+    beta: NDArray,
+    b: NDArray,
+    active: list[int],
+    abs_A: NDArray,
+    tol: float,
+    nonbinding: set[int],
+) -> NDArray:
+    """Positions in ``active`` of the rows of ``nonbinding`` that still do not bind at ``beta``.
+
+    The others leave ``nonbinding``: a row that has bound, or left the working set, rejoins it
+    only through the ratio test, at its bound.
+    """
+    if not nonbinding:
+        return np.empty(0, dtype=np.intp)
+    loose = [j for j in _loose_rows(A, beta, b, active, abs_A, tol) if active[j] in nonbinding]
+    nonbinding.intersection_update(active[j] for j in loose)
+    return np.array(loose, dtype=np.intp)
+
+
+def _release_nonbinding(
+    A: NDArray,
+    beta: NDArray,
+    b: NDArray,
+    active: list[int],
+    abs_A: NDArray,
+    tol: float,
+    nonbinding: set[int],
+    basis: _WorkingBasis,
+    cycles: _CycleGuard,
+) -> None:
+    """Remove from ``active`` and ``basis`` the rows of ``nonbinding`` that do not bind at
+    ``beta`` (Gill and Wong 2015, Result 3.2), and empty ``nonbinding``."""
+    for position in _still_nonbinding(A, beta, b, active, abs_A, tol, nonbinding)[::-1].tolist():
+        active.pop(position)
+        basis.delete(position)
+    nonbinding.clear()
+    cycles.note(active, beta, basis)
 
 
 @functools.lru_cache(maxsize=256)
@@ -982,12 +1035,44 @@ class _WorkingBasis:
                 kept.append(row)
         return kept
 
-    def raises_rank(self, row: int) -> bool:
-        """Whether row ``row`` of ``A`` is independent of the working rows."""
+    def distance(self, row: int) -> float:
+        """The distance of unit row ``row`` from the working rows' span."""
         candidate = self.rows[row]
         residual = candidate - self.q @ (self.q.T @ candidate)
         # ``np.linalg.norm``'s own formula for a vector, without its dispatch.
-        return bool(_raises_rank(math.sqrt(residual.dot(residual))))
+        return math.sqrt(residual.dot(residual))
+
+    def raises_rank(self, row: int) -> bool:
+        """Whether row ``row`` of ``A`` is independent of the working rows."""
+        return bool(_raises_rank(self.distance(row)))
+
+    def rank_counts(self, row: int, floor: float) -> bool:
+        """Whether ``matrix_rank`` counts row ``row`` independent of the working rows: a
+        distance above ``floor`` shows it (_full_column_rank's margin), and below it the SVD
+        decides."""
+        if self.distance(row) > floor:
+            return True
+        stacked = np.column_stack([self.q, self.rows[row]])
+        return int(np.linalg.matrix_rank(stacked)) > self.q.shape[1]
+
+    def exchange(self, row: int, positions: NDArray) -> int | None:
+        """Of the working rows at ``positions``, the one whose removal lets dependent row ``row``
+        raise the rank, or ``None``.
+
+        ``row``'s unit vector is ``sum_k c_k w_k`` over the unit working rows (``r @ c = q.T @
+        a``); with the dual basis ``inv(r) @ q.T``, ``row`` lies ``c_k / ||inv(r)[k]||`` from
+        the others once ``w_k`` leaves. Only ``c_k > 0`` qualifies: ``w_k`` then turns slack
+        along the step ``row`` blocks, where ``c_k < 0`` (a slab's far side) breaks it (Gill
+        and Wong 2015, Result 3.3(b); qpOASES's ratio test (16) is one-signed too). The
+        farthest, keeping the rows best separated, is taken if ``_raises_rank`` accepts it.
+        """
+        coefficients = scipy.linalg.solve_triangular(
+            self.r, self.q.T @ self.rows[row], check_finite=False
+        )
+        dual = scipy.linalg.solve_triangular(self.r, np.eye(self.r.shape[0]), check_finite=False)
+        distance = coefficients[positions] / _row_norms(dual[positions])
+        best = int(np.argmax(distance))
+        return int(positions[best]) if _raises_rank(distance[best]) else None
 
     def insert(self, row: int) -> None:
         """Append row ``row`` of ``A`` to the working rows."""
@@ -1007,6 +1092,14 @@ class _WorkingBasis:
         q, r = _qr_delete(self.q, self.r, position, which="col", check_finite=False)
         k = r.shape[1]
         self.q, self.r = q[:, :k], r[:k]
+
+
+def _row_norms(matrix: NDArray) -> NDArray:
+    """The Euclidean norm of each row of ``matrix``, scaled by a power of two first, as LAPACK's
+    ``xNRM2`` scales, so a finite row whose squares overflow keeps its finite norm."""
+    exponent = np.frexp(np.max(np.abs(matrix), axis=1, initial=0.0))[1]
+    scaled = np.ldexp(matrix, -exponent[:, None])
+    return np.ldexp(np.sqrt(np.einsum("ij,ij->i", scaled, scaled)), exponent)
 
 
 class _CycleGuard:
@@ -1053,10 +1146,7 @@ class _CycleGuard:
         if not _is_feasible(self.A, beta, self.b, self.tol, abs_A=self.abs_A):
             return
         self.least_index = True
-        # Binding is the feasibility test's band read from above: slack within ``tol``
-        # plus the dot product's rounding, in the same relative units.
-        slack = _feasibility_slack(self.A[active], beta, self.b[active], abs_A=self.abs_A[active])
-        loose = np.flatnonzero(slack > self.tol + _roundoff_tolerance(len(beta)))
+        loose = _loose_rows(self.A, beta, self.b, active, self.abs_A, self.tol)
         for position in loose[::-1].tolist():
             active.pop(position)
             basis.delete(position)
@@ -1066,6 +1156,11 @@ class _CycleGuard:
         rounding bound (Higham 2002, section 3.1), both in one power of two. A cycle leaves the
         objective unchanged; a working set met again after the objective rose (a warm start
         whose rows were not tight) is not one."""
+        return self._change(earlier, beta) == 0.0
+
+    def _change(self, earlier: NDArray, beta: NDArray) -> float:
+        """The objective at ``beta`` less that at ``earlier``, in one power of two, or zero
+        where it is within twice either's rounding bound."""
         x_exponent = max(_exponent(earlier), _exponent(beta))
         quadratic = 2 * x_exponent + self.h_exponent
         linear = x_exponent + self.g_exponent
@@ -1082,12 +1177,63 @@ class _CycleGuard:
                 + np.ldexp(float(np.abs(self.g) @ np.abs(x)), linear - top)
             )
         rounding = 2.0 * gamma(len(beta) + 2) * max(magnitudes)
-        return bool(abs(values[1] - values[0]) <= rounding)
+        change = values[1] - values[0]
+        return 0.0 if abs(change) <= rounding else float(change)
+
+    def descended(self, earlier: NDArray, beta: NDArray) -> bool:
+        """Whether the objective at ``beta`` is below that at ``earlier`` past their rounding."""
+        return self._change(earlier, beta) < 0.0
 
 
 def _exponent(values: NDArray) -> int:
     """The power of two that scales ``values``' largest magnitude into [0.5, 1)."""
     return int(np.frexp(float(np.max(np.abs(values), initial=0.0)))[1])
+
+
+def _line_minimum(cycles: _CycleGuard, beta: NDArray, step: NDArray) -> float:
+    """The step length ``alpha* = (g - H beta) @ step / step @ H @ step`` that minimizes the
+    objective along ``step``, when it is below one, else ``1.0``.
+
+    Every term is formed in powers of two scaled out of ``H``, ``g`` (the guard's copies),
+    ``beta`` and ``step``, and the quotient of their mantissas carries the exponent, so a
+    finite problem near the exponent range cannot overflow it. Zero or negative curvature
+    reads as no minimum before the end.
+    """
+    s_exponent, x_exponent = _exponent(step), _exponent(beta)
+    s = np.ldexp(step, -s_exponent)
+    hs = cycles.H @ s
+    curvature = float(s @ hs)
+    if not curvature > 0.0:
+        return 1.0
+    linear = cycles.g_exponent - cycles.h_exponent
+    top = max(linear, x_exponent)
+    slope = np.ldexp(float(cycles.g @ s), linear - top) - np.ldexp(
+        float(np.ldexp(beta, -x_exponent) @ hs), x_exponent - top
+    )
+    if not slope > 0.0:
+        return 0.0
+    slope_mantissa, slope_exponent = math.frexp(float(slope))
+    curvature_mantissa, curvature_exponent = math.frexp(curvature)
+    exponent = slope_exponent - curvature_exponent + top - s_exponent
+    # The mantissas' quotient lies in (1/2, 2), so from 2**2 up alpha is at least 1.
+    if exponent >= 2:
+        return 1.0
+    return min(math.ldexp(slope_mantissa / curvature_mantissa, exponent), 1.0)
+
+
+def _beyond_return(beta: NDArray, step: NDArray, alpha: float, tol: float) -> bool:
+    """Whether the full step reaches so far past ``beta + alpha * step`` that coming back
+    cannot hold the feasibility band: a point ``reach`` times larger carries ``u * reach`` of
+    rounding, in the units of the iterates around it, against ``tol``. Only the coordinates
+    the step moves count, so a large coordinate it leaves alone cannot hide the reach."""
+    moved = step != 0.0
+    if not np.any(moved):
+        return False
+    far = float(np.max(np.abs(beta[moved] + step[moved])))
+    near = max(
+        float(np.max(np.abs(beta[moved]))), float(np.max(np.abs(beta[moved] + alpha * step[moved])))
+    )
+    return far * UNIT_ROUNDOFF > tol * near
 
 
 def _zero_block_faces(
@@ -1097,6 +1243,7 @@ def _zero_block_faces(
     active: list[int],
     blocks: _ConstraintBlocks,
     full_rank: dict[tuple[int, ...], bool],
+    zero_meets: NDArray,
 ) -> NDArray:
     """Construct the exact zero point of each block on a homogeneous zero face.
 
@@ -1106,14 +1253,16 @@ def _zero_block_faces(
     block and primal slack, measured relative to it, reads as violated, up to ``-1``. ``A_eq``
     holds the normalized working rows in ``active`` order, ``full_rank`` caches the rank
     decision by row tuple, and only blocks with at least as many working rows as coefficients
-    are examined.
+    are examined. ``zero_meets[j]`` says zero meets every row of block ``j`` (``b <= 0`` there);
+    elsewhere the zero point is not a move the loop may make, since a warm working row that does
+    not bind can put it outside the other rows, and the saddle step goes through the ratio test.
     """
     if len(active) < blocks.least_width:
         # No block has as many working rows as coefficients.
         return beta
     labels = blocks.row_label[active]
     counts = np.bincount(labels[labels >= 0], minlength=blocks.width.size)
-    for j in np.flatnonzero(counts >= blocks.width):
+    for j in np.flatnonzero((counts >= blocks.width) & zero_meets):
         block_cols = blocks.columns[j]
         local = np.flatnonzero(labels == j)
         rows = tuple(active[k] for k in local)
@@ -1237,10 +1386,20 @@ def solve_constrained_qp(
 
     The working rows stay linearly independent (Nocedal and Wright 2006,
     section 16.5): the ratio test takes the least step among rows that raise
-    the working rank (_WorkingBasis), ties to the lowest index. Each block
-    whose homogeneous working rows have full column rank is set to its exact
-    zero point (_zero_block_faces), and the certificate's multipliers are
-    fitted in the certificate's own units (_stationarity_certificate).
+    the working rank (_WorkingBasis), ties to the lowest index. A row the step
+    breaks that the rank cutoff calls dependent blocks by replacing a working
+    row: one that does not bind (Gill and Wong 2015, Result 3.5), else one of
+    the right sign while the objective falls (qpOASES's exchange, Ferreau et
+    al. 2014, section 2.2), else it joins them where matrix_rank's rule counts
+    it independent. A step toward warm rows that do not bind, which would
+    reach too far past the objective's minimum along it to come back within
+    tol, stops at that minimum, where they leave the working set (Gill and
+    Wong 2015, section 3). A solve that leaves the plain loop this way and
+    fails is solved again on the plain loop (_solve_qp). Each block whose
+    homogeneous working rows have full column rank, and whose rows zero meets,
+    is set to its exact zero point (_zero_block_faces), and the certificate's
+    multipliers are fitted in the certificate's own units
+    (_stationarity_certificate).
 
     A failed face certificate or an infeasible step with no independent
     blocker switches the equality subproblem to coordinate null-space form.
@@ -1248,8 +1407,8 @@ def solve_constrained_qp(
     afterwards; changed faces try their ordinary solve first. The complete
     original certificate still decides convergence.
 
-    active_set_init supplies a warm active set; a row dependent on those
-    before it is left out. beta_start is a point the caller knows meets the
+    active_set_init supplies a warm active set, whose rows need not bind at
+    the start; a row dependent on those before it is left out. beta_start is a point the caller knows meets the
     rows: the loop starts from it, as the primal active-set method assumes
     (Nocedal and Wright 2006, Algorithm 16.3), instead of from the repair of
     the unconstrained optimum (_project_feasible), which need not reach the
@@ -1259,6 +1418,70 @@ def solve_constrained_qp(
     _decomposition is likewise decompose_gram of H's symmetric part.
     Result rank metadata describes the shared H decomposition; no ridge is
     added.
+    """
+    departed: list[bool] = []
+    first = _solve_qp(
+        H,
+        g,
+        A,
+        b,
+        active_set_init,
+        max_iter,
+        tol,
+        beta_start,
+        _trace_run,
+        _structure,
+        _decomposition,
+        conservative=False,
+        departed=departed,
+    )
+    if first.converged or not departed:
+        return first
+    # The warm-row and nearly-dependent-row moves gain far more solves than they lose, but a
+    # degenerate path can still lose one the plain loop certifies. As qpOASES recedes to a safe
+    # start when a warm start fails (Ferreau et al. 2014, section 3.12), the plain loop then
+    # solves from the same start; the result reports both attempts' iterations.
+    plain = _solve_qp(
+        H,
+        g,
+        A,
+        b,
+        active_set_init,
+        max_iter,
+        tol,
+        beta_start,
+        _trace_run,
+        _structure,
+        _decomposition,
+        conservative=True,
+        departed=[],
+    )
+    best = plain if plain.converged else first
+    return replace(best, n_iter=first.n_iter + plain.n_iter)
+
+
+def _solve_qp(
+    H: NDArray,
+    g: NDArray,
+    A: NDArray,
+    b: NDArray,
+    active_set_init: list[int] | None,
+    max_iter: int,
+    tol: float,
+    beta_start: NDArray | None,
+    _trace_run: TraceRun | None,
+    _structure: _ConstraintStructure | None,
+    _decomposition: RankDecomposition | None,
+    *,
+    conservative: bool,
+    departed: list[bool],
+) -> QPResult:
+    """The active-set loop of ``solve_constrained_qp``.
+
+    ``conservative`` turns off the moves for warm rows that do not bind and for rows the
+    rank cutoff calls dependent, leaving the plain loop (Nocedal and Wright 2006, Algorithm
+    16.3, with the rank filter and its recoveries). ``departed`` gains an entry when a solve
+    leaves that loop's path, so its caller knows a plain solve could differ.
     """
     # Checked at the public boundary rather than at each use: every predicate
     # below reads ``tol``, and a vacuous one is not detectable from the result.
@@ -1374,6 +1597,21 @@ def solve_constrained_qp(
         beta = np.array(beta_start, dtype=float)
     else:
         beta = _project_feasible(beta_unc, A, b, tol, structure=structure)
+    # The warm rows that do not bind at the start: a working row need not bind (Gill and
+    # Wong 2015, section 2), and a step moves these until they do. A row the ratio test adds
+    # binds there, and one on a face the loop reaches binds, so their later slack is rounding
+    # and they never count. Cold solves have none.
+    nonbinding = (
+        {active[k] for k in _loose_rows(A, beta, b, active, abs_A, tol)}
+        if active and not conservative
+        else set()
+    )
+    # Where a row last replaced a binding row since the last full step. The next such exchange
+    # needs a lower objective, past its rounding (_CycleGuard), so the working sets of those
+    # exchanges never repeat: two nearly dependent rows could otherwise replace each other
+    # at a zero step indefinitely.
+    swap_point: NDArray | None = None
+    rank_floor = _RANK_CUTOFF_MARGIN * p * _EPS
 
     # Resolved once: the hot loop must not pay a per-row or per-iteration
     # attribute lookup for a seam that is off in every production call.
@@ -1393,6 +1631,14 @@ def solve_constrained_qp(
     direct_solves = 0
     blocks = structure.blocks
     block_zero_face: dict[tuple[int, ...], bool] = {}
+    # Zero meets a row exactly when ``b_i <= 0``. The exact zero face below is a jump, not a
+    # step, so it is taken only where zero meets the rows it could break.
+    zero_meets = np.ones(blocks.width.size, dtype=bool)
+    if not conservative:
+        zero_meets[blocks.row_label[(b > 0.0) & (blocks.row_label >= 0)]] = False
+    zero_meets_all = conservative or bool(np.all(b <= 0.0))
+    if nonbinding or not zero_meets_all:
+        departed.append(True)
     # Whether ``beta`` minimizes on the current face (previous iteration took
     # its full step and kept the active set). The exact next step is then zero
     # (Nocedal and Wright 2006, Algorithm 16.3); in floating point it is the
@@ -1451,7 +1697,7 @@ def solve_constrained_qp(
 
             n_eq = len(active)
             zero_face = False
-            if n_eq >= p and np.all(b[active] == 0.0):
+            if n_eq >= p and zero_meets_all and np.all(b[active] == 0.0):
                 # A full-column-rank homogeneous active face is exactly {0}.
                 # Construct that point rather than a cancellation residue from
                 # beta + step. Check the original bounds: normalization must
@@ -1461,7 +1707,7 @@ def solve_constrained_qp(
                     zero_face_cache[key] = decompose_factor(A_eq).rank == p
                 zero_face = zero_face_cache[key]
             if not zero_face:
-                beta = _zero_block_faces(beta, A_eq, b, active, blocks, block_zero_face)
+                beta = _zero_block_faces(beta, A_eq, b, active, blocks, block_zero_face, zero_meets)
             if zero_face:
                 beta = np.zeros_like(beta)
                 step = np.zeros_like(beta)
@@ -1483,7 +1729,7 @@ def solve_constrained_qp(
                     face_candidate = _coordinate_face_minimum(H_sym, g, A_eq, b_eq)
                     if face_candidate is not None:
                         face_candidate = _zero_block_faces(
-                            face_candidate, A_eq, b, active, blocks, block_zero_face
+                            face_candidate, A_eq, b, active, blocks, block_zero_face, zero_meets
                         )
                         step = face_candidate - beta
                 if (
@@ -1570,14 +1816,31 @@ def solve_constrained_qp(
         # Both tests use the per-row scale of the convergence test, so a row
         # ``_is_feasible`` accepts is never treated as violated.
         beta_new = beta + step if face_candidate is None else face_candidate
+        # A working row that does not bind puts ``beta`` off the face, so the step to the
+        # face's minimum need not descend all the way; taking it is the warm start. Where it
+        # would carry ``beta`` so far past the minimum along it that the way back cannot hold
+        # ``tol`` (_beyond_return), it stops at that minimum instead, where the rows that do
+        # not bind leave the working set (Gill and Wong 2015, section 3, the step
+        # min(alpha*, alpha_F), and Result 3.2).
+        off_face = not nonbinding.isdisjoint(active)
+        alpha_line = _line_minimum(cycles, beta, step) if off_face else 1.0
+        if alpha_line < 1.0 and not _beyond_return(beta, step, alpha_line, tol):
+            alpha_line = 1.0
+        if alpha_line < 1.0:
+            beta_new = beta + alpha_line * step
 
-        if _is_feasible(A, beta_new, b, tol, abs_A=abs_A):
+        if alpha_line < 1.0 and _is_feasible(A, beta_new, b, tol, abs_A=abs_A):
+            beta = beta_new
+            _release_nonbinding(A, beta, b, active, abs_A, tol, nonbinding, basis, cycles)
+        elif _is_feasible(A, beta_new, b, tol, abs_A=abs_A):
             # Full step is feasible
             beta = beta_new
             at_face_minimum = True
+            nonbinding.clear()
+            swap_point = None
         else:
             # Find blocking constraint (first to be violated along step)
-            alpha_min = 1.0
+            alpha_min = alpha_line
             blocking = -1
 
             actions = _constraint_actions(A, beta, b, abs_A, step)
@@ -1593,13 +1856,67 @@ def solve_constrained_qp(
             alphas = (products[candidates] - bounds[candidates]) / -raw_step[candidates]
             ahead = alphas < alpha_min
             candidates, alphas = candidates[ahead], alphas[ahead]
-            # The least step among rows that raise the working rank, ties to
-            # the lowest index: rows are tested in that order until one does.
+            # The least step among rows that raise the working rank, ties to the lowest
+            # index: rows are tested in that order until one does.
+            skipped = []
             for k in np.lexsort((candidates, alphas)):
                 if basis.raises_rank(int(candidates[k])):
                     alpha_min = float(alphas[k])
                     blocking = int(candidates[k])
                     break
+                skipped.append(k)
+            # A skipped row the step breaks, in ``_is_feasible``'s band, blocks. It moves either
+            # through a working row that does not bind (a warm set's rows need not), which it
+            # replaces (Gill and Wong, Math. Prog. Comp. 7, 2015, section 3, Result 3.5), or
+            # because ``_raises_rank`` calls dependent a row nearly parallel to binding rows,
+            # which in exact arithmetic is independent. qpOASES decides dependence at a
+            # tolerance and then exchanges a working row (Ferreau et al., Math. Prog. Comp. 6,
+            # 2014, section 2.2, step 6(b), and section 3.9), and so does the loop, while the
+            # objective has fallen since its last such exchange; failing an exchange, the row
+            # is added where ``matrix_rank``'s rule counts it independent. Removing a non-
+            # binding row bounds those exchanges, the falling objective bounds the others, and
+            # an added row raises the rank. A skipped row the step leaves within the band moved
+            # only by rounding, and one an inaccurate face step breaks is first given the
+            # face's recovered step, as a step with no independent blocker is below.
+            exchanged = None
+            if skipped and not conservative:
+                rows = candidates[skipped]
+                reached = beta + alpha_min * step
+                band = -tol - _roundoff_tolerance(p)
+                slack = _feasibility_slack(A[rows], reached, b[rows], abs_A=abs_A[rows])
+                # A row already broken at ``beta`` (an infeasible iterate) is not this step's
+                # blocker: its ratio is negative, and the step would run backwards.
+                held = _feasibility_slack(A[rows], beta, b[rows], abs_A=abs_A[rows]) >= band
+                broken = (slack < band) & held
+                if np.any(broken):
+                    departed.append(True)
+                if np.any(broken) and not kkt_may_be_singular and coordinate_face != tuple(active):
+                    coordinate_face = tuple(active)
+                    continue
+                if np.any(broken):
+                    k = skipped[int(np.argmax(broken))]
+                    row = int(candidates[k])
+                    loose = _still_nonbinding(A, beta, b, active, abs_A, tol, nonbinding)
+                    exchanged = basis.exchange(row, loose) if loose.size else None
+                    meets = beta + float(alphas[k]) * step
+                    if exchanged is None and (
+                        swap_point is None or cycles.descended(swap_point, meets)
+                    ):
+                        exchanged = basis.exchange(row, np.arange(len(active)))
+                        if exchanged is not None:
+                            swap_point = meets
+                    if exchanged is None and basis.rank_counts(row, rank_floor):
+                        # No row may leave for it, yet the step breaks it. A binding working
+                        # row has ``a_w @ step = 0``, so ``a @ step < 0`` puts it outside their
+                        # span (Nocedal and Wright 2006, section 16.5), and it is added as a
+                        # blocking row is, once ``matrix_rank`` counts it independent
+                        # (_WorkingBasis.rank_counts). ``_raises_rank`` is a preference for
+                        # well-separated rows, which an exchange keeps where one exists.
+                        alpha_min = float(alphas[k])
+                        blocking = row
+                    if exchanged is not None:
+                        alpha_min = float(alphas[k])
+                        blocking = int(candidates[k])
 
             if tracing:
                 # After selection, before `active` is mutated, so the recorded
@@ -1623,12 +1940,22 @@ def solve_constrained_qp(
 
             if blocking >= 0:
                 beta = beta + alpha_min * step
+                if exchanged is not None:
+                    active.pop(exchanged)
+                    basis.delete(exchanged)
                 active.append(blocking)
                 basis.insert(blocking)
+                nonbinding.discard(blocking)
                 cycles.note(active, beta, basis)
             else:
                 if active and not kkt_may_be_singular and coordinate_face != tuple(active):
                     coordinate_face = tuple(active)
+                    continue
+                if off_face:
+                    # The face is reached only through working rows that do not bind, and
+                    # no row resolves the way there: they leave, as at the minimum along
+                    # the step, and the binding rows' face is solved from ``beta``.
+                    _release_nonbinding(A, beta, b, active, abs_A, tol, nonbinding, basis, cycles)
                     continue
                 # No row resolves the step, yet it breaks one: once the face's recovery has
                 # run, the step is below every row's resolution, so ``beta`` is the face's
