@@ -1023,7 +1023,12 @@ class _CycleGuard:
     """
 
     def __init__(self, H: NDArray, g: NDArray) -> None:
-        self.H, self.g = H, g
+        # The objective's two terms are compared in powers of two scaled out of H, g and the
+        # points, so a finite problem near the exponent range cannot overflow the comparison.
+        self.h_exponent = _exponent(H)
+        self.g_exponent = _exponent(g)
+        self.H = np.ldexp(H, -self.h_exponent)
+        self.g = np.ldexp(g, -self.g_exponent)
         self.least_index = False
         # Each working set met, as the order-free set of its rows, with the point it was met at.
         self.visited: dict[frozenset[int], NDArray] = {}
@@ -1039,22 +1044,34 @@ class _CycleGuard:
         key = frozenset(active)
         earlier = self.visited.get(key)
         self.visited[key] = beta
-        if earlier is not None and self._value(beta) >= self._value(earlier) - self._rounding(
-            beta, earlier
-        ):
+        if earlier is not None and not self._fell(earlier, beta):
             self.least_index = True
 
-    def _value(self, beta: NDArray) -> float:
-        return 0.5 * float(beta @ (self.H @ beta)) - float(self.g @ beta)
+    def _fell(self, earlier: NDArray, beta: NDArray) -> bool:
+        """Whether the objective at ``beta`` is below that at ``earlier`` by more than twice
+        either's rounding bound (Higham 2002, section 3.1), both in one power of two."""
+        x_exponent = max(_exponent(earlier), _exponent(beta))
+        quadratic = 2 * x_exponent + self.h_exponent
+        linear = x_exponent + self.g_exponent
+        top = max(quadratic, linear)
+        values, magnitudes = [], []
+        for point in (earlier, beta):
+            x = np.ldexp(point, -x_exponent)
+            values.append(
+                np.ldexp(0.5 * float(x @ (self.H @ x)), quadratic - top)
+                - np.ldexp(float(self.g @ x), linear - top)
+            )
+            magnitudes.append(
+                np.ldexp(0.5 * float(np.abs(x) @ (np.abs(self.H) @ np.abs(x))), quadratic - top)
+                + np.ldexp(float(np.abs(self.g) @ np.abs(x)), linear - top)
+            )
+        rounding = 2.0 * gamma(len(beta) + 2) * max(magnitudes)
+        return bool(values[1] < values[0] - rounding)
 
-    def _rounding(self, *points: NDArray) -> float:
-        """Twice the rounding bound of either point's objective (Higham 2002, section 3.1)."""
-        magnitude = max(
-            0.5 * float(np.abs(x) @ (np.abs(self.H) @ np.abs(x)))
-            + float(np.abs(self.g) @ np.abs(x))
-            for x in points
-        )
-        return 2.0 * gamma(len(points[0]) + 2) * magnitude
+
+def _exponent(values: NDArray) -> int:
+    """The power of two that scales ``values``' largest magnitude into [0.5, 1)."""
+    return int(np.frexp(float(np.max(np.abs(values), initial=0.0)))[1])
 
 
 def _zero_block_faces(

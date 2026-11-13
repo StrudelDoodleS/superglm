@@ -3491,6 +3491,29 @@ class TestDegenerateCycle:
         scale = np.max(np.abs(cold.beta))
         assert np.max(np.abs(result.beta - cold.beta)) <= 1e-9 * scale
 
+    def test_the_cycle_check_holds_a_finite_problem_near_the_exponent_range(self):
+        """The guard compares objectives in powers of two scaled out of the problem.
+
+        ``H`` near 2**400 and ``g`` near 2**800 put ``beta' H beta`` past the float64 range
+        although every input and the optimum are finite. Master certifies this solve; the
+        guard's unscaled objective overflowed at the first release. The optimum scales as
+        ``beta(s) = s beta(1)``, so the solve at ``s`` must reach the scaled solve at 1.
+        """
+        A = np.array([[3.0, 3.0], [1.0, -1.0], [1.0, -1.0]])
+
+        def solve(s):
+            H = s * np.array([[2.0, 1.0], [1.0, 3.0]])
+            g = s * s * np.array([-3.0, -1.0])
+            b = s * np.array([-4.0, -2.0, 0.0])
+            return solve_constrained_qp(H, g, A, b, active_set_init=[1], beta_start=np.zeros(2))
+
+        s = 2.0**400
+        with np.errstate(over="raise", invalid="raise"):
+            result = solve(s)
+        unit = solve(1.0)
+        assert result.converged and unit.converged
+        assert np.max(np.abs(result.beta / s - unit.beta)) <= 1e-12 * np.max(np.abs(unit.beta))
+
 
 class TestCertificateRank:
     """The certificate decides full rank from its own inverse, and its SVD only otherwise."""
