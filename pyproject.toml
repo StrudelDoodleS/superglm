@@ -105,6 +105,8 @@ required-version = "==0.12.1"
 # which admits that release and nothing newer, listed with its advisories in
 # tests/test_supply_chain_governance.py; drop it once the window has passed it.
 exclude-newer = "7 days"
+# tornado 6.6.1 (uploaded 2026-11-09T21:09:22Z) fixes GHSA-5cjw-f85j-cv6r.
+exclude-newer-package = { tornado = "2026-11-09T21:10:00Z" }
 
 [build-system]
 requires = ["hatchling>=1.27"]
