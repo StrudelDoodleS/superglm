@@ -404,7 +404,8 @@ def summary(
         ),
     )
     _withhold_repaired_term_inference(coef_rows, shape_repaired_feature_names(model))
-    phi = res.phi
+    from superglm._weight_units import standard_errors
+
     se_dict: dict[str, np.ndarray] = {}
     se_raw_dict: dict[str, np.ndarray] = {}
     for g in model._groups:
@@ -426,8 +427,8 @@ def summary(
                     XtWX_inv_aug,
                     augmented_indices,
                 )
-                se_raw_dict[g.name] = np.sqrt(np.maximum(var_diag, 0.0))
-                se_dict[g.name] = np.sqrt(np.maximum(phi * var_diag, 0.0))
+                se_raw_dict[g.name] = standard_errors(var_diag, res, raw=True)
+                se_dict[g.name] = standard_errors(var_diag, res)
 
     data["standard_errors"] = {
         "coefficient_se": se_dict,

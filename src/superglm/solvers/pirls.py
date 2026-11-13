@@ -343,6 +343,13 @@ class PIRLSResult:
     # judgement when it was judged, else (unconverged) the latest that found
     # any, marked ``earlier``; else empty.
     truncated_directions: tuple = ()
+    # Retained rank/factor geometry uses 2**weight_exponent times the physical
+    # objective. Scalars above remain physical. solver_phi is the estimated
+    # dispersion in that unit (which cannot be recovered from an underflowed
+    # public phi); None means a known scale or the ordinary, unscaled route.
+    # Class defaults also restore results saved before these fields existed.
+    weight_exponent: int = 0
+    solver_phi: float | None = None
 
     def __setattr__(self, name: str, value: object) -> None:
         if self.__dict__.get("_publication_locked", False):

@@ -23,6 +23,7 @@ from superglm._group_matrix._group_matrix_tabmat import (
     _is_raw_spline_tabmat_centering_candidate,
 )
 from superglm._utils import weighted_row_sum
+from superglm._weight_units import objective_weight_exponent, scale_penalties
 from superglm.distributions import (
     Binomial,
     Distribution,
@@ -226,6 +227,7 @@ def fit_irls_direct(
     separation: str = "warn",
     *,
     weight_semantics: str,
+    _weight_unit: bool = False,
     _initial_data_reuse: _InitialDataReuse | None = None,
     _raw_moment_policy: TabmatCenteringState | None = None,
     _fisher_data_reuse: _FisherDataReuse | None = None,
@@ -282,6 +284,7 @@ def fit_irls_direct(
             trace_purpose=trace_purpose,
             separation=separation,
             weight_semantics=weight_semantics,
+            _weight_unit=_weight_unit,
             _initial_data_reuse=_initial_data_reuse,
             _raw_moment_policy=_raw_moment_policy,
             _fisher_data_reuse=_fisher_data_reuse,
@@ -567,7 +570,7 @@ class _IRLSDirectFitFields:
         # _setup_design
         " dm n p gms objective_merit_scale structured_decision _use_structured step"
         " _direct_fallback_reason _state_center beta intercept _start_lowered S"
-        " _penalty_curvature"
+        " _penalty_curvature _physical_weights weight_exponent"
         # _setup_routes
         " qp curvature"
         # _setup_systems
@@ -768,6 +771,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
     separation: str = "warn"
     _: KW_ONLY
     weight_semantics: str
+    _weight_unit: bool = False
     _initial_data_reuse: _InitialDataReuse | None = None
     _raw_moment_policy: TabmatCenteringState | None = None
     _fisher_data_reuse: _FisherDataReuse | None = None
@@ -853,8 +857,42 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             raise ValueError("weights must match the design row count")
         if not np.all(np.isfinite(weights)) or np.any(weights < 0.0):
             raise ValueError("weights must be finite and non-negative")
-        if not np.any(weights > 0.0):
+        # REML and moment-reuse callers retain their existing units. Only the
+        # ordinary model fit opts in, and it discards the returned inverse.
+        use_weight_unit = (
+            self._weight_unit
+            and self.cache_out is None
+            and not self.return_xtwx
+            and not self._return_working_system
+            and self.S_override is None
+            and self._deviance_init is None
+            and self._initial_data_reuse is None
+            and self._fisher_data_reuse is None
+        )
+        if use_weight_unit:
+            w_max = float(np.max(weights, initial=0.0))
+            has_positive_weight = w_max > 0.0
+        else:
+            has_positive_weight = bool(np.any(weights > 0.0))
+        if not has_positive_weight:
             raise ValueError("weights must contain at least one positive value")
+        self._physical_weights = weights
+        self.weight_exponent = 0
+        if use_weight_unit:
+            self.weight_exponent = objective_weight_exponent(
+                w_max,
+                gms,
+                groups,
+                self.lambda2,
+                self.reml_penalties,
+                response=self.y,
+                offset=offset,
+                family=family,
+                link=link,
+            )
+            if self.weight_exponent:
+                weights = np.ldexp(weights, self.weight_exponent)
+                self.lambda2 = scale_penalties(self.lambda2, self.weight_exponent)
         objective_merit_scale = _irls_objective_scale(
             y=self.y,
             weights=weights,
@@ -1764,7 +1802,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         if _compute_fit_statistics and not getattr(family, "scale_known", True):
             pearson_sum = pearson_chi2(distribution=family, y=y, mu=self.mu, sample_weight=weights)
             df_resid = pearson_residual_degrees_of_freedom(
-                weights,
+                self._physical_weights,
                 p_eff,
                 weight_semantics=self.weight_semantics,
             )
@@ -1780,16 +1818,47 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             p_eff = float("nan")
             phi = float("nan")
 
+        exponent = self.weight_exponent
+        solver_phi = phi if exponent and not getattr(family, "scale_known", True) else None
+        deviance, log_det_H = self.dev, final.log_det_H
+        iteration_log = self.recorder.iteration_log if self.record_diagnostics else None
+        if exponent:
+            deviance = float(np.ldexp(deviance, -exponent))
+            if solver_phi is not None:
+                phi = float(np.ldexp(phi, -exponent))
+            if log_det_H is not None:
+                log_det_H -= final.reml_hessian_rank * exponent * math.log(2.0)
+            if iteration_log is not None:
+                iteration_log = [
+                    replace(
+                        row,
+                        deviance=float(np.ldexp(row.deviance, -exponent)),
+                        w_min=float(np.ldexp(row.w_min, -exponent)),
+                        w_max=float(np.ldexp(row.w_max, -exponent)),
+                        raw_w_min=(
+                            None
+                            if row.raw_w_min is None
+                            else float(np.ldexp(row.raw_w_min, -exponent))
+                        ),
+                        raw_w_max=(
+                            None
+                            if row.raw_w_max is None
+                            else float(np.ldexp(row.raw_w_max, -exponent))
+                        ),
+                    )
+                    for row in iteration_log
+                ]
+
         result = PIRLSResult(
             beta=self.beta,
             intercept=self.intercept,
             n_iter=it + 1,
-            deviance=self.dev,
+            deviance=deviance,
             converged=self.converged,
             phi=phi,
             effective_df=p_eff,
-            iteration_log=self.recorder.iteration_log if self.record_diagnostics else None,
-            log_det_H=final.log_det_H,
+            iteration_log=iteration_log,
+            log_det_H=log_det_H,
             reml_hessian_rank=final.reml_hessian_rank,
             reml_geometry=final.reml_geometry_summary,
             reml_slope_decomposition=final.retained_reml_decomposition,
@@ -1818,6 +1887,8 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             mean_space_boundary_unresolved=(
                 mean_space is not None and mean_space.truncated_boundary
             ),
+            weight_exponent=exponent,
+            solver_phi=solver_phi,
         )
 
         if self.return_xtwx:

@@ -234,6 +234,21 @@ def feature_se_from_cov(
     from superglm.features.polynomial import Polynomial
     from superglm.features.random_effect import RandomEffect
     from superglm.features.spline import _SplineBase
+    from superglm.inference.covariance import BinaryScaledCovariance
+
+    if isinstance(Cov_active, BinaryScaledCovariance):
+        se = feature_se_from_cov(
+            name,
+            Cov_active.base,
+            active_groups,
+            result,
+            groups,
+            specs,
+            interaction_specs,
+            n_points=n_points,
+            center=center,
+        )
+        return np.ldexp(se, Cov_active.exponent // 2)
 
     feature_groups = [g for g in groups if g.feature_name == name]
     spec = specs.get(name) or interaction_specs.get(name)
@@ -411,6 +426,14 @@ def piecewise_knot_covariance(
     SEs cannot reproduce.  Returns ``None`` when no subgroup is active.
     """
     spec = specs[name]
+    from superglm.inference.covariance import BinaryScaledCovariance
+
+    if isinstance(Cov_active, BinaryScaledCovariance):
+        covariance = piecewise_knot_covariance(name, Cov_active.base, active_groups, specs)
+        if covariance is None:
+            return None
+        with np.errstate(over="ignore"):
+            return np.ldexp(covariance, Cov_active.exponent)
     active_subs = [ag for ag in active_groups if ag.feature_name == name]
     if not active_subs:
         return None
@@ -474,6 +497,11 @@ def simultaneous_band_and_critical_value(
         )
 
     Cov_active, active_groups = covariance_fn()
+    from superglm.inference.covariance import BinaryScaledCovariance
+
+    exponent = 0
+    if isinstance(Cov_active, BinaryScaledCovariance):
+        Cov_active, exponent = Cov_active.base, Cov_active.exponent
     beta = result.beta
     feature_groups = [g for g in groups if g.feature_name == feature]
 
@@ -533,6 +561,9 @@ def simultaneous_band_and_critical_value(
     c_sim = float(np.quantile(T_sim, 1.0 - alpha))
 
     z = norm.ppf(1.0 - alpha / 2.0)
+
+    if exponent:
+        se = np.ldexp(se, exponent // 2)
 
     bands = pd.DataFrame(
         {

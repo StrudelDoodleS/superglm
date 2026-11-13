@@ -452,12 +452,15 @@ def _gap_variances(
     which their fit fingerprints decide, the curve's checked against ``X``,
     the frame the free fit read.
     """
-    phi = float(free_model.result.phi)
+    from superglm._weight_units import covariance_exponent, solver_dispersion
+
+    free_solver = free_model.result
+    phi = float(solver_dispersion(free_solver))
     if not phi > 0.0 or _term_covariance(free_model, name) is None:
         # No dispersion, or a selection penalty that cannot be lifted removed
         # the free term: there is no free variance to judge by.
         return np.zeros(len(free_rows)), None
-    if not float(model.result.phi) > 0.0:
+    if not float(solver_dispersion(model.result)) > 0.0:
         curve_rows = None
     if curve_rows is not None:
         fingerprints = [getattr(fit, "_fit_geometry_guard", None) for fit in (free_model, model)]
@@ -483,6 +486,11 @@ def _gap_variances(
             return None, _UNMEASURED
         # The curve's influence goes onto the free fit's rows by this ratio.
         curve_side, ratio = found, free_side.spread / found.spread
+        exponent = getattr(model.result, "weight_exponent", 0) - getattr(
+            free_solver, "weight_exponent", 0
+        )
+        if exponent:
+            ratio = np.ldexp(ratio, exponent)
     informative = free_side.fisher > 0.0
     root = np.sqrt(free_side.fisher[informative])
     variances = np.empty(len(free_rows))
@@ -491,6 +499,9 @@ def _gap_variances(
         if curve_side is not None and ratio is not None and curve_rows is not None:
             moved = moved - ratio * curve_side.influence(curve_rows[i])
         variances[i] = phi * float(np.sum((root * moved[informative]) ** 2))
+        if covariance_exponent(free_solver):
+            with np.errstate(over="ignore"):
+                variances[i] = np.ldexp(variances[i], covariance_exponent(free_solver))
         if not np.isfinite(variances[i]):
             return None, _UNMEASURED
     return variances, None
@@ -703,6 +714,10 @@ def _influence(model, name: str) -> _Influence | str:
         if model._fit_weights is None
         else np.asarray(model._fit_weights, dtype=np.float64)
     )
+    from superglm._weight_units import solver_dispersion, solver_weights
+    from superglm.inference.covariance import BinaryScaledCovariance
+
+    prior = solver_weights(prior, solver)
     fisher = fisher_working_weights(
         distribution=distribution, link=link, mu=mu, eta=eta, sample_weight=prior
     )
@@ -731,7 +746,15 @@ def _influence(model, name: str) -> _Influence | str:
         curvature, data_gram = fisher, None
         covariance, active = model._coef_covariance
         X, _active, _columns = _grouped_active_state(model, {group.name for group in active})
-        scale = float(model.result.phi)
+        scale = float(solver_dispersion(solver))
+        if isinstance(covariance, BinaryScaledCovariance):
+            from superglm._weight_units import covariance_exponent
+
+            # The wrapper can carry part of phi as well as the objective unit.
+            # Divide its base by the same dispersion mantissa, not all of phi.
+            dispersion_exponent = covariance.exponent - covariance_exponent(solver)
+            scale = float(np.ldexp(scale, -dispersion_exponent))
+            covariance = covariance.base
         if getattr(solver.rank_info, "face", None) is not None:
             # The response moves the fit along its binding rows' face, so the
             # influence takes the face fit's inverse (``RankInfo.augmented_inverse``);

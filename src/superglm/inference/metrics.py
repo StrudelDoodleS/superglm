@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import math
 import re
 from functools import cache, cached_property, partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy.special import gammaln
 
 from superglm._utils import weighted_row_sum
-from superglm.distributions import weighted_log_likelihood
+from superglm._weight_units import (
+    dispersion_standard_deviation,
+    scale_penalties,
+    scaled_standard_errors,
+    solver_dispersion,
+    unit_log_likelihood,
+)
 from superglm.group_matrix import DesignMatrix
 from superglm.inference._metrics_design import (
     EvaluationDesign,
@@ -71,6 +78,7 @@ from superglm.solvers.working_rows import fisher_working_weights, pearson_chi2
 from superglm.types import GroupSlice
 
 if TYPE_CHECKING:
+    from superglm._frame import EagerFrame, FrameLike
     from superglm.model import SuperGLM
 
 
@@ -613,18 +621,70 @@ class ModelMetrics:
         return self._result.phi
 
     @cached_property
+    def _geometry_weight_exponent(self) -> int:
+        """Unit of this evaluation's geometry, which can differ from the fit's."""
+        from superglm._weight_units import evaluation_weight_exponent
+
+        exponent = self._result.weight_exponent
+        if not exponent or self._fit_geometry_matches:
+            return exponent
+        if np.max(self._weights, initial=0.0) >= 2.0**-512:
+            return 0
+        # A new evaluation may extrapolate far beyond the fit's columns.
+        # Read its existing bounded chunks only on the exceptional unit path;
+        # no observation-level matrix or transformed columns are retained.
+        columns = np.arange(len(self._result.beta), dtype=np.intp)
+        # This non-compact evaluation's frame was validated by predict().
+        frame = cast("FrameLike | EagerFrame", self._X)
+        design = EvaluationDesign(self._model, frame, columns)
+        eta, mu = self._working_eta_mu
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            moment_weights = fisher_working_weights(
+                distribution=self._family,
+                link=self._link,
+                mu=mu,
+                eta=eta,
+                sample_weight=self._weights,
+            )
+        return evaluation_weight_exponent(
+            self._weights,
+            self._result,
+            group_matrices=(design,),
+            response=self._y,
+            offset=self._offset,
+            mean=mu,
+            moment_weights=moment_weights,
+        )
+
+    @cached_property
+    def _geometry_prior_weights(self):
+        exponent = self._geometry_weight_exponent
+        return np.ldexp(self._weights, exponent) if exponent else self._weights
+
+    @cached_property
+    def _inference_unit_result(self):
+        """Transient view pairing the fit's dispersion with evaluation geometry."""
+        if self._geometry_weight_exponent == self._result.weight_exponent:
+            return self._result
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            **self._result.__dict__, _geometry_weight_exponent=self._geometry_weight_exponent
+        )
+
+    @cached_property
     def deviance(self) -> float:
         """Weighted residual deviance on this object's evaluation rows."""
         return weighted_row_sum(self._weights, self._family.deviance_unit, self._y, self._mu)
 
     @cached_property
     def log_likelihood(self) -> float:
-        return weighted_log_likelihood(
+        return unit_log_likelihood(
             self._family,
             self._y,
             self._mu,
             self._weights,
-            self.phi,
+            self._result,
             weight_semantics=self._weight_semantics,
             report_contract=not self._contract_checked,
         )
@@ -636,7 +696,7 @@ class ModelMetrics:
 
         return _compute_null_mu(
             self._y,
-            self._weights,
+            self._geometry_prior_weights,
             self._offset,
             self._family,
             self._link,
@@ -646,12 +706,12 @@ class ModelMetrics:
     @cached_property
     def null_log_likelihood(self) -> float:
         """Log-likelihood at the intercept-only (null) model."""
-        return weighted_log_likelihood(
+        return unit_log_likelihood(
             self._family,
             self._y,
             self._null_mu,
             self._weights,
-            self.phi,
+            self._result,
             weight_semantics=self._weight_semantics,
             report_contract=not self._contract_checked,
         )
@@ -665,6 +725,18 @@ class ModelMetrics:
         """1 - deviance / null_deviance. Analogous to R-squared."""
         from superglm._utils import _explained_deviance
 
+        if self._geometry_weight_exponent:
+            return _explained_deviance(
+                weighted_row_sum(
+                    self._geometry_prior_weights, self._family.deviance_unit, self._y, self._mu
+                ),
+                weighted_row_sum(
+                    self._geometry_prior_weights, self._family.deviance_unit, self._y, self._null_mu
+                ),
+                self._y,
+                self._null_mu,
+                self._geometry_prior_weights,
+            )
         return _explained_deviance(
             self.deviance,
             self.null_deviance,
@@ -757,6 +829,9 @@ class ModelMetrics:
 
         if kind == "deviance":
             d = family.deviance_unit(y, mu)
+            if self._geometry_weight_exponent:
+                residual = np.sign(y - mu) * np.sqrt(self._geometry_prior_weights * d)
+                return np.ldexp(residual, -(self._geometry_weight_exponent // 2))
             return np.sign(y - mu) * np.sqrt(w * d)
 
         if kind == "pearson":
@@ -804,6 +879,16 @@ class ModelMetrics:
         # marginal. A replicated row has the unit-weight marginal (CDFs below use w = 1); a prior
         # weight is part of the distribution (Gaussian variance, Gamma shape, count lattice).
         prior = self._weight_semantics == "prior"
+        phi = self.phi
+        unit_phi = self._result.solver_phi
+
+        def normal_cdf(residual, root):
+            with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+                standardized = residual / root
+            # The zero-dispersion limit at the mean, without a 0/0 intermediate.
+            standardized = np.where((root == 0.0) & (residual == 0.0), 0.0, standardized)
+            return norm.cdf(standardized)
+
         if isinstance(self._family, Binomial):
             # Binomial is contract-invariant here by necessity. The prior construction
             # `w Y ~ Binomial(w, mu)` lives on {0, 1/w, ..., 1}, but y is pinned to {0, 1}, so the
@@ -829,36 +914,84 @@ class ModelMetrics:
             b = nbinom.cdf(count, n=n_param, p=p_nb)
             u = rng.uniform(a, b)
         elif isinstance(self._family, Gamma):
-            shape = (w if prior else 1.0) / self.phi
-            scale = mu * self.phi / (w if prior else 1.0)
-            u = gamma_dist.cdf(y, a=shape, scale=scale)
+            if unit_phi is not None:
+                root = dispersion_standard_deviation(w if prior else np.ones_like(w), self._result)
+                normal = root < 2.0**-256
+                u = np.empty_like(y)
+                # At shape > 2**512 the normal-limit CDF's O(sqrt(phi))
+                # correction is far below binary64 rounding, including at mu.
+                u[normal] = normal_cdf((y[normal] - mu[normal]) / mu[normal], root[normal])
+                other = ~normal
+                if np.any(other):
+                    shape = (1.0 / root[other]) ** 2
+                    u[other] = gamma_dist.cdf(y[other] / mu[other] * shape, a=shape)
+            else:
+                shape = (w if prior else 1.0) / phi
+                scale = mu * phi / (w if prior else 1.0)
+                u = gamma_dist.cdf(y, a=shape, scale=scale)
         elif isinstance(self._family, Gaussian):
-            variance = self.phi / w if prior else np.full_like(y, self.phi)
-            u = norm.cdf(y, loc=mu, scale=np.sqrt(variance))
+            if unit_phi is not None:
+                sigma = dispersion_standard_deviation(w if prior else np.ones_like(w), self._result)
+                u = normal_cdf(y - mu, sigma)
+            else:
+                variance = phi / w if prior else np.full_like(y, phi)
+                sigma = np.sqrt(variance)
+                u = norm.cdf(y, loc=mu, scale=sigma)
         elif isinstance(self._family, Tweedie):
             # Tweedie p in (1,2): compound Poisson-Gamma.
             # With weights: lambda and scale both depend on w.
             p_tw = self._family.p
-            phi = self.phi
+            normal_rows = None
+            u = np.empty_like(y)
+            if unit_phi is not None:
+                w_eff = w if prior else np.ones_like(w)
+                with np.errstate(divide="ignore"):
+                    log_row_phi = (
+                        np.log(unit_phi)
+                        - self._result.weight_exponent * np.log(2.0)
+                        - np.log(w_eff)
+                    )
+                log_relative_variance = log_row_phi + (p_tw - 2.0) * np.log(mu)
+                normal_rows = log_relative_variance < -512 * np.log(2.0)
+                root = dispersion_standard_deviation(w_eff, self._result)
+                u[normal_rows] = normal_cdf(
+                    y[normal_rows] - mu[normal_rows],
+                    root[normal_rows] * np.power(mu[normal_rows], p_tw / 2.0),
+                )
+                # Evaluate the existing compound parameters in logarithmic
+                # units where no common physical phi/w can be represented.
+                other = ~normal_rows
+                lam = np.zeros_like(mu)
+                scale_tw = np.ones_like(mu)
+                with np.errstate(over="ignore"):
+                    lam[other] = np.exp(
+                        (2.0 - p_tw) * np.log(mu[other]) - np.log(2.0 - p_tw) - log_row_phi[other]
+                    )
+                    scale_tw[other] = np.exp(
+                        log_row_phi[other] + np.log(p_tw - 1.0) + (p_tw - 1.0) * np.log(mu[other])
+                    )
 
             # Weight-adjusted Poisson rate and compound Gamma parameters.  A
             # replicated row's marginal is the unit-weight one, so the
             # frequency contract evaluates the compound distribution at w = 1.
-            w_eff = w if prior else np.ones_like(w)
-            lam = w_eff * np.power(mu, 2 - p_tw) / ((2 - p_tw) * phi)
+            else:
+                w_eff = w if prior else np.ones_like(w)
+                lam = w_eff * np.power(mu, 2 - p_tw) / ((2 - p_tw) * phi)
+                scale_tw = phi * (p_tw - 1) * np.power(mu, p_tw - 1) / w_eff
             p_zero = np.exp(-lam)
             alpha_tw = (2 - p_tw) / (p_tw - 1)  # Gamma shape per claim
-            scale_tw = phi * (p_tw - 1) * np.power(mu, p_tw - 1) / w_eff
-
-            u = np.empty_like(y)
 
             # y = 0: jitter in [0, P(Y=0)]
             zero_mask = y == 0
+            if normal_rows is not None:
+                zero_mask = zero_mask & ~normal_rows
             if np.any(zero_mask):
                 u[zero_mask] = rng.uniform(0.0, p_zero[zero_mask])
 
             # y > 0: F(y) = P(Y=0) + sum_k P(N=k) * Gamma_CDF(y; k*alpha, scale)
             pos_mask = ~zero_mask
+            if normal_rows is not None:
+                pos_mask = pos_mask & ~normal_rows
             if np.any(pos_mask):
                 y_p = y[pos_mask]
                 lam_p = lam[pos_mask]
@@ -930,7 +1063,7 @@ class ModelMetrics:
                 link=self._link,
                 mu=mu,
                 eta=eta,
-                sample_weight=self._weights,
+                sample_weight=self._geometry_prior_weights,
             )
 
         uses_fitted_rank = self._working_weights_match_fit(W)
@@ -993,7 +1126,7 @@ class ModelMetrics:
                 penalty=fitted_penalty(self._model),
             )
             X_a = EvaluationDesign(self._model, self._X, selected_columns)
-            lam2 = fitted_lambda2(self._model)
+            lam2 = scale_penalties(fitted_lambda2(self._model), self._geometry_weight_exponent)
             penalty_terms = (self._model._dm.group_matrices, self._groups, active_groups, lam2)
             reml_penalties = getattr(self._model, "_reml_penalties", None)
             S_active = _active_penalty_matrix(*penalty_terms, reml_penalties=reml_penalties)
@@ -1045,7 +1178,7 @@ class ModelMetrics:
             penalty=fitted_penalty(self._model),
         )
         X_a = _grouped_active_design(self._model, active_groups)
-        lam2 = fitted_lambda2(self._model)
+        lam2 = scale_penalties(fitted_lambda2(self._model), self._geometry_weight_exponent)
         penalty_terms = (self._dm.group_matrices, self._groups, active_groups, lam2)
         reml_penalties = getattr(self._model, "_reml_penalties", None)
         S_active = _active_penalty_matrix(*penalty_terms, reml_penalties=reml_penalties)
@@ -1281,6 +1414,12 @@ class ModelMetrics:
         literal expanded copy.
         """
         h = self._hat_diag
+        if self._result.weight_exponent:
+            if solver_dispersion(self._result) <= 0.0:
+                return np.zeros_like(h)
+            return (
+                self.std_pearson_residuals**2 * h / (self.effective_df * np.maximum(1.0 - h, 1e-10))
+            )
         r_p = self.residuals("pearson")
         p = self.effective_df
         phi = self.phi
@@ -1296,6 +1435,8 @@ class ModelMetrics:
         residual and compressed-row leverage, so it represents deletion of the
         whole weighted cell rather than one literal expanded copy.
         """
+        if self._result.weight_exponent:
+            return self._unit_standardized_residuals("deviance")
         h = self._hat_diag
         r = self.residuals("deviance")
         scale = np.sqrt(self.phi * np.maximum(1.0 - h, 1e-10))
@@ -1309,10 +1450,26 @@ class ModelMetrics:
         residual and compressed-row leverage, so it represents deletion of the
         whole weighted cell rather than one literal expanded copy.
         """
+        if self._result.weight_exponent:
+            return self._unit_standardized_residuals("pearson")
         h = self._hat_diag
         r = self.residuals("pearson")
         scale = np.sqrt(self.phi * np.maximum(1.0 - h, 1e-10))
         return r / scale
+
+    def _unit_standardized_residuals(self, kind):
+        weights = self._geometry_prior_weights
+        if kind == "deviance":
+            magnitude = np.sqrt(weights * self._family.deviance_unit(self._y, self._mu))
+            r = np.sign(self._y - self._mu) * magnitude
+        else:
+            r = np.sqrt(weights) * (self._y - self._mu) / np.sqrt(self._family.variance(self._mu))
+        dispersion = solver_dispersion(self._result)
+        exponent = -self._geometry_weight_exponent
+        if self._result.solver_phi is not None:
+            exponent += self._result.weight_exponent
+        standardized = r / np.sqrt(dispersion * np.maximum(1.0 - self._hat_diag, 1e-10))
+        return np.ldexp(standardized, exponent // 2)
 
     # ── Coefficient standard errors ──────────────────────────────
 
@@ -1332,7 +1489,7 @@ class ModelMetrics:
     def _coefficient_dispersion(self) -> float:
         """Dispersion used by the explicitly quasi-likelihood SE accessor."""
         if not self._known_scale:
-            return max(float(self.phi), 0.0)
+            return max(float(solver_dispersion(self._result)), 0.0)
         from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
 
         residual_df = pearson_residual_degrees_of_freedom(
@@ -1340,7 +1497,37 @@ class ModelMetrics:
             self.effective_df,
             weight_semantics=self._weight_semantics,
         )
-        return max(float(self.pearson_chi2) / residual_df, 0.0)
+        if self._geometry_weight_exponent:
+            pearson = pearson_chi2(
+                distribution=self._family,
+                y=self._y,
+                mu=self._mu,
+                sample_weight=self._geometry_prior_weights,
+                variance_floor=0.0,
+            )
+        else:
+            pearson = self.pearson_chi2
+        return max(float(pearson) / residual_df, 0.0)
+
+    def _se_unit_exponent(self, scaled):
+        if not scaled:
+            return self._geometry_weight_exponent
+        return (
+            0
+            if self._known_scale
+            else (self._geometry_weight_exponent - self._result.weight_exponent)
+        )
+
+    def _restore_se_unit(self, errors, scaled):
+        exponent = self._se_unit_exponent(scaled)
+        return np.ldexp(errors, exponent // 2) if exponent else errors
+
+    def _variance_standard_errors(self, variance, *, scaled):
+        dispersion = self._coefficient_dispersion if scaled else 1.0
+        if self._result.weight_exponent:
+            return scaled_standard_errors(variance, dispersion, self._se_unit_exponent(scaled))
+        value = dispersion * variance if scaled else variance
+        return self._restore_se_unit(np.sqrt(np.maximum(value, 0.0)), scaled)
 
     @cached_property
     def coefficient_se(self) -> dict[str, NDArray]:
@@ -1384,7 +1571,6 @@ class ModelMetrics:
     def _group_standard_errors(self, *, scaled: bool) -> dict[str, NDArray]:
         """Per-group SEs of the augmented covariance, times the dispersion when ``scaled``."""
         _, _, _, XtWX_inv_aug, active_groups = self._active_info
-        dispersion = self._coefficient_dispersion if scaled else None
         selected_names = selected_group_name_set(
             self._result,
             self._groups,
@@ -1406,9 +1592,7 @@ class ModelMetrics:
                     XtWX_inv_aug,
                     augmented_indices,
                 )
-                if dispersion is not None:
-                    var_diag = dispersion * var_diag
-                values = np.sqrt(np.maximum(var_diag, 0.0))
+                values = self._variance_standard_errors(var_diag, scaled=scaled)
                 values[~self._current_coefficient_estimable[g.sl]] = np.nan
                 result[g.name] = values
         return result
@@ -1427,7 +1611,7 @@ class ModelMetrics:
         icpt_var = float(XtWX_inv_aug[0, 0])
         if icpt_var <= 0:
             return 0.0
-        return float(np.sqrt(self._coefficient_dispersion * icpt_var))
+        return float(self._variance_standard_errors(icpt_var, scaled=True))
 
     @cached_property
     def intercept_se_raw(self) -> float:
@@ -1436,7 +1620,7 @@ class ModelMetrics:
         icpt_var = float(XtWX_inv_aug[0, 0])
         if icpt_var <= 0:
             return 0.0
-        return float(np.sqrt(icpt_var))
+        return float(self._restore_se_unit(np.sqrt(icpt_var), False))
 
     def _feature_se_impl(
         self,
@@ -1444,6 +1628,7 @@ class ModelMetrics:
         n_points: int = 200,
         *,
         phi_scale: bool = True,
+        _restore_units: bool = True,
     ) -> dict[str, Any]:
         """SE of the log-relativity curve/levels for a feature, from the coefficient covariance.
 
@@ -1456,6 +1641,23 @@ class ModelMetrics:
         name : str
             Feature name (e.g. "DrivAge"); a ``select=True`` spline's subgroups are gathered.
         """
+        exponent = self._se_unit_exponent(phi_scale)
+        phi_unit = None
+        if self._result.weight_exponent:
+            phi_unit = self._coefficient_dispersion if phi_scale else 1.0
+            if phi_unit > 0.0:
+                phi_power = math.frexp(phi_unit)[1]
+                phi_power -= phi_power & 1
+                phi_unit = math.ldexp(phi_unit, -phi_power)
+                exponent += phi_power
+        if exponent and _restore_units:
+            values = self._feature_se_impl(
+                name, n_points, phi_scale=phi_scale, _restore_units=False
+            )
+            return {
+                key: np.ldexp(value, exponent // 2) if key.startswith("se") else value
+                for key, value in values.items()
+            }
         from superglm.features.categorical import Categorical
         from superglm.features.numeric import Numeric
         from superglm.features.ordered_categorical import OrderedCategorical
@@ -1475,7 +1677,11 @@ class ModelMetrics:
         )
         if isinstance(spec, OrderedCategorical) and spec.basis == "spline":
             _, _, _, XtWX_inv_aug, active_groups = self._active_info
-            phi = self._coefficient_dispersion if phi_scale else 1.0
+            phi = (
+                phi_unit
+                if phi_unit is not None
+                else (self._coefficient_dispersion if phi_scale else 1.0)
+            )
             se = feature_se_from_cov(
                 name,
                 covariance_slope_view(XtWX_inv_aug, scale=phi),
@@ -1512,7 +1718,11 @@ class ModelMetrics:
 
         # Gather covariance from all active subgroups (use augmented inverse)
         _, _, _, XtWX_inv_aug, active_groups = self._active_info
-        phi = self._coefficient_dispersion if phi_scale else 1.0
+        phi = (
+            phi_unit
+            if phi_unit is not None
+            else (self._coefficient_dispersion if phi_scale else 1.0)
+        )
         active_subs = [ag for ag in active_groups if ag.feature_name == name]
         if not active_subs:
             if isinstance(spec, _SplineBase):
@@ -1637,7 +1847,7 @@ class ModelMetrics:
             groups=self._groups,
             specs=self._model._specs,
             interaction_specs=self._model._interaction_specs,
-            result=self._result,
+            result=self._inference_unit_result,
             X_a=X_a,
             W=W,
             XtWX_inv=XtWX_inv,

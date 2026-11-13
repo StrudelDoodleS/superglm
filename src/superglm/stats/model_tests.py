@@ -191,6 +191,15 @@ def _per_obs_log_likelihood(
     y = np.asarray(y, dtype=float)
     family = getattr(model, "_distribution")
     result = model.result
+    if getattr(result, "weight_exponent", 0) and getattr(result, "solver_phi", None) is not None:
+        from superglm._weight_units import unit_prior_log_density
+
+        weights = (
+            np.ones_like(y) if sample_weight is None else np.asarray(sample_weight, dtype=float)
+        )
+        density = unit_prior_log_density(family, y, mu, weights, result)
+        if density is not None:
+            return density
 
     if sample_weight is not None and not isinstance(family, Tweedie):
         density = prior_weight_log_density(

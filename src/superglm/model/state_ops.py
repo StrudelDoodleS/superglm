@@ -7,6 +7,7 @@ from typing import cast
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._weight_units import coefficient_covariance, scale_penalties, solver_weights
 from superglm.group_matrix import DesignMatrix
 from superglm.inference._metrics_design import MappedColumnFactor, factor_from_gram
 from superglm.inference.covariance import (
@@ -54,7 +55,7 @@ def _solver_space_working_weights(model) -> NDArray:
         link=model._link,
         mu=mu,
         eta=eta,
-        sample_weight=model._fit_weights,
+        sample_weight=solver_weights(model._fit_weights, solver),
     )
 
 
@@ -172,7 +173,7 @@ def _legacy_rank_state(model, solver, W: NDArray):
         penalty=fitted_penalty(model),
     )
     design, active_groups, _ = _grouped_active_state(model, selected_names)
-    lam2 = fitted_lambda2(model)
+    lam2 = scale_penalties(fitted_lambda2(model), getattr(solver, "weight_exponent", 0))
     curvature = np.array(
         _active_penalty_matrix(
             model._dm.group_matrices,
@@ -456,19 +457,19 @@ def coef_covariance(model):
                 {group.name for group in model._groups},
             )
         mapped_covariance = np.asarray(scop_inference.augmented_inverse)[1:, 1:]
-        covariance = solver.phi * mapped_covariance[np.ix_(selected, selected)]
+        covariance = coefficient_covariance(mapped_covariance[np.ix_(selected, selected)], solver)
         return covariance, active_groups
     linear_state = retained_linear_state(model)
     if isinstance(linear_state, StructuredLinearSystemState):
         _, augmented, active_groups = _structured_covariance_state(model, linear_state)
-        return augmented.scaled(solver.phi).slopes, active_groups
+        return coefficient_covariance(augmented.slopes, solver), active_groups
     if solver.rank_info is not None:
         _, active_groups = _rank_active_state(model, solver.rank_info)
-        covariance = solver.phi * solver.rank_info.covariance_inverse()
+        covariance = coefficient_covariance(solver.rank_info.covariance_inverse(), solver)
         return covariance, active_groups
     W = _solver_space_working_weights(model)
     _, active_groups, _, _, _, profile_inverse, _ = _legacy_active_state(model, solver, W)
-    return solver.phi * profile_inverse, active_groups
+    return coefficient_covariance(profile_inverse, solver), active_groups
 
 
 def fit_active_info(model):

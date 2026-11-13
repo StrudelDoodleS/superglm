@@ -134,14 +134,21 @@ class TweedieRows:
         """`saddlepoint_switch` at this power, read by every pass."""
         return saddlepoint_switch(self.p)
 
-    def row_saturated(self, phi: float) -> tuple[NDArray, NDArray, NDArray]:
+    def row_saturated(
+        self, phi: float, *, _log_phi: float | None = None
+    ) -> tuple[NDArray, NDArray, NDArray]:
         """Per row: l_sat, T = d(-l_sat)/d log phi and dT/d log phi at ``phi``."""
-        log_t = self.log_t_unit_phi - (self.a + 1.0) * math.log(phi)
+        log_phi = math.log(phi) if _log_phi is None else _log_phi
+        log_t = self.log_t_unit_phi - (self.a + 1.0) * log_phi
         ok, log_w, mean_j, var_j = series_moments(log_t, self.a, max_mode=self.switch)
         # |c w / phi| = (a + 1) j is at most (a + 1) times the switch on summed
         # rows; past it the quotient may overflow and the saddlepoint takes its log.
         with np.errstate(over="ignore"):
-            canonical = self.saturated_canonical / phi
+            canonical = (
+                self.saturated_canonical / phi
+                if _log_phi is None
+                else -np.exp(_log_negative_canonical(self.p, log_t))
+            )
         unrepresented = np.flatnonzero(ok & ~np.isfinite(canonical))
         canonical[unrepresented] = -np.exp(_log_negative_canonical(self.p, log_t[unrepresented]))
         inverse_r = self.a + 1.0

@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 
 from superglm._utils import _explained_deviance
-from superglm.distributions import weighted_log_likelihood
+from superglm._weight_units import unit_log_likelihood
 from superglm.editor.evaluation import (
     EvaluationDataset,
     _validate_evaluation_weights,
@@ -201,7 +201,6 @@ def _compute_metrics(
     if mu.size != y_arr.size:
         raise ValueError(f"Predictions have length {mu.size}, expected {y_arr.size}.")
     family = model._distribution
-    phi = float(model.result.phi)
     edf = float(model.result.effective_df)
     likelihood_size = dispersion_likelihood_size(
         w,
@@ -216,12 +215,12 @@ def _compute_metrics(
 
         check_weight_contract(y_arr, w, family, model_weight_semantics(model))
     log_likelihood = float(
-        weighted_log_likelihood(
+        unit_log_likelihood(
             family,
             y_arr,
             mu,
             w,
-            phi,
+            model.result,
             weight_semantics=model_weight_semantics(model),
             report_contract=not contract_checked,
         )

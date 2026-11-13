@@ -20,9 +20,10 @@ from numpy.typing import NDArray
 
 from superglm._frame import FrameLike, as_eager_frame
 from superglm._utils import weighted_row_sum
+from superglm._weight_units import unit_log_likelihood
 from superglm.distributional.api import SuperLSS
 from superglm.distributional.cross_validation import LSSFolds, parts_ratio
-from superglm.distributions import Tweedie, weighted_log_likelihood
+from superglm.distributions import Tweedie
 
 # The full-frame binding pass lives in a neutral module so the public
 # SuperGLM.bind_levels runs this exact resolution without importing this one.
@@ -467,12 +468,12 @@ def _score_nll(model, X_val, y_val, *, sample_weight=None, offset=None):
         model._distribution,
         model_weight_semantics(model),
     )
-    ll = weighted_log_likelihood(
+    ll = unit_log_likelihood(
         model._distribution,
         y_val,
         mu,
         weights,
-        model.result.phi,
+        model.result,
         weight_semantics=model_weight_semantics(model),
     )
     return float(-ll / denominator)
@@ -506,12 +507,12 @@ def _pooled_nll_parts(model, X_val, y_val, *, sample_weight=None, offset=None):
         model._distribution,
         model_weight_semantics(model),
     )
-    ll = weighted_log_likelihood(
+    ll = unit_log_likelihood(
         model._distribution,
         y_val,
         mu,
         weights,
-        model.result.phi,
+        model.result,
         weight_semantics=model_weight_semantics(model),
     )
     return float(-ll), denominator

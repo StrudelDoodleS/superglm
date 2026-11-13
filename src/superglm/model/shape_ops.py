@@ -235,8 +235,11 @@ class _CompactPenaltyTerms:
 _LegacyPenaltyTerms = tuple[tuple[slice, float, object, object], ...]
 
 
-def _build_smooth_penalty_terms(model) -> _CompactPenaltyTerms | _LegacyPenaltyTerms:
+def _build_smooth_penalty_terms(
+    model, *, weight_exponent=0
+) -> _CompactPenaltyTerms | _LegacyPenaltyTerms:
     """Prepare block/component quadratic terms without allocating a global ``p x p`` S."""
+    from superglm._weight_units import scale_penalties
     from superglm.group_matrix import (
         DiscretizedSplineCategoricalGroupMatrix,
         DiscretizedSSPGroupMatrix,
@@ -245,7 +248,7 @@ def _build_smooth_penalty_terms(model) -> _CompactPenaltyTerms | _LegacyPenaltyT
     )
     from superglm.model.fit_state import fitted_lambda2
 
-    lambda2 = fitted_lambda2(model)
+    lambda2 = scale_penalties(fitted_lambda2(model), weight_exponent)
     group_matrices = model._dm.group_matrices
     groups = model._groups
     reml_penalties = getattr(model, "_reml_penalties", None)
@@ -1560,6 +1563,10 @@ def _refresh_repaired_scale_and_statistics(model) -> None:
 
     y = np.asarray(model._fit_y_ref, dtype=np.float64)
     weights = np.asarray(model._fit_weights, dtype=np.float64)
+    from superglm._weight_units import solver_weights
+
+    scoring_weights = solver_weights(weights, model._solver_result)
+    solver_phi = None
     mu = np.asarray(model._fit_mu, dtype=np.float64)
     if getattr(model._distribution, "scale_known", True):
         phi = 1.0
@@ -1577,9 +1584,11 @@ def _refresh_repaired_scale_and_statistics(model) -> None:
     else:
         variance = np.maximum(model._distribution.variance(mu), _VARIANCE_FLOOR)
         # a zero-weight row holds an exact 0, as in ``weighted_row_sum`` (#369)
-        carried = weights != 0.0
-        terms = np.zeros_like(weights)
-        terms[carried] = weights[carried] * (y[carried] - mu[carried]) ** 2 / variance[carried]
+        carried = scoring_weights != 0.0
+        terms = np.zeros_like(scoring_weights)
+        terms[carried] = (
+            scoring_weights[carried] * (y[carried] - mu[carried]) ** 2 / variance[carried]
+        )
         pearson = float(np.sum(terms))
         residual_df = pearson_residual_degrees_of_freedom(
             weights,
@@ -1587,6 +1596,9 @@ def _refresh_repaired_scale_and_statistics(model) -> None:
             weight_semantics=model_weight_semantics(model),
         )
         phi = pearson / residual_df
+        if model._solver_result.weight_exponent:
+            solver_phi = phi
+            phi = float(np.ldexp(phi, -model._solver_result.weight_exponent))
 
     updated: set[int] = set()
     for result_name in ("_result", "_solver_result"):
@@ -1594,6 +1606,7 @@ def _refresh_repaired_scale_and_statistics(model) -> None:
         if result is None or id(result) in updated:
             continue
         result.phi = float(phi)
+        result.solver_phi = solver_phi
         updated.add(id(result))
     model._fit_stats = _compute_fit_stats(
         y,
@@ -1605,6 +1618,7 @@ def _refresh_repaired_scale_and_statistics(model) -> None:
         float(phi),
         null_mu=model._fit_null_mu,
         weight_semantics=model_weight_semantics(model),
+        solver_result=model._solver_result,
     )
     model._summary_cache = None
 
@@ -1688,10 +1702,15 @@ def _apply_shape_postfit(model, X, sample_weight, offset, *, n_grid: int):
         sample_weight if sample_weight is not None else getattr(work_model, "_fit_weights", None)
     )
     scoring_weights_arr = np.asarray(scoring_weight, dtype=np.float64)
+    from superglm._weight_units import solver_weights
+
+    scoring_weights_arr = solver_weights(scoring_weights_arr, work_model._solver_result)
     scoring_offset = offset if offset is not None else getattr(work_model, "_fit_offset", None)
 
     selection_penalty = fitted_penalty(work_model)
-    smooth_penalty_terms = _build_smooth_penalty_terms(work_model)
+    smooth_penalty_terms = _build_smooth_penalty_terms(
+        work_model, weight_exponent=work_model._solver_result.weight_exponent
+    )
     from superglm.solvers.mode_score import linear_predictor
 
     current_eta = linear_predictor(

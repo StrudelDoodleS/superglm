@@ -726,15 +726,29 @@ def _refresh_fit_statistics(
     if mu.size != y_arr.size:
         raise ValueError(f"Predictions have length {mu.size}, expected {y_arr.size}.")
 
+    from superglm._weight_units import evaluation_weight_exponent
+
+    exponent = evaluation_weight_exponent(
+        weights, model.result, response=y_arr, offset=offset_arr, mean=mu
+    )
+    unit_weights = np.ldexp(weights, exponent) if exponent else weights
     null_mu = _compute_null_mu(
         y_arr,
-        weights,
+        unit_weights,
         offset_arr,
         model._distribution,
         model._link,
         weight_semantics=model_weight_semantics(model),
     )
-    deviance = weighted_row_sum(weights, model._distribution.deviance_unit, y_arr, mu)
+    if exponent:
+        deviance = float(
+            np.ldexp(
+                weighted_row_sum(unit_weights, model._distribution.deviance_unit, y_arr, mu),
+                -exponent,
+            )
+        )
+    else:
+        deviance = weighted_row_sum(weights, model._distribution.deviance_unit, y_arr, mu)
     model._fit_stats = (
         _compute_fit_stats(
             y_arr,
@@ -746,6 +760,7 @@ def _refresh_fit_statistics(
             model.result.phi,
             null_mu=null_mu,
             weight_semantics=model_weight_semantics(model),
+            solver_result=model.result,
         )
         if statistics
         else None
