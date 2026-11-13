@@ -3005,7 +3005,8 @@ class TestDegenerateVertex:
         residue[:8] = np.arange(1.0, 9.0)
         for active, zeroed in (([0, 1, 2, 3], True), ([0, 1, 2], False)):
             A_eq = A[active] / np.max(np.abs(A[active]), axis=1)[:, None]
-            out = _zero_block_faces(residue, A_eq, b, active, blocks, {})
+            zero_meets = np.ones(blocks.width.size, dtype=bool)
+            out = _zero_block_faces(residue, A_eq, b, active, blocks, {}, zero_meets)
             assert bool(np.all(out[8:12] == 0.0)) is zeroed
             np.testing.assert_array_equal(out[:8], residue[:8])
             np.testing.assert_array_equal(out[12:], residue[12:])
@@ -3658,6 +3659,64 @@ class TestDegenerateCycle:
         unit = solve(1.0)
         assert result.converged and unit.converged
         assert np.max(np.abs(result.beta / s - unit.beta)) <= 1e-12 * np.max(np.abs(unit.beta))
+
+
+class TestNonbindingWarmRows:
+    """A warm working row need not bind at the start, as the shape repairs pass them.
+
+    Its step then moves the working rows, so a row they span can block it. That row
+    replaces a working row that does not bind (Gill and Wong, Math. Prog. Comp. 7, 2015,
+    section 3, Result 3.5), and the iterate stays feasible. Each case below fails on master,
+    which skips a blocker that does not raise the working rank and steps past it.
+    """
+
+    @staticmethod
+    def _solve_both(H, g, A, b, active, start):
+        warm = solve_constrained_qp(H, g, A, b, active_set_init=active, beta_start=start)
+        cold = solve_constrained_qp(H, g, A, b, beta_start=start)
+        return warm, cold
+
+    @pytest.mark.parametrize("active", [[0, 1], [1, 0]])
+    def test_a_row_the_slack_warm_rows_span_blocks_the_step_to_their_vertex(self, active):
+        """Rows 0 and 1 span both coefficients and are slack at zero, so the face's step goes
+        to their vertex ``(-1, -1)``, which breaks row 2. Row 2 lies in their span, so it
+        cannot raise the working rank: master steps past it and is unconverged. It blocks at
+        ``(-0.5, -0.5)`` and replaces one of them. Mutation: with no exchange, the solve is
+        unconverged again.
+        """
+        A = np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+        b = np.array([-1.0, -1.0, -1.0])
+        warm, cold = self._solve_both(np.eye(2), np.array([-3.0, -3.0]), A, b, active, np.zeros(2))
+        assert cold.converged and warm.converged
+        np.testing.assert_allclose(warm.beta, [-0.5, -0.5], rtol=1e-12)
+        np.testing.assert_allclose(warm.beta, cold.beta, rtol=1e-12)
+        assert warm.active_set == [2]
+
+    def test_a_row_parallel_to_a_slack_warm_row_blocks_it(self):
+        """Row 1 shares row 0's normal and lies ahead of it. Row 0 is slack at zero and in the
+        warm set, so the step heads for ``x_0 = -1`` and passes ``x_0 = -0.5``, where row 1
+        binds. Master skips row 1 as dependent and is unconverged; row 1 replaces row 0.
+        """
+        A = np.array([[1.0, 0.0], [1.0, 0.0]])
+        b = np.array([-1.0, -0.5])
+        warm, cold = self._solve_both(np.eye(2), np.array([-3.0, 0.0]), A, b, [0], np.zeros(2))
+        assert cold.converged and warm.converged
+        np.testing.assert_allclose(warm.beta, [-0.5, 0.0], rtol=1e-12, atol=1e-15)
+        assert warm.active_set == [1]
+
+    def test_the_exact_zero_face_is_taken_only_where_zero_meets_every_row(self):
+        """Homogeneous warm rows of full rank fix their block at zero, which row 2
+        (``x_0 + x_1 >= 1``) does not allow. Jumping there left the iterate infeasible and the
+        solve unconverged on master. The zero point is now taken only where zero meets every
+        row of the block, and the step to it goes through the ratio test, where row 2 blocks.
+        Mutation: jumping to zero regardless, the solve is unconverged again.
+        """
+        A = np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+        b = np.array([0.0, 0.0, 1.0])
+        warm, cold = self._solve_both(np.eye(2), np.array([0.2, 0.3]), A, b, [0, 1], np.ones(2))
+        assert cold.converged and warm.converged
+        np.testing.assert_allclose(warm.beta, [0.45, 0.55], rtol=1e-12)
+        np.testing.assert_allclose(warm.beta, cold.beta, rtol=1e-12)
 
 
 class TestCertificateRank:
