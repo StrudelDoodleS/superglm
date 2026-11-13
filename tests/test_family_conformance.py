@@ -24,6 +24,7 @@ ones at two parameters, times every built-in link), this module checks
 from __future__ import annotations
 
 import warnings
+from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -79,9 +80,32 @@ from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.mode_score import linear_predictor
 from superglm.solvers.working_rows import fisher_working_weights
 from superglm.types import GroupSlice, PenaltyComponent
-from tests.test_signed_rows import _companion_bound, _exact_hessian, _exact_reference
+from tests.test_signed_rows import _companion_bound, _exact_hessian, _log
 
 EPS = np.finfo(np.float64).eps
+
+
+def _exact_log_det(H: list[list[Fraction]]) -> float | None:
+    """``log det H`` when the exact ``H`` is positive definite, else ``None``.
+
+    The elimination half of ``tests.test_signed_rows._exact_reference``, the
+    same rational pivots summed in the same order: the battery below reads only
+    the log determinant and the definiteness, and the Gauss-Jordan inverse that
+    reference goes on to form for ``diag(H^-1)`` was 85% of its time.
+    """
+    A = [row[:] for row in H]
+    logdet = 0.0
+    for c in range(len(A)):
+        pivot = A[c][c]
+        if pivot <= 0:
+            return None
+        logdet += _log(pivot.numerator) - _log(pivot.denominator)
+        for r in range(c + 1, len(A)):
+            if A[r][c]:
+                ratio = A[r][c] / pivot
+                A[r] = [a - ratio * b for a, b in zip(A[r], A[c], strict=True)]
+    return logdet
+
 
 FAMILIES = {
     "gaussian": Gaussian(),
@@ -441,7 +465,7 @@ def test_the_observed_geometry_on_the_chain_is_exact(family, link, lam) -> None:
     rows = compute_observed_information_weights(family, link, y, mu, eta, sample_weight)
     S = build_penalty_matrix(dm.group_matrices, groups, lambdas, dm.p, components)
     X = dm.toarray()
-    reference = _exact_reference(_exact_hessian(X, rows, S))
+    reference = _exact_log_det(_exact_hessian(X, rows, S))
     if reference is None:
         with pytest.raises(ObservedGeometryInfeasibleError):
             build_observed_reml_geometry(**arguments)
@@ -452,7 +476,7 @@ def test_the_observed_geometry_on_the_chain_is_exact(family, link, lam) -> None:
     np.testing.assert_array_equal(geometry.weights, rows)
     error = observed_row_error_scale(family, link, y, mu, eta, sample_weight, rows)
     bound = _companion_bound(X, rows, S, error)
-    assert abs(geometry.log_det_H - reference[0]) <= dm.p * bound
+    assert abs(geometry.log_det_H - reference) <= dm.p * bound
 
 
 def test_the_battery_reaches_signed_rows() -> None:
