@@ -520,7 +520,9 @@ ROW_ORACLE = OracleStore(
         _times,
         _KEYS,
         _INF,
-        test_gg_uniform_tail,
+        # ``reference`` and ``expansion_reference``: the uniform tail's store
+        # fingerprints exactly the code they run.
+        test_gg_uniform_tail.STORED_REFERENCE.fingerprint,
     ),
     module="tests/test_generalized_gamma_response_bounds.py",
 )
@@ -534,7 +536,7 @@ def _log_cdf_near_zero_shape(w, q):
 LOG_CDF_NEAR_ZERO_SHAPE = OracleStore(
     "generalized_gamma_response_bounds_log_cdf_near_zero_shape",
     _log_cdf_near_zero_shape,
-    depends=(test_gg_uniform_tail,),
+    depends=(test_gg_uniform_tail.STORED_REFERENCE.fingerprint,),
     module="tests/test_generalized_gamma_response_bounds.py",
 )
 
