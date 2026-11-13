@@ -1046,6 +1046,31 @@ def test_the_intercept_search_takes_no_stationary_maximum_for_a_minimum():
     np.testing.assert_allclose(location, y.mean(), rtol=1e-7)
 
 
+@pytest.mark.parametrize("lowest", ["start", "upper"])
+def test_the_intercept_search_leaves_a_plateau_by_more_than_its_rounding(lowest):
+    # A saturated link holds the likelihood flat in the intercept: every probe in Brent's
+    # first window differs from the start only in its last bits. At 6160e6284 those bits
+    # decided: under OpenBLAS's Haswell and Zen kernels the start came out lowest and was
+    # published (test_a_continued_repair_at_the_zero_curve_takes_the_dropped_terms_intercept),
+    # under SkylakeX an end did and the walk found the optimum. Forced: the plateau's last bit
+    # favours the start, or the upper side, which stays flat forever; below -30 units the
+    # objective is a parabola, with its minimum at -40.
+    from superglm.distributional.shape_repair import _derivative_free_minimum
+
+    level, rounding = 100.0, 1e-12
+    bit = np.spacing(level)
+
+    def objective(t: float) -> float:
+        if t < -30.0:
+            return level + (t + 40.0) ** 2 / 10.0 - 10.0
+        if lowest == "start":
+            return level if t == 0.0 else level + bit
+        return level - bit if t > 0.0 else level
+
+    best = _derivative_free_minimum(objective, 0.0, 1.0, rounding=rounding)
+    assert best == pytest.approx(-40.0, abs=1e-6)
+
+
 def test_a_probe_whose_likelihood_overflows_is_a_wall_of_the_intercept_search():
     # Sol's case: the scale's offset runs from -100 to 0, so a trial shift of the scale
     # intercept far enough down overflows the Gaussian likelihood. At 19a6ab028 that raised
@@ -1591,9 +1616,14 @@ def _narrow_interval_revision():
         family.scale(s("x", kind="bs", k=6, constraint=rule), offset="off"),
         family.shape(s("x", kind="bs", k=6)),
     )
+    # The smoothing parameters REML reaches on the default kernels, fixed: on this nearly
+    # constant response its scale term's ranges from 7e4 to 0.04 across OpenBLAS kernels and
+    # releases, and with it the curvature the repair projects in. Every coefficient is replaced
+    # below; the penalty is all these tests take from the fit.
+    lambdas = {"mean:x#wiggle": 1e10, "scale:x#wiggle": 7.2e4, "shape:x#wiggle": 4.7e7}
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model.fit_reml(X, y)
+        model.fit(X, y, lambdas=lambdas)
     fitted = model._model
     layout = fitted.layout
     beta = np.array(fitted.coefficients, dtype=np.float64)
