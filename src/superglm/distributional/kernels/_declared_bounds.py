@@ -604,47 +604,55 @@ def gg_window_jets(
     return tuple(result)
 
 
-def _warmup_declared_bounds() -> None:
+def _warmup_declared_bounds(*parts: str) -> None:
     """Compile the window kernels a bounded fit of a declared-bounds family calls.
 
     ``GammaLS``: orders 0-2 in ``(mean, cv)`` and 3-4 in ``(log mean, log cv)``
     on both tails, the narrow window and the carrier. The other declared
     families: each kernel once (order is a run-time argument) on both tail
-    routes and a narrow window.
+    routes and a narrow window. ``parts`` (``"gamma"``, ``"generalized_gamma"``,
+    ``"others"``; default all, in that order) lets ``warmup()`` compile them in
+    separate processes.
     """
     lower = np.array([1.0, 0.0, 1.0])
     upper = np.array([np.inf, 1.0, 1.0 + 1e-6])
     weight = np.ones(3)
-    for order in (0, 1, 2):
-        gamma_window_jets(lower, upper, np.ones((3, 2)), weight, order=order)
-    for order in (3, 4):
-        gamma_window_jets(lower, upper, np.zeros((3, 2)), weight, order=order, coordinates="log")
-    # GeneralizedGammaLSS: one row kernel for every order, on both tail routes.
-    # A positive first column is a valid mean and a valid location.
-    theta = np.array([[1.0, 1.0, 0.0], [1.0, 1.0, 1.0], [1.0, 1.0, -0.5]])
-    for mean_form in (False, True):
-        gg_window_jets(lower, upper, theta, order=4, mean_form=mean_form)
     ones = np.ones(3)
-    normal_window_jets(
-        np.array([-np.inf, 1.0, 0.0]),
-        np.array([0.0, np.inf, 1e-6]),
-        np.zeros(3),
-        ones,
-        ones,
-        order=4,
-    )
-    gpd_window_jets(lower, upper, ones, np.array([0.0, 0.5, 0.2]), order=4)
-    for module in (lomax, log_logistic):
-        declared_window_jets(
-            module,
-            lower,
-            upper,
-            np.ones((3, 2)),
-            (),
+    parts = parts or ("gamma", "generalized_gamma", "others")
+    if "gamma" in parts:
+        for order in (0, 1, 2):
+            gamma_window_jets(lower, upper, np.ones((3, 2)), weight, order=order)
+        for order in (3, 4):
+            gamma_window_jets(
+                lower, upper, np.zeros((3, 2)), weight, order=order, coordinates="log"
+            )
+    if "generalized_gamma" in parts:
+        # GeneralizedGammaLSS: one row kernel for every order, on both tail routes.
+        # A positive first column is a valid mean and a valid location.
+        theta = np.array([[1.0, 1.0, 0.0], [1.0, 1.0, 1.0], [1.0, 1.0, -0.5]])
+        for mean_form in (False, True):
+            gg_window_jets(lower, upper, theta, order=4, mean_form=mean_form)
+    if "others" in parts:
+        normal_window_jets(
+            np.array([-np.inf, 1.0, 0.0]),
+            np.array([0.0, np.inf, 1e-6]),
+            np.zeros(3),
+            ones,
+            ones,
             order=4,
-            from_lower=np.zeros(3, bool),
-            rate=np.full(3, 12.0),
         )
+        gpd_window_jets(lower, upper, ones, np.array([0.0, 0.5, 0.2]), order=4)
+        for module in (lomax, log_logistic):
+            declared_window_jets(
+                module,
+                lower,
+                upper,
+                np.ones((3, 2)),
+                (),
+                order=4,
+                from_lower=np.zeros(3, bool),
+                rate=np.full(3, 12.0),
+            )
 
 
 __all__ = [

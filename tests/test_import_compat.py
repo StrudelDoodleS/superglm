@@ -546,14 +546,22 @@ def test_scalar_observation_warmup_covers_core_dispatchers_and_operands(tmp_path
 
     This short subprocess exercises just the new warmup stage. The full census
     below still owns every package dispatcher, import laziness and cold starts.
+    The two families warm in two processes at once, as ``warmup()``'s workers
+    do, saving to one cache under its lock; together they must give every core
+    dispatcher a signature, and each family's first evaluations must reuse its own.
     """
     code = r"""
 import importlib
+import json
+import sys
 import numpy as np
 from numba.core.dispatcher import Dispatcher
 import superglm
+from superglm._warmup import _locked_cache
 
-superglm._warmup_scalar_observations()
+chosen = sys.argv[1]
+with _locked_cache():
+    superglm._warmup_scalar_observations(chosen)
 modules = [importlib.import_module("superglm.distributional.kernels." + name)
            for name in ("_incomplete_beta", "_negative_binomial_windows", "_incomplete_gamma",
                         "_gamma_windows", "_tweedie_windows")]
@@ -561,43 +569,58 @@ dispatchers = {f"{m.__name__}.{name}": obj for m in modules
                for name, obj in vars(m).items() if isinstance(obj, Dispatcher)}
 # The gamma operand module also has uncommon fallbacks owned by the full
 # census. Here require every dispatcher defined by the bounded core modules.
-for m in (modules[0], modules[1], modules[3], modules[4]):
-    for name, obj in vars(m).items():
-        if isinstance(obj, Dispatcher) and obj.py_func.__module__ == m.__name__:
-            assert obj.signatures, (m.__name__, name)
+core = {f"{m.__name__}.{name}": bool(obj.signatures)
+        for m in (modules[0], modules[1], modules[3], modules[4])
+        for name, obj in vars(m).items()
+        if isinstance(obj, Dispatcher) and obj.py_func.__module__ == m.__name__}
 before = {name: tuple(obj.signatures) for name, obj in dispatchers.items()}
-superglm._warmup_scalar_observations()
+superglm._warmup_scalar_observations(chosen)
 from superglm.distributional.families.negative_binomial import NegativeBinomialLS
 from superglm.distributional.families.tweedie import TweedieLSS
 from superglm.distributional.family import bounded_observation
 from superglm.distributional.observation import ResponseBounds
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
-for family, theta in ((NegativeBinomialLS(), [2., .7]), (TweedieLSS(), [2., 1.2, 1.5])):
-    y = np.array([1., 2., 3.])
-    bounds = ResponseBounds.from_arrays(np.zeros(3), np.full(3, 5.), np.array([-1, 0, 1]))
-    for semantics in ("prior", "frequency"):
-        w = resolve_likelihood_weights(np.full(3, 2.), n_observations=3, contract=WeightContract(semantics=semantics))
-        plan = family.bind_likelihood(y, w, bounded_observation(bounds))
-        matrix = np.tile(theta, (3, 1))
-        matrix.setflags(write=False)
-        for order in (0, 1, 2):
-            result = family.evaluate_natural(y, matrix, plan, derivative_order=order)
-            assert result.valid.all()
+family, theta = {"negative_binomial": (NegativeBinomialLS(), [2., .7]),
+                 "tweedie": (TweedieLSS(), [2., 1.2, 1.5])}[chosen]
+y = np.array([1., 2., 3.])
+bounds = ResponseBounds.from_arrays(np.zeros(3), np.full(3, 5.), np.array([-1, 0, 1]))
+for semantics in ("prior", "frequency"):
+    w = resolve_likelihood_weights(np.full(3, 2.), n_observations=3, contract=WeightContract(semantics=semantics))
+    plan = family.bind_likelihood(y, w, bounded_observation(bounds))
+    matrix = np.tile(theta, (3, 1))
+    matrix.setflags(write=False)
+    for order in (0, 1, 2):
+        result = family.evaluate_natural(y, matrix, plan, derivative_order=order)
+        assert result.valid.all()
 after = {name: tuple(obj.signatures) for name, obj in dispatchers.items()}
 assert before == after, {name: after[name] for name in before if before[name] != after[name]}
-print("ok")
+print(json.dumps(core))
 """
-    completed = subprocess.run(
-        [sys.executable, "-c", code],
-        capture_output=True,
-        text=True,
-        timeout=210,
-        env={**os.environ, "NUMBA_CACHE_DIR": str(tmp_path / "scalar-core-cache")},
-    )
-    assert completed.returncode == 0, completed.stderr
-    assert completed.stdout.strip() == "ok"
+    env = {**os.environ, "NUMBA_CACHE_DIR": str(tmp_path / "scalar-core-cache")}
+    running = [
+        subprocess.Popen(
+            [sys.executable, "-c", code, family],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        for family in ("negative_binomial", "tweedie")
+    ]
+    core: dict[str, bool] = {}
+    try:
+        for process in running:
+            stdout, stderr = process.communicate(timeout=210)
+            assert process.returncode == 0, stderr
+            for name, warmed in json.loads(stdout).items():
+                core[name] = core.get(name, False) or warmed
+    finally:
+        for process in running:
+            process.kill()
+            process.wait()
+    assert core and all(core.values()), sorted(name for name, warmed in core.items() if not warmed)
 
-    # The first process filled this private cache. A fresh process must load
+    # The two processes filled this private cache. A fresh process must load
     # the same core code without recompiling an imported-callee composition.
     reload_code = r"""
 import json
@@ -807,12 +830,20 @@ from superglm._group_matrix import _group_matrix_kernels as group_kernels
 from superglm._group_matrix import _group_matrix_support as support_scans
 from superglm.features import interaction
 from superglm.reml import multi_penalty
-from tests._numba_dispatchers import is_inlined, package_dispatchers, signatures
+from tests._numba_dispatchers import (
+    cached_signatures,
+    compile_log,
+    is_inlined,
+    package_dispatchers,
+    signatures,
+)
 
 dispatchers, problems = package_dispatchers()
 at_import = signatures(dispatchers)
+compiled = compile_log(dispatchers)
 superglm.warmup()
-warmed = signatures(dispatchers)
+warmed = cached_signatures(dispatchers)
+in_warmup, compiled[:] = compiled[:], []
 
 # These core observation routes have Python callers with scalar/readonly
 # operands distinct from the complete-row kernels. Census them after warmup.
@@ -923,9 +954,21 @@ from superglm.distributional import crps_closed_form
 law, counts = readonly(np.array([[0.07, 1.1], [2.0, 0.5]]), np.array([0.0, 70.0]))
 assert np.all(crps_closed_form(superglm.NegativeBinomialLS(), counts, law) > 0)
 
-entry_points = signatures(dispatchers)
+import os
+from pathlib import Path
+
+
+def cache_files():
+    root = Path(os.environ["NUMBA_CACHE_DIR"])
+    stats = {path: path.stat() for path in root.rglob("*") if path.is_file()}
+    return {str(path): (stat.st_size, stat.st_mtime_ns) for path, stat in stats.items()}
+
+
+entry_points, compiled[:] = compiled[:], []
+before = cache_files()
 superglm.warmup()
-rewarmed = signatures(dispatchers)
+rewarmed, compiled[:] = compiled[:], []
+cache_changed = sorted(set(cache_files().items()) ^ set(before.items()))
 
 # First fits: a binned SuperGLM fit and binned Tweedie and negative binomial
 # SuperLSS fits, each with a spline, a categorical and a RandomEffect of 300
@@ -1007,15 +1050,13 @@ print(json.dumps({
     "inlined": sorted(name for name, value in dispatchers.items() if is_inlined(value)),
     "at_import": {name: found for name, found in at_import.items() if found},
     "warmed": warmed,
+    "in_warmup": in_warmup,
     "entry_points": entry_points,
     "rewarmed": rewarmed,
-    "fitted": signatures(dispatchers),
+    "cache_changed": cache_changed,
+    "fitted": compiled,
 }))
 """
-
-
-def _changed(before: dict, after: dict) -> dict:
-    return {name: after[name] for name in after if after[name] != before.get(name)}
 
 
 @pytest.mark.slow
@@ -1023,17 +1064,20 @@ def test_public_warmup_compiles_every_kernel_but_the_first_use_allowlist(tmp_pat
     """After ``superglm.warmup()`` a first fit compiles only the kernels in ``_FIRST_USE``.
 
     On an empty numba cache a kernel compiles the kernels it calls, so after
-    warmup each of the package's dispatchers has a signature, is inlined
+    warmup each of the package's dispatchers has a signature in this process
+    or in the cache its worker processes filled, is inlined
     (``inline="always"``: it never compiles on its own), or is listed in
     ``_FIRST_USE``.  A listed kernel that warmup compiles, or that no longer
-    exists, fails as well, so the list cannot rot.  The production entry points
-    then run with the layouts and flags their callers pass and must reuse
-    warmup's signatures, a second warmup compiles nothing, and first fits
-    (SuperGLM, and Tweedie and negative binomial SuperLSS, binned, with a
-    spline, a categorical and a structured RandomEffect; an exact ordinary
-    spline; binned ``fs`` and ``sz`` factor smooths; and an exact gamma ``fs``
-    fit, which takes the signed rows) compile nothing outside ``_FIRST_USE``.
-    ``warmup()`` stays a bare call: import compiles nothing.
+    exists, fails as well, so the list cannot rot.  The workers leave nothing
+    for this process to compile.  The production entry points then run with
+    the layouts and flags their callers pass and must reuse warmup's
+    signatures, a second warmup compiles nothing here or in its workers (the
+    cache files stay as they were), and first fits (SuperGLM, and Tweedie and
+    negative binomial SuperLSS, binned, with a spline, a categorical and a
+    structured RandomEffect; an exact ordinary spline; binned ``fs`` and
+    ``sz`` factor smooths; and an exact gamma ``fs`` fit, which takes the
+    signed rows) compile nothing outside ``_FIRST_USE``.  ``warmup()`` stays a
+    bare call: import compiles nothing.
     """
     assert inspect.signature(superglm.warmup).parameters == {}
     completed = subprocess.run(
@@ -1042,8 +1086,9 @@ def test_public_warmup_compiles_every_kernel_but_the_first_use_allowlist(tmp_pat
         capture_output=True,
         text=True,
         cwd=Path(__file__).resolve().parents[1],
-        env=dict(os.environ, NUMBA_CACHE_DIR=str(tmp_path / "numba-cache")),
-        timeout=1800,  # a cold warmup takes about a minute; this bounds a hang
+        # Four workers, whatever the runner's default, so the census covers them.
+        env=dict(os.environ, NUMBA_CACHE_DIR=str(tmp_path / "numba-cache"), SUPERGLM_N_JOBS="4"),
+        timeout=1800,  # a cold warmup takes under a minute on four workers; this bounds a hang
     )
     assert completed.returncode == 0, completed.stderr
     census = json.loads(completed.stdout)
@@ -1069,9 +1114,15 @@ def test_public_warmup_compiles_every_kernel_but_the_first_use_allowlist(tmp_pat
         f"warmup() compiled the inlined {compiled_inline} on its own: numba caches no inlined "
         "kernel, so it would compile again in every process"
     )
-    assert not _changed(warmed, census["entry_points"]), "a first fit's operands compiled anew"
-    assert not _changed(warmed, census["rewarmed"]), "a second warmup() compiled anew"
-    first_fits = sorted(set(_changed(census["rewarmed"], census["fitted"])) - _FIRST_USE.keys())
+    assert not census["in_warmup"], (
+        f"warmup()'s workers left {sorted(set(census['in_warmup']))} for this process to compile"
+    )
+    assert not census["entry_points"], f"a first fit's operands compiled {census['entry_points']}"
+    assert not census["rewarmed"], f"a second warmup() compiled {census['rewarmed']}"
+    assert not census["cache_changed"], (
+        f"a second warmup()'s workers saved {census['cache_changed']}"
+    )
+    first_fits = sorted(set(census["fitted"]) - _FIRST_USE.keys())
     assert not first_fits, f"a first fit after warmup() compiled {first_fits}"
 
 

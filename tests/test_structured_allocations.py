@@ -505,7 +505,7 @@ def test_the_fs_build_after_a_compile_frees_the_stack_the_compile_pinned(
     assert len(collections) == 1
 
 
-def test_the_first_build_after_warmup_does_not_collect() -> None:
+def test_the_first_build_after_warmup_does_not_collect(monkeypatch) -> None:
     """``superglm.warmup()`` compiles outside any fit, so the next build does not collect (#432).
 
     A warmup that compiles marks a compile, and the process then paid one
@@ -542,7 +542,10 @@ def test_the_first_build_after_warmup_does_not_collect() -> None:
 
         block_leaves.release_leaf_memo(layout_cache)
         _numba_compile._compiled[0] = True  # a compile inside warmup
-        superglm.warmup()
+        with monkeypatch.context() as scoped:
+            # Four compile workers, whatever the suite pinned; the build stays as pinned.
+            scoped.setenv("SUPERGLM_N_JOBS", "4")
+            superglm.warmup()
         thresholds = gc.get_threshold()
         gc.set_threshold(0)  # no automatic collection; the collector stays enabled
         gc.callbacks.append(count)
