@@ -250,13 +250,10 @@ def _locked_cache() -> Iterator[None]:
     The lock is a file in the cache directory, so two warmups writing one
     cache (cluster nodes sharing ``NUMBA_CACHE_DIR``) exclude each other too.
 
-    A save is Numba's ``IndexDataCacheFile.save`` with its last two writes
-    swapped, the data file first and then the index that names it, and a new
-    entry's data file is one that no index on disk names, a stale one
-    included. A process stopped between the two writes leaves every index as
-    it was, naming only the code it was written with. Where the lock cannot
-    be taken, a save is skipped and a load misses, so the kernel compiles
-    again in this process rather than through an unlocked cache.
+    A save writes the data file, one no index on disk names, before the index
+    that names it, so a process stopped between the two writes leaves every
+    index naming only the code it was written with. Where the lock cannot be
+    taken, a save is skipped and a load misses: the kernel compiles again.
     """
     from numba.core import caching
 
