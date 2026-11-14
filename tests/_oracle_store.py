@@ -42,9 +42,13 @@ import atexit
 import fractions
 import functools
 import hashlib
+import importlib
+import importlib.metadata
+import importlib.util
 import inspect
 import json
 import os
+import sys
 import textwrap
 import time
 from collections.abc import Callable, Iterable
@@ -231,24 +235,117 @@ def _code_source(code: Any) -> str:
     return best
 
 
+def _library_version(name: str) -> str:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return "absent"
+
+
+_ORACLE_LIBRARIES = tuple((name, _library_version(name)) for name in ("mpmath", "sympy"))
+
+
+def _is_data(value: Any) -> bool:
+    """A value, not code: neither callable nor a module."""
+    return not (callable(value) or inspect.ismodule(value))
+
+
+def _node_names(node: ast.AST) -> set[str]:
+    found = set()
+    for child in ast.walk(node):
+        if isinstance(child, ast.Name):
+            found.add(child.id)
+        elif isinstance(child, ast.Attribute):
+            found.add(child.attr)
+    return found
+
+
+def _names(source: str) -> list[str]:
+    """Every name and attribute name ``source`` mentions, sorted.
+
+    Read from the syntax tree, not from ``co_names``: what a code object
+    records varies by Python version and by who imported the module (pytest's
+    assertion rewriting adds names), and it leaves out the names in default
+    arguments and decorators, which are evaluated outside the function.
+    """
+    text = textwrap.dedent(source)
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:  # a lambda segment cut from its statement
+        tree = ast.parse(f"({text.strip()})")
+    return sorted(_node_names(tree))
+
+
+@functools.cache
+def _module_tree(name: str, source: str) -> ast.Module:
+    return ast.parse(source)
+
+
+def _bound(target: ast.AST, name: str) -> bool:
+    return any(isinstance(n, ast.Name) and n.id == name for n in ast.walk(target))
+
+
+def _bindings(module: Any, name: str) -> list[ast.stmt]:
+    """The module-level statements that bind ``name`` (not those inside a def or class)."""
+    found, pending = [], list(_module_tree(module.__name__, inspect.getsource(module)).body)
+    while pending:
+        node = pending.pop(0)
+        if isinstance(node, (ast.If, ast.Try, ast.With, ast.For, ast.While)):
+            pending.extend(
+                child for child in ast.iter_child_nodes(node) if isinstance(child, ast.stmt)
+            )
+            for handler in getattr(node, "handlers", ()):
+                pending.extend(handler.body)
+        targets: list[ast.AST] = []
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
+        elif isinstance(node, (ast.For, ast.With)):
+            targets = (
+                [node.target]
+                if isinstance(node, ast.For)
+                else [item.optional_vars for item in node.items if item.optional_vars is not None]
+            )
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            if any((alias.asname or alias.name.partition(".")[0]) == name for alias in node.names):
+                found.append(node)
+            continue
+        if any(_bound(target, name) for target in targets):
+            found.append(node)
+    return found
+
+
 class _Fingerprint:
     """A sha256 of an oracle and everything its answer can depend on.
 
     Code defined in the repository enters by its source, and the walk follows
-    every name that source reaches: the globals and closure cells its code
-    objects load (including nested functions and comprehensions), the
-    attributes it names of repository modules, default arguments, class bodies
-    and methods.  So a helper the oracle calls through another helper, in a test
-    module or in ``src``, is covered without being listed.  Data enters
-    losslessly: a float by ``float.hex``, an array by its dtype, shape and
-    little-endian bytes, an ``mpmath.mpf`` by its mantissa and exponent.  Each
-    object is hashed once, in the order the walk first reaches it, so the
-    digest is the same on every platform and run.
+    every name that source mentions: the module globals and closure cells it
+    resolves to, and the attributes it names of repository modules.  So a
+    helper the oracle calls through another helper, in a test module or in
+    ``src``, is covered without being listed.
+
+    A module-level constant enters by the source of the statements that bind
+    it, and the walk follows the names those statements mention, never by the
+    value it computed at import: ``leggauss(3)`` or ``np.log(2 * np.pi)``
+    rounds differently on another platform's LAPACK or libm, and an edit to
+    the constant is an edit to that source.  Values enter only where they are
+    an oracle's input data rather than code: what a test passes in
+    ``depends``, closure cells, and a bound method's receiver.  They enter
+    losslessly: a float by ``float.hex``, an array by its full little-endian
+    dtype descriptor, shape and bytes, an ``mpmath.mpf`` by its mantissa and
+    exponent.
+
+    Each object is hashed once, in the order the walk first reaches it, and
+    nothing platform- or version-specific enters (no path, no address, no
+    library internals), so the digest is the same on every platform, Python
+    version and run.
     """
 
     def __init__(self) -> None:
         self._digest = hashlib.sha256()
-        self._seen: dict[int, int] = {}  # id -> the order the walk first reached it
+        # id, or (module, global name) -> the order the walk first reached it
+        self._seen: dict[Any, int] = {}
         self._keep: list[Any] = []  # holds walked objects so their ids stay unique
 
     def hexdigest(self) -> str:
@@ -259,15 +356,20 @@ class _Fingerprint:
         self._digest.update(f"{tag}:{len(data)}:".encode())
         self._digest.update(data)
 
+    def _first(self, key: Any) -> bool:
+        """Whether the walk reaches ``key`` for the first time; a repeat names it by order."""
+        if key in self._seen:
+            self._put("seen", str(self._seen[key]))
+            return False
+        self._seen[key] = len(self._seen)
+        return True
+
     def add(self, item: Any) -> None:
         if isinstance(item, (type(None), bool, int, str, bytes, float, complex)):
             self._data(item)
             return
-        if id(item) in self._seen:
-            # Which object, by when the walk first reached it: the same on every run.
-            self._put("seen", str(self._seen[id(item)]))
+        if not self._first(id(item)):
             return
-        self._seen[id(item)] = len(self._seen)
         self._keep.append(item)
         if isinstance(item, OracleStore):
             self._put("store", item.fingerprint)
@@ -321,69 +423,121 @@ class _Fingerprint:
         if _source_file(cls) is None:
             self._named(cls)
             return
-        self._put("class", inspect.getsource(cls))
+        source = inspect.getsource(cls)
+        self._put("class", source)
         for base in cls.__bases__:
             self.add(base)
         for name, value in vars(cls).items():
-            # Methods written in the class body and its attribute values; not the
-            # methods ``dataclass`` or ``typing`` generate, nor dunder data such as
-            # ``__static_attributes__`` or ``__annotate__``, which vary by Python version.
-            code = isinstance(value, (staticmethod, classmethod, property)) or inspect.isfunction(
+            # Methods written in the class body; not the ones ``dataclass`` or
+            # ``typing`` generate, nor ``__annotate__``, which vary by Python version.
+            if isinstance(value, (staticmethod, classmethod, property)) or inspect.isfunction(
                 value
-            )
-            if code:
+            ):
                 function = getattr(value, "__func__", getattr(value, "fget", value))
                 if not name.startswith("__annotate") and _source_file(function) is not None:
                     self._put("member", name)
                     self.add(value)
-            elif not (name.startswith("__") and name.endswith("__")):
-                self._put("member", name)
-                self.add(value)
+        # The class body's attribute values enter by their source, above; the
+        # names that source mentions resolve in the class's module.
+        body = [
+            node
+            for node in ast.parse(textwrap.dedent(source)).body[0].body
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        module = sys.modules.get(cls.__module__)
+        if module is not None:
+            names = sorted({n for node in body for n in _node_names(node)})
+            self._resolve(vars(module), {}, names)
 
     def _function(self, function: Any) -> None:
         if _source_file(function) is None or not hasattr(function, "__code__"):
             self._named(function)
             return
-        self._put("function", _code_source(function.__code__))
-        self.add(function.__defaults__)
-        self.add(function.__kwdefaults__)
-        scope = dict(function.__globals__)
+        source = _code_source(function.__code__)
+        self._put("function", source)
+        cells = {}
         for name, cell in zip(
             function.__code__.co_freevars, function.__closure__ or (), strict=True
         ):
             try:
-                scope[name] = cell.cell_contents
+                cells[name] = cell.cell_contents
             except ValueError:  # an empty cell
-                scope.pop(name, None)
-        names: list[str] = [*function.__code__.co_freevars]
-        codes = [function.__code__]
-        while codes:
-            code = codes.pop(0)
-            names.extend(code.co_names)
-            # Not the ``__annotate__`` functions Python 3.14 compiles for annotations.
-            codes.extend(
-                c for c in code.co_consts if inspect.iscode(c) and c.co_name != "__annotate__"
-            )
-        # Sorted: the order of ``co_names``, and whether a comprehension has its
-        # own code object, are the compiler's business and vary by Python version.
-        # pytest's assertion rewriting adds ``@pytest_ar`` and ``@py_builtins``,
-        # which are not identifiers: the walk must not depend on who imported the module.
-        names = sorted({name for name in names if name.isidentifier()})
-        modules = {
-            id(scope[n]): scope[n]
-            for n in names
-            if inspect.ismodule(scope.get(n)) and _source_file(scope[n]) is not None
-        }
+                pass
+        self._resolve(function.__globals__, cells, _names(source))
+
+    def _resolve(self, scope: dict[str, Any], cells: dict[str, Any], names: list[str]) -> None:
+        """Walk what ``names`` resolve to in a module's globals and a closure's cells."""
+        modules: dict[int, Any] = {}
         for name in names:
-            if inspect.ismodule(scope.get(name)):
-                # A module the code names: only the attributes it names (below).
-                self._put("module name", scope[name].__name__)
+            if name in cells:
+                value = cells[name]
             elif name in scope:
-                self.add(scope[name])
-            # ``helpers.name``: the attribute of a repository module the code names.
-            for module in modules.values():
-                if hasattr(module, name):
-                    self.add(getattr(module, name))
+                value = scope[name]
+            else:
+                continue
+            if inspect.ismodule(value):
+                # A module the code names: only the attributes it names (below).
+                self._put("module name", value.__name__)
+                if _source_file(value) is not None:
+                    modules[id(value)] = value
+            elif name in cells or not _is_data(value):
+                self.add(value)  # code, or a closure cell's runtime value
+            else:
+                self._global(scope.get("__name__"), name, value)
+        # ``helpers.name``: the attribute of a repository module the code names.
+        pending = list(modules.values())
+        while pending:
+            module = pending.pop(0)
+            for name in names:
+                value = getattr(module, name, None)
+                if value is None:
+                    continue
+                if inspect.ismodule(value):
+                    self._put("module name", value.__name__)
+                    if _source_file(value) is not None and id(value) not in modules:
+                        modules[id(value)] = value
+                        pending.append(value)
+                elif _is_data(value):
+                    self._global(module.__name__, name, value)
+                else:
+                    self.add(value)
+
+    def _global(self, module_name: str | None, name: str, value: Any) -> None:
+        """A module-level constant: the source of the statements that bind it."""
+        module = sys.modules.get(module_name or "")
+        if module is None or _source_file(module) is None:
+            self._data(value)  # a library's constant: its value, which it does not compute
+            return
+        if not self._first((module_name, name)):
+            return
+        text = inspect.getsource(module)
+        statements = _bindings(module, name)
+        if not statements:
+            # Bound some other way (``globals()``, a loop): its value is all there is.
+            self._put("unbound global", f"{module_name}.{name}")
+            self.add(value)
+            return
+        self._put("global", f"{module_name}.{name}")
+        names: set[str] = set()
+        for statement in statements:
+            if isinstance(statement, ast.ImportFrom) and statement.module:
+                # ``from x import name``: the constant is x's; follow it there.
+                alias = next(a for a in statement.names if (a.asname or a.name) == name)
+                source = importlib.import_module(
+                    statement.module
+                    if statement.level == 0
+                    else importlib.util.resolve_name(
+                        "." * statement.level + statement.module, module.__package__
+                    )
+                )
+                self._put("import", f"{source.__name__}.{alias.name}")
+                self._global(source.__name__, alias.name, value)
+                continue
+            # The statement's exact text: ``ast.unparse`` formats differently by version.
+            self._put("binding", ast.get_source_segment(text, statement) or "")
+            names.update(_node_names(statement))
+        names.discard(name)
+        self._resolve(vars(module), {}, sorted(names))
 
     def _data(self, item: Any) -> None:
         if item is None or isinstance(item, (bool, int, str)):
@@ -482,6 +636,10 @@ class OracleStore:
     ) -> None:
         self.name, self.oracle, self.module, self.sample = name, oracle, module, sample
         fingerprint = _Fingerprint()
+        # The oracle libraries' versions: an upgrade recomputes every answer
+        # rather than leaving it to the sampled check.
+        fingerprint.add(_ORACLE_LIBRARIES)
+        self._depends = tuple(depends)
         for item in (oracle, *depends):
             fingerprint.add(item)
         self.fingerprint = fingerprint.hexdigest()

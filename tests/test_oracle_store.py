@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-import functools
+import importlib
 import json
+import linecache
+import sys
+import textwrap
 
 import numpy as np
 import pytest
@@ -137,11 +140,8 @@ def _outer(x):
     return _inner(x) + 1
 
 
-def test_the_fingerprint_follows_every_helper_and_constant_the_oracle_reaches(monkeypatch):
+def test_the_fingerprint_follows_every_helper_the_oracle_reaches(monkeypatch):
     before = _fingerprint(_outer)
-    monkeypatch.setattr(f"{__name__}._SCALE", 1.000000001)
-    assert _fingerprint(_outer) != before
-    monkeypatch.undo()
     monkeypatch.setattr(f"{__name__}._inner", lambda x: mp.mpf(x) * 2)
     assert _fingerprint(_outer) != before
     monkeypatch.undo()
@@ -205,74 +205,6 @@ def test_verify_catches_a_stored_answer_replaced_by_an_infinity(store_directory,
         OracleStore("sample", _oracle, module="tests/test_oracle_store.py").verify()
 
 
-def _scaled(function):
-    @functools.wraps(function)
-    def wrapper(x):
-        return function(x) * _SCALE
-
-    return wrapper
-
-
-@_scaled
-def _decorated(x):
-    return mp.mpf(x)
-
-
-class _Law:
-    scale = _SCALE
-
-    @staticmethod
-    def evaluate(x):
-        return x * _Law.scale
-
-
-_A, _B = [1.0], [2.0]
-_CONFIGURATION = (_A, _B, _A)
-_ENABLED = np.bool_(True)
-_TABLE = np.array([(1.0, 2.0)], dtype=[("x", "f8"), ("y", "f8")])
-
-
-def _reads_a_repeat(x):
-    return _CONFIGURATION[2][0] * x
-
-
-def _reads_a_flag(x):
-    return x if _ENABLED else -x
-
-
-def _reads_a_field(x):
-    return _TABLE["x"][0] * x
-
-
-@pytest.mark.parametrize(
-    ("oracle", "name", "changed"),
-    [
-        (_decorated, "_SCALE", 2.0),
-        (_Law.evaluate, "_Law.scale", 2.0),
-        (_reads_a_repeat, "_CONFIGURATION", (_A, _B, _B)),
-        (_reads_a_flag, "_ENABLED", np.bool_(False)),
-        (_reads_a_field, "_TABLE", np.array([(1.0, 2.0)], dtype=[("y", "f8"), ("x", "f8")])),
-    ],
-    ids=[
-        "decorator-wrapper",
-        "class-attribute",
-        "repeated-object",
-        "numpy-bool",
-        "structured-dtype",
-    ],
-)
-def test_the_fingerprint_sees_every_kind_of_state_an_oracle_reads(
-    monkeypatch, oracle, name, changed
-):
-    """A decorator's wrapper, a class attribute, which object a repeat names, a numpy
-    scalar's value and a structured array's fields each change the oracle's answer."""
-    before = _fingerprint(oracle)
-    monkeypatch.setattr(f"{__name__}.{name}", changed)
-    assert _fingerprint(oracle) != before
-    monkeypatch.undo()
-    assert _fingerprint(oracle) == before
-
-
 def test_a_module_level_mpmath_constant_does_not_take_the_ambient_precision():
     """Importing a module that raises ``mp.dps`` first must not change a store's fingerprint."""
     import importlib
@@ -295,43 +227,6 @@ class _Scaled:
         return self.scale * x
 
 
-_IDENTITY, _DOUBLED = lambda x: x, lambda x: x if x <= 2 else 2 * x
-_HELPER = _IDENTITY
-_TERMS = range(2)
-_OBJECT_TABLE = np.array([(1.0, 2.0)], dtype=[("x", object), ("y", object)])
-
-
-def _calls_the_helper(x):
-    return _HELPER(x)
-
-
-def _sums_the_terms(x):
-    return sum(x**k for k in _TERMS)
-
-
-def _reads_an_object_field(x):
-    return _OBJECT_TABLE["x"][0] * x
-
-
-@pytest.mark.parametrize(
-    ("oracle", "name", "changed"),
-    [
-        (_calls_the_helper, "_HELPER", _DOUBLED),
-        (_sums_the_terms, "_TERMS", range(3)),
-        (
-            _reads_an_object_field,
-            "_OBJECT_TABLE",
-            np.array([(1.0, 2.0)], dtype=[("y", object), ("x", object)]),
-        ),
-    ],
-    ids=["lambda-sharing-a-statement", "range", "object-structured-dtype"],
-)
-def test_the_fingerprint_tells_apart_values_that_look_alike(monkeypatch, oracle, name, changed):
-    before = _fingerprint(oracle)
-    monkeypatch.setattr(f"{__name__}.{name}", changed)
-    assert _fingerprint(oracle) != before
-
-
 def test_a_bound_method_enters_with_its_receiver():
     assert _fingerprint(_Scaled(1.0).evaluate) != _fingerprint(_Scaled(2.0).evaluate)
     assert _fingerprint(_Scaled(1.0).evaluate) == _fingerprint(_Scaled(1.0).evaluate)
@@ -340,3 +235,144 @@ def test_a_bound_method_enters_with_its_receiver():
 def test_a_builtin_constant_the_fingerprint_cannot_read_is_refused():
     with pytest.raises(TypeError, match="cannot hash"):
         _fingerprint(_oracle, (bytearray(b"x"),))
+
+
+@pytest.fixture
+def fingerprint_of(tmp_path, monkeypatch):
+    """The fingerprint of ``oracle`` in a repository module written from ``source``.
+
+    A constant enters a fingerprint by the source that binds it, so an edit is
+    an edit to a file: each call writes the module ``_oracle_store_case`` into
+    a fresh directory and imports it afresh, under the same name.
+    """
+    monkeypatch.setattr(_oracle_store, "_SOURCE_ROOTS", (*_oracle_store._SOURCE_ROOTS, tmp_path))
+    calls = []
+
+    def fingerprint(source):
+        directory = tmp_path / str(len(calls))
+        directory.mkdir()
+        calls.append(directory)
+        (directory / "_oracle_store_case.py").write_text(textwrap.dedent(source))
+        sys.modules.pop("_oracle_store_case", None)
+        linecache.clearcache()
+        importlib.invalidate_caches()
+        sys.path.insert(0, str(directory))
+        try:
+            return _fingerprint(importlib.import_module("_oracle_store_case").oracle)
+        finally:
+            sys.path.remove(str(directory))
+
+    yield fingerprint
+    sys.modules.pop("_oracle_store_case", None)
+
+
+_EDITS = {
+    "array-element": (
+        "import numpy as np\nWEIGHTS = np.array([1.0, 2.0])\n"
+        "def oracle(x):\n    return WEIGHTS[0] * x\n",
+        "1.0, 2.0",
+        "1.000000001, 2.0",
+    ),
+    "constant-through-a-helper": (
+        "SCALE = 1.0\ndef inner(x):\n    return x * SCALE\ndef oracle(x):\n    return inner(x)\n",
+        "SCALE = 1.0",
+        "SCALE = 2.0",
+    ),
+    "constant-in-a-default": (
+        "SCALE = 1.0\ndef oracle(x, scale=SCALE):\n    return x * scale\n",
+        "SCALE = 1.0",
+        "SCALE = 2.0",
+    ),
+    "decorator-wrapper": (
+        "import functools\nSCALE = 1.0\n"
+        "def scaled(f):\n    @functools.wraps(f)\n    def wrapper(x):\n"
+        "        return f(x) * SCALE\n    return wrapper\n"
+        "@scaled\ndef oracle(x):\n    return x\n",
+        "SCALE = 1.0",
+        "SCALE = 2.0",
+    ),
+    "class-attribute": (
+        "SCALE = 1.0\nclass Law:\n    scale = SCALE\ndef oracle(x):\n    return x * Law.scale\n",
+        "SCALE = 1.0",
+        "SCALE = 2.0",
+    ),
+    "repeated-object": (
+        "A, B = [1.0], [2.0]\nCONFIGURATION = (A, B, A)\n"
+        "def oracle(x):\n    return CONFIGURATION[2][0] * x\n",
+        "(A, B, A)",
+        "(A, B, B)",
+    ),
+    "numpy-bool": (
+        "import numpy as np\nENABLED = np.bool_(True)\n"
+        "def oracle(x):\n    return x if ENABLED else -x\n",
+        "True",
+        "False",
+    ),
+    "structured-dtype": (
+        "import numpy as np\n"
+        "TABLE = np.array([(1.0, 2.0)], dtype=[('x', 'f8'), ('y', 'f8')])\n"
+        "def oracle(x):\n    return TABLE['x'][0] * x\n",
+        "[('x', 'f8'), ('y', 'f8')]",
+        "[('y', 'f8'), ('x', 'f8')]",
+    ),
+    "lambda-sharing-a-statement": (
+        "IDENTITY, DOUBLED = lambda x: x, lambda x: x if x <= 2 else 2 * x\n"
+        "HELPER = IDENTITY\ndef oracle(x):\n    return HELPER(x)\n",
+        "HELPER = IDENTITY",
+        "HELPER = DOUBLED",
+    ),
+    "range": (
+        "TERMS = range(2)\ndef oracle(x):\n    return sum(x**k for k in TERMS)\n",
+        "range(2)",
+        "range(3)",
+    ),
+}
+
+
+@pytest.mark.parametrize("edit", sorted(_EDITS))
+def test_an_edit_to_what_the_oracle_reads_changes_its_fingerprint(fingerprint_of, edit):
+    """A helper, a constant behind it, a default, a decorator's wrapper, a class
+    attribute, which object a repeat names, a numpy scalar, a structured dtype,
+    one of two lambdas on a line and a range each change the oracle's answer."""
+    source, old, new = _EDITS[edit]
+    assert old in source
+    before = fingerprint_of(source)
+    assert fingerprint_of(source) == before
+    assert fingerprint_of(source.replace(old, new)) != before
+
+
+def test_a_value_computed_at_import_does_not_enter_the_fingerprint(fingerprint_of, monkeypatch):
+    """``leggauss`` is an eigenvalue solve: another platform's LAPACK rounds its
+    nodes differently, and a fingerprint must not see that."""
+    source = (
+        "import numpy as np\nNODES, WEIGHTS = np.polynomial.legendre.leggauss(3)\n"
+        "def oracle(x):\n    return sum(w * x ** t for t, w in zip(NODES, WEIGHTS))\n"
+    )
+    before = fingerprint_of(source)
+    module = sys.modules["_oracle_store_case"]
+    monkeypatch.setattr(module, "NODES", np.nextafter(module.NODES, np.inf))
+    assert _fingerprint(module.oracle) == before
+
+
+def test_no_store_fingerprints_the_platforms_legendre_rounding(monkeypatch):
+    """The LSS bounds store reaches ``_response_tails``' Gauss-Legendre nodes."""
+    from superglm.distributional.kernels import _response_tails
+    from tests import test_lss_response_bounds
+
+    store = test_lss_response_bounds.ROW_PARTIALS
+    rebuilt = OracleStore(store.name, store.oracle, depends=store._depends, module=store.module)
+    assert rebuilt.fingerprint == store.fingerprint
+    for name in ("_LEGENDRE_NODES", "_LEGENDRE_WEIGHTS"):
+        monkeypatch.setattr(
+            _response_tails, name, np.nextafter(getattr(_response_tails, name), np.inf)
+        )
+    nudged = OracleStore(store.name, store.oracle, depends=store._depends, module=store.module)
+    assert nudged.fingerprint == store.fingerprint
+
+
+def test_every_fingerprint_names_the_oracle_libraries_versions(monkeypatch):
+    before = _fingerprint(_oracle)
+    monkeypatch.setattr(
+        _oracle_store, "_ORACLE_LIBRARIES", (("mpmath", "9.9"), ("sympy", "1.14.0"))
+    )
+    assert _fingerprint(_oracle) != before

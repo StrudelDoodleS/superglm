@@ -1,7 +1,7 @@
 {
 "oracle": "tests.test_gamma_ls_response_bounds._deep_lower_tail_window",
 "refresh": "SUPERGLM_REFRESH_ORACLES=1 uv run --with mpmath pytest tests/test_gamma_ls_response_bounds.py -n 8",
-"fingerprint": "eaf253d3e6f1bfb787210b62f034357afe397c43608d66fea3eceb9cb991b2a5",
+"fingerprint": "b4b97b0fd36074b1eb14de9966211958688f1954e6ba76d733a86f0368fd38b7",
 "entries": {
 "{\"t\":[{\"t\":[{\"i\":0}]},{\"t\":[]}]}": [{"m":[1,"0x72cbed2a65bdceb18d9eaa5d5b7bad3795",-177,135]},0.356],
 "{\"t\":[{\"t\":[{\"i\":1}]},{\"t\":[]}]}": [{"m":[1,"0xf8268325692439ce258be85e386b0036e7",-177,136]},2.441],

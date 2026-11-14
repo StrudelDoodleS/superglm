@@ -1,7 +1,7 @@
 {
 "oracle": "tests.test_generalized_gamma_response_bounds._log_cdf_near_zero_shape",
 "refresh": "SUPERGLM_REFRESH_ORACLES=1 uv run --with mpmath pytest tests/test_generalized_gamma_response_bounds.py -n 8",
-"fingerprint": "e34e732605ca8b52405ac96809813a74a05c8799ba4b04b831b1bc349da1db61",
+"fingerprint": "357d58bb14f55538dddb2ad6b6c193fac284ce0281f2581a4f618daed67bdcd2",
 "entries": {
 "{\"t\":[{\"t\":[{\"f\":\"-0x1.0000000000000p+0\"},{\"f\":\"-0x1.5798ee2308c3ap-28\"}]},{\"t\":[]}]}": [{"m":[1,"0x75d34c773acfa56cddfb7b42e5012a7567df7829eb5d7fc6b6c5c213eb",-230,231]},0.137],
 "{\"t\":[{\"t\":[{\"f\":\"-0x1.0000000000000p+0\"},{\"f\":\"0x0.0p+0\"}]},{\"t\":[]}]}": [{"m":[1,"0xeba698e6457e05883d66a70fa7dcc3443fffa1514712906369cc74d438b",-235,236]},0.133],
