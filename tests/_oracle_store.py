@@ -285,14 +285,26 @@ def _mentions(node: ast.AST, name: str) -> bool:
     return any(isinstance(n, ast.Name) and n.id == name for n in ast.walk(node))
 
 
+def _calls_on(node: ast.AST, name: str) -> bool:
+    """Whether ``node`` calls a method of ``name`` (``HEAD = X.pop(0)`` changes ``X``)."""
+    return any(
+        isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and isinstance(n.func.value, ast.Name)
+        and n.func.value.id == name
+        for n in ast.walk(node)
+    )
+
+
 def _touches(statement: ast.stmt, name: str) -> bool:
     """Whether a module-level statement binds or changes ``name``.
 
-    An assignment whose target mentions it (``X = ...``, ``X[0] = ...``), an
-    import of it, an expression or ``del`` that mentions it
-    (``X.append(3.0)``), or a compound statement with such a statement inside.
-    A ``def`` or ``class`` is code, walked when something names it, and an
-    assignment to another name only reads it.
+    An assignment whose target mentions it (``X = ...``, ``X[0] = ...``) or
+    that calls one of its methods (``HEAD = X.pop(0)``), an import of it, an
+    expression or ``del`` that mentions it (``X.append(3.0)``), or a compound
+    statement with such a statement inside.  A ``def`` or ``class`` is code,
+    walked when something names it, and any other assignment to another name
+    only reads it.
     """
     if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
         return False
@@ -301,9 +313,9 @@ def _touches(statement: ast.stmt, name: str) -> bool:
             (alias.asname or alias.name.partition(".")[0]) == name for alias in statement.names
         )
     if isinstance(statement, ast.Assign):
-        return any(_mentions(target, name) for target in statement.targets)
+        return any(_mentions(t, name) for t in statement.targets) or _calls_on(statement, name)
     if isinstance(statement, (ast.AnnAssign, ast.AugAssign)):
-        return _mentions(statement.target, name)
+        return _mentions(statement.target, name) or _calls_on(statement, name)
     if isinstance(statement, (ast.Expr, ast.Delete)):
         return _mentions(statement, name)
     inner: list[ast.AST] = []
@@ -495,8 +507,8 @@ class _Fingerprint:
                 self._put("module name", value.__name__)
                 if _source_file(value) is not None:
                     modules[id(value)] = value
-            elif name in cells or not _is_data(value):
-                self.add(value)  # code, or a closure cell's runtime value
+            elif name in cells:
+                self.add(value)  # a closure cell's runtime value
             else:
                 self._global(scope.get("__name__"), name, value)
         # ``helpers.name``: the attribute of a repository module the code names.
@@ -512,22 +524,28 @@ class _Fingerprint:
                     if _source_file(value) is not None and id(value) not in modules:
                         modules[id(value)] = value
                         pending.append(value)
-                elif _is_data(value):
-                    self._global(module.__name__, name, value)
                 else:
-                    self.add(value)
+                    self._global(module.__name__, name, value)
 
     def _global(self, module_name: str | None, name: str, value: Any) -> None:
-        """A module-level constant: the source of the statements that bind it."""
+        """A module global: the source of the statements that bind or change it.
+
+        For a constant that source is all that enters, never the value it
+        computed at import; code (a function, a class) enters as well by its
+        own source, and its binding statements say which code a name selects
+        (``F = mp.exp``).
+        """
         module = sys.modules.get(module_name or "")
         if module is None or _source_file(module) is None:
-            self._data(value)  # a library's constant: its value, which it does not compute
+            self.add(value)  # a library's: its code by name, its constant by value
             return
         if not self._first((module_name, name)):
             return
         text = inspect.getsource(module)
         statements = _bindings(module, name)
-        if not statements:
+        if not _is_data(value):
+            self.add(value)
+        elif not statements:
             # Bound some other way (``globals()``, a loop): its value is all there is.
             self._put("unbound global", f"{module_name}.{name}")
             self.add(value)
@@ -535,26 +553,26 @@ class _Fingerprint:
         self._put("global", f"{module_name}.{name}")
         names: set[str] = set()
         for statement in statements:
-            if (
-                isinstance(statement, ast.ImportFrom)
-                and statement.module
-                and any((a.asname or a.name) == name for a in statement.names)
-            ):
-                # ``from x import name``: the constant is x's; follow it there.
-                alias = next(a for a in statement.names if (a.asname or a.name) == name)
-                source = importlib.import_module(
-                    statement.module
-                    if statement.level == 0
-                    else importlib.util.resolve_name(
-                        "." * statement.level + statement.module, module.__package__
-                    )
-                )
-                self._put("import", f"{source.__name__}.{alias.name}")
-                self._global(source.__name__, alias.name, value)
-                continue
             # The statement's exact text: ``ast.unparse`` formats differently by version.
             self._put("binding", ast.get_source_segment(text, statement) or "")
             names.update(_node_names(statement))
+            # ``from x import name``, at the top level or under a guard: the
+            # constant is x's too, so follow it there.
+            for node in ast.walk(statement):
+                if not (isinstance(node, ast.ImportFrom) and node.module and _is_data(value)):
+                    continue
+                for alias in node.names:
+                    if (alias.asname or alias.name) != name:
+                        continue
+                    source = importlib.import_module(
+                        node.module
+                        if node.level == 0
+                        else importlib.util.resolve_name(
+                            "." * node.level + node.module, module.__package__
+                        )
+                    )
+                    self._put("import", f"{source.__name__}.{alias.name}")
+                    self._global(source.__name__, alias.name, getattr(source, alias.name, value))
         names.discard(name)
         self._resolve(vars(module), {}, sorted(names))
 
@@ -613,7 +631,16 @@ class _Fingerprint:
         elif _source_file(type(item)) is not None:
             # An instance of a repository class: the class and the instance's state.
             self.add(type(item))
-            slots = [n for c in type(item).__mro__ for n in getattr(c, "__slots__", ())]
+            slots = [
+                n
+                for c in type(item).__mro__
+                # ``__slots__ = "scale"`` declares one slot, not five.
+                for n in (
+                    (c.__dict__["__slots__"],)
+                    if isinstance(c.__dict__.get("__slots__"), str)
+                    else c.__dict__.get("__slots__", ())
+                )
+            ]
             state = dict(vars(item)) if hasattr(item, "__dict__") else {}
             self.add({**state, **{n: getattr(item, n) for n in slots if hasattr(item, n)}})
         elif type(item).__module__.partition(".")[0] == "sympy":

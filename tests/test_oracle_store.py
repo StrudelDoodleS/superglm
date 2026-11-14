@@ -248,12 +248,14 @@ def fingerprint_of(tmp_path, monkeypatch):
     monkeypatch.setattr(_oracle_store, "_SOURCE_ROOTS", (*_oracle_store._SOURCE_ROOTS, tmp_path))
     calls = []
 
-    def fingerprint(source):
+    def fingerprint(source, helper=""):
         directory = tmp_path / str(len(calls))
         directory.mkdir()
         calls.append(directory)
         (directory / "_oracle_store_case.py").write_text(textwrap.dedent(source))
+        (directory / "_oracle_store_helper.py").write_text(textwrap.dedent(helper))
         sys.modules.pop("_oracle_store_case", None)
+        sys.modules.pop("_oracle_store_helper", None)
         linecache.clearcache()
         importlib.invalidate_caches()
         sys.path.insert(0, str(directory))
@@ -264,6 +266,7 @@ def fingerprint_of(tmp_path, monkeypatch):
 
     yield fingerprint
     sys.modules.pop("_oracle_store_case", None)
+    sys.modules.pop("_oracle_store_helper", None)
 
 
 _EDITS = {
@@ -331,6 +334,17 @@ _EDITS = {
         "WEIGHTS = [1.0, 2.0]\nWEIGHTS.append(3.0)\ndef oracle(x):\n    return WEIGHTS[-1] * x\n",
         "append(3.0)",
         "append(4.0)",
+    ),
+    "callable-selection": (
+        "import mpmath as mp\nF = mp.exp\ndef oracle(x):\n    return F(x)\n",
+        "F = mp.exp",
+        "F = mp.sin",
+    ),
+    "mutation-in-another-assignment": (
+        "COEFFICIENTS = [1.0, 2.0, 3.0]\nHEAD = COEFFICIENTS.pop(0)\n"
+        "def oracle(x):\n    return sum(COEFFICIENTS) * x\n",
+        "pop(0)",
+        "pop(1)",
     ),
     "range": (
         "TERMS = range(2)\ndef oracle(x):\n    return sum(x**k for k in TERMS)\n",
@@ -407,3 +421,27 @@ def test_the_window_store_neither_hashes_nor_looks_up_the_platforms_legendre_rou
     assert rebuilt.fingerprint == store.fingerprint
     case = jets._NARROW_CASES[0]
     jets.test_quadrature_jets_match_the_oracle_to_order_four(*case[:1], *case[2:])
+
+
+def test_a_constant_imported_under_a_guard_is_followed_to_its_module(fingerprint_of):
+    source = (
+        "try:\n    from _oracle_store_helper import SCALE\nexcept ImportError:\n"
+        "    SCALE = 1.0\ndef oracle(x):\n    return x * SCALE\n"
+    )
+    before = fingerprint_of(source, helper="SCALE = 1.0\n")
+    assert fingerprint_of(source, helper="SCALE = 1.0\n") == before
+    assert fingerprint_of(source, helper="SCALE = 2.0\n") != before
+
+
+class _OneSlot:
+    __slots__ = "scale"
+
+    def __init__(self, scale):
+        self.scale = scale
+
+    def evaluate(self, x):
+        return self.scale * x
+
+
+def test_a_receiver_with_one_string_slot_enters_with_its_state():
+    assert _fingerprint(_OneSlot(1.0).evaluate) != _fingerprint(_OneSlot(2.0).evaluate)
