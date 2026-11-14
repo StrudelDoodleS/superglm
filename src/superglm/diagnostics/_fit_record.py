@@ -112,7 +112,10 @@ def _safe(fn, *args):
 
 def _steal_ticks():
     try:
-        fields = [int(v) for v in Path("/proc/stat").read_text().split("\n", 1)[0].split()[1:]]
+        fields = [
+            int(v)
+            for v in Path("/proc/stat").read_text(encoding="utf-8").split("\n", 1)[0].split()[1:]
+        ]
         return sum(fields), fields[7] if len(fields) > 7 else 0
     except (OSError, ValueError, IndexError):
         return None
@@ -137,7 +140,7 @@ _PROCESS_TOKEN = uuid.uuid4().hex[:12]
 
 def _proc_start(pid):
     try:
-        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+        return Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[19]
     except (OSError, IndexError):
         return None
 
@@ -148,14 +151,14 @@ def _cpu_now() -> dict:
     try:
         mhz = [
             float(line.split(":", 1)[1])
-            for line in Path("/proc/cpuinfo").read_text().splitlines()
+            for line in Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines()
             if line.startswith("cpu MHz")
         ]
         out["mhz_mean"] = sum(mhz) / len(mhz) if mhz else None
     except (OSError, ValueError):
         pass
     try:
-        for line in Path("/proc/meminfo").read_text().splitlines():
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
             if line.startswith("MemAvailable:"):
                 out["mem_available_gib"] = round(int(line.split()[1]) / 2**20, 2)
     except (OSError, ValueError):
@@ -169,14 +172,16 @@ def _cpu_topology() -> dict:
     cpu0 = Path("/sys/devices/system/cpu/cpu0/cache")
     for index in sorted(cpu0.glob("index*")):
         try:
-            level = (index / "level").read_text().strip()
-            kind = (index / "type").read_text().strip()
+            level = (index / "level").read_text(encoding="utf-8").strip()
+            kind = (index / "type").read_text(encoding="utf-8").strip()
             name = f"L{level}" + ("d" if kind == "Data" else "i" if kind == "Instruction" else "")
-            out["caches"][name] = (index / "size").read_text().strip()
+            out["caches"][name] = (index / "size").read_text(encoding="utf-8").strip()
         except OSError:
             pass
     try:
-        out["smt_active"] = Path("/sys/devices/system/cpu/smt/active").read_text().strip() == "1"
+        out["smt_active"] = (
+            Path("/sys/devices/system/cpu/smt/active").read_text(encoding="utf-8").strip() == "1"
+        )
     except OSError:
         out["smt_active"] = None
     out["numa_nodes"] = len(list(Path("/sys/devices/system/node").glob("node[0-9]*"))) or None
@@ -218,7 +223,7 @@ def _process_facts() -> dict:
     cpu, cores, ram = platform.processor() or None, None, None
     try:
         physical, phys = set(), None
-        for line in Path("/proc/cpuinfo").read_text().splitlines():
+        for line in Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines():
             key, _, value = (part.strip() for part in line.partition(":"))
             if key == "model name":
                 cpu = value
@@ -229,7 +234,7 @@ def _process_facts() -> dict:
         cores = len(physical) or None
         ram = next(
             round(int(line.split()[1]) / 2**20, 1)
-            for line in Path("/proc/meminfo").read_text().splitlines()
+            for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines()
             if line.startswith("MemTotal:")
         )
     except (OSError, StopIteration, ValueError):
