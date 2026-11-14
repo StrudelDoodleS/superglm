@@ -315,7 +315,7 @@ def _tail_log_survival(
         rows = pending.pop()
         workspace = TweedieWindowWorkspace()
         value, refused = _window_log_probability(
-            q[rows], np.inf, values[rows], weights[rows], workspace
+            q[rows], np.full(len(rows), np.inf), values[rows], weights[rows], workspace
         )
         result[rows] = value
         if not refused.any():
