@@ -940,11 +940,21 @@ def _floats(values):
     return [float(v) if np.isfinite(v) else None for v in a]
 
 
-def glm_outputs(spec, model, test) -> dict:
+def glm_outputs(spec, model, test, train=None) -> dict:
     """What a user reads off a fitted SuperGLM, on a fixed sample of test rows.
 
-    ``SuperGLM.predict`` gives no standard errors, so the standard errors are the summary's
-    coefficient table: the intercept's and each term's, on the fitted-family scale.
+    ``SuperGLM.predict`` gives no standard errors, so the standard errors are the two
+    surfaces a user reads them from:
+
+    - ``summary_se``, ``summary_curve_se`` and ``summary_basis_se``: what ``model.summary()``
+      prints, on the fitted-family scale (``phi = 1`` for a known-scale family such as Poisson
+      or binomial): each non-spline row's standard error (the intercept, a linear term, a
+      categorical level), each spline row's curve SE range, and each spline coefficient's
+      standard error in the ``detail="full"`` rows;
+    - ``quasi_coef_se``: ``model.metrics(train).coefficient_se``, the Pearson-scaled
+      quasi-likelihood standard errors per coefficient of every term.  For an estimated-scale
+      family it equals the fitted-family value; for a known-scale one it differs by
+      ``sqrt(pearson_chi2 / residual_df)``.
     """
     rows = _sample_rows(len(test))
     X, _, _, off = _glm_inputs(spec, test.iloc[rows].reset_index(drop=True))
@@ -972,9 +982,22 @@ def glm_outputs(spec, model, test) -> dict:
     }
     try:
         summary = model.summary()
-        se = summary.to_dict()["standard_errors"]["coefficient_se"]
-        out["coef_se"] = {str(k): _floats(v) for k, v in se.items()}
-        out["intercept_se"] = next(float(r.se) for r in summary._coef_rows if r.name == "Intercept")
+        rows = summary._coef_rows
+        out["summary_se"] = {r.name: _floats([r.se])[0] for r in rows if not r.is_spline}
+        out["summary_curve_se"] = {
+            r.name: _floats([r.curve_se_min, r.curve_se_max])
+            for r in rows
+            if r.is_spline and r.curve_se_min is not None
+        }
+        out["summary_basis_se"] = {
+            str(k): _floats([b.se for b in v]) for k, v in summary._basis_detail.items()
+        }
+        if train is not None:
+            Xt, yt, wt, ot = _glm_inputs(spec, train)
+            with warnings.catch_warnings():  # the fit's own warnings are already recorded
+                warnings.simplefilter("ignore")
+                quasi = model.metrics(Xt, yt, sample_weight=wt, offset=ot).coefficient_se
+            out["quasi_coef_se"] = {str(k): _floats(v) for k, v in quasi.items()}
     except Exception as exc:  # noqa: BLE001 - a summary that refuses is recorded, and compared
         out["coef_se_unavailable"] = f"{type(exc).__name__}: {exc}"[:200]
     return out
@@ -1218,8 +1241,10 @@ def _run_case(case: str, threads: str, *, counts_only: bool) -> tuple[dict, dict
             spec, model, test
         )
         try:
-            record["outputs"] = (glm_outputs if spec["kind"] == "glm" else lss_outputs)(
-                spec, model, test
+            record["outputs"] = (
+                glm_outputs(spec, model, test, train)
+                if spec["kind"] == "glm"
+                else lss_outputs(spec, model, test)
             )
         except Exception as exc:  # noqa: BLE001 - check refuses the pair and says why
             record["outputs"] = {"error": f"{type(exc).__name__}: {exc}"[:300]}
@@ -1827,13 +1852,16 @@ def compare(records: list[dict], base_sha: str | None = None, lookup=stored_reco
     return (None, refusals) if refusals else (comparison_table(pairs), [])
 
 
-def _latest_records(out: Path, sha: str, threads: str | None) -> list[Path]:
-    latest: dict[tuple[str, str], dict] = {}
+def _index(out: Path) -> list[dict]:
     index = out / "index.jsonl"
     if not index.exists():
         return []
-    for line in index.read_text(encoding="utf-8").splitlines():
-        entry = json.loads(line)
+    return [json.loads(line) for line in index.read_text(encoding="utf-8").splitlines()]
+
+
+def _latest_records(out: Path, sha: str, threads: str | None) -> list[Path]:
+    latest: dict[tuple[str, str], dict] = {}
+    for entry in _index(out):
         if entry["sha"] == sha and threads in (None, entry["threads"]):
             latest[(entry["case"], entry["threads"])] = entry
     return [Path(e["path"]) for e in latest.values()]
@@ -1884,8 +1912,10 @@ FLOOR_FRACTION = 1e-3
 VALUE_OUTPUTS = {
     "predictions": "vector",
     "prediction_se": "vector",
-    "coef_se": "vector",
-    "intercept_se": 0.0,
+    "summary_se": "vector",
+    "summary_curve_se": "vector",
+    "summary_basis_se": "vector",
+    "quasi_coef_se": "vector",
     "intercept": 1.0,
     "edf_total": 1.0,
     "edf_by_term": 1.0,
@@ -1994,7 +2024,8 @@ def _log_move(a: dict, b: dict) -> float:
 # Table columns: (heading, the outputs whose largest move the column shows).
 CHECK_COLUMNS = (
     ("Predictions", ("predictions",)),
-    ("SEs", ("prediction_se", "coef_se", "intercept_se")),
+    ("SEs", ("prediction_se", "summary_se", "summary_curve_se", "summary_basis_se")),
+    ("Quasi SEs", ("quasi_coef_se",)),
     ("Intercept", ("intercept",)),
     ("EDF", ("edf_total", "edf_by_term")),
     ("Dispersion", ("family",)),
@@ -2046,6 +2077,24 @@ def check_table(rows) -> str:
     return "\n".join(lines)
 
 
+def missing_outputs(base: dict, branch: dict) -> list[str]:
+    """Gated outputs the branch records and the baseline does not: a baseline from an older
+    harness, which cannot vouch for them.  A summary that refused on either side, or a failed
+    fit, is a decision ``check_pair`` reports instead."""
+    bo, no = base.get("outputs") or {}, branch.get("outputs") or {}
+    if bo.get("error") or base["status"] != branch["status"]:
+        return []
+    refused = bo.get("coef_se_unavailable") or no.get("coef_se_unavailable")
+    return [
+        n
+        for n in VALUE_OUTPUTS
+        if n in no and n not in bo and not (refused and n in _SUMMARY_SE_OUTPUTS)
+    ]
+
+
+_SUMMARY_SE_OUTPUTS = ("summary_se", "summary_curve_se", "summary_basis_se", "quasi_coef_se")
+
+
 def check(records: list[dict], base_sha: str | None = None, lookup=None):
     """(table, failures, refusals) for branch records against their stored baselines."""
     rows, refusals, lookup, stored = [], [], lookup or stored_records, {}
@@ -2064,30 +2113,60 @@ def check(records: list[dict], base_sha: str | None = None, lookup=None):
             refusals.append(f"{rec['case']} [{rec['threads']}]: {reason}")
         elif "outputs" not in rec:
             refusals.append(f"{rec['case']} [{rec['threads']}]: the branch record has no outputs")
+        elif missing := missing_outputs(match, rec):
+            refusals.append(
+                f"{rec['case']} [{rec['threads']}]: the baseline at {base[:12]} lacks"
+                f" {', '.join(missing)}; re-record it: books.py baseline {base[:12]}"
+                f" --cases {rec['case']} --counts-only --force"
+            )
         else:
             rows.append((rec, base, check_pair(match, rec)))
     failures = [r for r in rows if any(f["failed"] for f in r[2])]
     return (check_table(rows) if rows else None), failures, refusals
 
 
+def _fit_for_check(out: Path, head: str, cases: list[str], args):
+    """Fit each case at HEAD; (the records this invocation wrote, a refusal for each case whose
+    fit wrote none or whose child failed after writing a successful one).  An older record for
+    the same HEAD never stands in: it would pass a fit that just failed."""
+    before = {e["path"] for e in _index(out)}
+    codes = {}
+    for case in cases:
+        cmd = outputs_command(Path(sys.executable), case, args, job="check")
+        codes[case] = subprocess.run(cmd, cwd=HARNESS_ROOT, check=False).returncode
+    fresh = {
+        e["case"]: e
+        for e in _index(out)
+        if e["path"] not in before and e["sha"] == head and e["threads"] == "pinned"
+    }
+    records, unchecked = [], []
+    for case, code in codes.items():
+        if case not in fresh:
+            unchecked.append(f"{case} [pinned]: the branch fit wrote no record (exit {code})")
+            continue
+        rec = json.loads(Path(fresh[case]["path"]).read_text(encoding="utf-8"))
+        records.append(rec)  # a fit that raised is checked: its status differs, exit 1
+        if code and rec["status"] == "ok":
+            unchecked.append(f"{case} [pinned]: the branch fit exited {code} after its record")
+    return records, unchecked
+
+
 def cmd_check(args) -> int:
     out = Path(args.out)
+    unchecked: list[str] = []
     if args.records:
         records = [json.loads(Path(p).read_text(encoding="utf-8")) for p in args.records]
     else:
         head = tree_state(HARNESS_ROOT)["sha"]
-        cases = _case_list(args) if (args.set or args.cases) else None
-        for case in cases or []:
-            cmd = outputs_command(Path(sys.executable), case, args, job="check")
-            if subprocess.run(cmd, cwd=HARNESS_ROOT, check=False).returncode:
-                print(f"the branch fit of {case} failed; its record is checked", file=sys.stderr)
-        threads = "pinned" if cases else args.threads
-        paths = _latest_records(out, head, threads)
-        records = [json.loads(p.read_text(encoding="utf-8")) for p in paths]
-        records = [r for r in records if cases is None or r["case"] in cases]
-        if not records:
+        if args.set or args.cases:
+            records, unchecked = _fit_for_check(out, head, _case_list(args), args)
+        else:
+            paths = _latest_records(out, head, args.threads)
+            records = [json.loads(p.read_text(encoding="utf-8")) for p in paths]
+        if not records and not unchecked:
             raise SystemExit(f"no records for {head[:12]} in {out}; pass --set NAME to run them")
     table, failures, refusals = check(records, _resolve(args.base) if args.base else None)
+    refusals = unchecked + refusals
     dirty = [r["case"] for r in records if r["provenance"]["dirty"]]
     if dirty:
         print(f"note: branch records from a tree with uncommitted changes: {', '.join(dirty)}\n")

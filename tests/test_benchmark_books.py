@@ -321,8 +321,8 @@ def test_the_record_carries_what_a_user_reads_on_fixed_test_rows(run):
     }
     assert len(out["predictions"]) == len(rows) == min(books.OUTPUT_ROWS, len(test))
     assert out["edf_total"] == pytest.approx(sum(out["edf_by_term"].values()) + 1.0)
-    assert set(out["smoothing"]) and set(out["coef_se"]) == set(out["edf_by_term"])
-    assert isinstance(out["intercept"], float) and out["intercept_se"] > 0
+    assert set(out["smoothing"]) and set(out["quasi_coef_se"]) == set(out["edf_by_term"])
+    assert isinstance(out["intercept"], float) and out["summary_se"]["Intercept"] > 0
     assert set(out["decisions"]) == set(books.DECISIONS)
     json.dumps(out, allow_nan=False)  # non-finite entries are null, in the file and in benchboard
 
@@ -350,7 +350,7 @@ def _check(record, edit=None, base_edit=None, lookup=None):
 def test_a_branch_that_reproduces_its_baseline_passes(run):
     table, failures, refusals = _check(run[0])
     assert failures == [] and refusals == []
-    assert "| smoke_poisson | pinned | pass | 0 | 0 | 0 | 0 | 0 | 0 | same |" in table
+    assert "| smoke_poisson | pinned | pass | 0 | 0 | 0 | 0 | 0 | 0 | 0 | same |" in table
 
 
 def _scale_intercept(rec, factor):
@@ -370,8 +370,23 @@ def test_a_one_in_a_million_intercept_shift_fails_and_names_the_intercept(run):
     ("output", "edit"),
     [
         ("predictions", lambda o, f: o["predictions"].__setitem__(7, o["predictions"][7] * f)),
-        ("coef_se", lambda o, f: o["coef_se"]["a"].__setitem__(0, o["coef_se"]["a"][0] * f)),
-        ("intercept_se", lambda o, f: o.update(intercept_se=o["intercept_se"] * f)),
+        ("summary_se", lambda o, f: o["summary_se"].update(d=o["summary_se"]["d"] * f)),
+        (
+            "summary_curve_se",
+            lambda o, f: o["summary_curve_se"]["a"].__setitem__(
+                1, o["summary_curve_se"]["a"][1] * f
+            ),
+        ),
+        (
+            "summary_basis_se",
+            lambda o, f: o["summary_basis_se"]["b"].__setitem__(
+                2, o["summary_basis_se"]["b"][2] * f
+            ),
+        ),
+        (
+            "quasi_coef_se",
+            lambda o, f: o["quasi_coef_se"]["a"].__setitem__(0, o["quasi_coef_se"]["a"][0] * f),
+        ),
         ("edf_by_term", lambda o, f: o["edf_by_term"].update(a=o["edf_by_term"]["a"] * f)),
         ("edf_total", lambda o, f: o.update(edf_total=o["edf_total"] * f)),
         ("family", lambda o, f: o["family"].update(phi=o["family"]["phi"] * f)),
@@ -411,7 +426,7 @@ def test_an_entry_near_zero_is_read_against_its_outputs_scale():
             ),
         ),
         ("status", lambda r: r.update(status="raised RuntimeError: x")),
-        ("coef_se[a] estimability", lambda r: r["outputs"]["coef_se"]["a"].__setitem__(0, None)),
+        ("summary_se[d] estimability", lambda r: r["outputs"]["summary_se"].update(d=None)),
         ("edf_by_term entries", lambda r: r["outputs"]["edf_by_term"].pop("a")),
         ("smoothing terms", lambda r: r["outputs"]["smoothing"].pop("a")),
     ],
@@ -492,3 +507,85 @@ def test_a_run_from_a_git_hook_still_names_its_commit(monkeypatch, tmp_path):
     expected = books.tree_state(package, package=True)["sha"]
     monkeypatch.setenv("GIT_DIR", str(tmp_path))
     assert expected and books.tree_state(package, package=True)["sha"] == expected
+
+
+def test_the_recorded_standard_errors_are_the_rendered_summarys(run):
+    """Poisson is known-scale: ``summary()`` prints fitted-family SEs (phi = 1), while
+    ``metrics().coefficient_se`` is Pearson-scaled; the record keeps both, labelled."""
+    record, _ = run
+    out = record["outputs"]
+    assert set(out["summary_se"]) == {"Intercept", "c[1]", "c[2]", "c[3]", "c[4]", "c[5]", "d"}
+    assert set(out["summary_curve_se"]) == {"a", "b"}  # the rows that print a curve SE range
+    assert set(out["summary_basis_se"]) == {"a", "b"}
+    assert [len(v) for v in out["summary_basis_se"].values()] == [7, 7]
+    # the quasi surface is the rendered one times one Pearson factor, which is not 1 here
+    ratios = [
+        out["quasi_coef_se"]["d"][0] / out["summary_se"]["d"],
+        out["quasi_coef_se"]["c"][0] / out["summary_se"]["c[1]"],
+        out["quasi_coef_se"]["a"][3] / out["summary_basis_se"]["a"][3],
+    ]
+    assert abs(ratios[0] - 1.0) > 1e-3 and ratios == pytest.approx([ratios[0]] * 3, rel=1e-12)
+
+
+def test_check_refuses_a_baseline_that_lacks_an_output_the_branch_records(run):
+    record, _ = run
+    table, failures, refusals = _check(record, base_edit=lambda b: b["outputs"].pop("summary_se"))
+    assert table is None and failures == []
+    assert len(refusals) == 1 and "lacks summary_se; re-record it" in refusals[0]
+
+    # a summary that refused on the baseline's side is a decision, not a missing output
+    def refuse(b):
+        for name in books._SUMMARY_SE_OUTPUTS:
+            b["outputs"].pop(name)
+        b["outputs"]["coef_se_unavailable"] = "LinAlgError: x"
+
+    table, failures, refusals = _check(record, base_edit=refuse)
+    assert refusals == [] and ": summary refusal decision differs" in table
+
+
+def _fake_children(monkeypatch, tmp_path, record, codes):
+    """``check --set``'s children: each case writes a record from ``record`` and exits 0, or
+    exits its code in ``codes`` without writing."""
+    head = books.tree_state(books.HARNESS_ROOT)["sha"]
+
+    real = books.subprocess.run
+
+    def child(cmd, **kw):
+        if cmd[0] != "benchboard":
+            return real(cmd, **kw)
+        case = cmd[cmd.index("run") + 1]
+        if case in codes:
+            return SimpleNamespace(returncode=codes[case])
+        rec = copy.deepcopy(record)
+        rec["case"] = case
+        rec["provenance"] = dict(rec["provenance"], sha=head)
+        books.write_record(rec, tmp_path)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(books.subprocess, "run", child)
+    monkeypatch.setattr(books, "stored_records", lambda *_: [_baseline(record, head)])
+    return head
+
+
+def test_check_set_never_checks_a_record_older_than_its_own_fit(run, tmp_path, monkeypatch, capsys):
+    record, _ = run
+    head = _fake_children(monkeypatch, tmp_path, record, {"smoke_poisson": 124})
+    stale = copy.deepcopy(record)
+    stale["provenance"] = dict(stale["provenance"], sha=head)
+    books.write_record(stale, tmp_path)  # an earlier, passing record for the same HEAD
+    argv = ["check", "--cases", "smoke_poisson", "--base", "HEAD", "--out", str(tmp_path)]
+    assert books.main(argv) == 2
+    assert (
+        "smoke_poisson [pinned]: the branch fit wrote no record (exit 124)"
+        in capsys.readouterr().err
+    )
+
+
+def test_check_set_names_a_case_whose_fit_failed_with_no_record(run, tmp_path, monkeypatch, capsys):
+    record, _ = run
+    _fake_children(monkeypatch, tmp_path, record, {"std_mains": 1})
+    argv = ["check", "--cases", "smoke_poisson,std_mains", "--base", "HEAD", "--out", str(tmp_path)]
+    assert books.main(argv) == 2
+    captured = capsys.readouterr()
+    assert "| smoke_poisson | pinned | pass |" in captured.out
+    assert "std_mains [pinned]: the branch fit wrote no record (exit 1)" in captured.err

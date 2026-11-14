@@ -121,8 +121,13 @@ baseline under `compare`'s key rules: same dataset, spec, harness, environment, 
 thread setting, so a pinned record is only ever checked against a pinned baseline. Given
 record files, or none (the latest per case for `HEAD`), it fits nothing. It prints one
 table row per case and a `FAIL` line naming the case, the output and the size of every
-move beyond tolerance. It exits 1 when anything moves, 2 when a record has no usable
-baseline, and 0 otherwise.
+move beyond tolerance. It exits 1 when anything moves, including a branch fit that raised
+(its status differs). It exits 2 when something could not be checked, naming each case:
+a record with no usable baseline, a baseline that lacks an output the branch records (one
+stored by an older harness; re-record it with `baseline --counts-only --force`), or, under
+`--set`, a case whose fit wrote no record in this invocation or whose child failed after
+writing one. An older record for the same `HEAD` never stands in for a fit that failed. It
+exits 0 otherwise.
 
 Pinned on one core, the smoke fit takes about 5 s, `std_mains` 8.5 s and `lss_gamma` 6 s;
 the larger `standard`, `families` and `lss` fits take longer, so add those sets for changes
@@ -134,9 +139,14 @@ Every record carries an `outputs` block:
 
 - the sample: 2,000 test rows (all of them on a smaller test frame) drawn with the harness
   seed, so a dataset hash names the same rows at every commit, and a hash of the rows;
-- `SuperGLM`: the predicted means on those rows, the intercept, the summary's coefficient
-  standard errors (per term, and the intercept's; `predict` gives no standard errors),
-  total and per-term EDF, the dispersion and any estimated theta or Tweedie power, and the
+- `SuperGLM`: the predicted means on those rows, the intercept, and the standard errors
+  from the two surfaces a user reads them on (`predict` gives none). `summary_se`,
+  `summary_curve_se` and `summary_basis_se` are what `model.summary()` prints, on the
+  fitted-family scale (`phi = 1` for Poisson or binomial): every non-spline row's standard
+  error (intercept, linear terms, categorical levels), every spline row's curve SE range,
+  and every spline coefficient's in the `detail="full"` rows. `quasi_coef_se` is
+  `model.metrics(train).coefficient_se`, the Pearson-scaled quasi-likelihood standard error
+  of every coefficient. Then total and per-term EDF, the dispersion and any estimated theta or Tweedie power, and the
   smoothing parameters;
 - `SuperLSS`: every parameter's prediction on its natural scale and its linear
   predictor's standard error (`predict_link(se_fit=True)`) on those rows, each
