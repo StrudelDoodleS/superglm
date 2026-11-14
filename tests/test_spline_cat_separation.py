@@ -528,3 +528,43 @@ def test_held_rows_settles_data_that_do_not_separate_in_two_programs(design, mon
     held = separation._held_rows(D)
     assert not held.any()
     assert len(calls) == 2
+
+
+def test_a_counting_program_hit_the_certificate_rules_out_does_not_refuse_the_design():
+    """A level whose signed rows have an exactly positive dual null vector cannot separate.
+
+    Level B's eight responses alternate along ``x``, two of its values ``2e-7`` apart.  HiGHS's
+    counting program marks rows moved by breaking its constraints by about ``5.6e-9``, under its
+    feasibility tolerance; kept, those hits are refused as separation under
+    ``separation="error"``.  The certificate (``_unmoved_rows``) covers all eight rows, so
+    ``_held_rows`` drops the hits and the design fits.  Mutation check: keeping counting-program
+    hits on certified rows raised ``SeparationError`` naming x 0.37 and 0.952 of level B.
+    """
+    import superglm.diagnostics.separation as separation
+
+    xa = np.linspace(0.0, 1.0, 50)
+    xb = np.array([0.347, 0.37, 0.403, 0.4030002, 0.47, 0.588, 0.808, 0.952])
+    X = pd.DataFrame({"x": np.r_[xa, xa, xb], "f": ["A"] * 100 + ["B"] * 8})
+    y = np.r_[np.zeros(50), np.ones(50), np.arange(8) % 2].astype(float)
+    decided = []
+    real = separation._held_rows
+
+    def recorded(D):
+        decided.append(real(D))
+        return decided[-1]
+
+    model = SuperGLM(
+        family="binomial",
+        features={
+            "x": Spline(knots=[0.2, 0.4, 0.6, 0.8], boundary=(0.0, 1.0)),
+            "f": Categorical(base="A"),
+        },
+        interactions=[("x", "f")],
+        discrete=False,
+        separation="error",
+    )
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(separation, "_held_rows", recorded)
+        model.fit(X, y)
+    assert [held.tolist() for held in decided] == [[False] * 8]
+    assert model.predict(X).shape == (len(X),)

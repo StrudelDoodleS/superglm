@@ -849,10 +849,11 @@ def _held_rows(D: NDArray) -> NDArray:
     These directions form a cone whose moved rows are the complement of the linearity in Geyer
     (2009, section 3.12). One program maximises how many rows a direction moves (``sum t`` under
     ``D a >= t``, ``0 <= t <= 1``, ``|a| <= 1``); each row it leaves gets its own program,
-    maximising ``D_j a`` under ``D a >= 0``, unless the dual certificate of ``_unmoved_rows``,
-    one program for all of them, already bounds that maximum within ``_PROGRAM_TOL``. On data
-    that do not separate the certificate covers every row, so two programs decide them all; it
-    is not sought for a single row left, which its own program settles as cheaply. Rows are scaled to unit
+    maximising ``D_j a`` under ``D a >= 0``. The dual certificate of ``_unmoved_rows``, one
+    program for all rows, bounds that maximum within ``_PROGRAM_TOL`` for every row it covers:
+    such a row gets no program of its own, and a counting-program hit on it, which can only be
+    the solver's feasibility tolerance at work, is dropped. On data that do not separate the
+    certificate covers every row, so two programs decide them all. Rows are scaled to unit
     length (sign, hence the cone, unchanged) and the box keeps the programs bounded, since HiGHS
     fails on the free ones once rows differ in scale. The rows passed are those the free
     directions see by more than the rank cut (``separated_curve_support``).
@@ -877,10 +878,9 @@ def _held_rows(D: NDArray) -> NDArray:
         if program.status == 0
         else np.zeros(n_rows, dtype=bool)
     )
-    left = np.flatnonzero(~held)
-    if len(left) > 1:
-        left = left[~_unmoved_rows(D)[left]]
-    for row in left:
+    unmoved = _unmoved_rows(D) if n_rows > 1 else np.zeros(n_rows, dtype=bool)
+    held &= ~unmoved
+    for row in np.flatnonzero(~held & ~unmoved):
         single = linprog(-D[row], A_ub=-D, b_ub=np.zeros(n_rows), bounds=box, method="highs")
         held[row] = single.status == 0 and -float(single.fun) > _PROGRAM_TOL
     return held
