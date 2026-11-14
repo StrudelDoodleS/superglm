@@ -325,10 +325,21 @@ def _build_term_comparison_data(
             }
         )
 
+    # The response axis reads as the models' curves do: relativities around 1, or
+    # added amounts around 0; models that disagree share no title or baseline.
+    kinds = {transform_for_link(model._link).kind for model in normalized_models.values()}
+    response_axis = (
+        {"title": "Relativity", "no_effect": 1.0}
+        if kinds <= {"relativity"}
+        else {"title": "Effect", "no_effect": 0.0}
+        if kinds == {"additive"}
+        else {"title": "Relativity or effect", "no_effect": None}
+    )
     return {
         "kind": "term_comparison",
         "terms": payload_terms,
         "skipped_terms": skipped,
+        "response_axis": response_axis,
     }
 
 

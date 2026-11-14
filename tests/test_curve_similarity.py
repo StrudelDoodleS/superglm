@@ -510,3 +510,31 @@ def test_a_log_link_response_curve_stays_the_relativity():
         curves = term["curves"]
         for label, link in curves["link"].items():
             np.testing.assert_array_equal(curves["response"][label], np.exp(link))
+
+
+@pytest.mark.parametrize(
+    ("family", "title", "baseline"), [("gaussian", "Effect", 0.0), ("poisson", "Relativity", 1.0)]
+)
+def test_the_comparison_plot_reads_the_curves_scale(family, title, baseline):
+    """An identity link's curves are amounts around 0; a log link's relativities around 1."""
+    pytest.importorskip("plotly")
+    from superglm import plot_term_comparison
+
+    rng = np.random.default_rng(5)
+    n = 300
+    X = pd.DataFrame({"x": rng.uniform(0, 10, n), "band": rng.choice(["A", "B", "C"], n)})
+    mean = 3.0 + 0.2 * np.sin(X["x"].to_numpy())
+    y = mean + rng.normal(0.0, 0.1, n) if family == "gaussian" else rng.poisson(mean).astype(float)
+    models = {}
+    for label, rows in (("a", slice(0, n // 2)), ("b", slice(n // 2, n))):
+        model = SuperGLM(
+            family=family,
+            selection_penalty=0.0,
+            features={"x": Spline(n_knots=4), "band": Categorical(base="A")},
+        )
+        models[label] = model.fit(X.iloc[rows], y[rows])
+    fig = plot_term_comparison(models=models, X=X, terms=None, engine="plotly", n_points=21)
+
+    assert fig.layout.yaxis.title.text == title
+    (line,) = [shape for shape in fig.layout.shapes if shape.type == "line"]
+    assert line.y0 == baseline and line.visible is not False
