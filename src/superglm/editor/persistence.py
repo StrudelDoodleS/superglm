@@ -276,7 +276,7 @@ def save_session(session, path: str | Path) -> None:
         ],
         "left_out": _left_out(session),
     }
-    Path(path).write_text(json.dumps(jsonable(payload), indent=2, sort_keys=True))
+    Path(path).write_text(json.dumps(jsonable(payload), indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _left_out(session) -> list[str]:
@@ -315,7 +315,7 @@ def _left_out(session) -> list[str]:
 
 def load_session(session_cls, path: str | Path, *, model):
     """Load an edit artifact against a fitted model."""
-    payload = json.loads(Path(path).read_text())
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if payload.get("format") != "superglm.editor.v1":
         raise ValueError(f"Unsupported editor artifact format: {payload.get('format')!r}")
 

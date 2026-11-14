@@ -341,7 +341,7 @@ def _physical_memory() -> int | None:
 
 def _cgroup_limit(path: Path) -> int | None:
     try:
-        text = path.read_text().strip()
+        text = path.read_text(encoding="utf-8").strip()
     except OSError:
         return None
     try:
@@ -360,7 +360,7 @@ def _cgroup_memory_limit() -> int | None:
     maximum far above physical memory, so taking the minimum ignores it.
     """
     try:
-        lines = Path(_PROC_CGROUP).read_text().splitlines()
+        lines = Path(_PROC_CGROUP).read_text(encoding="utf-8").splitlines()
     except OSError:
         return None
     limits = []

@@ -37,7 +37,7 @@ def open_directory_path(path: str | Path | None = None) -> Path:
 
 def _is_wsl() -> bool:
     try:
-        proc_version = Path("/proc/version").read_text(errors="ignore").lower()
+        proc_version = Path("/proc/version").read_text(encoding="utf-8", errors="ignore").lower()
     except OSError:
         proc_version = ""
     return "microsoft" in proc_version or bool(os.environ.get("WSL_DISTRO_NAME"))

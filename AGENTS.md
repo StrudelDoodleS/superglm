@@ -19,6 +19,13 @@ development default. The ordinary checks are:
 - `uv pip check`
 - `uv run python run_test.py`
 
+Before every push, run `uv run python scripts/pre_push.py`, which runs the
+format, lint, lock and type checks the way CI does, the changed test files
+under the two OpenBLAS kernels GitHub's x86-64 runners use, and the quick
+suite; `--install` runs it from git's pre-push hook. A change to
+`solvers/constrained_qp.py` also runs `benchmarks/qp_random_search.py` before
+its first push, and its pull request reports the counts.
+
 Five suites are anchored to the real freMTPL2 book and skip without a local
 copy of it, and all five need both `freMTPL2freq.parquet` and
 `freMTPL2sev.parquet`. `tests/test_screening_guide_numbers.py`,
@@ -215,6 +222,10 @@ including those that form and apply the factor. One `nextafter` covers one
 rounding, not a chain of them. A tolerance is `u` times a magnitude and, where
 relevant, a conditioning or growth factor, never a bare absolute `eps`.
 
+A platform bug is not closed until its whole class has a check that fails
+on any machine: `tests/test_extended_dtype_guard.py` (extended dtypes) and
+`tests/test_platform_hazard_guard.py` (unguarded Unix- or Windows-only calls,
+the `fork` start method, text files without an encoding) are the pattern.
 A numerical portability fix needs native Windows, macOS and Linux ARM64
 regression coverage; a simulation of the platform on another one does not
 establish native compatibility. Compare complete-fit cost before accepting the
