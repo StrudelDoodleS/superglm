@@ -203,8 +203,16 @@ def _verify_push(lines) -> None:
     unchecked = []
     for line in lines:
         fields = line.split()
-        if len(fields) == 4 and fields[1] != NO_COMMIT and not _stamp(fields[1]).exists():
-            unchecked.append(fields[1][:12])
+        if len(fields) != 4 or fields[1] == NO_COMMIT:
+            continue
+        # An annotated tag arrives as its tag object; the commit it names is what passed.
+        # A tag of a tree or blob names no commit, so there is nothing to check.
+        try:
+            commit = _git("rev-parse", "--verify", "--quiet", f"{fields[1]}^{{commit}}")
+        except subprocess.CalledProcessError:
+            continue
+        if not _stamp(commit).exists():
+            unchecked.append(commit[:12])
     if unchecked:
         sys.exit(
             f"pre-push: {', '.join(unchecked)} has not passed the checks; run "

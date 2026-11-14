@@ -209,3 +209,9 @@ def test_git_push_through_the_hook_waits_for_a_stamp(tmp_path, monkeypatch):
     pre_push._stamp(head).touch()
     sent = subprocess.run(push, cwd=repo, capture_output=True, text=True)
     assert sent.returncode == 0, sent.stderr
+    # An annotated tag reaches the hook as a tag object; its commit's stamp covers it.
+    subprocess.run(["git", "tag", "-a", "v9.9.9", "-m", "release"], cwd=repo, check=True)
+    tagged = subprocess.run(
+        ["git", "push", "-q", "origin", "v9.9.9"], cwd=repo, capture_output=True, text=True
+    )
+    assert tagged.returncode == 0, tagged.stderr
