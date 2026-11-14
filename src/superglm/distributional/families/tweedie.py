@@ -1366,15 +1366,13 @@ class TweedieLSS(TweediePredictors):
         """Solve ``log S(q) = log(1 - p)`` on the window kernel's log survival function.
 
         Far up the tail a distribution function near one cannot resolve ``1 - p``,
-        so the root is taken on the survival function's log, as an inverse
-        survival function is (``isf``).  The bracket grows from the start by a
-        step that doubles on every move, first the smaller of the law's standard
-        deviation and the start, so a concentrated law is not probed far past
-        its root: the last probe overshoots the root by less than the root's
-        distance from the start plus one first step.  The Illinois false
-        position (Dowell & Jarratt 1971) closes it, its iterates inside the
-        bracket.  Returns the roots and the rows solved: a row the kernel
-        refused anywhere, or whose bracket never straddled the target, is not.
+        so the root is taken on the survival function's log, as ``isf`` is.  The
+        bracket grows from the start by a step that doubles on every move, first
+        the smaller of the law's standard deviation and the start, so a
+        concentrated law is not probed far past its root.  Illinois false
+        position (Dowell & Jarratt 1971) closes it inside the bracket.  Returns
+        the roots and the rows solved: not a row the kernel refused anywhere, or
+        whose bracket never straddled the target.
         """
         failed = ~np.isfinite(start)
 
