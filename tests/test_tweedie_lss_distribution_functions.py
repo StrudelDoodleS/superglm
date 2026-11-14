@@ -19,6 +19,7 @@ import pytest
 from numpy.typing import NDArray
 from scipy import integrate, special, stats
 
+from superglm.distributional.families import tweedie as tweedie_module
 from superglm.distributional.families.gamma import GammaLS
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.families.tweedie import (
@@ -32,6 +33,8 @@ from superglm.distributional.families.tweedie import (
     _series_blocks,
     _validated_probabilities,
 )
+from superglm.distributional.kernels._gamma_windows import GammaWindowWorkspace
+from superglm.distributional.kernels._tweedie_windows import TweedieWindowWorkspace
 from superglm.distributional.model import DenseDistributionalModel, fit_dense_distributional
 from superglm.distributional.predictor import Predictor
 from superglm.distributional.results.solver import DenseSolverConfig
@@ -584,6 +587,87 @@ def test_tweedie_quantile_inverts_the_survival_function_in_the_far_upper_tail(
     assert family.quantile_prior_weighted(bulk, theta[: len(bulk)], weights) == pytest.approx(
         _quantile_bisection(family, bulk, theta[: len(bulk)], weights), rel=1e-10
     )
+
+
+def test_tweedie_far_tail_quantile_does_not_depend_on_how_rows_are_batched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row's far-tail quantile is the same in one batch of 16 as in batches of 4.
+
+    The window kernel's endpoint budget covers one workspace, and sharing it across
+    a call refused 400 rows it answered in batches of 100.  A budget of 300 endpoints
+    (about 66 a row here) forces it to run out on the batch of 16; the rows refused
+    for the budget alone are evaluated again in smaller chunks.
+    """
+    exhausted = []
+
+    def small_budget() -> TweedieWindowWorkspace:
+        return TweedieWindowWorkspace(gamma=GammaWindowWorkspace(max_evaluations=300))
+
+    evaluate = tweedie_module._window_log_probability
+
+    def spy(lower, upper, values, prior, workspace):
+        result = evaluate(lower, upper, values, prior, workspace)
+        exhausted.append(workspace.gamma.evaluations >= workspace.gamma.max_evaluations)
+        return result
+
+    monkeypatch.setattr(tweedie_module, "TweedieWindowWorkspace", small_budget)
+    monkeypatch.setattr(tweedie_module, "_window_log_probability", spy)
+    family = TweedieLSS()
+    rows = 16
+    theta = np.column_stack(
+        [np.linspace(100.0, 101.0, rows), np.full(rows, 2.0), np.full(rows, 1.5)]
+    )
+    probabilities = np.full(rows, 1.0 - 1.0e-8)
+    together = family.quantile(probabilities, theta)
+    assert any(exhausted)
+    apart = np.concatenate(
+        [family.quantile(probabilities[i : i + 4], theta[i : i + 4]) for i in range(0, rows, 4)]
+    )
+    # The series start is already batch-dependent in its last bits (its term count
+    # follows the batch's largest rate); the tail root is not otherwise.
+    np.testing.assert_allclose(together, apart, rtol=1e-12, atol=0.0)
+    for row in (0, rows - 1):
+        reached = np.exp(_log_survival_series(together[[row]], theta[row], 1.0))
+        assert reached[0] == pytest.approx(1.0e-8, rel=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("row", "tail", "terms", "expected"),
+    [
+        # A zero mass above 1 - 1e-6: the series start landed in the atom.
+        ((1.0, 2.0e6, 1.5), 1.0e-10, 4000, 9_210_344.394),
+        (
+            (0.038958874595129034, 197294.57210584029, 1.21165921284594),
+            1.4954896922570397e-10,
+            4000,
+            None,
+        ),
+        # A concentrated law: doubling q from the start probed a tail the kernel cannot reach.
+        ((1.0, 1.0 / 9000.0, 1.5), 5.0e-7, 25_000, 1.052198934),
+        (
+            (0.5229850076509105, 0.0001005117876296651, 1.483236117121606),
+            2.4177387470869236e-15,
+            25_000,
+            None,
+        ),
+    ],
+)
+def test_tweedie_far_tail_quantile_reaches_atom_heavy_and_concentrated_laws(
+    row: tuple[float, float, float], tail: float, terms: int, expected: float | None
+) -> None:
+    """The far-tail root is found where the series start sits in the atom or the law is narrow.
+
+    A row whose zero mass passes ``1 - 1e-6`` starts from its single gamma jump, and the
+    bracket grows by steps from the law's standard deviation rather than by doubling ``q``.
+    """
+    probability = 1.0 - tail
+    quantile = TweedieLSS().quantile(np.array([probability]), np.array([row]))
+    assert np.isfinite(quantile[0]) and quantile[0] > 0.0
+    if expected is not None:
+        assert quantile[0] == pytest.approx(expected, rel=1e-9)
+    reached = np.exp(_log_survival_series(quantile, np.asarray(row), 1.0, terms=terms))
+    assert reached[0] == pytest.approx(1.0 - probability, rel=1e-6)
 
 
 # ── the prior-weighted trio ─────────────────────────────────────────────────
