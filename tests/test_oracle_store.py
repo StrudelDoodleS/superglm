@@ -414,8 +414,8 @@ def test_the_window_store_neither_hashes_nor_looks_up_the_platforms_legendre_rou
     from tests import test_response_window_jets as jets
 
     store = jets._NARROW_INPUTS
-    nodes = np.polynomial.legendre.leggauss(3)[0]
-    assert jets._LEGENDRE_NODES.tolist() == nodes.tolist()  # this platform rounds them exactly
+    # The exact nodes, one ulp off: another platform's ``leggauss`` rounding at most.
+    nodes = np.asarray(jets._LEGENDRE_NODES, dtype=np.float64)
     monkeypatch.setattr(_response_tails, "_LEGENDRE_NODES", np.nextafter(nodes, np.inf))
     rebuilt = OracleStore(store.name, store.oracle, depends=store._depends, module=store.module)
     assert rebuilt.fingerprint == store.fingerprint
