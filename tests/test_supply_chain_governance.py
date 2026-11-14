@@ -6,6 +6,7 @@ import tomllib
 from datetime import datetime
 from pathlib import Path
 
+import yaml
 from packaging.version import Version
 
 from tests.test_ci_contracts import _check_run_names, _compatibility_cases, _jobs
@@ -644,3 +645,16 @@ def test_security_policy_and_codeowners_cover_governance_surfaces():
         "scripts/bump_version.py",
     ):
         assert release_surface in codeowners
+
+
+def test_cache_cleanup_deletes_only_a_closed_pull_requests_own_caches():
+    workflow = yaml.safe_load(_read(".github/workflows/cache-cleanup.yml"))
+    # PyYAML reads the bare key ``on`` as True.
+    assert workflow[True] == {"pull_request": {"types": ["closed"]}}
+    assert workflow["permissions"] == {"contents": "read"}
+    (job,) = workflow["jobs"].values()
+    assert job["permissions"] == {"actions": "write"}
+    (step,) = job["steps"]
+    assert "uses" not in step  # nothing from the pull request is checked out or run
+    assert step["env"]["REF"] == "refs/pull/${{ github.event.pull_request.number }}/merge"
+    assert '--ref "$REF"' in step["run"] and 'gh cache delete "$id"' in step["run"]
