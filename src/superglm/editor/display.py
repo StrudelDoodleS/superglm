@@ -112,7 +112,7 @@ def _inverse_is(link: Link, expected: NDArray[np.float64], rtol: float = 1.0e-10
     """Whether ``link`` maps the probe points to ``expected`` within ``rtol``."""
     try:
         values = np.asarray(link.inverse(_LINK_PROBE), dtype=np.float64)
-    except (AttributeError, TypeError, ValueError, FloatingPointError):
+    except (AttributeError, TypeError, ValueError, ArithmeticError):
         return False
     return values.shape == _LINK_PROBE.shape and bool(
         np.allclose(values, expected, rtol=rtol, atol=0.0)
