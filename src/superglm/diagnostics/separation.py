@@ -796,16 +796,57 @@ def _unseen_directions(rows: NDArray) -> NDArray:
 _PROGRAM_TOL = 1e-5
 
 
+#: Largest weight ``_unmoved_rows`` gives a row, against the ``1`` every certified row reaches.
+#: The rounding of ``D' y`` at this weight, about ``u 1e8 ~ 1e-8`` per column of unit-length
+#: rows, stays three digits below ``_PROGRAM_TOL``; overlap by a margin of ``1e-5`` or more
+#: needs no wider spread.
+_CERTIFICATE_SPREAD = 1e8
+
+
+def _unmoved_rows(D: NDArray) -> NDArray:
+    """Rows no direction ``a`` with ``D a >= 0`` and ``|a| <= 1`` moves by more than ``_PROGRAM_TOL``.
+
+    Row ``j`` is held at zero by the whole cone exactly when some ``y >= 0``, ``y_j > 0``, has
+    ``D' y = 0`` (Stiemke's alternative; Konis 2007, chapter 4). One program, maximising
+    ``sum t`` under ``D' y = 0``, ``t <= y``, ``0 <= t <= 1``, ``y <= _CERTIFICATE_SPREAD``,
+    finds a ``y`` for all such rows (unbounded, HiGHS returns weights near ``1e13`` too coarse to
+    certify). It is checked, not trusted: ``y_j D_j a <= (D' y)' a <= |D' y|_1``, so a row counts
+    when ``|D' y|_1 / y_j``, with the rounding of ``D' y`` (Higham 2002, section 3.5), is at most
+    ``_PROGRAM_TOL``. Other rows, and all rows if the program fails, are left to ``_held_rows``.
+    """
+    from scipy import sparse
+    from scipy.optimize import linprog
+
+    n_rows, width = D.shape
+    identity = sparse.identity(n_rows, format="csr")
+    program = linprog(
+        np.concatenate([np.zeros(n_rows), -np.ones(n_rows)]),
+        A_ub=sparse.hstack([-identity, identity], format="csr"),
+        b_ub=np.zeros(n_rows),
+        A_eq=sparse.hstack([sparse.csr_matrix(D.T), sparse.csr_matrix((width, n_rows))]),
+        b_eq=np.zeros(width),
+        bounds=[(0.0, _CERTIFICATE_SPREAD)] * n_rows + [(0.0, 1.0)] * n_rows,
+        method="highs",
+    )
+    if program.status != 0:
+        return np.zeros(n_rows, dtype=bool)
+    y = np.maximum(np.asarray(program.x[:n_rows], dtype=np.float64), 0.0)
+    residual = np.abs(D.T @ y) + gamma(n_rows) * (np.abs(D.T) @ y)
+    bound = float(np.sum(residual)) * (1.0 + gamma(width + 2))
+    return (y > 0.0) & (bound <= _PROGRAM_TOL * y)
+
+
 def _held_rows(D: NDArray) -> NDArray:
     """The rows some direction ``a`` moves strictly the right way, ``D a > 0``, with the others unmoved.
 
-    These directions form a cone whose moved rows are the complement of the linearity in Geyer
-    (2009, section 3.12). One program maximises how many rows a direction moves (``sum t`` under
-    ``D a >= t``, ``0 <= t <= 1``, ``|a| <= 1``); each row it leaves gets its own program,
-    maximising ``D_j a`` under ``D a >= 0``. Rows are scaled to unit length (sign, hence the
-    cone, unchanged) and the box keeps the programs bounded, since HiGHS fails on the free ones
-    once rows differ in scale. The rows passed are those the free directions see by more than
-    the rank cut (``separated_curve_support``).
+    These directions form a cone whose moved rows are the complement of the linearity (Geyer
+    2009, section 3.12). One program maximises how many rows a direction moves (``sum t`` under
+    ``D a >= t``, ``0 <= t <= 1``, ``|a| <= 1``); each row it leaves gets its own, maximising
+    ``D_j a`` under ``D a >= 0``, unless ``_unmoved_rows`` certifies it, which also drops a
+    counting hit on it as solver tolerance. Overlapping rows are decided by these two programs.
+    Rows are scaled to unit length and the box keeps the programs bounded (HiGHS fails on free
+    ones once rows differ in scale); they are those the free directions see by more than the
+    rank cut (``separated_curve_support``).
     """
     from scipy import sparse
     from scipy.optimize import linprog
@@ -827,7 +868,9 @@ def _held_rows(D: NDArray) -> NDArray:
         if program.status == 0
         else np.zeros(n_rows, dtype=bool)
     )
-    for row in np.flatnonzero(~held):
+    unmoved = _unmoved_rows(D) if n_rows > 1 else np.zeros(n_rows, dtype=bool)
+    held &= ~unmoved
+    for row in np.flatnonzero(~held & ~unmoved):
         single = linprog(-D[row], A_ub=-D, b_ub=np.zeros(n_rows), bounds=box, method="highs")
         held[row] = single.status == 0 and -float(single.fun) > _PROGRAM_TOL
     return held
