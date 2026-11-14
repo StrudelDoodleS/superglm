@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -83,3 +84,17 @@ def test_a_run_passes_only_on_the_exit_codes_it_allows():
     pre_push._run("all skipped", command, passing=frozenset({0, pre_push.NO_TESTS_COLLECTED}))
     with pytest.raises(SystemExit, match="exit 5"):
         pre_push._run("all skipped", command)
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="git's hooks run under a POSIX sh")
+def test_the_hook_lets_a_branch_without_the_gate_push(tmp_path):
+    hook = tmp_path / "pre-push"
+    hook.write_text(pre_push.HOOK, encoding="utf-8")
+    # No scripts/pre_push.py here, and no uv on the empty PATH: the hook exits 0 before uv.
+    shell = shutil.which("sh")
+    result = subprocess.run([shell, str(hook)], cwd=tmp_path, env={"PATH": ""}, capture_output=True)
+    assert result.returncode == 0
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "pre_push.py").write_text("", encoding="utf-8")
+    result = subprocess.run([shell, str(hook)], cwd=tmp_path, env={"PATH": ""}, capture_output=True)
+    assert result.returncode != 0  # with the script, the hook runs the gate (here: no uv)

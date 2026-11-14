@@ -6,11 +6,11 @@
 
 The checks, in order, stopping at the first failure:
 
-1. ``ruff format --check`` and ``ruff check`` on ``src/`` and ``tests/``.
-2. ``uv lock --check``.
+1. ``uv lock --check``, then ``uv sync`` with the extras the type-check job
+   installs, which every later check runs in.
+2. ``ruff format --check`` and ``ruff check`` on ``src/`` and ``tests/``.
 3. ``ty`` on ``src/superglm``, its diagnostic count against the backlog the
-   type-check job accepts (read from ``.github/workflows/dev-ci.yml``), in an
-   environment synced with the extras that job installs.
+   type-check job accepts (read from ``.github/workflows/dev-ci.yml``).
 4. The test files the branch changes since its merge base with
    ``origin/master``, under OpenBLAS's Haswell and SkylakeX kernels
    (``OPENBLAS_CORETYPE``): a test that asserts one kernel's rounding fails
@@ -42,8 +42,11 @@ QUICK = "not slow and not browser and not docs"
 KERNELS = {"Haswell": ("AVX2", "FMA3"), "SkylakeX": ("AVX512_SKX",)}
 NO_TESTS_COLLECTED = 5
 TY_EXTRAS = ("dev", "bench", "plotting")
+# Git runs the hook from the top of the worktree being pushed. A branch from
+# before the gate has no script, so it pushes as it did then.
 HOOK = """#!/bin/sh
 # Installed by scripts/pre_push.py --install.
+[ -f scripts/pre_push.py ] || exit 0
 exec uv run --no-sync python scripts/pre_push.py
 """
 
@@ -75,8 +78,6 @@ def _ty_backlog() -> int:
 
 def _ty() -> None:
     print("pre-push: ty diagnostics against the accepted backlog", flush=True)
-    extras = [option for extra in TY_EXTRAS for option in ("--extra", extra)]
-    subprocess.run(["uv", "sync", "--locked", "--quiet", *extras], cwd=ROOT, check=True)
     output = subprocess.run(
         ["uv", "run", "--no-sync", "ty", "check", "src/superglm", "--output-format", "concise"],
         cwd=ROOT,
@@ -150,9 +151,13 @@ def main(argv: list[str] | None = None) -> None:
         _install()
         return
 
+    _run("uv lock", ["uv", "lock", "--check"])
+    # Every later check runs in the environment the type-check job installs,
+    # whatever this worktree had synced before.
+    extras = [option for extra in TY_EXTRAS for option in ("--extra", extra)]
+    _run("uv sync with CI's extras", ["uv", "sync", "--locked", "--quiet", *extras])
     _run("ruff format", ["uv", "run", "--no-sync", "ruff", "format", "--check", "src", "tests"])
     _run("ruff check", ["uv", "run", "--no-sync", "ruff", "check", "src", "tests"])
-    _run("uv lock", ["uv", "lock", "--check"])
     _ty()
     pytest = ["uv", "run", "--no-sync", "python", "-m", "pytest", "-q", "-p", "no:randomly"]
     changed = _changed_tests()
