@@ -44,8 +44,9 @@ NO_TESTS_COLLECTED = 5
 TY_EXTRAS = ("dev", "bench", "plotting")
 # Git runs the hook from the top of the worktree being pushed. A branch from
 # before the gate has no script, so it pushes as it did then.
-HOOK = """#!/bin/sh
-# Installed by scripts/pre_push.py --install.
+HOOK_MARK = "# Installed by scripts/pre_push.py --install."
+HOOK = f"""#!/bin/sh
+{HOOK_MARK}
 [ -f scripts/pre_push.py ] || exit 0
 exec uv run --no-sync python scripts/pre_push.py
 """
@@ -134,7 +135,8 @@ def _install() -> None:
         check=True,
     ).stdout.strip()
     hook = (ROOT / hooks / "pre-push").resolve()
-    if hook.exists() and hook.read_text(encoding="utf-8") != HOOK:
+    # Any hook this script wrote, by any version of it, carries the mark and is replaced.
+    if hook.exists() and HOOK_MARK not in hook.read_text(encoding="utf-8").splitlines():
         sys.exit(f"pre-push: {hook} exists and is not this script's; leaving it alone")
     hook.parent.mkdir(parents=True, exist_ok=True)
     hook.write_text(HOOK, encoding="utf-8")

@@ -51,12 +51,18 @@ def test_changed_tests_are_the_test_files_the_branch_adds_or_edits(tmp_path, mon
     assert sorted(pre_push._changed_tests()) == ["tests/test_new.py", "tests/test_old.py"]
 
 
-def test_install_writes_the_hook_once_and_leaves_a_foreign_one_alone(tmp_path, monkeypatch):
+def test_install_writes_and_upgrades_its_hook_and_leaves_a_foreign_one_alone(tmp_path, monkeypatch):
     monkeypatch.setattr(pre_push, "ROOT", _repo(tmp_path))
     pre_push._install()
     hook = tmp_path / ".git" / "hooks" / "pre-push"
     assert hook.read_text(encoding="utf-8") == pre_push.HOOK
     pre_push._install()  # the same hook again is fine
+    # An earlier version's hook carries the mark and is upgraded in place.
+    hook.write_text(
+        "#!/bin/sh\n# Installed by scripts/pre_push.py --install.\nexec old\n", encoding="utf-8"
+    )
+    pre_push._install()
+    assert hook.read_text(encoding="utf-8") == pre_push.HOOK
     hook.write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
     with pytest.raises(SystemExit, match="not this script's"):
         pre_push._install()
