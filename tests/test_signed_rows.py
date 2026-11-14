@@ -95,28 +95,46 @@ def _log(value: int) -> float:
 
 
 def _exact_reference(H: list[list[Fraction]]) -> tuple[float, np.ndarray] | None:
-    """``(log det H, diag(H^-1))`` when ``H`` is positive definite, else ``None``."""
+    """``(log det H, diag(H^-1))`` when ``H`` is positive definite, else ``None``.
+
+    ``H`` is dyadic, so ``N = d H`` is an integer matrix for ``d`` the largest
+    denominator.  Fraction-free forward elimination (Bareiss 1968) of ``[N |
+    I]`` stays in exact integers, each entry after step ``c`` being a minor
+    of order ``c + 2`` of ``[N | I]`` (Sylvester's identity).  Its pivots are
+    the leading principal minors ``m_c``, all positive exactly when ``H`` is
+    positive definite (Sylvester's criterion), and its row ``k`` is
+    ``m_{k-1}`` times Gaussian elimination's, so with ``N = L D L'`` the
+    right block's row ``k`` is ``m_{k-1}`` times that of ``L^-1`` and ``D_k =
+    m_k / m_{k-1}``.  The trailing block of a symmetric ``N`` stays symmetric,
+    so only its upper triangle is formed.  Then ``log det H = log m_last -
+    size log d`` and ``(H^-1)_ii = d sum_k (L^-1)_ki^2 / D_k = d sum_k R_ki^2
+    / (m_{k-1} m_k)``, exact until each is rounded once.
+    """
     size = len(H)
-    A = [row[:] for row in H]
-    logdet = 0.0
+    d = max(value.denominator for row in H for value in row)
+    U = [[value.numerator * (d // value.denominator) for value in row] for row in H]
+    R = [[int(i == j) for j in range(size)] for i in range(size)]
+    pivots = [1]
     for c in range(size):
-        pivot = A[c][c]
+        pivot, previous = U[c][c], pivots[-1]
         if pivot <= 0:
             return None
-        logdet += _log(pivot.numerator) - _log(pivot.denominator)
+        Uc, Rc = U[c], R[c]
         for r in range(c + 1, size):
-            if A[r][c]:
-                ratio = A[r][c] / pivot
-                A[r] = [a - ratio * b for a, b in zip(A[r], A[c], strict=True)]
-    B = [row[:] + [Fraction(int(i == j)) for j in range(size)] for i, row in enumerate(H)]
-    for c in range(size):
-        inverse = 1 / B[c][c]
-        B[c] = [value * inverse for value in B[c]]
-        for r in range(size):
-            if r != c and B[r][c]:
-                ratio = B[r][c]
-                B[r] = [a - ratio * b for a, b in zip(B[r], B[c], strict=True)]
-    return logdet, np.array([float(B[i][size + i]) for i in range(size)])
+            factor = Uc[r]  # U[r][c]: the trailing block is symmetric
+            Ur, Rr = U[r], R[r]
+            for j in range(r, size):
+                Ur[j] = (Ur[j] * pivot - factor * Uc[j]) // previous
+            for i in range(c + 1):
+                Rr[i] = (Rr[i] * pivot - factor * Rc[i]) // previous
+            Rr[r] = Rr[r] * pivot // previous
+        pivots.append(pivot)
+    logdet = _log(pivots[-1]) - size * _log(d)
+    diagonal = [
+        d * sum(Fraction(R[k][i] ** 2, pivots[k] * pivots[k + 1]) for k in range(i, size))
+        for i in range(size)
+    ]
+    return logdet, np.array([float(value) for value in diagonal])
 
 
 def _companion_bound(X: np.ndarray, w: np.ndarray, S: np.ndarray, error: np.ndarray) -> float:

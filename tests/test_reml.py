@@ -2947,6 +2947,60 @@ def _rounding_stall_gamma(n=4000, seed=1053):
     return X.iloc[:n], y[:n]
 
 
+@pytest.fixture(scope="module")
+def ten_penalty_poisson_fit():
+    """``_ten_penalty_poisson``'s default fit, once per module, with what its tests spy on.
+
+    The spies pass every call through, so the fit is the unspied one; they
+    record each PIRLS call's phase and each REML objective evaluation.
+    """
+    import superglm.reml.direct as direct_module
+    from superglm.reml.objective import REMLObjectiveEvaluation
+
+    phases, evaluations = [], []
+    real_fit = direct_module.fit_irls_direct
+    real_objective = direct_module.reml_laml_objective
+
+    def fit_recorded(*args, **kwargs):
+        phases.append((kwargs.get("debug_context") or {}).get("phase"))
+        return real_fit(*args, **kwargs)
+
+    def objective_recorded(*args, **kw):
+        evaluation = real_objective(*args, **kw)
+        if isinstance(evaluation, REMLObjectiveEvaluation):
+            evaluations.append(evaluation)
+        return evaluation
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(direct_module, "fit_irls_direct", fit_recorded)
+        patch.setattr(direct_module, "reml_laml_objective", objective_recorded)
+        model, X, y = _ten_penalty_poisson()
+        info = model.fit_reml(X, y).reml_diagnostics()
+    return SimpleNamespace(info=info, phases=tuple(phases), evaluations=tuple(evaluations))
+
+
+@pytest.fixture(scope="module")
+def stall_gamma_fit():
+    """``TestExactPresolve._fit_stall_gamma``'s unforced fit, once per module, with its
+    REML objective evaluations (recorded by a pass-through spy)."""
+    import superglm.reml.direct as direct_module
+    from superglm.reml.objective import REMLObjectiveEvaluation
+
+    evaluations = []
+    real_objective = direct_module.reml_laml_objective
+
+    def objective_recorded(*args, **kw):
+        evaluation = real_objective(*args, **kw)
+        if isinstance(evaluation, REMLObjectiveEvaluation):
+            evaluations.append(evaluation)
+        return evaluation
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(direct_module, "reml_laml_objective", objective_recorded)
+        info = TestExactPresolve._fit_stall_gamma(patch)
+    return SimpleNamespace(info=info, evaluations=tuple(evaluations))
+
+
 class TestExactPresolve:
     """A cold exact fit with many smoothing parameters starts from the cached-W fixed point.
 
@@ -2957,36 +3011,24 @@ class TestExactPresolve:
     rounding are the two rules a pre-solved fit adds.
     """
 
-    def test_a_cold_ten_parameter_fit_converges_from_the_presolve(self):
+    def test_a_cold_ten_parameter_fit_converges_from_the_presolve(self, ten_penalty_poisson_fit):
         """Mutation check: on the PR #487 head (no pre-solve) the exact loop took
         14 iterations; from the pre-solve's 11 cached-W updates it converges in
         4, to an objective 1.8e-5 lower (both stops within reml_tol)."""
-        model, X, y = _ten_penalty_poisson()
-        info = model.fit_reml(X, y).reml_diagnostics()
+        info = ten_penalty_poisson_fit.info
         assert info["profile"]["reml_presolve_n_iter"] > 0
         assert info["n_presolve_iter"] == info["profile"]["reml_presolve_n_iter"]
         assert info["converged"]
         assert info["n_reml_iter"] <= 6
 
-    def test_the_presolve_replaces_the_bootstrap_fit(self, monkeypatch):
+    def test_the_presolve_replaces_the_bootstrap_fit(self, ten_penalty_poisson_fit):
         """After the pre-solve every estimated component starts warm, so the
         bootstrap PIRLS fitted the mode the first candidate fits again, at the
         same lambdas.  The candidate now starts from the pre-solve's mode:
         one PIRLS call and one row pass fewer, the same fit (mutation check:
         the PR #487 head ran a bootstrap phase; 5 PIRLS calls and 6 PIRLS
         iterations against 4 and 5 now, the objective equal to 1e-15)."""
-        import superglm.reml.direct as direct_module
-
-        phases = []
-        real_fit = direct_module.fit_irls_direct
-
-        def recorded(*args, **kwargs):
-            phases.append((kwargs.get("debug_context") or {}).get("phase"))
-            return real_fit(*args, **kwargs)
-
-        monkeypatch.setattr(direct_module, "fit_irls_direct", recorded)
-        model, X, y = _ten_penalty_poisson()
-        info = model.fit_reml(X, y).reml_diagnostics()
+        info, phases = ten_penalty_poisson_fit.info, ten_penalty_poisson_fit.phases
         assert info["profile"]["reml_presolve_n_iter"] > 0
         assert "bootstrap" not in phases
         assert "candidate" in phases
@@ -3007,17 +3049,18 @@ class TestExactPresolve:
         assert "reml_presolve_n_iter" not in info["profile"]
         assert info["n_presolve_iter"] == 0
 
-    def test_the_presolve_does_not_inherit_a_loose_caller_tolerance(self):
+    def test_the_presolve_does_not_inherit_a_loose_caller_tolerance(self, ten_penalty_poisson_fit):
         """Its freeze and stop bars scale with the tolerance: under the caller's
         reml_tol = 1e-5 it stopped after 8 updates instead of 11, and the exact
         loop, stopping on that loose bar, published an objective 5.1e-3 higher.
-        Its tolerance is never looser than 1e-9 (a tighter one passes through)."""
-        updates = []
-        for tol in (None, 1e-5):
-            model, X, y = _ten_penalty_poisson()
-            info = model.fit_reml(X, y, reml_tol=tol)
-            updates.append(info.reml_diagnostics()["profile"]["reml_presolve_n_iter"])
-        assert updates[0] == updates[1]
+        Its tolerance is never looser than 1e-9 (a tighter one passes through).
+        The default tolerance's fit is the module's shared one."""
+        model, X, y = _ten_penalty_poisson()
+        loose = model.fit_reml(X, y, reml_tol=1e-5).reml_diagnostics()
+        default = ten_penalty_poisson_fit.info
+        assert (
+            default["profile"]["reml_presolve_n_iter"] == loose["profile"]["reml_presolve_n_iter"]
+        )
 
     def test_two_parameters_keep_the_cold_newton_start(self):
         """Below eight estimated smoothing parameters the pre-solve did not pay
@@ -3114,7 +3157,9 @@ class TestExactPresolve:
 
         monkeypatch.setattr(direct_module, "reml_laml_objective", widened)
 
-    def test_a_stop_on_rounding_needs_the_dead_search_certificate(self, monkeypatch):
+    def test_a_stop_on_rounding_needs_the_dead_search_certificate(
+        self, monkeypatch, stall_gamma_fit
+    ):
         """From the pre-solve's point this Gamma/log fit's exact loop accepted
         steps that lowered the objective by about ten units in its last place,
         while a gradient whose own error is above the score bar kept the score
@@ -3127,7 +3172,7 @@ class TestExactPresolve:
         (measured: 5.5e-11 apart).  Mutation check: with the certificate
         dropped from the rule, the fit stopped at its first accepted trial
         and reported ``line_search_failed``."""
-        plain = self._fit_stall_gamma(monkeypatch)
+        plain = stall_gamma_fit.info
         self._count_every_decrease_as_rounding(monkeypatch)
         forced = self._fit_stall_gamma(monkeypatch)
         assert forced["converged"]
@@ -3158,7 +3203,9 @@ class TestExactPresolve:
         assert info["n_reml_iter"] == 1
         assert info["lambdas"] == info["lambda_history"][1]
 
-    def test_each_evaluation_carries_its_rounding_estimate(self, monkeypatch):
+    def test_each_evaluation_carries_its_rounding_estimate(
+        self, ten_penalty_poisson_fit, stall_gamma_fit
+    ):
         """The stall rule reads each evaluation's rounding estimate, which the
         forced tests widen.  Unforced, it is at least the value's own last
         place, ``u |V|`` (the summands' absolute total is at least ``|V|``),
@@ -3169,23 +3216,8 @@ class TestExactPresolve:
         Mutation check: with the estimate zeroed, the Gamma fixture ran to
         ``max_reml_iter`` unconverged, and this test fails on the first
         evaluation."""
-        import superglm.reml.direct as direct_module
-        from superglm.reml.objective import REMLObjectiveEvaluation
-
-        real_objective = direct_module.reml_laml_objective
-        evaluations = []
-
-        def recorded(*args, **kw):
-            evaluation = real_objective(*args, **kw)
-            if isinstance(evaluation, REMLObjectiveEvaluation):
-                evaluations.append(evaluation)
-            return evaluation
-
-        monkeypatch.setattr(direct_module, "reml_laml_objective", recorded)
-        model, X, y = _ten_penalty_poisson()
-        model.fit_reml(X, y)
-        self._fit_stall_gamma(monkeypatch)
-        assert evaluations
+        evaluations = ten_penalty_poisson_fit.evaluations + stall_gamma_fit.evaluations
+        assert ten_penalty_poisson_fit.evaluations and stall_gamma_fit.evaluations
         u = 2.0**-53
         for evaluation in evaluations:
             value = abs(evaluation.value)
@@ -3285,6 +3317,34 @@ def _ten_penalty_response(case, eta, rng):
     return rng.poisson(np.exp(eta - 1.0)).astype(float), {"family": "poisson"}
 
 
+_HELD_ROWS_ANSWERS: dict = {}
+
+
+@pytest.fixture
+def shared_separation_programs(monkeypatch):
+    """Solve each of the separation scan's row programs once per test process.
+
+    A binomial fit on ``_ten_penalty_frame`` scans the spline-by-factor's
+    curves for separation before it fits: some 6,000 small linear programs
+    (``separation._held_rows``), about 13 s of a 14 s fit, the same on every
+    fit of the same design and response, whatever the link or start.  The
+    programs depend only on the matrix they are given, so each distinct one
+    is solved once and its answer handed back as a copy; the fits, and every
+    decision the scan takes, are those of the live code.
+    """
+    import superglm.diagnostics.separation as separation
+
+    real = separation._held_rows
+
+    def held_rows(D):
+        key = (D.shape, D.dtype.str, D.tobytes())
+        if key not in _HELD_ROWS_ANSWERS:
+            _HELD_ROWS_ANSWERS[key] = real(D)
+        return _HELD_ROWS_ANSWERS[key].copy()
+
+    monkeypatch.setattr(separation, "_held_rows", held_rows)
+
+
 class TestExactPresolveScope:
     """The automatic pre-solve runs only where it was measured to pay.
 
@@ -3312,7 +3372,9 @@ class TestExactPresolveScope:
             "binomial_cloglog",
         ],
     )
-    def test_an_admitted_pair_starts_from_the_presolve(self, case, monkeypatch):
+    def test_an_admitted_pair_starts_from_the_presolve(
+        self, case, monkeypatch, shared_separation_programs
+    ):
         """And lands no worse than the plain cold start, to the stop's
         resolution ``reml_tol (1 + |V|)``: on these fixtures 3.4e-4 .. 9.7e-4
         lower, against resolutions of 1.9e-6 .. 3.5e-6 (the cold probit fit stopped at

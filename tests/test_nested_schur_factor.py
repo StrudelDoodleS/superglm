@@ -173,6 +173,8 @@ FIXTURES = {
 MAIN = ["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F9"]
 TRUNCATED = ["F8a", "F8b", "F8c", "F8d", "F8e", "F8f"]
 PROFILED = ["F1", "F2", "F4", "F6", "F7", "F9"]
+# The checks below take ``name`` at module scope, so pytest runs each fixture's
+# checks together and a worker builds its exact references (``_case``) once.
 # Fixtures whose H is well conditioned enough for forward solve comparisons.
 WELL_CONDITIONED = {"F1", "F7"}
 
@@ -808,7 +810,7 @@ def _unit_columns(p, indices):
 
 
 # ------------------------------------------------------------ the checks
-@pytest.mark.parametrize("name", MAIN)
+@pytest.mark.parametrize("name", MAIN, scope="module")
 def test_pivots_logdet_and_inverse_diagonal(name):
     refs, factor, penalized, *_ = _augmented_case(name)
     gamma_tree, gamma_border = refs["gamma_tree"], refs["gamma_border"]
@@ -869,7 +871,7 @@ def test_pivots_logdet_and_inverse_diagonal(name):
     assert np.isnan(certificate.trailing_bound) and not certificate.directions
 
 
-@pytest.mark.parametrize("name", MAIN)
+@pytest.mark.parametrize("name", MAIN, scope="module")
 def test_solve_backward_and_forward_error(name):
     refs, factor, penalized, *_ = _augmented_case(name)
     gamma = 4 * (refs["gamma_tree"] + refs["gamma_border"])
@@ -888,7 +890,7 @@ def test_solve_backward_and_forward_error(name):
     assert np.all(np.abs(vector - exact[:, 0]) <= allowance)
 
 
-@pytest.mark.parametrize("name", MAIN)
+@pytest.mark.parametrize("name", MAIN, scope="module")
 def test_penalty_traces_and_pairs(name):
     refs, factor, _, _, _, levels, border, crossed = _augmented_case(name)
     gamma_tree, gamma_border = refs["gamma_tree"], refs["gamma_border"]
@@ -924,7 +926,7 @@ def test_penalty_traces_and_pairs(name):
         assert abs(value - exact) <= 4 * gamma_border * exact
 
 
-@pytest.mark.parametrize("name", MAIN)
+@pytest.mark.parametrize("name", MAIN, scope="module")
 def test_operator_traces_and_diagonals(name):
     refs, factor, penalized, O1, O2, levels, border, crossed = _augmented_case(name)
     gamma_tree, gamma_border = refs["gamma_tree"], refs["gamma_border"]
@@ -975,7 +977,7 @@ def test_operator_traces_and_diagonals(name):
         assert np.all(np.abs(square - refs["square_O1"]) <= bound)
 
 
-@pytest.mark.parametrize("name", MAIN)
+@pytest.mark.parametrize("name", MAIN, scope="module")
 def test_derivative_cross_traces_batched_and_pairwise(name):
     refs, factor, _, O1, O2, levels, border, crossed = _augmented_case(name)
     gamma_tree, gamma_border = refs["gamma_tree"], refs["gamma_border"]
@@ -1002,7 +1004,7 @@ def test_derivative_cross_traces_batched_and_pairwise(name):
             )
 
 
-@pytest.mark.parametrize("name", PROFILED)
+@pytest.mark.parametrize("name", PROFILED, scope="module")
 def test_profiled_factor_against_the_exact_centred_reference(name):
     refs, profiled, data, C1, C2, levels, border, crossed = _profiled_case(name)
     gamma_tree, gamma_border = refs["gamma_tree"], refs["gamma_border"]
@@ -1144,7 +1146,7 @@ def test_a_profiled_direction_does_not_keep_its_augmented_leaf_copies():
             gc.enable()
 
 
-@pytest.mark.parametrize("name", PROFILED)
+@pytest.mark.parametrize("name", PROFILED, scope="module")
 def test_profiled_derivative_cross_traces(name):
     refs, profiled, data, C1, C2, levels, border, crossed = _profiled_case(name)
     gamma_tree, gamma_border = refs["gamma_tree"], refs["gamma_border"]
@@ -1245,7 +1247,7 @@ def test_chain_only_factor_with_an_intercept_border():
     assert factor.scaled_schur_eigenvalues().shape == (0,)
 
 
-@pytest.mark.parametrize("name", TRUNCATED)
+@pytest.mark.parametrize("name", TRUNCATED, scope="module")
 def test_rank_deficient_border_is_truncated_by_exactly_one_direction(name):
     refs = _case(name)
     fx = refs["fx"]
