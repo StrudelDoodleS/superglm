@@ -113,23 +113,66 @@ def stage_environment(pinned: bool, base: Mapping[str, str]) -> dict[str, str]:
     return environment
 
 
+# Options that take a separate value, which may itself be a path (``--ignore
+# tests/x.py``) and so is not a test this runner would add. Any other option's
+# value can be joined to it with ``=``.
+VALUE_OPTIONS = frozenset(
+    {
+        "-k",
+        "-m",
+        "-p",
+        "-o",
+        "-c",
+        "-n",
+        "-W",
+        "-r",
+        "--ignore",
+        "--ignore-glob",
+        "--deselect",
+        "--junitxml",
+        "--junit-xml",
+        "--rootdir",
+        "--confcutdir",
+        "--basetemp",
+        "--config-file",
+        "--override-ini",
+        "--cov",
+        "--cov-report",
+        "--cov-config",
+        "--cov-fail-under",
+        "--log-file",
+        "--durations",
+        "--durations-min",
+        "--maxfail",
+        "--dist",
+        "--splits",
+        "--group",
+        "--splitting-algorithm",
+        "--durations-path",
+        "--timeout",
+    }
+)
+
+
+def _looks_like_tests(arg: str) -> bool:
+    return (
+        "::" in arg or arg.endswith(".py") or arg.rstrip("/") == "tests" or arg.startswith("tests/")
+    )
+
+
 def named_tests(passthrough: list[str]) -> list[str]:
     """Arguments that name test files or node IDs, which this runner cannot honour.
 
     Both stages run all of ``tests/``, so a file named here would be run beside
-    the whole suite rather than instead of it.
+    the whole suite rather than instead of it. A value following an option in
+    ``VALUE_OPTIONS`` is that option's, not a test.
     """
-    return [
-        arg
-        for arg in passthrough
-        if not arg.startswith("-")
-        and (
-            "::" in arg
-            or arg.endswith(".py")
-            or arg.rstrip("/") == "tests"
-            or arg.startswith("tests/")
-        )
-    ]
+    named, previous = [], None
+    for arg in passthrough:
+        if not arg.startswith("-") and previous not in VALUE_OPTIONS and _looks_like_tests(arg):
+            named.append(arg)
+        previous = arg
+    return named
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -143,7 +186,8 @@ def main(argv: list[str] | None = None) -> int:
     if named:
         parser.error(
             f"it always runs all of tests/, so {', '.join(named)} would run beside the whole "
-            "suite; select with -k or -m, or run `uv run python -m pytest <file>` directly"
+            "suite; select with -k or -m, give an option's path value as --option=value, or run "
+            "`uv run python -m pytest <file>` directly"
         )
     codes = [
         subprocess.call(command, cwd=ROOT, env=stage_environment(pinned, os.environ))

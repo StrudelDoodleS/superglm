@@ -667,7 +667,11 @@ def test_the_suite_runner_refuses_a_test_file_it_would_run_beside_the_suite(
 
 
 def test_the_suite_runner_passes_option_values_through() -> None:
-    passthrough = ["--splits", "4", "--group", "1", "-k", "reml and not slow", "--junitxml=r.xml"]
+    passthrough = [
+        *["--splits", "4", "--group", "1", "-k", "reml and not slow", "--junitxml=r.xml"],
+        *["--ignore", "tests/test_reml.py", "--deselect", "tests/test_reml.py::TestExactPresolve"],
+        *["--junitxml", "tests/out.xml", "--ignore=tests/docs"],
+    ]
     assert _suite_runner().named_tests(passthrough) == []
 
 
