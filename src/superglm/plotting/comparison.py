@@ -250,6 +250,9 @@ def _build_term_comparison_data(
     n_points: int = 200,
 ) -> dict[str, Any]:
     """Build normalized per-term comparison data for labeled fitted models."""
+    # Imported here: superglm.editor imports this module through its CV tab.
+    from superglm.editor.display import transform_for_link
+
     normalized_models = _normalize_models(models)
     frame = as_eager_frame(X)
     resolved_terms, skipped = _resolve_comparable_terms(normalized_models, terms=terms)
@@ -292,8 +295,11 @@ def _build_term_comparison_data(
                 for label, model in normalized_models.items()
             }
 
-        for entry in series.values():
-            entry["response"] = np.exp(entry["link"])
+        # A term's response curve is what the editor shows for it: a relativity on
+        # a log, shifted log or logit link, the added amount on any other.
+        for label, entry in series.items():
+            transform = transform_for_link(normalized_models[label]._link)
+            entry["response"] = transform.to_display(entry["link"])
 
         if normalized_support is None:
             support = _support_payload(family, frame, term, sample_weight_arr, domain)

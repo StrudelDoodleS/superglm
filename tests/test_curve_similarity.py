@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import polars as pl
@@ -442,3 +444,69 @@ def test_a_level_whose_group_a_fold_never_saw_is_a_gap_whatever_routes_it(unseen
     assert np.isnan(link[at["C"]])
     assert np.isfinite(np.delete(link, at["C"])).all()
     assert link[at["E"]] == link[at["D"]]
+
+
+def _cv_similarity(family, X, y):
+    from sklearn.model_selection import KFold
+
+    from superglm import cross_validate
+
+    model = SuperGLM(
+        family=family,
+        selection_penalty=0.0,
+        features={"x": Spline(n_knots=6), "band": Categorical(base="A")},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        result = cross_validate(
+            model, X, y, cv=KFold(2, shuffle=True, random_state=0), return_estimators=True
+        )
+    return result.curve_similarity
+
+
+def test_an_identity_link_response_curve_is_the_added_amount_and_never_overflows():
+    """A Gaussian term's effect is an amount added to the mean, not a factor.
+
+    Its response curve was ``exp`` of the link curve whatever the link, so level
+    effects of several hundred overflowed the similarity's squares. On an
+    identity link the response curve is the link curve itself, as the editor
+    shows it (``editor.display.transform_for_link``).
+    """
+    rng = np.random.default_rng(3)
+    n = 400
+    x = rng.uniform(0, 10, n)
+    band = rng.choice(["A", "B", "C"], n)
+    y = 3000.0 + 80.0 * np.sin(x) + np.select([band == "B", band == "C"], [450.0, 700.0])
+    y = y + rng.normal(0.0, 20.0, n)
+    X = pd.DataFrame({"x": x, "band": band})
+
+    similarity = _cv_similarity("gaussian", X, y)
+
+    assert set(similarity) == {"x", "band"}
+    for term in similarity.values():
+        curves = term["curves"]
+        for label, link in curves["link"].items():
+            np.testing.assert_array_equal(curves["response"][label], link)
+        for kind in ("pairwise", "vs_mean"):
+            frame = term[kind]["response"]
+            values = frame.values() if isinstance(frame, dict) else [frame]
+            for table in values:
+                numbers = np.asarray(table, dtype=np.float64)
+                assert np.isfinite(numbers).all()
+
+
+def test_a_log_link_response_curve_stays_the_relativity():
+    rng = np.random.default_rng(4)
+    n = 400
+    x = rng.uniform(0, 10, n)
+    band = rng.choice(["A", "B", "C"], n)
+    mu = np.exp(-1.0 + 0.3 * np.sin(x) + 0.4 * (band == "C"))
+    y = rng.poisson(mu).astype(float)
+    X = pd.DataFrame({"x": x, "band": band})
+
+    similarity = _cv_similarity("poisson", X, y)
+
+    for term in similarity.values():
+        curves = term["curves"]
+        for label, link in curves["link"].items():
+            np.testing.assert_array_equal(curves["response"][label], np.exp(link))
