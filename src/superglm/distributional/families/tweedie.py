@@ -300,7 +300,7 @@ def _window_refusal(workspace: TweedieWindowWorkspace) -> ValueError:
 def _tail_log_survival(
     q: NDArray[np.float64], values: NDArray[np.float64], weights: NDArray[np.float64]
 ) -> NDArray[np.float64]:
-    """``log P(Y > q)`` per row, the same whatever rows share the call.
+    """``log P(Y > q)`` per row, the same whatever rows share the call, NaN where refused.
 
     The window kernel's endpoint budget covers one workspace, so each chunk of
     rows gets its own, and rows a chunk refused for that budget alone are
@@ -322,7 +322,8 @@ def _tail_log_survival(
             continue
         budget = workspace.gamma.evaluations >= workspace.gamma.max_evaluations
         if not budget or len(rows) == 1:
-            raise _window_refusal(workspace)
+            result[rows[refused]] = np.nan
+            continue
         again = rows[refused]
         pending += [half for half in np.array_split(again, 2) if half.size]
     return result
@@ -1326,6 +1327,11 @@ class TweedieLSS(TweediePredictors):
             rate, jump_shape, jump_scale, above, terms, derivatives=True
         ):
             result[rows] = _block_quantile(block, series_target[rows])
+        # The survival root replaces the series answer only where the window
+        # kernel evaluates it and the bracket straddles it.  Elsewhere a row
+        # keeps the series answer at its own ``p``, right to the series'
+        # absolute tolerance, so the tail route never refuses what the series
+        # answers.
         # ``1 - p`` is exact for ``p`` above one half (Sterbenz).
         tail = above[1.0 - probabilities[above] < _QUANTILE_TAIL_LEVEL]
         if tail.size:
@@ -1339,9 +1345,15 @@ class TweedieLSS(TweediePredictors):
                 rows = tail[atomic]
                 beyond = np.minimum((1.0 - probabilities[rows]) / positive_mass[atomic], 1.0)
                 result[rows] = jump_scale[rows] * special.gammainccinv(jump_shape[rows], beyond)
-            result[tail] = self._tail_quantile(
+            result[tail], solved = self._tail_quantile(
                 np.log1p(-probabilities[tail]), values[tail], weights[tail], result[tail]
             )
+            kept = tail[~solved]
+            if kept.size:
+                for rows, block in _series_blocks(
+                    rate, jump_shape, jump_scale, kept, terms, derivatives=True
+                ):
+                    result[rows] = _block_quantile(block, probabilities[rows])
         return result
 
     def _tail_quantile(
@@ -1350,7 +1362,7 @@ class TweedieLSS(TweediePredictors):
         values: NDArray[np.float64],
         weights: NDArray[np.float64],
         start: NDArray[np.float64],
-    ) -> NDArray[np.float64]:
+    ) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
         """Solve ``log S(q) = log(1 - p)`` on the window kernel's log survival function.
 
         Far up the tail a distribution function near one cannot resolve ``1 - p``,
@@ -1361,13 +1373,19 @@ class TweedieLSS(TweediePredictors):
         its root: the last probe overshoots the root by less than the root's
         distance from the start plus one first step.  The Illinois false
         position (Dowell & Jarratt 1971) closes it, its iterates inside the
-        bracket.
+        bracket.  Returns the roots and the rows solved: a row the kernel
+        refused anywhere, or whose bracket never straddled the target, is not.
         """
+        failed = ~np.isfinite(start)
 
         def excess(q: NDArray[np.float64], rows: NDArray[np.intp]) -> NDArray[np.float64]:
-            if rows.size == 0:
-                return np.zeros(0)
-            return _tail_log_survival(q, values[rows], weights[rows]) - log_target[rows]
+            gap = np.full(len(rows), np.nan)
+            ok = ~failed[rows]
+            if ok.any():
+                kept = rows[ok]
+                gap[ok] = _tail_log_survival(q[ok], values[kept], weights[kept]) - log_target[kept]
+            failed[rows] |= np.isnan(gap)
+            return gap
 
         rows = np.arange(len(start))
         g_start = excess(start, rows)
@@ -1375,20 +1393,21 @@ class TweedieLSS(TweediePredictors):
         low, g_low = start.copy(), g_start.copy()
         high, g_high = start.copy(), g_start.copy()
         short = g_start <= 0.0
-        # From a zero start the first probe is the mean.
-        step = np.where(
-            start > 0.0,
-            np.minimum(np.sqrt(_tweedie_variance(values, weights)), start),
-            values[:, 0],
-        )
+        # From a zero start the first probe is the mean.  The standard deviation
+        # is formed in logs: ``phi mu^p / w`` can underflow where its root does not.
+        mean, dispersion, power = values.T
+        with np.errstate(over="ignore", under="ignore"):
+            spread = np.exp(0.5 * (np.log(dispersion) + power * np.log(mean) - np.log(weights)))
+        step = np.where(start > 0.0, np.minimum(spread, start), mean)
+        failed |= ~(step > 0.0)
         low[short] = np.maximum(start[short] - step[short], 0.5 * start[short])
         high[~short] = start[~short] + step[~short]
         moved = np.where(short, low, high)
         g_moved = excess(moved, rows)
         g_low[short], g_high[~short] = g_moved[short], g_moved[~short]
         for _ in range(_TAIL_BRACKET_STEPS):
-            widen = np.flatnonzero(~short & (g_high > 0.0))
-            narrow = np.flatnonzero(short & (g_low <= 0.0))
+            widen = np.flatnonzero(~failed & ~short & (g_high > 0.0))
+            narrow = np.flatnonzero(~failed & short & (g_low <= 0.0))
             if widen.size == 0 and narrow.size == 0:
                 break
             step[widen] *= 2.0
@@ -1401,7 +1420,8 @@ class TweedieLSS(TweediePredictors):
             g_low[narrow] = excess(low[narrow], narrow)
         side = np.zeros(len(start), dtype=np.int8)
         answer = high.copy()
-        active = np.flatnonzero(g_high < 0.0)
+        bracketed = (g_low > 0.0) & (g_high <= 0.0)
+        active = np.flatnonzero(~failed & bracketed & (g_high < 0.0))
         for _ in range(_TAIL_ITERATIONS):
             if active.size == 0:
                 break
@@ -1423,8 +1443,8 @@ class TweedieLSS(TweediePredictors):
             settled = (np.abs(g_proposed) <= _TAIL_LOG_TOLERANCE) | (
                 high[active] - low[active] <= _TAIL_BRACKET_SPACINGS * np.spacing(high[active])
             )
-            active = active[~settled]
-        return answer
+            active = active[~settled & ~failed[active]]
+        return answer, bracketed & ~failed
 
 
 __all__ = ["BoundedPowerLink", "TweedieLikelihoodPlan", "TweedieLSS"]

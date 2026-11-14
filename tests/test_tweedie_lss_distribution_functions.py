@@ -670,6 +670,34 @@ def test_tweedie_far_tail_quantile_reaches_atom_heavy_and_concentrated_laws(
     assert reached[0] == pytest.approx(1.0 - probability, rel=1e-6)
 
 
+def test_tweedie_far_tail_quantile_steps_by_a_spread_whose_variance_underflows() -> None:
+    """The bracket's first step is the standard deviation even where the variance underflows.
+
+    At mean 1e-170 and dispersion 2e-85 the variance ``phi mu^p``, 2e-340, is below the
+    least float64 subnormal while its root, 1.4e-170, is not.  A zero step left the
+    bracket where it started, and the start's tail, about 1e-6, came back for 1e-8.
+    """
+    row = (1.0e-170, 2.0e-85, 1.5)
+    quantile = TweedieLSS().quantile(np.array([1.0 - 1.0e-8]), np.array([row]))
+    reached = np.exp(_log_survival_series(quantile, np.asarray(row), 1.0))
+    assert reached[0] == pytest.approx(1.0e-8, rel=1e-6)
+
+
+def test_tweedie_far_tail_quantile_keeps_the_series_answer_where_the_kernel_refuses() -> None:
+    """A law the series answers keeps its far-tail quantile when the survival kernel refuses.
+
+    At dispersion 2/18800 the rate passes the series' Poisson cap, but the window kernel
+    cannot establish its remainder within its index cap, and the quantile at ``1 - 1e-7``
+    refused.  The row keeps the series answer, the value the quantile gave before the
+    tail route, and the row beside it in the batch is still solved on the survival function.
+    """
+    theta = np.array([[1.0, 2.0 / 18800.0, 1.5], [100.0, 2.0, 1.5]])
+    quantile = TweedieLSS().quantile(np.full(2, 1.0 - 1.0e-7), theta)
+    assert quantile[0] == pytest.approx(1.054319167502973, rel=1e-10)
+    reached = np.exp(_log_survival_series(quantile[1:], theta[1], 1.0))
+    assert reached[0] == pytest.approx(1.0e-7, rel=1e-6)
+
+
 # ── the prior-weighted trio ─────────────────────────────────────────────────
 
 
