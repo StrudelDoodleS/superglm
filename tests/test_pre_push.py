@@ -198,7 +198,9 @@ def test_git_push_through_the_hook_waits_for_a_stamp(tmp_path, monkeypatch):
     (repo / "scripts").mkdir()
     shutil.copy(ROOT / "scripts" / "pre_push.py", repo / "scripts" / "pre_push.py")
     hook = repo / ".git" / "hooks" / "pre-push"
-    hook.write_text(pre_push.HOOK.replace("uv run --no-sync python", sys.executable), "utf-8")
+    # Quoted, with forward slashes: sh (Git Bash on Windows) eats a path's backslashes.
+    python = f'"{Path(sys.executable).as_posix()}"'
+    hook.write_text(pre_push.HOOK.replace("uv run --no-sync python", python), "utf-8")
     hook.chmod(0o755)
     push = ["git", "push", "-q", "origin", "master"]
     refused = subprocess.run(push, cwd=repo, capture_output=True, text=True)
