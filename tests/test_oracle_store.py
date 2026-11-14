@@ -321,6 +321,17 @@ _EDITS = {
         "HELPER = IDENTITY",
         "HELPER = DOUBLED",
     ),
+    "guarded-binding": (
+        "ENABLED = True\nif ENABLED:\n    SCALE = 1.0\nelse:\n    SCALE = 2.0\n"
+        "def oracle(x):\n    return x * SCALE\n",
+        "ENABLED = True",
+        "ENABLED = False",
+    ),
+    "mutation-after-binding": (
+        "WEIGHTS = [1.0, 2.0]\nWEIGHTS.append(3.0)\ndef oracle(x):\n    return WEIGHTS[-1] * x\n",
+        "append(3.0)",
+        "append(4.0)",
+    ),
     "range": (
         "TERMS = range(2)\ndef oracle(x):\n    return sum(x**k for k in TERMS)\n",
         "range(2)",
@@ -376,3 +387,23 @@ def test_every_fingerprint_names_the_oracle_libraries_versions(monkeypatch):
         _oracle_store, "_ORACLE_LIBRARIES", (("mpmath", "9.9"), ("sympy", "1.14.0"))
     )
     assert _fingerprint(_oracle) != before
+
+
+def test_dependencies_passed_as_a_generator_enter_the_fingerprint():
+    assert _fingerprint(_oracle, (v for v in (1.0,))) != _fingerprint(_oracle, (v for v in (2.0,)))
+
+
+def test_the_window_store_neither_hashes_nor_looks_up_the_platforms_legendre_rounding(monkeypatch):
+    """The narrow-window store's node fractions must not depend on ``leggauss``:
+    neither its fingerprint, nor the fractions the engine asks for."""
+    from superglm.distributional.kernels import _response_tails
+    from tests import test_response_window_jets as jets
+
+    store = jets._NARROW_INPUTS
+    nodes = np.polynomial.legendre.leggauss(3)[0]
+    assert jets._LEGENDRE_NODES.tolist() == nodes.tolist()  # this platform rounds them exactly
+    monkeypatch.setattr(_response_tails, "_LEGENDRE_NODES", np.nextafter(nodes, np.inf))
+    rebuilt = OracleStore(store.name, store.oracle, depends=store._depends, module=store.module)
+    assert rebuilt.fingerprint == store.fingerprint
+    case = jets._NARROW_CASES[0]
+    jets.test_quadrature_jets_match_the_oracle_to_order_four(*case[:1], *case[2:])

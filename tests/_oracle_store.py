@@ -281,39 +281,54 @@ def _module_tree(name: str, source: str) -> ast.Module:
     return ast.parse(source)
 
 
-def _bound(target: ast.AST, name: str) -> bool:
-    return any(isinstance(n, ast.Name) and n.id == name for n in ast.walk(target))
+def _mentions(node: ast.AST, name: str) -> bool:
+    return any(isinstance(n, ast.Name) and n.id == name for n in ast.walk(node))
+
+
+def _touches(statement: ast.stmt, name: str) -> bool:
+    """Whether a module-level statement binds or changes ``name``.
+
+    An assignment whose target mentions it (``X = ...``, ``X[0] = ...``), an
+    import of it, an expression or ``del`` that mentions it
+    (``X.append(3.0)``), or a compound statement with such a statement inside.
+    A ``def`` or ``class`` is code, walked when something names it, and an
+    assignment to another name only reads it.
+    """
+    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return False
+    if isinstance(statement, (ast.Import, ast.ImportFrom)):
+        return any(
+            (alias.asname or alias.name.partition(".")[0]) == name for alias in statement.names
+        )
+    if isinstance(statement, ast.Assign):
+        return any(_mentions(target, name) for target in statement.targets)
+    if isinstance(statement, (ast.AnnAssign, ast.AugAssign)):
+        return _mentions(statement.target, name)
+    if isinstance(statement, (ast.Expr, ast.Delete)):
+        return _mentions(statement, name)
+    inner: list[ast.AST] = []
+    for field in ("body", "orelse", "finalbody", "handlers", "cases"):
+        for child in getattr(statement, field, ()):
+            # An ``except`` handler or a ``match`` case holds its statements in ``body``.
+            inner.extend([child] if isinstance(child, ast.stmt) else child.body)
+    if isinstance(statement, (ast.For, ast.AsyncFor)) and _mentions(statement.target, name):
+        return True
+    if isinstance(statement, (ast.With, ast.AsyncWith)) and any(
+        item.optional_vars is not None and _mentions(item.optional_vars, name)
+        for item in statement.items
+    ):
+        return True
+    return any(isinstance(child, ast.stmt) and _touches(child, name) for child in inner)
 
 
 def _bindings(module: Any, name: str) -> list[ast.stmt]:
-    """The module-level statements that bind ``name`` (not those inside a def or class)."""
-    found, pending = [], list(_module_tree(module.__name__, inspect.getsource(module)).body)
-    while pending:
-        node = pending.pop(0)
-        if isinstance(node, (ast.If, ast.Try, ast.With, ast.For, ast.While)):
-            pending.extend(
-                child for child in ast.iter_child_nodes(node) if isinstance(child, ast.stmt)
-            )
-            for handler in getattr(node, "handlers", ()):
-                pending.extend(handler.body)
-        targets: list[ast.AST] = []
-        if isinstance(node, ast.Assign):
-            targets = node.targets
-        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
-            targets = [node.target]
-        elif isinstance(node, (ast.For, ast.With)):
-            targets = (
-                [node.target]
-                if isinstance(node, ast.For)
-                else [item.optional_vars for item in node.items if item.optional_vars is not None]
-            )
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            if any((alias.asname or alias.name.partition(".")[0]) == name for alias in node.names):
-                found.append(node)
-            continue
-        if any(_bound(target, name) for target in targets):
-            found.append(node)
-    return found
+    """The module-level statements that bind or change ``name``, whole.
+
+    A compound statement enters whole, so the ``if`` that chooses between two
+    bindings, or the ``with`` around one, is part of the constant's source.
+    """
+    tree = _module_tree(module.__name__, inspect.getsource(module))
+    return [statement for statement in tree.body if _touches(statement, name)]
 
 
 class _Fingerprint:
@@ -520,7 +535,11 @@ class _Fingerprint:
         self._put("global", f"{module_name}.{name}")
         names: set[str] = set()
         for statement in statements:
-            if isinstance(statement, ast.ImportFrom) and statement.module:
+            if (
+                isinstance(statement, ast.ImportFrom)
+                and statement.module
+                and any((a.asname or a.name) == name for a in statement.names)
+            ):
                 # ``from x import name``: the constant is x's; follow it there.
                 alias = next(a for a in statement.names if (a.asname or a.name) == name)
                 source = importlib.import_module(
@@ -640,7 +659,7 @@ class OracleStore:
         # rather than leaving it to the sampled check.
         fingerprint.add(_ORACLE_LIBRARIES)
         self._depends = tuple(depends)
-        for item in (oracle, *depends):
+        for item in (oracle, *self._depends):
             fingerprint.add(item)
         self.fingerprint = fingerprint.hexdigest()
         self.path = STORE_DIRECTORY / f"{name}.json"

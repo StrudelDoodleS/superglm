@@ -92,7 +92,11 @@ _U = 2.0**-53
 _TINY = 64 * 2.0**-1074
 _K = 2
 _ORDER = 4
-_LEGENDRE_NODES, _LEGENDRE_WEIGHTS = np.polynomial.legendre.leggauss(3)
+# The nodes as every IEEE platform rounds them (``/`` and ``sqrt`` are correctly
+# rounded), since they key stored oracle answers; ``leggauss`` is an eigenvalue
+# solve, which another platform's LAPACK may round otherwise.
+_LEGENDRE_NODES = np.array([-math.sqrt(3 / 5), 0.0, math.sqrt(3 / 5)])
+_LEGENDRE_WEIGHTS = np.polynomial.legendre.leggauss(3)[1]
 
 
 def _tuples(order: int) -> tuple[tuple[int, ...], ...]:
@@ -501,7 +505,6 @@ _NARROW_INPUTS = OracleStore(
         _normal_point,
         _weibull_point,
         _WEIBULL_RATE,
-        _LEGENDRE_NODES.tolist(),
     ),
     module="tests/test_response_window_jets.py",
 )
@@ -514,7 +517,16 @@ def test_the_stored_oracle_answers_are_current():
 
 def _narrow_inputs(law_name, where, scale, width, reading):
     half_width, nodes, oracle = _NARROW_INPUTS(law_name, where, scale, width, reading)
-    return np.array([half_width]), (lambda fraction: nodes[fraction]), list(nodes.values()), oracle
+
+    def jets(fraction):
+        # The engine's nodes come from its own ``leggauss``, which another
+        # platform's LAPACK may round a few ulps of a node (in [-1, 1]) away
+        # from these exact ones; the fraction ``(1 + t) / 2`` inherits that.
+        nearest = min(nodes, key=lambda stored: abs(stored - fraction))
+        assert abs(nearest - fraction) <= 4 * _U, (fraction, nearest)
+        return nodes[nearest]
+
+    return np.array([half_width]), jets, list(nodes.values()), oracle
 
 
 _NARROW_CASES = [(*case, width) for case in _NARROW for width in (1e-3, 1e-8)]

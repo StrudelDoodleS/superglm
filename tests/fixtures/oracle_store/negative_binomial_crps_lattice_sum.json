@@ -1,7 +1,7 @@
 {
 "oracle": "tests._negative_binomial_crps_oracle.nb2_crps",
 "refresh": "SUPERGLM_REFRESH_ORACLES=1 uv run --with mpmath pytest tests/test_lss_scores.py -n 8",
-"fingerprint": "77a62bb87eea538f761aca78d5018dd6a40992646271d740927e3d18e53e223f",
+"fingerprint": "b7906f59006e949b7e77113a3f8e9a0b6bf7affaa8d50613c8565e661f90866c",
 "entries": {
 "{\"t\":[{\"t\":[{\"f\":\"0x1.0000000000000p+1\"},{\"f\":\"0x1.0000000000000p-1\"},{\"f\":\"0x1.1800000000000p+6\"}]},{\"t\":[]}]}": [{"f":"0x1.0a6a3da3bb371p+6"},0.01],
 "{\"t\":[{\"t\":[{\"f\":\"0x1.0000000000000p+2\"},{\"f\":\"0x1.0000000000000p+0\"},{\"f\":\"0x0.0p+0\"}]},{\"t\":[]}]}": [{"f":"0x1.c71c71c71c71cp+0"},0.01],
