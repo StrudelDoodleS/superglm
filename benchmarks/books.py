@@ -1622,6 +1622,7 @@ def cmd_baseline(args) -> int:
     if args.counts_only and settings != ["pinned"]:
         raise SystemExit("--counts-only runs under benchboard heavy, which pins every pool")
     usable = usable_for_check if args.counts_only else usable_baseline
+    at_sha = None  # benchboard's records at sha, read once: each read scans its whole history
     for threads in settings:
         keys_file = Path(args.out) / "tmp" / f"keys_{sha[:12]}_{threads}.json"
         keys_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1652,10 +1653,12 @@ def cmd_baseline(args) -> int:
             case, key = entry["case"], entry["key"]
             if key["sha"] != sha:
                 raise SystemExit(f"the baseline tree imported superglm at {key['sha']}, not {sha}")
+            at_sha = stored_records(sha) if at_sha is None else at_sha
             stored = [
                 r
-                for r in stored_records(sha, case, threads)
-                if usable(r)
+                for r in at_sha
+                if (r["case"], r["threads"]) == (case, threads)
+                and usable(r)
                 and reuse_part(r["key"]) == reuse_part(key)
                 and r["key"]["sha"] == sha
                 and "threads_observed" in r["key"]  # an older key can never pass compare
