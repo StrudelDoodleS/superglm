@@ -122,9 +122,13 @@ thread setting, so a pinned record is only ever checked against a pinned baselin
 record files, or none (the latest per case for `HEAD`), it fits nothing. It prints one
 table row per case and a `FAIL` line naming the case, the output and the size of every
 move beyond tolerance. It exits 1 when anything moves, 2 when a record has no usable
-baseline, and 0 otherwise. The smoke set takes about 10 s a side; `lss` about 6 to 30 s a
-case; `standard` and `families` are freMTPL2 book fits of a minute or more each, so run
-them for changes that reach those fits.
+baseline, and 0 otherwise.
+
+Pinned on one core, the smoke fit takes about 5 s, `std_mains` 8.5 s and `lss_gamma` 6 s;
+the larger `standard`, `families` and `lss` fits take longer, so add those sets for changes
+that reach them. Each `baseline` or `check` run also reads benchboard's history once per
+baseline commit, which has no index for that read and takes 2 to 3 minutes on a 54 GB
+history, and a first `baseline` at a commit creates and syncs its worktree (about a minute).
 
 Every record carries an `outputs` block:
 
@@ -140,8 +144,11 @@ Every record carries an `outputs` block:
 - decisions: the convergence flag and termination reason, and the dispatched backend.
   The warning categories come from the record's captured warnings.
 
-A record grows by about 45 KB for a `SuperGLM` case and 200 KB for a `SuperLSS` case on
-disk (one float per line), about a quarter of that compressed in benchboard's history.
+The block is about 44 KB of JSON for a `SuperGLM` book case (2,000 predictions and 67
+coefficient standard errors on `std_mains`) and 166 KB for a two-parameter `SuperLSS` case (a prediction and
+a standard error per parameter and row). On disk, one float per line, the `std_mains`
+record is 58 KB and the `lss_gamma` record 206 KB; compressed in benchboard's history they
+are 23 KB and 76 KB.
 
 ### Tolerances
 
