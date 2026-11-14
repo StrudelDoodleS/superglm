@@ -28,6 +28,7 @@ from __future__ import annotations
 import importlib
 import itertools
 import os
+import pickle
 import subprocess
 import sys
 import tempfile
@@ -146,8 +147,17 @@ def _run(stages) -> None:
 
 @contextmanager
 def _file_lock(path: str) -> Iterator[None]:
-    """Hold an exclusive lock on the file at ``path`` (created if missing) across processes."""
-    with open(path, "a+b") as file:
+    """Hold an exclusive lock on the file at ``path`` (created if missing) across processes.
+
+    Its directory goes only once every worker has exited, so a call that finds
+    it gone (a fit's thread that entered a save just before) needs no lock.
+    """
+    try:
+        file = open(path, "a+b")
+    except FileNotFoundError:
+        yield
+        return
+    with file:
         if sys.platform == "win32":
             import msvcrt
 
@@ -174,7 +184,42 @@ def _file_lock(path: str) -> Iterator[None]:
 
 
 # The private ``IndexDataCacheFile`` methods ``_locked_cache`` composes a save from.
-_CACHE_FILE_METHODS = ("load", "_load_index", "_save_index", "_save_data", "_data_name")
+_CACHE_FILE_METHODS = (
+    "load",
+    "_load_index",
+    "_save_index",
+    "_save_data",
+    "_data_name",
+    "_data_path",
+)
+
+
+def _published_names(cache_file) -> set[str] | None:
+    """The data files the index on disk names, whatever source or Numba wrote it; ``None`` if unread.
+
+    Read as Numba writes it: a pickled version, then a pickled ``(stamp, overloads)``.
+    """
+    try:
+        with open(cache_file._index_path, "rb") as file:
+            pickle.load(file)
+            _, overloads = pickle.loads(file.read())
+        return set(overloads.values())
+    except FileNotFoundError:
+        return set()
+    except Exception:
+        return None
+
+
+def _free_data_name(cache_file, overloads: dict) -> str:
+    """A data file no index names: neither this source's nor the one on disk (a stale one)."""
+    published = _published_names(cache_file)
+    taken = set(overloads.values()) | (published or set())
+    for number in itertools.count(1):
+        name = cache_file._data_name(number)
+        unknown = published is None and os.path.exists(cache_file._data_path(name))
+        if name not in taken and not unknown:
+            return name
+    raise AssertionError("unreachable")
 
 
 @contextmanager
@@ -182,9 +227,10 @@ def _locked_cache(lock_path: str) -> Iterator[None]:
     """Inside the block, this process's Numba cache saves and loads take the lock at ``lock_path``.
 
     A save is Numba's ``IndexDataCacheFile.save`` with its last two writes
-    swapped: the data file first, then the index that names it. A process
-    stopped between the two leaves the index as it was, which does not name
-    the new file (a stale index loads as empty).
+    swapped, the data file first and then the index that names it, and a new
+    entry's data file is one that no index on disk names, a stale one
+    included. A process stopped between the two writes leaves every index as
+    it was, naming only the code it was written with.
     """
     from numba.core import caching
 
@@ -194,14 +240,7 @@ def _locked_cache(lock_path: str) -> Iterator[None]:
     def locked_save(self, key, data):
         with _file_lock(lock_path):
             overloads = self._load_index()
-            name = overloads.get(key)
-            if name is None:
-                taken = set(overloads.values())
-                name = next(
-                    self._data_name(i)
-                    for i in itertools.count(1)
-                    if self._data_name(i) not in taken
-                )
+            name = overloads.get(key) or _free_data_name(self, overloads)
             self._save_data(name, data)
             if overloads.get(key) != name:
                 overloads[key] = name

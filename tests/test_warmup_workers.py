@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import ast
 import importlib
+import pickle
 import sys
 import threading
 import types
+from pathlib import Path
 
 import pytest
 
@@ -98,6 +100,17 @@ def test_a_save_stopped_between_its_writes_leaves_no_entry_naming_an_old_kernel(
             fresh.save("new signature", "new kernel")
     monkeypatch.undo()
     assert _cache_file(tmp_path, "new source").load("new signature") is None
+    # The stale index on disk, which a process on the old source (or a
+    # rollback to it) still reads, names only the old kernel.
+    assert _cache_file(tmp_path, "old source").load("old signature") == "old kernel"
+
+
+def test_a_cache_call_after_the_workers_lock_is_gone_proceeds_unlocked(tmp_path):
+    """A fit's thread can enter a save just before the last worker exits and the lock goes."""
+    entry = _cache_file(tmp_path, "stamp")
+    with _warmup._locked_cache(str(tmp_path / "removed" / "cache.lock")):
+        entry.save("key", "kernel")
+        assert entry.load("key") == "kernel"
 
 
 def _fake_stages(monkeypatch):
@@ -284,3 +297,14 @@ def test_an_interrupt_stops_the_running_workers_and_starts_no_more(monkeypatch):
         _warmup._compile_in_workers(["first", "second"], 2)
     assert len(started) == 1
     assert killed == started
+
+
+def test_an_unreadable_index_leaves_every_existing_data_file_alone(tmp_path):
+    """An index another Numba wrote, which this one cannot read, may still name any data file."""
+    old = _cache_file(tmp_path, "old source")
+    old.save("old signature", "old kernel")
+    # Numba reads the version first and skips the rest when it differs.
+    Path(old._index_path).write_bytes(pickle.dumps("another numba") + b"not a pickle")
+    with _warmup._locked_cache(str(tmp_path / "cache.lock")):
+        _cache_file(tmp_path, "new source").save("new signature", "new kernel")
+    assert pickle.loads(Path(old._data_path(old._data_name(1))).read_bytes()) == "old kernel"
