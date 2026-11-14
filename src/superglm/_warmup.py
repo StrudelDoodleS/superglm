@@ -297,7 +297,7 @@ def _can_start_workers() -> bool:
     from numba.core import caching
 
     return (
-        not numba.config.DISABLE_JIT
+        not getattr(numba.config, "DISABLE_JIT", False)
         and bool(sys.executable)
         and not getattr(sys, "frozen", False)
         and all(
@@ -312,8 +312,9 @@ def _compile_in_workers(units: list[str], workers: int) -> None:
     import numba
 
     env = dict(os.environ)
-    if numba.config.CACHE_DIR:  # set in code or by superglm._numba_cache, not only in env
-        env["NUMBA_CACHE_DIR"] = str(numba.config.CACHE_DIR)
+    cache_dir = getattr(numba.config, "CACHE_DIR", "")
+    if cache_dir:  # set in code or by superglm._numba_cache, not only in env
+        env["NUMBA_CACHE_DIR"] = str(cache_dir)
     order = sorted(units, key=lambda unit: -_UNIT_SECONDS.get(unit, 0.0))
     stop, guard, live = threading.Event(), threading.Lock(), set()
 

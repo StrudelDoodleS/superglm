@@ -71,8 +71,10 @@ the same wheel wrote, after each of these changes:
 With Numba 0.67, fixing the file times as above makes a reinstall load the
 cache (1.0 s).
 
-Several workers can share one directory: Numba writes each entry to a
-temporary file and renames it into place.
+Several workers can load from one directory. Two processes compiling the
+same kernel into it at once can overwrite each other's entry, because Numba
+keeps one index file per kernel, so fill the directory before the workers
+fit, for example with `superglm.warmup()` in the init script below.
 
 ## Optionally, warm up in the init script
 
