@@ -37,6 +37,7 @@ dropped when it changed.
 
 from __future__ import annotations
 
+import ast
 import atexit
 import fractions
 import functools
@@ -44,6 +45,7 @@ import hashlib
 import inspect
 import json
 import os
+import textwrap
 import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -195,6 +197,40 @@ def _source_file(item: Any) -> Path | None:
     return path if any(path.is_relative_to(root) for root in _SOURCE_ROOTS) else None
 
 
+def _code_source(code: Any) -> str:
+    """The source of one code object; for a lambda, the lambda's own expression.
+
+    ``inspect.getsource`` gives a lambda's whole statement, which
+    ``f, g = lambda x: x, lambda x: 2 * x`` shares between two lambdas; the
+    lambda is the one whose span holds most of its code's source positions.
+    """
+    lines, start = inspect.getsourcelines(code)  # the code object's own: no ``__wrapped__``
+    source = "".join(lines)
+    if code.co_name != "<lambda>":
+        return source
+    indent = len(lines[0]) - len(lines[0].lstrip())
+    text = textwrap.dedent(source)
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return source
+    positions = [
+        (line - start + 1, column - indent)
+        for line, _, column, _ in code.co_positions()
+        if line is not None and column is not None
+    ]
+    best, best_score = source, None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Lambda):
+            continue
+        span = ((node.lineno, node.col_offset), (node.end_lineno, node.end_col_offset))
+        segment = ast.get_source_segment(text, node) or source
+        node_score = (sum(span[0] <= at < span[1] for at in positions), -len(segment))
+        if best_score is None or node_score > best_score:
+            best, best_score = segment, node_score
+    return best
+
+
 class _Fingerprint:
     """A sha256 of an oracle and everything its answer can depend on.
 
@@ -253,6 +289,8 @@ class _Fingerprint:
             # A decorator's wrapper is code too: its own source, globals and
             # closure (which usually hold the function it wraps), then that function.
             self._function(getattr(item, "__func__", item))
+            if inspect.ismethod(item):  # a bound method: its receiver's state too
+                self.add(item.__self__)
             if hasattr(item, "__wrapped__"):
                 self.add(item.__wrapped__)
         elif hasattr(item, "__wrapped__"):  # ``functools.lru_cache`` and other C wrappers
@@ -306,8 +344,7 @@ class _Fingerprint:
         if _source_file(function) is None or not hasattr(function, "__code__"):
             self._named(function)
             return
-        # The code object's own source: ``getsource(function)`` follows ``__wrapped__``.
-        self._put("function", inspect.getsource(function.__code__))
+        self._put("function", _code_source(function.__code__))
         self.add(function.__defaults__)
         self.add(function.__kwdefaults__)
         scope = dict(function.__globals__)
@@ -366,7 +403,7 @@ class _Fingerprint:
             self._put("int", repr(int(item)))
         elif isinstance(item, np.ndarray):
             if item.dtype.hasobject:
-                self._put("array", f"{item.dtype.str[1:]}{item.shape}")
+                self._put("array", f"{item.dtype.descr!r}{item.shape}")
                 for element in item.ravel().tolist():
                     self.add(element)
             else:
@@ -380,6 +417,8 @@ class _Fingerprint:
         elif hasattr(item, "_mpf_"):
             sign, mantissa, exponent, bits = item._mpf_
             self._put("mpf", f"{sign},{mantissa:x},{exponent},{bits}")
+        elif isinstance(item, (range, slice)):
+            self._put(type(item).__name__, f"{item.start},{item.stop},{item.step}")
         elif isinstance(item, (tuple, list)):
             self._put(type(item).__name__, str(len(item)))
             if type(item) not in (tuple, list):  # a named tuple
@@ -410,6 +449,11 @@ class _Fingerprint:
             self._put("sympy", sympy.srepr(item))
         elif callable(item) and hasattr(item, "__name__"):  # ``np.log``, ``math.exp``
             self._named(item)
+        elif type(item).__module__ == "builtins":
+            raise TypeError(
+                f"an oracle fingerprint cannot hash a {type(item).__name__} constant: {item!r}; "
+                "teach _Fingerprint._data its value"
+            )
         else:
             # Anything else from outside the repository, such as a module-level
             # mpmath context, whose repr would carry the ambient precision: its

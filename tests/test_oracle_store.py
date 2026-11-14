@@ -285,3 +285,58 @@ def test_a_module_level_mpmath_constant_does_not_take_the_ambient_precision():
             assert importlib.reload(module)._RELATIVE_TAIL._mpf_ == tail._mpf_
     finally:
         importlib.reload(module)
+
+
+class _Scaled:
+    def __init__(self, scale):
+        self.scale = scale
+
+    def evaluate(self, x):
+        return self.scale * x
+
+
+_IDENTITY, _DOUBLED = lambda x: x, lambda x: x if x <= 2 else 2 * x
+_HELPER = _IDENTITY
+_TERMS = range(2)
+_OBJECT_TABLE = np.array([(1.0, 2.0)], dtype=[("x", object), ("y", object)])
+
+
+def _calls_the_helper(x):
+    return _HELPER(x)
+
+
+def _sums_the_terms(x):
+    return sum(x**k for k in _TERMS)
+
+
+def _reads_an_object_field(x):
+    return _OBJECT_TABLE["x"][0] * x
+
+
+@pytest.mark.parametrize(
+    ("oracle", "name", "changed"),
+    [
+        (_calls_the_helper, "_HELPER", _DOUBLED),
+        (_sums_the_terms, "_TERMS", range(3)),
+        (
+            _reads_an_object_field,
+            "_OBJECT_TABLE",
+            np.array([(1.0, 2.0)], dtype=[("y", object), ("x", object)]),
+        ),
+    ],
+    ids=["lambda-sharing-a-statement", "range", "object-structured-dtype"],
+)
+def test_the_fingerprint_tells_apart_values_that_look_alike(monkeypatch, oracle, name, changed):
+    before = _fingerprint(oracle)
+    monkeypatch.setattr(f"{__name__}.{name}", changed)
+    assert _fingerprint(oracle) != before
+
+
+def test_a_bound_method_enters_with_its_receiver():
+    assert _fingerprint(_Scaled(1.0).evaluate) != _fingerprint(_Scaled(2.0).evaluate)
+    assert _fingerprint(_Scaled(1.0).evaluate) == _fingerprint(_Scaled(1.0).evaluate)
+
+
+def test_a_builtin_constant_the_fingerprint_cannot_read_is_refused():
+    with pytest.raises(TypeError, match="cannot hash"):
+        _fingerprint(_oracle, (bytearray(b"x"),))
