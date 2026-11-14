@@ -104,9 +104,12 @@ jobs:
       # and ``*.nbc``) and reuses it while that source file's content and the CPU it
       # was compiled for are unchanged, so a fresh checkout recompiles every kernel a
       # shard reaches. Numba does not notice a change to a kernel's callee in another
-      # file, so the key holds every package source file and the lock, with no
-      # partial (restore-keys) match: a hit means byte-identical sources and
-      # dependencies. The host CPU and its features are in the key because a
+      # file or to a global it froze at compile time, so the key hashes every module
+      # that compiles with numba, every superglm module those import, transitively,
+      # and the lock (scripts/numba_cache_key.py), with no partial (restore-keys)
+      # match: a hit means byte-identical kernel sources and dependencies. A change
+      # to any other module leaves the key, and the cache, as they were. The host CPU
+      # and its features are in the key because a
       # kernel compiled for one CPU is not reused on another, and the shard is too,
       # since each shard compiles what its own tests reach.
       - name: Name the host CPU for the numba kernel cache
@@ -118,6 +121,16 @@ jobs:
           print('cpu=' + ll.get_host_cpu_name() + '-' + hashlib.sha256(features.encode()).hexdigest()[:12])"
           >> "$GITHUB_OUTPUT"
 
+      - name: Hash the sources numba's kernels are compiled from
+        id: numba-sources
+        shell: bash
+        # Assigned on its own line so that a failing script fails the step (bash runs
+        # with -e and pipefail) instead of keying every commit alike; tr drops the \r
+        # Python on Windows writes and $( ) keeps.
+        run: |
+          hash=$(uv run python scripts/numba_cache_key.py | tr -d '\r')
+          echo "hash=$hash" >> "$GITHUB_OUTPUT"
+
       - name: Restore numba's compiled kernels for identical sources
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
@@ -125,7 +138,7 @@ jobs:
             src/superglm/**/__pycache__/*.nbi
             src/superglm/**/__pycache__/*.nbc
           key: >-
-            numba-${{ runner.os }}-${{ runner.arch }}-py${{ matrix.runtime.python-version }}-${{ steps.numba-host.outputs.cpu }}-shard${{ matrix.group }}-${{ hashFiles('uv.lock', 'src/superglm/**/*.py') }}
+            numba-${{ runner.os }}-${{ runner.arch }}-py${{ matrix.runtime.python-version }}-${{ steps.numba-host.outputs.cpu }}-shard${{ matrix.group }}-${{ steps.numba-sources.outputs.hash }}
 
       # The runner mirrors local runs: a parallel pass with one BLAS/numba thread per
       # worker, then the few `threads` tests serially with the default pools.
