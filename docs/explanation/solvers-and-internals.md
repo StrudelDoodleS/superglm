@@ -6,6 +6,7 @@ If the optimization stack feels like too many acronyms piled on top of each othe
 - `PIRLS` is that same idea after adding penalties.
 - when `selection_penalty > 0`, the penalized weighted least-squares subproblem is nonsmooth, so it needs an inner solver
 - this repo uses proximal Newton block coordinate descent for that inner solve
+- when a term carries a shape rule (monotone, convex, a cap), the weighted least-squares subproblem gains linear inequality constraints, so each step is a small quadratic program
 - `REML` sits outside all of that and chooses the smoothing parameters
 
 So the stack is not:
@@ -178,31 +179,30 @@ until λ and the REML objective stabilize
 
 ```text
 # ── fREML: same outer goal, fewer expensive refreshes ─────────
-# Key idea: if W is nearly unchanged, reuse weighted summaries
+# Key idea: hold W fixed within a step, and try new λ on
+# weighted summaries instead of on the rows
 
 initialize λ
 
 repeat:
-    β̂, μ, W = run a full inner fit
-    cache XᵀWX, XᵀWz, XᵀW1, ΣW, ΣWz
+    β̂, W = one IRLS step at the current λ
+    cache the weighted summaries of the rows at this W
 
-    repeat a few cheap smoothing updates:
-        hold W fixed
-        change only S(λ)
-        re-solve from cached summaries
-        update λ
+    take one Newton step on log λ for the REML criterion
+        of the working model that W defines
+    line-search that step on the cached summaries:
+        each trial λ is a small p x p solve, no pass over the rows
 
-    if λ changed enough that W is no longer trustworthy:
-        refresh with another full inner fit
-
-until λ stabilizes
+until λ and the REML objective stabilize
 ```
 
 ```{admonition} Conceptually
 :class: note
 `REML` is "fit coefficients, score the current smoothness, update the smoothness, repeat."
-`fREML` is the same outer idea, but engineered to reduce repeated full data passes
-by reusing weighted summaries when the IRLS geometry has not changed much.
+`fREML` is the same outer idea, but engineered to reduce repeated full data passes:
+it updates the weights and the smoothing parameters together, one step each,
+and tries candidate smoothing parameters on cached weighted summaries.
+This is Wood's performance-oriented iteration (Wood 2011, section 6.2).
 ```
 
 ```{admonition} Which curvature the binned route uses
@@ -276,8 +276,8 @@ that matter for this repo:
 | Layer | Main question | Solves for | Why it exists | In this repo |
 |---|---|---|---|---|
 | GLM likelihood | How should the mean depend on the predictors? | `beta`, intercept | The base statistical model | `fit()`, `fit_reml()` |
-| IRLS / PIRLS | What quadratic surrogate should represent the GLM right now? | working weights `W`, working response `z` | GLM loss is not quadratic | `src/superglm/solvers/pirls.py`, `src/superglm/solvers/irls_direct.py` |
-| Inner coefficient solver | For fixed `W` and `z`, what coefficients solve the penalized WLS problem? | `beta`, intercept | penalties may be nonsmooth | direct solve or proximal Newton BCD |
+| IRLS / PIRLS | What quadratic surrogate should represent the GLM right now? | working weights `W`, working response `z` | GLM loss is not quadratic | `src/superglm/solvers/pirls.py`, `src/superglm/solvers/irls_direct/` |
+| Inner coefficient solver | For fixed `W` and `z`, what coefficients solve the penalized WLS problem? | `beta`, intercept | penalties may be nonsmooth, and shape rules add inequality constraints | direct solve, proximal Newton BCD, or an active-set QP (`src/superglm/solvers/constrained_qp.py`) |
 | REML / fREML | How smooth should each smooth term be? | per-term `lambda_j` | the inner fit does not choose smoothness for you | `src/superglm/reml/` |
 
 ```{admonition} If you remember one thing
@@ -319,12 +319,21 @@ $$
 \begin{pmatrix} \sum W_i & \mathbf{1}^\top \mathbf{W} \mathbf{X} \\ \mathbf{X}^\top \mathbf{W} \mathbf{1} & \mathbf{X}^\top \mathbf{W} \mathbf{X} + \mathbf{S} \end{pmatrix} \begin{pmatrix} \alpha \\ \boldsymbol{\beta} \end{pmatrix} = \begin{pmatrix} \sum W_i z_i \\ \mathbf{X}^\top \mathbf{W} \mathbf{z} \end{pmatrix}
 $$
 
+The code does not form this bordered system. It profiles the intercept out
+first: every column is centred on its weighted mean, which leaves a
+$p \times p$ system for $\boldsymbol{\beta}$ alone, and the intercept follows
+from the weighted means. That is the Schur complement of the intercept row,
+so it gives the same answer, and centring keeps the rounding of each column
+in proportion to its spread rather than to its size.
+
 That is the whole IRLS idea. Each outer iteration does four things:
 
 1. compute $\mathbf{W}$ and $\mathbf{z}$ from the current fit
 2. solve one penalized weighted least-squares problem
 3. update $\eta$ and $\mu$
-4. stop when the deviance stabilizes
+4. stop when the penalized deviance stabilizes (the default,
+   `convergence="deviance"`; `"coefficients"` stops on the coefficient change
+   instead). A step the line search had to reject never counts as converged.
 
 So the only reason IRLS feels complicated at first is that the weights are
 endogenous. Once $\mathbf{W}$ and $\mathbf{z}$ are fixed, the subproblem is
@@ -352,9 +361,10 @@ That is why the repo has two inner paths:
 # ── PIRLS dispatch ─────────────────────────────────────────────
 # At fit time, the solver is chosen automatically:
 
-if selection_penalty == 0:
+if any term carries a shape rule, or selection_penalty == 0:
     # All penalties are quadratic (smoothing only)
-    # → one dense (p+1)×(p+1) solve per IRLS iteration
+    # → one p×p solve per IRLS iteration, or one small QP
+    #   when shape rules add inequality constraints
     result, H⁻¹ = fit_irls_direct(X, y, W, S)
 
 else:
@@ -384,30 +394,41 @@ $$
 ```
 # ── Direct IRLS: smooth penalties only ─────────────────────────
 # S = block-diagonal smoothing penalty (one block per spline)
-# Uses gram-based ops: XᵀWX via per-group gram + cross_gram
+# XᵀWX is formed from per-group Grams and cross-Grams
 #   → O(n_bins ⋅ K²) for discretized groups, not O(n ⋅ p²)
 
 η = α + Xβ
 μ = g⁻¹(η)
 
 for t in 1, 2, ...:
-    W, z = working_quantities(η, μ, y)
+    W, z = working weights and working response at (η, μ, y)
 
-    # Form augmented (p+1)×(p+1) system from cached summaries
-    XᵀWX, XᵀW1, XᵀWz = block_xtwx_rhs(groups, W, Wz)
+    # Profile the intercept out: centre the columns on their
+    # weighted means x̄ = XᵀW1 / ΣW, and z on z̄ = ΣWz / ΣW
+    X̃ᵀWX̃ = XᵀWX − ΣW ⋅ x̄x̄ᵀ           # centred Gram, p×p
+    X̃ᵀWz̃ = XᵀWz − ΣW ⋅ x̄z̄
 
-    M = [[ΣWᵢ,   XᵀW1  ],           # intercept row
-         [XᵀW1,  XᵀWX + S]]          # coefficient rows
-    rhs = [ΣWᵢzᵢ, XᵀWz]
+    β = solve(X̃ᵀWX̃ + S, X̃ᵀWz̃)       # Cholesky, or a rank-certified factor
+    α = z̄ − x̄ᵀβ
 
-    α, β = solve(M, rhs)              # one eigh or Cholesky
-
-    η = α + Xβ
-    μ = g⁻¹(η)
+    η = α + Xβ                         # line search if the step raised
+    μ = g⁻¹(η)                         #   the penalized deviance
     if converged(deviance): break
 ```
 
-The repo uses this in `src/superglm/solvers/irls_direct.py`. Typical iteration counts: 5-7 for Poisson/log, even with `select=True` double-penalty terms.
+The repo uses this in `src/superglm/solvers/irls_direct/`. The solve step has
+four forms there, one per kind of model:
+
+- the Gram step above, the default (`direct_solve="gram"`, or `"auto"` for
+  most models);
+- a QR factor of the weighted, centred design stacked on the penalty's square
+  root (`direct_solve="qr"`), backward-stable but $O(n p^2)$ per iteration,
+  for smaller datasets;
+- block elimination for large `RandomEffect` chains and factor-smooth
+  (`basis="fs"` or `"sz"`) terms, which never forms their dense Gram
+  (`direct_solve="auto"` picks it from the terms and their sizes);
+- an active-set quadratic program when a term carries a shape rule
+  (section 6.3).
 
 ### 6.2 Nonsmooth case: selection_penalty > 0
 
@@ -427,6 +448,55 @@ That means a plain Newton or Cholesky solve is no longer enough. You need a meth
 
 That is what the inner proximal solver is for.
 
+### 6.3 Constrained case: shape rules
+
+A shape rule (`Constraint.fit.increasing`, `convex`, a cap, a flat stretch,
+`max_step`) is a set of linear inequalities on a term's coefficients: for a
+monotone P-spline, every first difference of its coefficients has one sign;
+for a convex spline of degree three or lower, a set of linear conditions on
+its coefficients that holds exactly when its curvature does. With $\mathbf{W}$ and
+$\mathbf{z}$ fixed, the penalized least-squares step becomes
+
+$$
+\min_{\boldsymbol{\beta}} \; \tfrac{1}{2}\boldsymbol{\beta}^\top \mathbf{H} \boldsymbol{\beta} - \mathbf{g}^\top \boldsymbol{\beta}
+\quad \text{subject to} \quad \mathbf{A}\boldsymbol{\beta} \ge \mathbf{b},
+\qquad \mathbf{H} = \tilde{\mathbf{X}}^\top \mathbf{W} \tilde{\mathbf{X}} + \mathbf{S}
+$$
+
+a convex quadratic program. superglm solves it with a primal active-set
+method (Nocedal and Wright, *Numerical Optimization*, 2nd ed., 2006,
+Algorithm 16.3): keep a working set of constraints held at equality, solve the
+equality-constrained problem on it, and either step until a new constraint
+blocks or release the constraint whose multiplier has the wrong sign. Every
+shape-constrained spline kind (`PSpline`, `BSplineSmooth`,
+`CubicRegressionSpline`) fits on this one solver, in
+`src/superglm/solvers/constrained_qp.py`. The SCOP reparameterization
+(Pya and Wood 2015), which releases up to 0.41.0 used for shape-constrained
+P-splines, is retired; a model saved with it still loads and predicts.
+
+The textbook loop needs a few guards to be safe in floating point:
+
+- **Independent working rows.** In exact arithmetic a row that depends on
+  the working rows cannot block a step; rounding can make it appear to. The
+  working rows' span is held as a QR factor that is updated as rows enter and
+  leave (Golub and Van Loan 2013, section 6.5), and a row that would not raise
+  its rank enters by replacing one (Gill and Wong 2015).
+- **Anti-cycling.** On a degenerate face, a release can be undone by a zero
+  step that blocks on the same row, and the working sets cycle. Once a
+  working set repeats with the objective unchanged, releases switch to
+  Bland's least-index rule (Bland 1977), which cannot cycle.
+- **Warm starts.** Each IRLS iteration starts from the previous one's working
+  set, so a fit's later steps usually need few or no changes to it. A warm
+  solve that fails is solved again from a cold start.
+- **A rank-deficient $\mathbf{H}$** is truncated by the shared rank policy,
+  never regularized, and the result is accepted only after a check of
+  feasibility, multiplier signs, stationarity and complementarity.
+
+With `fit_reml()`, the smoothing parameters are chosen without the shape
+rules, and the model is then refit with them at those smoothing parameters.
+See [Monotone and curvature constraints](../how-to/constrain-a-smooth.md)
+for what that means for intervals and degrees of freedom.
+
 ## 7. What "proximal Newton BCD" means
 
 This name sounds more complicated than the actual algorithm.
@@ -436,28 +506,44 @@ For one PIRLS outer step, the code loops over coefficient groups and does:
 1. hold $\mathbf{W}$ and $\mathbf{z}$ fixed
 2. update the intercept in closed form
 3. for each group $g$, compute the local gradient and block Hessian
-4. take a Newton step for that block
-5. apply the proximal operator of the group penalty
-6. update the residual cheaply
+4. minimize the group's local quadratic model plus its penalty
+5. update the residual cheaply
 
-The gradient and Hessian for group $g$ are:
-
-$$
-\nabla_g = -\mathbf{X}_g^\top \mathbf{W} \mathbf{r}, \qquad \mathbf{H}_g = \mathbf{X}_g^\top \mathbf{W} \mathbf{X}_g
-$$
-
-where $\mathbf{r} = \mathbf{z} - \alpha\mathbf{1} - \mathbf{X}\boldsymbol{\beta}$ is the working residual. The Newton direction is $\mathbf{d}_g = \mathbf{H}_g^{-1} \nabla_g$, and the proximal operator enforces group sparsity:
+The gradient and Hessian for group $g$, including the group's share of the
+smoothing penalty, are:
 
 $$
-\boldsymbol{\beta}_g^{\text{new}} = \text{prox}_{\lambda_1 w_g / L_g}\!\left(\boldsymbol{\beta}_g - \mathbf{d}_g\right) = \left(1 - \frac{\lambda_1 w_g / L_g}{\|\boldsymbol{\beta}_g - \mathbf{d}_g\|_2}\right)_+ (\boldsymbol{\beta}_g - \mathbf{d}_g)
+\nabla_g = -\mathbf{X}_g^\top \mathbf{W} \mathbf{r} + (\mathbf{S}\boldsymbol{\beta})_g, \qquad \mathbf{H}_g = \mathbf{X}_g^\top \mathbf{W} \mathbf{X}_g + \mathbf{S}_{gg}
 $$
 
-where $L_g$ is the maximum eigenvalue of $\mathbf{H}_g$ (local Lipschitz constant).
+where $\mathbf{r} = \mathbf{z} - \alpha\mathbf{1} - \mathbf{X}\boldsymbol{\beta}$ is the working residual. Step 4 then solves
+
+$$
+\boldsymbol{\beta}_g^{\text{new}} = \arg\min_{\mathbf{b}} \; \nabla_g^\top(\mathbf{b} - \boldsymbol{\beta}_g) + \tfrac12 (\mathbf{b} - \boldsymbol{\beta}_g)^\top \mathbf{H}_g (\mathbf{b} - \boldsymbol{\beta}_g) + P_g(\mathbf{b})
+$$
+
+and how it does so depends on the penalty:
+
+- **Group lasso and group elastic net** ($P_g = \lambda_1 w_g \|\mathbf{b}\|_2$,
+  plus a ridge part for the elastic net): this block problem is solved
+  exactly. The group is zero when $\|\mathbf{H}_g\boldsymbol{\beta}_g - \nabla_g\|_2 \le \lambda_1 w_g$;
+  otherwise the eigendecomposition of $\mathbf{H}_g$ reduces the optimality
+  condition to one scalar equation in $\|\mathbf{b}\|_2$, solved by a root
+  search. This is the block coordinate descent of Qin, Scheinberg and
+  Goldfarb (*Mathematical Programming Computation* 5(2), 2013).
+- **Ridge:** the block problem is quadratic, so it is one solve with
+  $\mathbf{H}_g + \lambda_1\mathbf{I}$, factored once per IRLS step.
+- **Other penalties, such as sparse group lasso:** one proximal-gradient
+  step, with step length $1/L_g$ where $L_g$ is the largest eigenvalue of
+  $\mathbf{H}_g$. For sparse group lasso the prox is soft-thresholding of each
+  coordinate followed by group soft-thresholding (Simon, Friedman, Hastie and
+  Tibshirani 2013).
 
 ```
 # ── Proximal Newton BCD: one PIRLS outer step ─────────────────
 # W, z fixed from the current IRLS approximation
 # r = z − α1 − Xβ (working residual)
+# Hg = XgᵀWXg + Sgg, formed (and factored) once per outer step
 
 for inner in 1, 2, ..., max_bcd:
     # Intercept update (closed form, unpenalised)
@@ -465,20 +551,21 @@ for inner in 1, 2, ..., max_bcd:
     α += δ
     r -= δ
 
-    # BCD cycle: one Newton+prox step per group
+    # BCD cycle: one block minimization per group
     for g in groups:
+        if active_set and g was zero and passed its KKT check: skip
+
         βg_old = βg
-        ∇g     = −Xgᵀ(W ⊙ r)               # group gradient
-        dg     = chol_solve(Hg, ∇g)          # Newton direction: Hg⁻¹∇g
-        βg_cand = βg_old − dg                # candidate (no penalty)
-        βg_new  = prox(βg_cand, λ₁wg/Lg)    # group soft-threshold
+        ∇g     = −Xgᵀ(W ⊙ r) + (Sβ)g           # group gradient
+        βg_new = block_minimizer(Hg, ∇g, βg_old, penalty)
 
         # Cheap residual update (no full matvec)
         if βg_new ≠ βg_old:
             r -= Xg(βg_new − βg_old)
             βg = βg_new
 
-    if max|β − β_prev| < tol: break
+    every 5th sweep: recompute r from scratch (stops rounding drift)
+    if max|β − β_prev| < tol / 100: break
 ```
 
 The words in the name mean:
@@ -603,8 +690,9 @@ can be formed by:
 2. doing small dense linear algebra on the binned basis
 3. scattering or gathering only when needed
 
-That is exactly what `DiscretizedSSPGroupMatrix` in `src/superglm/group_matrix.py`
-is built for. Here `SSP` just means the spline is stored in the repo's
+That is exactly what `DiscretizedSSPGroupMatrix` (imported from
+`superglm.group_matrix`, defined in
+`src/superglm/_group_matrix/_group_matrix_discretized.py`) is built for. Here `SSP` just means the spline is stored in the repo's
 reparameterized penalized form: sparse basis `B`, small dense transform
 `R_inv`, and penalty matrix `omega`, rather than one fully materialized dense
 design block.
@@ -734,7 +822,22 @@ $$
 
 with an optional first-order $W(\boldsymbol{\rho})$ correction that accounts for $\mathrm{d}\mathbf{W}/\mathrm{d}\boldsymbol{\rho}$ via the implicit function theorem.
 
-## 13. The three REML paths in this repo
+## 13. The REML paths in this repo
+
+Both paths below search $\boldsymbol{\rho} = \log\boldsymbol{\lambda}$ inside
+a box. The box is not a fixed range of $\lambda$: it is
+$[10^{-6}, 10^{10}]$ times the fit's *information unit*, the mean Fisher
+information one likelihood row carries at the intercept-only fit, rounded to
+a power of two (`src/superglm/_lambda_box.py`). A penalty $\lambda\mathbf{S}$
+is weighed against the data curvature $\mathbf{X}^\top\mathbf{W}\mathbf{X}$,
+so multiplying every prior weight by $c$ multiplies the optimal $\lambda$ by
+$c$ too, while predictions and EDF stay where they were (Wood, Pya and Säfken
+2016, section 3.1). A box in the fit's own units moves with the optimum, so
+the same model fits the same way in any units. Rounding the unit to a power of
+two makes a rescaling by $2^k$ move the bounds exactly, and the ceiling never
+falls below $10^{10}$, since it acts as the working infinity for a term that
+should be smoothed away. When a smoothing parameter finishes on a bound and
+the gradient presses against it, the fit warns and names the term.
 
 ### 13.1 Direct REML (Newton)
 
@@ -748,12 +851,13 @@ Any other cold fit takes its first step from a bootstrap fit. Main effects are a
 
 ```
 # ── Direct REML: Newton on log-λ ──────────────────────────────
-# Phase 1: fixed-point warmup (3 iterations)
-# Phase 2: Newton with gradient, Hessian, line search
+# Start: the cached-W pre-solve (above), or one bootstrap fit
+# Then: Newton with gradient, Hessian, W(ρ) correction, line search
 
-# Bootstrap: fit once at minimal penalty (λ = 1 for interactions, a random effect's
-#   levels' mean information tr(A)/q for random effects), take one FP step
-β̂, H⁻¹ = fit_irls_direct(X, y, W, S=10⁻⁴)
+# Bootstrap: fit once at small penalty (λ = 10⁻⁴ for main effects,
+#   1 for interactions, tr(A)/q for random effects, all clipped to
+#   the box), then take one Fellner-Schall step from it
+β̂, H⁻¹ = fit_irls_direct(X, y, W, S(λ_boot))
 for j in each group:
     ρⱼ = log(rⱼ / (β̂gᵀ Ωg β̂g + tr(H⁻¹[g,g] Ωg)))
 
@@ -761,32 +865,31 @@ for iter in 1, 2, ..., max_reml_iter:
     λ = exp(ρ)
     β̂, H⁻¹, XᵀWX = fit_irls_direct(X, y, W, S(λ))
 
-    if iter ≤ 3:
-        # Fixed-point warmup (cheap, no Hessian needed)
-        for j in each group:
-            ρⱼ = log(rⱼ / (β̂gᵀΩgβ̂g + tr(H⁻¹[g,g] Ωg)))
+    ∇ = reml_gradient(β̂, H⁻¹, λ)
+    ∇ += w_correction(dW/dη, dβ̂/dρ)     # implicit function theorem
+    ℋ = reml_hessian(H⁻¹, λ, ∇)
 
-    else:
-        # Newton phase: gradient + Hessian + W(ρ) correction
-        ∇ = reml_gradient(β̂, H⁻¹, λ)
-        ∇ += w_correction(dW/dη, dβ̂/dρ)     # IFT
-        ℋ = reml_hessian(H⁻¹, λ, ∇)
-        δ = −solve(ℋ, ∇)                     # Newton step
-        δ = clip(δ, −5, 5)                    # trust region
+    hold directions whose gradient and curvature are both negligible
+    if the gradient, the objective change or the Newton step left
+       is below the stop resolution: stop
 
-        # Armijo line search: refit at trial ρ
-        for step in 1.0, 0.5, 0.25, ...:
-            ρ_trial = ρ + step ⋅ δ
-            obj_trial = reml_objective(ρ_trial)
-            if obj_trial ≤ obj + 10⁻⁴ ⋅ step ⋅ (∇ᵀδ):
-                ρ = ρ_trial; break
+    δ = −solve(ℋ, ∇) on the directions not held   # Newton step
+    if max|δ| > 5: δ ⋅= 5 / max|δ|                 # step bound
 
-    if |projected ∇| < tol: break
+    # Armijo line search: refit at trial ρ
+    for step in 1.0, 0.5, 0.25, ...:
+        ρ_trial = clip(ρ + step ⋅ δ, box)
+        obj_trial = reml_objective(ρ_trial)
+        if obj_trial ≤ obj + 10⁻⁴ ⋅ step ⋅ (∇ᵀδ):
+            ρ = ρ_trial; break
+    if no trial was accepted: the dead-search certificate decides the stop
 ```
 
-This is the cleanest path mathematically. The $W(\boldsymbol{\rho})$ correction (enabled after warmup) accounts for the fact that changing $\boldsymbol{\lambda}$ changes $\hat{\boldsymbol{\beta}}$, which changes $\boldsymbol{\mu}$, which changes $\mathbf{W}$.
+This is the cleanest path mathematically. The $W(\boldsymbol{\rho})$ correction, used from the first Newton step, accounts for the fact that changing $\boldsymbol{\lambda}$ changes $\hat{\boldsymbol{\beta}}$, which changes $\boldsymbol{\mu}$, which changes $\mathbf{W}$.
 
-Its gradient term is $\tfrac12\operatorname{tr}(\mathbf{H}^{-1}\mathbf{X}^\top\mathbf{D}_j\mathbf{X})$, with $\mathbf{D}_j$ the change of the weights along $\rho_j$. It equals $\tfrac12\sum_r d_{jr} h_r$, where $h_r = \mathbf{x}_r^\top\mathbf{H}^{-1}\mathbf{x}_r$ is row $r$'s leverage (Wood 2011, section 3.5.1). One pass over the rows therefore serves every smoothing parameter. The exact Newton Hessian also needs $\operatorname{tr}(\mathbf{H}^{-1}\mathbf{X}^\top\mathbf{D}_i\mathbf{X}\,\mathbf{H}^{-1}\mathbf{X}^\top\mathbf{D}_j\mathbf{X})$, which costs one $p \times p$ weighted cross-product per smoothing parameter. On the dense solver, a model with four or more smoothing parameters and no random-effect or factor-smooth term leaves that product out of the outer Hessian once those cross-products would cost about two seconds a step ($m\,n\,p^2 \ge 10^{11}$ multiply-adds). It keeps the terms the same pass forms. The gradient stays exact, so the fit stops at the same optimum; only the Newton steps that reach it can differ.
+Its gradient term is $\tfrac12\operatorname{tr}(\mathbf{H}^{-1}\mathbf{X}^\top\mathbf{D}_j\mathbf{X})$, with $\mathbf{D}_j$ the change of the weights along $\rho_j$. It equals $\tfrac12\sum_r d_{jr} h_r$, where $h_r = \mathbf{x}_r^\top\mathbf{H}^{-1}\mathbf{x}_r$ is row $r$'s leverage (Wood 2011, section 3.5.1). One pass over the rows therefore serves every smoothing parameter. The exact Newton Hessian also needs $\operatorname{tr}(\mathbf{H}^{-1}\mathbf{X}^\top\mathbf{D}_i\mathbf{X}\,\mathbf{H}^{-1}\mathbf{X}^\top\mathbf{D}_j\mathbf{X})$, which costs one $p \times p$ weighted cross-product per smoothing parameter. On the dense solver, a model with four or more smoothing parameters and no random-effect or factor-smooth term leaves that product out of the outer Hessian once those cross-products would cost about two seconds a step ($m\,n\,p^2 \ge 10^{11}$ multiply-adds). It keeps the terms the same pass forms. Binomial/logit on the dense solver
+takes this route at any size, since its derivative Grams cost several
+leverage passes. The gradient stays exact, so the fit stops at the same optimum; only the Newton steps that reach it can differ.
 
 In this repo: `src/superglm/reml/direct.py::optimize_direct_reml`.
 
@@ -794,44 +897,53 @@ In this repo: `src/superglm/reml/direct.py::optimize_direct_reml`.
 
 When `discrete=True`, the expensive part is repeatedly rebuilding $\mathbf{X}^\top \mathbf{W} \mathbf{X}$ from $n$ observations.
 
-So the repo caches the weighted summaries after each IRLS convergence and does multiple analytical $\boldsymbol{\lambda}$ updates before refreshing $\mathbf{W}$:
+So the repo runs performance-oriented iteration (Wood 2011, section 6.2;
+the scheme mgcv's `bam` uses): each outer iteration takes one IRLS step,
+which refreshes $\mathbf{W}$ and caches the weighted summaries, then one
+Newton step on $\log\boldsymbol{\lambda}$ for the REML criterion of the
+working linear model that $\mathbf{W}$ defines. The line search tries its
+candidate $\boldsymbol{\lambda}$ on the cached summaries alone:
 
 ```
 # ── Cached-W fREML: minimize data passes ──────────────────────
 # Key insight: changing S(λ) with fixed W is O(p³),
 #              but refreshing W requires O(n) data passes.
 
-for w_iter in 1, 2, ...:
-    # Expensive: full IRLS to convergence (data passes through n obs)
-    β̂, H⁻¹, XᵀWX = fit_irls_direct(X, y, W, S(λ))
-    cache(XᵀWX, XᵀWz, XᵀW1, ΣW, ΣWz)              # save for reuse
+for poi_iter in 1, 2, ..., max_reml_iter:
+    # One IRLS step at the current λ (one pass over the n rows)
+    β̂, H⁻¹, XᵀWX = fit_irls_direct(X, y, W, S(λ), max_iter=1)
+    cache(centred XᵀWX, centred XᵀWz, weighted column means, ΣW)
 
-    # Cheap inner loop: analytical λ updates at fixed W
-    for inner in 1, 2, ..., 30:
-        S_new = build_penalty(λ)
-        # Re-solve p×p system from cached summaries (no data pass!)
-        M = [[ΣW, XᵀW1], [XᵀW1, XᵀWX + S_new]]
-        α, β̂ = cholesky_solve(M, [ΣWz, XᵀWz])
-        H⁻¹ = invert(XᵀWX + S_new)
+    obj = reml_objective(β̂, H, λ)          # the working model's REML
+    ∇, ℋ = reml_gradient_and_hessian(β̂, H⁻¹, λ)
 
-        # Fellner-Schall fixed-point update
-        for j in each group:
-            λⱼ = rⱼ / (β̂gᵀΩgβ̂g + tr(H⁻¹[g,g] Ωg))
-            if dead_group(β̂gᵀΩgβ̂g ≪ tr):
-                λⱼ → ceiling                  # snap degenerate
+    hold flat directions; stop if the gradient, objective change or
+        Newton step left is below the stop resolution, with the
+        working model settled
+    δ = −solve(ℋ, ∇);  if max|δ| > 5: δ ⋅= 5 / max|δ|
 
-        if max|Δρ| < 0.01: break
-
-    if only_dead_groups_changed:
-        skip_irls_next_iter = True             # analytical continuation
-
-    if converged: break
+    # Line search on the cached system: no data pass per trial
+    for step in 1.0, 0.5, 0.25, ...:
+        λ_trial = exp(clip(ρ + step ⋅ δ, box))
+        β̂_trial = cholesky_solve(centred XᵀWX + S(λ_trial), centred XᵀWz)
+        if reml_objective(trial) is low enough: accept; break
 ```
 
 The mental model is:
 
 - if $\mathbf{W}$ changes, the local geometry changed and you need fresh weighted summaries (expensive)
 - if only $\mathbf{S}(\boldsymbol{\lambda})$ changes, you can reuse the same weighted geometry and do cheap $p \times p$ algebra (free)
+
+The working model holds $\mathbf{W}$ fixed within a step and has no term for
+how $\mathbf{W}$ moves with $\boldsymbol{\lambda}$, so this path stops near,
+not exactly at, the exact REML optimum. Where the REML surface is flat in a
+noise direction, it may also stop at a nearby stationary point with a large
+but not maximal $\lambda$. A tensor term whose margins share a block takes a
+damped Newton step on the pair instead of the plain step bound.
+
+The same loop has a second job. On an exact fit (`discrete=False`) that
+meets the pre-solve rule in section 13.1, it runs first on the exact design
+to give the Newton loop its start.
 
 In this repo: `src/superglm/reml/discrete.py::optimize_discrete_reml_cached_w`.
 
@@ -898,11 +1010,14 @@ If you want to understand the implementation from top to bottom, read in this or
 
 1. `src/superglm/model/fit_ops.py::fit`
 2. `src/superglm/solvers/pirls.py::_fit_pirls_inner`
-3. `src/superglm/solvers/irls_direct.py::fit_irls_direct`
-4. `src/superglm/model/fit_ops.py::fit_reml`
-5. `src/superglm/reml/objective.py::reml_laml_objective`
-6. `src/superglm/reml/direct.py::optimize_direct_reml`
-7. `src/superglm/reml/discrete.py::optimize_discrete_reml_cached_w`
+3. `src/superglm/solvers/irls_direct/_fit.py::fit_irls_direct`, then the step
+   it picks in `_dense.py`, `_qr.py`, `_qp.py` or `_structured.py`
+4. `src/superglm/solvers/constrained_qp.py::solve_constrained_qp`, for
+   shape-constrained terms
+5. `src/superglm/model/fit_ops.py::fit_reml`
+6. `src/superglm/reml/objective.py::reml_laml_objective`
+7. `src/superglm/reml/direct.py::optimize_direct_reml`
+8. `src/superglm/reml/discrete.py::optimize_discrete_reml_cached_w`
 
 ```{admonition} Three questions to keep in your head
 :class: tip
@@ -931,7 +1046,12 @@ For one fixed set of IRLS weights $\mathbf{W}$, the coefficient problem only dep
 | $\sum W_i$ | scalar | $O(n)$ |
 | $\sum W_i z_i$ | scalar | $O(n)$ |
 
-Those are exactly the quantities saved out of `fit_irls_direct()` for reuse.
+`fit_irls_direct()` saves these in their centred form, the one it solves
+(section 4): the centred Gram, the centred right-hand side, the weighted
+column means $\mathbf{X}^\top\mathbf{W}\mathbf{1}/\sum W_i$, the weighted
+mean of $\mathbf{z}$, and $\sum W_i$. A model with large random-effect or
+factor-smooth terms caches their block-eliminated system instead of a dense
+Gram.
 
 Once you have them, changing the smoothing penalty only changes the penalty matrix $\mathbf{S}(\boldsymbol{\lambda})$. It does **not** force you to revisit all $n$ observations immediately.
 
@@ -949,61 +1069,87 @@ Only while $\mathbf{W}$ is effectively unchanged.
 
 That is why the fast REML path alternates between:
 
-- expensive IRLS refreshes, which update $\mathbf{W}$ ($O(n)$ per iteration)
-- cheap analytical continuation steps, which keep $\mathbf{W}$ fixed and only change $\mathbf{S}(\boldsymbol{\lambda})$ ($O(p^3)$ per step)
+- an IRLS step, which updates $\mathbf{W}$ ($O(n)$, once per outer iteration)
+- line-search trials, which keep $\mathbf{W}$ fixed and only change $\mathbf{S}(\boldsymbol{\lambda})$ ($O(p^3)$ per trial)
+
+The cache lives for one outer iteration: the next IRLS step replaces it.
 
 The cache is not magic. It is just:
 
 > if the observation-side geometry has not changed, do not recompute it
 
-### 17.2 Why the "dead group" logic exists
+### 17.2 Why some smoothing parameters are held still
 
-In the fast REML path, some groups are detected as effectively dead: their coefficient energy is tiny relative to the trace term.
-
-The practical interpretation is:
+Some smoothing components are effectively dead: their coefficient energy
+$\hat{\boldsymbol{\beta}}_g^\top\boldsymbol{\Omega}_g\hat{\boldsymbol{\beta}}_g$
+is tiny next to the trace term. The practical reading is:
 
 - that smooth component is already basically gone
 - pushing its lambda higher will not materially change the fitted mean
-- so it will not materially change `W`
+- so the REML criterion is flat in that direction
 
-That is why the code can sometimes keep nudging those lambdas upward without a full IRLS refresh.
+Two pieces of code act on this.
 
-It is a pragmatic shortcut, not a new statistical principle.
+- **At the start.** With `select=True`, a null-space component whose
+  bootstrap coefficient energy is below a tenth of its trace term starts at
+  the box's ceiling rather than at its fixed-point value, since almost any
+  $\lambda$ is a fixed point there.
+- **At every Newton step.** A direction whose gradient and curvature are
+  both negligible at the stop resolution is held still for that step
+  (`freeze_flat_directions` in `src/superglm/reml/convergence.py`), so a flat
+  direction neither absorbs the step bound nor keeps the fit from stopping.
+  A direction that is flat but concave, a shoulder, takes a bounded step
+  downhill instead.
 
-### 17.3 QR: why is there QR code in `covariance.py` if the fitter uses Cholesky/eigendecomposition?
+Holding a flat direction is Wood's "working infinity" (Wood 2008, section
+3.4), not a new statistical principle. The stop test leaves a held direction
+out only while its gradient stays below the hold's bar; a direction whose
+gradient grows past it is live again. An accepted stop must also pass a
+second-order check, so a concave shoulder cannot pass for a minimum.
 
-Because the QR code is mostly for diagnostics and inference, not for the hot fitting path.
+### 17.3 QR: where is it used if the fitter uses Cholesky?
 
-The dense covariance fallback in `src/superglm/inference/covariance.py` builds
-an augmented matrix:
+The default fit solves the centred normal equations by Cholesky, falling back
+to a rank-certified factor when the Gram cannot certify its own rank. QR
+appears in three other places, each where stability matters more than speed.
+
+**The QR solve option.** With `direct_solve="qr"`, each IRLS step factors the
+stacked matrix
 
 $$
-\mathbf{A} = \begin{pmatrix} \mathbf{W}^{1/2} \mathbf{X}_a \\ \mathbf{S}^{1/2} \end{pmatrix}
+\mathbf{A} = \begin{pmatrix} \mathbf{W}^{1/2} \tilde{\mathbf{X}} \\ \mathbf{S}^{1/2} \end{pmatrix}
 $$
 
-so that $\mathbf{A}^\top \mathbf{A} = \mathbf{X}^\top \mathbf{W} \mathbf{X} + \mathbf{S}$. Then a reduced QR decomposition gives $\mathbf{A} = \mathbf{Q}\mathbf{R}$, which implies:
+so that $\mathbf{A}^\top \mathbf{A} = \tilde{\mathbf{X}}^\top \mathbf{W} \tilde{\mathbf{X}} + \mathbf{S}$. A reduced QR decomposition $\mathbf{A} = \mathbf{Q}\mathbf{R}$ then gives
 
 $$
-\mathbf{R}^\top \mathbf{R} = \mathbf{A}^\top \mathbf{A} = \mathbf{X}^\top \mathbf{W} \mathbf{X} + \mathbf{S}
+\mathbf{R}^\top \mathbf{R} = \mathbf{A}^\top \mathbf{A} = \tilde{\mathbf{X}}^\top \mathbf{W} \tilde{\mathbf{X}} + \mathbf{S}
 $$
 
-So QR is being used as a numerically stable way to factor the penalized normal equations when computing:
+without ever squaring the condition number of the design, as forming the
+Gram does. The price is the materialised $n \times p$ design and $O(np^2)$
+work per iteration, so this is an option for smaller, near-collinear data
+(`src/superglm/solvers/irls_direct/_qr.py`).
 
-- coefficient covariance: $\hat{\phi} \cdot (\mathbf{X}^\top \mathbf{W} \mathbf{X} + \mathbf{S})^{-1}$
-- leverage and effective degrees of freedom
-- inference summaries (SEs, Wood smooth tests)
+**The data rank.** Deciding which coefficients the data can estimate
+(section 17.3.2) factors a thin block of rows by QR when the Gram alone cannot
+decide.
 
-It is not the main coefficient-fitting method for the core solver.
+**Smooth-term tests.** `src/superglm/stats/wood_pvalue.py` uses pivoted QR to
+move a smooth term into a numerically stable test space before Wood's
+significance calculation.
+
+Coefficient covariance, leverage and EDF come from the inverse of the
+penalized Hessian that the fit's last solve leaves behind
+(`src/superglm/model/state_ops.py`), not from a separate QR pass.
 
 #### 17.3.1 Why use QR there?
 
-Because for diagnostics, you often care more about stability than raw speed.
+Because for those jobs, you often care more about stability than raw speed.
 
 The QR path is basically saying:
 
 > I want a reliable factorization of the penalized weighted design, even if the active design is a bit awkward or nearly rank-deficient
-
-There is also pivoted QR in `src/superglm/stats/wood_pvalue.py`, but that is again an inference thing, not a fitting thing. There QR is used to move a smooth term into a numerically stable test space before doing Wood-style significance calculations.
 
 #### 17.3.2 Which coefficients the data can estimate
 
@@ -1041,56 +1187,100 @@ On the freMTPL2 frequency book with ten interaction pairs, $p = 1535$. Of
 its 230 directions outside the data rank, 164 are read off the tables, and
 $k = 178$ directions are checked against the rows.
 
-### 17.4 Kernels: what are they really doing?
+### 17.4 Separation: checking that a finite answer exists
 
-The kernels in `src/superglm/_group_matrix/_group_matrix_kernels.py` look intimidating because they are low-level and optimized, but conceptually they are mostly just "fast weighted aggregation." `MatrixExecutionPlan.moments`, in `src/superglm/_group_matrix/_group_matrix_execution.py`, chooses which kernel builds each block.
+IRLS assumes the likelihood has a finite maximum. Sometimes it does not. A
+categorical level whose responses are all zero under a log-link Poisson, or
+all 0 or all 1 under a binomial, has its maximum at $\eta = -\infty$ or
+$+\infty$. IRLS then drifts until the objective stops changing and returns
+fitted values collapsed to the boundary, while the rank checks still look
+healthy. This is nonexistence of the exponential-family MLE (Albert and
+Anderson 1984; Fienberg and Rinaldo 2012).
 
-#### 17.4.1 `_fused_bincount_2`
+So the design build scans for it before the solver runs
+(`src/superglm/diagnostics/separation.py`).
 
-This computes binwise sums of `W` and `Wz` in one pass.
+- **Indicator blocks.** For categoricals and crossed categoricals, the
+  directions along which the likelihood keeps rising are exactly the cells
+  that have exposure and only boundary responses, so a counting pass over the
+  rows is exact.
+- **Spline-by-factor levels.** In general finding those directions is a
+  linear program (Konis 2007): find the rows some direction $\mathbf{a}$ with
+  $\mathbf{D}\mathbf{a} \ge 0$ moves strictly. Solving one program per row
+  costs one program per distinct row. Instead, one dual program first
+  certifies the rows that no such direction can move: by Stiemke's
+  alternative, a row is held exactly when some $\mathbf{y} \ge 0$ that is
+  positive on it has $\mathbf{D}^\top\mathbf{y} = 0$. Per-row programs then run
+  only on the rows that certificate leaves open. On one 3,000-row binomial
+  fit whose levels did not separate, the 3,008 per-row programs had taken
+  14.8 of its 19.8 seconds; the certificate decides those rows in one
+  program.
 
-Instead of:
+What the fit does with a separated level (`separation="warn"`, `"error"` or
+`"ignore"`) is described in
+[the spline-by-factor separation migration note](../development/migrations/spline-factor-separation-hold.md).
 
-- pass once for `W`
-- pass again for `Wz`
+### 17.5 Post-fit shape repair and its intercept search
 
-it does both together.
+`apply_shape_postfit()` changes a fitted term's curve after the fit, so the
+intercept has to be estimated again with the other coefficients held. That
+is a one-dimensional problem: minimize the deviance over a shift of the
+linear predictor.
 
-#### 17.4.2 `_weighted_bincount_2d`
+- The search looks for the root of the intercept's score with Fisher-scoring
+  steps, kept inside the bracket the score's signs give and bisecting where
+  a step would leave it (safeguarded Newton; Press et al., *Numerical
+  Recipes*, 3rd ed., 2007, section 9.4). Where the family's unit deviance is
+  convex in the linear predictor (a canonical link, and a declared list of
+  others, such as Gamma/log and binomial probit and cloglog), that root is
+  the minimum.
+- Where it is not convex, a root can be higher than the start, so the result
+  is compared with the start, and if it is higher the search runs again on
+  the deviance itself.
+- A run that stops on a maximum, where the Fisher step is zero, hands over
+  to a search with no derivatives: it brackets a minimum by steps that grow
+  outward, then refines it with Brent's method (Brent, *Algorithms for
+  Minimization Without Derivatives*, 1973, chapter 5).
 
-This aggregates a dense matrix by bin with weights, without materializing the big temporary `W[:, None] * M`.
+On a saturated link the deviance can be flat in the shift to the last bits of
+float64. There the derivative-free search compares deviances only by more
+than their rounding: it walks outward until one side falls by more than that,
+and keeps the start if neither does. Otherwise the side it left by would be
+chosen by those last bits, which differ from one BLAS build to another.
 
-So it is mostly an allocation-avoidance kernel.
+The rest of the repair, the projection of the curve onto the shape in the
+fit's penalized metric, is described in
+[Post-fit repair](../how-to/constrain-a-smooth.md#post-fit-repair).
 
-#### 17.4.3 `_csr_weighted_bincount`
+### 17.6 Compiled kernels: why the first fit is slower
 
-Same idea, but for sparse CSR matrices.
+Most of a fit's time goes into a few kinds of loop over the rows: summing
+weights into bins, forming weighted cross-products block by block, evaluating
+a family's likelihood and its derivatives row by row. superglm writes those
+loops in Python and compiles them to machine code with Numba the first time a
+process needs them.
 
-It avoids densifying sparse groups just to do weighted aggregation.
+So a first fit in a fresh environment includes some compile time, a few
+seconds for a typical model. Numba saves what it compiles to an on-disk
+cache, and later processes load it from there instead of compiling again.
+Two things follow:
 
-#### 17.4.4 `_disc_disc_2d_hist`
+- On a laptop or a long-lived server, you pay the compile once, the first
+  time each kind of fit runs.
+- On machines that start from a clean disk every time, such as job clusters,
+  put the cache on persistent storage, and optionally call
+  `superglm.warmup()` in the start-up script to compile everything ahead of
+  the first fit. [Starting fast on ephemeral clusters](../how-to/start-fast-on-ephemeral-clusters.md)
+  shows how.
 
-This builds a 2D weighted histogram for two discretized groups.
+The kernels are an implementation detail: they compute the same quantities
+the sections above describe, and nothing about a fit's answer depends on
+whether they were compiled in this process or loaded from the cache. For a
+walk-through of each kernel family, which solver step calls it, and how the
+cache and `warmup()` work, see
+[Compiled kernels](../development/internals/compiled-kernels.md).
 
-That lets the code compute cross-products between two discretized groups without reconstructing full observation-level matrices.
-
-#### 17.4.5 `MatrixExecutionPlan.moments`
-
-This is the main orchestration routine.
-
-Its job is:
-
-- build `X'WX`
-- build `X'W`
-- build `X'Wz`
-
-block by block, using the cheapest kernel available for each group-pair type.
-
-So if you want one sentence for the whole kernel layer, it is:
-
-> these kernels are just specialized ways of building weighted cross-products and weighted right-hand sides without materializing expensive temporary matrices
-
-### 17.5 A good way to read this code without getting lost
+### 17.7 A good way to read this code without getting lost
 
 If you try to understand the kernels line by line first, the code will feel cryptic.
 
