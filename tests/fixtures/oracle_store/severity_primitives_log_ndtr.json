@@ -1,7 +1,7 @@
 {
 "oracle": "tests.test_severity_primitives._log_ndtr_derivatives",
 "refresh": "SUPERGLM_REFRESH_ORACLES=1 uv run --with mpmath pytest tests/test_severity_primitives.py -n 8",
-"fingerprint": "3e9e4f3aec6cf2cc622f2e8ec30e0a0d0188f4a0ce5c7db1c18f485d6b72b9c3",
+"fingerprint": "e7aa3e979ee12a896bd7802ccbcc7f97cb107aa399c1f1bd6563ea61e6c2ae95",
 "entries": {
 "{\"t\":[{\"t\":[{\"f\":\"-0x1.0000000000000p+0\"}]},{\"t\":[]}]}": [[{"m":[1,"0xeba698e6457e05883d66a70fa7dcc3443fffa15147",-167,168]},{"m":[0,"0x1866f43f5165c17c0727ab894dab0c3ad49bb5b23bf",-168,169]},{"m":[1,"0x6683f7bad52c0c6942ef4fdd2237192fdc7cb1e453",-167,167]},{"m":[0,"0xef799f61359615f16ef27d0f78f33e858371caf8b3",-171,168]},{"m":[0,"0xa2267e6c8fa38f383a300e480a206f0971c7a4d411",-171,168]},{"m":[0,"0x18f99256b3acb5acbcf703731d64f0bb63086e9a1ab",-173,169]}],0.003],
 "{\"t\":[{\"t\":[{\"f\":\"-0x1.0000000000000p+64\"}]},{\"t\":[]}]}": [[{"m":[1,"0x40000000000000000000000000000016a3e2c61bcd",-39,167]},{"m":[0,"0x100000000000000000000000000000001",-64,129]},{"m":[1,"0xffffffffffffffffffffffffffffffff",-128,128]},{"m":[0,"0x3ffffffffffffffffffffffffffffffd",-317,126]},{"m":[0,"0xbffffffffffffffffffffffffffffff1",-381,128]},{"m":[0,"0x1",-305,1]}],0.002],

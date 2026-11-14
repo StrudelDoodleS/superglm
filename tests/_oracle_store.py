@@ -212,7 +212,7 @@ class _Fingerprint:
 
     def __init__(self) -> None:
         self._digest = hashlib.sha256()
-        self._seen: set[int] = set()
+        self._seen: dict[int, int] = {}  # id -> the order the walk first reached it
         self._keep: list[Any] = []  # holds walked objects so their ids stay unique
 
     def hexdigest(self) -> str:
@@ -228,9 +228,10 @@ class _Fingerprint:
             self._data(item)
             return
         if id(item) in self._seen:
-            self._put("seen", f"{type(item).__qualname__}")
+            # Which object, by when the walk first reached it: the same on every run.
+            self._put("seen", str(self._seen[id(item)]))
             return
-        self._seen.add(id(item))
+        self._seen[id(item)] = len(self._seen)
         self._keep.append(item)
         if isinstance(item, OracleStore):
             self._put("store", item.fingerprint)
@@ -248,10 +249,15 @@ class _Fingerprint:
             self.add(item.func)
             self.add(item.args)
             self.add(item.keywords)
-        elif hasattr(item, "__wrapped__"):  # ``functools.lru_cache`` and other wrappers
-            self.add(inspect.unwrap(item))
         elif inspect.isfunction(item) or inspect.ismethod(item):
-            self._function(inspect.unwrap(getattr(item, "__func__", item)))
+            # A decorator's wrapper is code too: its own source, globals and
+            # closure (which usually hold the function it wraps), then that function.
+            self._function(getattr(item, "__func__", item))
+            if hasattr(item, "__wrapped__"):
+                self.add(item.__wrapped__)
+        elif hasattr(item, "__wrapped__"):  # ``functools.lru_cache`` and other C wrappers
+            self._put("wrapper", type(item).__qualname__)
+            self.add(item.__wrapped__)
         elif hasattr(item, "py_func"):  # a numba dispatcher: its Python source is the code
             self.add(item.py_func)
         else:
@@ -281,24 +287,27 @@ class _Fingerprint:
         for base in cls.__bases__:
             self.add(base)
         for name, value in vars(cls).items():
-            # Methods written in the class body; not the ones ``dataclass`` or
-            # ``typing`` generate, nor ``__annotate__``, which vary by Python version.
-            function = getattr(value, "__func__", getattr(value, "fget", value))
-            if (
-                (
-                    inspect.isfunction(value)
-                    or isinstance(value, (staticmethod, classmethod, property))
-                )
-                and not name.startswith("__annotate")
-                and _source_file(function) is not None
-            ):
+            # Methods written in the class body and its attribute values; not the
+            # methods ``dataclass`` or ``typing`` generate, nor dunder data such as
+            # ``__static_attributes__`` or ``__annotate__``, which vary by Python version.
+            code = isinstance(value, (staticmethod, classmethod, property)) or inspect.isfunction(
+                value
+            )
+            if code:
+                function = getattr(value, "__func__", getattr(value, "fget", value))
+                if not name.startswith("__annotate") and _source_file(function) is not None:
+                    self._put("member", name)
+                    self.add(value)
+            elif not (name.startswith("__") and name.endswith("__")):
+                self._put("member", name)
                 self.add(value)
 
     def _function(self, function: Any) -> None:
         if _source_file(function) is None or not hasattr(function, "__code__"):
             self._named(function)
             return
-        self._put("function", inspect.getsource(function))
+        # The code object's own source: ``getsource(function)`` follows ``__wrapped__``.
+        self._put("function", inspect.getsource(function.__code__))
         self.add(function.__defaults__)
         self.add(function.__kwdefaults__)
         scope = dict(function.__globals__)
@@ -344,19 +353,27 @@ class _Fingerprint:
             self._put(type(item).__name__, repr(item))
         elif isinstance(item, bytes):
             self._put("bytes", item)
-        elif isinstance(item, (float, np.floating)):
+        elif isinstance(item, float):
             self._put("float", float(item).hex())
+        elif isinstance(item, np.generic) and not item.dtype.hasobject:
+            # ``np.bool_``, ``np.float32``, ``np.int64``...: the dtype and the bytes.
+            little = np.asarray(item).astype(item.dtype.newbyteorder("<"))
+            self._put("numpy scalar", repr(little.dtype.descr))
+            self._put("bytes", little.tobytes())
         elif isinstance(item, (complex, np.complexfloating)):
             self._put("complex", f"{item.real.hex()},{item.imag.hex()}")
         elif isinstance(item, np.integer):
             self._put("int", repr(int(item)))
         elif isinstance(item, np.ndarray):
-            self._put("array", f"{item.dtype.str[1:]}{item.shape}")
             if item.dtype.hasobject:
+                self._put("array", f"{item.dtype.str[1:]}{item.shape}")
                 for element in item.ravel().tolist():
                     self.add(element)
             else:
+                # The full little-endian descriptor, which keeps a structured
+                # dtype's field names, types and offsets.
                 little = np.ascontiguousarray(item).astype(item.dtype.newbyteorder("<"))
+                self._put("array", f"{little.dtype.descr!r}{item.shape}")
                 self._put("bytes", little.tobytes())
         elif isinstance(item, fractions.Fraction):
             self._put("fraction", f"{item.numerator}/{item.denominator}")

@@ -1,7 +1,7 @@
 {
 "oracle": "tests.test_lss_expected_shortfall._expected_shortfall_reference",
 "refresh": "SUPERGLM_REFRESH_ORACLES=1 uv run --with mpmath pytest tests/test_lss_expected_shortfall.py -n 8",
-"fingerprint": "81e97665ce067f2ba48a25caf156fe47e66224555f7710a86237fe005f3514a7",
+"fingerprint": "4977f6f7d8ef8a1682ab4de7400216c2aa7bb9dbd836b4b3694805329845aace",
 "entries": {
 "{\"t\":[{\"t\":[{\"f\":\"0x1.0000000000000p-1\"},{\"f\":\"0x1.999999999999ap-3\"},{\"f\":\"0x1.3333333333333p-2\"},{\"f\":\"-0x1.0624dd2f1a9fcp-10\"}]},{\"t\":[]}]}": [{"t":[{"f":"0x1.9444a279c4741p+0"},{"f":"0x1.3c5fa386de24cp+0"}]},0.276],
 "{\"t\":[{\"t\":[{\"f\":\"0x1.0000000000000p-1\"},{\"f\":\"0x1.999999999999ap-3\"},{\"f\":\"0x1.3333333333333p-2\"},{\"f\":\"-0x1.0c6f7a0b5ed8dp-20\"}]},{\"t\":[]}]}": [{"t":[{"f":"0x1.9433b2f094232p+0"},{"f":"0x1.3c5ee2fd64fa4p+0"}]},0.231],

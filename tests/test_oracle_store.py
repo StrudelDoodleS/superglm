@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 
 import numpy as np
@@ -202,3 +203,85 @@ def test_verify_catches_a_stored_answer_replaced_by_an_infinity(store_directory,
     path.write_text(json.dumps(data))
     with pytest.raises(AssertionError, match="no longer reproduces"):
         OracleStore("sample", _oracle, module="tests/test_oracle_store.py").verify()
+
+
+def _scaled(function):
+    @functools.wraps(function)
+    def wrapper(x):
+        return function(x) * _SCALE
+
+    return wrapper
+
+
+@_scaled
+def _decorated(x):
+    return mp.mpf(x)
+
+
+class _Law:
+    scale = _SCALE
+
+    @staticmethod
+    def evaluate(x):
+        return x * _Law.scale
+
+
+_A, _B = [1.0], [2.0]
+_CONFIGURATION = (_A, _B, _A)
+_ENABLED = np.bool_(True)
+_TABLE = np.array([(1.0, 2.0)], dtype=[("x", "f8"), ("y", "f8")])
+
+
+def _reads_a_repeat(x):
+    return _CONFIGURATION[2][0] * x
+
+
+def _reads_a_flag(x):
+    return x if _ENABLED else -x
+
+
+def _reads_a_field(x):
+    return _TABLE["x"][0] * x
+
+
+@pytest.mark.parametrize(
+    ("oracle", "name", "changed"),
+    [
+        (_decorated, "_SCALE", 2.0),
+        (_Law.evaluate, "_Law.scale", 2.0),
+        (_reads_a_repeat, "_CONFIGURATION", (_A, _B, _B)),
+        (_reads_a_flag, "_ENABLED", np.bool_(False)),
+        (_reads_a_field, "_TABLE", np.array([(1.0, 2.0)], dtype=[("y", "f8"), ("x", "f8")])),
+    ],
+    ids=[
+        "decorator-wrapper",
+        "class-attribute",
+        "repeated-object",
+        "numpy-bool",
+        "structured-dtype",
+    ],
+)
+def test_the_fingerprint_sees_every_kind_of_state_an_oracle_reads(
+    monkeypatch, oracle, name, changed
+):
+    """A decorator's wrapper, a class attribute, which object a repeat names, a numpy
+    scalar's value and a structured array's fields each change the oracle's answer."""
+    before = _fingerprint(oracle)
+    monkeypatch.setattr(f"{__name__}.{name}", changed)
+    assert _fingerprint(oracle) != before
+    monkeypatch.undo()
+    assert _fingerprint(oracle) == before
+
+
+def test_a_module_level_mpmath_constant_does_not_take_the_ambient_precision():
+    """Importing a module that raises ``mp.dps`` first must not change a store's fingerprint."""
+    import importlib
+
+    from tests import _negative_binomial_crps_oracle as module
+
+    tail = module._RELATIVE_TAIL
+    try:
+        with mp.workdps(50):
+            assert importlib.reload(module)._RELATIVE_TAIL._mpf_ == tail._mpf_
+    finally:
+        importlib.reload(module)
