@@ -643,6 +643,34 @@ def _suite_runner():
     return module
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["tests/test_reml.py"],
+        ["tests/test_reml.py::TestExactPresolve"],
+        ["-k", "reml", "tests/"],
+        ["test_reml.py"],
+    ],
+)
+def test_the_suite_runner_refuses_a_test_file_it_would_run_beside_the_suite(
+    arguments, capsys, monkeypatch
+) -> None:
+    runner, started = _suite_runner(), []
+    monkeypatch.setattr(
+        runner.subprocess, "call", lambda command, **_: started.append(command) or 0
+    )
+    with pytest.raises(SystemExit) as stopped:
+        runner.main(arguments)
+    assert started == []
+    assert stopped.value.code == 2
+    assert "always runs all of tests/" in capsys.readouterr().err
+
+
+def test_the_suite_runner_passes_option_values_through() -> None:
+    passthrough = ["--splits", "4", "--group", "1", "-k", "reml and not slow", "--junitxml=r.xml"]
+    assert _suite_runner().named_tests(passthrough) == []
+
+
 def test_the_suite_runner_pins_pools_in_parallel_and_frees_them_for_threads() -> None:
     runner = _suite_runner()
     passthrough = [
