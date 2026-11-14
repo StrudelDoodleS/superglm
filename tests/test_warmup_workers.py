@@ -6,6 +6,7 @@ tests stand in for them where a real compile would take a minute.
 
 from __future__ import annotations
 
+import ast
 import importlib
 import sys
 import threading
@@ -43,8 +44,9 @@ def test_every_stage_resolves_and_every_unit_has_a_start_order():
     assert set(_warmup._UNIT_SECONDS) == set(_warmup._units())
 
 
-def test_a_worker_saves_to_the_numba_cache_under_the_lock(tmp_path, monkeypatch):
-    """Two workers saving different signatures of one kernel must not interleave."""
+def test_a_worker_saves_to_and_loads_from_the_numba_cache_under_the_lock(tmp_path, monkeypatch):
+    """Two workers saving different signatures of one kernel must not interleave,
+    and a load must not fall between a save's index and its data file."""
     from numba.core import caching
 
     lock = str(tmp_path / "cache.lock")
@@ -52,11 +54,17 @@ def test_a_worker_saves_to_the_numba_cache_under_the_lock(tmp_path, monkeypatch)
     monkeypatch.setattr(
         caching.IndexDataCacheFile,
         "save",
-        lambda self, key, data: seen.append((key, data, _locked_elsewhere(lock))),
+        lambda self, key, data: seen.append(("save", key, data, _locked_elsewhere(lock))),
     )
-    _warmup._locked_saves(lock)
+    monkeypatch.setattr(
+        caching.IndexDataCacheFile,
+        "load",
+        lambda self, key: seen.append(("load", key, _locked_elsewhere(lock))) or "payload",
+    )
+    _warmup._locked_cache(lock)
     caching.IndexDataCacheFile.save(None, "key", "data")
-    assert seen == [("key", "data", True)]
+    assert caching.IndexDataCacheFile.load(None, "key") == "payload"
+    assert seen == [("save", "key", "data", True), ("load", "key", True)]
     assert not _locked_elsewhere(lock)
 
 
@@ -109,11 +117,17 @@ def test_more_workers_start_each_unit_once_then_run_every_stage_here(monkeypatch
     import numba
 
     monkeypatch.setattr(numba.config, "CACHE_DIR", str(tmp_path))
+    # A path no ASCII locale can encode reaches the worker unchanged, as ASCII.
+    monkeypatch.syspath_prepend(str(tmp_path / "caf\u00e9"))
     _warmup.warmup()
     assert sorted(worker.code.rsplit("'", 2)[-2] for worker in started) == ["first", "second"]
     for worker in started:
         assert worker.command == [sys.executable, "-P", "-"]
-        assert "_run_unit(" in worker.code and repr(sys.path) in worker.code
+        assert worker.code.isascii() and "_run_unit(" in worker.code
+        assert (
+            ast.literal_eval(worker.code.split("sys.path[:] = ", 1)[1].split("\n", 1)[0])
+            == sys.path
+        )
         assert worker.env["NUMBA_CACHE_DIR"] == str(tmp_path)
     assert calls == ["a", "b", "c"]
 
@@ -127,6 +141,19 @@ def test_a_worker_that_cannot_start_leaves_its_unit_to_this_process(monkeypatch)
 
     monkeypatch.setattr(_warmup.subprocess, "Popen", cannot_start)
     _warmup.warmup()
+    assert calls == ["a", "b", "c"]
+
+
+def test_no_place_for_the_lock_leaves_every_unit_to_this_process(monkeypatch):
+    calls, started = _fake_stages(monkeypatch), []
+    _fake_workers(monkeypatch, "2", started)
+
+    def no_scratch(*args, **options):
+        raise FileNotFoundError("no temporary directory")
+
+    monkeypatch.setattr(_warmup.tempfile, "TemporaryDirectory", no_scratch)
+    _warmup.warmup()
+    assert started == []
     assert calls == ["a", "b", "c"]
 
 

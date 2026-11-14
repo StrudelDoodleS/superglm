@@ -12,8 +12,10 @@ call from an already loaded overload whose types it can convert to.
 Numba's cache index is a read-modify-write of one file per function, and the
 data file an entry points to does not record the signature it was compiled
 for. Two processes saving different signatures of one kernel at once can both
-claim the same data file and leave the index pointing at the other's code, so
-the workers take one lock around each save (``_locked_saves``).
+claim the same data file and leave the index pointing at the other's code;
+and a save over a stale index publishes the index before it replaces the data
+file, so a load in between reads an obsolete kernel. The workers take one lock
+around each save and each load (``_locked_cache``).
 
 One worker, or an interpreter that cannot start workers, runs the stages here
 alone, as ``warmup`` always did.
@@ -168,22 +170,27 @@ def _file_lock(path: str) -> Iterator[None]:
                 fcntl.flock(file.fileno(), fcntl.LOCK_UN)
 
 
-def _locked_saves(lock_path: str) -> None:
-    """Make this process's Numba cache saves take the lock at ``lock_path``."""
+def _locked_cache(lock_path: str) -> None:
+    """Make this process's Numba cache saves and loads take the lock at ``lock_path``."""
     from numba.core import caching
 
-    save = caching.IndexDataCacheFile.save
+    save, load = caching.IndexDataCacheFile.save, caching.IndexDataCacheFile.load
 
     def locked_save(self, key, data):
         with _file_lock(lock_path):
             return save(self, key, data)
 
+    def locked_load(self, key):
+        with _file_lock(lock_path):
+            return load(self, key)
+
     caching.IndexDataCacheFile.save = locked_save
+    caching.IndexDataCacheFile.load = locked_load
 
 
 def _run_unit(lock_path: str, unit: str) -> None:
-    """A worker's whole job: run one unit's stages with its cache saves locked."""
-    _locked_saves(lock_path)
+    """A worker's whole job: run one unit's stages with its cache locked."""
+    _locked_cache(lock_path)
     _run(_units()[unit])
 
 
@@ -202,6 +209,7 @@ def _can_start_workers() -> bool:
         and bool(sys.executable)
         and not getattr(sys, "frozen", False)
         and callable(getattr(caching.IndexDataCacheFile, "save", None))
+        and callable(getattr(caching.IndexDataCacheFile, "load", None))
     )
 
 
@@ -214,16 +222,21 @@ def _compile_in_workers(units: list[str], workers: int) -> None:
         env["NUMBA_CACHE_DIR"] = str(numba.config.CACHE_DIR)
     order = sorted(units, key=lambda unit: -_UNIT_SECONDS.get(unit, 0.0))
     stop, guard, live = threading.Event(), threading.Lock(), set()
-    with tempfile.TemporaryDirectory(prefix="superglm-warmup-") as scratch:
+    try:
+        scratch_directory = tempfile.TemporaryDirectory(prefix="superglm-warmup-")
+    except OSError:  # no place for the lock: this process compiles every unit instead
+        return
+    with scratch_directory as scratch:
         lock = os.path.join(scratch, "cache.lock")
 
         def start(unit: str) -> None:
             # -P and the parent's sys.path: the worker imports this superglm,
             # never a module that happens to sit in the working directory. The
-            # code goes in on stdin, which has no command line's length limit.
+            # code goes in on stdin, which has no command line's length limit,
+            # as ASCII (``ascii``), which every locale's encoding can carry.
             code = (
-                f"import sys; sys.path[:] = {sys.path!r}\n"
-                f"from superglm._warmup import _run_unit; _run_unit({lock!r}, {unit!r})\n"
+                f"import sys; sys.path[:] = {ascii(sys.path)}\n"
+                f"from superglm._warmup import _run_unit; _run_unit({ascii(lock)}, {ascii(unit)})\n"
             )
             with guard:
                 if stop.is_set():

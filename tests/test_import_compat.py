@@ -557,10 +557,10 @@ import sys
 import numpy as np
 from numba.core.dispatcher import Dispatcher
 import superglm
-from superglm._warmup import _locked_saves
+from superglm._warmup import _locked_cache
 
 chosen, lock = sys.argv[1:]
-_locked_saves(lock)
+_locked_cache(lock)
 superglm._warmup_scalar_observations(chosen)
 modules = [importlib.import_module("superglm.distributional.kernels." + name)
            for name in ("_incomplete_beta", "_negative_binomial_windows", "_incomplete_gamma",
