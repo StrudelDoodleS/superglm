@@ -154,11 +154,11 @@ Every record carries an `outputs` block:
 - decisions: the convergence flag and termination reason, and the dispatched backend.
   The warning categories come from the record's captured warnings.
 
-The block is about 44 KB of JSON for a `SuperGLM` book case (2,000 predictions and 67
-coefficient standard errors on `std_mains`) and 166 KB for a two-parameter `SuperLSS` case (a prediction and
-a standard error per parameter and row). On disk, one float per line, the `std_mains`
-record is 58 KB and the `lss_gamma` record 206 KB; compressed in benchboard's history they
-are 23 KB and 76 KB.
+The block is about 46 KB of JSON for a `SuperGLM` book case (2,000 predictions, 74
+rendered and 67 quasi-likelihood standard errors on `std_mains`) and 166 KB for a
+two-parameter `SuperLSS` case (a prediction and a standard error per parameter and row). On
+disk, one float per line, the `std_mains` record is 61 KB and the `lss_gamma` record
+206 KB; compressed in benchboard's history the `lss_gamma` record is 76 KB.
 
 ### Tolerances
 
