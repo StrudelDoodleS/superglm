@@ -25,6 +25,8 @@ def plot_term_comparison_plotly(
         ) from None
 
     terms = payload["terms"]
+    axis = payload.get("response_axis", {"title": "Relativity", "no_effect": 1.0})
+    baseline = axis["no_effect"]
     style_cfg = _resolve_plotly_style(style)
     fig = make_subplots(
         rows=2,
@@ -63,7 +65,7 @@ def plot_term_comparison_plotly(
                         mode="lines",
                         name=label,
                         line=dict(color=colors[series_idx % len(colors)], width=2.0),
-                        hovertemplate=f"{label}<br>{term['name']}: %{{x:.3f}}<br>Relativity: %{{y:.4f}}<extra></extra>",
+                        hovertemplate=f"{label}<br>{term['name']}: %{{x:.3f}}<br>{axis['title']}: %{{y:.4f}}<extra></extra>",
                         visible=(term_idx == 0),
                     ),
                     row=1,
@@ -127,7 +129,7 @@ def plot_term_comparison_plotly(
                         name=label,
                         marker=dict(color=colors[series_idx % len(colors)], size=8),
                         line=dict(color=colors[series_idx % len(colors)], width=1.5),
-                        hovertemplate=f"{label}<br>{term['name']}: %{{x}}<br>Relativity: %{{y:.4f}}<extra></extra>",
+                        hovertemplate=f"{label}<br>{term['name']}: %{{x}}<br>{axis['title']}: %{{y:.4f}}<extra></extra>",
                         visible=(term_idx == 0),
                     ),
                     row=1,
@@ -184,7 +186,8 @@ def plot_term_comparison_plotly(
                 link_ys.append(support["density"])
 
     fig.add_hline(
-        y=1.0,
+        y=0.0 if baseline is None else baseline,
+        visible=baseline is not None,
         line_dash="dash",
         line_color="rgba(100,100,100,0.6)",
         line_width=1.0,
@@ -199,7 +202,7 @@ def plot_term_comparison_plotly(
         margin=dict(l=70, r=40, t=150, b=100),
         legend_y=-0.15,
     )
-    fig.update_yaxes(title_text="Relativity", row=1, col=1)
+    fig.update_yaxes(title_text=axis["title"], row=1, col=1)
     fig.update_yaxes(title_text="Support", row=2, col=1)
 
     base_title = title or "Term comparison"
@@ -221,15 +224,17 @@ def plot_term_comparison_plotly(
     response_restyle = {"y": response_ys}
     link_restyle = {"y": link_ys}
     response_relayout = {
-        "yaxis.title.text": "Relativity",
-        "shapes[0].y0": 1.0,
-        "shapes[0].y1": 1.0,
+        "yaxis.title.text": axis["title"],
+        "shapes[0].y0": baseline,
+        "shapes[0].y1": baseline,
+        "shapes[0].visible": baseline is not None,
     }
     link_relayout = {
         "yaxis.title.text": "η (link scale)",
         "yaxis.autorange": True,
         "shapes[0].y0": 0.0,
         "shapes[0].y1": 0.0,
+        "shapes[0].visible": True,
     }
 
     dropdown_buttons = []
@@ -242,9 +247,10 @@ def plot_term_comparison_plotly(
                 args=[
                     {"visible": visible, "y": response_ys},
                     {
-                        "yaxis.title.text": "Relativity",
-                        "shapes[0].y0": 1.0,
-                        "shapes[0].y1": 1.0,
+                        "yaxis.title.text": axis["title"],
+                        "shapes[0].y0": baseline,
+                        "shapes[0].y1": baseline,
+                        "shapes[0].visible": baseline is not None,
                         "updatemenus[0].active": 0,
                     },
                 ],

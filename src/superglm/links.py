@@ -729,7 +729,7 @@ def _is_shifted_log_link(link: Any) -> bool:
     """
     try:
         derivative = np.asarray(link.deriv_inverse(_LOG_LINK_PROBE), dtype=np.float64)
-    except (AttributeError, TypeError, ValueError, FloatingPointError):
+    except (AttributeError, TypeError, ValueError, ArithmeticError):
         return False
     if derivative.shape != _LOG_LINK_PROBE.shape:
         return False

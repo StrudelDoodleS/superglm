@@ -401,3 +401,26 @@ def test_an_additive_edit_of_the_reference_level_in_tiny_units_moves_only_that_l
     change = session.to_model().predict(rows) - model.predict(rows)
     np.testing.assert_allclose(change[0], 5e-16, rtol=1e-6)
     assert abs(change[1]) <= 1e-6 * 5e-16
+
+
+class ScalarReciprocalLink:
+    """A valid reciprocal link written with Python division, which raises at eta = 0."""
+
+    def link(self, mu):
+        return np.array([1.0 / v for v in np.asarray(mu).tolist()])
+
+    def inverse(self, eta):
+        return np.array([1.0 / v for v in np.asarray(eta).tolist()])
+
+    def deriv(self, mu):
+        return np.array([-1.0 / v**2 for v in np.asarray(mu).tolist()])
+
+    def deriv_inverse(self, eta):
+        return np.array([-1.0 / v**2 for v in np.asarray(eta).tolist()])
+
+
+def test_a_link_that_raises_at_the_probe_is_drawn_as_added_amounts():
+    """Recognising a link probes it across eta = 0; a link that raises there is no log link."""
+    transform = transform_for_link(ScalarReciprocalLink())
+    assert transform.kind == "additive"
+    assert link_name(ScalarReciprocalLink()) == "scalar_reciprocal"
