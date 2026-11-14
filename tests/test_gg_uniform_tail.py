@@ -389,6 +389,23 @@ def test_the_stored_oracle_answers_are_current():
     STORED_REFERENCE.verify()
 
 
+def test_an_infinite_reference_fails_the_comparison_instead_of_widening_its_bound(monkeypatch):
+    """An infinite reference partial makes its block's scale, and so its bound, infinite."""
+    w, q = 8576.766730882224, 0.0001
+    lower, upper = STORED_REFERENCE(w, q)
+    assert row_failures(w, q, lower, upper) == []
+    corrupted = {**lower, (ORDER, 0): mp.inf}
+    live = engine_partials
+
+    def wrong_in_the_corrupted_block(w, q, upper, order=ORDER):
+        out = live(w, q, upper, order)
+        out[BLOCKS[ORDER]] += 0.0 if upper else 1e100
+        return out
+
+    monkeypatch.setattr(f"{__name__}.engine_partials", wrong_in_the_corrupted_block)
+    assert row_failures(w, q, corrupted, upper)
+
+
 def plain_partials(jet):
     return np.array([float(jet[(i, j)] * math.factorial(i) * math.factorial(j)) for i, j in KEYS])
 
@@ -526,6 +543,12 @@ def row_failures(w, q, lower_jet, upper_jet):
         actual = engine_partials(w, q, upper)
         widen = 1.0 if upper == small_is_upper else 1.0 + abs(log_small)
         for order, block in enumerate(BLOCKS):
+            # An infinite reference would make the bound below infinite and pass anything.
+            if not np.all(np.isfinite(expected[block])):
+                failures.append(
+                    f"w={w!r} q={q!r} upper={upper} order {order}: reference not finite"
+                )
+                continue
             scale = float(np.max(np.abs(expected[block])))
             error = float(np.max(np.abs(actual[block] - expected[block])))
             truncation = 10 * float(np.max(omitted[block]))

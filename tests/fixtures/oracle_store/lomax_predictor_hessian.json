@@ -1,7 +1,7 @@
 {
 "oracle": "tests.test_lomax_lss_kernel._predictor_hessian_reference",
 "refresh": "SUPERGLM_REFRESH_ORACLES=1 uv run --with mpmath pytest tests/test_lomax_lss_kernel.py -n 8",
-"fingerprint": "6eb3ae3ca485c5d55dd988d560f1e3ebf8c4a5763fc5524db8fede6f52bc88b5",
+"fingerprint": "4612a28ea3d63aecdc67d44df2808340bc424657d61b8261f42850437963e32d",
 "entries": {
 "{\"t\":[{\"t\":[{\"f\":\"0x1.0000000000000p+0\"},{\"f\":\"0x0.0p+0\"},{\"f\":\"0x0.0p+0\"}]},{\"t\":[]}]}": [{"a":"float64","s":[3],"v":[{"f":"-0x1.0000000000000p-1"},{"f":"0x1.0000000000000p-1"},{"f":"-0x1.62e42fefa39efp-1"}]},0.002],
 "{\"t\":[{\"t\":[{\"f\":\"0x1.00e1e9796324ep-15\"},{\"f\":\"-0x1.ba18a998fffa0p+3\"},{\"f\":\"0x1.62e42fefa39efp-1\"}]},{\"t\":[]}]}": [{"a":"float64","s":[3],"v":[{"f":"-0x1.784aed00d03bap-4"},{"f":"0x1.efcf23b15fc58p+0"},{"f":"-0x1.ba18a998fff9ep+2"}]},0.004],
