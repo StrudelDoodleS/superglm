@@ -7,6 +7,7 @@ tests stand in for them where a real compile would take a minute.
 from __future__ import annotations
 
 import ast
+import errno
 import importlib
 import pickle
 import sys
@@ -115,6 +116,30 @@ def test_a_load_from_a_cache_directory_not_made_yet_proceeds_unlocked(tmp_path):
     """No directory, no lock file: the load misses, as Numba's own does, rather than raise."""
     with _warmup._locked_cache():
         assert _cache_file(tmp_path / "not made yet", "stamp").load("key") is None
+
+
+def test_a_cache_directory_that_cannot_lock_is_neither_written_nor_read(tmp_path, monkeypatch):
+    """Two workers saving unlocked can leave an index naming the other's kernel, so none may."""
+    entry = _cache_file(tmp_path, "stamp")
+    entry.save("key", "kernel")
+
+    def unsupported(*args):
+        raise OSError(errno.EINVAL, "locking not supported")
+
+    if sys.platform == "win32":
+        import msvcrt
+
+        monkeypatch.setattr(msvcrt, "locking", unsupported)
+    else:
+        import fcntl
+
+        monkeypatch.setattr(fcntl, "flock", unsupported)
+    with _warmup._locked_cache():
+        entry.save("other key", "other kernel")
+        assert entry.load("key") is None
+    monkeypatch.undo()
+    assert entry.load("key") == "kernel"
+    assert entry.load("other key") is None
 
 
 def _fake_stages(monkeypatch):

@@ -152,18 +152,19 @@ _LOCK_NAME = "superglm-cache.lock"
 
 
 @contextmanager
-def _file_lock(path: str | None) -> Iterator[None]:
+def _file_lock(path: str | None) -> Iterator[bool]:
     """Hold an exclusive lock on the file at ``path`` (created if missing) across processes.
 
-    Without the file (no directory yet, so nothing to load) or a file system
-    that cannot lock, the call goes ahead unlocked, as Numba's own does.
+    Yields whether the lock is held. Without the file (no directory yet) or on
+    a file system that cannot lock, it is not, and the caller leaves the cache
+    alone rather than read or write it unlocked.
     """
     try:
         file = open(path, "a+b") if path is not None else None
     except OSError:
         file = None
     if file is None:
-        yield
+        yield False
         return
     with file:
         if sys.platform == "win32":
@@ -176,10 +177,10 @@ def _file_lock(path: str | None) -> Iterator[None]:
                     break
                 except OSError as error:  # LK_LOCK gives up after ten one-second tries
                     if error.errno not in (errno.EDEADLOCK, errno.EACCES):
-                        yield
+                        yield False
                         return
             try:
-                yield
+                yield True
             finally:
                 file.seek(0)
                 msvcrt.locking(file.fileno(), msvcrt.LK_UNLCK, 1)
@@ -189,10 +190,10 @@ def _file_lock(path: str | None) -> Iterator[None]:
             try:
                 fcntl.flock(file.fileno(), fcntl.LOCK_EX)
             except OSError:
-                yield
+                yield False
                 return
             try:
-                yield
+                yield True
             finally:
                 fcntl.flock(file.fileno(), fcntl.LOCK_UN)
 
@@ -253,7 +254,9 @@ def _locked_cache() -> Iterator[None]:
     swapped, the data file first and then the index that names it, and a new
     entry's data file is one that no index on disk names, a stale one
     included. A process stopped between the two writes leaves every index as
-    it was, naming only the code it was written with.
+    it was, naming only the code it was written with. Where the lock cannot
+    be taken, a save is skipped and a load misses, so the kernel compiles
+    again in this process rather than through an unlocked cache.
     """
     from numba.core import caching
 
@@ -261,7 +264,9 @@ def _locked_cache() -> Iterator[None]:
     save, load = cache_file.save, cache_file.load
 
     def locked_save(self, key, data):
-        with _file_lock(_lock_path(self)):
+        with _file_lock(_lock_path(self)) as held:
+            if not held:  # unsaved: this process compiles the kernel again instead
+                return
             overloads = self._load_index()
             name = overloads.get(key) or _free_data_name(self, overloads)
             self._save_data(name, data)
@@ -270,8 +275,8 @@ def _locked_cache() -> Iterator[None]:
                 self._save_index(overloads)
 
     def locked_load(self, key):
-        with _file_lock(_lock_path(self)):
-            return load(self, key)
+        with _file_lock(_lock_path(self)) as held:
+            return load(self, key) if held else None
 
     cache_file.save, cache_file.load = locked_save, locked_load
     try:
