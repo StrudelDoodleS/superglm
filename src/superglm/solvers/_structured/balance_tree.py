@@ -81,6 +81,7 @@ from numpy.typing import NDArray
 
 from superglm._blas_threads import narrow_kernel_blas_threads
 from superglm._roundoff import EPS as _EPS
+from superglm._roundoff import PENALTY_RANK_CUT as _PENALTY_RANK_CUT
 from superglm._roundoff import UNIT_ROUNDOFF as _UNIT
 from superglm._roundoff import gamma as _gamma
 from superglm.solvers._structured.border import (
@@ -1498,9 +1499,9 @@ class SumToZeroTreeFactor:
         data nulls ``beta_t += N_P f (K - 1) / K``, ``beta_l -= N_P f / K`` elsewhere and border
         ``+g(x)' f / K``, for every ``f`` with ``g(x)' f = 0`` on its ``x`` values. Only the border
         penalty curves them, so they are deflated structurally, not truncated as data (which would
-        make ``log|H|`` jump with lambda). Only combinations the penalty certifies above the
-        quadratic form's rounding are returned, a scale-invariant test (Wood, Pya & Safken 2016,
-        §3.1.2); the border part must reproduce the null-space functions to ``sqrt(eps)``.
+        make ``log|H|`` jump with lambda). A combination is returned when its curvature clears
+        the quadratic form's rounding and the border penalty's rank cut (Wood, Pya & Safken
+        2016, §3.1.2); the border part must reproduce the null-space functions to ``sqrt(eps)``.
         ``None`` without thin levels or penalty.
         """
         counts = getattr(system, "thin_counts", None)
@@ -1613,7 +1614,14 @@ class SumToZeroTreeFactor:
         # the penalty as well) is left with rounding alone, below this
         spread = np.abs(border) @ np.abs(vectors)
         magnitude = np.einsum("it,ij,jt->t", spread, np.abs(S_b), spread)
-        certified = values > (q + 2 + len(values)) * _EPS * magnitude
+        # the penalty rank rule on each combination: a formed penalty's null
+        # direction keeps entries of rounding size, which the test above alone
+        # takes for curvature where that direction lies on a coordinate axis
+        lengths = np.sum((border @ vectors) ** 2, axis=0)
+        largest = float(np.linalg.eigvalsh(0.5 * (S_b + S_b.T))[-1])
+        certified = (values > (q + 2 + len(values)) * _EPS * magnitude) & (
+            values > _PENALTY_RANK_CUT * largest * lengths
+        )
         if not np.any(certified):
             return None
         return aliases @ vectors[:, certified]

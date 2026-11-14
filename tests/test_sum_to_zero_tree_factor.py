@@ -516,7 +516,7 @@ def test_a_signed_level_shift_is_the_level_space_penalty() -> None:
     assert shifted_factor.logdet() == pytest.approx(np.linalg.slogdet(expected)[1], abs=tolerance)
 
 
-def _thin_model(direct_solve: str, *, discrete: bool = False):
+def _thin_model(direct_solve: str, *, discrete: bool = False, spline: dict | None = None):
     rng = np.random.default_rng(3)
     n, levels = 3000, 25
     g = rng.integers(0, levels, n)
@@ -528,7 +528,10 @@ def _thin_model(direct_solve: str, *, discrete: bool = False):
     y = 0.3 * frame["x1"].to_numpy() + 0.3 * np.sin(2 * np.pi * x) + rng.normal(0, 0.5, n)
     model = SuperGLM(
         family="gaussian",
-        features={"x1": Numeric(), "x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))},
+        features={
+            "x1": Numeric(),
+            "x": Spline(n_knots=6, **(spline or {"lambda_policy": LambdaPolicy.fixed(1.0)})),
+        },
         interactions=[
             FactorSmooth("x", group="g", basis="sz", k=6, lambda_policy=LambdaPolicy.fixed(2.0))
         ],
@@ -577,6 +580,33 @@ def test_thin_levels_are_named_and_kept(discrete: bool) -> None:
 
     tree_objective, gram_objective = penalized(model), penalized(gram)
     assert tree_objective <= gram_objective + len(frame) * EPS * abs(gram_objective)
+
+
+def test_a_thin_alias_on_the_main_effect_s_penalty_null_is_not_deflated() -> None:
+    """A thin level's alias along the main effect's penalty null stays an exact null of the tree.
+
+    The raw global Spline at lambda 1e11 is turned at the lambda update so
+    its penalty null lies near a coordinate axis, where the formed penalty
+    keeps an entry of rounding size (1.6e-12 of its largest).  That entry
+    is under the border penalty's rank cut (Wood, Pya & Safken 2016,
+    sec. 3.1.2), so it is no curvature to deflate an alias on: the aliases
+    stay with the pivoted factorization and the rows are fitted as gram
+    fits them, within n eps of their scale.  Mutation: without the rank
+    cut in ``_penalized_aliases`` the structured fit stops unconverged
+    with coefficients near 1e13.
+    """
+    spline = {"penalty": "none", "lambda_policy": LambdaPolicy.fixed(1e11)}
+    model, frame, _ = _thin_model("auto", spline=spline)
+    gram, _, _ = _thin_model("gram", spline=spline)
+    assert model.result.direct_backend == "structured"
+    assert bool(model.result.converged)
+    expected = gram.predict(frame)
+    np.testing.assert_allclose(
+        model.predict(frame),
+        expected,
+        rtol=0.0,
+        atol=len(frame) * EPS * float(np.max(np.abs(expected))),
+    )
 
 
 def _one_row(count):
