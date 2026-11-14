@@ -12,10 +12,12 @@ call from an already loaded overload whose types it can convert to.
 Numba's cache index is a read-modify-write of one file per function, and the
 data file an entry points to does not record the signature it was compiled
 for. Two processes saving different signatures of one kernel at once can both
-claim the same data file and leave the index pointing at the other's code;
-and a save over a stale index publishes the index before it replaces the data
-file, so a load in between reads an obsolete kernel. The workers take one lock
-around each save and each load (``_locked_cache``).
+claim the same data file and leave the index pointing at the other's code.
+Numba also publishes the index before it replaces the data file, so a load in
+between, or a worker stopped in between, leaves an entry that names an obsolete
+kernel. While workers run, every save and load here and in the workers takes
+one lock, and a save writes its data file before the index (``_locked_cache``).
+One ``warmup`` runs at a time in a process.
 
 One worker, or an interpreter that cannot start workers, runs the stages here
 alone, as ``warmup`` always did.
@@ -24,6 +26,7 @@ alone, as ``warmup`` always did.
 from __future__ import annotations
 
 import importlib
+import itertools
 import os
 import subprocess
 import sys
@@ -170,28 +173,55 @@ def _file_lock(path: str) -> Iterator[None]:
                 fcntl.flock(file.fileno(), fcntl.LOCK_UN)
 
 
-def _locked_cache(lock_path: str) -> None:
-    """Make this process's Numba cache saves and loads take the lock at ``lock_path``."""
+# The private ``IndexDataCacheFile`` methods ``_locked_cache`` composes a save from.
+_CACHE_FILE_METHODS = ("load", "_load_index", "_save_index", "_save_data", "_data_name")
+
+
+@contextmanager
+def _locked_cache(lock_path: str) -> Iterator[None]:
+    """Inside the block, this process's Numba cache saves and loads take the lock at ``lock_path``.
+
+    A save is Numba's ``IndexDataCacheFile.save`` with its last two writes
+    swapped: the data file first, then the index that names it. A process
+    stopped between the two leaves the index as it was, which does not name
+    the new file (a stale index loads as empty).
+    """
     from numba.core import caching
 
-    save, load = caching.IndexDataCacheFile.save, caching.IndexDataCacheFile.load
+    cache_file = caching.IndexDataCacheFile
+    save, load = cache_file.save, cache_file.load
 
     def locked_save(self, key, data):
         with _file_lock(lock_path):
-            return save(self, key, data)
+            overloads = self._load_index()
+            name = overloads.get(key)
+            if name is None:
+                taken = set(overloads.values())
+                name = next(
+                    self._data_name(i)
+                    for i in itertools.count(1)
+                    if self._data_name(i) not in taken
+                )
+            self._save_data(name, data)
+            if overloads.get(key) != name:
+                overloads[key] = name
+                self._save_index(overloads)
 
     def locked_load(self, key):
         with _file_lock(lock_path):
             return load(self, key)
 
-    caching.IndexDataCacheFile.save = locked_save
-    caching.IndexDataCacheFile.load = locked_load
+    cache_file.save, cache_file.load = locked_save, locked_load
+    try:
+        yield
+    finally:
+        cache_file.save, cache_file.load = save, load
 
 
 def _run_unit(lock_path: str, unit: str) -> None:
     """A worker's whole job: run one unit's stages with its cache locked."""
-    _locked_cache(lock_path)
-    _run(_units()[unit])
+    with _locked_cache(lock_path):
+        _run(_units()[unit])
 
 
 def _worker_count(units: int) -> int:
@@ -208,8 +238,10 @@ def _can_start_workers() -> bool:
         not numba.config.DISABLE_JIT
         and bool(sys.executable)
         and not getattr(sys, "frozen", False)
-        and callable(getattr(caching.IndexDataCacheFile, "save", None))
-        and callable(getattr(caching.IndexDataCacheFile, "load", None))
+        and all(
+            callable(getattr(caching.IndexDataCacheFile, name, None))
+            for name in _CACHE_FILE_METHODS
+        )
     )
 
 
@@ -261,7 +293,9 @@ def _compile_in_workers(units: list[str], workers: int) -> None:
 
         pool = ThreadPoolExecutor(workers)
         try:
-            list(pool.map(start, order))
+            # This process's own saves, a fit on another thread say, take the lock too.
+            with _locked_cache(lock):
+                list(pool.map(start, order))
         except BaseException:  # an interrupt: start no more workers and stop those running
             stop.set()
             with guard:
@@ -272,13 +306,17 @@ def _compile_in_workers(units: list[str], workers: int) -> None:
             pool.shutdown(wait=True)
 
 
+_one_warmup = threading.Lock()
+
+
 def warmup() -> None:
     """Compile every stage's kernels, in worker processes where it can, then load them here."""
     from superglm._numba_compile import forget_compiles
 
-    units = _units()
-    workers = _worker_count(len(units))
-    if workers > 1 and _can_start_workers():
-        _compile_in_workers(list(units), workers)
-    _run((module, function, args) for _, module, function, args in _STAGES)
-    forget_compiles()
+    with _one_warmup:
+        units = _units()
+        workers = _worker_count(len(units))
+        if workers > 1 and _can_start_workers():
+            _compile_in_workers(list(units), workers)
+        _run((module, function, args) for _, module, function, args in _STAGES)
+        forget_compiles()

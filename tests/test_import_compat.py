@@ -560,8 +560,8 @@ import superglm
 from superglm._warmup import _locked_cache
 
 chosen, lock = sys.argv[1:]
-_locked_cache(lock)
-superglm._warmup_scalar_observations(chosen)
+with _locked_cache(lock):
+    superglm._warmup_scalar_observations(chosen)
 modules = [importlib.import_module("superglm.distributional.kernels." + name)
            for name in ("_incomplete_beta", "_negative_binomial_windows", "_incomplete_gamma",
                         "_gamma_windows", "_tweedie_windows")]

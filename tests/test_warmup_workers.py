@@ -44,28 +44,60 @@ def test_every_stage_resolves_and_every_unit_has_a_start_order():
     assert set(_warmup._UNIT_SECONDS) == set(_warmup._units())
 
 
-def test_a_worker_saves_to_and_loads_from_the_numba_cache_under_the_lock(tmp_path, monkeypatch):
-    """Two workers saving different signatures of one kernel must not interleave,
-    and a load must not fall between a save's index and its data file."""
+def _cache_file(path, stamp):
     from numba.core import caching
 
-    lock = str(tmp_path / "cache.lock")
-    seen = []
-    monkeypatch.setattr(
-        caching.IndexDataCacheFile,
-        "save",
-        lambda self, key, data: seen.append(("save", key, data, _locked_elsewhere(lock))),
-    )
-    monkeypatch.setattr(
-        caching.IndexDataCacheFile,
-        "load",
-        lambda self, key: seen.append(("load", key, _locked_elsewhere(lock))) or "payload",
-    )
-    _warmup._locked_cache(lock)
-    caching.IndexDataCacheFile.save(None, "key", "data")
-    assert caching.IndexDataCacheFile.load(None, "key") == "payload"
-    assert seen == [("save", "key", "data", True), ("load", "key", True)]
+    return caching.IndexDataCacheFile(str(path), "kernel-1.py313", stamp)
+
+
+def test_a_worker_saves_to_and_loads_from_the_numba_cache_under_the_lock(tmp_path, monkeypatch):
+    """Two workers saving different signatures of one kernel must not interleave."""
+    from numba.core import caching
+
+    lock, seen = str(tmp_path / "cache.lock"), []
+    cache_file = caching.IndexDataCacheFile
+    for name in ("_save_data", "_save_index", "load"):
+        method = getattr(cache_file, name)
+
+        def recorded(self, *args, method=method, name=name):
+            seen.append((name, _locked_elsewhere(lock)))
+            return method(self, *args)
+
+        monkeypatch.setattr(cache_file, name, recorded)
+    original = cache_file.save, cache_file.load
+    entry = _cache_file(tmp_path, "stamp")
+    with _warmup._locked_cache(lock):
+        entry.save("key", "kernel")
+        assert entry.load("key") == "kernel"
+    assert seen == [("_save_data", True), ("_save_index", True), ("load", True)]
+    assert (cache_file.save, cache_file.load) == original
     assert not _locked_elsewhere(lock)
+
+
+def test_a_save_stopped_between_its_writes_leaves_no_entry_naming_an_old_kernel(
+    tmp_path, monkeypatch
+):
+    """A worker killed mid-save must not leave a fresh index naming a stale data file."""
+    from numba.core import caching
+
+    _cache_file(tmp_path, "old source").save("old signature", "old kernel")
+    writes = []
+    for name in ("_save_data", "_save_index"):
+        method = getattr(caching.IndexDataCacheFile, name)
+
+        def stopped_on_second(self, *args, method=method):
+            writes.append(args)
+            if len(writes) == 2:
+                raise KeyboardInterrupt  # the worker is stopped after its first write
+            return method(self, *args)
+
+        monkeypatch.setattr(caching.IndexDataCacheFile, name, stopped_on_second)
+    fresh = _cache_file(tmp_path, "new source")
+    with _warmup._locked_cache(str(tmp_path / "cache.lock")):
+        with pytest.raises(KeyboardInterrupt):
+            fresh.save("new signature", "new kernel")
+    monkeypatch.undo()
+    assert _cache_file(tmp_path, "new source").load("new signature") is None
 
 
 def _fake_stages(monkeypatch):
@@ -130,6 +162,57 @@ def test_more_workers_start_each_unit_once_then_run_every_stage_here(monkeypatch
         )
         assert worker.env["NUMBA_CACHE_DIR"] == str(tmp_path)
     assert calls == ["a", "b", "c"]
+
+
+def test_this_process_saves_under_the_workers_lock_while_they_run(monkeypatch, tmp_path):
+    """A fit on another thread saves while the workers do: it must take their lock."""
+    from numba.core import caching
+
+    _fake_stages(monkeypatch)
+    original, held = caching.IndexDataCacheFile.save, []
+
+    class Checking(_Started):
+        def communicate(self, code):
+            lock = ast.literal_eval(code.rsplit("_run_unit(", 1)[1].split(",", 1)[0])
+            save_data = caching.IndexDataCacheFile._save_data
+
+            def recorded(entry, name, data):
+                held.append(_locked_elsewhere(lock))
+                return save_data(entry, name, data)
+
+            with pytest.MonkeyPatch.context() as scoped:
+                scoped.setattr(caching.IndexDataCacheFile, "_save_data", recorded)
+                _cache_file(tmp_path, "stamp").save("key", "kernel")
+
+    _fake_workers(monkeypatch, "2", [])
+    monkeypatch.setattr(_warmup.subprocess, "Popen", lambda *a, **k: Checking([], *a, **k))
+    _warmup._compile_in_workers(["first"], 2)
+    assert held == [True]
+    assert caching.IndexDataCacheFile.save is original
+
+
+def test_one_warmup_runs_at_a_time(monkeypatch):
+    calls = _fake_stages(monkeypatch)
+    entered, gate = threading.Event(), threading.Event()
+
+    def stage(name):
+        calls.append(name)
+        if len(calls) == 1:
+            entered.set()
+            gate.wait(10)
+
+    monkeypatch.setattr(sys.modules["_superglm_fake_stages"], "stage", stage)
+    monkeypatch.setenv("SUPERGLM_N_JOBS", "1")
+    first, second = (threading.Thread(target=_warmup.warmup) for _ in range(2))
+    first.start()
+    assert entered.wait(10)
+    second.start()
+    second.join(0.2)  # the second waits for the first to finish
+    assert calls == ["a"]
+    gate.set()
+    first.join(10)
+    second.join(10)
+    assert calls == ["a", "b", "c", "a", "b", "c"]
 
 
 def test_a_worker_that_cannot_start_leaves_its_unit_to_this_process(monkeypatch):
