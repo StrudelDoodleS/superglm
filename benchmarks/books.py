@@ -2111,7 +2111,7 @@ def check(records: list[dict], base_sha: str | None = None, lookup=None):
                 reason += f"; store one: books.py baseline {base[:12]} --cases {rec['case']}"
                 reason += " --counts-only"
             refusals.append(f"{rec['case']} [{rec['threads']}]: {reason}")
-        elif "outputs" not in rec:
+        elif "outputs" not in rec and rec["status"] == "ok":
             refusals.append(f"{rec['case']} [{rec['threads']}]: the branch record has no outputs")
         elif missing := missing_outputs(match, rec):
             refusals.append(

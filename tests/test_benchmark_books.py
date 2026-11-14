@@ -543,6 +543,15 @@ def test_check_refuses_a_baseline_that_lacks_an_output_the_branch_records(run):
     assert refusals == [] and ": summary refusal decision differs" in table
 
 
+def test_a_branch_fit_that_raised_fails_the_check_rather_than_being_refused(run):
+    def raised(r):
+        r["status"] = "raised AttributeError: x"
+        r.pop("outputs")
+
+    table, failures, refusals = _check(run[0], raised)
+    assert refusals == [] and len(failures) == 1 and ": status decision differs" in table
+
+
 def _fake_children(monkeypatch, tmp_path, record, codes):
     """``check --set``'s children: each case writes a record from ``record`` and exits 0, or
     exits its code in ``codes`` without writing."""
