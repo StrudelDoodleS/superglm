@@ -16,7 +16,9 @@ claim the same data file and leave the index pointing at the other's code.
 Numba also publishes the index before it replaces the data file, so a load in
 between, or a worker stopped in between, leaves an entry that names an obsolete
 kernel. While workers run, every save and load here and in the workers takes
-one lock, and a save writes its data file before the index (``_locked_cache``).
+the lock of the cache directory it touches, a file there that any other
+warmup writing the same cache takes as well, and a save writes its data file
+before the index (``_locked_cache``).
 One ``warmup`` runs at a time in a process.
 
 One worker, or an interpreter that cannot start workers, runs the stages here
@@ -25,13 +27,13 @@ alone, as ``warmup`` always did.
 
 from __future__ import annotations
 
+import errno
 import importlib
 import itertools
 import os
 import pickle
 import subprocess
 import sys
-import tempfile
 import threading
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -145,16 +147,22 @@ def _run(stages) -> None:
         getattr(importlib.import_module(module), function)(*args)
 
 
+# The lock every warmup's workers and their parent take on one cache directory.
+_LOCK_NAME = "superglm-cache.lock"
+
+
 @contextmanager
-def _file_lock(path: str) -> Iterator[None]:
+def _file_lock(path: str | None) -> Iterator[None]:
     """Hold an exclusive lock on the file at ``path`` (created if missing) across processes.
 
-    Its directory goes only once every worker has exited, so a call that finds
-    it gone (a fit's thread that entered a save just before) needs no lock.
+    Without the file (no directory yet, so nothing to load) or a file system
+    that cannot lock, the call goes ahead unlocked, as Numba's own does.
     """
     try:
-        file = open(path, "a+b")
-    except FileNotFoundError:
+        file = open(path, "a+b") if path is not None else None
+    except OSError:
+        file = None
+    if file is None:
         yield
         return
     with file:
@@ -166,8 +174,10 @@ def _file_lock(path: str) -> Iterator[None]:
                 try:
                     msvcrt.locking(file.fileno(), msvcrt.LK_LOCK, 1)
                     break
-                except OSError:  # LK_LOCK gives up after ten one-second tries
-                    continue
+                except OSError as error:  # LK_LOCK gives up after ten one-second tries
+                    if error.errno not in (errno.EDEADLOCK, errno.EACCES):
+                        yield
+                        return
             try:
                 yield
             finally:
@@ -176,11 +186,21 @@ def _file_lock(path: str) -> Iterator[None]:
         else:
             import fcntl
 
-            fcntl.flock(file.fileno(), fcntl.LOCK_EX)
+            try:
+                fcntl.flock(file.fileno(), fcntl.LOCK_EX)
+            except OSError:
+                yield
+                return
             try:
                 yield
             finally:
                 fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+
+
+def _lock_path(cache_file) -> str | None:
+    """The lock of the directory ``cache_file`` lives in, shared by every warmup that writes it."""
+    path = getattr(cache_file, "_index_path", None)
+    return None if path is None else os.path.join(os.path.dirname(path), _LOCK_NAME)
 
 
 # The private ``IndexDataCacheFile`` methods ``_locked_cache`` composes a save from.
@@ -223,8 +243,11 @@ def _free_data_name(cache_file, overloads: dict) -> str:
 
 
 @contextmanager
-def _locked_cache(lock_path: str) -> Iterator[None]:
-    """Inside the block, this process's Numba cache saves and loads take the lock at ``lock_path``.
+def _locked_cache() -> Iterator[None]:
+    """Inside the block, this process's Numba cache saves and loads take their directory's lock.
+
+    The lock is a file in the cache directory, so two warmups writing one
+    cache (cluster nodes sharing ``NUMBA_CACHE_DIR``) exclude each other too.
 
     A save is Numba's ``IndexDataCacheFile.save`` with its last two writes
     swapped, the data file first and then the index that names it, and a new
@@ -238,7 +261,7 @@ def _locked_cache(lock_path: str) -> Iterator[None]:
     save, load = cache_file.save, cache_file.load
 
     def locked_save(self, key, data):
-        with _file_lock(lock_path):
+        with _file_lock(_lock_path(self)):
             overloads = self._load_index()
             name = overloads.get(key) or _free_data_name(self, overloads)
             self._save_data(name, data)
@@ -247,7 +270,7 @@ def _locked_cache(lock_path: str) -> Iterator[None]:
                 self._save_index(overloads)
 
     def locked_load(self, key):
-        with _file_lock(lock_path):
+        with _file_lock(_lock_path(self)):
             return load(self, key)
 
     cache_file.save, cache_file.load = locked_save, locked_load
@@ -257,9 +280,9 @@ def _locked_cache(lock_path: str) -> Iterator[None]:
         cache_file.save, cache_file.load = save, load
 
 
-def _run_unit(lock_path: str, unit: str) -> None:
+def _run_unit(unit: str) -> None:
     """A worker's whole job: run one unit's stages with its cache locked."""
-    with _locked_cache(lock_path):
+    with _locked_cache():
         _run(_units()[unit])
 
 
@@ -293,56 +316,50 @@ def _compile_in_workers(units: list[str], workers: int) -> None:
         env["NUMBA_CACHE_DIR"] = str(numba.config.CACHE_DIR)
     order = sorted(units, key=lambda unit: -_UNIT_SECONDS.get(unit, 0.0))
     stop, guard, live = threading.Event(), threading.Lock(), set()
-    try:
-        scratch_directory = tempfile.TemporaryDirectory(prefix="superglm-warmup-")
-    except OSError:  # no place for the lock: this process compiles every unit instead
-        return
-    with scratch_directory as scratch:
-        lock = os.path.join(scratch, "cache.lock")
 
-        def start(unit: str) -> None:
-            # -P and the parent's sys.path: the worker imports this superglm,
-            # never a module that happens to sit in the working directory. The
-            # code goes in on stdin, which has no command line's length limit,
-            # as ASCII (``ascii``), which every locale's encoding can carry.
-            code = (
-                f"import sys; sys.path[:] = {ascii(sys.path)}\n"
-                f"from superglm._warmup import _run_unit; _run_unit({ascii(lock)}, {ascii(unit)})\n"
-            )
-            with guard:
-                if stop.is_set():
-                    return
-                try:
-                    process = subprocess.Popen(
-                        [sys.executable, "-P", "-"],
-                        env=env,
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        text=True,
-                    )
-                except OSError:  # this process compiles the unit afterwards instead
-                    return
-                live.add(process)
+    def start(unit: str) -> None:
+        # -P and the parent's sys.path: the worker imports this superglm,
+        # never a module that happens to sit in the working directory. The
+        # code goes in on stdin, which has no command line's length limit,
+        # as ASCII (``ascii``), which every locale's encoding can carry.
+        code = (
+            f"import sys; sys.path[:] = {ascii(sys.path)}\n"
+            f"from superglm._warmup import _run_unit; _run_unit({ascii(unit)})\n"
+        )
+        with guard:
+            if stop.is_set():
+                return
             try:
-                process.communicate(code)
-            finally:
-                with guard:
-                    live.discard(process)
-
-        pool = ThreadPoolExecutor(workers)
+                process = subprocess.Popen(
+                    [sys.executable, "-P", "-"],
+                    env=env,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                )
+            except OSError:  # this process compiles the unit afterwards instead
+                return
+            live.add(process)
         try:
-            # This process's own saves, a fit on another thread say, take the lock too.
-            with _locked_cache(lock):
-                list(pool.map(start, order))
-        except BaseException:  # an interrupt: start no more workers and stop those running
-            stop.set()
-            with guard:
-                for process in live:
-                    process.kill()
-            raise
+            process.communicate(code)
         finally:
-            pool.shutdown(wait=True)
+            with guard:
+                live.discard(process)
+
+    pool = ThreadPoolExecutor(workers)
+    try:
+        # This process's own saves, a fit on another thread say, take the lock too.
+        with _locked_cache():
+            list(pool.map(start, order))
+    except BaseException:  # an interrupt: start no more workers and stop those running
+        stop.set()
+        with guard:
+            for process in live:
+                process.kill()
+        raise
+    finally:
+        pool.shutdown(wait=True)
 
 
 _one_warmup = threading.Lock()

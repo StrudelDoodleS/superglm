@@ -559,8 +559,8 @@ from numba.core.dispatcher import Dispatcher
 import superglm
 from superglm._warmup import _locked_cache
 
-chosen, lock = sys.argv[1:]
-with _locked_cache(lock):
+chosen = sys.argv[1]
+with _locked_cache():
     superglm._warmup_scalar_observations(chosen)
 modules = [importlib.import_module("superglm.distributional.kernels." + name)
            for name in ("_incomplete_beta", "_negative_binomial_windows", "_incomplete_gamma",
@@ -597,10 +597,9 @@ assert before == after, {name: after[name] for name in before if before[name] !=
 print(json.dumps(core))
 """
     env = {**os.environ, "NUMBA_CACHE_DIR": str(tmp_path / "scalar-core-cache")}
-    lock = str(tmp_path / "cache.lock")
     running = [
         subprocess.Popen(
-            [sys.executable, "-c", code, family, lock],
+            [sys.executable, "-c", code, family],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

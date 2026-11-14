@@ -52,11 +52,17 @@ def _cache_file(path, stamp):
     return caching.IndexDataCacheFile(str(path), "kernel-1.py313", stamp)
 
 
-def test_a_worker_saves_to_and_loads_from_the_numba_cache_under_the_lock(tmp_path, monkeypatch):
-    """Two workers saving different signatures of one kernel must not interleave."""
+def test_a_worker_saves_to_and_loads_from_the_numba_cache_under_its_directory_lock(
+    tmp_path, monkeypatch
+):
+    """Two workers saving different signatures of one kernel must not interleave.
+
+    The lock is a file in the cache directory, so the workers of two warmups
+    writing one cache (two cluster nodes) take the same one.
+    """
     from numba.core import caching
 
-    lock, seen = str(tmp_path / "cache.lock"), []
+    lock, seen = str(tmp_path / _warmup._LOCK_NAME), []
     cache_file = caching.IndexDataCacheFile
     for name in ("_save_data", "_save_index", "load"):
         method = getattr(cache_file, name)
@@ -68,7 +74,7 @@ def test_a_worker_saves_to_and_loads_from_the_numba_cache_under_the_lock(tmp_pat
         monkeypatch.setattr(cache_file, name, recorded)
     original = cache_file.save, cache_file.load
     entry = _cache_file(tmp_path, "stamp")
-    with _warmup._locked_cache(lock):
+    with _warmup._locked_cache():
         entry.save("key", "kernel")
         assert entry.load("key") == "kernel"
     assert seen == [("_save_data", True), ("_save_index", True), ("load", True)]
@@ -95,7 +101,7 @@ def test_a_save_stopped_between_its_writes_leaves_no_entry_naming_an_old_kernel(
 
         monkeypatch.setattr(caching.IndexDataCacheFile, name, stopped_on_second)
     fresh = _cache_file(tmp_path, "new source")
-    with _warmup._locked_cache(str(tmp_path / "cache.lock")):
+    with _warmup._locked_cache():
         with pytest.raises(KeyboardInterrupt):
             fresh.save("new signature", "new kernel")
     monkeypatch.undo()
@@ -105,12 +111,10 @@ def test_a_save_stopped_between_its_writes_leaves_no_entry_naming_an_old_kernel(
     assert _cache_file(tmp_path, "old source").load("old signature") == "old kernel"
 
 
-def test_a_cache_call_after_the_workers_lock_is_gone_proceeds_unlocked(tmp_path):
-    """A fit's thread can enter a save just before the last worker exits and the lock goes."""
-    entry = _cache_file(tmp_path, "stamp")
-    with _warmup._locked_cache(str(tmp_path / "removed" / "cache.lock")):
-        entry.save("key", "kernel")
-        assert entry.load("key") == "kernel"
+def test_a_load_from_a_cache_directory_not_made_yet_proceeds_unlocked(tmp_path):
+    """No directory, no lock file: the load misses, as Numba's own does, rather than raise."""
+    with _warmup._locked_cache():
+        assert _cache_file(tmp_path / "not made yet", "stamp").load("key") is None
 
 
 def _fake_stages(monkeypatch):
@@ -186,7 +190,7 @@ def test_this_process_saves_under_the_workers_lock_while_they_run(monkeypatch, t
 
     class Checking(_Started):
         def communicate(self, code):
-            lock = ast.literal_eval(code.rsplit("_run_unit(", 1)[1].split(",", 1)[0])
+            lock = str(tmp_path / _warmup._LOCK_NAME)
             save_data = caching.IndexDataCacheFile._save_data
 
             def recorded(entry, name, data):
@@ -237,19 +241,6 @@ def test_a_worker_that_cannot_start_leaves_its_unit_to_this_process(monkeypatch)
 
     monkeypatch.setattr(_warmup.subprocess, "Popen", cannot_start)
     _warmup.warmup()
-    assert calls == ["a", "b", "c"]
-
-
-def test_no_place_for_the_lock_leaves_every_unit_to_this_process(monkeypatch):
-    calls, started = _fake_stages(monkeypatch), []
-    _fake_workers(monkeypatch, "2", started)
-
-    def no_scratch(*args, **options):
-        raise FileNotFoundError("no temporary directory")
-
-    monkeypatch.setattr(_warmup.tempfile, "TemporaryDirectory", no_scratch)
-    _warmup.warmup()
-    assert started == []
     assert calls == ["a", "b", "c"]
 
 
@@ -305,6 +296,6 @@ def test_an_unreadable_index_leaves_every_existing_data_file_alone(tmp_path):
     old.save("old signature", "old kernel")
     # Numba reads the version first and skips the rest when it differs.
     Path(old._index_path).write_bytes(pickle.dumps("another numba") + b"not a pickle")
-    with _warmup._locked_cache(str(tmp_path / "cache.lock")):
+    with _warmup._locked_cache():
         _cache_file(tmp_path, "new source").save("new signature", "new kernel")
     assert pickle.loads(Path(old._data_path(old._data_name(1))).read_bytes()) == "old kernel"
