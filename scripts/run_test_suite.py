@@ -13,7 +13,7 @@ assert on thread counts or need a pool with more than one thread.
 
 Every other argument goes to both stages; no ``--`` separator is needed, so
 the same command line works under PowerShell. Select tests with ``-m`` or
-``-k``: the runner always runs ``tests/``, so file paths are not supported.
+``-k``: the runner always runs ``tests/``, so it refuses a file path or node ID.
 A junit report from stage 2 is written beside stage 1's (``-threads``
 suffix), whether it is named here or in ``PYTEST_ADDOPTS``. One named in
 the pytest config file is not renamed, so stage 2 would overwrite stage
@@ -113,6 +113,68 @@ def stage_environment(pinned: bool, base: Mapping[str, str]) -> dict[str, str]:
     return environment
 
 
+# Options that take a separate value, which may itself be a path (``--ignore
+# tests/x.py``) and so is not a test this runner would add. Any other option's
+# value can be joined to it with ``=``.
+VALUE_OPTIONS = frozenset(
+    {
+        "-k",
+        "-m",
+        "-p",
+        "-o",
+        "-c",
+        "-n",
+        "-W",
+        "-r",
+        "--ignore",
+        "--ignore-glob",
+        "--deselect",
+        "--junitxml",
+        "--junit-xml",
+        "--rootdir",
+        "--confcutdir",
+        "--basetemp",
+        "--config-file",
+        "--override-ini",
+        "--cov",
+        "--cov-report",
+        "--cov-config",
+        "--cov-fail-under",
+        "--log-file",
+        "--durations",
+        "--durations-min",
+        "--maxfail",
+        "--dist",
+        "--splits",
+        "--group",
+        "--splitting-algorithm",
+        "--durations-path",
+        "--timeout",
+    }
+)
+
+
+def _looks_like_tests(arg: str) -> bool:
+    return (
+        "::" in arg or arg.endswith(".py") or arg.rstrip("/") == "tests" or arg.startswith("tests/")
+    )
+
+
+def named_tests(passthrough: list[str]) -> list[str]:
+    """Arguments that name test files or node IDs, which this runner cannot honour.
+
+    Both stages run all of ``tests/``, so a file named here would be run beside
+    the whole suite rather than instead of it. A value following an option in
+    ``VALUE_OPTIONS`` is that option's, not a test.
+    """
+    named, previous = [], None
+    for arg in passthrough:
+        if not arg.startswith("-") and previous not in VALUE_OPTIONS and _looks_like_tests(arg):
+            named.append(arg)
+        previous = arg
+    return named
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     # Only -m: pytest's own --markers lists the registered markers.
@@ -120,6 +182,13 @@ def main(argv: list[str] | None = None) -> int:
     # Drop "--" before parsing: a -m after it would reach pytest and override both stages.
     argv = [arg for arg in (sys.argv[1:] if argv is None else argv) if arg != "--"]
     args, passthrough = parser.parse_known_args(argv)
+    named = named_tests(passthrough)
+    if named:
+        parser.error(
+            f"it always runs all of tests/, so {', '.join(named)} would run beside the whole "
+            "suite; select with -k or -m, give an option's path value as --option=value, or run "
+            "`uv run python -m pytest <file>` directly"
+        )
     codes = [
         subprocess.call(command, cwd=ROOT, env=stage_environment(pinned, os.environ))
         for command, pinned in stage_commands(args.markers, passthrough)
