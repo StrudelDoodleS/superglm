@@ -26,6 +26,8 @@ def test_the_ty_backlog_is_the_type_check_jobs():
 
 
 def _repo(tmp_path: Path) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+
     def git(*args):
         subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
 
@@ -101,10 +103,15 @@ def test_the_hook_lets_a_branch_without_the_gate_push(tmp_path):
     shell = shutil.which("sh")
     result = subprocess.run([shell, str(hook)], cwd=tmp_path, env={"PATH": ""}, capture_output=True)
     assert result.returncode == 0
+    # A script from before the stamps, without --verify-push: still no uv.
     (tmp_path / "scripts").mkdir()
-    (tmp_path / "scripts" / "pre_push.py").write_text("", encoding="utf-8")
-    result = subprocess.run([shell, str(hook)], cwd=tmp_path, env={"PATH": ""}, capture_output=True)
-    assert result.returncode != 0  # with the script, the hook runs the gate (here: no uv)
+    (tmp_path / "scripts" / "pre_push.py").write_text("# no verifier\n", encoding="utf-8")
+    path = {"PATH": os.path.dirname(shutil.which("grep"))}  # grep, but no uv
+    result = subprocess.run([shell, str(hook)], cwd=tmp_path, env=path, capture_output=True)
+    assert result.returncode == 0
+    (tmp_path / "scripts" / "pre_push.py").write_text("# --verify-push\n", encoding="utf-8")
+    result = subprocess.run([shell, str(hook)], cwd=tmp_path, env=path, capture_output=True)
+    assert result.returncode != 0  # with the verifier, the hook runs it (here: no uv)
 
 
 def test_the_gate_and_the_suite_drop_the_variables_git_gives_a_hook():
@@ -146,3 +153,67 @@ def test_a_suite_run_from_the_hook_leaves_the_pushed_repository_alone(tmp_path):
     )
     assert run.returncode == 0, run.stdout[-2000:]
     assert (pushed / ".git" / "config").read_text(encoding="utf-8") == before
+
+
+def _quiet_gate(monkeypatch):
+    """The gate with every check passing at once, so only its stamping is under test."""
+    for name in ("_run", "_ty"):
+        monkeypatch.setattr(pre_push, name, lambda *a, **k: None)
+    monkeypatch.setattr(pre_push, "_changed_tests", lambda: [])
+
+
+def test_a_passing_gate_stamps_a_clean_head_and_only_a_clean_one(tmp_path, monkeypatch):
+    monkeypatch.setattr(pre_push, "ROOT", _repo(tmp_path))
+    _quiet_gate(monkeypatch)
+    head = pre_push._git("rev-parse", "HEAD")
+    (tmp_path / "untracked.txt").write_text("not pushed", encoding="utf-8")
+    pre_push.main([])
+    assert pre_push._stamp(head).exists()  # untracked files are not pushed
+    pre_push._stamp(head).unlink()
+    pre_push.main(["--no-suite"])  # an incomplete run passes nothing
+    assert not pre_push._stamp(head).exists()
+    (tmp_path / "tests" / "test_old.py").write_text("x = 2\n", encoding="utf-8")
+    pre_push.main([])  # what was checked is not what HEAD holds
+    assert not pre_push._stamp(head).exists()
+
+
+def test_the_verifier_refuses_exactly_the_commits_without_a_stamp(tmp_path, monkeypatch):
+    monkeypatch.setattr(pre_push, "ROOT", _repo(tmp_path))
+    head = pre_push._git("rev-parse", "HEAD")
+    line = f"refs/heads/master {head} refs/heads/master {pre_push.NO_COMMIT}"
+    deletion = f"(delete) {pre_push.NO_COMMIT} refs/heads/old {head}"
+    with pytest.raises(SystemExit, match=head[:12]):
+        pre_push._verify_push([line, deletion])
+    pre_push._stamp(head).parent.mkdir()
+    pre_push._stamp(head).touch()
+    pre_push._verify_push([line, deletion])
+
+
+def test_git_push_through_the_hook_waits_for_a_stamp(tmp_path, monkeypatch):
+    """The hook as git runs it: stdin from git, an unstamped push refused, a stamped one sent."""
+    repo = _repo(tmp_path / "work")
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=repo, check=True)
+    (repo / "scripts").mkdir()
+    shutil.copy(ROOT / "scripts" / "pre_push.py", repo / "scripts" / "pre_push.py")
+    hook = repo / ".git" / "hooks" / "pre-push"
+    # Quoted, with forward slashes: sh (Git Bash on Windows) eats a path's backslashes.
+    python = f'"{Path(sys.executable).as_posix()}"'
+    hook.write_text(pre_push.HOOK.replace("uv run --no-sync python", python), "utf-8")
+    hook.chmod(0o755)
+    push = ["git", "push", "-q", "origin", "master"]
+    refused = subprocess.run(push, cwd=repo, capture_output=True, text=True)
+    assert refused.returncode != 0 and "has not passed the checks" in refused.stderr
+    monkeypatch.setattr(pre_push, "ROOT", repo)
+    head = pre_push._git("rev-parse", "HEAD")
+    pre_push._stamp(head).parent.mkdir()
+    pre_push._stamp(head).touch()
+    sent = subprocess.run(push, cwd=repo, capture_output=True, text=True)
+    assert sent.returncode == 0, sent.stderr
+    # An annotated tag reaches the hook as a tag object; its commit's stamp covers it.
+    subprocess.run(["git", "tag", "-a", "v9.9.9", "-m", "release"], cwd=repo, check=True)
+    tagged = subprocess.run(
+        ["git", "push", "-q", "origin", "v9.9.9"], cwd=repo, capture_output=True, text=True
+    )
+    assert tagged.returncode == 0, tagged.stderr

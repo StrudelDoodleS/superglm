@@ -2,7 +2,7 @@
 
     uv run python scripts/pre_push.py              # every check
     uv run python scripts/pre_push.py --no-suite   # skip the quick test suite
-    uv run python scripts/pre_push.py --install    # run it from git's pre-push hook
+    uv run python scripts/pre_push.py --install    # refuse pushes of commits it has not passed
 
 The checks, in order, stopping at the first failure:
 
@@ -18,6 +18,12 @@ The checks, in order, stopping at the first failure:
    execute is skipped; with neither (ARM64), the tests run once as dispatched.
 5. The quick suite, ``scripts/run_test_suite.py -m "not slow and not browser
    and not docs"``.
+
+When every check passes on a clean tree, the commit is stamped as passed. The
+hook ``--install`` writes only checks that every commit being pushed carries a
+stamp, which takes a moment: git opens its connection to the remote before
+running the hook, and a remote drops a connection left idle for the length
+of the checks. ``git push --no-verify`` skips the hook.
 
 On a machine with ``benchboard`` on the path, every pytest run goes through
 it. Native Windows, macOS and ARM64 behaviour still needs CI's runners; no
@@ -43,13 +49,18 @@ KERNELS = {"Haswell": ("AVX2", "FMA3"), "SkylakeX": ("AVX512_SKX",)}
 NO_TESTS_COLLECTED = 5
 TY_EXTRAS = ("dev", "bench", "plotting")
 # Git runs the hook from the top of the worktree being pushed. A branch from
-# before the gate has no script, so it pushes as it did then.
+# before the gate has no script, and one from before the stamps has a script
+# without --verify-push; both push as they did then.
 HOOK_MARK = "# Installed by scripts/pre_push.py --install."
 HOOK = f"""#!/bin/sh
 {HOOK_MARK}
 [ -f scripts/pre_push.py ] || exit 0
-exec uv run --no-sync python scripts/pre_push.py
+grep -q -- --verify-push scripts/pre_push.py || exit 0
+exec uv run --no-sync python scripts/pre_push.py --verify-push
 """
+# A pre-push hook reads "<local ref> <local sha> <remote ref> <remote sha>" lines;
+# a deletion pushes this all-zero sha.
+NO_COMMIT = "0" * 40
 
 
 def _run(
@@ -167,16 +178,68 @@ GIT_REPOSITORY_ENV = (
 )
 
 
+def _git(*args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=ROOT, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def _stamp(sha: str) -> Path:
+    """Where the gate records that ``sha`` passed: shared by every worktree of the repository."""
+    return Path(_git("rev-parse", "--path-format=absolute", "--git-common-dir")) / (
+        f"superglm-pre-push/{sha}"
+    )
+
+
+def _clean_head() -> str | None:
+    """HEAD's sha when no tracked file differs from it, else ``None``."""
+    return (
+        None if _git("status", "--porcelain", "--untracked-files=no") else _git("rev-parse", "HEAD")
+    )
+
+
+def _verify_push(lines) -> None:
+    """Refuse the push unless every commit it sends has passed the gate."""
+    unchecked = []
+    for line in lines:
+        fields = line.split()
+        if len(fields) != 4 or fields[1] == NO_COMMIT:
+            continue
+        # An annotated tag arrives as its tag object; the commit it names is what passed.
+        # A tag of a tree or blob names no commit, so there is nothing to check.
+        try:
+            commit = _git("rev-parse", "--verify", "--quiet", f"{fields[1]}^{{commit}}")
+        except subprocess.CalledProcessError:
+            continue
+        if not _stamp(commit).exists():
+            unchecked.append(commit[:12])
+    if unchecked:
+        sys.exit(
+            f"pre-push: {', '.join(unchecked)} has not passed the checks; run "
+            "`uv run python scripts/pre_push.py` on a clean tree, then push again "
+            "(`git push --no-verify` skips this)"
+        )
+
+
 def main(argv: list[str] | None = None) -> None:
     for name in GIT_REPOSITORY_ENV:
         os.environ.pop(name, None)
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--install", action="store_true", help="install the git pre-push hook")
     parser.add_argument("--no-suite", action="store_true", help="skip the quick test suite")
+    parser.add_argument(
+        "--verify-push",
+        action="store_true",
+        help="the hook: refuse commits the checks have not passed",
+    )
     options = parser.parse_args(argv)
     if options.install:
         _install()
         return
+    if options.verify_push:
+        _verify_push(sys.stdin)
+        return
+    start = _clean_head()
 
     _run("uv lock", ["uv", "lock", "--check"])
     # Every later check runs in the environment the type-check job installs,
@@ -203,6 +266,14 @@ def main(argv: list[str] | None = None) -> None:
         suite = ["uv", "run", "--no-sync", "python", "scripts/run_test_suite.py", "-m", QUICK, "-q"]
         _run("quick suite", _pytest("quick-suite", suite))
     print("pre-push: every check passed")
+    if options.no_suite:
+        return
+    if start is None or _clean_head() != start:
+        print("pre-push: the tree had uncommitted changes, so no commit is stamped as passed")
+        return
+    _stamp(start).parent.mkdir(exist_ok=True)
+    _stamp(start).touch()
+    print(f"pre-push: stamped {start[:12]} as passed")
 
 
 if __name__ == "__main__":
