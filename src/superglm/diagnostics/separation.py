@@ -806,20 +806,13 @@ _CERTIFICATE_SPREAD = 1e8
 def _unmoved_rows(D: NDArray) -> NDArray:
     """Rows no direction ``a`` with ``D a >= 0`` and ``|a| <= 1`` moves by more than ``_PROGRAM_TOL``.
 
-    A row ``j`` is held at zero by every direction of the cone ``{a : D a >= 0}`` exactly when
-    some ``y >= 0`` with ``y_j > 0`` has ``D' y = 0`` (Stiemke's theorem of the alternative; the
-    dual feasibility test of Konis 2007, chapter 4). One program finds such a ``y`` for every
-    such row at once: maximize ``sum t`` under ``D' y = 0``, ``t <= y``, ``0 <= t <= 1``,
-    ``0 <= y <= _CERTIFICATE_SPREAD``. The ``y`` are a cone, so scaling one with the widest
-    support gives ``t = 1`` on all of it, unless its weights must spread wider than the cap,
-    which leaves a row to its own program but never mislabels one. Unbounded, HiGHS returns
-    weights as large as ``1e13`` whose residual ``D' y`` is its tolerance times that size, too
-    coarse to certify anything. The answer is then checked, not trusted: for every
-    ``a`` in the box with ``D a >= 0``, ``y_j D_j a <= y' D a = (D' y)' a <= |D' y|_1``, so
-    ``D_j a <= |D' y|_1 / y_j``. A row counts as unmoved when that bound, with the rounding of
-    ``D' y`` added (Higham 2002, section 3.5), is at most ``_PROGRAM_TOL``, the distance below
-    which ``_held_rows`` reads a row as unmoved. Any other row, and every row if the program
-    fails, is left to ``_held_rows``'s own programs.
+    Row ``j`` is held at zero by the whole cone exactly when some ``y >= 0``, ``y_j > 0``, has
+    ``D' y = 0`` (Stiemke's alternative; Konis 2007, chapter 4). One program, maximising
+    ``sum t`` under ``D' y = 0``, ``t <= y``, ``0 <= t <= 1``, ``y <= _CERTIFICATE_SPREAD``,
+    finds a ``y`` for all such rows (unbounded, HiGHS returns weights near ``1e13`` too coarse to
+    certify). It is checked, not trusted: ``y_j D_j a <= (D' y)' a <= |D' y|_1``, so a row counts
+    when ``|D' y|_1 / y_j``, with the rounding of ``D' y`` (Higham 2002, section 3.5), is at most
+    ``_PROGRAM_TOL``. Other rows, and all rows if the program fails, are left to ``_held_rows``.
     """
     from scipy import sparse
     from scipy.optimize import linprog
@@ -846,17 +839,14 @@ def _unmoved_rows(D: NDArray) -> NDArray:
 def _held_rows(D: NDArray) -> NDArray:
     """The rows some direction ``a`` moves strictly the right way, ``D a > 0``, with the others unmoved.
 
-    These directions form a cone whose moved rows are the complement of the linearity in Geyer
-    (2009, section 3.12). One program maximises how many rows a direction moves (``sum t`` under
-    ``D a >= t``, ``0 <= t <= 1``, ``|a| <= 1``); each row it leaves gets its own program,
-    maximising ``D_j a`` under ``D a >= 0``. The dual certificate of ``_unmoved_rows``, one
-    program for all rows, bounds that maximum within ``_PROGRAM_TOL`` for every row it covers:
-    such a row gets no program of its own, and a counting-program hit on it, which can only be
-    the solver's feasibility tolerance at work, is dropped. On data that do not separate the
-    certificate covers every row, so two programs decide them all. Rows are scaled to unit
-    length (sign, hence the cone, unchanged) and the box keeps the programs bounded, since HiGHS
-    fails on the free ones once rows differ in scale. The rows passed are those the free
-    directions see by more than the rank cut (``separated_curve_support``).
+    These directions form a cone whose moved rows are the complement of the linearity (Geyer
+    2009, section 3.12). One program maximises how many rows a direction moves (``sum t`` under
+    ``D a >= t``, ``0 <= t <= 1``, ``|a| <= 1``); each row it leaves gets its own, maximising
+    ``D_j a`` under ``D a >= 0``, unless ``_unmoved_rows`` certifies it, which also drops a
+    counting hit on it as solver tolerance. Overlapping rows are decided by these two programs.
+    Rows are scaled to unit length and the box keeps the programs bounded (HiGHS fails on free
+    ones once rows differ in scale); they are those the free directions see by more than the
+    rank cut (``separated_curve_support``).
     """
     from scipy import sparse
     from scipy.optimize import linprog
