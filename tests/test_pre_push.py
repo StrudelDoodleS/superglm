@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import shutil
 import subprocess
@@ -104,3 +105,44 @@ def test_the_hook_lets_a_branch_without_the_gate_push(tmp_path):
     (tmp_path / "scripts" / "pre_push.py").write_text("", encoding="utf-8")
     result = subprocess.run([shell, str(hook)], cwd=tmp_path, env={"PATH": ""}, capture_output=True)
     assert result.returncode != 0  # with the script, the hook runs the gate (here: no uv)
+
+
+def test_the_gate_and_the_suite_drop_the_variables_git_gives_a_hook():
+    # The list both carry is git's own, so a git that adds one shows up here.
+    local = subprocess.run(
+        ["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True, check=True
+    ).stdout.split()
+    from tests import conftest
+
+    assert set(local) <= set(pre_push.GIT_REPOSITORY_ENV)
+    assert set(local) <= set(conftest.GIT_REPOSITORY_ENV)
+
+
+def test_a_suite_run_from_the_hook_leaves_the_pushed_repository_alone(tmp_path):
+    """As a hook, git sets GIT_DIR; a test that builds its own repository must not use it."""
+    pushed = tmp_path / "pushed"
+    subprocess.run(["git", "init", "-q", str(pushed)], check=True)
+    before = (pushed / ".git" / "config").read_text(encoding="utf-8")
+    env = {**os.environ, "GIT_DIR": str(pushed / ".git"), "GIT_WORK_TREE": str(pushed)}
+    selected = (
+        "tests/test_pre_push.py::test_changed_tests_are_the_test_files_the_branch_adds_or_edits"
+    )
+    run = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:randomly",
+            "-p",
+            "no:cacheprovider",
+            selected,
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert run.returncode == 0, run.stdout[-2000:]
+    assert (pushed / ".git" / "config").read_text(encoding="utf-8") == before
