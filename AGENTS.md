@@ -99,6 +99,13 @@ regression test. An adversarial regression includes a mutation check or a
 demonstration against the unfixed implementation; a test that also passes
 against the unfixed code proves nothing.
 
+A change under `src/` runs `uv run python benchmarks/books.py baseline --set smoke
+--counts-only` (which reuses a baseline already stored) and `books.py check --set
+smoke`, adding the case sets the change reaches (`--set smoke,lss`), and puts the
+check's table in its pull request; both run untimed on one core, the smoke fit takes
+about 5 s, and each command spends about 2 minutes reading benchboard's history
+([benchmark baselines](docs/development/benchmark-baselines.md)).
+
 ## Performance evidence
 
 Changes to solver logic, REML, numerical kernels, or anything else that can
