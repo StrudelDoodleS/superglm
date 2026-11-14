@@ -19,6 +19,7 @@ import pytest
 from numpy.typing import NDArray
 from scipy import integrate, special, stats
 
+from superglm.distributional.families import tweedie as tweedie_module
 from superglm.distributional.families.gamma import GammaLS
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.families.tweedie import (
@@ -32,6 +33,8 @@ from superglm.distributional.families.tweedie import (
     _series_blocks,
     _validated_probabilities,
 )
+from superglm.distributional.kernels._gamma_windows import GammaWindowWorkspace
+from superglm.distributional.kernels._tweedie_windows import TweedieWindowWorkspace
 from superglm.distributional.model import DenseDistributionalModel, fit_dense_distributional
 from superglm.distributional.predictor import Predictor
 from superglm.distributional.results.solver import DenseSolverConfig
@@ -532,6 +535,167 @@ def test_tweedie_quantile_refuses_exactly_what_the_bisection_refuses() -> None:
     ):
         with pytest.raises(ValueError, match="tail mass"):
             call(np.array([0.5]), refused, np.array([1.0]))
+
+
+def _log_survival_series(
+    y: NDArray[np.float64], theta: NDArray[np.float64], weight: float, terms: int = 4000
+) -> NDArray[np.float64]:
+    """``log P(Y > y)`` summed in log space over every Poisson order up to ``terms``."""
+    mean, dispersion, power = theta
+    rate = weight * mean ** (2.0 - power) / (dispersion * (2.0 - power))
+    scale = dispersion * (power - 1.0) * mean ** (power - 1.0) / weight
+    order = np.arange(1.0, terms + 1.0)[:, None]
+    log_mass = order * np.log(rate) - rate - special.gammaln(order + 1.0)
+    shape = order * (2.0 - power) / (power - 1.0)
+    return special.logsumexp(log_mass + stats.gamma.logsf(y[None, :], shape, scale=scale), axis=0)
+
+
+@pytest.mark.parametrize(
+    ("row", "weight"),
+    [
+        ((100.0, 2.0, 1.5), 1.0),
+        ((100.0, 2.0, 1.2), 1.0),
+        ((100.0, 2.0, 1.9), 1.0),
+        ((100.0, 0.1, 1.5), 1.0),
+        ((1.0e4, 2.0, 1.5), 1.0),
+        ((100.0, 2.0, 1.5), 3.0),
+    ],
+)
+def test_tweedie_quantile_inverts_the_survival_function_in_the_far_upper_tail(
+    row: tuple[float, float, float], weight: float
+) -> None:
+    """Out where ``1 - p`` nears the series' truncated mass the quantile still inverts the law.
+
+    The windowed distribution function is right to an absolute ``1e-12``, so near one it
+    cannot resolve a tail of that size and once levelled off below ``p`` the root search
+    ran to ``exp(709)``.  The quantile must match an independent log-space survival sum
+    to a relative ``1e-6`` of the tail, down to ``1 - p = 1e-15``.
+    """
+    family = TweedieLSS()
+    tail = 10.0 ** -np.arange(6.0, 15.5, 0.5)
+    probabilities = 1.0 - tail
+    theta = np.tile(row, (len(tail), 1))
+    quantile = family.quantile_prior_weighted(probabilities, theta, np.full(len(tail), weight))
+    assert np.all(np.isfinite(quantile)) and np.all(np.diff(quantile) > 0.0)
+    reached = np.exp(_log_survival_series(quantile, np.asarray(row), weight))
+    # ``1 - p`` is exact for ``p`` above one half (Sterbenz), so it is the tail asked for.
+    assert reached == pytest.approx(1.0 - probabilities, rel=1e-6)
+
+    # Where the series already resolves the tail the answer is the one it gave.
+    bulk = np.array([1.0e-6, 0.2, 0.9, 1.0 - 1.0e-6])
+    weights = np.full(len(bulk), weight)
+    assert family.quantile_prior_weighted(bulk, theta[: len(bulk)], weights) == pytest.approx(
+        _quantile_bisection(family, bulk, theta[: len(bulk)], weights), rel=1e-10
+    )
+
+
+def test_tweedie_far_tail_quantile_does_not_depend_on_how_rows_are_batched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row's far-tail quantile is the same in one batch of 16 as in batches of 4.
+
+    The window kernel's endpoint budget covers one workspace, and sharing it across
+    a call refused 400 rows it answered in batches of 100.  A budget of 300 endpoints
+    (about 66 a row here) forces it to run out on the batch of 16; the rows refused
+    for the budget alone are evaluated again in smaller chunks.
+    """
+    exhausted = []
+
+    def small_budget() -> TweedieWindowWorkspace:
+        return TweedieWindowWorkspace(gamma=GammaWindowWorkspace(max_evaluations=300))
+
+    evaluate = tweedie_module._window_log_probability
+
+    def spy(lower, upper, values, prior, workspace):
+        result = evaluate(lower, upper, values, prior, workspace)
+        exhausted.append(workspace.gamma.evaluations >= workspace.gamma.max_evaluations)
+        return result
+
+    monkeypatch.setattr(tweedie_module, "TweedieWindowWorkspace", small_budget)
+    monkeypatch.setattr(tweedie_module, "_window_log_probability", spy)
+    family = TweedieLSS()
+    rows = 16
+    theta = np.column_stack(
+        [np.linspace(100.0, 101.0, rows), np.full(rows, 2.0), np.full(rows, 1.5)]
+    )
+    probabilities = np.full(rows, 1.0 - 1.0e-8)
+    together = family.quantile(probabilities, theta)
+    assert any(exhausted)
+    apart = np.concatenate(
+        [family.quantile(probabilities[i : i + 4], theta[i : i + 4]) for i in range(0, rows, 4)]
+    )
+    # The series start is already batch-dependent in its last bits (its term count
+    # follows the batch's largest rate); the tail root is not otherwise.
+    np.testing.assert_allclose(together, apart, rtol=1e-12, atol=0.0)
+    for row in (0, rows - 1):
+        reached = np.exp(_log_survival_series(together[[row]], theta[row], 1.0))
+        assert reached[0] == pytest.approx(1.0e-8, rel=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("row", "tail", "terms", "expected"),
+    [
+        # A zero mass above 1 - 1e-6: the series start landed in the atom.
+        ((1.0, 2.0e6, 1.5), 1.0e-10, 4000, 9_210_344.394),
+        (
+            (0.038958874595129034, 197294.57210584029, 1.21165921284594),
+            1.4954896922570397e-10,
+            4000,
+            None,
+        ),
+        # A concentrated law: doubling q from the start probed a tail the kernel cannot reach.
+        ((1.0, 1.0 / 9000.0, 1.5), 5.0e-7, 25_000, 1.052198934),
+        (
+            (0.5229850076509105, 0.0001005117876296651, 1.483236117121606),
+            2.4177387470869236e-15,
+            25_000,
+            None,
+        ),
+    ],
+)
+def test_tweedie_far_tail_quantile_reaches_atom_heavy_and_concentrated_laws(
+    row: tuple[float, float, float], tail: float, terms: int, expected: float | None
+) -> None:
+    """The far-tail root is found where the series start sits in the atom or the law is narrow.
+
+    A row whose zero mass passes ``1 - 1e-6`` starts from its single gamma jump, and the
+    bracket grows by steps from the law's standard deviation rather than by doubling ``q``.
+    """
+    probability = 1.0 - tail
+    quantile = TweedieLSS().quantile(np.array([probability]), np.array([row]))
+    assert np.isfinite(quantile[0]) and quantile[0] > 0.0
+    if expected is not None:
+        assert quantile[0] == pytest.approx(expected, rel=1e-9)
+    reached = np.exp(_log_survival_series(quantile, np.asarray(row), 1.0, terms=terms))
+    assert reached[0] == pytest.approx(1.0 - probability, rel=1e-6)
+
+
+def test_tweedie_far_tail_quantile_steps_by_a_spread_whose_variance_underflows() -> None:
+    """The bracket's first step is the standard deviation even where the variance underflows.
+
+    At mean 1e-170 and dispersion 2e-85 the variance ``phi mu^p``, 2e-340, is below the
+    least float64 subnormal while its root, 1.4e-170, is not.  A zero step left the
+    bracket where it started, and the start's tail, about 1e-6, came back for 1e-8.
+    """
+    row = (1.0e-170, 2.0e-85, 1.5)
+    quantile = TweedieLSS().quantile(np.array([1.0 - 1.0e-8]), np.array([row]))
+    reached = np.exp(_log_survival_series(quantile, np.asarray(row), 1.0))
+    assert reached[0] == pytest.approx(1.0e-8, rel=1e-6)
+
+
+def test_tweedie_far_tail_quantile_keeps_the_series_answer_where_the_kernel_refuses() -> None:
+    """A law the series answers keeps its far-tail quantile when the survival kernel refuses.
+
+    At dispersion 2/18800 the rate passes the series' Poisson cap, but the window kernel
+    cannot establish its remainder within its index cap, and the quantile at ``1 - 1e-7``
+    refused.  The row keeps the series answer, the value the quantile gave before the
+    tail route, and the row beside it in the batch is still solved on the survival function.
+    """
+    theta = np.array([[1.0, 2.0 / 18800.0, 1.5], [100.0, 2.0, 1.5]])
+    quantile = TweedieLSS().quantile(np.full(2, 1.0 - 1.0e-7), theta)
+    assert quantile[0] == pytest.approx(1.054319167502973, rel=1e-10)
+    reached = np.exp(_log_survival_series(quantile[1:], theta[1], 1.0))
+    assert reached[0] == pytest.approx(1.0e-7, rel=1e-6)
 
 
 # ── the prior-weighted trio ─────────────────────────────────────────────────
