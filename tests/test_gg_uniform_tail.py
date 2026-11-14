@@ -64,6 +64,7 @@ from superglm.distributional.kernels import _gg_uniform_tail as engine  # noqa: 
 from superglm.distributional.kernels._severity_primitives import (  # noqa: E402
     log_ndtr_01234,
 )
+from tests._oracle_store import OracleStore  # noqa: E402
 
 U = 2.0**-53
 ORDER = 4
@@ -354,6 +355,57 @@ def reference(w, q):
     return gammainc_reference(w, q)
 
 
+# The grid's reference answers are stored (``tests/_oracle_store.py``): the
+# 90-digit gammainc stencil and the 70-digit q-expansion were nearly all of the
+# grid test's time.  ``reference`` itself stays live for the modules importing it.
+STORED_REFERENCE = OracleStore(
+    "gg_uniform_tail_reference",
+    reference,
+    depends=(
+        expansion_reference,
+        _expansion_reference,
+        q_expansion,
+        _gaussian_operator,
+        _poly_add,
+        _poly_mul,
+        _series_exp,
+        _evaluate,
+        _jet_mul,
+        _jet_log,
+        gammainc_reference,
+        _stencil_inverse,
+        _univariate_log,
+        _tails,
+        _density_taylor_in_w,
+        ORDER,
+        KEYS,
+        EXPANSION_TERMS,
+    ),
+    module="tests/test_gg_uniform_tail.py",
+)
+
+
+def test_the_stored_oracle_answers_are_current():
+    STORED_REFERENCE.verify()
+
+
+def test_an_infinite_reference_fails_the_comparison_instead_of_widening_its_bound(monkeypatch):
+    """An infinite reference partial makes its block's scale, and so its bound, infinite."""
+    w, q = 8576.766730882224, 0.0001
+    lower, upper = STORED_REFERENCE(w, q)
+    assert row_failures(w, q, lower, upper) == []
+    corrupted = {**lower, (ORDER, 0): mp.inf}
+    live = engine_partials
+
+    def wrong_in_the_corrupted_block(w, q, upper, order=ORDER):
+        out = live(w, q, upper, order)
+        out[BLOCKS[ORDER]] += 0.0 if upper else 1e100
+        return out
+
+    monkeypatch.setattr(f"{__name__}.engine_partials", wrong_in_the_corrupted_block)
+    assert row_failures(w, q, corrupted, upper)
+
+
 def plain_partials(jet):
     return np.array([float(jet[(i, j)] * math.factorial(i) * math.factorial(j)) for i, j in KEYS])
 
@@ -491,6 +543,12 @@ def row_failures(w, q, lower_jet, upper_jet):
         actual = engine_partials(w, q, upper)
         widen = 1.0 if upper == small_is_upper else 1.0 + abs(log_small)
         for order, block in enumerate(BLOCKS):
+            # An infinite reference would make the bound below infinite and pass anything.
+            if not np.all(np.isfinite(expected[block])):
+                failures.append(
+                    f"w={w!r} q={q!r} upper={upper} order {order}: reference not finite"
+                )
+                continue
             scale = float(np.max(np.abs(expected[block])))
             error = float(np.max(np.abs(actual[block] - expected[block])))
             truncation = 10 * float(np.max(omitted[block]))
@@ -545,7 +603,7 @@ def test_the_two_references_agree():
 def test_log_tails_match_the_references_to_order_four(q):
     failures = []
     for w in grid_points(q):
-        failures += row_failures(w, q, *reference(w, q))
+        failures += row_failures(w, q, *STORED_REFERENCE(w, q))
     assert not failures, "\n".join(failures)
 
 

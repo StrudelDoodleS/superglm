@@ -1,0 +1,12 @@
+{
+"oracle": "tests.test_gamma_ls_response_bounds._deep_lower_tail_window",
+"refresh": "SUPERGLM_REFRESH_ORACLES=1 uv run --with mpmath pytest tests/test_gamma_ls_response_bounds.py -n 8",
+"fingerprint": "b4b97b0fd36074b1eb14de9966211958688f1954e6ba76d733a86f0368fd38b7",
+"entries": {
+"{\"t\":[{\"t\":[{\"i\":0}]},{\"t\":[]}]}": [{"m":[1,"0x72cbed2a65bdceb18d9eaa5d5b7bad3795",-177,135]},0.356],
+"{\"t\":[{\"t\":[{\"i\":1}]},{\"t\":[]}]}": [{"m":[1,"0xf8268325692439ce258be85e386b0036e7",-177,136]},2.441],
+"{\"t\":[{\"t\":[{\"i\":2}]},{\"t\":[]}]}": [{"m":[1,"0xfd7f8b2ed0de13b5137468f44e2b533805",-176,136]},3.351],
+"{\"t\":[{\"t\":[{\"i\":3}]},{\"t\":[]}]}": [{"m":[0,"0x58e38e38e38c572b497fd75edeeb7e235f",-128,135]},2.113],
+"{\"t\":[{\"t\":[{\"i\":4}]},{\"t\":[]}]}": [{"m":[1,"0xa9f4f8ad555fe247c07b2363314d4845cd",-123,136]},0.341]
+}
+}

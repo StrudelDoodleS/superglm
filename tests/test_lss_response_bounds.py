@@ -50,6 +50,7 @@ from superglm.distributional.weights import (
     resolve_likelihood_weights,
 )
 from superglm.links import IdentityLink, PowerLink
+from tests._oracle_store import OracleStore
 
 _U = 2.0**-53
 
@@ -225,6 +226,17 @@ def _mp_normal_window(mp, za, zb):
     return mp.log1p(-(lower + upper))
 
 
+def _rounded(function, x) -> np.ndarray:
+    """An mpmath elementary function of ``x``, rounded once to binary64 from 40 digits.
+
+    The stored oracle answers belong to these rows, so the engine and the oracle
+    read the same binary64 inputs on every platform's libm.
+    """
+    mp = pytest.importorskip("mpmath")
+    with mp.workdps(40):
+        return np.vectorize(lambda v: float(function(mp.mpf(float(v)))), otypes=[float])(x)
+
+
 def _oracle_case(case: str):
     """Family, plan inputs, natural parameters, predictors and the oracle's terms per row."""
     mp = pytest.importorskip("mpmath")
@@ -271,15 +283,14 @@ def _oracle_case(case: str):
     else:
         family, mu, sigma = LogNormalLS(parametrisation=form), 0.4, 0.7
         semantics, root = "frequency", np.ones_like(weights)
-        with np.errstate(over="ignore"):
-            y, lower, upper = (np.exp(mu + v * sigma) for v in (z, z_lo, z_hi))
-        first = np.exp(mu + 0.5 * sigma**2) if form == "mean" else mu
+        y, lower, upper = (_rounded(mp.exp, mu + v * sigma) for v in (z, z_lo, z_hi))
+        first = _rounded(mp.exp, mu + 0.5 * sigma**2)[()] if form == "mean" else mu
         theta = np.column_stack((np.full(len(z), first), np.full(len(z), sigma)))
     floor = family.scale_floor
     eta = theta.copy()
-    eta[:, 1] = np.log(sigma - floor)
+    eta[:, 1] = _rounded(mp.log, sigma - floor)
     if form == "mean":
-        eta[:, 0] = np.log(theta[:, 0])
+        eta[:, 0] = _rounded(mp.log, theta[:, 0])
     log_y = name == "log_normal"
 
     def terms(i, coordinates):
@@ -316,30 +327,58 @@ def _oracle_case(case: str):
     return family, y, (lower, upper, side), weights, semantics, theta, eta, terms
 
 
-@functools.cache
+def _scale_floor(case: str):
+    """The scale floor the case's family applies, which enters its oracle's predictor map."""
+    return getattr(_oracle_case(case)[0], "scale_floor", None)
+
+
+def _live_row_partials(case: str, floor, i: int):
+    """Row ``i``'s packed partials and term scales, per coordinate system."""
+    mp = pytest.importorskip("mpmath")
+    assert floor == _scale_floor(case)
+    *_, theta, eta, terms = _oracle_case(case)
+    row = {}
+    with mp.workdps(60):
+        systems = (("natural", theta[i]),) + ((("predictor", eta[i]),) if case != "pareto" else ())
+        for coordinates, point in systems:
+            at = tuple(mp.mpf(float(v)) for v in point)
+            pieces, _ = terms(i, coordinates)
+            per_term = [
+                [[mp.diff(f, at, (k - j, j)) for j in range(k + 1)] for k in range(5)]
+                for f in pieces
+            ]
+            total = [[sum(t[k][j] for t in per_term) for j in range(k + 1)] for k in range(5)]
+            scales = [max(abs(v) for t in per_term for v in t[k]) for k in range(5)]
+            row[coordinates] = (total, scales)
+    return row
+
+
+# The 60-digit oracle takes nearly all of this test's time and depends only on
+# the case, its family's scale floor and the row, so its answers are stored
+# (``tests/_oracle_store.py``); the engine-against-oracle comparison still runs.
+ROW_PARTIALS = OracleStore(
+    "lss_response_bounds_row_partials",
+    _live_row_partials,
+    depends=(
+        _oracle_case,
+        _rounded,
+        _mp_normal_window,
+        _NORMAL_ROWS,
+        _PARETO_ROWS,
+        _ORACLE_WEIGHTS,
+    ),
+    module="tests/test_lss_response_bounds.py",
+)
+
+
+def test_the_stored_oracle_answers_are_current():
+    ROW_PARTIALS.verify()
+
+
 def _oracle_partials(case: str):
     """Per row and coordinate system, the bounded row's packed partials and term scales."""
-    mp = pytest.importorskip("mpmath")
-    *_, theta, eta, terms = _oracle_case(case)
-    out = []
-    with mp.workdps(60):
-        for i in range(len(theta)):
-            row = {}
-            systems = (("natural", theta[i]),) + (
-                (("predictor", eta[i]),) if case != "pareto" else ()
-            )
-            for coordinates, point in systems:
-                at = tuple(mp.mpf(float(v)) for v in point)
-                pieces, _ = terms(i, coordinates)
-                per_term = [
-                    [[mp.diff(f, at, (k - j, j)) for j in range(k + 1)] for k in range(5)]
-                    for f in pieces
-                ]
-                total = [[sum(t[k][j] for t in per_term) for j in range(k + 1)] for k in range(5)]
-                scales = [max(abs(v) for t in per_term for v in t[k]) for k in range(5)]
-                row[coordinates] = (total, scales)
-            out.append(row)
-    return out
+    floor, rows = _scale_floor(case), len(_oracle_case(case)[5])
+    return [ROW_PARTIALS(case, floor, i) for i in range(rows)]
 
 
 @pytest.mark.parametrize("case", list(_ORACLE_MEASURED))

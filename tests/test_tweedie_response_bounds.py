@@ -7,7 +7,41 @@ from superglm.distributional.families.tweedie import TweedieLSS
 from superglm.distributional.family import bounded_observation
 from superglm.distributional.observation import ResponseBounds
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
+from tests import _tweedie_window_oracle
+from tests._oracle_store import OracleStore
 from tests._tweedie_window_oracle import density, gamma_window, log_jet, window
+
+
+def _conditional_jet(lower, y, upper, side, theta, weight):
+    """The jet of a bounded row's log conditional law: its density or censored
+    window, over its truncation window, at ``weight`` (prior semantics)."""
+
+    def conditional(*t):
+        denominator = window(lower, upper, *t, weight=weight)
+        if side == 0:
+            numerator = density(y, *t, weight=weight)
+        elif side == -1:
+            numerator = window(lower, y, *t, weight=weight)
+        else:
+            numerator = window(y, upper, *t, weight=weight)
+        return numerator / denominator
+
+    return log_jet(conditional, theta)
+
+
+# The 60-digit compound-law jets take nearly all of the conditional-law tests'
+# time and depend only on their arguments, so their answers are stored
+# (``tests/_oracle_store.py``); every comparison with the engine still runs.
+CONDITIONAL_JET = OracleStore(
+    "tweedie_response_bounds_conditional_jet",
+    _conditional_jet,
+    depends=(_tweedie_window_oracle,),
+    module="tests/test_tweedie_response_bounds.py",
+)
+
+
+def test_the_stored_oracle_answers_are_current():
+    CONDITIONAL_JET.verify()
 
 
 def _plan(y, lower, upper, side, weights=None, semantics="frequency"):
@@ -239,18 +273,14 @@ def test_normalized_values_scores_hessians_match_independent_law(semantics):
     for row in range(len(y)):
         w = weights[row] if semantics == "prior" else 1
         mass = weights[row] if semantics == "frequency" else 1
-
-        def conditional(*t):
-            denominator = window(lower[row], upper[row], *t, weight=w)
-            if side[row] == 0:
-                numerator = density(y[row], *t, weight=w)
-            elif side[row] == -1:
-                numerator = window(lower[row], y[row], *t, weight=w)
-            else:
-                numerator = window(y[row], upper[row], *t, weight=w)
-            return numerator / denominator
-
-        expected = log_jet(conditional, theta[row])
+        expected = CONDITIONAL_JET(
+            float(lower[row]),
+            float(y[row]),
+            float(upper[row]),
+            int(side[row]),
+            tuple(map(float, theta[row])),
+            float(w),
+        )
         for actual, reference in zip(
             (got.optimizing_log_likelihood, got.score, got.hessian_packed), expected, strict=True
         ):
@@ -535,16 +565,7 @@ def test_narrow_conditional_law_keeps_small_derivatives(side):
     plan = _plan([y], lo, hi, side, [2.0], "prior")
     evaluated = family.evaluate_natural([y], theta, plan)
 
-    def conditional(*t):
-        denominator = window(lo, hi, *t, weight=2)
-        numerator = (
-            density(y, *t, weight=2)
-            if side == 0
-            else window(lo if side == -1 else y, y if side == -1 else hi, *t, weight=2)
-        )
-        return numerator / denominator
-
-    expected = log_jet(conditional, theta[0])
+    expected = CONDITIONAL_JET(lo, y, hi, side, tuple(map(float, theta[0])), 2.0)
     assert evaluated.valid[0]
     for got, reference in zip(
         (evaluated.optimizing_log_likelihood, evaluated.score, evaluated.hessian_packed),

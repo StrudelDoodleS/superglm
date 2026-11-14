@@ -58,6 +58,7 @@ from superglm.distributional.kernels import _gg_uniform_tail as uniform  # noqa:
 from superglm.distributional.kernels.generalized_gamma import (  # noqa: E402
     generalized_gamma_cdf,
 )
+from tests._oracle_store import OracleStore  # noqa: E402
 from tests.test_gg_uniform_tail import (  # noqa: E402
     _float_mul,
     edge_t,
@@ -241,7 +242,7 @@ def boundary_pair(w, q, along_w):
 def test_the_oracle_agrees_with_the_uniform_tails_stencil_reference():
     worst = 0.0
     for w, q in ((0.3, 0.29), (-8.0, 0.5), (3.0, -1.5)):
-        mine = reference(w, q)
+        mine = REFERENCE(w, q)
         theirs = tuple(plain_partials(jet) for jet in gammainc_reference(w, q))
         for a, b in zip(mine, theirs, strict=True):
             for block in BLOCKS:
@@ -256,7 +257,7 @@ def test_composed_route_matches_the_oracle_in_the_body_and_tails(q):
     found = []
     for w in BODY_W:
         assert not uniform.gg_uniform_in_domain(w, q)
-        lower, upper = reference(w, q)
+        lower, upper = REFERENCE(w, q)
         for side, expected in ((False, lower), (True, upper)):
             actual, coefficients = composed_partials(w, q, side)
             assert np.array_equal(actual, partials(w, q, side))
@@ -274,7 +275,7 @@ def test_body_between_the_engines_keeps_order_four_within_2e_10():
     worst = np.zeros(ORDER + 1)
     for q in BETWEEN_Q:
         for w in BETWEEN_W:
-            for side, expected in zip((False, True), reference(w, q), strict=True):
+            for side, expected in zip((False, True), REFERENCE(w, q), strict=True):
                 actual = partials(w, q, side)
                 for order, block in enumerate(BLOCKS):
                     error = np.max(np.abs(actual[block] - expected[block]))
@@ -287,7 +288,7 @@ def test_composed_route_matches_the_oracle_in_far_tails_at_small_shape(q):
     found = []
     for w in far_points(q):
         assert not uniform.gg_uniform_in_domain(w, q)
-        lower, upper = reference(w, q)
+        lower, upper = REFERENCE(w, q)
         for side, expected in ((False, lower), (True, upper)):
             actual, coefficients = composed_partials(w, q, side)
             found += failures(w, q, side, actual, expected, composed_bound(w, q, coefficients))
@@ -321,6 +322,24 @@ def _leading_term_reference(w, q):
         )
 
 
+# Both oracles' answers are stored (``tests/_oracle_store.py``): they take about
+# 1.3 s a point at 40 digits, and every comparison below reads them back.
+REFERENCE = OracleStore(
+    "gg_log_tail_reference", reference, depends=(DIGITS, KEYS), module="tests/test_gg_log_tail.py"
+)
+LEADING_TERM_REFERENCE = OracleStore(
+    "gg_log_tail_leading_term",
+    _leading_term_reference,
+    depends=(DIGITS, KEYS),
+    module="tests/test_gg_log_tail.py",
+)
+
+
+def test_the_stored_oracle_answers_are_current():
+    REFERENCE.verify()
+    LEADING_TERM_REFERENCE.verify()
+
+
 @pytest.mark.parametrize(
     ("w", "q"),
     [(-40.0, 20.0), (40.0, -20.0), (-36.0, 20.0), (-0.0069, 1e5), (-2000.0, 0.5)],
@@ -333,7 +352,7 @@ def test_a_point_below_the_normal_range_keeps_log_x(w, q):
     ``x``; ``(-2000, 0.5)`` a subnormal ``e^(q w)``.  The route keeps ``log x``
     and its error is the composition's (``composed_bound``).
     """
-    expected = _leading_term_reference(w, q)
+    expected = LEADING_TERM_REFERENCE(w, q)
     for side in (False, True):
         actual, coefficients = composed_partials(w, q, side)
         assert np.all(np.isfinite(actual))

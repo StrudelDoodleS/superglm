@@ -7,6 +7,42 @@ import pytest
 from scipy.stats import fisk
 
 from tests._declared_scalar_oracles import assert_scaled_jets, jets, log_density, log_window
+from tests._oracle_store import OracleStore
+
+
+def _density_reference(y, scale, shape):
+    """The 100-digit ``mp.diff`` jets of the log density in ``(scale, shape)`` to order 4."""
+    return jets(lambda x, b: log_density("log_logistic", mp.mpf(y), x, b), (scale, shape), 4)
+
+
+def _window_reference(lower, upper, scale, shape):
+    """The 100-digit ``mp.diff`` jets of the log window probability to order 4."""
+    return jets(
+        lambda s, a: log_window("log_logistic", mp.mpf(lower), mp.mpf(upper), s, a),
+        (scale, shape),
+        4,
+    )
+
+
+# The mpmath jets' answers are stored (``tests/_oracle_store.py``): their
+# ``mp.diff`` stencils were nearly all of this module's time.
+DENSITY_REFERENCE = OracleStore(
+    "log_logistic_density_jets",
+    _density_reference,
+    depends=(jets, log_density),
+    module="tests/test_log_logistic_lss_kernel.py",
+)
+WINDOW_REFERENCE = OracleStore(
+    "log_logistic_window_jets",
+    _window_reference,
+    depends=(jets, log_window),
+    module="tests/test_log_logistic_lss_kernel.py",
+)
+
+
+def test_the_stored_oracle_answers_are_current():
+    DENSITY_REFERENCE.verify()
+    WINDOW_REFERENCE.verify()
 
 
 @pytest.fixture(scope="module")
@@ -19,14 +55,19 @@ def kernel():
 def test_log_logistic_law_and_all_mixed_jets(kernel):
     for s, a in product((1e-6, 1.0, 1e6), (0.6, 1.0, 1.5, 2.0, 4.0, 12.0)):
         law = fisk(c=a, scale=s)
-        # Independent inverse in log space; scipy.ppf cancels at 1e-100.
+        # Independent inverse in log space; scipy.ppf cancels at 1e-100.  Each point is
+        # the quantile rounded once from 50 digits, the same float on every platform
+        # (and so the stored oracle's key), where float64 libm calls may differ.
         ps = (0.001, 0.1, 0.5, 0.9, 0.999, 1e-12, 1e-30, 1e-100)
-        points = [s * np.exp((np.log(p) - np.log1p(-p)) / a) for p in ps]
-        points += [s * np.exp((np.log1p(-p) - np.log(p)) / a) for p in (1e-12, 1e-30, 1e-100)]
+        with mp.workdps(50):
+            points = [float(s * mp.exp((mp.log(p) - mp.log1p(-p)) / a)) for p in ps]
+            points += [
+                float(s * mp.exp((mp.log1p(-p) - mp.log(p)) / a)) for p in (1e-12, 1e-30, 1e-100)
+            ]
         for index, y in enumerate(points):
             actual = kernel.density_jets(np.array([y]), np.array([[s, a]]), np.ones(1), order=4)
             assert actual.valid.all()
-            ref = jets(lambda x, b: log_density("log_logistic", mp.mpf(y), x, b), (s, a), 4)
+            ref = DENSITY_REFERENCE(y, s, a)
             assert_scaled_jets(
                 (actual.jets[0] + actual.carrier, *actual.jets[1:]), ref, (s, a), factor=2048
             )
@@ -51,9 +92,7 @@ def test_log_logistic_windows_and_moment_boundaries(kernel):
         t = (2.0, 0.6)
         actual, valid = kernel.window_jets(np.array([lo]), np.array([hi]), np.array([t]), order=4)
         assert valid.all()
-        reference = jets(
-            lambda s, a: log_window("log_logistic", mp.mpf(lo), mp.mpf(hi), s, a), t, 4
-        )
+        reference = WINDOW_REFERENCE(float(lo), float(hi), *t)
         assert_scaled_jets(actual, reference, t, factor=8192)
     for a in (
         0.6,

@@ -59,6 +59,7 @@ from superglm.links import LogLink
 
 mp = pytest.importorskip("mpmath")
 
+from tests._oracle_store import OracleStore  # noqa: E402
 from tests.test_gg_uniform_tail import rounding_bound  # noqa: E402
 from tests.test_incomplete_gamma_engine import _TOLERANCE as _ENGINE_TOLERANCE  # noqa: E402
 
@@ -334,17 +335,91 @@ def _summed(terms, point, order):
     return total, scale
 
 
-@functools.cache
+def _row_partials(row):
+    """One row's natural partials to order 2 and log-coordinate partials to order 4."""
+    with mp.workdps(40):
+        return (
+            _summed(_oracle(row, True), (mp.mpf(row[4]), mp.mpf(row[5])), 2),
+            _summed(_oracle(row, False), (mp.log(mp.mpf(row[4])), mp.log(mp.mpf(row[5]))), 4),
+        )
+
+
+def _row_above_the_shapes(z):
+    """A row ``z/sqrt(a)`` from mean one at shape ``a = 1e5``: its response and log CV.
+
+    Rounded once to binary64 from 40 digits, so every platform's libm reads the
+    same row and the stored oracle answers belong to it.
+    """
+    with mp.workdps(40):
+        a = mp.mpf(10) ** 5
+        return float(mp.exp(z / mp.sqrt(a))), float(-mp.log(a) / 2)
+
+
+def _censored_row_above_the_shapes(z, upper, k, j):
+    """``d^k / dlog(mean)^(k-j) dlog(cv)^j`` of a censored row's log tail at shape ``1e5``.
+
+    At 80 digits, at the test's binary64 response and log CV.
+    """
+    y, log_cv = _row_above_the_shapes(z)
+
+    def tail(p0, p1):
+        shape = 1 / mp.exp(p1) ** 2
+        x = shape * mp.mpf(y) / mp.exp(p0)
+        ends = (x, mp.inf) if upper else (0, x)
+        return mp.log(mp.gammainc(shape, *ends, regularized=True))
+
+    with mp.workdps(80):
+        return mp.diff(tail, (mp.mpf(0), mp.mpf(log_cv)), (k - j, j))
+
+
+def _deep_lower_tail_window(j):
+    """``d^4 / dlog(mean)^(4-j) dlog(cv)^j`` of the log window ``(1e-14, 2e-14]`` at CV 0.3."""
+
+    def window(p0, p1):
+        shape = 1 / mp.exp(p1) ** 2
+        scale = shape / mp.exp(p0)
+        return mp.log(
+            mp.gammainc(shape, scale * mp.mpf(1e-14), scale * mp.mpf(2e-14), regularized=True)
+        )
+
+    with mp.workdps(40):
+        return mp.diff(window, (mp.mpf(0), mp.log(mp.mpf(0.3))), (4 - j, j))
+
+
+# The mpmath oracles take nearly all of these tests' time and depend only on
+# their arguments, so their answers are stored (``tests/_oracle_store.py``);
+# every engine-against-oracle comparison still runs.
+_MODULE = "tests/test_gamma_ls_response_bounds.py"
+ROW_PARTIALS = OracleStore(
+    "gamma_ls_response_bounds_row_partials",
+    _row_partials,
+    depends=(_oracle, _partials, _summed, _INF),
+    module=_MODULE,
+)
+CENSORED_ROW_ABOVE_THE_SHAPES = OracleStore(
+    "gamma_ls_response_bounds_censored_row_above_the_shapes",
+    _censored_row_above_the_shapes,
+    depends=(_row_above_the_shapes,),
+    module=_MODULE,
+)
+# Each of its partials takes about two seconds: the check recomputes one.
+DEEP_LOWER_TAIL_WINDOW = OracleStore(
+    "gamma_ls_response_bounds_deep_lower_tail_window",
+    _deep_lower_tail_window,
+    module=_MODULE,
+    sample=1,
+)
+
+
+def test_the_stored_oracle_answers_are_current():
+    ROW_PARTIALS.verify()
+    CENSORED_ROW_ABOVE_THE_SHAPES.verify()
+    DEEP_LOWER_TAIL_WINDOW.verify()
+
+
 def _oracle_partials(rows):
     """Per row, natural partials to order 2 and log-coordinate partials to order 4."""
-    with mp.workdps(40):
-        return tuple(
-            (
-                _summed(_oracle(row, True), (mp.mpf(row[4]), mp.mpf(row[5])), 2),
-                _summed(_oracle(row, False), (mp.log(mp.mpf(row[4])), mp.log(mp.mpf(row[5]))), 4),
-            )
-            for row in rows
-        )
+    return tuple(ROW_PARTIALS(row) for row in rows)
 
 
 def _bound_plan(rows, semantics, weights):
@@ -714,24 +789,17 @@ def test_a_censored_row_above_the_engines_shapes_meets_the_oracle_to_order_four(
     (``tests/test_gg_uniform_tail.py``) times four for the chain rule into
     ``(log mean, log cv)``; measured 1.1, 2.6, 6.4, 57 and 262 ``u`` at orders 0-4.
     """
-    a = 1e5
-    y = np.array([np.exp(z / np.sqrt(a))])
-    theta = np.array([[0.0, -0.5 * np.log(a)]])
+    response, log_cv = _row_above_the_shapes(z)
+    y = np.array([response])
+    theta = np.array([[0.0, log_cv]])
     lower, upper_end = (y, np.array([_INF])) if upper else (np.zeros(1), y)
     jets = _declared_bounds.gamma_window_jets(
         lower, upper_end, theta, np.ones(1), order=4, coordinates="log"
     )
 
-    def tail(p0, p1):
-        shape = 1 / mp.exp(p1) ** 2
-        x = shape * mp.mpf(y[0]) / mp.exp(p0)
-        ends = (x, mp.inf) if upper else (0, x)
-        return mp.log(mp.gammainc(shape, *ends, regularized=True))
-
     with mp.workdps(80):
-        point = (mp.mpf(0), mp.mpf(theta[0, 1]))
         for k in range(5):
-            exact = [mp.diff(tail, point, (k - j, j)) for j in range(k + 1)]
+            exact = [CENSORED_ROW_ABOVE_THE_SHAPES(z, upper, k, j) for j in range(k + 1)]
             got = [jets[0][0]] if k == 0 else list(jets[k][0])
             scale = max(abs(e) for e in exact)
             error = max(abs(mp.mpf(float(g)) - e) for g, e in zip(got, exact, strict=True))
@@ -747,16 +815,7 @@ def test_a_window_deep_in_the_lower_tail_is_read_from_the_lower_tail():
     )
     assert all(np.all(np.isfinite(level)) for level in jets)
 
-    def window(p0, p1):
-        shape = 1 / mp.exp(p1) ** 2
-        scale = shape / mp.exp(p0)
-        return mp.log(
-            mp.gammainc(shape, scale * mp.mpf(1e-14), scale * mp.mpf(2e-14), regularized=True)
-        )
-
-    with mp.workdps(40):
-        point = (mp.mpf(0), mp.log(mp.mpf(0.3)))
-        exact = [mp.diff(window, point, (4 - j, j)) for j in range(5)]
+    exact = [DEEP_LOWER_TAIL_WINDOW(j) for j in range(5)]
     scale = max(abs(e) for e in exact)
     assert max(abs(mp.mpf(float(g)) - e) for g, e in zip(jets[4][0], exact)) <= 1e-9 * scale
 

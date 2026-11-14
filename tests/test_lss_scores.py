@@ -20,6 +20,7 @@ import pytest
 from scipy import integrate, special, stats
 
 import superglm.distributional.checks.scores as scores_module
+import tests._negative_binomial_crps_oracle as nb2_crps_oracle
 from superglm import Categorical, Spline
 from superglm.distributional import Predictor
 from superglm.distributional.checks.compare import (
@@ -53,6 +54,7 @@ from superglm.distributional.weights import (
     resolve_likelihood_weights,
 )
 from tests._negative_binomial_crps_oracle import nb2_crps, nb2_crps_by_quadrature
+from tests._oracle_store import OracleStore
 from tests.bound_predictor_fixtures import model_from_templates
 
 _GRID = 96
@@ -1685,6 +1687,29 @@ _NB_LAWS = [
 ]
 
 
+# The NB2 oracles' answers at fixed laws are stored (``tests/_oracle_store.py``):
+# the 60-digit lattice sum and quadratures were nearly all of these tests' time.
+# Calls at a fitted model's parameters stay live, since a fit's last bits vary
+# by platform.
+STORED_NB2_CRPS = OracleStore(
+    "negative_binomial_crps_lattice_sum",
+    nb2_crps,
+    depends=(nb2_crps_oracle,),
+    module="tests/test_lss_scores.py",
+)
+STORED_NB2_CRPS_BY_QUADRATURE = OracleStore(
+    "negative_binomial_crps_quadrature",
+    nb2_crps_by_quadrature,
+    depends=(nb2_crps_oracle,),
+    module="tests/test_lss_scores.py",
+)
+
+
+def test_the_stored_oracle_answers_are_current() -> None:
+    STORED_NB2_CRPS.verify()
+    STORED_NB2_CRPS_BY_QUADRATURE.verify()
+
+
 @pytest.mark.parametrize("mean,size", _NB_LAWS)
 def test_negative_binomial_closed_form_crps_matches_the_lattice_sum(mean, size) -> None:
     # 70 is past the pmf sum, so the partial-moment shortfall is checked as well.
@@ -1693,7 +1718,7 @@ def test_negative_binomial_closed_form_crps_matches_the_lattice_sum(mean, size) 
     )
     theta = np.tile([mean, size], (len(responses), 1))
     closed = crps_closed_form(NegativeBinomialLS(), np.array(responses), theta)
-    expected = [nb2_crps(mean, size, y) for y in responses]
+    expected = [STORED_NB2_CRPS(mean, size, y) for y in responses]
     np.testing.assert_allclose(closed, expected, rtol=1e-12, atol=0)
 
 
@@ -1716,8 +1741,8 @@ def test_negative_binomial_crps_below_the_support_grows_by_the_distance() -> Non
 def test_the_quadrature_oracle_agrees_with_the_lattice_sum() -> None:
     """The oracle for laws too wide to sum, checked where the lattice still runs."""
     for mean, size, y in ((2.0, 0.5, 70.0), (30.0, 1e9, 70.0), (4.0, 2.5, 3.7)):
-        assert nb2_crps_by_quadrature(mean, size, y) == pytest.approx(
-            nb2_crps(mean, size, y), rel=1e-15
+        assert STORED_NB2_CRPS_BY_QUADRATURE(mean, size, y) == pytest.approx(
+            STORED_NB2_CRPS(mean, size, y), rel=1e-15
         )
 
 
@@ -1736,7 +1761,7 @@ def test_negative_binomial_crps_keeps_its_sign_when_the_size_is_tiny(mean, size)
     responses = np.array([63.0, 64.0, 70.0, 500.0])
     theta = np.tile([mean, size], (len(responses), 1))
     closed = crps_closed_form(NegativeBinomialLS(), responses, theta)
-    expected = [nb2_crps_by_quadrature(mean, size, y) for y in responses]
+    expected = [STORED_NB2_CRPS_BY_QUADRATURE(mean, size, float(y)) for y in responses]
     np.testing.assert_allclose(closed, expected, rtol=1e-13, atol=0)
 
 
@@ -1763,7 +1788,7 @@ def test_negative_binomial_crps_is_accurate_at_large_central_counts(mean, size, 
     the mean.
     """
     closed = crps_closed_form(NegativeBinomialLS(), np.array([y]), np.array([[mean, size]]))
-    np.testing.assert_allclose(closed, [nb2_crps_by_quadrature(mean, size, y)], rtol=rtol)
+    np.testing.assert_allclose(closed, [STORED_NB2_CRPS_BY_QUADRATURE(mean, size, y)], rtol=rtol)
 
 
 def test_negative_binomial_crps_refuses_a_response_past_the_count_range() -> None:

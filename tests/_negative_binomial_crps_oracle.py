@@ -27,7 +27,9 @@ import math
 import mpmath as mp
 
 _DIGITS = 60
-_RELATIVE_TAIL = mp.mpf(10) ** -35
+# At a fixed precision: a module importing this one may have changed the ambient one.
+with mp.workprec(53):
+    _RELATIVE_TAIL = mp.mpf(10) ** -35
 
 
 def nb2_crps(mean: float, size: float, response: float) -> float:
