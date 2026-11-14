@@ -144,7 +144,32 @@ def _install() -> None:
     print(f"pre-push: installed {hook}")
 
 
+# Git exports these to the hook (``git rev-parse --local-env-vars``), naming the
+# repository being pushed; every check below runs without them, so nothing it
+# starts (a test's throwaway ``git init``, books.py's git calls) acts on that
+# repository. tests/conftest.py drops them too, for a suite started elsewhere.
+GIT_REPOSITORY_ENV = (
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+)
+
+
 def main(argv: list[str] | None = None) -> None:
+    for name in GIT_REPOSITORY_ENV:
+        os.environ.pop(name, None)
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--install", action="store_true", help="install the git pre-push hook")
     parser.add_argument("--no-suite", action="store_true", help="skip the quick test suite")

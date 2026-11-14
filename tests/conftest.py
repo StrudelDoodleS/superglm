@@ -1,6 +1,32 @@
 """Shared pytest fixtures and hooks."""
 
+import os
+
 import pytest
+
+# Git exports these to its hooks (``git rev-parse --local-env-vars``), naming
+# the repository being pushed. A test that builds a throwaway repository with
+# ``git init`` and ``git config`` would act on that repository instead, as a
+# suite run from the pre-push hook once did to the shared ``.git/config``.
+GIT_REPOSITORY_ENV = (
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+)
+for _name in GIT_REPOSITORY_ENV:
+    os.environ.pop(_name, None)
 
 
 def pytest_addoption(parser):
