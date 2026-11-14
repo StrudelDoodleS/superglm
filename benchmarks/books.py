@@ -474,10 +474,20 @@ def _column(frame, name):
 # --------------------------------------------------------------------------- provenance
 
 
+# Set by git for its hooks: they would point every ``git -C tree`` at the hook's repository.
+_GIT_REPOSITORY_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
+
+
 def _git(tree, *args) -> str | None:
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_REPOSITORY_VARIABLES}
     try:
         out = subprocess.run(
-            ["git", "-C", str(tree), *args], capture_output=True, text=True, timeout=60, check=True
+            ["git", "-C", str(tree), *args],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
+            env=env,
         )
     except (OSError, subprocess.SubprocessError):
         return None

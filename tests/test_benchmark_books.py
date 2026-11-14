@@ -482,3 +482,13 @@ def test_check_reads_a_near_zero_prediction_against_the_predictions_scale(run):
 
     _, failures, _ = _check(run[0], tiny(2e-12), base_edit=tiny(1e-12))
     assert failures == []
+
+
+def test_a_run_from_a_git_hook_still_names_its_commit(monkeypatch, tmp_path):
+    """git exports GIT_DIR to its hooks; the pre-push gate runs these tests from one."""
+    import superglm
+
+    package = books.Path(superglm.__file__).parent
+    expected = books.tree_state(package, package=True)["sha"]
+    monkeypatch.setenv("GIT_DIR", str(tmp_path))
+    assert expected and books.tree_state(package, package=True)["sha"] == expected
