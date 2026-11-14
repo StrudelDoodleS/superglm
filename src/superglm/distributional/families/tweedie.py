@@ -221,6 +221,20 @@ _QUANTILE_BRACKET_TOLERANCE = 1.0e-13
 # bracket down to the bracket tolerance; the loop leaves as soon as every row
 # has settled, so the cap costs nothing on the rows that converge in three.
 _QUANTILE_ITERATIONS = 200
+# The windowed series is right to an absolute ``_POISSON_TAIL_TOLERANCE``, so
+# near one it resolves a tail ``1 - p`` only to that over ``1 - p``.  Below the
+# level where this passes ``_QUANTILE_TAIL_RTOL`` the quantile inverts the log
+# survival function instead.
+_QUANTILE_TAIL_RTOL = 1.0e-6
+_QUANTILE_TAIL_LEVEL = _POISSON_TAIL_TOLERANCE / _QUANTILE_TAIL_RTOL
+# The tail solve stops once ``log S(q)`` is this close to ``log(1 - p)``, or
+# its bracket is a few float64 spacings of ``q`` wide.
+_TAIL_LOG_TOLERANCE = 1.0e-10
+_TAIL_BRACKET_SPACINGS = 8.0
+# Doubling or halving from the series start crosses the float64 exponent range
+# well inside this many steps.
+_TAIL_BRACKET_STEPS = 2200
+_TAIL_ITERATIONS = 200
 _TINY_PROBABILITY = 1.0e-300
 _PROBABILITY_MARGIN = 1.0e-16
 
@@ -1255,12 +1269,95 @@ class TweedieLSS(TweediePredictors):
         above = np.flatnonzero(probabilities > np.exp(-rate))
         if above.size == 0:
             return result
+        # A far-tail row solves the series at the tail level first: that answer
+        # is where the series is still right, and starts the survival bracket.
+        series_target = np.minimum(probabilities, 1.0 - _QUANTILE_TAIL_LEVEL)
         terms = _poisson_terms(float(np.max(rate[above])))
         for rows, block in _series_blocks(
             rate, jump_shape, jump_scale, above, terms, derivatives=True
         ):
-            result[rows] = _block_quantile(block, probabilities[rows])
+            result[rows] = _block_quantile(block, series_target[rows])
+        # ``1 - p`` is exact for ``p`` above one half (Sterbenz).
+        tail = above[1.0 - probabilities[above] < _QUANTILE_TAIL_LEVEL]
+        if tail.size:
+            result[tail] = self._tail_quantile(
+                np.log1p(-probabilities[tail]), values[tail], weights[tail], result[tail]
+            )
         return result
+
+    def _tail_quantile(
+        self,
+        log_target: NDArray[np.float64],
+        values: NDArray[np.float64],
+        weights: NDArray[np.float64],
+        start: NDArray[np.float64],
+    ) -> NDArray[np.float64]:
+        """Solve ``log S(q) = log(1 - p)`` on the window kernel's log survival function.
+
+        Far up the tail a distribution function near one cannot resolve ``1 - p``,
+        so the root is taken on the survival function's log, as an inverse
+        survival function is (``isf``).  The bracket grows geometrically from the
+        series answer and is closed by the Illinois false position (Dowell &
+        Jarratt 1971), whose iterates stay inside the bracket.
+        """
+        infinite = np.full(len(start), np.inf)
+
+        def excess(q: NDArray[np.float64], rows: NDArray[np.intp]) -> NDArray[np.float64]:
+            if rows.size == 0:
+                return np.zeros(0)
+            return (
+                self.log_window_probability(q, infinite[rows], values[rows], weights[rows])
+                - log_target[rows]
+            )
+
+        rows = np.arange(len(start))
+        g_start = excess(start, rows)
+        # ``low`` keeps ``S(low) > 1 - p`` and ``high`` keeps ``S(high) <= 1 - p``.
+        low, g_low = start.copy(), g_start.copy()
+        high, g_high = start.copy(), g_start.copy()
+        short = g_start <= 0.0
+        low[short] = 0.5 * start[short]
+        high[~short] = np.where(start[~short] > 0.0, 2.0 * start[~short], values[~short, 0])
+        moved = np.where(short, low, high)
+        g_moved = excess(moved, rows)
+        g_low[short], g_high[~short] = g_moved[short], g_moved[~short]
+        for _ in range(_TAIL_BRACKET_STEPS):
+            widen = np.flatnonzero(~short & (g_high > 0.0))
+            narrow = np.flatnonzero(short & (g_low <= 0.0))
+            if widen.size == 0 and narrow.size == 0:
+                break
+            low[widen], g_low[widen] = high[widen], g_high[widen]
+            high[widen] *= 2.0
+            g_high[widen] = excess(high[widen], widen)
+            high[narrow], g_high[narrow] = low[narrow], g_low[narrow]
+            low[narrow] *= 0.5
+            g_low[narrow] = excess(low[narrow], narrow)
+        side = np.zeros(len(start), dtype=np.int8)
+        answer = high.copy()
+        active = np.flatnonzero(g_high < 0.0)
+        for _ in range(_TAIL_ITERATIONS):
+            if active.size == 0:
+                break
+            lo, hi, g_lo, g_hi = low[active], high[active], g_low[active], g_high[active]
+            with np.errstate(divide="ignore", invalid="ignore"):
+                proposed = lo + g_lo * (hi - lo) / (g_lo - g_hi)
+            proposed = np.where((proposed > lo) & (proposed < hi), proposed, 0.5 * (lo + hi))
+            g_proposed = excess(proposed, active)
+            answer[active] = proposed
+            left = g_proposed > 0.0
+            # Illinois: an end kept twice running has its value halved.
+            g_high[active] = np.where(left & (side[active] == 1), 0.5 * g_hi, g_hi)
+            g_low[active] = np.where(~left & (side[active] == -1), 0.5 * g_lo, g_lo)
+            low[active] = np.where(left, proposed, lo)
+            g_low[active] = np.where(left, g_proposed, g_low[active])
+            high[active] = np.where(left, hi, proposed)
+            g_high[active] = np.where(left, g_high[active], g_proposed)
+            side[active] = np.where(left, 1, -1)
+            settled = (np.abs(g_proposed) <= _TAIL_LOG_TOLERANCE) | (
+                high[active] - low[active] <= _TAIL_BRACKET_SPACINGS * np.spacing(high[active])
+            )
+            active = active[~settled]
+        return answer
 
 
 __all__ = ["BoundedPowerLink", "TweedieLikelihoodPlan", "TweedieLSS"]

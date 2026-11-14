@@ -534,6 +534,58 @@ def test_tweedie_quantile_refuses_exactly_what_the_bisection_refuses() -> None:
             call(np.array([0.5]), refused, np.array([1.0]))
 
 
+def _log_survival_series(
+    y: NDArray[np.float64], theta: NDArray[np.float64], weight: float, terms: int = 4000
+) -> NDArray[np.float64]:
+    """``log P(Y > y)`` summed in log space over every Poisson order up to ``terms``."""
+    mean, dispersion, power = theta
+    rate = weight * mean ** (2.0 - power) / (dispersion * (2.0 - power))
+    scale = dispersion * (power - 1.0) * mean ** (power - 1.0) / weight
+    order = np.arange(1.0, terms + 1.0)[:, None]
+    log_mass = order * np.log(rate) - rate - special.gammaln(order + 1.0)
+    shape = order * (2.0 - power) / (power - 1.0)
+    return special.logsumexp(log_mass + stats.gamma.logsf(y[None, :], shape, scale=scale), axis=0)
+
+
+@pytest.mark.parametrize(
+    ("row", "weight"),
+    [
+        ((100.0, 2.0, 1.5), 1.0),
+        ((100.0, 2.0, 1.2), 1.0),
+        ((100.0, 2.0, 1.9), 1.0),
+        ((100.0, 0.1, 1.5), 1.0),
+        ((1.0e4, 2.0, 1.5), 1.0),
+        ((100.0, 2.0, 1.5), 3.0),
+    ],
+)
+def test_tweedie_quantile_inverts_the_survival_function_in_the_far_upper_tail(
+    row: tuple[float, float, float], weight: float
+) -> None:
+    """Out where ``1 - p`` nears the series' truncated mass the quantile still inverts the law.
+
+    The windowed distribution function is right to an absolute ``1e-12``, so near one it
+    cannot resolve a tail of that size and once levelled off below ``p`` the root search
+    ran to ``exp(709)``.  The quantile must match an independent log-space survival sum
+    to a relative ``1e-6`` of the tail, down to ``1 - p = 1e-15``.
+    """
+    family = TweedieLSS()
+    tail = 10.0 ** -np.arange(6.0, 15.5, 0.5)
+    probabilities = 1.0 - tail
+    theta = np.tile(row, (len(tail), 1))
+    quantile = family.quantile_prior_weighted(probabilities, theta, np.full(len(tail), weight))
+    assert np.all(np.isfinite(quantile)) and np.all(np.diff(quantile) > 0.0)
+    reached = np.exp(_log_survival_series(quantile, np.asarray(row), weight))
+    # ``1 - p`` is exact for ``p`` above one half (Sterbenz), so it is the tail asked for.
+    assert reached == pytest.approx(1.0 - probabilities, rel=1e-6)
+
+    # Where the series already resolves the tail the answer is the one it gave.
+    bulk = np.array([1.0e-6, 0.2, 0.9, 1.0 - 1.0e-6])
+    weights = np.full(len(bulk), weight)
+    assert family.quantile_prior_weighted(bulk, theta[: len(bulk)], weights) == pytest.approx(
+        _quantile_bisection(family, bulk, theta[: len(bulk)], weights), rel=1e-10
+    )
+
+
 # ── the prior-weighted trio ─────────────────────────────────────────────────
 
 
