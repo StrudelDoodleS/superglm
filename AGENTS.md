@@ -22,7 +22,8 @@ development default. The ordinary checks are:
 Before every push, run `uv run python scripts/pre_push.py`, which runs the
 format, lint, lock and type checks the way CI does, the changed test files
 under the two OpenBLAS kernels GitHub's x86-64 runners use, and the quick
-suite; `--install` runs it from git's pre-push hook. A change to
+suite, and on a clean tree stamps the commit as passed; `--install` adds a
+git pre-push hook that refuses a push of any commit without that stamp. A change to
 `solvers/constrained_qp.py` also runs `benchmarks/qp_random_search.py` before
 its first push, and its pull request reports the counts.
 
