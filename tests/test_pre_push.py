@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -50,12 +51,18 @@ def test_changed_tests_are_the_test_files_the_branch_adds_or_edits(tmp_path, mon
     assert sorted(pre_push._changed_tests()) == ["tests/test_new.py", "tests/test_old.py"]
 
 
-def test_install_writes_the_hook_once_and_leaves_a_foreign_one_alone(tmp_path, monkeypatch):
+def test_install_writes_and_upgrades_its_hook_and_leaves_a_foreign_one_alone(tmp_path, monkeypatch):
     monkeypatch.setattr(pre_push, "ROOT", _repo(tmp_path))
     pre_push._install()
     hook = tmp_path / ".git" / "hooks" / "pre-push"
     assert hook.read_text(encoding="utf-8") == pre_push.HOOK
     pre_push._install()  # the same hook again is fine
+    # An earlier version's hook carries the mark and is upgraded in place.
+    hook.write_text(
+        "#!/bin/sh\n# Installed by scripts/pre_push.py --install.\nexec old\n", encoding="utf-8"
+    )
+    pre_push._install()
+    assert hook.read_text(encoding="utf-8") == pre_push.HOOK
     hook.write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
     with pytest.raises(SystemExit, match="not this script's"):
         pre_push._install()
@@ -83,3 +90,17 @@ def test_a_run_passes_only_on_the_exit_codes_it_allows():
     pre_push._run("all skipped", command, passing=frozenset({0, pre_push.NO_TESTS_COLLECTED}))
     with pytest.raises(SystemExit, match="exit 5"):
         pre_push._run("all skipped", command)
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="git's hooks run under a POSIX sh")
+def test_the_hook_lets_a_branch_without_the_gate_push(tmp_path):
+    hook = tmp_path / "pre-push"
+    hook.write_text(pre_push.HOOK, encoding="utf-8")
+    # No scripts/pre_push.py here, and no uv on the empty PATH: the hook exits 0 before uv.
+    shell = shutil.which("sh")
+    result = subprocess.run([shell, str(hook)], cwd=tmp_path, env={"PATH": ""}, capture_output=True)
+    assert result.returncode == 0
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "pre_push.py").write_text("", encoding="utf-8")
+    result = subprocess.run([shell, str(hook)], cwd=tmp_path, env={"PATH": ""}, capture_output=True)
+    assert result.returncode != 0  # with the script, the hook runs the gate (here: no uv)
