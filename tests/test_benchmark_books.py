@@ -304,3 +304,178 @@ def test_baseline_reuse_ignores_the_widths_the_key_step_cannot_see(run, monkeypa
         books, "cmd_baseline", lambda args: seen.append(books._case_list(args)) or 0
     )
     assert books.main(remedy) == 0 and seen == [["smoke_poisson"]]
+
+
+# --------------------------------------------------------------------------- fit-output check
+
+
+def test_the_record_carries_what_a_user_reads_on_fixed_test_rows(run):
+    record, _ = run
+    out = record["outputs"]
+    _, test = books.load_book(books.SYNTHETIC)
+    rows = books._sample_rows(len(test))
+    assert out["sample"] == {
+        "rows": len(rows),
+        "seed": books.SEED,
+        "hash": books.digest(rows.tolist()),
+    }
+    assert len(out["predictions"]) == len(rows) == min(books.OUTPUT_ROWS, len(test))
+    assert out["edf_total"] == pytest.approx(sum(out["edf_by_term"].values()) + 1.0)
+    assert set(out["smoothing"]) and set(out["coef_se"]) == set(out["edf_by_term"])
+    assert isinstance(out["intercept"], float) and out["intercept_se"] > 0
+    assert set(out["decisions"]) == set(books.DECISIONS)
+    json.dumps(out, allow_nan=False)  # non-finite entries are null, in the file and in benchboard
+
+
+def test_the_sample_rows_depend_only_on_the_test_frame_size():
+    import numpy as np
+
+    rows = books._sample_rows(50_000)
+    assert len(rows) == books.OUTPUT_ROWS == len(np.unique(rows)) and (np.diff(rows) > 0).all()
+    np.testing.assert_array_equal(rows, books._sample_rows(50_000))
+    np.testing.assert_array_equal(books._sample_rows(10), np.arange(10))
+
+
+def _check(record, edit=None, base_edit=None, lookup=None):
+    base_sha = "c" * 40
+    base = _baseline(record, base_sha)
+    branch = copy.deepcopy(record)
+    if edit:
+        edit(branch)
+    if base_edit:
+        base_edit(base)
+    return books.check([branch], base_sha, lookup or (lambda *_: [base]))
+
+
+def test_a_branch_that_reproduces_its_baseline_passes(run):
+    table, failures, refusals = _check(run[0])
+    assert failures == [] and refusals == []
+    assert "| smoke_poisson | pinned | pass | 0 | 0 | 0 | 0 | 0 | 0 | same |" in table
+
+
+def _scale_intercept(rec, factor):
+    rec["outputs"]["intercept"] *= factor
+
+
+def test_a_one_in_a_million_intercept_shift_fails_and_names_the_intercept(run):
+    record, _ = run
+    table, failures, _ = _check(record, lambda r: _scale_intercept(r, 1 + 1e-6))
+    assert len(failures) == 1
+    beta0 = record["outputs"]["intercept"]
+    expected = abs(beta0) * 1e-6 / max(abs(beta0), 1.0)  # the link-scale floor of 1
+    assert f"- FAIL smoke_poisson [pinned] vs {'c' * 12}: intercept moved {expected:.2e}" in table
+
+
+@pytest.mark.parametrize(
+    ("output", "edit"),
+    [
+        ("predictions", lambda o, f: o["predictions"].__setitem__(7, o["predictions"][7] * f)),
+        ("coef_se", lambda o, f: o["coef_se"]["a"].__setitem__(0, o["coef_se"]["a"][0] * f)),
+        ("intercept_se", lambda o, f: o.update(intercept_se=o["intercept_se"] * f)),
+        ("edf_by_term", lambda o, f: o["edf_by_term"].update(a=o["edf_by_term"]["a"] * f)),
+        ("edf_total", lambda o, f: o.update(edf_total=o["edf_total"] * f)),
+        ("family", lambda o, f: o["family"].update(phi=o["family"]["phi"] * f)),
+    ],
+)
+def test_a_value_fails_just_beyond_the_tolerance_and_passes_just_inside(run, output, edit):
+    record, _ = run
+    for factor, fails in ((1 + 2 * books.VALUE_RTOL, True), (1 + 0.5 * books.VALUE_RTOL, False)):
+        table, failures, _ = _check(record, lambda r, f=factor: edit(r["outputs"], f))
+        assert bool(failures) is fails, (output, factor)
+        assert (f"{output} moved" in table) is fails
+    if output == "predictions":
+        table, _, _ = _check(record, lambda r: edit(r["outputs"], 1 + 1e-6))
+        assert "predictions moved 1.00e-06 relative at sample row 7" in table
+
+
+def test_an_entry_near_zero_is_read_against_its_outputs_scale():
+    assert books.relative_move([1.0, 1e-9], [1.0, 2e-9], books.FLOOR_FRACTION)[0] == pytest.approx(
+        1e-9 / books.FLOOR_FRACTION
+    )
+    assert books.relative_move([1.0, 1e-9], [1.0, 2e-9], 0.0)[0] == pytest.approx(0.5)
+    assert books.relative_move([0.0, 0.0], [0.0, 0.0], 0.0) == (0.0, 0)
+    assert books.relative_move([1.0, None], [1.0, 2.0], 0.0) is None  # estimability moved
+    assert books.relative_move([1.0], [1.0, 2.0], 0.0) is None
+
+
+@pytest.mark.parametrize(
+    ("decision", "edit"),
+    [
+        ("converged", lambda r: r["outputs"]["decisions"].update(converged=False)),
+        ("termination_reason", lambda r: r["outputs"]["decisions"].update(termination_reason="x")),
+        ("backend", lambda r: r["outputs"]["decisions"].update(backend="qr")),
+        (
+            "warning categories",
+            lambda r: r["warnings"].append(
+                {"category": "ConvergenceWarning", "message": "m", "count": 1}
+            ),
+        ),
+        ("status", lambda r: r.update(status="raised RuntimeError: x")),
+        ("coef_se[a] estimability", lambda r: r["outputs"]["coef_se"]["a"].__setitem__(0, None)),
+        ("edf_by_term entries", lambda r: r["outputs"]["edf_by_term"].pop("a")),
+        ("smoothing terms", lambda r: r["outputs"]["smoothing"].pop("a")),
+    ],
+)
+def test_a_decision_must_match_exactly(run, decision, edit):
+    table, failures, _ = _check(run[0], edit)
+    assert len(failures) == 1
+    assert f": {decision} decision differs" in table
+
+
+def test_a_warning_count_and_a_smoothing_parameter_are_reported_not_gated(run):
+    record, _ = run
+
+    def edit(r):
+        if r["warnings"]:
+            r["warnings"][0] = dict(r["warnings"][0], count=r["warnings"][0]["count"] + 3)
+        r["outputs"]["smoothing"]["a"] *= 10.0  # a flat direction's lambda is not identified
+
+    table, failures, _ = _check(record, edit)
+    assert failures == [] and "| 2.3e+00 | same |" in table
+
+
+def test_a_pinned_record_is_checked_only_against_a_pinned_baseline(run):
+    record, _ = run
+    asked = []
+    default = _baseline(record, "c" * 40)
+    default["threads"], default["key"] = "default", dict(default["key"], threads="default")
+
+    def lookup(sha, case, threads):
+        asked.append(threads)
+        return [default]
+
+    table, failures, refusals = _check(record, lookup=lookup)
+    assert asked == ["pinned"] and table is None and failures == []
+    assert "threads: baseline" in refusals[0]
+
+
+def test_an_untimed_baseline_serves_check_but_not_compare(run):
+    record, _ = run
+    untimed = dict(_baseline(record, "c" * 40), counts_only=True)
+    assert books.usable_for_check(untimed) and not books.usable_baseline(untimed)
+    assert not books.usable_for_check(dict(untimed, outputs={"error": "RuntimeError: x"}))
+    assert not books.usable_for_check({**untimed, "provenance": {"dirty": True}})
+    _, failures, refusals = _check(record, lookup=lambda *_: [untimed])
+    assert failures == [] and refusals == []
+
+
+@pytest.mark.parametrize(("factor", "code"), [(1.0, 0), (1 + 1e-6, 1)])
+def test_check_exits_nonzero_when_an_output_moves(run, tmp_path, monkeypatch, factor, code):
+    record, _ = run
+    base_sha = books._resolve("HEAD")
+    branch = copy.deepcopy(record)
+    _scale_intercept(branch, factor)
+    path = tmp_path / "branch.json"
+    path.write_text(json.dumps(branch))
+    monkeypatch.setattr(books, "stored_records", lambda *_: [_baseline(record, base_sha)])
+    assert books.main(["check", str(path), "--base", "HEAD"]) == code
+    monkeypatch.setattr(books, "stored_records", lambda *_: [])
+    assert books.main(["check", str(path), "--base", "HEAD"]) == 2  # no baseline: refused
+
+
+def test_check_reads_a_near_zero_prediction_against_the_predictions_scale(run):
+    def tiny(value):
+        return lambda r: r["outputs"]["predictions"].__setitem__(0, value)
+
+    _, failures, _ = _check(run[0], tiny(2e-12), base_edit=tiny(1e-12))
+    assert failures == []

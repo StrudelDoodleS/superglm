@@ -104,6 +104,87 @@ held-out metrics, base → branch with ratios), then the phases and work counts 
 each case. For a pass/fail gate on a pinned run, `benchboard run-timed --vs` with
 the same benchboard case name kills a run that passes the factor.
 
+## Check fit outputs against master
+
+`check` asks whether a branch moves what a user reads. It does not time anything, so it
+runs on one core beside other work:
+
+```
+uv run python benchmarks/books.py baseline --set smoke --counts-only --label me
+uv run python benchmarks/books.py check --set smoke --label me
+```
+
+`baseline --counts-only` stores untimed, pinned fits of the merge base, one `benchboard
+heavy --cores 1` job per case, and reuses a key already stored (a timed baseline serves as
+well). `check --set` fits the same cases at `HEAD` the same way and compares each with its
+baseline under `compare`'s key rules: same dataset, spec, harness, environment, machine and
+thread setting, so a pinned record is only ever checked against a pinned baseline. Given
+record files, or none (the latest per case for `HEAD`), it fits nothing. It prints one
+table row per case and a `FAIL` line naming the case, the output and the size of every
+move beyond tolerance. It exits 1 when anything moves, 2 when a record has no usable
+baseline, and 0 otherwise. The smoke set takes about 10 s a side; `lss` about 6 to 30 s a
+case; `standard` and `families` are freMTPL2 book fits of a minute or more each, so run
+them for changes that reach those fits.
+
+Every record carries an `outputs` block:
+
+- the sample: 2,000 test rows (all of them on a smaller test frame) drawn with the harness
+  seed, so a dataset hash names the same rows at every commit, and a hash of the rows;
+- `SuperGLM`: the predicted means on those rows, the intercept, the summary's coefficient
+  standard errors (per term, and the intercept's; `predict` gives no standard errors),
+  total and per-term EDF, the dispersion and any estimated theta or Tweedie power, and the
+  smoothing parameters;
+- `SuperLSS`: every parameter's prediction on its natural scale and its linear
+  predictor's standard error (`predict_link(se_fit=True)`) on those rows, each
+  parameter's intercept, total and per-term EDF, and the smoothing parameters;
+- decisions: the convergence flag and termination reason, and the dispatched backend.
+  The warning categories come from the record's captured warnings.
+
+A record grows by about 45 KB for a `SuperGLM` case and 200 KB for a `SuperLSS` case on
+disk (one float per line), about a quarter of that compressed in benchboard's history.
+
+### Tolerances
+
+Decisions must match exactly: status, convergence flag, termination reason, backend,
+the set of warning categories, the terms that carry EDF and smoothing parameters, and
+which standard errors are finite. A warning's count may change.
+
+Values are gated at `VALUE_RTOL = 2**-26 ≈ 1.49e-8` relative, entry by entry:
+`|b - a| / max(|a|, |b|, floor)` against the baseline value `a`. The argument:
+
+- Two fits under one key run the same arithmetic on the same machine with the same
+  thread pools. A branch that leaves the numerical code alone reproduces its baseline bit
+  for bit, so master against itself moves nothing.
+- A branch that reorders that arithmetic (another summation order, a faster kernel)
+  moves a converged output by rounding amplified by the problem's conditioning. Last-bit
+  thread differences reach about 1e-9 after REML, and are accepted as rounding.
+- A branch that changes where a fit stops moves its outputs by up to the fit's
+  convergence slack, and that is not rounding. The slack is set by PIRLS stopping on a
+  relative deviance change of `tol = 1e-6`, and by REML stopping on a projected
+  log-lambda gradient and an objective change of `reml_tol * (1 + |V|)` with
+  `reml_tol = 1e-9`, or on a Newton step of at most `1e-3` in log lambda. On these books,
+  with `|V|` in the thousands or more, that moves outputs far beyond 1e-8. Such a move must
+  be judged against a reference optimum, and passing it silently would hide it.
+- Between the two sits `sqrt(eps)`: the accuracy to which rounding in an objective limits
+  where its minimiser can be located (Gill, Murray and Wright, *Practical Optimization*,
+  1981, section 8.2.2, written in machine precision, `eps = 2u` here). A move beyond it is
+  a different answer, not rounding, and it is still far below anything priced.
+
+The floor of each output's scale:
+
+- Predictions and standard errors are read relative to themselves. An entry under a
+  thousandth of the output's largest baseline entry is read against that thousandth,
+  because a relative move of a near-zero entry says nothing a user reads.
+- The intercept has a floor of 1 on the link scale. Moving it by `d` moves every linear
+  predictor by `d`, so a log-link price moves by a factor of about `1 + d`.
+- EDF has a floor of 1 effective parameter.
+- The dispersion, theta and power are relative.
+
+Smoothing parameters are reported, as the largest `|Δ log λ|`, and not gated. Along a flat
+direction they are not identified, and rounding can move them by orders of magnitude while
+the EDF and predictions stay put (AGENTS.md, *Fidelity and guards*). The EDF and the
+predictions carry their effect.
+
 ## Every fit on a benchboard machine is recorded
 
 `SuperGLM.fit`, `fit_path`, `fit_reml`, `estimate_p` and `estimate_theta`, and `SuperLSS.fit` and

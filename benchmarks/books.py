@@ -9,6 +9,9 @@ Subcommands (``python benchmarks/books.py <cmd> --help`` for options)::
                                 run-timed per fit (--record for pinned runs), reusing any key
                                 already stored
     compare [RECORD ...]        branch records against the stored baseline at the merge base
+    check [RECORD ...]          the fit outputs a user reads (predictions, standard errors,
+                                intercept, EDF, decisions) against the stored baseline at the
+                                merge base; exits 1 when anything moves beyond tolerance
 
 A record is keyed by (git SHA, dataset hash, case-spec hash, environment,
 machine, thread setting).  benchboard keys a baseline by (case, commit,
@@ -43,7 +46,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 HARNESS_ROOT = HERE.parent
-SCHEMA = 1
+SCHEMA = 2
 DEFAULT_OUT = Path(
     os.environ.get("SUPERGLM_BOOKS_DIR", Path.home() / ".cache" / "benchboard" / "books")
 )
@@ -316,6 +319,10 @@ _SEMANTICS = (
     "_nb2_deviance",
     "glm_results",
     "lss_results",
+    "_sample_rows",
+    "_floats",
+    "glm_outputs",
+    "lss_outputs",
     "Counters",
     "glm_state",
     "lss_state",
@@ -325,7 +332,8 @@ _SEMANTICS = (
 
 def harness_hash() -> str:
     return digest(
-        [inspect.getsource(globals()[name]) for name in _SEMANTICS] + [COUNTERS, PROFILE_WORK]
+        [inspect.getsource(globals()[name]) for name in _SEMANTICS]
+        + [COUNTERS, PROFILE_WORK, OUTPUT_ROWS]
     )
 
 
@@ -900,6 +908,97 @@ def lss_results(spec, model, test) -> dict:
     return out
 
 
+# --------------------------------------------------------------------------- fit outputs
+
+# Test rows whose predictions a record keeps.  They are drawn from the prepared test frame
+# with the harness seed, so a dataset hash names the same rows at every commit.
+OUTPUT_ROWS = 2000
+
+
+def _sample_rows(n_test):
+    import numpy as np
+
+    rows = np.random.default_rng(SEED).choice(n_test, size=min(OUTPUT_ROWS, n_test), replace=False)
+    return np.sort(rows)
+
+
+def _floats(values):
+    """A JSON list of floats; a non-finite entry (an unestimable SE, say) is null."""
+    import numpy as np
+
+    a = np.asarray(values, dtype=np.float64).ravel()
+    return [float(v) if np.isfinite(v) else None for v in a]
+
+
+def glm_outputs(spec, model, test) -> dict:
+    """What a user reads off a fitted SuperGLM, on a fixed sample of test rows.
+
+    ``SuperGLM.predict`` gives no standard errors, so the standard errors are the summary's
+    coefficient table: the intercept's and each term's, on the fitted-family scale.
+    """
+    rows = _sample_rows(len(test))
+    X, _, _, off = _glm_inputs(spec, test.iloc[rows].reset_index(drop=True))
+    mu = model.predict(X) if off is None else model.predict(X, offset=off)
+    diag = model.reml_diagnostics()
+    result, dist = model.result, model._distribution
+    family = {"phi": float(result.phi)}
+    for name in ("theta", "p"):  # a negative binomial theta, a Tweedie power
+        value = getattr(dist, name, None)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            family[name] = float(value)
+    out = {
+        "sample": {"rows": len(rows), "seed": SEED, "hash": digest(rows.tolist())},
+        "predictions": _floats(mu),
+        "intercept": float(result.intercept),
+        "edf_total": float(result.effective_df),
+        "edf_by_term": {str(k): float(v) for k, v in model._group_edf.items()},
+        "family": family,
+        "smoothing": {str(k): _floats([v])[0] for k, v in (diag.get("lambdas") or {}).items()},
+        "decisions": {
+            "converged": diag.get("converged"),
+            "termination_reason": diag.get("termination_reason"),
+            "backend": getattr(result, "direct_backend", None),
+        },
+    }
+    try:
+        summary = model.summary()
+        se = summary.to_dict()["standard_errors"]["coefficient_se"]
+        out["coef_se"] = {str(k): _floats(v) for k, v in se.items()}
+        out["intercept_se"] = next(float(r.se) for r in summary._coef_rows if r.name == "Intercept")
+    except Exception as exc:  # noqa: BLE001 - a summary that refuses is recorded, and compared
+        out["coef_se_unavailable"] = f"{type(exc).__name__}: {exc}"[:200]
+    return out
+
+
+def lss_outputs(spec, model, test) -> dict:
+    """What a user reads off a fitted SuperLSS: every parameter's prediction on the natural
+    scale and its linear predictor's standard error, on a fixed sample of test rows."""
+    rows = _sample_rows(len(test))
+    X, _, _, offsets = _lss_inputs(spec, test.iloc[rows].reset_index(drop=True))
+    params = model.predict_parameters(X, offsets=offsets)
+    _, se = model.predict_link(X, offsets=offsets, se_fit=True)
+    state, result = model._model.fit_state, model.result_
+    smoothing = state.smoothing
+    return {
+        "sample": {"rows": len(rows), "seed": SEED, "hash": digest(rows.tolist())},
+        "predictions": {str(c): _floats(params[c]) for c in params.columns},
+        "prediction_se": {str(c): _floats(se[c]) for c in se.columns},
+        "intercept": {
+            name.split(":", 1)[0]: float(v)
+            for name, v in model.coef_.items()
+            if name.endswith(":(intercept)")
+        },
+        "edf_total": float(result.total_effective_df),
+        "edf_by_term": {str(k): float(v) for k, v in result.term_edf.items()},
+        "smoothing": {str(k): _floats([v])[0] for k, v in model.smoothing_parameters_.items()},
+        "decisions": {
+            "converged": bool(smoothing.converged),
+            "termination_reason": str(smoothing.convergence_reason),
+            "backend": None,
+        },
+    }
+
+
 def _scalars(d):
     return {
         k: v for k, v in (d or {}).items() if isinstance(v, (int, float, str, bool)) or v is None
@@ -1108,6 +1207,12 @@ def _run_case(case: str, threads: str, *, counts_only: bool) -> tuple[dict, dict
         record["results"] = (glm_results if spec["kind"] == "glm" else lss_results)(
             spec, model, test
         )
+        try:
+            record["outputs"] = (glm_outputs if spec["kind"] == "glm" else lss_outputs)(
+                spec, model, test
+            )
+        except Exception as exc:  # noqa: BLE001 - check refuses the pair and says why
+            record["outputs"] = {"error": f"{type(exc).__name__}: {exc}"[:300]}
     else:
         record["work"] = calls
     record["key"] = key_of(case, threads, provenance["sha"], data_hash, env, mach, seen)
@@ -1371,6 +1476,18 @@ def usable_baseline(rec: dict) -> bool:
     )
 
 
+def usable_for_check(rec: dict) -> bool:
+    """A baseline for ``check``: a successful fit of a clean tree with an outputs block.  It
+    need not be timed, since the outputs carry no clock."""
+    outputs = rec.get("outputs")
+    return (
+        rec["status"] == "ok"
+        and rec["provenance"]["dirty"] is False
+        and outputs is not None
+        and "error" not in outputs
+    )
+
+
 # --------------------------------------------------------------------------- baseline
 
 
@@ -1439,7 +1556,13 @@ def _child(python: Path, tree: Path, args: list[str], timeout: float) -> int:
 
 
 # Upper bounds for one benchboard run-timed lease, minutes (at least twice the expected time).
-LEASE_MINUTES = {"std_mains": 2, "std_pairs4": 5, "std_pairs4_binned": 5, "std_pairs10": 12}
+LEASE_MINUTES = {
+    "std_mains": 2,
+    "std_pairs4": 5,
+    "std_pairs4_binned": 5,
+    "std_pairs10": 12,
+    "smoke_poisson": 3,
+}
 
 
 def timed_command(python: Path, case: str, threads: str, sha: str, args) -> list[str]:
@@ -1472,6 +1595,16 @@ def timed_command(python: Path, case: str, threads: str, sha: str, args) -> list
     return [*bench, "--", *run]
 
 
+def outputs_command(python: Path, case: str, args, job: str = "outputs") -> list[str]:
+    """One untimed, pinned fit on a single core through ``benchboard heavy``: what ``check``
+    needs, without holding the whole machine as a timed run does."""
+    minutes = args.minutes or LEASE_MINUTES.get(case, 30)
+    run = [str(python), str(Path(__file__).resolve()), "run", case, "--threads", "pinned"]
+    run += ["--counts-only", *(["--baseline"] if job == "outputs" else []), "--out", str(args.out)]
+    bench = ["benchboard", "heavy", f"{args.label}-{job}-{case}", "--cores", "1", "--"]
+    return [*bench, "timeout", str(int(minutes * 90)), *run]
+
+
 def cmd_baseline(args) -> int:
     sha = _resolve(args.ref) if args.ref else merge_base()
     tree = prepare_tree(sha)
@@ -1479,7 +1612,11 @@ def cmd_baseline(args) -> int:
         print(f"baseline tree ready: {tree} at {sha}")
         return 0
     python, cases, failures = _venv_python(tree), _case_list(args), 0
-    for threads in args.threads.split(","):
+    settings = (args.threads or ("pinned" if args.counts_only else "pinned,default")).split(",")
+    if args.counts_only and settings != ["pinned"]:
+        raise SystemExit("--counts-only runs under benchboard heavy, which pins every pool")
+    usable = usable_for_check if args.counts_only else usable_baseline
+    for threads in settings:
         keys_file = Path(args.out) / "tmp" / f"keys_{sha[:12]}_{threads}.json"
         keys_file.parent.mkdir(parents=True, exist_ok=True)
         key_cmd = [
@@ -1512,7 +1649,7 @@ def cmd_baseline(args) -> int:
             stored = [
                 r
                 for r in stored_records(sha, case, threads)
-                if usable_baseline(r)
+                if usable(r)
                 and reuse_part(r["key"]) == reuse_part(key)
                 and r["key"]["sha"] == sha
                 and "threads_observed" in r["key"]  # an older key can never pass compare
@@ -1520,7 +1657,10 @@ def cmd_baseline(args) -> int:
             if stored and not args.force:
                 print(f"reused  {case} [{threads}] {bench_case(entry)} at {sha[:12]}", flush=True)
                 continue
-            cmd = timed_command(python, case, threads, sha, args)
+            if args.counts_only:
+                cmd = outputs_command(python, case, args)
+            else:
+                cmd = timed_command(python, case, threads, sha, args)
             cmd = [part.replace("{case}", bench_case(entry)) for part in cmd]
             rc = subprocess.run(cmd, cwd=tree, env=_clean_env(), check=False).returncode
             failures += rc != 0
@@ -1543,10 +1683,10 @@ def _diff(a, b, prefix="") -> list[str]:
     return [] if a == b else [f"{prefix}: baseline {canonical(a)} vs branch {canonical(b)}"]
 
 
-def match_baseline(record: dict, candidates: list[dict], base_sha: str):
+def match_baseline(record: dict, candidates: list[dict], base_sha: str, usable=usable_baseline):
     """(baseline, None) when a stored record's key equals the branch's in everything but the SHA;
     else (None, the reason, naming each component that differs)."""
-    usable = [c for c in candidates if usable_baseline(c)]
+    usable = [c for c in candidates if usable(c)]
     if not usable:
         return None, f"no stored baseline at {base_sha[:12]} for this case and thread setting"
     want = dict(record["key"], sha=base_sha)
@@ -1703,6 +1843,240 @@ def cmd_compare(args) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------- check
+
+# Two fits under one key (dataset, spec, environment, machine, thread setting) run the same
+# arithmetic, so a branch that leaves the numerical code alone reproduces its baseline bit
+# for bit.  A branch that reorders that arithmetic moves a converged output by rounding
+# amplified by the problem's conditioning; one that changes where a fit stops moves it by up
+# to the fit's convergence slack, which the REML and PIRLS stop bars put far above this
+# tolerance.  The tolerance is sqrt(eps): the accuracy to which rounding in an objective
+# limits where its minimiser can be located (Gill, Murray and Wright, Practical
+# Optimization, 1981, section 8.2.2, written in machine precision, eps here).  A move beyond
+# it is a different answer, not rounding.  docs/development/benchmark-baselines.md argues it.
+VALUE_RTOL = 2.0**-26
+# An entry below this fraction of its output's largest baseline entry is read against that
+# fraction rather than against itself: a near-zero entry's relative move says nothing a user
+# reads.
+FLOOR_FRACTION = 1e-3
+# Each gated output and the floor of its scale: "vector" is FLOOR_FRACTION of the output's
+# largest baseline entry; a number is an absolute floor in the output's own unit (1 on the
+# link scale, where a move of d moves every prediction by d; 1 effective parameter for EDF).
+VALUE_OUTPUTS = {
+    "predictions": "vector",
+    "prediction_se": "vector",
+    "coef_se": "vector",
+    "intercept_se": 0.0,
+    "intercept": 1.0,
+    "edf_total": 1.0,
+    "edf_by_term": 1.0,
+    "family": 0.0,
+}
+DECISIONS = ("converged", "termination_reason", "backend")
+
+
+def _entries(value) -> dict:
+    """An output as {entry: list of floats}; a number is one entry, a dict one per key."""
+    if isinstance(value, dict):
+        return {str(k): v if isinstance(v, list) else [v] for k, v in value.items()}
+    return {"": value if isinstance(value, list) else [value]}
+
+
+def relative_move(a, b, floor: float):
+    """(largest |b - a| / max(|a|, |b|, floor), its index) over two equal-length lists, or None
+    when they differ in length or in which entries are null (non-finite): that is a
+    decision, not a value."""
+    import numpy as np
+
+    a = np.array([np.nan if v is None else v for v in a], dtype=np.float64)
+    b = np.array([np.nan if v is None else v for v in b], dtype=np.float64)
+    if a.shape != b.shape or (np.isfinite(a) != np.isfinite(b)).any():
+        return None
+    ok = np.isfinite(a)
+    if not ok.any():
+        return 0.0, None
+    scale = np.maximum(np.maximum(np.abs(a), np.abs(b)), max(floor, np.finfo(np.float64).tiny))
+    move = np.abs(np.where(ok, b - a, 0.0)) / np.where(ok, scale, 1.0)
+    i = int(np.argmax(move))
+    return float(move[i]), i
+
+
+def _warning_categories(rec) -> list[str]:
+    return sorted({w["category"] for w in rec.get("warnings") or []})
+
+
+def check_pair(base: dict, branch: dict) -> list[dict]:
+    """Findings for one branch record against its baseline: each names an output, its move
+    (None for a decision) and whether it failed."""
+    found = []
+
+    def decision(name, a, b):
+        found.append(
+            {
+                "output": name,
+                "move": None,
+                "failed": a != b,
+                "detail": f"baseline {canonical(a)}, branch {canonical(b)}",
+            }
+        )
+
+    bo, no = base.get("outputs") or {}, branch.get("outputs") or {}
+    decision("status", base["status"], branch["status"])
+    decision("outputs error", bo.get("error"), no.get("error"))
+    if any(f["failed"] for f in found) or bo.get("error"):
+        return found
+    for name in DECISIONS:
+        decision(name, bo["decisions"].get(name), no["decisions"].get(name))
+    decision("warning categories", _warning_categories(base), _warning_categories(branch))
+    decision("summary refusal", bo.get("coef_se_unavailable"), no.get("coef_se_unavailable"))
+    decision("sample rows", bo.get("sample"), no.get("sample"))
+    for name, floor in VALUE_OUTPUTS.items():
+        if name not in bo and name not in no:
+            continue
+        ea, eb = _entries(bo.get(name)), _entries(no.get(name))
+        if set(ea) != set(eb):
+            decision(f"{name} entries", sorted(ea), sorted(eb))
+            continue
+        worst = {"output": name, "move": 0.0, "failed": False, "detail": ""}
+        for key, a in ea.items():
+            finite = [abs(v) for v in a if v is not None]
+            fl = FLOOR_FRACTION * max(finite, default=0.0) if floor == "vector" else floor
+            moved = relative_move(a, eb[key], fl)
+            if moved is None:
+                decision(f"{name}{f'[{key}]' if key else ''} estimability", a, eb[key])
+                continue
+            if moved[0] > worst["move"]:
+                where = [f"[{key}]"] if key else []
+                where += [f" at sample row {moved[1]}"] if len(a) > 1 else []
+                worst.update(move=moved[0], failed=moved[0] > VALUE_RTOL, detail="".join(where))
+        found.append(worst)
+    sa, sb = bo.get("smoothing") or {}, no.get("smoothing") or {}
+    if set(sa) != set(sb):
+        decision("smoothing terms", sorted(sa), sorted(sb))
+    else:
+        found.append({"output": "smoothing", "move": _log_move(sa, sb), "failed": False})
+    return found
+
+
+def _log_move(a: dict, b: dict) -> float:
+    """Largest |log b - log a| over smoothing parameters; reported, never gated."""
+    import math
+
+    moves = [0.0]
+    for k, x in a.items():
+        y = b[k]
+        if x == y:
+            continue
+        ok = all(isinstance(v, float) and v > 0 for v in (x, y))
+        moves.append(abs(math.log(y) - math.log(x)) if ok else math.inf)
+    return max(moves)
+
+
+# Table columns: (heading, the outputs whose largest move the column shows).
+CHECK_COLUMNS = (
+    ("Predictions", ("predictions",)),
+    ("SEs", ("prediction_se", "coef_se", "intercept_se")),
+    ("Intercept", ("intercept",)),
+    ("EDF", ("edf_total", "edf_by_term")),
+    ("Dispersion", ("family",)),
+    ("log λ (not gated)", ("smoothing",)),
+)
+
+
+def _move_cell(findings, outputs) -> str:
+    hits = [f for f in findings if f["output"] in outputs and f["move"] is not None]
+    if not hits:
+        return "—"
+    move = max(f["move"] for f in hits)
+    mark = " ✗" if any(f["failed"] for f in hits) else ""
+    return ("0" if move == 0 else f"{move:.1e}") + mark
+
+
+def check_table(rows) -> str:
+    """The pull request's table: one row per case, each output's largest relative move."""
+    head = ["Case", "Threads", "Result", *(c for c, _ in CHECK_COLUMNS), "Decisions"]
+    lines = [
+        f"Fit outputs against the baseline; values gated at {VALUE_RTOL:.1e} relative"
+        " (sqrt(eps)), decisions exactly.",
+        "",
+        "| " + " | ".join(head) + " |",
+        "|" + "---|" * len(head),
+    ]
+    failures = []
+    for rec, base_sha, found in rows:
+        failed = [f for f in found if f["failed"]]
+        moved = [f["output"] for f in failed if f["move"] is None]
+        cells = [_move_cell(found, outputs) for _, outputs in CHECK_COLUMNS]
+        result = "FAIL" if failed else "pass"
+        lines.append(
+            f"| {rec['case']} | {rec['threads']} | {result} | "
+            + " | ".join(cells)
+            + f" | {', '.join(moved) or 'same'} |"
+        )
+        for f in failed:
+            what = (
+                f"moved {f['move']:.2e} relative{f['detail']} (tolerance {VALUE_RTOL:.2e})"
+                if f["move"] is not None
+                else f"decision differs: {f['detail']}"
+            )
+            failures.append(
+                f"{rec['case']} [{rec['threads']}] vs {base_sha[:12]}: {f['output']} {what}"
+            )
+    if failures:
+        lines += ["", *(f"- FAIL {line}" for line in failures)]
+    return "\n".join(lines)
+
+
+def check(records: list[dict], base_sha: str | None = None, lookup=None):
+    """(table, failures, refusals) for branch records against their stored baselines."""
+    rows, refusals, lookup = [], [], lookup or stored_records
+    for rec in records:
+        base = base_sha or merge_base(rec["provenance"]["sha"])
+        candidates = lookup(base, rec["case"], rec["threads"])
+        match, reason = match_baseline(rec, candidates, base, usable=usable_for_check)
+        if reason:
+            if reason.startswith("no stored baseline"):
+                reason += f"; store one: books.py baseline {base[:12]} --cases {rec['case']}"
+                reason += " --counts-only"
+            refusals.append(f"{rec['case']} [{rec['threads']}]: {reason}")
+        elif "outputs" not in rec:
+            refusals.append(f"{rec['case']} [{rec['threads']}]: the branch record has no outputs")
+        else:
+            rows.append((rec, base, check_pair(match, rec)))
+    failures = [r for r in rows if any(f["failed"] for f in r[2])]
+    return (check_table(rows) if rows else None), failures, refusals
+
+
+def cmd_check(args) -> int:
+    out = Path(args.out)
+    if args.records:
+        records = [json.loads(Path(p).read_text(encoding="utf-8")) for p in args.records]
+    else:
+        head = tree_state(HARNESS_ROOT)["sha"]
+        cases = _case_list(args) if (args.set or args.cases) else None
+        for case in cases or []:
+            cmd = outputs_command(Path(sys.executable), case, args, job="check")
+            if subprocess.run(cmd, cwd=HARNESS_ROOT, check=False).returncode:
+                print(f"the branch fit of {case} failed; its record is checked", file=sys.stderr)
+        threads = "pinned" if cases else args.threads
+        paths = _latest_records(out, head, threads)
+        records = [json.loads(p.read_text(encoding="utf-8")) for p in paths]
+        records = [r for r in records if cases is None or r["case"] in cases]
+        if not records:
+            raise SystemExit(f"no records for {head[:12]} in {out}; pass --set NAME to run them")
+    table, failures, refusals = check(records, _resolve(args.base) if args.base else None)
+    dirty = [r["case"] for r in records if r["provenance"]["dirty"]]
+    if dirty:
+        print(f"note: branch records from a tree with uncommitted changes: {', '.join(dirty)}\n")
+    if table:
+        print(table)
+    if refusals:
+        print("refused:", file=sys.stderr)
+        for r in refusals:
+            print(f"  {r}", file=sys.stderr)
+    return 1 if failures else 2 if refusals else 0
+
+
 # --------------------------------------------------------------------------- CLI
 
 
@@ -1747,8 +2121,13 @@ def main(argv=None) -> int:
     p.add_argument("ref", nargs="?", help=f"default: the merge base of HEAD with {UPSTREAM}")
     p.add_argument("--set", default="standard")
     p.add_argument("--cases")
-    p.add_argument("--threads", default="pinned,default")
+    p.add_argument("--threads", help="default: pinned,default (pinned with --counts-only)")
     p.add_argument("--force", action="store_true", help="re-time keys already stored")
+    p.add_argument(
+        "--counts-only",
+        action="store_true",
+        help="untimed pinned fits on one core through benchboard heavy: a baseline for check",
+    )
     p.add_argument(
         "--prepare", action="store_true", help="only create and sync the baseline worktree"
     )
@@ -1766,6 +2145,20 @@ def main(argv=None) -> int:
     p.add_argument("--threads", choices=THREADS)
     p.add_argument("--out", default=str(DEFAULT_OUT))
 
+    p = sub.add_parser(
+        "check", help="fit outputs against the stored baseline; exit 1 when anything moves"
+    )
+    p.add_argument("records", nargs="*", help="record files; default: the latest per case for HEAD")
+    p.add_argument("--set", help="first run these cases at HEAD: pinned, untimed, one core each")
+    p.add_argument("--cases")
+    p.add_argument(
+        "--base", help=f"baseline ref; default: each record's merge base with {UPSTREAM}"
+    )
+    p.add_argument("--threads", choices=THREADS, help="without --set: only this thread setting")
+    p.add_argument("--label", default="books", help="benchboard label prefix (your agent name)")
+    p.add_argument("--minutes", type=float, help="timeout bound per fit, minutes")
+    p.add_argument("--out", default=str(DEFAULT_OUT))
+
     args = parser.parse_args(argv)
     if getattr(args, "out", None):  # child processes run in another tree's directory
         args.out = str(Path(args.out).resolve())
@@ -1777,6 +2170,8 @@ def main(argv=None) -> int:
         return cmd_baseline(args)
     if args.cmd == "compare":
         return cmd_compare(args)
+    if args.cmd == "check":
+        return cmd_check(args)
     if args.cmd == "run" and args.tree:
         tree = Path(args.tree).resolve()
         return _child(_venv_python(tree), tree, _child_argv(argv, args.out), 24 * 3600)
@@ -1789,9 +2184,10 @@ def main(argv=None) -> int:
             print(text)
         return 0
     record, clock = run_case(args.case, args.threads, counts_only=args.counts_only)
-    if args.baseline and not usable_baseline(record):
+    if args.baseline and not (usable_for_check if args.counts_only else usable_baseline)(record):
         raise SystemExit(
-            "refused: a baseline is a timed, successful fit of a clean, committed tree"
+            "refused: a baseline is a successful fit of a clean, committed tree, timed unless"
+            " --counts-only"
         )
     path = write_record(record, Path(args.out))
     where = "not recorded in benchboard (--no-benchboard)"
