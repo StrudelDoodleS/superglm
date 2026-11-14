@@ -105,6 +105,11 @@ find "$SUPERGLM_DIR" -name '*.py' -exec touch -d '2000-01-01 00:00:00' {} +
 Set the same `NUMBA_CACHE_DIR` in the cluster's environment variables, so
 notebooks and jobs read the cache the script filled.
 
+`warmup()` compiles in worker processes, one per physical core by default, and
+then loads what they compiled. `SUPERGLM_N_JOBS` sets how many run at once, and
+`SUPERGLM_MAX_MEMORY` allows one per 600 MB; with one, it compiles in the
+calling process.
+
 `warmup()` covers every family's core fitting route, including bounded scalar
 responses and complete Dirichlet compositions. Startup cost depends on the
 platform and cache contents. The generated primitive digests invalidate cached

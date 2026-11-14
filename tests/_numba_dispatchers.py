@@ -180,3 +180,41 @@ def is_inlined(dispatcher) -> bool:
 
 def signatures(dispatchers) -> dict[str, list[str]]:
     return {name: [str(sig) for sig in value.signatures] for name, value in dispatchers.items()}
+
+
+def cached_signatures(dispatchers) -> dict[str, list[str]]:
+    """Each dispatcher's signatures in this process or in its Numba cache index.
+
+    ``superglm.warmup()`` compiles in worker processes, so a kernel it warmed
+    is in the on-disk cache until this process calls it.
+    """
+    found = signatures(dispatchers)
+    for name, value in dispatchers.items():
+        index = getattr(getattr(value, "_cache", None), "_cache_file", None)
+        if index is not None:
+            found[name] = sorted({*found[name], *(str(key[0]) for key in index._load_index())})
+    return found
+
+
+def compile_log(dispatchers) -> list[str]:
+    """A list that collects, from now on, each package dispatcher this process compiles.
+
+    Numba raises ``numba:compile`` only when a signature misses both the
+    process and the on-disk cache.
+    """
+    from numba.core import event
+
+    names = {id(value): name for name, value in dispatchers.items()}
+    compiled: list[str] = []
+
+    class _Listener(event.Listener):
+        def on_start(self, ev):
+            name = names.get(id(ev.data.get("dispatcher")))
+            if name is not None:
+                compiled.append(name)
+
+        def on_end(self, ev):
+            pass
+
+    event.register("numba:compile", _Listener())
+    return compiled

@@ -349,13 +349,15 @@ _numba_cache.ensure_cache_location()
 __getattr__, __dir__ = _attach(__name__, __path__, _LAZY_EXPORTS)
 
 
-def _warmup_scalar_observations() -> None:
+def _warmup_scalar_observations(*families: str) -> None:
     """Warm bounded NB/beta and compound-gamma core operands (orders 0–2).
 
     Warm the compiled gamma-window compositions and Tweedie remainder
     admission as well as their incomplete-gamma operands. NB's normalized
     recurrence and beta fraction are separate from its complete-density route.
     Optional third/fourth derivatives and endpoint fallbacks remain first-use.
+    ``families`` (``"negative_binomial"``, ``"tweedie"``; default both, in that
+    order) lets ``warmup()`` compile the two in separate processes.
     """
     import numpy as np
 
@@ -367,10 +369,13 @@ def _warmup_scalar_observations() -> None:
 
     response = np.array([1.0, 2.0, 3.0])
     bounds = ResponseBounds.from_arrays(np.zeros(3), np.full(3, 5.0), np.array([-1, 0, 1]))
-    for family, parameters in (
-        (NegativeBinomialLS(), [2.0, 0.7]),
-        (TweedieLSS(), [2.0, 1.2, 1.5]),
-    ):
+    cases = {
+        "negative_binomial": (NegativeBinomialLS, [2.0, 0.7]),
+        "tweedie": (TweedieLSS, [2.0, 1.2, 1.5]),
+    }
+    for name in families or tuple(cases):
+        family_type, parameters = cases[name]
+        family = family_type()
         theta = np.tile(parameters, (3, 1))
         theta.setflags(write=False)
         for semantics in ("prior", "frequency"):
@@ -435,7 +440,11 @@ def warmup() -> None:
 
     It compiles the kernels of every family and route, ``RandomEffect`` and
     ``FactorSmooth`` terms included, and the two basis kernels a prediction of
-    8,192 rows or more reads. Cost depends on the platform and cache contents.
+    8,192 rows or more reads. It compiles in worker processes, as many at once
+    as ``SUPERGLM_N_JOBS`` allows (the physical cores by default; at most one
+    per 600 MB of ``SUPERGLM_MAX_MEMORY``), each saving its kernels to Numba's
+    cache, and then loads them into this process; with one worker it compiles
+    here. Cost depends on the platform and cache contents.
     A smaller prediction compiles nothing, so a service of quotes does not need
     it. Kernels few fits reach compile on first use
     instead and then join the cache: the third and fourth derivatives a
@@ -444,58 +453,9 @@ def warmup() -> None:
     CPU model, so a cache built on one node type compiles again on another.
     See the how-to *Starting fast on ephemeral clusters*.
     """
-    from superglm._group_matrix._group_matrix_kernels import _warmup_group_matrix_kernels
-    from superglm._group_matrix._group_matrix_support import _warmup_support_scans
-    from superglm._group_matrix._lookup_tables import _warmup_lookup_tables
-    from superglm._nb2_deviance import _warmup_nb2_deviance
-    from superglm._tweedie_series import warmup as _warmup_tweedie_series
-    from superglm.distributional.kernels._declared import _warmup_rows as _warmup_declared_rows
-    from superglm.distributional.kernels._declared_bounds import _warmup_declared_bounds
-    from superglm.distributional.kernels._negative_binomial_crps import (
-        _warmup_negative_binomial_crps,
-    )
-    from superglm.distributional.kernels.gamma import _warmup_gamma
-    from superglm.distributional.kernels.generalized_gamma import _warmup_generalized_gamma
-    from superglm.distributional.kernels.negative_binomial import _warmup_negative_binomial
-    from superglm.distributional.kernels.tweedie import _warmup_tweedie
-    from superglm.distributional.solver._joint_tables import _warmup_joint_tables
-    from superglm.distributional.solver._ordinary_packing import _warmup_ordinary_packing
-    from superglm.distributional.solver.derivatives import _warmup_chain_rule
-    from superglm.features._basis_kernels import _warmup_basis_kernels
-    from superglm.features.interaction import _warmup_row_kron
-    from superglm.reml._compensated import _warmup_compensated
-    from superglm.reml._leverage_rows import _warmup_leverage_rows
-    from superglm.solvers._exact_sums import _warmup_exact_sums
-    from superglm.solvers._structured.block_leaves import _warmup_factor_smooth
-    from superglm.solvers._structured.leaf_kernels import _warmup_leaf_kernels
+    from superglm._warmup import warmup as _warmup
 
-    _warmup_tweedie()
-    _warmup_tweedie_series()
-    _warmup_group_matrix_kernels()
-    _warmup_compensated()
-    _warmup_exact_sums()
-    _warmup_ordinary_packing()
-    _warmup_chain_rule()
-    _warmup_joint_tables()
-    _warmup_support_scans()
-    _warmup_row_kron()
-    _warmup_basis_kernels()
-    _warmup_lookup_tables()
-    _warmup_leverage_rows()
-    _warmup_gamma()
-    _warmup_declared_bounds()
-    _warmup_declared_rows()
-    _warmup_negative_binomial()
-    _warmup_nb2_deviance()
-    _warmup_negative_binomial_crps()
-    _warmup_scalar_observations()
-    _warmup_dirichlet()
-    _warmup_generalized_gamma()
-    _warmup_leaf_kernels()
-    _warmup_factor_smooth()
-    from superglm._numba_compile import forget_compiles
-
-    forget_compiles()
+    _warmup()
 
 
 # The reviewed public surface, pinned by tests/test_public_api_snapshot.py.

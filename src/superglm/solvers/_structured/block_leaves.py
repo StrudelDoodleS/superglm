@@ -1199,7 +1199,7 @@ def _raw_moment_segments(
                     A[t, i, j] += xi * border[r, j]
 
 
-def _warmup_factor_smooth() -> None:
+def _warmup_factor_smooth(balance_tree: bool = True) -> None:
     """Compile the structured engine's FactorSmooth kernels for ``fs`` and ``sz`` (no rows).
 
     Fisher and signed rows (an observed-curvature family), exact and binned,
@@ -1208,7 +1208,8 @@ def _warmup_factor_smooth() -> None:
     ``balance_tree._warmup_balance_tree``.  Left to first use: the hat
     diagonal's per-row forms (``_level_row_forms``, a fit's diagnostics),
     and the moment segments of a binned term's signed weight derivatives
-    (``_moment_segments``), which no census fit reached.
+    (``_moment_segments``), which no census fit reached.  ``balance_tree=False``
+    leaves the tree out, for ``warmup()`` to compile it in another process.
     """
     from superglm.solvers._structured.balance_tree import _warmup_balance_tree
     from superglm.solvers._structured.leaf_kernels import (
@@ -1242,7 +1243,8 @@ def _warmup_factor_smooth() -> None:
     _first_distinct_level_rows(f1, i32, i32, i1, f1, 0, 0)
     # The compensated mode's per-column sums of an exact fs term.
     _factor_smooth_level_sums(f1, i32, i32, f2, i1, i1, frozen_f2, frozen_f2, np.zeros((4, 0)))
-    _warmup_balance_tree()
+    if balance_tree:
+        _warmup_balance_tree()
 
 
 def factor_smooth_moment_operators(
