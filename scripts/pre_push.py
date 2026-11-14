@@ -14,7 +14,8 @@ The checks, in order, stopping at the first failure:
 4. The test files the branch changes since its merge base with
    ``origin/master``, under OpenBLAS's Haswell and SkylakeX kernels
    (``OPENBLAS_CORETYPE``): a test that asserts one kernel's rounding fails
-   here instead of on a CI runner with another CPU.
+   here instead of on a CI runner with another CPU. A kernel this CPU cannot
+   execute is skipped; with neither (ARM64), the tests run once as dispatched.
 5. The quick suite, ``scripts/run_test_suite.py -m "not slow and not browser
    and not docs"``.
 
@@ -35,8 +36,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 QUICK = "not slow and not browser and not docs"
-# The kernels GitHub's x86-64 runners dispatch to: AMD EPYC runs Haswell's, Intel Xeon SkylakeX's.
-KERNELS = ("Haswell", "SkylakeX")
+# The kernels GitHub's x86-64 runners dispatch to (AMD EPYC runs Haswell's,
+# Intel Xeon SkylakeX's), each with the CPU features it needs, as NumPy names
+# them. A forced kernel the host cannot execute crashes, so it is skipped.
+KERNELS = {"Haswell": ("AVX2", "FMA3"), "SkylakeX": ("AVX512_SKX",)}
+NO_TESTS_COLLECTED = 5
 TY_EXTRAS = ("dev", "bench", "plotting")
 HOOK = """#!/bin/sh
 # Installed by scripts/pre_push.py --install.
@@ -44,10 +48,12 @@ exec uv run --no-sync python scripts/pre_push.py
 """
 
 
-def _run(label: str, command: list[str], env: dict[str, str] | None = None) -> None:
+def _run(
+    label: str, command: list[str], env: dict[str, str] | None = None, passing=frozenset({0})
+) -> None:
     print(f"pre-push: {label}", flush=True)
     result = subprocess.run(command, cwd=ROOT, env=env)
-    if result.returncode != 0:
+    if result.returncode not in passing:
         sys.exit(f"pre-push: {label} failed (exit {result.returncode})")
 
 
@@ -107,6 +113,17 @@ def _changed_tests() -> list[str]:
     return [name for name in names if re.fullmatch(r"tests/(.*/)?test_[^/]*\.py", name)]
 
 
+def _runnable_kernels() -> list[str | None]:
+    """The kernels this host can execute; ``[None]`` (native dispatch) off x86-64 or with none."""
+    from numpy._core._multiarray_umath import __cpu_features__ as features
+
+    kernels = [name for name, needs in KERNELS.items() if all(features.get(f) for f in needs)]
+    skipped = sorted(set(KERNELS) - set(kernels))
+    if skipped:
+        print(f"pre-push: this CPU cannot run OpenBLAS {', '.join(skipped)}; CI's runners do")
+    return kernels or [None]
+
+
 def _install() -> None:
     hooks = subprocess.run(
         ["git", "rev-parse", "--git-path", "hooks"],
@@ -139,12 +156,16 @@ def main(argv: list[str] | None = None) -> None:
     _ty()
     pytest = ["uv", "run", "--no-sync", "python", "-m", "pytest", "-q", "-p", "no:randomly"]
     changed = _changed_tests()
-    for kernel in KERNELS if changed else ():
-        env = {**os.environ, "OPENBLAS_CORETYPE": kernel}
+    for kernel in _runnable_kernels() if changed else ():
+        env = dict(os.environ) if kernel is None else {**os.environ, "OPENBLAS_CORETYPE": kernel}
+        # Every selected test skipping (an optional dependency missing) collects nothing.
         _run(
-            f"changed tests on OpenBLAS {kernel}",
-            _pytest(f"kernel-{kernel.lower()}", [*pytest, "-n", "4", *changed], cores=4),
+            f"changed tests on OpenBLAS {kernel or 'native dispatch'}",
+            _pytest(
+                f"kernel-{kernel or 'native'}".lower(), [*pytest, "-n", "4", *changed], cores=4
+            ),
             env=env,
+            passing=frozenset({0, NO_TESTS_COLLECTED}),
         )
     if not options.no_suite:
         suite = ["uv", "run", "--no-sync", "python", "scripts/run_test_suite.py", "-m", QUICK, "-q"]

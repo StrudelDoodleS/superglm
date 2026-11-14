@@ -60,3 +60,26 @@ def test_install_writes_the_hook_once_and_leaves_a_foreign_one_alone(tmp_path, m
     with pytest.raises(SystemExit, match="not this script's"):
         pre_push._install()
     assert "mine" in hook.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("present", "kernels"),
+    [
+        ({"AVX2", "FMA3", "AVX512_SKX"}, ["Haswell", "SkylakeX"]),
+        ({"AVX2", "FMA3"}, ["Haswell"]),  # Zen 2/3 and Intel without AVX-512
+        (set(), [None]),  # ARM64: the tests run once, as dispatched
+    ],
+)
+def test_only_kernels_the_cpu_can_execute_are_forced(monkeypatch, present, kernels):
+    from numpy._core._multiarray_umath import __cpu_features__ as features
+
+    for name in ("AVX2", "FMA3", "AVX512_SKX"):
+        monkeypatch.setitem(features, name, name in present)
+    assert pre_push._runnable_kernels() == kernels
+
+
+def test_a_run_passes_only_on_the_exit_codes_it_allows():
+    command = [sys.executable, "-c", "raise SystemExit(5)"]
+    pre_push._run("all skipped", command, passing=frozenset({0, pre_push.NO_TESTS_COLLECTED}))
+    with pytest.raises(SystemExit, match="exit 5"):
+        pre_push._run("all skipped", command)
