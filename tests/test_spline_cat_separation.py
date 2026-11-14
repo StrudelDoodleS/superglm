@@ -439,3 +439,92 @@ def test_unseen_directions_does_not_form_the_left_factor_of_a_tall_matrix():
     np.testing.assert_allclose(rows @ free, 0.0, atol=64 * 12 * U * np.linalg.norm(rows, 2))
     # The left factor alone would be 500 times the input.
     assert peak < 64 * rows.nbytes
+
+
+def _signed_rows(kind, rng):
+    """``D = sign * X`` for a design that overlaps, separates completely or quasi-completely,
+    or overlaps by a margin of ``1e-3`` (near separation)."""
+    n, p = 200, 4
+    X = np.column_stack([np.ones(n), rng.normal(size=(n, p - 1))])
+    b = rng.normal(size=p)
+    eta = X @ b
+    if kind == "overlap":
+        y = rng.uniform(size=n) < 1.0 / (1.0 + np.exp(-eta))
+    elif kind == "complete":
+        y = eta > 0.0
+    elif kind == "quasi":
+        # 20 rows on the hyperplane x'b = 0 with both responses: they hold it, the rest move.
+        X[:20, -1] = -(X[:20, :-1] @ b[:-1]) / b[-1]
+        y = X @ b > 0.0
+        y[:20] = np.arange(20) % 2 == 0
+    else:  # near: separated at 0 except one row of each response crossing by 1e-3
+        x = np.r_[rng.uniform(0.1, 1.0, n // 2), -rng.uniform(0.1, 1.0, n // 2), 1e-3, -1e-3]
+        X = np.column_stack([np.ones(len(x)), x])
+        y = np.r_[np.ones(n // 2), np.zeros(n // 2), 0.0, 1.0] > 0.0
+    return np.where(y, 1.0, -1.0)[:, None] * X
+
+
+@pytest.mark.parametrize("kind", ["overlap", "complete", "quasi", "near"])
+def test_held_rows_decides_as_one_program_per_row(kind):
+    """Each row is moved exactly when its own program, maximising ``D_j a`` under ``D a >= 0``
+    in the box, clears the program tolerance (Geyer 2009, section 3.12; Konis 2007): overlap and
+    the near-separated design move none, complete separation every row, and quasi-complete
+    separation every row off the hyperplane.  The dual certificate (``_unmoved_rows``) may only
+    skip programs, never change what they would decide."""
+    from scipy.optimize import linprog
+
+    from superglm.diagnostics.separation import _PROGRAM_TOL, _held_rows
+
+    D = _signed_rows(kind, np.random.default_rng(11))
+    unit = D / np.linalg.norm(D, axis=1, keepdims=True)
+    box = [(-1.0, 1.0)] * D.shape[1]
+    zero = np.zeros(len(D))
+    reference = np.array(
+        [-linprog(-row, A_ub=-unit, b_ub=zero, bounds=box).fun > _PROGRAM_TOL for row in unit]
+    )
+    expected = {
+        "overlap": np.zeros(len(D), bool),
+        "near": np.zeros(len(D), bool),
+        "complete": np.ones(len(D), bool),
+        "quasi": np.arange(len(D)) >= 20,
+    }[kind]
+    np.testing.assert_array_equal(reference, expected)
+    np.testing.assert_array_equal(_held_rows(D), expected)
+
+
+@pytest.mark.parametrize("design", ["spline", "near"])
+def test_held_rows_settles_data_that_do_not_separate_in_two_programs(design, monkeypatch):
+    """The cost the scan used to have: a level whose rows overlap took one program per row,
+    3,008 for the eight levels of a 3,000-row binomial spline-by-factor fit.  The dual
+    certificate of ``_unmoved_rows`` (Konis 2007, chapter 4: overlap exactly when some
+    ``y > 0`` has ``D' y = 0``) bounds every row's program within the tolerance, so it and the
+    counting program decide every row, on a spline level's 400 rows and on the design that
+    overlaps by only ``1e-3``.  Mutation check: with ``_unmoved_rows`` certifying no row the
+    counts are 401 and 203, and with ``_CERTIFICATE_SPREAD`` at ``1e4`` the near design's is 124.
+    """
+    import scipy.optimize
+
+    import superglm.diagnostics.separation as separation
+
+    rng = np.random.default_rng(2)
+    if design == "spline":
+        x = np.sort(rng.uniform(size=400))
+        spec = Spline(n_knots=8)
+        spec.build(x)
+        raw = np.asarray(spec._raw_basis_matrix(x), dtype=np.float64)
+        y = rng.uniform(size=400) < 1.0 / (1.0 + np.exp(-2.0 * np.sin(6.0 * x)))
+        D = np.where(y, 1.0, -1.0)[:, None] * raw
+    else:
+        D = _signed_rows("near", np.random.default_rng(11))
+
+    calls = []
+    real = scipy.optimize.linprog
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(scipy.optimize, "linprog", counted)
+    held = separation._held_rows(D)
+    assert not held.any()
+    assert len(calls) == 2

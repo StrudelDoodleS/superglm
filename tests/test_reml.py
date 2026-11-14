@@ -3317,34 +3317,6 @@ def _ten_penalty_response(case, eta, rng):
     return rng.poisson(np.exp(eta - 1.0)).astype(float), {"family": "poisson"}
 
 
-_HELD_ROWS_ANSWERS: dict = {}
-
-
-@pytest.fixture
-def shared_separation_programs(monkeypatch):
-    """Solve each of the separation scan's row programs once per test process.
-
-    A binomial fit on ``_ten_penalty_frame`` scans the spline-by-factor's
-    curves for separation before it fits: some 6,000 small linear programs
-    (``separation._held_rows``), about 13 s of a 14 s fit, the same on every
-    fit of the same design and response, whatever the link or start.  The
-    programs depend only on the matrix they are given, so each distinct one
-    is solved once and its answer handed back as a copy; the fits, and every
-    decision the scan takes, are those of the live code.
-    """
-    import superglm.diagnostics.separation as separation
-
-    real = separation._held_rows
-
-    def held_rows(D):
-        key = (D.shape, D.dtype.str, D.tobytes())
-        if key not in _HELD_ROWS_ANSWERS:
-            _HELD_ROWS_ANSWERS[key] = real(D)
-        return _HELD_ROWS_ANSWERS[key].copy()
-
-    monkeypatch.setattr(separation, "_held_rows", held_rows)
-
-
 class TestExactPresolveScope:
     """The automatic pre-solve runs only where it was measured to pay.
 
@@ -3372,9 +3344,7 @@ class TestExactPresolveScope:
             "binomial_cloglog",
         ],
     )
-    def test_an_admitted_pair_starts_from_the_presolve(
-        self, case, monkeypatch, shared_separation_programs
-    ):
+    def test_an_admitted_pair_starts_from_the_presolve(self, case, monkeypatch):
         """And lands no worse than the plain cold start, to the stop's
         resolution ``reml_tol (1 + |V|)``: on these fixtures 3.4e-4 .. 9.7e-4
         lower, against resolutions of 1.9e-6 .. 3.5e-6 (the cold probit fit stopped at
