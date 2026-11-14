@@ -440,13 +440,16 @@ def test_a_pinned_record_is_checked_only_against_a_pinned_baseline(run):
     default = _baseline(record, "c" * 40)
     default["threads"], default["key"] = "default", dict(default["key"], threads="default")
 
-    def lookup(sha, case, threads):
-        asked.append(threads)
+    def lookup(sha):
+        asked.append(sha)
         return [default]
 
     table, failures, refusals = _check(record, lookup=lookup)
-    assert asked == ["pinned"] and table is None and failures == []
-    assert "threads: baseline" in refusals[0]
+    assert asked == ["c" * 40] and table is None and failures == []
+    assert "no stored baseline" in refusals[0]
+    # a record whose key says another setting is refused even if it were offered
+    _, reason = books.match_baseline(record, [default], "c" * 40, usable=books.usable_for_check)
+    assert "threads: baseline" in reason
 
 
 def test_an_untimed_baseline_serves_check_but_not_compare(run):

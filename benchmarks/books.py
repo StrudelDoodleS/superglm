@@ -1445,8 +1445,9 @@ def record_to_benchboard(record: dict, clock: dict) -> str:
     )
 
 
-def stored_records(sha: str, case: str, threads: str) -> list[dict]:
-    """Full records of this harness's fits at ``sha`` in benchboard's history, oldest first."""
+def stored_records(sha: str, case: str | None = None, threads: str | None = None) -> list[dict]:
+    """Full records of this harness's fits at ``sha`` in benchboard's history, oldest first;
+    ``None`` for the case or thread setting reads every one (one scan of the history)."""
     import sqlite3
 
     path = benchboard_dir() / "history.sqlite3"
@@ -1454,13 +1455,18 @@ def stored_records(sha: str, case: str, threads: str) -> list[dict]:
     if history is None or not path.exists():
         return []
     db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+    where, params = "", [sha]
+    for field, value in (("books_case", case), ("threads", threads)):
+        if value is not None:
+            where += f" AND json_extract(f.config_json, '$.{field}') = ?"
+            params.append(value)
     try:
         rows = db.execute(
             """SELECT d.codec, d.payload FROM fits f JOIN fit_diagnostics d ON d.fit_id = f.id
-               WHERE f.method LIKE 'books.%' AND json_extract(f.config_json, '$.sha') = ?
-               AND json_extract(f.config_json, '$.books_case') = ?
-               AND json_extract(f.config_json, '$.threads') = ? ORDER BY f.started_at""",
-            (sha, case, threads),
+               WHERE f.method LIKE 'books.%' AND json_extract(f.config_json, '$.sha') = ?"""
+            + where
+            + " ORDER BY f.started_at",
+            params,
         ).fetchall()
     finally:
         db.close()
@@ -2029,10 +2035,14 @@ def check_table(rows) -> str:
 
 def check(records: list[dict], base_sha: str | None = None, lookup=None):
     """(table, failures, refusals) for branch records against their stored baselines."""
-    rows, refusals, lookup = [], [], lookup or stored_records
+    rows, refusals, lookup, stored = [], [], lookup or stored_records, {}
     for rec in records:
         base = base_sha or merge_base(rec["provenance"]["sha"])
-        candidates = lookup(base, rec["case"], rec["threads"])
+        if base not in stored:  # one scan of benchboard's history per baseline commit
+            stored[base] = lookup(base)
+        candidates = [
+            c for c in stored[base] if (c["case"], c["threads"]) == (rec["case"], rec["threads"])
+        ]
         match, reason = match_baseline(rec, candidates, base, usable=usable_for_check)
         if reason:
             if reason.startswith("no stored baseline"):
