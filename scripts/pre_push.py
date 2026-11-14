@@ -49,11 +49,13 @@ KERNELS = {"Haswell": ("AVX2", "FMA3"), "SkylakeX": ("AVX512_SKX",)}
 NO_TESTS_COLLECTED = 5
 TY_EXTRAS = ("dev", "bench", "plotting")
 # Git runs the hook from the top of the worktree being pushed. A branch from
-# before the gate has no script, so it pushes as it did then.
+# before the gate has no script, and one from before the stamps has a script
+# without --verify-push; both push as they did then.
 HOOK_MARK = "# Installed by scripts/pre_push.py --install."
 HOOK = f"""#!/bin/sh
 {HOOK_MARK}
 [ -f scripts/pre_push.py ] || exit 0
+grep -q -- --verify-push scripts/pre_push.py || exit 0
 exec uv run --no-sync python scripts/pre_push.py --verify-push
 """
 # A pre-push hook reads "<local ref> <local sha> <remote ref> <remote sha>" lines;

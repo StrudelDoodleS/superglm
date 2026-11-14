@@ -103,10 +103,15 @@ def test_the_hook_lets_a_branch_without_the_gate_push(tmp_path):
     shell = shutil.which("sh")
     result = subprocess.run([shell, str(hook)], cwd=tmp_path, env={"PATH": ""}, capture_output=True)
     assert result.returncode == 0
+    # A script from before the stamps, without --verify-push: still no uv.
     (tmp_path / "scripts").mkdir()
-    (tmp_path / "scripts" / "pre_push.py").write_text("", encoding="utf-8")
-    result = subprocess.run([shell, str(hook)], cwd=tmp_path, env={"PATH": ""}, capture_output=True)
-    assert result.returncode != 0  # with the script, the hook runs the verifier (here: no uv)
+    (tmp_path / "scripts" / "pre_push.py").write_text("# no verifier\n", encoding="utf-8")
+    path = {"PATH": os.path.dirname(shutil.which("grep"))}  # grep, but no uv
+    result = subprocess.run([shell, str(hook)], cwd=tmp_path, env=path, capture_output=True)
+    assert result.returncode == 0
+    (tmp_path / "scripts" / "pre_push.py").write_text("# --verify-push\n", encoding="utf-8")
+    result = subprocess.run([shell, str(hook)], cwd=tmp_path, env=path, capture_output=True)
+    assert result.returncode != 0  # with the verifier, the hook runs it (here: no uv)
 
 
 def test_the_gate_and_the_suite_drop_the_variables_git_gives_a_hook():
