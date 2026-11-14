@@ -161,9 +161,7 @@ def test_one_worker_runs_every_stage_here_and_starts_no_process(monkeypatch):
 
 
 @pytest.mark.parametrize("method", _warmup._CACHE_FILE_METHODS)
-def test_a_numba_without_the_cache_methods_the_lock_uses_warms_up_here_alone(
-    monkeypatch, method
-):
+def test_a_numba_without_the_cache_methods_the_lock_uses_warms_up_here_alone(monkeypatch, method):
     from numba.core import caching
 
     calls, started = _fake_stages(monkeypatch), []
