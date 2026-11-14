@@ -25,7 +25,7 @@ with the drift reported beside the result.
 - `families`: 13 family/link cases on the same book, mains plus 4 pairs, exact
   and binned.
 - `lss`: the negative binomial, Tweedie and gamma severity `SuperLSS` models.
-- `smoke`: a tiny synthetic book, for developing the harness itself.
+- `smoke`: a tiny synthetic book, for developing the harness and as `check`'s default set.
 
 ## Run one fit
 
