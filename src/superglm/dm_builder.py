@@ -147,9 +147,17 @@ def compute_R_inv(
 ) -> NDArray:
     """Compute SSP reparametrisation matrix R_inv without forming B @ R_inv.
 
-    Wood (2011) Section 3.1 / Section 5: absorb penalty into parameterization.
-    R = chol(B'WB/n + λΩ + εI)^T, then R_inv = R^{-1} so that the SSP basis
-    X_ssp = B @ R_inv has near-identity X'WX regardless of λ.
+    The sparsity-smoothness penalty of Meier, van de Geer & Buhlmann (2009,
+    Ann. Statist. 37(6B), sec. 2.2): R = chol(B'WB/n + λΩ + εI)^T and
+    R_inv = R^{-1}, so that the group norm of a block's coefficients in
+    X_ssp = B @ R_inv is sqrt(||f||_n^2 + λ f'Ωf). That is the estimator the
+    group lasso of ``fit`` and ``fit_path`` uses, with the loss per unit weight.
+
+    Under ``fit_reml`` no selection penalty acts, and R_inv is a change of
+    coordinates alone: fitted values do not depend on it. The objective there
+    is not divided by the weight sum N, so with R_inv built at λ the block
+    of X'WX + λ'S is N times the identity at λ' = N·λ, not at λ' = λ (for
+    working weights proportional to ``sample_weight``).
 
     The normaliser is the weight sum over every row, including rows where the
     block is zero, so every block's ``X'WX`` sits on the same scale.
