@@ -1855,21 +1855,22 @@ def _assert_cap_success(outcome, case, *, terms: int) -> None:
     )
 
 
-@pytest.mark.parametrize("case", FROZEN_CUTOFF_CAP_BOUNDARIES, ids=lambda case: case.id)
-def test_a_cap_equal_to_the_window_succeeds_and_one_term_fewer_refuses(case) -> None:
+def _separated_windows(case):
+    """The ``(cutoff, window)`` pairs known for ``case``'s row, bracketing its tuned cutoff."""
     separated = {other.id: other for other in FROZEN_CUSTOM_CUTOFF_CASES}[
         _CAP_BOUNDARY_WINDOWS[case.id]
     ]
-    assert separated.row == case.row
-    windows = _SEPARATED_CUTOFF_WINDOWS[separated.id]
-    assert case.terms in [terms for _, terms in windows]
+    assert (separated.row, separated.semantics) == (case.row, case.semantics)
+    below, above = _SEPARATED_CUTOFF_WINDOWS[separated.id]
+    assert below[0] < case.log_cutoff < above[0]
+    assert below[1] == case.terms == above[1] - 1
+    return below, above
 
-    for cutoff, terms in windows:
-        fits = _capped(case, max_terms=terms, log_cutoff=cutoff)
-        assert fits[0] == (case.status, case.failing_row)
-        assert fits[1].terms.tolist() == [terms]
-        if terms == case.terms:
-            _assert_cap_success(fits, case, terms=terms)
+
+@pytest.mark.parametrize("case", FROZEN_CUTOFF_CAP_BOUNDARIES, ids=lambda case: case.id)
+def test_a_cap_equal_to_the_window_succeeds_and_one_term_fewer_refuses(case) -> None:
+    for cutoff, terms in _separated_windows(case):
+        _assert_cap_success(_capped(case, max_terms=terms, log_cutoff=cutoff), case, terms=terms)
         _assert_cap_refusal(
             _capped(case, max_terms=terms - 1, log_cutoff=cutoff), max_terms=terms - 1
         )
@@ -1878,12 +1879,14 @@ def test_a_cap_equal_to_the_window_succeeds_and_one_term_fewer_refuses(case) -> 
 @pytest.mark.parametrize("case", FROZEN_CUTOFF_CAP_BOUNDARIES, ids=lambda case: case.id)
 def test_endpoint_tuned_custom_cap_matches_frozen_boundary(case) -> None:
     # The frozen cutoff sits on the window's endpoint, where the platform's
-    # rounded threshold decides between the frozen count and one more term.
-    # The cap rule is exact for whichever count the platform reaches; the
+    # rounded threshold decides between the two separated windows that bracket
+    # it. The cap rule is exact for whichever count the platform reaches; the
     # exact counts are asserted at the separated cutoffs above.
-    _, uncapped = _capped(case, max_terms=case.max_terms + 1, log_cutoff=case.log_cutoff)
-    terms = int(uncapped.terms[0])
-    assert case.terms <= terms <= case.terms + 1
+    (_, fewest), (_, most) = _separated_windows(case)
+    raw, widest = _capped(case, max_terms=most, log_cutoff=case.log_cutoff)
+    assert raw == (case.status, case.failing_row)
+    terms = int(widest.terms[0])
+    assert fewest <= terms <= most
     _assert_cap_success(
         _capped(case, max_terms=terms, log_cutoff=case.log_cutoff), case, terms=terms
     )
