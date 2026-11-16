@@ -1805,31 +1805,90 @@ def test_selected_custom_cutoff_endpoints_match_frozen_windows(case) -> None:
     assert selected_terms == sorted(selected_terms)
 
 
-@pytest.mark.parametrize("case", FROZEN_CUTOFF_CAP_BOUNDARIES, ids=lambda case: case.id)
-def test_endpoint_tuned_custom_cap_matches_frozen_boundary(case) -> None:
+# Each cap boundary shares its row with a separated-cutoff fixture above, whose
+# windows are known from the independent evaluation.
+_CAP_BOUNDARY_WINDOWS = {
+    "lower-positive-compiled-four-term-boundary": "lower-positive-adjacent-cutoff",
+    "tiny-positive-three-term-boundary": "tiny-positive-adjacent-cutoff",
+}
+
+
+def _capped(case, *, max_terms: int, log_cutoff: float):
+    """The raw ``(status, row)`` and the public result or refusal at one cap and cutoff."""
     arrays = tuple(np.array([value], dtype=np.float64) for value in case.row)
     raw = _raw_batch(
         *arrays,
         0 if case.semantics == "prior" else 1,
         0,
-        case.max_terms,
-        case.log_cutoff,
+        max_terms,
+        log_cutoff,
     )
-    result = evaluate_tweedie_rows(
-        *arrays,
-        case.semantics,
-        derivative_order=0,
-        max_terms=case.max_terms,
-        log_cutoff=case.log_cutoff,
-    )
+    try:
+        public = evaluate_tweedie_rows(
+            *arrays,
+            case.semantics,
+            derivative_order=0,
+            max_terms=max_terms,
+            log_cutoff=log_cutoff,
+        )
+    except TweedieNumericalRefusal as refusal:
+        public = refusal
+    return raw[5:], public
 
-    assert raw[5:] == (case.status, case.failing_row)
-    assert result.terms.tolist() == [case.terms]
+
+def _assert_cap_refusal(outcome, *, max_terms: int) -> None:
+    raw, public = outcome
+    assert raw == (int(tweedie_kernel._compiled.KERNEL_MAX_TERMS), 0)
+    assert isinstance(public, TweedieNumericalRefusal)
+    assert str(public) == f"row 0: positive series window reached per-row max_terms={max_terms}"
+
+
+def _assert_cap_success(outcome, case, *, terms: int) -> None:
+    raw, public = outcome
+    assert raw == (case.status, case.failing_row)
+    assert public.terms.tolist() == [terms]
     np.testing.assert_allclose(
-        result.log_likelihood,
+        public.log_likelihood,
         [case.log_likelihood],
         rtol=0.0,
-        atol=64.0 * np.finfo(np.float64).eps * float(case.terms + 1),
+        atol=64.0 * np.finfo(np.float64).eps * float(terms + 1),
+    )
+
+
+@pytest.mark.parametrize("case", FROZEN_CUTOFF_CAP_BOUNDARIES, ids=lambda case: case.id)
+def test_a_cap_equal_to_the_window_succeeds_and_one_term_fewer_refuses(case) -> None:
+    separated = {other.id: other for other in FROZEN_CUSTOM_CUTOFF_CASES}[
+        _CAP_BOUNDARY_WINDOWS[case.id]
+    ]
+    assert separated.row == case.row
+    windows = _SEPARATED_CUTOFF_WINDOWS[separated.id]
+    assert case.terms in [terms for _, terms in windows]
+
+    for cutoff, terms in windows:
+        fits = _capped(case, max_terms=terms, log_cutoff=cutoff)
+        assert fits[0] == (case.status, case.failing_row)
+        assert fits[1].terms.tolist() == [terms]
+        if terms == case.terms:
+            _assert_cap_success(fits, case, terms=terms)
+        _assert_cap_refusal(
+            _capped(case, max_terms=terms - 1, log_cutoff=cutoff), max_terms=terms - 1
+        )
+
+
+@pytest.mark.parametrize("case", FROZEN_CUTOFF_CAP_BOUNDARIES, ids=lambda case: case.id)
+def test_endpoint_tuned_custom_cap_matches_frozen_boundary(case) -> None:
+    # The frozen cutoff sits on the window's endpoint, where the platform's
+    # rounded threshold decides between the frozen count and one more term.
+    # The cap rule is exact for whichever count the platform reaches; the
+    # exact counts are asserted at the separated cutoffs above.
+    _, uncapped = _capped(case, max_terms=case.max_terms + 1, log_cutoff=case.log_cutoff)
+    terms = int(uncapped.terms[0])
+    assert case.terms <= terms <= case.terms + 1
+    _assert_cap_success(
+        _capped(case, max_terms=terms, log_cutoff=case.log_cutoff), case, terms=terms
+    )
+    _assert_cap_refusal(
+        _capped(case, max_terms=terms - 1, log_cutoff=case.log_cutoff), max_terms=terms - 1
     )
 
 
