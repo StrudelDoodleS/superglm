@@ -248,8 +248,13 @@ def build_penalized_sum_to_zero_operator(
     A, D, small_position, structured_position = _leaf_penalty_parts(
         operator, S_override, (operator.n_levels - 1) * operator.block_size, "sum_to_zero"
     )
+    blocks = (
+        None
+        if reml_penalties is None
+        else _border_penalty_blocks(reml_penalties, small_position, p)
+    )
     if S_override is not None:
-        return SumToZeroPenalizedOperator.with_penalties(operator, A, D)
+        return SumToZeroPenalizedOperator.with_penalties(operator, A, D, blocks)
 
     if reml_penalties is None:
         raise ValueError(_PENALTIES_REQUIRED)
@@ -303,7 +308,30 @@ def build_penalized_sum_to_zero_operator(
             )
         A[np.ix_(local_small, local_small)] += lam * omega
 
-    return SumToZeroPenalizedOperator.with_penalties(operator, A, D)
+    return SumToZeroPenalizedOperator.with_penalties(operator, A, D, blocks)
+
+
+def _border_penalty_blocks(
+    reml_penalties: list[PenaltyComponent], small_position: NDArray, p: int
+) -> tuple[NDArray, ...]:
+    """Each border term's positions in the small block: the components' index sets, joined.
+
+    Components whose positions overlap (a term's several penalties) share a
+    block; the border penalty is block diagonal over these, whatever lambda.
+    """
+    owner = np.full(len(np.flatnonzero(small_position >= 0)), -1, dtype=np.intp)
+    blocks: list[NDArray] = []
+    for component in reml_penalties:
+        local = small_position[_component_indices(component, p)]
+        if not len(local) or np.any(local < 0):
+            continue
+        joined = np.unique(owner[local][owner[local] >= 0])
+        members = np.unique(np.concatenate([local, *(blocks[index] for index in joined)]))
+        for index in joined:
+            blocks[index] = np.zeros(0, dtype=np.intp)
+        owner[members] = len(blocks)
+        blocks.append(members)
+    return tuple(block for block in blocks if len(block))
 
 
 def _nested_penalty_terms(
@@ -437,9 +465,12 @@ def _memoised_leaf_factor(system, penalized_operator, factor_type: type, name: s
     if penalized_operator.penalty_small is None or penalized_operator.penalty_local is None:
         raise ValueError(f"An {name} factor needs the penalized operator's penalty parts.")
     factor = None
-    for small, local, held in system.factor_memo:
-        if np.array_equal(small, penalized_operator.penalty_small) and np.array_equal(
-            local, penalized_operator.penalty_local
+    blocks = getattr(penalized_operator, "penalty_blocks", None)
+    for small, local, held_blocks, held in system.factor_memo:
+        if (
+            np.array_equal(small, penalized_operator.penalty_small)
+            and np.array_equal(local, penalized_operator.penalty_local)
+            and _same_blocks(held_blocks, blocks)
         ):
             factor = held()
     if factor is None:
@@ -448,10 +479,20 @@ def _memoised_leaf_factor(system, penalized_operator, factor_type: type, name: s
             (
                 np.array(penalized_operator.penalty_small, copy=True),
                 np.array(penalized_operator.penalty_local, copy=True),
+                blocks,
                 weakref.ref(factor),
             )
         ]
     return factor, _augmented_rhs(system)
+
+
+def _same_blocks(first, second) -> bool:
+    """Whether two ``penalty_blocks`` (or ``None``) name the same blocks."""
+    if first is None or second is None:
+        return first is second
+    return len(first) == len(second) and all(
+        np.array_equal(a, b) for a, b in zip(first, second, strict=True)
+    )
 
 
 def build_augmented_block_factor(

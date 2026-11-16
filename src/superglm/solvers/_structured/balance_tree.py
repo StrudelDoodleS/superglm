@@ -1058,14 +1058,22 @@ class SumToZeroPenalizedOperator(SumToZeroBlockOperator):
     ``penalty_small`` ``(q, q)`` and ``penalty_local`` ``(K, k, k)`` (one block
     per level, all ``K``) are the parts the factor takes as square roots;
     ``A`` and ``D`` already include them (the operator every trace reads).
+    ``penalty_blocks`` holds each border term's positions in ``penalty_small``,
+    the diagonal blocks its penalty components were assembled into (fixed by
+    the model's terms, not by lambda); ``None`` when no terms were given.
     """
 
     penalty_small: NDArray | None = None
     penalty_local: NDArray | None = None
+    penalty_blocks: tuple[NDArray, ...] | None = None
 
     @classmethod
     def with_penalties(
-        cls, operator: SumToZeroBlockOperator, penalty_small: NDArray, penalty_local: NDArray
+        cls,
+        operator: SumToZeroBlockOperator,
+        penalty_small: NDArray,
+        penalty_local: NDArray,
+        penalty_blocks: tuple[NDArray, ...] | None = None,
     ) -> SumToZeroPenalizedOperator:
         from superglm.solvers._structured.block_leaves import share_cross_block
 
@@ -1079,6 +1087,7 @@ class SumToZeroPenalizedOperator(SumToZeroBlockOperator):
             structured_indices=operator.structured_indices,
             penalty_small=0.5 * (small + small.T),
             penalty_local=0.5 * (local + local.transpose(0, 2, 1)),
+            penalty_blocks=penalty_blocks,
         )
         return share_cross_block(penalized, operator.C)
 
@@ -1500,9 +1509,9 @@ class SumToZeroTreeFactor:
         ``+g(x)' f / K``, for every ``f`` with ``g(x)' f = 0`` on its ``x`` values. Only the border
         penalty curves them, so they are deflated structurally, not truncated as data (which would
         make ``log|H|`` jump with lambda). A combination is returned when its curvature clears
-        the quadratic form's rounding and the border penalty's rank cut (Wood, Pya & Safken
-        2016, §3.1.2); the border part must reproduce the null-space functions to ``sqrt(eps)``.
-        ``None`` without thin levels or penalty.
+        the quadratic form's rounding and, on each term's block (``penalty_blocks``), the
+        block's rank cut (Wood, Pya & Safken 2016, §3.1.2); the border part must reproduce the
+        null-space functions to ``sqrt(eps)``. ``None`` without thin levels or penalty.
         """
         counts = getattr(system, "thin_counts", None)
         if counts is None or not len(counts[0]):
@@ -1614,13 +1623,25 @@ class SumToZeroTreeFactor:
         # the penalty as well) is left with rounding alone, below this
         spread = np.abs(border) @ np.abs(vectors)
         magnitude = np.einsum("it,ij,jt->t", spread, np.abs(S_b), spread)
-        # the penalty rank rule on each combination: a formed penalty's null
-        # direction keeps entries of rounding size, which the test above alone
-        # takes for curvature where that direction lies on a coordinate axis
-        lengths = np.sum((border @ vectors) ** 2, axis=0)
-        largest = float(np.linalg.eigvalsh(0.5 * (S_b + S_b.T))[-1])
-        certified = (values > (q + 2 + len(values)) * _EPS * magnitude) & (
-            values > _PENALTY_RANK_CUT * largest * lengths
+        # Each term's formed penalty block resolves curvature only to its rank
+        # cut, PENALTY_RANK_CUT of the block's largest eigenvalue, the scale on
+        # which the penalty rank decides its nulls: below it a formed penalty's
+        # null keeps rounding and is turned by its formation. lambda_t scales
+        # block t uniformly, so a term's own lambda moves neither its curvature
+        # nor its resolution relative to the other (Wood, Pya & Safken 2016,
+        # sec. 3.1.2); a combination resting on one term's null and curved only
+        # by a far weaker term is left to the pivoted factorization. Without
+        # the terms' blocks, the rounding alone.
+        resolution = np.zeros_like(values)
+        blocks = getattr(penalized, "penalty_blocks", None)
+        if blocks is not None:
+            combined = border @ vectors
+            for block in blocks:
+                largest = float(np.linalg.eigvalsh(S_b[np.ix_(block, block)])[-1])
+                resolution += max(largest, 0.0) * np.sum(combined[block] ** 2, axis=0)
+        # each error at most half the curvature, as the rounding test asks of its own
+        certified = values > (q + 2 + len(values)) * _EPS * magnitude + (
+            2.0 * _PENALTY_RANK_CUT * resolution
         )
         if not np.any(certified):
             return None

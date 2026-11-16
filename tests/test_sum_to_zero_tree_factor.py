@@ -582,20 +582,26 @@ def test_thin_levels_are_named_and_kept(discrete: bool) -> None:
     assert tree_objective <= gram_objective + len(frame) * EPS * abs(gram_objective)
 
 
-def test_a_thin_alias_on_the_main_effect_s_penalty_null_is_not_deflated() -> None:
+@pytest.mark.parametrize("lam", [1e10, 1e11, 1e14])
+def test_a_thin_alias_on_the_main_effect_s_penalty_null_is_not_deflated(lam) -> None:
     """A thin level's alias along the main effect's penalty null stays an exact null of the tree.
 
-    The raw global Spline at lambda 1e11 is turned at the lambda update so
-    its penalty null lies near a coordinate axis, where the formed penalty
-    keeps an entry of rounding size (1.6e-12 of its largest).  That entry
-    is under the border penalty's rank cut (Wood, Pya & Safken 2016,
-    sec. 3.1.2), so it is no curvature to deflate an alias on: the aliases
-    stay with the pivoted factorization and the rows are fitted as gram
-    fits them, within n eps of their scale.  Mutation: without the rank
-    cut in ``_penalized_aliases`` the structured fit stops unconverged
-    with coefficients near 1e13.
+    The raw global Spline (lambda 1e10 inside the REML box, 1e11 and 1e14
+    fixed) is turned at the lambda update so its penalty null lies near a
+    coordinate axis, keeping an entry of about 1.6e-12 of the Spline block's
+    largest there (at 1e11), and its formed null is turned off the aliases
+    by an angle that grows with lambda (curvature 5e-16 of the largest at
+    1e11, 1e-13 at 1e14).  Both are under the block's own rank cut (Wood,
+    Pya & Safken 2016, sec. 3.1.2), nothing to deflate on: the aliases stay
+    with the pivoted factorization and the rows and the EDF are gram's,
+    within n eps of their scale.  End to end this relies on where the
+    lambda update's rounding lands; the factor-level test forces the event
+    (``test_a_formed_penalty_s_null_is_no_curvature_for_a_thin_alias``).
+    Mutation: certifying on the quadratic form's rounding alone, the fit
+    stops unconverged with coefficients near 1e13 (EDF 70.82 for 70.01 at
+    1e10); zeroing the block's eigenvalues under its cut instead, so at 1e14.
     """
-    spline = {"penalty": "none", "lambda_policy": LambdaPolicy.fixed(1e11)}
+    spline = {"penalty": "none", "lambda_policy": LambdaPolicy.fixed(lam)}
     model, frame, _ = _thin_model("auto", spline=spline)
     gram, _, _ = _thin_model("gram", spline=spline)
     assert model.result.direct_backend == "structured"
@@ -606,6 +612,10 @@ def test_a_thin_alias_on_the_main_effect_s_penalty_null_is_not_deflated() -> Non
         expected,
         rtol=0.0,
         atol=len(frame) * EPS * float(np.max(np.abs(expected))),
+    )
+    edf = float(np.sum(gram.result.effective_df))
+    assert float(np.sum(model.result.effective_df)) == pytest.approx(
+        edf, rel=0.0, abs=len(frame) * EPS * edf
     )
 
 
@@ -674,15 +684,17 @@ def test_an_exhausted_subtree_is_deferred_against_its_unreduced_columns(
     )
 
 
-def _alias_beside_a_random_effect(S_b: np.ndarray):
+def _alias_beside_a_random_effect(S_b: np.ndarray, *, thin_row=(1.0, 1.0), blocks=None):
     """A one-row level beside a random effect, built by hand: ``(factor, case)``.
 
     ``K = 8``, ``k = 4``, ``omega = diag(1, 1, 0, 0)``.  Level 0's single row
-    has unpenalized coordinates ``(1, 1)``, so its free direction is ``(1,
-    -1)``.  The border holds ``z_2`` and ``z_3`` (the global Spline's share
-    of the null-space functions, which represents the alias) and a complete
-    three-level one-hot block, whose sum is the generator.  ``thin_counts``
-    is set as ``layout.thin_level_counts`` would set it.
+    has unpenalized coordinates ``thin_row``, so its free direction is the one
+    orthogonal to it (``(1, -1)`` by default).  The border holds ``z_2`` and
+    ``z_3`` (the global Spline's share of the null-space functions, which
+    represents the alias) and a complete three-level one-hot block, whose sum
+    is the generator.  ``thin_counts`` is set as ``layout.thin_level_counts``
+    would set it, and ``blocks`` (the terms' border positions) as the
+    assembly would, or left out as a hand-built operator leaves it.
     """
     K, k, n, lam = 8, 4, 400, 0.3
     rng = np.random.default_rng(7)
@@ -690,7 +702,7 @@ def _alias_beside_a_random_effect(S_b: np.ndarray):
     levels[0] = 0
     x = rng.uniform(size=n)
     Z = np.column_stack([x**j for j in range(k)]) + 0.1 * rng.normal(size=(n, k))
-    Z[0, 2:] = 1.0
+    Z[0, 2:] = thin_row
     effect = rng.integers(0, 3, n)
     effect[:3] = np.arange(3)
     X = np.column_stack((Z[:, 2:], np.eye(3)[effect]))
@@ -712,10 +724,139 @@ def _alias_beside_a_random_effect(S_b: np.ndarray):
     system = dataclasses.replace(system, thin_counts=(np.array([0]), np.array([1])))
     omega = np.diag([1.0, 1.0, 0.0, 0.0])
     penalized = SumToZeroPenalizedOperator.with_penalties(
-        system.operator, S_b, np.broadcast_to(lam * omega, (K, k, k)).copy()
+        system.operator, S_b, np.broadcast_to(lam * omega, (K, k, k)).copy(), blocks
     )
     case = dict(K=K, k=k, q=q, levels=levels, Z=Z, X=X, W=W, z=z, omega=omega, lam=lam, S_b=S_b)
     return SumToZeroTreeFactor(system, penalized), case
+
+
+# the border's terms as the assembly gives them: the Spline's ``z_2, z_3``, the effect's levels
+_TERM_BLOCKS = (np.array([0, 1]), np.array([2, 3, 4]))
+
+
+def _alias_null(case, f) -> np.ndarray:
+    """``K`` times level 0's alias in ``_alias_beside_a_random_effect``, ``f`` its free direction.
+
+    Border ``f`` on ``z_2, z_3``, level 0 ``(K - 1) f`` and every other public level
+    ``-f`` on the unpenalized coordinates (the last level's ``-f`` is implied): exact
+    entries, a null of the data and of the level penalty.
+    """
+    K, k, q = case["K"], case["k"], case["q"]
+    N = np.zeros(1 + q + (K - 1) * k)
+    N[1:3] = f
+    for level in range(K - 1):
+        share = K - 1.0 if level == 0 else -1.0
+        N[1 + q + level * k + 2 : 1 + q + (level + 1) * k] = share * np.asarray(f)
+    return N
+
+
+_TURN = 2.0**-20  # exact, with its square
+
+
+@pytest.mark.parametrize(
+    "spline_block",
+    [np.diag([1.0, 1e-12]), np.array([[1.0, _TURN], [_TURN, _TURN**2]])],
+    ids=["rounding_entry", "turned_null"],
+)
+def test_a_formed_penalty_s_null_is_no_curvature_for_a_thin_alias(spline_block) -> None:
+    """A formed penalty's null keeps rounding and is turned; the alias is not deflated on either.
+
+    Level 0's single row ``(1, 0)`` puts the thin alias on the second axis of the Spline's
+    border block, the penalty's null.  Formed, the block keeps an entry of rounding size
+    there (a congruence leaves about 1e-12 of the block's largest), or its null is turned
+    off the axis by about 1e-6 with an exact null eigenvalue (``[[1, t], [t, t^2]]``).
+    Either way the alias's curvature on the block is about 1e-12 of its largest, under the
+    block's own rank cut, so it stays with the pivoted factorization, which truncates it as
+    the exact null of ``H_0`` (the block at ``diag(1, 0)``), and the factor has ``H_0``'s
+    rank and ``log H_00 + log pdet(H_0c)``: within the factorizations' agreement and what
+    the perturbation ``dS`` (rank 2) can move it, ``-2 log(1 - ||B^-1|| ||dS||)``.
+    Mutation: certifying on the quadratic form's rounding alone (the rule a hand-built
+    operator without blocks keeps) deflates the alias on that 1e-12: rank 34, ``log|H|``
+    31.7 below; so does zeroing the block's eigenvalues under its cut, for the turned null.
+    """
+    S_b = np.diag([0.0, 0.0, 0.5, 0.5, 0.5])
+    S_b[:2, :2] = spline_block
+    factor, case = _alias_beside_a_random_effect(S_b, thin_row=(1.0, 0.0), blocks=_TERM_BLOCKS)
+    exact = dict(case, S_b=np.diag([1.0, 0.0, 0.5, 0.5, 0.5]))
+    H0, _, _ = _dense(exact)
+    N = _alias_null(case, (0.0, 1.0))
+    n, p = len(case["W"]), H0.shape[0]
+    magnitude = _magnitude(exact)
+    assert np.all(np.abs(H0 @ N) <= _gamma(n + p + 2) * (magnitude @ np.abs(N)))
+    assert factor._alias_x is None
+    assert factor.border_certificate.deflated == 1  # the effect's generator alone
+    assert factor.rank == p - 1
+    # log H_00 + log pdet(H_0c) = log det(H_0 + t t') - log(t't), t = (0, N_1), as in
+    # ``test_a_penalty_coupling_a_generator_and_a_thin_alias_keeps_the_alias_out``
+    tail = np.r_[0.0, N[1:]]
+    B = H0 + np.outer(tail, tail)
+    tolerance = _logdet_agreement(B, magnitude + np.outer(np.abs(tail), np.abs(tail)), n + p + 4)
+    moved = np.linalg.norm(np.linalg.inv(B), 2) * np.linalg.norm(S_b - exact["S_b"], 2)
+    tolerance -= 2.0 * np.log1p(-moved)
+    assert abs(factor.logdet() - (_cholesky_logdet(B) - np.log(tail @ tail))) <= tolerance
+
+
+@pytest.mark.parametrize("blocks", [None, _TERM_BLOCKS], ids=["hand_built", "term_blocks"])
+def test_a_term_penalized_far_below_another_still_curves_its_thin_alias(blocks) -> None:
+    """A penalty's scale is its own term's: a Spline at 1e-10 beside an effect at 10 curves the alias.
+
+    The alias lies in the Spline's block, exactly diagonal at 1e-10, so its curvature is
+    real however large the effect's penalty, and deflated, ``H`` keeps full rank.  ``H``'s
+    smallest eigenvalue is under the rounding of the formed ``H`` (``slogdet`` is 4e-3
+    off), so the reference is exact in the alias: ``N`` the alias with ``N_1 = 1`` and
+    ``H N = S N`` exactly, ``det H = det(B' H B)`` for ``B`` the identity with column 1
+    replaced by ``N``, that is ``N'SN det(H_r - s s' / N'SN)`` with ``H_r`` the rest of
+    ``H`` and ``s`` the rest of ``S N`` (Schur complement on the alias).  A hand-built
+    operator without blocks certifies on the quadratic form's rounding alone.
+    Mutation: a rank cut against the whole border penalty's largest eigenvalue rejects the
+    alias: rank 33 and ``log|H|`` 73.37 for 46.32.
+    """
+    S_b = np.diag([1e-10, 1e-10, 10.0, 10.0, 10.0])
+    factor, case = _alias_beside_a_random_effect(S_b, blocks=blocks)
+    H, _, _ = _dense(case)
+    N = _alias_null(case, (1.0, -1.0))
+    SN = np.zeros_like(N)
+    SN[1:6] = S_b @ N[1:6]  # the level penalty is zero on N's coordinates
+    corner = float(N @ SN)
+    rest = np.flatnonzero(np.arange(len(N)) != 1)
+    reduced = H[np.ix_(rest, rest)] - np.outer(SN[rest], SN[rest]) / corner
+    n, p = len(case["W"]), H.shape[0]
+    tolerance = _logdet_agreement(reduced, _magnitude(case)[np.ix_(rest, rest)], n + p + 3)
+    assert factor._alias_x is not None and factor._alias_x.shape[1] == 1
+    assert factor.border_certificate.deflated == 2
+    assert factor.rank == p
+    assert abs(factor.logdet() - (np.log(corner) + _cholesky_logdet(reduced))) <= tolerance
+
+
+@pytest.mark.parametrize("scale", [1e-12, 1e12])
+@pytest.mark.parametrize("term", [0, 1], ids=["spline", "effect"])
+def test_the_alias_certification_does_not_move_with_a_term_s_lambda(term, scale) -> None:
+    """Scaling one term's penalty block, as its lambda does, certifies the same aliases.
+
+    A combination's curvature is weighed against the rank cut of the blocks it lies in,
+    each on its own scale, so the decision does not move with ``lambda_t``: the alias
+    curved by the Spline at 1e-10 is certified, bit for bit the same column, and the one
+    on the Spline's rounding-size null axis is not, whatever either term's scale (Wood,
+    Pya & Safken 2016, sec. 3.1.2).  Mutation: a rank cut against the whole border
+    penalty's largest eigenvalue drops the first when the Spline is scaled by 1e-12 or
+    the effect by 1e12.
+    """
+    curved = (np.array([1e-10, 1e-10, 10.0, 10.0, 10.0]), (1.0, 1.0))
+    on_null = (np.array([1.0, 1e-12, 0.5, 0.5, 0.5]), (1.0, 0.0))
+    for diagonal, thin_row in (curved, on_null):
+        scaled = diagonal.copy()
+        scaled[_TERM_BLOCKS[term]] *= scale
+        reference, _ = _alias_beside_a_random_effect(
+            np.diag(diagonal), thin_row=thin_row, blocks=_TERM_BLOCKS
+        )
+        factor, _ = _alias_beside_a_random_effect(
+            np.diag(scaled), thin_row=thin_row, blocks=_TERM_BLOCKS
+        )
+        if thin_row == curved[1]:
+            assert reference._alias_x is not None and factor._alias_x is not None
+            np.testing.assert_array_equal(np.abs(factor._alias_x), np.abs(reference._alias_x))
+        else:
+            assert reference._alias_x is None and factor._alias_x is None
 
 
 def test_a_penalty_coupling_a_generator_and_a_thin_alias_keeps_the_alias_out() -> None:

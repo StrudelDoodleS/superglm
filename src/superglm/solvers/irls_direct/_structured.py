@@ -180,6 +180,7 @@ def _levenberg_shifted_leaf_operator(
     index = np.arange(k)
     local[:, index, index] += local_shift
     small[np.diag_indices_from(small)] += border_shift
+    blocks = getattr(penalized, "penalty_blocks", None)
     operator = type(penalized)(
         A=system.operator.A + small,
         C=system.operator.C,
@@ -188,6 +189,7 @@ def _levenberg_shifted_leaf_operator(
         structured_indices=penalized.structured_indices,
         penalty_small=small,
         penalty_local=local,
+        **({} if blocks is None else {"penalty_blocks": blocks}),
     )
     structured = penalized.structured_indices
     if isinstance(penalized, SumToZeroPenalizedOperator):
