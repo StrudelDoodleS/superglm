@@ -1763,7 +1763,6 @@ class SumToZeroTreeFactor:
         mixed = chosen.T @ S_b @ chosen
         turn = np.linalg.eigh(0.5 * (mixed + mixed.T))[1]
         held, known, phi, chosen = held @ turn, known @ turn, phi @ turn, chosen @ turn
-        combinations = combinations @ turn
         error = (
             (scale[:, None] * known)[1:],
             scale[1:, None] * gram_vectors[1:, kept] / np.sqrt(gram_values[kept]),
@@ -1781,7 +1780,9 @@ class SumToZeroTreeFactor:
         curved &= np.linalg.norm(held[1:], axis=0) > _ALIAS_RESOLUTION * np.linalg.norm(
             held, axis=0
         )
-        return combinations[:, curved] if np.any(curved) else None
+        if np.all(curved):  # the formed rule's own set: the re-formed one spans it
+            return combinations
+        return combinations @ turn[:, curved] if np.any(curved) else None
 
     def _joint_generators(self, generators, system) -> BorderGenerators:
         """The border generators over ``[alpha | carried | border]`` (super-root deferred).

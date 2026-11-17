@@ -720,7 +720,13 @@ def test_an_exhausted_subtree_is_deferred_against_its_unreduced_columns(
 
 
 def _alias_beside_a_random_effect(
-    S_b: np.ndarray, *, thin_row=(1.0, 1.0), border_roots=None, split: float = 0.0, head=None
+    S_b: np.ndarray,
+    *,
+    thin_row=(1.0, 1.0),
+    border_roots=None,
+    split: float = 0.0,
+    head=None,
+    null: int = 2,
 ):
     """A one-row level beside a random effect, built by hand: ``(factor, case)``.
 
@@ -734,7 +740,8 @@ def _alias_beside_a_random_effect(
     a hand-built operator leaves them.  A nonzero ``split`` holds ``z_3`` as
     two columns ``z_3 / 2 +/- split a`` (``a`` standard normal), whose
     difference the data barely see; ``head(Z)`` gives the border other
-    leading columns than ``z_2`` and ``z_3``.
+    leading columns than ``z_2`` and ``z_3``.  ``null = 3`` leaves ``z_1``
+    unpenalized and in the border too, so the level has two free directions.
     """
     K, k, n, lam = 8, 4, 400, 0.3
     rng = np.random.default_rng(7)
@@ -742,10 +749,10 @@ def _alias_beside_a_random_effect(
     levels[0] = 0
     x = rng.uniform(size=n)
     Z = np.column_stack([x**j for j in range(k)]) + 0.1 * rng.normal(size=(n, k))
-    Z[0, 2:] = thin_row
+    Z[0, k - null :] = thin_row
     effect = rng.integers(0, 3, n)
     effect[:3] = np.arange(3)
-    X = np.column_stack((Z[:, 2:] if head is None else head(Z), np.eye(3)[effect]))
+    X = np.column_stack((Z[:, k - null :] if head is None else head(Z), np.eye(3)[effect]))
     q = X.shape[1]
     W = rng.uniform(0.5, 2.0, n)
     z = rng.normal(size=n)
@@ -768,7 +775,7 @@ def _alias_beside_a_random_effect(
         basis="sz",
     )
     system = dataclasses.replace(system, thin_counts=(np.array([0]), np.array([1])))
-    omega = np.diag([1.0, 1.0, 0.0, 0.0])
+    omega = np.diag(np.r_[np.ones(k - null), np.zeros(null)])
     penalized = SumToZeroPenalizedOperator.with_penalties(
         system.operator, S_b, np.broadcast_to(lam * omega, (K, k, k)).copy(), border_roots
     )
@@ -1380,6 +1387,43 @@ def test_a_null_combination_a_representation_error_turns_is_judged_re_formed(mon
     assert alias is not None and alias.shape[1] == 1
     assert factor.border_certificate.deflated == 1
     _matches_dense(factor, case, null)
+
+
+def test_a_certified_set_the_veto_keeps_whole_is_the_formed_rule_s_own(monkeypatch) -> None:
+    """Where the veto rejects nothing, the aliases are the formed rule's, bit for bit.
+
+    A one-row level with three unpenalized coordinates has two free
+    directions, on ``z_2`` and ``z_3``, each curved by its own ridge: the
+    formed rule certifies both and the veto keeps both.  The combinations
+    the veto judges are re-formed, here turned by 0.3 (forced: on real fits
+    by whatever the representation's error mixed), and span the same two
+    aliases, so the factor is given the formed rule's own columns and a
+    fit the veto does not touch keeps master's numbers.  Mutation: handed
+    the re-formed combinations, the aliases differ from the formed rule's.
+    """
+    ridge = np.array([1.0, 2.0, 3.0])
+    S_b = scipy.linalg.block_diag(np.diag(ridge), 0.5 * np.eye(3))
+    roots = ((np.arange(3), np.diag(ridge), np.eye(3), 1.0), (np.arange(3, 6), None, None, 0.5))
+    formed, _ = _alias_beside_a_random_effect(S_b, thin_row=(1.0, 0.0, 0.0), null=3)
+    eigh, seen = np.linalg.eigh, []
+    c, s = np.cos(0.3), np.sin(0.3)
+
+    def turning(a, *args, **kwargs):
+        values, vectors = eigh(a, *args, **kwargs)
+        if np.shape(a) == (2, 2):  # the two aliases' curvature: formed, then re-formed
+            seen.append(True)
+            if len(seen) == 2:
+                vectors = vectors @ np.array([[c, -s], [s, c]])
+        return values, vectors
+
+    monkeypatch.setattr(np.linalg, "eigh", turning)
+    factor, case = _alias_beside_a_random_effect(
+        S_b, thin_row=(1.0, 0.0, 0.0), null=3, border_roots=roots
+    )
+    monkeypatch.undo()
+    assert len(seen) == 2 and formed._alias_x is not None and formed._alias_x.shape[1] == 2
+    assert np.array_equal(factor._alias_x, formed._alias_x)
+    _matches_dense(factor, case)
 
 
 def test_a_penalty_coupling_a_generator_and_a_thin_alias_keeps_the_alias_out() -> None:
