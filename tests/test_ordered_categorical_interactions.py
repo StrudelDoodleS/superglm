@@ -163,9 +163,14 @@ def test_discretize_gates_refuse_oc_parents_under_discrete_mode():
 
 
 class _SplineBackedOC(OrderedCategorical, _SplineBase):
-    """An OrderedCategorical that also passes the spline-spec duck type."""
+    """An OrderedCategorical that also passes the spline-spec duck type.
+
+    It keeps the base spline ``build()``, since a spline with its own build
+    does not bin (``should_discretize``).
+    """
 
     discrete = None
+    build = _SplineBase.build
 
 
 def test_discretize_gates_refuse_oc_parents_that_pass_the_spline_duck_type():
