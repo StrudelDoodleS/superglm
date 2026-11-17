@@ -315,7 +315,15 @@ def compile_predictor_design(
                 feature_build_weight,
                 bin_knots(spec, x_col, feature_build_weight),
             )
-            B_unique = spec._raw_basis_matrix(bin_centers)
+            # A bin is read on the basis the unbinned build reads its rows on:
+            # continued past the boundary under extrapolation="extend", clipped
+            # to it under every other policy. Only splines bin (should_discretize).
+            spline = cast(_SplineBase, spec)
+            B_unique = (
+                spline._basis_matrix(bin_centers).toarray()
+                if spline.extrapolation == "extend"
+                else spline._raw_basis_matrix(bin_centers)
+            )
             exposure_agg = np.bincount(bin_idx, weights=sample_weight, minlength=len(bin_centers))
 
             # ── QP monotone constraint metadata (coefficient-space, survives discretization) ──

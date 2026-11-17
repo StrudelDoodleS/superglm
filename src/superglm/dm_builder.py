@@ -886,18 +886,23 @@ def _process_info(
     else:
         n_cols = info.n_cols
         R_inv = None
-        if use_tensor:
-            gm = DiscretizedTensorGroupMatrix(
-                tensor_build.B1_unique,
-                tensor_build.B2_unique,
-                tensor_build.idx1,
-                tensor_build.idx2,
-                B_unique,
-                np.eye(info.n_cols, dtype=np.float64),
-                bin_idx,
-                tensor_id=tensor_id,
-                raw_channels=tensor_build.raw_channels,
-            )
+        if use_discrete:
+            # A binned block without a projection holds its bins' rows unmapped.
+            identity = np.eye(info.n_cols, dtype=np.float64)
+            if use_tensor:
+                gm = DiscretizedTensorGroupMatrix(
+                    tensor_build.B1_unique,
+                    tensor_build.B2_unique,
+                    tensor_build.idx1,
+                    tensor_build.idx2,
+                    B_unique,
+                    identity,
+                    bin_idx,
+                    tensor_id=tensor_id,
+                    raw_channels=tensor_build.raw_channels,
+                )
+            else:
+                gm = DiscretizedSSPGroupMatrix(B_unique, identity, bin_idx)
             if info.penalty_matrix is not None:
                 gm.omega = info.penalty_matrix
             if info.penalty_components is not None:

@@ -217,6 +217,75 @@ class TestDiscretizedFit:
                 rtol=1e-7,
             )
 
+    @pytest.mark.parametrize("route", ["fit", "fit_reml"])
+    @pytest.mark.parametrize("penalty", ["ssp", "none"])
+    def test_one_value_column_bins_to_the_response_mean(self, penalty, route):
+        """A binned spline on a one-value column holds one bin and predicts the response mean.
+
+        The column has no identifiability projection, so its block is the bin's
+        row, unmapped. With the intercept free, the fitted value is the mean
+        whatever the penalty: a problem of condition one, solved over 30 rows
+        and 8 columns, so its rounding is near ``38 u`` relative and 1e-12
+        bounds it with room.
+        """
+        X = pd.DataFrame({"x": np.full(30, 3.0)})
+        y = (np.arange(30) % 7).astype(float)
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0,
+            discrete=True,
+            features={"x": Spline(kind="ps", n_knots=4, penalty=penalty)},
+        )
+        getattr(model, route)(X, y)
+        (block,) = model._dm.group_matrices
+        assert isinstance(block, DiscretizedSSPGroupMatrix)
+        assert block.n_bins == 1
+        np.testing.assert_allclose(model.predict(X), np.full(30, y.mean()), rtol=1e-12)
+
+    @pytest.mark.parametrize("kind", ["cr", "bs", "cr_cardinal"])
+    @pytest.mark.parametrize("penalty", ["ssp", "none"])
+    def test_extend_reads_bins_past_the_boundary(self, penalty, kind):
+        """Under ``extrapolation="extend"`` bins past ``boundary`` are read on the continued basis.
+
+        The unbinned build and prediction both continue the basis past the
+        boundary, so the bins must too. Each of the 200 rows has its own bin,
+        and ``y = 1 + 2x`` lies in every kind's penalty null space, so the
+        binned fit, the unbinned fit and the truth agree, on the rows and on
+        new points between them, to the solve's rounding: ``u * kappa**2 *
+        max|y|`` with the design's condition number ``kappa`` at most about
+        400 here, 1e-10, which 1e-9 bounds. The kinds cover the three
+        continuations: linear tails (``cr``), the end polynomials of a
+        B-spline (``bs``) and the cardinal tails.
+        """
+        x = np.linspace(-1.0, 2.0, 200)
+        X = pd.DataFrame({"x": x})
+        y = 1.0 + 2.0 * x
+        new = pd.DataFrame({"x": np.linspace(-0.9, 1.9, 8)})
+
+        def fitted(discrete):
+            spline = Spline(
+                kind=kind, n_knots=5, penalty=penalty, boundary=(0, 1), extrapolation="extend"
+            )
+            model = SuperGLM(
+                family="gaussian",
+                selection_penalty=0,
+                spline_penalty=0.1,
+                discrete=discrete,
+                n_bins=256,
+                features={"x": spline},
+            )
+            model.fit(X, y)
+            return model
+
+        binned, exact = fitted(True), fitted(False)
+        assert isinstance(binned._dm.group_matrices[0], DiscretizedSSPGroupMatrix)
+        for frame in (X, new):
+            truth = 1.0 + 2.0 * frame["x"].to_numpy()
+            np.testing.assert_allclose(
+                binned.predict(frame), exact.predict(frame), rtol=0, atol=1e-9
+            )
+            np.testing.assert_allclose(binned.predict(frame), truth, rtol=0, atol=1e-9)
+
     def test_categorical_stays_exact(self):
         """Categorical features should not be affected by discrete=True."""
         rng = np.random.default_rng(42)
