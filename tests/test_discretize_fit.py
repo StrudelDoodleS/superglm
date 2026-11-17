@@ -219,14 +219,16 @@ class TestDiscretizedFit:
 
     @pytest.mark.parametrize("route", ["fit", "fit_reml"])
     @pytest.mark.parametrize("penalty", ["ssp", "none"])
-    def test_one_value_column_bins_to_the_response_mean(self, penalty, route):
+    @pytest.mark.parametrize("kind", ["ps", "bs"])
+    def test_one_value_column_bins_to_the_response_mean(self, kind, penalty, route):
         """A binned spline on a one-value column holds one bin and predicts the response mean.
 
         The column has no identifiability projection, so its block is the bin's
         row, unmapped. With the intercept free, the fitted value is the mean
         whatever the penalty: a problem of condition one, solved over 30 rows
         and 8 columns, so its rounding is near ``38 u`` relative and 1e-12
-        bounds it with room.
+        bounds it with room. ``bs``'s integrated penalty is zero on such a
+        column, so ``"ssp"`` reaches the unmapped block too.
         """
         X = pd.DataFrame({"x": np.full(30, 3.0)})
         y = (np.arange(30) % 7).astype(float)
@@ -234,7 +236,7 @@ class TestDiscretizedFit:
             family="gaussian",
             selection_penalty=0,
             discrete=True,
-            features={"x": Spline(kind="ps", n_knots=4, penalty=penalty)},
+            features={"x": Spline(kind=kind, n_knots=4, penalty=penalty)},
         )
         getattr(model, route)(X, y)
         (block,) = model._dm.group_matrices
