@@ -110,6 +110,10 @@ if TYPE_CHECKING:
 # A pivot direction whose scaled pivot squared is below 20 k eps is deferred
 # to the border (cost only).
 _DEFERRAL_FACTOR = 20.0
+# The function-space resolution of the thin-alias decision: its least squares
+# is accepted at a misfit of sqrt(eps), and a border share of sqrt(eps) is a
+# curvature of eps, the formed quadratic form's own resolution.
+_ALIAS_RESOLUTION = math.sqrt(2.0 * _UNIT)
 
 
 def _append_generators(
@@ -154,6 +158,60 @@ def _append_generators(
         labels.append(f"{term_name}: a thin level's penalized alias")
     matrix = np.column_stack(columns) if columns else np.zeros((width, 0))
     return BorderGenerators(matrix, np.array(references, dtype=np.intp), tuple(labels))
+
+
+def _curved_by_a_root(border: NDArray, spread: NDArray, roots, error=None) -> NDArray:
+    """Which border directions ``border`` ``(q, g)`` some border penalty component curves.
+
+    Judged without lambda, one component at a time (Wood, Pya & Safken 2016,
+    sec. 3.1.2): with ``E'E`` a component's raw penalty and ``C`` its map to
+    raw coefficients, ``||E C b||`` is the root of the raw penalty of the
+    function ``b`` represents, in any solver basis.  It counts above what a
+    null of that penalty can show: the products' rounding on ``spread >=
+    |b|``, the image of ``b``'s ``error`` (twice a known part ``(q, g)``,
+    which resolves the curvature to a half, and a map ``(q, r)`` times norms
+    ``(g,)``), and the root's null tilt and ``_ALIAS_RESOLUTION`` of its
+    scale.  A component without a raw root curves what has that share on it.
+    """
+    from superglm.solvers.centered_system import penalty_factor
+
+    def reach(image, positions):
+        if error is None:
+            return 0.0
+        known, lift, unknown = error
+        return 2.0 * np.linalg.norm(image @ known[positions], axis=0) + (
+            np.linalg.norm(image @ lift[positions], 2) * unknown
+        )
+
+    sizes = np.linalg.norm(border, axis=0)
+    curved = np.zeros(border.shape[1], dtype=bool)
+    for positions, omega, coordinate_map in roots:
+        part = border[positions]
+        if omega is None:
+            bar = _ALIAS_RESOLUTION * sizes + reach(np.eye(len(positions)), positions)
+            curved |= np.linalg.norm(part, axis=0) > bar
+            continue
+        root = penalty_factor(np.asarray(omega, dtype=np.float64))
+        if not root.size:
+            continue
+        coordinate_map = np.asarray(coordinate_map, dtype=np.float64)
+        raw = coordinate_map @ part
+        singular = np.linalg.svd(root, compute_uv=False)
+        largest, width = float(singular[0]), root.shape[1]
+        # gamma_(w + |P| + 1) |E||C||b| bounds fl(E fl(C b)) (Higham 2002, sec.
+        # 3.5).  The root's rows are eigenvectors of Omega + dOmega, ||dOmega||_2
+        # <= w u ||Omega||_2 (LAPACK Users' Guide, 3rd ed., sec. 4.7), so each
+        # meets a null x of Omega in v'x = v'dOmega x / mu and ||E x|| <= w u
+        # sigma_max^2 / sigma_min ||x||.
+        allowance = (
+            _gamma(width + len(positions) + 1)
+            * np.linalg.norm(np.abs(root) @ (np.abs(coordinate_map) @ spread[positions]), axis=0)
+            + (width * _UNIT * largest / float(singular[-1]) + _ALIAS_RESOLUTION)
+            * (largest * np.linalg.norm(raw, axis=0))
+            + reach(root @ coordinate_map, positions)
+        )
+        curved |= np.linalg.norm(root @ raw, axis=0) > allowance
+    return curved
 
 
 # ------------------------------------------------------------- topology ----
@@ -1057,14 +1115,23 @@ class SumToZeroPenalizedOperator(SumToZeroBlockOperator):
     ``penalty_small`` ``(q, q)`` and ``penalty_local`` ``(K, k, k)`` (one block
     per level, all ``K``) are the parts the factor takes as square roots;
     ``A`` and ``D`` already include them (the operator every trace reads).
+    ``border_roots`` holds one ``(positions, Omega, C)`` per border penalty
+    component with a positive smoothing parameter (``assembly._border_root``),
+    read where a null-space membership is decided; ``None`` where the penalty
+    came without its components, or with a ridge that curves every direction.
     """
 
     penalty_small: NDArray | None = None
     penalty_local: NDArray | None = None
+    border_roots: tuple | None = None
 
     @classmethod
     def with_penalties(
-        cls, operator: SumToZeroBlockOperator, penalty_small: NDArray, penalty_local: NDArray
+        cls,
+        operator: SumToZeroBlockOperator,
+        penalty_small: NDArray,
+        penalty_local: NDArray,
+        border_roots: tuple | None = None,
     ) -> SumToZeroPenalizedOperator:
         from superglm.solvers._structured.block_leaves import share_cross_block
 
@@ -1078,6 +1145,7 @@ class SumToZeroPenalizedOperator(SumToZeroBlockOperator):
             structured_indices=operator.structured_indices,
             penalty_small=0.5 * (small + small.T),
             penalty_local=0.5 * (local + local.transpose(0, 2, 1)),
+            border_roots=border_roots,
         )
         return share_cross_block(penalized, operator.C)
 
@@ -1481,6 +1549,18 @@ class SumToZeroTreeFactor:
             rest_bound[rest] = 0.0
         if aliases is not None and aliases.shape[1]:
             generators = _append_generators(generators, aliases, self.term_name)
+        roots = penalized.border_roots
+        # A border column that is a data null within its bound and that no
+        # component curves holds only its formed penalty's rounding, lambda
+        # times a squared rounding the bound does not cover: exact zeros there
+        # (Wood, Pya & Safken 2016, Supplementary Appendix C) leave the null it is.
+        null = np.diag(Q_rest)[lead:] <= rest_bound[lead:]
+        null = np.flatnonzero(null & (np.diag(S_rest)[lead:] > 0.0)) if roots is not None else ()
+        if len(null):
+            unit = np.zeros((q, len(null)))
+            unit[null, np.arange(len(null))] = 1.0
+            null = lead + null[~_curved_by_a_root(unit, unit, roots)]
+            S_rest[null, :] = S_rest[:, null] = 0.0
         border = factor_border(
             Q_rest,
             S_rest,
@@ -1498,10 +1578,10 @@ class SumToZeroTreeFactor:
         data nulls ``beta_t += N_P f (K - 1) / K``, ``beta_l -= N_P f / K`` elsewhere and border
         ``+g(x)' f / K``, for every ``f`` with ``g(x)' f = 0`` on its ``x`` values. Only the border
         penalty curves them, so they are deflated structurally, not truncated as data (which would
-        make ``log|H|`` jump with lambda). Only combinations the penalty certifies above the
-        quadratic form's rounding are returned, a scale-invariant test (Wood, Pya & Safken 2016,
-        §3.1.2); the border part must reproduce the null-space functions to ``sqrt(eps)``.
-        ``None`` without thin levels or penalty.
+        make ``log|H|`` jump with lambda). Only combinations the formed penalty certifies above
+        its quadratic form's rounding and a border penalty component curves in its raw basis
+        (``_curved_by_a_root``) are returned; the border part must reproduce the null-space
+        functions to ``sqrt(eps)``. ``None`` without thin levels or penalty.
         """
         counts = getattr(system, "thin_counts", None)
         if counts is None or not len(counts[0]):
@@ -1552,8 +1632,9 @@ class SumToZeroTreeFactor:
         # aliases exactly zero there, and least squares never gives 0.0 (#432).
         if self.excluded:
             scale[self._small_position[np.asarray(self.excluded, dtype=np.intp)]] = 0.0
+        gram = scale[:, None] * G_BB * scale[None, :]
         scaled = scipy.linalg.lstsq(
-            scale[:, None] * G_BB * scale[None, :],
+            gram,
             scale[:, None] * G_BZ,
             cond=(1 + q) * _EPS,
             check_finite=False,
@@ -1570,7 +1651,7 @@ class SumToZeroTreeFactor:
         if not size > 0.0 or misfit > math.sqrt(_EPS) * size:
             return None
         tree = self._tree
-        columns = []
+        columns, functions = [], []
         for level, count in zip(levels, distinct, strict=True):
             free = m - int(count)
             if free <= 0:
@@ -1596,6 +1677,7 @@ class SumToZeroTreeFactor:
                             tree.h[node, side] * shift[deferred]
                         )
                 columns.append(vector)
+                functions.append(f / K)
         if not columns:
             return None
         aliases = np.column_stack(columns)
@@ -1616,7 +1698,42 @@ class SumToZeroTreeFactor:
         certified = values > (q + 2 + len(values)) * _EPS * magnitude
         if not np.any(certified):
             return None
-        return aliases @ vectors[:, certified]
+        combinations = aliases @ vectors[:, certified]
+        roots = penalized.border_roots
+        if roots is None:
+            return combinations
+        # The formed bar reads the rounding of its quadratic form alone, which the
+        # representation's own error clears wherever the form does not cancel, so a
+        # certified combination is kept only if a component curves it above that
+        # error. The exact alias has R_B U* = R_Z (the thin-level algebra), so with
+        # A_s = [R_B; tail] D and A_s'A_s = V Lambda V' the scaled Gram the least
+        # squares kept, b* - b = D V Lambda^-1 V' A_s' r_phi: the correction the
+        # residual shows, and D V Lambda^-1/2 times at most the residual's own
+        # rounding, gamma_(q+2) (|R_Z| + |R_B||U|) |phi| (Higham 2002, sec. 3.5).
+        phi = np.column_stack(functions) @ vectors[:, certified]
+        floor = _gamma(q + 2) * np.concatenate(
+            ((np.abs(RZ) + np.abs(RB) @ np.abs(U)).reshape(-1, m), np.abs(tail) @ np.abs(U))
+        )
+        back = (np.einsum("lai,laj->ij", RB, residual) - tail.T @ tail_residual) @ phi
+        gram_values, gram_vectors = np.linalg.eigh(gram)
+        kept = gram_values > (1 + q) * _EPS * float(gram_values[-1])
+        basis = scale[1:, None] * gram_vectors[1:, kept]
+        known = basis @ (
+            (gram_vectors[:, kept].T @ (scale[:, None] * back)) / gram_values[kept, None]
+        )
+        error = (
+            known,
+            basis / np.sqrt(gram_values[kept]),
+            np.linalg.norm(floor @ np.abs(phi), axis=0),
+        )
+        chosen = combinations[1 + c :]
+        curved = _curved_by_a_root(chosen, spread[:, certified], roots, error)
+        # A combination the intercept or the carried coordinates hold whole has a
+        # border part of the eigenvectors' mixing, below the form's resolution.
+        curved &= np.linalg.norm(chosen, axis=0) > _ALIAS_RESOLUTION * np.linalg.norm(
+            combinations, axis=0
+        )
+        return combinations[:, curved] if np.any(curved) else None
 
     def _joint_generators(self, generators, system) -> BorderGenerators:
         """The border generators over ``[alpha | carried | border]`` (super-root deferred).

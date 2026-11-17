@@ -19,6 +19,7 @@ import warnings
 import numpy as np
 import pandas as pd
 import pytest
+import scipy.linalg
 
 from superglm import FactorSmooth, LambdaPolicy, Numeric, Spline, SuperGLM
 from superglm.solvers._structured.balance_tree import (
@@ -516,7 +517,7 @@ def test_a_signed_level_shift_is_the_level_space_penalty() -> None:
     assert shifted_factor.logdet() == pytest.approx(np.linalg.slogdet(expected)[1], abs=tolerance)
 
 
-def _thin_model(direct_solve: str, *, discrete: bool = False):
+def _thin_model(direct_solve: str, *, discrete: bool = False, main: Spline | None = None):
     rng = np.random.default_rng(3)
     n, levels = 3000, 25
     g = rng.integers(0, levels, n)
@@ -528,7 +529,10 @@ def _thin_model(direct_solve: str, *, discrete: bool = False):
     y = 0.3 * frame["x1"].to_numpy() + 0.3 * np.sin(2 * np.pi * x) + rng.normal(0, 0.5, n)
     model = SuperGLM(
         family="gaussian",
-        features={"x1": Numeric(), "x": Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))},
+        features={
+            "x1": Numeric(),
+            "x": main or Spline(n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0)),
+        },
         interactions=[
             FactorSmooth("x", group="g", basis="sz", k=6, lambda_policy=LambdaPolicy.fixed(2.0))
         ],
@@ -577,6 +581,28 @@ def test_thin_levels_are_named_and_kept(discrete: bool) -> None:
 
     tree_objective, gram_objective = penalized(model), penalized(gram)
     assert tree_objective <= gram_objective + len(frame) * EPS * abs(gram_objective)
+
+
+def test_a_stiff_main_effect_leaves_its_thin_aliases_exact_nulls() -> None:
+    """A thin level beside a main effect at the top of the REML box fits as gram fits it.
+
+    ``_thin_model`` with the main effect in its raw basis (``penalty="none"``)
+    at lambda ``1e10``: each one-row level's alias is linear, in the null
+    space of the main effect's penalty, so the tree truncates it as gram
+    does.  Converged, with gram's fitted values and EDF within ``n eps`` of
+    their scale times the border's conditioning allowance.  Mutation:
+    without the veto the alias's representation error is certified as
+    curvature and divided by: the fit stops unconverged with an EDF 0.8 off.
+    """
+    main = Spline("cr", n_knots=6, penalty="none", lambda_policy=LambdaPolicy.fixed(1e10))
+    model, frame, _ = _thin_model("structured", main=main)
+    gram, _, _ = _thin_model("gram", main=main)
+    assert model.result.direct_backend == "structured" and model.result.converged
+    fitted, expected = model.predict(frame), gram.predict(frame)
+    scale = float(np.max(np.abs(expected)))
+    assert np.max(np.abs(fitted - expected)) <= 1e3 * len(frame) * EPS * scale
+    edf, edf_gram = np.sum(model.result.effective_df), np.sum(gram.result.effective_df)
+    assert abs(edf - edf_gram) <= 1e3 * len(frame) * EPS * edf_gram
 
 
 def _one_row(count):
@@ -644,15 +670,17 @@ def test_an_exhausted_subtree_is_deferred_against_its_unreduced_columns(
     )
 
 
-def _alias_beside_a_random_effect(S_b: np.ndarray):
+def _alias_beside_a_random_effect(S_b: np.ndarray, *, thin_row=(1.0, 1.0), border_roots=None):
     """A one-row level beside a random effect, built by hand: ``(factor, case)``.
 
     ``K = 8``, ``k = 4``, ``omega = diag(1, 1, 0, 0)``.  Level 0's single row
-    has unpenalized coordinates ``(1, 1)``, so its free direction is ``(1,
-    -1)``.  The border holds ``z_2`` and ``z_3`` (the global Spline's share
-    of the null-space functions, which represents the alias) and a complete
-    three-level one-hot block, whose sum is the generator.  ``thin_counts``
-    is set as ``layout.thin_level_counts`` would set it.
+    has unpenalized coordinates ``thin_row``, so its free direction is the
+    one orthogonal to it (``(1, -1)`` by default).  The border holds ``z_2``
+    and ``z_3`` (the global Spline's share of the null-space functions, which
+    represents the alias) and a complete three-level one-hot block, whose sum
+    is the generator.  ``thin_counts`` is set as ``layout.thin_level_counts``
+    would set it, and ``border_roots`` as the assembly would, or left out as
+    a hand-built operator leaves them.
     """
     K, k, n, lam = 8, 4, 400, 0.3
     rng = np.random.default_rng(7)
@@ -660,7 +688,7 @@ def _alias_beside_a_random_effect(S_b: np.ndarray):
     levels[0] = 0
     x = rng.uniform(size=n)
     Z = np.column_stack([x**j for j in range(k)]) + 0.1 * rng.normal(size=(n, k))
-    Z[0, 2:] = 1.0
+    Z[0, 2:] = thin_row
     effect = rng.integers(0, 3, n)
     effect[:3] = np.arange(3)
     X = np.column_stack((Z[:, 2:], np.eye(3)[effect]))
@@ -682,10 +710,211 @@ def _alias_beside_a_random_effect(S_b: np.ndarray):
     system = dataclasses.replace(system, thin_counts=(np.array([0]), np.array([1])))
     omega = np.diag([1.0, 1.0, 0.0, 0.0])
     penalized = SumToZeroPenalizedOperator.with_penalties(
-        system.operator, S_b, np.broadcast_to(lam * omega, (K, k, k)).copy()
+        system.operator, S_b, np.broadcast_to(lam * omega, (K, k, k)).copy(), border_roots
     )
     case = dict(K=K, k=k, q=q, levels=levels, Z=Z, X=X, W=W, z=z, omega=omega, lam=lam, S_b=S_b)
     return SumToZeroTreeFactor(system, penalized), case
+
+
+def _misrepresenting(monkeypatch, rows, delta: float) -> None:
+    """``scipy.linalg.lstsq`` with ``delta`` added to its solution's ``rows``: a forced representation error.
+
+    The thin-alias least squares solves for ``[intercept | border]`` in its
+    Jacobi-scaled coordinates, one column per null-space function.
+    """
+    solve = scipy.linalg.lstsq
+
+    def misrepresented(*args, **kwargs):
+        solution, residues, rank, singular = solve(*args, **kwargs)
+        solution = solution.copy()
+        solution[rows] += delta
+        return solution, residues, rank, singular
+
+    monkeypatch.setattr(scipy.linalg, "lstsq", misrepresented)
+
+
+def _matches_dense(factor, case, null=None) -> None:
+    """``factor``'s rank, ``log|H|`` and fitted values against the dense ``H``, ``null`` its exact null.
+
+    ``log H_00 + log pdet(H_c) = log det(H + t t') - log(t't)``, ``t = (0,
+    null_1)``; the fitted values are those of ``(H + null null') beta = X'Wz``
+    (``X null = 0``), within ``8 p u kappa_s`` (Higham 2002, Theorem 10.6).
+    """
+    H, X, _ = _dense(case)
+    n, p = len(case["W"]), H.shape[0]
+    magnitude = _magnitude(case)
+    B, G, shift = H, H, 0.0
+    if null is not None:
+        assert np.all(np.abs(H @ null) <= _gamma(n + p + 2) * (magnitude @ np.abs(null)))
+        tail = np.r_[0.0, null[1:]]
+        B, G = H + np.outer(tail, tail), H + np.outer(null, null)
+        magnitude = magnitude + np.outer(np.abs(tail), np.abs(tail))
+        shift = float(np.log(tail @ tail))
+    assert factor.rank == p - (null is not None)
+    tolerance = _logdet_agreement(B, magnitude, n + p + 4)
+    assert abs(factor.logdet() - (_cholesky_logdet(B) - shift)) <= tolerance
+    expected = X @ np.linalg.solve(G, X.T @ (case["W"] * case["z"]))
+    reach = 8 * p * _U * _kappa(G) * float(np.max(np.abs(expected)))
+    assert np.max(np.abs(X @ factor.solve_data() - expected)) <= reach
+
+
+def _alias_null(case, f) -> np.ndarray:
+    """``K`` times level 0's alias in ``_alias_beside_a_random_effect``, ``f`` its free direction.
+
+    Border ``f`` on ``z_2, z_3``, level 0 ``(K - 1) f`` and every other public
+    level ``-f`` on the unpenalized coordinates (the last level's ``-f`` is
+    implied): exact entries, a null of the data and of the level penalty.
+    """
+    K, k, q = case["K"], case["k"], case["q"]
+    N = np.zeros(1 + q + (K - 1) * k)
+    N[1:3] = f
+    for level in range(K - 1):
+        share = K - 1.0 if level == 0 else -1.0
+        N[1 + q + level * k + 2 : 1 + q + (level + 1) * k] = share * np.asarray(f)
+    return N
+
+
+_EFFECT = (np.array([2, 3, 4]), None, None)  # the random effect's ridge: no raw root
+
+
+def test_a_representation_error_does_not_certify_a_null_alias_at_a_large_lambda(
+    monkeypatch,
+) -> None:
+    """A thin alias in the border penalty's null space stays a null, whatever its representation carries.
+
+    Level 0's single row ``(1, 0)`` puts the alias on ``z_3``, the null of the
+    Spline's penalty ``diag(1, 0)`` at lambda ``1e10``.  The least squares'
+    solution is given ``1e-10`` on ``z_2`` (its scaled coordinates), so the
+    alias's border part carries curvature ``1e10`` times that squared on an
+    axis where nothing cancels: the formed rule's bar is that curvature's own
+    rounding, and an operator without roots certifies the alias and divides
+    by it.  With the border roots the raw penalty's image of the border part
+    is inside the decision's resolution, so the alias is left to the pivoted
+    factorization, which truncates the exact null: rank, pseudo-determinant
+    and fitted values are the dense ``H``'s.  Mutation: without the veto the
+    alias is deflated on the forced error.
+    """
+    S_b = np.diag([1e10, 0.0, 0.5, 0.5, 0.5])
+    roots = ((np.array([0, 1]), np.diag([1.0, 0.0]), np.eye(2)), _EFFECT)
+    _misrepresenting(monkeypatch, 1, 1e-10)
+    formed, _ = _alias_beside_a_random_effect(S_b, thin_row=(1.0, 0.0))
+    factor, case = _alias_beside_a_random_effect(S_b, thin_row=(1.0, 0.0), border_roots=roots)
+    monkeypatch.undo()
+    assert formed._alias_x is not None and formed.border_certificate.deflated == 2
+    assert factor._alias_x is None and factor.border_certificate.deflated == 1
+    _matches_dense(factor, case, _alias_null(case, (0.0, 1.0)))
+
+
+@pytest.mark.parametrize("rounding", [3e-11, 5e-11, 1e-8])
+def test_a_formed_penalty_s_rounding_on_a_null_border_column_is_cleared(rounding) -> None:
+    """A border column that is a data null and a null of its raw penalty is an exact null of ``H``.
+
+    Level 0's single row ``(1, 0)`` makes the border's ``z_3`` column itself
+    the alias, and the Spline's raw penalty ``diag(1, 0)`` does not curve it,
+    but the formed block keeps ``rounding`` there (a large lambda times a
+    squared rounding).  The formed rule certifies the alias on it, the veto
+    leaves the alias out, and the column's formed penalty is cleared, so the
+    factor is that of the exact block: rank, pseudo-determinant and fitted
+    values.  Mutation: left in, the column stays live at a diagonal just above
+    its data-side bound, which makes the rank cut's tolerance vacuous (3e-11
+    and 5e-11: fitted values 9e-2 of their scale off).
+    """
+    S_b = np.diag([1.0, rounding, 0.5, 0.5, 0.5])
+    roots = ((np.array([0, 1]), np.diag([1.0, 0.0]), np.eye(2)), _EFFECT)
+    factor, case = _alias_beside_a_random_effect(S_b, thin_row=(1.0, 0.0), border_roots=roots)
+    assert factor._alias_x is None and factor.border_certificate.deflated == 1
+    exact = dict(case, S_b=np.diag([1.0, 0.0, 0.5, 0.5, 0.5]))
+    _matches_dense(factor, exact, _alias_null(exact, (0.0, 1.0)))
+
+
+@pytest.mark.parametrize("lam", [1.0, 1e-6])
+def test_a_thin_alias_a_border_penalty_curves_stays_certified_at_any_lambda(lam) -> None:
+    """The veto reads the raw penalty, not its smoothing parameter: a curved alias is deflated.
+
+    Level 0's alias ``(1, -1)`` on ``z_2, z_3`` against the Spline's raw
+    penalty ``diag(0.5, 0.7)``, formed at ``lam``: the root's image of the
+    border part is the same at every ``lam`` and far above its allowance, so
+    the alias is deflated beside the effect's generator and ``H`` keeps its
+    full rank and determinant.  Mutation: a veto that fires on every
+    combination leaves the alias out (one generator deflated).
+    """
+    raw = np.diag([0.5, 0.7])
+    S_b = np.diag([lam * 0.5, lam * 0.7, 0.3, 0.4, 0.6])
+    roots = ((np.array([0, 1]), raw, np.eye(2)), _EFFECT)
+    factor, case = _alias_beside_a_random_effect(S_b, border_roots=roots)
+    assert factor._alias_x is not None and factor._alias_x.shape[1] == 1
+    assert factor.border_certificate.deflated == 2
+    _matches_dense(factor, case)
+
+
+def test_a_thin_alias_the_intercept_carries_is_not_deflated(monkeypatch) -> None:
+    """The ghost: a combination of thin aliases whose border part is its representation error.
+
+    Two one-row levels at ``x = 1/2`` and ``-1/2`` beside a stiff term (an
+    identity at ``1e6`` on two columns): each alias is linear, ``x -/+ 1/2``,
+    and their difference is the constant, which the intercept carries, an
+    exact null of ``H``.  The least squares' solution is given ``1e-10`` of
+    the constant's representation on the stiff term's columns, an error only
+    that difference carries.  It sits inside the representation error its
+    residual shows, so no component curves the difference: the sum alone is
+    deflated (the ``x`` column's ridge curves it) and the pivoted
+    factorization truncates the null.  Mutation: without the veto the
+    difference is deflated on ``1e6`` times the squared error (two deflated,
+    rank ``p``).
+    """
+    K, k, n, lam = 8, 4, 400, 0.3
+    rng = np.random.default_rng(5)
+    levels = rng.integers(2, K, n)
+    levels[:2] = (0, 1)
+    x = rng.uniform(-1.0, 1.0, n)
+    x[:2] = (0.5, -0.5)
+    Z = np.column_stack([np.cos(3 * x), np.sin(2 * x), np.ones(n), x])
+    Z[:, :2] += 0.1 * rng.normal(size=(n, 2))
+    v = rng.uniform(-1.0, 1.0, n)
+    X = np.column_stack((x, v, v**2 - 1.0 / 3.0))
+    q = X.shape[1]
+    W = rng.uniform(0.5, 2.0, n)
+    z = rng.normal(size=n)
+    system = leaf_system_from_rows(
+        Z,
+        X,
+        levels,
+        W,
+        W * z,
+        n_levels=K,
+        small_indices=np.arange(q),
+        structured_indices=np.arange(q, q + (K - 1) * k).reshape(K - 1, k),
+        basis="sz",
+    )
+    system = dataclasses.replace(system, thin_counts=(np.array([0, 1]), np.array([1, 1])))
+    omega = np.diag([1.0, 1.0, 0.0, 0.0])
+    S_b = np.diag([1.0, 1e6, 1e6])
+    roots = ((np.array([0]), np.eye(1), np.eye(1)), (np.array([1, 2]), None, None))
+    penalized = SumToZeroPenalizedOperator.with_penalties(
+        system.operator, S_b, np.broadcast_to(lam * omega, (K, k, k)).copy(), roots
+    )
+    solve = scipy.linalg.lstsq
+
+    def misrepresented(*args, **kwargs):
+        solution, residues, rank, singular = solve(*args, **kwargs)
+        solution = solution.copy()
+        solution[2:] += 1e-10 * solution[0]  # rows: intercept, x, the stiff term's two
+        return solution, residues, rank, singular
+
+    monkeypatch.setattr(scipy.linalg, "lstsq", misrepresented)
+    factor = SumToZeroTreeFactor(system, penalized)
+    monkeypatch.undo()
+    case = dict(K=K, k=k, q=q, levels=levels, Z=Z, X=X, W=W, z=z, omega=omega, lam=lam, S_b=S_b)
+    ghost = np.zeros(1 + q + (K - 1) * k)
+    for level, f in ((0, (-0.5, 1.0)), (1, (0.5, 1.0))):
+        sign = 1.0 if level == 0 else -1.0
+        ghost[:2] += sign * np.asarray(f)  # intercept and x: the main effect's share, K f / K
+        for public in range(K - 1):
+            share = K - 1.0 if public == level else -1.0
+            ghost[1 + q + public * k + 2 : 1 + q + (public + 1) * k] += sign * share * np.asarray(f)
+    assert factor._alias_x is not None and factor._alias_x.shape[1] == 1
+    assert factor.border_certificate.deflated == 1
+    _matches_dense(factor, case, ghost)
 
 
 def test_a_penalty_coupling_a_generator_and_a_thin_alias_keeps_the_alias_out() -> None:

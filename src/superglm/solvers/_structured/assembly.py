@@ -253,6 +253,7 @@ def build_penalized_sum_to_zero_operator(
 
     if reml_penalties is None:
         raise ValueError(_PENALTIES_REQUIRED)
+    roots = []
     for component in reml_penalties:
         lam = _lambda_for_component(lambda2, component.name)
         if lam == 0.0:
@@ -268,6 +269,7 @@ def build_penalized_sum_to_zero_operator(
             if not wholly_small:
                 raise ValueError("The dominant SZ block accepts only a sum-to-zero penalty.")
             A[local_small, local_small] += lam
+            roots.append((local_small, None, None))
             continue
         if component.penalty_kind == "sum_to_zero":
             if (
@@ -302,8 +304,27 @@ def build_penalized_sum_to_zero_operator(
                 f"expected ({len(indices)}, {len(indices)})."
             )
         A[np.ix_(local_small, local_small)] += lam * omega
+        roots.append(_border_root(component, group_matrices[component.group_index], local_small))
 
-    return SumToZeroPenalizedOperator.with_penalties(operator, A, D)
+    return SumToZeroPenalizedOperator.with_penalties(operator, A, D, tuple(roots))
+
+
+def _border_root(
+    component: PenaltyComponent, group_matrix: GroupMatrix, positions: NDArray
+) -> tuple[NDArray, NDArray | None, NDArray | None]:
+    """``(positions, Omega, C)``: one border penalty component in its raw basis, by reference.
+
+    ``Omega`` is the component's raw penalty and ``C`` the map from the term's
+    solver coefficients to its raw ones (``R_inv``), the pair its solver-space
+    penalty ``C' Omega C`` is formed from.  ``(positions, None, None)`` where
+    the component has no such pair.
+    """
+    omega, coordinate_map = component.omega_raw, getattr(group_matrix, "R_inv", None)
+    if omega is None or coordinate_map is None:
+        return positions, None, None
+    if np.shape(coordinate_map) != (np.shape(omega)[0], len(positions)):
+        return positions, None, None
+    return positions, omega, coordinate_map
 
 
 def _nested_penalty_terms(
