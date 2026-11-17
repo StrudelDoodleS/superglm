@@ -191,8 +191,6 @@ def _root_images(border: NDArray, spread: NDArray, roots, error=None):
             yield lam, np.linalg.norm(part, axis=0), 0.0, slack, np.linalg.norm(border, axis=0)
             continue
         root, full, tilt = penalty_factor_tilt(np.asarray(omega, dtype=np.float64))
-        if not root.size:
-            continue
         coordinate_map = np.asarray(coordinate_map, dtype=np.float64)
         raw = coordinate_map @ part
         # gamma_(w + |P| + 3) |E||C||b| bounds fl(E fl(C b)) and the root's own
@@ -1548,8 +1546,8 @@ class SumToZeroTreeFactor:
         # the square of an image inside the decision's resolution, which the
         # bound does not cover, is cleared (Wood, Pya & Safken 2016,
         # Supplementary Appendix C).  Only where that diagonal is the Gram of
-        # the components' images, within the products' and the sums' rounding:
-        # one the roots do not account for is kept.
+        # the components' images, within the products' rounding: one the roots
+        # do not account for is kept.
         formed = np.diag(S_rest)[lead:]
         null = np.flatnonzero((np.diag(Q_rest)[lead:] <= rest_bound[lead:]) & (formed > 0.0))
         if roots is not None and len(null):
@@ -1559,7 +1557,7 @@ class SumToZeroTreeFactor:
             for lam, image, rounding, slack, size in _root_images(unit, unit, roots):
                 accounted += lam * (image + 2.0 * rounding) ** 2
                 flat &= image <= rounding + slack + _ALIAS_RESOLUTION * size
-            flat &= formed[null] <= (1.0 + _gamma(n_x + 2 * len(roots) + 8)) * accounted
+            flat &= formed[null] <= accounted
             cleared = lead + null[flat]
             S_rest[cleared, :] = S_rest[:, cleared] = 0.0
         border = factor_border(

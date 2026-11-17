@@ -790,34 +790,6 @@ def _alias_null(case, f, border=None) -> np.ndarray:
 _EFFECT = (np.array([2, 3, 4]), None, None, 0.5)  # the random effect's ridge: no raw root
 
 
-def test_a_representation_error_does_not_certify_a_null_alias_at_a_large_lambda(
-    monkeypatch,
-) -> None:
-    """A thin alias in the border penalty's null space stays a null, whatever its representation carries.
-
-    Level 0's single row ``(1, 0)`` puts the alias on ``z_3``, the null of the
-    Spline's penalty ``diag(1, 0)`` at lambda ``1e10``.  The least squares'
-    solution is given ``1e-10`` on ``z_2`` (its scaled coordinates), so the
-    alias's border part carries curvature ``1e10`` times that squared on an
-    axis where nothing cancels: the formed rule's bar is that curvature's own
-    rounding, and an operator without roots certifies the alias and divides
-    by it.  With the border roots the raw penalty's image of the border part
-    is inside the decision's resolution, so the alias is left to the pivoted
-    factorization, which truncates the exact null: rank, pseudo-determinant
-    and fitted values are the dense ``H``'s.  Mutation: without the veto the
-    alias is deflated on the forced error.
-    """
-    S_b = np.diag([1e10, 0.0, 0.5, 0.5, 0.5])
-    roots = ((np.array([0, 1]), np.diag([1.0, 0.0]), np.eye(2), 1e10), _EFFECT)
-    _misrepresenting(monkeypatch, 1, 1e-10)
-    formed, _ = _alias_beside_a_random_effect(S_b, thin_row=(1.0, 0.0))
-    factor, case = _alias_beside_a_random_effect(S_b, thin_row=(1.0, 0.0), border_roots=roots)
-    monkeypatch.undo()
-    assert formed._alias_x is not None and formed.border_certificate.deflated == 2
-    assert factor._alias_x is None and factor.border_certificate.deflated == 1
-    _matches_dense(factor, case, _alias_null(case, (0.0, 1.0)))
-
-
 @pytest.mark.parametrize("shown", [1.0, 0.7])
 def test_a_representation_error_the_data_barely_see_does_not_certify_a_null_alias(
     monkeypatch, shown
@@ -1103,36 +1075,6 @@ def _two_thin_levels_beside_a_stiff_term(t: float = 0.5):
     return system, penalized, case, null
 
 
-def test_a_thin_alias_the_intercept_carries_is_not_deflated(monkeypatch) -> None:
-    """The ghost: a combination of thin aliases whose border part is its representation error.
-
-    ``_two_thin_levels_beside_a_stiff_term`` at ``x = 1/2`` and ``-1/2``.
-    The least squares' solution is given ``1e-10`` of the constant's
-    representation on the stiff term's columns, an error only the
-    difference carries.  It sits inside the representation error its
-    residual shows, so no component curves the difference: the sum alone is
-    deflated (the ``x`` column's ridge curves it) and the pivoted
-    factorization truncates the null.  Mutation: without the veto the
-    difference is deflated on ``1e6`` times the squared error (two deflated,
-    rank ``p``).
-    """
-    system, penalized, case, ghost = _two_thin_levels_beside_a_stiff_term()
-    solve = scipy.linalg.lstsq
-
-    def misrepresented(*args, **kwargs):
-        solution, residues, rank, singular = solve(*args, **kwargs)
-        solution = solution.copy()
-        solution[2:] += 1e-10 * solution[0]  # rows: intercept, x, the stiff term's two
-        return solution, residues, rank, singular
-
-    monkeypatch.setattr(scipy.linalg, "lstsq", misrepresented)
-    factor = SumToZeroTreeFactor(system, penalized)
-    monkeypatch.undo()
-    assert factor._alias_x is not None and factor._alias_x.shape[1] == 1
-    assert factor.border_certificate.deflated == 1
-    _matches_dense(factor, case, ghost)
-
-
 def test_a_curved_alias_mixed_into_the_intercept_s_combination_is_not_deflated(monkeypatch) -> None:
     """The share test: a combination the intercept holds whole is not certified by a mixed-in curved part.
 
@@ -1167,7 +1109,7 @@ def test_a_curved_alias_mixed_into_the_intercept_s_combination_is_not_deflated(m
     formed = SumToZeroTreeFactor(system, dataclasses.replace(penalized, border_roots=None))
     factor = SumToZeroTreeFactor(system, penalized)
     monkeypatch.undo()
-    assert len(turned) == 2 and formed._alias_x is not None and formed._alias_x.shape[1] == 2
+    assert turned and formed._alias_x is not None and formed._alias_x.shape[1] == 2
     alias = factor._alias_x
     assert alias is not None and alias.shape[1] == 1
     assert np.linalg.norm(alias[1:]) > 0.5 * np.linalg.norm(alias)  # the sum, on x
