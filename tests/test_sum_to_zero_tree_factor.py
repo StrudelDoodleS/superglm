@@ -670,7 +670,9 @@ def test_an_exhausted_subtree_is_deferred_against_its_unreduced_columns(
     )
 
 
-def _alias_beside_a_random_effect(S_b: np.ndarray, *, thin_row=(1.0, 1.0), border_roots=None):
+def _alias_beside_a_random_effect(
+    S_b: np.ndarray, *, thin_row=(1.0, 1.0), border_roots=None, split: float = 0.0
+):
     """A one-row level beside a random effect, built by hand: ``(factor, case)``.
 
     ``K = 8``, ``k = 4``, ``omega = diag(1, 1, 0, 0)``.  Level 0's single row
@@ -680,7 +682,9 @@ def _alias_beside_a_random_effect(S_b: np.ndarray, *, thin_row=(1.0, 1.0), borde
     represents the alias) and a complete three-level one-hot block, whose sum
     is the generator.  ``thin_counts`` is set as ``layout.thin_level_counts``
     would set it, and ``border_roots`` as the assembly would, or left out as
-    a hand-built operator leaves them.
+    a hand-built operator leaves them.  A nonzero ``split`` holds ``z_3`` as
+    two columns ``z_3 / 2 +/- split a`` (``a`` standard normal), whose
+    difference the data barely see.
     """
     K, k, n, lam = 8, 4, 400, 0.3
     rng = np.random.default_rng(7)
@@ -695,6 +699,10 @@ def _alias_beside_a_random_effect(S_b: np.ndarray, *, thin_row=(1.0, 1.0), borde
     q = X.shape[1]
     W = rng.uniform(0.5, 2.0, n)
     z = rng.normal(size=n)
+    if split:
+        a = split * rng.normal(size=n)
+        X = np.column_stack((Z[:, 2], Z[:, 3] / 2 + a, Z[:, 3] / 2 - a, X[:, 2:]))
+        q = X.shape[1]
     system = leaf_system_from_rows(
         Z,
         X,
@@ -704,7 +712,9 @@ def _alias_beside_a_random_effect(S_b: np.ndarray, *, thin_row=(1.0, 1.0), borde
         n_levels=K,
         small_indices=np.arange(q),
         structured_indices=np.arange(q, q + (K - 1) * k).reshape(K - 1, k),
-        generators=BorderGenerators(matrix=np.array([[0.0, 0.0, 1.0, 1.0, 1.0]]).T, references=[2]),
+        generators=BorderGenerators(
+            matrix=np.r_[np.zeros(q - 3), np.ones(3)][:, None], references=[q - 3]
+        ),
         basis="sz",
     )
     system = dataclasses.replace(system, thin_counts=(np.array([0]), np.array([1])))
@@ -716,7 +726,7 @@ def _alias_beside_a_random_effect(S_b: np.ndarray, *, thin_row=(1.0, 1.0), borde
     return SumToZeroTreeFactor(system, penalized), case
 
 
-def _misrepresenting(monkeypatch, rows, delta: float) -> None:
+def _misrepresenting(monkeypatch, rows, delta) -> None:
     """``scipy.linalg.lstsq`` with ``delta`` added to its solution's ``rows``: a forced representation error.
 
     The thin-alias least squares solves for ``[intercept | border]`` in its
@@ -758,16 +768,17 @@ def _matches_dense(factor, case, null=None) -> None:
     assert np.max(np.abs(X @ factor.solve_data() - expected)) <= reach
 
 
-def _alias_null(case, f) -> np.ndarray:
+def _alias_null(case, f, border=None) -> np.ndarray:
     """``K`` times level 0's alias in ``_alias_beside_a_random_effect``, ``f`` its free direction.
 
-    Border ``f`` on ``z_2, z_3``, level 0 ``(K - 1) f`` and every other public
-    level ``-f`` on the unpenalized coordinates (the last level's ``-f`` is
-    implied): exact entries, a null of the data and of the level penalty.
+    Border ``f`` on ``z_2, z_3`` (or ``border``, its representation on a split
+    border), level 0 ``(K - 1) f`` and every other public level ``-f`` on the
+    unpenalized coordinates (the last level's ``-f`` is implied): exact
+    entries, a null of the data and of the level penalty.
     """
     K, k, q = case["K"], case["k"], case["q"]
     N = np.zeros(1 + q + (K - 1) * k)
-    N[1:3] = f
+    N[1 : 1 + q - 3] = f if border is None else border
     for level in range(K - 1):
         share = K - 1.0 if level == 0 else -1.0
         N[1 + q + level * k + 2 : 1 + q + (level + 1) * k] = share * np.asarray(f)
@@ -803,6 +814,40 @@ def test_a_representation_error_does_not_certify_a_null_alias_at_a_large_lambda(
     assert formed._alias_x is not None and formed.border_certificate.deflated == 2
     assert factor._alias_x is None and factor.border_certificate.deflated == 1
     _matches_dense(factor, case, _alias_null(case, (0.0, 1.0)))
+
+
+def test_a_representation_error_the_data_barely_see_does_not_certify_a_null_alias(
+    monkeypatch,
+) -> None:
+    """A representation error above the decision's resolution is read from the residual, not as curvature.
+
+    Level 0's single row ``(1, 0)`` puts the alias on ``z_3``, which the
+    border holds split in two, ``z_3 / 2 +/- 1e-4 a``, under a difference
+    penalty ``[[1, -1], [-1, 1]]``: the alias ``(0, 1, 1)`` is in its null.
+    The least squares' solution is given ``+/-1e-5`` on the two halves (its
+    scaled coordinates), along the difference the data barely see, so the
+    misfit stays far inside its ``sqrt(eps)`` acceptance while the border
+    part's raw image is about ``1e-6`` of its scale, well above the
+    decision's ``sqrt(eps)`` resolution.  The formed rule certifies the
+    alias (asserted, without roots); the correction the residual shows is
+    that error, so with the roots the alias is left to the pivoted
+    factorization: rank, pseudo-determinant and fitted values are the dense
+    ``H``'s.  Mutation: without the representation-error term the alias is
+    deflated on the forced error, and the fitted values are ``1.7e-7`` off,
+    370 times their bound (``log|H|`` 3.5 times its tolerance).
+    """
+    omega = np.array([[1.0, -1.0], [-1.0, 1.0]])
+    S_b = scipy.linalg.block_diag(0.0, omega, 0.5 * np.eye(3))
+    roots = ((np.array([1, 2]), omega, np.eye(2)), (np.array([3, 4, 5]), None, None))
+    _misrepresenting(monkeypatch, [2, 3], np.array([[1e-5], [-1e-5]]))
+    formed, _ = _alias_beside_a_random_effect(S_b, thin_row=(1.0, 0.0), split=1e-4)
+    factor, case = _alias_beside_a_random_effect(
+        S_b, thin_row=(1.0, 0.0), split=1e-4, border_roots=roots
+    )
+    monkeypatch.undo()
+    assert formed._alias_x is not None and formed.border_certificate.deflated == 2
+    assert factor._alias_x is None and factor.border_certificate.deflated == 1
+    _matches_dense(factor, case, _alias_null(case, (0.0, 1.0), border=(0.0, 1.0, 1.0)))
 
 
 @pytest.mark.parametrize("rounding", [3e-11, 5e-11, 1e-8])
@@ -847,27 +892,21 @@ def test_a_thin_alias_a_border_penalty_curves_stays_certified_at_any_lambda(lam)
     _matches_dense(factor, case)
 
 
-def test_a_thin_alias_the_intercept_carries_is_not_deflated(monkeypatch) -> None:
-    """The ghost: a combination of thin aliases whose border part is its representation error.
+def _two_thin_levels_beside_a_stiff_term(t: float = 0.5):
+    """Two one-row levels at ``x = t`` and ``-t`` beside a stiff term: ``(system, penalized, case, null)``.
 
-    Two one-row levels at ``x = 1/2`` and ``-1/2`` beside a stiff term (an
-    identity at ``1e6`` on two columns): each alias is linear, ``x -/+ 1/2``,
-    and their difference is the constant, which the intercept carries, an
-    exact null of ``H``.  The least squares' solution is given ``1e-10`` of
-    the constant's representation on the stiff term's columns, an error only
-    that difference carries.  It sits inside the representation error its
-    residual shows, so no component curves the difference: the sum alone is
-    deflated (the ``x`` column's ridge curves it) and the pivoted
-    factorization truncates the null.  Mutation: without the veto the
-    difference is deflated on ``1e6`` times the squared error (two deflated,
-    rank ``p``).
+    Unpenalized coordinates ``(1, x)``; the border holds ``x`` (a unit
+    ridge) and a stiff term (an identity at ``1e6`` on two columns).  Each
+    level's alias is linear, ``x -/+ t``; their difference is the constant,
+    which the intercept carries, and ``null`` is ``K`` times it: an exact
+    null of ``H``.
     """
     K, k, n, lam = 8, 4, 400, 0.3
     rng = np.random.default_rng(5)
     levels = rng.integers(2, K, n)
     levels[:2] = (0, 1)
     x = rng.uniform(-1.0, 1.0, n)
-    x[:2] = (0.5, -0.5)
+    x[:2] = (t, -t)
     Z = np.column_stack([np.cos(3 * x), np.sin(2 * x), np.ones(n), x])
     Z[:, :2] += 0.1 * rng.normal(size=(n, 2))
     v = rng.uniform(-1.0, 1.0, n)
@@ -893,6 +932,31 @@ def test_a_thin_alias_the_intercept_carries_is_not_deflated(monkeypatch) -> None
     penalized = SumToZeroPenalizedOperator.with_penalties(
         system.operator, S_b, np.broadcast_to(lam * omega, (K, k, k)).copy(), roots
     )
+    case = dict(K=K, k=k, q=q, levels=levels, Z=Z, X=X, W=W, z=z, omega=omega, lam=lam, S_b=S_b)
+    null = np.zeros(1 + q + (K - 1) * k)
+    for level, f in ((0, (-t, 1.0)), (1, (t, 1.0))):
+        sign = 1.0 if level == 0 else -1.0
+        null[:2] += sign * np.asarray(f)  # intercept and x: the main effect's share, K f / K
+        for public in range(K - 1):
+            share = K - 1.0 if public == level else -1.0
+            null[1 + q + public * k + 2 : 1 + q + (public + 1) * k] += sign * share * np.asarray(f)
+    return system, penalized, case, null
+
+
+def test_a_thin_alias_the_intercept_carries_is_not_deflated(monkeypatch) -> None:
+    """The ghost: a combination of thin aliases whose border part is its representation error.
+
+    ``_two_thin_levels_beside_a_stiff_term`` at ``x = 1/2`` and ``-1/2``.
+    The least squares' solution is given ``1e-10`` of the constant's
+    representation on the stiff term's columns, an error only the
+    difference carries.  It sits inside the representation error its
+    residual shows, so no component curves the difference: the sum alone is
+    deflated (the ``x`` column's ridge curves it) and the pivoted
+    factorization truncates the null.  Mutation: without the veto the
+    difference is deflated on ``1e6`` times the squared error (two deflated,
+    rank ``p``).
+    """
+    system, penalized, case, ghost = _two_thin_levels_beside_a_stiff_term()
     solve = scipy.linalg.lstsq
 
     def misrepresented(*args, **kwargs):
@@ -904,17 +968,50 @@ def test_a_thin_alias_the_intercept_carries_is_not_deflated(monkeypatch) -> None
     monkeypatch.setattr(scipy.linalg, "lstsq", misrepresented)
     factor = SumToZeroTreeFactor(system, penalized)
     monkeypatch.undo()
-    case = dict(K=K, k=k, q=q, levels=levels, Z=Z, X=X, W=W, z=z, omega=omega, lam=lam, S_b=S_b)
-    ghost = np.zeros(1 + q + (K - 1) * k)
-    for level, f in ((0, (-0.5, 1.0)), (1, (0.5, 1.0))):
-        sign = 1.0 if level == 0 else -1.0
-        ghost[:2] += sign * np.asarray(f)  # intercept and x: the main effect's share, K f / K
-        for public in range(K - 1):
-            share = K - 1.0 if public == level else -1.0
-            ghost[1 + q + public * k + 2 : 1 + q + (public + 1) * k] += sign * share * np.asarray(f)
     assert factor._alias_x is not None and factor._alias_x.shape[1] == 1
     assert factor.border_certificate.deflated == 1
     _matches_dense(factor, case, ghost)
+
+
+def test_a_curved_alias_mixed_into_the_intercept_s_combination_is_not_deflated(monkeypatch) -> None:
+    """The share test: a combination the intercept holds whole is not certified by a mixed-in curved part.
+
+    ``_two_thin_levels_beside_a_stiff_term`` at ``x = 40`` and ``-40``: the
+    difference of the two aliases is the constant, ``80 / K`` on the
+    intercept, and the sum is ``2 / K`` on ``x``.  The eigenvectors of the
+    aliases' formed curvature are turned by ``1.5e-7`` (forced), so the
+    intercept's combination carries ``1.5e-7`` of the sum: a border part
+    that is exact, with no representation error, curved by ``x``'s root and
+    certified by the formed bar (about 18 times over: a turn under ``3.5e-8``
+    is not), and ``3.8e-9`` of the vector, a quarter of the form's
+    ``sqrt(eps)`` resolution.  The sum alone is deflated and the pivoted
+    factorization truncates the constant's exact null.  Mutation: without
+    the share test the mixed combination is certified beside the sum (two
+    columns), and their penalty Gram is singular, so the deflation declines
+    and the sum loses its structural deflation (none deflated).
+    """
+    system, penalized, case, null = _two_thin_levels_beside_a_stiff_term(40.0)
+    eigh, turned = np.linalg.eigh, []
+    c, s = np.cos(1.5e-7), np.sin(1.5e-7)
+
+    def mixing(a, *args, **kwargs):
+        values, vectors = eigh(a, *args, **kwargs)
+        if np.shape(a) == (2, 2):  # the two aliases' formed curvature, the only 2 x 2 here
+            turned.append(True)
+            vectors = vectors @ np.array([[c, -s], [s, c]])
+            values = np.einsum("ij,ik,kj->j", vectors, np.asarray(a), vectors)
+        return values, vectors
+
+    monkeypatch.setattr(np.linalg, "eigh", mixing)
+    formed = SumToZeroTreeFactor(system, dataclasses.replace(penalized, border_roots=None))
+    factor = SumToZeroTreeFactor(system, penalized)
+    monkeypatch.undo()
+    assert len(turned) == 2 and formed._alias_x is not None and formed._alias_x.shape[1] == 2
+    alias = factor._alias_x
+    assert alias is not None and alias.shape[1] == 1
+    assert np.linalg.norm(alias[1:]) > 0.5 * np.linalg.norm(alias)  # the sum, on x
+    assert factor.border_certificate.deflated == 1
+    _matches_dense(factor, case, null)
 
 
 def test_a_penalty_coupling_a_generator_and_a_thin_alias_keeps_the_alias_out() -> None:
