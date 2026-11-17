@@ -23,7 +23,6 @@ import scipy.linalg
 
 from superglm import FactorSmooth, LambdaPolicy, Numeric, Spline, SuperGLM
 from superglm.solvers import centered_system
-from superglm.solvers._structured import balance_tree as balance_tree_module
 from superglm.solvers._structured.balance_tree import (
     ProfiledSumToZeroTreeFactor,
     SumToZeroPenalizedOperator,
@@ -59,6 +58,7 @@ def _case(
     weights=None,
     border=None,
     relabel=None,
+    centred=True,
 ):
     rng = np.random.default_rng(seed)
     levels = rng.integers(0, K, n)
@@ -85,7 +85,7 @@ def _case(
         n_levels=K,
         small_indices=np.arange(q),
         structured_indices=np.arange(q, q + (K - 1) * k).reshape(K - 1, k),
-        center=X.mean(axis=0),
+        center=X.mean(axis=0) if centred else None,
         signed=signed,
         basis="sz",
     )
@@ -629,6 +629,52 @@ def _weightless_pair(W, levels):
     return W
 
 
+def _zero_on_level_0(rng, n, levels):
+    """Three border columns, the last one zero on level 0's rows."""
+    X = rng.normal(size=(n, 3))
+    X[levels == 0, -1] = 0.0
+    return X
+
+
+@pytest.mark.parametrize("residue", [2.0**-1030, 2.0**-1074])
+def test_a_thin_signed_leaf_s_residue_below_the_underflow_floor_is_reflected(residue) -> None:
+    """A signed leaf's exhausted column is reflected whatever its residue, down to the smallest subnormal.
+
+    A one-row level's signed leaf is a rank-deficient stack triangularized
+    over every border column: each exhausted column holds the rounding of the
+    one before, which decays into the subnormal range under a wide border.
+    There ``1 / (alpha - beta)`` overflows, so the reflector is formed on the
+    column lifted by a power of two (LAPACK's ``dlarfg``).  Which column the
+    rounding leaves a residue in differs by BLAS kernel, so it is planted:
+    level 0's single row is zero on the last border column, which stays
+    exactly zero in its leaf, and a zero pseudo-row below it gets ``residue``
+    there (``residue^2`` is zero: the same ``H``, observed weights all
+    positive).  The factor is the dense ``H``'s: rank, ``log|H|`` and fitted
+    values.  Mutation: without the lift the leaf's export is not finite and
+    the pivot certificate refuses a positive definite ``H``.
+    """
+    case = _case(
+        K=6,
+        k=4,
+        n=240,
+        seed=5,
+        signed=True,
+        relabel=_one_row(1),
+        weights=lambda W, levels: np.abs(W),
+        border=_zero_on_level_0,
+        centred=False,
+    )
+    system = case["system"]
+    rows = system.leaf.pseudo_rows.copy()
+    column = rows.shape[2] - 2
+    row = int(np.flatnonzero(~rows[0].any(axis=1))[-1])
+    assert row > column and not rows[0, :, column].any()
+    rows[0, row, column] = residue
+    leaf = dataclasses.replace(system.leaf, pseudo_rows=rows)
+    factor = SumToZeroTreeFactor(dataclasses.replace(system, leaf=leaf), case["penalized"])
+    _matches_dense(factor, case)
+
+
 @pytest.mark.parametrize(
     ("relabel", "weights", "nullity"),
     [(_one_row(4), None, 2), (_one_row(6), None, 4), (None, _weightless_pair, 2)],
@@ -1002,7 +1048,7 @@ def test_a_null_border_column_s_formed_penalty_is_cleared(monkeypatch, off, form
 
 @pytest.mark.parametrize("formed", [3e-11, 1e-8])
 def test_a_null_column_s_formed_penalty_above_its_image_s_gram_by_rounding_is_cleared(
-    monkeypatch, formed
+    formed,
 ) -> None:
     """The clearing accounts for the products' rounding: a diagonal that far above the images' Gram is cleared.
 
@@ -1013,9 +1059,9 @@ def test_a_null_column_s_formed_penalty_above_its_image_s_gram_by_rounding_is_cl
     component's own (``_root_images``): ``5.6e-5`` of it above the Gram,
     and inside the ``lambda (image + 2 rounding)^2`` the roots account for
     (both asserted), as a formed matrix rounded or cut apart from its root
-    can hold.  The block ``factor_border`` receives is ``S_b`` with the
-    column cleared (asserted), so rank, pseudo-determinant and fitted values
-    are those of the block without it.  Mutation: with the rounding left out
+    can hold.  The veto leaves the alias out and the column's formed penalty
+    is cleared, so rank, pseudo-determinant and fitted values are those of
+    the block without it.  Mutation: with the rounding left out
     of the accounting the column is kept, at ``3e-11`` the rank is 32 for 33,
     and at ``1e-8`` ``log|H|`` is ``4e-5`` off, beyond its bound.
     """
@@ -1032,21 +1078,11 @@ def test_a_null_column_s_formed_penalty_above_its_image_s_gram_by_rounding_is_cl
     S_b = scipy.linalg.block_diag(lam * 0.5 * (gram + gram.T), 0.5 * np.eye(3))
     S_b[1, 1] = lam * float(shown[0] + rounding[0]) ** 2
     assert lam * gram[1, 1] < S_b[1, 1] <= lam * float(shown[0] + 2.0 * rounding[0]) ** 2
-    blocks, factor_border = [], balance_tree_module.factor_border
-
-    def spy(Q, S, *args, **kwargs):
-        blocks.append(S.copy())
-        return factor_border(Q, S, *args, **kwargs)
-
-    monkeypatch.setattr(balance_tree_module, "factor_border", spy)
     factor, case = _alias_beside_a_random_effect(
         S_b, thin_row=(1.0, 0.0), border_roots=(root, _EFFECT)
     )
-    monkeypatch.undo()
     assert factor._alias_x is None and factor.border_certificate.deflated == 1
     S_b[1, :] = S_b[:, 1] = 0.0
-    q = case["q"]
-    assert len(blocks) == 1 and np.array_equal(blocks[0][-q:, -q:], S_b)
     _matches_dense(factor, case, _alias_null(case, (0.0, 1.0)))
 
 

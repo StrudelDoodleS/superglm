@@ -81,6 +81,7 @@ from numpy.typing import NDArray
 
 from superglm._blas_threads import narrow_kernel_blas_threads
 from superglm._roundoff import EPS as _EPS
+from superglm._roundoff import TINY as _TINY
 from superglm._roundoff import UNIT_ROUNDOFF as _UNIT
 from superglm._roundoff import gamma as _gamma
 from superglm.solvers._structured.border import (
@@ -288,6 +289,14 @@ def balance_tree(n_levels: int) -> BalanceTree:
 # Lemma 19.2).  No BLAS, so no result depends on a thread count, and a
 # reflector depends on its own column alone: the decision pass and the full
 # pass compute the same pivots bit for bit.
+#
+# A reflector with |beta| below dlarfg's safe minimum over its epsilon is
+# formed on the column lifted by that power of two: so close to underflow the
+# column has too few bits and 1 / (alpha - beta) overflows.  An exhausted
+# column's residue decays there (a one-row level under a wide border).
+_REFLECTOR_FLOOR = _TINY / _UNIT
+
+
 @numba.njit(cache=True)
 def _norm(A, lo, hi, c):  # pragma: no cover - compiled
     """Scaled 2-norm of ``A[lo:hi, c]`` (no overflow or underflow of the squares)."""
@@ -316,13 +325,21 @@ def _reflect(A, row, c, columns, v):  # pragma: no cover - compiled
     if xnorm == 0.0:
         return 0.0
     beta = -math.copysign(math.hypot(alpha, xnorm), alpha)
+    lift = 1.0
+    if abs(beta) < _REFLECTOR_FLOOR:
+        # once: the smallest subnormal lands at 2^-105, above the floor
+        lift = 1.0 / _REFLECTOR_FLOOR
+        alpha *= lift
+        for i in range(row + 1, m):
+            A[i, c] *= lift
+        beta = -math.copysign(math.hypot(alpha, _norm(A, row + 1, m, c)), alpha)
     tau = (beta - alpha) / beta
     scale = 1.0 / (alpha - beta)
     v[row] = 1.0
     for i in range(row + 1, m):
         v[i] = A[i, c] * scale
         A[i, c] = 0.0
-    A[row, c] = beta
+    A[row, c] = beta / lift
     for d in columns:
         s = A[row, d]
         for i in range(row + 1, m):
