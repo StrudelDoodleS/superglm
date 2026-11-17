@@ -793,6 +793,21 @@ def _misrepresenting(monkeypatch, rows, delta) -> None:
     monkeypatch.setattr(scipy.linalg, "lstsq", misrepresented)
 
 
+def _showing(monkeypatch, shown: float) -> None:
+    """``np.linalg.eigh`` with the split border's ``[1 | border]`` Gram's eigenvalues over ``shown``.
+
+    The correction a residual shows divides by them, so each one then removes
+    ``shown`` of the representation's error.
+    """
+    eigh = np.linalg.eigh
+
+    def partly(a, *args, **kwargs):
+        values, vectors = eigh(a, *args, **kwargs)
+        return (values / shown if np.shape(a) == (7, 7) else values), vectors
+
+    monkeypatch.setattr(np.linalg, "eigh", partly)
+
+
 def _matches_dense(factor, case, null=None) -> None:
     """``factor``'s rank, ``log|H|`` and fitted values against the dense ``H``, ``null`` its exact null.
 
@@ -838,7 +853,7 @@ def _alias_null(case, f, border=None) -> np.ndarray:
 _EFFECT = (np.array([2, 3, 4]), None, None, 0.5)  # the random effect's ridge: no raw root
 
 
-@pytest.mark.parametrize("shown", [1.0, 0.7])
+@pytest.mark.parametrize("shown", [1.0, 0.6])
 def test_a_representation_error_the_data_barely_see_does_not_certify_a_null_alias(
     monkeypatch, shown
 ) -> None:
@@ -847,31 +862,26 @@ def test_a_representation_error_the_data_barely_see_does_not_certify_a_null_alia
     Level 0's single row ``(1, 0)`` puts the alias on ``z_3``, which the
     border holds split in two, ``z_3 / 2 +/- 1e-4 a``, under a difference
     penalty ``[[1, -1], [-1, 1]]``: the alias ``(0, 1, 1)`` is in its null.
-    The least squares' solution is given ``+/-1e-5`` on the two halves (its
+    The least squares' solution is given ``+/-1e-4`` on the two halves (its
     scaled coordinates), along the difference the data barely see, so the
-    misfit stays far inside its ``sqrt(eps)`` acceptance while the border
-    part's raw image is about ``1e-6`` of its scale, well above the
+    misfit stays inside its ``sqrt(eps)`` acceptance while the border
+    part's raw image is about ``1e-5`` of its scale, well above the
     decision's ``sqrt(eps)`` resolution.  The formed rule certifies the
-    alias (asserted, without roots); the correction the residual shows is
-    that error, or ``shown`` of it (the Gram's eigenvalues the correction
-    divides by, forced larger), and twice it still covers the image, so
-    with the roots the alias is left to the pivoted factorization: rank,
-    pseudo-determinant and fitted values are the dense ``H``'s.  Mutations:
-    without the representation-error term, or at ``shown = 0.7`` with the
-    correction counted once, the alias is deflated on the forced error, and
-    the fitted values are ``1.7e-7`` off, 370 times their bound.
+    alias (asserted, without roots).  Each correction the residual shows
+    removes ``shown`` of the error left (the Gram's eigenvalues it divides
+    by, forced larger): all of it at once, or 0.6 of it, which after the
+    five refinement steps leaves an image seven times the resolution that
+    the correction still due, twice over, covers.  So with the roots the
+    alias is left to the pivoted factorization: rank, pseudo-determinant and
+    fitted values are the dense ``H``'s.  Mutations: with the refined slack
+    on the unrefined representation, or at ``shown = 0.6`` with the
+    correction counted once, the alias is deflated on the forced error.
     """
     omega = np.array([[1.0, -1.0], [-1.0, 1.0]])
     S_b = scipy.linalg.block_diag(0.0, omega, 0.5 * np.eye(3))
     roots = ((np.array([1, 2]), omega, np.eye(2), 1.0), (np.array([3, 4, 5]), None, None, 0.5))
-    eigh = np.linalg.eigh
-
-    def partly(a, *args, **kwargs):
-        values, vectors = eigh(a, *args, **kwargs)
-        return (values / shown if np.shape(a) == (7, 7) else values), vectors  # [1 | border]
-
-    monkeypatch.setattr(np.linalg, "eigh", partly)
-    _misrepresenting(monkeypatch, [2, 3], np.array([[1e-5], [-1e-5]]))
+    _showing(monkeypatch, shown)
+    _misrepresenting(monkeypatch, [2, 3], np.array([[1e-4], [-1e-4]]))
     formed, _ = _alias_beside_a_random_effect(S_b, thin_row=(1.0, 0.0), split=1e-4)
     factor, case = _alias_beside_a_random_effect(
         S_b, thin_row=(1.0, 0.0), split=1e-4, border_roots=roots
@@ -880,6 +890,40 @@ def test_a_representation_error_the_data_barely_see_does_not_certify_a_null_alia
     assert formed._alias_x is not None and formed.border_certificate.deflated == 2
     assert factor._alias_x is None and factor.border_certificate.deflated == 1
     _matches_dense(factor, case, _alias_null(case, (0.0, 1.0), border=(0.0, 1.0, 1.0)))
+
+
+@pytest.mark.parametrize("shown", [1.0, 0.7])
+def test_a_representation_error_the_residual_shows_does_not_veto_a_curved_alias(
+    monkeypatch, shown
+) -> None:
+    """A curved alias is judged on its refined representation, not vetoed on the least squares' error.
+
+    The border of the test above, with the halves under ``[[1 + s, -1 + s],
+    [-1 + s, 1 + s]]``, ``s = 1e-7``: the alias ``(0, 1, 1)`` is curved, at
+    ``sqrt(s)`` of full curvature.  The least squares' solution is given
+    ``+/-8e-3`` on the two halves, an error whose image is 5.8 times the
+    alias's own and which the residual shows (the normal equations' error on
+    an ill-conditioned border, forced).  Refined on its residual, each step
+    removing ``shown`` of what is left, the representation shows the alias's
+    own image above the correction still due, so the alias stays certified
+    and is deflated: rank, determinant and fitted values are the dense
+    ``H``'s.  Mutations: judged unrefined, with the first correction counted
+    twice against an image that is mostly that error, the alias is vetoed and
+    the pivoted factorization drops a direction ``H`` curves, rank 34 for 35;
+    so is it at ``shown = 0.7`` after one refinement step.
+    """
+    s, lam = 1e-7, 1e4
+    omega = np.array([[1.0 + s, -1.0 + s], [-1.0 + s, 1.0 + s]])
+    S_b = scipy.linalg.block_diag(0.0, lam * omega, 0.5 * np.eye(3))
+    roots = ((np.array([1, 2]), omega, np.eye(2), lam), (np.array([3, 4, 5]), None, None, 0.5))
+    _showing(monkeypatch, shown)
+    _misrepresenting(monkeypatch, [2, 3], np.array([[8e-3], [-8e-3]]))
+    factor, case = _alias_beside_a_random_effect(
+        S_b, thin_row=(1.0, 0.0), split=1e-6, border_roots=roots
+    )
+    monkeypatch.undo()
+    assert factor._alias_x is not None and factor.border_certificate.deflated == 2
+    _matches_dense(factor, case)
 
 
 def test_a_representation_error_inside_the_residual_s_rounding_does_not_certify_a_null_alias(
@@ -1202,14 +1246,16 @@ def test_a_tilted_level_basis_does_not_certify_a_null_alias(monkeypatch) -> None
     _matches_dense(factor, case, _alias_null(case, (1.0, -1.0), border=(0.0, 1.0, -1.0)))
 
 
-def _two_thin_levels_beside_a_stiff_term(t: float = 0.5):
+def _two_thin_levels_beside_a_stiff_term(t: float = 0.5, split: float = 0.0):
     """Two one-row levels at ``x = t`` and ``-t`` beside a stiff term: ``(system, penalized, case, null)``.
 
     Unpenalized coordinates ``(1, x)``; the border holds ``x`` (a unit
     ridge) and a stiff term (an identity at ``1e6`` on two columns).  Each
     level's alias is linear, ``x -/+ t``; their difference is the constant,
     which the intercept carries, and ``null`` is ``K`` times it: an exact
-    null of ``H``.
+    null of ``H``.  A nonzero ``split`` holds ``x`` as two columns ``x / 2
+    +/- split a`` (``a`` standard normal) under ``diag(1, 4)``, whose
+    difference the data barely see.
     """
     K, k, n, lam = 8, 4, 400, 0.3
     rng = np.random.default_rng(5)
@@ -1221,7 +1267,12 @@ def _two_thin_levels_beside_a_stiff_term(t: float = 0.5):
     Z[:, :2] += 0.1 * rng.normal(size=(n, 2))
     v = rng.uniform(-1.0, 1.0, n)
     X = np.column_stack((x, v, v**2 - 1.0 / 3.0))
-    q = X.shape[1]
+    ridge = np.ones(1)
+    if split:
+        a = split * rng.normal(size=n)
+        X = np.column_stack((x / 2 + a, x / 2 - a, X[:, 1:]))
+        ridge = np.array([1.0, 4.0])
+    q, held = X.shape[1], len(ridge)
     W = rng.uniform(0.5, 2.0, n)
     z = rng.normal(size=n)
     system = leaf_system_from_rows(
@@ -1237,8 +1288,11 @@ def _two_thin_levels_beside_a_stiff_term(t: float = 0.5):
     )
     system = dataclasses.replace(system, thin_counts=(np.array([0, 1]), np.array([1, 1])))
     omega = np.diag([1.0, 1.0, 0.0, 0.0])
-    S_b = np.diag([1.0, 1e6, 1e6])
-    roots = ((np.array([0]), np.eye(1), np.eye(1), 1.0), (np.array([1, 2]), None, None, 1e6))
+    S_b = np.diag(np.r_[ridge, 1e6, 1e6])
+    roots = (
+        (np.arange(held), np.diag(ridge), np.eye(held), 1.0),
+        (np.arange(held, q), None, None, 1e6),
+    )
     penalized = SumToZeroPenalizedOperator.with_penalties(
         system.operator, S_b, np.broadcast_to(lam * omega, (K, k, k)).copy(), roots
     )
@@ -1246,7 +1300,8 @@ def _two_thin_levels_beside_a_stiff_term(t: float = 0.5):
     null = np.zeros(1 + q + (K - 1) * k)
     for level, f in ((0, (-t, 1.0)), (1, (t, 1.0))):
         sign = 1.0 if level == 0 else -1.0
-        null[:2] += sign * np.asarray(f)  # intercept and x: the main effect's share, K f / K
+        null[0] += sign * f[0]  # intercept and x: the main effect's share, K f / K
+        null[1 : 1 + held] += sign * f[1]
         for public in range(K - 1):
             share = K - 1.0 if public == level else -1.0
             null[1 + q + public * k + 2 : 1 + q + (public + 1) * k] += sign * share * np.asarray(f)
@@ -1291,6 +1346,38 @@ def test_a_curved_alias_mixed_into_the_intercept_s_combination_is_not_deflated(m
     alias = factor._alias_x
     assert alias is not None and alias.shape[1] == 1
     assert np.linalg.norm(alias[1:]) > 0.5 * np.linalg.norm(alias)  # the sum, on x
+    assert factor.border_certificate.deflated == 1
+    _matches_dense(factor, case, null)
+
+
+def test_a_null_combination_a_representation_error_turns_is_judged_re_formed(monkeypatch) -> None:
+    """The combinations are re-formed on the refined border, where a null one carries no curved share.
+
+    ``_two_thin_levels_beside_a_stiff_term`` with ``x`` held as two halves:
+    the two aliases' sum is curved, on the halves, and their difference is
+    the constant, which the intercept carries whole.  The least squares'
+    representation of the constant is given ``+/-1e-4`` on the halves (its
+    scaled coordinates), along the difference the data barely see: an error
+    whose image under ``diag(1, 4)`` is neither along the sum's nor across
+    it.  The eigenvectors of the formed curvature therefore turn the
+    constant's combination by the share of the sum that cancels the error's
+    image along it, and the formed rule certifies both (asserted, without
+    roots).  Refined, the turned combination's border part is that share of
+    the sum and nothing else: curved at full strength, and far above the
+    share test's resolution.  Re-formed on the refined border it is the
+    constant again, so the sum alone is deflated and the pivoted
+    factorization truncates the constant's exact null: rank,
+    pseudo-determinant and fitted values are the dense ``H``'s.  Mutation:
+    judged in the unrefined border's eigenvectors, both are certified.
+    """
+    system, penalized, case, null = _two_thin_levels_beside_a_stiff_term(split=1e-6)
+    _misrepresenting(monkeypatch, [1, 2], np.array([[1e-4, 0.0], [-1e-4, 0.0]]))
+    formed = SumToZeroTreeFactor(system, dataclasses.replace(penalized, border_roots=None))
+    factor = SumToZeroTreeFactor(system, penalized)
+    monkeypatch.undo()
+    assert formed._alias_x is not None and formed._alias_x.shape[1] == 2
+    alias = factor._alias_x
+    assert alias is not None and alias.shape[1] == 1
     assert factor.border_certificate.deflated == 1
     _matches_dense(factor, case, null)
 

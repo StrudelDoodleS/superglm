@@ -116,6 +116,8 @@ _DEFERRAL_FACTOR = 20.0
 # curvature of eps, the formed quadratic form's own resolution.  It stands for
 # what the decision's residual cannot show, the level basis's own null tilt.
 _ALIAS_RESOLUTION = math.sqrt(2.0 * _UNIT)
+# LAPACK's ITMAX: the refinement steps xPORFS allows a solution.
+_REFINEMENT_STEPS = 5
 
 
 def _append_generators(
@@ -1726,33 +1728,56 @@ class SumToZeroTreeFactor:
         # squares kept, b* - b = D V Lambda^-1 V' A_s' r_phi: the correction the
         # residual shows, and D V Lambda^-1/2 times at most the residual's own
         # rounding, gamma_(q+2) (|R_Z| + |R_B||U|) |phi| (Higham 2002, sec. 3.5).
+        # The normal equations leave an error of kappa(A_s)^2 u, which the
+        # correction removes at that rate a step (Bjorck 1987; Carson &
+        # Dauzickaite 2024, Theorem 3.1), so the judged representation is refined
+        # as LAPACK's xPORFS refines: while the correction halves, five steps at most.
         phi = np.column_stack(functions) @ vectors[:, certified]
         floor = _gamma(q + 2) * np.concatenate(
             ((np.abs(RZ) + np.abs(RB) @ np.abs(U)).reshape(-1, m), np.abs(tail) @ np.abs(U))
         )
-        back = (np.einsum("lai,laj->ij", RB, residual) - tail.T @ tail_residual) @ phi
         gram_values, gram_vectors = np.linalg.eigh(gram)
         kept = gram_values > (1 + q) * _EPS * float(gram_values[-1])
-        basis = scale[1:, None] * gram_vectors[1:, kept]
-        known = basis @ (
-            (gram_vectors[:, kept].T @ (scale[:, None] * back)) / gram_values[kept, None]
-        )
+        solve = gram_vectors[:, kept] / gram_values[kept]
+        target = np.matmul(RZ, phi)
+
+        def shown(held):
+            """The correction ``held``'s residual shows, in its Jacobi coordinates."""
+            part = scale[:, None] * held
+            back = np.einsum("lai,laj->ij", RB, target - np.matmul(RB, part))
+            return solve @ (
+                gram_vectors[:, kept].T @ (scale[:, None] * (back - tail.T @ (tail @ part)))
+            )
+
+        held = scaled @ phi
+        known = shown(held)
+        for _ in range(_REFINEMENT_STEPS):
+            held, last = held + known, known
+            known = shown(held)
+            if not 2.0 * np.linalg.norm(known) < np.linalg.norm(last):
+                break
+        # The combinations are eigenvectors of the unrefined border's curvature,
+        # which its error turns: a null one takes the share of a curved one that
+        # cancels the error's image.  They are re-formed on the refined border.
+        chosen = (scale[:, None] * held)[1:]
+        mixed = chosen.T @ S_b @ chosen
+        turn = np.linalg.eigh(0.5 * (mixed + mixed.T))[1]
+        held, known, phi, chosen = held @ turn, known @ turn, phi @ turn, chosen @ turn
+        combinations = combinations @ turn
         error = (
-            known,
-            basis / np.sqrt(gram_values[kept]),
+            (scale[:, None] * known)[1:],
+            scale[1:, None] * gram_vectors[1:, kept] / np.sqrt(gram_values[kept]),
             np.linalg.norm(floor @ np.abs(phi), axis=0),
         )
-        chosen = combinations[1 + c :]
         curved = np.zeros(chosen.shape[1], dtype=bool)
         for _, image, rounding, slack, size in _root_images(
-            chosen, spread[:, certified], roots, error
+            chosen, spread[:, certified] @ np.abs(turn), roots, error
         ):
             curved |= image > rounding + slack + _ALIAS_RESOLUTION * size
         # A combination the intercept holds whole has a border part of the
         # eigenvectors' mixing or the representation's dust: its share of the
         # representation, each column in the least squares' Jacobi coordinates
         # (so in no column's units), is below the form's resolution.
-        held = scaled @ phi
         curved &= np.linalg.norm(held[1:], axis=0) > _ALIAS_RESOLUTION * np.linalg.norm(
             held, axis=0
         )
