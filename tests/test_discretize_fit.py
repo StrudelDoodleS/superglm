@@ -171,6 +171,52 @@ class TestDiscretizedFit:
         gms = model._dm.group_matrices
         assert isinstance(gms[0], DiscretizedSSPGroupMatrix)
 
+    @pytest.mark.parametrize("route", ["fit", "fit_reml"])
+    def test_raw_basis_bins_like_the_ssp_basis(self, route):
+        """``penalty="none"`` bins under ``discrete=True`` and fits the binned ``"ssp"`` model.
+
+        The two options are one penalized model in two bases, so on the same
+        bins they read the same fitted values, EDF and standard errors up to
+        the solves' convergence, here 1e-10; the unbinned fit misses them by
+        the 32 bins' own error, some 1e-3.
+        """
+        rng = np.random.default_rng(659)
+        n = 4000
+        X = pd.DataFrame({"x1": rng.uniform(0, 10, n), "x2": rng.standard_normal(n)})
+        y = rng.poisson(np.exp(0.3 + 0.4 * np.sin(X["x1"]) + 0.2 * X["x2"])).astype(float)
+        grid = pd.DataFrame({"x1": np.linspace(0, 10, 101), "x2": np.linspace(-2, 2, 101)})
+        tolerances = {"fit": {"tol": 1e-10}, "fit_reml": {"reml_tol": 1e-10, "pirls_tol": 1e-10}}
+
+        def fitted(penalty):
+            model = SuperGLM(
+                family="poisson",
+                selection_penalty=0,
+                discrete=True,
+                n_bins=32,
+                features={
+                    "x1": Spline(n_knots=10, penalty=penalty),
+                    "x2": Spline(kind="ps", n_knots=8, penalty=penalty),
+                },
+            )
+            getattr(model, route)(X, y, **tolerances[route])
+            return model
+
+        raw, ssp = fitted("none"), fitted("ssp")
+        for raw_block, ssp_block in zip(raw._dm.group_matrices, ssp._dm.group_matrices):
+            assert isinstance(raw_block, DiscretizedSSPGroupMatrix)
+            np.testing.assert_array_equal(raw_block.bin_idx, ssp_block.bin_idx)
+            if route == "fit":
+                # The raw basis: the identifiability projection is its only map.
+                np.testing.assert_array_equal(raw_block.R_inv, raw_block.projection)
+        np.testing.assert_allclose(raw.predict(grid), ssp.predict(grid), rtol=1e-7)
+        assert raw.result.effective_df == pytest.approx(ssp.result.effective_df, rel=1e-7)
+        for name in ("x1", "x2"):
+            np.testing.assert_allclose(
+                raw.term_inference(name).se_log_relativity,
+                ssp.term_inference(name).se_log_relativity,
+                rtol=1e-7,
+            )
+
     def test_categorical_stays_exact(self):
         """Categorical features should not be affected by discrete=True."""
         rng = np.random.default_rng(42)

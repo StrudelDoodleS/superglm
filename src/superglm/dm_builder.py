@@ -158,7 +158,10 @@ def _whitening_map(G: NDArray, omega: NDArray, lam2: float) -> NDArray:
 
 
 def _dominant_penalty_eigenbasis(
-    info: GroupInfo, sample_weight: NDArray, lambda2: float | dict
+    info: GroupInfo,
+    columns: NDArray | sp.spmatrix | None,
+    weights: NDArray | None,
+    lambda2: float | dict,
 ) -> NDArray | None:
     """The eigenbasis of a raw block's penalty where it outweighs the data by ``1/sqrt(u)``.
 
@@ -168,25 +171,28 @@ def _dominant_penalty_eigenbasis(
     coordinate axes and keeps the formed penalty to second order (Wood, Pya
     & Safken 2016, sec. 3.1.1), and the penalty dominates every range
     direction, so the turn costs the data's column scaling nothing.
+    ``columns`` and ``weights`` are the block's raw rows and their weights:
+    a binned block's distinct rows and bin weights.
     """
     omega = info.penalty_matrix
-    if omega is None or info.columns is None or len(info.penalty_components or ()) > 1:
+    if omega is None or columns is None or len(info.penalty_components or ()) > 1:
         return None
     penalty = _resolve_lambda2(lambda2) * float(np.max(np.diag(omega)))
-    columns = sp.csr_matrix(info.columns)
-    data = float(np.max(columns.multiply(columns).T @ sample_weight, initial=0.0))
+    columns = sp.csr_matrix(columns)
+    data = float(np.max(columns.multiply(columns).T @ weights, initial=0.0))
     if penalty * np.sqrt(UNIT_ROUNDOFF) <= data:
         return None
     return np.linalg.eigh(omega)[1]
 
 
 def should_discretize(spec: FeatureSpec, model_discrete: bool) -> bool:
-    """Check if a feature spec should use fit-time discretization."""
+    """Check if a feature spec should use fit-time discretization.
+
+    Every penalty option bins; ``"none"`` holds its raw basis in the binned block.
+    """
     from superglm.features.spline import _SplineBase
 
     if not isinstance(spec, _SplineBase):
-        return False
-    if spec.penalty != "ssp":
         return False
     if spec.discrete is not None:
         return spec.discrete
@@ -797,8 +803,16 @@ def _process_info(
             R_inv_local = compute_projected_R_inv(B_for, P, info.penalty_matrix, exp_for, lambda2)
             R_inv = P @ R_inv_local
         else:
+            # A binned main effect is read on its distinct rows and bin weights,
+            # a tensor block on its own columns.
+            binned = use_discrete and not use_tensor
             R_inv_local = (
-                _dominant_penalty_eigenbasis(info, sample_weight, lambda2)
+                _dominant_penalty_eigenbasis(
+                    info,
+                    B_unique if binned else info.columns,
+                    exposure_agg if binned else sample_weight,
+                    lambda2,
+                )
                 if eigenbasis_turn
                 else None
             )
