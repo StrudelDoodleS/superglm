@@ -23,6 +23,7 @@ import scipy.linalg
 
 from superglm import FactorSmooth, LambdaPolicy, Numeric, Spline, SuperGLM
 from superglm.solvers import centered_system
+from superglm.solvers._structured import balance_tree as balance_tree_module
 from superglm.solvers._structured.balance_tree import (
     ProfiledSumToZeroTreeFactor,
     SumToZeroPenalizedOperator,
@@ -996,6 +997,56 @@ def test_a_null_border_column_s_formed_penalty_is_cleared(monkeypatch, off, form
     factor, case = _alias_beside_a_random_effect(S_b, thin_row=(1.0, 0.0), border_roots=roots)
     assert factor._alias_x is None and factor.border_certificate.deflated == 1
     S_b[1, :] = S_b[:, 1] = 0.0
+    _matches_dense(factor, case, _alias_null(case, (0.0, 1.0)))
+
+
+@pytest.mark.parametrize("formed", [3e-11, 1e-8])
+def test_a_null_column_s_formed_penalty_above_its_image_s_gram_by_rounding_is_cleared(
+    monkeypatch, formed
+) -> None:
+    """The clearing accounts for the products' rounding: a diagonal that far above the images' Gram is cleared.
+
+    The map variant of the test above (``z_3``'s raw coefficients ``1e-10``
+    off the exact null of ``G'G``, lambda chosen so the Gram of the root's
+    image is ``formed`` on the column), with that one diagonal raised to
+    ``lambda (image + rounding)^2``, ``image`` and ``rounding`` the
+    component's own (``_root_images``): ``5.6e-5`` of it above the Gram,
+    and inside the ``lambda (image + 2 rounding)^2`` the roots account for
+    (both asserted), as a formed matrix rounded or cut apart from its root
+    can hold.  The block ``factor_border`` receives is ``S_b`` with the
+    column cleared (asserted), so rank, pseudo-determinant and fitted values
+    are those of the block without it.  Mutation: with the rounding left out
+    of the accounting the column is kept, at ``3e-11`` the rank is 32 for 33,
+    and at ``1e-8`` ``log|H|`` is ``4e-5`` off, beyond its bound.
+    """
+    G = np.array([[1.0, -1.0, 0.0], [1.0, 1.0, -2.0]])
+    omega = G.T @ G
+    C = np.column_stack(([1.0, 0.0, 0.0], np.ones(3)))
+    C[0, 1] += 1e-10
+    image = centered_system.penalty_factor(omega) @ C
+    gram = image.T @ image
+    lam = formed / float(gram[1, 1])
+    root = (np.array([0, 1]), omega, C, lam)
+    unit = np.array([[0.0], [1.0]])
+    ((_, shown, rounding, _, _),) = _root_images(unit, unit, (root,))
+    S_b = scipy.linalg.block_diag(lam * 0.5 * (gram + gram.T), 0.5 * np.eye(3))
+    S_b[1, 1] = lam * float(shown[0] + rounding[0]) ** 2
+    assert lam * gram[1, 1] < S_b[1, 1] <= lam * float(shown[0] + 2.0 * rounding[0]) ** 2
+    blocks, factor_border = [], balance_tree_module.factor_border
+
+    def spy(Q, S, *args, **kwargs):
+        blocks.append(S.copy())
+        return factor_border(Q, S, *args, **kwargs)
+
+    monkeypatch.setattr(balance_tree_module, "factor_border", spy)
+    factor, case = _alias_beside_a_random_effect(
+        S_b, thin_row=(1.0, 0.0), border_roots=(root, _EFFECT)
+    )
+    monkeypatch.undo()
+    assert factor._alias_x is None and factor.border_certificate.deflated == 1
+    S_b[1, :] = S_b[:, 1] = 0.0
+    q = case["q"]
+    assert len(blocks) == 1 and np.array_equal(blocks[0][-q:, -q:], S_b)
     _matches_dense(factor, case, _alias_null(case, (0.0, 1.0)))
 
 
