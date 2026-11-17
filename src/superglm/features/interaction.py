@@ -173,8 +173,8 @@ def interaction_spline_spec(
         return spec
     # Polynomial ranges are equality constraints on the parent's own basis
     # (``_constraint_rows``) that the cardinal basis lacks, so a ranged parent keeps
-    # its constrained basis.  The interaction screen passes ``keep_ranges=False``
-    # and stays on the cardinal basis, since no interaction is refit on a ranged parent.
+    # its constrained basis. SuperGLM's refit and screen both defer ranged
+    # parents, while SuperLSS carries the ranges into the interaction.
     if keep_ranges and getattr(spec, "polynomial_ranges", ()):
         return spec
 
