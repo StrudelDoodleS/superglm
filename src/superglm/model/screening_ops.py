@@ -50,6 +50,8 @@ import scipy.sparse as sp
 
 from superglm._frame import as_eager_frame
 from superglm.distributions import Tweedie, validate_response
+from superglm.dm_builder import interaction_parent_has_ranges, knot_geometry_weight
+from superglm.features._spline_knots import row_quantile_knots
 from superglm.features.categorical import (
     Categorical,
     _codes_against,
@@ -148,7 +150,7 @@ def _structured_evaluation_allowance(max_cells, n_a, k_s, n_levels):
     return max(remaining, 0) // max(per_evaluation, 1)
 
 
-def _quantile_binned(x, bins):
+def _quantile_binned(x, bins, geometry_weight):
     """Replace x by per-bin mean representatives on an empirical quantile grid.
 
     Screening-only lossy compression for continuous covariates whose joint
@@ -156,10 +158,15 @@ def _quantile_binned(x, bins):
     within-bin mean, so the probe sees the same marginal geometry at <= bins
     support points.  Never applied when the pair fits the budget exactly.
     """
-    edges = np.unique(np.quantile(x, np.linspace(0.0, 1.0, bins + 1)[1:-1]))
+    edges = row_quantile_knots(x, bins - 1, geometry_weight)
     codes = np.searchsorted(edges, x, side="right")
     _, codes = np.unique(codes, return_inverse=True)
-    reps = np.bincount(codes, weights=x) / np.bincount(codes)
+    if geometry_weight is None:
+        reps = np.bincount(codes, weights=x) / np.bincount(codes)
+    else:
+        mass = np.bincount(codes, weights=geometry_weight)
+        shares = geometry_weight / mass[codes]
+        reps = np.bincount(codes, weights=x * shares)
     return reps[codes]
 
 
@@ -182,6 +189,8 @@ _DEFERRED_KIND_HINT = (
 
 def _margin_kind(spec) -> str | None:
     """Classify a fitted spec for screening; None means not screenable."""
+    if interaction_parent_has_ranges(spec):
+        return None
     if isinstance(spec, _SplineBase):
         return "spline"
     if isinstance(spec, OrderedCategorical):
@@ -211,6 +220,8 @@ def _deferral_reason(spec) -> str:
     Called only for names ``_margin_kind`` refused; the reason is reported on
     ``table.attrs["deferred_features"]`` and in the candidates error.
     """
+    if interaction_parent_has_ranges(spec):
+        return "polynomial_ranges margins are deferred: SuperGLM cannot refit interactions on them"
     if isinstance(spec, OrderedCategorical):
         if spec.has_specials:
             return (
@@ -417,10 +428,10 @@ def screen_interactions(
     the value used is ``table.attrs["phi"]`` and ``phi=`` overrides it.
 
     Fitted mains with no screenable margin (``Polynomial``, ``RandomEffect``,
-    step-mode ``OrderedCategorical``, any ``OrderedCategorical`` with
-    ``specials=``) are excluded and reported in ``table.attrs["deferred_features"]``,
-    a ``{feature: reason}`` mapping.  Naming one in ``candidates`` raises with the
-    same reason.
+    spline parents with ``polynomial_ranges``, step-mode ``OrderedCategorical``,
+    any ``OrderedCategorical`` with ``specials=``) are excluded and reported in
+    ``table.attrs["deferred_features"]``, a ``{feature: reason}`` mapping.
+    Naming one in ``candidates`` raises with the same reason.
 
     Returns a frame sorted by ``z`` (descending) with columns ``feature_a,
     feature_b, kind, statistic, z, edf0, lambda0, n_cells, approx``;
@@ -687,14 +698,32 @@ def screen_interactions(
     marginal_cache: dict[tuple[str, bool], tuple[np.ndarray, np.ndarray]] = {}
     level_cache: dict[str, tuple[np.ndarray, int]] = {}
     contrast_cache: dict[str, np.ndarray] = {}
+    geometry_weight = knot_geometry_weight(weights, model_weight_semantics(model))
+    positive_rows = geometry_weight > 0.0
+    if np.all(positive_rows):
+        positive_rows = None
+    else:
+        geometry_weight = geometry_weight[positive_rows]
+    if np.all(geometry_weight == 1.0):
+        geometry_weight = None
 
     def _support(name, binned):
         key = (name, binned)
         if key not in support_cache:
             x = _margin_source(name)[1]
+            if positive_rows is not None:
+                x = x[positive_rows]
             if binned:
-                x = _quantile_binned(x, screen_bins)
+                x = _quantile_binned(x, screen_bins, geometry_weight)
             uniq, codes, counts = np.unique(x, return_inverse=True, return_counts=True)
+            if geometry_weight is not None:
+                counts = np.bincount(codes, weights=geometry_weight)
+            if positive_rows is not None:
+                # The moment kernels need one code per row. Zero-weight rows
+                # carry no moments, so they can point at the first support.
+                full_codes = np.zeros(n_rows, dtype=codes.dtype)
+                full_codes[positive_rows] = codes
+                codes = full_codes
             support_cache[key] = {
                 "x": x,
                 "uniq": uniq,
@@ -703,6 +732,15 @@ def screen_interactions(
                 "n": len(uniq),
             }
         return support_cache[key]
+
+    def _refit_support_size(name):
+        support = _support(name, False)
+        if positive_rows is None:
+            return support["n"]
+        if "refit_n" not in support:
+            # Fit-time interaction discretization bins the full column.
+            support["refit_n"] = np.unique(_margin_source(name)[1]).size
+        return support["refit_n"]
 
     def _one_marginal(name, binned):
         """Build (menu, penalty) for a single feature; each side independently.
@@ -720,9 +758,7 @@ def screen_interactions(
                 None,
                 support=s["uniq"],
                 counts=s["counts"],
-                # The probe's geometry as it was: SuperGLM refits no
-                # interaction on a ranged parent.
-                keep_ranges=False,
+                geometry_weight=geometry_weight,
             )
             S = _normalize_tensor_penalty(m.penalty) if m.normalize_penalty else m.penalty
             basis = m.basis
@@ -876,7 +912,7 @@ def screen_interactions(
         if any(isinstance(model._specs[name], OrderedCategorical) for name in (feat_a, feat_b)):
             return False
         return any(
-            _support(name, False)["n"]
+            _refit_support_size(name)
             > resolve_discrete_n_bins(name, _margin_spec(name), n_bins_config)
             for name in _refit_binned_margins(kind, feat_a, feat_b)
         )

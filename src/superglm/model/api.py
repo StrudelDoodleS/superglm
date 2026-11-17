@@ -881,11 +881,15 @@ class SuperGLM:
         training data — pass both arrays explicitly to screen a holdout,
         subsample, or reordered frame.  The dispersion used is attached as
         ``table.attrs["phi"]`` and can be overridden via ``phi=``.
+        Spline knot placement, centering and fallback bins follow the model's
+        weight semantics. Frequency weights count as row mass. Prior weights
+        count each positive-weight row once for geometry.
 
         Fitted mains with no screenable margin — ``Polynomial``,
-        ``RandomEffect``, step-mode ``OrderedCategorical`` and any
-        ``OrderedCategorical`` carrying ``specials=`` — are excluded from the
-        sweep and reported in ``table.attrs["deferred_features"]``, a
+        ``RandomEffect``, spline parents with ``polynomial_ranges``, step-mode
+        ``OrderedCategorical`` and any ``OrderedCategorical`` carrying
+        ``specials=`` — are excluded from the sweep and reported in
+        ``table.attrs["deferred_features"]``, a
         ``{feature: reason}`` mapping that is empty when everything fitted was
         screened.  Naming one of them in ``candidates`` raises with the same
         reason.

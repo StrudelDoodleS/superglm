@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from superglm import Categorical, SuperGLM
+from superglm.features._spline_ranges import PolynomialRange
 from superglm.features.factor_smooth import FactorSmoothGroupTermWarning
 from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
@@ -99,6 +100,83 @@ def test_candidates_rejects_deferred_and_ineligible_kinds():
     # ... while a name the model never fitted still gets the generic message.
     with pytest.raises(ValueError, match="screenable features"):
         model2.screen_interactions(df2, y, candidates=[("age", "nope")])
+
+
+@pytest.mark.parametrize("ordered", [False, True], ids=["spline", "ordered-spline"])
+def test_polynomial_ranges_are_deferred_before_scoring(ordered):
+    df, rng = _mixed_frame(n=800)
+    y = _null_y(df, rng)
+    if ordered:
+        name = "band"
+        basis = Spline(kind="cr", k=6, polynomial_ranges=[PolynomialRange("26-35", "46-55", 1)])
+        ranged = OrderedCategorical(order=BANDS, basis=basis)
+    else:
+        name = "age"
+        ranged = Spline(kind="cr", k=6, polynomial_ranges=[PolynomialRange(30.0, 50.0, 1)])
+    model = SuperGLM(
+        features={name: ranged, "region": Categorical(), "brand": Categorical()},
+    ).fit_reml(df, y)
+
+    screen = model.screen_interactions(df, y)
+    assert len(screen) == 1
+    assert screen.iloc[0]["kind"] == "cat_cat"
+    assert "polynomial_ranges" in screen.attrs["deferred_features"][name]
+    with pytest.raises(ValueError, match="polynomial_ranges"):
+        model.screen_interactions(df, y, candidates=[(name, "region")])
+
+
+@pytest.mark.parametrize("binned", [False, True], ids=["exact", "binned"])
+def test_frequency_weighted_spline_screen_matches_replication(binned):
+    rng = np.random.default_rng(229)
+    x = rng.uniform(0.0, 10.0, 320)
+    group = rng.choice(["A", "B", "C"], size=len(x))
+    df = pd.DataFrame({"x": x, "group": group})
+    y = np.sin(x) * (group == "B") + 0.03 * x + rng.normal(0.0, 0.2, size=len(x))
+    weights = np.where(x < 1.5, 35, 1)
+    weights[x > 9.0] = 0
+    model = SuperGLM(
+        family="gaussian",
+        features={
+            "x": Spline(kind="cr", n_knots=8, knot_strategy="quantile_rows"),
+            "group": Categorical(),
+        },
+        weight_semantics="frequency",
+    ).fit_reml(df, y, sample_weight=weights)
+
+    options = {"max_cells": 500, "screen_bins": 16} if binned else {}
+    replicated = np.repeat(np.arange(len(df)), weights)
+    weighted = model.screen_interactions(df, y, sample_weight=weights, **options).iloc[0]
+    expanded = model.screen_interactions(
+        df.iloc[replicated], y[replicated], sample_weight=np.ones(len(replicated)), **options
+    ).iloc[0]
+
+    assert bool(weighted["approx"]) == bool(expanded["approx"]) == binned
+    # Literal positive row replication supplies the geometry and score without
+    # running the extra weighted-knot and weighted-bin code paths.
+    for col in ("statistic", "z", "edf0"):
+        assert weighted[col] == pytest.approx(expanded[col], rel=1e-8, abs=1e-8)
+
+
+@pytest.mark.pins_behaviour
+def test_screen_approx_counts_zero_weight_rows_in_discrete_refit():
+    x = np.tile(np.arange(10, dtype=float), 30)
+    group = np.repeat(["A", "B", "C"], len(x) // 3)
+    df = pd.DataFrame({"x": x, "group": group})
+    weights = (x < 8).astype(float)
+    y = np.sin(x + (group == "B"))
+    model = SuperGLM(
+        family="gaussian",
+        features={
+            "x": Spline(kind="ps", k=6, discrete=True, n_bins=8),
+            "group": Categorical(),
+        },
+    ).fit_reml(df, y, sample_weight=weights)
+
+    row = model.screen_interactions(df, y).iloc[0]
+
+    # The discrete interaction refit bins the full ten-value column, even
+    # though only eight values carry mass in the screen.
+    assert row["approx"]
 
 
 def test_fitted_pairs_of_every_class_are_excluded():

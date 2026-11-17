@@ -135,10 +135,12 @@ penalized level curves; see [Interactions](specify-interactions.md).
 
 **What gets swept.** `candidates=None` pairs every eligible fitted feature:
 splines, `OrderedCategorical`, `Categorical` and `Numeric`.
-`Polynomial`, `RandomEffect` and any
-`OrderedCategorical` carrying `specials=` have no screenable margin — a
+`Polynomial`, `RandomEffect`, spline parents with `polynomial_ranges`,
+step-mode `OrderedCategorical`, and `OrderedCategorical` terms carrying
+`specials=` are deferred. SuperGLM
+refuses to refit an interaction on a parent with polynomial ranges. A
 special is a free level with no position on the spline axis, so the pair
-would need a composite margin. Each of them is reported in
+would need a composite margin. Each deferred feature is reported in
 `table.attrs["deferred_features"]`, a `{feature: reason}` mapping, and naming
 one in `candidates` raises with that same reason. A `Categorical` carrying a
 `grouping=` is eligible too: screening and
@@ -159,6 +161,11 @@ that deferral specifically, not a generic "unknown feature" error. Pairs the
 model already fits as an interaction — of any class, `FactorSmooth`
 included — are excluded too: the screen profiles only the parent mains, so it
 cannot re-screen a term already in the model.
+
+Spline probes use the refit's weight convention for knot placement and
+centering. Frequency weights count as row mass. Prior weights count each
+positive-weight row once for geometry. The same convention determines the
+quantile edges and means when screening falls back to a binned margin.
 
 A mixed sweep comes back as one sorted table. The example below screens an
 80,000-row sample of the freMTPL2 frequency book under
@@ -214,16 +221,16 @@ features = {
 table = model.screen_interactions(df, y, sample_weight=exposure)
 print(table.to_string(index=False))
 #  feature_a  feature_b        kind  statistic         z       edf0      lambda0  n_cells  approx
-#     VehAge BonusMalus          ti   7.869834  3.759400   2.000000 1.908607e+02     5220   False
-#    DrivAge BonusMalus          ti  15.025011  2.245878   8.000000 3.161582e+01     7200   False
-# BonusMalus   VehBrand  spline_cat  22.106513  1.216701  16.000000 4.542683e+03      990   False
-#    DrivAge     VehAge          ti   1.155967 -0.538605   1.999999 3.420509e+01     4640   False
-# BonusMalus     Region  spline_cat  16.813307 -0.646021  20.999995 7.594828e+09     1980   False
-#    DrivAge   VehBrand  spline_cat   5.821906 -0.934241   9.999931 9.847305e+09      880   False
+#     VehAge BonusMalus          ti   7.871294  3.760159   2.000001 1.902571e+02     5220   False
+#    DrivAge BonusMalus          ti  15.043391  2.251744   7.999999 3.121002e+01     7200   False
+# BonusMalus   VehBrand  spline_cat  22.106512  1.216701  16.000000 4.542683e+03      990   False
+#    DrivAge     VehAge          ti   1.162569 -0.534497   2.000000 3.443127e+01     4640   False
+# BonusMalus     Region  spline_cat  16.813313 -0.646021  21.000009 7.392606e+09     1980   False
+#    DrivAge   VehBrand  spline_cat   5.821920 -0.934241   9.999957 9.855343e+09      880   False
 # LogDensity   VehBrand numeric_cat   3.902437 -1.363456  10.000000 0.000000e+00       11   False
-#     VehAge   VehBrand  spline_cat   2.264075 -1.729759   9.999084 2.958023e+09      638   False
-#     VehAge     Region  spline_cat   7.177188 -2.132613  20.994454 1.813179e+09     1276   False
-#    DrivAge     Region  spline_cat   6.265124 -2.273626  20.999673 5.161319e+09     1760   False
+#     VehAge   VehBrand  spline_cat   2.264169 -1.729773   9.999786 2.972079e+09      638   False
+#     VehAge     Region  spline_cat   7.177852 -2.132735  20.998707 1.820207e+09     1276   False
+#    DrivAge     Region  spline_cat   6.265211 -2.273618  20.999794 5.166309e+09     1760   False
 # LogDensity     Region numeric_cat   5.959582 -2.320787  21.000000 0.000000e+00       22   False
 #   VehBrand     Region     cat_cat  59.946820 -7.258904 208.000000 0.000000e+00      242   False
 ```

@@ -528,6 +528,15 @@ def _build_unpenalized_sparse_group(B_csr, n_cols: int):
     )
 
 
+def interaction_parent_has_ranges(spec: FeatureSpec | None) -> bool:
+    """Whether an interaction parent carries polynomial ranges on its spline."""
+    from superglm.features.ordered_categorical import OrderedCategorical
+    from superglm.features.spline import _SplineBase
+
+    spline = spec._spline if isinstance(spec, OrderedCategorical) else spec
+    return isinstance(spline, _SplineBase) and bool(spline.polynomial_ranges)
+
+
 def refuse_unsupported_interaction_parents(
     feat1: str,
     feat2: str,
@@ -548,7 +557,6 @@ def refuse_unsupported_interaction_parents(
     them.
     """
     from superglm.features.ordered_categorical import OrderedCategorical
-    from superglm.features.spline import _SplineBase
 
     # An OrderedCategorical without an inner spline (an old pickle's step mode)
     # has no marginal smooth to cross with, and a specials term's free levels
@@ -584,13 +592,7 @@ def refuse_unsupported_interaction_parents(
                 "with; use basis=Spline(...) for an interactable ordinal parent, or "
                 "a Categorical feature for level-by-level structure."
             )
-        # SuperGLM refuses a ranged parent: its interaction screen's probe
-        # (keep_ranges=False) has no constrained basis.  SuperLSS passes
-        # ranged_margins.
-        spline = spec._spline if isinstance(spec, OrderedCategorical) else spec
-        if isinstance(spline, _SplineBase) and spline.polynomial_ranges:
-            if ranged_margins:
-                continue
+        if not ranged_margins and interaction_parent_has_ranges(spec):
             raise NotImplementedError(
                 f"cannot add the interaction ({feat1!r}, {feat2!r}): {parent!r} has "
                 "polynomial_ranges, which shape a main effect only in this version; "
