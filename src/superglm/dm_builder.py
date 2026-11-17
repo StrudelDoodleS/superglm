@@ -803,8 +803,9 @@ def _process_info(
             R_inv_local = compute_projected_R_inv(B_for, P, info.penalty_matrix, exp_for, lambda2)
             R_inv = P @ R_inv_local
         else:
-            # A binned main effect is read on its distinct rows and bin weights,
-            # a tensor block on its own columns.
+            # A binned main effect is read on its distinct rows and bin weights.
+            # A binned tensor has no columns and one penalty per margin, so the
+            # turn never applies to it.
             binned = use_discrete and not use_tensor
             R_inv_local = (
                 _dominant_penalty_eigenbasis(
