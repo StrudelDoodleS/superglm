@@ -27,6 +27,7 @@ from superglm.solvers._structured.balance_tree import (
     ProfiledSumToZeroTreeFactor,
     SumToZeroPenalizedOperator,
     SumToZeroTreeFactor,
+    _root_images,
     balance_tree,
 )
 from superglm.solvers._structured.border import BorderGenerators
@@ -832,6 +833,96 @@ def test_a_representation_error_the_data_barely_see_does_not_certify_a_null_alia
     assert formed._alias_x is not None and formed.border_certificate.deflated == 2
     assert factor._alias_x is None and factor.border_certificate.deflated == 1
     _matches_dense(factor, case, _alias_null(case, (0.0, 1.0), border=(0.0, 1.0, 1.0)))
+
+
+def test_a_representation_error_inside_the_residual_s_rounding_does_not_certify_a_null_alias(
+    monkeypatch,
+) -> None:
+    """An error the residual cannot show is bounded by the residual's own rounding, not read as curvature.
+
+    Every row is a unit row of the level basis, so each level's triangle is
+    its rows exactly (every Householder step has ``tau = 0``), and level 0's
+    single row ``e_2`` makes the border's ``z_3`` its alias.  Two border
+    columns ``w_1, w_2`` agree but on two ``z_3`` rows, where they hold ``1``
+    and ``1 + 2**-20`` swapped: their difference, which their raw penalty
+    ``[[1, -1], [-1, 1]]`` curves at full strength, is one the data see at
+    ``1e-6`` of their norm.  The least squares returns its exact
+    representation of ``z_3`` (rounded to it) plus ``+/-2**-56`` on the two
+    columns: far below the rows' unit roundoff, so ``R_B U`` rounds to
+    ``R_Z`` and the correction the residual shows is exactly zero (asserted).
+    The formed rule certifies the alias on that error (asserted, without
+    roots); the residual's rounding, lifted through the Gram the least
+    squares kept, covers it, so with the roots the alias is left to the
+    pivoted factorization: rank, pseudo-determinant, fitted values and EDF
+    are the dense ``H``'s.  Mutation: without the residual's rounding the
+    alias is deflated on the error's penalty, ``3e-37``, and EDF is 36,876
+    for 15.26.
+    """
+    K, k, n = 5, 4, 17
+    levels = np.repeat(np.arange(K), [1] + [k] * (K - 1))
+    Z = np.vstack((np.eye(k)[2], np.tile(np.eye(k), (K - 1, 1))))
+    rng = np.random.default_rng(3)
+    w_1 = 2.0 ** rng.integers(0, 3, n)  # powers of two: the error's products are exact
+    rows = np.array([4, 8])  # the z_3 rows of levels 1 and 2
+    w_1[rows] = 1.0
+    w_2 = w_1.copy()
+    w_1[rows[1]] = w_2[rows[0]] = 1.0 + 2.0**-20
+    X = np.column_stack((Z[:, 2:], w_1, w_2))
+    q, W, z = X.shape[1], np.ones(n), rng.normal(size=n)
+    system = leaf_system_from_rows(
+        Z,
+        X,
+        levels,
+        W,
+        W * z,
+        n_levels=K,
+        small_indices=np.arange(q),
+        structured_indices=np.arange(q, q + (K - 1) * k).reshape(K - 1, k),
+        basis="sz",
+    )
+    system = dataclasses.replace(system, thin_counts=(np.array([0]), np.array([1])))
+    omega, lam, pair = np.diag([1.0, 1.0, 0.0, 0.0]), 0.3, np.array([[1.0, -1.0], [-1.0, 1.0]])
+    S_b = scipy.linalg.block_diag(np.zeros((2, 2)), pair)
+    penalized = SumToZeroPenalizedOperator.with_penalties(
+        system.operator,
+        S_b,
+        np.broadcast_to(lam * omega, (K, k, k)).copy(),
+        ((np.array([2, 3]), pair, np.eye(2), 1.0),),
+    )
+    solve, images, shown = scipy.linalg.lstsq, _root_images, []
+
+    def exact_plus_error(*args, **kwargs):
+        solution, *rest = solve(*args, **kwargs)
+        solution = solution.copy()  # [1 | border] x (z_2, z_3), Jacobi-scaled
+        solution[:, 1] = np.round(solution[:, 1])  # z_3's representation, 2 e_(z_3)
+        solution[3:, 1] += 2.0**-56 * np.array([1.0, -1.0])
+        return (solution, *rest)
+
+    def spy(border, spread, roots, error=None):
+        if error is not None:
+            shown.append(error[0])
+        return images(border, spread, roots, error)
+
+    monkeypatch.setattr(scipy.linalg, "lstsq", exact_plus_error)
+    monkeypatch.setattr("superglm.solvers._structured.balance_tree._root_images", spy)
+    formed = SumToZeroTreeFactor(system, dataclasses.replace(penalized, border_roots=None))
+    factor = SumToZeroTreeFactor(system, penalized)
+    monkeypatch.undo()
+    assert formed._alias_x is not None and formed.border_certificate.deflated == 1
+    assert shown and not np.any(shown[0])
+    assert factor._alias_x is None and factor.border_certificate.deflated == 0
+    case = dict(K=K, k=k, q=q, levels=levels, Z=Z, X=X, W=W, z=z, omega=omega, lam=lam, S_b=S_b)
+    null = np.zeros(1 + q + (K - 1) * k)
+    null[2] = 1.0
+    null[1 + q + 3 :: k] = -1.0
+    null[1 + q + 3] = K - 1.0
+    _matches_dense(factor, case, null)
+    H, design, _ = _dense(case)
+    values = np.abs(np.linalg.eigvalsh(H))
+    tolerance = 4 * H.shape[0] ** 2 * EPS * values[-1] / values[1]
+    edf = float(np.trace(_pinv_known_nullity(H, 1) @ (design.T @ design)))
+    data = LowRankSymmetricOperator(basis=design.T, core=np.eye(n))  # X'WX, the fit's EDF trace
+    assert factor.trace_inverse_operator(data) == pytest.approx(edf, abs=n * tolerance)
 
 
 @pytest.mark.parametrize("grade", [1.0, 2.0**20, 2.0**-20])
