@@ -179,6 +179,8 @@ def build_integrated_derivative_penalty(
             "Integrated-derivative penalty requires order <= degree."
         )
     K = len(knots) - degree - 1
+    if _collapsed(knots, degree):
+        return np.zeros((K, K))
     knots, bounds = _unit_knots(knots, degree, excluded, intervals)
     return sum(_interval_blocks(knots, degree, order, bounds), np.zeros((K, K)))
 
@@ -193,6 +195,15 @@ def mean_knot_interval(breaks: NDArray) -> float:
     """
     distinct = np.unique(breaks)
     return float((distinct[-1] - distinct[0]) / (distinct.size - 1))
+
+
+def _collapsed(knots: NDArray, degree: int) -> bool:
+    """Whether the domain ``[t[degree], t[n_basis]]`` has no width, as on a one-value column.
+
+    Such a domain has no knot interval to integrate over, so its penalty is
+    zero, and ``_unit_knots`` would divide its zero width by zero.
+    """
+    return bool(knots[degree] == knots[len(knots) - degree - 1])
 
 
 def _unit_knots(
@@ -234,6 +245,8 @@ def structural_derivative_penalty(
     ``width**(1 - 2 * order)`` spread a narrow interval gives the penalty's eigenvalues.
     """
     K = len(knots) - degree - 1
+    if _collapsed(knots, degree):
+        return np.zeros((K, K))
     knots, bounds = _unit_knots(knots, degree, excluded, intervals)
     blocks = _interval_blocks(knots, degree, order, bounds)
     return sum((block / np.linalg.norm(block) for block in blocks), np.zeros((K, K)))

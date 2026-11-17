@@ -21,7 +21,7 @@ from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame
 from superglm._parallel import pooled_map
-from superglm.features._spline_build import qp_geometry, shape_engine
+from superglm.features._spline_build import finish_penalties, qp_geometry, shape_engine
 from superglm.features._spline_penalties import structural_penalty_ranks
 from superglm.features._spline_runtime import bin_knots
 from superglm.features.categorical import Categorical
@@ -309,27 +309,21 @@ def compile_predictor_design(
                 omega, n_cols_penalty, projection_penalty = spec.build_knots_and_penalty(
                     x_col, feature_build_weight, n_bins_feat
                 )
+                # ── QP monotone constraint metadata (coefficient-space, survives discretization) ──
+                constraints, monotone_engine, raw_to_solver_map = qp_geometry(
+                    spec, engine, projection_penalty
+                )
             bin_centers, bin_idx = _discretize_spline_column(
                 x_col,
                 n_bins_feat,
                 feature_build_weight,
                 bin_knots(spec, x_col, feature_build_weight),
             )
-            # A bin is read on the basis the unbinned build reads its rows on:
-            # continued past the boundary under extrapolation="extend", clipped
-            # to it under every other policy. Only splines bin (should_discretize).
-            spline = cast(_SplineBase, spec)
-            B_unique = (
-                spline._basis_matrix(bin_centers).toarray()
-                if spline.extrapolation == "extend"
-                else spline._raw_basis_matrix(bin_centers)
-            )
+            # A bin is read on the basis the unbinned build and prediction read
+            # their rows on, under the extrapolation policy. Only splines bin
+            # (should_discretize).
+            B_unique = cast(_SplineBase, spec)._basis_matrix(bin_centers).toarray()
             exposure_agg = np.bincount(bin_idx, weights=sample_weight, minlength=len(bin_centers))
-
-            # ── QP monotone constraint metadata (coefficient-space, survives discretization) ──
-            constraints, monotone_engine, raw_to_solver_map = qp_geometry(
-                spec, engine, projection_penalty
-            )
 
             if getattr(spec, "select", False):
                 n_null = 1
@@ -385,19 +379,21 @@ def compile_predictor_design(
                 infos[0].structural_ranks = structural_penalty_ranks(spec, infos[0])
             else:
                 infos = [
-                    GroupInfo(
-                        columns=None,
-                        n_cols=n_cols_penalty,
-                        penalty_matrix=omega,
-                        reparametrize=(spec.penalty == "ssp"),
-                        projection=projection_penalty,
-                        penalty_components=getattr(spec, "_penalty_components", None),
-                        constraints=constraints,
-                        monotone_engine=monotone_engine,
-                        raw_to_solver_map=raw_to_solver_map,
+                    finish_penalties(
+                        spec,
+                        GroupInfo(
+                            columns=None,
+                            n_cols=n_cols_penalty,
+                            penalty_matrix=omega,
+                            reparametrize=(spec.penalty == "ssp"),
+                            projection=projection_penalty,
+                            penalty_components=getattr(spec, "_penalty_components", None),
+                            constraints=constraints,
+                            monotone_engine=monotone_engine,
+                            raw_to_solver_map=raw_to_solver_map,
+                        ),
                     )
                 ]
-                infos[0].structural_ranks = structural_penalty_ranks(spec, infos[0])
         else:
             with _feature_named_messages(name):
                 if isinstance(spec, OrderedCategorical):

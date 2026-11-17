@@ -189,10 +189,14 @@ def should_discretize(spec: FeatureSpec, model_discrete: bool) -> bool:
     """Check if a feature spec should use fit-time discretization.
 
     Every penalty option bins; ``"none"`` holds its raw basis in the binned block.
+    Binning assembles the base ``build()`` from its parts, so a spline whose
+    ``build()`` is overridden does not bin: its own build runs on the rows.
     """
     from superglm.features.spline import _SplineBase
 
     if not isinstance(spec, _SplineBase):
+        return False
+    if getattr(spec.build, "__func__", None) is not _SplineBase.build:
         return False
     if spec.discrete is not None:
         return spec.discrete
@@ -1412,6 +1416,7 @@ def rebuild_design_matrix_with_lambdas(
             new_gm.omega_components = gm.omega_components
             new_gm.component_types = gm.component_types
             new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
+            new_gm.lambda_policies = gm.lambda_policies
             new_gms.append(new_gm)
         else:
             new_gms.append(gm)
