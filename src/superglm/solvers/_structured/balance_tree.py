@@ -112,7 +112,8 @@ if TYPE_CHECKING:
 _DEFERRAL_FACTOR = 20.0
 # The function-space resolution of the thin-alias decision: its least squares
 # is accepted at a misfit of sqrt(eps), and a border share of sqrt(eps) is a
-# curvature of eps, the formed quadratic form's own resolution.
+# curvature of eps, the formed quadratic form's own resolution.  It stands for
+# what the decision's residual cannot show, the level basis's own null tilt.
 _ALIAS_RESOLUTION = math.sqrt(2.0 * _UNIT)
 
 
@@ -160,20 +161,20 @@ def _append_generators(
     return BorderGenerators(matrix, np.array(references, dtype=np.intp), tuple(labels))
 
 
-def _curved_by_a_root(border: NDArray, spread: NDArray, roots, error=None) -> NDArray:
-    """Which border directions ``border`` ``(q, g)`` some border penalty component curves.
+def _root_images(border: NDArray, spread: NDArray, roots, error=None):
+    """Each border penalty component's ``(lambda, image, rounding, slack, scale)`` of ``border`` ``(q, g)``.
 
     Judged without lambda, one component at a time (Wood, Pya & Safken 2016,
-    sec. 3.1.2): with ``E'E`` a component's raw penalty and ``C`` its map to
-    raw coefficients, ``||E C b||`` is the root of the raw penalty of the
-    function ``b`` represents, in any solver basis.  It counts above what a
-    null of that penalty can show: the products' rounding on ``spread >=
-    |b|``, the image of ``b``'s ``error`` (twice a known part ``(q, g)``,
-    which resolves the curvature to a half, and a map ``(q, r)`` times norms
-    ``(g,)``), and the root's null tilt and ``_ALIAS_RESOLUTION`` of its
-    scale.  A component without a raw root curves what has that share on it.
+    sec. 3.1.2): with ``E'E`` its raw penalty and ``C`` its map to raw
+    coefficients, ``image = ||E C b||`` is the root of the raw penalty of the
+    function ``b`` represents, and ``lambda image^2`` its formed penalty.  A
+    null of it shows at most ``rounding`` (the two products' on ``spread >=
+    |b|``) plus ``slack``: the root's null tilt and the image of ``b``'s
+    ``error`` (twice a known part, which resolves the curvature to a half,
+    and a map times norms).  ``scale`` is the image at full curvature in each
+    block's own metric (``penalty_factor_tilt``); a rootless part is held whole.
     """
-    from superglm.solvers.centered_system import penalty_factor
+    from superglm.solvers.centered_system import penalty_factor_tilt
 
     def reach(image, positions):
         if error is None:
@@ -183,35 +184,27 @@ def _curved_by_a_root(border: NDArray, spread: NDArray, roots, error=None) -> ND
             np.linalg.norm(image @ lift[positions], 2) * unknown
         )
 
-    sizes = np.linalg.norm(border, axis=0)
-    curved = np.zeros(border.shape[1], dtype=bool)
-    for positions, omega, coordinate_map in roots:
+    for positions, omega, coordinate_map, lam in roots:
         part = border[positions]
         if omega is None:
-            bar = _ALIAS_RESOLUTION * sizes + reach(np.eye(len(positions)), positions)
-            curved |= np.linalg.norm(part, axis=0) > bar
+            slack = reach(np.eye(len(positions)), positions)
+            yield lam, np.linalg.norm(part, axis=0), 0.0, slack, np.linalg.norm(border, axis=0)
             continue
-        root = penalty_factor(np.asarray(omega, dtype=np.float64))
+        root, full, tilt = penalty_factor_tilt(np.asarray(omega, dtype=np.float64))
         if not root.size:
             continue
         coordinate_map = np.asarray(coordinate_map, dtype=np.float64)
         raw = coordinate_map @ part
-        singular = np.linalg.svd(root, compute_uv=False)
-        largest, width = float(singular[0]), root.shape[1]
-        # gamma_(w + |P| + 1) |E||C||b| bounds fl(E fl(C b)) (Higham 2002, sec.
-        # 3.5).  The root's rows are eigenvectors of Omega + dOmega, ||dOmega||_2
-        # <= w u ||Omega||_2 (LAPACK Users' Guide, 3rd ed., sec. 4.7), so each
-        # meets a null x of Omega in v'x = v'dOmega x / mu and ||E x|| <= w u
-        # sigma_max^2 / sigma_min ||x||.
-        allowance = (
-            _gamma(width + len(positions) + 1)
-            * np.linalg.norm(np.abs(root) @ (np.abs(coordinate_map) @ spread[positions]), axis=0)
-            + (width * _UNIT * largest / float(singular[-1]) + _ALIAS_RESOLUTION)
-            * (largest * np.linalg.norm(raw, axis=0))
-            + reach(root @ coordinate_map, positions)
+        # gamma_(w + |P| + 3) |E||C||b| bounds fl(E fl(C b)) and the root's own
+        # three roundings a row (Higham 2002, sec. 3.5).
+        rounding = _gamma(root.shape[1] + len(positions) + 3) * np.linalg.norm(
+            np.abs(root) @ (np.abs(coordinate_map) @ spread[positions]), axis=0
         )
-        curved |= np.linalg.norm(root @ raw, axis=0) > allowance
-    return curved
+        slack = np.linalg.norm(tilt[:, None] * raw, axis=0) + reach(
+            root @ coordinate_map, positions
+        )
+        scale = np.linalg.norm(full[:, None] * raw, axis=0)
+        yield lam, np.linalg.norm(root @ raw, axis=0), rounding, slack, scale
 
 
 # ------------------------------------------------------------- topology ----
@@ -1115,7 +1108,7 @@ class SumToZeroPenalizedOperator(SumToZeroBlockOperator):
     ``penalty_small`` ``(q, q)`` and ``penalty_local`` ``(K, k, k)`` (one block
     per level, all ``K``) are the parts the factor takes as square roots;
     ``A`` and ``D`` already include them (the operator every trace reads).
-    ``border_roots`` holds one ``(positions, Omega, C)`` per border penalty
+    ``border_roots`` holds one ``(positions, Omega, C, lambda)`` per border penalty
     component with a positive smoothing parameter (``assembly._border_root``),
     read where a null-space membership is decided; ``None`` where the penalty
     came without its components, or with a ridge that curves every direction.
@@ -1551,16 +1544,24 @@ class SumToZeroTreeFactor:
             generators = _append_generators(generators, aliases, self.term_name)
         roots = penalized.border_roots
         # A border column that is a data null within its bound and that no
-        # component curves holds only its formed penalty's rounding, lambda
-        # times a squared rounding the bound does not cover: exact zeros there
-        # (Wood, Pya & Safken 2016, Supplementary Appendix C) leave the null it is.
-        null = np.diag(Q_rest)[lead:] <= rest_bound[lead:]
-        null = np.flatnonzero(null & (np.diag(S_rest)[lead:] > 0.0)) if roots is not None else ()
-        if len(null):
+        # component curves is an exact null: its formed penalty, lambda times
+        # the square of an image inside the decision's resolution, which the
+        # bound does not cover, is cleared (Wood, Pya & Safken 2016,
+        # Supplementary Appendix C).  Only where that diagonal is the Gram of
+        # the components' images, within the products' and the sums' rounding:
+        # one the roots do not account for is kept.
+        formed = np.diag(S_rest)[lead:]
+        null = np.flatnonzero((np.diag(Q_rest)[lead:] <= rest_bound[lead:]) & (formed > 0.0))
+        if roots is not None and len(null):
             unit = np.zeros((q, len(null)))
             unit[null, np.arange(len(null))] = 1.0
-            null = lead + null[~_curved_by_a_root(unit, unit, roots)]
-            S_rest[null, :] = S_rest[:, null] = 0.0
+            accounted, flat = np.zeros(len(null)), np.ones(len(null), dtype=bool)
+            for lam, image, rounding, slack, size in _root_images(unit, unit, roots):
+                accounted += lam * (image + 2.0 * rounding) ** 2
+                flat &= image <= rounding + slack + _ALIAS_RESOLUTION * size
+            flat &= formed[null] <= (1.0 + _gamma(n_x + 2 * len(roots) + 8)) * accounted
+            cleared = lead + null[flat]
+            S_rest[cleared, :] = S_rest[:, cleared] = 0.0
         border = factor_border(
             Q_rest,
             S_rest,
@@ -1580,7 +1581,7 @@ class SumToZeroTreeFactor:
         penalty curves them, so they are deflated structurally, not truncated as data (which would
         make ``log|H|`` jump with lambda). Only combinations the formed penalty certifies above
         its quadratic form's rounding and a border penalty component curves in its raw basis
-        (``_curved_by_a_root``) are returned; the border part must reproduce the null-space
+        (``_root_images``) are returned; the border part must reproduce the null-space
         functions to ``sqrt(eps)``. ``None`` without thin levels or penalty.
         """
         counts = getattr(system, "thin_counts", None)
@@ -1727,11 +1728,18 @@ class SumToZeroTreeFactor:
             np.linalg.norm(floor @ np.abs(phi), axis=0),
         )
         chosen = combinations[1 + c :]
-        curved = _curved_by_a_root(chosen, spread[:, certified], roots, error)
-        # A combination the intercept or the carried coordinates hold whole has a
-        # border part of the eigenvectors' mixing, below the form's resolution.
-        curved &= np.linalg.norm(chosen, axis=0) > _ALIAS_RESOLUTION * np.linalg.norm(
-            combinations, axis=0
+        curved = np.zeros(chosen.shape[1], dtype=bool)
+        for _, image, rounding, slack, size in _root_images(
+            chosen, spread[:, certified], roots, error
+        ):
+            curved |= image > rounding + slack + _ALIAS_RESOLUTION * size
+        # A combination the intercept holds whole has a border part of the
+        # eigenvectors' mixing or the representation's dust: its share of the
+        # representation, each column in the least squares' Jacobi coordinates
+        # (so in no column's units), is below the form's resolution.
+        held = scaled @ phi
+        curved &= np.linalg.norm(held[1:], axis=0) > _ALIAS_RESOLUTION * np.linalg.norm(
+            held, axis=0
         )
         return combinations[:, curved] if np.any(curved) else None
 

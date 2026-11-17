@@ -269,7 +269,7 @@ def build_penalized_sum_to_zero_operator(
             if not wholly_small:
                 raise ValueError("The dominant SZ block accepts only a sum-to-zero penalty.")
             A[local_small, local_small] += lam
-            roots.append((local_small, None, None))
+            roots.append((local_small, None, None, lam))
             continue
         if component.penalty_kind == "sum_to_zero":
             if (
@@ -304,7 +304,8 @@ def build_penalized_sum_to_zero_operator(
                 f"expected ({len(indices)}, {len(indices)})."
             )
         A[np.ix_(local_small, local_small)] += lam * omega
-        roots.append(_border_root(component, group_matrices[component.group_index], local_small))
+        root = _border_root(component, group_matrices[component.group_index], local_small)
+        roots.append((*root, lam))
 
     return SumToZeroPenalizedOperator.with_penalties(operator, A, D, tuple(roots))
 

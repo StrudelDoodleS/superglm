@@ -22,6 +22,7 @@ import pytest
 import scipy.linalg
 
 from superglm import FactorSmooth, LambdaPolicy, Numeric, Spline, SuperGLM
+from superglm.solvers import centered_system
 from superglm.solvers._structured.balance_tree import (
     ProfiledSumToZeroTreeFactor,
     SumToZeroPenalizedOperator,
@@ -671,7 +672,7 @@ def test_an_exhausted_subtree_is_deferred_against_its_unreduced_columns(
 
 
 def _alias_beside_a_random_effect(
-    S_b: np.ndarray, *, thin_row=(1.0, 1.0), border_roots=None, split: float = 0.0
+    S_b: np.ndarray, *, thin_row=(1.0, 1.0), border_roots=None, split: float = 0.0, head=None
 ):
     """A one-row level beside a random effect, built by hand: ``(factor, case)``.
 
@@ -684,7 +685,8 @@ def _alias_beside_a_random_effect(
     would set it, and ``border_roots`` as the assembly would, or left out as
     a hand-built operator leaves them.  A nonzero ``split`` holds ``z_3`` as
     two columns ``z_3 / 2 +/- split a`` (``a`` standard normal), whose
-    difference the data barely see.
+    difference the data barely see; ``head(Z)`` gives the border other
+    leading columns than ``z_2`` and ``z_3``.
     """
     K, k, n, lam = 8, 4, 400, 0.3
     rng = np.random.default_rng(7)
@@ -695,7 +697,7 @@ def _alias_beside_a_random_effect(
     Z[0, 2:] = thin_row
     effect = rng.integers(0, 3, n)
     effect[:3] = np.arange(3)
-    X = np.column_stack((Z[:, 2:], np.eye(3)[effect]))
+    X = np.column_stack((Z[:, 2:] if head is None else head(Z), np.eye(3)[effect]))
     q = X.shape[1]
     W = rng.uniform(0.5, 2.0, n)
     z = rng.normal(size=n)
@@ -785,7 +787,7 @@ def _alias_null(case, f, border=None) -> np.ndarray:
     return N
 
 
-_EFFECT = (np.array([2, 3, 4]), None, None)  # the random effect's ridge: no raw root
+_EFFECT = (np.array([2, 3, 4]), None, None, 0.5)  # the random effect's ridge: no raw root
 
 
 def test_a_representation_error_does_not_certify_a_null_alias_at_a_large_lambda(
@@ -806,7 +808,7 @@ def test_a_representation_error_does_not_certify_a_null_alias_at_a_large_lambda(
     alias is deflated on the forced error.
     """
     S_b = np.diag([1e10, 0.0, 0.5, 0.5, 0.5])
-    roots = ((np.array([0, 1]), np.diag([1.0, 0.0]), np.eye(2)), _EFFECT)
+    roots = ((np.array([0, 1]), np.diag([1.0, 0.0]), np.eye(2), 1e10), _EFFECT)
     _misrepresenting(monkeypatch, 1, 1e-10)
     formed, _ = _alias_beside_a_random_effect(S_b, thin_row=(1.0, 0.0))
     factor, case = _alias_beside_a_random_effect(S_b, thin_row=(1.0, 0.0), border_roots=roots)
@@ -816,8 +818,9 @@ def test_a_representation_error_does_not_certify_a_null_alias_at_a_large_lambda(
     _matches_dense(factor, case, _alias_null(case, (0.0, 1.0)))
 
 
+@pytest.mark.parametrize("shown", [1.0, 0.7])
 def test_a_representation_error_the_data_barely_see_does_not_certify_a_null_alias(
-    monkeypatch,
+    monkeypatch, shown
 ) -> None:
     """A representation error above the decision's resolution is read from the residual, not as curvature.
 
@@ -830,15 +833,24 @@ def test_a_representation_error_the_data_barely_see_does_not_certify_a_null_alia
     part's raw image is about ``1e-6`` of its scale, well above the
     decision's ``sqrt(eps)`` resolution.  The formed rule certifies the
     alias (asserted, without roots); the correction the residual shows is
-    that error, so with the roots the alias is left to the pivoted
-    factorization: rank, pseudo-determinant and fitted values are the dense
-    ``H``'s.  Mutation: without the representation-error term the alias is
-    deflated on the forced error, and the fitted values are ``1.7e-7`` off,
-    370 times their bound (``log|H|`` 3.5 times its tolerance).
+    that error, or ``shown`` of it (the Gram's eigenvalues the correction
+    divides by, forced larger), and twice it still covers the image, so
+    with the roots the alias is left to the pivoted factorization: rank,
+    pseudo-determinant and fitted values are the dense ``H``'s.  Mutations:
+    without the representation-error term, or at ``shown = 0.7`` with the
+    correction counted once, the alias is deflated on the forced error, and
+    the fitted values are ``1.7e-7`` off, 370 times their bound.
     """
     omega = np.array([[1.0, -1.0], [-1.0, 1.0]])
     S_b = scipy.linalg.block_diag(0.0, omega, 0.5 * np.eye(3))
-    roots = ((np.array([1, 2]), omega, np.eye(2)), (np.array([3, 4, 5]), None, None))
+    roots = ((np.array([1, 2]), omega, np.eye(2), 1.0), (np.array([3, 4, 5]), None, None, 0.5))
+    eigh = np.linalg.eigh
+
+    def partly(a, *args, **kwargs):
+        values, vectors = eigh(a, *args, **kwargs)
+        return (values / shown if np.shape(a) == (7, 7) else values), vectors  # [1 | border]
+
+    monkeypatch.setattr(np.linalg, "eigh", partly)
     _misrepresenting(monkeypatch, [2, 3], np.array([[1e-5], [-1e-5]]))
     formed, _ = _alias_beside_a_random_effect(S_b, thin_row=(1.0, 0.0), split=1e-4)
     factor, case = _alias_beside_a_random_effect(
@@ -850,46 +862,194 @@ def test_a_representation_error_the_data_barely_see_does_not_certify_a_null_alia
     _matches_dense(factor, case, _alias_null(case, (0.0, 1.0), border=(0.0, 1.0, 1.0)))
 
 
-@pytest.mark.parametrize("rounding", [3e-11, 5e-11, 1e-8])
-def test_a_formed_penalty_s_rounding_on_a_null_border_column_is_cleared(rounding) -> None:
-    """A border column that is a data null and a null of its raw penalty is an exact null of ``H``.
+@pytest.mark.parametrize("grade", [1.0, 2.0**20, 2.0**-20])
+def test_a_penalty_root_shows_a_null_within_its_tilt_and_a_vector_within_its_metric(grade) -> None:
+    """``penalty_factor_tilt``'s two bounds on a graded block, against an eigensolve at its backward error.
+
+    ``S = L G'G L``, ``G = [(1, -1, 0), (1, 1, -2)]`` and ``L = diag(1, 1,
+    grade)``, has the exact null ``x = L^-1 (1, 1, 1)``.  The root of ``S +
+    M F M`` (``M`` the block's metric, ``F`` symmetric, coupling the null to
+    the weakest kept pair at ``||F||_2 = 3 eps ||B||_2``, LAPACK's bound)
+    shows ``x`` within ``||t * x||`` and above a hundredth of it, in any
+    grading, so the bound is the size of the effect and sits in the metric
+    the eigensolve ran in.  ``||R v|| = ||s * v||`` on the leading pair.
+    """
+    L = np.diag([1.0, 1.0, grade])
+    G = np.array([[1.0, -1.0, 0.0], [1.0, 1.0, -2.0]]) @ L
+    S, x = G.T @ G, np.array([1.0, 1.0, 1.0 / grade])
+    assert not np.any(S @ x)
+    root, full, tilt = centered_system.penalty_factor_tilt(S)
+    M = np.sqrt(np.diag(S))
+    values, vectors = np.linalg.eigh(S / np.outer(M, M))
+    y, weakest = M * x / np.linalg.norm(M * x), vectors[:, 1]
+    F = 3 * EPS * values[-1] * (np.outer(y, weakest) + np.outer(weakest, y))
+    shown = np.linalg.norm(centered_system.penalty_factor(S + np.outer(M, M) * F) @ x)
+    assert 0.01 * np.linalg.norm(tilt * x) <= shown <= np.linalg.norm(tilt * x)
+    leading = vectors[:, -1] / M
+    assert np.linalg.norm(root @ leading) == pytest.approx(
+        np.linalg.norm(full * leading), rel=1e-12
+    )
+
+
+@pytest.mark.parametrize("formed", [3e-11, 5e-11, 1e-8])
+@pytest.mark.parametrize("off", ["the root", "the map"])
+def test_a_null_border_column_s_formed_penalty_is_cleared(monkeypatch, off, formed) -> None:
+    """A border column that is a data null and, to the decision's resolution, a null of its raw penalty.
 
     Level 0's single row ``(1, 0)`` makes the border's ``z_3`` column itself
-    the alias, and the Spline's raw penalty ``diag(1, 0)`` does not curve it,
-    but the formed block keeps ``rounding`` there (a large lambda times a
-    squared rounding).  The formed rule certifies the alias on it, the veto
-    leaves the alias out, and the column's formed penalty is cleared, so the
-    factor is that of the exact block: rank, pseudo-determinant and fitted
-    values.  Mutation: left in, the column stays live at a diagonal just above
-    its data-side bound, which makes the rank cut's tolerance vacuous (3e-11
-    and 5e-11: fitted values 9e-2 of their scale off).
+    the alias.  Its raw coefficients ``(1, 1, 1)`` are an exact null of the
+    raw penalty ``G'G``, ``G = [(1, -1, 0), (1, 1, -2)]``, and the formed
+    block, the Gram of the root's image, still keeps ``formed`` on the
+    column, lambda times a small square, in one of two ways.  The map leaves
+    the column ``1e-10`` off the null (as a whitened basis does at a large
+    lambda): an image 10,000 times the products' rounding and the root's
+    tilt, inside the resolution.  Or the root is given a null tilt bound of
+    eight times the resolution (a kept eigenvalue at the eigensolver's cut)
+    and a tilt of a quarter of it (``penalty_factor_tilt``, forced): twice
+    the resolution, inside the tilt.  The veto leaves the alias out and the
+    column's formed penalty is cleared, so the factor is that of the block
+    without it: rank, pseudo-determinant and fitted values.  Mutations:
+    without the clearing, with the resolution left out of it (the map), or
+    with the root's tilt left out of what a null shows (the root), the
+    column stays live at a diagonal just above its data-side bound, which
+    makes the rank cut's tolerance vacuous (3e-11 and 5e-11).
     """
-    S_b = np.diag([1.0, rounding, 0.5, 0.5, 0.5])
-    roots = ((np.array([0, 1]), np.diag([1.0, 0.0]), np.eye(2)), _EFFECT)
+    G = np.array([[1.0, -1.0, 0.0], [1.0, 1.0, -2.0]])
+    omega, null = G.T @ G, np.ones(3)
+    C = np.column_stack(([1.0, 0.0, 0.0], null))
+    assert not np.any(omega @ null)
+    root, full, tilt = centered_system.penalty_factor_tilt(omega)
+    if off == "the map":
+        C[0, 1] += 1e-10
+    else:
+        tilt = 8.0 * np.sqrt(EPS) * full
+        root[0] += 0.25 * np.linalg.norm(tilt * null) * null / 3.0
+        monkeypatch.setattr(centered_system, "penalty_factor_tilt", lambda _: (root, full, tilt))
+    image = root @ C
+    gram = image.T @ image
+    lam = formed / float(gram[1, 1])
+    S_b = scipy.linalg.block_diag(lam * 0.5 * (gram + gram.T), 0.5 * np.eye(3))
+    roots = ((np.array([0, 1]), omega, C, lam), _EFFECT)
     factor, case = _alias_beside_a_random_effect(S_b, thin_row=(1.0, 0.0), border_roots=roots)
     assert factor._alias_x is None and factor.border_certificate.deflated == 1
-    exact = dict(case, S_b=np.diag([1.0, 0.0, 0.5, 0.5, 0.5]))
-    _matches_dense(factor, exact, _alias_null(exact, (0.0, 1.0)))
+    S_b[1, :] = S_b[:, 1] = 0.0
+    _matches_dense(factor, case, _alias_null(case, (0.0, 1.0)))
 
 
-@pytest.mark.parametrize("lam", [1.0, 1e-6])
-def test_a_thin_alias_a_border_penalty_curves_stays_certified_at_any_lambda(lam) -> None:
-    """The veto reads the raw penalty, not its smoothing parameter: a curved alias is deflated.
+def _weakly_curved(name: str):
+    """``(S_b, roots)``: the border's ``z_3`` column under a penalty far below its raw penalty's largest scale."""
+    position = np.array([0, 1])
+    if name == "two components":  # combined diag(2e12, 2e-6): each curves z_3 by 1e-9 of its norm
+        lam = 1e12
+        omegas = [np.outer((1.0, s * 1e-9), (1.0, s * 1e-9)) for s in (1.0, -1.0)]
+        return lam * sum(omegas), tuple((position, omega, np.eye(2), lam) for omega in omegas)
+    if name == "graded diagonal":  # formed 1e-4 on z_3, 1e-8 of the root's norm
+        lam = 1e12
+        omega = np.diag([1.0, 1e-16])
+        return lam * omega, ((position, omega, np.eye(2), lam),)
+    # a formed penalty its root does not show (a column whose image is rounding)
+    return np.diag([1.0, 0.171]), ((position, np.diag([1.0, 0.0]), np.eye(2), 1.0),)
 
-    Level 0's alias ``(1, -1)`` on ``z_2, z_3`` against the Spline's raw
-    penalty ``diag(0.5, 0.7)``, formed at ``lam``: the root's image of the
-    border part is the same at every ``lam`` and far above its allowance, so
-    the alias is deflated beside the effect's generator and ``H`` keeps its
-    full rank and determinant.  Mutation: a veto that fires on every
-    combination leaves the alias out (one generator deflated).
+
+@pytest.mark.parametrize("name", ["two components", "graded diagonal", "unaccounted"])
+def test_a_weak_penalty_on_a_data_null_border_column_is_kept(name) -> None:
+    """A null column's formed penalty is not cleared for being small beside its raw penalty's norm.
+
+    Level 0's single row ``(1, 0)`` makes the border's ``z_3`` column the
+    alias, a data null within its bound, and each case gives it a formed
+    penalty that is real: two components that each curve it by ``1e-9`` of
+    their norm, a graded diagonal that curves it by ``1e-8`` of it, and a
+    diagonal the roots do not account for.  In its penalty block's own
+    metric the column is at full curvature in the first two, so the alias is
+    deflated on it; in the third the diagonal is above the Gram of the
+    images, so it is kept.  ``H`` keeps its full rank: rank, determinant and
+    fitted values are the dense ``H``'s.  Mutation: judged against the stacked
+    root's norm, with no account of the diagonal, the column is cleared, the
+    factor loses a rank and ``log|H|`` moves by 13 to 22.
     """
-    raw = np.diag([0.5, 0.7])
-    S_b = np.diag([lam * 0.5, lam * 0.7, 0.3, 0.4, 0.6])
-    roots = ((np.array([0, 1]), raw, np.eye(2)), _EFFECT)
-    factor, case = _alias_beside_a_random_effect(S_b, border_roots=roots)
-    assert factor._alias_x is not None and factor._alias_x.shape[1] == 1
-    assert factor.border_certificate.deflated == 2
+    block, roots = _weakly_curved(name)
+    S_b = scipy.linalg.block_diag(block, 0.5 * np.eye(3))
+    factor, case = _alias_beside_a_random_effect(
+        S_b, thin_row=(1.0, 0.0), border_roots=(*roots, _EFFECT)
+    )
+    assert (factor._alias_x is None) == (name == "unaccounted")
+    assert factor.border_certificate.exact_null == 0
     _matches_dense(factor, case)
+
+
+def test_a_thin_alias_is_judged_the_same_in_any_border_column_units() -> None:
+    """The alias decision reads no column's units: the same model with two border columns scaled.
+
+    Level 0's alias ``(1, -1)`` on the border's ``z_2 - 1`` and ``z_3``
+    (the intercept carries the constant) under the raw penalty ``diag(0.5,
+    0.7)`` at lambda ``1e-10``, a curvature the pivoted factorization does
+    not resolve, so the alias is identified only by its deflation.  With the
+    two columns held as ``M (z_2 - 1)`` and ``M z_3``, ``M = 1e9``, the
+    coefficients are ``1 / M`` of the intercept's and the formed penalty
+    ``M^2`` larger: the alias is deflated as at ``M = 1``, with the same rank
+    and fitted values, and ``log|H|`` moves by ``4 log M``.  Mutation: with
+    the border share measured on the coefficients, the alias at ``M = 1e9``
+    is left out, a rank is lost and ``log|H|`` is 27.5 off.
+    """
+    raw, lam = np.diag([0.5, 0.7]), 1e-10
+    factors = []
+    for M in (1.0, 1e9):
+        S_b = scipy.linalg.block_diag(lam * M * M * raw, np.diag([0.3, 0.4, 0.6]))
+        roots = ((np.array([0, 1]), raw, M * np.eye(2), lam), _EFFECT)
+        head = lambda Z, M=M: M * np.column_stack((Z[:, 2] - 1.0, Z[:, 3]))  # noqa: E731
+        factor, case = _alias_beside_a_random_effect(S_b, border_roots=roots, head=head)
+        assert factor._alias_x is not None and factor.border_certificate.deflated == 2
+        H, X, _ = _dense(case)
+        factors.append((factor, X @ factor.solve_data(), H, case))
+    (unit, fitted, H, case), (scaled, moved, _, _) = factors
+    p = H.shape[0]
+    assert unit.rank == scaled.rank == p
+    tolerance = p * p * EPS * abs(scaled.logdet())  # p pivots' logarithms, each to p eps
+    assert abs(scaled.logdet() - unit.logdet() - 4.0 * np.log(1e9)) <= tolerance
+    # the fitted values do not move along the alias, so their conditioning is H's without it
+    alias = np.r_[1.0, _alias_null(case, (1.0, -1.0))[1:]]
+    reach = 8 * p * _U * _kappa(H + np.outer(alias, alias)) * float(np.max(np.abs(fitted)))
+    assert np.max(np.abs(moved - fitted)) <= reach
+
+
+def test_a_tilted_level_basis_does_not_certify_a_null_alias(monkeypatch) -> None:
+    """The resolution: a border part the level basis's own tilt makes is not curvature.
+
+    The border also holds ``z_1``, a function the level penalty curves, and
+    its raw penalty, the all-ones block on raw coefficients ``z_1 (1, 0, 0) +
+    z_2 (1, -1, 0) + z_3 (0, 1, -1)`` at lambda ``1e10``, curves ``z_1``
+    alone; level 0's alias ``(1, -1)`` on ``z_2, z_3`` is in its null.  The
+    level penalty's null basis is
+    tilted by ``1e-10`` toward ``z_1`` (its eigenvectors, forced), and the
+    border reproduces the tilted function exactly, so the residual is silent
+    and the alias carries ``1e-10`` on ``z_1``: a raw image 2,000 times its
+    representation error and 150 times under ``sqrt(eps)`` of its scale.
+    The alias is left to the pivoted factorization, which truncates the
+    exact null: rank, pseudo-determinant and fitted values are the dense
+    ``H``'s.  Mutation: without the resolution the alias is deflated on
+    ``1e10`` times the squared tilt (two deflated, rank ``p``).
+    """
+    eigh, tilted = np.linalg.eigh, []
+
+    def tilting(a, *args, **kwargs):
+        values, vectors = eigh(a, *args, **kwargs)
+        if np.shape(a) == (4, 4):  # the balanced level penalty, diag(c, c, 0, 0)
+            tilted.append(True)
+            vectors = vectors.copy()
+            vectors[1, np.argmax(np.abs(vectors[2]))] = 1e-10
+        return values, vectors
+
+    monkeypatch.setattr(np.linalg, "eigh", tilting)
+    S_b = np.diag([1e10, 0.0, 0.0, 0.5, 0.5, 0.5])
+    C = np.array([[1.0, 1.0, 0.0], [0.0, -1.0, 1.0], [0.0, 0.0, -1.0]])
+    roots = (
+        (np.array([0, 1, 2]), np.ones((3, 3)), C, 1e10),
+        (np.array([3, 4, 5]), None, None, 0.5),
+    )
+    factor, case = _alias_beside_a_random_effect(S_b, border_roots=roots, head=lambda Z: Z[:, 1:])
+    monkeypatch.undo()
+    assert tilted and factor._alias_x is None and factor.border_certificate.deflated == 1
+    _matches_dense(factor, case, _alias_null(case, (1.0, -1.0), border=(0.0, 1.0, -1.0)))
 
 
 def _two_thin_levels_beside_a_stiff_term(t: float = 0.5):
@@ -928,7 +1088,7 @@ def _two_thin_levels_beside_a_stiff_term(t: float = 0.5):
     system = dataclasses.replace(system, thin_counts=(np.array([0, 1]), np.array([1, 1])))
     omega = np.diag([1.0, 1.0, 0.0, 0.0])
     S_b = np.diag([1.0, 1e6, 1e6])
-    roots = ((np.array([0]), np.eye(1), np.eye(1)), (np.array([1, 2]), None, None))
+    roots = ((np.array([0]), np.eye(1), np.eye(1), 1.0), (np.array([1, 2]), None, None, 1e6))
     penalized = SumToZeroPenalizedOperator.with_penalties(
         system.operator, S_b, np.broadcast_to(lam * omega, (K, k, k)).copy(), roots
     )
