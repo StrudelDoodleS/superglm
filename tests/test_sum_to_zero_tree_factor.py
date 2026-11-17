@@ -1143,8 +1143,9 @@ def test_a_curved_alias_mixed_into_the_intercept_s_combination_is_not_deflated(m
     intercept's combination carries ``1.5e-7`` of the sum: a border part
     that is exact, with no representation error, curved by ``x``'s root and
     certified by the formed bar (about 18 times over: a turn under ``3.5e-8``
-    is not), and ``3.8e-9`` of the vector, a quarter of the form's
-    ``sqrt(eps)`` resolution.  The sum alone is deflated and the pivoted
+    is not), and ``7.9e-9`` of the combination's representation in the least
+    squares' Jacobi coordinates, half the form's ``sqrt(eps)`` resolution
+    (``3.8e-9`` of its coefficients).  The sum alone is deflated and the pivoted
     factorization truncates the constant's exact null.  Mutation: without
     the share test the mixed combination is certified beside the sum (two
     columns), and their penalty Gram is singular, so the deflation declines
