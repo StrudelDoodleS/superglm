@@ -282,7 +282,7 @@ def dense_raw_basis(evaluator: Any, x: NDArray) -> NDArray:
     if evaluations is None:
         return np.asarray(evaluator(x), dtype=np.float64)
     bspline, cardinal = evaluations
-    spec = getattr(evaluator, "__self__", None)
+    spec: Any = getattr(evaluator, "__self__", None)
     method = getattr(evaluator, "__func__", None)
     rows = None
     if type(spec) is CardinalCRSpline and method is CardinalCRSpline._raw_basis_matrix:
