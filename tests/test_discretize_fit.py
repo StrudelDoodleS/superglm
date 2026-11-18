@@ -115,6 +115,20 @@ class _DoubledCardinal(CardinalCRSpline):
         return 2.0 * super()._basis_matrix(x)
 
 
+class _SquaredCR(CubicRegressionSpline):
+    """A cubic regression spline whose own basis reads the column squared."""
+
+    def _basis_matrix(self, x):
+        return super()._basis_matrix(np.asarray(x, dtype=np.float64) ** 2)
+
+    def _raw_basis_matrix(self, x):
+        return super()._raw_basis_matrix(np.asarray(x, dtype=np.float64) ** 2)
+
+
+class _OwnCR(CubicRegressionSpline):
+    """A cubic regression spline subclass that overrides nothing."""
+
+
 class _StiffTensor(TensorInteraction):
     """A tensor interaction whose own ``build()`` multiplies its penalties by 1000."""
 
@@ -341,6 +355,23 @@ class TestDiscretizedFit:
             assert block.n_bins == 1
         np.testing.assert_allclose(model.predict(X), np.full(30, y.mean()), rtol=1e-12)
 
+    @pytest.mark.parametrize("discrete", [True, False], ids=["binned", "exact"])
+    @pytest.mark.parametrize("kind", ["cr", "ns", "cr_cardinal"])
+    def test_one_value_column_refuses_a_natural_spline_by_name(self, kind, discrete):
+        """A natural spline on a one-value column is refused by name, binned or not.
+
+        Its knots have no range to be placed on, and the cardinal basis would divide
+        by the zero knot spacing. The message names the kind that fits such a column.
+        """
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0,
+            discrete=discrete,
+            features={"x": Spline(kind=kind, n_knots=4)},
+        )
+        with pytest.raises(ValueError, match="no range to place its knots on.*kind='ps'"):
+            model.fit(pd.DataFrame({"x": np.full(30, 3.0)}), np.arange(30.0) % 7)
+
     @pytest.mark.parametrize("kind", ["cr", "bs", "cr_cardinal"])
     @pytest.mark.parametrize("penalty", ["ssp", "none"])
     def test_extend_reads_bins_past_the_boundary(self, penalty, kind):
@@ -467,6 +498,34 @@ class TestDiscretizedFit:
             np.testing.assert_allclose(
                 predicted(asked, points[:size]), blocks[:size], rtol=0, atol=1e-12
             )
+
+    @pytest.mark.parametrize(
+        "spline_cls", [_DoubledPSpline, _DoubledCardinal], ids=["own_basis", "own_cardinal_basis"]
+    )
+    def test_a_subclass_curve_is_read_on_its_own_basis(self, spline_cls):
+        """A subclass's term curve is read on the basis it fits and predicts with.
+
+        Under the identity link a one-term fit predicts the intercept plus the
+        curve, so the curve's steps on its grid are the predictions' steps there,
+        to the rounding of the two products with the coefficients, which 1e-12
+        bounds on these values near 3. The stock basis would halve them.
+        """
+        x = np.linspace(0.0, 1.0, 120)
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0,
+            spline_penalty=0.1,
+            features={"x": spline_cls(n_knots=6)},
+        )
+        model.fit(pd.DataFrame({"x": x}), 1.0 + 2.0 * x + 0.5 * np.sin(6.0 * x))
+        curve = model.term_inference("x")
+        predicted = np.asarray(model.predict(pd.DataFrame({"x": curve.x})))
+        np.testing.assert_allclose(
+            curve.log_relativity - curve.log_relativity[0],
+            predicted - predicted[0],
+            rtol=0,
+            atol=1e-12,
+        )
 
     @pytest.mark.parametrize("penalty", ["ssp", "none"])
     def test_an_estimate_policy_keeps_the_penalty_rank(self, penalty):
@@ -636,6 +695,95 @@ class TestDiscretizedFit:
         assert not isinstance(blocks[0], binned_blocks)
         assert not isinstance(blocks[-1], binned_blocks)
         np.testing.assert_allclose(binned.predict(X), fitted(False).predict(X), rtol=0, atol=1e-9)
+
+    @pytest.mark.parametrize("interaction", [("x", "z"), ("x", "c")], ids=["tensor", "by_level"])
+    def test_an_interaction_reads_a_cr_subclass_on_its_own_basis(self, interaction):
+        """An interaction on a cr subclass reads the subclass's basis, not the cardinal one.
+
+        Only ``CubicRegressionSpline`` itself is read through the cardinal basis in an
+        interaction. A subclass reading the cr basis at ``x**2`` on fixed knots is, on the
+        rows, a plain subclass on the column ``x**2``, so the two fits solve one problem
+        and agree to the solve's rounding, which 1e-9 bounds on these values near 10;
+        read through the cardinal basis at ``x`` they differ by 2.5 to 3.6.
+        """
+        X = _grid_frame(12)
+        x, z = X["x"].to_numpy(), X["z"].to_numpy()
+        y = 10.0 * np.sin(2.0 * np.pi * x) * np.sin(2.0 * np.pi * z)
+
+        def predicted(parent, column):
+            model = SuperGLM(
+                family="gaussian",
+                selection_penalty=0,
+                spline_penalty=1.0,
+                features={
+                    "x": parent(knots=[0.2, 0.4, 0.6, 0.8], boundary=(0.0, 1.0)),
+                    "z": Spline(kind="ps", n_knots=5),
+                    "c": Categorical(base="a"),
+                },
+                interactions=[interaction],
+            )
+            frame = X.assign(x=column)
+            model.fit(frame, y)
+            return model.predict(frame)
+
+        np.testing.assert_allclose(
+            predicted(_SquaredCR, x), predicted(_OwnCR, x**2), rtol=0, atol=1e-9
+        )
+
+    @pytest.mark.parametrize("weight_semantics", ["prior", "frequency"])
+    def test_a_zero_weight_row_leaves_a_custom_tensor_margin(self, weight_semantics):
+        """A row of zero weight does not move a tensor margin that centres on its rows.
+
+        A margin that drops the support keywords centres on the rows it is handed,
+        which are the rows of positive weight, so the fits with and without a
+        zero-weight row solve one problem, up to rounding, which 1e-10 bounds on
+        these values near 5. Centred on every row, they differ by 0.05.
+        """
+        X = pd.concat([_grid_frame(4)] * 3, ignore_index=True)
+        x, z = X["x"].to_numpy(), X["z"].to_numpy()
+        y = 5.0 + 4.0 * np.sin(3.0 * x) * (z - 0.5)
+
+        def predicted(frame, response, weight):
+            model = SuperGLM(
+                family="gaussian",
+                selection_penalty=0,
+                spline_penalty=0.01,
+                weight_semantics=weight_semantics,
+                features={
+                    "x": _MarginDroppingSupport(n_knots=3),
+                    "z": Spline(kind="ps", n_knots=3),
+                },
+                interactions=[("x", "z")],
+            )
+            model.fit(frame, response, sample_weight=weight)
+            return model.predict(X)
+
+        with_row = pd.concat([X, pd.DataFrame({"x": [0.1], "z": [0.9]})], ignore_index=True)
+        weight = np.append(np.ones(len(y)), 0.0)
+        np.testing.assert_allclose(
+            predicted(with_row, np.append(y, 50.0), weight),
+            predicted(X, y, None),
+            rtol=0,
+            atol=1e-10,
+        )
+
+    def test_a_custom_tensor_margin_off_the_frequency_weights_is_refused(self):
+        """A margin that drops the support keywords cannot centre on frequency weights.
+
+        It would count a row of frequency 2 once, so it is refused by name, as a
+        margin taking ``x`` alone is.
+        """
+        X = pd.concat([_grid_frame(4)] * 3, ignore_index=True)
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0,
+            weight_semantics="frequency",
+            features={"x": _MarginDroppingSupport(n_knots=3), "z": Spline(kind="ps", n_knots=3)},
+            interactions=[("x", "z")],
+        )
+        weight = np.where(X["x"] < 0.5, 1.0, 2.0)
+        with pytest.raises(NotImplementedError, match="_MarginDroppingSupport's tensor margin"):
+            model.fit(X, X["x"].to_numpy(), sample_weight=weight)
 
     @pytest.mark.parametrize("term", ["tensor", "by_level", "factor_smooth"])
     @pytest.mark.parametrize("penalty", ["ssp", "none"])
