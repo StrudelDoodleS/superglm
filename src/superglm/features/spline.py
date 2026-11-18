@@ -46,8 +46,8 @@ _ONE_VALUE = (
 # space for select=True to split from its range.
 _ONE_VALUE_SELECT = (
     "every value of this column is {value}, so this spline's penalty is zero and "
-    "select=True has no straight-line part to separate from its curve. Drop the term, "
-    "pass select=False, or pass kind='ps', which selects on a column with one value."
+    "select=True has no straight-line part to separate from its curve. Drop the term "
+    "or pass select=False."
 )
 
 
@@ -223,8 +223,8 @@ class _SplineBase:
         """Evaluate the raw B-spline basis under the extrapolation policy.
 
         Override it to change a subclass's basis: ``build`` reads it, and
-        predictions and curves read it through the module ``transform``, so
-        overriding ``transform`` alone changes nothing the fit uses.
+        predictions read it through the module ``transform``. Overriding
+        ``transform`` alone leaves the fit and its predictions on this basis.
         """
         return _spline_runtime.basis_matrix(self, x)
 
@@ -371,19 +371,25 @@ class _SplineBase:
         )
 
     def _eigendecompose_select(self, omega_c: NDArray, Z: NDArray | None) -> None:
-        """Eigendecompose the constrained penalty for select=True splitting."""
-        if not self._hi > self._lo and not np.any(omega_c):
-            raise ValueError(_ONE_VALUE_SELECT.format(value=f"{self._lo:g}"))
+        """Eigendecompose the constrained penalty for select=True splitting.
+
+        A split that fails on a column with one value is refused by naming it.
+        """
         structural = self._structural_penalty_for_order(max(self._m_orders))
         if structural is not None and Z is not None:
             structural = Z.T @ structural @ Z
-        self._U_null, self._U_range, self._omega_range = _spline_select.eigendecompose_select(
-            omega_c,
-            Z,
-            n_basis=self._n_basis,
-            spline_kind=type(self).__name__,
-            structural=structural,
-        )
+        try:
+            self._U_null, self._U_range, self._omega_range = _spline_select.eigendecompose_select(
+                omega_c,
+                Z,
+                n_basis=self._n_basis,
+                spline_kind=type(self).__name__,
+                structural=structural,
+            )
+        except ValueError as exc:
+            if self._hi > self._lo:
+                raise
+            raise ValueError(_ONE_VALUE_SELECT.format(value=f"{self._lo:g}")) from exc
 
     def _structural_penalty_for_order(self, order: int) -> NDArray | None:
         """A penalty with this one's exact null space and no knot-spacing spread, if known."""

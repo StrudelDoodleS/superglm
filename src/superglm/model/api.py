@@ -123,14 +123,15 @@ class SuperGLM:
             own weights. A float sets every term. A dict sets terms by name,
             and a term it does not name is not smoothed (weight 0.0):
 
-            - ``"x"`` sets every penalty of the term ``x``; ``"x:z"`` a
-              tensor interaction, and ``"x:c"`` every level of a spline by
-              the categorical ``c``.
+            - ``"x"`` sets every penalty of the main effect ``x``, and
+              ``"x:z"`` a tensor interaction that is not decomposed.
             - ``"x:<penalty>"`` sets one penalty of a term that has several:
               ``"x:wiggle"`` and ``"x:null"`` under ``select=True``,
               ``"x:d1"`` and ``"x:d2"`` under ``m=(1, 2)``, or
-              ``"x:z:margin_x"`` for one margin of a tensor.
-            - ``"x:c[a]"`` sets the level ``a`` of a spline by a categorical.
+              ``"x:z:margin_x"`` for one margin of a tensor
+              (``"x:z:wiggly:margin_x"`` when it is decomposed).
+            - ``"x:c[a]"`` sets the level ``a`` of a spline by the
+              categorical ``c``; each level takes its own key.
 
             The more specific key wins: under ``select=True``,
             ``{"x": 5.0, "x:null": 1.0}`` puts 1.0 on the null-space penalty
