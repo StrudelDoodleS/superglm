@@ -99,12 +99,12 @@ def _penalty_terms(
     """The ``(lam_j, Omega_j)`` a fit applies to a block, zero weights dropped.
 
     A mapping is read as ``build_penalty_matrix`` reads it, each group or
-    penalty component weighted by its own entry.
+    penalty component weighted by its own entry. The block has a penalty.
     """
     from superglm.reml.penalty_algebra import resolve_component_lambda, resolve_group_lambda
 
     if not info.penalty_components:
-        terms = [(resolve_group_lambda(lambda2, group_name), info.penalty_matrix)]
+        terms = [(resolve_group_lambda(lambda2, group_name), cast(NDArray, info.penalty_matrix))]
     else:
         terms = [
             (resolve_component_lambda(lambda2, group_name, suffix), omega)
@@ -119,12 +119,13 @@ def _applied_penalty(
     """``(lam, Omega)`` with ``lam Omega`` the penalty the fit applies to the block.
 
     A scalar weights the declared penalty; a mapping weights each term
-    (``_penalty_terms``).
+    (``_penalty_terms``). The block has a penalty.
     """
+    omega = cast(NDArray, info.penalty_matrix)
     if not isinstance(lambda2, dict):
-        return float(lambda2), info.penalty_matrix
+        return float(lambda2), omega
     terms = _penalty_terms(info, group_name, lambda2)
-    return _lambda_beside_penalty(terms) if terms else (0.0, info.penalty_matrix)
+    return _lambda_beside_penalty(terms) if terms else (0.0, omega)
 
 
 def compute_R_inv(
