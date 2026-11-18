@@ -891,6 +891,16 @@ class TestDiscretizedFit:
         stock = self._override_model(PSpline(n_knots=6)).fit(X, y)
         np.testing.assert_allclose(fitted.predict(X), stock.predict(X), rtol=0, atol=1e-10)
 
+    @pytest.mark.parametrize("parent_cls", [_SquaredCR, PSpline], ids=["cr_subclass", "ps"])
+    def test_explicit_knots_take_precedence_over_a_tensor_knot_count(self, parent_cls):
+        """A margin keeps its parent's explicit knots under a knot-count override."""
+        X = _grid_frame(12)
+        knots = [0.02, 0.06, 0.2, 0.85]
+        model = self._override_model(parent_cls(knots=knots, boundary=(0.0, 1.0)))
+        model.fit(X, 1.0 + np.cos(6.0 * X["x"]) * np.sin(4.0 * X["z"]))
+        margin = model._interaction_specs["x:z"]._marginal1.raw_basis_eval.__self__
+        np.testing.assert_array_equal(margin.fitted_knots, knots)
+
     def test_a_tensor_knot_override_names_a_subclass_its_constructor_cannot_build(self):
         """A subclass whose constructor needs an argument the override does not pass is refused.
 

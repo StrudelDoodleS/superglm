@@ -2265,7 +2265,12 @@ class TensorInteraction:
         if cardinal is not spec:
             return cardinal, True
 
-        if n_knots_override is not None and n_knots_override != spec.n_knots:
+        # Explicit knots take precedence over a knot count, as on the spline itself.
+        if (
+            n_knots_override is not None
+            and n_knots_override != spec.n_knots
+            and getattr(spec, "_explicit_knots", None) is None
+        ):
             kwargs: dict = dict(
                 n_knots=n_knots_override,
                 knot_strategy=spec.knot_strategy,
