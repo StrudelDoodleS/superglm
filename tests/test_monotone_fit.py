@@ -273,23 +273,26 @@ class TestShapePenaltyInEDF:
 class TestMonotoneEdgeOfRange:
     """A fit whose maximum is at the edge of the link's range never raises."""
 
-    @pytest.mark.parametrize("seed", [3, 8])
+    @pytest.mark.parametrize("seed", [2, 15])
     def test_poisson_identity_increasing_pspline_publishes_its_faces_edf(self, monkeypatch, seed):
         """Zero counts below ``x = 0.3`` put the maximum at a mean of zero.
 
         The iterates approach that edge and the Fisher weights ``1 / mu`` reach
         ``1e15``.  Whether the inner QP completes its KKT certificate there
         before the line search runs out of representable descent is rounding,
-        and so is which face it holds and whether forming that face's Gram
-        leaves it indefinite: on one OpenBLAS thread seed 3 ends
-        ``constraint_kkt_incomplete`` and seed 8 converges, and seed 3
-        converges on CI's Windows and version-floor shards.  This checks what
-        holds for every outcome: no raise, a named stop, an increasing curve,
-        and the EDF of the face it holds, the influence trace of the observation
-        rows on that face, within the error of whichever decomposition decided
-        it.  The decisions themselves are forced in ``test_irls_direct``'s face
-        tests.  Mutation: 2b67e8dd publishes 1.86 and 6.25 against 4.26 and
-        4.15, and -112.5 against 4.15 under the Haswell kernel.
+        and so is which of the edge's rows it holds (on some seeds and kernels
+        none), and whether forming that face's Gram leaves it indefinite.
+        Counts that fall above ``x = 0.8`` force a face: the unconstrained
+        curve falls there by more than 1, so the increasing rows there bind with a
+        multiplier far above that rounding, on every seed and kernel.  This
+        checks what holds for every outcome: no raise, a named stop, an
+        increasing curve, and the EDF of the face it holds, the influence trace
+        of the observation rows on that face, within the error of whichever
+        decomposition decided it.  The decisions themselves are forced in
+        ``test_irls_direct``'s face tests.  Mutation: keeping every face Gram
+        that factors (no ``_face_formation_unresolved``) publishes EDF 0.05
+        and 0.15 off that trace, reading the EDF off the face Gram (no
+        ``_face_factor_edf``) 0.05 and 0.31, against bounds near 2e-6.
         """
         import superglm.solvers.irls_direct._finalise as irls_finalise
         from superglm._roundoff import gamma
@@ -316,7 +319,8 @@ class TestMonotoneEdgeOfRange:
         monkeypatch.setattr(irls_finalise, "_feature_edf", feature_edf)
         rng = np.random.default_rng(seed)
         x = np.sort(rng.uniform(0, 1, 80))
-        y = rng.poisson(np.where(x < 0.3, 0.0, 6 * (x - 0.3))).astype(float)
+        mean = np.where(x < 0.3, 0.0, np.where(x < 0.8, 6 * (x - 0.3), 1.0))
+        y = rng.poisson(mean).astype(float)
         frame = pd.DataFrame({"x": x})
         model = SuperGLM(
             family="poisson",
