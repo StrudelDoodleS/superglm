@@ -545,6 +545,34 @@ class TestDiscretizedFit:
         assert binned.diagnostics()["x"]["weakly_identified"] == flagged
         assert binned.result.phi == pytest.approx(exact.result.phi, rel=1e-6)
 
+    @pytest.mark.parametrize("discrete", [True, False], ids=["binned", "exact"])
+    @pytest.mark.parametrize(
+        "policy", [LambdaPolicy.off(), {"d1": LambdaPolicy.off()}], ids=["one", "per-component"]
+    )
+    def test_a_policy_on_a_one_value_column_fits_the_response_mean(self, policy, discrete):
+        """A two-penalty spline takes a per-component policy on a one-value column.
+
+        ``bs``'s integrated penalties are zero on such a column, so the block
+        carries none. The names a policy may use are the ones its declaration
+        gives, ``"d1"`` and ``"d2"`` for ``m=(1, 2)``, on this column as on any
+        other, so ``{"d1": off()}`` fits as one ``off()`` does and ``"wiggle"``
+        is refused. The fit is the response mean, to the rounding of
+        ``test_one_value_column_fits_the_response_mean``.
+        """
+        X = pd.DataFrame({"x": np.full(30, 3.0)})
+        y = (np.arange(30) % 7).astype(float)
+
+        def model(lambda_policy):
+            spline = Spline(kind="bs", n_knots=4, m=(1, 2), lambda_policy=lambda_policy)
+            return SuperGLM(
+                family="gaussian", selection_penalty=0, discrete=discrete, features={"x": spline}
+            )
+
+        fitted = model(policy).fit_reml(X, y)
+        np.testing.assert_allclose(fitted.predict(X), np.full(30, y.mean()), rtol=1e-12)
+        with pytest.raises(ValueError, match="unknown component names"):
+            model({"wiggle": LambdaPolicy.off()}).fit_reml(X, y)
+
     @pytest.mark.parametrize("route", ["fit", "fit_path", "fit_reml"])
     @pytest.mark.parametrize("penalty", ["ssp", "none"])
     def test_a_binned_select_with_a_fit_shape_rule_is_refused(self, penalty, route):

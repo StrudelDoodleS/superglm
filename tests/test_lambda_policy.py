@@ -272,12 +272,14 @@ class TestFitRemlLambdaPolicy:
         lam_val = next(iter(model._reml_lambdas.values()))
         assert lam_val == 0.0, f"off() lambda should be 0.0, got {lam_val}"
 
-    def test_fit_rejects_lambda_policy(self, poisson_data):
-        """fit() raises NotImplementedError when lambda_policy is set."""
+    @pytest.mark.parametrize("route", ["fit", "fit_path"])
+    def test_fit_rejects_lambda_policy(self, poisson_data, route):
+        """fit() and fit_path() refuse lambda_policy, naming the route and fit_reml()."""
         X, y, w = poisson_data
         model = SuperGLM(
             family="poisson",
+            selection_penalty=0.01,
             features={"x": Spline(kind="cr", n_knots=8, lambda_policy=LambdaPolicy.fixed(1.0))},
         )
-        with pytest.raises(NotImplementedError, match="fit_reml"):
-            model.fit(X, y, sample_weight=w)
+        with pytest.raises(NotImplementedError, match=rf"fit_reml\(\), not {route}\(\)"):
+            getattr(model, route)(X, y, sample_weight=w)

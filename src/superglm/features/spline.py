@@ -372,7 +372,9 @@ class _SplineBase:
 
     def _resolve_lambda_policies(self, info: GroupInfo) -> dict[str, LambdaPolicy] | None:
         """Resolve lambda_policy parameter into a per-component dict."""
-        return _spline_select.resolve_lambda_policies(self._lambda_policy, info)
+        return _spline_select.resolve_lambda_policies(
+            self._lambda_policy, info, self._m_orders, self.select
+        )
 
     def build(
         self, x: NDArray, sample_weight: NDArray | None = None
