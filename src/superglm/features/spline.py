@@ -42,6 +42,15 @@ _ONE_VALUE = (
 )
 
 
+# On one value every derivative penalty of ``bs`` is zero, so there is no null
+# space for select=True to split from its range.
+_ONE_VALUE_SELECT = (
+    "every value of this column is {value}, so this spline's penalty is zero and "
+    "select=True has no straight-line part to separate from its curve. Drop the term, "
+    "pass select=False, or pass kind='ps', which selects on a column with one value."
+)
+
+
 class OneValueError(ValueError):
     """A natural spline's column holds one value, so its knots have no range."""
 
@@ -358,6 +367,8 @@ class _SplineBase:
 
     def _eigendecompose_select(self, omega_c: NDArray, Z: NDArray | None) -> None:
         """Eigendecompose the constrained penalty for select=True splitting."""
+        if not self._hi > self._lo and not np.any(omega_c):
+            raise ValueError(_ONE_VALUE_SELECT.format(value=f"{self._lo:g}"))
         structural = self._structural_penalty_for_order(max(self._m_orders))
         if structural is not None and Z is not None:
             structural = Z.T @ structural @ Z

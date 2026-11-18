@@ -99,6 +99,25 @@ def test_a_natural_spline_on_a_column_with_one_value_says_so(kind):
     Spline(kind="ps").build(np.full(300, 3.0))
 
 
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "binned"])
+def test_a_selected_b_spline_on_a_column_with_one_value_says_so(discrete):
+    """``bs`` has a zero penalty on one value, so ``select=True`` has nothing to split.
+
+    The refusal names the column's value, as a natural spline's does, not the
+    eigenvalue count the split found; a P-spline selects on the same column.
+    """
+    frame = pd.DataFrame({"x": np.full(300, 3.0)})
+    y = np.random.default_rng(0).poisson(2.0, 300).astype(float)
+
+    def fit(kind):
+        features = {"x": Spline(kind=kind, n_knots=6, select=True)}
+        return SuperGLM(family="poisson", discrete=discrete, features=features).fit(frame, y)
+
+    with pytest.raises(ValueError, match="every value of this column is 3, so this spline's"):
+        fit("bs")
+    fit("ps")
+
+
 def test_an_ordered_term_at_one_level_names_its_basis_not_a_score():
     """The level score (0.5 here) and ``kind=`` mean nothing on an ordered term."""
     from superglm import OrderedCategorical
