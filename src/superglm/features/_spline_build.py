@@ -23,7 +23,7 @@ from superglm.features._spline_penalties import _gapped_rank, structural_penalty
 from superglm.features._spline_select import build_select
 from superglm.features._spline_subclass_ops import prepare_shape_rules
 from superglm.features.constraint import postfit_token, rules_of
-from superglm.types import GroupInfo, LinearConstraintSet, TensorMarginalInfo
+from superglm.types import GroupInfo, LinearConstraintSet, NullCoordinates, TensorMarginalInfo
 
 
 def _uses_fit_time_shape_constraints(spec: Any) -> bool:
@@ -348,22 +348,25 @@ def finish_penalties(
         info.component_types = {"wiggle": "difference"}
     info.lambda_policies = spec._resolve_lambda_policies(info)
     info.structural_ranks = structural_penalty_ranks(spec, info)
-    info.null_basis = declared_null_basis(spec, info, x, sample_weight)
+    info.null_coordinates = declared_null_coordinates(spec, info, x, sample_weight)
     return info
 
 
-def declared_null_basis(
+def declared_null_coordinates(
     spec: Any, info: GroupInfo, x: NDArray, sample_weight: NDArray | None
-) -> NDArray | None:
-    """The term's exact penalty null basis in ``info``'s coordinates, when its kind states one.
+) -> NullCoordinates | None:
+    """The term's exact penalty null spaces and penalty roots in ``info``'s coordinates, if stated.
 
-    A built-in kind with one penalty states the raw polynomials its penalty
-    annihilates (``_penalty_null_basis``); ``term_null_basis`` keeps those its
-    constraints and centring leave, which must account for the whole null
-    space the penalty's rank leaves: the structural rank where the kind
-    declares one, else the penalty's own rank across a gap (a difference
-    penalty's spectrum resolves it). A subclass may build another penalty,
-    so it states none.
+    A built-in kind states, for each penalty order, the raw polynomials the
+    penalty annihilates (``_penalty_null_basis``) and its square root
+    (``_penalty_root_for_order``). ``term_null_basis`` keeps the polynomials
+    the constraints and centring leave, which must account for the whole
+    null space each penalty's rank leaves: the structural rank where the
+    kind declares one, else the penalty's own rank across a gap (a
+    difference penalty's spectrum resolves it). A multi-order term's null
+    spaces nest, the polynomials of lower degree inside those of higher, so
+    its penalties share one basis (``_nested_null_basis``). A subclass may
+    build other penalties, so it states none.
 
     The null directions are unpenalised, so only the rows can identify them:
     ``d`` centred polynomial directions need ``d + 1`` distinct values among
@@ -393,19 +396,27 @@ def declared_null_basis(
     """
     from superglm.features.spline import _BUILT_IN_SPLINES
 
-    omega = info.penalty_matrix
-    if type(spec) not in _BUILT_IN_SPLINES or omega is None or len(spec._m_orders) != 1:
+    if type(spec) not in _BUILT_IN_SPLINES or info.penalty_matrix is None:
         return None
-    null_raw = spec._penalty_null_basis(spec._m_orders[0])
-    if null_raw is None:
+    named = info.penalty_components or [("", info.penalty_matrix)]
+    orders = spec._m_orders if len(named) > 1 else spec._m_orders[:1]
+    thetas, roots = [], []
+    for (suffix, omega), order in zip(named, orders, strict=True):
+        null_raw, root = spec._penalty_null_basis(order), spec._penalty_root_for_order(order)
+        rank = (info.structural_ranks or {}).get(suffix)
+        if rank is None:
+            rank = _gapped_rank(np.linalg.eigvalsh(omega))
+        if null_raw is None or root is None or rank is None:
+            return None
+        theta = term_null_basis(null_raw, info.projection, info.n_cols - rank)
+        if theta is None:
+            return None
+        thetas.append(theta)
+        roots.append(root if info.projection is None else root @ info.projection)
+    null_basis = _nested_null_basis(thetas)
+    if null_basis is None:
         return None
-    key = "" if info.penalty_components is None else info.penalty_components[0][0]
-    rank = (info.structural_ranks or {}).get(key)
-    if rank is None:
-        rank = _gapped_rank(np.linalg.eigvalsh(omega))
-    if rank is None:
-        return None
-    nullity = info.n_cols - rank
+    nullity = null_basis.shape[1]
     values = np.asarray(x, dtype=np.float64).ravel()
     weights = np.ones_like(values)
     if sample_weight is not None:
@@ -417,15 +428,37 @@ def declared_null_basis(
     basis = spec._basis_matrix(support).toarray()
     if not np.all(np.abs(basis).sum(axis=0) > 0.0):
         return None
-    null_basis = term_null_basis(null_raw, info.projection, nullity)
-    if null_basis is None:
-        return None
     members = null_basis if info.projection is None else info.projection @ null_basis
-    root = np.sqrt(np.bincount(inverse, weights=weights[kept]))[:, None] * basis
-    cut = np.sqrt(2.0**-53) * np.linalg.norm(root, 2)
-    if nullity and np.linalg.svd(root @ members, compute_uv=False)[-1] < cut:
+    rows = np.sqrt(np.bincount(inverse, weights=weights[kept]))[:, None] * basis
+    cut = np.sqrt(2.0**-53) * np.linalg.norm(rows, 2)
+    if nullity and np.linalg.svd(rows @ members, compute_uv=False)[-1] < cut:
         return None
-    return null_basis
+    return NullCoordinates(null_basis, tuple(t.shape[1] for t in thetas), tuple(roots))
+
+
+def _nested_null_basis(thetas: list[NDArray]) -> NDArray | None:
+    """One orthonormal basis whose leading columns span each of the null bases ``thetas``.
+
+    Taken from the narrowest up, each must hold the basis so far, which is
+    then extended by its own directions orthogonal to it. A narrower null
+    space inside a wider one leaves it a residual of rounding, ``O(u)``; one
+    outside leaves at least the share of a polynomial the wider kind does
+    not annihilate, so the shared factor resolution ``sqrt(eps)`` decides, as
+    in ``term_null_basis``. Null spaces that do not nest share no such
+    basis, and the term declares none.
+    """
+    from superglm.solvers.rank import SHARED_RANK_POLICY
+
+    basis = thetas[0][:, :0]
+    for theta in sorted(thetas, key=lambda t: t.shape[1]):
+        width = basis.shape[1]
+        if width:
+            inside = theta.T @ basis
+            if np.linalg.norm(basis - theta @ inside, 2) > SHARED_RANK_POLICY.factor_rcond:
+                return None
+            theta = theta @ np.linalg.qr(inside, mode="complete")[0][:, width:]
+        basis = np.hstack([basis, theta])
+    return basis
 
 
 def build_knots_and_penalty(

@@ -6,7 +6,12 @@ polynomials it annihilates by ``u ||Omega|| / mu_min`` (Davis-Kahan), about
 1e-4, differently on each BLAS kernel: at a fixed lambda the fit leaks onto the
 line by 8e-5, and REML's lambda moves by percents.  Each kind states its null
 basis; the term holds it on leading coordinates whose penalty rows are exact
-zeros, kept through the SSP whitening into REML.
+zeros, kept through the SSP whitening into REML. Its range block is the Gram of
+the penalty's square root (the quadrature root, the difference matrix or the
+cardinal ``L^{-1} B``), whose rows keep the knot spacing's grading, rather
+than the formed penalty turned into those coordinates. A multi-order term's
+null spaces nest (the polynomials of lower degree inside those of higher), so
+its penalties share the coordinates, each with its own exact null block.
 
 The references are an independent mpmath natural cubic smoothing spline on the
 fit's own knots (Green and Silverman, *Nonparametric Regression and Generalized
@@ -26,10 +31,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Numeric, Spline, SuperGLM
+from superglm import LambdaPolicy, Numeric, Spline, SuperGLM
 
 U = 2.0**-53
 FIXED_LAMBDA = 3000.0
+# A d1 penalty off leaves m=(1, 2) the m=2 spline (test_large_lambda_null_space).
+D1_OFF = {"d1": LambdaPolicy.off()}
 # _exact_reml_optimum on the fixture, stored because the root takes seconds;
 # test_the_stored_reml_optima_are_the_oracles recomputes them.
 LAMBDA_STAR = {0.08: 2964.1283569199913, 0.09: 1027.718621024655}
@@ -42,8 +49,8 @@ def _fixture(amplitude: float) -> tuple[pd.DataFrame, np.ndarray]:
     return pd.DataFrame({"x": x}), 1.0 + x / 1e5 + amplitude * np.sin(np.log(x)) + noise
 
 
-def _model(kind: str, discrete: bool = True, **settings) -> SuperGLM:
-    spline = Spline(kind=kind, n_knots=10, knot_strategy="quantile_rows")
+def _model(kind: str, discrete: bool = True, m=2, policy=None, **settings) -> SuperGLM:
+    spline = Spline(kind=kind, n_knots=10, m=m, knot_strategy="quantile_rows", lambda_policy=policy)
     return SuperGLM(
         family="gaussian",
         selection_penalty=0,
@@ -149,40 +156,132 @@ def test_the_null_rows_are_exact_zeros_through_to_reml(kind, discrete):
     assert np.max(np.abs(residual)) <= 2**8 * U * np.max(np.abs(curve))
 
 
-@pytest.mark.parametrize("kind", ["cr", "cr_cardinal"])
-def test_a_fixed_lambda_fits_the_exact_smoother(kind):
+@pytest.mark.parametrize(
+    ("kind", "m", "tolerance"),
+    [("cr", 2, 2**4 * U * 1e8), ("cr", (1, 2), 2**4 * U * 1e8), ("cr_cardinal", 2, 4e-6)],
+    ids=["cr", "cr m=(1,2) d1 off", "cr_cardinal"],
+)
+def test_a_fixed_lambda_fits_the_exact_smoother(kind, m, tolerance):
     """At a fixed lambda the fit is the exact natural smoothing spline's.
 
-    The range block is still the formed penalty turned into the term's
-    coordinates, whose smallest eigenvalue keeps a relative error of about
-    ``u kappa_+`` (``kappa_+`` near 2e12 here), which moves the fit by about
-    1e-6; a penalty leaking onto the line moves it by 8e-5.
+    The penalty's rounding no longer limits it. The range block is the Gram
+    of the quadrature root, whose rows each carry one knot interval's scale:
+    scaled to unit rows its condition is 8 here, against the formed
+    penalty's ``kappa_+`` of 2e12, whose turned smallest eigenvalue kept a
+    relative error near ``u kappa_+`` and moved the fit by 1e-6 (a penalty
+    leaking onto the line, by 8e-5). What remains is the solve in the SSP
+    whitened coordinates, whose map has condition 7e7 at this lambda: about
+    ``u cond`` relative, 1e-8 (5e-9 to 1.2e-8 measured on three kernels), so
+    the bound is ``16 u 1e8``. ``m=(1, 2)`` with ``d1`` off holds its ``d2``
+    penalty in the same coordinates as ``m=2`` and fits the same smoother.
+
+    ``cr_cardinal`` sits at 5e-7 to 1.3e-6 on three kernels however its
+    penalty is held (its formed matrix turned, its root, or the correctly
+    rounded exact penalty, 8e-8 to 2e-7), above its whitening's ``u cond``
+    of 2e-8, so that floor is not the penalty's; 4e-6 still separates the
+    1e-5 to 2e-5 a leaking null space costs it.
     """
     frame, y = _fixture(0.08)
-    model = _model(kind, spline_penalty=FIXED_LAMBDA)
+    fixed = LambdaPolicy.fixed(FIXED_LAMBDA)
+    model = _model(kind, m=m, policy=fixed if m == 2 else {**D1_OFF, "d2": fixed})
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model.fit(frame, y)
+        model.fit_reml(frame, y)
     exact = _exact_fit(_knots(model), frame["x"], y, FIXED_LAMBDA)
-    assert np.max(np.abs(model.predict(frame) - exact) / np.abs(exact)) <= 1e-5
+    assert np.max(np.abs(model.predict(frame) - exact) / np.abs(exact)) <= tolerance
 
 
 @pytest.mark.parametrize("amplitude", [0.08, 0.09])
-@pytest.mark.parametrize("kind", ["cr", "cr_cardinal"])
-def test_reml_finds_the_exact_optimum(kind, amplitude):
+@pytest.mark.parametrize(
+    ("kind", "m"),
+    [("cr", 2), ("cr", (1, 2)), ("cr_cardinal", 2)],
+    ids=["cr", "cr m=(1,2) d1 off", "cr_cardinal"],
+)
+def test_reml_finds_the_exact_optimum(kind, m, amplitude):
     """REML's lambda is the exact smoother's REML optimum to the stop rule's resolution.
 
     These basins are shallow (EDF near 2), so a leak onto the line of
     ``u ||Omega||`` tilts the criterion enough to move lambda by 2 to 7 percent;
-    with the null rows exact the stop leaves it within about 5e-4.
+    with the null rows exact the stop leaves it within about 5e-4. ``m=(1,
+    2)`` with ``d1`` off estimates its ``d2`` lambda on the same criterion.
     """
     frame, y = _fixture(amplitude)
-    model = _model(kind)
+    model = _model(kind, m=m, policy=None if m == 2 else D1_OFF)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         model.fit_reml(frame, y)
-    estimate = model._reml_result.lambdas["x"]
+    lambdas = model._reml_result.lambdas
+    estimate = lambdas["x"] if m == 2 else lambdas["x:d2"]
     assert abs(estimate / LAMBDA_STAR[amplitude] - 1.0) <= 1e-3
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "binned"])
+@pytest.mark.parametrize("kind", ["bs", "ps"])
+def test_nested_penalties_share_the_null_coordinates(kind, discrete):
+    """``m=(2, 3)``: the line is ``d2``'s null coordinate, the line and the quadratic ``d3``'s.
+
+    Each component's term penalty is exactly zero on its own leading null
+    coordinates, and the line, which neither penalises, has exactly zero
+    rows in every component's REML penalty; on the basis those coordinates
+    are the polynomials, to the basis's rounding.
+    """
+    frame, y = _fixture(0.08)
+    model = _model(kind, discrete, m=(2, 3))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y)
+    group = model._dm.group_matrices[0]
+    zero_rows = {
+        suffix: np.flatnonzero(~np.any(omega != 0.0, axis=1)).tolist()
+        for suffix, omega in group.omega_components
+    }
+    assert zero_rows == {"d2": [0], "d3": [0, 1]}
+    for penalty in model._reml_penalties:
+        assert not np.any(penalty.omega_ssp[0]) and not np.any(penalty.omega_ssp[:, 0])
+    grid = np.geomspace(1.0, 1e5, 50)
+    curves = model._specs["x"]._basis_matrix(grid) @ group.R_inv[:, :2]
+    for degree in (1, 2):
+        polynomials = np.vander(grid / 1e5, degree + 1)
+        curve = curves[:, degree - 1]
+        residual = curve - polynomials @ np.linalg.lstsq(polynomials, curve, rcond=None)[0]
+        assert np.max(np.abs(residual)) <= 2**8 * U * np.max(np.abs(curve))
+
+
+def test_penalties_whose_null_spaces_do_not_nest_keep_their_own():
+    """``ps`` with ``m=(2, 4)`` fits its two penalties as built.
+
+    On quantile knots ``d2`` is the projected difference penalty, whose null
+    space is the polynomials, while ``d4`` (above the degree) keeps the
+    standard one, whose null space is the integer sequences ``j**p``: the
+    line is not in it, so no coordinates hold both null spaces on leading
+    axes and the term keeps the data's. The reference is the dense penalised
+    least squares on the term's basis and its two formed penalties, which a
+    well conditioned solve meets to rounding (2e-13 measured). Mutation:
+    nesting them anyway drops part of ``d4`` and moves the fit by 1.5e-3.
+    """
+    x = np.geomspace(1.0, 1e3, 300)
+    y = np.log(x) + np.sin(np.log(x)) + 0.1 * np.random.default_rng(5).normal(size=x.size)
+    lam = 0.3
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        spline_penalty=lam,
+        features={"x": Spline(kind="ps", n_knots=12, m=(2, 4), knot_strategy="quantile_rows")},
+    ).fit(pd.DataFrame({"x": x}), y)
+    spec, group = model._specs["x"], model._dm.group_matrices[0]
+    assert spec._difference_penalty == {2: "projected", 4: "standard"}
+    P = group.projection
+    columns = np.column_stack([np.ones_like(x), spec._basis_matrix(x).toarray() @ P])
+    raw = spec._build_penalty_for_order(2) + spec._build_penalty_for_order(4)
+    penalty = np.zeros((columns.shape[1], columns.shape[1]))
+    penalty[1:, 1:] = lam * P.T @ raw @ P
+    values, vectors = np.linalg.eigh(penalty)
+    root = np.sqrt(np.maximum(values, 0.0))[:, None] * vectors.T
+    stacked = np.vstack([columns, root])
+    coef = np.linalg.lstsq(stacked, np.r_[y, np.zeros(len(root))], rcond=None)[0]
+    exact = columns @ coef
+    fitted = model.predict(pd.DataFrame({"x": x}))
+    assert np.max(np.abs(fitted - exact) / np.abs(exact)) <= 2**16 * U
 
 
 @pytest.mark.slow

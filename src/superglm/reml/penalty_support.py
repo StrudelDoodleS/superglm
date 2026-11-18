@@ -253,7 +253,13 @@ def _penalty_support_from_roots(
     mapped = np.zeros((width, rank), dtype=np.float64)
     mapped[active] = column_scale[active, None] * vectors
     coordinate_map = _finite_double(mapped, "support coordinate map")
-    full_q, full_t = scipy.linalg.qr(coordinate_map, mode="full", check_finite=False)
+    # A coordinate no root reaches lies outside the support exactly: the QR
+    # runs on the reached rows, so the support basis keeps exact zeros there
+    # and a term's exact null coordinates stay unpenalised through the map.
+    reached_q, full_t = scipy.linalg.qr(coordinate_map[active], mode="full", check_finite=False)
+    full_q = np.zeros((width, width))
+    full_q[active, : len(active)] = reached_q
+    full_q[np.flatnonzero(column_scale == 0), len(active) :] = np.eye(width - len(active))
     triangular = full_t[:rank]
     if np.any(np.diag(triangular) == 0):
         raise PenaltyNumericalError("singular support coordinate map")

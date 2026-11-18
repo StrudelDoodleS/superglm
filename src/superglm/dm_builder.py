@@ -44,7 +44,13 @@ from superglm.group_matrix import (
 from superglm.links import Link, resolve_link
 from superglm.solvers._structured.selection import carry_nesting_cache
 from superglm.solvers.dispersion import PRIOR_WEIGHTS, validate_weight_semantics
-from superglm.types import DiscreteTensorBuildResult, FeatureSpec, GroupInfo, GroupSlice
+from superglm.types import (
+    DiscreteTensorBuildResult,
+    FeatureSpec,
+    GroupInfo,
+    GroupSlice,
+    NullCoordinates,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -701,33 +707,46 @@ def _validate_group_pricing(group_pricing: str) -> None:
 
 
 def _in_term_coordinates(info: GroupInfo) -> GroupInfo:
-    """``info`` turned into the null-explicit coordinates of its declared null basis.
+    """``info`` turned into the null-explicit coordinates of its declared null spaces.
 
     With ``T = [theta, theta_perp]`` (``null_explicit_coordinates``) the
-    projection becomes ``P T`` and the penalty ``T' Omega T``, whose null rows
-    and columns are set to the exact zeros the construction gives them; the
-    QP rows and the raw-to-solver map turn with the coordinates.
+    projection becomes ``P T``. Each penalty is the Gram of its root's range
+    columns, ``(R T)[:, d:]``, beside the exact zero rows and columns of its
+    ``d`` null coordinates. The root's rows each carry one knot interval's
+    scale, so its Gram keeps the range block's small eigenvalues to about
+    ``u`` times the condition of the root with unit rows; a dense turn of
+    the formed penalty rounds them by ``u ||Omega||`` (Wood 2011, sec. 3.3;
+    Demmel and Veselic 1992). The QP rows and the raw-to-solver map turn
+    with the coordinates.
     """
     from dataclasses import replace
 
     from superglm.features._spline_identifiability import null_explicit_coordinates
 
-    null_basis = cast(NDArray, info.null_basis)
-    turn = null_explicit_coordinates(null_basis)
-    nullity = null_basis.shape[1]
-    omega = turn.T @ cast(NDArray, info.penalty_matrix) @ turn
-    omega = 0.5 * (omega + omega.T)
-    omega[:nullity, :] = 0.0
-    omega[:, :nullity] = 0.0
+    declared = cast(NullCoordinates, info.null_coordinates)
+    turn = null_explicit_coordinates(declared.basis)
+    roots = tuple(root @ turn for root in declared.roots)
+    parts = []
+    for root, nullity in zip(roots, declared.nullities, strict=True):
+        omega = np.zeros((len(turn), len(turn)))
+        gram = root[:, nullity:].T @ root[:, nullity:]
+        omega[nullity:, nullity:] = 0.5 * (gram + gram.T)
+        parts.append(omega)
     components = info.penalty_components
     return replace(
         info,
-        penalty_matrix=omega,
+        penalty_matrix=parts[0] if len(parts) == 1 else sum(parts),
         projection=turn if info.projection is None else info.projection @ turn,
-        penalty_components=None if components is None else [(components[0][0], omega)],
+        penalty_components=(
+            None
+            if components is None
+            else [(suffix, part) for (suffix, _), part in zip(components, parts, strict=True)]
+        ),
         constraints=None if info.constraints is None else info.constraints.compose(turn),
         raw_to_solver_map=None if info.raw_to_solver_map is None else info.raw_to_solver_map @ turn,
-        null_basis=np.eye(len(turn))[:, :nullity],
+        null_coordinates=replace(
+            declared, basis=np.eye(len(turn))[:, : declared.basis.shape[1]], roots=roots
+        ),
     )
 
 
@@ -756,7 +775,7 @@ def _process_info(
     ``group_name`` is the block's group, which a ``lambda2`` mapping keys.
 
     ``term_coordinates=True`` holds a term that declares its penalty's null
-    basis (``GroupInfo.null_basis``) in null-explicit coordinates
+    basis (``GroupInfo.null_coordinates``) in null-explicit coordinates
     (``_in_term_coordinates``), and its group keeps the penalty there beside
     ``R_inv_local`` instead of lifting it to the raw basis as ``P Omega P'``:
     a lift and each later re-projection round by ``u ||Omega||``, onto the null
@@ -770,7 +789,7 @@ def _process_info(
         # Only a sparse block carries a penalty, so dense penalised columns (a
         # build() override's) are held sparse, keeping the penalty they came with.
         info.columns = sp.csr_matrix(info.columns)
-    in_term = term_coordinates and info.null_basis is not None
+    in_term = term_coordinates and info.null_coordinates is not None
     if in_term:
         info = _in_term_coordinates(info)
     R_inv: NDArray | None = None

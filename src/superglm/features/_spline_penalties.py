@@ -27,7 +27,9 @@ def build_difference_penalty(n_basis: int, order: int) -> NDArray:
     return Dm.T @ Dm
 
 
-def _general_difference_penalty(knots: NDArray, degree: int, order: int) -> tuple[NDArray, str]:
+def _general_difference_penalty(
+    knots: NDArray, degree: int, order: int
+) -> tuple[NDArray, str, NDArray]:
     """General difference penalty for B-spline coefficients on any knot vector.
 
     Li and Cao (2022, arXiv:2201.06808, sec. 2): each difference step divides by the span
@@ -38,7 +40,8 @@ def _general_difference_penalty(knots: NDArray, degree: int, order: int) -> tupl
     at most ``_CONDITION_LIMIT = 1/sqrt(eps)``, where ``solvers/rank.py`` starts to ask for a
     certificate. Past it the term takes ``Delta_m (I - Q Q')``, ``Q`` an orthonormal basis of
     those polynomials' coefficients: same null space, the standard scale and spread, a Gram of
-    its factor. Returns ``(penalty, kind)``, ``kind`` ``"general"`` or ``"projected"``.
+    its factor. Returns ``(penalty, kind, root)``, ``kind`` ``"general"`` or ``"projected"``,
+    and ``root' root`` the penalty (``difference_penalty_root``).
     """
     t = np.asarray(knots, dtype=np.float64)
     d = degree + 1
@@ -59,11 +62,11 @@ def _general_difference_penalty(knots: NDArray, degree: int, order: int) -> tupl
     if np.isfinite(penalty).all():
         eigenvalues = np.linalg.eigvalsh(penalty)
         if eigenvalues[order] * _CONDITION_LIMIT >= eigenvalues[-1]:
-            top = np.linalg.eigvalsh(standard.T @ standard)[-1]
-            return penalty * (top / eigenvalues[-1]), "general"
+            scale = np.linalg.eigvalsh(standard.T @ standard)[-1] / eigenvalues[-1]
+            return penalty * scale, "general", D * np.sqrt(scale)
     Q, _ = np.linalg.qr(_polynomial_coefficients(t, degree, order))
     standard -= (standard @ Q) @ Q.T
-    return standard.T @ standard, "projected"
+    return standard.T @ standard, "projected", standard
 
 
 def _polynomial_coefficients(knots: NDArray, degree: int, order: int) -> NDArray:
@@ -104,7 +107,7 @@ def difference_penalty_for(spec, order: int) -> NDArray:
         and order <= spec.degree
         and not _evenly_spaced(spec)
     ):
-        penalty, kind = _general_difference_penalty(spec._knots, spec.degree, order)
+        penalty, kind, _ = _general_difference_penalty(spec._knots, spec.degree, order)
     else:
         penalty, kind = build_difference_penalty(spec._n_basis, order), "standard"
     # A spec saved before the record existed has no attribute until it is placed again.
@@ -125,6 +128,18 @@ def difference_null_basis(spec, order: int) -> NDArray:
     if getattr(spec, "_difference_penalty", {}).get(order) == "standard":
         return np.vander(np.arange(spec._n_basis, dtype=np.float64), order, increasing=True)
     return _polynomial_coefficients(spec._knots, spec.degree, order)
+
+
+def difference_penalty_root(spec, order: int) -> NDArray:
+    """The factor ``R`` with ``R' R`` the difference penalty ``difference_penalty_for`` built.
+
+    The difference matrix itself (Eilers and Marx 1996, sec. 5; Li and Cao
+    2022, sec. 2.4): ``Delta_m`` for the standard penalty, the scaled
+    general ``D_m``, or ``Delta_m (I - Q Q')`` for the projected one.
+    """
+    if getattr(spec, "_difference_penalty", {}).get(order) == "standard":
+        return np.diff(np.eye(spec._n_basis), n=order, axis=0)
+    return _general_difference_penalty(spec._knots, spec.degree, order)[2]
 
 
 def difference_penalty_kind(spec) -> str | None:
@@ -198,6 +213,32 @@ def build_integrated_derivative_penalty(
     return sum(_interval_blocks(knots, degree, order, bounds), np.zeros((K, K)))
 
 
+def integrated_derivative_root(
+    knots: NDArray,
+    degree: int,
+    order: int,
+    excluded: Sequence[tuple[float, float]] = (),
+    intervals: int | None = None,
+) -> NDArray:
+    """The quadrature root ``R = W^(1/2) D`` of ``build_integrated_derivative_penalty``.
+
+    Its rows are the ``order``-th derivatives of the basis at each kept
+    interval's Gauss-Legendre nodes, times the square roots of their
+    weights, so ``R' R`` is the penalty (Wood 2016, arXiv:1605.02446,
+    section 1, steps 5 and 6). ``R`` keeps its null space, the polynomials
+    of degree below ``order``, to ``u kappa(R)``; the formed penalty keeps
+    it only to ``u kappa(Omega) = u kappa(R)**2``.
+    """
+    K = len(knots) - degree - 1
+    if _collapsed(knots, degree):
+        return np.zeros((0, K))
+    knots, bounds = _unit_knots(knots, degree, excluded, intervals)
+    rows = [
+        np.sqrt(w_q)[:, None] * Dm_q for Dm_q, w_q in _interval_nodes(knots, degree, order, bounds)
+    ]
+    return np.vstack(rows) if rows else np.zeros((0, K))
+
+
 def mean_knot_interval(breaks: NDArray) -> float:
     """The mean width of the intervals between the distinct ``breaks``.
 
@@ -267,6 +308,12 @@ def structural_derivative_penalty(
 
 def _interval_blocks(knots, degree, order, excluded):
     """Each unpinned knot interval's block of the integrated squared ``order``-th derivative."""
+    for Dm_q, w_q in _interval_nodes(knots, degree, order, excluded):
+        yield Dm_q.T @ (Dm_q * w_q[:, None])
+
+
+def _interval_nodes(knots, degree, order, excluded):
+    """Each unpinned interval's ``order``-th basis derivatives at its Gauss-Legendre nodes, and weights."""
     unique_knots = np.unique(knots)
     starts, ends = unique_knots[:-1], unique_knots[1:]
     bounds = np.asarray(excluded, dtype=np.float64).reshape(-1, 2)
@@ -276,8 +323,7 @@ def _interval_blocks(knots, degree, order, excluded):
     for a, b in zip(starts[kept], ends[kept]):
         x_q = 0.5 * (b - a) * xi + 0.5 * (a + b)
         w_q = 0.5 * (b - a) * wi
-        Dm_q = derivative_design(knots, degree, x_q, order)
-        yield Dm_q.T @ (Dm_q * w_q[:, None])
+        yield derivative_design(knots, degree, x_q, order), w_q
 
 
 def structural_penalty_ranks(spec: Any, info: Any) -> dict[str, int] | None:
