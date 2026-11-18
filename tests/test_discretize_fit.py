@@ -2275,7 +2275,7 @@ class TestDiscretizedTensorInteraction:
         lambdas = {f"{name}:{suffix}": 2.0 for suffix, _ in gm.omega_components}
 
         rebuilt = dm_builder.rebuild_design_matrix_with_lambdas(
-            model._dm, model._groups, lambdas, np.ones(len(X)), lambdas
+            model._dm, model._groups, lambdas, np.ones(len(X))
         ).group_matrices[index]
 
         assert rebuilt is not gm
@@ -2323,7 +2323,6 @@ class TestDiscretizedTensorInteraction:
             model._groups,
             lambdas,
             np.ones(len(X)),
-            lambdas,
         )
 
         assert rebuilt.group_matrices[tensor_idx] is tensor_gm

@@ -1423,5 +1423,4 @@ def rebuild_dm_with_lambdas(
         model._groups,
         lambdas,
         sample_weight,
-        configured_lambda2(model),
     )

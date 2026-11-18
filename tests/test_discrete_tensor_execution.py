@@ -780,7 +780,7 @@ def test_tensor_cross_observes_changed_marginals(margin, replace, transfer):
         right.omega = np.eye(right.B_unique.shape[1])
         dm = DesignMatrix([right], 64, right.shape[1])
         groups = [GroupSlice("tensor", 0, right.shape[1])]
-        rebuilt = rebuild_design_matrix_with_lambdas(dm, groups, {"tensor": 2.0}, np.ones(64), 1.0)
+        rebuilt = rebuild_design_matrix_with_lambdas(dm, groups, {"tensor": 2.0}, np.ones(64))
         right = rebuilt.group_matrices[0]
     expected, bound = _dense_cross(left, right, weights)
     actual = algebra._cross_gram(left, right, weights, cache=algebra._BlockWeightCache())

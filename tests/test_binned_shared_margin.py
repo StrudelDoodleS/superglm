@@ -292,7 +292,6 @@ def test_whitening_rebuild_preserves_certification_and_pool_is_deterministic():
         model._groups,
         {g.name: 2.0 for g in model._groups},
         np.ones(model._dm.n),
-        1.0,
     )
     W = np.linspace(0.5, 1.5, dm.n)
     for group in dm.group_matrices:

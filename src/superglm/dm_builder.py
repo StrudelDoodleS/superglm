@@ -1281,7 +1281,6 @@ def rebuild_design_matrix_with_lambdas(
     groups: list[GroupSlice],
     lambdas: dict[str, float],
     sample_weight: NDArray,
-    lambda2: float | dict,
 ) -> DesignMatrix:
     """Rebuild design matrix with per-group smoothing lambdas.
 

@@ -694,7 +694,6 @@ def optimize_discrete_reml_cached_w(
         groups,
         boot_lambdas,
         sample_weight,
-        boot_lambdas,
     )
     _t_rebuild_dm += _time.perf_counter() - _t0
     _t0 = _time.perf_counter()
@@ -1712,7 +1711,6 @@ def optimize_discrete_reml_cached_w(
             groups,
             current_lambdas,
             sample_weight,
-            current_lambdas,
         )
         _t_rebuild_dm += _time.perf_counter() - _t0
         _t0 = _time.perf_counter()
@@ -1794,7 +1792,6 @@ def optimize_discrete_reml_cached_w(
         groups,
         final_lambdas,
         sample_weight,
-        final_lambdas,
     )
     _t_rebuild_dm += _time.perf_counter() - _t0
     _t0 = _time.perf_counter()

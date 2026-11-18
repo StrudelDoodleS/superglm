@@ -140,7 +140,6 @@ class TestSplineLambdaPolicy:
             [group],
             {"x:area[A]:wiggle": 0.25},
             sample_weight=np.ones(n),
-            lambda2=1.0,
         )
 
         rebuilt_gm = rebuilt.group_matrices[0]
@@ -169,7 +168,6 @@ class TestSplineLambdaPolicy:
             [group],
             {"x:area[A]:wiggle": 0.25},
             sample_weight=np.ones(n),
-            lambda2=1.0,
         )
 
         rebuilt_gm = rebuilt.group_matrices[0]

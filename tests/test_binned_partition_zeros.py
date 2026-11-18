@@ -52,7 +52,6 @@ def test_builder_compiles_disjoint_raw_blocks_and_carries_through_whitening(monk
                 model._groups,
                 {g.name: float(step + 2) for g in model._groups},
                 np.ones(dm.n),
-                1.0,
             )
     assert calls
     assert all(left == right for left, right in calls), calls
