@@ -1209,19 +1209,20 @@ def build_design_matrix(
 
 
 def _resolve_group_lambda(gm, g, lambdas):
-    """Resolve the effective lambda and omega for a group, handling multi-penalty.
+    """The lambda and penalty a group's SSP whitening is built from.
 
-    Returns (effective_lambda, effective_omega, has_components) where:
-    - For single-penalty groups: (lambdas[g.name], gm.omega, False)
-    - For multi-penalty groups: (1.0, sum(lam_j * omega_j), True)
-      The effective lambda is 1.0 because it's already baked into the omega.
+    One penalty keeps its lambda beside it, named or not: a lambda policy names
+    a single penalty ``"wiggle"``, and stating the default policy must not
+    change the arithmetic.  Several penalties are summed, ``sum(lam_j omega_j)``,
+    under a unit lambda.
     """
-    if gm.omega_components is not None:
-        effective_omega = sum(
-            lambdas[f"{g.name}:{suffix}"] * omega_j for suffix, omega_j in gm.omega_components
-        )
-        return 1.0, effective_omega, True
-    return lambdas[g.name], gm.omega, False
+    components = gm.omega_components
+    if components is None:
+        return lambdas[g.name], gm.omega
+    if len(components) == 1:
+        suffix, omega = components[0]
+        return lambdas[f"{g.name}:{suffix}"], omega
+    return 1.0, sum(lambdas[f"{g.name}:{suffix}"] * omega_j for suffix, omega_j in components)
 
 
 def _group_has_lambda(gm, g, lambdas):
@@ -1259,7 +1260,7 @@ def rebuild_design_matrix_with_lambdas(
             if gm.omega is None:
                 new_gms.append(gm)
                 continue
-            lam, omega_eff, has_comp = _resolve_group_lambda(gm, g, lambdas)
+            lam, omega_eff = _resolve_group_lambda(gm, g, lambdas)
             if gm.projection is not None:
                 P = gm.projection
                 omega_proj = P.T @ omega_eff @ P
@@ -1279,7 +1280,7 @@ def rebuild_design_matrix_with_lambdas(
             if gm.omega is None:
                 new_gms.append(gm)
                 continue
-            lam, omega_eff, has_comp = _resolve_group_lambda(gm, g, lambdas)
+            lam, omega_eff = _resolve_group_lambda(gm, g, lambdas)
             level_weight = sample_weight[gm.row_idx]
             if gm.projection is not None:
                 P = gm.projection
@@ -1306,7 +1307,7 @@ def rebuild_design_matrix_with_lambdas(
             if gm.omega is None:
                 new_gms.append(gm)
                 continue
-            lam, omega_eff, has_comp = _resolve_group_lambda(gm, g, lambdas)
+            lam, omega_eff = _resolve_group_lambda(gm, g, lambdas)
             level_weight = np.bincount(
                 gm.bin_idx_level,
                 weights=sample_weight[gm.row_idx],
@@ -1356,7 +1357,7 @@ def rebuild_design_matrix_with_lambdas(
                 # packed design, as in mgcv bam(discrete=TRUE).
                 new_gms.append(gm)
                 continue
-            lam, omega_eff, has_comp = _resolve_group_lambda(gm, g, lambdas)
+            lam, omega_eff = _resolve_group_lambda(gm, g, lambdas)
             exposure_agg = np.bincount(gm.bin_idx, weights=sample_weight, minlength=gm.n_bins)
             if gm.projection is not None:
                 P = gm.projection
@@ -1388,7 +1389,7 @@ def rebuild_design_matrix_with_lambdas(
             if gm.omega is None:
                 new_gms.append(gm)
                 continue
-            lam, omega_eff, has_comp = _resolve_group_lambda(gm, g, lambdas)
+            lam, omega_eff = _resolve_group_lambda(gm, g, lambdas)
             exposure_agg = np.bincount(gm.bin_idx, weights=sample_weight, minlength=gm.n_bins)
             if gm.projection is not None:
                 P = gm.projection

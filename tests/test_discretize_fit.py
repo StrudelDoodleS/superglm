@@ -527,8 +527,9 @@ class TestDiscretizedFit:
             atol=1e-12,
         )
 
+    @pytest.mark.parametrize("signal", ["linear", "curved"])
     @pytest.mark.parametrize("penalty", ["ssp", "none"])
-    def test_an_estimate_policy_keeps_the_penalty_rank(self, penalty):
+    def test_an_estimate_policy_keeps_the_penalty_rank(self, penalty, signal):
         """``LambdaPolicy.estimate()`` on a binned spline fits what no policy fits.
 
         ``estimate()`` is the default policy, stated. It names the penalty
@@ -538,18 +539,17 @@ class TestDiscretizedFit:
         the rank read from its eigenvalues is 8, which moves the optimum to
         EDF 7.7 from 4.7.
 
-        The two fits reach the same optimum by different rounding (a named
-        penalty is rebuilt with lambda folded into it), so they agree to the
-        stop rule. The signal is curved, so the optimum (lambda 0.56) is
-        interior and quadratic in log lambda, with curvature 0.43. A stop
-        leaves Newton's step in log lambda below
-        ``newton_step_stop_bar(1e-9) = 1e-3``. The fitted values move by at
-        most 1.9e-2 relative per unit of log lambda there, so two stops are at
-        most 2e-3 * 1.9e-2 = 4e-5 apart; ``rtol`` is 1e-4.
+        Stating it changes no arithmetic: a named single penalty is rebuilt
+        with its lambda beside it, as an unnamed one is, so the two fits are
+        the same to the last bit. The linear signal's REML surface is flat
+        towards the linear limit (lambda near 1.7e7), where a difference in
+        rounding moved the stop by 1% in lambda; the curved one's optimum is
+        interior (lambda 0.56, EDF 4.7).
         """
         x = np.geomspace(1.0, 1e5, 200)
         X = pd.DataFrame({"x": x})
-        y = 1.0 + 0.1 * np.sin(np.log(x)) + np.random.default_rng(74).normal(0.0, 0.15, 200)
+        trend = x / 1e5 if signal == "linear" else 0.1 * np.sin(np.log(x))
+        y = 1.0 + trend + np.random.default_rng(74).normal(0.0, 0.15, 200)
 
         def fitted(policy):
             spline = Spline(
@@ -569,7 +569,11 @@ class TestDiscretizedFit:
         assert isinstance(stated._dm.group_matrices[0], DiscretizedSSPGroupMatrix)
         assert [p.rank for p in default._reml_penalties] == [10]
         assert [p.rank for p in stated._reml_penalties] == [10]
-        np.testing.assert_allclose(stated.predict(X), default.predict(X), rtol=1e-4)
+        assert list(stated._reml_result.lambdas.values()) == list(
+            default._reml_result.lambdas.values()
+        )
+        assert stated.result.effective_df == default.result.effective_df
+        np.testing.assert_array_equal(stated.predict(X), default.predict(X))
 
     @pytest.mark.parametrize("penalty", ["ssp", "none"])
     def test_an_off_policy_survives_the_binned_reml_rebuild(self, penalty):
