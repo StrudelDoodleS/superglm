@@ -89,9 +89,8 @@ class _SplineBase:
     discrete : bool or None
         If True, bin the covariate at fit time into at most ``n_bins`` bins on its knots and rows:
         O(n) algebra becomes O(n_bins). If None (default), defers to the model-level ``discrete``.
-        Only the built-in spline types bin: a subclass, whatever it overrides, is fitted on its
-        rows and predicted through its own methods, with a warning, and so are its interactions.
-        A method patched onto a built-in class or bound on an instance is not supported.
+        A subclass is fitted on its rows by its own methods, with a warning, as are its
+        interactions. A method patched onto a built-in class or instance is not supported.
     n_bins : int or None
         Number of bins when the column bins. If None (default), defers to the model-level
         ``n_bins`` setting (which defaults to 256).
