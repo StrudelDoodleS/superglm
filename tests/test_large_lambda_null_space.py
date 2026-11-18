@@ -144,6 +144,39 @@ def test_a_mapping_that_weights_one_component_fits_its_null_space(kind, lam, dis
     assert abs(model.result.effective_df - 2.0) <= 1e5 / lam + 2**16 * U
 
 
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "binned"])
+def test_a_policy_that_turns_one_component_off_is_the_one_penalty_spline(discrete):
+    """``m=(1, 2)`` with ``d1`` off and ``d2`` fixed is the ``m=2`` spline at that lambda.
+
+    ``fit_reml`` rebuilds the design at the resolved lambdas, where the zero
+    weight drops ``d1`` as the first build does, so both declarations whiten
+    one penalty and agree in predictions and standard errors to the solve's
+    rounding, the bound of ``test_a_large_penalty_fits_its_null_space``.
+    Summing the zero term instead moves both by 8e-3 on these quantile knots
+    over five decades.
+    """
+    x = np.geomspace(1.0, 1e5, 200)
+    frame = pd.DataFrame({"x": x})
+    y = 1.0 + x / 1e5 + np.random.default_rng(74).normal(0.0, 0.15, x.size)
+
+    def fitted(m, policy):
+        spline = Spline(
+            kind="cr", n_knots=10, m=m, knot_strategy="quantile_rows", lambda_policy=policy
+        )
+        model = SuperGLM(
+            family="gaussian", selection_penalty=0.0, features={"x": spline}, discrete=discrete
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit_reml(frame, y)
+        return model.predict(frame), model.term_inference("x").se_log_relativity
+
+    fixed = LambdaPolicy.fixed(1e14)
+    one, two = fitted(2, fixed), fitted((1, 2), {"d1": LambdaPolicy.off(), "d2": fixed})
+    for single, both in zip(one, two):
+        np.testing.assert_allclose(both, single, rtol=0, atol=2**16 * U * np.max(np.abs(y)))
+
+
 @pytest.mark.parametrize("route", ["fit", "fit_path"])
 def test_a_mapping_fits_as_the_equal_scalar_under_a_selection_penalty(route):
     """``{"x": 0.0}`` whitens and selects the term as ``0.0`` does, so path and fit agree."""

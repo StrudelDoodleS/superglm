@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import OrderedCategorical, SuperGLM
+from superglm import Numeric, OrderedCategorical, SuperGLM
 from superglm.features.spline import Spline
 from superglm.types import GroupInfo, LambdaPolicy
 
@@ -297,3 +297,49 @@ class TestFitRemlLambdaPolicy:
         )
         with pytest.raises(NotImplementedError, match=rf"'grade'.*fit_reml\(\), not {route}\(\)"):
             getattr(model, route)(pd.DataFrame({"grade": np.asarray(levels)[codes]}), np.sin(codes))
+
+    @pytest.mark.parametrize("term", ["spline", "ordered"])
+    def test_refits_after_fit_reml_take_the_resolved_lambda(self, term):
+        """drop1 and refit_unpenalised refit a fixed policy at the lambda fit_reml resolved.
+
+        Their clones keep the policy but are fitted at the source's smoothing, so the
+        refusal of a declared policy in fit() does not reach them. Each refit is the
+        policy-free model declared at the same scalar lambda (3.0, or 0.0 when the
+        smoothing is dropped): one Gaussian solve each, equal to rounding, which 1e-10
+        bounds on these values near 2.
+        """
+        levels = list("abcdefgh")
+        rng = np.random.default_rng(0)
+        codes, z, x = rng.integers(0, 8, 300), rng.uniform(size=300), rng.uniform(size=300)
+        column = x if term == "spline" else np.asarray(levels)[codes]
+        frame = pd.DataFrame({"s": column, "z": z})
+        y = np.sin(codes) + z + np.sin(4.0 * x) + rng.normal(0.0, 0.1, 300)
+
+        def features(policy=None):
+            if term == "spline":
+                smooth = Spline(kind="ps", n_knots=6, lambda_policy=policy)
+            else:
+                basis = Spline(kind="ps", n_knots=4, lambda_policy=policy)
+                smooth = OrderedCategorical(order=levels, basis=basis)
+            return {"s": smooth, "z": Numeric()}
+
+        model = SuperGLM(
+            family="gaussian", selection_penalty=0, features=features(LambdaPolicy.fixed(3.0))
+        )
+        model.fit_reml(frame, y)
+
+        def declared(lam):
+            return SuperGLM(
+                family="gaussian", selection_penalty=0, spline_penalty=lam, features=features()
+            ).fit(frame, y)
+
+        for keep, lam in ((True, 3.0), (False, 0.0)):
+            refit = model.refit_unpenalised(frame, y, keep_smoothing=keep)
+            np.testing.assert_allclose(
+                refit.predict(frame), declared(lam).predict(frame), rtol=0, atol=1e-10
+            )
+        np.testing.assert_allclose(
+            model.drop1(frame, y).set_index("feature")["deviance_reduced"].sort_index(),
+            declared(3.0).drop1(frame, y).set_index("feature")["deviance_reduced"].sort_index(),
+            rtol=1e-10,
+        )

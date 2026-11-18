@@ -1110,7 +1110,9 @@ def clone_without_features(
         new_model._level_bindings = stored
         new_model._config = new_model._config.with_value(level_bindings=stored)
 
-    # Resolve lambda2
+    # Resolve lambda2: the clone is fitted at it, so a lambda policy it keeps
+    # has nothing left to resolve (``_reject_lambda_policy_fit``).
+    new_model._smoothing_resolved = True
     if lambda2 is ...:
         source_lambda2 = fitted_lambda2(model)
         if isinstance(source_lambda2, dict):

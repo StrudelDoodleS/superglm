@@ -181,10 +181,14 @@ class PathResult:
 def _reject_lambda_policy_fit(model, method: str = "fit") -> None:
     """lambda_policy is only supported in fit_reml(); reject fit() and fit_path().
 
-    An ``OrderedCategorical`` carries its policy on its spline basis.
+    An ``OrderedCategorical`` carries its policy on its spline basis. A refit
+    clone (``clone_without_features``) is fitted at the smoothing its source
+    resolved, so its policies are not refused.
     """
     from superglm.features.ordered_categorical import OrderedCategorical
 
+    if getattr(model, "_smoothing_resolved", False):
+        return
     for name, spec in model._specs.items():
         smooth = spec._basis_spline if isinstance(spec, OrderedCategorical) else spec
         if getattr(smooth, "_lambda_policy", None) is not None:

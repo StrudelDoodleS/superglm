@@ -1243,14 +1243,15 @@ def _resolve_group_lambda(gm, g, lambdas):
     One penalty keeps its lambda beside it, named or not: a lambda policy names
     a single penalty ``"wiggle"``, and stating the default policy must not
     change the arithmetic.  Several penalties are summed, ``sum(lam_j omega_j)``,
-    under a unit lambda.
+    under a unit lambda.  A zero weight drops its penalty, as in the build
+    (``_penalty_terms``).
     """
     components = gm.omega_components
     if components is None:
         return lambdas[g.name], gm.omega
-    return _lambda_beside_penalty(
-        [(lambdas[f"{g.name}:{suffix}"], omega_j) for suffix, omega_j in components]
-    )
+    terms = [(lambdas[f"{g.name}:{suffix}"], omega_j) for suffix, omega_j in components]
+    terms = [(lam, omega_j) for lam, omega_j in terms if lam != 0.0]
+    return _lambda_beside_penalty(terms) if terms else (0.0, gm.omega)
 
 
 def _group_has_lambda(gm, g, lambdas):
