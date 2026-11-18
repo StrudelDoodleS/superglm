@@ -19,7 +19,7 @@ import pandas as pd
 import pytest
 import scipy.sparse as sp
 
-from superglm import LambdaPolicy, Spline, SuperGLM
+from superglm import LambdaPolicy, Numeric, Spline, SuperGLM
 from superglm.dm_builder import compute_R_inv
 from superglm.penalties import GroupElasticNet, GroupLasso, Ridge, SparseGroupLasso
 from superglm.reml.penalty_algebra import ssp_penalty_matrix
@@ -31,8 +31,9 @@ Y = 1.0 + 2.0 * X_GRID + 0.1 * np.random.default_rng(468).standard_normal(X_GRID
 
 
 def _fit(kind: str, penalty: str, route: str, lam: float, discrete: bool = False) -> SuperGLM:
-    if route == "fit":
-        spline, extra = Spline(kind=kind, n_knots=8, penalty=penalty), {"spline_penalty": lam}
+    if route in ("fit", "mapping"):
+        smoothing = {"x": lam} if route == "mapping" else lam
+        spline, extra = Spline(kind=kind, n_knots=8, penalty=penalty), {"spline_penalty": smoothing}
     else:
         policy = LambdaPolicy.fixed(lam)
         spline, extra = Spline(kind=kind, n_knots=8, penalty=penalty, lambda_policy=policy), {}
@@ -46,7 +47,7 @@ def _fit(kind: str, penalty: str, route: str, lam: float, discrete: bool = False
     frame = pd.DataFrame({"x": X_GRID})
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model.fit(frame, Y) if route == "fit" else model.fit_reml(frame, Y)
+        model.fit_reml(frame, Y) if route == "fit_reml" else model.fit(frame, Y)
     return model
 
 
@@ -63,7 +64,7 @@ def _null_space_fit(model: SuperGLM, kind: str) -> np.ndarray:
 # The 200 grid values sit under the 256 bins, so the binned fit is the exact one.
 @pytest.mark.parametrize("discrete", [False, True], ids=["exact", "binned"])
 @pytest.mark.parametrize("lam", [1e14, 1e18])
-@pytest.mark.parametrize("route", ["fit", "fit_reml"])
+@pytest.mark.parametrize("route", ["fit", "mapping", "fit_reml"])
 @pytest.mark.parametrize("penalty", ["none", "ssp"])
 @pytest.mark.parametrize("kind", ["cr", "bs", "ps", "cr_cardinal"])
 def test_a_large_penalty_fits_its_null_space(kind, penalty, route, lam, discrete):
@@ -80,6 +81,40 @@ def test_a_large_penalty_fits_its_null_space(kind, penalty, route, lam, discrete
     # and the trace rounds within some thousands of u.
     assert abs(model.result.effective_df - 2.0) <= 1e5 / lam + 2**16 * U
     assert model.result.converged
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "binned"])
+@pytest.mark.parametrize("penalty", ["none", "ssp"])
+def test_a_mapping_protects_each_term_at_its_own_penalty(penalty, discrete):
+    """``{"x": 1e14, "z": 1e-3}`` fits ``x`` on its null space and ``z`` as at 1e-3 alone.
+
+    The reference gives ``x`` its null space ``1, x`` as a linear term and ``z``
+    its small penalty as a scalar, so no term borrows another's.
+    """
+    z = np.random.default_rng(0).permutation(X_GRID)
+    frame = pd.DataFrame({"x": X_GRID, "z": z})
+    y = Y + np.sin(6.0 * z)
+
+    def fit(x_term, smoothing):
+        features = {"x": x_term, "z": Spline(kind="cr", n_knots=8, penalty=penalty)}
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features=features,
+            discrete=discrete,
+            spline_penalty=smoothing,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return model.fit(frame, y)
+
+    mapped = fit(Spline(kind="cr", n_knots=8, penalty=penalty), {"x": 1e14, "z": 1e-3})
+    reference = fit(Numeric(), 1e-3)
+    # The single-term test's bounds: x's range adds at most 1e5 / lambda edf.
+    tolerance = 2**16 * U * np.max(np.abs(y))
+    assert np.max(np.abs(mapped.predict(frame) - reference.predict(frame))) <= tolerance
+    edf_gap = mapped.result.effective_df - reference.result.effective_df
+    assert abs(edf_gap) <= 1e5 / 1e14 + 2**16 * U
 
 
 def test_the_ssp_map_factors_a_penalty_whose_formed_null_is_negative():

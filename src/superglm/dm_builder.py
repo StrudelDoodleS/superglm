@@ -81,18 +81,36 @@ def validate_fitted_group_names(groups: list[GroupSlice]) -> None:
 # ═══════════════════════════════════════════════════════════════════
 
 
-def _resolve_lambda2(lambda2: float | dict) -> float:
-    """Resolve lambda2 to a scalar (dict → 1.0 fallback for initial basis)."""
-    if isinstance(lambda2, dict):
-        return 1.0
-    return lambda2
+def _applied_penalty(
+    info: GroupInfo, group_name: str, lambda2: float | dict
+) -> tuple[float, NDArray | None]:
+    """``(lam, Omega)`` with ``lam Omega`` the penalty the fit applies to the block.
+
+    A mapping is read as ``build_penalty_matrix`` reads it, each group or
+    penalty component weighted by its own entry; several components are
+    then summed at weight one, as ``rebuild_design_matrix_with_lambdas``
+    sums REML's.
+    """
+    from superglm.reml.penalty_algebra import resolve_component_lambda, resolve_group_lambda
+
+    components = info.penalty_components
+    if info.penalty_matrix is None:
+        return 0.0, None
+    if not isinstance(lambda2, dict) or not components:
+        return resolve_group_lambda(lambda2, group_name), info.penalty_matrix
+    weighted = [
+        (resolve_component_lambda(lambda2, group_name, s), omega) for s, omega in components
+    ]
+    if len(weighted) == 1:
+        return weighted[0]
+    return 1.0, cast(NDArray, sum(lam * omega for lam, omega in weighted))
 
 
 def compute_R_inv(
     B: sp.spmatrix | NDArray,
     omega: NDArray,
     sample_weight: NDArray,
-    lambda2: float | dict,
+    lambda2: float,
 ) -> NDArray:
     """Compute SSP reparametrisation matrix R_inv without forming B @ R_inv.
 
@@ -103,7 +121,6 @@ def compute_R_inv(
     The normaliser is the weight sum over every row, including rows where the
     block is zero, so every block's ``X'WX`` sits on the same scale.
     """
-    lam2 = _resolve_lambda2(lambda2)
     total = float(np.sum(sample_weight))
     if total <= 0.0:
         G = np.zeros((omega.shape[0], omega.shape[0]), dtype=np.float64)
@@ -111,7 +128,7 @@ def compute_R_inv(
         G = np.asarray((B.multiply(sample_weight[:, None]).T @ B).todense()) / total
     else:
         G = (B * sample_weight[:, None]).T @ B / total
-    return _whitening_map(G, omega, lam2)
+    return _whitening_map(G, omega, lambda2)
 
 
 def compute_projected_R_inv(
@@ -119,13 +136,12 @@ def compute_projected_R_inv(
     projection: NDArray,
     penalty_sub: NDArray,
     sample_weight: NDArray,
-    lambda2: float | dict,
+    lambda2: float,
 ) -> NDArray:
     """Compute SSP R_inv within a projected subspace (linear-split range space).
 
     Normalised over every row, as in ``compute_R_inv``.
     """
-    lam2 = _resolve_lambda2(lambda2)
     total = float(np.sum(sample_weight))
     if total <= 0.0:
         G_full = np.zeros((projection.shape[0], projection.shape[0]), dtype=np.float64)
@@ -133,7 +149,7 @@ def compute_projected_R_inv(
         G_full = np.asarray((B.multiply(sample_weight[:, None]).T @ B).todense()) / total
     else:
         G_full = (B * sample_weight[:, None]).T @ B / total
-    return _whitening_map(projection.T @ G_full @ projection, penalty_sub, lam2)
+    return _whitening_map(projection.T @ G_full @ projection, penalty_sub, lambda2)
 
 
 def _whitening_map(G: NDArray, omega: NDArray, lam2: float) -> NDArray:
@@ -160,7 +176,7 @@ def _dominant_penalty_eigenbasis(
     info: GroupInfo,
     columns: NDArray | sp.spmatrix | None,
     weights: NDArray | None,
-    lambda2: float | dict,
+    lam: float,
 ) -> NDArray | None:
     """The eigenbasis of a raw block's penalty where it outweighs the data by ``1/sqrt(u)``.
 
@@ -171,12 +187,13 @@ def _dominant_penalty_eigenbasis(
     & Safken 2016, sec. 3.1.1), and the penalty dominates every range
     direction, so the turn costs the data's column scaling nothing.
     ``columns`` and ``weights`` are the block's raw rows and their weights:
-    a binned block's distinct rows and bin weights.
+    a binned block's distinct rows and bin weights; ``lam`` is the block's
+    own smoothing weight (``_applied_penalty``).
     """
     omega = info.penalty_matrix
     if omega is None or columns is None or len(info.penalty_components or ()) > 1:
         return None
-    penalty = _resolve_lambda2(lambda2) * float(np.max(np.diag(omega)))
+    penalty = lam * float(np.max(np.diag(omega)))
     columns = sp.csr_matrix(columns)
     data = float(np.max(columns.multiply(columns).T @ weights, initial=0.0))
     if penalty * np.sqrt(UNIT_ROUNDOFF) <= data:
@@ -655,6 +672,7 @@ def _validate_group_pricing(group_pricing: str) -> None:
 def _process_info(
     info: GroupInfo,
     *,
+    group_name: str,
     B_unique: NDArray | None = None,
     bin_idx: NDArray | None = None,
     sample_weight: NDArray,
@@ -672,9 +690,12 @@ def _process_info(
     if no reparametrization was applied.  ``ssp_supports`` is shared by the
     calls of one term, so subgroups over one basis share its row support.
     ``eigenbasis_turn=False`` keeps a raw block in its declared coordinates.
+    ``group_name`` is the block's group, which a ``lambda2`` mapping keys.
     """
     use_discrete = B_unique is not None
     use_tensor = tensor_build is not None
+    # The SSP map and the eigenbasis turn are built at the penalty the fit applies.
+    lam, applied_omega = _applied_penalty(info, group_name, lambda2)
     if isinstance(info.columns, np.ndarray) and (
         info.penalty_matrix is not None or info.penalty_components is not None
     ):
@@ -716,21 +737,15 @@ def _process_info(
             use_discrete_spline_cat = False
         if info.projection is not None:
             P = info.projection
-            if info.reparametrize and info.penalty_matrix is not None:
-                R_inv_local = compute_projected_R_inv(
-                    B_for,
-                    P,
-                    info.penalty_matrix,
-                    level_weight,
-                    lambda2,
-                )
+            if info.reparametrize and applied_omega is not None:
+                R_inv_local = compute_projected_R_inv(B_for, P, applied_omega, level_weight, lam)
                 R_inv = P @ R_inv_local
             else:
                 R_inv = P
                 R_inv_local = None
             omega_full = P @ info.penalty_matrix @ P.T if info.penalty_matrix is not None else None
-        elif info.reparametrize and info.penalty_matrix is not None:
-            R_inv = compute_R_inv(B_for, info.penalty_matrix, level_weight, lambda2)
+        elif info.reparametrize and applied_omega is not None:
+            R_inv = compute_R_inv(B_for, applied_omega, level_weight, lam)
             R_inv_local = R_inv
             omega_full = info.penalty_matrix
         else:
@@ -774,10 +789,10 @@ def _process_info(
 
     elif info.projection is not None:
         P = info.projection
-        if info.reparametrize and info.penalty_matrix is not None:
+        if info.reparametrize and applied_omega is not None:
             B_for = B_unique if use_discrete else info.columns
             exp_for = exposure_agg if use_discrete else sample_weight
-            R_inv_local = compute_projected_R_inv(B_for, P, info.penalty_matrix, exp_for, lambda2)
+            R_inv_local = compute_projected_R_inv(B_for, P, applied_omega, exp_for, lam)
             R_inv = P @ R_inv_local
         else:
             # A binned main effect is read on its distinct rows and bin weights.
@@ -789,7 +804,7 @@ def _process_info(
                     info,
                     B_unique if binned else info.columns,
                     exposure_agg if binned else sample_weight,
-                    lambda2,
+                    lam,
                 )
                 if eigenbasis_turn
                 else None
@@ -827,10 +842,10 @@ def _process_info(
             if info.lambda_policies is not None:
                 gm.lambda_policies = info.lambda_policies
 
-    elif info.reparametrize and info.penalty_matrix is not None:
+    elif info.reparametrize and applied_omega is not None:
         B_for = B_unique if use_discrete else info.columns
         exp_for = exposure_agg if use_discrete else sample_weight
-        R_inv = compute_R_inv(B_for, info.penalty_matrix, exp_for, lambda2)
+        R_inv = compute_R_inv(B_for, applied_omega, exp_for, lam)
         # No projection — constraints are in raw space, same as R_inv input
         R_inv_local = R_inv
         n_cols = R_inv.shape[1]

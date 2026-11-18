@@ -1789,6 +1789,13 @@ def evaluate_tensor_pair_logdet_summaries(
     return evaluations
 
 
+def resolve_group_lambda(lambda2: float | dict[str, float], group_name: str) -> float:
+    """The smoothing weight of a group: its own entry in a mapping, 0.0 when it has none."""
+    if not isinstance(lambda2, dict):
+        return float(lambda2)
+    return float(lambda2.get(group_name, 0.0))
+
+
 def resolve_component_lambda(
     lambda2: float | dict[str, float],
     group_name: str,
@@ -1805,7 +1812,7 @@ def resolve_component_lambda(
     """
     if not isinstance(lambda2, dict):
         return float(lambda2)
-    return float(lambda2.get(f"{group_name}:{suffix}", lambda2.get(group_name, 0.0)))
+    return float(lambda2.get(f"{group_name}:{suffix}", resolve_group_lambda(lambda2, group_name)))
 
 
 def ssp_penalty_matrix(coordinate_map: NDArray, omega: NDArray) -> NDArray:
@@ -1891,7 +1898,7 @@ def build_penalty_matrix(
             if group_index in represented_group_indices:
                 continue
             if g.scop_reparameterization is not None and g.penalized:
-                lam_g = lambda2.get(g.name, 0.0) if isinstance(lambda2, dict) else lambda2
+                lam_g = resolve_group_lambda(lambda2, g.name)
                 if lam_g > 0:
                     S[g.sl, g.sl] += lam_g * g.scop_reparameterization.penalty_matrix()
 
@@ -1916,7 +1923,7 @@ def build_penalty_matrix(
                         continue
                     S[g.sl, g.sl] += lam_j * ssp_penalty_matrix(gm.R_inv, omega_j)
                 continue
-            lam_g = lambda2.get(g.name, 0.0) if isinstance(lambda2, dict) else lambda2
+            lam_g = resolve_group_lambda(lambda2, g.name)
             if lam_g == 0:
                 continue
             omega = gm.omega
@@ -1924,7 +1931,7 @@ def build_penalty_matrix(
                 continue
             S[g.sl, g.sl] += lam_g * ssp_penalty_matrix(gm.R_inv, omega)
         elif g.scop_reparameterization is not None:
-            lam_g = lambda2.get(g.name, 0.0) if isinstance(lambda2, dict) else lambda2
+            lam_g = resolve_group_lambda(lambda2, g.name)
             if lam_g == 0:
                 continue
             S[g.sl, g.sl] += lam_g * g.scop_reparameterization.penalty_matrix()
