@@ -340,9 +340,7 @@ def test_rebuild_with_lambdas_preserves_lossless_type():
         f"expected the exact path to compress this block, got {type(original).__name__}"
     )
 
-    rebuilt = rebuild_design_matrix_with_lambdas(
-        model._dm, model._groups, {"age": 2.0}, weights, 1.0
-    )
+    rebuilt = rebuild_design_matrix_with_lambdas(model._dm, model._groups, {"age": 2.0}, weights)
     assert type(rebuilt.group_matrices[0]) is SupportCompressedSSPGroupMatrix
 
 
@@ -907,7 +905,7 @@ def test_spline_cat_rebuild_with_lambdas_preserves_lossless_type():
     weights = np.ones(frame.shape[0])
     lambdas = {group.name: 2.0 for group in model._groups}
 
-    rebuilt = rebuild_design_matrix_with_lambdas(model._dm, model._groups, lambdas, weights, 1.0)
+    rebuilt = rebuild_design_matrix_with_lambdas(model._dm, model._groups, lambdas, weights)
 
     original = _spline_cat_blocks(model)
     assert original, "expected spline_cat blocks to rebuild"

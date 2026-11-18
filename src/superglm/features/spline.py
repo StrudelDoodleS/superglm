@@ -42,6 +42,15 @@ _ONE_VALUE = (
 )
 
 
+# On one value every derivative penalty of ``bs`` is zero, so there is no null
+# space for select=True to split from its range.
+_ONE_VALUE_SELECT = (
+    "every value of this column is {value}, so this spline's penalty is zero and "
+    "select=True has no straight-line part to separate from its curve. Drop the term "
+    "or pass select=False."
+)
+
+
 class OneValueError(ValueError):
     """A natural spline's column holds one value, so its knots have no range."""
 
@@ -211,7 +220,12 @@ class _SplineBase:
         )
 
     def _basis_matrix(self, x: NDArray):
-        """Evaluate the raw B-spline basis under the extrapolation policy."""
+        """Evaluate the raw B-spline basis under the extrapolation policy.
+
+        Override it to change a subclass's basis: ``build`` reads it, and
+        predictions read it through the module ``transform``. Overriding
+        ``transform`` alone leaves the fit and its predictions on this basis.
+        """
         return _spline_runtime.basis_matrix(self, x)
 
     def _raw_basis_matrix(self, x: NDArray) -> NDArray:
@@ -357,17 +371,25 @@ class _SplineBase:
         )
 
     def _eigendecompose_select(self, omega_c: NDArray, Z: NDArray | None) -> None:
-        """Eigendecompose the constrained penalty for select=True splitting."""
+        """Eigendecompose the constrained penalty for select=True splitting.
+
+        A split that fails on a column with one value is refused by naming it.
+        """
         structural = self._structural_penalty_for_order(max(self._m_orders))
         if structural is not None and Z is not None:
             structural = Z.T @ structural @ Z
-        self._U_null, self._U_range, self._omega_range = _spline_select.eigendecompose_select(
-            omega_c,
-            Z,
-            n_basis=self._n_basis,
-            spline_kind=type(self).__name__,
-            structural=structural,
-        )
+        try:
+            self._U_null, self._U_range, self._omega_range = _spline_select.eigendecompose_select(
+                omega_c,
+                Z,
+                n_basis=self._n_basis,
+                spline_kind=type(self).__name__,
+                structural=structural,
+            )
+        except ValueError as exc:
+            if self._hi > self._lo:
+                raise
+            raise ValueError(_ONE_VALUE_SELECT.format(value=f"{self._lo:g}")) from exc
 
     def _structural_penalty_for_order(self, order: int) -> NDArray | None:
         """A penalty with this one's exact null space and no knot-spacing spread, if known."""
@@ -440,16 +462,16 @@ class _SplineBase:
         support: NDArray | None = None,
         counts: NDArray | None = None,
     ) -> TensorMarginalInfo:
-        """Compute marginal basis, penalty, and projection for tensor products.
+        """Marginal basis, penalty and projection of a built spec for tensor products.
 
-        Must be called on an already-built spec (after ``build()`` or
-        ``_place_knots()``).  Reuses the parent's knot vector, penalty
-        type, and boundary constraints so that tensor marginals inherit
-        the parent spline geometry.
+        Reuses the parent's knots, penalty type and boundary constraints, and
+        returns a ``TensorMarginalInfo``: the centred, constrained marginal basis,
+        its penalty and the projection from the raw B-spline space to the centred one.
 
-        Returns a ``TensorMarginalInfo`` with the centered+constrained
-        marginal basis, penalty, and a projection from the raw B-spline
-        space to the effective (centered) space.
+        An override taking ``support`` and ``counts`` evaluates its basis on
+        ``support`` (the column's distinct values) and centres it on ``counts``
+        (their weights), as this one does; one that ignores them is centred on
+        its rows, off centre under zero or unequal weights.
         """
         return _spline_build.tensor_marginal_info(
             self,

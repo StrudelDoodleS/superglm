@@ -312,8 +312,11 @@ def test_a_row_from_the_book_fills_the_risk_with_a_training_rows_values(open_lss
         train = session.model.X_train.iloc[row["index"]]
         assert row["values"]["age"] == pytest.approx(float(train["age"]))
         assert row["values"]["region"] == str(train["region"])
-        region = page.locator('#riskPanel [data-risk="a"][data-column="region"]')
-        assert region.input_value() == row["values"]["region"]
+        page.wait_for_function(
+            'level => document.querySelector(\'#riskPanel [data-risk="a"][data-column="region"]\')'
+            ".value === level",
+            arg=row["values"]["region"],
+        )
 
         page.locator('#riskPanel [data-risk="a"][data-risk-action="reset"]').click()
         reference = session.model.reference_row().iloc[0]

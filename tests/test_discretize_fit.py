@@ -2275,7 +2275,7 @@ class TestDiscretizedTensorInteraction:
         lambdas = {f"{name}:{suffix}": 2.0 for suffix, _ in gm.omega_components}
 
         rebuilt = dm_builder.rebuild_design_matrix_with_lambdas(
-            model._dm, model._groups, lambdas, np.ones(len(X)), lambdas
+            model._dm, model._groups, lambdas, np.ones(len(X))
         ).group_matrices[index]
 
         assert rebuilt is not gm
@@ -2323,7 +2323,6 @@ class TestDiscretizedTensorInteraction:
             model._groups,
             lambdas,
             np.ones(len(X)),
-            lambdas,
         )
 
         assert rebuilt.group_matrices[tensor_idx] is tensor_gm
@@ -2740,10 +2739,13 @@ def _fit_two_pairs(X, y, *, reml, decline_channel=False, decline_raw=False):
     # 64 bins per margin: each tensor observes about 4,000 of its 4,096 cells,
     # so the tensor x tensor block's n_joint (about 1.6e7) is above the
     # histogram cell cap and the displaced route is the row-expanding one.
+    # One thread, so a pooled fit does not split a block's raw stage into
+    # parts, each its own kernel call, whatever SUPERGLM_N_JOBS says.
     model = SuperGLM(
         family="poisson",
         discrete=True,
         n_bins=64,
+        n_jobs=1,
         features={name: Spline(kind="ps", k=8) for name in X.columns},
         interactions=[("x0", "x1"), ("x2", "x3")],
     )

@@ -211,7 +211,7 @@ def test_lambda_rebuilds_share_the_nesting_cache_and_rebuild_the_border() -> Non
     weights = np.ones(dm.n)
 
     def rebuild(design: DesignMatrix, lam: float) -> DesignMatrix:
-        rebuilt = rebuild_design_matrix_with_lambdas(design, groups, {"spline": lam}, weights, 1.0)
+        rebuilt = rebuild_design_matrix_with_lambdas(design, groups, {"spline": lam}, weights)
         assert rebuilt.group_matrices[1] is not design.group_matrices[1]
         return rebuilt
 

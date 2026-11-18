@@ -247,6 +247,7 @@ def _build_smooth_penalty_terms(
         SplineCategoricalGroupMatrix,
     )
     from superglm.model.fit_state import fitted_lambda2
+    from superglm.reml.penalty_algebra import resolve_component_lambda, resolve_group_lambda
 
     lambda2 = scale_penalties(fitted_lambda2(model), weight_exponent)
     group_matrices = model._dm.group_matrices
@@ -272,15 +273,13 @@ def _build_smooth_penalty_terms(
         if isinstance(gm, penalty_matrix_types):
             omega_components = getattr(gm, "omega_components", None)
             if omega_components is not None:
-                from superglm.reml.penalty_algebra import resolve_component_lambda
-
                 for suffix, omega_j in omega_components:
                     lam_j = float(resolve_component_lambda(lambda2, group.name, suffix))
                     if lam_j == 0.0:
                         continue
                     terms.append((group.sl, lam_j, omega_j, gm.R_inv))
                 continue
-            lam = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
+            lam = resolve_group_lambda(lambda2, group.name)
             lam_float = float(lam)
             if lam_float == 0.0:
                 continue
@@ -288,7 +287,7 @@ def _build_smooth_penalty_terms(
             if omega is not None:
                 terms.append((group.sl, lam_float, omega, gm.R_inv))
             continue
-        lam = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
+        lam = resolve_group_lambda(lambda2, group.name)
         lam_float = float(lam)
         if lam_float == 0.0:
             continue

@@ -389,7 +389,11 @@ def _active_penalty_components(
     ``columns`` is the term's slice in compact active coordinates and
     ``omega`` its ``S_k`` there; ``None`` is the identity on the slice.
     """
-    from superglm.reml.penalty_algebra import ssp_penalty_matrix
+    from superglm.reml.penalty_algebra import (
+        resolve_component_lambda,
+        resolve_group_lambda,
+        ssp_penalty_matrix,
+    )
 
     active_by_name = {group.name: group for group in active_groups}
     if reml_penalties is not None:
@@ -422,7 +426,7 @@ def _active_penalty_components(
             active_group = active_by_name.get(group.name)
             if active_group is None or group.scop_reparameterization is None or not group.penalized:
                 continue
-            lam = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
+            lam = resolve_group_lambda(lambda2, group.name)
             if lam > 0:
                 yield active_group.sl, lam, group.scop_reparameterization.penalty_matrix()
         return
@@ -440,15 +444,13 @@ def _active_penalty_components(
         ):
             omega_components = getattr(gm, "omega_components", None)
             if omega_components is not None:
-                from superglm.reml.penalty_algebra import resolve_component_lambda
-
                 for suffix, omega_j in omega_components:
                     lam_j = resolve_component_lambda(lambda2, group.name, suffix)
                     if lam_j == 0:
                         continue
                     yield active_group.sl, lam_j, ssp_penalty_matrix(gm.R_inv, omega_j)
                 continue
-            lam = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
+            lam = resolve_group_lambda(lambda2, group.name)
             if lam == 0:
                 continue
             omega = gm.omega
@@ -456,7 +458,7 @@ def _active_penalty_components(
                 omega = _second_diff_penalty(gm.R_inv.shape[0])
             yield active_group.sl, lam, ssp_penalty_matrix(gm.R_inv, omega)
         elif group.scop_reparameterization is not None:
-            lam = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
+            lam = resolve_group_lambda(lambda2, group.name)
             if lam == 0:
                 continue
             yield active_group.sl, lam, group.scop_reparameterization.penalty_matrix()
