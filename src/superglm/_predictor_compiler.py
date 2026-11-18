@@ -20,8 +20,10 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame
+from superglm._group_matrix._group_matrix_bins import discretize_positive_support
 from superglm._parallel import pooled_map
-from superglm.features._spline_build import qp_geometry, shape_engine
+from superglm._warn import warn_caller
+from superglm.features._spline_build import finish_penalties, qp_geometry, shape_engine
 from superglm.features._spline_penalties import structural_penalty_ranks
 from superglm.features._spline_runtime import bin_knots
 from superglm.features.categorical import Categorical
@@ -39,7 +41,7 @@ from superglm.features.ordered_categorical import (
 )
 from superglm.features.piecewise import Piecewise
 from superglm.features.polynomial import Polynomial
-from superglm.features.spline import _SplineBase
+from superglm.features.spline import _BUILT_IN_SPLINES, _SplineBase
 from superglm.group_matrix import DesignMatrix, GroupMatrix
 from superglm.types import DiscreteTensorBuildResult, FeatureSpec, GroupInfo, GroupSlice
 
@@ -48,6 +50,31 @@ from superglm.types import DiscreteTensorBuildResult, FeatureSpec, GroupInfo, Gr
 # build() patched in later, is not one of them and keeps its own build.
 _SPLINE_BUILD = _SplineBase.build
 _TENSOR_BUILD = TensorInteraction.build
+# The term types that bin: exactly these, never a subclass (``_bins_as_built_in``).
+_BINNED_TYPES = _BUILT_IN_SPLINES | {TensorInteraction, SplineCategorical, FactorSmooth}
+
+
+def _bins_as_built_in(name: str, term: Any, asks: bool) -> bool:
+    """Whether a term that ``asks`` to bin does: only when its type is exactly a built-in one.
+
+    A binned fit stands in for a term's build and basis evaluation, and its prediction for the
+    basis, so a subclass, whatever it overrides, is fitted on its rows and predicted through its
+    own methods, with a warning. An interaction on a subclass spline does not ask
+    (``should_discretize``), under that spline's warning.
+    """
+    if not asks or type(term) in _BINNED_TYPES:
+        return asks
+    remedy = (
+        "set discrete=False on it to fit it on its rows without this warning; its "
+        "interactions are fitted on their rows too"
+        if isinstance(term, _SplineBase)
+        else "set discrete=False to fit it on its rows without this warning"
+    )
+    warn_caller(
+        f"Term {name!r} is fitted on its rows, not binned: {type(term).__name__} subclasses a "
+        f"built-in term type, and only those bin. Use the built-in type to bin it, or {remedy}."
+    )
+    return False
 
 
 @dataclass(frozen=True)
@@ -219,16 +246,15 @@ def compile_predictor_design(
     # dm_builder imports this module at module scope, so these stay local:
     # hoisted, they raise a partially-initialized-module ImportError.
     from superglm.dm_builder import (
-        _discretize_spline_column,
         _priced_group_dimension,
         _process_info,
         add_interaction,
         refuse_unsupported_interaction_parents,
         resolve_discrete_n_bins,
-        should_discretize,
         should_discretize_factor_smooth,
         should_discretize_spline_categorical_interaction,
         should_discretize_tensor_interaction,
+        spline_bins,
         validate_fitted_group_names,
         validate_term_name_namespace,
     )
@@ -296,7 +322,7 @@ def compile_predictor_design(
             feature_build_weight = sample_weight
 
         # Check if this feature should use fit-time discretization
-        use_discrete = should_discretize(spec, model_discrete)
+        use_discrete = _bins_as_built_in(name, spec, spline_bins(spec, model_discrete))
         B_unique = None
         bin_idx = None
         exposure_agg = None
@@ -309,19 +335,21 @@ def compile_predictor_design(
                 omega, n_cols_penalty, projection_penalty = spec.build_knots_and_penalty(
                     x_col, feature_build_weight, n_bins_feat
                 )
-            bin_centers, bin_idx = _discretize_spline_column(
+                # ── QP monotone constraint metadata (coefficient-space, survives discretization) ──
+                constraints, monotone_engine, raw_to_solver_map = qp_geometry(
+                    spec, engine, projection_penalty
+                )
+            bin_centers, bin_idx = discretize_positive_support(
                 x_col,
                 n_bins_feat,
                 feature_build_weight,
                 bin_knots(spec, x_col, feature_build_weight),
             )
-            B_unique = spec._raw_basis_matrix(bin_centers)
+            # A bin is read on the basis the unbinned build and prediction read
+            # their rows on, under the extrapolation policy. Only splines bin
+            # (should_discretize).
+            B_unique = cast(_SplineBase, spec)._basis_matrix(bin_centers).toarray()
             exposure_agg = np.bincount(bin_idx, weights=sample_weight, minlength=len(bin_centers))
-
-            # ── QP monotone constraint metadata (coefficient-space, survives discretization) ──
-            constraints, monotone_engine, raw_to_solver_map = qp_geometry(
-                spec, engine, projection_penalty
-            )
 
             if getattr(spec, "select", False):
                 n_null = 1
@@ -377,19 +405,21 @@ def compile_predictor_design(
                 infos[0].structural_ranks = structural_penalty_ranks(spec, infos[0])
             else:
                 infos = [
-                    GroupInfo(
-                        columns=None,
-                        n_cols=n_cols_penalty,
-                        penalty_matrix=omega,
-                        reparametrize=(spec.penalty == "ssp"),
-                        projection=projection_penalty,
-                        penalty_components=getattr(spec, "_penalty_components", None),
-                        constraints=constraints,
-                        monotone_engine=monotone_engine,
-                        raw_to_solver_map=raw_to_solver_map,
+                    finish_penalties(
+                        spec,
+                        GroupInfo(
+                            columns=None,
+                            n_cols=n_cols_penalty,
+                            penalty_matrix=omega,
+                            reparametrize=(spec.penalty == "ssp"),
+                            projection=projection_penalty,
+                            penalty_components=getattr(spec, "_penalty_components", None),
+                            constraints=constraints,
+                            monotone_engine=monotone_engine,
+                            raw_to_solver_map=raw_to_solver_map,
+                        ),
                     )
                 ]
-                infos[0].structural_ranks = structural_penalty_ranks(spec, infos[0])
         else:
             with _feature_named_messages(name):
                 if isinstance(spec, OrderedCategorical):
@@ -508,6 +538,8 @@ def compile_predictor_design(
     # Discrete tensors are numbered in interaction order before any term
     # builds, and every parent column is read here, once, on this thread.
     tensor_ids: dict[str, int] = {}
+    # Each interaction's (tensor, by-level, factor-smooth) binned route.
+    binned_routes: dict[str, tuple[bool, bool, bool]] = {}
     # Each build is priced from its parents' main-effect widths, or a tensor's
     # override margins; the pool is sized by the largest
     # (``_interaction_build_row_bytes``).
@@ -526,15 +558,20 @@ def compile_predictor_design(
             )
         for parent in ispec.parent_names:
             X.column_array(parent)
-        binned_tensor = should_discretize_tensor_interaction(ispec, specs, model_discrete)
-        if binned_tensor:
+        # At most one route asks, by the term's type; the builds below read it.
+        routes = tuple(
+            _bins_as_built_in(iname, ispec, asks)
+            for asks in (
+                should_discretize_tensor_interaction(ispec, specs, model_discrete),
+                should_discretize_spline_categorical_interaction(ispec, specs, model_discrete),
+                should_discretize_factor_smooth(ispec, model_discrete),
+            )
+        )
+        binned_routes[iname] = cast("tuple[bool, bool, bool]", routes)
+        if routes[0]:
             tensor_ids[iname] = _next_tensor_id
             _next_tensor_id += 1
-        binned = (
-            binned_tensor
-            or should_discretize_spline_categorical_interaction(ispec, specs, model_discrete)
-            or should_discretize_factor_smooth(ispec, model_discrete)
-        )
+        binned = any(routes)
         a, b = (max(widths.get(parent, 1), 1) for parent in ispec.parent_names)
         if isinstance(ispec, TensorInteraction) and ispec._n_knots is not None:
             # An n_knots override builds its margins at that knot count, whose
@@ -578,16 +615,9 @@ def compile_predictor_design(
             if scan_curves and isinstance(ispec, SplineCategorical)
             else None
         )
-        use_discrete_tensor = should_discretize_tensor_interaction(ispec, specs, model_discrete)
-        use_discrete_spline_cat = should_discretize_spline_categorical_interaction(
-            ispec,
-            specs,
-            model_discrete,
-        )
-        use_discrete_factor_smooth = should_discretize_factor_smooth(
-            ispec,
-            model_discrete,
-        )
+        use_discrete_tensor, use_discrete_spline_cat, use_discrete_factor_smooth = binned_routes[
+            iname
+        ]
         B_unique_inter = None
         bin_idx_inter = None
         exposure_agg_inter = None

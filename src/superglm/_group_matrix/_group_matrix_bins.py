@@ -70,13 +70,14 @@ def discretize_column(
     into their range. Which spans and cells hold rows depends only on the
     values present, zero-weight rows included, and the equal-width bins
     themselves never read the weights. A caller that should not let
-    zero-weight rows shape the support leaves them out (the main-effect site
-    of a binned fit does; the interaction sites bin every row).
+    zero-weight rows shape the support leaves them out, as every site of a
+    binned fit does (``discretize_positive_support``).
 
     The width shares are formed on the column scaled by a power of two to
     magnitude at most one, which is exact and changes no share of a column
     whose widths are finite, so a column near the float64 limit allocates its
-    cells without overflow.
+    cells without overflow; a column whose range itself overflows is cut on
+    the halved range.
 
     Returns the support points (sorted) and each row's index into them.
     """
@@ -91,10 +92,17 @@ def discretize_column(
     lo, hi = float(x.min()), float(x.max())
     if lo == hi:
         return np.array([lo]), np.zeros(len(x), dtype=np.intp)
-    edges = np.linspace(lo, hi, n_bins + 1)
+    # linspace forms hi - lo, which overflows on a column spanning both float64
+    # extremes; there the edges are cut on the halved interval, and halving is exact.
+    edges = (
+        np.linspace(lo, hi, n_bins + 1)
+        if np.isfinite(hi - lo)
+        else 2.0 * np.linspace(0.5 * lo, 0.5 * hi, n_bins + 1)
+    )
     bin_of_value = np.clip(np.searchsorted(edges, unique_vals, side="right") - 1, 0, n_bins - 1)
     bin_idx = bin_of_value[inverse]
-    bin_centers = 0.5 * (edges[:-1] + edges[1:])
+    # Halved before the sum, which cannot then overflow; halving is exact.
+    bin_centers = 0.5 * edges[:-1] + 0.5 * edges[1:]
     if knots is None or n_bins < _MIN_CELLS:
         return bin_centers, bin_idx
 
@@ -115,6 +123,46 @@ def discretize_column(
     if n_held < _MIN_CELLS and n_held < np.unique(bin_of_value).size:
         return bin_centers, bin_idx
     return support, cell_of_value[inverse].astype(np.intp)
+
+
+def discretize_positive_support(
+    x: NDArray,
+    n_bins: int,
+    geometry_weight: NDArray | None,
+    knots: NDArray | None = None,
+) -> tuple[NDArray, NDArray]:
+    """Discretize on the positive-frequency support and map every fit row.
+
+    ``knots`` are the knots the bins follow (``bin_knots``: the spline's,
+    plus its ranges' cuts), so the bins resolve its pieces
+    (``discretize_column``), and the active rows count by their geometry
+    weight, as they do for the knots. Zero-frequency rows keep a valid bin
+    index (the design keeps its physical row count) but do not shape the
+    support: a row no fit sees cannot set the bins every other row is read
+    in. They map to the nearest active support point, and their zero weight
+    moves no coefficient. Every binned site, main effect and interaction,
+    bins its spline column here.
+    """
+    values = np.asarray(x, dtype=np.float64).ravel()
+    if geometry_weight is None:
+        return discretize_column(values, n_bins, knots)
+
+    weights = np.asarray(geometry_weight, dtype=np.float64).ravel()
+    active = weights > 0.0
+    if np.all(active):
+        return discretize_column(values, n_bins, knots, weights)
+
+    support, active_index = discretize_column(values[active], n_bins, knots, weights[active])
+    if len(support) == 1:
+        full_index = np.zeros(len(values), dtype=np.intp)
+    else:
+        insertion = np.searchsorted(support, values)
+        right = np.clip(insertion, 0, len(support) - 1)
+        left = np.clip(insertion - 1, 0, len(support) - 1)
+        choose_right = np.abs(values - support[right]) <= np.abs(values - support[left])
+        full_index = np.where(choose_right, right, left).astype(np.intp)
+    full_index[active] = active_index
+    return support, full_index
 
 
 def _value_mass(inverse: NDArray, n_values: int, weights: NDArray | None, n_rows: int) -> NDArray:
@@ -269,4 +317,4 @@ def _adaptive_bins(
     return support, cell_of_value
 
 
-__all__ = ["discretize_column"]
+__all__ = ["discretize_column", "discretize_positive_support"]

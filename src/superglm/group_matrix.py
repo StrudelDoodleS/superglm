@@ -26,7 +26,6 @@ from ._group_matrix._group_matrix_bin_space import (
     MixedBinSpaceCenteringPlan,
     build_mixed_bin_space_centering_plan,
 )
-from ._group_matrix._group_matrix_bins import discretize_column
 from ._group_matrix._group_matrix_core import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
@@ -71,16 +70,6 @@ DiscretizedSCOPGroupMatrix.__module__ = __name__
 DiscretizedSplineCategoricalGroupMatrix.__module__ = __name__
 SupportCompressedSplineCategoricalGroupMatrix.__module__ = __name__
 DiscretizedTensorGroupMatrix.__module__ = __name__
-
-
-def _discretize_column(
-    x: NDArray,
-    n_bins: int = 256,
-    knots: NDArray | None = None,
-    weights: NDArray | None = None,
-) -> tuple[NDArray, NDArray]:
-    """Compatibility wrapper for the private discretization helper."""
-    return cast(tuple[NDArray, NDArray], discretize_column(x, n_bins, knots, weights))
 
 
 GroupMatrix = (

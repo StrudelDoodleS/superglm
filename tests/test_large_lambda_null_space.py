@@ -30,13 +30,19 @@ X_GRID = np.linspace(0.0, 1.0, 200)
 Y = 1.0 + 2.0 * X_GRID + 0.1 * np.random.default_rng(468).standard_normal(X_GRID.size)
 
 
-def _fit(kind: str, penalty: str, route: str, lam: float) -> SuperGLM:
+def _fit(kind: str, penalty: str, route: str, lam: float, discrete: bool = False) -> SuperGLM:
     if route == "fit":
         spline, extra = Spline(kind=kind, n_knots=8, penalty=penalty), {"spline_penalty": lam}
     else:
         policy = LambdaPolicy.fixed(lam)
         spline, extra = Spline(kind=kind, n_knots=8, penalty=penalty, lambda_policy=policy), {}
-    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"x": spline}, **extra)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": spline},
+        discrete=discrete,
+        **extra,
+    )
     frame = pd.DataFrame({"x": X_GRID})
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -46,7 +52,7 @@ def _fit(kind: str, penalty: str, route: str, lam: float) -> SuperGLM:
 
 def _null_space_fit(model: SuperGLM, kind: str) -> np.ndarray:
     if kind == "ps":
-        basis = model._dm.group_matrices[0].B.toarray()
+        basis = model._specs["x"]._raw_basis_matrix(X_GRID)
         null = basis @ np.arange(basis.shape[1], dtype=np.float64)
     else:
         null = X_GRID
@@ -54,12 +60,14 @@ def _null_space_fit(model: SuperGLM, kind: str) -> np.ndarray:
     return design @ np.linalg.lstsq(design, Y, rcond=None)[0]
 
 
+# The 200 grid values sit under the 256 bins, so the binned fit is the exact one.
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "binned"])
 @pytest.mark.parametrize("lam", [1e14, 1e18])
 @pytest.mark.parametrize("route", ["fit", "fit_reml"])
 @pytest.mark.parametrize("penalty", ["none", "ssp"])
 @pytest.mark.parametrize("kind", ["cr", "bs", "ps", "cr_cardinal"])
-def test_a_large_penalty_fits_its_null_space(kind, penalty, route, lam):
-    model = _fit(kind, penalty, route, lam)
+def test_a_large_penalty_fits_its_null_space(kind, penalty, route, lam, discrete):
+    model = _fit(kind, penalty, route, lam, discrete)
     reference = _null_space_fit(model, kind)
     predictions = model.predict(pd.DataFrame({"x": X_GRID}))
     # The solve runs in coordinates conditioned up to 1/sqrt(u) (an SSP map

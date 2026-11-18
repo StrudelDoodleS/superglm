@@ -176,9 +176,9 @@ def test_discretize_gates_refuse_oc_parents_that_pass_the_spline_duck_type():
     # duck type, the discrete paths must still refuse it, because they read the
     # raw parent columns as float64 and an OC column holds labels, not numbers.
     oc = _SplineBackedOC(order=BANDS, basis=Spline(kind="ps", n_knots=4))
-    from superglm.dm_builder import should_discretize
+    from superglm.dm_builder import spline_bins
 
-    assert should_discretize(oc, True) is True  # the guard is the only refusal left
+    assert spline_bins(oc, True) is True  # it asks to bin, as a spline does
 
     power = Spline(kind="ps", n_knots=5)
     tensor = TensorInteraction("age_band", "power")

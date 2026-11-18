@@ -40,7 +40,6 @@ from superglm.group_matrix import (
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
     SupportCompressedSplineCategoricalGroupMatrix,
-    _discretize_column,
 )
 from superglm.links import Link, resolve_link
 from superglm.solvers._structured.selection import carry_nesting_cache
@@ -158,7 +157,10 @@ def _whitening_map(G: NDArray, omega: NDArray, lam2: float) -> NDArray:
 
 
 def _dominant_penalty_eigenbasis(
-    info: GroupInfo, sample_weight: NDArray, lambda2: float | dict
+    info: GroupInfo,
+    columns: NDArray | sp.spmatrix | None,
+    weights: NDArray | None,
+    lambda2: float | dict,
 ) -> NDArray | None:
     """The eigenbasis of a raw block's penalty where it outweighs the data by ``1/sqrt(u)``.
 
@@ -168,29 +170,42 @@ def _dominant_penalty_eigenbasis(
     coordinate axes and keeps the formed penalty to second order (Wood, Pya
     & Safken 2016, sec. 3.1.1), and the penalty dominates every range
     direction, so the turn costs the data's column scaling nothing.
+    ``columns`` and ``weights`` are the block's raw rows and their weights:
+    a binned block's distinct rows and bin weights.
     """
     omega = info.penalty_matrix
-    if omega is None or info.columns is None or len(info.penalty_components or ()) > 1:
+    if omega is None or columns is None or len(info.penalty_components or ()) > 1:
         return None
     penalty = _resolve_lambda2(lambda2) * float(np.max(np.diag(omega)))
-    columns = sp.csr_matrix(info.columns)
-    data = float(np.max(columns.multiply(columns).T @ sample_weight, initial=0.0))
+    columns = sp.csr_matrix(columns)
+    data = float(np.max(columns.multiply(columns).T @ weights, initial=0.0))
     if penalty * np.sqrt(UNIT_ROUNDOFF) <= data:
         return None
     return np.linalg.eigh(omega)[1]
 
 
-def should_discretize(spec: FeatureSpec, model_discrete: bool) -> bool:
-    """Check if a feature spec should use fit-time discretization."""
+def spline_bins(spec: FeatureSpec, model_discrete: bool) -> bool:
+    """Whether a spline asks to bin at fit time: its own ``discrete``, else the model's.
+
+    Every penalty option bins; ``"none"`` holds its raw basis in the binned block.
+    """
     from superglm.features.spline import _SplineBase
 
     if not isinstance(spec, _SplineBase):
         return False
-    if spec.penalty != "ssp":
-        return False
     if spec.discrete is not None:
         return spec.discrete
     return model_discrete
+
+
+def should_discretize(spec: FeatureSpec, model_discrete: bool) -> bool:
+    """Check if a spline bins at fit time: it asks to (``spline_bins``) and is a built-in type.
+
+    A subclass, whatever it overrides, is fitted on its rows, and so are its interactions.
+    """
+    from superglm.features.spline import _BUILT_IN_SPLINES
+
+    return type(spec) in _BUILT_IN_SPLINES and spline_bins(spec, model_discrete)
 
 
 def should_discretize_tensor_interaction(
@@ -274,44 +289,6 @@ def knot_geometry_weight(sample_weight, weight_semantics: str):
     if sample_weight is None or weight_semantics != PRIOR_WEIGHTS:
         return sample_weight
     return (np.asarray(sample_weight, dtype=np.float64) > 0.0).astype(np.float64)
-
-
-def _discretize_spline_column(
-    x: NDArray,
-    n_bins: int,
-    geometry_weight: NDArray | None,
-    knots: NDArray | None = None,
-) -> tuple[NDArray, NDArray]:
-    """Discretize on the positive-frequency support and map every fit row.
-
-    ``knots`` are the knots the bins follow (``bin_knots``: the spline's,
-    plus its ranges' cuts), so the bins resolve its pieces
-    (``discretize_column``), and the active rows count by their geometry
-    weight, as they do for the knots. Zero-frequency rows keep a valid bin index (the
-    design keeps its physical row count) but do not shape the support: they
-    map to the nearest active support point, as clipped spline evaluation
-    would.
-    """
-    values = np.asarray(x, dtype=np.float64).ravel()
-    if geometry_weight is None:
-        return _discretize_column(values, n_bins, knots)
-
-    weights = np.asarray(geometry_weight, dtype=np.float64).ravel()
-    active = weights > 0.0
-    if np.all(active):
-        return _discretize_column(values, n_bins, knots, weights)
-
-    support, active_index = _discretize_column(values[active], n_bins, knots, weights[active])
-    if len(support) == 1:
-        full_index = np.zeros(len(values), dtype=np.intp)
-    else:
-        insertion = np.searchsorted(support, values)
-        right = np.clip(insertion, 0, len(support) - 1)
-        left = np.clip(insertion - 1, 0, len(support) - 1)
-        choose_right = np.abs(values - support[right]) <= np.abs(values - support[left])
-        full_index = np.where(choose_right, right, left).astype(np.intp)
-    full_index[active] = active_index
-    return support, full_index
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -698,6 +675,12 @@ def _process_info(
     """
     use_discrete = B_unique is not None
     use_tensor = tensor_build is not None
+    if isinstance(info.columns, np.ndarray) and (
+        info.penalty_matrix is not None or info.penalty_components is not None
+    ):
+        # Only a sparse block carries a penalty, so dense penalised columns (a
+        # build() override's) are held sparse, keeping the penalty they came with.
+        info.columns = sp.csr_matrix(info.columns)
     R_inv: NDArray | None = None
     # R_inv_local: SSP transform in post-identifiability space (projected -> solver).
     # Used to compose constraints that are already in post-identifiability space.
@@ -797,8 +780,17 @@ def _process_info(
             R_inv_local = compute_projected_R_inv(B_for, P, info.penalty_matrix, exp_for, lambda2)
             R_inv = P @ R_inv_local
         else:
+            # A binned main effect is read on its distinct rows and bin weights.
+            # A binned tensor has no columns and one penalty per margin, so the
+            # turn never applies to it.
+            binned = use_discrete and not use_tensor
             R_inv_local = (
-                _dominant_penalty_eigenbasis(info, sample_weight, lambda2)
+                _dominant_penalty_eigenbasis(
+                    info,
+                    B_unique if binned else info.columns,
+                    exposure_agg if binned else sample_weight,
+                    lambda2,
+                )
                 if eigenbasis_turn
                 else None
             )
@@ -872,18 +864,23 @@ def _process_info(
     else:
         n_cols = info.n_cols
         R_inv = None
-        if use_tensor:
-            gm = DiscretizedTensorGroupMatrix(
-                tensor_build.B1_unique,
-                tensor_build.B2_unique,
-                tensor_build.idx1,
-                tensor_build.idx2,
-                B_unique,
-                np.eye(info.n_cols, dtype=np.float64),
-                bin_idx,
-                tensor_id=tensor_id,
-                raw_channels=tensor_build.raw_channels,
-            )
+        if use_discrete:
+            # A binned block without a projection holds its bins' rows unmapped.
+            identity = np.eye(info.n_cols, dtype=np.float64)
+            if use_tensor:
+                gm = DiscretizedTensorGroupMatrix(
+                    tensor_build.B1_unique,
+                    tensor_build.B2_unique,
+                    tensor_build.idx1,
+                    tensor_build.idx2,
+                    B_unique,
+                    identity,
+                    bin_idx,
+                    tensor_id=tensor_id,
+                    raw_channels=tensor_build.raw_channels,
+                )
+            else:
+                gm = DiscretizedSSPGroupMatrix(B_unique, identity, bin_idx)
             if info.penalty_matrix is not None:
                 gm.omega = info.penalty_matrix
             if info.penalty_components is not None:
@@ -1370,6 +1367,7 @@ def rebuild_design_matrix_with_lambdas(
             new_gm.omega_components = gm.omega_components
             new_gm.component_types = gm.component_types
             new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
+            new_gm.lambda_policies = gm.lambda_policies
             new_gms.append(new_gm)
         elif isinstance(gm, DiscretizedSSPGroupMatrix) and _group_has_lambda(gm, g, lambdas):
             if gm.omega is None:
@@ -1392,6 +1390,7 @@ def rebuild_design_matrix_with_lambdas(
             new_gm.omega_components = gm.omega_components
             new_gm.component_types = gm.component_types
             new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
+            new_gm.lambda_policies = gm.lambda_policies
             new_gms.append(new_gm)
         else:
             new_gms.append(gm)

@@ -127,8 +127,12 @@ def _warn_if_saved_on_scop(spec: Any) -> None:
 
 
 def _raise_if_unsupported_fit_shape_constraint(spec: Any) -> None:
-    """Reject fit-time shape constraints that no current engine can build."""
-    if not _uses_fit_time_shape_constraints(spec) or shape_engine(spec) is not None:
+    """Reject fit-time shape constraints that no current engine can build, or under ``select``."""
+    if not _uses_fit_time_shape_constraints(spec):
+        return
+    if shape_engine(spec) is not None:
+        if spec.select:
+            raise NotImplementedError(fit_time_select_message(rules_of(spec)))
         return
     rules = rules_of(spec)
     token = postfit_token(rules)
@@ -250,10 +254,6 @@ def build_group_info(
     clear_scop_state(spec)
     engine = shape_engine(spec)
 
-    if _uses_fit_time_shape_constraints(spec):
-        if spec.select:
-            raise NotImplementedError(fit_time_select_message(rules_of(spec)))
-
     x = np.asarray(x, dtype=np.float64).ravel()
     spec._place_knots(x, sample_weight)
     spec._validate_m_orders_build()
@@ -324,6 +324,15 @@ def build_group_info(
         monotone_engine=monotone_engine,
         raw_to_solver_map=raw_to_solver_map,
     )
+    return _with_row_support(finish_penalties(spec, info), value_rows, index, full)
+
+
+def finish_penalties(spec: Any, info: GroupInfo) -> GroupInfo:
+    """``info`` with the spec's lambda policies, then the rank of each named penalty.
+
+    A ``lambda_policy`` names a one-penalty term's penalty ``"wiggle"``, and the
+    ranks are keyed by penalty name, so they are found after it.
+    """
     if (
         spec._lambda_policy is not None
         and info.penalty_components is None
@@ -333,7 +342,7 @@ def build_group_info(
         info.component_types = {"wiggle": "difference"}
     info.lambda_policies = spec._resolve_lambda_policies(info)
     info.structural_ranks = structural_penalty_ranks(spec, info)
-    return _with_row_support(info, value_rows, index, full)
+    return info
 
 
 def build_knots_and_penalty(

@@ -26,6 +26,7 @@ import scipy.sparse as sp
 from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
+from superglm._group_matrix._group_matrix_bins import discretize_positive_support
 from superglm.features import _basis_kernels
 from superglm.features._spline_config import SplineOptionWarning
 from superglm.features._spline_penalties import _gapped_rank, structural_penalty_ranks
@@ -40,7 +41,6 @@ from superglm.features.categorical import (
     _validate_missing_only,
     _warn_unseen_routed,
 )
-from superglm.group_matrix import _discretize_column
 from superglm.solvers.rank import SHARED_RANK_POLICY, _eigensolver_relative_bar
 from superglm.types import (
     DiscreteTensorBuildResult,
@@ -587,8 +587,8 @@ class SplineCategorical:
             x_spline, x_cat, parent_specs, sample_weight
         )
 
-        support, bin_idx = _discretize_column(
-            x_spline, int(n_bins), bin_knots(spline_spec, x_spline, sample_weight), sample_weight
+        support, bin_idx = discretize_positive_support(
+            x_spline, int(n_bins), sample_weight, bin_knots(spline_spec, x_spline, sample_weight)
         )
         B_unique = np.asarray(spline_spec._raw_basis_matrix(support), dtype=np.float64)
 
@@ -2383,8 +2383,8 @@ class TensorInteraction:
             )
             support = counts = None
             if n_bins is not None:
-                support, idx = _discretize_column(
-                    x, n_bins, bin_knots(candidate, x, geometry_weight), geometry_weight
+                support, idx = discretize_positive_support(
+                    x, n_bins, geometry_weight, bin_knots(candidate, x, geometry_weight)
                 )
                 counts = np.bincount(idx, weights=geometry_weight, minlength=len(support))
                 bins.append((support, idx))

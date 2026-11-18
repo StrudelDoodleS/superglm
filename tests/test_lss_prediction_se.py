@@ -1251,8 +1251,10 @@ def test_error_extrapolation_gives_one_answer_at_every_call_size(rows):
 
 def test_a_tensor_margin_reads_the_kernels_only_for_the_stock_raw_basis(monkeypatch):
     """A spline subclass may hand a tensor its own evaluation and inherit the stock basis, so the
-    question is which method came, at every call size. Mutation check: asking only whether the
-    spec's class overrides the stock method reads the stock rows for the custom one."""
+    question is which method came, at every call size: the kernels read only a built-in spline's
+    stock raw basis, and a subclass's, inherited or not, is its own to evaluate. Mutation check:
+    asking only whether the spec's class overrides the stock method reads the stock rows for the
+    custom one."""
 
     class Doubled(PSpline):
         def doubled(self, x):
@@ -1266,9 +1268,12 @@ def test_a_tensor_margin_reads_the_kernels_only_for_the_stock_raw_basis(monkeypa
         np.testing.assert_array_equal(
             _basis_kernels.dense_raw_basis(spec.doubled, x), spec.doubled(x)
         )
+    stock = PSpline(n_knots=6)
+    stock.build(np.linspace(0.0, 1.0, 101))
     marker = np.zeros((1, 9))
     monkeypatch.setattr(_basis_kernels, "_evaluations", lambda _rows: (lambda *_: marker, None))
-    assert _basis_kernels.dense_raw_basis(spec._raw_basis_matrix, points[:1]) is marker
+    assert _basis_kernels.dense_raw_basis(stock._raw_basis_matrix, points[:1]) is marker
+    assert _basis_kernels.dense_raw_basis(spec._raw_basis_matrix, points[:1]) is not marker
 
 
 def test_a_read_only_column_and_a_writable_one_share_each_kernels_one_signature():

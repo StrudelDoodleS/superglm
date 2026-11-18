@@ -720,8 +720,8 @@ class FactorSmooth:
     ) -> GroupInfo:
         """Build compact support-space geometry with a fixed natural basis."""
         del specs
+        from superglm._group_matrix._group_matrix_bins import discretize_positive_support
         from superglm.features._spline_runtime import bin_knots
-        from superglm.group_matrix import _discretize_column
 
         numeric = self._validate_numeric(x)
         # Same geometry rule as the exact path; only the final evaluated basis
@@ -737,8 +737,8 @@ class FactorSmooth:
         spline = self._spline
         if spline is None:  # pragma: no cover - populated by _build_marginal
             raise RuntimeError("FactorSmooth marginal spline was not initialized.")
-        support, bin_idx = _discretize_column(
-            numeric, n_bins, bin_knots(spline, numeric, sample_weight), sample_weight
+        support, bin_idx = discretize_positive_support(
+            numeric, n_bins, sample_weight, bin_knots(spline, numeric, sample_weight)
         )
         basis_unique = spline._raw_basis_matrix(support)
         return self._group_info(

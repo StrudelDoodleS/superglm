@@ -87,12 +87,12 @@ class _SplineBase:
         ``knot_strategy`` are ignored. Use this for reproducibility
         across refits with different data.
     discrete : bool or None
-        If True, discretize the covariate into at most ``n_bins`` bins that
-        follow its knots and rows at fit time: O(n) algebra becomes O(n_bins).
-        If None (default), defers to the model-level ``discrete`` setting.
+        If True, bin the covariate at fit time into at most ``n_bins`` bins on its knots and rows:
+        O(n) algebra becomes O(n_bins). If None (default), defers to the model-level ``discrete``.
+        A subclass is fitted on its rows by its own methods, with a warning, as are its
+        interactions. A method patched onto a built-in class or instance is not supported.
     n_bins : int or None
-        Number of bins for discretization. Only used when
-        ``discrete=True``. If None (default), defers to the model-level
+        Number of bins when the column bins. If None (default), defers to the model-level
         ``n_bins`` setting (which defaults to 256).
     extrapolation : {"clip", "extend", "error"}
         Prediction-time behavior outside the training range. ``"clip"``
@@ -127,6 +127,9 @@ class _SplineBase:
     # ``(value, label)`` of each level when the spline is an ordered term's basis,
     # so a message names levels rather than their values; None otherwise.
     _axis_levels: tuple[tuple[float, Any], ...] | None = None
+    # The default policy (REML estimates the smoothing parameter), for a spline
+    # pickled before the field existed.
+    _lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None
 
     # Configuration and build-time state, assigned by ``_spline_config`` and by the
     # build helpers in ``_spline_runtime`` and ``_spline_cardinal_spec``. Annotations
@@ -149,7 +152,6 @@ class _SplineBase:
     _explicit_boundary: tuple[float, float] | None
     _knot_strategy_actual: str
     _difference_penalty: dict[int, str]
-    _lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None
     _lo: float
     _hi: float
 
@@ -1093,6 +1095,13 @@ class CardinalCRSpline(_SplineBase):
         return _spline_cardinal_spec.reconstruct(self, beta, n_points=n_points)
 
     # tensor_marginal_ingredients: inherited from _SplineBase
+
+
+#: The spline types that bin at fit time and that the compiled kernels evaluate: exactly these.
+#: A subclass, whatever it overrides, is fitted and predicted through its own methods.
+_BUILT_IN_SPLINES = frozenset(
+    {PSpline, BSplineSmooth, NaturalSpline, CubicRegressionSpline, CardinalCRSpline}
+)
 
 
 # ═══════════════════════════════════════════════════════════════════
