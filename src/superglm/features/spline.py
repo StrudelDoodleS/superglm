@@ -59,7 +59,10 @@ class _SplineBase:
     """Base class for all spline feature specs.
 
     Subclasses must implement ``_build_penalty()`` and may override
-    ``_constraint_rows()`` to add boundary constraints.
+    ``_constraint_rows()`` to add boundary constraints. To change the basis,
+    override ``_basis_matrix()``: ``build`` reads it, and predictions and
+    curves read it through the module's ``transform``, so overriding
+    ``transform`` alone changes nothing the fit uses.
 
     Basis capability attributes (override in subclasses):
         _penalty_semantics : how the penalty is computed
@@ -461,6 +464,12 @@ class _SplineBase:
         Returns a ``TensorMarginalInfo`` with the centered+constrained
         marginal basis, penalty, and a projection from the raw B-spline
         space to the effective (centered) space.
+
+        An override that takes ``support`` and ``counts`` must evaluate its
+        basis on ``support`` (the column's distinct values) and centre it on
+        ``counts`` (their weights), as this one does. One that accepts them
+        and ignores them is centred on its rows, so zero or unequal weights
+        put the margin off centre.
         """
         return _spline_build.tensor_marginal_info(
             self,
