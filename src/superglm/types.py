@@ -409,6 +409,11 @@ class TensorMarginalInfo:
     # ``tensor_marginal_info`` evaluated so, and read with ``getattr``;
     # ``replace`` drops it, so no derived or stored margin keeps it.
     distinct: tuple[NDArray, NDArray] = field(init=False, repr=False, compare=False)
+    # Whether ``basis`` was evaluated on the discrete support it was given
+    # (``tensor_marginal_info(support=...)``), not on the rows. Only that
+    # function sets it, and ``replace`` drops it, so a basis it did not
+    # evaluate, whatever its length, is evaluated on the support again.
+    on_support: bool = field(default=False, init=False, repr=False, compare=False)
 
 
 # ── Tensor raw band ────────────────────────────────────────────

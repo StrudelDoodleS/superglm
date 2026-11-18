@@ -12,9 +12,21 @@ from superglm._group_matrix._group_matrix_bins import discretize_column
 from superglm.distributional.predictor import ShapeConstraintIgnoredWarning
 from superglm.features import interaction as interaction_module
 from superglm.features.categorical import Categorical
+from superglm.features.factor_smooth import FactorSmooth
+from superglm.features.interaction import SplineCategorical, TensorInteraction
 from superglm.features.numeric import Numeric
-from superglm.features.spline import CubicRegressionSpline, NaturalSpline, PSpline, Spline
-from superglm.group_matrix import DiscretizedSSPGroupMatrix, DiscretizedTensorGroupMatrix
+from superglm.features.spline import (
+    CubicRegressionSpline,
+    NaturalSpline,
+    PSpline,
+    Spline,
+    _SplineBase,
+)
+from superglm.group_matrix import (
+    DiscretizedSplineCategoricalGroupMatrix,
+    DiscretizedSSPGroupMatrix,
+    DiscretizedTensorGroupMatrix,
+)
 
 
 @pytest.fixture
@@ -94,6 +106,71 @@ class _DoubledPSpline(PSpline):
 
     def _basis_matrix(self, x):
         return 2.0 * super()._basis_matrix(x)
+
+
+class _StiffTensor(TensorInteraction):
+    """A tensor interaction whose own ``build()`` multiplies its penalties by 1000."""
+
+    def build(self, x1, x2, parent_specs, sample_weight=None, **kwargs):
+        info = super().build(x1, x2, parent_specs, sample_weight=sample_weight, **kwargs)
+        info.penalty_matrix = 1000.0 * info.penalty_matrix
+        info.penalty_components = [
+            (name, 1000.0 * omega) for name, omega in info.penalty_components
+        ]
+        return info
+
+
+def _stiffened(groups):
+    for info in groups:
+        info.penalty_matrix = 1000.0 * info.penalty_matrix
+    return groups
+
+
+class _StiffByLevel(SplineCategorical):
+    """A spline-by-category interaction whose own ``build()`` multiplies its penalty by 1000."""
+
+    def build(self, x_spline, x_cat, parent_specs, sample_weight=None, **kwargs):
+        return _stiffened(super().build(x_spline, x_cat, parent_specs, sample_weight, **kwargs))
+
+
+class _StiffBinnedByLevel(_StiffByLevel):
+    """The same, with its own binned build, which stiffens the penalty as its build does."""
+
+    def build_discrete(self, x_spline, x_cat, parent_specs, n_bins, sample_weight=None, **kwargs):
+        return _stiffened(
+            super().build_discrete(x_spline, x_cat, parent_specs, n_bins, sample_weight, **kwargs)
+        )
+
+
+class _StiffFactorSmooth(FactorSmooth):
+    """A factor smooth whose own ``build()`` multiplies its penalties by 1000."""
+
+    def build(self, x, group, specs, sample_weight=None):
+        info = super().build(x, group, specs, sample_weight)
+        info.repeated_penalty_components = [
+            (name, 1000.0 * omega) for name, omega in info.repeated_penalty_components
+        ]
+        return info
+
+
+class _MarginDroppingSupport(PSpline):
+    """A P-spline whose tensor margin takes the support keywords and drops them."""
+
+    def tensor_marginal_ingredients(self, x, **kwargs):
+        return super().tensor_marginal_ingredients(x)
+
+
+def _named(interaction, name):
+    """An explicit interaction spec under ``name``, as ``interactions=`` takes one."""
+    interaction.name = name
+    return interaction
+
+
+def _grid_frame(n_side):
+    """``x`` and ``z`` on an ``n_side`` by ``n_side`` grid over the unit square, a level by ``z``."""
+    axis = np.linspace(0.0, 1.0, n_side)
+    x, z = (values.ravel() for values in np.meshgrid(axis, axis))
+    return pd.DataFrame({"x": x, "z": z, "c": np.where(z < 0.5, "a", "b")})
 
 
 class TestDiscretizedFit:
@@ -368,7 +445,8 @@ class TestDiscretizedFit:
             return model
 
         wave = 10.0 * np.sin(2.0 * np.pi * x)
-        stiff = fitted(_StiffPSpline, True, wave, 0.1)
+        with pytest.warns(UserWarning, match="Term 'x' is fitted on its rows, not binned"):
+            stiff = fitted(_StiffPSpline, True, wave, 0.1)
         assert not isinstance(stiff._dm.group_matrices[0], DiscretizedSSPGroupMatrix)
         np.testing.assert_array_equal(
             stiff.predict(X), fitted(_StiffPSpline, False, wave, 0.1).predict(X)
@@ -466,6 +544,408 @@ class TestDiscretizedFit:
             warnings.simplefilter("ignore", ShapeConstraintIgnoredWarning)
             with pytest.raises(NotImplementedError, match="not supported with select=True"):
                 getattr(model, route)(pd.DataFrame({"x": x}), 1.0 + 2.0 * x)
+
+    @pytest.mark.parametrize("interaction", [("a", "b"), ("a", "c")], ids=["tensor", "by_level"])
+    def test_a_parent_with_its_own_build_leaves_its_interactions_binned(self, interaction):
+        """A spline fitted on its rows by its own ``build()`` still has its interactions binned.
+
+        Binning would replace the spline's ``build()``, so its main effect is
+        fitted on its rows, with a warning naming it. Its interactions never
+        call that ``build()``: they read its knots, basis and penalty, so they
+        bin as the model asks.
+        """
+        rng = np.random.default_rng(664)
+        n = 4000
+        X = pd.DataFrame(
+            {
+                "a": rng.uniform(0.0, 1.0, n),
+                "b": rng.uniform(0.0, 1.0, n),
+                "c": rng.choice(["p", "q", "r"], n),
+            }
+        )
+        y = np.sin(4.0 * X["a"]) + X["b"] + (X["c"] == "q") * X["a"] + rng.normal(0.0, 0.1, n)
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0,
+            discrete=True,
+            n_bins=32,
+            features={
+                "a": _StiffPSpline(n_knots=8),
+                "b": Spline(kind="ps", n_knots=6),
+                "c": Categorical(),
+            },
+            interactions=[interaction],
+        )
+        with pytest.warns(UserWarning, match="Term 'a' is fitted on its rows, not binned"):
+            model.fit(X, y)
+        blocks = model._dm.group_matrices
+        assert not isinstance(blocks[0], DiscretizedSSPGroupMatrix)
+        binned = (DiscretizedTensorGroupMatrix, DiscretizedSplineCategoricalGroupMatrix)
+        assert isinstance(blocks[-1], binned)
+
+    @pytest.mark.parametrize(
+        "term", ["tensor", "by_level", "by_level_with_its_binned_build", "factor_smooth"]
+    )
+    @pytest.mark.parametrize("penalty", ["ssp", "none"])
+    def test_an_interaction_with_its_own_build_is_fitted_by_it(self, penalty, term):
+        """An interaction whose own build stiffens its penalty is fitted by it, binned or not.
+
+        Binning would replace an interaction's ``build()`` by its
+        ``build_discrete()``, so one that overrides only the first is fitted
+        on its rows by it, with a warning, and one that overrides both bins
+        by its own binned build. Every value has its own bin, so either way
+        the binned fit is the unbinned one. Under ``fit`` both solve one
+        penalised least-squares problem, whose rounding, ``u * kappa**2 *
+        max|y|`` for a condition number under 1e3, 1e-9 bounds; the factor
+        smooth's REML, run to ``reml_tol=1e-10`` in both, agrees to 1e-6.
+        """
+        X = _grid_frame(12)
+        x, z = X["x"].to_numpy(), X["z"].to_numpy()
+        if term == "tensor":
+            y = 10.0 * np.sin(2.0 * np.pi * x) * np.sin(2.0 * np.pi * z)
+        else:
+            y = 10.0 * np.sin(2.0 * np.pi * x) * (z < 0.5)
+        binned_build = term == "by_level_with_its_binned_build"
+
+        def terms():
+            features = {"x": Spline(kind="ps", n_knots=5, penalty=penalty)}
+            if term == "tensor":
+                features["z"] = Spline(kind="ps", n_knots=5, penalty=penalty)
+                return features, _named(_StiffTensor("x", "z"), "x:z")
+            if term == "factor_smooth":
+                fixed = LambdaPolicy.fixed(1.0)
+                return features, _StiffFactorSmooth("x", group="c", k=6, lambda_policy=fixed)
+            features["c"] = Categorical(base="a")
+            cls = _StiffBinnedByLevel if binned_build else _StiffByLevel
+            return features, _named(cls("x", "c"), "x:c")
+
+        name = terms()[1].name
+
+        def fitted(discrete):
+            features, interaction = terms()
+            model = SuperGLM(
+                family="gaussian",
+                selection_penalty=0,
+                spline_penalty=1.0,
+                discrete=discrete,
+                features=features,
+                interactions=[interaction],
+            )
+            if term == "factor_smooth":
+                model.fit_reml(X, y, reml_tol=1e-10)
+            else:
+                model.fit(X, y)
+            return model
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            binned = fitted(True)
+        exact = fitted(False)
+        if term == "factor_smooth":
+            np.testing.assert_allclose(binned.predict(X), exact.predict(X), rtol=1e-6)
+        else:
+            np.testing.assert_allclose(binned.predict(X), exact.predict(X), rtol=0, atol=1e-9)
+        # A factor smooth's block bins when it holds a bin index.
+        block = binned._dm.group_matrices[-1]
+        binned_blocks = (DiscretizedTensorGroupMatrix, DiscretizedSplineCategoricalGroupMatrix)
+        is_binned = isinstance(block, binned_blocks) or getattr(block, "bin_idx", None) is not None
+        assert is_binned == binned_build
+        own = [w for w in caught if f"Term {name!r} is fitted on its rows" in str(w.message)]
+        assert len(own) == (0 if binned_build else 1)
+
+    @pytest.mark.parametrize("term", ["tensor", "by_level", "factor_smooth"])
+    @pytest.mark.parametrize("penalty", ["ssp", "none"])
+    def test_a_zero_frequency_row_leaves_the_interaction_bins(self, penalty, term):
+        """A row of frequency zero far off the data does not move a binned interaction.
+
+        A row no fit sees must not set the bins every other row is read in,
+        so an interaction bins its spline column on the positive-frequency
+        rows, as its main effect does; the zero-frequency row is read in the
+        nearest bin at no weight. The fits with and without it then solve one
+        problem, up to rounding, which 1e-10 bounds on these values near 5
+        (the factor smooth's REML to its convergence).
+        The equal-width bins of every row would put the three grid values in
+        one bin and fit the interaction away.
+        """
+        if term == "factor_smooth":
+            # More values than bins, so the bins are cut, and cut on the rows.
+            rng = np.random.default_rng(5)
+            x = np.tile(np.linspace(0.0, 1.0, 21), 6)
+            c = np.repeat(["a", "b", "c"], 42)
+            slope = np.select([c == "a", c == "b"], [4.0, -4.0], 1.0)
+            y = 5.0 + slope * np.sin(3.0 * x) + rng.normal(0.0, 0.05, x.size)
+            X = pd.DataFrame({"x": x, "c": c})
+            extra = {"x": [100.0], "c": ["b"]}
+        else:
+            X = pd.concat([_grid_frame(3)] * 5, ignore_index=True)
+            x, z = X["x"].to_numpy(), X["z"].to_numpy()
+            if term == "tensor":
+                y = 5.0 + 4.0 * (x - 0.5) * (z - 0.5)
+            else:
+                y = 5.0 + np.where(z < 0.5, 4.0, -4.0) * (x - 0.5)
+            extra = {"x": [100.0], "z": [1.0], "c": ["b"]}
+        with_row = pd.concat([X, pd.DataFrame(extra)], ignore_index=True)
+
+        def predicted(frame, response, weight):
+            features = {"x": Spline(kind="ps", n_knots=2, penalty=penalty)}
+            if term == "tensor":
+                features["z"] = Spline(kind="ps", n_knots=2, penalty=penalty)
+                interactions = [("x", "z")]
+            elif term == "by_level":
+                features["c"] = Categorical(base="a")
+                interactions = [("x", "c")]
+            else:
+                interactions = [
+                    FactorSmooth("x", group="c", k=6, lambda_policy=LambdaPolicy.fixed(0.01))
+                ]
+            model = SuperGLM(
+                family="gaussian",
+                selection_penalty=0,
+                spline_penalty=0.01,
+                discrete=True,
+                n_bins=8 if term == "factor_smooth" else 3,
+                features=features,
+                interactions=interactions,
+            )
+            if term == "factor_smooth":
+                model.fit_reml(frame, response, sample_weight=weight)
+            else:
+                model.fit(frame, response, sample_weight=weight)
+            return model.predict(X)
+
+        without = predicted(X, y, None)
+        weight = np.append(np.ones(len(y)), 0.0)
+        # The factor smooth's REML agrees to its convergence, 1e-6 relative.
+        tolerance = {"rtol": 1e-6} if term == "factor_smooth" else {"rtol": 0, "atol": 1e-10}
+        np.testing.assert_allclose(
+            predicted(with_row, np.append(y, 5.0), weight), without, **tolerance
+        )
+
+    @pytest.mark.parametrize("penalty", ["ssp", "none"])
+    def test_a_margin_that_drops_the_support_bins_in_any_row_order(self, penalty):
+        """A tensor margin that takes the support keywords and drops them is read on its bins.
+
+        It returns its basis on the rows, unsorted. Here every value has its
+        own bin, so the rows number as many as the bins, and only how the
+        margin was built, not its length, says which it holds: the builder
+        evaluates it on the bins again. ``y = 2 + 4xz`` lies in the
+        unpenalised tensor model's span, so the fit reproduces it to the
+        solve's rounding, ``u * kappa**2 * max|y|``, which 1e-9 bounds for
+        this design's condition number under 1e3.
+        """
+        rng = np.random.default_rng(3)
+        x = rng.permutation(np.linspace(0.0, 1.0, 100))
+        z = rng.permutation(np.linspace(0.0, 1.0, 100))
+        X = pd.DataFrame({"x": x, "z": z})
+        y = 2.0 + 4.0 * x * z
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0,
+            spline_penalty=0.0,
+            discrete=True,
+            n_bins=256,
+            features={
+                "x": _MarginDroppingSupport(n_knots=2, penalty=penalty),
+                "z": _MarginDroppingSupport(n_knots=2, penalty=penalty),
+            },
+            interactions=[("x", "z")],
+        )
+        model.fit(X, y)
+        assert isinstance(model._dm.group_matrices[-1], DiscretizedTensorGroupMatrix)
+        np.testing.assert_allclose(model.predict(X), y, rtol=0, atol=1e-9)
+
+    def test_a_build_patched_onto_the_spline_class_reaches_a_binned_fit(self, monkeypatch):
+        """A ``build()`` patched onto the spline base class after import is fitted, binned or not.
+
+        The binned route compares a spline's build with the one the design
+        compiler captured at import, so a build patched in later is the
+        spline's own: the binned fit runs it on the rows, with a warning, and
+        is the unbinned fit, bit for bit (no term bins, so the model's
+        ``discrete`` changes no arithmetic).
+        """
+        original = _SplineBase.build
+
+        def stiff(self, x, sample_weight=None):
+            info = original(self, x, sample_weight)
+            info.penalty_matrix = 1000.0 * info.penalty_matrix
+            return info
+
+        monkeypatch.setattr(_SplineBase, "build", stiff)
+        x = np.linspace(0.0, 1.0, 200)
+        X = pd.DataFrame({"x": x})
+        y = 10.0 * np.sin(2.0 * np.pi * x)
+
+        def fitted(discrete):
+            model = SuperGLM(
+                family="gaussian",
+                selection_penalty=0,
+                spline_penalty=0.1,
+                discrete=discrete,
+                features={"x": PSpline(n_knots=6)},
+            )
+            model.fit(X, y)
+            return model
+
+        with pytest.warns(UserWarning, match="Term 'x' is fitted on its rows, not binned"):
+            binned = fitted(True)
+        assert not isinstance(binned._dm.group_matrices[0], DiscretizedSSPGroupMatrix)
+        np.testing.assert_array_equal(binned.predict(X), fitted(False).predict(X))
+
+    @pytest.mark.parametrize("discrete", [True, False], ids=["binned", "exact"])
+    def test_an_instance_bound_basis_predicts_as_it_fits(self, discrete):
+        """A ``_basis_matrix`` bound on one spline instance is read in the fit and at every size.
+
+        The fit's build calls ``spec._basis_matrix`` on the instance, so
+        prediction looks the basis up there too: at one row and at 8192,
+        where kernels would otherwise stand in for it, and in between. The
+        doubled basis spans ``y = 1 + 2x``, which the unpenalised fit
+        reproduces to the solve's rounding, which 1e-9 bounds as in
+        ``test_an_overridden_build_or_basis_fits_as_unbinned``.
+        """
+        from types import MethodType
+
+        spline = PSpline(n_knots=6)
+
+        def doubled(self, points):
+            return 2.0 * PSpline._basis_matrix(self, points)
+
+        spline._basis_matrix = MethodType(doubled, spline)
+        x = np.linspace(0.0, 1.0, 200)
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0,
+            spline_penalty=0.0,
+            discrete=discrete,
+            n_bins=256,
+            features={"x": spline},
+        )
+        model.fit(pd.DataFrame({"x": x}), 1.0 + 2.0 * x)
+        assert isinstance(model._dm.group_matrices[0], DiscretizedSSPGroupMatrix) == discrete
+        for size in (1, 200, 8192):
+            points = np.linspace(0.0, 1.0, size)
+            np.testing.assert_allclose(
+                model.predict(pd.DataFrame({"x": points})), 1.0 + 2.0 * points, rtol=0, atol=1e-9
+            )
+
+    @pytest.mark.parametrize("route", ["fit", "fit_path", "fit_reml"])
+    @pytest.mark.parametrize("penalty", ["ssp", "none"])
+    def test_bins_near_the_float64_limit_read_inside_the_range(self, penalty, route):
+        """A column near the float64 limit bins at finite centres inside its range.
+
+        An equal-width bin is read at its midpoint, halved before the sum,
+        which cannot then overflow: 9e307 plus 9e307 would. So a spline whose
+        ``extrapolation="error"`` refuses any point outside its training
+        range accepts every bin, and the fit is the fit on the same column
+        mapped onto ``[0, 1]``: the bins, knots and basis values are those of
+        the affine image to a few ``u``, and 1e-9 bounds the difference after
+        the solve on these values near 1.5.
+        """
+        x = np.linspace(9e307, 9.01e307, 40)
+        support, _ = discretize_column(x, 16)
+        edges = np.linspace(x[0], x[-1], 17)
+        assert np.all(np.isfinite(support))
+        assert np.all((edges[:-1] <= support) & (support <= edges[1:]))
+
+        y = np.linspace(1.0, 2.0, 40) + 0.01 * np.cos(np.arange(40))
+
+        def predicted(column):
+            spline = Spline(kind="ps", n_knots=4, penalty=penalty, extrapolation="error")
+            model = SuperGLM(
+                family="gaussian",
+                selection_penalty=0,
+                discrete=True,
+                n_bins=16,
+                features={"x": spline},
+            )
+            frame = pd.DataFrame({"x": column})
+            extra = {"lambda_seq": [1.0, 0.1]} if route == "fit_path" else {}
+            getattr(model, route)(frame, y, **extra)
+            assert isinstance(model._dm.group_matrices[0], DiscretizedSSPGroupMatrix)
+            return model.predict(frame)
+
+        np.testing.assert_allclose(
+            predicted(x), predicted(np.linspace(0.0, 1.0, 40)), rtol=0, atol=1e-9
+        )
+
+    def test_a_raw_basis_path_bins_and_follows_the_unbinned_path(self):
+        """A binned ``penalty="none"`` path on lossless bins is the unbinned path.
+
+        Forty values, each repeated five times, each have their own bin, so at
+        every positive ``selection_penalty`` the binned and unbinned paths
+        solve one problem in two storage forms, and their predictions and
+        EDF agree to the path solves' convergence, 1e-7 relative at
+        ``tol=1e-10``.
+        """
+        rng = np.random.default_rng(664)
+        x = np.tile(np.linspace(0.0, 1.0, 40), 5)
+        z = np.tile(np.linspace(-1.0, 1.0, 40)[rng.permutation(40)], 5)
+        X = pd.DataFrame({"x": x, "z": z})
+        y = np.sin(3.0 * x) + 0.5 * z**2 + rng.normal(0.0, 0.1, x.size)
+
+        def path(discrete):
+            model = SuperGLM(
+                family="gaussian",
+                discrete=discrete,
+                n_bins=256,
+                tol=1e-10,
+                features={
+                    "x": Spline(kind="ps", n_knots=8, penalty="none"),
+                    "z": Spline(kind="cr", n_knots=6, penalty="none"),
+                },
+            )
+            return model, model.fit_path(X, y, lambda_seq=np.array([0.5, 0.05]))
+
+        (binned, binned_path), (exact, exact_path) = path(True), path(False)
+        for block in binned._dm.group_matrices:
+            assert isinstance(block, DiscretizedSSPGroupMatrix)
+        np.testing.assert_allclose(binned_path.edf_path, exact_path.edf_path, rtol=1e-7)
+        np.testing.assert_allclose(binned.predict(X), exact.predict(X), rtol=1e-7)
+
+    @pytest.mark.parametrize("route", ["fit", "fit_reml"])
+    @pytest.mark.parametrize("penalty", ["ssp", "none"])
+    def test_lossless_interactions_bin_and_fit_as_unbinned(self, penalty, route):
+        """By-level and tensor terms bin with their splines and fit what the unbinned model fits.
+
+        Each spline column has 20 values, each in its own bin, so the binned
+        interactions hold the unbinned ones' rows: one model, whose fitted
+        values agree to the solves' convergence at the tolerances below,
+        1e-7 relative under ``fit`` and 1e-6 of the response's unit scale
+        under REML, whose binned optimiser takes its own path.
+        """
+        rng = np.random.default_rng(659)
+        X = pd.concat([_grid_frame(20)] * 2, ignore_index=True)
+        x, z = X["x"].to_numpy(), X["z"].to_numpy()
+        y = (
+            np.sin(3.0 * x)
+            + z
+            + 2.0 * x * z
+            + np.where(X["c"] == "b", 1.0, -1.0) * x
+            + rng.normal(0.0, 0.1, x.size)
+        )
+        tolerances = {"fit": {"tol": 1e-10}, "fit_reml": {"reml_tol": 1e-10, "pirls_tol": 1e-10}}
+
+        def fitted(discrete):
+            model = SuperGLM(
+                family="gaussian",
+                selection_penalty=0,
+                discrete=discrete,
+                n_bins=256,
+                features={
+                    "x": Spline(kind="ps", n_knots=6, penalty=penalty),
+                    "z": Spline(kind="ps", n_knots=6, penalty=penalty),
+                    "c": Categorical(base="a"),
+                },
+                interactions=[("x", "z"), ("x", "c")],
+            )
+            getattr(model, route)(X, y, **tolerances[route])
+            return model
+
+        binned, exact = fitted(True), fitted(False)
+        kinds = {type(block) for block in binned._dm.group_matrices}
+        assert DiscretizedTensorGroupMatrix in kinds
+        assert DiscretizedSplineCategoricalGroupMatrix in kinds
+        tolerance = {"rtol": 1e-7} if route == "fit" else {"rtol": 0, "atol": 1e-6}
+        np.testing.assert_allclose(binned.predict(X), exact.predict(X), **tolerance)
 
     def test_categorical_stays_exact(self):
         """Categorical features should not be affected by discrete=True."""

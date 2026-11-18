@@ -2959,24 +2959,55 @@ def test_a_spline_subclass_that_rescales_its_basis_in_place_is_fitted_on_it():
 
 
 def test_a_spline_subclass_that_replaces_its_basis_with_a_dense_one_keeps_it():
+    """A ``build()`` that returns its basis dense keeps that basis and its penalty.
+
+    Only a sparse block carries a penalty, so the builder holds the dense
+    columns sparse, as they are, and finds their repeated rows. The
+    override returns the stock spline's basis and penalty, so its fit,
+    binned or not, is the stock fit in another storage form, agreeing to
+    the solve's rounding, which 1e-10 bounds on these values near 2; a
+    dropped penalty would leave it unpenalised.
+    """
     import dataclasses
 
     import pandas as pd
+    import pytest
 
     from superglm import PSpline, SuperGLM
-    from superglm.group_matrix import DenseGroupMatrix
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSSPGroupMatrix,
+    )
 
     class Densified(PSpline):
         def build(self, x, sample_weight=None):
             info = super().build(x, sample_weight)
-            return dataclasses.replace(info, columns=info.columns.toarray())
+            self.built = info.columns.toarray()
+            return dataclasses.replace(info, columns=self.built)
 
     x = np.tile(np.linspace(0.0, 1.0, 20), 200)
     frame, y = pd.DataFrame({"x": x}), 2.0 + np.sin(4.0 * x)
-    model = SuperGLM(
-        family="gaussian", selection_penalty=0, discrete=False, features={"x": Densified(n_knots=5)}
-    )
-    model.fit(frame, y)
 
-    (group,) = model._dm.group_matrices
-    assert type(group) is DenseGroupMatrix
+    def fitted(spline, discrete):
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0,
+            spline_penalty=100.0,
+            discrete=discrete,
+            features={"x": spline},
+        )
+        model.fit(frame, y)
+        return model
+
+    stock = fitted(PSpline(n_knots=5), False)
+    for discrete in (False, True):
+        if discrete:
+            # Binning would skip the override, which is fitted on its rows instead.
+            with pytest.warns(UserWarning, match="Term 'x' is fitted on its rows"):
+                model = fitted(Densified(n_knots=5), discrete)
+        else:
+            model = fitted(Densified(n_knots=5), discrete)
+        (group,) = model._dm.group_matrices
+        assert type(group) is SupportCompressedSSPGroupMatrix
+        _assert_same_state(group.B_unique[group.bin_idx], model._specs["x"].built, "basis")
+        assert model.result.effective_df == pytest.approx(stock.result.effective_df, rel=1e-10)
+        np.testing.assert_allclose(model.predict(frame), stock.predict(frame), rtol=0, atol=1e-10)

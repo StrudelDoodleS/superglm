@@ -20,6 +20,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame
+from superglm._group_matrix._group_matrix_bins import discretize_positive_support
 from superglm._parallel import pooled_map
 from superglm.features._spline_build import finish_penalties, qp_geometry, shape_engine
 from superglm.features._spline_penalties import structural_penalty_ranks
@@ -48,6 +49,62 @@ from superglm.types import DiscreteTensorBuildResult, FeatureSpec, GroupInfo, Gr
 # build() patched in later, is not one of them and keeps its own build.
 _SPLINE_BUILD = _SplineBase.build
 _TENSOR_BUILD = TensorInteraction.build
+# Each binning term's built-in build, and the binned build (its name and the
+# method as defined) that replaces build() when the term bins.
+_BINNED_BUILDS = (
+    (_SplineBase, _SPLINE_BUILD, "build_knots_and_penalty", _SplineBase.build_knots_and_penalty),
+    (TensorInteraction, _TENSOR_BUILD, "build_discrete", TensorInteraction.build_discrete),
+    (
+        SplineCategorical,
+        SplineCategorical.build,
+        "build_discrete",
+        SplineCategorical.build_discrete,
+    ),
+    (FactorSmooth, FactorSmooth.build, "build_discrete", FactorSmooth.build_discrete),
+)
+
+
+def _method(bound: Any) -> Any:
+    """The function behind a bound method, looked up on the instance as a call finds it."""
+    return getattr(bound, "__func__", None)
+
+
+def own_build_binned_build(term: Any) -> str | None:
+    """The name of the binned build that would skip ``term``'s own ``build()``, or None.
+
+    A binned term is built by its binned build, never its ``build()``. A term
+    whose ``build()`` is its own (a subclass's, or one patched in later) and
+    whose binned build is the built-in one would lose that build, so it is
+    fitted on its rows; one that overrides both bins by its own binned build.
+    """
+    for cls, build, binned_name, binned in _BINNED_BUILDS:
+        if isinstance(term, cls):
+            own = _method(term.build) is not build
+            return binned_name if own and _method(getattr(term, binned_name)) is binned else None
+    return None
+
+
+def _bins_unless_own_build(name: str, term: Any, asks: bool) -> bool:
+    """Whether a term that ``asks`` to bin does: not if binning would skip its own build.
+
+    A term fitted on its rows for that reason is named in a warning.
+    """
+    binned_build = own_build_binned_build(term) if asks else None
+    if binned_build is None:
+        return asks
+    remedy = (
+        ", or set discrete=False on it to fit it on its rows without this warning"
+        if isinstance(term, _SplineBase)
+        else ""
+    )
+    warnings.warn(
+        f"Term {name!r} is fitted on its rows, not binned: its build() is overridden, and "
+        f"binning would replace it by {binned_build}(). Override {binned_build}() as well "
+        f"to bin it{remedy}.",
+        UserWarning,
+        stacklevel=2,
+    )
+    return False
 
 
 @dataclass(frozen=True)
@@ -219,16 +276,15 @@ def compile_predictor_design(
     # dm_builder imports this module at module scope, so these stay local:
     # hoisted, they raise a partially-initialized-module ImportError.
     from superglm.dm_builder import (
-        _discretize_spline_column,
         _priced_group_dimension,
         _process_info,
         add_interaction,
         refuse_unsupported_interaction_parents,
         resolve_discrete_n_bins,
-        should_discretize,
         should_discretize_factor_smooth,
         should_discretize_spline_categorical_interaction,
         should_discretize_tensor_interaction,
+        spline_bins,
         validate_fitted_group_names,
         validate_term_name_namespace,
     )
@@ -296,7 +352,7 @@ def compile_predictor_design(
             feature_build_weight = sample_weight
 
         # Check if this feature should use fit-time discretization
-        use_discrete = should_discretize(spec, model_discrete)
+        use_discrete = _bins_unless_own_build(name, spec, spline_bins(spec, model_discrete))
         B_unique = None
         bin_idx = None
         exposure_agg = None
@@ -313,7 +369,7 @@ def compile_predictor_design(
                 constraints, monotone_engine, raw_to_solver_map = qp_geometry(
                     spec, engine, projection_penalty
                 )
-            bin_centers, bin_idx = _discretize_spline_column(
+            bin_centers, bin_idx = discretize_positive_support(
                 x_col,
                 n_bins_feat,
                 feature_build_weight,
@@ -512,6 +568,8 @@ def compile_predictor_design(
     # Discrete tensors are numbered in interaction order before any term
     # builds, and every parent column is read here, once, on this thread.
     tensor_ids: dict[str, int] = {}
+    # Each interaction's (tensor, by-level, factor-smooth) binned route.
+    binned_routes: dict[str, tuple[bool, bool, bool]] = {}
     # Each build is priced from its parents' main-effect widths, or a tensor's
     # override margins; the pool is sized by the largest
     # (``_interaction_build_row_bytes``).
@@ -530,15 +588,20 @@ def compile_predictor_design(
             )
         for parent in ispec.parent_names:
             X.column_array(parent)
-        binned_tensor = should_discretize_tensor_interaction(ispec, specs, model_discrete)
-        if binned_tensor:
+        # At most one route asks, by the term's type; the builds below read it.
+        routes = tuple(
+            _bins_unless_own_build(iname, ispec, asks)
+            for asks in (
+                should_discretize_tensor_interaction(ispec, specs, model_discrete),
+                should_discretize_spline_categorical_interaction(ispec, specs, model_discrete),
+                should_discretize_factor_smooth(ispec, model_discrete),
+            )
+        )
+        binned_routes[iname] = cast("tuple[bool, bool, bool]", routes)
+        if routes[0]:
             tensor_ids[iname] = _next_tensor_id
             _next_tensor_id += 1
-        binned = (
-            binned_tensor
-            or should_discretize_spline_categorical_interaction(ispec, specs, model_discrete)
-            or should_discretize_factor_smooth(ispec, model_discrete)
-        )
+        binned = any(routes)
         a, b = (max(widths.get(parent, 1), 1) for parent in ispec.parent_names)
         if isinstance(ispec, TensorInteraction) and ispec._n_knots is not None:
             # An n_knots override builds its margins at that knot count, whose
@@ -582,16 +645,9 @@ def compile_predictor_design(
             if scan_curves and isinstance(ispec, SplineCategorical)
             else None
         )
-        use_discrete_tensor = should_discretize_tensor_interaction(ispec, specs, model_discrete)
-        use_discrete_spline_cat = should_discretize_spline_categorical_interaction(
-            ispec,
-            specs,
-            model_discrete,
-        )
-        use_discrete_factor_smooth = should_discretize_factor_smooth(
-            ispec,
-            model_discrete,
-        )
+        use_discrete_tensor, use_discrete_spline_cat, use_discrete_factor_smooth = binned_routes[
+            iname
+        ]
         B_unique_inter = None
         bin_idx_inter = None
         exposure_agg_inter = None

@@ -877,7 +877,7 @@ def screen_interactions(
         return _structured_evaluation_allowance(max_cells, n_a, k_s, n_levels)
 
     rows = []
-    from superglm.dm_builder import resolve_discrete_n_bins, should_discretize
+    from superglm.dm_builder import resolve_discrete_n_bins, spline_bins
 
     # Discretization is decided per SPEC (spec.discrete overrides the model flag)
     # and is lossless when a margin's cardinality fits its bin count, so approx
@@ -899,8 +899,7 @@ def screen_interactions(
         splines = [
             name
             for name in (feat_a, feat_b)
-            if margin_kinds[name] == "spline"
-            and should_discretize(_margin_spec(name), model_discrete)
+            if margin_kinds[name] == "spline" and spline_bins(_margin_spec(name), model_discrete)
         ]
         if kind == "ti" and len(splines) < 2:
             return []

@@ -87,12 +87,12 @@ class _SplineBase:
         ``knot_strategy`` are ignored. Use this for reproducibility
         across refits with different data.
     discrete : bool or None
-        If True, discretize the covariate into at most ``n_bins`` bins that
-        follow its knots and rows at fit time: O(n) algebra becomes O(n_bins).
-        If None (default), defers to the model-level ``discrete`` setting.
+        If True, bin the covariate at fit time into at most ``n_bins`` bins on its knots and rows:
+        O(n) algebra becomes O(n_bins). If None (default), defers to the model-level ``discrete``.
+        A subclass overriding ``build()`` but not ``build_knots_and_penalty()`` is fitted on its
+        rows by its own build, with a warning; its interactions still bin.
     n_bins : int or None
-        Number of bins for discretization. Only used when
-        ``discrete=True``. If None (default), defers to the model-level
+        Number of bins when the column bins. If None (default), defers to the model-level
         ``n_bins`` setting (which defaults to 256).
     extrapolation : {"clip", "extend", "error"}
         Prediction-time behavior outside the training range. ``"clip"``

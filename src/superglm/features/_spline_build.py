@@ -506,4 +506,5 @@ def tensor_marginal_info(
     )
     if distinct is not None:
         info.distinct = distinct
+    info.on_support = support is not None
     return info

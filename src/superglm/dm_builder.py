@@ -22,6 +22,7 @@ from superglm._group_matrix._level_partition import carry_level_support, certify
 from superglm._predictor_compiler import (
     CompiledPredictorDesign,
     compile_predictor_design,
+    own_build_binned_build,
 )
 from superglm._roundoff import PENALTY_RANK_CUT, UNIT_ROUNDOFF
 from superglm._utils import _validate_strict_prior_weights
@@ -40,7 +41,6 @@ from superglm.group_matrix import (
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
     SupportCompressedSplineCategoricalGroupMatrix,
-    _discretize_column,
 )
 from superglm.links import Link, resolve_link
 from superglm.solvers._structured.selection import carry_nesting_cache
@@ -185,28 +185,37 @@ def _dominant_penalty_eigenbasis(
     return np.linalg.eigh(omega)[1]
 
 
-def should_discretize(spec: FeatureSpec, model_discrete: bool) -> bool:
-    """Check if a feature spec should use fit-time discretization.
+def spline_bins(spec: FeatureSpec, model_discrete: bool) -> bool:
+    """Whether a spline's column bins at fit time: its own ``discrete``, else the model's.
 
     Every penalty option bins; ``"none"`` holds its raw basis in the binned block.
-    Binning assembles the base ``build()`` from its parts, so a spline whose
-    ``build()`` is overridden does not bin: its own build runs on the rows.
     """
     from superglm.features.spline import _SplineBase
 
     if not isinstance(spec, _SplineBase):
-        return False
-    if getattr(spec.build, "__func__", None) is not _SplineBase.build:
         return False
     if spec.discrete is not None:
         return spec.discrete
     return model_discrete
 
 
+def should_discretize(spec: FeatureSpec, model_discrete: bool) -> bool:
+    """Check if a spline main effect bins at fit time.
+
+    Its column bins (``spline_bins``) unless binning would skip its own
+    ``build()`` (``own_build_binned_build``): then that build runs on the rows.
+    """
+    return spline_bins(spec, model_discrete) and own_build_binned_build(spec) is None
+
+
 def should_discretize_tensor_interaction(
     ispec: Any, specs: dict[str, FeatureSpec], model_discrete: bool
 ) -> bool:
-    """Check if a tensor interaction should use fit-time discretization."""
+    """Whether a tensor interaction's columns bin: both parents' columns do.
+
+    The parents' own builds do not matter: the tensor never calls them. The
+    compiler fits a term on its rows when binning would skip its own build.
+    """
     from superglm.features.interaction import TensorInteraction
     from superglm.features.ordered_categorical import OrderedCategorical
 
@@ -220,15 +229,17 @@ def should_discretize_tensor_interaction(
     if not isinstance(ispec, TensorInteraction):
         return False
     p1, p2 = ispec.parent_names
-    return should_discretize(specs[p1], model_discrete) and should_discretize(
-        specs[p2], model_discrete
-    )
+    return spline_bins(specs[p1], model_discrete) and spline_bins(specs[p2], model_discrete)
 
 
 def should_discretize_spline_categorical_interaction(
     ispec: Any, specs: dict[str, FeatureSpec], model_discrete: bool
 ) -> bool:
-    """Check if a spline-categorical interaction should use spline support compression."""
+    """Whether a spline-categorical interaction's columns bin: its spline parent's do.
+
+    As for a tensor (``should_discretize_tensor_interaction``), the parent's
+    own build does not matter.
+    """
     from superglm.features.interaction import SplineCategorical
     from superglm.features.ordered_categorical import OrderedCategorical
 
@@ -242,7 +253,7 @@ def should_discretize_spline_categorical_interaction(
     if not isinstance(ispec, SplineCategorical):
         return False
     spline_name, _cat_name = ispec.parent_names
-    return should_discretize(specs[spline_name], model_discrete)
+    return spline_bins(specs[spline_name], model_discrete)
 
 
 def should_discretize_factor_smooth(ispec: Any, model_discrete: bool) -> bool:
@@ -284,44 +295,6 @@ def knot_geometry_weight(sample_weight, weight_semantics: str):
     if sample_weight is None or weight_semantics != PRIOR_WEIGHTS:
         return sample_weight
     return (np.asarray(sample_weight, dtype=np.float64) > 0.0).astype(np.float64)
-
-
-def _discretize_spline_column(
-    x: NDArray,
-    n_bins: int,
-    geometry_weight: NDArray | None,
-    knots: NDArray | None = None,
-) -> tuple[NDArray, NDArray]:
-    """Discretize on the positive-frequency support and map every fit row.
-
-    ``knots`` are the knots the bins follow (``bin_knots``: the spline's,
-    plus its ranges' cuts), so the bins resolve its pieces
-    (``discretize_column``), and the active rows count by their geometry
-    weight, as they do for the knots. Zero-frequency rows keep a valid bin index (the
-    design keeps its physical row count) but do not shape the support: they
-    map to the nearest active support point, as clipped spline evaluation
-    would.
-    """
-    values = np.asarray(x, dtype=np.float64).ravel()
-    if geometry_weight is None:
-        return _discretize_column(values, n_bins, knots)
-
-    weights = np.asarray(geometry_weight, dtype=np.float64).ravel()
-    active = weights > 0.0
-    if np.all(active):
-        return _discretize_column(values, n_bins, knots, weights)
-
-    support, active_index = _discretize_column(values[active], n_bins, knots, weights[active])
-    if len(support) == 1:
-        full_index = np.zeros(len(values), dtype=np.intp)
-    else:
-        insertion = np.searchsorted(support, values)
-        right = np.clip(insertion, 0, len(support) - 1)
-        left = np.clip(insertion - 1, 0, len(support) - 1)
-        choose_right = np.abs(values - support[right]) <= np.abs(values - support[left])
-        full_index = np.where(choose_right, right, left).astype(np.intp)
-    full_index[active] = active_index
-    return support, full_index
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -708,6 +681,12 @@ def _process_info(
     """
     use_discrete = B_unique is not None
     use_tensor = tensor_build is not None
+    if isinstance(info.columns, np.ndarray) and (
+        info.penalty_matrix is not None or info.penalty_components is not None
+    ):
+        # Only a sparse block carries a penalty, so dense penalised columns (a
+        # build() override's) are held sparse, keeping the penalty they came with.
+        info.columns = sp.csr_matrix(info.columns)
     R_inv: NDArray | None = None
     # R_inv_local: SSP transform in post-identifiability space (projected -> solver).
     # Used to compose constraints that are already in post-identifiability space.
