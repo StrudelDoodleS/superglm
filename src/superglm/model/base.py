@@ -1140,28 +1140,30 @@ def clone_without_features(
 def _drop_resolved_policies(features: dict[str, Any]) -> set[str]:
     """Drop the lambda policies of copied specs refitted at resolved smoothing.
 
-    Returns the features whose one penalty the policy named ``"wiggle"``: without
-    it the penalty is unnamed and keyed by the feature itself. An
-    ``OrderedCategorical`` carries its policy on its spline basis.
+    Returns the features whose one penalty the policy named ``"wiggle"`` (one
+    derivative order, no ``select``): without it the penalty is unnamed and keyed
+    by the feature itself. An ``OrderedCategorical`` carries its policy on its
+    spline basis.
     """
     from superglm.features.ordered_categorical import OrderedCategorical
 
     named = set()
     for name, spec in features.items():
         smooth = spec._basis_spline if isinstance(spec, OrderedCategorical) else spec
-        if getattr(smooth, "_lambda_policy", None) is not None:
-            smooth._lambda_policy = None
+        if getattr(smooth, "_lambda_policy", None) is None:
+            continue
+        smooth._lambda_policy = None
+        if len(getattr(smooth, "_m_orders", (2,))) == 1 and not getattr(smooth, "select", False):
             named.add(name)
     return named
 
 
 def _unname_single_penalties(lambda2: dict, names: set[str]) -> dict:
-    """``lambda2`` with ``"<name>:wiggle"`` keyed ``"<name>"`` where it is the term's only penalty."""
+    """``lambda2`` with each term's ``"<name>:wiggle"`` keyed ``"<name>"``, its one penalty."""
     out = dict(lambda2)
     for name in names:
-        key = f"{name}:wiggle"
-        if key in out and not any(k.startswith(f"{name}:") and k != key for k in out):
-            out[name] = out.pop(key)
+        if f"{name}:wiggle" in out:
+            out[name] = out.pop(f"{name}:wiggle")
     return out
 
 

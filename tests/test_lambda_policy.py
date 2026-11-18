@@ -314,6 +314,31 @@ class TestFitRemlLambdaPolicy:
         with pytest.raises(NotImplementedError, match=rf"'x'.*fit_reml\(\), not {route}\(\)"):
             getattr(applied, route)(pd.DataFrame({"x": x}), np.sin(6.0 * x))
 
+    def test_a_refit_keeps_a_policy_term_smoothing_beside_its_interaction(self):
+        """The resolved lambda of a policy term stays on it when an interaction shares its name.
+
+        The interaction's own keys (``"x:z:..."``) start with the term's name; the
+        refit still keys the term's one penalty by the term, at the fixed 3.0.
+        """
+        rng = np.random.default_rng(1)
+        x, z = rng.uniform(size=300), rng.uniform(size=300)
+        frame = pd.DataFrame({"x": x, "z": z})
+        y = np.sin(4.0 * x) + z + x * z + rng.normal(0.0, 0.1, 300)
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0,
+            features={
+                "x": Spline(kind="ps", n_knots=5, lambda_policy=LambdaPolicy.fixed(3.0)),
+                "z": Spline(kind="ps", n_knots=5),
+            },
+            interactions=[("x", "z")],
+        )
+        model.fit_reml(frame, y)
+        refit = model.refit_unpenalised(frame, y, keep_smoothing=True)
+        assert refit.lambda2["x"] == 3.0
+        assert "x:wiggle" not in refit.lambda2
+        assert any(key.startswith("x:z") for key in refit.lambda2)
+
     @pytest.mark.parametrize("term", ["spline", "ordered"])
     def test_refits_after_fit_reml_take_the_resolved_lambda(self, term):
         """drop1 and refit_unpenalised refit a fixed policy at the lambda fit_reml resolved.
