@@ -39,6 +39,13 @@ def place_knots(
         explicit_boundary=spec._explicit_boundary,
         sample_weight=sample_weight,
     )
+    # The cardinal system needs distinct knots: a quantile knot on the boundary
+    # (all rows at one end of an explicit range) falls back to uniform knots.
+    if spec._knot_strategy_actual in _spline_knots.QUANTILE_STRATEGIES and not np.all(
+        (interior > spec._lo) & (interior < spec._hi)
+    ):
+        interior = np.linspace(spec._lo, spec._hi, spec.n_knots + 2)[1:-1]
+        spec._knot_strategy_actual = "uniform"
 
     spec._cr_knots = np.concatenate([[spec._lo], interior, [spec._hi]])
     spec._n_basis = len(spec._cr_knots)

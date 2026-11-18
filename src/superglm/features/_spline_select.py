@@ -127,11 +127,11 @@ def resolve_lambda_policies(
 ) -> dict[str, LambdaPolicy] | None:
     """Resolve lambda_policy into a policy for each penalty ``info`` carries.
 
-    The names a policy may use are fixed by the declaration: ``"wiggle"`` for
-    one derivative order, else ``"d{order}"`` for each, with ``"null"`` beside
-    them under ``select=True``. A column whose penalty is identically zero (one
-    value under ``kind="bs"``) carries no components, and accepts the names any
-    other column does.
+    A policy may name the penalties the build carries, ``"wiggle"`` for a
+    single unnamed one. A column whose penalty is identically zero (one value
+    under ``kind="bs"``) carries none, and accepts the names the declaration
+    gives any other column: ``"wiggle"`` for one derivative order, else
+    ``"d{order}"`` for each, with ``"null"`` beside them under ``select=True``.
     """
     if lambda_policy is None:
         return None
@@ -144,9 +144,12 @@ def resolve_lambda_policies(
     if isinstance(lambda_policy, LambdaPolicy):
         return {name: lambda_policy for name in built_names}
 
-    valid_names = {"wiggle"} if len(m_orders) == 1 else {f"d{order}" for order in m_orders}
-    if select:
-        valid_names.add("null")
+    if info.penalty_components is not None or info.penalty_matrix is not None:
+        valid_names = built_names
+    else:
+        valid_names = {"wiggle"} if len(m_orders) == 1 else {f"d{order}" for order in m_orders}
+        if select:
+            valid_names.add("null")
     policy_dict = lambda_policy
     unknown = set(policy_dict) - valid_names
     if unknown:

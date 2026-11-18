@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperGLM
+from superglm import OrderedCategorical, SuperGLM
 from superglm.features.spline import Spline
 from superglm.types import GroupInfo, LambdaPolicy
 
@@ -283,3 +283,17 @@ class TestFitRemlLambdaPolicy:
         )
         with pytest.raises(NotImplementedError, match=rf"fit_reml\(\), not {route}\(\)"):
             getattr(model, route)(X, y, sample_weight=w)
+
+    @pytest.mark.parametrize("route", ["fit", "fit_path"])
+    def test_fit_rejects_lambda_policy_on_an_ordered_basis(self, route):
+        """A policy on an OrderedCategorical's spline basis is refused, naming the feature."""
+        levels = list("abcdefgh")
+        codes = np.tile(np.arange(len(levels)), 15)
+        basis = Spline(kind="ps", n_knots=5, lambda_policy=LambdaPolicy.fixed(100.0))
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.01,
+            features={"grade": OrderedCategorical(order=levels, basis=basis)},
+        )
+        with pytest.raises(NotImplementedError, match=rf"'grade'.*fit_reml\(\), not {route}\(\)"):
+            getattr(model, route)(pd.DataFrame({"grade": np.asarray(levels)[codes]}), np.sin(codes))

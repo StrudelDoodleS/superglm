@@ -117,6 +117,58 @@ def test_a_mapping_protects_each_term_at_its_own_penalty(penalty, discrete):
     assert abs(edf_gap) <= 1e5 / 1e14 + 2**16 * U
 
 
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "binned"])
+@pytest.mark.parametrize("lam", [1e14, 1e18])
+@pytest.mark.parametrize("kind", ["cr", "bs", "ps"])
+def test_a_mapping_that_weights_one_component_fits_its_null_space(kind, lam, discrete):
+    """``m=(1, 2)`` with only ``"x:d2"`` mapped is the ``m=2`` spline at that weight.
+
+    ``d1`` is unlisted, so its weight is zero and the applied penalty is the
+    single ``d2`` term, whose null space is the least squares line.
+    """
+    spline = Spline(kind=kind, n_knots=8, m=(1, 2), penalty="none")
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": spline},
+        discrete=discrete,
+        spline_penalty={"x:d2": lam},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(pd.DataFrame({"x": X_GRID}), Y)
+    reference = _null_space_fit(model, kind)
+    predictions = model.predict(pd.DataFrame({"x": X_GRID}))
+    # The bounds of test_a_large_penalty_fits_its_null_space.
+    assert np.max(np.abs(predictions - reference)) <= 2**16 * U * np.max(np.abs(Y))
+    assert abs(model.result.effective_df - 2.0) <= 1e5 / lam + 2**16 * U
+
+
+@pytest.mark.parametrize("route", ["fit", "fit_path"])
+def test_a_mapping_fits_as_the_equal_scalar_under_a_selection_penalty(route):
+    """``{"x": 0.0}`` whitens and selects the term as ``0.0`` does, so path and fit agree."""
+    frame = pd.DataFrame({"x": X_GRID})
+    y = 2.0 + 1.2 * np.sin(6.0 * np.pi * X_GRID)
+
+    def fitted(smoothing):
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=20.0,
+            spline_penalty=smoothing,
+            features={"x": Spline(kind="ps", n_knots=6)},
+        )
+        if route == "fit":
+            return model.fit(frame, y).predict(frame), None
+        lambda_max = model.fit_path(frame, y, n_lambda=2).lambda_seq[0]
+        return model.predict(frame), lambda_max
+
+    (mapped, mapped_max), (scalar, scalar_max) = fitted({"x": 0.0}), fitted(0.0)
+    np.testing.assert_allclose(mapped, scalar, rtol=0, atol=2**8 * U * np.max(np.abs(y)))
+    if route == "fit_path":
+        # lambda_max is the largest group gradient norm at the intercept-only fit.
+        assert mapped_max == pytest.approx(scalar_max, rel=2**8 * U)
+
+
 def test_the_ssp_map_factors_a_penalty_whose_formed_null_is_negative():
     """``G + lambda Omega`` formed at 1e14 is indefinite when Omega rounds below zero on its null."""
     p, n = 10, 200

@@ -301,7 +301,7 @@ def score(spec: Any, x: NDArray, beta: NDArray) -> NDArray:
 def reconstruct(spec: Any, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
     """Reconstruct a spline curve on a regular grid, read on the spec's own basis (``transform``)."""
     x_grid = np.linspace(spec._lo, spec._hi, n_points)
-    log_rels = transform(spec, x_grid) @ beta
+    log_rels = spec.transform(x_grid) @ beta
     scop_sigma = getattr(spec, "_scop_Sigma", None)
     if scop_sigma is not None:
         beta_orig = beta

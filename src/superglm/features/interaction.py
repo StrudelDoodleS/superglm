@@ -27,8 +27,13 @@ from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_bins import discretize_positive_support
+from superglm._roundoff import UNIT_ROUNDOFF
 from superglm.features import _basis_kernels
-from superglm.features._spline_config import SplineOptionWarning
+from superglm.features._spline_config import (
+    SplineOptionWarning,
+    configure_knots,
+    initialize_runtime_state,
+)
 from superglm.features._spline_penalties import _gapped_rank, structural_penalty_ranks
 from superglm.features._spline_runtime import bin_knots
 from superglm.features._spline_select import _certified_range, _null_mask
@@ -1955,33 +1960,27 @@ def _row_kron(B1: sp.spmatrix, B2: sp.spmatrix) -> sp.csr_matrix:
 
 
 def _centred_on(basis: NDArray, counts: NDArray) -> bool:
-    """Whether a margin's ``basis`` on the support is centred under the ``counts`` the fit uses.
+    """Whether a margin's ``basis`` on the support is centred on the ``counts`` the fit uses.
 
-    Each column's weighted sum is held to ``gamma_{n+k}`` times its absolute
-    sum: the rounding of a sum over ``n`` rows of a column formed by a
-    ``k``-term product (Higham 2002, section 3.1). A margin centred on other
-    weights misses it by a shift of the column's mean. A basis with another row
-    count is not on the support.
+    Every column's weighted sum is held to ``sqrt(u)`` times the largest
+    column's weighted absolute sum, the scale of mgcv's ``rank.tol`` (the
+    square root of R's machine epsilon, ``2u``). A centred margin sits at
+    rounding, ``1e-16`` to ``1e-14`` of that sum; one centred on other weights
+    misses by a shift of a column's mean, ``1e-3`` and more.
     """
     basis = np.asarray(basis, dtype=np.float64)
     counts = np.asarray(counts, dtype=np.float64)
-    if basis.ndim != 2 or basis.shape[0] != counts.size:
-        return False
-    rounding = (basis.shape[0] + basis.shape[1]) * 2.0**-53
-    return bool(
-        np.all(
-            np.abs(counts @ basis) <= rounding / (1.0 - rounding) * (np.abs(counts) @ np.abs(basis))
-        )
-    )
+    scale = float(np.max(np.abs(counts) @ np.abs(basis), initial=0.0))
+    return bool(np.all(np.abs(counts @ basis) <= np.sqrt(UNIT_ROUNDOFF) * scale))
 
 
 def _uncentred_margin(candidate) -> NotImplementedError:
-    """The refusal of a custom margin that cannot centre on non-unit geometry weights."""
+    """The refusal of a custom margin that cannot centre on unequal geometry weights."""
     return NotImplementedError(
-        f"{type(candidate).__name__}'s tensor margin cannot certify non-unit geometry "
+        f"{type(candidate).__name__}'s tensor margin cannot certify unequal geometry "
         "weights: its basis is not centred on the frequency weights the fit uses. Implement "
         "tensor_marginal_ingredients(x, *, support=..., counts=...) to evaluate the basis "
-        "on support and centre it on counts, or fit with frequency weights of 0 and 1 only."
+        "on support and centre it on counts, or fit with equal positive weights."
     )
 
 
@@ -2287,27 +2286,24 @@ class TensorInteraction:
             return cardinal, True
 
         if n_knots_override is not None and n_knots_override != spec.n_knots:
-            kwargs: dict = dict(
-                n_knots=n_knots_override,
-                knot_strategy=spec.knot_strategy,
-                penalty=spec.penalty,
-                boundary=(spec._lo, spec._hi),
-                knot_alpha=spec.knot_alpha,
-                # Single-penalty by the guard above, so the parent's order
-                # carries over intact; dropping it would rebuild a cr m=1 or
-                # m=3 margin on the default second-derivative penalty.
-                m=spec._m_orders[0],
-            )
-            # CubicRegressionSpline/CardinalCRSpline hardcode degree=3
-            if "degree" in inspect.signature(type(spec).__init__).parameters:
-                kwargs["degree"] = spec.degree
-            # The ranges travel with the margin at the new knot count, or the
-            # clone would bend the interaction inside them.
-            if keep_ranges and getattr(spec, "polynomial_ranges", ()):
-                kwargs["polynomial_ranges"] = spec.polynomial_ranges
+            # A copy of the configured spec, so a subclass keeps its own
+            # configuration. The override replaces stated knots: the count is
+            # placed by the parent's rule on its fitted range, and the ranges
+            # travel with the margin unless the caller leaves them out.
+            clone = copy.copy(spec)
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", SplineOptionWarning)
-                clone = type(spec)(**kwargs)
+                configure_knots(
+                    clone,
+                    knots=None,
+                    n_knots=n_knots_override,
+                    knot_strategy=spec.knot_strategy,
+                    knot_alpha=spec.knot_alpha,
+                    boundary=(spec._lo, spec._hi),
+                )
+            initialize_runtime_state(clone, spec.knot_strategy, None)
+            if not keep_ranges:
+                clone._polynomial_ranges = ()
             clone._place_knots(x, geometry_weight, n_bins)
             return clone, False
         return spec, False
@@ -2323,16 +2319,16 @@ class TensorInteraction:
     ) -> TensorMarginalInfo:
         """A margin's basis, penalty and projection from its resolved spec (``_marginal_spec``).
 
-        The margin is handed the rows of positive geometry weight as ``x``, so one
-        that centres on ``x`` leaves a row of zero weight out, as one centring on
-        ``counts`` does; under 0/1 geometry (prior weights, and frequency weights of
-        0 and 1) the two are one centring. Under other weights a custom margin is
-        used only when its basis is on the support and centred on ``counts``
-        (``_centred_on``): one that drops the keywords, or takes ``x`` alone, would
-        count a repeated row once, and is refused. A built-in margin centres on
-        ``counts`` (``tensor_marginal_info``).
+        The built-in method centres on ``counts`` (``tensor_marginal_info``). A
+        custom one is handed the rows of positive geometry weight as ``x``, so one
+        that centres on ``x`` is centred on ``counts`` whenever the positive
+        weights are equal (0/1 indicators, equal frequencies). Under unequal
+        weights a custom margin is used only when it takes ``support`` and
+        ``counts`` and its basis, aligned to the support, is centred on the
+        counts (``_centred_on``); one that drops them, or takes ``x`` alone,
+        would count a repeated row once, and is refused.
         """
-        from superglm.features.spline import _BUILT_IN_SPLINES
+        from superglm.features.spline import _SplineBase
 
         method = candidate.tensor_marginal_ingredients
         if support is None and geometry_weight is None:
@@ -2342,11 +2338,6 @@ class TensorInteraction:
         effective_counts = geometry_weight if counts is None else counts
         if effective_counts is None:  # pragma: no cover - guarded by the branch above
             raise RuntimeError("tensor marginal geometry mass is unavailable")
-        rows, indicator_geometry = x, True
-        if geometry_weight is not None:
-            weight = np.asarray(geometry_weight, dtype=np.float64)
-            rows = np.asarray(x, dtype=np.float64).ravel()[weight > 0.0]
-            indicator_geometry = bool(np.all((weight == 0.0) | (weight == 1.0)))
 
         def compact_legacy(legacy: TensorMarginalInfo) -> TensorMarginalInfo:
             support_clipped = np.clip(
@@ -2356,6 +2347,20 @@ class TensorInteraction:
             compact_basis = compact_basis @ legacy.projection
             return replace(legacy, basis=compact_basis)
 
+        def on_support(info: TensorMarginalInfo) -> TensorMarginalInfo:
+            if np.asarray(info.basis).shape[0] == len(effective_support):
+                return info
+            return compact_legacy(info)
+
+        if getattr(method, "__func__", None) is _SplineBase.tensor_marginal_ingredients:
+            return on_support(method(x, support=effective_support, counts=effective_counts))
+
+        rows, equal_weights = x, True
+        if geometry_weight is not None:
+            weight = np.asarray(geometry_weight, dtype=np.float64)
+            rows = np.asarray(x, dtype=np.float64).ravel()[weight > 0.0]
+            equal_weights = np.unique(weight[weight > 0.0]).size <= 1
+
         try:
             parameters = inspect.signature(method).parameters
         except (TypeError, ValueError):
@@ -2364,24 +2369,14 @@ class TensorInteraction:
             parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
         )
         if accepts_keywords or {"support", "counts"} <= parameters.keys():
-            compact = method(
-                rows,
-                support=effective_support,
-                counts=effective_counts,
-            )
-            if not (
-                indicator_geometry
-                or type(candidate) in _BUILT_IN_SPLINES
-                or _centred_on(compact.basis, effective_counts)
-            ):
+            compact = on_support(method(rows, support=effective_support, counts=effective_counts))
+            if not (equal_weights or _centred_on(compact.basis, effective_counts)):
                 raise _uncentred_margin(candidate)
-            if np.asarray(compact.basis).shape[0] == len(effective_support):
-                return compact
-            return compact_legacy(compact)
+            return compact
 
         # A custom spline overriding the old one-argument method keeps its projection
         # and penalty geometry, evaluated on the support.
-        if not indicator_geometry:
+        if not equal_weights:
             raise _uncentred_margin(candidate)
         return compact_legacy(method(rows))
 

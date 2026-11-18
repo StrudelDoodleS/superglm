@@ -81,29 +81,50 @@ def validate_fitted_group_names(groups: list[GroupSlice]) -> None:
 # ═══════════════════════════════════════════════════════════════════
 
 
-def _applied_penalty(
+def _lambda_beside_penalty(terms: list[tuple[float, NDArray]]) -> tuple[float, NDArray]:
+    """``(lam, Omega)`` for a block penalised by the ``(lam_j, Omega_j)`` terms.
+
+    One penalty keeps its lambda beside it, so stating its weight by name does
+    not change the arithmetic; several are summed, ``sum(lam_j Omega_j)``,
+    under a unit lambda.
+    """
+    if len(terms) == 1:
+        return terms[0]
+    return 1.0, cast(NDArray, sum(lam * omega for lam, omega in terms))
+
+
+def _penalty_terms(
     info: GroupInfo, group_name: str, lambda2: float | dict
-) -> tuple[float, NDArray | None]:
-    """``(lam, Omega)`` with ``lam Omega`` the penalty the fit applies to the block.
+) -> list[tuple[float, NDArray]]:
+    """The ``(lam_j, Omega_j)`` a fit applies to a block, zero weights dropped.
 
     A mapping is read as ``build_penalty_matrix`` reads it, each group or
-    penalty component weighted by its own entry; several components are
-    then summed at weight one, as ``rebuild_design_matrix_with_lambdas``
-    sums REML's.
+    penalty component weighted by its own entry.
     """
     from superglm.reml.penalty_algebra import resolve_component_lambda, resolve_group_lambda
 
-    components = info.penalty_components
-    if info.penalty_matrix is None:
-        return 0.0, None
-    if not isinstance(lambda2, dict) or not components:
-        return resolve_group_lambda(lambda2, group_name), info.penalty_matrix
-    weighted = [
-        (resolve_component_lambda(lambda2, group_name, s), omega) for s, omega in components
-    ]
-    if len(weighted) == 1:
-        return weighted[0]
-    return 1.0, cast(NDArray, sum(lam * omega for lam, omega in weighted))
+    if not info.penalty_components:
+        terms = [(resolve_group_lambda(lambda2, group_name), info.penalty_matrix)]
+    else:
+        terms = [
+            (resolve_component_lambda(lambda2, group_name, suffix), omega)
+            for suffix, omega in info.penalty_components
+        ]
+    return [(lam, omega) for lam, omega in terms if lam != 0.0]
+
+
+def _applied_penalty(
+    info: GroupInfo, group_name: str, lambda2: float | dict
+) -> tuple[float, NDArray]:
+    """``(lam, Omega)`` with ``lam Omega`` the penalty the fit applies to the block.
+
+    A scalar weights the declared penalty; a mapping weights each term
+    (``_penalty_terms``).
+    """
+    if not isinstance(lambda2, dict):
+        return float(lambda2), info.penalty_matrix
+    terms = _penalty_terms(info, group_name, lambda2)
+    return _lambda_beside_penalty(terms) if terms else (0.0, info.penalty_matrix)
 
 
 def compute_R_inv(
@@ -176,7 +197,8 @@ def _dominant_penalty_eigenbasis(
     info: GroupInfo,
     columns: NDArray | sp.spmatrix | None,
     weights: NDArray | None,
-    lam: float,
+    group_name: str,
+    lambda2: float | dict,
 ) -> NDArray | None:
     """The eigenbasis of a raw block's penalty where it outweighs the data by ``1/sqrt(u)``.
 
@@ -187,12 +209,16 @@ def _dominant_penalty_eigenbasis(
     & Safken 2016, sec. 3.1.1), and the penalty dominates every range
     direction, so the turn costs the data's column scaling nothing.
     ``columns`` and ``weights`` are the block's raw rows and their weights:
-    a binned block's distinct rows and bin weights; ``lam`` is the block's
-    own smoothing weight (``_applied_penalty``).
+    a binned block's distinct rows and bin weights.  The turn needs one
+    penalty term (``_penalty_terms``): the eigenbasis of a sum of terms at
+    different weights is not found without them.
     """
-    omega = info.penalty_matrix
-    if omega is None or columns is None or len(info.penalty_components or ()) > 1:
+    if info.penalty_matrix is None or columns is None:
         return None
+    terms = _penalty_terms(info, group_name, lambda2)
+    if len(terms) != 1:
+        return None
+    lam, omega = terms[0]
     penalty = lam * float(np.max(np.diag(omega)))
     columns = sp.csr_matrix(columns)
     data = float(np.max(columns.multiply(columns).T @ weights, initial=0.0))
@@ -694,8 +720,6 @@ def _process_info(
     """
     use_discrete = B_unique is not None
     use_tensor = tensor_build is not None
-    # The SSP map and the eigenbasis turn are built at the penalty the fit applies.
-    lam, applied_omega = _applied_penalty(info, group_name, lambda2)
     if isinstance(info.columns, np.ndarray) and (
         info.penalty_matrix is not None or info.penalty_components is not None
     ):
@@ -737,15 +761,17 @@ def _process_info(
             use_discrete_spline_cat = False
         if info.projection is not None:
             P = info.projection
-            if info.reparametrize and applied_omega is not None:
-                R_inv_local = compute_projected_R_inv(B_for, P, applied_omega, level_weight, lam)
+            if info.reparametrize and info.penalty_matrix is not None:
+                lam, omega = _applied_penalty(info, group_name, lambda2)
+                R_inv_local = compute_projected_R_inv(B_for, P, omega, level_weight, lam)
                 R_inv = P @ R_inv_local
             else:
                 R_inv = P
                 R_inv_local = None
             omega_full = P @ info.penalty_matrix @ P.T if info.penalty_matrix is not None else None
-        elif info.reparametrize and applied_omega is not None:
-            R_inv = compute_R_inv(B_for, applied_omega, level_weight, lam)
+        elif info.reparametrize and info.penalty_matrix is not None:
+            lam, omega = _applied_penalty(info, group_name, lambda2)
+            R_inv = compute_R_inv(B_for, omega, level_weight, lam)
             R_inv_local = R_inv
             omega_full = info.penalty_matrix
         else:
@@ -789,10 +815,11 @@ def _process_info(
 
     elif info.projection is not None:
         P = info.projection
-        if info.reparametrize and applied_omega is not None:
+        if info.reparametrize and info.penalty_matrix is not None:
             B_for = B_unique if use_discrete else info.columns
             exp_for = exposure_agg if use_discrete else sample_weight
-            R_inv_local = compute_projected_R_inv(B_for, P, applied_omega, exp_for, lam)
+            lam, omega = _applied_penalty(info, group_name, lambda2)
+            R_inv_local = compute_projected_R_inv(B_for, P, omega, exp_for, lam)
             R_inv = P @ R_inv_local
         else:
             # A binned main effect is read on its distinct rows and bin weights.
@@ -804,7 +831,8 @@ def _process_info(
                     info,
                     B_unique if binned else info.columns,
                     exposure_agg if binned else sample_weight,
-                    lam,
+                    group_name,
+                    lambda2,
                 )
                 if eigenbasis_turn
                 else None
@@ -842,10 +870,11 @@ def _process_info(
             if info.lambda_policies is not None:
                 gm.lambda_policies = info.lambda_policies
 
-    elif info.reparametrize and applied_omega is not None:
+    elif info.reparametrize and info.penalty_matrix is not None:
         B_for = B_unique if use_discrete else info.columns
         exp_for = exposure_agg if use_discrete else sample_weight
-        R_inv = compute_R_inv(B_for, applied_omega, exp_for, lam)
+        lam, omega = _applied_penalty(info, group_name, lambda2)
+        R_inv = compute_R_inv(B_for, omega, exp_for, lam)
         # No projection — constraints are in raw space, same as R_inv input
         R_inv_local = R_inv
         n_cols = R_inv.shape[1]
@@ -1219,10 +1248,9 @@ def _resolve_group_lambda(gm, g, lambdas):
     components = gm.omega_components
     if components is None:
         return lambdas[g.name], gm.omega
-    if len(components) == 1:
-        suffix, omega = components[0]
-        return lambdas[f"{g.name}:{suffix}"], omega
-    return 1.0, sum(lambdas[f"{g.name}:{suffix}"] * omega_j for suffix, omega_j in components)
+    return _lambda_beside_penalty(
+        [(lambdas[f"{g.name}:{suffix}"], omega_j) for suffix, omega_j in components]
+    )
 
 
 def _group_has_lambda(gm, g, lambdas):
