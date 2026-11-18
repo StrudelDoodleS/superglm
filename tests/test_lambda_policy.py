@@ -298,6 +298,22 @@ class TestFitRemlLambdaPolicy:
         with pytest.raises(NotImplementedError, match=rf"'grade'.*fit_reml\(\), not {route}\(\)"):
             getattr(model, route)(pd.DataFrame({"grade": np.asarray(levels)[codes]}), np.sin(codes))
 
+    @pytest.mark.parametrize("route", ["fit", "fit_path"])
+    def test_a_structure_applied_to_a_declaration_keeps_its_policy_refused(self, route):
+        """``Structure.apply`` copies the declared smoothing, which leaves a policy unresolved."""
+        from superglm import Structure
+
+        x = np.linspace(0.0, 1.0, 120)
+        declared = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.01,
+            spline_penalty=0.1,
+            features={"x": Spline(kind="ps", n_knots=6, lambda_policy=LambdaPolicy.fixed(1000.0))},
+        )
+        applied = Structure(features={}).apply(declared)
+        with pytest.raises(NotImplementedError, match=rf"'x'.*fit_reml\(\), not {route}\(\)"):
+            getattr(applied, route)(pd.DataFrame({"x": x}), np.sin(6.0 * x))
+
     @pytest.mark.parametrize("term", ["spline", "ordered"])
     def test_refits_after_fit_reml_take_the_resolved_lambda(self, term):
         """drop1 and refit_unpenalised refit a fixed policy at the lambda fit_reml resolved.

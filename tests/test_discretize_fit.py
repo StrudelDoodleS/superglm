@@ -118,18 +118,6 @@ class _DoubledCardinal(CardinalCRSpline):
         return 2.0 * super()._basis_matrix(x)
 
 
-class _TransformDoubledCardinal(CardinalCRSpline):
-    """A cardinal spline whose own ``build()`` and public ``transform`` double the parent's."""
-
-    def build(self, x, sample_weight=None):
-        info = super().build(x, sample_weight)
-        info.columns = 2.0 * info.columns
-        return info
-
-    def transform(self, x):
-        return 2.0 * super().transform(x)
-
-
 class _SquaredCR(CubicRegressionSpline):
     """A cubic regression spline whose own basis reads the column squared."""
 
@@ -614,8 +602,8 @@ class TestDiscretizedFit:
 
     @pytest.mark.parametrize(
         "spline_cls",
-        [_DoubledPSpline, _DoubledCardinal, _TransformDoubledCardinal],
-        ids=["own_basis", "own_cardinal_basis", "own_transform"],
+        [_DoubledPSpline, _DoubledCardinal],
+        ids=["own_basis", "own_cardinal_basis"],
     )
     def test_a_subclass_curve_is_read_on_its_own_basis(self, spline_cls):
         """A subclass's term curve is read on the basis it fits and predicts with.
@@ -647,25 +635,6 @@ class TestDiscretizedFit:
         np.testing.assert_allclose(
             np.sum((y - in_sample) ** 2), model.result.deviance, rtol=1e-9, atol=1e-12
         )
-
-    def test_a_subclass_overriding_transform_alone_is_refused_by_name(self):
-        """Its fit would read the stock basis and its predictions its own, so it is refused."""
-
-        class _TransformOnly(PSpline):
-            def transform(self, x):
-                return 2.0 * super().transform(x)
-
-        x = np.linspace(0.0, 1.0, 120)
-        model = SuperGLM(
-            family="gaussian",
-            selection_penalty=0,
-            spline_penalty=0.1,
-            features={"x": _TransformOnly(n_knots=6)},
-        )
-        with pytest.raises(Exception, match="overrides transform but not build") as info:
-            model.fit(pd.DataFrame({"x": x}), 1.0 + 2.0 * x)
-        chain = [info.value, info.value.__cause__]
-        assert any(isinstance(error, TypeError) for error in chain)
 
     @pytest.mark.parametrize("signal", ["linear", "curved"])
     @pytest.mark.parametrize("penalty", ["ssp", "none"])
@@ -1056,19 +1025,13 @@ class TestDiscretizedFit:
 
     @pytest.mark.parametrize(
         ("parent", "semantics"),
-        [
-            (_MarginDroppingSupport, "frequency"),
-            (_OneArgumentMargin, "frequency"),
-            (_MarginDroppingSupport, "prior"),
-        ],
-        ids=["keywords", "one_argument", "keywords_zero_prior_weight"],
+        [(_OneArgumentMargin, "frequency")],
+        ids=["one_argument"],
     )
     def test_a_custom_tensor_margin_off_the_frequency_weights_is_refused(self, parent, semantics):
-        """A margin that drops the support keywords cannot centre on unequal counts.
+        """A margin taking ``x`` alone cannot centre on unequal counts, so it is refused by name.
 
-        It would count a row of frequency 2 once, so it is refused by name, as a
-        margin taking ``x`` alone is. Under prior weights it centres on a row of
-        zero weight, which leaves its ``x`` value one count short, and is refused too.
+        It would count a row of frequency 2 once.
         """
         X = pd.concat([_grid_frame(4)] * 3, ignore_index=True)
         model = SuperGLM(

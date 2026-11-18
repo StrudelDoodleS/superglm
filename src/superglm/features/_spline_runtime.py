@@ -274,7 +274,7 @@ def transform(spec: Any, x: NDArray) -> NDArray:
 
 
 def score(spec: Any, x: NDArray, beta: NDArray) -> NDArray:
-    """Score a spline term on the spec's own basis (``spec.transform``)."""
+    """Score a spline term directly from the public runtime basis."""
     x = np.asarray(x, dtype=np.float64).ravel()
     beta = np.asarray(beta, dtype=np.float64).ravel()
     if x.size == 0:
@@ -285,23 +285,23 @@ def score(spec: Any, x: NDArray, beta: NDArray) -> NDArray:
     if np.unique(sample).size <= max(1, sample.size // 2):
         support, inverse = np.unique(x, return_inverse=True)
         if support.size * max(beta.size, 1) <= _MAX_SPLINE_SCORE_SUPPORT_CELLS:
-            support_values = np.asarray(spec.transform(support) @ beta, dtype=np.float64).ravel()
+            support_values = np.asarray(transform(spec, support) @ beta, dtype=np.float64).ravel()
             return cast(NDArray, support_values[inverse])
 
     result = np.empty(len(x), dtype=np.float64)
     for start in range(0, len(x), _SPLINE_SCORE_CHUNK_SIZE):
         stop = min(start + _SPLINE_SCORE_CHUNK_SIZE, len(x))
         result[start:stop] = np.asarray(
-            spec.transform(x[start:stop]) @ beta,
+            transform(spec, x[start:stop]) @ beta,
             dtype=np.float64,
         ).ravel()
     return result
 
 
 def reconstruct(spec: Any, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
-    """Reconstruct a spline curve on a regular grid, read on the spec's own basis (``transform``)."""
+    """Reconstruct a spline curve on a regular grid."""
     x_grid = np.linspace(spec._lo, spec._hi, n_points)
-    log_rels = spec.transform(x_grid) @ beta
+    log_rels = transform(spec, x_grid) @ beta
     scop_sigma = getattr(spec, "_scop_Sigma", None)
     if scop_sigma is not None:
         beta_orig = beta

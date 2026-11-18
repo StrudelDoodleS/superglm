@@ -535,8 +535,10 @@ class SuperGLM:
 
     # ── Core model operations ─────────────────────────────────────
 
-    def _clone_without_features(self, drop, *, lambda1=..., lambda2=...):
-        return base.clone_without_features(self, drop, lambda1=lambda1, lambda2=lambda2)
+    def _clone_without_features(self, drop, *, lambda1=..., lambda2=..., smoothing_resolved=False):
+        return base.clone_without_features(
+            self, drop, lambda1=lambda1, lambda2=lambda2, smoothing_resolved=smoothing_resolved
+        )
 
     def _auto_detect_features(self, X, sample_weight=None):
         return base.auto_detect(self, as_eager_frame(X), sample_weight)

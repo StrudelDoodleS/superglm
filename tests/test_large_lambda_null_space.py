@@ -202,6 +202,38 @@ def test_a_mapping_fits_as_the_equal_scalar_under_a_selection_penalty(route):
         assert mapped_max == pytest.approx(scalar_max, rel=2**8 * U)
 
 
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "binned"])
+@pytest.mark.parametrize("route", ["fit", "fit_path"])
+def test_equal_component_weights_fit_as_the_scalar(route, discrete):
+    """Every component of a multi-penalty spline at one weight is the scalar's penalty.
+
+    The SSP map is built from it as the scalar builds it, so the fits are the same
+    bits. On x spread over nine decades, summing the weighted components instead
+    moved the selection fit's predictions by 0.031.
+    """
+    x = np.geomspace(1.0, 1.0e9, 200)
+    frame = pd.DataFrame({"x": x})
+    y = 2.0 + 1.2 * np.sin(6.0 * np.pi * (x - x.min()) / np.ptp(x))
+
+    def predicted(smoothing):
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.1,
+            spline_penalty=smoothing,
+            discrete=discrete,
+            features={"x": Spline(kind="cr", n_knots=18, m=(1, 2), knot_strategy="quantile_rows")},
+        )
+        if route == "fit":
+            model.fit(frame, y)
+        else:
+            model.fit_path(frame, y, n_lambda=3)
+        return np.asarray(model.predict(frame))
+
+    scalar = predicted(7.0)
+    np.testing.assert_array_equal(predicted({"x": 7.0}), scalar)
+    np.testing.assert_array_equal(predicted({"x:d1": 7.0, "x:d2": 7.0}), scalar)
+
+
 def test_the_ssp_map_factors_a_penalty_whose_formed_null_is_negative():
     """``G + lambda Omega`` formed at 1e14 is indefinite when Omega rounds below zero on its null."""
     p, n = 10, 200

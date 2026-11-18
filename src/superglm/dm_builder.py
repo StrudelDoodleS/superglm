@@ -125,7 +125,12 @@ def _applied_penalty(
     if not isinstance(lambda2, dict):
         return float(lambda2), omega
     terms = _penalty_terms(info, group_name, lambda2)
-    return _lambda_beside_penalty(terms) if terms else (0.0, omega)
+    if not terms:
+        return 0.0, omega
+    # Every declared component at one weight is the scalar's penalty, read as the scalar reads it.
+    if len(terms) == len(info.penalty_components or ()) > 1 and len({lam for lam, _ in terms}) == 1:
+        return terms[0][0], omega
+    return _lambda_beside_penalty(terms)
 
 
 def compute_R_inv(

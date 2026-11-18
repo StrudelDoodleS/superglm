@@ -1001,11 +1001,14 @@ def clone_without_features(
     *,
     lambda1: float | None = ...,  # sentinel: ... means "keep current"
     lambda2: float | dict[str, float] | None = ...,
+    smoothing_resolved: bool = False,
 ):
     """Create a new SuperGLM with a subset of features removed.
 
     Copies family, link, penalty type, and solver options. Interactions
     whose parents include a dropped feature are also removed.
+    ``smoothing_resolved`` marks a refit at a fitted model's smoothing, whose
+    lambda policies have nothing left to resolve (``_reject_lambda_policy_fit``).
     """
     keep_features = {n: s for n, s in model._specs.items() if n not in drop}
 
@@ -1110,9 +1113,8 @@ def clone_without_features(
         new_model._level_bindings = stored
         new_model._config = new_model._config.with_value(level_bindings=stored)
 
-    # Resolve lambda2: the clone is fitted at it, so a lambda policy it keeps
-    # has nothing left to resolve (``_reject_lambda_policy_fit``).
-    new_model._smoothing_resolved = True
+    new_model._smoothing_resolved = smoothing_resolved
+    # Resolve lambda2
     if lambda2 is ...:
         source_lambda2 = fitted_lambda2(model)
         if isinstance(source_lambda2, dict):

@@ -27,7 +27,6 @@ from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_bins import discretize_positive_support
-from superglm._roundoff import UNIT_ROUNDOFF
 from superglm.features import _basis_kernels
 from superglm.features._spline_config import SplineOptionWarning
 from superglm.features._spline_penalties import _gapped_rank, structural_penalty_ranks
@@ -1955,46 +1954,13 @@ def _row_kron(B1: sp.spmatrix, B2: sp.spmatrix) -> sp.csr_matrix:
     return T
 
 
-def _centred_on(basis: NDArray, counts: NDArray) -> bool:
-    """Whether a margin's ``basis`` on the support is centred on the ``counts`` the fit uses.
-
-    Every column's weighted sum is held to ``sqrt(u)`` times the total count
-    times the basis's largest entry on the support, the scale of mgcv's
-    ``rank.tol`` (the square root of R's machine epsilon, ``2u``). A centred
-    margin sits at rounding, ``1e-16`` to ``1e-14`` of that scale, even where
-    the counts sit on one point and its centred basis is zero there; one
-    centred on other weights misses by a shift of a column's mean, ``1e-3``
-    and more.
-    """
-    basis = np.asarray(basis, dtype=np.float64)
-    counts = np.asarray(counts, dtype=np.float64)
-    scale = float(np.sum(np.abs(counts)) * np.max(np.abs(basis), initial=0.0))
-    return bool(np.all(np.abs(counts @ basis) <= np.sqrt(UNIT_ROUNDOFF) * scale))
-
-
-def _equal_counts(support: NDArray, counts: NDArray) -> bool:
-    """Whether every distinct support point carries the same total count.
-
-    A margin centred on its distinct points is then centred on the counts, and
-    one point (a constant column) leaves nothing to centre.
-    """
-    _, point = np.unique(np.asarray(support, dtype=np.float64).ravel(), return_inverse=True)
-    totals = np.bincount(point, weights=np.asarray(counts, dtype=np.float64).ravel())
-    return np.unique(totals).size <= 1
-
-
-def _uncentred_margin(candidate, *, takes_counts: bool) -> NotImplementedError:
-    """The refusal of a custom margin that cannot centre on unequal geometry weights."""
-    if takes_counts:
-        remedy = "evaluate its basis on support and centre it on counts."
-    else:
-        remedy = (
-            "implement tensor_marginal_ingredients(x, *, support=..., counts=...) to evaluate "
-            "the basis on support and centre it on counts, or fit with equal positive weights."
-        )
+def _uncentred_margin(candidate) -> NotImplementedError:
+    """The refusal of a one-argument custom margin under unequal geometry weights."""
     return NotImplementedError(
-        f"{type(candidate).__name__}'s tensor margin cannot certify unequal geometry "
-        f"weights: its basis is not centred on the weights the fit uses. To fit them, {remedy}"
+        f"{type(candidate).__name__}'s tensor margin cannot centre on unequal geometry "
+        "weights: it takes x alone. Implement tensor_marginal_ingredients(x, *, support=..., "
+        "counts=...) to evaluate the basis on support and centre it on counts, or fit with "
+        "equal positive weights."
     )
 
 
@@ -2343,16 +2309,12 @@ class TensorInteraction:
     ) -> TensorMarginalInfo:
         """A margin's basis, penalty and projection from its resolved spec (``_marginal_spec``).
 
-        The built-in method centres on ``counts`` (``tensor_marginal_info``). A
-        custom one taking ``support`` and ``counts`` is called as the built-in one
-        is; when the support points carry unequal counts, its basis, aligned to
-        the support, must be centred on them (``_centred_on``), or it is refused.
-        A custom one taking ``x`` alone is handed the rows of positive geometry
-        weight, so it is centred on ``counts`` when the positive weights are
-        equal (0/1 indicators, equal frequencies), and refused otherwise.
+        A method taking ``support`` and ``counts`` evaluates its basis on the
+        support and centres it on the counts, as the built-in one does
+        (``tensor_marginal_info``). One taking ``x`` alone is handed the rows of
+        positive geometry weight, so it is centred on ``counts`` when the positive
+        weights are equal (0/1 indicators, equal frequencies), and refused otherwise.
         """
-        from superglm.features.spline import _SplineBase
-
         method = candidate.tensor_marginal_ingredients
         if support is None and geometry_weight is None:
             return method(x)
@@ -2375,9 +2337,6 @@ class TensorInteraction:
                 return info
             return compact_legacy(info)
 
-        if getattr(method, "__func__", None) is _SplineBase.tensor_marginal_ingredients:
-            return on_support(method(x, support=effective_support, counts=effective_counts))
-
         try:
             parameters = inspect.signature(method).parameters
         except (TypeError, ValueError):
@@ -2386,12 +2345,7 @@ class TensorInteraction:
             parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
         )
         if accepts_keywords or {"support", "counts"} <= parameters.keys():
-            compact = on_support(method(x, support=effective_support, counts=effective_counts))
-            if not _equal_counts(effective_support, effective_counts) and not _centred_on(
-                compact.basis, effective_counts
-            ):
-                raise _uncentred_margin(candidate, takes_counts=True)
-            return compact
+            return on_support(method(x, support=effective_support, counts=effective_counts))
 
         # A custom spline overriding the old one-argument method keeps its projection
         # and penalty geometry, evaluated on the support.
@@ -2400,7 +2354,7 @@ class TensorInteraction:
             weight = np.asarray(geometry_weight, dtype=np.float64)
             rows = np.asarray(x, dtype=np.float64).ravel()[weight > 0.0]
             if np.unique(weight[weight > 0.0]).size > 1:
-                raise _uncentred_margin(candidate, takes_counts=False)
+                raise _uncentred_margin(candidate)
         return compact_legacy(method(rows))
 
     def _centered_marginal_dense(self, x: NDArray, info: TensorMarginalInfo) -> NDArray:

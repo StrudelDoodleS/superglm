@@ -235,23 +235,6 @@ def _interaction_projection(
     return build_identifiability_projection_for_spec(spec, x, constraint, sample_weight)
 
 
-def _raise_if_transform_alone_is_overridden(spec: Any) -> None:
-    """Refuse a subclass whose ``transform`` would predict on a basis its ``build`` never fitted.
-
-    The stock build reads the basis from ``_basis_matrix``, and predictions and term
-    curves read it from ``transform``: overriding the second alone makes them disagree.
-    """
-    from superglm.features.spline import _SplineBase
-
-    cls = type(spec)
-    if cls.transform is not _SplineBase.transform and cls.build is _SplineBase.build:
-        raise TypeError(
-            f"{cls.__name__} overrides transform but not build, so its fit would read the "
-            "stock basis and its predictions its own. Override _basis_matrix to change the "
-            "basis for both, or override build as well."
-        )
-
-
 def build_group_info(
     spec: Any,
     x: NDArray,
@@ -266,7 +249,6 @@ def build_group_info(
     support on those rows (``GroupInfo.row_support``), for the design
     builder to store without scanning the basis.
     """
-    _raise_if_transform_alone_is_overridden(spec)
     _raise_if_unsupported_fit_shape_constraint(spec)
     _warn_if_saved_on_scop(spec)
     clear_scop_state(spec)
