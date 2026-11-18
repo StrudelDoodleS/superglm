@@ -318,8 +318,8 @@ class TestFitRemlLambdaPolicy:
     def test_refits_after_fit_reml_take_the_resolved_lambda(self, term):
         """drop1 and refit_unpenalised refit a fixed policy at the lambda fit_reml resolved.
 
-        Their clones keep the policy but are fitted at the source's smoothing, so the
-        refusal of a declared policy in fit() does not reach them. Each refit is the
+        Their clones are fitted at the source's smoothing, so they carry no policy, and
+        neither does an unfitted clone of the model a refit returns. Each refit is the
         policy-free model declared at the same scalar lambda (3.0, or 0.0 when the
         smoothing is dropped): one Gaussian solve each, equal to rounding, which 1e-10
         bounds on these values near 2.
@@ -351,9 +351,10 @@ class TestFitRemlLambdaPolicy:
 
         for keep, lam in ((True, 3.0), (False, 0.0)):
             refit = model.refit_unpenalised(frame, y, keep_smoothing=keep)
-            np.testing.assert_allclose(
-                refit.predict(frame), declared(lam).predict(frame), rtol=0, atol=1e-10
-            )
+            expected = declared(lam).predict(frame)
+            np.testing.assert_allclose(refit.predict(frame), expected, rtol=0, atol=1e-10)
+            again = refit.clone_unfitted().fit(frame, y)
+            np.testing.assert_allclose(again.predict(frame), expected, rtol=0, atol=1e-10)
         np.testing.assert_allclose(
             model.drop1(frame, y).set_index("feature")["deviance_reduced"].sort_index(),
             declared(3.0).drop1(frame, y).set_index("feature")["deviance_reduced"].sort_index(),
