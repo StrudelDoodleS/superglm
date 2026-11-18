@@ -648,8 +648,11 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
     selection_penalty : float, {"auto"}, or None
         Group penalty strength. ``None`` and zero disable feature selection;
         ``"auto"`` explicitly calibrates the strength from the fit data.
-    spline_penalty : float or None
-        Within-group spline smoothing.  Defaults to 0.1.
+    spline_penalty : float, dict[str, float] or None
+        How strongly each spline is smoothed.  Defaults to 0.1.  A float
+        sets every term; a dict sets terms by name (``"x"``,
+        ``"x:<penalty>"``, ``"x:c[a]"``) and leaves the terms it does not
+        name unsmoothed.  See ``SuperGLM`` for the keys.
     features : dict[str, FeatureSpec] or None
         Native-style feature specs.  Mutually exclusive with the
         shorthand wrapper arguments (``spline_features``,
@@ -695,7 +698,7 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         family: str | Distribution = "poisson",
         penalty: str | Penalty | None = None,
         selection_penalty: float | Literal["auto"] | None = None,
-        spline_penalty: float | None = None,
+        spline_penalty: float | dict[str, float] | None = None,
         features: dict | None = None,
         spline_features: list[str | int] | None = None,
         categorical_features: list[str | int] | None = None,
@@ -833,7 +836,7 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         ``"group_lasso"``.
     selection_penalty : float, {"auto"}, or None
         See ``SuperGLMRegressor``.
-    spline_penalty : float or None
+    spline_penalty : float, dict[str, float] or None
         See ``SuperGLMRegressor``.
     features : dict[str, FeatureSpec] or None
         Native-style feature specs.  Mutually exclusive with shorthand
@@ -877,7 +880,7 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         self,
         penalty: str | Penalty | None = None,
         selection_penalty: float | Literal["auto"] | None = None,
-        spline_penalty: float | None = None,
+        spline_penalty: float | dict[str, float] | None = None,
         features: dict | None = None,
         spline_features: list[str | int] | None = None,
         categorical_features: list[str | int] | None = None,

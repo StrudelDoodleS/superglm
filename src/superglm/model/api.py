@@ -66,7 +66,7 @@ class SuperGLM:
         link: str | Link | None = None,
         penalty: Penalty | str | None = None,
         selection_penalty: float | Literal["auto"] | None = None,
-        spline_penalty: float | None = None,
+        spline_penalty: float | dict[str, float] | None = None,
         penalty_features: str | list[str] | None = None,
         # Feature configuration
         features: Mapping[Hashable, FeatureSpec] | None = None,
@@ -117,9 +117,25 @@ class SuperGLM:
             Regularisation strength for the group penalty (feature selection).
             ``None`` (default) and ``0.0`` disable selection. ``"auto"``
             explicitly requests calibration to 10% of lambda_max at fit time.
-        spline_penalty : float, optional
-            Within-group ridge shrinkage for spline smoothing.
-            Defaults to 0.1.
+        spline_penalty : float or dict[str, float], optional
+            How strongly ``fit`` smooths each spline: the weight on its
+            wiggliness penalty. Defaults to 0.1; ``fit_reml`` estimates its
+            own weights. A float sets every term. A dict sets terms by name,
+            and a term it does not name is not smoothed (weight 0.0):
+
+            - ``"x"`` sets every penalty of the term ``x``; ``"x:z"`` a
+              tensor interaction, and ``"x:c"`` every level of a spline by
+              the categorical ``c``.
+            - ``"x:<penalty>"`` sets one penalty of a term that has several:
+              ``"x:wiggle"`` and ``"x:null"`` under ``select=True``,
+              ``"x:d1"`` and ``"x:d2"`` under ``m=(1, 2)``, or
+              ``"x:z:margin_x"`` for one margin of a tensor.
+            - ``"x:c[a]"`` sets the level ``a`` of a spline by a categorical.
+
+            The more specific key wins: under ``select=True``,
+            ``{"x": 5.0, "x:null": 1.0}`` puts 1.0 on the null-space penalty
+            and 5.0 on the other. A key that names nothing in the model is
+            ignored.
         penalty_features : str or list[str], optional
             Restrict the selection penalty to specific feature or group names.
             ``None`` (default) applies to all penalizable groups.
