@@ -59,10 +59,7 @@ class _SplineBase:
     """Base class for all spline feature specs.
 
     Subclasses must implement ``_build_penalty()`` and may override
-    ``_constraint_rows()`` to add boundary constraints. To change the basis,
-    override ``_basis_matrix()``: ``build`` reads it, and predictions and
-    curves read it through the module's ``transform``, so overriding
-    ``transform`` alone changes nothing the fit uses.
+    ``_constraint_rows()`` to add boundary constraints.
 
     Basis capability attributes (override in subclasses):
         _penalty_semantics : how the penalty is computed
@@ -223,7 +220,12 @@ class _SplineBase:
         )
 
     def _basis_matrix(self, x: NDArray):
-        """Evaluate the raw B-spline basis under the extrapolation policy."""
+        """Evaluate the raw B-spline basis under the extrapolation policy.
+
+        Override it to change a subclass's basis: ``build`` reads it, and
+        predictions and curves read it through the module ``transform``, so
+        overriding ``transform`` alone changes nothing the fit uses.
+        """
         return _spline_runtime.basis_matrix(self, x)
 
     def _raw_basis_matrix(self, x: NDArray) -> NDArray:
@@ -454,22 +456,16 @@ class _SplineBase:
         support: NDArray | None = None,
         counts: NDArray | None = None,
     ) -> TensorMarginalInfo:
-        """Compute marginal basis, penalty, and projection for tensor products.
+        """Marginal basis, penalty and projection of a built spec for tensor products.
 
-        Must be called on an already-built spec (after ``build()`` or
-        ``_place_knots()``).  Reuses the parent's knot vector, penalty
-        type, and boundary constraints so that tensor marginals inherit
-        the parent spline geometry.
+        Reuses the parent's knots, penalty type and boundary constraints, and
+        returns a ``TensorMarginalInfo``: the centred, constrained marginal basis,
+        its penalty and the projection from the raw B-spline space to the centred one.
 
-        Returns a ``TensorMarginalInfo`` with the centered+constrained
-        marginal basis, penalty, and a projection from the raw B-spline
-        space to the effective (centered) space.
-
-        An override that takes ``support`` and ``counts`` must evaluate its
-        basis on ``support`` (the column's distinct values) and centre it on
-        ``counts`` (their weights), as this one does. One that accepts them
-        and ignores them is centred on its rows, so zero or unequal weights
-        put the margin off centre.
+        An override taking ``support`` and ``counts`` evaluates its basis on
+        ``support`` (the column's distinct values) and centres it on ``counts``
+        (their weights), as this one does; one that ignores them is centred on
+        its rows, off centre under zero or unequal weights.
         """
         return _spline_build.tensor_marginal_info(
             self,
