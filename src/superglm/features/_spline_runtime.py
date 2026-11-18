@@ -274,7 +274,7 @@ def transform(spec: Any, x: NDArray) -> NDArray:
 
 
 def score(spec: Any, x: NDArray, beta: NDArray) -> NDArray:
-    """Score a spline term directly from the public runtime basis."""
+    """Score a spline term on the spec's own basis (``spec.transform``)."""
     x = np.asarray(x, dtype=np.float64).ravel()
     beta = np.asarray(beta, dtype=np.float64).ravel()
     if x.size == 0:
@@ -285,14 +285,14 @@ def score(spec: Any, x: NDArray, beta: NDArray) -> NDArray:
     if np.unique(sample).size <= max(1, sample.size // 2):
         support, inverse = np.unique(x, return_inverse=True)
         if support.size * max(beta.size, 1) <= _MAX_SPLINE_SCORE_SUPPORT_CELLS:
-            support_values = np.asarray(transform(spec, support) @ beta, dtype=np.float64).ravel()
+            support_values = np.asarray(spec.transform(support) @ beta, dtype=np.float64).ravel()
             return cast(NDArray, support_values[inverse])
 
     result = np.empty(len(x), dtype=np.float64)
     for start in range(0, len(x), _SPLINE_SCORE_CHUNK_SIZE):
         stop = min(start + _SPLINE_SCORE_CHUNK_SIZE, len(x))
         result[start:stop] = np.asarray(
-            transform(spec, x[start:stop]) @ beta,
+            spec.transform(x[start:stop]) @ beta,
             dtype=np.float64,
         ).ravel()
     return result

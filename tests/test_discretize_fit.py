@@ -127,9 +127,6 @@ class _TransformDoubledCardinal(CardinalCRSpline):
     def transform(self, x):
         return 2.0 * super().transform(x)
 
-    def score(self, x, beta):
-        return self.transform(x) @ beta
-
 
 class _SquaredCR(CubicRegressionSpline):
     """A cubic regression spline whose own basis reads the column squared."""
@@ -619,8 +616,7 @@ class TestDiscretizedFit:
         ``"wiggle"``, and its structural rank is found under that name, so
         REML reads rank 10 under both declarations. The quantile knots on a
         column spanning five decades spread the penalty's spectrum so far that
-        the rank read from its eigenvalues is 8, which moves the optimum to
-        EDF 7.7 from 4.7.
+        the rank read from its eigenvalues would be 8.
 
         Stating it changes no arithmetic: a named single penalty is rebuilt
         with its lambda beside it, as an unnamed one is, so the two fits are
