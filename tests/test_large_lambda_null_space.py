@@ -19,7 +19,7 @@ import pandas as pd
 import pytest
 import scipy.sparse as sp
 
-from superglm import Categorical, LambdaPolicy, Numeric, Spline, SuperGLM
+from superglm import LambdaPolicy, Numeric, Spline, SuperGLM
 from superglm.dm_builder import compute_R_inv
 from superglm.penalties import GroupElasticNet, GroupLasso, Ridge, SparseGroupLasso
 from superglm.reml.penalty_algebra import ssp_penalty_matrix
@@ -115,67 +115,6 @@ def test_a_mapping_protects_each_term_at_its_own_penalty(penalty, discrete):
     assert np.max(np.abs(mapped.predict(frame) - reference.predict(frame))) <= tolerance
     edf_gap = mapped.result.effective_df - reference.result.effective_df
     assert abs(edf_gap) <= 1e5 / 1e14 + 2**16 * U
-
-
-@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "binned"])
-@pytest.mark.parametrize("select", [False, True], ids=["one-penalty", "select"])
-@pytest.mark.parametrize("lam", [1.0, 1e14])
-def test_a_by_level_interactions_name_weights_each_level(lam, select, discrete):
-    """``{"x:c": lam}`` fits as each level of ``x:c`` keyed at ``lam`` by its own name.
-
-    Each non-base level of the interaction is its own group, ``x:c[<level>]``;
-    the interaction's name is the default for each, as a term's name is for
-    its penalty components.  Unkeyed, every level fitted unpenalised.
-    """
-    rng = np.random.default_rng(6)
-    frame = pd.DataFrame({"x": X_GRID, "c": rng.choice(["a", "b", "d"], X_GRID.size)})
-    y = Y + np.where(frame["c"] == "b", np.sin(6.0 * X_GRID), 0.0)
-
-    def fit(smoothing):
-        model = SuperGLM(
-            family="gaussian",
-            selection_penalty=0.0,
-            features={"x": Spline(kind="cr", n_knots=8, select=select), "c": Categorical()},
-            interactions=[("x", "c")],
-            discrete=discrete,
-            spline_penalty=smoothing,
-        )
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            return model.fit(frame, y)
-
-    named = fit({"x": 1e-3, "x:c": lam})
-    level_groups = [g.name for g in named._groups if g.name.startswith("x:c[")]
-    assert len(level_groups) == 2
-    levels = fit({"x": 1e-3, **dict.fromkeys(level_groups, lam)})
-    np.testing.assert_array_equal(named.predict(frame), levels.predict(frame))
-    assert named.result.effective_df == levels.result.effective_df
-    np.testing.assert_array_equal(named._coef_covariance[0], levels._coef_covariance[0])
-
-
-def test_a_decomposed_tensors_name_weights_its_wiggly_group():
-    """``{"x:z": lam}`` reaches the group ``x:z:wiggly`` that ``decompose=True`` builds."""
-    z = np.random.default_rng(0).permutation(X_GRID)
-    frame = pd.DataFrame({"x": X_GRID, "z": z})
-    y = Y + np.sin(6.0 * X_GRID) * z
-
-    def fit(smoothing):
-        model = SuperGLM(
-            family="gaussian",
-            selection_penalty=0.0,
-            features={"x": Spline(kind="cr", n_knots=6), "z": Spline(kind="cr", n_knots=6)},
-            spline_penalty=smoothing,
-        )
-        model._add_interaction("x", "z", decompose=True)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            return model.fit(frame, y)
-
-    named = fit({"x": 1.0, "z": 1.0, "x:z": 50.0})
-    assert "x:z:wiggly" in {g.name for g in named._groups}
-    wiggly = fit({"x": 1.0, "z": 1.0, "x:z:wiggly": 50.0})
-    np.testing.assert_array_equal(named.predict(frame), wiggly.predict(frame))
-    assert named.result.effective_df == wiggly.result.effective_df
 
 
 @pytest.mark.parametrize("discrete", [False, True], ids=["exact", "binned"])

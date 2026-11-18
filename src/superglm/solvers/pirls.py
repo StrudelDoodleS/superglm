@@ -108,11 +108,11 @@ def _has_structural_smoothing_penalty(
             omega_components = getattr(gm, "omega_components", None)
             if omega_components is not None:
                 for suffix, _omega_j in omega_components:
-                    lam = resolve_component_lambda(lambda2, group.name, suffix, group.feature_name)
+                    lam = resolve_component_lambda(lambda2, group.name, suffix)
                     if float(lam) != 0.0:
                         return True
                 continue
-            lam = resolve_group_lambda(lambda2, group.name, group.feature_name)
+            lam = resolve_group_lambda(lambda2, group.name)
             if float(lam) != 0.0 and gm.omega is not None:
                 return True
     return False

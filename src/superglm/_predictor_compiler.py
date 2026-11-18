@@ -481,7 +481,6 @@ def compile_predictor_design(
             gm, r_inv, n_cols = _process_info(
                 info,
                 group_name=_group_name(name, info),
-                term=str(name),
                 B_unique=B_unique,
                 bin_idx=bin_idx,
                 sample_weight=sample_weight,
@@ -709,7 +708,6 @@ def compile_predictor_design(
             sample_weight=sample_weight,
             exposure_agg=exposure_agg_inter,
             lambda2=lambda2,
-            term=iname,
             tensor_build=tensor_build,
             tensor_id=tensor_id,
             eigenbasis_turn=eigenbasis_turn,
