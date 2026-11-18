@@ -378,6 +378,18 @@ def declared_null_basis(
     polynomials have coefficients inside and outside the empty support (their
     projectors do not commute), so a rotation would leave that count to
     rounding; such a term states none and keeps the data's coordinates.
+
+    Centring cancels a null direction whose polynomial is nearly constant on
+    the rows (``x`` clustered within a small share of the knot span). Each
+    basis value is a rounded float, so a unit coefficient vector's column
+    ``B m`` carries rounding of order ``u ||W^(1/2) B||_2``, which centring
+    (an exact or once-rounded subtraction, Higham 2002, sec. 2.2 and 3.1)
+    does not reduce. When the centred null columns' smallest weighted norm,
+    ``sigma_min(W^(1/2) B M)`` for the orthonormal null members ``M``, falls
+    below ``sqrt(u) ||W^(1/2) B||_2``, that rounding exceeds ``sqrt(u)`` of
+    the column: more than half its digits are lost, the order of the fit's
+    ``sqrt(eps) = sqrt(2 u)`` rank cut, so the fit's rank would count the
+    direction's rounding. Such a term states none.
     """
     from superglm.features.spline import _BUILT_IN_SPLINES
 
@@ -395,28 +407,25 @@ def declared_null_basis(
         return None
     nullity = info.n_cols - rank
     values = np.asarray(x, dtype=np.float64).ravel()
+    weights = np.ones_like(values)
     if sample_weight is not None:
-        values = values[np.asarray(sample_weight, dtype=np.float64).ravel() > 0.0]
-    if not _distinct_values_exceed(values, nullity):
+        weights = np.asarray(sample_weight, dtype=np.float64).ravel()
+    kept = weights > 0.0
+    support, inverse = np.unique(values[kept], return_inverse=True)
+    if support.size <= nullity:
         return None
-    if not _reaches_every_basis_function(spec, values):
+    basis = spec._basis_matrix(support).toarray()
+    if not np.all(np.abs(basis).sum(axis=0) > 0.0):
         return None
-    return term_null_basis(null_raw, info.projection, nullity)
-
-
-def _reaches_every_basis_function(spec: Any, values: NDArray) -> bool:
-    """Whether every basis function of ``spec`` is nonzero at one of ``values``."""
-    basis = spec._basis_matrix(np.unique(values))
-    return bool(np.all(np.asarray(abs(basis).sum(axis=0)).ravel() > 0.0))
-
-
-def _distinct_values_exceed(values: NDArray, count: int) -> bool:
-    """Whether ``values`` hold more than ``count`` distinct values."""
-    for _ in range(count + 1):
-        if values.size == 0:
-            return False
-        values = values[values != values[0]]
-    return True
+    null_basis = term_null_basis(null_raw, info.projection, nullity)
+    if null_basis is None:
+        return None
+    members = null_basis if info.projection is None else info.projection @ null_basis
+    root = np.sqrt(np.bincount(inverse, weights=weights[kept]))[:, None] * basis
+    cut = np.sqrt(2.0**-53) * np.linalg.norm(root, 2)
+    if nullity and np.linalg.svd(root @ members, compute_uv=False)[-1] < cut:
+        return None
+    return null_basis
 
 
 def build_knots_and_penalty(

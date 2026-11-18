@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Spline, SuperGLM
+from superglm import Numeric, Spline, SuperGLM
 
 U = 2.0**-53
 FIXED_LAMBDA = 3000.0
@@ -246,3 +246,33 @@ def test_a_basis_function_no_row_reaches_keeps_its_exact_zero_column(kind):
     group = model._dm.group_matrices[0]
     columns = model._specs["x"]._basis_matrix(x) @ group.R_inv
     assert np.count_nonzero(~np.any(columns != 0.0, axis=0)) == 6
+
+
+@pytest.mark.parametrize("kind", ["bs", "ps"])
+def test_a_null_direction_centring_cancels_keeps_the_datas_coordinates(kind):
+    """On ``x`` within 1e-8 of 0.5, beside ``u = x``, the fit is the least squares line.
+
+    The centred line's column is 1.8e-9 of the basis's, under ``sqrt(u)``, so
+    the basis's rounding is ``6.6e-8`` of it, above the fit's ``sqrt(eps)`` rank
+    cut: on the line's own coordinate the fit counted it apart from ``u``
+    (which it equals exactly), rank 4 of 3, with coefficients near 1e13 and
+    fitted values 4e-3 off the line. The term declares no null basis and keeps
+    the data's coordinates, where the rank is 3 and the fit is the line to
+    2e-9. Mutation: no cancellation gate in ``declared_null_basis``.
+    """
+    a = np.linspace(-1.0, 1.0, 80)
+    frame = pd.DataFrame({"x": 0.5 + 1e-8 * a, "u": 0.5 + 1e-8 * a})
+    y = 1.0 + 0.4 * a + 0.1 * np.cos(np.arange(80))
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        spline_penalty=1e-6,
+        features={
+            "x": Spline(kind=kind, n_knots=0, degree=2, boundary=(-1.0, 2.0)),
+            "u": Numeric(),
+        },
+    ).fit(frame, y)
+    line = np.column_stack((np.ones_like(a), a))
+    exact = line @ np.linalg.lstsq(line, y, rcond=None)[0]
+    assert model.result.reml_hessian_rank == model._dm.p
+    assert np.max(np.abs(model.predict(frame) - exact) / np.abs(exact)) <= 1e-6
