@@ -370,6 +370,14 @@ def declared_null_basis(
     the rows of positive weight. With fewer, a null coordinate's column is
     zero but for rounding, and an exactly unpenalised one would be fitted to
     that rounding; such a term states none.
+
+    A basis function that no row of positive weight reaches has an exactly
+    zero data column, and where the penalty does not reach it either (a zero
+    lambda) the fit's rank counts it exactly. No orthogonal ``T`` keeps both
+    that column and the null basis on coordinate axes, because the
+    polynomials have coefficients inside and outside the empty support (their
+    projectors do not commute), so a rotation would leave that count to
+    rounding; such a term states none and keeps the data's coordinates.
     """
     from superglm.features.spline import _BUILT_IN_SPLINES
 
@@ -386,16 +394,24 @@ def declared_null_basis(
     if rank is None:
         return None
     nullity = info.n_cols - rank
-    if not _distinct_values_exceed(x, sample_weight, nullity):
+    values = np.asarray(x, dtype=np.float64).ravel()
+    if sample_weight is not None:
+        values = values[np.asarray(sample_weight, dtype=np.float64).ravel() > 0.0]
+    if not _distinct_values_exceed(values, nullity):
+        return None
+    if not _reaches_every_basis_function(spec, values):
         return None
     return term_null_basis(null_raw, info.projection, nullity)
 
 
-def _distinct_values_exceed(x: NDArray, sample_weight: NDArray | None, count: int) -> bool:
-    """Whether the rows of positive weight hold more than ``count`` distinct values of ``x``."""
-    values = np.asarray(x, dtype=np.float64).ravel()
-    if sample_weight is not None:
-        values = values[np.asarray(sample_weight, dtype=np.float64).ravel() > 0.0]
+def _reaches_every_basis_function(spec: Any, values: NDArray) -> bool:
+    """Whether every basis function of ``spec`` is nonzero at one of ``values``."""
+    basis = spec._basis_matrix(np.unique(values))
+    return bool(np.all(np.asarray(abs(basis).sum(axis=0)).ravel() > 0.0))
+
+
+def _distinct_values_exceed(values: NDArray, count: int) -> bool:
+    """Whether ``values`` hold more than ``count`` distinct values."""
     for _ in range(count + 1):
         if values.size == 0:
             return False

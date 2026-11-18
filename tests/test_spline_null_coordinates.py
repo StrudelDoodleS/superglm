@@ -222,3 +222,27 @@ def test_a_null_space_its_rows_cannot_see_stays_unfitted(kind):
     model.fit(pd.DataFrame({"x": np.full(z.size, 0.5), "z": z}), y)
     predictions = model.predict(pd.DataFrame({"x": [0.2, 0.5, 0.8], "z": [0.3, 0.3, 0.3]}))
     assert np.ptp(predictions) <= 2**10 * U * np.max(np.abs(y))
+
+
+@pytest.mark.parametrize("kind", ["bs", "ps"])
+def test_a_basis_function_no_row_reaches_keeps_its_exact_zero_column(kind):
+    """A gap in ``x`` empties six basis functions, whose solver columns stay exactly zero.
+
+    Unpenalised, they are what the fit's rank leaves out, counted exactly. A
+    rotation onto the null basis would mix them into every column at rounding
+    (the polynomials reach inside and outside the gap), so the term keeps the
+    data's coordinates. Mutation: declaring the null basis anyway leaves no
+    zero column, and the constrained QP of ``test_constrained_qp``'s gap
+    fixture then counts rank 14 of 19 for 13.
+    """
+    x = np.concatenate([np.linspace(0.0, 0.2, 60), np.linspace(0.8, 1.0, 60)])
+    y = np.exp(0.5 + 2.0 * x)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        spline_penalty=0.0,
+        features={"x": Spline(kind=kind, n_knots=16)},
+    ).fit(pd.DataFrame({"x": x}), y)
+    group = model._dm.group_matrices[0]
+    columns = model._specs["x"]._basis_matrix(x) @ group.R_inv
+    assert np.count_nonzero(~np.any(columns != 0.0, axis=0)) == 6
