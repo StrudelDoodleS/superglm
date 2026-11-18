@@ -1506,6 +1506,7 @@ class EditorSession:
             set(names),
             lambda1=lambda1,
             lambda2=lambda2,
+            smoothing_resolved=True,
         )
         fit_refit_model(
             self.model,

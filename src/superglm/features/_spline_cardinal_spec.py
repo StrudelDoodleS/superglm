@@ -22,6 +22,7 @@ def place_knots(
         spec._lo, spec._hi = spec._explicit_boundary
     else:
         spec._lo, spec._hi = float(x.min()), float(x.max())
+    spec._require_range()
     spec._basis_lo = None
     spec._basis_hi = None
     spec._basis_d1_lo = None
@@ -38,6 +39,13 @@ def place_knots(
         explicit_boundary=spec._explicit_boundary,
         sample_weight=sample_weight,
     )
+    # The cardinal system needs distinct knots: a quantile knot on the boundary
+    # (all rows at one end of an explicit range) falls back to uniform knots.
+    if spec._knot_strategy_actual in _spline_knots.QUANTILE_STRATEGIES and not np.all(
+        (interior > spec._lo) & (interior < spec._hi)
+    ):
+        interior = np.linspace(spec._lo, spec._hi, spec.n_knots + 2)[1:-1]
+        spec._knot_strategy_actual = "uniform"
 
     spec._cr_knots = np.concatenate([[spec._lo], interior, [spec._hi]])
     spec._n_basis = len(spec._cr_knots)
@@ -84,19 +92,3 @@ def linear_tail_cardinal_basis(spec: Any, x: NDArray) -> sp.csr_matrix:
 def eval_cardinal_basis(spec: Any, x: NDArray) -> sp.csr_matrix:
     """Evaluate the cardinal cubic regression spline basis."""
     return _spline_cardinal.eval_cardinal_basis(x, spec._cr_knots, spec._cr_M)
-
-
-def reconstruct(spec: Any, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
-    """Reconstruct a cardinal spline curve on a regular grid."""
-    beta_orig = spec._R_inv @ beta if spec._R_inv is not None else beta
-    x_grid = np.linspace(spec._lo, spec._hi, n_points)
-    basis_grid = basis_matrix(spec, x_grid).toarray()
-    log_rels = basis_grid @ beta_orig
-    assert spec._cr_knots is not None
-    return {
-        "x": x_grid,
-        "log_relativity": log_rels,
-        "relativity": np.exp(log_rels),
-        "knots_interior": spec._cr_knots[1:-1],
-        "coefficients_original": beta_orig,
-    }

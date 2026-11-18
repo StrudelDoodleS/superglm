@@ -336,7 +336,7 @@ def drop1(
             if p1 == name or p2 == name:
                 drop_set.add(iname)
 
-        reduced = model._clone_without_features(drop_set)
+        reduced = model._clone_without_features(drop_set, smoothing_resolved=True)
         reduced_X = _drop1_reduced_frame(reduced, X)
         reduced.fit(reduced_X, y, sample_weight=sample_weight, offset=offset)
         dev_reduced = deviance_in_units(reduced, reduced_X)
@@ -438,7 +438,9 @@ def refit_unpenalised(
     else:
         lam2 = ...
 
-    new_model = model._clone_without_features(inactive, lambda1=0.0, lambda2=lam2)
+    new_model = model._clone_without_features(
+        inactive, lambda1=0.0, lambda2=lam2, smoothing_resolved=True
+    )
     new_model.fit(
         X,
         y,

@@ -158,6 +158,13 @@ def _interaction_build_row_bytes(ispec: Any, a: int, b: int, binned: bool) -> in
     return _INTERACTION_BUILD_ROW_BYTES + 32 * a * b + 8 * (a + b)
 
 
+def _group_name(term: Any, info: GroupInfo, level: Any = None) -> str:
+    """A block's group name: its term, the term's subgroup, or the term's level."""
+    if level is not None:
+        return f"{term}[{level}]"
+    return f"{term}:{info.subgroup_name}" if info.subgroup_name else f"{term}"
+
+
 @dataclass
 class _BuiltInteraction:
     """One interaction's build: its spec, the spec's groups, each group's matrix, its records."""
@@ -473,6 +480,7 @@ def compile_predictor_design(
         for info in infos:
             gm, r_inv, n_cols = _process_info(
                 info,
+                group_name=_group_name(name, info),
                 B_unique=B_unique,
                 bin_idx=bin_idx,
                 sample_weight=sample_weight,
@@ -501,11 +509,10 @@ def compile_predictor_design(
                 r_inv_parts.append(r_inv)
 
             group_matrices.append(gm)
-            subgroup_suffix = f":{info.subgroup_name}" if info.subgroup_name else ""
             priced, penalty_dim = _priced_group_dimension(info, n_cols, group_pricing)
             groups.append(
                 GroupSlice(
-                    name=f"{name}{subgroup_suffix}",
+                    name=_group_name(name, info),
                     start=col_offset,
                     end=col_offset + n_cols,
                     weight=np.sqrt(priced),
@@ -707,18 +714,23 @@ def compile_predictor_design(
         )
         processed: list[tuple[Any, GroupInfo, GroupMatrix, NDArray | None, int]] = []
         if not isinstance(result, list):
-            processed.append((None, result, *_process_info(result, **pi_kwargs)))
+            processed.append((None, result, *_process_info(result, group_name=iname, **pi_kwargs)))
         elif any(info.subgroup_name is not None for info in result):
             # A decomposed tensor's subgroups share one basis and its support.
             ssp_supports: dict = {}
             for info in result:
-                processed.append(
-                    (None, info, *_process_info(info, **pi_kwargs, ssp_supports=ssp_supports))
+                block = _process_info(
+                    info,
+                    group_name=_group_name(iname, info),
+                    ssp_supports=ssp_supports,
+                    **pi_kwargs,
                 )
+                processed.append((None, info, *block))
         else:
             # Per-level groups (SplineCategorical, PolynomialCategorical)
             for level, info in zip(ispec._non_base, result):
-                processed.append((level, info, *_process_info(info, **pi_kwargs)))
+                block = _process_info(info, group_name=_group_name(iname, info, level), **pi_kwargs)
+                processed.append((level, info, *block))
         return _BuiltInteraction(ispec, result, processed, records)
 
     # Interactions read their parents' learned state and write only their
@@ -737,11 +749,10 @@ def compile_predictor_design(
                             r_inv_parts_i.append(r_inv)
 
                         group_matrices.append(gm)
-                        subgroup_suffix = f":{info.subgroup_name}" if info.subgroup_name else ""
                         priced, penalty_dim = _priced_group_dimension(info, n_cols, group_pricing)
                         groups.append(
                             GroupSlice(
-                                name=f"{iname}{subgroup_suffix}",
+                                name=_group_name(iname, info),
                                 start=col_offset,
                                 end=col_offset + n_cols,
                                 weight=np.sqrt(priced),
@@ -767,7 +778,7 @@ def compile_predictor_design(
                         priced, penalty_dim = _priced_group_dimension(info, n_cols, group_pricing)
                         groups.append(
                             GroupSlice(
-                                name=f"{iname}[{level}]",
+                                name=_group_name(iname, info, level),
                                 start=col_offset,
                                 end=col_offset + n_cols,
                                 weight=np.sqrt(priced),

@@ -122,19 +122,34 @@ def _certified_range(
 def resolve_lambda_policies(
     lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None,
     info: GroupInfo,
+    m_orders: tuple[int, ...],
+    select: bool,
 ) -> dict[str, LambdaPolicy] | None:
-    """Resolve lambda_policy parameter into a per-component dict."""
+    """Resolve lambda_policy into a policy for each penalty ``info`` carries.
+
+    A policy may name the penalties the build carries, ``"wiggle"`` for a
+    single unnamed one. A column whose penalty is identically zero (one value
+    under ``kind="bs"``) carries none, and accepts the names the declaration
+    gives any other column: ``"wiggle"`` for one derivative order, else
+    ``"d{order}"`` for each, with ``"null"`` beside them under ``select=True``.
+    """
     if lambda_policy is None:
         return None
 
     if info.penalty_components is not None:
-        valid_names = {name for name, _ in info.penalty_components}
+        built_names = {name for name, _ in info.penalty_components}
     else:
-        valid_names = {"wiggle"}
+        built_names = {"wiggle"}
 
     if isinstance(lambda_policy, LambdaPolicy):
-        return {name: lambda_policy for name in valid_names}
+        return {name: lambda_policy for name in built_names}
 
+    if info.penalty_components is not None or info.penalty_matrix is not None:
+        valid_names = built_names
+    else:
+        valid_names = {"wiggle"} if len(m_orders) == 1 else {f"d{order}" for order in m_orders}
+        if select:
+            valid_names.add("null")
     policy_dict = lambda_policy
     unknown = set(policy_dict) - valid_names
     if unknown:
@@ -142,7 +157,7 @@ def resolve_lambda_policies(
             f"lambda_policy contains unknown component names: {unknown}. "
             f"Valid names: {sorted(valid_names)}"
         )
-    return {name: policy_dict.get(name, LambdaPolicy.estimate()) for name in valid_names}
+    return {name: policy_dict.get(name, LambdaPolicy.estimate()) for name in built_names}
 
 
 def build_select_group_info(
@@ -195,7 +210,7 @@ def build_select_group_info(
         penalty_components=components,
         component_types=component_types,
     )
-    info.lambda_policies = resolve_lambda_policies(lambda_policy, info)
+    info.lambda_policies = resolve_lambda_policies(lambda_policy, info, m_orders, select=True)
     return info
 
 

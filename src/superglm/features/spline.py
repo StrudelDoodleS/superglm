@@ -341,10 +341,14 @@ class _SplineBase:
             self._Z = Z
         return B, Z.T @ omega @ Z, Z.shape[1], Z
 
-    def _natural_constraint_rows(self) -> NDArray:
-        """The 2 x K natural boundary rows f''(lo) = f''(hi) = 0."""
+    def _require_range(self) -> None:
+        """Refuse a natural spline's one-value column: its knots have no range (``OneValueError``)."""
         if not self._hi > self._lo:
             raise OneValueError(_ONE_VALUE.format(value=f"{self._lo:g}"))
+
+    def _natural_constraint_rows(self) -> NDArray:
+        """The 2 x K natural boundary rows f''(lo) = f''(hi) = 0."""
+        self._require_range()
         return _spline_constraints.build_natural_constraint_rows(
             self._knots,
             self.degree,
@@ -372,7 +376,9 @@ class _SplineBase:
 
     def _resolve_lambda_policies(self, info: GroupInfo) -> dict[str, LambdaPolicy] | None:
         """Resolve lambda_policy parameter into a per-component dict."""
-        return _spline_select.resolve_lambda_policies(self._lambda_policy, info)
+        return _spline_select.resolve_lambda_policies(
+            self._lambda_policy, info, self._m_orders, self.select
+        )
 
     def build(
         self, x: NDArray, sample_weight: NDArray | None = None
@@ -1091,10 +1097,7 @@ class CardinalCRSpline(_SplineBase):
         del main_effect
         return B, omega, self._n_basis, None
 
-    def reconstruct(self, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
-        return _spline_cardinal_spec.reconstruct(self, beta, n_points=n_points)
-
-    # tensor_marginal_ingredients: inherited from _SplineBase
+    # reconstruct, tensor_marginal_ingredients: inherited from _SplineBase
 
 
 #: The spline types that bin at fit time and that the compiled kernels evaluate: exactly these.

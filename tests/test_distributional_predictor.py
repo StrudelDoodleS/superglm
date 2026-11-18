@@ -699,7 +699,7 @@ def test_legacy_tensor_marginal_refuses_nonunit_frequency_geometry(discrete: boo
     _, counts = _geometry_fixture()
     _LegacyTensorPSpline.marginal_calls = 0
 
-    with pytest.raises(NotImplementedError, match="cannot certify non-unit geometry"):
+    with pytest.raises(NotImplementedError, match="cannot certify unequal geometry"):
         _custom_tensor_geometry_compilation(
             _LegacyTensorPSpline,
             counts,

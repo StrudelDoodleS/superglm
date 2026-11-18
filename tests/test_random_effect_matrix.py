@@ -72,6 +72,7 @@ def test_design_builder_dispatches_random_effect_group_info_to_compact_type():
 
     gm, r_inv, n_cols = _process_info(
         info,
+        group_name="g",
         sample_weight=np.ones(4),
         lambda2=0.1,
     )

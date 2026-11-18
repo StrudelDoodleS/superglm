@@ -5,8 +5,10 @@ import warnings
 import numpy as np
 import pandas as pd
 import pytest
+import scipy.sparse as sp
+from scipy.interpolate import BSpline
 
-from superglm import Constraint, GaussianLS, LambdaPolicy, SuperGLM, SuperLSS, s
+from superglm import Constraint, GaussianLS, LambdaPolicy, SuperGLM, SuperLSS, s, ti
 from superglm._group_matrix import _group_matrix_algebra as algebra
 from superglm._group_matrix._group_matrix_bins import discretize_column
 from superglm.distributional.predictor import ShapeConstraintIgnoredWarning
@@ -27,6 +29,7 @@ from superglm.group_matrix import (
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
 )
+from superglm.types import GroupInfo
 
 
 @pytest.fixture
@@ -115,6 +118,57 @@ class _DoubledCardinal(CardinalCRSpline):
         return 2.0 * super()._basis_matrix(x)
 
 
+class _SquaredCR(CubicRegressionSpline):
+    """A cubic regression spline whose own basis reads the column squared."""
+
+    def _basis_matrix(self, x):
+        return super()._basis_matrix(np.asarray(x, dtype=np.float64) ** 2)
+
+    def _raw_basis_matrix(self, x):
+        return super()._raw_basis_matrix(np.asarray(x, dtype=np.float64) ** 2)
+
+
+class _CachedEvaluatorPS(PSpline):
+    """A P-spline that keeps a SciPy evaluator at its placed knots in a dict."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.evaluators = {}
+
+    def _place_knots(self, x, sample_weight=None, n_bins=None):
+        super()._place_knots(x, sample_weight, n_bins)
+        self.evaluators["value"] = BSpline(self._knots.copy(), np.eye(self._n_basis), self.degree)
+
+    def _raw_basis_matrix(self, x):
+        return self.evaluators["value"](np.clip(x, self._lo, self._hi))
+
+    def _basis_matrix(self, x):
+        return sp.csr_matrix(self._raw_basis_matrix(x))
+
+
+class _WidthSizedPS(PSpline):
+    """A P-spline whose constructor sizes a unit scale for each of its columns."""
+
+    def __init__(self, n_knots=6, **kwargs):
+        super().__init__(n_knots=n_knots, **kwargs)
+        self.column_scale = np.ones(n_knots + self.degree + 1)
+
+    def _raw_basis_matrix(self, x):
+        return super()._raw_basis_matrix(x) * self.column_scale
+
+
+class _LabelledPS(PSpline):
+    """A P-spline whose constructor requires a label."""
+
+    def __init__(self, label, **kwargs):
+        super().__init__(**kwargs)
+        self.label = label
+
+
+class _OwnCR(CubicRegressionSpline):
+    """A cubic regression spline subclass that overrides nothing."""
+
+
 class _StiffTensor(TensorInteraction):
     """A tensor interaction whose own ``build()`` multiplies its penalties by 1000."""
 
@@ -156,6 +210,48 @@ class _MarginDroppingSupport(PSpline):
 
     def tensor_marginal_ingredients(self, x, **kwargs):
         return super().tensor_marginal_ingredients(x)
+
+
+class _OwnPSpline(PSpline):
+    """A P-spline subclass that overrides nothing, so its tensor margin is the built-in one."""
+
+
+class _ForwardingMargin(PSpline):
+    """A P-spline whose tensor margin forwards the support keywords to the built-in one."""
+
+    def tensor_marginal_ingredients(self, x, **kwargs):
+        return super().tensor_marginal_ingredients(x, **kwargs)
+
+
+class _SupportCheckingMargin(PSpline):
+    """A weight-aware tensor margin that checks its support is drawn from its rows."""
+
+    def tensor_marginal_ingredients(self, x, *, support=None, counts=None):
+        if support is not None and len(support) > len(x):
+            raise ValueError("tensor support is larger than its input rows")
+        return super().tensor_marginal_ingredients(x, support=support, counts=counts)
+
+
+class _OneArgumentMargin(PSpline):
+    """A P-spline whose tensor margin takes ``x`` alone, the method's old signature."""
+
+    def tensor_marginal_ingredients(self, x):
+        return super().tensor_marginal_ingredients(x)
+
+
+class _CurvaturePSpline(PSpline):
+    """A P-spline whose own ``build()`` names its one penalty ``"curvature"``."""
+
+    def build(self, x, sample_weight=None):
+        omega, k, projection = self.build_knots_and_penalty(x, sample_weight)
+        return GroupInfo(
+            columns=self._basis_matrix(x),
+            n_cols=k,
+            projection=projection,
+            penalty_matrix=omega,
+            penalty_components=[("curvature", omega)],
+            reparametrize=True,
+        )
 
 
 def _named(interaction, name):
@@ -341,6 +437,42 @@ class TestDiscretizedFit:
             assert block.n_bins == 1
         np.testing.assert_allclose(model.predict(X), np.full(30, y.mean()), rtol=1e-12)
 
+    @pytest.mark.parametrize("discrete", [True, False], ids=["binned", "exact"])
+    @pytest.mark.parametrize("kind", ["cr", "ns", "cr_cardinal"])
+    def test_one_value_column_refuses_a_natural_spline_by_name(self, kind, discrete):
+        """A natural spline on a one-value column is refused by name, binned or not.
+
+        Its knots have no range to be placed on, and the cardinal basis would divide
+        by the zero knot spacing. The message names the kind that fits such a column.
+        """
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0,
+            discrete=discrete,
+            features={"x": Spline(kind=kind, n_knots=4)},
+        )
+        with pytest.raises(ValueError, match="no range to place its knots on.*kind='ps'"):
+            model.fit(pd.DataFrame({"x": np.full(30, 3.0)}), np.arange(30.0) % 7)
+
+    @pytest.mark.parametrize("discrete", [True, False], ids=["binned", "exact"])
+    @pytest.mark.parametrize("strategy", ["quantile", "quantile_rows", "quantile_tempered"])
+    def test_a_cardinal_spline_at_its_boundary_places_uniform_knots(self, strategy, discrete):
+        """Every row at one end of an explicit boundary puts no quantile knot inside it.
+
+        The cardinal knots then fall back to the uniform ones, ``[0, 0.5, 1]``, and the
+        fit is the response mean, to the rounding of
+        ``test_one_value_column_fits_the_response_mean``.
+        """
+        X = pd.DataFrame({"x": np.zeros(50)})
+        y = (np.arange(50) % 7).astype(float)
+        spline = Spline(kind="cr_cardinal", n_knots=1, boundary=(0, 1), knot_strategy=strategy)
+        model = SuperGLM(
+            family="gaussian", selection_penalty=0, discrete=discrete, features={"x": spline}
+        )
+        model.fit(X, y)
+        np.testing.assert_array_equal(model._specs["x"]._knots[1:-1], [0.5])
+        np.testing.assert_allclose(model.predict(X), np.full(50, y.mean()), rtol=1e-12)
+
     @pytest.mark.parametrize("kind", ["cr", "bs", "cr_cardinal"])
     @pytest.mark.parametrize("penalty", ["ssp", "none"])
     def test_extend_reads_bins_past_the_boundary(self, penalty, kind):
@@ -468,29 +600,65 @@ class TestDiscretizedFit:
                 predicted(asked, points[:size]), blocks[:size], rtol=0, atol=1e-12
             )
 
+    @pytest.mark.parametrize(
+        "spline_cls",
+        [_DoubledPSpline, _DoubledCardinal],
+        ids=["own_basis", "own_cardinal_basis"],
+    )
+    def test_a_subclass_curve_is_read_on_its_own_basis(self, spline_cls):
+        """A subclass's term curve is read on the basis it fits and predicts with.
+
+        Under the identity link a one-term fit predicts the intercept plus the
+        curve, so the curve's steps on its grid are the predictions' steps there,
+        to the rounding of the two products with the coefficients, which 1e-12
+        bounds on these values near 3. The stock basis would halve them. The
+        predictions on the training rows reproduce the fit's own deviance.
+        """
+        x = np.linspace(0.0, 1.0, 120)
+        y = 1.0 + 2.0 * x + 0.5 * np.sin(6.0 * x)
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0,
+            spline_penalty=0.1,
+            features={"x": spline_cls(n_knots=6)},
+        )
+        model.fit(pd.DataFrame({"x": x}), y)
+        curve = model.term_inference("x")
+        predicted = np.asarray(model.predict(pd.DataFrame({"x": curve.x})))
+        np.testing.assert_allclose(
+            curve.log_relativity - curve.log_relativity[0],
+            predicted - predicted[0],
+            rtol=0,
+            atol=1e-12,
+        )
+        in_sample = np.asarray(model.predict(pd.DataFrame({"x": x})))
+        np.testing.assert_allclose(
+            np.sum((y - in_sample) ** 2), model.result.deviance, rtol=1e-9, atol=1e-12
+        )
+
+    @pytest.mark.parametrize("signal", ["linear", "curved"])
     @pytest.mark.parametrize("penalty", ["ssp", "none"])
-    def test_an_estimate_policy_keeps_the_penalty_rank(self, penalty):
+    def test_an_estimate_policy_keeps_the_penalty_rank(self, penalty, signal):
         """``LambdaPolicy.estimate()`` on a binned spline fits what no policy fits.
 
         ``estimate()`` is the default policy, stated. It names the penalty
         ``"wiggle"``, and its structural rank is found under that name, so
         REML reads rank 10 under both declarations. The quantile knots on a
         column spanning five decades spread the penalty's spectrum so far that
-        the rank read from its eigenvalues is 8, which moves the optimum to
-        EDF 7.7 from 4.7.
+        the rank read from its eigenvalues would be 8.
 
-        The two fits reach the same optimum by different rounding (a named
-        penalty is rebuilt with lambda folded into it), so they agree to the
-        stop rule. The signal is curved, so the optimum (lambda 0.56) is
-        interior and quadratic in log lambda, with curvature 0.43. A stop
-        leaves Newton's step in log lambda below
-        ``newton_step_stop_bar(1e-9) = 1e-3``. The fitted values move by at
-        most 1.9e-2 relative per unit of log lambda there, so two stops are at
-        most 2e-3 * 1.9e-2 = 4e-5 apart; ``rtol`` is 1e-4.
+        Stating it changes no arithmetic: a named single penalty is rebuilt
+        with its lambda beside it, as an unnamed one is, so the two fits are
+        the same to the last bit. The linear signal's REML surface is flat
+        towards the linear limit (lambda near 1.7e7), where rebuilding the
+        named penalty as ``(1, lambda Omega)`` moved the stop by 9e-11 relative
+        (16782964.37858 against 16782964.38007); the curved one's optimum is
+        interior (lambda 0.56, EDF 4.7), where it moved by 1e-14.
         """
         x = np.geomspace(1.0, 1e5, 200)
         X = pd.DataFrame({"x": x})
-        y = 1.0 + 0.1 * np.sin(np.log(x)) + np.random.default_rng(74).normal(0.0, 0.15, 200)
+        trend = x / 1e5 if signal == "linear" else 0.1 * np.sin(np.log(x))
+        y = 1.0 + trend + np.random.default_rng(74).normal(0.0, 0.15, 200)
 
         def fitted(policy):
             spline = Spline(
@@ -510,7 +678,11 @@ class TestDiscretizedFit:
         assert isinstance(stated._dm.group_matrices[0], DiscretizedSSPGroupMatrix)
         assert [p.rank for p in default._reml_penalties] == [10]
         assert [p.rank for p in stated._reml_penalties] == [10]
-        np.testing.assert_allclose(stated.predict(X), default.predict(X), rtol=1e-4)
+        assert list(stated._reml_result.lambdas.values()) == list(
+            default._reml_result.lambdas.values()
+        )
+        assert stated.result.effective_df == default.result.effective_df
+        np.testing.assert_array_equal(stated.predict(X), default.predict(X))
 
     @pytest.mark.parametrize("penalty", ["ssp", "none"])
     def test_an_off_policy_survives_the_binned_reml_rebuild(self, penalty):
@@ -544,6 +716,55 @@ class TestDiscretizedFit:
         assert flagged
         assert binned.diagnostics()["x"]["weakly_identified"] == flagged
         assert binned.result.phi == pytest.approx(exact.result.phi, rel=1e-6)
+
+    @pytest.mark.parametrize("discrete", [True, False], ids=["binned", "exact"])
+    @pytest.mark.parametrize(
+        "policy", [LambdaPolicy.off(), {"d1": LambdaPolicy.off()}], ids=["one", "per-component"]
+    )
+    def test_a_policy_on_a_one_value_column_fits_the_response_mean(self, policy, discrete):
+        """A two-penalty spline takes a per-component policy on a one-value column.
+
+        ``bs``'s integrated penalties are zero on such a column, so the block
+        carries none. The names a policy may use are the ones its declaration
+        gives, ``"d1"`` and ``"d2"`` for ``m=(1, 2)``, on this column as on any
+        other, so ``{"d1": off()}`` fits as one ``off()`` does and ``"wiggle"``
+        is refused. The fit is the response mean, to the rounding of
+        ``test_one_value_column_fits_the_response_mean``.
+        """
+        X = pd.DataFrame({"x": np.full(30, 3.0)})
+        y = (np.arange(30) % 7).astype(float)
+
+        def model(lambda_policy):
+            spline = Spline(kind="bs", n_knots=4, m=(1, 2), lambda_policy=lambda_policy)
+            return SuperGLM(
+                family="gaussian", selection_penalty=0, discrete=discrete, features={"x": spline}
+            )
+
+        fitted = model(policy).fit_reml(X, y)
+        np.testing.assert_allclose(fitted.predict(X), np.full(30, y.mean()), rtol=1e-12)
+        with pytest.raises(ValueError, match="unknown component names"):
+            model({"wiggle": LambdaPolicy.off()}).fit_reml(X, y)
+
+    @pytest.mark.parametrize("discrete", [True, False], ids=["binned", "exact"])
+    def test_a_policy_names_the_penalty_a_custom_build_carries(self, discrete):
+        """A ``build()`` that names its penalty ``"curvature"`` takes a policy by that name.
+
+        The names come from the build whenever it carries a penalty, so
+        ``"wiggle"``, which it does not carry, is refused.
+        """
+        x = np.linspace(0.0, 1.0, 200)
+        X = pd.DataFrame({"x": x})
+        y = 1.0 + np.sin(9.0 * x) + np.random.default_rng(7).normal(0.0, 0.15, x.size)
+
+        def model(name):
+            spline = _CurvaturePSpline(n_knots=6, lambda_policy={name: LambdaPolicy.fixed(8.0)})
+            return SuperGLM(
+                family="gaussian", selection_penalty=0, discrete=discrete, features={"x": spline}
+            )
+
+        assert model("curvature").fit_reml(X, y)._reml_lambdas == {"x:curvature": 8.0}
+        with pytest.raises(ValueError, match="unknown component names"):
+            model("wiggle").fit_reml(X, y)
 
     @pytest.mark.parametrize("route", ["fit", "fit_path", "fit_reml"])
     @pytest.mark.parametrize("penalty", ["ssp", "none"])
@@ -608,6 +829,234 @@ class TestDiscretizedFit:
         assert not isinstance(blocks[0], binned_blocks)
         assert not isinstance(blocks[-1], binned_blocks)
         np.testing.assert_allclose(binned.predict(X), fitted(False).predict(X), rtol=0, atol=1e-9)
+
+    @pytest.mark.parametrize("interaction", [("x", "z"), ("x", "c")], ids=["tensor", "by_level"])
+    def test_an_interaction_reads_a_cr_subclass_on_its_own_basis(self, interaction):
+        """An interaction on a cr subclass reads the subclass's basis, not the cardinal one.
+
+        Only ``CubicRegressionSpline`` itself is read through the cardinal basis in an
+        interaction. A subclass reading the cr basis at ``x**2`` on fixed knots is, on the
+        rows, a plain subclass on the column ``x**2``, so the two fits solve one problem
+        and agree to the solve's rounding, which 1e-9 bounds on these values near 10;
+        read through the cardinal basis at ``x`` they differ by 2.5 to 3.6.
+        """
+        X = _grid_frame(12)
+        x, z = X["x"].to_numpy(), X["z"].to_numpy()
+        y = 10.0 * np.sin(2.0 * np.pi * x) * np.sin(2.0 * np.pi * z)
+
+        def predicted(parent, column):
+            model = SuperGLM(
+                family="gaussian",
+                selection_penalty=0,
+                spline_penalty=1.0,
+                features={
+                    "x": parent(knots=[0.2, 0.4, 0.6, 0.8], boundary=(0.0, 1.0)),
+                    "z": Spline(kind="ps", n_knots=5),
+                    "c": Categorical(base="a"),
+                },
+                interactions=[interaction],
+            )
+            frame = X.assign(x=column)
+            model.fit(frame, y)
+            return model.predict(frame)
+
+        np.testing.assert_allclose(
+            predicted(_SquaredCR, x), predicted(_OwnCR, x**2), rtol=0, atol=1e-9
+        )
+
+    @staticmethod
+    def _override_model(parent):
+        return SuperGLM(
+            family="gaussian",
+            selection_penalty=0,
+            spline_penalty=1.0,
+            features={"x": parent, "z": PSpline(n_knots=4)},
+            interactions=[_named(TensorInteraction("x", "z", n_knots=(3, 4)), "x:z")],
+        )
+
+    @pytest.mark.parametrize("parent", [_CachedEvaluatorPS, _WidthSizedPS], ids=["cached", "sized"])
+    def test_a_tensor_knot_override_builds_a_subclass_through_its_constructor(self, parent):
+        """A knot-count override builds a subclass margin from the subclass's constructor.
+
+        Each subclass's basis is the stock P-spline's, so its fit and predictions
+        under the override are the stock spline's, to the solve's rounding, which
+        1e-10 bounds on these values near 3. A copy of the parent would share its
+        evaluator cache with the main effect, or keep a scale sized for the
+        parent's ten columns.
+        """
+        X = _grid_frame(15)
+        x, z = X["x"].to_numpy(), X["z"].to_numpy()
+        y = 1.0 + x + z + np.sin(6.0 * x) * np.cos(4.0 * z)
+        fitted = self._override_model(parent(n_knots=6)).fit(X, y)
+        stock = self._override_model(PSpline(n_knots=6)).fit(X, y)
+        np.testing.assert_allclose(fitted.predict(X), stock.predict(X), rtol=0, atol=1e-10)
+
+    @pytest.mark.parametrize("parent_cls", [_SquaredCR, PSpline], ids=["cr_subclass", "ps"])
+    def test_explicit_knots_take_precedence_over_a_tensor_knot_count(self, parent_cls):
+        """A margin keeps its parent's explicit knots under a knot-count override."""
+        X = _grid_frame(12)
+        knots = [0.02, 0.06, 0.2, 0.85]
+        model = self._override_model(parent_cls(knots=knots, boundary=(0.0, 1.0)))
+        model.fit(X, 1.0 + np.cos(6.0 * X["x"]) * np.sin(4.0 * X["z"]))
+        margin = model._interaction_specs["x:z"]._marginal1.raw_basis_eval.__self__
+        np.testing.assert_array_equal(margin.fitted_knots, knots)
+
+    def test_a_tensor_knot_override_names_a_subclass_its_constructor_cannot_build(self):
+        """A subclass whose constructor needs an argument the override does not pass is refused.
+
+        The refusal names the subclass, the constructor rebuild, and the two ways to fit.
+        """
+        X = _grid_frame(6)
+        model = self._override_model(_LabelledPS("a label", n_knots=6))
+        with pytest.raises(
+            TypeError,
+            match=r"override rebuilds the _LabelledPS margin through its constructor.*"
+            r"Give the main effect the knot count itself, or drop the override",
+        ):
+            model.fit(X, X["x"].to_numpy())
+
+    @staticmethod
+    def _margin_model(parent):
+        return SuperGLM(
+            family="gaussian",
+            selection_penalty=0,
+            spline_penalty=0.1,
+            weight_semantics="frequency",
+            features={"x": parent, "z": Spline(kind="ps", n_knots=4)},
+            interactions=[("x", "z")],
+        )
+
+    def test_a_weight_aware_margin_is_handed_every_row(self):
+        """A margin taking the support keywords is called on every row, as the built-in one is.
+
+        Frequencies 0 to 3 on a grid: the margin checks that its support is drawn
+        from the rows it is handed, centres on the counts, and fits as the stock
+        spline on the rows replicated by their weights, to the solve's rounding,
+        which 1e-10 bounds on these values near 2.
+        """
+        X = _grid_frame(13)
+        x, z = X["x"].to_numpy(), X["z"].to_numpy()
+        y = 2.0 + np.sin(5.0 * x) * z
+        weight = np.where(np.arange(x.size) % 7 == 0, 0.0, 1.0 + np.arange(x.size) % 3)
+        rows = np.repeat(np.arange(x.size), weight.astype(int))
+        replicated = self._margin_model(PSpline(n_knots=4))
+        replicated.fit(X.iloc[rows].reset_index(drop=True), y[rows])
+        weighted = self._margin_model(_SupportCheckingMargin(n_knots=4))
+        weighted.fit(X, y, sample_weight=weight)
+        np.testing.assert_allclose(weighted.predict(X), replicated.predict(X), rtol=0, atol=1e-10)
+
+    @pytest.mark.parametrize(
+        ("model_type", "layout"),
+        [("glm", "constant"), ("glm", "one_weighted_value"), ("lss", "constant")],
+    )
+    def test_a_forwarding_margin_on_one_weighted_value_fits(self, model_type, layout):
+        """A forwarding margin whose weighted rows share one value fits as the stock spline.
+
+        Its centred basis is zero on that value. On a constant column (124 rows at
+        0.5, frequencies 1 to 4) every count sits on one point and there is nothing
+        to check; beside zero-weight rows at 0.2 the check reads the basis there.
+        Either fit is the stock spline's on the rows replicated by their weights,
+        to the solve's rounding, which 1e-10 bounds on these values near 2.
+        """
+        z = np.tile(np.linspace(0.0, 1.0, 31), 4)
+        if layout == "constant":
+            x, weight = np.full(z.size, 0.5), 1.0 + np.arange(z.size) % 4
+        else:
+            x = np.where(np.arange(z.size) % 5 == 0, 0.2, 0.5)
+            weight = (x == 0.5).astype(float)
+        X = pd.DataFrame({"x": x, "z": z})
+        y = 2.0 + np.sin(8.0 * z) + 0.1 * np.random.default_rng(2026).normal(size=z.size)
+        rows = np.repeat(np.arange(z.size), weight.astype(int))
+
+        def fitted(parent, frame, response, sample_weight=None):
+            terms = {"x": parent(n_knots=3, boundary=(0.0, 1.0)), "z": PSpline(n_knots=4)}
+            if model_type == "glm":
+                return self._margin_model(terms["x"]).fit(frame, response, sample_weight)
+            family = GaussianLS()
+            model = SuperLSS(
+                family,
+                family.location(terms, ti("x", "z")),
+                family.scale(),
+                weight_semantics="frequency",
+            )
+            lambdas = dict.fromkeys(
+                ("location:x#wiggle", "location:z#wiggle")
+                + ("location:x:z#margin_x", "location:x:z#margin_z"),
+                0.05,
+            )
+            return model.fit(frame, response, sample_weight=sample_weight, lambdas=lambdas)
+
+        replicated = fitted(PSpline, X.iloc[rows].reset_index(drop=True), y[rows])
+        weighted = fitted(_ForwardingMargin, X, y, weight)
+        np.testing.assert_allclose(weighted.predict(X), replicated.predict(X), rtol=0, atol=1e-10)
+
+    @pytest.mark.parametrize("parent", [_OwnPSpline, _ForwardingMargin], ids=["own", "forwarding"])
+    def test_a_margin_on_the_built_in_method_takes_frequency_weights(self, parent):
+        """A margin that is, or forwards to, the built-in method fits frequencies as replicated rows.
+
+        Frequency weights 1 to 4 on two x values: the fit is the stock spline's on the
+        rows replicated by their weights, one problem, to the solve's rounding, which
+        1e-10 bounds on these values near 3.
+        """
+        axis = np.linspace(0.0, 1.0, 25)
+        x, z = (a.ravel() for a in np.meshgrid([0.0, 1.0], axis))
+        X = pd.DataFrame({"x": x, "z": z})
+        y = (
+            3.0
+            + x
+            + np.sin(5.0 * x) * (z - 0.5)
+            + np.random.default_rng(232).normal(0, 0.1, x.size)
+        )
+        weight = 1.0 + np.arange(x.size) % 4
+        rows = np.repeat(np.arange(x.size), weight.astype(int))
+        replicated = self._margin_model(PSpline(n_knots=1))
+        replicated.fit(X.iloc[rows].reset_index(drop=True), y[rows])
+        weighted = self._margin_model(parent(n_knots=1)).fit(X, y, sample_weight=weight)
+        np.testing.assert_allclose(weighted.predict(X), replicated.predict(X), rtol=0, atol=1e-10)
+
+    @pytest.mark.parametrize(
+        "parent", [_MarginDroppingSupport, _OneArgumentMargin], ids=["keywords", "one_argument"]
+    )
+    def test_a_custom_margin_takes_equal_positive_frequencies(self, parent):
+        """Under equal counts a margin centring on its rows is centred on the counts.
+
+        Frequency 2 on every row but one grid row of zero weight, so every ``x`` value
+        counts 12: the keyword margin centres on its rows, the one-argument margin is
+        handed the rows of positive weight, and each is the stock spline's, to the
+        solve's rounding, which 1e-10 bounds on these values near 5.
+        """
+        X = _grid_frame(7)
+        x, z = X["x"].to_numpy(), X["z"].to_numpy()
+        y = 5.0 + np.cos(x) + np.sin(9.0 * z) * x
+        weight = np.where(np.arange(x.size) < 7, 0.0, 2.0)
+        custom = self._margin_model(parent(n_knots=4)).fit(X, y, sample_weight=weight)
+        stock = self._margin_model(PSpline(n_knots=4)).fit(X, y, sample_weight=weight)
+        np.testing.assert_allclose(custom.predict(X), stock.predict(X), rtol=0, atol=1e-10)
+
+    @pytest.mark.parametrize(
+        ("parent", "semantics"),
+        [(_OneArgumentMargin, "frequency")],
+        ids=["one_argument"],
+    )
+    def test_a_custom_tensor_margin_off_the_frequency_weights_is_refused(self, parent, semantics):
+        """A margin taking ``x`` alone cannot centre on unequal counts, so it is refused by name.
+
+        It would count a row of frequency 2 once.
+        """
+        X = pd.concat([_grid_frame(4)] * 3, ignore_index=True)
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0,
+            weight_semantics=semantics,
+            features={"x": parent(n_knots=3), "z": Spline(kind="ps", n_knots=3)},
+            interactions=[("x", "z")],
+        )
+        if semantics == "frequency":
+            weight = np.where(X["x"] < 0.5, 1.0, 2.0)
+        else:
+            weight = np.where(np.arange(len(X)) == 0, 0.0, 1.0)
+        with pytest.raises(NotImplementedError, match=f"{parent.__name__}'s tensor margin"):
+            model.fit(X, X["x"].to_numpy(), sample_weight=weight)
 
     @pytest.mark.parametrize("term", ["tensor", "by_level", "factor_smooth"])
     @pytest.mark.parametrize("penalty", ["ssp", "none"])

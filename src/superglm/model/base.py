@@ -1001,11 +1001,15 @@ def clone_without_features(
     *,
     lambda1: float | None = ...,  # sentinel: ... means "keep current"
     lambda2: float | dict[str, float] | None = ...,
+    smoothing_resolved: bool = False,
 ):
     """Create a new SuperGLM with a subset of features removed.
 
     Copies family, link, penalty type, and solver options. Interactions
     whose parents include a dropped feature are also removed.
+    ``smoothing_resolved`` marks a refit at a fitted model's smoothing: its
+    lambda policies are already resolved into ``lambda2``, so the clone carries
+    none (``_drop_resolved_policies``).
     """
     keep_features = {n: s for n, s in model._specs.items() if n not in drop}
 
@@ -1047,6 +1051,7 @@ def clone_without_features(
 
     # Deep-copy specs so the new model doesn't share mutable state
     new_features = {n: copy.deepcopy(s) for n, s in keep_features.items()}
+    unnamed = _drop_resolved_policies(new_features) if smoothing_resolved else set()
 
     fit_state = getattr(model, "_fit_state", None)
     if fit_state is None:
@@ -1126,8 +1131,40 @@ def clone_without_features(
         new_model.lambda2 = 0.0
     else:
         new_model.lambda2 = lambda2
+    if unnamed and isinstance(new_model.lambda2, dict):
+        new_model.lambda2 = _unname_single_penalties(new_model.lambda2, unnamed)
 
     return new_model
+
+
+def _drop_resolved_policies(features: dict[str, Any]) -> set[str]:
+    """Drop the lambda policies of copied specs refitted at resolved smoothing.
+
+    Returns the features whose one penalty the policy named ``"wiggle"`` (one
+    derivative order, no ``select``): without it the penalty is unnamed and keyed
+    by the feature itself. An ``OrderedCategorical`` carries its policy on its
+    spline basis.
+    """
+    from superglm.features.ordered_categorical import OrderedCategorical
+
+    named = set()
+    for name, spec in features.items():
+        smooth = spec._basis_spline if isinstance(spec, OrderedCategorical) else spec
+        if getattr(smooth, "_lambda_policy", None) is None:
+            continue
+        smooth._lambda_policy = None
+        if len(getattr(smooth, "_m_orders", (2,))) == 1 and not getattr(smooth, "select", False):
+            named.add(name)
+    return named
+
+
+def _unname_single_penalties(lambda2: dict, names: set[str]) -> dict:
+    """``lambda2`` with each term's ``"<name>:wiggle"`` keyed ``"<name>"``, its one penalty."""
+    out = dict(lambda2)
+    for name in names:
+        if f"{name}:wiggle" in out:
+            out[name] = out.pop(f"{name}:wiggle")
+    return out
 
 
 def auto_detect(model, X: EagerFrame, sample_weight: NDArray | None) -> None:

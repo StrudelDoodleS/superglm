@@ -81,18 +81,63 @@ def validate_fitted_group_names(groups: list[GroupSlice]) -> None:
 # ═══════════════════════════════════════════════════════════════════
 
 
-def _resolve_lambda2(lambda2: float | dict) -> float:
-    """Resolve lambda2 to a scalar (dict → 1.0 fallback for initial basis)."""
-    if isinstance(lambda2, dict):
-        return 1.0
-    return lambda2
+def _lambda_beside_penalty(terms: list[tuple[float, NDArray]]) -> tuple[float, NDArray]:
+    """``(lam, Omega)`` for a block penalised by the ``(lam_j, Omega_j)`` terms.
+
+    One penalty keeps its lambda beside it, so stating its weight by name does
+    not change the arithmetic; several are summed, ``sum(lam_j Omega_j)``,
+    under a unit lambda.
+    """
+    if len(terms) == 1:
+        return terms[0]
+    return 1.0, cast(NDArray, sum(lam * omega for lam, omega in terms))
+
+
+def _penalty_terms(
+    info: GroupInfo, group_name: str, lambda2: float | dict
+) -> list[tuple[float, NDArray]]:
+    """The ``(lam_j, Omega_j)`` a fit applies to a block, zero weights dropped.
+
+    A mapping is read as ``build_penalty_matrix`` reads it, each group or
+    penalty component weighted by its own entry. The block has a penalty.
+    """
+    from superglm.reml.penalty_algebra import resolve_component_lambda, resolve_group_lambda
+
+    if not info.penalty_components:
+        terms = [(resolve_group_lambda(lambda2, group_name), cast(NDArray, info.penalty_matrix))]
+    else:
+        terms = [
+            (resolve_component_lambda(lambda2, group_name, suffix), omega)
+            for suffix, omega in info.penalty_components
+        ]
+    return [(lam, omega) for lam, omega in terms if lam != 0.0]
+
+
+def _applied_penalty(
+    info: GroupInfo, group_name: str, lambda2: float | dict
+) -> tuple[float, NDArray]:
+    """``(lam, Omega)`` with ``lam Omega`` the penalty the fit applies to the block.
+
+    A scalar weights the declared penalty; a mapping weights each term
+    (``_penalty_terms``). The block has a penalty.
+    """
+    omega = cast(NDArray, info.penalty_matrix)
+    if not isinstance(lambda2, dict):
+        return float(lambda2), omega
+    terms = _penalty_terms(info, group_name, lambda2)
+    if not terms:
+        return 0.0, omega
+    # Every declared component at one weight is the scalar's penalty, read as the scalar reads it.
+    if len(terms) == len(info.penalty_components or ()) > 1 and len({lam for lam, _ in terms}) == 1:
+        return terms[0][0], omega
+    return _lambda_beside_penalty(terms)
 
 
 def compute_R_inv(
     B: sp.spmatrix | NDArray,
     omega: NDArray,
     sample_weight: NDArray,
-    lambda2: float | dict,
+    lambda2: float,
 ) -> NDArray:
     """Compute SSP reparametrisation matrix R_inv without forming B @ R_inv.
 
@@ -103,7 +148,6 @@ def compute_R_inv(
     The normaliser is the weight sum over every row, including rows where the
     block is zero, so every block's ``X'WX`` sits on the same scale.
     """
-    lam2 = _resolve_lambda2(lambda2)
     total = float(np.sum(sample_weight))
     if total <= 0.0:
         G = np.zeros((omega.shape[0], omega.shape[0]), dtype=np.float64)
@@ -111,7 +155,7 @@ def compute_R_inv(
         G = np.asarray((B.multiply(sample_weight[:, None]).T @ B).todense()) / total
     else:
         G = (B * sample_weight[:, None]).T @ B / total
-    return _whitening_map(G, omega, lam2)
+    return _whitening_map(G, omega, lambda2)
 
 
 def compute_projected_R_inv(
@@ -119,13 +163,12 @@ def compute_projected_R_inv(
     projection: NDArray,
     penalty_sub: NDArray,
     sample_weight: NDArray,
-    lambda2: float | dict,
+    lambda2: float,
 ) -> NDArray:
     """Compute SSP R_inv within a projected subspace (linear-split range space).
 
     Normalised over every row, as in ``compute_R_inv``.
     """
-    lam2 = _resolve_lambda2(lambda2)
     total = float(np.sum(sample_weight))
     if total <= 0.0:
         G_full = np.zeros((projection.shape[0], projection.shape[0]), dtype=np.float64)
@@ -133,7 +176,7 @@ def compute_projected_R_inv(
         G_full = np.asarray((B.multiply(sample_weight[:, None]).T @ B).todense()) / total
     else:
         G_full = (B * sample_weight[:, None]).T @ B / total
-    return _whitening_map(projection.T @ G_full @ projection, penalty_sub, lam2)
+    return _whitening_map(projection.T @ G_full @ projection, penalty_sub, lambda2)
 
 
 def _whitening_map(G: NDArray, omega: NDArray, lam2: float) -> NDArray:
@@ -160,6 +203,7 @@ def _dominant_penalty_eigenbasis(
     info: GroupInfo,
     columns: NDArray | sp.spmatrix | None,
     weights: NDArray | None,
+    group_name: str,
     lambda2: float | dict,
 ) -> NDArray | None:
     """The eigenbasis of a raw block's penalty where it outweighs the data by ``1/sqrt(u)``.
@@ -170,13 +214,17 @@ def _dominant_penalty_eigenbasis(
     coordinate axes and keeps the formed penalty to second order (Wood, Pya
     & Safken 2016, sec. 3.1.1), and the penalty dominates every range
     direction, so the turn costs the data's column scaling nothing.
-    ``columns`` and ``weights`` are the block's raw rows and their weights:
-    a binned block's distinct rows and bin weights.
+    ``columns`` and ``weights`` are the block's raw (or binned) rows and weights.
+    It needs one penalty term (``_penalty_terms``): a weighted sum's
+    eigenbasis is not found without the weights.
     """
-    omega = info.penalty_matrix
-    if omega is None or columns is None or len(info.penalty_components or ()) > 1:
+    if info.penalty_matrix is None or columns is None:
         return None
-    penalty = _resolve_lambda2(lambda2) * float(np.max(np.diag(omega)))
+    terms = _penalty_terms(info, group_name, lambda2)
+    if len(terms) != 1:
+        return None
+    lam, omega = terms[0]
+    penalty = lam * float(np.max(np.diag(omega)))
     columns = sp.csr_matrix(columns)
     data = float(np.max(columns.multiply(columns).T @ weights, initial=0.0))
     if penalty * np.sqrt(UNIT_ROUNDOFF) <= data:
@@ -655,6 +703,7 @@ def _validate_group_pricing(group_pricing: str) -> None:
 def _process_info(
     info: GroupInfo,
     *,
+    group_name: str,
     B_unique: NDArray | None = None,
     bin_idx: NDArray | None = None,
     sample_weight: NDArray,
@@ -672,6 +721,7 @@ def _process_info(
     if no reparametrization was applied.  ``ssp_supports`` is shared by the
     calls of one term, so subgroups over one basis share its row support.
     ``eigenbasis_turn=False`` keeps a raw block in its declared coordinates.
+    ``group_name`` is the block's group, which a ``lambda2`` mapping keys.
     """
     use_discrete = B_unique is not None
     use_tensor = tensor_build is not None
@@ -717,20 +767,16 @@ def _process_info(
         if info.projection is not None:
             P = info.projection
             if info.reparametrize and info.penalty_matrix is not None:
-                R_inv_local = compute_projected_R_inv(
-                    B_for,
-                    P,
-                    info.penalty_matrix,
-                    level_weight,
-                    lambda2,
-                )
+                lam, omega = _applied_penalty(info, group_name, lambda2)
+                R_inv_local = compute_projected_R_inv(B_for, P, omega, level_weight, lam)
                 R_inv = P @ R_inv_local
             else:
                 R_inv = P
                 R_inv_local = None
             omega_full = P @ info.penalty_matrix @ P.T if info.penalty_matrix is not None else None
         elif info.reparametrize and info.penalty_matrix is not None:
-            R_inv = compute_R_inv(B_for, info.penalty_matrix, level_weight, lambda2)
+            lam, omega = _applied_penalty(info, group_name, lambda2)
+            R_inv = compute_R_inv(B_for, omega, level_weight, lam)
             R_inv_local = R_inv
             omega_full = info.penalty_matrix
         else:
@@ -777,7 +823,8 @@ def _process_info(
         if info.reparametrize and info.penalty_matrix is not None:
             B_for = B_unique if use_discrete else info.columns
             exp_for = exposure_agg if use_discrete else sample_weight
-            R_inv_local = compute_projected_R_inv(B_for, P, info.penalty_matrix, exp_for, lambda2)
+            lam, omega = _applied_penalty(info, group_name, lambda2)
+            R_inv_local = compute_projected_R_inv(B_for, P, omega, exp_for, lam)
             R_inv = P @ R_inv_local
         else:
             # A binned main effect is read on its distinct rows and bin weights.
@@ -789,6 +836,7 @@ def _process_info(
                     info,
                     B_unique if binned else info.columns,
                     exposure_agg if binned else sample_weight,
+                    group_name,
                     lambda2,
                 )
                 if eigenbasis_turn
@@ -830,7 +878,8 @@ def _process_info(
     elif info.reparametrize and info.penalty_matrix is not None:
         B_for = B_unique if use_discrete else info.columns
         exp_for = exposure_agg if use_discrete else sample_weight
-        R_inv = compute_R_inv(B_for, info.penalty_matrix, exp_for, lambda2)
+        lam, omega = _applied_penalty(info, group_name, lambda2)
+        R_inv = compute_R_inv(B_for, omega, exp_for, lam)
         # No projection — constraints are in raw space, same as R_inv input
         R_inv_local = R_inv
         n_cols = R_inv.shape[1]
@@ -1194,19 +1243,20 @@ def build_design_matrix(
 
 
 def _resolve_group_lambda(gm, g, lambdas):
-    """Resolve the effective lambda and omega for a group, handling multi-penalty.
+    """The lambda and penalty a group's SSP whitening is built from.
 
-    Returns (effective_lambda, effective_omega, has_components) where:
-    - For single-penalty groups: (lambdas[g.name], gm.omega, False)
-    - For multi-penalty groups: (1.0, sum(lam_j * omega_j), True)
-      The effective lambda is 1.0 because it's already baked into the omega.
+    One penalty keeps its lambda beside it, named or not: a lambda policy names
+    a single penalty ``"wiggle"``, and stating the default policy must not
+    change the arithmetic.  Several penalties are summed, ``sum(lam_j omega_j)``,
+    under a unit lambda.  A zero weight drops its penalty, as in the build
+    (``_penalty_terms``).
     """
-    if gm.omega_components is not None:
-        effective_omega = sum(
-            lambdas[f"{g.name}:{suffix}"] * omega_j for suffix, omega_j in gm.omega_components
-        )
-        return 1.0, effective_omega, True
-    return lambdas[g.name], gm.omega, False
+    components = gm.omega_components
+    if components is None:
+        return lambdas[g.name], gm.omega
+    terms = [(lambdas[f"{g.name}:{suffix}"], omega_j) for suffix, omega_j in components]
+    terms = [(lam, omega_j) for lam, omega_j in terms if lam != 0.0]
+    return _lambda_beside_penalty(terms) if terms else (0.0, gm.omega)
 
 
 def _group_has_lambda(gm, g, lambdas):
@@ -1244,7 +1294,7 @@ def rebuild_design_matrix_with_lambdas(
             if gm.omega is None:
                 new_gms.append(gm)
                 continue
-            lam, omega_eff, has_comp = _resolve_group_lambda(gm, g, lambdas)
+            lam, omega_eff = _resolve_group_lambda(gm, g, lambdas)
             if gm.projection is not None:
                 P = gm.projection
                 omega_proj = P.T @ omega_eff @ P
@@ -1264,7 +1314,7 @@ def rebuild_design_matrix_with_lambdas(
             if gm.omega is None:
                 new_gms.append(gm)
                 continue
-            lam, omega_eff, has_comp = _resolve_group_lambda(gm, g, lambdas)
+            lam, omega_eff = _resolve_group_lambda(gm, g, lambdas)
             level_weight = sample_weight[gm.row_idx]
             if gm.projection is not None:
                 P = gm.projection
@@ -1291,7 +1341,7 @@ def rebuild_design_matrix_with_lambdas(
             if gm.omega is None:
                 new_gms.append(gm)
                 continue
-            lam, omega_eff, has_comp = _resolve_group_lambda(gm, g, lambdas)
+            lam, omega_eff = _resolve_group_lambda(gm, g, lambdas)
             level_weight = np.bincount(
                 gm.bin_idx_level,
                 weights=sample_weight[gm.row_idx],
@@ -1341,7 +1391,7 @@ def rebuild_design_matrix_with_lambdas(
                 # packed design, as in mgcv bam(discrete=TRUE).
                 new_gms.append(gm)
                 continue
-            lam, omega_eff, has_comp = _resolve_group_lambda(gm, g, lambdas)
+            lam, omega_eff = _resolve_group_lambda(gm, g, lambdas)
             exposure_agg = np.bincount(gm.bin_idx, weights=sample_weight, minlength=gm.n_bins)
             if gm.projection is not None:
                 P = gm.projection
@@ -1373,7 +1423,7 @@ def rebuild_design_matrix_with_lambdas(
             if gm.omega is None:
                 new_gms.append(gm)
                 continue
-            lam, omega_eff, has_comp = _resolve_group_lambda(gm, g, lambdas)
+            lam, omega_eff = _resolve_group_lambda(gm, g, lambdas)
             exposure_agg = np.bincount(gm.bin_idx, weights=sample_weight, minlength=gm.n_bins)
             if gm.projection is not None:
                 P = gm.projection

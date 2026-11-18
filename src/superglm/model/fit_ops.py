@@ -179,9 +179,15 @@ class PathResult:
 
 
 def _reject_lambda_policy_fit(model, method: str = "fit") -> None:
-    """lambda_policy is only supported in fit_reml(); reject ordinary fits."""
+    """lambda_policy is only supported in fit_reml(); reject fit() and fit_path().
+
+    An ``OrderedCategorical`` carries its policy on its spline basis.
+    """
+    from superglm.features.ordered_categorical import OrderedCategorical
+
     for name, spec in model._specs.items():
-        if getattr(spec, "_lambda_policy", None) is not None:
+        smooth = spec._basis_spline if isinstance(spec, OrderedCategorical) else spec
+        if getattr(smooth, "_lambda_policy", None) is not None:
             raise NotImplementedError(
                 f"lambda_policy on feature '{name}' is only supported with "
                 f"fit_reml(), not {method}(). Use fit_reml() or remove lambda_policy."
@@ -1680,6 +1686,7 @@ def _fit_path_in_workspace(
 ):
     """Build and solve a regularization path on private mutable state."""
     _reject_random_effect_selection_fit(model, "fit_path")
+    _reject_lambda_policy_fit(model, "fit_path")
     from superglm.model.base import (
         compute_lambda_max,
         model_build_design_matrix,

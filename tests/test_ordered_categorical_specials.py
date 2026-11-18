@@ -405,7 +405,7 @@ def test_ssp_gram_of_the_zero_filled_block_is_on_the_all_row_scale():
     spec = _oc()
     spline_info, _ = spec.build(band, weight)
 
-    gm, _, _ = _process_info(spline_info, sample_weight=weight, lambda2=0.0)
+    gm, _, _ = _process_info(spline_info, group_name="band", sample_weight=weight, lambda2=0.0)
     X = np.asarray(gm.toarray(), dtype=np.float64)
     assert np.allclose(X[is_special], 0.0)
 
@@ -416,7 +416,7 @@ def test_ssp_gram_of_the_zero_filled_block_is_on_the_all_row_scale():
     np.testing.assert_allclose(gram / weight.sum(), np.eye(gram.shape[0]), atol=1e-3)
 
     full_support = Spline(kind="ps", k=8).build(np.linspace(0.0, 1.0, len(band)))
-    gm_ref, _, _ = _process_info(full_support, sample_weight=weight, lambda2=0.0)
+    gm_ref, _, _ = _process_info(full_support, group_name="band", sample_weight=weight, lambda2=0.0)
     X_ref = np.asarray(gm_ref.toarray(), dtype=np.float64)
     gram_ref = X_ref.T @ (weight[:, None] * X_ref)
     np.testing.assert_allclose(np.diag(gram), np.diag(gram_ref), rtol=1e-3)

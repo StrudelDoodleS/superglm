@@ -311,6 +311,6 @@ def reconstruct(spec: Any, beta: NDArray, n_points: int = 200) -> dict[str, Any]
         "x": x_grid,
         "log_relativity": log_rels,
         "relativity": np.exp(log_rels),
-        "knots_interior": spec._knots[spec.degree + 1 : -(spec.degree + 1)],
+        "knots_interior": spec.fitted_knots,
         "coefficients_original": beta_orig,
     }

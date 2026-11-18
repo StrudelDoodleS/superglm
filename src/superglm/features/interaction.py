@@ -150,15 +150,17 @@ def interaction_spline_spec(
     (the placement the probe uses); an explicitly knotted or quantile parent is
     left alone.
 
-    Returns *spec* unchanged for every other spline kind and for the cr
-    configurations the cardinal basis cannot express.  The returned spec has its
+    Returns *spec* unchanged for every other spline type, a subclass of
+    ``CubicRegressionSpline`` among them (its basis is its own, so its
+    interactions read it), and for the cr configurations the cardinal basis
+    cannot express.  The returned spec has its
     knots already placed on *x*; callers must store it and read the basis back from
     the stored copy, since a predict-time basis rebuilt from the original spec
     would disagree with the fitted design.
     """
     from superglm.features.spline import CubicRegressionSpline
 
-    if not isinstance(spec, CubicRegressionSpline):
+    if type(spec) is not CubicRegressionSpline:
         return spec
 
     # A select=True parent's double-penalty shrinkage lives in its own
@@ -1952,6 +1954,16 @@ def _row_kron(B1: sp.spmatrix, B2: sp.spmatrix) -> sp.csr_matrix:
     return T
 
 
+def _uncentred_margin(candidate) -> NotImplementedError:
+    """The refusal of a one-argument custom margin under unequal geometry weights."""
+    return NotImplementedError(
+        f"{type(candidate).__name__}'s tensor margin cannot certify unequal geometry "
+        "weights: it takes x alone. Implement tensor_marginal_ingredients(x, *, support=..., "
+        "counts=...) to evaluate the basis on support and centre it on counts, or fit with "
+        "equal positive weights."
+    )
+
+
 def _row_kron_index_dtype(nnz: int, n_cols: int) -> type:
     """The index dtype ``_row_kron`` stores: int32 while the entries and columns fit in it."""
     return np.int32 if max(nnz, n_cols) <= np.iinfo(np.int32).max else np.int64
@@ -2253,7 +2265,12 @@ class TensorInteraction:
         if cardinal is not spec:
             return cardinal, True
 
-        if n_knots_override is not None and n_knots_override != spec.n_knots:
+        # Explicit knots take precedence over a knot count, as on the spline itself.
+        if (
+            n_knots_override is not None
+            and n_knots_override != spec.n_knots
+            and getattr(spec, "_explicit_knots", None) is None
+        ):
             kwargs: dict = dict(
                 n_knots=n_knots_override,
                 knot_strategy=spec.knot_strategy,
@@ -2272,9 +2289,16 @@ class TensorInteraction:
             # clone would bend the interaction inside them.
             if keep_ranges and getattr(spec, "polynomial_ranges", ()):
                 kwargs["polynomial_ranges"] = spec.polynomial_ranges
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", SplineOptionWarning)
-                clone = type(spec)(**kwargs)
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", SplineOptionWarning)
+                    clone = type(spec)(**kwargs)
+            except TypeError as exc:
+                raise TypeError(
+                    f"A tensor knot-count override rebuilds the {type(spec).__name__} margin "
+                    f"through its constructor, which failed: {exc}. Give the main effect the "
+                    "knot count itself, or drop the override."
+                ) from exc
             clone._place_knots(x, geometry_weight, n_bins)
             return clone, False
         return spec, False
@@ -2288,7 +2312,14 @@ class TensorInteraction:
         counts: NDArray | None,
         geometry_weight: NDArray | None,
     ) -> TensorMarginalInfo:
-        """A margin's basis, penalty and projection from its resolved spec (``_marginal_spec``)."""
+        """A margin's basis, penalty and projection from its resolved spec (``_marginal_spec``).
+
+        A method taking ``support`` and ``counts`` evaluates its basis on the
+        support and centres it on the counts, as the built-in one does
+        (``tensor_marginal_info``). One taking ``x`` alone is handed the rows of
+        positive geometry weight, so it is centred on ``counts`` when the positive
+        weights are equal (0/1 indicators, equal frequencies), and refused otherwise.
+        """
         method = candidate.tensor_marginal_ingredients
         if support is None and geometry_weight is None:
             return method(x)
@@ -2306,6 +2337,11 @@ class TensorInteraction:
             compact_basis = compact_basis @ legacy.projection
             return replace(legacy, basis=compact_basis)
 
+        def on_support(info: TensorMarginalInfo) -> TensorMarginalInfo:
+            if np.asarray(info.basis).shape[0] == len(effective_support):
+                return info
+            return compact_legacy(info)
+
         try:
             parameters = inspect.signature(method).parameters
         except (TypeError, ValueError):
@@ -2314,27 +2350,17 @@ class TensorInteraction:
             parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
         )
         if accepts_keywords or {"support", "counts"} <= parameters.keys():
-            compact = method(
-                x,
-                support=effective_support,
-                counts=effective_counts,
-            )
-            if np.asarray(compact.basis).shape[0] == len(effective_support):
-                return compact
-            return compact_legacy(compact)
+            return on_support(method(x, support=effective_support, counts=effective_counts))
 
-        # Compatibility for custom spline subclasses overriding the old one-argument
-        # method: keep their projection and penalty geometry but only its evaluation on
-        # the discrete support, since it cannot centre in non-unit replication mass.
-        if geometry_weight is not None and not np.all(
-            np.asarray(geometry_weight, dtype=np.float64) == 1.0
-        ):
-            raise NotImplementedError(
-                "legacy tensor marginal method cannot certify non-unit geometry weights; "
-                "implement tensor_marginal_ingredients(..., support=..., counts=...) "
-                "to support frequency geometry"
-            )
-        return compact_legacy(method(x))
+        # A custom spline overriding the old one-argument method keeps its projection
+        # and penalty geometry, evaluated on the support.
+        rows = x
+        if geometry_weight is not None:
+            weight = np.asarray(geometry_weight, dtype=np.float64)
+            rows = np.asarray(x, dtype=np.float64).ravel()[weight > 0.0]
+            if np.unique(weight[weight > 0.0]).size > 1:
+                raise _uncentred_margin(candidate)
+        return compact_legacy(method(rows))
 
     def _centered_marginal_dense(self, x: NDArray, info: TensorMarginalInfo) -> NDArray:
         x = np.asarray(x, dtype=np.float64).ravel()
