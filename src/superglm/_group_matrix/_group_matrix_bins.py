@@ -76,7 +76,8 @@ def discretize_column(
     The width shares are formed on the column scaled by a power of two to
     magnitude at most one, which is exact and changes no share of a column
     whose widths are finite, so a column near the float64 limit allocates its
-    cells without overflow.
+    cells without overflow; a column whose range itself overflows is cut on
+    the halved range.
 
     Returns the support points (sorted) and each row's index into them.
     """
@@ -91,7 +92,13 @@ def discretize_column(
     lo, hi = float(x.min()), float(x.max())
     if lo == hi:
         return np.array([lo]), np.zeros(len(x), dtype=np.intp)
-    edges = np.linspace(lo, hi, n_bins + 1)
+    # linspace forms hi - lo, which overflows on a column spanning both float64
+    # extremes; there the edges are cut on the halved interval, and halving is exact.
+    edges = (
+        np.linspace(lo, hi, n_bins + 1)
+        if np.isfinite(hi - lo)
+        else 2.0 * np.linspace(0.5 * lo, 0.5 * hi, n_bins + 1)
+    )
     bin_of_value = np.clip(np.searchsorted(edges, unique_vals, side="right") - 1, 0, n_bins - 1)
     bin_idx = bin_of_value[inverse]
     # Halved before the sum, which cannot then overflow; halving is exact.

@@ -22,7 +22,6 @@ from superglm._group_matrix._level_partition import carry_level_support, certify
 from superglm._predictor_compiler import (
     CompiledPredictorDesign,
     compile_predictor_design,
-    own_build_binned_build,
 )
 from superglm._roundoff import PENALTY_RANK_CUT, UNIT_ROUNDOFF
 from superglm._utils import _validate_strict_prior_weights
@@ -186,7 +185,7 @@ def _dominant_penalty_eigenbasis(
 
 
 def spline_bins(spec: FeatureSpec, model_discrete: bool) -> bool:
-    """Whether a spline's column bins at fit time: its own ``discrete``, else the model's.
+    """Whether a spline asks to bin at fit time: its own ``discrete``, else the model's.
 
     Every penalty option bins; ``"none"`` holds its raw basis in the binned block.
     """
@@ -200,22 +199,19 @@ def spline_bins(spec: FeatureSpec, model_discrete: bool) -> bool:
 
 
 def should_discretize(spec: FeatureSpec, model_discrete: bool) -> bool:
-    """Check if a spline main effect bins at fit time.
+    """Check if a spline bins at fit time: it asks to (``spline_bins``) and is a built-in type.
 
-    Its column bins (``spline_bins``) unless binning would skip its own
-    ``build()`` (``own_build_binned_build``): then that build runs on the rows.
+    A subclass, whatever it overrides, is fitted on its rows, and so are its interactions.
     """
-    return spline_bins(spec, model_discrete) and own_build_binned_build(spec) is None
+    from superglm.features.spline import _BUILT_IN_SPLINES
+
+    return type(spec) in _BUILT_IN_SPLINES and spline_bins(spec, model_discrete)
 
 
 def should_discretize_tensor_interaction(
     ispec: Any, specs: dict[str, FeatureSpec], model_discrete: bool
 ) -> bool:
-    """Whether a tensor interaction's columns bin: both parents' columns do.
-
-    The parents' own builds do not matter: the tensor never calls them. The
-    compiler fits a term on its rows when binning would skip its own build.
-    """
+    """Check if a tensor interaction should use fit-time discretization."""
     from superglm.features.interaction import TensorInteraction
     from superglm.features.ordered_categorical import OrderedCategorical
 
@@ -229,17 +225,15 @@ def should_discretize_tensor_interaction(
     if not isinstance(ispec, TensorInteraction):
         return False
     p1, p2 = ispec.parent_names
-    return spline_bins(specs[p1], model_discrete) and spline_bins(specs[p2], model_discrete)
+    return should_discretize(specs[p1], model_discrete) and should_discretize(
+        specs[p2], model_discrete
+    )
 
 
 def should_discretize_spline_categorical_interaction(
     ispec: Any, specs: dict[str, FeatureSpec], model_discrete: bool
 ) -> bool:
-    """Whether a spline-categorical interaction's columns bin: its spline parent's do.
-
-    As for a tensor (``should_discretize_tensor_interaction``), the parent's
-    own build does not matter.
-    """
+    """Check if a spline-categorical interaction should use spline support compression."""
     from superglm.features.interaction import SplineCategorical
     from superglm.features.ordered_categorical import OrderedCategorical
 
@@ -253,7 +247,7 @@ def should_discretize_spline_categorical_interaction(
     if not isinstance(ispec, SplineCategorical):
         return False
     spline_name, _cat_name = ispec.parent_names
-    return spline_bins(specs[spline_name], model_discrete)
+    return should_discretize(specs[spline_name], model_discrete)
 
 
 def should_discretize_factor_smooth(ispec: Any, model_discrete: bool) -> bool:
@@ -1373,6 +1367,7 @@ def rebuild_design_matrix_with_lambdas(
             new_gm.omega_components = gm.omega_components
             new_gm.component_types = gm.component_types
             new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
+            new_gm.lambda_policies = gm.lambda_policies
             new_gms.append(new_gm)
         elif isinstance(gm, DiscretizedSSPGroupMatrix) and _group_has_lambda(gm, g, lambdas):
             if gm.omega is None:

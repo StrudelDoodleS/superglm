@@ -22,6 +22,7 @@ from numpy.typing import NDArray
 from superglm._frame import EagerFrame
 from superglm._group_matrix._group_matrix_bins import discretize_positive_support
 from superglm._parallel import pooled_map
+from superglm._warn import warn_caller
 from superglm.features._spline_build import finish_penalties, qp_geometry, shape_engine
 from superglm.features._spline_penalties import structural_penalty_ranks
 from superglm.features._spline_runtime import bin_knots
@@ -40,7 +41,7 @@ from superglm.features.ordered_categorical import (
 )
 from superglm.features.piecewise import Piecewise
 from superglm.features.polynomial import Polynomial
-from superglm.features.spline import _SplineBase
+from superglm.features.spline import _BUILT_IN_SPLINES, _SplineBase
 from superglm.group_matrix import DesignMatrix, GroupMatrix
 from superglm.types import DiscreteTensorBuildResult, FeatureSpec, GroupInfo, GroupSlice
 
@@ -49,60 +50,29 @@ from superglm.types import DiscreteTensorBuildResult, FeatureSpec, GroupInfo, Gr
 # build() patched in later, is not one of them and keeps its own build.
 _SPLINE_BUILD = _SplineBase.build
 _TENSOR_BUILD = TensorInteraction.build
-# Each binning term's built-in build, and the binned build (its name and the
-# method as defined) that replaces build() when the term bins.
-_BINNED_BUILDS = (
-    (_SplineBase, _SPLINE_BUILD, "build_knots_and_penalty", _SplineBase.build_knots_and_penalty),
-    (TensorInteraction, _TENSOR_BUILD, "build_discrete", TensorInteraction.build_discrete),
-    (
-        SplineCategorical,
-        SplineCategorical.build,
-        "build_discrete",
-        SplineCategorical.build_discrete,
-    ),
-    (FactorSmooth, FactorSmooth.build, "build_discrete", FactorSmooth.build_discrete),
-)
+# The term types that bin: exactly these, never a subclass (``_bins_as_built_in``).
+_BINNED_TYPES = _BUILT_IN_SPLINES | {TensorInteraction, SplineCategorical, FactorSmooth}
 
 
-def _method(bound: Any) -> Any:
-    """The function behind a bound method, looked up on the instance as a call finds it."""
-    return getattr(bound, "__func__", None)
+def _bins_as_built_in(name: str, term: Any, asks: bool) -> bool:
+    """Whether a term that ``asks`` to bin does: only when its type is exactly a built-in one.
 
-
-def own_build_binned_build(term: Any) -> str | None:
-    """The name of the binned build that would skip ``term``'s own ``build()``, or None.
-
-    A binned term is built by its binned build, never its ``build()``. A term
-    whose ``build()`` is its own (a subclass's, or one patched in later) and
-    whose binned build is the built-in one would lose that build, so it is
-    fitted on its rows; one that overrides both bins by its own binned build.
+    A binned fit stands in for a term's build and basis evaluation, and its prediction for the
+    basis, so a subclass, whatever it overrides, is fitted on its rows and predicted through its
+    own methods, with a warning. An interaction on a subclass spline does not ask
+    (``should_discretize``), under that spline's warning.
     """
-    for cls, build, binned_name, binned in _BINNED_BUILDS:
-        if isinstance(term, cls):
-            own = _method(term.build) is not build
-            return binned_name if own and _method(getattr(term, binned_name)) is binned else None
-    return None
-
-
-def _bins_unless_own_build(name: str, term: Any, asks: bool) -> bool:
-    """Whether a term that ``asks`` to bin does: not if binning would skip its own build.
-
-    A term fitted on its rows for that reason is named in a warning.
-    """
-    binned_build = own_build_binned_build(term) if asks else None
-    if binned_build is None:
+    if not asks or type(term) in _BINNED_TYPES:
         return asks
     remedy = (
-        ", or set discrete=False on it to fit it on its rows without this warning"
+        "set discrete=False on it to fit it on its rows without this warning; its "
+        "interactions are fitted on their rows too"
         if isinstance(term, _SplineBase)
-        else ""
+        else "set discrete=False to fit it on its rows without this warning"
     )
-    warnings.warn(
-        f"Term {name!r} is fitted on its rows, not binned: its build() is overridden, and "
-        f"binning would replace it by {binned_build}(). Override {binned_build}() as well "
-        f"to bin it{remedy}.",
-        UserWarning,
-        stacklevel=2,
+    warn_caller(
+        f"Term {name!r} is fitted on its rows, not binned: {type(term).__name__} subclasses a "
+        f"built-in term type, and only those bin. Use the built-in type to bin it, or {remedy}."
     )
     return False
 
@@ -352,7 +322,7 @@ def compile_predictor_design(
             feature_build_weight = sample_weight
 
         # Check if this feature should use fit-time discretization
-        use_discrete = _bins_unless_own_build(name, spec, spline_bins(spec, model_discrete))
+        use_discrete = _bins_as_built_in(name, spec, spline_bins(spec, model_discrete))
         B_unique = None
         bin_idx = None
         exposure_agg = None
@@ -590,7 +560,7 @@ def compile_predictor_design(
             X.column_array(parent)
         # At most one route asks, by the term's type; the builds below read it.
         routes = tuple(
-            _bins_unless_own_build(iname, ispec, asks)
+            _bins_as_built_in(iname, ispec, asks)
             for asks in (
                 should_discretize_tensor_interaction(ispec, specs, model_discrete),
                 should_discretize_spline_categorical_interaction(ispec, specs, model_discrete),

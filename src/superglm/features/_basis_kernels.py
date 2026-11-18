@@ -210,18 +210,9 @@ def cardinal_dense(x: NDArray, knots: NDArray, second_derivative_map: NDArray) -
     return out
 
 
-def _basis_method(spec: Any) -> Any:
-    """The function ``spec._basis_matrix`` calls, looked up on the instance as the fit's build does.
-
-    An override bound on the instance, or a plain function set there (``None``), is the spec's
-    own basis, which the kernels must not stand in for.
-    """
-    return getattr(spec._basis_matrix, "__func__", None)
-
-
 def _evaluates_by_scipy(spec: Any, spline_base: type, *overrides: type) -> bool:
     """Whether ``spec._basis_matrix`` is the SciPy B-spline design (``extend`` aside)."""
-    method = _basis_method(spec)
+    method = type(spec)._basis_matrix
     if method is spline_base._basis_matrix:
         return True
     return spec.extrapolation != "extend" and any(method is cls._basis_matrix for cls in overrides)
@@ -255,6 +246,7 @@ def dense_basis(spec: Any, x: NDArray) -> NDArray:
     """``spec._basis_matrix(x).toarray()``, from the kernels or the Python rows where the spec allows."""
     from superglm.features import _spline_runtime
     from superglm.features.spline import (
+        _BUILT_IN_SPLINES,
         CardinalCRSpline,
         CubicRegressionSpline,
         NaturalSpline,
@@ -265,14 +257,10 @@ def dense_basis(spec: Any, x: NDArray) -> NDArray:
     if getattr(spec, "_scop_Sigma", None) is not None or evaluations is None:
         return spec._basis_matrix(x).toarray()  # a saved SCOP term keeps its exact route
     bspline, cardinal = evaluations
-    if (
-        type(spec) is CardinalCRSpline
-        and _basis_method(spec) is CardinalCRSpline._basis_matrix
-        and spec.extrapolation != "extend"
-    ):
+    if type(spec) is CardinalCRSpline and spec.extrapolation != "extend":
         x_eval, _ = _spline_runtime.prepare_eval_points(spec, x)
         rows = cardinal(x_eval, spec._cr_knots, spec._cr_M)
-    elif isinstance(spec, _SplineBase) and _evaluates_by_scipy(
+    elif type(spec) in _BUILT_IN_SPLINES and _evaluates_by_scipy(
         spec, _SplineBase, CubicRegressionSpline, NaturalSpline
     ):
         x_eval, _ = _spline_runtime.prepare_eval_points(spec, x)
@@ -288,7 +276,7 @@ def dense_basis(spec: Any, x: NDArray) -> NDArray:
 
 def dense_raw_basis(evaluator: Any, x: NDArray) -> NDArray:
     """``evaluator(x)``, read from the kernels only where it is the spec's stock raw basis."""
-    from superglm.features.spline import CardinalCRSpline, _SplineBase
+    from superglm.features.spline import _BUILT_IN_SPLINES, CardinalCRSpline, _SplineBase
 
     evaluations = _evaluations(np.size(x))
     if evaluations is None:
@@ -299,7 +287,7 @@ def dense_raw_basis(evaluator: Any, x: NDArray) -> NDArray:
     rows = None
     if type(spec) is CardinalCRSpline and method is CardinalCRSpline._raw_basis_matrix:
         rows = cardinal(np.clip(x, spec._lo, spec._hi), spec._cr_knots, spec._cr_M)
-    elif isinstance(spec, _SplineBase) and method is _SplineBase._raw_basis_matrix:
+    elif type(spec) in _BUILT_IN_SPLINES and method is _SplineBase._raw_basis_matrix:
         rows = bspline(np.clip(x, spec._lo, spec._hi), spec._knots, spec.degree)
     if rows is not None and np.isfinite(rows).all():
         return rows

@@ -89,8 +89,9 @@ class _SplineBase:
     discrete : bool or None
         If True, bin the covariate at fit time into at most ``n_bins`` bins on its knots and rows:
         O(n) algebra becomes O(n_bins). If None (default), defers to the model-level ``discrete``.
-        A subclass overriding ``build()`` but not ``build_knots_and_penalty()`` is fitted on its
-        rows by its own build, with a warning; its interactions still bin.
+        Only the built-in spline types bin: a subclass, whatever it overrides, is fitted on its
+        rows and predicted through its own methods, with a warning, and so are its interactions.
+        A method patched onto a built-in class or bound on an instance is not supported.
     n_bins : int or None
         Number of bins when the column bins. If None (default), defers to the model-level
         ``n_bins`` setting (which defaults to 256).
@@ -127,6 +128,9 @@ class _SplineBase:
     # ``(value, label)`` of each level when the spline is an ordered term's basis,
     # so a message names levels rather than their values; None otherwise.
     _axis_levels: tuple[tuple[float, Any], ...] | None = None
+    # The default policy (REML estimates the smoothing parameter), for a spline
+    # pickled before the field existed.
+    _lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None
 
     # Configuration and build-time state, assigned by ``_spline_config`` and by the
     # build helpers in ``_spline_runtime`` and ``_spline_cardinal_spec``. Annotations
@@ -149,7 +153,6 @@ class _SplineBase:
     _explicit_boundary: tuple[float, float] | None
     _knot_strategy_actual: str
     _difference_penalty: dict[int, str]
-    _lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None
     _lo: float
     _hi: float
 
@@ -1093,6 +1096,13 @@ class CardinalCRSpline(_SplineBase):
         return _spline_cardinal_spec.reconstruct(self, beta, n_points=n_points)
 
     # tensor_marginal_ingredients: inherited from _SplineBase
+
+
+#: The spline types that bin at fit time and that the compiled kernels evaluate: exactly these.
+#: A subclass, whatever it overrides, is fitted and predicted through its own methods.
+_BUILT_IN_SPLINES = frozenset(
+    {PSpline, BSplineSmooth, NaturalSpline, CubicRegressionSpline, CardinalCRSpline}
+)
 
 
 # ═══════════════════════════════════════════════════════════════════

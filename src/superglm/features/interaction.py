@@ -2319,16 +2319,9 @@ class TensorInteraction:
                 support=effective_support,
                 counts=effective_counts,
             )
-            # Without a support the margin is read on the rows, which it holds
-            # whether or not it passed them on. On a support only a margin that
-            # passed it on was evaluated there; one that dropped it holds its
-            # rows, which may number as many as the support's points.
-            evaluated = (
-                np.asarray(compact.basis).shape[0] == len(effective_support)
-                if support is None
-                else getattr(compact, "on_support", False)
-            )
-            return compact if evaluated else compact_legacy(compact)
+            if np.asarray(compact.basis).shape[0] == len(effective_support):
+                return compact
+            return compact_legacy(compact)
 
         # Compatibility for custom spline subclasses overriding the old one-argument
         # method: keep their projection and penalty geometry but only its evaluation on

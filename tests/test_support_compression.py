@@ -3001,7 +3001,7 @@ def test_a_spline_subclass_that_replaces_its_basis_with_a_dense_one_keeps_it():
     stock = fitted(PSpline(n_knots=5), False)
     for discrete in (False, True):
         if discrete:
-            # Binning would skip the override, which is fitted on its rows instead.
+            # A subclass is fitted on its rows, not binned.
             with pytest.warns(UserWarning, match="Term 'x' is fitted on its rows"):
                 model = fitted(Densified(n_knots=5), discrete)
         else:
