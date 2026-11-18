@@ -94,27 +94,30 @@ def _lambda_beside_penalty(terms: list[tuple[float, NDArray]]) -> tuple[float, N
 
 
 def _penalty_terms(
-    info: GroupInfo, group_name: str, lambda2: float | dict
+    info: GroupInfo, group_name: str, term: str | None, lambda2: float | dict
 ) -> list[tuple[float, NDArray]]:
     """The ``(lam_j, Omega_j)`` a fit applies to a block, zero weights dropped.
 
     A mapping is read as ``build_penalty_matrix`` reads it, each group or
-    penalty component weighted by its own entry. The block has a penalty.
+    penalty component weighted by its own entry, else its term's. The block
+    has a penalty.
     """
     from superglm.reml.penalty_algebra import resolve_component_lambda, resolve_group_lambda
 
     if not info.penalty_components:
-        terms = [(resolve_group_lambda(lambda2, group_name), cast(NDArray, info.penalty_matrix))]
+        terms = [
+            (resolve_group_lambda(lambda2, group_name, term), cast(NDArray, info.penalty_matrix))
+        ]
     else:
         terms = [
-            (resolve_component_lambda(lambda2, group_name, suffix), omega)
+            (resolve_component_lambda(lambda2, group_name, suffix, term), omega)
             for suffix, omega in info.penalty_components
         ]
     return [(lam, omega) for lam, omega in terms if lam != 0.0]
 
 
 def _applied_penalty(
-    info: GroupInfo, group_name: str, lambda2: float | dict
+    info: GroupInfo, group_name: str, term: str | None, lambda2: float | dict
 ) -> tuple[float, NDArray]:
     """``(lam, Omega)`` with ``lam Omega`` the penalty the fit applies to the block.
 
@@ -124,7 +127,7 @@ def _applied_penalty(
     omega = cast(NDArray, info.penalty_matrix)
     if not isinstance(lambda2, dict):
         return float(lambda2), omega
-    terms = _penalty_terms(info, group_name, lambda2)
+    terms = _penalty_terms(info, group_name, term, lambda2)
     if not terms:
         return 0.0, omega
     # Every declared component at one weight is the scalar's penalty, read as the scalar reads it.
@@ -204,6 +207,7 @@ def _dominant_penalty_eigenbasis(
     columns: NDArray | sp.spmatrix | None,
     weights: NDArray | None,
     group_name: str,
+    term: str | None,
     lambda2: float | dict,
 ) -> NDArray | None:
     """The eigenbasis of a raw block's penalty where it outweighs the data by ``1/sqrt(u)``.
@@ -220,7 +224,7 @@ def _dominant_penalty_eigenbasis(
     """
     if info.penalty_matrix is None or columns is None:
         return None
-    terms = _penalty_terms(info, group_name, lambda2)
+    terms = _penalty_terms(info, group_name, term, lambda2)
     if len(terms) != 1:
         return None
     lam, omega = terms[0]
@@ -704,6 +708,7 @@ def _process_info(
     info: GroupInfo,
     *,
     group_name: str,
+    term: str | None = None,
     B_unique: NDArray | None = None,
     bin_idx: NDArray | None = None,
     sample_weight: NDArray,
@@ -721,7 +726,8 @@ def _process_info(
     if no reparametrization was applied.  ``ssp_supports`` is shared by the
     calls of one term, so subgroups over one basis share its row support.
     ``eigenbasis_turn=False`` keeps a raw block in its declared coordinates.
-    ``group_name`` is the block's group, which a ``lambda2`` mapping keys.
+    ``group_name`` is the block's group and ``term`` the term that built it,
+    which a ``lambda2`` mapping keys (``resolve_group_lambda``).
     """
     use_discrete = B_unique is not None
     use_tensor = tensor_build is not None
@@ -767,7 +773,7 @@ def _process_info(
         if info.projection is not None:
             P = info.projection
             if info.reparametrize and info.penalty_matrix is not None:
-                lam, omega = _applied_penalty(info, group_name, lambda2)
+                lam, omega = _applied_penalty(info, group_name, term, lambda2)
                 R_inv_local = compute_projected_R_inv(B_for, P, omega, level_weight, lam)
                 R_inv = P @ R_inv_local
             else:
@@ -775,7 +781,7 @@ def _process_info(
                 R_inv_local = None
             omega_full = P @ info.penalty_matrix @ P.T if info.penalty_matrix is not None else None
         elif info.reparametrize and info.penalty_matrix is not None:
-            lam, omega = _applied_penalty(info, group_name, lambda2)
+            lam, omega = _applied_penalty(info, group_name, term, lambda2)
             R_inv = compute_R_inv(B_for, omega, level_weight, lam)
             R_inv_local = R_inv
             omega_full = info.penalty_matrix
@@ -823,7 +829,7 @@ def _process_info(
         if info.reparametrize and info.penalty_matrix is not None:
             B_for = B_unique if use_discrete else info.columns
             exp_for = exposure_agg if use_discrete else sample_weight
-            lam, omega = _applied_penalty(info, group_name, lambda2)
+            lam, omega = _applied_penalty(info, group_name, term, lambda2)
             R_inv_local = compute_projected_R_inv(B_for, P, omega, exp_for, lam)
             R_inv = P @ R_inv_local
         else:
@@ -837,6 +843,7 @@ def _process_info(
                     B_unique if binned else info.columns,
                     exposure_agg if binned else sample_weight,
                     group_name,
+                    term,
                     lambda2,
                 )
                 if eigenbasis_turn
@@ -878,7 +885,7 @@ def _process_info(
     elif info.reparametrize and info.penalty_matrix is not None:
         B_for = B_unique if use_discrete else info.columns
         exp_for = exposure_agg if use_discrete else sample_weight
-        lam, omega = _applied_penalty(info, group_name, lambda2)
+        lam, omega = _applied_penalty(info, group_name, term, lambda2)
         R_inv = compute_R_inv(B_for, omega, exp_for, lam)
         # No projection — constraints are in raw space, same as R_inv input
         R_inv_local = R_inv

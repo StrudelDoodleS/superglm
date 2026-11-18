@@ -426,7 +426,7 @@ def _active_penalty_components(
             active_group = active_by_name.get(group.name)
             if active_group is None or group.scop_reparameterization is None or not group.penalized:
                 continue
-            lam = resolve_group_lambda(lambda2, group.name)
+            lam = resolve_group_lambda(lambda2, group.name, group.feature_name)
             if lam > 0:
                 yield active_group.sl, lam, group.scop_reparameterization.penalty_matrix()
         return
@@ -445,12 +445,14 @@ def _active_penalty_components(
             omega_components = getattr(gm, "omega_components", None)
             if omega_components is not None:
                 for suffix, omega_j in omega_components:
-                    lam_j = resolve_component_lambda(lambda2, group.name, suffix)
+                    lam_j = resolve_component_lambda(
+                        lambda2, group.name, suffix, group.feature_name
+                    )
                     if lam_j == 0:
                         continue
                     yield active_group.sl, lam_j, ssp_penalty_matrix(gm.R_inv, omega_j)
                 continue
-            lam = resolve_group_lambda(lambda2, group.name)
+            lam = resolve_group_lambda(lambda2, group.name, group.feature_name)
             if lam == 0:
                 continue
             omega = gm.omega
@@ -458,7 +460,7 @@ def _active_penalty_components(
                 omega = _second_diff_penalty(gm.R_inv.shape[0])
             yield active_group.sl, lam, ssp_penalty_matrix(gm.R_inv, omega)
         elif group.scop_reparameterization is not None:
-            lam = resolve_group_lambda(lambda2, group.name)
+            lam = resolve_group_lambda(lambda2, group.name, group.feature_name)
             if lam == 0:
                 continue
             yield active_group.sl, lam, group.scop_reparameterization.penalty_matrix()

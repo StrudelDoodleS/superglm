@@ -274,12 +274,14 @@ def _build_smooth_penalty_terms(
             omega_components = getattr(gm, "omega_components", None)
             if omega_components is not None:
                 for suffix, omega_j in omega_components:
-                    lam_j = float(resolve_component_lambda(lambda2, group.name, suffix))
+                    lam_j = float(
+                        resolve_component_lambda(lambda2, group.name, suffix, group.feature_name)
+                    )
                     if lam_j == 0.0:
                         continue
                     terms.append((group.sl, lam_j, omega_j, gm.R_inv))
                 continue
-            lam = resolve_group_lambda(lambda2, group.name)
+            lam = resolve_group_lambda(lambda2, group.name, group.feature_name)
             lam_float = float(lam)
             if lam_float == 0.0:
                 continue
@@ -287,7 +289,7 @@ def _build_smooth_penalty_terms(
             if omega is not None:
                 terms.append((group.sl, lam_float, omega, gm.R_inv))
             continue
-        lam = resolve_group_lambda(lambda2, group.name)
+        lam = resolve_group_lambda(lambda2, group.name, group.feature_name)
         lam_float = float(lam)
         if lam_float == 0.0:
             continue

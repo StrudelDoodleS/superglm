@@ -18,7 +18,7 @@ References
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Hashable, Sequence
 from dataclasses import dataclass, field, replace
 
 import numpy as np
@@ -1789,17 +1789,29 @@ def evaluate_tensor_pair_logdet_summaries(
     return evaluations
 
 
-def resolve_group_lambda(lambda2: float | dict[str, float], group_name: str) -> float:
-    """The smoothing weight of a group: its own entry in a mapping, 0.0 when it has none."""
+def resolve_group_lambda(
+    lambda2: float | dict[str, float], group_name: str, term: Hashable | None = None
+) -> float:
+    """The smoothing weight of a group: its own entry in a mapping, else its term's, else 0.0.
+
+    ``term`` is the term that built the group (``GroupSlice.feature_name``).
+    Its entry is the default for every group of the term not listed by its
+    own name, as a group's is for its components (``resolve_component_lambda``):
+    ``{"x:c": 5.0}`` weights each level's group ``"x:c[a]"`` of a by-level
+    interaction ``"x:c"`` at 5.0.
+    """
     if not isinstance(lambda2, dict):
         return float(lambda2)
-    return float(lambda2.get(group_name, 0.0))
+    if group_name in lambda2 or term is None:
+        return float(lambda2.get(group_name, 0.0))
+    return float(lambda2.get(str(term), 0.0))
 
 
 def resolve_component_lambda(
     lambda2: float | dict[str, float],
     group_name: str,
     suffix: str,
+    term: Hashable | None = None,
 ) -> float:
     """Resolve the smoothing weight for one penalty component of a group.
 
@@ -1808,11 +1820,14 @@ def resolve_component_lambda(
     group-wide key acts as the default for every component not listed by
     its full name, so ``{"a:b": 5.0, "a:b:margin_a": 2.0}`` resolves
     ``margin_a`` to 2.0 and every other component of ``a:b`` to 5.0.
-    Components matched by neither key resolve to 0.0.
+    The group's own weight falls back to its term's (``resolve_group_lambda``),
+    and components matched by no key resolve to 0.0.
     """
     if not isinstance(lambda2, dict):
         return float(lambda2)
-    return float(lambda2.get(f"{group_name}:{suffix}", resolve_group_lambda(lambda2, group_name)))
+    return float(
+        lambda2.get(f"{group_name}:{suffix}", resolve_group_lambda(lambda2, group_name, term))
+    )
 
 
 def ssp_penalty_matrix(coordinate_map: NDArray, omega: NDArray) -> NDArray:
@@ -1898,7 +1913,7 @@ def build_penalty_matrix(
             if group_index in represented_group_indices:
                 continue
             if g.scop_reparameterization is not None and g.penalized:
-                lam_g = resolve_group_lambda(lambda2, g.name)
+                lam_g = resolve_group_lambda(lambda2, g.name, g.feature_name)
                 if lam_g > 0:
                     S[g.sl, g.sl] += lam_g * g.scop_reparameterization.penalty_matrix()
 
@@ -1918,12 +1933,12 @@ def build_penalty_matrix(
             omega_components = getattr(gm, "omega_components", None)
             if omega_components is not None:
                 for suffix, omega_j in omega_components:
-                    lam_j = resolve_component_lambda(lambda2, g.name, suffix)
+                    lam_j = resolve_component_lambda(lambda2, g.name, suffix, g.feature_name)
                     if lam_j == 0:
                         continue
                     S[g.sl, g.sl] += lam_j * ssp_penalty_matrix(gm.R_inv, omega_j)
                 continue
-            lam_g = resolve_group_lambda(lambda2, g.name)
+            lam_g = resolve_group_lambda(lambda2, g.name, g.feature_name)
             if lam_g == 0:
                 continue
             omega = gm.omega
@@ -1931,7 +1946,7 @@ def build_penalty_matrix(
                 continue
             S[g.sl, g.sl] += lam_g * ssp_penalty_matrix(gm.R_inv, omega)
         elif g.scop_reparameterization is not None:
-            lam_g = resolve_group_lambda(lambda2, g.name)
+            lam_g = resolve_group_lambda(lambda2, g.name, g.feature_name)
             if lam_g == 0:
                 continue
             S[g.sl, g.sl] += lam_g * g.scop_reparameterization.penalty_matrix()
