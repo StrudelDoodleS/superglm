@@ -41,6 +41,7 @@ from superglm.group_matrix import (
     RandomEffectGroupMatrix,
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
+    penalty_coordinate_map,
 )
 from superglm.reml.result import PenaltyCache
 from superglm.types import GroupSlice, PenaltyComponent
@@ -1122,7 +1123,8 @@ def _penalty_component_omega_ssp(
         return component.omega_ssp
     if group_matrix is None or component.omega_raw is None:
         raise ValueError(f"Dense penalty component {component.name!r} has no solver-space matrix.")
-    return group_matrix.R_inv.T @ component.omega_raw @ group_matrix.R_inv
+    coordinate_map = penalty_coordinate_map(group_matrix)
+    return coordinate_map.T @ component.omega_raw @ coordinate_map
 
 
 def _repeated_penalty_geometry(
@@ -1890,7 +1892,7 @@ def build_penalty_matrix(
             omega_ssp = (
                 pc.omega_ssp
                 if pc.omega_ssp is not None
-                else ssp_penalty_matrix(gm.R_inv, pc.omega_raw)
+                else ssp_penalty_matrix(penalty_coordinate_map(gm), pc.omega_raw)
             )
             S[pc.group_sl, pc.group_sl] += lam * omega_ssp
 
@@ -1921,7 +1923,7 @@ def build_penalty_matrix(
                     lam_j = resolve_component_lambda(lambda2, g.name, suffix)
                     if lam_j == 0:
                         continue
-                    S[g.sl, g.sl] += lam_j * ssp_penalty_matrix(gm.R_inv, omega_j)
+                    S[g.sl, g.sl] += lam_j * ssp_penalty_matrix(penalty_coordinate_map(gm), omega_j)
                 continue
             lam_g = resolve_group_lambda(lambda2, g.name)
             if lam_g == 0:
@@ -1929,7 +1931,7 @@ def build_penalty_matrix(
             omega = gm.omega
             if omega is None:
                 continue
-            S[g.sl, g.sl] += lam_g * ssp_penalty_matrix(gm.R_inv, omega)
+            S[g.sl, g.sl] += lam_g * ssp_penalty_matrix(penalty_coordinate_map(gm), omega)
         elif g.scop_reparameterization is not None:
             lam_g = resolve_group_lambda(lambda2, g.name)
             if lam_g == 0:
@@ -2208,7 +2210,7 @@ def build_penalty_components(
             ct_map = getattr(gm, "component_types", None) or {}
             lp_map = getattr(gm, "lambda_policies", None) or {}
             if len(gm.omega_components) > 1 and not isinstance(gm, DiscretizedTensorGroupMatrix):
-                coordinate_map = np.asarray(gm.R_inv, dtype=float)
+                coordinate_map = np.asarray(penalty_coordinate_map(gm), dtype=float)
                 raw_width = gm.omega_components[0][1].shape[0]
                 if coordinate_map.shape == (raw_width, raw_width):
                     from superglm.reml.penalty_support import _penalty_support
@@ -2267,7 +2269,7 @@ def build_penalty_components(
                     rank, log_det, pos_eigvals = tensor_summary
                     omega_ssp_j = _canonicalize_ssp_penalty(omega_j, rank)
                 else:
-                    omega_ssp_j = ssp_penalty_matrix(gm.R_inv, omega_j)
+                    omega_ssp_j = ssp_penalty_matrix(penalty_coordinate_map(gm), omega_j)
                     force_solver_rank = (
                         isinstance(gm, DiscretizedTensorGroupMatrix)
                         and getattr(gm, "projection", None) is not None
@@ -2296,7 +2298,7 @@ def build_penalty_components(
         else:
             # Single-penalty path.
             lp_map = getattr(gm, "lambda_policies", None) or {}
-            omega_ssp = ssp_penalty_matrix(gm.R_inv, gm.omega)
+            omega_ssp = ssp_penalty_matrix(penalty_coordinate_map(gm), gm.omega)
             force_solver_rank = (
                 isinstance(gm, DiscretizedTensorGroupMatrix)
                 and getattr(gm, "projection", None) is not None
@@ -2420,7 +2422,8 @@ def coerce_reml_penalties(
                 # A raw rounded congruence can contaminate its exact nullspace.
                 components.extend(build_penalty_components(group_matrices, [(idx, g)]))
                 continue
-            omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
+            coordinate_map = penalty_coordinate_map(gm)
+            omega_ssp = coordinate_map.T @ gm.omega @ coordinate_map
         if gm is not None and hasattr(gm, "omega"):
             omega_raw = gm.omega
         components.append(
@@ -2844,7 +2847,7 @@ def _single_penalty_raw_family(gm, grouped, declared_rank, *, rank_rcond=None):
     from superglm.reml.penalty_support import PenaltyNumericalError, _penalty_support
 
     omega = getattr(gm, "omega", None)
-    coordinate_map = getattr(gm, "R_inv", None)
+    coordinate_map = penalty_coordinate_map(gm) if hasattr(gm, "R_inv") else None
     if omega is None or coordinate_map is None or len(grouped) != 1:
         return None
     omega, coordinate_map = np.asarray(omega), np.asarray(coordinate_map)
@@ -3014,7 +3017,7 @@ def _plain_single_raw_route(gm, grouped, declared_rank, prior, *, rank_rcond):
     from superglm.solvers.rank import SHARED_RANK_POLICY, _eigensolver_relative_bar
 
     omega = getattr(gm, "omega", None)
-    coordinate_map = getattr(gm, "R_inv", None)
+    coordinate_map = penalty_coordinate_map(gm) if hasattr(gm, "R_inv") else None
     if omega is None or coordinate_map is None or len(grouped) != 1:
         return None
     omega, coordinate_map = np.asarray(omega), np.asarray(coordinate_map)

@@ -36,6 +36,19 @@ from ._group_matrix_kernels import (
 from ._row_lookup import build_row_lookup
 
 
+def penalty_coordinate_map(gm) -> NDArray:
+    """The map that carries ``gm.omega`` and its components to the group's solver coordinates.
+
+    A term held in its own coordinates (the columns of ``gm.projection``) keeps
+    its penalty there, beside ``R_inv_local``, so the structure the term was
+    built with (exact zero rows on its penalty's null space) reaches the
+    solver unrounded. Every other group states its penalty on the raw basis
+    ``R_inv`` reads.
+    """
+    local = getattr(gm, "R_inv_local", None)
+    return gm.R_inv if local is None else local
+
+
 class DenseGroupMatrix:
     """Dense group matrix wrapper."""
 
@@ -701,6 +714,7 @@ class SparseSSPGroupMatrix:
         "shape",
         "omega",
         "projection",
+        "R_inv_local",
         "omega_components",
         "component_types",
         "structural_ranks",
@@ -713,8 +727,9 @@ class SparseSSPGroupMatrix:
         self._p_b = self.B.shape[1]
         self.R_inv = np.asarray(R_inv)
         self.shape = (self.B.shape[0], self.R_inv.shape[1])
-        self.omega = None  # (K, K) B-spline-space penalty, set externally
+        self.omega = None  # the penalty, in the coordinates penalty_coordinate_map(self) maps
         self.projection = None  # (K, n_sub) projection matrix, set externally
+        self.R_inv_local = None  # (n_sub, p) term-to-solver map, when omega is in term coordinates
         self.omega_components = None  # list[(suffix, omega)] for multi-penalty, set externally
         self.component_types = None  # dict[suffix, type] for multi-penalty, set externally
         self.structural_ranks = None
@@ -824,6 +839,7 @@ class SparseSSPGroupMatrix:
         sub = SparseSSPGroupMatrix(self.B[idx], self.R_inv)
         sub.omega = self.omega
         sub.projection = self.projection
+        sub.R_inv_local = getattr(self, "R_inv_local", None)
         sub.omega_components = self.omega_components
         sub.component_types = self.component_types
         sub.structural_ranks = getattr(self, "structural_ranks", None)

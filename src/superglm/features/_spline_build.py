@@ -16,9 +16,10 @@ from superglm.features._spline_config import (
 from superglm.features._spline_identifiability import (
     apply_identifiability_for_spec,
     build_identifiability_projection_for_spec,
+    term_null_basis,
 )
 from superglm.features._spline_multi_penalty import build_multi_m_components
-from superglm.features._spline_penalties import structural_penalty_ranks
+from superglm.features._spline_penalties import _gapped_rank, structural_penalty_ranks
 from superglm.features._spline_select import build_select
 from superglm.features._spline_subclass_ops import prepare_shape_rules
 from superglm.features.constraint import postfit_token, rules_of
@@ -324,14 +325,19 @@ def build_group_info(
         monotone_engine=monotone_engine,
         raw_to_solver_map=raw_to_solver_map,
     )
-    return _with_row_support(finish_penalties(spec, info), value_rows, index, full)
+    return _with_row_support(
+        finish_penalties(spec, info, x, sample_weight), value_rows, index, full
+    )
 
 
-def finish_penalties(spec: Any, info: GroupInfo) -> GroupInfo:
-    """``info`` with the spec's lambda policies, then the rank of each named penalty.
+def finish_penalties(
+    spec: Any, info: GroupInfo, x: NDArray, sample_weight: NDArray | None
+) -> GroupInfo:
+    """``info`` with the spec's lambda policies, the rank of each named penalty and its null basis.
 
     A ``lambda_policy`` names a one-penalty term's penalty ``"wiggle"``, and the
-    ranks are keyed by penalty name, so they are found after it.
+    ranks are keyed by penalty name, so they are found after it. ``x`` and
+    ``sample_weight`` are the rows the term was built on (``declared_null_basis``).
     """
     if (
         spec._lambda_policy is not None
@@ -342,7 +348,59 @@ def finish_penalties(spec: Any, info: GroupInfo) -> GroupInfo:
         info.component_types = {"wiggle": "difference"}
     info.lambda_policies = spec._resolve_lambda_policies(info)
     info.structural_ranks = structural_penalty_ranks(spec, info)
+    info.null_basis = declared_null_basis(spec, info, x, sample_weight)
     return info
+
+
+def declared_null_basis(
+    spec: Any, info: GroupInfo, x: NDArray, sample_weight: NDArray | None
+) -> NDArray | None:
+    """The term's exact penalty null basis in ``info``'s coordinates, when its kind states one.
+
+    A built-in kind with one penalty states the raw polynomials its penalty
+    annihilates (``_penalty_null_basis``); ``term_null_basis`` keeps those its
+    constraints and centring leave, which must account for the whole null
+    space the penalty's rank leaves: the structural rank where the kind
+    declares one, else the penalty's own rank across a gap (a difference
+    penalty's spectrum resolves it). A subclass may build another penalty,
+    so it states none.
+
+    The null directions are unpenalised, so only the rows can identify them:
+    ``d`` centred polynomial directions need ``d + 1`` distinct values among
+    the rows of positive weight. With fewer, a null coordinate's column is
+    zero but for rounding, and an exactly unpenalised one would be fitted to
+    that rounding; such a term states none.
+    """
+    from superglm.features.spline import _BUILT_IN_SPLINES
+
+    omega = info.penalty_matrix
+    if type(spec) not in _BUILT_IN_SPLINES or omega is None or len(spec._m_orders) != 1:
+        return None
+    null_raw = spec._penalty_null_basis(spec._m_orders[0])
+    if null_raw is None:
+        return None
+    key = "" if info.penalty_components is None else info.penalty_components[0][0]
+    rank = (info.structural_ranks or {}).get(key)
+    if rank is None:
+        rank = _gapped_rank(np.linalg.eigvalsh(omega))
+    if rank is None:
+        return None
+    nullity = info.n_cols - rank
+    if not _distinct_values_exceed(x, sample_weight, nullity):
+        return None
+    return term_null_basis(null_raw, info.projection, nullity)
+
+
+def _distinct_values_exceed(x: NDArray, sample_weight: NDArray | None, count: int) -> bool:
+    """Whether the rows of positive weight hold more than ``count`` distinct values of ``x``."""
+    values = np.asarray(x, dtype=np.float64).ravel()
+    if sample_weight is not None:
+        values = values[np.asarray(sample_weight, dtype=np.float64).ravel() > 0.0]
+    for _ in range(count + 1):
+        if values.size == 0:
+            return False
+        values = values[values != values[0]]
+    return True
 
 
 def build_knots_and_penalty(

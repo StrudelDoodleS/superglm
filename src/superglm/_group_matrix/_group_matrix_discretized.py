@@ -97,6 +97,7 @@ class DiscretizedSSPGroupMatrix:
         "shape",
         "omega",
         "projection",
+        "R_inv_local",
         "omega_components",
         "component_types",
         "structural_ranks",
@@ -109,8 +110,9 @@ class DiscretizedSSPGroupMatrix:
         self.bin_idx = np.asarray(bin_idx, dtype=np.intp)  # (n,)
         self.n_bins = self.B_unique.shape[0]
         self.shape = (len(bin_idx), self.R_inv.shape[1])
-        self.omega = None  # (K, K) B-spline-space penalty, set externally
+        self.omega = None  # the penalty, in the coordinates penalty_coordinate_map(self) maps
         self.projection = None  # (K, n_sub) projection matrix, set externally
+        self.R_inv_local = None  # (n_sub, p) term-to-solver map, when omega is in term coordinates
         self.omega_components = None  # list[(suffix, omega)] for multi-penalty, set externally
         self.component_types = None  # dict[suffix, type] for multi-penalty, set externally
         self.structural_ranks = None
@@ -220,6 +222,7 @@ class DiscretizedSSPGroupMatrix:
         sub = type(self)(self.B_unique, self.R_inv, self.bin_idx[idx])
         sub.omega = self.omega
         sub.projection = self.projection
+        sub.R_inv_local = getattr(self, "R_inv_local", None)
         sub.omega_components = self.omega_components
         sub.component_types = self.component_types
         sub.structural_ranks = getattr(self, "structural_ranks", None)

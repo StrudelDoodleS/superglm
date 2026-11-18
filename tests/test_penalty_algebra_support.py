@@ -249,7 +249,7 @@ def test_repeated_group_stays_compact_and_includes_fixed_components(monkeypatch)
     assert evaluation.hessian["a", "b"] == pytest.approx(-1.2)
 
 
-def test_public_discrete_tensor_only_factors_singleton_marginals(monkeypatch):
+def test_public_discrete_tensor_only_factors_singleton_marginals(monkeypatch, kind="cr"):
     """Check actual root dimensions as well as use of the tensor spectral path."""
     import pandas as pd
 
@@ -285,7 +285,7 @@ def test_public_discrete_tensor_only_factors_singleton_marginals(monkeypatch):
         family="poisson",
         selection_penalty=0,
         discrete=True,
-        features={"x1": Spline(n_knots=5), "x2": Spline(n_knots=5)},
+        features={"x1": Spline(kind, n_knots=5), "x2": Spline(kind, n_knots=5)},
         interactions=[("x1", "x2")],
     ).fit_reml(pd.DataFrame({"x1": x1, "x2": x2}), y, max_reml_iter=3, reml_tol=1e-12)
     assert tensor_dimensions and singleton_dimensions
@@ -311,14 +311,17 @@ def test_public_discrete_tensor_only_factors_singleton_marginals(monkeypatch):
 def test_public_singleton_raw_support_survives_null_round_off_above_the_floor(monkeypatch):
     """Reproduce the native ARM64 refusal of the cr singletons' raw support.
 
-    A cr penalty restricted by its boundary constraints carries formation
-    round-off in its four-dimensional null space at the eigensolver's floor
+    A penalty restricted by boundary constraints and lifted to its raw basis
+    carries formation round-off in its null space at the eigensolver's floor
     ``p(n) eps ||A||`` (up to 0.85 of it on x86-64, 0.03 for ps). Another
     BLAS build can resolve one such direction above the floor, which made the
-    raw support one rank wider than the declared rank and refused it. Plant
-    one at ``1e-14`` relative (about 60 floors once equilibrated, 300 times
-    below the declared ``eps**(2/3)`` cut, outside the band of 32 on both
-    sides), and require the singletons to stay on their raw basis.
+    raw support one rank wider than the declared rank and refused it. A cr
+    term holds its penalty in its own coordinates, exactly zero on its null
+    space, so it carries none; an ns term declares no null basis and is
+    lifted. Plant one at ``1e-14`` relative (about 60 floors once
+    equilibrated, 300 times below the declared ``eps**(2/3)`` cut, outside
+    the band of 32 on both sides), and require the singletons to stay on
+    their raw basis.
     """
     import superglm.reml.penalty_support as support_module
 
@@ -335,9 +338,9 @@ def test_public_singleton_raw_support_survives_null_round_off_above_the_floor(mo
         return original(matrix, **kwargs)
 
     monkeypatch.setattr(support_module, "decompose_gram", planted)
-    test_public_discrete_tensor_only_factors_singleton_marginals(monkeypatch)
+    test_public_discrete_tensor_only_factors_singleton_marginals(monkeypatch, kind="ns")
     # The plant is resolved at the floor: the floor rank alone would refuse.
-    assert floor_ranks and set(floor_ranks) == {6}
+    assert floor_ranks and set(floor_ranks) == {7}
 
 
 @pytest.mark.parametrize("bad", [-1.0, np.inf, np.nan])

@@ -223,6 +223,7 @@ def compile_predictor_design(
     ranged_margins: bool = False,
     separation_response: NDArray | None = None,
     eigenbasis_turn: bool = True,
+    term_coordinates: bool = False,
 ) -> CompiledPredictorDesign:
     """Compile an owned design without resolving scalar likelihood concerns.
 
@@ -243,6 +244,9 @@ def compile_predictor_design(
     ``build_design_matrix`` documents them; ``ranged_margins`` as
     ``refuse_unsupported_interaction_parents``.  ``eigenbasis_turn=False``
     keeps every raw block in its declared coordinates (``_process_info``).
+    ``term_coordinates=True`` holds each main effect that declares its
+    penalty's null basis in null-explicit term coordinates (``_process_info``);
+    scalar SuperGLM's penalty algebra reads them.
 
     ``first_tensor_id`` numbers this design's discrete tensors from that
     value; equal ids share marginals, so a caller pairing two compiled designs
@@ -425,6 +429,8 @@ def compile_predictor_design(
                             monotone_engine=monotone_engine,
                             raw_to_solver_map=raw_to_solver_map,
                         ),
+                        x_col,
+                        feature_build_weight,
                     )
                 ]
         else:
@@ -487,6 +493,7 @@ def compile_predictor_design(
                 exposure_agg=exposure_agg,
                 lambda2=lambda2,
                 eigenbasis_turn=eigenbasis_turn,
+                term_coordinates=term_coordinates,
             )
             qp_info = cast(GroupInfo, info)
             if qp_info.monotone_engine == "qp":

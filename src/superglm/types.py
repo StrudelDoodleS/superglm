@@ -169,6 +169,10 @@ class GroupInfo:
     # there are no components). REML takes it where the computed spectrum
     # resolves it (``penalty_algebra._rank_and_logdet``).
     structural_ranks: dict[str, int] | None = None
+    # The orthonormal basis (n_cols x d) of the single penalty's exact null space in
+    # these coordinates, when the term declares one (``_spline_build.declared_null_basis``);
+    # ``d`` may be 0. The design builder then holds the term in null-explicit coordinates.
+    null_basis: NDArray | None = None
     # Optional per-component lambda control; keys match penalty_components suffixes.
     lambda_policies: dict[str, LambdaPolicy] | None = None
     # Monotone constraint metadata (QP engine).

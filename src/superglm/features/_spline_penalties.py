@@ -114,6 +114,19 @@ def difference_penalty_for(spec, order: int) -> NDArray:
     return penalty
 
 
+def difference_null_basis(spec, order: int) -> NDArray:
+    """Raw coefficients of the null space of the difference penalty ``difference_penalty_for`` built.
+
+    The standard penalty annihilates the integer sequences ``j**p``, ``p < order``
+    (Eilers and Marx 1996, sec. 5), exactly representable in binary64; the
+    general and projected penalties annihilate the polynomials of degree below
+    ``order`` (``_polynomial_coefficients``).
+    """
+    if getattr(spec, "_difference_penalty", {}).get(order) == "standard":
+        return np.vander(np.arange(spec._n_basis, dtype=np.float64), order, increasing=True)
+    return _polynomial_coefficients(spec._knots, spec.degree, order)
+
+
 def difference_penalty_kind(spec) -> str | None:
     """Which difference penalty a built spline took, for reports; None without one.
 

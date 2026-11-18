@@ -17,6 +17,7 @@ from superglm.group_matrix import (
     DiscretizedSSPGroupMatrix,
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
+    penalty_coordinate_map,
 )
 from superglm.solvers._structured.balance_tree import ProfiledSumToZeroTreeFactor
 from superglm.solvers._structured.block_leaves import (
@@ -412,7 +413,7 @@ def _active_penalty_components(
             omega = (
                 component.omega_ssp
                 if component.omega_ssp is not None
-                else ssp_penalty_matrix(gm.R_inv, component.omega_raw)
+                else ssp_penalty_matrix(penalty_coordinate_map(gm), component.omega_raw)
             )
             yield (
                 active_group.sl,
@@ -448,7 +449,11 @@ def _active_penalty_components(
                     lam_j = resolve_component_lambda(lambda2, group.name, suffix)
                     if lam_j == 0:
                         continue
-                    yield active_group.sl, lam_j, ssp_penalty_matrix(gm.R_inv, omega_j)
+                    yield (
+                        active_group.sl,
+                        lam_j,
+                        ssp_penalty_matrix(penalty_coordinate_map(gm), omega_j),
+                    )
                 continue
             lam = resolve_group_lambda(lambda2, group.name)
             if lam == 0:
@@ -456,7 +461,7 @@ def _active_penalty_components(
             omega = gm.omega
             if omega is None:
                 omega = _second_diff_penalty(gm.R_inv.shape[0])
-            yield active_group.sl, lam, ssp_penalty_matrix(gm.R_inv, omega)
+            yield active_group.sl, lam, ssp_penalty_matrix(penalty_coordinate_map(gm), omega)
         elif group.scop_reparameterization is not None:
             lam = resolve_group_lambda(lambda2, group.name)
             if lam == 0:

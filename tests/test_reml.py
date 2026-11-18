@@ -14,7 +14,11 @@ from superglm.distributions import NegativeBinomial
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import CubicRegressionSpline, NaturalSpline, Spline
-from superglm.group_matrix import DiscretizedSSPGroupMatrix, SparseSSPGroupMatrix
+from superglm.group_matrix import (
+    DiscretizedSSPGroupMatrix,
+    SparseSSPGroupMatrix,
+    penalty_coordinate_map,
+)
 from superglm.inference.covariance import (
     _active_penalty_matrix,
     _second_diff_penalty,
@@ -108,8 +112,7 @@ class TestOmegaStored:
         assert gm.omega is not None
         assert gm.projection is not None
         # CRS omega should differ from second-difference penalty
-        p_b = gm.R_inv.shape[0]
-        d2_penalty = _second_diff_penalty(p_b)
+        d2_penalty = _second_diff_penalty(gm.omega.shape[0])
         assert not np.allclose(gm.omega, d2_penalty, atol=1e-6)
 
 
@@ -238,10 +241,9 @@ class TestPenalisedHessianAssembly:
         # The stored omega on the group matrix should be the CRS penalty,
         # not _second_diff_penalty. Check the penalty contribution differs.
         gm = model._dm.group_matrices[0]
-        R_inv = gm.R_inv
+        R_inv = penalty_coordinate_map(gm)
         omega_crs = gm.omega
-        p_b = R_inv.shape[0]
-        omega_d2 = _second_diff_penalty(p_b)
+        omega_d2 = _second_diff_penalty(R_inv.shape[0])
 
         S_crs = R_inv.T @ omega_crs @ R_inv
         S_d2 = R_inv.T @ omega_d2 @ R_inv
@@ -456,10 +458,10 @@ class TestComputeRInvOverride:
         model.fit(X[["x1"]], y, sample_weight=w)
 
         gm = model._dm.group_matrices[0]
-        from superglm.dm_builder import compute_R_inv
+        from superglm.dm_builder import compute_projected_R_inv
 
-        R_inv_1 = compute_R_inv(gm.B, gm.omega, w, 0.01)
-        R_inv_2 = compute_R_inv(gm.B, gm.omega, w, 1.0)
+        R_inv_1 = compute_projected_R_inv(gm.B, gm.projection, gm.omega, w, 0.01)
+        R_inv_2 = compute_projected_R_inv(gm.B, gm.projection, gm.omega, w, 1.0)
         assert not np.allclose(R_inv_1, R_inv_2, atol=1e-6)
 
     def test_zero_total_weight_returns_finite_penalty_only_R_inv(self):
@@ -573,7 +575,7 @@ class TestMgcvStyleSmoothTestInput:
 class TestBetaMapping:
     def test_roundtrip(self, poisson_data):
         """Mapping beta through old -> B-spline -> new preserves B-spline coefficients."""
-        from superglm.dm_builder import compute_projected_R_inv, compute_R_inv
+        from superglm.dm_builder import _projected_penalty, compute_projected_R_inv, compute_R_inv
 
         X, y, w = poisson_data
         model = SuperGLM(
@@ -588,8 +590,9 @@ class TestBetaMapping:
 
         # Create new R_inv with different lambda, respecting projection
         P = gm_old.projection
+        R_inv_local = None
         if P is not None:
-            omega_proj = P.T @ gm_old.omega @ P
+            omega_proj = _projected_penalty(gm_old, gm_old.omega)
             R_inv_local = compute_projected_R_inv(gm_old.B, P, omega_proj, w, 0.5)
             R_inv_new = P @ R_inv_local
         else:
@@ -597,6 +600,7 @@ class TestBetaMapping:
         gm_new = SparseSSPGroupMatrix(gm_old.B, R_inv_new)
         gm_new.omega = gm_old.omega
         gm_new.projection = P
+        gm_new.R_inv_local = None if gm_old.R_inv_local is None else R_inv_local
 
         # Map beta
         beta_mapped = _map_beta_between_bases(

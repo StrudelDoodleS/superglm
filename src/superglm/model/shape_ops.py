@@ -245,6 +245,7 @@ def _build_smooth_penalty_terms(
         DiscretizedSSPGroupMatrix,
         SparseSSPGroupMatrix,
         SplineCategoricalGroupMatrix,
+        penalty_coordinate_map,
     )
     from superglm.model.fit_state import fitted_lambda2
     from superglm.reml.penalty_algebra import resolve_component_lambda, resolve_group_lambda
@@ -277,7 +278,7 @@ def _build_smooth_penalty_terms(
                     lam_j = float(resolve_component_lambda(lambda2, group.name, suffix))
                     if lam_j == 0.0:
                         continue
-                    terms.append((group.sl, lam_j, omega_j, gm.R_inv))
+                    terms.append((group.sl, lam_j, omega_j, penalty_coordinate_map(gm)))
                 continue
             lam = resolve_group_lambda(lambda2, group.name)
             lam_float = float(lam)
@@ -285,7 +286,7 @@ def _build_smooth_penalty_terms(
                 continue
             omega = gm.omega
             if omega is not None:
-                terms.append((group.sl, lam_float, omega, gm.R_inv))
+                terms.append((group.sl, lam_float, omega, penalty_coordinate_map(gm)))
             continue
         lam = resolve_group_lambda(lambda2, group.name)
         lam_float = float(lam)

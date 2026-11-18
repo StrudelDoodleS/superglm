@@ -700,6 +700,37 @@ def _validate_group_pricing(group_pricing: str) -> None:
         raise ValueError(f"group_pricing must be 'rank' or 'spanned', got {group_pricing!r}")
 
 
+def _in_term_coordinates(info: GroupInfo) -> GroupInfo:
+    """``info`` turned into the null-explicit coordinates of its declared null basis.
+
+    With ``T = [theta, theta_perp]`` (``null_explicit_coordinates``) the
+    projection becomes ``P T`` and the penalty ``T' Omega T``, whose null rows
+    and columns are set to the exact zeros the construction gives them; the
+    QP rows and the raw-to-solver map turn with the coordinates.
+    """
+    from dataclasses import replace
+
+    from superglm.features._spline_identifiability import null_explicit_coordinates
+
+    null_basis = cast(NDArray, info.null_basis)
+    turn = null_explicit_coordinates(null_basis)
+    nullity = null_basis.shape[1]
+    omega = turn.T @ cast(NDArray, info.penalty_matrix) @ turn
+    omega = 0.5 * (omega + omega.T)
+    omega[:nullity, :] = 0.0
+    omega[:, :nullity] = 0.0
+    components = info.penalty_components
+    return replace(
+        info,
+        penalty_matrix=omega,
+        projection=turn if info.projection is None else info.projection @ turn,
+        penalty_components=None if components is None else [(components[0][0], omega)],
+        constraints=None if info.constraints is None else info.constraints.compose(turn),
+        raw_to_solver_map=None if info.raw_to_solver_map is None else info.raw_to_solver_map @ turn,
+        null_basis=np.eye(len(turn))[:, :nullity],
+    )
+
+
 def _process_info(
     info: GroupInfo,
     *,
@@ -713,6 +744,7 @@ def _process_info(
     tensor_id: int = -1,
     ssp_supports: dict | None = None,
     eigenbasis_turn: bool = True,
+    term_coordinates: bool = False,
 ) -> tuple[GroupMatrix, NDArray | None, int]:
     """Compute R_inv and construct a GroupMatrix from a single GroupInfo.
 
@@ -722,6 +754,13 @@ def _process_info(
     calls of one term, so subgroups over one basis share its row support.
     ``eigenbasis_turn=False`` keeps a raw block in its declared coordinates.
     ``group_name`` is the block's group, which a ``lambda2`` mapping keys.
+
+    ``term_coordinates=True`` holds a term that declares its penalty's null
+    basis (``GroupInfo.null_basis``) in null-explicit coordinates
+    (``_in_term_coordinates``), and its group keeps the penalty there beside
+    ``R_inv_local`` instead of lifting it to the raw basis as ``P Omega P'``:
+    a lift and each later re-projection round by ``u ||Omega||``, onto the null
+    space too. Only a consumer that reads ``penalty_coordinate_map`` may ask.
     """
     use_discrete = B_unique is not None
     use_tensor = tensor_build is not None
@@ -731,6 +770,9 @@ def _process_info(
         # Only a sparse block carries a penalty, so dense penalised columns (a
         # build() override's) are held sparse, keeping the penalty they came with.
         info.columns = sp.csr_matrix(info.columns)
+    in_term = term_coordinates and info.null_basis is not None
+    if in_term:
+        info = _in_term_coordinates(info)
     R_inv: NDArray | None = None
     # R_inv_local: SSP transform in post-identifiability space (projected -> solver).
     # Used to compose constraints that are already in post-identifiability space.
@@ -844,7 +886,15 @@ def _process_info(
             )
             R_inv = P if R_inv_local is None else P @ R_inv_local
         n_cols = R_inv.shape[1]
-        omega_full = P @ info.penalty_matrix @ P.T if info.penalty_matrix is not None else None
+        if in_term:
+            omega_full, omega_parts = info.penalty_matrix, info.penalty_components
+        else:
+            omega_full = P @ info.penalty_matrix @ P.T if info.penalty_matrix is not None else None
+            omega_parts = (
+                None
+                if info.penalty_components is None
+                else [(suffix, P @ omega_j @ P.T) for suffix, omega_j in info.penalty_components]
+            )
         if use_tensor:
             gm: GroupMatrix = DiscretizedTensorGroupMatrix(
                 tensor_build.B1_unique,
@@ -867,10 +917,10 @@ def _process_info(
             gm.omega = omega_full
         if hasattr(gm, "projection"):
             gm.projection = P
-        if info.penalty_components is not None and hasattr(gm, "omega_components"):
-            gm.omega_components = [
-                (suffix, P @ omega_j @ P.T) for suffix, omega_j in info.penalty_components
-            ]
+        if in_term:
+            gm.R_inv_local = np.eye(n_cols) if R_inv_local is None else R_inv_local
+        if omega_parts is not None and hasattr(gm, "omega_components"):
+            gm.omega_components = omega_parts
             gm.component_types = info.component_types
             if info.lambda_policies is not None:
                 gm.lambda_policies = info.lambda_policies
@@ -1148,6 +1198,7 @@ def build_design_matrix(
         own_specs=False,
         separation_response=y,
         eigenbasis_turn=eigenbasis_turn,
+        term_coordinates=True,
     )
     separation_records = compiled.separation_records
     from superglm.features.categorical import Categorical
@@ -1291,6 +1342,17 @@ def _resolve_group_lambda(gm, g, lambdas):
     return _lambda_beside_penalty(terms) if terms else (0.0, gm.omega)
 
 
+def _projected_penalty(gm, omega: NDArray) -> NDArray:
+    """A projected group's penalty ``omega`` in the coordinates of its projection's columns.
+
+    A group held in term coordinates keeps it there already; any other states
+    it on the raw basis, ``P' omega P``.
+    """
+    if getattr(gm, "R_inv_local", None) is not None:
+        return omega
+    return gm.projection.T @ omega @ gm.projection
+
+
 def _group_has_lambda(gm, g, lambdas):
     """Check whether lambdas dict contains entries for this group."""
     if g.name in lambdas:
@@ -1326,9 +1388,10 @@ def rebuild_design_matrix_with_lambdas(
                 new_gms.append(gm)
                 continue
             lam, omega_eff = _resolve_group_lambda(gm, g, lambdas)
+            R_inv_local = None
             if gm.projection is not None:
                 P = gm.projection
-                omega_proj = P.T @ omega_eff @ P
+                omega_proj = _projected_penalty(gm, omega_eff)
                 R_inv_local = compute_projected_R_inv(gm.B, P, omega_proj, sample_weight, lam)
                 R_inv_new = P @ R_inv_local
             else:
@@ -1336,6 +1399,7 @@ def rebuild_design_matrix_with_lambdas(
             new_gm = SparseSSPGroupMatrix(gm.B, R_inv_new)
             new_gm.omega = gm.omega
             new_gm.projection = gm.projection
+            new_gm.R_inv_local = None if getattr(gm, "R_inv_local", None) is None else R_inv_local
             new_gm.omega_components = gm.omega_components
             new_gm.component_types = gm.component_types
             new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
@@ -1349,7 +1413,7 @@ def rebuild_design_matrix_with_lambdas(
             level_weight = sample_weight[gm.row_idx]
             if gm.projection is not None:
                 P = gm.projection
-                omega_proj = P.T @ omega_eff @ P
+                omega_proj = _projected_penalty(gm, omega_eff)
                 R_inv_local = compute_projected_R_inv(gm.B_level, P, omega_proj, level_weight, lam)
                 R_inv_new = P @ R_inv_local
             else:
@@ -1380,7 +1444,7 @@ def rebuild_design_matrix_with_lambdas(
             )
             if gm.projection is not None:
                 P = gm.projection
-                omega_proj = P.T @ omega_eff @ P
+                omega_proj = _projected_penalty(gm, omega_eff)
                 R_inv_local = compute_projected_R_inv(
                     gm.B_unique,
                     P,
@@ -1426,7 +1490,7 @@ def rebuild_design_matrix_with_lambdas(
             exposure_agg = np.bincount(gm.bin_idx, weights=sample_weight, minlength=gm.n_bins)
             if gm.projection is not None:
                 P = gm.projection
-                omega_proj = P.T @ omega_eff @ P
+                omega_proj = _projected_penalty(gm, omega_eff)
                 R_inv_local = compute_projected_R_inv(gm.B_unique, P, omega_proj, exposure_agg, lam)
                 R_inv_new = P @ R_inv_local
             else:
@@ -1456,9 +1520,10 @@ def rebuild_design_matrix_with_lambdas(
                 continue
             lam, omega_eff = _resolve_group_lambda(gm, g, lambdas)
             exposure_agg = np.bincount(gm.bin_idx, weights=sample_weight, minlength=gm.n_bins)
+            R_inv_local = None
             if gm.projection is not None:
                 P = gm.projection
-                omega_proj = P.T @ omega_eff @ P
+                omega_proj = _projected_penalty(gm, omega_eff)
                 R_inv_local = compute_projected_R_inv(gm.B_unique, P, omega_proj, exposure_agg, lam)
                 R_inv_new = P @ R_inv_local
             else:
@@ -1468,6 +1533,7 @@ def rebuild_design_matrix_with_lambdas(
             new_gm = type(gm)(gm.B_unique, R_inv_new, gm.bin_idx)
             new_gm.omega = gm.omega
             new_gm.projection = gm.projection
+            new_gm.R_inv_local = None if getattr(gm, "R_inv_local", None) is None else R_inv_local
             new_gm.omega_components = gm.omega_components
             new_gm.component_types = gm.component_types
             new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
