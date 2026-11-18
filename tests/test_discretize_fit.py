@@ -474,15 +474,23 @@ class TestDiscretizedFit:
 
         ``estimate()`` is the default policy, stated. It names the penalty
         ``"wiggle"``, and its structural rank is found under that name, so
-        REML reads the same rank and selects the same smoothing parameter.
-        The quantile knots on a column spanning five decades spread the
-        penalty's spectrum so far that a rank read from it would differ. The
-        two fits run the same arithmetic up to the policy's bookkeeping, so
-        they agree to REML's convergence, 1e-8 relative.
+        REML reads rank 10 under both declarations. The quantile knots on a
+        column spanning five decades spread the penalty's spectrum so far that
+        the rank read from its eigenvalues is 8, which moves the optimum to
+        EDF 7.7 from 4.7.
+
+        The two fits reach the same optimum by different rounding (a named
+        penalty is rebuilt with lambda folded into it), so they agree to the
+        stop rule. The signal is curved, so the optimum (lambda 0.56) is
+        interior and quadratic in log lambda, with curvature 0.43. A stop
+        leaves Newton's step in log lambda below
+        ``newton_step_stop_bar(1e-9) = 1e-3``. The fitted values move by at
+        most 1.9e-2 relative per unit of log lambda there, so two stops are at
+        most 2e-3 * 1.9e-2 = 4e-5 apart; ``rtol`` is 1e-4.
         """
         x = np.geomspace(1.0, 1e5, 200)
         X = pd.DataFrame({"x": x})
-        y = 1.0 + x / 1e5 + np.random.default_rng(74).normal(0.0, 0.15, 200)
+        y = 1.0 + 0.1 * np.sin(np.log(x)) + np.random.default_rng(74).normal(0.0, 0.15, 200)
 
         def fitted(policy):
             spline = Spline(
@@ -500,8 +508,9 @@ class TestDiscretizedFit:
 
         default, stated = fitted(None), fitted(LambdaPolicy.estimate())
         assert isinstance(stated._dm.group_matrices[0], DiscretizedSSPGroupMatrix)
-        np.testing.assert_allclose(stated.predict(X), default.predict(X), rtol=1e-8)
-        assert stated.result.effective_df == pytest.approx(default.result.effective_df, rel=1e-8)
+        assert [p.rank for p in default._reml_penalties] == [10]
+        assert [p.rank for p in stated._reml_penalties] == [10]
+        np.testing.assert_allclose(stated.predict(X), default.predict(X), rtol=1e-4)
 
     @pytest.mark.parametrize("penalty", ["ssp", "none"])
     def test_an_off_policy_survives_the_binned_reml_rebuild(self, penalty):
