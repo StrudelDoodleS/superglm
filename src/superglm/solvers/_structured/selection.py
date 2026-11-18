@@ -761,10 +761,12 @@ def resolve_structured_backend(
             has_dominant_penalty = bool(
                 np.any(np.diag(override_penalty[dominant_group.sl, dominant_group.sl]) > 0.0)
             )
-        elif isinstance(lambda2, dict):
-            has_dominant_penalty = float(lambda2.get(group_name, 0.0)) != 0.0
         else:
-            has_dominant_penalty = lambda2 is not None and float(lambda2) != 0.0
+            from superglm.reml.penalty_algebra import resolve_group_lambda
+
+            has_dominant_penalty = (
+                lambda2 is not None and resolve_group_lambda(lambda2, group_name) != 0.0
+            )
         if not has_dominant_penalty:
             return _backend_ineligibility(
                 (

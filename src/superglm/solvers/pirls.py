@@ -91,6 +91,8 @@ def _has_structural_smoothing_penalty(
     lambda2: float | dict[str, float],
 ) -> bool:
     """Whether ordinary penalty assembly can contribute a nonzero S block."""
+    from superglm.reml.penalty_algebra import resolve_component_lambda, resolve_group_lambda
+
     if _lambda2_is_identically_zero(lambda2):
         return False
     for gm, group in zip(gms, groups, strict=True):
@@ -105,14 +107,12 @@ def _has_structural_smoothing_penalty(
         ):
             omega_components = getattr(gm, "omega_components", None)
             if omega_components is not None:
-                from superglm.reml.penalty_algebra import resolve_component_lambda
-
                 for suffix, _omega_j in omega_components:
                     lam = resolve_component_lambda(lambda2, group.name, suffix)
                     if float(lam) != 0.0:
                         return True
                 continue
-            lam = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
+            lam = resolve_group_lambda(lambda2, group.name)
             if float(lam) != 0.0 and gm.omega is not None:
                 return True
     return False
