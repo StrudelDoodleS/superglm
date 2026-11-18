@@ -1957,7 +1957,7 @@ def _row_kron(B1: sp.spmatrix, B2: sp.spmatrix) -> sp.csr_matrix:
 def _uncentred_margin(candidate) -> NotImplementedError:
     """The refusal of a one-argument custom margin under unequal geometry weights."""
     return NotImplementedError(
-        f"{type(candidate).__name__}'s tensor margin cannot centre on unequal geometry "
+        f"{type(candidate).__name__}'s tensor margin cannot certify unequal geometry "
         "weights: it takes x alone. Implement tensor_marginal_ingredients(x, *, support=..., "
         "counts=...) to evaluate the basis on support and centre it on counts, or fit with "
         "equal positive weights."
