@@ -209,10 +209,9 @@ def _dominant_penalty_eigenbasis(
     coordinate axes and keeps the formed penalty to second order (Wood, Pya
     & Safken 2016, sec. 3.1.1), and the penalty dominates every range
     direction, so the turn costs the data's column scaling nothing.
-    ``columns`` and ``weights`` are the block's raw rows and their weights:
-    a binned block's distinct rows and bin weights.  The turn needs one
-    penalty term (``_penalty_terms``): the eigenbasis of a sum of terms at
-    different weights is not found without them.
+    ``columns`` and ``weights`` are the block's raw (or binned) rows and weights.
+    It needs one penalty term (``_penalty_terms``): a weighted sum's
+    eigenbasis is not found without the weights.
     """
     if info.penalty_matrix is None or columns is None:
         return None

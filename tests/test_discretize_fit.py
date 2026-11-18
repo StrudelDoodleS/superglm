@@ -588,16 +588,18 @@ class TestDiscretizedFit:
         Under the identity link a one-term fit predicts the intercept plus the
         curve, so the curve's steps on its grid are the predictions' steps there,
         to the rounding of the two products with the coefficients, which 1e-12
-        bounds on these values near 3. The stock basis would halve them.
+        bounds on these values near 3. The stock basis would halve them. The
+        predictions on the training rows reproduce the fit's own deviance.
         """
         x = np.linspace(0.0, 1.0, 120)
+        y = 1.0 + 2.0 * x + 0.5 * np.sin(6.0 * x)
         model = SuperGLM(
             family="gaussian",
             selection_penalty=0,
             spline_penalty=0.1,
             features={"x": spline_cls(n_knots=6)},
         )
-        model.fit(pd.DataFrame({"x": x}), 1.0 + 2.0 * x + 0.5 * np.sin(6.0 * x))
+        model.fit(pd.DataFrame({"x": x}), y)
         curve = model.term_inference("x")
         predicted = np.asarray(model.predict(pd.DataFrame({"x": curve.x})))
         np.testing.assert_allclose(
@@ -606,6 +608,29 @@ class TestDiscretizedFit:
             rtol=0,
             atol=1e-12,
         )
+        in_sample = np.asarray(model.predict(pd.DataFrame({"x": x})))
+        np.testing.assert_allclose(
+            np.sum((y - in_sample) ** 2), model.result.deviance, rtol=1e-9, atol=1e-12
+        )
+
+    def test_a_subclass_overriding_transform_alone_is_refused_by_name(self):
+        """Its fit would read the stock basis and its predictions its own, so it is refused."""
+
+        class _TransformOnly(PSpline):
+            def transform(self, x):
+                return 2.0 * super().transform(x)
+
+        x = np.linspace(0.0, 1.0, 120)
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0,
+            spline_penalty=0.1,
+            features={"x": _TransformOnly(n_knots=6)},
+        )
+        with pytest.raises(Exception, match="overrides transform but not build") as info:
+            model.fit(pd.DataFrame({"x": x}), 1.0 + 2.0 * x)
+        chain = [info.value, info.value.__cause__]
+        assert any(isinstance(error, TypeError) for error in chain)
 
     @pytest.mark.parametrize("signal", ["linear", "curved"])
     @pytest.mark.parametrize("penalty", ["ssp", "none"])

@@ -81,6 +81,12 @@ def _fitted_basis(spec: _SplineBase, grid: NDArray) -> NDArray:
     return _reused(spec, ("basis", _fingerprint(points)), compute)
 
 
+def _fitted_curve(spec: _SplineBase, beta: NDArray, n_grid: int) -> tuple[NDArray, NDArray]:
+    """The grid ``reconstruct`` reads a curve on, and the curve, on the shared fitted basis."""
+    grid = np.linspace(spec._lo, spec._hi, n_grid)
+    return grid, np.asarray(_fitted_basis(spec, grid) @ beta, dtype=np.float64)
+
+
 @dataclass
 class MonotoneRepairResult:
     """Result of a post-fit shape repair for one spline feature."""
@@ -505,9 +511,7 @@ def _repair_shape(
     which the caller has already formed.
     """
     beta_combined = np.concatenate([beta_reparam[g.sl] for g in groups])
-    recon = spec.reconstruct(beta_combined, n_points=n_grid)
-    x_grid = recon["x"]
-    log_rels = recon["log_relativity"]
+    x_grid, log_rels = _fitted_curve(spec, beta_combined, n_grid)
     certificate_before = (
         shape_constraint_certificate(spec, beta_combined, shape)
         if certificate is None
@@ -582,8 +586,7 @@ def _flat_repair(
     """
     if before is None:
         fitted = np.concatenate([beta_reparam[g.sl] for g in groups])
-        recon = spec.reconstruct(fitted, n_points=n_grid)
-        grid, original = recon["x"], np.array(recon["log_relativity"], dtype=np.float64)
+        grid, original = _fitted_curve(spec, fitted, n_grid)
         if certificate is None:
             certificate = shape_constraint_certificate(spec, fitted, shape)
         violation, name = certificate.violation, ""
