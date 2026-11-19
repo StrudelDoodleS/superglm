@@ -409,12 +409,14 @@ def test_structured_summary_blanks_the_later_dense_small_alias():
     The structured factor truncates the alias and splits it evenly; it publishes the dense
     solver's zero on ``duplicate`` (``identifiability.Gauge``), so ``x`` reports the whole
     effect with the dense fit's coefficient and SE, as R's ``lm`` does.  At ``633289397`` both
-    rows were blank.
+    rows were blank.  The blank row has no p-value, and ``x``'s row is the fit without the
+    duplicate column: the same coefficient, SE and p-value.
     """
     x = np.linspace(-2.0, 2.0, 160)
     levels = np.array([f"g{i}" for i in np.arange(len(x)) % 40], dtype=object)
+    # a slope near its SE, so the p-value is far from both 0 and 1
     X = pd.DataFrame({"x": x, "duplicate": x, "group": levels})
-    y = 0.8 + 1.6 * x + 0.05 * np.sin(4.0 * x)
+    y = 0.8 + 0.004 * x + 0.05 * np.sin(4.0 * x)
     common = dict(
         family="gaussian",
         features={
@@ -426,17 +428,27 @@ def test_structured_summary_blanks_the_later_dense_small_alias():
     )
     model = SuperGLM(**common, direct_solve="structured").fit_reml(X, y)
     dense = SuperGLM(**common, direct_solve="gram").fit_reml(X, y)
+    single_features = {
+        name: spec for name, spec in common["features"].items() if name != "duplicate"
+    }
+    single = SuperGLM(
+        **{**common, "features": single_features}, direct_solve="structured"
+    ).fit_reml(X.drop(columns="duplicate"), y)
 
     state = model._linear_system_state
     assert isinstance(state, StructuredLinearSystemState)
     assert state.profiled_factor.rank < state.profiled_factor.shape[0]
     rows = {row.name: row for row in model.summary()._coef_rows}
     reference = {row.name: row for row in dense.summary()._coef_rows}
+    alone = next(row for row in single.summary()._coef_rows if row.name == "x")
     assert not rows["duplicate"].estimable and np.isnan(rows["duplicate"].se)
+    assert np.isnan(rows["duplicate"].p)
     assert rows["duplicate"].coef == 0.0
     assert rows["x"].estimable and np.isfinite(rows["x"].p)
     assert rows["x"].coef == pytest.approx(reference["x"].coef, rel=1e-8)
     assert rows["x"].se == pytest.approx(reference["x"].se, rel=1e-8)
+    for field in ("coef", "se", "p"):
+        assert getattr(rows["x"], field) == pytest.approx(getattr(alone, field), rel=1e-8), field
 
 
 def test_structured_estimability_uses_centered_data_geometry():
