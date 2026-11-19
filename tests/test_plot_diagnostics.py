@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 import warnings
 from fractions import Fraction
 
@@ -504,53 +505,120 @@ class TestWeightContractDiagnostics:
         return model
 
     def test_binary_qq_envelope_holds_a_calibrated_fit(self):
-        """A simulated Bernoulli response and its jitter use independent uniforms."""
-        # Calibrated outcomes: each row predicts 0.5, and half the outcomes are 1.
-        # A jitter that reuses the response's uniforms puts no simulated PIT in
-        # (0.25, 0.75), pushing the envelope to +-0.94 at theoretical +-0.4.
+        """A simulated Bernoulli response and its jitter use independent uniforms.
+
+        Calibrated outcomes: each row predicts 0.5, and half the outcomes are 1.
+        With independent response and jitter uniforms every randomized PIT, observed
+        or simulated, is exactly uniform, so each plotted order statistic at plotting
+        position ``p`` is within its sampling spread ``sigma = sqrt(p (1 - p) / n) /
+        phi(z)`` of ``z = Phi^-1(p)``: the observed curve, and the envelope's middle
+        (the mean of its 2.5% and 97.5% points over the replicates, whose spread is
+        below one replicate's).  Six ``sigma`` at every grid point with ``|z| <= 2``
+        leaves a correct sampler a failure chance below 1e-5 on any seed (a union
+        bound over both curves).  A jitter that reuses the response's uniforms puts
+        no simulated PIT in (0.25, 0.75), and the envelope's middle at ``z = 0.4``
+        sits near 0.94, nineteen ``sigma`` out.  Mutation check: drawing the response from the jitter's seed
+        (``default_rng(_stream_seed(jitter_stream))`` in ``_panel_qq_envelope``)
+        fails the envelope.
+        """
+        from scipy import stats as scipy_stats
+
         model = self._balanced_binary_model()
         n = 2_000
         frame = pd.DataFrame({"x": np.zeros(n)})
         fig = model.plot_diagnostics(frame, np.tile([0.0, 1.0], n // 2), n_sim=20, seed=42)
-        ax = fig.axes[0]
-        theoretical, observed = ax.lines[0].get_data()
-        envelope = ax.collections[0].get_paths()[0].vertices
-        for target in (-0.4, 0.4):
-            k = int(np.argmin(np.abs(theoretical - target)))
-            band = envelope[envelope[:, 0] == theoretical[k], 1]
-            assert band.min() <= observed[k] <= band.max(), (target, observed[k], band)
-        plt.close(fig)
+        try:
+            ax = fig.axes[0]
+            theoretical, observed = ax.lines[0].get_data()
+            envelope = ax.collections[0].get_paths()[0].vertices
+            p = scipy_stats.norm.cdf(theoretical)
+            sigma = np.sqrt(p * (1.0 - p) / n) / scipy_stats.norm.pdf(theoretical)
+            inner = np.abs(theoretical) <= 2.0
+            assert np.count_nonzero(inner) > 900
+            middle = np.array(
+                [
+                    0.5 * (band.min() + band.max())
+                    for band in (envelope[envelope[:, 0] == z, 1] for z in theoretical[inner])
+                ]
+            )
+            assert np.all(np.abs(observed[inner] - theoretical[inner]) <= 6.0 * sigma[inner])
+            assert np.all(np.abs(middle - theoretical[inner]) <= 6.0 * sigma[inner])
+        finally:
+            plt.close(fig)
 
     def test_capped_selection_is_independent_of_the_observed_jitter(self, monkeypatch):
-        """Which occurrences the cap selects does not share uniforms with their jitter."""
-        # Two rows predicting 0.5 with outcomes 0 and 1, 2**34 occurrences each.
-        # A zero's PIT is u/2 and a one's (1 + u)/2, so the middle quartile counts
-        # differ by (zeros with u > 1/2) - (ones with u < 1/2), whose SD is
-        # sqrt(m/2), about 224, for independent streams. Selection and jitter on
-        # one stream leave it within 1 of 0.
+        """Which occurrences the cap selects does not share uniforms with their jitter.
+
+        Two rows predicting 0.5 with outcomes 0 and 1, ``2**34`` occurrences each, so
+        the cap selects.  The selection is driven: a stand-in for ``occurrence_rows``
+        draws one uniform per kept occurrence from the generator it is handed and keeps
+        row 1 where it is at least 1/2, so its draws are known.  A Binomial PIT is
+        ``a + (b - a) v`` on ``[a, b] = [0, 1 - mu]`` or ``[1 - mu, 1]``, its jitter
+        ``v`` drawn from the observed seed.  The kept rows' residuals are the quantile
+        residuals of those rows at that seed, computed afresh (the selection consumed
+        nothing of the jitter's stream), and no kept row's residual is the one the
+        selection's own uniform would give (``Phi^-1(a + (b - a) u)``, to the inverse
+        normal's rounding): two independent uniforms coincide that closely with
+        probability about 1e-12 per row, a shared stream on every row.  Mutation check:
+        selecting from the observed seed's generator
+        (``np.random.default_rng(observed_seed)`` for the selection in
+        ``plot_diagnostics``) fails the second check on every row.
+        """
+        from scipy import stats as scipy_stats
+
+        from superglm.inference.metrics import ModelMetrics
+
+        kept = 4_000
+        selections = []
+
+        def driven_selection(counts, cap, rng):
+            draws = rng.random(kept)
+            selections.append(draws)
+            return (draws >= 0.5).astype(np.intp)
+
         captured = []
         rows = diagnostics_module._diagnostic_rows
 
         def recording_rows(*args, **kwargs):
             out = rows(*args, **kwargs)
-            captured.append(out[4])
+            captured.append(out)
             return out
 
+        seeds = []
+        residuals = ModelMetrics.residuals
+
+        def recording_residuals(self, kind="deviance", *, seed=42):
+            seeds.append((len(self._y), seed))
+            return residuals(self, kind, seed=seed)
+
+        monkeypatch.setattr(diagnostics_module, "occurrence_rows", driven_selection)
         monkeypatch.setattr(diagnostics_module, "_diagnostic_rows", recording_rows)
+        monkeypatch.setattr(ModelMetrics, "residuals", recording_residuals)
         model = self._balanced_binary_model()
         frame = pd.DataFrame({"x": [0.0, 0.0]})
-        weights = np.full(2, 2.0**34)
-        for seed in (0, 1, 2):
-            fig = model.plot_diagnostics(
-                frame, np.array([0.0, 1.0]), sample_weight=weights, n_sim=1, seed=seed
-            )
-            plt.close(fig)
-        quartile = 0.6744897501960817  # the standard normal's upper quartile
-        differences = [
-            int(np.sum((q > -quartile) & (q < 0.0)) - np.sum((q > 0.0) & (q < quartile)))
-            for q in captured
-        ]
-        assert max(abs(d) for d in differences) > 3, differences
+        fig = model.plot_diagnostics(
+            frame, np.array([0.0, 1.0]), sample_weight=np.full(2, 2.0**34), n_sim=1, seed=0
+        )
+        plt.close(fig)
+
+        (draws,) = selections
+        ((row_y, row_mu, _eta, row_weights, row_qresid),) = captured
+        np.testing.assert_array_equal(row_y, (draws >= 0.5).astype(float))
+        np.testing.assert_array_equal(row_weights, np.ones(kept))
+        # The observed residuals read the kept rows at the observed seed, the first call
+        # on exactly those rows.
+        observed_seed = next(seed for size, seed in seeds if size == kept)
+        fresh = residuals(
+            ModelMetrics(model, y=row_y, sample_weight=row_weights, _mu=row_mu),
+            "quantile",
+            seed=observed_seed,
+        )
+        np.testing.assert_array_equal(row_qresid, fresh)
+        lower = np.where(row_y == 0.0, 0.0, 1.0 - row_mu)
+        upper = np.where(row_y == 0.0, 1.0 - row_mu, 1.0)
+        shared = scipy_stats.norm.ppf(lower + (upper - lower) * draws)
+        coincide = np.isclose(row_qresid, shared, rtol=1e3 * np.finfo(float).eps, atol=0.0)
+        assert np.count_nonzero(coincide) == 0, np.count_nonzero(coincide)
 
     @pytest.mark.parametrize(
         "family",
@@ -724,11 +792,29 @@ class TestWeightContractDiagnostics:
             plt.close(repeated_figure)
 
 
+def _local_fit_bound(y: np.ndarray) -> float:
+    """Rounding bound on a weighted local-linear LOWESS value at one of two tied x values.
+
+    The fit there is a weighted mean of the tier's outcomes, formed from weighted sums
+    whose positive and negative contributions ``sum w |y| / sum w <= max |y|`` each carry
+    ``gamma_n`` (Higham 2002, section 3.1); the intercept and slope combine four of them,
+    and with two x values the local design interpolates, so its condition adds no factor
+    beyond them.
+    """
+    n = len(y)
+    u = np.finfo(np.float64).eps / 2
+    return 4.0 * n * u / (1.0 - n * u) * float(np.max(np.abs(y)))
+
+
 class TestTiedPredictions:
     """Rows sharing a prediction share every bin and neighbourhood, whatever their order."""
 
     def test_calibration_puts_one_prediction_in_one_bin(self):
-        """Two rows predicting one rate, 2,000 copies each, one without an event and one with."""
+        """Two rows predicting one rate, 2,000 copies each, one without an event and one with.
+
+        Mutation checks: titling the panel with the requested bin count (20) fails the
+        count; dropping the tie notice fails it too.
+        """
         rng = np.random.default_rng(5)
         X, y = _make_binomial_data(rng, n=200)
         model = SuperGLM(
@@ -744,7 +830,12 @@ class TestTiedPredictions:
         try:
             points = fig.get_axes()[1].collections[0].get_offsets()
             np.testing.assert_allclose(points, [[model.predict(frame)[0], 0.5]], rtol=1e-12)
-            assert fig.get_axes()[1].get_title() == "Calibration (1 score bin, ties kept together)"
+            # The title says how many bins hold the points and that ties share one, in
+            # whatever words.
+            title = fig.get_axes()[1].get_title()
+            counts = [int(count) for count in re.findall(r"(\d+)\s+(?:\w+\s+)?bins?\b", title)]
+            assert counts == [1], title
+            assert re.search(r"\bties?\b", title, re.IGNORECASE), title
         finally:
             plt.close(fig)
 
@@ -840,10 +931,20 @@ class TestTiedPredictions:
         then gives every row of the outlying tier weight zero, and its fit stays at that mean
         rather than at each row's own value, which the order of the rows would pick for the
         line: R's ``lowess`` draws the first case's tier at -10 or +10 by that order.
+        Mutation check: a fallback that keeps each row's own value
+        (``y_hat[i] = y_s[i]`` where every weight vanished) fails.
         """
         y = np.repeat(values, counts)
         x = np.repeat([0.0, 1.0], [sum(counts[:3]), sum(counts[3:])])
         outlying = x == 1.0
+        # The first pass fits each tier at its mean (two x values: the local line
+        # interpolates the tier means), and the reweighting's known weights are zero on
+        # every row of the outlying tier, so the fallback must keep that first fit.
+        first_fit = np.where(outlying, np.mean(y[outlying]), np.mean(y[~outlying]))
+        scaled = (y - first_fit) / (6.0 * np.median(np.abs(y - first_fit)))
+        robustness = np.where(np.abs(scaled) < 1.0, (1.0 - scaled**2) ** 2, 0.0)
+        assert np.all(robustness[outlying] == 0.0) and np.all(robustness[~outlying] > 0.0)
+        bound = _local_fit_bound(y)
         reversed_rows = np.r_[np.flatnonzero(~outlying), np.flatnonzero(outlying)[::-1]]
         for rows in (np.arange(len(y)), reversed_rows):
             fig, ax = plt.subplots()
@@ -851,7 +952,7 @@ class TestTiedPredictions:
                 diagnostics_module._trend_line(ax, x[rows], y[rows], len(y), None)
                 (line,) = ax.get_lines()
                 expected = np.where(np.sort(x) == 1.0, np.mean(y[outlying]), np.mean(y[~outlying]))
-                np.testing.assert_allclose(line.get_ydata(), expected, atol=1e-12)
+                np.testing.assert_allclose(line.get_ydata(), expected, rtol=0.0, atol=bound)
             finally:
                 plt.close(fig)
 
@@ -872,7 +973,9 @@ class TestTiedPredictions:
         A row tied with an end of a window is as near as that end, so the window holds all of
         them. The smoother is odd in the outcomes, whose multiset is symmetric, so an
         order-free trend is zero at both tiers (R's ``lowess`` draws zero on the first case);
-        reversing either tier leaves it there.
+        reversing either tier leaves it there, to the rounding of the cancelling positive and
+        negative contributions (``_local_fit_bound``).  Mutation check: a window that stops
+        at its ``k`` nearest rows, without the rows tied with its ends, fails.
         """
         a, b = len(first), len(second)
         x = np.repeat([0.0, gap], [a, b])
@@ -886,7 +989,9 @@ class TestTiedPredictions:
             try:
                 diagnostics_module._trend_line(ax, x[rows], y[rows], a + b, None)
                 (line,) = ax.get_lines()
-                np.testing.assert_allclose(line.get_ydata(), 0.0, atol=1e-12)
+                np.testing.assert_allclose(
+                    line.get_ydata(), 0.0, rtol=0.0, atol=_local_fit_bound(y)
+                )
             finally:
                 plt.close(fig)
 
