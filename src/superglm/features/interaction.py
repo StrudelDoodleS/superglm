@@ -2138,8 +2138,8 @@ def _tensor_raw_channels(
     row (the cardinal ``cr`` basis).  A custom spline whose ``raw_basis_eval``
     disagrees with its basis is not re-checked here.
     """
-    raw1 = np.asarray(info1.raw_basis_eval(np.clip(support1, info1.lo, info1.hi)), dtype=np.float64)
-    raw2 = np.asarray(info2.raw_basis_eval(np.clip(support2, info2.lo, info2.hi)), dtype=np.float64)
+    raw1 = np.asarray(info1.raw_basis_eval(support1), dtype=np.float64)
+    raw2 = np.asarray(info2.raw_basis_eval(support2), dtype=np.float64)
     offsets1, values1 = _raw_band(raw1)
     offsets2, values2 = _raw_band(raw2)
     if values1.shape[1] * values2.shape[1] >= info1.K_eff * info2.K_eff:
@@ -2290,6 +2290,7 @@ class TensorInteraction:
                 knot_strategy=spec.knot_strategy,
                 penalty=spec.penalty,
                 boundary=(spec._lo, spec._hi),
+                extrapolation=spec.extrapolation,
                 knot_alpha=spec.knot_alpha,
                 # Single-penalty by the guard above, so the parent's order
                 # carries over intact; dropping it would rebuild a cr m=1 or
@@ -2344,10 +2345,8 @@ class TensorInteraction:
             raise RuntimeError("tensor marginal geometry mass is unavailable")
 
         def compact_legacy(legacy: TensorMarginalInfo) -> TensorMarginalInfo:
-            support_clipped = np.clip(
-                np.asarray(effective_support, dtype=np.float64), legacy.lo, legacy.hi
-            )
-            compact_basis = np.asarray(legacy.raw_basis_eval(support_clipped), dtype=np.float64)
+            support_values = np.asarray(effective_support, dtype=np.float64)
+            compact_basis = np.asarray(legacy.raw_basis_eval(support_values), dtype=np.float64)
             compact_basis = compact_basis @ legacy.projection
             return replace(legacy, basis=compact_basis)
 
@@ -2377,9 +2376,9 @@ class TensorInteraction:
         return compact_legacy(method(rows))
 
     def _centered_marginal_dense(self, x: NDArray, info: TensorMarginalInfo) -> NDArray:
+        """The centred margin at ``x``; its raw basis owns the rule outside the training range."""
         x = np.asarray(x, dtype=np.float64).ravel()
-        x_clip = np.clip(x, info.lo, info.hi)
-        return _basis_kernels.dense_raw_basis(info.raw_basis_eval, x_clip) @ info.projection
+        return _basis_kernels.dense_raw_basis(info.raw_basis_eval, x) @ info.projection
 
     def _centered_marginal_basis(self, x: NDArray, info: TensorMarginalInfo) -> sp.csr_matrix:
         return sp.csr_matrix(self._centered_marginal_dense(x, info))

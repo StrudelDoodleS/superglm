@@ -275,22 +275,16 @@ def dense_basis(spec: Any, x: NDArray) -> NDArray:
 
 
 def dense_raw_basis(evaluator: Any, x: NDArray) -> NDArray:
-    """``evaluator(x)``, read from the kernels only where it is the spec's stock raw basis."""
-    from superglm.features.spline import _BUILT_IN_SPLINES, CardinalCRSpline, _SplineBase
+    """``evaluator(x)``, read as ``dense_basis`` where it is a built-in spline's own raw basis.
 
-    evaluations = _evaluations(np.size(x))
-    if evaluations is None:
-        return np.asarray(evaluator(x), dtype=np.float64)
-    bspline, cardinal = evaluations
+    A built-in spline's raw basis is its ``_basis_matrix``, dense, extrapolation policy included.
+    """
+    from superglm.features.spline import _BUILT_IN_SPLINES
+
     spec: Any = getattr(evaluator, "__self__", None)
     method = getattr(evaluator, "__func__", None)
-    rows = None
-    if type(spec) is CardinalCRSpline and method is CardinalCRSpline._raw_basis_matrix:
-        rows = cardinal(np.clip(x, spec._lo, spec._hi), spec._cr_knots, spec._cr_M)
-    elif type(spec) in _BUILT_IN_SPLINES and method is _SplineBase._raw_basis_matrix:
-        rows = bspline(np.clip(x, spec._lo, spec._hi), spec._knots, spec.degree)
-    if rows is not None and np.isfinite(rows).all():
-        return rows
+    if type(spec) in _BUILT_IN_SPLINES and method is type(spec)._raw_basis_matrix:
+        return dense_basis(spec, x)
     return np.asarray(evaluator(x), dtype=np.float64)
 
 

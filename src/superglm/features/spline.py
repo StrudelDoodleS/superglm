@@ -229,9 +229,12 @@ class _SplineBase:
         return _spline_runtime.basis_matrix(self, x)
 
     def _raw_basis_matrix(self, x: NDArray) -> NDArray:
-        """Evaluate the raw (pre-projection) basis at points clipped to training range.
+        """Evaluate the raw (pre-projection) basis under the extrapolation policy.
 
-        Returns a dense ``(n, n_basis)`` array.  All code outside spline.py
+        Returns a dense ``(n, n_basis)`` array: the rows of this class's own
+        ``_basis_matrix``, read past any subclass override of it, so an
+        interaction margin continues, holds or refuses outside the training
+        range as its spline does.  All code outside spline.py
         that needs to evaluate a spline's basis should call this method
         rather than constructing a ``BSpline.design_matrix`` directly, so
         that non-B-spline subclasses (e.g. :class:`CardinalCRSpline`) get
@@ -860,6 +863,9 @@ class NaturalSpline(_SplineBase):
             return super()._basis_matrix(x)
         return self._linear_tail_basis_matrix(x)
 
+    def _raw_basis_matrix(self, x: NDArray) -> NDArray:
+        return NaturalSpline._basis_matrix(self, x).toarray()
+
     def _constraint_rows(self) -> NDArray:
         if self.degree < 3:
             return super()._constraint_rows()
@@ -960,6 +966,9 @@ class CubicRegressionSpline(_IntegratedPenaltySpline):
         if self.extrapolation != "extend":
             return super()._basis_matrix(x)
         return self._linear_tail_basis_matrix(x)
+
+    def _raw_basis_matrix(self, x: NDArray) -> NDArray:
+        return CubicRegressionSpline._basis_matrix(self, x).toarray()
 
     def _build_monotone_constraints_raw(self) -> LinearConstraintSet:
         """Build fit-time shape constraints on raw B-spline coefficients.

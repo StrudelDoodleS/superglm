@@ -1134,7 +1134,7 @@ def test_a_quote_compiles_no_basis_kernel_and_a_full_block_reads_them(monkeypatc
         original = getattr(kernels, name)
 
         def spy(*args, _original=original, _route=route, **kwargs):
-            reached[_route].append(sys._getframe(1).f_code.co_name)
+            reached[_route].append(sys._getframe(2).f_code.co_name)
             return _original(*args, **kwargs)
 
         monkeypatch.setattr(kernels, name, spy)
@@ -1150,7 +1150,8 @@ def test_a_quote_compiles_no_basis_kernel_and_a_full_block_reads_them(monkeypatc
     for rows in (kernels.SCALAR_MAX_ROWS + 1, 1000, kernels.KERNEL_MIN_ROWS - 1):
         assert routes(rows) == (False, False)
     assert routes(kernels.KERNEL_MIN_ROWS) == (False, True)
-    assert set(reached["kernel"]) == {"dense_basis", "dense_raw_basis"}
+    # The main effect's transform and the tensor margins' raw basis both reach them.
+    assert set(reached["kernel"]) == {"transform", "dense_raw_basis"}
     whole = model.predict_link(block).to_numpy()
     tolerance = 64 * U * float(np.abs(whole).max())
     for rows in (1, kernels.SCALAR_MAX_ROWS, 1000):

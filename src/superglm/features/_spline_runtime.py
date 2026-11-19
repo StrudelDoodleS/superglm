@@ -52,10 +52,8 @@ def basis_matrix(spec: Any, x: NDArray):
 
 
 def raw_basis_matrix(spec: Any, x: NDArray) -> NDArray:
-    """Evaluate the raw (pre-projection) basis at points clipped to training range."""
-    x = np.asarray(x, dtype=np.float64).ravel()
-    x_clip = np.clip(x, spec._lo, spec._hi)
-    return BSpl.design_matrix(x_clip, spec._knots, spec.degree, extrapolate=False).toarray()
+    """Evaluate the raw (pre-projection) B-spline basis under the extrapolation policy, dense."""
+    return basis_matrix(spec, x).toarray()
 
 
 def basis_value_and_slope_at(spec: Any, x0: float) -> tuple[NDArray, NDArray]:

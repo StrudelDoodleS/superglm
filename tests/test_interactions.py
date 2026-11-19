@@ -1,5 +1,6 @@
 """Tests for all interaction features."""
 
+import itertools
 import pickle
 import warnings
 
@@ -1887,6 +1888,139 @@ class TestDirectInteractionPrediction:
         np.testing.assert_allclose(model.predict(X[columns]), baseline, rtol=1e-12, atol=1e-12)
 
 
+# ── Interaction margins outside the training range ─────────────
+
+
+def _rating_cells():
+    """Equal-exposure Poisson frequencies on an age x bonus x region grid, ages 25 to 75."""
+    age, bonus, region = (
+        grid.ravel()
+        for grid in np.meshgrid(
+            np.linspace(25, 75, 21), np.linspace(50, 100, 11), ["A", "B"], indexing="ij"
+        )
+    )
+    a, b = (age - 50) / 25, (bonus - 75) / 25
+    eta = -2.2 + 0.35 * a + 0.14 * b + 0.51 * a * b + (region == "B") * (0.08 + 0.37 * a)
+    return pd.DataFrame({"age": age, "bonus": bonus, "region": region}), np.exp(eta)
+
+
+def _rating_model(kind, n_knots, extrapolation, *, boundary=None, discrete=False):
+    from superglm import cat, interaction, s, ti
+
+    return SuperGLM(
+        family="poisson",
+        terms=[
+            s("age", kind=kind, n_knots=3, extrapolation=extrapolation, boundary=boundary),
+            s("bonus", kind=kind, n_knots=3, extrapolation=extrapolation),
+            cat("region", base="A"),
+            ti("age", "bonus", n_knots=n_knots),
+            interaction(SplineCategorical("age", "region")),
+        ],
+        selection_penalty=0.0,
+        spline_penalty=0.03,
+        discrete=discrete,
+        n_jobs=1,
+    )
+
+
+def _interaction_contrasts(model, age):
+    """The log-rate contrasts the tensor and the region-B curve alone move, at ``age``.
+
+    Bonus 95 against 55 at region B leaves the bonus main effect's constant and the
+    tensor; region B against A at bonus 95 leaves the region constant and the B curve.
+    """
+
+    def log_rate(bonus, region):
+        frame = pd.DataFrame({"age": age, "bonus": bonus, "region": region})
+        return np.log(np.asarray(model.predict(frame), dtype=np.float64))
+
+    return log_rate(95.0, "B") - log_rate(55.0, "B"), log_rate(95.0, "B") - log_rate(95.0, "A")
+
+
+def _continuation(model, span, beyond, tail_from=None):
+    """Both contrasts at ``beyond``, and their continuation from four ages on one knot span.
+
+    On one knot span each contrast is a cubic in age plus a constant, so four
+    predictions there give it, continued as the cubic itself (a P-spline's end
+    polynomial) or, with ``tail_from`` the boundary, as its tangent there (the
+    natural linear tail of ``cr``).
+    """
+    cubics = [
+        np.polynomial.Polynomial.fit(span, curve, 3)
+        for curve in _interaction_contrasts(model, span)
+    ]
+    expected = [
+        cubic(beyond)
+        if tail_from is None
+        else cubic(tail_from) + (beyond - tail_from) * cubic.deriv()(tail_from)
+        for cubic in cubics
+    ]
+    return np.array(_interaction_contrasts(model, beyond)), np.array(expected)
+
+
+class TestInteractionMarginExtrapolation:
+    """An interaction margin continues or refuses past the training range as its spline does."""
+
+    CASES = [("ps", None), ("ps", (4, 5)), ("cr", None)]
+    IDS = ["ps", "ps_knot_override", "cr_cardinal"]
+
+    @pytest.mark.parametrize(("kind", "n_knots"), CASES, ids=IDS)
+    def test_extend_continues_both_interactions(self, kind, n_knots):
+        """Under ``extrapolation="extend"`` both interaction curves continue past the range.
+
+        Every margin here has its end knots at or inside 35 and 65, so the spans
+        read lie on one knot span. A margin held at the boundary moves neither
+        contrast past it, missing the continuation by 0.07 or more. 1e-10 bounds
+        the predictions' rounding, of order 1e-15 on these contrasts of order 1,
+        as the four-point extrapolation amplifies it.
+        """
+        X, y = _rating_cells()
+        model = _rating_model(kind, n_knots, "extend").fit(X, y)
+        ends = ((75.0, [66.0, 69.0, 72.0, 75.0], 80.0), (25.0, [25.0, 28.0, 31.0, 34.0], 20.0))
+        for edge, span, beyond in ends:
+            tail_from = edge if kind == "cr" else None
+            actual, expected = _continuation(model, np.array(span), np.array([beyond]), tail_from)
+            np.testing.assert_allclose(actual, expected, rtol=0, atol=1e-10)
+
+    @pytest.mark.parametrize(("kind", "n_knots"), CASES, ids=IDS)
+    def test_error_refuses_in_both_interactions(self, kind, n_knots):
+        """Under ``extrapolation="error"`` both interactions refuse a row past the range.
+
+        Their own ``transform`` and ``score`` refuse as the spline does, and read
+        a row on the boundary.
+        """
+        X, y = _rating_cells()
+        model = _rating_model(kind, n_knots, "error").fit(X, y)
+        terms = (("age:bonus", np.array([95.0])), ("age:region", np.array(["B"])))
+        for (name, other), age in itertools.product(terms, (80.0, 20.0)):
+            spec = model._interaction_specs[name]
+            width = spec.transform(np.array([75.0]), other).shape[1]
+            with pytest.raises(ValueError, match="outside training range"):
+                spec.transform(np.array([age]), other)
+            with pytest.raises(ValueError, match="outside training range"):
+                spec.score(np.array([age]), other, np.zeros(width))
+
+    def test_a_boundary_inside_the_data_continues_the_fitted_rows_past_it(self):
+        """Rows past a stated ``boundary`` are fitted on the continued margins, binned or not.
+
+        With ``boundary=(30, 65)`` and ``extend`` the rows at ages 70 and 75 are
+        rated on the end cubic of the span from the last knot, 56.25, to 65. The
+        binned fit, whose bins hold each distinct value, is the exact one to the
+        solve's tolerance, so its tensor block reads the same continued rows.
+        """
+        X, y = _rating_cells()
+        fits = [
+            _rating_model("ps", None, "extend", boundary=(30.0, 65.0), discrete=discrete).fit(X, y)
+            for discrete in (False, True)
+        ]
+        for model in fits:
+            actual, expected = _continuation(
+                model, np.array([57.0, 60.0, 62.5, 65.0]), np.array([70.0, 75.0])
+            )
+            np.testing.assert_allclose(actual, expected, rtol=0, atol=1e-10)
+        np.testing.assert_allclose(fits[1].predict(X), fits[0].predict(X), rtol=1e-6, atol=0)
+
+
 # ── Tensor marginal parent geometry tests ──────────────────────
 
 
@@ -2236,6 +2370,20 @@ class TestDiscreteTensorRawBand:
         # Z-projected, so the identity holds at round-off rather than bitwise.
         reproduced = self._expand(band.offsets1, band.values1, k_raw) @ ti._marginal1.projection
         assert np.abs(reproduced - result.B1_unique).max() <= 1e-14
+
+    def test_band_continues_the_bins_past_a_boundary_inside_the_data(self):
+        # Under extrapolation="extend" the bins past a stated boundary are fitted
+        # on the continued basis: the last four, past 90, hold four rows, not one
+        # held row, and the band the raw stage reads reproduces them.
+        rng = np.random.default_rng(34)
+        x1 = rng.uniform(0, 100, 3000)
+        x2 = rng.uniform(0, 50, 3000)
+        parent = Spline(kind="ps", k=10, boundary=(10.0, 90.0), extrapolation="extend")
+        ti, result = self._build(parent, x1, Spline(kind="ps", k=10), x2)
+        assert len(np.unique(result.B1_unique[-4:], axis=0)) == 4
+        band = result.raw_channels
+        reproduced = self._expand(band.offsets1, band.values1, 10) @ ti._marginal1.projection
+        assert np.abs(reproduced - result.B1_unique).max() <= 1e-15
 
 
 class TestPolynomialInteractionStoredFactor:
