@@ -539,7 +539,7 @@ BOUNDARY_TESTS: dict[str, str | tuple[str, ...]] = {
     "distributional/posterior.py::_theta_blocks": (
         "test_lss_posterior.py::test_prior_weights_are_chunked_in_step_with_their_rows"
     ),
-    "distributional/posterior.py::posterior_parameters": (
+    "distributional/posterior.py::_posterior_blocks": (
         "test_lss_posterior.py::test_chunking_never_changes_the_pushforward"
     ),
     "distributional/smoothing/derivatives.py::_absolute_contraction": (

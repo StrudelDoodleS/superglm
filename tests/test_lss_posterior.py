@@ -446,13 +446,21 @@ def test_named_quantities_follow_the_family(fit_case) -> None:
         resolve_quantity(_UnitLawOnlyFamily(fitted.family), ("expected_shortfall", 0.5))
 
 
+@pytest.mark.pins_behaviour
 def test_named_posterior_bounds_refuse_non_finite_functional_draws(fit_case) -> None:
+    """A control: a named quantity that is not finite at a draw refuses the bounds, as before.
+
+    Its stub of the fitted model
+    gains ``_predicted_parameters`` and ``inverse_on_domain``, which the reader now reads in place of ``predict_parameters``.
+    """
     fitted, X, _ = fit_case
     head = X.iloc[:5]
     family = _FiniteEstimateInfiniteDrawFamily(fitted.family, len(head))
     stub = SimpleNamespace(
         family=family,
         predict_parameters=fitted.predict_parameters,
+        _predicted_parameters=fitted._predicted_parameters,
+        inverse_on_domain=fitted.inverse_on_domain,
         layout=fitted.layout,
         compiled_predictors=fitted.compiled_predictors,
         fit_state=fitted.fit_state,

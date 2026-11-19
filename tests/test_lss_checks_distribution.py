@@ -222,8 +222,14 @@ def test_qq_accepts_same_evaluation_and_checks_manual_transforms(gaussian_case):
             qq_payload(fitted, changed, X=X, n_sim=2, max_points=10)
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("counts,cap", [([200, 800], 1000), ([200000, 800000], 17)])
 def test_atom_distribution_checks_use_aligned_occurrences(frequency_case, monkeypatch, counts, cap):
+    """A control: the atom checks read each frequency occurrence's own design row, as before.
+
+    Its stub of the fitted model
+    gains ``_predicted_parameters``, which the reader now reads in place of ``predict_parameters``.
+    """
     fitted, X, *_ = frequency_case
 
     class Atom:
@@ -244,6 +250,7 @@ def test_atom_distribution_checks_use_aligned_occurrences(frequency_case, monkey
         layout=fitted.layout,
         predict_eta=fitted.predict_eta,
         predict_parameters=fitted.predict_parameters,
+        _predicted_parameters=fitted._predicted_parameters,
         prediction_coefficients=fitted.prediction_coefficients,
         _predict_eta_resolved=fitted._predict_eta_resolved,
         parameters_from_eta=fitted.parameters_from_eta,

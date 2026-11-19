@@ -175,6 +175,8 @@ def _spread_stub(semantics="frequency"):
             predictor_templates=(SimpleNamespace(name="mean"), SimpleNamespace(name="tail")),
         ),
         predict_parameters=predict,
+        predict_eta=predict,
+        parameters_from_eta=lambda eta: eta,
     )
 
 
@@ -337,8 +339,14 @@ def test_review_density_weights_follow_swept_prior_law(gaussian_case):
             density_fan(fitted, X, {}, "x", n_points=5, weights=invalid)
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("edge", [1.0, 1e20, np.nan, np.inf])
 def test_review_density_refuses_unresolvable_grid(gaussian_case, edge):
+    """A control: a density fan whose quantile endpoints give no grid is refused, as before.
+
+    Its stub of the fitted model
+    gains ``predict_eta`` and ``parameters_from_eta``, which the reader now reads in place of ``predict_parameters``.
+    """
     fitted, X, _ = gaussian_case
 
     class DegenerateCDF:
@@ -353,6 +361,8 @@ def test_review_density_refuses_unresolvable_grid(gaussian_case, edge):
         fit_state=fitted.fit_state,
         compiled_predictors=fitted.compiled_predictors,
         predict_parameters=fitted.predict_parameters,
+        predict_eta=fitted.predict_eta,
+        parameters_from_eta=fitted.parameters_from_eta,
     )
     with pytest.raises(ValueError, match="response grid"):
         density_fan(stub, X, {}, "x", n_points=3)
@@ -372,7 +382,13 @@ def test_review_density_refuses_atoms_and_nonfinite_density(gaussian_case):
         density_fan(stub, X, {}, "x", n_points=3, n_y=20)
 
 
+@pytest.mark.pins_behaviour
 def test_review_density_grid_loses_distinct_float_points(gaussian_case):
+    """A control: a density grid too narrow for distinct float points is refused, as before.
+
+    Its stub of the fitted model
+    gains ``predict_eta`` and ``parameters_from_eta``, which the reader now reads in place of ``predict_parameters``.
+    """
     fitted, X, _ = gaussian_case
 
     class NarrowCDF:
@@ -387,12 +403,20 @@ def test_review_density_grid_loses_distinct_float_points(gaussian_case):
         fit_state=fitted.fit_state,
         compiled_predictors=fitted.compiled_predictors,
         predict_parameters=fitted.predict_parameters,
+        predict_eta=fitted.predict_eta,
+        parameters_from_eta=fitted.parameters_from_eta,
     )
     with pytest.raises(ValueError, match="response grid"):
         density_fan(stub, X, {}, "x", n_points=3, n_y=20)
 
 
+@pytest.mark.pins_behaviour
 def test_review_density_unit_weights_and_unsupported_prior_law(gaussian_case):
+    """A control: unit weights change no density, and a family with no prior-weighted law refuses.
+
+    Its stub of the fitted model
+    gains ``predict_eta`` and ``parameters_from_eta``, which the reader now reads in place of ``predict_parameters``.
+    """
     fitted, X, _ = gaussian_case
     plain = density_fan(fitted, X, {}, "x", n_points=4, n_y=30)
     unit = density_fan(fitted, X, {}, "x", n_points=4, n_y=30, weights=np.ones(4))
@@ -403,6 +427,8 @@ def test_review_density_unit_weights_and_unsupported_prior_law(gaussian_case):
         fit_state=fitted.fit_state,
         compiled_predictors=fitted.compiled_predictors,
         predict_parameters=fitted.predict_parameters,
+        predict_eta=fitted.predict_eta,
+        parameters_from_eta=fitted.parameters_from_eta,
     )
     with pytest.raises(NotImplementedError, match="prior-weighted"):
         density_fan(stub, X, {}, "x", n_points=4, weights=np.full(4, 2.0))
