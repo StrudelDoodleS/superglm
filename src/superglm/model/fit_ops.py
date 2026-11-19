@@ -1668,10 +1668,15 @@ def fit_path(
         lambda_ratio=lambda_ratio,
         lambda_seq=lambda_seq,
     )
+    from superglm.diagnostics.separation import format_path_runtime_message
+
     candidate = capture_fit_state(
         workspace,
         model,
         revision=model._fit_revision + 1,
+        separation_statement=format_path_runtime_message(
+            path_result.lambda_seq, path_result.separation_path
+        ),
     )
     _install_fit_state(model, candidate)
     return path_result
@@ -1734,15 +1739,10 @@ def _fit_path_in_workspace(
         offset=offset,
         lambda_seq=lambda_seq,
     )
-    # Set model state to the last (least-regularized) fit.  It publishes the
-    # path, so it carries the path's one separation statement, for every point
-    # the path returns.
-    from superglm.diagnostics.separation import format_path_runtime_message
+    result = path_data["result"]
 
-    model._result = replace(
-        path_data["result"],
-        separation_message=format_path_runtime_message(lambda_seq, path_data["separation_path"]),
-    )
+    # Set model state to the last (least-regularized) fit
+    model._result = result
 
     _publish_fit_statistics(
         model,

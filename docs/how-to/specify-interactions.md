@@ -427,12 +427,9 @@ model instead: a fit whose returned linear predictor is pinned at the link's
 overflow guard with an extreme working-weight range reports the same
 `SeparationWarning` once (or `SeparationError` under `separation="error"`).
 The trial solves of a smoothing-parameter, θ or power search are not
-reported; only the fit you get back is. Separation is the coefficients running
-off, so the backstop reads the model's own linear predictor, without the
-offset, against the responses: a row an offset alone takes to the guard is not
-reported, and nothing is when the rows whose response is off the boundary (a
-positive claim count, say) determine every coefficient, since then no
-coefficient can run off.
+reported; only the fit you get back is. The backstop reads the guard, offset
+included, so a row that its offset alone holds there (an exposure far below the
+rest, say) is reported too, although no coefficient runs off.
 This backstop fires only when the walk reaches the guard or exhausts a
 real iteration budget: a deviance-converged stop at moderate drift, and
 binomial-logit numeric indicators generally (the logit eta clip keeps the

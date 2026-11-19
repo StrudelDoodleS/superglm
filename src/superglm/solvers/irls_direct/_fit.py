@@ -250,6 +250,9 @@ def fit_irls_direct(
     rerun on another solver.  A Fisher-data reuse cache is cleared when the
     fit fails or ends unconverged.
     """
+    from superglm.diagnostics.separation import validate_solver_separation_mode
+
+    validate_solver_separation_mode(separation)
     result = None
     try:
         if max_iter < 1:
@@ -1673,12 +1676,12 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         # Both require the extreme working-weight range that a drifting cell
         # produces.  The build-time scan names cell separation before fitting
         # starts; this catches what the design scan cannot see (non-categorical
-        # indicator structure; ``separation.runtime_finding`` reads both on the
-        # model's own linear part).  The finding is recorded on the returned
-        # state; ``separation`` "warn" and "error" also warn or refuse here, for
-        # a direct caller, and "record" leaves it to the fit that publishes the
-        # state (``separation.disclose_runtime_separation``): a REML candidate, a
-        # theta or power evaluation or a line-search trial describes only itself.
+        # indicator structure; ``separation.runtime_finding``).  The finding is
+        # recorded on the returned state; ``separation`` "warn" and "error" also
+        # warn or refuse here, for a direct caller, and "record" leaves it to the
+        # fit that publishes the state (``separation.disclose_runtime_separation``):
+        # a REML candidate, a theta or power evaluation or a line-search trial
+        # describes only itself.
         self.separation_message = None
         if self.separation != "ignore" and np.isfinite(dev):
             from superglm.diagnostics.separation import (
@@ -1715,11 +1718,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                 ),
                 eta=eta,
                 eta_unclipped=eta_unclipped,
-                offset=self.offset,
-                y=self.y,
                 weights=weights,
-                family=family,
-                link=link,
             )
             if self.separation_message is not None and self.separation == "error":
                 raise SeparationError(self.separation_message)

@@ -185,10 +185,6 @@ class DesignMatrix:
         self._centered_pattern_plan = None
         self._centered_solver_supports = None
         self._structured_layout_cache: dict[object, Any] = {}
-        # Whether a set of rows (a digest of its mask) identifies every column:
-        # the runtime separation backstop's test, fixed by the columns
-        # (``separation._interior_rows_identify``).  Never pickled.
-        self._separation_identified: dict[bytes, bool] = {}
 
     def __getstate__(self) -> dict[str, Any]:
         """Serialize durable matrix state without the rebuildable execution plan."""
@@ -202,7 +198,6 @@ class DesignMatrix:
         state["_mixed_bin_space_centering_plan"] = None
         state["_mixed_bin_space_centering_plan_attempted"] = False
         state["_structured_layout_cache"] = {}
-        state["_separation_identified"] = {}
         state["_centered_pattern_plan"] = None
         return state
 
@@ -235,7 +230,6 @@ class DesignMatrix:
         # (one-engine stage 4) carries an empty one under the old name
         state.pop("_scalar_structured_layout_cache", None)
         state["_structured_layout_cache"] = {}
-        state["_separation_identified"] = {}
         state.setdefault("_tabmat_centering_candidate", None)
         state["_tabmat_vector_candidate"] = _is_retained_tabmat_vector_candidate(
             group_matrices,

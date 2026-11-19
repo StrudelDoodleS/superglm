@@ -424,7 +424,8 @@ def apply_separation_policy(
         return
     message = formatter(list(findings))
     if policy == "error":
-        raise SeparationError(message, levels=True)
+        levels = any(finding.kind != "intercept" for finding in findings)
+        raise SeparationError(message, levels=levels)
     warnings.warn(message, SeparationWarning, stacklevel=stacklevel)
 
 

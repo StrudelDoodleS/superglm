@@ -1843,14 +1843,16 @@ def test_a_left_censored_mean_form_scale_level_below_an_upper_bound_is_separated
 
 def test_every_row_censored_on_one_side_separates_the_intercept():
     # An intercept-only location has no categorical level to scan; its
-    # intercept is the level holding every row.
+    # intercept is the level holding every row.  The refusal names no factor
+    # level, so it does not say grouping one is the remedy (``levels``).
     y = np.linspace(-1.0, 1.0, 40)
     family = GaussianLS()
     with pytest.warns(SeparationWarning, match=r"'location': every row is right-censored"):
         SuperLSS(family, family.location(), family.scale()).fit(_intercepts(40), y, censored=True)
     strict = SuperLSS(family, family.location(), family.scale(), separation="error")
-    with pytest.raises(SeparationError, match="intercept"):
+    with pytest.raises(SeparationError, match="intercept") as refused:
         strict.fit(_intercepts(40), y, censored=np.ones(40, dtype=bool))
+    assert refused.value.levels is False
     with warnings.catch_warnings():
         warnings.simplefilter("error", SeparationWarning)
         SuperLSS(family, family.location(), family.scale()).fit(

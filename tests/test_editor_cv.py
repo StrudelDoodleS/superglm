@@ -2698,8 +2698,9 @@ def test_final_fit_gives_level_advice_only_for_a_separated_level(monkeypatch):
     A strict template of one numeric spline is refitted with every solve
     recording the runtime backstop's finding (forced at the check both solvers
     read), so the refit is refused.  Final fit says the fit ran a coefficient
-    off and that the log names the terms; db1d1ac19 told the user to group a
-    level the model does not have.  A fold's sentence is chosen the same way.
+    off and that the log names the terms, not to group a level the model does
+    not have.  A fold's sentence is chosen the same way.  Mutation check: with
+    level advice for every refusal, Final fit told the user to group a level.
     """
     import superglm.diagnostics.separation as separation_module
     import superglm.editor.cv as cv

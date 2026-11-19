@@ -353,7 +353,8 @@ class PIRLSResult:
     # The runtime separation backstop's statement about this returned state
     # (``separation.runtime_finding``), or None.  Recorded by every solve not run
     # under separation="ignore"; of a model's solves, only the published fit's is
-    # shown (``disclose_runtime_separation``).
+    # shown (``disclose_runtime_separation``).  A coefficient revision clears it,
+    # since no solve returned the revised state (``publish_revised_coefficients``).
     separation_message: str | None = None
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -1882,11 +1883,7 @@ def _fit_pirls_inner(
             ),
             eta=retained.eta,
             eta_unclipped=retained.eta_unclipped,
-            offset=offset,
-            y=y,
             weights=weights,
-            family=family,
-            link=link,
         )
         if separation_message is not None and separation == "error":
             raise SeparationError(separation_message)
@@ -2143,6 +2140,9 @@ def fit_pirls(
     ``"record"``, under which the finding only rides on the result, for the
     fit that publishes it.
     """
+    from superglm.diagnostics.separation import validate_solver_separation_mode
+
+    validate_solver_separation_mode(separation)
     if max_iter_outer < 1:
         raise ValueError(f"max_iter_outer must be at least 1, got {max_iter_outer}")
     if max_iter_inner < 1:
