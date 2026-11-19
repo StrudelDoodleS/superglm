@@ -706,6 +706,20 @@ def test_spread_draws_a_histogram_per_parameter_and_the_identically_priced_band(
     assert "ratio" in fig.data[-1].hovertemplate
 
 
+def test_spread_marks_the_percentiles_of_a_single_price(case) -> None:
+    """Rows of one price fill one bin, whose band has zero width: its percentiles are points."""
+    fitted, X, y, _ = case
+    spread = parameter_spread(
+        fitted, X.iloc[np.zeros(20, dtype=int)], threshold=float(np.quantile(y, 0.9)), n_bins=6
+    )
+    (row,) = spread.identically_priced.itertuples()
+    upper, lower = dp.plotly_spread(spread).data[-2:]
+    for trace, value in ((upper, row.p_hi), (lower, row.p_lo)):
+        assert trace.mode == "markers"
+        np.testing.assert_array_equal(trace.x, [row.mean])
+        np.testing.assert_array_equal(trace.y, [value])
+
+
 def test_portfolio_draws_the_total_and_the_segments(book) -> None:
     fig = dp.plotly_portfolio(book)
     assert_editor_template(fig)

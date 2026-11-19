@@ -1501,13 +1501,16 @@ def plotly_spread(payload: Any) -> go.Figure:
     row, col = divmod(len(names) + 1, cols)
     cell = dict(row=row + 1, col=col + 1)
     fig.add_trace(_band_trace(mean, low, high, name="within-bin spread", showlegend=False), **cell)
+    # One filled bin is a band of zero width: its percentiles are drawn as points.
+    mode = "lines" if len(table) > 1 else "markers"
     for bound, label in ((high, "upper percentile"), (low, "lower percentile")):
         fig.add_trace(
             go.Scatter(
                 x=mean,
                 y=bound,
-                mode="lines",
+                mode=mode,
                 line=_line(_OUTLINE),
+                marker=_point_marker() if mode == "markers" else None,
                 name=label,
                 showlegend=False,
                 customdata=np.column_stack([ratio, counts]),

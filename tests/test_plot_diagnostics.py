@@ -757,6 +757,18 @@ class TestTiedPredictions:
             np.testing.assert_allclose(line.get_ydata(), [np.median(t) for t in tiers])
             plt.close(fig)
 
+    def test_median_trend_marks_a_single_tier(self):
+        """One prediction for every row (an intercept-only model) is one bin: a point, not a line."""
+        y = np.random.default_rng(6).normal(size=100)
+        fig, ax = plt.subplots()
+        try:
+            diagnostics_module._binned_median_line(ax, np.full(100, 0.3), y)
+            (line,) = ax.get_lines()
+            assert line.get_marker() == "o"
+            np.testing.assert_array_equal(line.get_xydata(), [[0.3, np.median(y)]])
+        finally:
+            plt.close(fig)
+
     def test_lowess_neighbourhood_holds_every_tied_row(self):
         """At one shared x every row is at distance zero, so all of them enter the local fit."""
         y = np.random.default_rng(8).standard_t(3, size=60)
@@ -769,3 +781,34 @@ class TestTiedPredictions:
         for values in (y, y[rows]):
             smooth = diagnostics_module._lowess(np.zeros(60), values)
             np.testing.assert_allclose(smooth, fit, rtol=1e-13)
+
+    @pytest.mark.parametrize(
+        ("counts", "values"),
+        [
+            # Each reviewer's case: a calm tier, then a tier whose residuals all lie
+            # beyond six median absolute residuals of its first fit.
+            ([20, 18, 18, 22, 22], [0.0, -1.0, 1.0, -10.0, 10.0]),
+            ([36, 12, 12, 20, 20], [0.0, -0.25, 0.25, -2.5, 2.5]),
+        ],
+    )
+    def test_lowess_keeps_a_tiers_fit_when_its_robustness_weights_vanish(self, counts, values):
+        """Reversing the rows at one x leaves the plotted trend where it was.
+
+        Each tier is symmetric about its mean, where the first pass fits it. The reweighting
+        then gives every row of the outlying tier weight zero, and its fit stays at that mean
+        rather than at each row's own value, which the order of the rows would pick for the
+        line: R's ``lowess`` draws the first case's tier at -10 or +10 by that order.
+        """
+        y = np.repeat(values, counts)
+        x = np.repeat([0.0, 1.0], [sum(counts[:3]), sum(counts[3:])])
+        outlying = x == 1.0
+        reversed_rows = np.r_[np.flatnonzero(~outlying), np.flatnonzero(outlying)[::-1]]
+        for rows in (np.arange(len(y)), reversed_rows):
+            fig, ax = plt.subplots()
+            try:
+                diagnostics_module._trend_line(ax, x[rows], y[rows], len(y), None)
+                (line,) = ax.get_lines()
+                expected = np.where(np.sort(x) == 1.0, np.mean(y[outlying]), np.mean(y[~outlying]))
+                np.testing.assert_allclose(line.get_ydata(), expected, atol=1e-12)
+            finally:
+                plt.close(fig)

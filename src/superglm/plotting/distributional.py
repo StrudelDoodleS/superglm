@@ -913,7 +913,7 @@ def plot_spread(payload: Spread, *, fig: Figure | None = None) -> Figure:
                     rotation=90,
                 )
         ax.set_title(f"identically priced rows: spread of P(Y > {payload.threshold:.3g})")
-        ax.set_xlabel(f"predicted {payload.by} in {len(table)} equal-count bins")
+        ax.set_xlabel(f"predicted {payload.by} in {len(table)} score bins, ties kept together")
         ax.set_ylabel("exceedance probability")
         return _finish(fig, axes)
 

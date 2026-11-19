@@ -889,8 +889,9 @@ def test_tied_forecasts_above_the_cap_share_one_decile():
 
     Two rows share one Tweedie law, one observed at its median (inside the 50%
     interval) and one at its 99.5% quantile (outside), 100,000 times each.
-    The one mean decile holds the whole capped sample, so its realised coverage
-    is a binomial proportion near one half.
+    The one mean decile, the fifth, where the middle of the count lies, holds the
+    whole capped sample, so its realised coverage is a binomial proportion near
+    one half.
     """
     family = TweedieLSS()
     model = SuperLSS(family, family.mu(), family.phi(), family.p(), weight_semantics="frequency")
@@ -907,23 +908,23 @@ def test_tied_forecasts_above_the_cap_share_one_decile():
         quantile_grid=(),
     ).coverage
     deciles = table[table.group.str.startswith("mean:")]
-    assert deciles.group.tolist() == ["mean:decile 10"]
+    assert deciles.group.tolist() == ["mean:decile 5"]
     np.testing.assert_array_equal(deciles.n, table[table.group == "all"].n)
     assert np.all(np.abs(deciles.realised - 0.5) < 6 * np.sqrt(0.25 / deciles.n))
 
 
 def _tier_deciles(values: NDArray) -> NDArray:
-    """Each distinct value's rows, whole, in decile ``ceil(10 * F) - 1`` (integer F)."""
+    """Each distinct value's rows, whole, in decile ``ceil(10 * F) - 1`` at their middle."""
     _, tier, counts = np.unique(values, return_inverse=True, return_counts=True)
-    through = np.cumsum(counts)
-    return (-(-10 * through // len(values)) - 1)[tier]
+    twice_middle = 2 * np.cumsum(counts) - counts
+    return (-(-10 * twice_middle // (2 * len(values))) - 1)[tier]
 
 
 def test_deciles_keep_rows_sharing_a_law_together_whatever_their_order(gaussian_case):
     """Three covariate rows repeated, as a coarse tariff repeats them.
 
     Each parameter then has three tied tiers. Each tier sits whole in the decile
-    holding the top of its cumulative count, a decile's coverage and tail counts
+    holding the middle of its count, a decile's coverage and tail counts
     are those of its tiers' rows, and no row order changes either table.
     """
     fitted, X, _ = gaussian_case

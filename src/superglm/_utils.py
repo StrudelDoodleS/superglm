@@ -133,25 +133,42 @@ def occurrence_rows(counts, cap: int, generator: np.random.Generator) -> NDArray
 def score_bins(scores, mass, n_bins: int) -> NDArray[np.intp]:
     """Return each row's equal-mass bin of ``scores``, with every tied score in one bin.
 
-    A row's bin is ``ceil(n_bins * F) - 1``, where ``F`` is the share of ``mass``
-    on rows scoring at most its score. Distinct scores fill bins of equal mass
-    by their cumulative share; rows sharing a score share ``F``, so row order
-    never decides their bin. A tied tier holding more than one bin's mass leaves
-    bins empty, and the bins hold uneven mass, as in SAS PROC RANK's ``GROUPS=``
-    and Stata's ``estat gof, group()``. Every table and plot that cuts rows by
-    score bins through here.
+    Rows sharing a score form a tier, placed whole by the middle of its mass: in
+    bin ``ceil(n_bins * F) - 1``, clipped to ``[0, n_bins - 1]``, where
+    ``F = (mass below the tier + half the tier's mass) / total mass`` is the
+    sample mid-distribution function (Parzen, "Quantile probability and
+    statistical data modeling", Statistical Science 19, 2004). With unit mass
+    ``F = (mean rank - 1/2) / n``, so ties take their mean rank, as under the
+    default ``TIES=MEAN`` of SAS PROC RANK, whose ``GROUPS=`` "always assigns
+    observations with the same value to the same group". A tier holding more
+    than one bin's mass leaves bins empty and the bins uneven, as Stata's
+    ``estat gof, group()`` also does. Distinct unit-mass scores fill bins whose
+    sizes differ by at most one. Every table and plot that cuts rows by score
+    bins through here.
+
+    A tier whose mass ends on an edge has half its mass on the inner side, so
+    rounding in the sums moves only a tier whose middle lies on an edge to
+    within rounding, which fractional masses can reach. Integer masses with
+    ``n_bins * total < 2**52`` are summed and compared exactly, so a frequency
+    weight bins as its literal copies. A zero-mass tier sits at the mass below
+    it: in the lower bin at an edge, and in bin 0 at the bottom.
     """
     values = np.asarray(scores, dtype=np.float64)
     weights = np.asarray(mass, dtype=np.float64)
-    # Mass is the second sort key, so a tier's cumulative mass is one sum
-    # whatever order its rows arrive in.
+    # Mass is the second sort key, so a tier's sums are the same whatever
+    # order its rows arrive in.
     order = np.lexsort((weights, values))
     ordered = values[order]
-    cumulative = np.cumsum(weights[order])
-    through = cumulative[np.searchsorted(ordered, ordered, side="right") - 1]
-    edges = np.linspace(0.0, cumulative[-1] if len(cumulative) else 0.0, n_bins + 1)[1:]
-    codes = np.empty(len(values), dtype=np.intp)
-    codes[order] = np.minimum(np.searchsorted(edges, through, side="left"), n_bins - 1)
+    cumulative = np.concatenate(([0.0], np.cumsum(weights[order])))
+    total = cumulative[-1]
+    codes = np.zeros(len(values), dtype=np.intp)
+    if not total > 0.0:
+        return codes
+    below = cumulative[np.searchsorted(ordered, ordered, side="left")]
+    through = cumulative[np.searchsorted(ordered, ordered, side="right")]
+    # n_bins * F = n_bins * (below + through) / (2 * total), in one rounding.
+    position = np.ceil(n_bins * (below + through) / (2.0 * total))
+    codes[order] = np.clip(position - 1.0, 0, n_bins - 1).astype(np.intp)
     return codes
 
 

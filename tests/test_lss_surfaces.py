@@ -179,15 +179,19 @@ def _spread_stub(semantics="frequency"):
 
 
 def test_review_frequency_spread_hand_calculated_bins():
-    """A row's five copies are one price, so they share a bin."""
+    """A row's five copies are one price, so they share a bin.
+
+    The copies span 1 to 6 of 8, so their middle, 3.5 of 8, puts them in the first bin.
+    """
     X = pd.DataFrame({"mean": [0.0, 10.0, 20.0, 30.0], "tail": [0.1, 0.2, 0.8, 0.9]})
     counts = np.array([1, 5, 1, 1])
     result = parameter_spread(_spread_stub(), X, threshold=1, n_bins=2, sample_weight=counts)
     table = result.identically_priced
-    np.testing.assert_array_equal(table["n"], [1, 7])
+    np.testing.assert_array_equal(table["n"], [6, 2])
+    # Percentiles of the replicated tails [0.1, 0.2 x 5] and [0.8, 0.9], linear interpolation.
     np.testing.assert_allclose(
         table[["weight", "mean_lo", "mean_hi", "mean", "p_lo", "p_hi"]],
-        [[1, 0, 0, 0, 0.1, 0.1], [7, 10, 30, 100 / 7, 0.2, 0.87]],
+        [[6, 0, 10, 50 / 6, 0.125, 0.2], [2, 20, 30, 25, 0.805, 0.895]],
     )
     assert table["n"].dtype == np.int64
     for histogram, values in [
@@ -204,7 +208,7 @@ def test_review_frequency_spread_hand_calculated_bins():
 def test_rows_of_one_price_share_a_bin_whatever_their_order(semantics):
     """One price, two tail risks (two fuels at one area rate), and a second price.
 
-    Each price's rows sit whole in the bin holding the top of its count, and the
+    Each price's rows sit whole in the bin holding the middle of its count, and the
     bin's percentiles are those of the price's pooled tail probabilities, in any
     row order.
     """
@@ -215,7 +219,7 @@ def test_rows_of_one_price_share_a_bin_whatever_their_order(semantics):
         table = parameter_spread(
             _spread_stub(semantics), frame, threshold=1, n_bins=20
         ).identically_priced
-        np.testing.assert_array_equal(table["bin"], [15, 19])
+        np.testing.assert_array_equal(table["bin"], [7, 17])
         np.testing.assert_array_equal(table["n"], [100, 25])
         np.testing.assert_array_equal(table["mean"], [10.0, 20.0])
         np.testing.assert_allclose(

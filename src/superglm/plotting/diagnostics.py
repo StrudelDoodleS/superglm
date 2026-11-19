@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 def _lowess_core(x_s, y_s, k, n_steps):
     """Numba-accelerated LOWESS with tricube kernel and sliding window."""
     n = len(x_s)
-    y_hat = np.empty(n)
+    y_hat = y_s.copy()
     robustness_w = np.ones(n)
 
     for _iteration in range(1 + n_steps):
@@ -55,20 +55,19 @@ def _lowess_core(x_s, y_s, k, n_steps):
 
             right = min(left + k, n)
             h = max(x_s[i] - x_s[left], x_s[right - 1] - x_s[i]) + 1e-10
-            # The weights are a function of distance: a row tied with an end
-            # of the window is as near as that end and joins it.
-            lo, hi = left, right
-            while lo > 0 and x_s[lo - 1] == x_s[left]:
-                lo -= 1
-            while hi < n and x_s[hi] == x_s[right - 1]:
-                hi += 1
+            # A window inside one tier takes the whole tier, every row of which
+            # is at distance zero. The slide stops at the tier's first row, so
+            # only the right end can cut it.
+            if x_s[left] == x_s[right - 1]:
+                while right < n and x_s[right] == x_s[left]:
+                    right += 1
 
             sw = 0.0
             swx = 0.0
             swy = 0.0
             swxx = 0.0
             swxy = 0.0
-            for j in range(lo, hi):
+            for j in range(left, right):
                 u = abs(x_s[j] - x_s[i]) / h
                 if u < 1.0:
                     u3 = u * u * u
@@ -84,7 +83,9 @@ def _lowess_core(x_s, y_s, k, n_steps):
                 swxy += w * x_s[j] * y_s[j]
 
             if sw < 1e-12:
-                y_hat[i] = y_s[i]
+                # Every robustness weight in the window vanished, which only a
+                # reweighting pass can do: keep the previous pass's fit, which
+                # rows sharing an x share.
                 continue
 
             mx = swx / sw
@@ -352,16 +353,18 @@ def _trend_line(ax, x, y, n, rng):
         order = np.argsort(x[idx])
         ax.plot(x[idx][order], sm[order], color=_SPECIAL_COLOR, linewidth=_LINE_WIDTH)
     else:
-        # Quantile-bin medians (equal-count bins)
+        # Bin medians, in score bins with ties kept together
         _binned_median_line(ax, x, y)
 
 
 def _binned_median_line(ax, x, y, n_bins=_BIN_COUNT):
-    """Plot median trend using equal-count bins."""
+    """Plot the median trend in score bins of ``x``, ties kept together."""
     _, groups = bin_rows(score_bins(x, np.ones(len(x)), n_bins))
     mids = [np.median(x[group]) for group in groups]
     medians = [np.median(y[group]) for group in groups]
-    ax.plot(mids, medians, color=_SPECIAL_COLOR, linewidth=_LINE_WIDTH)
+    # One filled bin is one point, which a line alone does not draw.
+    marker = "o" if len(groups) == 1 else "None"
+    ax.plot(mids, medians, color=_SPECIAL_COLOR, linewidth=_LINE_WIDTH, marker=marker)
 
 
 def _scatter_or_hexbin(ax, x, y, n, max_points):
@@ -421,7 +424,7 @@ def _panel_calibration(ax, y, mu, w, n_bins=20):
     ax.plot(lims, lims, color=_REF_COLOR, linewidth=0.8, linestyle="--", label="y = x")
     ax.set_xlabel("Predicted (bin mean)")
     ax.set_ylabel("Observed (bin mean)")
-    ax.set_title(f"Calibration ({len(pred_means)} equal-weight bins)")
+    ax.set_title(f"Calibration ({len(pred_means)} score bins, ties kept together)")
     ax.legend(fontsize=7, loc="upper left")
 
 
@@ -447,10 +450,10 @@ def plot_diagnostics(
 
     1. **Q-Q with simulation envelope** — observed quantile residuals vs
        simulated reference, with 95% pointwise envelope.
-    2. **Calibration** — observed vs predicted values in equal-weight bins.
-       Rows with one predicted value share a bin, so tied predictions give
-       fewer, uneven bins. Integer replication weights are represented as
-       replicated rows; prior weights are used as mass.
+    2. **Calibration** — observed vs predicted values in score bins of equal
+       weight, ties kept together: rows with one predicted value share a bin, so
+       tied predictions give fewer, uneven bins. Integer replication weights
+       are represented as replicated rows; prior weights are used as mass.
     3. **Residuals vs Linear Predictor** — quantile residuals vs eta.
     4. **Residual distribution** — histogram with N(0,1) overlay.
 

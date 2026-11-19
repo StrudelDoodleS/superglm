@@ -569,8 +569,14 @@ def lift_chart(
         Exposure measure for rate models. When provided, bins are
         equal-exposure quantiles and averages are exposure-weighted.
     n_bins : int
-        Number of quantile bins. Rows with equal predictions share a bin, so
-        tied predictions give uneven bins; bins left empty are omitted.
+        Number of quantile bins. Rows with equal predictions share a bin,
+        placed by the middle of their exposure, so tied predictions give uneven
+        bins; bins left empty are omitted. When weight times exposure is an
+        integer, a frequency weight bins exactly as its literal copies. With
+        fractional exposure, a prediction whose exposure middle lies on a bin
+        edge to within rounding takes the side its float64 sums give, so a
+        weighted row and its literal copies, summed differently, can then sit
+        in neighbouring bins.
     ax : matplotlib Axes or None
         If provided, plot onto this axes (``figure`` in result will be None).
 
