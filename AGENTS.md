@@ -23,7 +23,18 @@ Before every push, run `uv run python scripts/pre_push.py`, which runs the
 format, lint, lock and type checks the way CI does, the changed test files
 under the two OpenBLAS kernels GitHub's x86-64 runners use, and the quick
 suite, and on a clean tree stamps the commit as passed; `--install` adds a
-git pre-push hook that refuses a push of any commit without that stamp. A change to
+git pre-push hook that refuses a push of any commit without that stamp. Of the
+quick suite it runs the test files the change reaches, by a local test map
+(`scripts/test_map.py`, whose docstring gives the rules; `uv run python
+scripts/test_map.py select` lists them and why), plus the contract tests. It runs
+the whole quick suite when no map is stored, when `pyproject.toml`, `uv.lock`, a
+`conftest.py`, the test runner or the selector changes, when the selection would
+take most of the suite's time anyway, or with `--full`; such a run on a clean tree
+records a new map, at little extra cost. The stamp and the hook say which ran. A
+commit without a stamp of its own carries the stamp of a commit with the same
+patch series over `origin/master`, so a rebase that changed no commit's diff
+needs no second run; one that resolved a conflict does. GitHub's CI still runs
+every test on every platform. A change to
 `solvers/constrained_qp.py` also runs `benchmarks/qp_random_search.py` before
 its first push, and its pull request reports the counts.
 
