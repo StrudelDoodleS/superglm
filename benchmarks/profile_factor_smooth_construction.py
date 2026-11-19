@@ -53,7 +53,6 @@ def main() -> None:
             {
                 "rows": args.rows,
                 "basis": args.basis,
-                "backend": spec._marginal_build_backend,
                 "elapsed_s": elapsed,
                 "peak_rss_mib": peak_mib,
                 "support_shape": list(basis_unique.shape),

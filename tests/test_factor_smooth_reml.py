@@ -133,25 +133,48 @@ def _polynomial_null_reference(X, y, test, lambdas, *, k, m):
     return design(test) @ beta, np.linalg.cond(hessian)
 
 
-def test_fixed_null_lambdas_penalize_each_polynomial_degree_in_any_row_order() -> None:
+def _smooth_case() -> tuple[pd.DataFrame, np.ndarray, pd.DataFrame]:
+    X, y = _gaussian_data()
+    test = pd.DataFrame(
+        {"x": np.tile(np.linspace(-0.95, 0.95, 7), 3), "group": np.repeat(["a", "b", "c"], 7)}
+    )
+    return X, y + 0.05 * np.cos(9.0 * X["x"].to_numpy()), test
+
+
+def _two_band_case() -> tuple[pd.DataFrame, np.ndarray, pd.DataFrame]:
+    """Three levels on two bands of x, with the knot spans between them empty of rows."""
+    support = np.r_[0:21, 60:71] / 70.0
+    code = np.repeat(np.arange(3), len(support))
+    x = np.tile(support, 3)
+    X = pd.DataFrame({"x": x, "group": np.array(["a", "b", "c"], dtype=object)[code]})
+    y = np.cos(3.0 * x) * (1 + code) + 0.8 * code + 0.1 * np.cos(50.0 * x)
+    return X, y, X
+
+
+@pytest.mark.parametrize(
+    ("case", "k", "m", "lambdas"),
+    [
+        (_smooth_case, 6, 3, (10.0, 1.0, 5.0e4, 1.0e3)),
+        (_two_band_case, 10, 2, (2.0, 1.0, 50.0)),
+    ],
+    ids=["m3", "two_bands"],
+)
+def test_fixed_null_lambdas_penalize_each_polynomial_degree_in_any_row_order(
+    case, k, m, lambdas
+) -> None:
     """Each ``null_j`` is the level's degree-j curve, orthonormal over the rows, in any row order.
 
     Unequal fixed null lambdas give one model: the reference's.  Before, ``null_j``
     was the j-th vector an eigensolver returned for the penalty's repeated zero
     eigenvalue, so its lambda shrank whatever mix of constant, line and quadratic
     that was, and the same rows in another order or on another platform priced
-    differently.
+    differently.  With two bands of rows the whitened penalty's eigenvectors also
+    mixed the null space into the wiggle columns, so the wiggle is built in the
+    complement of the null axes over the rows.
     """
-    X, y = _gaussian_data()
-    y = y + 0.05 * np.cos(9.0 * X["x"].to_numpy())
-    k, m, lambdas = 6, 3, (10.0, 1.0, 5.0e4, 1.0e3)
-    policies = {
-        name: LambdaPolicy.fixed(value)
-        for name, value in zip(("wiggle", "null_0", "null_1", "null_2"), lambdas, strict=True)
-    }
-    test = pd.DataFrame(
-        {"x": np.tile(np.linspace(-0.95, 0.95, 7), 3), "group": np.repeat(["a", "b", "c"], 7)}
-    )
+    X, y, test = case()
+    names = ("wiggle", *(f"null_{j}" for j in range(m)))
+    policies = {name: LambdaPolicy.fixed(value) for name, value in zip(names, lambdas, strict=True)}
     expected, condition = _polynomial_null_reference(X, y, test, lambdas, k=k, m=m)
     # The reference solve and the fit each round row sums of n terms and a
     # small solve with this conditioning (Higham 2002, sections 3.1 and 7.2).
@@ -164,6 +187,59 @@ def test_fixed_null_lambdas_penalize_each_polynomial_degree_in_any_row_order() -
             interactions=[FactorSmooth("x", group="group", k=k, m=m, lambda_policy=policies)],
             selection_penalty=0.0,
             tol=1e-12,
+        )
+        model.fit_reml(X.iloc[order], y[order])
+        np.testing.assert_allclose(model.predict(test), expected, rtol=0.0, atol=atol)
+
+
+def test_high_order_null_axes_leave_out_the_penalized_contrast() -> None:
+    """At ``m = k - 1`` the null space is every direction but the binomial contrast.
+
+    Equal null lambdas make the model independent of the null axes' basis, so it is
+    the reference's: unit-penalty least squares on the complement, over the rows, of
+    the one difference contrast, whose own penalty (above 1e35) leaves it no weight.
+    A null frame sampled from Legendre polynomials at the coefficient index loses its
+    high degrees as ``m`` nears ``k`` and leaks that contrast into ``null_j``.
+    """
+    import math
+
+    from scipy.interpolate import BSpline
+    from scipy.linalg import null_space, solve_triangular
+
+    rng = np.random.default_rng(316)
+    n, k = 960, 60
+    x = rng.uniform(-1.0, 1.0, n)
+    group = np.resize(np.array(["a", "b", "c"], dtype=object), n)
+    y = np.sin(2.0 * x) + 0.25 * (group == "a") + 0.25 * rng.standard_normal(n)
+    X = pd.DataFrame({"x": x, "group": group})
+    test = pd.DataFrame({"x": np.linspace(-0.99, 0.99, 99), "group": np.resize(group, 99)})
+    lo, hi = x.min(), x.max()
+    edge = 0.001 * (hi - lo)
+    knots = lo - edge + (hi - lo + 2.0 * edge) / (k - 3) * np.arange(-3, k + 1)
+    R = np.linalg.qr(BSpline.design_matrix(x, knots, 3).toarray() / np.sqrt(n), mode="r")
+    contrast = np.array([(-1.0) ** j * math.comb(k - 1, j) for j in range(k)])
+    whitened = solve_triangular(R, contrast / np.linalg.norm(contrast), trans="T")
+    null = solve_triangular(R, null_space(whitened[None, :]))
+
+    def design(rows: pd.DataFrame) -> np.ndarray:
+        curves = BSpline.design_matrix(rows["x"].to_numpy(), knots, 3).toarray() @ null
+        levels = rows["group"].to_numpy()
+        blocks = [curves * (levels == level)[:, None] for level in ("a", "b", "c")]
+        return np.column_stack([np.ones(len(rows)), *blocks])
+
+    A = design(X)
+    hessian = A.T @ A + np.diag(np.r_[0.0, np.ones(A.shape[1] - 1)])
+    expected = design(test) @ np.linalg.solve(hessian, A.T @ y)
+    u = np.finfo(np.float64).eps / 2
+    atol = 64.0 * (n * u / (1.0 - n * u)) * np.linalg.cond(hessian) * np.max(np.abs(expected))
+    policies = {f"null_{j}": LambdaPolicy.fixed(1.0) for j in range(k - 1)}
+    policies["wiggle"] = LambdaPolicy.fixed(10.0)
+    for order in (np.arange(n), rng.permutation(n)):
+        model = SuperGLM(
+            family="gaussian",
+            interactions=[FactorSmooth("x", group="group", k=k, m=k - 1, lambda_policy=policies)],
+            selection_penalty=0.0,
+            tol=1e-11,
         )
         model.fit_reml(X.iloc[order], y[order])
         np.testing.assert_allclose(model.predict(test), expected, rtol=0.0, atol=atol)

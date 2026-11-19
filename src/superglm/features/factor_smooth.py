@@ -54,6 +54,57 @@ def _combine_qr_r(
     )
 
 
+def _fs_coordinates(R: NDArray, rank: int) -> tuple[NDArray, NDArray]:
+    """fs's coordinates in the metric ``R'R``: unit-penalty wiggle columns, then ``null_j``.
+
+    Returns the map and each wiggle column's squared norm over the weighted rows.
+    ``null_j`` is degree ``j`` of the coefficient polynomials, the m-th difference
+    penalty's null space, orthonormal over the weighted rows with a positive leading
+    term: one curve for every frame of those degrees, row order, QR route and platform.
+    The wiggle spans their complement in the same metric and keeps the raw penalty
+    ``D'D`` without forming ``R^-T D'D R^-1``, whose eigenvectors mix the null space
+    into the wiggle when the rows leave a knot span all but empty.
+    """
+    k = R.shape[0]
+    null_dim = k - rank
+    # For m=2 this is Wood, Scheipl & Faraway's (2013, sec. 2.5) null-space
+    # reparameterization; for m >= 3 degree order departs on purpose from their
+    # centred-null-Gram eigenvectors, which are free within a repeated eigenvalue.
+    # Arnoldi on multiplication by the index scaled to [-1, 1], with one
+    # re-orthogonalization pass (Vandermonde with Arnoldi: Brubeck, Nakatsukasa &
+    # Trefethen, SIAM Rev. 63(2), 2021), keeps the high degrees that a sampled power or
+    # Legendre frame loses as m nears k.
+    grid = np.linspace(-1.0, 1.0, k)
+    null = np.empty((k, null_dim))
+    whitened_null = np.empty((k, null_dim))
+    for degree in range(null_dim):
+        direction = grid * null[:, degree - 1] if degree else np.ones(k)
+        whitened = R @ direction
+        for _ in range(2):
+            overlap = whitened_null[:, :degree].T @ whitened
+            whitened -= whitened_null[:, :degree] @ overlap
+            direction -= null[:, :degree] @ overlap
+        norm = np.linalg.norm(whitened)
+        null[:, degree] = direction / norm
+        whitened_null[:, degree] = whitened / norm
+
+    # The wiggle: the minimum-norm right inverse of D less its projection onto the null
+    # axes (Elden's A-weighted pseudoinverse, BIT 22, 1982), diagonalized over the rows
+    # by an SVD, i.e. the generalized SVD of (R, D).
+    # D' = QT, so Q T'^-1 is that right inverse: D @ wiggle = I.
+    q, t = np.linalg.qr(np.diff(np.eye(k), n=null_dim, axis=0).T)
+    wiggle = la.solve_triangular(t, q.T).T
+    whitened = R @ wiggle
+    for _ in range(2):
+        overlap = whitened_null.T @ whitened
+        whitened -= whitened_null @ overlap
+        wiggle -= null @ overlap
+    _, singular_values, right = la.svd(whitened, full_matrices=False)
+    # Ascending norm over the rows: the order of descending whitened-penalty eigenvalues.
+    natural_map = np.column_stack((wiggle @ right[::-1].T, null))
+    return natural_map, singular_values[::-1] ** 2
+
+
 def _natural_parameterization_from_r(
     R: NDArray,
     penalty: NDArray,
@@ -66,9 +117,10 @@ def _natural_parameterization_from_r(
     """Build a QR-whitened natural parameterization without materializing ``Q``.
 
     ``polynomial_null_axes`` sets the null coordinates by degree, for a penalty that
-    gives each its own smoothing parameter (``fs``).  Otherwise any basis of the null
-    space gives the same model (``sz`` penalizes it as one block), and the eigenbasis
-    is kept.
+    gives each its own smoothing parameter (``fs``), and takes ``penalty`` to be the
+    standard m-th difference penalty ``D'D`` that fs's evenly spaced knots give
+    (``_fs_coordinates``).  Otherwise any basis of the null space gives the same model
+    (``sz`` penalizes it as one block), and the eigenbasis is kept.
     """
     R_array = np.asarray(R, dtype=np.float64)
     S = np.asarray(penalty, dtype=np.float64)
@@ -85,34 +137,29 @@ def _natural_parameterization_from_r(
     mass = float(n_rows) if normalization_mass is None else float(normalization_mass)
     if not np.isfinite(mass) or mass <= 0.0:
         raise ValueError("factor-smooth normalization mass must be finite and positive")
-
-    R_inv = la.solve_triangular(R_array, np.eye(k), lower=False)
-    transformed_penalty = R_inv.T @ S @ R_inv
-    eigenvalues, eigenvectors = la.eigh(
-        0.5 * (transformed_penalty + transformed_penalty.T),
-        driver="evr",
-    )
-    order = np.argsort(eigenvalues)[::-1]
-    eigenvalues = eigenvalues[order]
-    eigenvectors = eigenvectors[:, order]
-    positive = eigenvalues[:rank]
-    if rank < 1 or rank > k or np.any(positive <= 0.0):
+    if rank < 1 or rank > k:
         raise ValueError("FactorSmooth marginal penalty has an invalid numerical rank")
 
     null_dim = k - rank
-    if null_dim and polynomial_null_axes:
-        # The penalty's null space is the coefficient sequences polynomial below degree
-        # null_dim in the index.  An eigensolver leaves the basis of that repeated zero
-        # eigenvalue free, so null_j is the degree-j member of the degree-ordered frame
-        # orthonormalized over the weighted rows (Gram-Schmidt in the metric R'R with a
-        # positive diagonal): one curve for every frame of those degrees, row order, QR
-        # route and platform.
-        frame = np.polynomial.legendre.legvander(np.linspace(-1.0, 1.0, k), null_dim - 1)
-        whitened, triangle = np.linalg.qr(R_array @ frame)
-        eigenvectors[:, rank:] = whitened * np.sign(np.diag(triangle))
-    natural_map = R_inv @ eigenvectors
-    natural_map[:, :rank] /= np.sqrt(positive)
-    penalized_scale = np.sqrt(mass * rank / np.sum(1.0 / positive))
+    if polynomial_null_axes and null_dim:
+        natural_map, wiggle_squared_norms = _fs_coordinates(R_array, rank)
+    else:
+        R_inv = la.solve_triangular(R_array, np.eye(k), lower=False)
+        transformed_penalty = R_inv.T @ S @ R_inv
+        eigenvalues, eigenvectors = la.eigh(
+            0.5 * (transformed_penalty + transformed_penalty.T),
+            driver="evr",
+        )
+        order = np.argsort(eigenvalues)[::-1]
+        eigenvalues = eigenvalues[order]
+        eigenvectors = eigenvectors[:, order]
+        positive = eigenvalues[:rank]
+        if np.any(positive <= 0.0):
+            raise ValueError("FactorSmooth marginal penalty has an invalid numerical rank")
+        natural_map = R_inv @ eigenvectors
+        natural_map[:, :rank] /= np.sqrt(positive)
+        wiggle_squared_norms = 1.0 / positive
+    penalized_scale = np.sqrt(mass * rank / np.sum(wiggle_squared_norms))
     natural_map[:, :rank] *= penalized_scale
     if null_dim:
         natural_map[:, rank:] *= np.sqrt(mass)
@@ -216,7 +263,12 @@ class FactorSmooth:
         ``"fs"`` penalizes every level's curve fully, its polynomial part through
         one ``null_j`` component per degree: ``null_0`` the level's constant,
         ``null_1`` its line, and so on, each orthogonal over the training rows to
-        the lower degrees.  ``"sz"`` fits sum-to-zero
+        the lower degrees.  The degree is that of the B-spline coefficients as a
+        polynomial in their index, which through ``null_3`` is the curve's degree
+        in x; from ``null_4`` (``m >= 5``) the curve stays piecewise cubic.  An fs
+        model saved by 0.43.0 or earlier keeps the null axes it was fitted on and
+        predicts as before, but its ``null_j`` smoothing parameters belong to those
+        axes and do not compare with a fresh fit's.  ``"sz"`` fits sum-to-zero
         deviations from a population curve and leaves each level's polynomial part
         (its line, with ``m=2``) unpenalized, as mgcv's ``sz`` does.
     kind : {"ps"}, default "ps"
@@ -625,14 +677,15 @@ class FactorSmooth:
             polynomial_null_axes=self.basis == "fs",
         )
         if self.basis == "sz":
-            # sz takes fs's natural parameterization: its sum-to-zero constraint is
-            # coefficientwise, so the per-level change of basis preserves it, the wiggle
-            # penalty becomes diagonal and the polynomial null coordinates separate.  sz
-            # penalizes the wiggle alone, unless the term selects its lines (#444): then one
-            # ``"null"`` component, the indicator of the null coordinates (Marra & Wood 2011
-            # null-space penalty; the sum of fs's ``null_j``), penalizes them all.  Those
-            # coordinates are orthonormal over the weighted rows, so ``beta_l' S* beta_l`` is
-            # the mean square of level ``l``'s line over the data.
+            # sz takes a natural parameterization like fs's, from the eigenbasis: its
+            # sum-to-zero constraint is coefficientwise, so the per-level change of basis
+            # preserves it, the wiggle penalty becomes diagonal and the polynomial null
+            # coordinates separate.  sz penalizes the wiggle alone, unless the term selects
+            # its lines (#444): then one ``"null"`` component, the indicator of the null
+            # coordinates (Marra & Wood 2011 null-space penalty; the sum of fs's
+            # ``null_j``), penalizes them all.  Those coordinates are orthonormal over the
+            # weighted rows, so ``beta_l' S* beta_l`` is the mean square of level ``l``'s
+            # line over the data.
             lines = [component for _, component in components[1:]]
             components = components[:1]
             if self._selects_lines:

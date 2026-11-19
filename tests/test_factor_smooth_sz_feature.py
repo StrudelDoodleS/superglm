@@ -94,8 +94,10 @@ def test_sz_takes_the_fs_natural_parameterization() -> None:
     the raw second-difference penalty is exactly the diagonal wiggle
     component, zero on the ``m`` polynomial coordinates, and the column space
     is the raw basis's.  sz keeps the wiggle component alone.  fs sets its
-    null coordinates by degree, as each has its own smoothing parameter; sz
-    penalizes them as one block, so it keeps the eigenbasis of the same span.
+    null coordinates by degree, as each has its own smoothing parameter, and
+    builds its wiggle columns by an SVD in their complement; sz penalizes the
+    null block as one, so it keeps the eigenbasis, whose wiggle columns are
+    fs's up to sign and rounding.
     """
     x = np.tile(np.linspace(-1.0, 1.0, 12), 3)
     group = np.repeat(["a", "b", "c"], 12)
@@ -105,11 +107,13 @@ def test_sz_takes_the_fs_natural_parameterization() -> None:
     fs_info = fs.build(x, group, {})
 
     sz_map, fs_map = info.factor_smooth_transform, fs_info.factor_smooth_transform
-    np.testing.assert_array_equal(sz_map[:, :4], fs_map[:, :4])
+    signs = np.sign(np.sum(sz_map[:, :4] * fs_map[:, :4], axis=0))
+    scale = np.max(np.abs(fs_map[:, :4]))
+    np.testing.assert_allclose(sz_map[:, :4] * signs, fs_map[:, :4], rtol=0.0, atol=1e-12 * scale)
     rotation = np.linalg.solve(sz_map[:, 4:].T @ sz_map[:, 4:], sz_map[:, 4:].T @ fs_map[:, 4:])
     np.testing.assert_allclose(sz_map[:, 4:] @ rotation, fs_map[:, 4:], rtol=0.0, atol=1e-12)
     wiggle = info.repeated_penalty_components[0][1]
-    np.testing.assert_array_equal(wiggle, fs_info.repeated_penalty_components[0][1])
+    np.testing.assert_allclose(wiggle, fs_info.repeated_penalty_components[0][1], rtol=1e-12)
     assert np.count_nonzero(np.diag(wiggle)) == 4
     np.testing.assert_array_equal(wiggle, np.diag(np.diag(wiggle)))
     raw_penalty = sz._spline._build_penalty()

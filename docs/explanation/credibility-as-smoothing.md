@@ -122,6 +122,12 @@ shrinks one degree of every level's polynomial part: `null_0` its constant,
 `null_1` its straight line, `null_2` (with `m=3`) its quadratic, each
 orthogonal over the training rows to the lower degrees. A `null_j` smoothing
 parameter therefore means the same curve whatever the row order or platform.
+The degree is that of the B-spline coefficients as a polynomial in their
+index: through `null_3` it is the curve's degree in x, and from `null_4`
+(`m >= 5`) the curve stays piecewise cubic. An fs model saved by 0.43.0 or
+earlier keeps the null axes it was fitted on and predicts as before, but its
+`null_j` smoothing parameters belong to those axes, not to the degrees, and do
+not compare with a fresh fit's.
 
 For level $j$, the scalar summary generalizes ordinary credibility to the
 whole coefficient block:
@@ -381,7 +387,8 @@ credibility and curve tables, and `credibility_demo.png`.
 - Missing numeric or grouping values are rejected.
 - The FS and SZ Gaussian, Poisson, construction, unseen-level, and discrete
   reference cases are pinned against mgcv in the test suite. The FS cases fit
-  the same penalties in mgcv through `paraPen`
+  the same penalties in mgcv 1.9-3 through `paraPen`
   (`tests/oracles/factor_smooth_mgcv_reference.R`), because mgcv's own
   `bs="fs"` penalizes whichever basis of the null space its eigensolver
-  returns, and a shuffle of the rows rotates that basis.
+  returns, and a shuffle of the rows can permute, flip or rotate that basis.
+  The SZ cases are pinned against mgcv 1.9-4's own `bs="sz"`.

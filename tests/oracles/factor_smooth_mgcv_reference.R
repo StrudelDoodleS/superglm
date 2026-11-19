@@ -4,7 +4,7 @@
 # (the smooth.construct.fs.smooth.spec help page), in whatever basis of the
 # penalty's zero eigenspace its eigensolver returns. Run as a black box on these
 # rows with xt=list(bs="ps"), its two null curves are a rotation of the constant
-# and the line that swaps and changes sign when the rows are shuffled. With the
+# and the line that a shuffle of the rows can swap or flip in sign. With the
 # default "tp" base, a shuffle rotates them freely. SuperGLM's fs puts null_j on
 # degree j of the penalty's polynomial null space, orthonormalized over the rows.
 # This script gives mgcv that model through paraPen: the per-level ps basis, its
