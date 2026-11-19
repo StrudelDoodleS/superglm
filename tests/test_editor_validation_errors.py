@@ -303,7 +303,7 @@ def test_run_cv_keeps_every_usable_fold_and_says_why_one_has_no_score():
     refused, scored = run.result.fold_scores.to_dict("records")
     assert np.isnan(refused["deviance"]) and refused["converged"]
     assert re.match(
-        r"1 of fold 1's 4 held-out rows have no quote .*positions 33\)", refused["score_refused"]
+        r"1 of fold 1's 4 held-out rows have no quote .*positions 33\)", refused["score refused"]
     )
     assert scored["deviance"] == pytest.approx(supplied.fold_scores["deviance"][1], rel=1e-12)
     assert run.result.pooled_scores["deviance"] == pytest.approx(scored["deviance"], rel=1e-12)
@@ -313,4 +313,4 @@ def test_run_cv_keeps_every_usable_fold_and_says_why_one_has_no_score():
         [result] = cv_report_payload(widget)["results"]
     finally:
         widget.close()
-    assert result["folds"][0]["score_refused"] == supplied.fold_scores["score_refused"][0]
+    assert result["folds"][0]["score_refused"] == supplied.fold_scores["score refused"][0]

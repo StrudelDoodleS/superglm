@@ -774,12 +774,17 @@ def _frequency_weight_log_likelihood(
         from superglm._tweedie import tweedie_logpdf
 
         w = np.asarray(weights, dtype=np.float64)
-        unit = np.ones_like(w)
-        # A zero-weight row adds an exact 0 whatever its mean, so one with none (NaN) is
-        # evaluated at a stand-in mean; the other rows' densities do not depend on it.
-        mu = np.where((w == 0.0) & np.isnan(mu), 1.0, mu)
-        logpdf = tweedie_logpdf(y, mu, phi, family.p, weights=unit)
-        return float(np.sum(w * logpdf))
+        # A zero-weight row adds an exact 0 whatever its mean (NaN where it has none) or
+        # response, so its density is not evaluated: each row's density is its own.
+        carried = w != 0.0
+        if not np.any(carried):
+            return 0.0
+        y_carried = np.asarray(y, dtype=np.float64)[carried]
+        mu_carried = np.asarray(mu, dtype=np.float64)[carried]
+        logpdf = tweedie_logpdf(
+            y_carried, mu_carried, phi, family.p, weights=np.ones(y_carried.size)
+        )
+        return float(np.sum(w[carried] * logpdf))
     return float(family.log_likelihood(y, mu, weights, phi))
 
 

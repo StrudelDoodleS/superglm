@@ -85,9 +85,14 @@ def _term_indices(groups: tuple[GroupSlice, ...], feature_name: str) -> NDArray[
     return pieces[0] if len(pieces) == 1 else np.concatenate(pieces)
 
 
-def _as_contribution(values: Any, *, n_observations: int, term_name: str) -> NDArray:
+def _as_contribution(
+    values: Any, *, n_observations: int, term_name: str, finite: bool = True
+) -> NDArray:
+    """One value per row, finite unless ``finite`` is false (a link with a declared domain)."""
     contribution = np.asarray(values, dtype=np.float64).ravel()
-    if contribution.shape != (n_observations,) or not np.all(np.isfinite(contribution)):
+    if contribution.shape != (n_observations,) or (
+        finite and not np.all(np.isfinite(contribution))
+    ):
         raise ValueError(f"prediction contribution for {term_name!r} is invalid")
     return contribution
 

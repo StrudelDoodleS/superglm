@@ -86,3 +86,18 @@ class UpperBoundedIdentity(IdentityLink):
 
     def inverse(self, eta):
         return np.where(eta <= 10.0, eta, np.nan)
+
+
+def negative_power_lss(fitted=True):
+    """A Gamma SuperLSS on ``TRAIN`` whose mean link is ``PowerLink(-1)``: the unseen cell has eta -0.5."""
+    import warnings
+
+    from superglm import GammaLS, SuperLSS, cat
+
+    family = GammaLS()
+    model = SuperLSS(family, family.mean(cat("a"), cat("b"), link=PowerLink(-1.0)), family.scale())
+    if not fitted:
+        return model
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return model.fit(TRAIN, TRAIN_Y)

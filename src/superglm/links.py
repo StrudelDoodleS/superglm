@@ -132,6 +132,22 @@ def interior_eta(link: object) -> float:
     return 0.0
 
 
+def eta_domain_text(link: object) -> str:
+    """Where ``link``'s declared domain lies, as a message states it: ``"above zero"`` for ``(0, inf)``."""
+    low, high = declared_eta_domain(link) or (-np.inf, np.inf)
+
+    def bound(value: float) -> str:
+        return "zero" if value == 0.0 else f"{value:g}"
+
+    if np.isfinite(low) and np.isfinite(high):
+        return f"between {bound(low)} and {bound(high)}"
+    if np.isfinite(low):
+        return f"above {bound(low)}"
+    if np.isfinite(high):
+        return f"below {bound(high)}"
+    return "anywhere"
+
+
 class LogLink:
     """Log link: eta = log(mu), mu = exp(eta)."""
 

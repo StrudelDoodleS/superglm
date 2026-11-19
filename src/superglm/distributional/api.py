@@ -1953,6 +1953,11 @@ class SuperLSS:
         prior weight, since a quantile of a row at a fifth of a year's exposure
         is the quantile of its own law; under frequency semantics there is no
         such slot and the call is refused.
+
+        A row with no value of a parameter, at the fit or at some draws (its
+        predictor leaves the link's declared domain, as ``eta <= 0`` under a
+        negative-power ``PowerLink``), has no posterior: its summaries read NaN,
+        with one warning, and its estimate does too where the fit gives it none.
         """
         self._refuse_frequency_row_law(sample_weight)
         bounds = posterior_bounds(
@@ -1981,6 +1986,10 @@ class SuperLSS:
         makes a book-level total affordable.  ``sample_weight`` enters as the
         row's prior weight, and under frequency semantics the call is refused
         rather than simulating a law the weight does not describe.
+
+        A row with no value of a parameter, at the fit or at some draws, reads NaN
+        in every draw, with one warning; a ``reduce``, which cannot leave it out,
+        refuses it with ``NoPredictedMeanError``.
         """
         require_scalar_response(self.family, "posterior_predictive")
         self._refuse_frequency_row_law(sample_weight)
@@ -2100,6 +2109,9 @@ class SuperLSS:
         enters twice under prior semantics -- every row is simulated on its own
         prior-weighted law and what the book pays is ``sum w y`` -- and is
         refused under frequency semantics, which has no row-law slot.
+
+        A row with no value of a parameter, at the fit or at some draws, is
+        refused with ``NoPredictedMeanError`` naming it: a total cannot leave it out.
         """
         require_scalar_response(self.family, "portfolio")
         self._refuse_frequency_row_law(sample_weight)

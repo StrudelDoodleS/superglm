@@ -48,6 +48,7 @@ from tests._no_mean_fixture import (  # noqa: E402
     UpperBoundedIdentity,
     cv_frame,
     editor_fit,
+    negative_power_lss,
     three_cell_fit,
 )
 
@@ -363,9 +364,9 @@ def test_a_fold_whose_score_is_refused_keeps_its_fit_estimator_and_predictions()
     # Named by their position in the whole frame, as the out-of-fold warning names them.
     assert re.match(
         r"1 of fold 0's 4 held-out rows have no predicted mean .*positions 33 in the frame\)",
-        refused["score_refused"],
+        refused["score refused"],
     )
-    assert not isinstance(scored.get("score_refused"), str)
+    assert not isinstance(scored.get("score refused"), str)
     assert np.isfinite(scored["deviance"])
     oof = result.oof_predictions[len(TRAIN_Y) : len(TRAIN_Y) + 4]
     assert np.isnan(oof[3])
@@ -438,13 +439,15 @@ def test_a_nan_from_a_link_with_no_declared_domain_is_not_a_missing_mean():
 def test_superlss_gives_a_row_outside_its_links_domain_no_value_also_once_saved(power, level):
     """A negative power has no mean at ``eta <= 0``, where its inverse's floor quoted 1e15 or 1e30.
 
-    SuperLSS builds and fits with the link. ``predict`` gives the unseen cell
-    NaN with one warning naming it, on the fitted model and on a pickled and a
-    copied one, and the other cells their means; a score of the cell is refused
-    by name. ``level`` is the two seen cells' mean beside the first's 1, which puts
-    the unseen cell's predictor ``2 level**p - 1`` clear of zero.
-    Mutation: the cell was priced at the floor (``1e15`` under ``PowerLink(-1)``)
-    with no warning by every copy, and scored there.
+    SuperLSS builds and fits with the link. ``predict``, ``predict_quantile`` and
+    ``predict_cdf`` give the unseen cell NaN with one warning naming it and its
+    link's domain, on the fitted model and on a pickled and a copied one, and the
+    other cells their values; a score of the cell is refused with the named
+    ``NoPredictedMeanError``. ``level`` is the two seen cells' mean beside the
+    first's 1, which puts the unseen cell's predictor ``2 level**p - 1`` clear of
+    zero. Mutation: the cell was priced at the floor (``1e15`` under
+    ``PowerLink(-1)``) with no warning by every copy, and scored there; the
+    quantile and the CDF read the stand-in law's values (those of cell (0, 0)).
     """
     import copy
 
@@ -457,17 +460,23 @@ def test_superlss_gives_a_row_outside_its_links_domain_no_value_also_once_saved(
         warnings.simplefilter("ignore")
         model.fit(TRAIN, np.where(TRAIN_Y > 1.5, TRAIN_Y * level / 4.0, TRAIN_Y))
     assert model.predict_link(CELLS).to_numpy()[3, 0] < -0.1
-    no_value = r"1 of 4 rows have no predicted value of 'mean' under the PowerLink.*positions 3\)"
+    no_value = (
+        r"1 of 4 rows have no predicted value of 'mean' under the PowerLink, which has one only "
+        r"at a linear predictor above zero.*positions 3\)"
+    )
     for restored in (model, pickle.loads(pickle.dumps(model)), copy.deepcopy(model)):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             predicted = restored.predict(CELLS)
             parameters = restored.predict_parameters(CELLS).to_numpy()
-        assert [re.match(no_value, str(w.message)) is not None for w in caught] == [True, True]
+            laws = restored.predict_quantile(CELLS, 0.5), restored.predict_cdf(CELLS, 1.0)
+        assert [re.match(no_value, str(w.message)) is not None for w in caught] == [True] * 4
         assert np.isnan(predicted[3]) and np.isnan(parameters[3, 0])
         assert np.isfinite(parameters[3, 1])
         assert_allclose(predicted[:3], [1.0, level, level], rtol=1e-6)
-    with pytest.raises(ValueError, match="'mean' has no value on 1 of the 4 rows read"):
+        for values in laws:
+            assert np.isnan(values[3]) and np.all(np.isfinite(values[:3]))
+    with pytest.raises(NoPredictedMeanError, match="'mean' has no value on 1 of the 4 rows read"):
         model.scores(CELLS, CELLS_Y)
 
 
@@ -695,12 +704,12 @@ def test_a_custom_scorer_that_reorders_its_rows_still_names_them_in_the_frame():
         with pytest.warns(UserWarning) as caught:
             result = cross_validate(editor_fit(), X, y, cv=splitter, scoring=scorer)
         refused, scored = result.fold_scores.to_dict("records")
-        assert re.search(r"positions 33 in the frame\)", refused["score_refused"])
+        assert re.search(r"positions 33 in the frame\)", refused["score refused"])
         name = scorer.__name__
         assert refused["converged"] and np.isfinite(scored[name])
         [summary] = [str(w.message) for w in caught if "folds" in str(w.message)]
         assert "scored 1 of 2 folds" in summary
-        assert "mean_scores and pooled_scores cover only the folds scored" in summary
+        assert "left out of mean_scores, std_scores and pooled_scores" in summary
         assert result.mean_scores[name] == scored[name]
 
 
@@ -732,3 +741,295 @@ def test_a_zero_weight_row_never_enters_the_vuong_moments():
         ignored = vuong_test(model, rival, CELLS, y, _IGNORE_LAST)
     assert ignored.statistic == pytest.approx(seen.statistic, rel=1e-12)
     assert ignored.p_value == pytest.approx(seen.p_value, rel=1e-12)
+
+
+_NO_VALUE = (
+    r"1 of {} rows have no predicted value of 'mean' under the PowerLink.*, so their {} are NaN "
+    r"\(row positions {}\)"
+)
+
+
+def _warned_once(call, pattern):
+    """``call()``'s result; it gives one warning, matching ``pattern``, and no other."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = call()
+    assert [re.match(pattern, str(w.message)) is not None for w in caught] == [True]
+    return result
+
+
+def test_superlss_posterior_readers_give_a_row_with_no_value_nan_and_refuse_its_total():
+    """The unseen cell, at ``eta = -0.5`` under ``PowerLink(-1)``, has no posterior value.
+
+    Its predictive draws, with or without parameter uncertainty, and its posterior
+    summaries read NaN, with one warning, beside the other cells' finite ones; a
+    portfolio total, which cannot leave it out, is refused by name. Mutation: the
+    draws read the inverse's floor, 1e15, with no warning, and the portfolio's total
+    mean was about 9e14; the plug-in path warned through ``predict_parameters`` and
+    then refused the NaN with the family's support error.
+    """
+    model = negative_power_lss()
+    for uncertainty in (True, False):
+        draws = _warned_once(
+            lambda: model.posterior_predictive(
+                CELLS, n_draws=20, parameter_uncertainty=uncertainty, seed=0
+            ),
+            _NO_VALUE.format(4, "predictive draws", 3),
+        )
+        assert np.all(np.isnan(draws[:, 3])) and np.all(np.isfinite(draws[:, :3]))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(NoPredictedMeanError, match=r"positions 3\), so the portfolio") as e:
+                model.portfolio(CELLS, n_draws=20, parameter_uncertainty=uncertainty, seed=0)
+        assert e.value.positions.tolist() == [3]
+    bounds = _warned_once(
+        lambda: model.posterior_bounds(CELLS, quantity="mean", n_draws=20, seed=0),
+        _NO_VALUE.format(4, "posterior summaries", 3),
+    )
+    assert bounds.iloc[3].isna().all() and np.all(np.isfinite(bounds.iloc[:3].to_numpy()))
+
+
+def test_a_row_whose_posterior_draws_cross_the_domain_has_no_posterior_summary():
+    """At ``x = 1`` the fit's mean predictor is 0.135, and 4 of 200 posterior draws cross zero.
+
+    There the mean is infinite on part of the posterior, so the row's posterior mean,
+    sd and band read NaN, with one warning, and its plug-in estimate stands; the risk
+    curves read NaN at that point alone, with one warning for the three quantiles; the
+    Q-Q envelope of the fitted rows, which cannot leave one out, refuses it by name.
+    Mutation: the crossing draws read 1e15, the posterior mean was 2e13 and the 99%
+    curve's band reached 3.7e15, and the envelope was drawn from them, with no warning.
+    """
+    from superglm import GammaLS, SuperLSS, term
+    from superglm.links import PowerLink
+
+    x = np.linspace(0.0, 1.0, 30)
+    family = GammaLS()
+    model = SuperLSS(
+        family, family.mean(term("x", Numeric()), link=PowerLink(-1.0)), family.scale()
+    )
+    frame, y = pd.DataFrame({"x": x}), np.where(x < 0.5, 1.0, 4.0) * np.tile([0.4, 1.6], 15)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(frame, y)
+    bounds = _warned_once(
+        lambda: model.posterior_bounds(
+            pd.DataFrame({"x": [0.0, 1.0]}), quantity="mean", n_draws=200, seed=0
+        ),
+        _NO_VALUE.format(2, "posterior summaries", 1),
+    )
+    assert np.all(np.isfinite(bounds.iloc[0])) and np.isfinite(bounds["estimate"].iloc[1])
+    assert bounds.iloc[1].drop("estimate").isna().all()
+    curves = _warned_once(
+        lambda: model.risk_curves({}, "x", n_points=5, n_draws=200, level=0.98, seed=0),
+        _NO_VALUE.format(5, "posterior summaries", 4),
+    )
+    assert np.all(np.isnan(curves.upper[:, 4])) and np.all(np.isfinite(curves.upper[:, :4]))
+    with pytest.raises(NoPredictedMeanError, match="so the Q-Q envelope cannot be computed") as e:
+        model.plot_data("qq", X=frame, y=y, parameter_uncertainty=True, n_sim=200)
+    assert 29 in e.value.positions
+
+
+def test_superlss_readers_of_a_row_with_no_value_refuse_it_by_name():
+    """``actual_expected``, ``parameter_spread`` and ``density_fan`` read every row they are given.
+
+    Each refuses the unseen cell with the named ``NoPredictedMeanError``, and does
+    not warn. Mutation: each warned through ``predict_parameters`` and then refused
+    its NaN with the family's support error ("outside its finite support"), which
+    names no row; under warnings as errors the warning was raised instead.
+    """
+    model = negative_power_lss()
+    readers = (
+        lambda: model.actual_expected(CELLS, CELLS_Y, covariate="a"),
+        lambda: model.parameter_spread(CELLS, threshold=2.0, n_bins=2),
+        lambda: model.density_fan({"a": "1", "b": "1"}, "a"),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        for reader in readers:
+            with pytest.raises(NoPredictedMeanError, match="'mean' has no value on 1 of the"):
+                reader()
+
+
+@pytest.mark.parametrize("pooled", [False, True], ids=["inline", "pooled"])
+def test_one_rows_overflowing_superlss_predictor_leaves_the_other_rows_their_quotes(pooled):
+    """A covariate of 1e308 overflows the mean's predictor, and so does a finite offset of 1e308.
+
+    That row has no value, with the one named warning, and every other row keeps its
+    quote, on the inline and the pooled assembly; a covariate that is not finite is
+    still refused. Mutation: the overflow raised ("prediction contribution for 'x' is
+    invalid", or "non-finite values") with NumPy's overflow warning, and no row was
+    quoted.
+    """
+    from superglm import GammaLS, SuperLSS
+    from superglm.distributional.model import POOLED_PREDICTION_ROWS
+    from superglm.links import PowerLink
+
+    x = np.linspace(0.0, 1.0, 40)
+    family = GammaLS()
+    model = SuperLSS(family, family.mean("x", link=PowerLink(-1.0)), family.scale())
+    model.fit(pd.DataFrame({"x": x}), np.tile([0.9, 1.1], 20) / (1.0 + 5.0 * x))
+    n = POOLED_PREDICTION_ROWS if pooled else 2
+    [quote] = model.predict(pd.DataFrame({"x": [0.5]}))
+    for large, offset in [(1e308, 0.0), (2e307, 1e308)]:
+        rows = pd.DataFrame({"x": np.r_[np.full(n - 1, 0.5), large]})
+        predicted = _warned_once(
+            lambda: model.predict(rows, offsets={"mean": np.r_[np.zeros(n - 1), offset]}),
+            rf"1 of {n} rows have no predicted value of 'mean'",
+        )
+        assert np.isnan(predicted[-1])
+        assert_allclose(predicted[:-1], quote, rtol=1e-15)
+    with pytest.raises(ValueError, match="prediction contribution for 'x' is invalid"):
+        model.predict(pd.DataFrame({"x": [0.5, np.nan]}))
+
+
+def test_interaction_screening_reads_a_zero_weight_row_with_no_mean_at_a_stand_in():
+    """Holdout row 0 has offset -2, so no mean under ``PowerLink(-0.025)``, and weight zero.
+
+    It adds nothing: the screen equals the screen without it, with no NumPy warning.
+    Mutation: its score and Fisher weights were read at the clipped predictor, where
+    the inverse overflows: under warnings as errors the inverse raised, otherwise the
+    QR refused the infinities.
+    """
+    from superglm.links import PowerLink
+
+    X = pd.DataFrame({"x": np.tile([-1.0, 0.0, 1.0], 12), "a": np.tile(["0", "1", "0", "1"], 9)})
+    y = np.tile([0.8, 1.0, 1.2, 1.0, 1.2, 1.4], 6)
+    model = SuperGLM(
+        family="gamma",
+        link=PowerLink(-0.025),
+        selection_penalty=0.0,
+        features={"x": Numeric(), "a": Categorical()},
+    ).fit(X, y)
+    weights, offset = np.ones(len(y)), np.zeros(len(y))
+    weights[0], offset[0] = 0.0, -2.0
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        kept = model.screen_interactions(
+            X, y, sample_weight=weights, offset=offset, candidates=[("x", "a")]
+        )
+        without = model.screen_interactions(
+            X.iloc[1:], y[1:], sample_weight=weights[1:], offset=offset[1:], candidates=[("x", "a")]
+        )
+    assert kept["statistic"].iloc[0] == pytest.approx(without["statistic"].iloc[0], rel=1e-10)
+
+
+def test_a_zero_weight_tweedie_row_is_not_evaluated():
+    """A zero-weight row with no mean and a response of 1e308 adds an exact 0 to the likelihood.
+
+    Mutation: its density was read at a stand-in mean, where 1e308 gives ``-inf``,
+    and ``0 * -inf`` made the log-likelihood NaN with NumPy's invalid-value warning.
+    """
+    from superglm.distributions import Tweedie
+    from superglm.links import PowerLink
+
+    model = _frequency_fit(Tweedie(p=1.5), PowerLink(-0.5), TRAIN_Y, weight_semantics="frequency")
+    offset = np.zeros(4)
+    offset[3] = -model._predict_eta_raw_exact(CELLS)[3] - 0.5
+    y = np.array([1.0, 4.0, 4.0, 1e308])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        ignored = model.metrics(CELLS, y, sample_weight=_IGNORE_LAST, offset=offset)
+        seen = model.metrics(CELLS.iloc[:3], y[:3], offset=offset[:3])
+        assert ignored.log_likelihood == pytest.approx(seen.log_likelihood, rel=1e-12)
+
+
+def test_a_numeric_error_score_stays_out_of_the_mean_and_spread():
+    """A refused fold's score reads ``error_score``, and leaves the mean, spread and pooled score.
+
+    Mutation: ``error_score=-999`` entered the mean (-499.43) and the standard
+    deviation (499.57), while the warning said the means covered the scored folds.
+    """
+    X, y, splitter = cv_frame()
+    with pytest.warns(UserWarning, match="left out of mean_scores, std_scores and pooled_scores"):
+        result = cross_validate(editor_fit(), X, y, cv=splitter, error_score=-999.0)
+    refused, scored = result.fold_scores["deviance"]
+    assert refused == -999.0
+    assert result.mean_scores["deviance"] == scored and result.std_scores["deviance"] == 0.0
+    assert result.pooled_scores["deviance"] == pytest.approx(scored, rel=1e-12)
+
+
+def test_a_custom_scorer_that_reads_fewer_rows_has_them_named_among_its_own():
+    """Held-out rows 32 and 33 have no mean (32 by an offset); the scorer reads row 33 alone.
+
+    The refusal names the one row the scorer read, among its rows and with its fold,
+    not both held-out rows. Mutation: CV named rows 32 and 33 and told the caller to
+    drop or zero-weight both.
+    """
+    from sklearn.model_selection import PredefinedSplit
+
+    X, y, _ = cv_frame()
+    X, y = X.iloc[:34], y[:34]
+    splitter = PredefinedSplit(np.r_[np.full(len(TRAIN_Y), -1), np.zeros(4)])
+    offset = np.zeros(len(y))
+    offset[32] = -1.0
+
+    def last_row(model, rows, target, *, sample_weight=None, offset=None):
+        return model.metrics(rows.iloc[[-1]], target[-1:], offset=offset[-1:]).deviance
+
+    with pytest.raises(NoPredictedMeanError, match=r"of the 1 rows fold 0's scorer read") as e:
+        cross_validate(
+            editor_fit(), X, y, cv=splitter, offset=offset, scoring=last_row, error_score="raise"
+        )
+    assert e.value.positions.tolist() == [0]
+
+
+def test_a_score_may_be_named_as_the_old_refusal_column():
+    """A score's name, a function's or a returned key, is the caller's: the refusal column is not one.
+
+    Mutation: a scorer named ``score_refused`` had its folds counted as refused ("scored
+    0 of 2 folds"), and a returned ``score_refused`` key was refused as reserved.
+    """
+
+    def score_refused(model, rows, target, *, sample_weight=None, offset=None):
+        return 0.25
+
+    def returned(model, rows, target, *, sample_weight=None, offset=None):
+        return {"score_refused": 0.25}
+
+    X, y, splitter = cv_frame()
+    model = SuperGLM(
+        family="gamma", selection_penalty=0.0, features={"a": Categorical(), "b": Categorical()}
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        for scorer in (score_refused, returned):
+            result = cross_validate(model, X, y, cv=splitter, scoring=scorer, error_score="raise")
+            assert result.fold_scores["score_refused"].tolist() == [0.25, 0.25]
+            assert result.mean_scores["score_refused"] == 0.25
+
+
+def test_a_superlss_fold_with_a_row_with_no_value_keeps_its_fit_and_names_it_in_the_frame():
+    """Fold 0 holds out the unseen cell, row 33 of the frame, which has no value of the mean.
+
+    Its scores are refused, naming row 33 in the frame; the fold keeps its fit and the
+    other rows' out-of-fold predictions. At weight zero the row is scored by no fold, and
+    the one out-of-fold warning names it as row 33. Mutation: the fold failed whole
+    (``converged`` False, every out-of-fold prediction NaN), and at weight zero
+    ``predict``'s own warning named the fold-local position 3.
+    """
+    X, y, splitter = cv_frame()
+    with pytest.warns(UserWarning) as caught:
+        result = cross_validate(
+            negative_power_lss(fitted=False), X, y, cv=splitter, return_oof=True
+        )
+    assert any("scored 1 of 2 folds" in str(w.message) for w in caught)
+    refused = result.fold_scores.iloc[0]
+    assert refused["converged"] and np.isnan(refused["nll"])
+    assert re.search(r"positions 33 in the frame\)", refused["score refused"])
+    oof = result.oof_predictions[len(TRAIN_Y) : len(TRAIN_Y) + 4]
+    assert np.isnan(oof[3]) and np.all(np.isfinite(oof[:3]))
+
+    weights = np.ones_like(y)
+    weights[len(TRAIN_Y) + 3] = 0.0
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        cross_validate(
+            negative_power_lss(fitted=False),
+            X,
+            y,
+            cv=splitter,
+            sample_weight=weights,
+            return_oof=True,
+        )
+    [message] = [str(w.message) for w in caught if "no predicted" in str(w.message)]
+    assert "out-of-fold predictions are NaN (row positions 33)" in message

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 from collections.abc import Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -213,9 +214,61 @@ def _score_term(
     n_rows: int,
     score: Callable[[], NDArray],
     levels: list | None = None,
+    *,
+    bounded: bool = False,
+    inputs: Sequence[NDArray] = (),
 ) -> tuple[NDArray, list]:
-    values = score()
-    return _as_contribution(values, n_observations=n_rows, term_name=term), levels or []
+    """A term's contribution; under a ``bounded`` link one that overflows is kept.
+
+    A link that declares a domain (``bounded``) gives a row whose predictor
+    overflows, or is NaN as ``inf - inf``, no value, and the domain check names
+    it: refusing the contribution here would cost every other row its quote, and
+    NumPy's floating-point warning would repeat the check's. A covariate in
+    ``inputs`` that is not finite is a fault in the data, refused as before.
+    """
+    with _bounded_arithmetic(bounded):
+        values = score()
+    contribution = _as_contribution(
+        values, n_observations=n_rows, term_name=term, finite=not bounded
+    )
+    if bounded:
+        lost = ~np.isfinite(contribution)
+        if np.any(lost) and any(
+            column.dtype.kind == "f" and np.any(lost & ~np.isfinite(column))
+            for column in map(np.asarray, inputs)
+        ):
+            raise ValueError(f"prediction contribution for {term!r} is invalid")
+    return contribution, levels or []
+
+
+def _bounded_arithmetic(bounded: bool):
+    """NumPy's overflow and invalid-value warnings silenced under a ``bounded`` link (``_score_term``)."""
+    return np.errstate(over="ignore", invalid="ignore") if bounded else contextlib.nullcontext()
+
+
+def _is_bounded(state: Any) -> bool:
+    """Whether a predictor's link declares a domain (``links.declared_eta_domain``)."""
+    from superglm.solvers.irls_state import link_domain_rows
+
+    return link_domain_rows(state.link) is not None
+
+
+def _readonly_eta(eta: NDArray, bounded: NDArray[np.bool_] | bool) -> NDArray[np.float64]:
+    """Freeze a linear predictor: finite, except in a column whose link is ``bounded``.
+
+    There a predictor that is not finite is outside the domain, and its row has
+    no value of that parameter (``_score_term``).
+    """
+    result = np.array(eta, dtype=np.float64, copy=True)
+    checked = (
+        result
+        if not np.any(bounded)
+        else result[~np.broadcast_to(np.asarray(bounded, dtype=bool), result.shape)]
+    )
+    if not np.all(np.isfinite(checked)):
+        raise ValueError("prediction produced non-finite values")
+    result.setflags(write=False)
+    return result
 
 
 def _level_effects(effects: NDArray, columns: NDArray) -> NDArray:
@@ -246,6 +299,7 @@ def _eta_tasks(
     whole = slice(0, len(frame))
     tasks: list[_EtaTask] = []
     assigned = np.zeros(len(slopes), dtype=np.bool_)
+    score_term = partial(_score_term, bounded=_is_bounded(state))
 
     def ranges(spec: Any) -> Sequence[slice]:
         return spans if spans and type(spec) in ROW_INDEPENDENT_TERMS else (whole,)
@@ -268,7 +322,7 @@ def _eta_tasks(
                         name,
                         rows,
                         partial(
-                            _score_term,
+                            score_term,
                             name,
                             rows.stop - rows.start,
                             partial(_level_effects, effects, coded[rows]),
@@ -284,10 +338,11 @@ def _eta_tasks(
                     name,
                     rows,
                     partial(
-                        _score_term,
+                        score_term,
                         name,
                         len(values),
                         partial(_score_feature, spec, values, beta),
+                        inputs=(values,),
                     ),
                 )
             )
@@ -313,7 +368,7 @@ def _eta_tasks(
                     name,
                     rows,
                     partial(
-                        _score_term,
+                        score_term,
                         name,
                         rows.stop - rows.start,
                         partial(
@@ -326,6 +381,7 @@ def _eta_tasks(
                             level_constants=constants,
                         ),
                         levels,
+                        inputs=(left[rows], right[rows]),
                     ),
                 )
             )
@@ -350,22 +406,24 @@ def _assemble_eta(
     state = layout.predictors[predictor.parameter_index]
     local_coefficients = coefficients[state.coefficient_slice]
     intercept_width = int(state.intercept_index is not None)
+    bounded = _is_bounded(state)
     eta = np.zeros(n_rows, dtype=np.float64)
-    for task, (contribution, levels) in zip(tasks, results, strict=True):
-        if levels and named is not None:
-            named.append(
-                f"{predictor.name} term {task.term!r} levels {', '.join(map(str, levels))}"
-            )
-        eta[task.rows] += contribution
-    # Match geometry, value screens and terminal materialization: accumulate
-    # the ordered slopes first, then add the intercept and finally the offset.
-    if intercept_width:
-        if len(local_coefficients) > 1:
-            eta += local_coefficients[0]
-        else:
-            eta[:] = local_coefficients[0]
-    eta += offset
-    return _readonly(eta)
+    with _bounded_arithmetic(bounded):
+        for task, (contribution, levels) in zip(tasks, results, strict=True):
+            if levels and named is not None:
+                named.append(
+                    f"{predictor.name} term {task.term!r} levels {', '.join(map(str, levels))}"
+                )
+            eta[task.rows] += contribution
+        # Match geometry, value screens and terminal materialization: accumulate
+        # the ordered slopes first, then add the intercept and finally the offset.
+        if intercept_width:
+            if len(local_coefficients) > 1:
+                eta += local_coefficients[0]
+            else:
+                eta[:] = local_coefficients[0]
+        eta += offset
+    return _readonly_eta(eta, bounded)
 
 
 def _dropped_in(
@@ -462,15 +520,16 @@ def _predict_eta_pooled(
         state = layout.predictors[predictors[i].parameter_index]
         local = coefficients[state.coefficient_slice]
         out = np.zeros(rows.stop - rows.start, dtype=np.float64)
-        for k, tasks in enumerate(grouped[i]):
-            out += scored[(i, k)][0][rows] if len(tasks) == 1 else tasks[block].run()[0]
-        # as ``_assemble_eta``: the ordered slopes, then the intercept, then the offset
-        if state.intercept_index is not None:
-            if len(local) > 1:
-                out += local[0]
-            else:
-                out[:] = local[0]
-        out += offsets[predictors[i].name][rows]
+        with _bounded_arithmetic(_is_bounded(state)):
+            for k, tasks in enumerate(grouped[i]):
+                out += scored[(i, k)][0][rows] if len(tasks) == 1 else tasks[block].run()[0]
+            # as ``_assemble_eta``: the ordered slopes, then the intercept, then the offset
+            if state.intercept_index is not None:
+                if len(local) > 1:
+                    out += local[0]
+                else:
+                    out[:] = local[0]
+            out += offsets[predictors[i].name][rows]
         eta[rows, i] = out
 
     # A job here holds one block of one term at a time, whatever the frame.
@@ -667,7 +726,13 @@ class DenseDistributionalModel:
                 )
             )
         warn_population_levels(named)
-        return _readonly(eta)
+        bounded = np.array(
+            [
+                _is_bounded(self.layout.predictors[p.parameter_index])
+                for p in self.compiled_predictors
+            ]
+        )
+        return _readonly_eta(eta, bounded)
 
     def predict_parameters(
         self,
@@ -685,29 +750,38 @@ class DenseDistributionalModel:
         return _readonly(theta, outside)
 
     def _predicted_parameters(
-        self, X: FrameLike | EagerFrame, offsets: Mapping[str, NDArray] | None
+        self,
+        X: FrameLike | EagerFrame,
+        offsets: Mapping[str, NDArray] | None,
+        *,
+        warn: bool = True,
     ) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
         """The rows' parameters, a stand-in where one has no value, and where that is.
 
         The stand-in is a valid parameter (``parameter_from_eta``'s ``"interior"``),
         so a prediction formed from the parameters reads every row and then sets
-        those rows to NaN. One warning names them.
+        those rows to NaN. One warning names them, unless ``warn`` is false, for a
+        reader that names them itself.
         """
         eta = self.predict_eta(X, offsets=offsets)
         outside = self.outside_domain(eta)
         theta = self.parameters_from_eta(eta, outside_domain="interior")
-        if np.any(outside):
+        if warn and np.any(outside):
             from superglm.model.base import warn_no_value
 
-            warn_no_value(
-                outside.any(axis=1),
-                ", ".join(
-                    f"{state.name!r} under the {type(state.link).__name__}"
-                    for state, column in zip(self.layout.predictors, outside.T, strict=True)
-                    if np.any(column)
-                ),
-            )
+            warn_no_value(outside.any(axis=1), self.no_value_parameters(outside))
         return theta, outside
+
+    def no_value_parameters(self, outside: NDArray[np.bool_]) -> str:
+        """The parameters ``outside`` marks (a column per parameter), each with its link's domain."""
+        from superglm.links import eta_domain_text
+
+        return ", ".join(
+            f"{state.name!r} under the {type(state.link).__name__}, which has one only at a "
+            f"linear predictor {eta_domain_text(state.link)}"
+            for state, column in zip(self.layout.predictors, np.asarray(outside).T, strict=True)
+            if np.any(column)
+        )
 
     def outside_domain(self, eta: NDArray[np.float64]) -> NDArray[np.bool_]:
         """Per row and parameter, whether ``eta`` leaves the link's declared domain.
@@ -716,17 +790,42 @@ class DenseDistributionalModel:
         """
         outside = np.zeros(np.shape(eta), dtype=bool)
         for index in range(len(self.layout.predictors)):
-            outside[:, index] = self._outside_domain(eta, index)
+            outside[:, index] = self._outside_domain(eta[:, index], index)
         return outside
 
-    def _outside_domain(self, eta: NDArray[np.float64], parameter_index: int) -> NDArray[np.bool_]:
-        """``outside_domain``'s column for one parameter."""
+    def _outside_domain(
+        self, column: NDArray[np.float64], parameter_index: int
+    ) -> NDArray[np.bool_]:
+        """``outside_domain`` for one parameter's predictors ``column``."""
         from superglm.solvers.irls_state import link_domain_rows
 
         rows = link_domain_rows(self.layout.predictors[parameter_index].link)
         if rows is None:
-            return np.zeros(len(eta), dtype=bool)
-        return np.asarray(rows(eta[:, parameter_index]), dtype=bool)
+            return np.zeros(np.shape(column), dtype=bool)
+        return np.asarray(rows(column), dtype=bool)
+
+    def inverse_on_domain(
+        self, column: NDArray[np.float64], parameter_index: int
+    ) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
+        """One parameter's inverse link of its predictors ``column``, and where it has no value.
+
+        The one place a SuperLSS turns a predictor into a parameter: a predictor
+        outside the link's declared domain (``outside_domain``) is read at one
+        inside it instead, since at its own the inverse can overflow, or a floor
+        in it quote a value; the caller refuses those rows or sets them to NaN.
+        """
+        from superglm.links import interior_eta
+
+        state = self.layout.predictors[parameter_index]
+        outside = self._outside_domain(column, parameter_index)
+        if np.any(outside):
+            column = np.where(outside, interior_eta(state.link), column)
+        # Overflow is refused by the callers' support checks.
+        with np.errstate(over="ignore", invalid="ignore"):
+            values = np.asarray(state.link.inverse(column), dtype=np.float64)
+        if values.shape != np.shape(column):
+            raise ValueError(f"inverse link for {state.name!r} returned an invalid shape")
+        return values, outside
 
     def parameters_from_eta(
         self, eta: NDArray[np.float64], *, outside_domain: str = "raise"
@@ -745,33 +844,28 @@ class DenseDistributionalModel:
         """One parameter's column of ``parameters_from_eta(eta)``, by the same operations.
 
         A row whose predictor leaves the link's declared domain has no value
-        (``outside_domain``): ``"raise"`` refuses it, as a value outside the
-        support is refused, for a reader that would score it; ``"interior"``
-        gives it the value at a predictor inside the domain, for prediction to
-        replace with NaN.
+        (``outside_domain``): ``"raise"`` refuses it with ``NoPredictedMeanError``,
+        as a value outside the support is refused, for a reader that would score
+        it; ``"interior"`` gives it the value at a predictor inside the domain,
+        for prediction to replace with NaN.
         """
         state = self.layout.predictors[parameter_index]
-        column = eta[:, parameter_index]
-        outside = self._outside_domain(eta, parameter_index)
-        if np.any(outside):
-            if outside_domain != "interior":
-                from superglm.model.base import _shown_positions
+        values, outside = self.inverse_on_domain(eta[:, parameter_index], parameter_index)
+        if outside_domain != "interior" and np.any(outside):
+            from superglm.model.base import NoPredictedMeanError, _shown_positions
 
-                raise ValueError(
-                    f"prediction parameter {state.name!r} has no value on "
-                    f"{np.count_nonzero(outside)} of the {outside.size} rows read (positions "
-                    f"among them {_shown_positions(np.flatnonzero(outside))}): the "
-                    f"{type(state.link).__name__} has none at their linear predictor"
-                )
-            from superglm.links import interior_eta
-
-            # At their own predictor the inverse can overflow, or a floor in it quote a value.
-            column = np.where(outside, interior_eta(state.link), column)
-        # Overflow is refused by the support check immediately below.
-        with np.errstate(over="ignore", invalid="ignore"):
-            values = np.asarray(state.link.inverse(column), dtype=np.float64)
-        if values.shape != (len(eta),):
-            raise ValueError(f"inverse link for {state.name!r} returned an invalid shape")
+            positions = np.flatnonzero(outside)
+            raise NoPredictedMeanError(
+                f"prediction parameter {state.name!r} has no value on {positions.size} of the "
+                f"{outside.size} rows read (positions among them {_shown_positions(positions)}): "
+                f"the {type(state.link).__name__} has none at their linear predictor",
+                positions=positions,
+                n_rows=int(outside.size),
+                link=type(state.link).__name__,
+                what="the scores",
+                advice=", or refit with a log link",
+                value=f"value of {state.name!r}",
+            )
         if not np.all(self.family.parameters[parameter_index].support.contains(values)):
             raise ValueError(f"prediction parameter {state.name!r} is outside its finite support")
         return values

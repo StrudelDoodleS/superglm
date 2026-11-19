@@ -883,3 +883,27 @@ def test_a_link_has_the_domain_declared_with_its_inverse():
         assert_allclose(model.predict(x.iloc[:2], offset=offset), np.exp(eta), rtol=1e-12)
     family = GammaLS()
     SuperLSS(family, family.mean(link=_LogViaInverse()), family.scale())
+
+
+class _NegativeIdentity(IdentityLink):
+    """An identity link with a mean only below zero."""
+
+    eta_domain = (-np.inf, 0.0)
+
+
+def test_the_prediction_warning_states_the_links_declared_domain():
+    """A custom link with a mean only at ``eta < 0``: the warning says so, not "at or below zero".
+
+    Mutation: the warning told the user the link had no mean at or below zero, the reverse
+    of this link's domain.
+    """
+    x = np.linspace(0.0, 1.0, 40)
+    model = SuperGLM(
+        family="gaussian",
+        link=_NegativeIdentity(),
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    ).fit(pd.DataFrame({"x": x}), -2.0 - x + np.tile([-0.1, 0.1], 20))
+    with pytest.warns(UserWarning, match="has a mean only at a linear predictor below zero"):
+        predicted = model.predict(pd.DataFrame({"x": [0.0, 0.0]}), offset=np.array([0.0, 4.0]))
+    assert predicted[0] < 0.0 and np.isnan(predicted[1])

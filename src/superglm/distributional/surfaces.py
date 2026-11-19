@@ -11,6 +11,7 @@ and tail spread among identically priced rows) and :func:`portfolio`
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -405,25 +406,30 @@ def risk_curves(
     rows, or one per level); without ``weights`` the curve is a reference
     policy at full exposure.
     """
+    from superglm.model.base import no_mean_warning_quiet
+
     require_scalar_response(fitted.family, "risk_curves")
     asked = _asked_quantiles(quantiles, what="risk curves")
     sweep, levels, positions, resolved = _sweep(fitted, X_train, reference, covariate, n_points)
 
     draws = posterior_draws(fitted, n_draws, covariance=covariance, seed=seed)
     estimates, lower, upper = [], [], []
-    for probability in asked:
-        bounds = cast(
-            "pd.DataFrame",
-            posterior_bounds(
-                fitted,
-                sweep,
-                ("quantile", probability),
-                level=level,
-                draws=draws,
-                offsets=offsets,
-                weights=weights,
-            ),
-        )
+    for index, probability in enumerate(asked):
+        # One draw set: a point with no posterior value has none at every quantile, and the
+        # first quantile's bounds name it once.
+        with no_mean_warning_quiet() if index else contextlib.nullcontext():
+            bounds = cast(
+                "pd.DataFrame",
+                posterior_bounds(
+                    fitted,
+                    sweep,
+                    ("quantile", probability),
+                    level=level,
+                    draws=draws,
+                    offsets=offsets,
+                    weights=weights,
+                ),
+            )
         estimates.append(bounds["estimate"].to_numpy())
         lower.append(bounds["lower"].to_numpy())
         upper.append(bounds["upper"].to_numpy())
@@ -497,7 +503,8 @@ def density_fan(
         raise ValueError("a density fan needs at least three response grid points")
 
     sweep, levels, positions, resolved = _sweep(fitted, X_train, reference, covariate, n_points)
-    theta = np.asarray(fitted.predict_parameters(sweep, offsets=offsets), dtype=np.float64)
+    # A swept point with no value of a parameter is refused by name: the fan's grid spans them all.
+    theta = fitted.parameters_from_eta(fitted.predict_eta(sweep, offsets=offsets))
     rows = len(theta)
     prior = _prior_weight_law(weights, rows)
     lower = resolve_quantity(family, ("quantile", _DENSITY_TAIL), weights=prior)(theta)
@@ -629,7 +636,8 @@ def parameter_spread(
         fitted.fit_state.predictor_templates, frame, offsets, positions
     )
     frame = as_eager_frame(frame.take_rows(positions))
-    theta = np.asarray(fitted.predict_parameters(frame, offsets=offsets), dtype=np.float64)
+    # A row with no value of a parameter is refused by name: every bin's ratio reads its rows.
+    theta = fitted.parameters_from_eta(fitted.predict_eta(frame, offsets=offsets))
     rows = len(theta)
     frequency = resolved.provenance.contract.semantics == "frequency"
     count = resolved.likelihood_count if frequency else rows
@@ -868,6 +876,7 @@ def portfolio(
     offsets = take_prediction_replacements(
         fitted.fit_state.predictor_templates, frame, offsets, positions
     )
+    n_given = len(frame)
     frame = as_eager_frame(frame.take_rows(positions))
     segmentation = _resolved_segments(frame, by, len(frame))
     exposure = None if weights is None else resolved.values
@@ -875,20 +884,28 @@ def portfolio(
     accumulator: Any = segment_totals
     if segment_totals is None and exposure is not None:
         accumulator = _WeightedTotal(exposure)
-    totals = np.asarray(
-        posterior_predictive(
-            fitted,
-            frame,
-            draws,
-            parameter_uncertainty=parameter_uncertainty,
-            reduce="sum" if accumulator is None else accumulator,
-            seed=seed,
-            chunk_rows=chunk_rows,
-            weights=exposure,
-            offsets=offsets,
-        ),
-        dtype=np.float64,
-    )
+    from superglm.model.base import NoPredictedMeanError
+
+    try:
+        totals = np.asarray(
+            posterior_predictive(
+                fitted,
+                frame,
+                draws,
+                parameter_uncertainty=parameter_uncertainty,
+                reduce="sum" if accumulator is None else accumulator,
+                seed=seed,
+                chunk_rows=chunk_rows,
+                weights=exposure,
+                offsets=offsets,
+            ),
+            dtype=np.float64,
+        )
+    except NoPredictedMeanError as refused:
+        # A total cannot leave a row out: the rows are named among the ones ``X`` holds.
+        raise refused._restated(
+            positions[refused.positions], n_given, what="the portfolio total"
+        ) from None
 
     table = (
         None if segment_totals is None else segment_totals.table(columns, asked, rows=len(frame))

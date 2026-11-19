@@ -50,7 +50,7 @@ class CrossValidationResult:
         smoothing-parameter selection and its final coefficient fit
         converged, and two more columns say how it got there:
         ``n_reml_iter`` (outer REML iterations) and ``warm_started``. A
-        ``score_refused`` column appears when a fold's held-out rows of
+        ``"score refused"`` column appears when a fold's held-out rows of
         positive weight had no predicted mean: it holds the reason, naming
         the rows by their position in the frame, and that fold's refused
         scores hold ``error_score``.
@@ -59,17 +59,18 @@ class CrossValidationResult:
         deviance and negative log-likelihood are normalized within each fold
         by the likelihood size the model's declared ``weight_semantics``
         implies: ``sum(sample_weight)`` under ``"frequency"``, the count of
-        positive-weight validation rows under ``"prior"``. A fold whose score
-        is refused (``score_refused``) is not in it: the mean is of the k of
-        n folds scored, and ``cross_validate`` warns how many those are. The
-        fold left out is one whose held-out rows have no predicted mean, so
-        compare two runs' means only on the same folds.
+        positive-weight validation rows under ``"prior"``. A refused score
+        (``"score refused"``) is not in it, whatever ``error_score`` it
+        reads: the mean is of the folds scored, and ``cross_validate`` warns
+        how many those are. The fold left out is one whose held-out rows have
+        no predicted mean, so compare two runs' means only on the same folds.
     pooled_scores : dict
         Supported overall pooled metrics, computed as ratio-of-sums rather than
         mean-of-fold-ratios, with the same denominator. Like ``mean_scores``,
-        they cover only the folds scored.
+        they leave out the refused scores.
     std_scores : dict
-        Standard deviation of each metric across folds.
+        Standard deviation of each metric across folds, without the refused
+        scores, as ``mean_scores``.
     fold_indices : list[tuple[ndarray, ndarray]] or None
         Per-fold ``(train_idx, test_idx)`` pairs from the CV splitter.
     curve_similarity : dict or None
@@ -84,7 +85,7 @@ class CrossValidationResult:
         Out-of-fold predictions (response scale; a SuperLSS's conditional
         mean), same length as *y*. ``None`` unless ``return_oof=True``. A SuperLSS's
         held-out row of weight zero that cannot be priced reads NaN, as does a
-        SuperGLM's held-out row with no predicted mean.
+        held-out row with no predicted mean (a SuperLSS's: no value of a parameter).
         Vector means have shape ``(n, K)`` in the family's component order;
         an unpriced vector row has NaN in all its components.
     estimators : list or None
@@ -457,6 +458,11 @@ def _scoring_weights(model, sample_weight, n_rows: int) -> tuple[NDArray, float]
     return weights, denominator
 
 
+#: ``fold_scores``' column holding why a fold's score was refused. A scorer named by its
+#: Python name cannot take it.
+REFUSED_COLUMN = "score refused"
+
+
 def _scored_mean(model, X_val, sample_weight, offset, what: str) -> NDArray:
     """``predict``'s means on the validation rows, refused if a scored row has none.
 
@@ -475,20 +481,46 @@ def refusal_in_frame(
 
     The rows are read from the held-out frame itself, in its order, whatever rows
     the scorer passed on (a custom one may reorder, select or repeat them): those
-    of positive weight with no predicted mean, or every one with none where the
-    scorer weighed the rows itself. Where the held-out frame has none, the scorer
-    scored other rows, and its own error stands.
+    of positive weight with no predicted mean (a SuperLSS: no value of a
+    parameter), or every one with none where the scorer weighed the rows itself.
+    They are named so only where the scorer refused as many rows, which it then
+    read: a scorer that read fewer, or changed their offsets, has its rows named
+    among those it read, with the fold. Where the held-out frame has none, the
+    scorer scored other rows, and its own error stands.
     """
-    from superglm.model.base import _no_mean_rows, predict_eta_raw_exact
-
-    if getattr(model, "_link", None) is None:
+    weights = None if sample_weight is None else np.asarray(sample_weight)
+    missing = _held_out_without_value(model, X_val, offset, weights)
+    if missing is None:
         return refused
-    missing = _no_mean_rows(model, predict_eta_raw_exact(model, X_val, offset, warn=False))
-    weighted = missing if sample_weight is None else missing & (np.asarray(sample_weight) != 0.0)
+    weighted = missing if weights is None else missing & (weights != 0.0)
     held = weighted if np.any(weighted) else missing
     if not np.any(held):
         return refused
+    if np.count_nonzero(held) != refused.positions.size:
+        return refused.in_scorer(fold)
     return refused.in_frame(np.asarray(rows)[held], n_rows, fold, len(rows))
+
+
+def _held_out_without_value(model, X_val, offset, weights) -> NDArray[np.bool_] | None:
+    """The held-out rows with no predicted mean, or no value of a SuperLSS parameter.
+
+    A SuperLSS reads only its rows of positive weight, as its scores do: a
+    zero-weight row may hold a label no fitted row has. None for a model with
+    neither.
+    """
+    from superglm.model.base import _no_mean_rows, predict_eta_raw_exact
+
+    if isinstance(model, SuperLSS):
+        fitted = model._require_fitted()
+        kept = np.arange(len(X_val)) if weights is None else np.flatnonzero(weights > 0.0)
+        frame = as_eager_frame(X_val).take_rows(kept)
+        missing = np.zeros(len(X_val), dtype=bool)
+        eta = fitted.predict_eta(frame, offsets=_take_offset(offset, kept))
+        missing[kept] = fitted.outside_domain(eta).any(axis=1)
+        return missing
+    if getattr(model, "_link", None) is None:
+        return None
+    return _no_mean_rows(model, predict_eta_raw_exact(model, X_val, offset, warn=False))
 
 
 def _score_deviance(model, X_val, y_val, *, sample_weight=None, offset=None):
@@ -575,7 +607,7 @@ _RESERVED_COLUMNS = frozenset(
         "effective_df",
         "n_reml_iter",
         "warm_started",
-        "score_refused",
+        REFUSED_COLUMN,
     }
 )
 
@@ -686,6 +718,10 @@ class _GLMFolds:
         from superglm.model.base import predict_priced
 
         return predict_priced(est, X, offset)
+
+    def no_value_rows(self, est, predictions) -> NDArray[np.bool_]:
+        """The rows of ``predict``'s values that have no mean (``base.unpriced_rows``)."""
+        return unpriced_rows(est, predictions)
 
     def curve_similarity(self, estimators, X, sample_weight) -> dict[str, Any]:
         from superglm.plotting.curve_similarity import build_cv_curve_similarity
@@ -862,13 +898,14 @@ def cross_validate(
     return_oof : bool
         If True, collect out-of-fold predictions. For a SuperLSS, a held-out row of weight
         zero that cannot be priced reads NaN, with a warning, and does not fail its fold.
-        For a SuperGLM, a held-out row with no predicted mean (``SuperGLM.predict``) reads
-        NaN, and one warning names every such row.
+        A held-out row with no predicted mean (``SuperGLM.predict``; for a SuperLSS, no
+        value of a parameter) reads NaN, and one warning names every such row by its
+        position in the frame.
     error_score : float or "raise"
         Value to assign when a fold fails. ``"raise"`` propagates the error. A score
         refused because held-out rows of positive weight have no predicted mean
         (``NoPredictedMeanError``) is assigned it too, with the reason in
-        ``fold_scores``' ``score_refused`` column; ``"raise"`` raises it, its
+        ``fold_scores``' ``"score refused"`` column; ``"raise"`` raises it, its
         ``positions`` those rows' positions in the frame. That fold is not failed: it keeps its
         fit record, its estimator and its out-of-fold predictions, its other scores
         stand, and one warning says how many folds were scored.
@@ -984,7 +1021,7 @@ def cross_validate(
     oof: NDArray | None = np.full((n, *folds.prediction_shape), np.nan) if return_oof else None
     unpriced_oof = np.zeros(n, dtype=bool) if return_oof else None
     # A SuperGLM's held-out row with no predicted mean reads NaN, named once below.
-    no_mean_oof = np.zeros(n, dtype=bool) if return_oof and isinstance(folds, _GLMFolds) else None
+    no_mean_oof = np.zeros(n, dtype=bool) if return_oof else None
     pooled_numerators: dict[str, float] = {
         name: 0.0 for name in score_names if name in folds.pooled_parts
     }
@@ -998,6 +1035,8 @@ def cross_validate(
     }
 
     n_failed = 0
+    # (fold, score) pairs whose score was refused: they read ``error_score`` and leave the means.
+    refused_cells: set[tuple[int, str]] = set()
     for fold_i, (train_idx, test_idx) in enumerate(cv.split(X, y, groups)):
         train_idx = np.asarray(train_idx)
         test_idx = np.asarray(test_idx)
@@ -1109,7 +1148,8 @@ def cross_validate(
                         f"Fold {fold_i}: {sname} refused: {exc} Setting it to {error_score}."
                     )
                     record[sname] = error_score
-                    record.setdefault("score_refused", str(exc))
+                    record.setdefault(REFUSED_COLUMN, str(exc))
+                    refused_cells.add((fold_i, sname))
             record["score_time_s"] = time.perf_counter() - t1
 
             # OOF predictions
@@ -1120,7 +1160,10 @@ def cross_validate(
                 oof[test_idx] = predictions
                 if no_mean_oof is not None:
                     # As ``oof``: a row a later fold holds out again takes that fold's reading.
-                    no_mean_oof[test_idx] = unpriced_rows(est, predictions)
+                    # A zero-weight row no fitted row prices is counted on its own, below.
+                    without = folds.no_value_rows(est, predictions)
+                    without[fold_unpriced] = False
+                    no_mean_oof[test_idx] = without
 
             # Only a fold that scored completely joins the pooled totals.
             for sname, (numerator, denominator) in fold_parts.items():
@@ -1139,7 +1182,8 @@ def cross_validate(
             if error_score == "raise":
                 raise
             logger.warning(f"Fold {fold_i} failed: {exc!r}. Setting scores to {error_score}.")
-            record.pop("score_refused", None)
+            record.pop(REFUSED_COLUMN, None)
+            refused_cells = {cell for cell in refused_cells if cell[0] != fold_i}
             n_failed += 1
             record["fit_time_s"] = np.nan
             record["score_time_s"] = np.nan
@@ -1178,18 +1222,18 @@ def cross_validate(
             f"{_shown_positions(positions)}). Check those rows' levels and values.",
             stacklevel=2,
         )
-    refused = [record for record in fold_records if "score_refused" in record]
+    refused = [record for record in fold_records if REFUSED_COLUMN in record]
     if refused:
         numbers = ", ".join(str(record["fold"]) for record in refused)
         warnings.warn(
             f"cross_validate scored {len(fold_records) - len(refused) - n_failed} of "
             f"{len(fold_records)} folds. Fold{'s' if len(refused) > 1 else ''} {numbers} "
             f"refused a score because held-out rows of positive weight have no predicted mean "
-            f"({refused[0]['score_refused']}) Those scores read "
-            f"error_score={error_score!r}, and mean_scores and pooled_scores cover only the "
-            "folds scored: the folds left out are the ones the model cannot price, so compare "
+            f"({refused[0][REFUSED_COLUMN]}) Those scores read "
+            f"error_score={error_score!r} and are left out of mean_scores, std_scores and "
+            "pooled_scores: the folds left out are the ones the model cannot price, so compare "
             "runs on the same folds. Each such fold keeps its fit, its estimator and its "
-            "out-of-fold predictions, and fold_scores' score_refused column says why.",
+            f"out-of-fold predictions, and fold_scores' {REFUSED_COLUMN!r} column says why.",
             stacklevel=2,
         )
 
@@ -1204,13 +1248,18 @@ def cross_validate(
     ]
     all_score_cols = present_score_cols + extra_cols
 
-    mean_scores = {c: float(fold_scores[c].mean()) for c in all_score_cols}
+    def scored(column: str) -> pd.Series:
+        """The folds' values of ``column``, without the ones refused."""
+        left_out = [fold for fold, name in refused_cells if name == column]
+        return fold_scores[column].drop(index=left_out)
+
+    mean_scores = {c: float(scored(c).mean()) for c in all_score_cols}
     pooled_scores = {
         name: pooled_numerators[name] / pooled_denominators[name]
         for name in pooled_numerators
         if pooled_denominators[name] != 0.0
     }
-    std_scores = {c: float(fold_scores[c].std(ddof=0)) for c in all_score_cols}
+    std_scores = {c: float(scored(c).std(ddof=0)) for c in all_score_cols}
 
     curve_similarity = None
     if estimators_list is not None:

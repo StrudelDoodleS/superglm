@@ -339,7 +339,18 @@ class LSSFolds:
         return costs
 
     def predict(self, estimator, X, offset) -> NDArray[np.float64]:
-        return np.asarray(estimator.predict(X, offsets=offset), dtype=np.float64)
+        """``predict``, without its warning for rows with no value of a parameter:
+        ``cross_validate`` names them once, by their position in the whole frame."""
+        from superglm.model.base import no_mean_warning_quiet
+
+        with no_mean_warning_quiet():
+            return np.asarray(estimator.predict(X, offsets=offset), dtype=np.float64)
+
+    def no_value_rows(self, estimator, predictions) -> NDArray[np.bool_]:
+        """The rows of ``predict``'s values with no value of a parameter: their NaNs."""
+        del estimator
+        values = np.asarray(predictions)
+        return np.isnan(values).reshape(len(values), -1).any(axis=1)
 
     def curve_similarity(self, estimators, X, sample_weight) -> None:
         """None: the editor's Cross-validation tab draws a SuperLSS's fold curves."""

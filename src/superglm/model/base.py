@@ -28,7 +28,7 @@ from superglm.dm_builder import (
 )
 from superglm.features.ordered_categorical import resolve_interaction_parent_of
 from superglm.group_matrix import DesignMatrix
-from superglm.links import Link, interior_eta, stabilize_eta
+from superglm.links import Link, eta_domain_text, interior_eta, stabilize_eta
 from superglm.model.fit_state import (
     configured_family,
     configured_lambda2,
@@ -691,8 +691,9 @@ def _no_mean_warning(model, eta: NDArray[np.floating], missing: NDArray[np.bool_
     reasons = []
     if overflowed < positions.size:
         reasons.append(
-            "The link has no mean at a linear predictor at or below zero, and the model "
-            "extrapolates past it on these rows' combination of covariate values or offsets."
+            f"The link has a mean only at a linear predictor {eta_domain_text(model._link)}, and "
+            "the model extrapolates outside that on these rows' combination of covariate values "
+            "or offsets."
         )
     if overflowed:
         reasons.append(
@@ -725,9 +726,10 @@ class NoPredictedMeanError(ValueError):
     out, or refit with a log link (logit for a binomial).
 
     ``positions`` are those rows' positions among ``n_rows`` (the message
-    names the first ten), ``link`` names the link that has no mean for them
-    and ``what`` the score refused.  The details survive a pickle round trip,
-    as when the error crosses a process boundary from a fold.
+    names the first ten), ``link`` names the link that has no mean for them,
+    ``what`` the score refused and ``value`` what the rows lack: ``"mean"``, or
+    a SuperLSS parameter's value (``"value of 'mean'"``).  The details survive a
+    pickle round trip, as when the error crosses a process boundary from a fold.
     """
 
     def __init__(
@@ -739,6 +741,7 @@ class NoPredictedMeanError(ValueError):
         link: str,
         what: str = "",
         advice: str = "",
+        value: str = "mean",
     ):
         super().__init__(message)
         self.positions = positions
@@ -746,6 +749,7 @@ class NoPredictedMeanError(ValueError):
         self.link = link
         self.what = what
         self.advice = advice
+        self.value = value
 
     def __reduce__(self):
         # ``BaseException`` rebuilds from ``args`` alone, the message.
@@ -756,6 +760,7 @@ class NoPredictedMeanError(ValueError):
             link=self.link,
             what=self.what,
             advice=self.advice,
+            value=self.value,
         )
         return rebuild, self.args, self.__dict__
 
@@ -763,14 +768,41 @@ class NoPredictedMeanError(ValueError):
         self, positions: NDArray[np.intp], n_rows: int, fold: int, n_held_out: int
     ) -> NoPredictedMeanError:
         """The refusal for fold ``fold``, naming its rows by their ``positions`` in the frame."""
+        return self._restated(
+            np.asarray(positions),
+            n_rows,
+            counted=f"fold {fold}'s {n_held_out} held-out rows",
+            where=" in the frame",
+        )
+
+    def in_scorer(self, fold: int) -> NoPredictedMeanError:
+        """The refusal for fold ``fold``, naming its rows among those its scorer read."""
+        return self._restated(
+            self.positions,
+            self.n_rows,
+            counted=f"the {self.n_rows} rows fold {fold}'s scorer read",
+            where=" among them",
+        )
+
+    def _restated(
+        self,
+        positions: NDArray[np.intp],
+        n_rows: int,
+        *,
+        counted: str | None = None,
+        where: str = "",
+        what: str | None = None,
+    ) -> NoPredictedMeanError:
+        """This refusal for its rows at ``positions`` among ``n_rows``, and for ``what``."""
         return _no_mean_error(
             np.asarray(positions),
             n_rows,
             self.link,
-            self.what,
+            self.what if what is None else what,
             self.advice,
-            counted=f"fold {fold}'s {n_held_out} held-out rows",
-            where=" in the frame",
+            counted=counted,
+            where=where,
+            value=self.value,
         )
 
 
@@ -783,11 +815,12 @@ def _no_mean_error(
     *,
     counted: str | None = None,
     where: str = "",
+    value: str = "mean",
 ) -> NoPredictedMeanError:
     """``NoPredictedMeanError`` for ``positions`` among ``n_rows``, ``counted`` as the message counts them."""
     every = f"; the error's .positions holds all {positions.size}" if positions.size > 10 else ""
     return NoPredictedMeanError(
-        f"{positions.size} of {counted or f'{n_rows} rows'} have no predicted mean under the "
+        f"{positions.size} of {counted or f'{n_rows} rows'} have no predicted {value} under the "
         f"{link} (row positions {_shown_positions(positions)}{where}{every}), so {what} cannot "
         f"be computed on them. Give those rows weight zero or leave them out{advice}.",
         positions=positions,
@@ -795,6 +828,7 @@ def _no_mean_error(
         link=link,
         what=what,
         advice=advice,
+        value=value,
     )
 
 
@@ -868,21 +902,29 @@ def no_mean_warning_quiet():
         _NO_MEAN_WARNING_QUIET.reset(token)
 
 
-def warn_no_value(rows: NDArray[np.bool_], parameters: str) -> None:
+def warn_no_value(
+    rows: NDArray[np.bool_],
+    parameters: str,
+    *,
+    what: str = "their predictions are NaN",
+    predictor: str = "Their linear predictor",
+) -> None:
     """A SuperLSS prediction's warning for ``rows``, which have no value of ``parameters``.
 
-    ``parameters`` names each parameter and its link. Silent where
-    ``no_mean_warning_quiet`` is in force, as ``predict``'s warning is.
+    ``parameters`` names each parameter, its link and where that link has a
+    value; ``what`` says what the rows read and ``predictor`` which of their
+    predictors leaves the domain. Silent where ``no_mean_warning_quiet`` is in
+    force, as ``predict``'s warning is.
     """
     if _NO_MEAN_WARNING_QUIET.get():
         return
     positions = np.flatnonzero(rows)
     warn_caller(
         f"{positions.size} of {rows.size} rows have no predicted value of {parameters}, so "
-        f"their predictions are NaN (row positions {_shown_positions(positions)}). Their "
-        "linear predictor is outside the link's domain (at or below zero, or not finite): the "
-        "model extrapolates past it on these rows' combination of covariate values or offsets. "
-        "Check those rows' levels and values, or use a log link, which has a value everywhere."
+        f"{what} (row positions {_shown_positions(positions)}). {predictor} is outside that "
+        "domain, or not finite: the model extrapolates outside it on these rows' combination "
+        "of covariate values or offsets. Check those rows' levels and values, or use a log "
+        "link, which has a value everywhere."
     )
 
 

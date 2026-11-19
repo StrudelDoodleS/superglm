@@ -661,12 +661,17 @@ def screen_interactions(
     # Use the stabilized predictor directly, not link(predict(X)): for a
     # non-injective link (sqrt) the round trip flips the sign of negative-eta rows.
     # It is predict's predictor without its warning, and a weighted row it gives no
-    # mean is refused (``base.priced_mean``); a zero-weight one adds nothing.
-    from superglm.links import stabilize_eta
+    # mean is refused (``base.priced_mean``); a zero-weight one adds nothing, and is
+    # read at a stand-in inside the domain, as the working residual reads it: at its
+    # clipped predictor a power near zero overflows the inverse and its derivative.
+    from superglm.links import interior_eta, stabilize_eta
     from superglm.model import base
 
     eta_raw = np.asarray(base.predict_eta_raw_exact(model, X, offset, warn=False), dtype=np.float64)
     base.priced_mean(model, eta_raw, weights, "the interaction screening scores")
+    missing = base._no_mean_rows(model, eta_raw)
+    if np.any(missing):
+        eta_raw = np.where(missing, interior_eta(link), eta_raw)
     eta = stabilize_eta(eta_raw, link)
     mu = np.asarray(link.inverse(eta), dtype=np.float64)
     score = working_score(y, mu, eta, weights, distribution, link)

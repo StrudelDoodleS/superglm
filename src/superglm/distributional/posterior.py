@@ -865,6 +865,32 @@ def posterior_parameters(
     maps to the natural parameter. The design is formed in blocks of
     ``DESIGN_BLOCK_ROWS`` rows, never for the whole frame; changing chunk or
     block sizes may change matrix-product roundoff.
+
+    A draw whose predictor for a parameter leaves its link's declared domain
+    (``eta <= 0`` under a negative-power ``PowerLink``) has no value of that
+    parameter: that cell is NaN.
+    """
+    for rows, block, outside in _posterior_blocks(
+        fitted, X, draws, offsets=offsets, chunk_rows=chunk_rows, name_levels=name_levels
+    ):
+        block[outside] = np.nan
+        yield rows, block
+
+
+def _posterior_blocks(
+    fitted: Any,
+    X: FrameLike | EagerFrame,
+    draws: PosteriorDraws,
+    *,
+    offsets: Mapping[str, NDArray] | None,
+    chunk_rows: int | None,
+    name_levels: bool,
+) -> Generator[tuple[slice, NDArray[np.float64], NDArray[np.bool_]], None, None]:
+    """``posterior_parameters``' blocks, a stand-in where a draw has no value, and where that is.
+
+    The stand-in is a valid parameter (``inverse_on_domain``), so a quantity
+    formed from the block reads every cell; the caller sets the cells, or the
+    rows, that have no value to NaN, or refuses them.
     """
     if not isinstance(draws, PosteriorDraws):
         raise TypeError("draws must be a PosteriorDraws")
@@ -888,23 +914,21 @@ def posterior_parameters(
     coefficients = draws.coefficients
     parameters = fitted.family.parameters
 
-    def pushforward(rows: slice, local: dict[str, NDArray]) -> list[NDArray]:
+    def pushforward(rows: slice, local: dict[str, NDArray]) -> list[tuple[NDArray, NDArray]]:
         pieces = []
         for index, state in enumerate(layout.predictors):
             eta = coefficients[:, state.coefficient_slice] @ local[state.name].T
             eta += resolved_offsets[state.name][rows][None, :]
-            with np.errstate(over="ignore", invalid="ignore"):
-                values = np.asarray(state.link.inverse(eta.reshape(-1)), dtype=np.float64)
-            if values.shape != (eta.size,):
-                raise ValueError(f"inverse link for {state.name!r} returned an invalid shape")
+            values, outside = fitted.inverse_on_domain(eta.reshape(-1), index)
             if not np.all(parameters[index].support.contains(values)):
                 raise ValueError(f"Posterior draws put {state.name} outside its supported range")
-            pieces.append(values.reshape(draws.n_draws, -1))
+            pieces.append((values.reshape(draws.n_draws, -1), outside.reshape(draws.n_draws, -1)))
         return pieces
 
     for start in range(0, n_observations, rows_per_chunk):
         stop = min(start + rows_per_chunk, n_observations)
         block = np.empty((draws.n_draws, stop - start, n_parameters), dtype=np.float64)
+        outside = np.zeros(block.shape, dtype=bool)
         spans = map_design_blocks(
             frame,
             fitted.compiled_predictors,
@@ -914,9 +938,46 @@ def posterior_parameters(
             stop=stop,
         )
         for rows, pieces in spans:
-            for index, values in enumerate(pieces):
+            for index, (values, lost) in enumerate(pieces):
                 block[:, rows.start - start : rows.stop - start, index] = values
-        yield slice(start, stop), block
+                outside[:, rows.start - start : rows.stop - start, index] = lost
+        yield slice(start, stop), block, outside
+
+
+def _no_value_error(fitted: Any, rows: NDArray[np.bool_], parameters: NDArray[np.bool_], what: str):
+    """The named refusal of ``rows``, which have no value of the ``parameters`` marked, for ``what``.
+
+    For an aggregate that cannot leave a row out, as a total over the rows.
+    """
+    from superglm.model.base import _no_mean_error
+
+    states = [state for state, lost in zip(fitted.layout.predictors, parameters) if lost]
+    return _no_mean_error(
+        np.flatnonzero(rows),
+        int(rows.size),
+        " and ".join(dict.fromkeys(type(state.link).__name__ for state in states)),
+        what,
+        ", or refit with a log link",
+        value="value of " + ", ".join(repr(state.name) for state in states),
+    )
+
+
+def _warn_no_posterior_value(
+    fitted: Any, rows: NDArray[np.bool_], parameters: NDArray[np.bool_], what: str, *, draws: bool
+) -> None:
+    """One warning for ``rows``, which read NaN (``what``): they have no value of ``parameters``."""
+    from superglm.model.base import warn_no_value
+
+    warn_no_value(
+        rows,
+        fitted.no_value_parameters(parameters[None, :]),
+        what=what,
+        predictor=(
+            "Their linear predictor, at the fitted coefficients or at some posterior draws,"
+            if draws
+            else "Their linear predictor"
+        ),
+    )
 
 
 def _scalar_argument(name: str, value: Any) -> float:
@@ -1083,16 +1144,21 @@ def posterior_bounds(
     if draws.n_draws < 2:
         raise ValueError("posterior bounds need at least 2 draws to estimate variance")
 
-    estimate = np.asarray(
-        evaluate(fitted.predict_parameters(frame, offsets=offsets)), dtype=np.float64
-    )
+    # A row with no value of a parameter, at the fit or at a draw, has no posterior summary:
+    # it reads NaN, with one warning, and its quantity is evaluated at a stand-in.
+    theta_hat, outside_hat = fitted._predicted_parameters(frame, offsets, warn=False)
+    no_value = outside_hat.any(axis=1)
+    lost_parameters = outside_hat.any(axis=0)
+    estimate = np.array(evaluate(theta_hat), dtype=np.float64)
     if estimate.shape != (n_observations,):
         raise ValueError("a posterior quantity must return one value per row")
-    if not callable(quantity) and not np.all(np.isfinite(estimate)):
+    if not callable(quantity) and not np.all(np.isfinite(estimate[~no_value])):
         raise ValueError(
             f"non-finite plug-in values from named posterior quantity {quantity!r}; "
             "posterior bounds are undefined"
         )
+    estimate[no_value] = np.nan
+    summarized = ~no_value
 
     tail = 0.5 * (1.0 - coverage)
     summaries = {
@@ -1103,7 +1169,7 @@ def posterior_bounds(
         np.empty((draws.n_draws, n_observations), dtype=np.float64) if return_draws else None
     )
     # The plug-in estimate above already named any population-predicted level.
-    for rows, block in posterior_parameters(
+    for rows, block, outside in _posterior_blocks(
         fitted, frame, draws, offsets=offsets, chunk_rows=chunk_rows, name_levels=False
     ):
         width = block.shape[1]
@@ -1120,11 +1186,14 @@ def posterior_bounds(
         if values.shape != (draws.n_draws * width,):
             raise ValueError("a posterior quantity must return one value per row")
         values = values.reshape(draws.n_draws, width)
-        if not callable(quantity) and not np.all(np.isfinite(values)):
+        lost = outside.any(axis=2)
+        if not callable(quantity) and not np.all(np.isfinite(values[~lost])):
             raise ValueError(
                 f"non-finite draws from named posterior quantity {quantity!r}; "
                 "posterior bounds are undefined"
             )
+        lost_parameters |= outside.any(axis=(0, 1))
+        summarized[rows] &= ~lost.any(axis=0)
         summaries["mean"][rows] = values.mean(axis=0)
         summaries["sd"][rows] = values.std(axis=0, ddof=1)
         summaries["lower"][rows], summaries["upper"][rows] = np.quantile(
@@ -1132,6 +1201,21 @@ def posterior_bounds(
         )
         if quantity_draws is not None:
             quantity_draws[:, rows] = values
+
+    if not np.all(summarized):
+        # The posterior of such a row puts mass where it has no value, so no summary of it
+        # exists; its plug-in estimate stands where the fit gives it one.
+        for summary in summaries.values():
+            summary[~summarized] = np.nan
+        if quantity_draws is not None:
+            quantity_draws[:, ~summarized] = np.nan
+        _warn_no_posterior_value(
+            fitted,
+            ~summarized,
+            lost_parameters,
+            "their posterior summaries are NaN",
+            draws=True,
+        )
 
     bounds = pd.DataFrame({"estimate": estimate, **summaries}, index=row_index(X, n_observations))
     if return_draws:
@@ -1221,18 +1305,26 @@ def _theta_blocks(
     offsets: Mapping[str, NDArray] | None,
     chunk_rows: int,
 ) -> Generator[tuple[slice, NDArray[np.float64]], None, None]:
-    """Yield ``(row_slice, theta)`` with ``theta`` flattened to ``(draws * rows, k)``."""
+    """Yield ``(row_slice, theta, outside)``, each flattened to ``(draws * rows, k)``.
+
+    ``theta`` holds a stand-in where ``outside`` marks a cell with no value
+    (``_posterior_blocks``).
+    """
     if parameter_uncertainty:
         draws = posterior_draws(fitted, n_draws, covariance=covariance, seed=seed)
-        for rows, block in posterior_parameters(
-            fitted, frame, draws, offsets=offsets, chunk_rows=chunk_rows
+        for rows, block, outside in _posterior_blocks(
+            fitted, frame, draws, offsets=offsets, chunk_rows=chunk_rows, name_levels=True
         ):
-            yield rows, block.reshape(-1, block.shape[2])
+            yield rows, block.reshape(-1, block.shape[2]), outside.reshape(-1, block.shape[2])
         return
-    theta = np.asarray(fitted.predict_parameters(frame, offsets=offsets), dtype=np.float64)
+    theta, outside = fitted._predicted_parameters(frame, offsets, warn=False)
     for start in range(0, len(theta), chunk_rows):
         stop = min(start + chunk_rows, len(theta))
-        yield slice(start, stop), np.tile(theta[start:stop], (n_draws, 1))
+        yield (
+            slice(start, stop),
+            np.tile(theta[start:stop], (n_draws, 1)),
+            np.tile(outside[start:stop], (n_draws, 1)),
+        )
 
 
 def posterior_predictive(
@@ -1261,6 +1353,11 @@ def posterior_predictive(
     ``weights`` are one prior weight per row of ``X``. Where they are not all
     one, responses are drawn through ``quantile_prior_weighted``, and a family
     without that law refuses.
+
+    A row with no value of a parameter, at the fitted coefficients or at a
+    posterior draw (its predictor leaves the link's declared domain), has no
+    predictive draws: its column reads NaN, with one warning, and a ``reduce``,
+    which cannot leave it out, refuses it with ``NoPredictedMeanError``.
     """
     require_scalar_response(fitted.family, "posterior_predictive")
     frame = as_eager_frame(X)
@@ -1287,7 +1384,9 @@ def posterior_predictive(
     uniform_rng = np.random.default_rng(np.random.SeedSequence(seed).spawn(2)[1])
 
     pieces: list[NDArray[np.float64]] = []
-    for rows, theta in _theta_blocks(
+    no_value = np.zeros(len(frame), dtype=bool)
+    lost_parameters = np.zeros(len(fitted.layout.predictors), dtype=bool)
+    for rows, theta, outside in _theta_blocks(
         fitted,
         frame,
         n_draws=count,
@@ -1298,6 +1397,13 @@ def posterior_predictive(
         chunk_rows=rows_per_chunk,
     ):
         width = rows.stop - rows.start
+        lost = outside.any(axis=1).reshape(count, width).any(axis=0)
+        if np.any(lost):
+            no_value[rows] = lost
+            lost_parameters |= outside.any(axis=0)
+        if combine is not None and np.any(no_value):
+            # Refused below; the rest of the frame is only read for the rows it names.
+            continue
         probabilities = uniform_rng.uniform(
             _PROBABILITY_MARGIN, 1.0 - _PROBABILITY_MARGIN, size=(count, width)
         )
@@ -1309,17 +1415,31 @@ def posterior_predictive(
             if row_weights is None
             else family.quantile_prior_weighted(levels, theta, np.tile(row_weights[rows], count))
         )
-        simulated = np.asarray(drawn, dtype=np.float64).reshape(count, width)
-        if not np.all(np.isfinite(simulated)):
+        simulated = np.array(drawn, dtype=np.float64).reshape(count, width)
+        if not np.all(np.isfinite(simulated[:, ~lost])):
             raise ValueError("non-finite predictive draws cannot be represented or reduced")
+        if combine is None:
+            simulated[:, lost] = np.nan
+            pieces.append(simulated)
+            continue
         with np.errstate(over="ignore", invalid="ignore"):
-            piece = simulated if combine is None else np.asarray(combine(simulated))
+            piece = np.asarray(combine(simulated))
         if piece.ndim not in (1, 2) or piece.shape[0] != count:
             raise ValueError("reduce must return one row per posterior draw")
         if not np.all(np.isfinite(piece)):
             raise ValueError("Predictive reduction produced non-finite values")
         pieces.append(piece)
 
+    if np.any(no_value):
+        if combine is not None:
+            raise _no_value_error(fitted, no_value, lost_parameters, "the reduced draws")
+        _warn_no_posterior_value(
+            fitted,
+            no_value,
+            lost_parameters,
+            "their predictive draws are NaN",
+            draws=bool(parameter_uncertainty),
+        )
     if not pieces:
         if combine is not None:
             raise ValueError("reduce needs at least one row to reduce")

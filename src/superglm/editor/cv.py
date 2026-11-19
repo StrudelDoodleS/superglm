@@ -80,6 +80,7 @@ from superglm.model.base import NoPredictedMeanError
 from superglm.model.fit_state import configured_family, configured_lambda2, configured_penalty
 from superglm.model_selection import (
     FINGERPRINT_VERSION,
+    REFUSED_COLUMN,
     CrossValidationResult,
     _data_fingerprint,
     _fingerprint_columns,
@@ -252,8 +253,6 @@ _FOLD_COLUMNS = (
     "n_iter",
     "effective_df",
     "n_reml_iter",
-    # Why a fold has no score where its held-out rows have no quote (``cross_validate``).
-    "score_refused",
 )
 
 
@@ -1085,7 +1084,10 @@ def _result_payload(
     folds = [
         {
             **{column: record.get(column) for column in _FOLD_COLUMNS},
-            "scores": {name: record.get(name) for name in names},
+            # Why a fold has no score where its held-out rows have no quote (``cross_validate``):
+            # its scores are shown as none, whatever ``error_score`` they read.
+            "score_refused": _refusal(record),
+            "scores": {name: None if _refusal(record) else record.get(name) for name in names},
         }
         for record in result.fold_scores.to_dict("records")
     ]
@@ -1102,6 +1104,12 @@ def _result_payload(
             name: result.pooled_scores[name] for name in names if name in result.pooled_scores
         },
     }
+
+
+def _refusal(record: dict[str, Any]) -> str | None:
+    """Why a fold's scores were refused, from its ``fold_scores`` record; None if they were not."""
+    reason = record.get(REFUSED_COLUMN)
+    return reason if isinstance(reason, str) else None
 
 
 def _folds_partition_rows(result: CrossValidationResult) -> bool:
@@ -1446,7 +1454,9 @@ def run_cv(plan: CVRunPlan, context) -> CVRun:
     context.progress("curves")
     fold_scores = result.fold_scores
     if recorder.refused:
-        fold_scores = fold_scores.assign(score_refused=fold_scores["fold"].map(recorder.refused))
+        fold_scores = fold_scores.assign(
+            **{REFUSED_COLUMN: fold_scores["fold"].map(recorder.refused)}
+        )
     return CVRun(
         result=replace(
             result,
