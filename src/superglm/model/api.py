@@ -1292,8 +1292,11 @@ class SuperGLM:
 
         At exactly zero fitted dispersion, a zero deviance change has statistic
         zero and p-value one; a nonzero deviance change is undefined and raises.
+        Its comparison fits name each separation notice once, within this call.
         """
-        with self._parallel_scope():
+        from superglm.diagnostics.separation import disclosure_scope
+
+        with self._parallel_scope(), disclosure_scope(self):
             return explain_ops.drop1(self, X, y, sample_weight, offset, test=test)
 
     def refit_unpenalised(

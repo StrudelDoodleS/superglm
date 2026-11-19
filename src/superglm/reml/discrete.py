@@ -25,6 +25,10 @@ from superglm._lambda_box import LambdaBox, bound_pressure, glm_lambda_box
 from superglm._roundoff import NEWTON_EIGENVALUE_FLOOR
 from superglm._roundoff import gamma as _gamma
 from superglm._utils import weighted_row_sum
+from superglm.diagnostics.separation import (
+    disclose_solver_separation,
+    validate_solver_separation_mode,
+)
 from superglm.distributions import Gamma, Gaussian, Tweedie, clip_mu
 from superglm.dm_builder import rebuild_design_matrix_with_lambdas
 from superglm.group_matrix import (
@@ -521,6 +525,7 @@ def optimize_discrete_reml_cached_w(
     start_out: dict | None = None,
     start_objective_tol: float | None = None,
     lambda_box: LambdaBox | None = None,
+    separation: str = "warn",
 ) -> REMLResult:
     """POI fREML optimizer for the discrete path.
 
@@ -540,7 +545,13 @@ def optimize_discrete_reml_cached_w(
     (O(p^3), no data pass) per trial. Where the REML surface is flat in noise
     directions it may stop at a nearby stationary point with large but not
     maximal noise lambdas.
+
+    ``separation`` governs the runtime separation finding on the returned
+    state as ``fit_irls_direct``'s keyword does: ``"warn"`` (default) warns
+    at the caller, ``"error"`` refuses, ``"ignore"`` and ``"record"`` say
+    nothing.  Its trial and candidate solves only record.
     """
+    validate_solver_separation_mode(separation)
 
     # The declared contract's likelihood size (``lazy_likelihood_size``).
     _contract_size = lazy_likelihood_size(sample_weight, weight_semantics=weight_semantics)
@@ -1776,6 +1787,7 @@ def optimize_discrete_reml_cached_w(
         if profile is not None:
             profile["reml_optimizer_s"] = _time.perf_counter() - _t_reml_start
             profile["reml_n_outer_iter"] = poi_iter + 1
+        disclose_solver_separation(getattr(pirls_result, "separation_message", None), separation)
         return REMLResult(
             lambdas=final_lambdas,
             pirls_result=pirls_result,
@@ -1978,6 +1990,7 @@ def optimize_discrete_reml_cached_w(
         if _outer_step_stats:
             profile["reml_outer_step_stats"] = _outer_step_stats
 
+    disclose_solver_separation(getattr(best_pirls, "separation_message", None), separation)
     return REMLResult(
         lambdas=best_lambdas,
         pirls_result=best_pirls,

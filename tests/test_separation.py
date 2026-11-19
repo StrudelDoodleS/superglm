@@ -813,13 +813,16 @@ def test_a_fit_reads_the_models_separation_mode_for_what_it_returns(monkeypatch,
     assert model.result.separation_message is None
 
 
-def test_estimate_p_warns_for_its_published_refit_not_for_each_power_it_tried(monkeypatch):
+@pytest.mark.parametrize("mode", ["warn", "error"])
+def test_estimate_p_warns_for_its_published_refit_not_for_each_power_it_tried(monkeypatch, mode):
     """A power-search candidate is ranked and discarded, so its fit says nothing.
 
     Every candidate's fit and the refit at the selected power record the
     backstop's finding (forced); the refit is the fit the caller receives, and
-    it warns once.  Mutation check: publishing a candidate's finding warned
-    once per power the search evaluated.
+    it warns once, or under ``"error"`` is what refuses.  Mutation checks:
+    publishing a candidate's finding warned once per power the search
+    evaluated; refusing a strict candidate as it finished refused the first
+    power tried.
     """
     rng = np.random.default_rng(3)
     n = 1500
@@ -827,7 +830,12 @@ def test_estimate_p_warns_for_its_published_refit_not_for_each_power_it_tried(mo
     y = _tweedie_response(rng, n, rate=0.6) * np.exp(np.sin(3.0 * x))
     frame = pd.DataFrame({"x": x})
     force_runtime_finding(monkeypatch)
-    model = SuperGLM(family=Tweedie(p=1.5), features={"x": Spline(kind="cr", k=8)})
+    model = SuperGLM(family=Tweedie(p=1.5), features={"x": Spline(kind="cr", k=8)}, separation=mode)
+    if mode == "error":
+        with pytest.raises(SeparationError) as refused:
+            model.estimate_p(frame, y, fit_mode="reml", search_fit_mode="reml")
+        assert "_refit_selected" in {entry.name for entry in refused.traceback}
+        return
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         result = model.estimate_p(frame, y, fit_mode="reml", search_fit_mode="reml")
@@ -908,7 +916,9 @@ def test_an_independent_fit_inside_a_progress_callback_reports_its_own_findings(
     level's curve over a range with no claim.  Mutation checks: a candidate
     opening its own scope named the hazard once per power; every nested call
     joining the enclosing scope left the callback's fit silent; a SuperLSS fit
-    without a scope of its own left the second distributional fit silent.
+    without a scope of its own left the second distributional fit silent.  A
+    ``drop1`` there names the level once, as alone; with its comparison fits
+    joining the enclosing call's scope instead of its own, it said nothing.
     """
     import superglm as sg
     from superglm import RandomEffect
@@ -921,6 +931,11 @@ def test_an_independent_fit_inside_a_progress_callback_reports_its_own_findings(
     y = np.where(count > 0, rng.gamma(2 * count + 1e-12, 0.6), 0.0)
     y[c == "zero"] = 0.0
     frame = pd.DataFrame({"c": c, "r": rng.choice([f"R{i}" for i in range(12)], size=n)})
+    frame["z"] = rng.normal(size=n)
+    other = SuperGLM(family=Tweedie(p=1.5), features={"c": Categorical(), "z": Numeric()})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        other.fit(frame[["c", "z"]], y)
     # Level C has no claim past x = 3; A and B have claims everywhere.
     level = np.tile(np.repeat(["A", "B", "C"], 9), 4)
     x = np.tile(np.arange(9.0), 12)
@@ -956,6 +971,10 @@ def test_an_independent_fit_inside_a_progress_callback_reports_its_own_findings(
                 distributional_fit()
             inner.append(notices(caught, "Separation detected"))
             inner.append(notices(caught, "Separation in a spline-by-factor term"))
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                other.drop1(frame[["c", "z"]], y)
+            inner.append(notices(caught, "Separation detected"))
 
     model = SuperGLM(family=Tweedie(p=1.5), features={"c": Categorical(), "r": RandomEffect()})
     with warnings.catch_warnings(record=True) as caught:
@@ -971,7 +990,7 @@ def test_an_independent_fit_inside_a_progress_callback_reports_its_own_findings(
         )
 
     assert len(result.evaluations) > 1
-    assert [len(found) for found in inner] == [1, 2]
+    assert [len(found) for found in inner] == [1, 2, 1]
     assert len(notices(caught, "RandomEffect variance component(s) 'r'")) == 1
     assert len(notices(caught, "Separation detected")) == 1
 
@@ -1029,17 +1048,20 @@ def test_the_exported_solvers_keep_their_separation_keyword(monkeypatch, solver,
     assert result.separation_message == (None if mode == "ignore" else message)
 
 
+@pytest.mark.parametrize("dropped", [("x",), ("x", "z")])
 @pytest.mark.parametrize("mode", ["warn", "ignore", "error"])
-def test_drop1_names_the_feature_whose_comparison_fit_is_separated(monkeypatch, mode):
+def test_drop1_names_the_feature_whose_comparison_fit_is_separated(monkeypatch, mode, dropped):
     """``drop1`` publishes its comparison fits' deviances, so it reports their findings once.
 
     The full model fits cleanly; then the backstop's finding is forced on the
-    solves of the comparison fit without ``x``.  The call warns once, naming
-    that feature and not ``z``, stays silent under ``"ignore"`` and refuses
-    under ``"error"``; the comparison fit itself, discarded, says nothing.
-    Mutation checks: with comparison fits publishing, the generic warning came
-    without the feature's name; with ``drop1`` reading no finding, it said
-    nothing under any mode.
+    solves of the comparison fit without ``x``, or of both comparison fits.
+    The call warns once, naming each comparison fit that carries it (one
+    without ``x``, or one without ``x`` and one without ``z``, never one
+    without both), stays silent under ``"ignore"`` and refuses under
+    ``"error"``; the comparison fit itself, discarded, says nothing.  Mutation
+    checks: with comparison fits publishing, the generic warning came without
+    the feature's name; with ``drop1`` reading no finding, it said nothing
+    under any mode.
     """
     import superglm.diagnostics.separation as separation_module
 
@@ -1053,23 +1075,224 @@ def test_drop1_names_the_feature_whose_comparison_fit_is_separated(monkeypatch, 
     message = forced_runtime_finding()
 
     def finding(design, groups, *_args, **_kwargs):
-        return None if any(group.name == "x" for group in groups) else message
+        missing = {"x", "z"} - {group.name for group in groups}
+        return message if missing & set(dropped) else None
 
+    opening = (
+        "drop1: the comparison fit without 'x' carries "
+        if dropped == ("x",)
+        else "drop1: the comparison fits without 'x' and without 'z' each carry "
+    )
     monkeypatch.setattr(separation_module, "runtime_finding", finding)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         if mode == "error":
-            with pytest.raises(SeparationError, match=r"without feature\(s\) 'x' carries"):
+            with pytest.raises(SeparationError) as refused:
                 model.drop1(frame, y)
+            assert str(refused.value).startswith(opening)
             return
         table = model.drop1(frame, y)
 
     claims = runtime_claims(caught)
     assert sorted(table["feature"]) == ["x", "z"]
     assert len(claims) == (1 if mode == "warn" else 0)
-    assert all(
-        claim.startswith("drop1: the comparison fit without feature(s) 'x' ") for claim in claims
+    assert all(claim.startswith(opening) for claim in claims)
+
+
+@pytest.mark.parametrize("route", ["fit", "fit_reml", "fit_reml without smooth terms"])
+def test_a_refused_fit_says_nothing_else_about_itself(monkeypatch, route):
+    """Under ``"error"`` a separated fit is refused before any statement about it is made.
+
+    Unforced: one claim-free row at offset -100 holds its predictor at the log
+    link's guard.  A log-link binomial ``fit`` would also report that row at
+    a probability of 0, and a ``fit_reml`` whose indicator ``z`` has one
+    active, claim-free row would name ``z`` weakly identified; both are
+    refused with no warning, as ``fit`` was on master.  The unresolved-row
+    report, which every route runs after its solve, is forced to speak, and
+    is not reached either.  Mutation checks: with the refusal left to
+    publication, ``fit`` gave a ``ConvergenceWarning``, ``fit_reml`` a
+    ``WeakIdentificationWarning`` and a ``fit_reml`` with no smooth term the
+    unresolved-row report about the fit they refused.
+    """
+    from superglm.distributions import Binomial
+    from superglm.links import LogLink
+    from superglm.model import fit_ops
+
+    def unresolved_rows(model):
+        warnings.warn("unresolved rows", UserWarning)
+
+    monkeypatch.setattr(fit_ops, "_warn_unresolved_rows", unresolved_rows)
+    if route != "fit_reml":
+        rng = np.random.default_rng(4)
+        n = 400
+        x = rng.uniform(-2.0, 2.0, n)
+        y = rng.binomial(1, np.clip(np.exp(-0.5 + 0.4 * x), 0.01, 0.99)).astype(float)
+        y[np.argmax(x)] = 1.0
+        frame = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family=Binomial(), link=LogLink(), features={"x": Numeric()}, separation="error"
+        )
+    else:
+        rng = np.random.default_rng(3)
+        n = 1500
+        x = rng.uniform(0.0, 1.0, n)
+        z = np.zeros(n)
+        z[1] = 1.0
+        y = rng.poisson(np.exp(0.3 + np.sin(3.0 * x))).astype(float)
+        y[1] = 0.0
+        frame = pd.DataFrame({"x": x, "z": z})
+        model = SuperGLM(
+            family="poisson",
+            features={"x": Spline(kind="cr", k=8), "z": Numeric()},
+            separation="error",
+        )
+    offset = np.zeros(n)
+    offset[0], y[0] = -100.0, 0.0
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(SeparationError, match="overflow guard"):
+            getattr(model, route.split()[0])(frame, y, offset=offset)
+
+    assert [c.category.__name__ for c in caught] == []
+
+
+def test_strict_fit_reml_decides_on_the_theta_refit_it_returns(monkeypatch):
+    """An NB2 ``theta="auto"`` REML fit refits at each new theta; only the last is returned.
+
+    The backstop's finding is forced on every refit but the last.  Under
+    ``"error"`` the fit is returned, its state clean: a refit the alternation
+    supersedes is no fit the caller receives.  Mutation check: refusing each
+    strict refit as it finished refused the first.
+    """
+    import superglm.diagnostics.separation as separation_module
+    from superglm.distributions import NegativeBinomial
+    from superglm.model import fit_ops
+
+    rng = np.random.default_rng(3)
+    n = 1500
+    x = rng.uniform(0.0, 1.0, n)
+    mean = np.exp(0.3 + np.sin(3.0 * x))
+    y = rng.negative_binomial(2.0, 2.0 / (2.0 + mean)).astype(float)
+    frame = pd.DataFrame({"x": x})
+    real_finalize, real_finding = fit_ops.finalize_reml_fit, separation_module.runtime_finding
+    message = forced_runtime_finding()
+    refits, last = [], []
+
+    def finalize(*args, **kwargs):
+        refits.append(1)
+        return real_finalize(*args, **kwargs)
+
+    def finding(*args, **kwargs):
+        if last and len(refits) < last[0]:
+            return message
+        return real_finding(*args, **kwargs)
+
+    monkeypatch.setattr(fit_ops, "finalize_reml_fit", finalize)
+    monkeypatch.setattr(separation_module, "runtime_finding", finding)
+
+    def fit():
+        model = SuperGLM(
+            family=NegativeBinomial(theta="auto"),
+            features={"x": Spline(kind="cr", k=8)},
+            separation="error",
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return model.fit_reml(frame, y)
+
+    fit()
+    assert len(refits) > 1
+    last.append(len(refits))
+    refits.clear()
+    model = fit()
+
+    assert len(refits) == last[0]
+    assert model.result.separation_message is None
+
+
+@pytest.mark.parametrize("discrete", [False, True])
+@pytest.mark.parametrize("mode", [None, "warn", "error", "ignore", "record", "recrod"])
+def test_the_exported_reml_optimizers_disclose_the_state_they_return(monkeypatch, discrete, mode):
+    """``optimize_direct_reml`` and ``optimize_discrete_reml_cached_w`` speak as the solvers do.
+
+    Each is called directly, with the arguments a model's ``fit_reml`` passes
+    it, on solves carrying the backstop's finding (forced).  It warns once by
+    default and under ``"warn"``, refuses under ``"error"`` and says nothing
+    under ``"ignore"`` and ``"record"`` (which the model passes, since its fit
+    publishes the finding); a misspelt mode is refused first.  Mutation check:
+    with the optimizer disclosing nothing, a direct call returned the finding
+    silently.
+    """
+    from superglm.model import reml_ops
+    from superglm.reml import optimize_direct_reml, optimize_discrete_reml_cached_w
+
+    frame, y = poisson_curve()
+    message = force_runtime_finding(monkeypatch)
+    calls = []
+
+    def standalone(*args, **kwargs):
+        assert kwargs.pop("separation") == "record"
+        function = optimize_direct_reml
+        if discrete:
+            function = optimize_discrete_reml_cached_w
+            args = args[:4] + args[5:]
+            kwargs.pop("w_correction_order")
+            kwargs.pop("presolve")
+        modes = {} if mode is None else {"separation": mode}
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            try:
+                result = function(*args, **kwargs, **modes)
+            except (SeparationError, ValueError) as exc:
+                result = exc
+        calls.append((result, runtime_claims(caught)))
+        return function(*args, **kwargs, separation="record")
+
+    monkeypatch.setattr(reml_ops, "optimize_direct_reml", standalone)
+    model = SuperGLM(
+        family="poisson",
+        features={"x": Spline(kind="cr", k=8)},
+        discrete=discrete,
+        separation="ignore",
     )
+    model.fit_reml(frame, y)
+
+    [(result, claims)] = calls
+    if mode == "recrod":
+        assert isinstance(result, ValueError)
+        assert "separation must be 'warn', 'error', 'ignore'" in str(result)
+        return
+    if mode == "error":
+        assert isinstance(result, SeparationError)
+        assert str(result) == message
+        return
+    assert claims == ([message] if mode in (None, "warn") else [])
+    assert result.pirls_result.separation_message == message
+
+
+def test_separation_error_takes_the_arguments_a_value_error_does():
+    """``SeparationError`` keeps ``ValueError``'s positional arguments, and loads old pickles.
+
+    ``levels`` is keyword-only.  An exception pickled before ``levels``
+    existed (its class and positional arguments only) loads with ``levels``
+    false.  Mutation check: with a single positional message, two arguments
+    raised ``TypeError`` and the no-argument form held one empty argument.
+    """
+    import pickle
+
+    assert SeparationError("x", "foo").args == ("x", "foo")
+    assert SeparationError().args == ()
+    assert SeparationError("level", levels=True).levels
+
+    class Saved:
+        def __reduce__(self):
+            return SeparationError, ("x", "foo")
+
+    loaded = pickle.loads(pickle.dumps(Saved()))
+    assert type(loaded) is SeparationError
+    assert (loaded.args, loaded.levels) == (("x", "foo"), False)
+    again = pickle.loads(pickle.dumps(SeparationError("level", levels=True)))
+    assert (again.args, again.levels) == (("level",), True)
 
 
 def test_a_coefficient_revision_clears_the_solves_separation_finding(monkeypatch):

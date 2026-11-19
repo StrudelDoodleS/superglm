@@ -15,6 +15,7 @@ from superglm._reporting_state import (
     StructuredLevelSupport,
     build_reporting_support_state,
 )
+from superglm.diagnostics.separation import refuse_published_separation
 from superglm.distributions import Gamma, Gaussian, Tweedie, clip_mu
 from superglm.links import stabilize_eta
 from superglm.model.base import rebuild_dm_with_lambdas
@@ -969,6 +970,8 @@ def finalize_reml_fit(
     corrected = replace(final_pirls, phi=phi_fixed)
     model._result = corrected
     model._reml_result.pirls_result = corrected
+    # Under "error" a separated fit is refused before anything describes it.
+    refuse_published_separation(model, corrected)
     _disclose_weak_identification(
         model,
         profile=profile,

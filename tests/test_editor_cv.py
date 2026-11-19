@@ -2729,6 +2729,87 @@ def test_final_fit_gives_level_advice_only_for_a_separated_level(monkeypatch):
     assert (fold, level) == sentences[::-1]
 
 
+def test_run_cv_gives_level_advice_only_for_a_separated_level():
+    """A fold refused for a coefficient run off is told so, not to group a level it lacks.
+
+    The editor's model is one numeric indicator whose active rows have no
+    claim in the supplied folds; strict, a fold's fit walks that slope to the
+    log link's guard and is refused by the runtime backstop.  Mutation check:
+    with Run CV passing the level sentence for both refusals, it told the user
+    to group a level.
+    """
+    import superglm.editor.cv as cv
+    from superglm.editor.cv import capture_cv_run, run_cv
+    from superglm.editor.errors import EditorValueError
+
+    x = np.tile([0.0, 1.0], 64)
+    X, y = pd.DataFrame({"x": x}), 1.0 - x
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        supplied = cross_validate(
+            SuperGLM(
+                family="poisson",
+                features={"x": Numeric()},
+                selection_penalty=1.0,
+                separation="ignore",
+            ),
+            X,
+            y,
+            cv=KFold(3),
+            scoring=("deviance",),
+        )
+        model = SuperGLM(
+            family="poisson",
+            features={"x": Numeric()},
+            separation="error",
+            convergence="coefficients",
+            max_iter=150,
+        ).fit(X, np.ones(len(X)))
+        session = EditorSession.from_model(model, cv=supplied, cv_data=(X, y), train_data=(X, y))
+        with pytest.raises(EditorValueError) as run:
+            run_cv(capture_cv_run(session), _Context())
+
+    assert run.value.public_message == cv.FOLD_FAILED.format(fold=1, reason=cv.FOLD_DIVERGED)
+
+
+@pytest.mark.parametrize("slope_scale", [0.0, 1.5])
+def test_final_fit_warns_about_separation_in_the_model_it_returns(slope_scale):
+    """Final fit's runtime warning describes the model after the carried edits.
+
+    The refit of a claim-free numeric indicator walks its slope to the log
+    link's guard.  An edit setting the slope to zero makes every returned
+    prediction 1, and Final fit says nothing about collapsed predictions; an
+    edit steeper than the refit's keeps the indicator's rows at the guard,
+    and it warns once.  Mutation check: with the refit's warning given before
+    the edits, the zero-slope model was said to have collapsed.
+    """
+    from superglm import SeparationWarning
+    from superglm.editor.cv import capture_final_fit, run_final_fit
+
+    z = np.repeat([0.0, 1.0], 64)
+    X, y = pd.DataFrame({"z": z}), 1.0 - z
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = SuperGLM(
+            family="poisson", features={"z": Numeric()}, convergence="coefficients", max_iter=150
+        ).fit(X, y)
+    session = EditorSession.from_model(model, terms=["z"], train_data=(X, y))
+    term = session.terms["z"]
+    term.edited_log_effect = term.original_log_effect * slope_scale
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        final = run_final_fit(capture_final_fit(session), _Context())
+
+    claims = [c for c in caught if issubclass(c.category, SeparationWarning)]
+    assert final.carried == ("z",)
+    if slope_scale == 0.0:
+        np.testing.assert_allclose(final.model.predict(X), 1.0, rtol=1e-6)
+        assert claims == []
+    else:
+        assert len(claims) == 1
+        assert "overflow guard" in str(claims[0].message)
+
+
 @pytest.mark.parametrize(
     "error",
     [

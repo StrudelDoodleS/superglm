@@ -51,8 +51,8 @@ class SeparationError(ValueError):
     finding and the runtime backstop's, which names model terms, are not.
     """
 
-    def __init__(self, message: str = "", *, levels: bool = False) -> None:
-        super().__init__(message)
+    def __init__(self, *args: object, levels: bool = False) -> None:
+        super().__init__(*args)
         self.levels = levels
 
 
@@ -72,8 +72,8 @@ def disclosure_scope(model: Any) -> Iterator[None]:
     Each call opens its own scope, restoring the enclosing one on exit, so an
     independent fit started inside another call (from a progress callback)
     reports what it finds.  A fit the enclosing call runs and discards
-    (``_discarded_fit``: a power-search candidate's ``fit_reml``) shares that
-    call's scope.
+    (``_discarded_fit``: a power-search candidate's ``fit_reml``, a ``drop1``
+    comparison fit) shares that call's scope.
     """
     if getattr(model, "_discarded_fit", False) and _DISCLOSED.get() is not None:
         yield
@@ -107,7 +107,64 @@ def disclose_runtime_separation(message: str | None, mode: str) -> None:
         return
     if mode == "error":
         raise SeparationError(message)
+    held = _HELD.get()
+    if held is not None:
+        held.append(message)
+        return
     warn_caller(message, SeparationWarning)
+
+
+#: The runtime warnings a caller holds back to decide on later; ``None`` when none does.
+_HELD: ContextVar[list[str] | None] = ContextVar("superglm_separation_held", default=None)
+
+
+@contextmanager
+def held_runtime_warnings() -> Iterator[list[str]]:
+    """Collect, rather than emit, the runtime warnings of the fits run inside.
+
+    For a caller that revises the fit before returning it (the editor's Final
+    fit carrying edits), which then warns about what it returns.  A refusal
+    under ``"error"`` is not held.
+    """
+    held: list[str] = []
+    token = _HELD.set(held)
+    try:
+        yield held
+    finally:
+        _HELD.reset(token)
+
+
+def refuses_on_publication(model: Any) -> bool:
+    """Whether a runtime finding on the fit ``model`` is solving now refuses it.
+
+    Under ``"error"``, a fit the caller receives is refused as soon as its
+    state is known, before anything else describes it.  A discarded fit
+    (``_discarded_fit``) and a refit of an NB2 theta alternation, which a later
+    refit may supersede, are decided where the call publishes
+    (``capture_fit_state``).
+    """
+    return (
+        getattr(model, "_separation", "warn") == "error"
+        and not getattr(model, "_discarded_fit", False)
+        and not getattr(model, "_nb_theta_search", False)
+    )
+
+
+def refuse_published_separation(model: Any, result: Any) -> None:
+    """Refuse ``result``, the state ``model``'s fit returns, when it carries a finding."""
+    message = getattr(result, "separation_message", None)
+    if message is not None and refuses_on_publication(model):
+        raise SeparationError(message)
+
+
+def disclose_solver_separation(message: str | None, mode: str) -> None:
+    """An exported optimizer's own disclosure of the state it returns, as a solver's.
+
+    ``"warn"`` warns at the optimizer's caller, ``"error"`` refuses, and
+    ``"ignore"`` and ``"record"`` say nothing.
+    """
+    if mode != "record":
+        disclose_runtime_separation(message, mode)
 
 
 def format_path_runtime_message(lambdas: NDArray, findings: Sequence[str | None]) -> str | None:
@@ -126,11 +183,20 @@ def format_drop1_runtime_message(findings: Sequence[tuple[str, str]]) -> str | N
     """One statement for ``drop1``: the dropped features whose comparison fit has a runtime finding."""
     if not findings:
         return None
-    names = ", ".join(repr(name) for name, _ in findings)
+    if len(findings) == 1:
+        opening = (
+            f"the comparison fit without {findings[0][0]!r} carries the runtime separation "
+            "finding, so the deviance change and test for dropping it compare"
+        )
+    else:
+        names = " and ".join(f"without {name!r}" for name, _ in findings)
+        opening = (
+            f"the comparison fits {names} each carry the runtime separation finding, so the "
+            "deviance change and test for dropping each compare"
+        )
     return (
-        f"drop1: the comparison fit without feature(s) {names} carries the runtime separation "
-        "finding, so the deviance change and test for dropping it compare with a fit that is "
-        f"not a maximum-likelihood fit. Without {findings[0][0]!r}: {findings[0][1]}"
+        f"drop1: {opening} with a fit that is not a maximum-likelihood fit. "
+        f"Without {findings[0][0]!r}: {findings[0][1]}"
     )
 
 

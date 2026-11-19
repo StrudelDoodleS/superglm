@@ -68,6 +68,8 @@ def model_optimize_direct_reml(
         presolve=False
         if getattr(model, "_in_power_search", False) or getattr(model, "_nb_theta_search", False)
         else None,
+        # The fit that publishes the result discloses it (``capture_fit_state``).
+        separation="record",
     )
     if model._discrete:
         from superglm.model.base import rebuild_dm_with_lambdas

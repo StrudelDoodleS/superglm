@@ -15,6 +15,7 @@ Every refusal is a fixed sentence (``editor/errors.py``).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import itertools
 import logging
@@ -31,7 +32,12 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
-from superglm.diagnostics.separation import SeparationError
+from superglm._warn import warn_caller
+from superglm.diagnostics.separation import (
+    SeparationError,
+    SeparationWarning,
+    held_runtime_warnings,
+)
 from superglm.distributional.api import SuperLSS
 from superglm.distributional.cross_validation import parts_ratio
 from superglm.distributional.rebuild import bind_replay_offsets
@@ -69,6 +75,7 @@ from superglm.features.rebuild import (
     clone_with_replaced_features,
     rebuilt_categorical,
 )
+from superglm.links import stabilize_eta
 from superglm.model.fit_state import configured_family, configured_lambda2, configured_penalty
 from superglm.model_selection import (
     FINGERPRINT_VERSION,
@@ -1626,16 +1633,20 @@ def run_final_fit(plan: FinalFitPlan, context) -> FinalFit:
         model = plan.model.lss._clone_with_replaced_terms(covering) if covering else plan.template
     else:
         model = _covering_template(plan.template, X, "Final fit").clone_unfitted()
+    # The edits carried below revise the refit, so its runtime separation
+    # warning waits for the model Final fit returns.
+    held = contextlib.nullcontext([]) if lss or not plan.edited else held_runtime_warnings()
     try:
-        fit_refit_model(
-            plan.model,
-            model,
-            method="auto",
-            X=X,
-            y=y,
-            sample_weight=sample_weight,
-            offset=offset,
-        )
+        with held as runtime_warnings:
+            fit_refit_model(
+                plan.model,
+                model,
+                method="auto",
+                X=X,
+                y=y,
+                sample_weight=sample_weight,
+                offset=offset,
+            )
     except (ValueError, *_SOLVER_FAILURES) as exc:
         # Separation and a solver failure say what they are. Any other
         # ValueError is a row the checks above do not name (a missing or
@@ -1656,6 +1667,9 @@ def run_final_fit(plan: FinalFitPlan, context) -> FinalFit:
             model, plan.edited, X, y, sample_weight, offset, n_points=plan.n_points
         )
         context.check()
+    if runtime_warnings and _predictor_at_guard(model, X, sample_weight, offset):
+        for message in runtime_warnings:
+            warn_caller(message, SeparationWarning)
     return FinalFit(
         model=model,
         model_revision=plan.model_revision,
@@ -1665,6 +1679,15 @@ def run_final_fit(plan: FinalFitPlan, context) -> FinalFit:
         carried=tuple(sorted(plan.edited)),
         pending=plan.pending,
         test_scores=lss_dataset_metrics(model, plan.test) if lss and plan.test else None,
+    )
+
+
+def _predictor_at_guard(model, X, sample_weight, offset) -> bool:
+    """Whether a weighted row's linear predictor sits at the link's overflow guard."""
+    eta = np.asarray(model._predict_eta_raw_exact(X, offset), dtype=np.float64)
+    at_guard = stabilize_eta(eta, model._link) != eta
+    return bool(
+        np.any(at_guard if sample_weight is None else at_guard & (np.asarray(sample_weight) > 0))
     )
 
 
