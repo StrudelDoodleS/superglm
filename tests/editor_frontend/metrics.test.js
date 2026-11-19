@@ -15,11 +15,26 @@ function render(payload) {
 
 const scores = (value) => Object.fromEntries(KEYS.map((key) => [key, value]));
 
+/** Each metric's rendered text, as tokens, and the direction it is coloured by. */
+function metricItems(html) {
+  return html.split(/<div class="metric-item"(?=[\s>])/).slice(1).map((item) => ({
+    direction: /data-direction="([^"]*)"/.exec(item)?.[1],
+    drawsArrow: /<svg/.test(item),
+    tokens: item.replace(/<[^>]*>/g, " ").replace(/^[^>]*>/, " ").split(/\s+/).filter(Boolean),
+  }));
+}
+
+const NUMBER = /^[+\u2212-]?\d/;
+
 test("an edited model is compared with the original's scores", () => {
   const html = render({ available: true, dataset_label: "Validation", metrics: { original: scores(2), edited: scores(3) } });
-  assert.match(html, /change against the original model/);
-  assert.match(html, /<span>\+1<\/span>/);
-  assert.match(html, /was 2</);
+  assert.match(html, /change against the original/i);
+  const items = metricItems(html);
+  assert.equal(items.length, KEYS.length);
+  for (const { tokens } of items) {
+    // the edited value, the original it was, and the signed change between them
+    assert.deepEqual(tokens.filter((token) => NUMBER.test(token)).sort(), ["+1", "2", "3"]);
+  }
 });
 
 // An edit that restores the quotes the original model lacks: its scores show, with no change.
@@ -30,9 +45,13 @@ test("an original with no scores shows the edited ones and no change", () => {
     note: "The original model has no quote for some of these rows, so the change against it is not shown.",
     metrics: { original: scores(null), edited: scores(3) },
   });
-  assert.match(html, /Validation data\. The original model has no quote/);
-  assert.match(html, /<span class="metric-item-value">3<\/span>/);
-  assert.match(html, /was --/);
-  assert.doesNotMatch(html, /\+3|NaN|null|undefined|metric-arrow/);
-  assert.doesNotMatch(html, /data-direction="(better|worse)"/);
+  assert.match(html, /The original model has no quote/);
+  const items = metricItems(html);
+  assert.equal(items.length, KEYS.length);
+  for (const { direction, drawsArrow, tokens } of items) {
+    // the edited value alone: no original, no change, and nothing coloured better or worse
+    assert.deepEqual(tokens.filter((token) => NUMBER.test(token)), ["3"]);
+    assert.ok(!tokens.some((token) => /NaN|null|undefined/.test(token)), tokens.join(" "));
+    assert.ok(!["better", "worse"].includes(direction) && !drawsArrow, direction);
+  }
 });
