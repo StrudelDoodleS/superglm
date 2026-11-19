@@ -3856,30 +3856,60 @@ def _dense_cross_trace(model: SuperGLM, X, W, rates, rank: int) -> tuple[float, 
 def test_an_alias_of_vanished_working_weights_keeps_its_fitted_values(monkeypatch) -> None:
     """A one-row level below the log link's range: no fitted value moves.
 
-    Its row's Fisher weight is ``3e-70``, so the weighted rows cannot tell a direction that
-    moves that row's linear predictor from zero, while the design on the rows with positive
-    prior weight identifies it (``identifiability._design_null``): it is no alias, so it is
-    never moved along (it would move that row by ``2.6e5``, to an overflowing mean), and its
+    An offset of ``-160`` puts the row's linear predictor below the log link's range
+    (``links._LOG_LINK_ETA_MIN``) from the first iteration, so its Fisher weight is the
+    range's floor, ``exp(-160) = 3e-70``, however far the walk goes, while its prior weight
+    stays one.  The weighted rows cannot tell a direction that moves that row's linear
+    predictor from zero, while the design on the rows with positive prior weight identifies it
+    (``identifiability._design_null``): it is no alias, so it is never moved along, and its
     coordinates' standard errors are not resolved at float64.  The design's own alias is
-    gauged, which moves no fitted value.  Mutation: treating every direction the weighted rows
-    put under their bound as an alias overflows the row's mean (and the cross-trace test below
-    raises on it).
+    gauged, which moves no fitted value.
+
+    The independent expectation is the same model with the row's prior weight zero, where that
+    direction is an exact null of the rows: the row's information (``3e-70``) and score
+    (``mu (y - mu)``, ``1e-35``) are far below the fit's tolerance, so every other row's fitted
+    mean is that fit's, the same aliased terms are reported (the vanished one ``"float64"``
+    where the weightless fit's is ``"rank"``), and the same coordinates keep a standard error.
+    The row itself predicts the link's floor.  Mutation: treating every direction the weighted
+    rows put under their bound as an alias (``_design_null`` returning them all), or gauging it,
+    reports it as ``"rank"`` and moves that row's mean from the floor to the ceiling,
+    ``exp(80)`` (and the cross-trace test below raises on it).
     """
     frame, y, weight = _signed_aliased_frame("one_row")
+    row = int(np.flatnonzero(frame["g"].to_numpy() == "g000")[0])
+    others = np.arange(len(y)) != row
+    offset = np.where(others, 0.0, -160.0)
+    weightless = np.where(others, weight, 0.0)
 
-    def fit():
+    def fit(prior=weight, shift=offset):
         model = _model("gaussian_log", "auto", lam=1.29, main_lam=1e-4, numerics=("x1", "x10"))
-        return _fit(model, frame, y, weight)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return model.fit_reml(frame, y, sample_weight=prior, offset=shift)
 
     model, before = fit(), without_gauge(monkeypatch, fit)
+    reference = fit(weightless, None)
     record = model._fit_inference_info["identifiability"]
-    assert {alias.source for alias in record.aliases} >= {"float64"}
+    expected = reference._fit_inference_info["identifiability"]
+    sources = {alias.term: alias.source for alias in record.aliases}
+    assert sources.keys() == {alias.term for alias in expected.aliases}
+    vanished = {term for term, source in sources.items() if source == "float64"}
+    assert len(vanished) == 1
+    assert {alias.source for alias in expected.aliases if alias.term in vanished} == {"rank"}
     assert record.weak is None
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        mean, unmoved = model.predict(frame), before.predict(frame)
+        mean, unmoved = model.predict(frame, offset=offset), before.predict(frame, offset=offset)
+        weightless_mean = reference.predict(frame)
+        se = model.metrics(frame, y, sample_weight=weight, offset=offset).coefficient_se
+        reference_se = reference.metrics(frame, y, sample_weight=weightless).coefficient_se
     assert np.all(np.isfinite(mean))
     np.testing.assert_allclose(mean, unmoved, rtol=1e-9)
+    np.testing.assert_allclose(mean[others], weightless_mean[others], rtol=1e-9)
+    # the floor, to the few ulp a SIMD ``exp`` may differ by
+    assert abs(mean[row] - math.exp(-80.0)) <= 8.0 * _U * math.exp(-80.0)
+    for term, values in reference_se.items():
+        assert np.array_equal(np.isfinite(se[term]), np.isfinite(values)), term
 
 
 @pytest.mark.parametrize(
