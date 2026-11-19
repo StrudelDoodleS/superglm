@@ -243,9 +243,9 @@ def test_endpoint_row_certificate_sums_every_row_chunk(monkeypatch) -> None:
 def test_likelihood_cache_compares_every_index_block_before_reusing_a_child() -> None:
     """A cached child is reused only for exactly its range of rows, checked in 8,192-index blocks.
 
-    Two rows swapped across the second and third blocks of 16,461 indices, or inside the
-    ragged final block of 77, are not the range, so the cache takes a fresh child with
-    those rows' weights rather than the child it holds.
+    Two rows swapped inside any one of the three blocks of 16,461 indices (two full blocks
+    and a ragged final block of 77) are not the range, so the cache takes a fresh child with
+    those rows' weights rather than the child it holds; each block is checked on its own.
     """
     n = 2 * 8192 + 77
     values = np.linspace(0.5, 1.5, n)
@@ -257,7 +257,7 @@ def test_likelihood_cache_compares_every_index_block_before_reusing_a_child() ->
     indices = np.arange(n)
     held = cache.take(plan, indices, start=0, stop=n)
     assert cache.take(plan, indices, start=0, stop=n) is held
-    for rows in ([8200, 16400], [n - 2, n - 1]):
+    for rows in ([20, 21], [8200, 8201], [n - 2, n - 1]):
         swapped = indices.copy()
         swapped[rows] = swapped[rows[::-1]]
         child = cache.take(plan, swapped, start=0, stop=n)
