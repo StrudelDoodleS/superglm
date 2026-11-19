@@ -962,27 +962,47 @@ def test_the_never_run_check_reads_every_shard_after_the_matrix() -> None:
         == f"python3 scripts/check_never_run_tests.py {download['with']['path']} --shards {shards}"
         for step in job["steps"]
     )
+    # each shard's two reports, the parallel stage's and the threads stage's, are the ones it reads
+    written = {
+        re.search(r"--junitxml=(\S+)", step["run"])[1]
+        for step in jobs["test-compatibility"]["steps"]
+        if "run_test_suite.py" in step.get("run", "")
+    }
+    assert [(report, _suite_runner()._beside(report)) for report in written] == [_REPORTS]
 
 
-def _junit(directory: Path, platform: str, cases: dict[tuple[str, str], str]) -> None:
-    """One shard's report: ``{(classname, name): outcome}``, outcome ``passed``, ``xfail``,
-    ``notrun`` (``xfail(run=False)``) or a skip message, in the forms pytest writes."""
-    shard = directory / f"pytest-{platform}-1"
+# A shard's reports: run_test_suite.py's parallel stage, then its serial threads stage.
+_REPORTS = ("pytest-results.xml", "pytest-results-threads.xml")
+
+
+def _junit(
+    directory: Path,
+    platform: str,
+    cases: dict[tuple[str, str], str],
+    group: int = 1,
+) -> Path:
+    """One shard's two reports: ``{(classname, name): outcome}`` in its parallel stage's and
+    one passing test in its threads stage's; outcome ``passed``, ``xfail``, ``notrun``
+    (``xfail(run=False)``) or a skip message, in the forms pytest writes."""
+    shard = directory / f"pytest-{platform}-{group}"
     shard.mkdir(parents=True)
-    body = []
-    for (classname, name), outcome in cases.items():
-        inner = {
-            "passed": "",
-            "xfail": '<skipped type="pytest.xfail" message="declared" />',
-            "notrun": '<skipped type="pytest.xfail" message="[NOTRUN] disabled until fixed" />',
-        }.get(outcome, f'<skipped type="pytest.skip" message="{outcome}" />')
-        body.append(
-            f'<testcase classname="{classname}" name="{name}" time="0.1">{inner}</testcase>'
+    threads = {("tests.test_ci_contracts", "test_with_the_default_pools"): "passed"}
+    for report, stage in zip(_REPORTS, (cases, threads), strict=True):
+        body = []
+        for (classname, name), outcome in stage.items():
+            inner = {
+                "passed": "",
+                "xfail": '<skipped type="pytest.xfail" message="declared" />',
+                "notrun": '<skipped type="pytest.xfail" message="[NOTRUN] disabled until fixed" />',
+            }.get(outcome, f'<skipped type="pytest.skip" message="{outcome}" />')
+            body.append(
+                f'<testcase classname="{classname}" name="{name}" time="0.1">{inner}</testcase>'
+            )
+        (shard / report).write_text(
+            f'<testsuites><testsuite name="pytest">{"".join(body)}</testsuite></testsuites>',
+            encoding="utf-8",
         )
-    (shard / "pytest-results.xml").write_text(
-        f'<testsuites><testsuite name="pytest">{"".join(body)}</testsuite></testsuites>',
-        encoding="utf-8",
-    )
+    return shard
 
 
 def _check_never_run(directory: Path, shards: int = 2) -> subprocess.CompletedProcess:
@@ -1056,21 +1076,43 @@ def test_the_never_run_check_fails_only_on_a_test_no_platform_ran(tmp_path: Path
         assert f"{classname.replace('.', '/')}.py::{name}: " in never_ran.stdout, name
 
 
-@pytest.mark.parametrize("report", ["missing", "empty", "no tests"])
-def test_the_never_run_check_fails_unless_every_shard_reported(tmp_path: Path, report) -> None:
-    """A shard whose junit is missing or holds no test hides what it skipped."""
-    _junit(tmp_path, "Linux-X64-py3.12", {("tests.test_ci_contracts", "test_a"): "passed"})
-    if report != "missing":
-        silent = tmp_path / "pytest-Windows-X64-py3.13-1"
-        silent.mkdir()
-        empty = "" if report == "empty" else '<testsuites><testsuite name="pytest" /></testsuites>'
-        (silent / "pytest-results.xml").write_text(empty, encoding="utf-8")
+@pytest.mark.parametrize(
+    ("report", "fault"),
+    [(report, fault) for report in _REPORTS for fault in ("missing", "unreadable", "holds no test")]
+    + [(None, "no artifact")],
+)
+def test_the_never_run_check_fails_unless_every_shard_sent_both_reports(
+    tmp_path: Path, report, fault
+) -> None:
+    """Either report of a shard missing, truncated or empty hides what that stage skipped, and
+    the check names the shard and the file; a shard that sent nothing is named by the platform
+    and the group the other shards show, and a whole runtime missing is counted."""
+    for platform in ("Linux-X64-py3.12", "Windows-X64-py3.13"):
+        for group in (1, 2):
+            _junit(tmp_path, platform, {("tests.test_ci_contracts", "test_a"): "passed"}, group)
+    shard = tmp_path / "pytest-Windows-X64-py3.13-2"
+    complete, runtime_missing = _check_never_run(tmp_path, 4), _check_never_run(tmp_path, 6)
+    if fault == "no artifact":
+        for name in _REPORTS:
+            (shard / name).unlink()
+        shard.rmdir()
+    elif fault == "missing":
+        (shard / report).unlink()
+    else:
+        text = (
+            '<testsuites><testsuite name="pytest">' if fault == "unreadable" else "<testsuites />"
+        )
+        (shard / report).write_text(text, encoding="utf-8")
 
-    done = _check_never_run(tmp_path)
+    done = _check_never_run(tmp_path, 4)
 
+    assert complete.returncode == 0, complete.stdout + complete.stderr
+    assert runtime_missing.returncode == 1 and "2 more sent no artifact" in runtime_missing.stdout
     assert done.returncode == 1, done.stdout + done.stderr
-    assert "1 of 2 shards reported a test" in done.stdout
-    assert ("pytest-Windows-X64-py3.13-1" in done.stdout) == (report != "missing")
+    assert "3 of 4 shards sent both reports, each holding a test" in done.stdout
+    faults = [(name, "missing") for name in _REPORTS] if report is None else [(report, fault)]
+    for name, why in faults:
+        assert f"pytest-Windows-X64-py3.13-2/{name} {why}" in done.stdout
 
 
 # A fit's outcome: what an assertion behind ``if <outcome>:`` or a skip waits on.
