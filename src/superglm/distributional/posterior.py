@@ -1304,7 +1304,7 @@ def _theta_blocks(
     seed: int,
     offsets: Mapping[str, NDArray] | None,
     chunk_rows: int,
-) -> Generator[tuple[slice, NDArray[np.float64]], None, None]:
+) -> Generator[tuple[slice, NDArray[np.float64], NDArray[np.bool_]], None, None]:
     """Yield ``(row_slice, theta, outside)``, each flattened to ``(draws * rows, k)``.
 
     ``theta`` holds a stand-in where ``outside`` marks a cell with no value
