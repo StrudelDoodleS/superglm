@@ -3912,6 +3912,109 @@ def test_an_alias_of_vanished_working_weights_keeps_its_fitted_values(monkeypatc
         assert np.array_equal(np.isfinite(se[term]), np.isfinite(values)), term
 
 
+def _contrast_rows(model: SuperGLM, frame) -> np.ndarray:
+    """Each row's linear predictor less the first row's, as a row of the coefficients."""
+    from superglm._frame import as_eager_frame
+    from superglm.model import base
+
+    rows, p = as_eager_frame(frame), len(model.result.beta)
+    plan = base._prediction_plan(model)
+    terms = [t for key in plan for t in plan[key] if isinstance(t, dict) and "beta_idx" in t]
+    design = np.column_stack(
+        [
+            sum(base._score_prediction_term_exact(term, rows, unit) for term in terms)
+            for unit in np.eye(p)
+        ]
+    )
+    return design[1:] - design[0]
+
+
+@pytest.mark.pins_behaviour
+def test_a_vanished_working_weight_publishes_the_gauge_of_a_zero_prior_weight() -> None:
+    """A row whose working weight vanished and the same row at prior weight zero: one gauge.
+
+    Pins the canonical gauge: a row that adds nothing to the information leaves the published
+    constraint where a weightless row puts it.  The fits are the one above's (offset ``-160``,
+    the row's Fisher weight ``3e-70``) and the same with that row's prior weight zero.  Their
+    coefficients are not comparable entry by entry: ``sz`` builds its basis from the prior
+    weights (the marginal's weighted QR, and a weightless level is held at the population curve
+    where a thin one is not), so the two designs differ in every spline and ``sz`` column, and
+    with them the coefficient SEs (183 of 192 differ, by up to 53%, at the fit above's
+    smoothing parameters).  What does not
+    depend on the coordinates is a contrast of linear predictors between new rows, every level
+    at seven values of ``x``; each one leans on ``null(H)``, so the published constraint
+    decides its SE (re-gauged onto the minimum-norm constraint, they move by factors up to 65).
+    The two fits give every contrast one SE up to one factor, the square root of their scales'
+    ratio: the vanished row's residual stays in its fit's Pearson sum as a data row's does.
+    The rest is the SEs' rounding, ``kappa u`` with ``kappa`` the Jacobi-scaled solver
+    Hessian's condition on the complement of ``null(H)`` (Demmel, LAPACK Working Note 14, 1989):
+    ``3.5e10`` with the main smooth at ``lambda = 100``, where its smallest identified curvature
+    (a direction only its penalty reaches) is ``8e-10`` of the largest, against ``1e-15`` at the
+    fit above's ``1e-4``, which would leave no bound.  Measured, the contrasts agree to
+    ``5.6e-14`` and the factor is the scales' ratio to ``5.6e-12``, inside the fits'
+    convergence ``tol``.  It held at ``253c6d353``,
+    where the 53% was read as a defect.  Mutation: a covariance projected along the moved
+    directions only, leaving the vanished one where the factor's inverse left it, changes the
+    vanished fit's contrasts by more.
+    """
+    from superglm.model import state_ops
+
+    frame, y, weight = _signed_aliased_frame("one_row")
+    row = int(np.flatnonzero(frame["g"].to_numpy() == "g000")[0])
+    others = np.arange(len(y)) != row
+    offset = np.where(others, 0.0, -160.0)
+    weightless = np.where(others, weight, 0.0)
+
+    def fit(prior, shift):
+        model = _model("gaussian_log", "auto", lam=1.29, main_lam=100.0, numerics=("x1", "x10"))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return model.fit_reml(frame, y, sample_weight=prior, offset=shift)
+
+    vanished, reference = fit(weight, offset), fit(weightless, None)
+    assert {a.source for a in vanished._fit_inference_info["identifiability"].aliases} == {
+        "rank",
+        "float64",
+    }
+    assert {a.source for a in reference._fit_inference_info["identifiability"].aliases} == {"rank"}
+    levels = sorted(frame["g"].unique())
+    new = pd.DataFrame(
+        [
+            {"x": x, "x1": 0.0, "x10": 10.0, "cat": "c00", "g": level}
+            for level in levels
+            for x in np.linspace(0.05, 0.95, 7)
+        ]
+    )
+    se = []
+    for model in (vanished, reference):
+        contrasts = _contrast_rows(model, new)
+        gauge = model._fit_inference_info["identifiability"].gauge
+        # every contrast leans on null(H), so the constraint decides its SE
+        reach = np.linalg.norm(contrasts @ np.linalg.qr(gauge.null)[0], axis=1)
+        assert np.all(reach > 1e-6 * np.linalg.norm(contrasts, axis=1))
+        covariance = np.asarray(model._coef_covariance[0])
+        se.append(np.sqrt(np.einsum("ij,jk,ik->i", contrasts, covariance, contrasts)))
+    # the Jacobi-scaled solver Hessian of the weightless fit, dense
+    W = np.asarray(state_ops._solver_space_working_weights(reference), dtype=np.float64)
+    n = reference._dm.n
+    X = np.hstack(
+        [np.asarray(m.toarray(), float).reshape(n, -1) for m in reference._dm.group_matrices]
+    )
+    state = state_ops.retained_linear_state(reference)
+    S = state_ops._structured_penalty_product(state.penalized_operator)(np.eye(X.shape[1]))[0]
+    B = np.sqrt(W)[:, None] * (X - (W @ X) / np.sum(W))
+    H = B.T @ B + S
+    jacobi = np.sqrt(np.diag(H))
+    values, vectors = np.linalg.eigh(H / np.outer(jacobi, jacobi))
+    k = reference._fit_inference_info["identifiability"].gauge.null.shape[1]
+    kappa = values[-1] / values[k]
+    ratio = se[0] / se[1]
+    factor = float(np.median(ratio))
+    assert np.max(np.abs(ratio / factor - 1.0)) <= 4.0 * kappa * _U
+    scale = math.sqrt(vanished.result.phi / reference.result.phi)
+    assert abs(factor / scale - 1.0) <= reference._tol
+
+
 @pytest.mark.parametrize(
     ("variant", "lam_x"), [("same_x", 8e-4), ("same_x", 1e-4), ("one_row", 1e-4)]
 )
