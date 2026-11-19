@@ -444,11 +444,15 @@ def test_capped_replication_reads_each_occurrence_at_most_once() -> None:
             assert abs(drawn - cap * share) <= 6 * sd
 
 
-@pytest.mark.parametrize("counts", [[2.0**62, 2.0**62], [2.0**63, 1.0]], ids=["wraps", "too-wide"])
+@pytest.mark.parametrize(
+    "counts",
+    [[2.0**62, 2.0**62], [2.0**63, 1.0], [2.0**53, 1.0]],
+    ids=["wraps", "too-wide", "rounds-to-bound"],
+)
 def test_replication_refuses_counts_past_the_exact_count_bound(counts) -> None:
     kwargs = _residual_kwargs(n=2)
     kwargs.update(weights=np.array(counts), weight_semantics="frequency")
-    with pytest.raises(ValueError, match=r"more than 2\*\*53 occurrences"):
+    with pytest.raises(ValueError, match=r"2\*\*53 or more occurrences"):
         replication_sample(ResidualSet(**kwargs), max_rows=10)
 
 

@@ -114,9 +114,11 @@ def occurrence_rows(counts, cap: int, generator: np.random.Generator) -> NDArray
     the draw's random order, so copies of one row do not sit together and a
     check that splits tied values by position splits them at random.
     """
-    if float(np.sum(counts, dtype=np.float64)) > 2.0**53:
+    # Partial sums of non-negative integers are exact below 2**53 and round
+    # monotonically, so the float total reaches 2**53 exactly when the true one does.
+    if float(np.sum(counts, dtype=np.float64)) >= 2.0**53:
         raise ValueError(
-            "the frequency weights total more than 2**53 occurrences, which cannot be "
+            "the frequency weights total 2**53 or more occurrences, which cannot be "
             "counted exactly; rescale them or declare prior weights"
         )
     occurrences = np.asarray(counts, dtype=np.int64)
