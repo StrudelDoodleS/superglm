@@ -129,6 +129,7 @@ def workflow() -> str:
 # ── the discovery itself must not silently find nothing ─────────────────────
 
 
+@pytest.mark.pins_behaviour
 def test_the_discovery_finds_the_suites_that_are_known_to_guard_on_data():
     """A scan that matched nothing would make every contract below vacuous."""
     found = data_guarded_suites()

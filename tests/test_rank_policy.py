@@ -2210,6 +2210,7 @@ def test_scaled_alias_summary_blanks_only_the_scaled_duplicate(alias_scale: floa
     assert legacy_rows["x"].se == pytest.approx(alone, rel=1e-8)
 
 
+@pytest.mark.pins_behaviour
 def test_coefficient_estimability_mask_is_vectorized(monkeypatch) -> None:
     """Wide coefficient masks must not repeat full null-space projections."""
     x = np.linspace(-1.0, 1.0, 80)

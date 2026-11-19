@@ -1365,7 +1365,11 @@ def exact_row_signs(matrix, direction: NDArray) -> NDArray:
     ``matrix`` is a SciPy CSR matrix.  Every product is split exactly (Dekker's TwoProduct,
     ``mode_score.two_product``).  A row whose plain sum clears its rounding bound,
     ``gamma_(2k) sum |terms|`` over its ``2k`` addends (Higham 2002, eq. 4.4), has that sum's
-    sign; every other row is summed exactly by ``math.fsum`` (Shewchuk's algorithm, correctly
+    sign.  A row whose products are exact (no tail) and whose terms lie on one dyadic grid
+    narrow enough to hold their sum (their exponents within ``53 - log2(count)`` bits of the
+    finest bit any of them sets) sums exactly in float64 in any order, so its plain sum is
+    exact: a structural row (indicator columns, a dyadic direction) is decided so, with no row
+    loop.  Every other row is summed exactly by ``math.fsum`` (Shewchuk's algorithm, correctly
     rounded, so its sign is the exact sum's).  A row whose product leaves the normal range
     (``0 < |p| < 2^-969``, where TwoProduct's tail is lost) is ``2``: not decidable here.
     """
@@ -1380,16 +1384,29 @@ def exact_row_signs(matrix, direction: NDArray) -> NDArray:
     high, low = two_product(np.asarray(matrix.data, dtype=np.float64), direction[matrix.indices])
     counts = np.diff(indptr)
     owner = np.repeat(np.arange(rows), counts)
-    plain = np.zeros(rows)
-    magnitude = np.zeros(rows)
-    np.add.at(plain, owner, high + low)
-    np.add.at(magnitude, owner, np.abs(high) + np.abs(low))
-    lost = np.zeros(rows, dtype=bool)
-    np.logical_or.at(lost, owner, (high != 0.0) & (np.abs(high) < 2.0**-969))
+    plain = np.bincount(owner, weights=high + low, minlength=rows)
+    magnitude = np.bincount(owner, weights=np.abs(high) + np.abs(low), minlength=rows)
+    nonzero = high != 0.0
+    lost = np.bincount(owner, weights=nonzero & (np.abs(high) < 2.0**-969), minlength=rows) > 0
     bound = gamma(2 * counts + 2) * magnitude
     clear = np.abs(plain) > bound
     signs[clear] = np.sign(plain[clear]).astype(np.int8)
-    for row in np.flatnonzero(~clear & ~lost & (counts > 0)):
+    # the dyadic grid of each row's terms: the finest bit any sets, the largest exponent
+    mantissa, exponent = np.frexp(high[nonzero])
+    significand = np.ldexp(np.abs(mantissa), 53).astype(np.int64)
+    finest = exponent - 53 + np.log2((significand & -significand).astype(np.float64)).astype(int)
+    big = np.iinfo(np.int64).max // 4
+    lowest = np.full(rows, big, dtype=np.int64)
+    highest = np.full(rows, -big, dtype=np.int64)
+    np.minimum.at(lowest, owner[nonzero], finest)
+    np.maximum.at(highest, owner[nonzero], exponent)
+    terms = np.bincount(owner[nonzero], minlength=rows)
+    tailed = np.bincount(owner, weights=low != 0.0, minlength=rows) > 0
+    span = highest - lowest + np.ceil(np.log2(np.maximum(terms, 1))).astype(np.int64) + 1
+    gridded = ~clear & ~lost & ~tailed & ((terms == 0) | (span <= 53))
+    exact = np.bincount(owner, weights=high, minlength=rows)
+    signs[gridded] = np.sign(exact[gridded]).astype(np.int8)
+    for row in np.flatnonzero(~clear & ~gridded & ~lost & (counts > 0)):
         lo, hi = indptr[row], indptr[row + 1]
         total = math.fsum(np.concatenate((high[lo:hi], low[lo:hi])).tolist())
         signs[row] = int(np.sign(total))
@@ -1416,15 +1433,17 @@ def _verified_separation(matrix, sides: NDArray, direction: NDArray) -> NDArray 
 
 
 def _snapped(direction: NDArray) -> list[NDArray]:
-    """Proposals near ``direction``: itself scaled to unit maximum, and on dyadic grids."""
+    """Proposals near ``direction``, scaled to unit maximum: on dyadic grids, coarsest first, then
+    itself (a structural direction verifies on a coarse grid, where its rows sum exactly)."""
     largest = float(np.max(np.abs(direction), initial=0.0))
     if not (largest > 0.0 and math.isfinite(largest)):
         return []
     unit = direction / largest
-    proposals = [unit]
+    proposals = []
     for bits in _SNAP_BITS:
         scale = float(2**bits)
         proposals.append(np.round(unit * scale) / scale)
+    proposals.append(unit)
     return proposals
 
 
@@ -1493,6 +1512,7 @@ def separating_direction(matrix, sides: NDArray) -> tuple[NDArray | None, NDArra
         return None, np.zeros(0, dtype=np.intp), work
     signed = (sides[boundary][moved, None] * values[moved]) / largest[moved, None]
     count, width = signed.shape
+    # HiGHS's interior-point method: on 200,000 boundary rows its dual simplex took minutes
     program = linprog(
         np.concatenate((np.zeros(width), -np.ones(count))),
         A_ub=sparse.hstack(
@@ -1500,17 +1520,21 @@ def separating_direction(matrix, sides: NDArray) -> tuple[NDArray | None, NDArra
         ),
         b_ub=np.zeros(count),
         bounds=[(None, None)] * width + [(0.0, 1.0)] * count,
-        method="highs",
+        method="highs-ipm",
     )
     work["lp_status"] = int(program.status)
     if program.status != 0 or program.x is None:
         return None, np.zeros(0, dtype=np.intp), work
     proposal = candidates @ np.asarray(program.x[:width], dtype=np.float64)
+    # the rows the program separates: a snap that keeps them all is the answer
+    target = int(np.count_nonzero(np.asarray(program.x[width:]) > 0.5))
     best: tuple[NDArray, NDArray] | None = None
     for direction in _snapped(proposal):
         strict = _verified_separation(matrix, sides, direction)
         if strict is not None and (best is None or strict.size > best[1].size):
             best = (direction, strict)
+            if strict.size >= target:
+                break
     work["verified"] = int(best is not None)
     if best is None:
         return None, np.zeros(0, dtype=np.intp), work

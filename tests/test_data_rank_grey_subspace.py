@@ -427,6 +427,7 @@ def test_the_grams_eigenpairs_are_read_not_recomputed(monkeypatch):
     _assert_same_decisions(decided, rank.decompose_factor(A))
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("blocks", ["one_block", "many_blocks"])
 @pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
 @pytest.mark.parametrize("kind", sorted(FIXTURES))
@@ -451,6 +452,7 @@ def test_grey_projection_is_the_rows_product(kind, discrete, blocks, monkeypatch
     _assert_rows_product(model._dm, blocks, monkeypatch)
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("blocks", ["one_block", "many_blocks"])
 @pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
 @pytest.mark.parametrize("basis", ["fs", "sz"])
@@ -690,6 +692,7 @@ def test_the_fits_data_rank_on_request_takes_the_fits_route(monkeypatch):
     _assert_same_decisions(data, reference)
 
 
+@pytest.mark.pins_behaviour
 def test_unpenalized_fits_keep_the_data_rank_on_the_full_factor(monkeypatch):
     """Unpenalized, ``metrics()`` and the rebuilt state certify the data rank on the full factor.
 

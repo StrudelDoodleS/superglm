@@ -152,34 +152,37 @@ def existence_certified(
     gradient = np.asarray(design.rmatvec(r), dtype=np.float64) - mean * rsum - applied[:, 0]
     step = solve(gradient)
     intercept = rsum / total - float(mean @ step)
-    moved_rows = residual_rows(step, intercept)
-    # iterative refinement (Wilkinson): the step solves ``H v = g`` only to the coupling's and
-    # the weak directions' accuracy; any ``v`` serves the certificate, and a refined one leaves a
-    # smaller defect
-    for _ in range(2):
-        e0, es = defect(moved_rows, step)
-        correction = solve(es)
-        step = step + correction
-        intercept = intercept + e0 / total - float(mean @ correction)
-        moved_rows = residual_rows(step, intercept)
-    margin = float(np.min(sides[boundary] * moved_rows[boundary]))
-    if not margin > 0.0:
-        return False
-    e0, es = defect(moved_rows, step)
-    _, magnitude = penalty((beta + step)[:, None])
     scale = np.asarray(decomposition.column_scale, dtype=np.float64)
     safe = np.where(scale > 0.0, scale, 1.0)
     carried = W > 0.0
-    zeta = math.sqrt(float(np.sum(moved_rows[carried] ** 2 / W[carried])))
     uncentred = np.sqrt(np.maximum(np.asarray(data_diagonal, np.float64), 0.0) + total * mean**2)
     n, p = int(design.n), int(beta.size)
-    rounding = np.r_[
-        gamma_up(n + 2) * zeta,
-        (2.0 * gamma_up(n + p + 4) * uncentred * zeta + gamma_up(p + 2) * magnitude[:, 0]) / safe,
-    ]
-    scaled = np.r_[e0 / math.sqrt(total), es / safe]
-    bound = float(np.linalg.norm(scaled)) + float(np.linalg.norm(rounding))
-    return recession_excluded(margin, bound, min(1.0, float(floor)), float(np.max(W)))
+    curvature, weight = min(1.0, float(floor)), float(np.max(W))
+    # iterative refinement (Wilkinson), taken only when the certificate needs it: the step
+    # solves ``H v = g`` only to the coupling's and the weak directions' accuracy; any ``v``
+    # serves the certificate, and a refined one leaves a smaller defect
+    for refinement in range(3):
+        moved_rows = residual_rows(step, intercept)
+        margin = float(np.min(sides[boundary] * moved_rows[boundary]))
+        e0, es = defect(moved_rows, step)
+        if margin > 0.0:
+            _, magnitude = penalty((beta + step)[:, None])
+            zeta = math.sqrt(float(np.sum(moved_rows[carried] ** 2 / W[carried])))
+            rounding = np.r_[
+                gamma_up(n + 2) * zeta,
+                (2.0 * gamma_up(n + p + 4) * uncentred * zeta + gamma_up(p + 2) * magnitude[:, 0])
+                / safe,
+            ]
+            scaled = np.r_[e0 / math.sqrt(total), es / safe]
+            bound = float(np.linalg.norm(scaled)) + float(np.linalg.norm(rounding))
+            if recession_excluded(margin, bound, curvature, weight):
+                return True
+        if refinement == 2:
+            return False
+        correction = solve(es)
+        step = step + correction
+        intercept = intercept + e0 / total - float(mean @ correction)
+    return False
 
 
 def structured_floor(factor, hessian_diagonal: NDArray) -> float:

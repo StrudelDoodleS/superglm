@@ -33,6 +33,7 @@ def _load(name: str) -> dict:
         return pickle.load(handle)
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("name", ["re_gaussian_exact", "re_poisson_discrete"])
 def test_a_random_effect_model_saved_by_v0_35_0_loads_predicts_and_rebuilds(name) -> None:
     """T8 row "retired-class shim removed": without the module ``__getattr__`` of

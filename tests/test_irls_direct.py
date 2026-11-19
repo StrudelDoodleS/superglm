@@ -515,6 +515,7 @@ class TestDirectSolverBasic:
         tolerance = 64 * raw.shape[1] * np.finfo(float).eps * np.linalg.cond(hessian)
         assert result.effective_df == pytest.approx(expected, rel=tolerance)
 
+    @pytest.mark.pins_behaviour
     def test_scop_candidate_can_skip_unused_generic_reml_decomposition(self, monkeypatch):
         """A private SCOP candidate may omit geometry replaced by its joint Hessian."""
         import superglm.solvers.irls_direct._finalise as irls_finalise

@@ -171,6 +171,7 @@ def test_deferred_rank_metadata_is_what_the_fit_computes_inline(monkeypatch, fac
     assert deferred._reml_result.pirls_result.rank_info is deferred.result.rank_info
 
 
+@pytest.mark.pins_behaviour
 def test_qp_passthrough_factors_the_data_rank_for_its_constrained_refit_only(monkeypatch):
     """The unconstrained terminal refit only warm-starts the published QP refit.
 

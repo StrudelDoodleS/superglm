@@ -596,6 +596,7 @@ def _repaired_system(dm, y, columns):
     return system
 
 
+@pytest.mark.pins_behaviour
 def test_a_recentred_column_keeps_its_centre_through_the_projection():
     """A recentred SSP column's centre is its centred support's, so the certificate sees master's rank.
 

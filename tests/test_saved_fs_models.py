@@ -145,6 +145,7 @@ def saved_se_scale(model, frame, y) -> float:
     return float(np.sqrt(pearson / model._fit_stats.pearson_chi2))
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("name", ["fs_gaussian_exact", "fs_poisson_discrete"])
 def test_an_fs_model_saved_by_v0_35_0_loads_predicts_and_rebuilds_its_inference(name) -> None:
     """T8 row "retired-class shim removed": without the module ``__getattr__`` of

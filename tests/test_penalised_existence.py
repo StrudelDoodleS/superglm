@@ -52,7 +52,8 @@ def _summary_se(model) -> dict[str, float]:
 
 
 def _notes(model) -> str:
-    return "\n".join(model._fit_inference_info["identifiability"].notes())
+    record = model._fit_inference_info.get("identifiability")
+    return "" if record is None else "\n".join(record.notes())
 
 
 def _kept_row_variance(model, rows) -> tuple[np.ndarray, np.ndarray]:
@@ -496,7 +497,7 @@ def test_a_resumed_fit_that_cannot_reach_stationarity_keeps_the_solvers_coeffici
     _patch(monkeypatch, "superglm.model.state_ops", "_RESUME_ITERATIONS", 1)
     oracle = json.loads((FIXTURES / "mgcv_poisson_near_duplicate.json").read_text())
     model, _, _ = _poisson_near_duplicate(oracle)
-    record = model._fit_inference_info["identifiability"]
-    assert record.weak is not None and not record.weak.fitted
+    record = model._fit_inference_info.get("identifiability")
+    assert record is not None and record.weak is not None and not record.weak.fitted
     assert model.result.beta[1] == 0.0
     assert "stay where the solver stopped" in _notes(model)
