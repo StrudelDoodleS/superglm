@@ -1876,7 +1876,7 @@ def test_a_separation_the_build_scan_named_is_warned_about_once(overlap):
         return
     assert len(claims) == 2 and decision_claims(caught) == claims[1:]
     assert says_infinite(claims[1], "f[D], z")
-    assert "level D of f" in claims[1] and "other rows" in claims[1]
+    assert re.search(r"\(level D of f, and \d+ other rows\)", claims[1])
 
 
 def test_drop1_says_a_separated_comparison_fit_is_the_limit_fit():
