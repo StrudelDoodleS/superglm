@@ -538,7 +538,9 @@ def test_the_rich_generalized_gamma_book_publishes_what_its_path_reached() -> No
     stationary endgame outranking a cap nomination
     (``test_a_stationary_endgame_voids_a_refreshed_cap_nomination``) and the
     gradient retaken at the published fit
-    (``test_a_revalidated_stationary_stop_publishes_derivatives_at_its_fit``).
+    (``test_a_revalidated_stationary_stop_publishes_derivatives_at_its_fit``),
+    and all three together on one fit
+    (``test_a_face_beside_a_certified_cap_finishes_stationary_through_one_stop``).
     Here, on any path: a stop short of convergence is disclosed, each exact face
     published was promoted on the way, the corrected covariance falls back only
     at the positive-definiteness gate, and the stop survives a pickle round trip.
@@ -677,6 +679,93 @@ def test_a_stationary_endgame_revalidates_its_face_beside_another_cap(monkeypatc
     assert smoothing.convergence_reason == "stationary"
     promoted = {name for item in smoothing.history for name in item.activated_face_components}
     assert promoted and set(model.result_.exact_face_components) == promoted
+
+
+def test_a_face_beside_a_certified_cap_finishes_stationary_through_one_stop(monkeypatch) -> None:
+    """The rich GeneralizedGammaLSS book's endgame, forced whole on one fit.
+
+    That book once ended its Newton endgame stationary with a scalar exact face
+    beside a tensor margin at the cap, and the three rules it needed act at one
+    stop: the terminal recheck sees another cap outside the face and keeps the
+    face (the waiver), the evidence refreshed after the revalidation nominates
+    every estimated component outside the face for the cap and the endgame's
+    exact gradient voids it, and the derivatives are retaken at the fit the
+    revalidation published. Here all three are forced on the one fit, which
+    publishes its promoted face, no unresolved cap, a stationary stop that
+    survives a pickle round trip, and a corrected covariance that replays the
+    retaken derivatives. Mutation checks: without the waiver the face retracts
+    and the stop is ``endpoint_revalidation_failed``; without the voided
+    nomination ``unresolved_upper_bound`` is nonempty; without the retake no
+    derivatives are taken at the published fit.
+    """
+    import superglm.distributional.smoothing.loop as loop
+
+    recheck, sole_cap = loop._recheck_exact_face, smoothing_faces._is_sole_cap_outside_face
+    endgame, fresh, retaken = (
+        loop.run_newton_endgame,
+        loop._fresh_raw_evidence,
+        loop.published_derivatives,
+    )
+    waivers: list[bool] = []
+    stationary: list[bool] = []
+    nominated: list[tuple[str, ...]] = []
+    retaken_at: list[DenseSolverResult] = []
+
+    def not_sole(*args, **kwargs) -> bool:
+        sole_cap(*args, **kwargs)
+        return False
+
+    def recheck_beside_another_cap(*args, **kwargs):
+        waivers.append(kwargs["other_caps_stationary"])
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(smoothing_faces, "_is_sole_cap_outside_face", not_sole)
+            return recheck(*args, **kwargs)
+
+    def flagged_endgame(*args, **kwargs):
+        outcome = endgame(*args, **kwargs)
+        if outcome.kind == "stationary":
+            stationary.append(True)
+        return outcome
+
+    def nominating(layout, lambdas, fit, config, *, face=None, **options):
+        evidence = fresh(layout, lambdas, fit, config, face=face, **options)
+        if stationary and face is not None:
+            outside = evidence.estimated_names
+            assert outside and not set(outside) & set(face.component_names)
+            nominated.append(outside)
+            return replace(evidence, unresolved_upper_bound=outside)
+        return evidence
+
+    def spy(*args, **kwargs):
+        retaken_at.append(kwargs["fit"])
+        return retaken(*args, **kwargs)
+
+    monkeypatch.setattr(loop, "_recheck_exact_face", recheck_beside_another_cap)
+    monkeypatch.setattr(loop, "run_newton_endgame", flagged_endgame)
+    monkeypatch.setattr(loop, "_fresh_raw_evidence", nominating)
+    monkeypatch.setattr(loop, "published_derivatives", spy)
+    frame, response = _flagged_generalized_pareto_problem()
+    model = _flagged_generalized_pareto_model(lambda_policy=LambdaPolicy.fixed(9.99e9)).fit_reml(
+        frame, response, outer="efs+newton"
+    )
+    fitted = model._require_fitted()
+    smoothing = fitted.smoothing
+    assert smoothing is not None
+    assert waivers == [True] and nominated, "the fixture's stationary endgame revalidates a face"
+    assert smoothing.convergence_reason == "stationary"
+    assert smoothing.converged is True
+    assert smoothing.unresolved_upper_bound == ()
+    promoted = {name for item in smoothing.history for name in item.activated_face_components}
+    assert promoted and set(model.result_.exact_face_components) == promoted
+    assert smoothing.history[-1].revalidated_face_components
+    assert len(retaken_at) == 1 and retaken_at[0] is smoothing.terminal_fit
+    fallbacks = _corrected_covariance_fallbacks(fitted)
+    assert _only_the_hessian_gate_declined(fallbacks), fallbacks
+    loaded = pickle.loads(pickle.dumps(model))._require_fitted().smoothing
+    assert loaded is not None
+    assert loaded.convergence_reason == "stationary"
+    assert loaded.converged is True
+    assert loaded.unresolved_upper_bound == ()
 
 
 _HESSIAN_GATE_REFUSALS = (

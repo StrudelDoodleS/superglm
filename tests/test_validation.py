@@ -101,11 +101,24 @@ class TestLiftChartWeighted:
         y_pred = np.array([1.1, 1.9, 3.1, 4.2, 4.8], dtype=float)
         w1 = np.ones(5)
         w2 = np.array([10, 1, 1, 1, 1], dtype=float)
-        r1 = lift_chart(y_obs, y_pred, sample_weight=w1, n_bins=3)
-        r2 = lift_chart(y_obs, y_pred, sample_weight=w2, n_bins=3)
-        # Different weights should generally produce different results
-        # At minimum, the weighted means should differ (the heavy row also fills fewer bins)
-        assert r1.bins["observed"].tolist() != r2.bins["observed"].tolist()
+        w3 = np.array([1, 2, 1, 1, 1], dtype=float)
+        u = np.finfo(np.float64).eps / 2
+        for w in (w1, w2, w3):
+            table = lift_chart(y_obs, y_pred, sample_weight=w, n_bins=3).bins
+            bins = _tier_bins(y_pred, w, 3)
+            occupied = np.unique(bins)
+            np.testing.assert_array_equal(table["bin"].to_numpy(), occupied + 1)
+            for row, b in zip(table.itertuples(), occupied, strict=True):
+                rows = bins == b
+                expected = float(np.sum(w[rows] * y_obs[rows]) / w[rows].sum())
+                # A weighted mean of k terms: (k + 1) roundings in the sum and one in the quotient.
+                assert abs(row.observed - expected) <= (rows.sum() + 2) * u * np.max(y_obs[rows])
+                assert row.exposure_share == pytest.approx(w[rows].sum() / w.sum(), rel=8 * u)
+        # Equal weights split the five rows 2-1-2; a heavy first row takes a bin of its own; the
+        # doubled second row keeps the 2-1-2 split but moves its bin's mean from 3/2 to 5/3.
+        assert _tier_bins(y_pred, w1, 3).tolist() == [0, 0, 1, 2, 2]
+        assert _tier_bins(y_pred, w2, 3).tolist() == [1, 2, 2, 2, 2]
+        assert _tier_bins(y_pred, w3, 3).tolist() == [0, 0, 1, 2, 2]
 
     def test_consistency_weighted_mean(self):
         """sum(bins.observed * bins.exposure_share) ≈ overall observed mean."""
