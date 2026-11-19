@@ -397,13 +397,61 @@ def _bound(node: ast.stmt) -> frozenset[str]:
     return frozenset(found)
 
 
-def _without_functions(node: ast.stmt) -> ast.stmt:
-    stripped = copy.deepcopy(node)
-    for child in ast.walk(stripped):
-        for name in ("body", "orelse", "finalbody"):
-            body = getattr(child, name, None)
-            if isinstance(body, list):
-                setattr(child, name, [n for n in body if not isinstance(n, _FUNCTIONS)])
+class _Dump:
+    """The ``ast.dump`` of some nodes, made on first comparison: most shapes are never compared."""
+
+    __slots__ = ("_text", "nodes")
+
+    def __init__(self, *nodes: ast.AST | str):
+        self.nodes, self._text = nodes, None
+
+    def text(self) -> str:
+        if self._text is None:
+            self._text = "".join(n if isinstance(n, str) else ast.dump(n) for n in self.nodes)
+        return self._text
+
+    def __add__(self, other: _Dump) -> _Dump:
+        return _Dump(*self.nodes, *other.nodes)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _Dump) and self.text() == other.text()
+
+    def __lt__(self, other: _Dump) -> bool:
+        return self.text() < other.text()
+
+    def __hash__(self) -> int:
+        return hash(self.text())
+
+
+class _Code(_Dump):
+    """A whole module's dump, parsed again from its text if it is ever compared."""
+
+    __slots__ = ("source",)
+
+    def __init__(self, source: str):
+        super().__init__()
+        self.source = source
+
+    def text(self) -> str:
+        if self._text is None:
+            self._text = ast.dump(ast.parse(self.source))
+        return self._text
+
+
+_BODIES = ("body", "orelse", "finalbody", "handlers", "cases")
+
+
+def _without_functions(node: ast.AST) -> ast.AST:
+    """``node`` without the functions it defines: each statement that holds others is copied,
+    so the caller may edit the copy's bodies and the parsed tree stays as it was."""
+    if not any(isinstance(getattr(node, name, None), list) for name in _BODIES):
+        return node
+    stripped = copy.copy(node)
+    for name in _BODIES:
+        body = getattr(node, name, None)
+        if isinstance(body, list):
+            kept = [_without_functions(n) for n in body if not isinstance(n, _FUNCTIONS)]
+            setattr(stripped, name, kept)
     return stripped
 
 
@@ -411,35 +459,37 @@ def _without_functions(node: ast.stmt) -> ast.stmt:
 class Shape:
     """A module as a change can reach it: its functions, and its module-level statements."""
 
-    code: str
-    functions: dict[str, str]
+    code: _Dump
+    functions: dict[str, _Dump]
     reads: dict[str, frozenset[str]]
     decorated: frozenset[str]
     # (names bound, names read, names called, dump) of each module-level statement, its
     # functions removed.
-    statements: list[tuple[frozenset[str], frozenset[str], frozenset[str], str]]
+    statements: list[tuple[frozenset[str], frozenset[str], frozenset[str], _Dump]]
     # "Class.attribute" -> dump, for each plain assignment in an undecorated class's body; the
     # rest of the class is its statement above.
-    attributes: dict[str, str] = field(default_factory=dict)
+    attributes: dict[str, _Dump] = field(default_factory=dict)
     docstrings: str = ""  # the module's and its classes' docstrings
     # Functions a numba extension decorator registers into compiled code everywhere.
     extensions: frozenset[str] = frozenset()
 
-    def bindings(self) -> dict[str, list[str]]:
-        found: dict[str, list[str]] = {}
+    def bindings(self) -> dict[str, list[_Dump]]:
+        found: dict[str, list[_Dump]] = {}
         for binds, _, _, dump in self.statements:
             for name in binds or {""}:  # "" collects the statements that bind nothing
                 found.setdefault(name, []).append(dump)
         return {name: sorted(dumps) for name, dumps in found.items()}
 
 
-def shape(text: str | None) -> Shape | None:
-    try:
-        tree = ast.parse(text or "")
-    except SyntaxError:
-        return None
-    code = ast.dump(tree)
-    functions: dict[str, str] = {}
+def shape(text: str | None, tree: ast.Module | None = None) -> Shape | None:
+    """``text``'s shape; ``tree`` is its parse when the caller has one (it is not changed)."""
+    if tree is None:
+        try:
+            tree = ast.parse(text or "")
+        except SyntaxError:
+            return None
+    code = _Code(text or "")
+    functions: dict[str, _Dump] = {}
     reads: dict[str, frozenset[str]] = {}
     decorated = set()
     extensions = set()
@@ -453,10 +503,12 @@ def shape(text: str | None) -> Shape | None:
     )
 
     def collect(node: ast.AST, prefix: str) -> None:
-        for child in ast.iter_child_nodes(node):
+        # Functions are statements, so only bodies hold them; expressions are not walked.
+        children = [n for name in _BODIES for n in getattr(node, name, None) or ()]
+        for child in children:
             if isinstance(child, _FUNCTIONS):
                 name = prefix + child.name
-                functions[name] = functions.get(name, "") + ast.dump(child)
+                functions[name] = functions.get(name, _Dump()) + _Dump(child)
                 reads[name] = reads.get(name, frozenset()) | _identifiers(child)
                 if _decorators(child) - PLAIN:
                     decorated.add(name)
@@ -470,7 +522,7 @@ def shape(text: str | None) -> Shape | None:
 
     collect(tree, "")
     statements = []
-    attributes: dict[str, str] = {}
+    attributes: dict[str, _Dump] = {}
     for node in tree.body:
         if isinstance(node, _FUNCTIONS):
             continue
@@ -486,7 +538,7 @@ def shape(text: str | None) -> Shape | None:
                 if targets and all(isinstance(target, ast.Name) for target in targets):
                     for target in targets:
                         key = f"{stripped.name}.{target.id}"
-                        attributes[key] = attributes.get(key, "") + ast.dump(item)
+                        attributes[key] = attributes.get(key, _Dump()) + _Dump(item)
                 else:
                     kept.append(item)
             stripped.body = kept or [ast.Pass()]
@@ -510,7 +562,7 @@ def shape(text: str | None) -> Shape | None:
                 _bound(stripped),
                 _identifiers(stripped, strings=False),
                 _called(stripped),
-                ast.dump(stripped),
+                _Dump(stripped),
             )
         )
     return Shape(
@@ -533,7 +585,7 @@ def _split_import(node: ast.stmt, statements: list) -> bool:
         single = copy.copy(node)
         single.names = [alias]
         bound = frozenset({(alias.asname or alias.name).split(".")[0]})
-        statements.append((bound, frozenset(), frozenset(), ast.dump(single)))
+        statements.append((bound, frozenset(), frozenset(), _Dump(single)))
     return True
 
 
@@ -549,7 +601,7 @@ def _split_lazy_table(node: ast.stmt, statements: list) -> None:
             if isinstance(item, ast.Constant) and isinstance(item.value, str):
                 bound = frozenset({item.value})
                 statements.append(
-                    (bound, frozenset(), frozenset(), f"lazy {key.value!r} {item.value}")
+                    (bound, frozenset(), frozenset(), _Dump(f"lazy {key.value!r} {item.value}"))
                 )
 
 
@@ -561,11 +613,24 @@ class Modules:
         self.read = read
         tracked = git(root, "ls-files", "--", "src/superglm", "tests").splitlines()
         self.paths = {name: path for path in tracked if (name := _module_name(path)) is not None}
-        self._importers: dict[str, set[str]] | None = None
+        self._importers: dict[str, dict[str, bool]] = {}
+
+    @functools.cache
+    def tree(self, path: str) -> ast.Module | None:
+        try:
+            return ast.parse(self.read(path) or "")
+        except SyntaxError:
+            return None
+
+    @functools.cache
+    def words(self, path: str) -> frozenset[str]:
+        """The words of the file's text: a file can only import or read a name it spells."""
+        return frozenset(re.findall(r"\w+", self.read(path) or ""))
 
     @functools.cache
     def shape(self, path: str) -> Shape | None:
-        return shape(self.read(path))
+        tree = self.tree(path)
+        return None if tree is None else shape(self.read(path), tree)
 
     @functools.cache
     def bindings(self, path: str) -> tuple[dict[str, tuple[str, str]], dict[str, set[str]]]:
@@ -575,10 +640,8 @@ class Modules:
         package's lazy re-export table ``{"module": ("name", ...)}``), and the names it binds to a
         module itself (``local -> modules``: ``import a.b`` binds ``a`` to ``a`` and ``a.b``).
         """
-        text = self.read(path)
-        try:
-            tree = ast.parse(text or "")
-        except SyntaxError:
+        tree = self.tree(path)
+        if tree is None:
             return {}, {}
         name = _module_name(path) or ""
         package = path.endswith("__init__.py")
@@ -621,19 +684,32 @@ class Modules:
             parent = parent.rsplit(".", node.level - 1)[0]
         return f"{parent}.{node.module}" if node.module else parent
 
-    def importers(self, path: str) -> set[str]:
-        """The modules that take a name from, or bind, the module at ``path``."""
-        if self._importers is None:
-            index: dict[str, set[str]] = {}
-            for source in self.paths.values():
+    def importers(self, path: str, spelling: Iterable[str] = ()) -> set[str]:
+        """The modules that take a name from, or bind, the module at ``path``; given
+        ``spelling``, only those whose text has one of those words or a star import.
+
+        Only a file that spells the module's last name (``from .x import``, ``import a.x``, a
+        lazy table's ``"a.x"``) can import it, and only one that spells a name can read it, so
+        only those are parsed.
+        """
+        module = _module_name(path)
+        last = (module or "").rpartition(".")[2]
+        wanted = frozenset(spelling)
+        found = set()
+        for source in self.paths.values():
+            words = self.words(source)
+            if source == path or last not in words:
+                continue
+            if wanted and not (words & wanted or "import *" in (self.read(source) or "")):
+                continue
+            if source not in self._importers.setdefault(path, {}):
                 names, modules = self.bindings(source)
-                targets = {module for module, _ in names.values()}
-                targets |= {module for found in modules.values() for module in found}
-                for module in targets:
-                    if module in self.paths:
-                        index.setdefault(self.paths[module], set()).add(source)
-            self._importers = index
-        return self._importers.get(path, set())
+                targets = {base for base, _ in names.values()}
+                targets |= {name for bound in modules.values() for name in bound}
+                self._importers[path][source] = module in targets
+            if self._importers[path][source]:
+                found.add(source)
+        return found
 
     def local_names(self, source: str, path: str, changed: set[str]) -> tuple[set[str], set[str]]:
         """The names ``source`` binds to ``changed`` names of ``path``, and to ``path`` itself."""
@@ -789,7 +865,7 @@ class _Selector:
             self.run_functions(path, reading, reason)
         if _module_name(path) is None:
             return
-        for importer in sorted(self.modules.importers(path)):
+        for importer in sorted(self.modules.importers(path, names | callables)):
             importer_shape = self.modules.shape(importer)
             if importer_shape is None:
                 continue
@@ -897,7 +973,7 @@ class _Selector:
     ) -> None:
         """The test files that ran a function reading any of ``identifiers`` (and, given
         ``also``, one of those too), in ``tests/`` alone when ``tests_only``."""
-        for source in sorted(self.texts):
+        for source in self.mentioning(identifiers):
             if tests_only and not source.startswith("tests/"):
                 continue
             shape = self.modules.shape(source)
@@ -913,7 +989,7 @@ class _Selector:
     def attribute_readers(self, attributes: set[str], origin: str) -> None:
         """Rule 4 for class attributes: every function, in any Python file, that reads one by
         name, and every module-level statement that does, followed from there."""
-        for source in sorted(self.texts):
+        for source in self.mentioning(attributes):
             shape = self.modules.shape(source)
             if shape is None:
                 continue
@@ -924,6 +1000,12 @@ class _Selector:
             self.run_functions(source, reading, reason)
             if any(reads & attributes for _, reads, _, _ in shape.statements):
                 self.propagate(source, set(attributes), shape, origin=origin)
+
+    def mentioning(self, identifiers: Iterable[str]) -> list[str]:
+        """The Python files whose text has one of ``identifiers`` as a word: the only ones a
+        parse could find reading it."""
+        wanted = frozenset(identifiers)
+        return [source for source in sorted(self.texts) if self.modules.words(source) & wanted]
 
     @functools.cached_property
     def texts(self) -> dict[str, str]:
