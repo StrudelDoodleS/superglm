@@ -30,11 +30,11 @@ suite) and the commit's series of patch ids over its merge base with
 ``origin/master``. The hook ``--install`` writes only checks that every commit
 being pushed carries a stamp, and says which suite each passed. A commit with
 no stamp of its own carries one whose series is the same (``git patch-id
---stable``, commit by commit): a rebase that changed no commit's diff. A rebase
-that resolved a conflict changes a patch id and needs the checks again. The
-hook takes a moment: git opens its connection to the remote before running
-the hook, and a remote drops a connection left idle for the length of the
-checks. ``git push --no-verify`` skips the hook.
+--verbatim``, commit by commit, whitespace included): a rebase that changed no
+commit's diff. A rebase that resolved a conflict changes a patch id and needs
+the checks again. The hook takes a moment: git opens its connection to the
+remote before running the hook, and a remote drops a connection left idle for
+the length of the checks. ``git push --no-verify`` skips the hook.
 
 On a machine with ``benchboard`` on the path, every pytest run goes through
 it. Native Windows, macOS and ARM64 behaviour still needs CI's runners; no
@@ -232,11 +232,12 @@ def _clean_head() -> str | None:
 
 
 def _series(commit: str) -> list[str] | None:
-    """``git patch-id --stable`` of each commit from the merge base with ``origin/master`` to
+    """``git patch-id --verbatim`` of each commit from the merge base with ``origin/master`` to
     ``commit``, oldest first; ``None`` when there is none, or a merge commit among them.
 
     Two commits with the same series apply the same diffs, commit by commit, to their bases: one
-    is a rebase of the other that resolved no conflict.
+    is a rebase of the other that resolved no conflict. ``--stable`` would ignore whitespace, and
+    an indentation change is a change of behaviour in Python.
     """
     try:
         base = _git("merge-base", commit, "origin/master")
@@ -254,7 +255,7 @@ def _series(commit: str) -> list[str] | None:
             check=True,
         ).stdout
         patch_id = subprocess.run(
-            ["git", "patch-id", "--stable"], cwd=ROOT, input=diff, capture_output=True, check=True
+            ["git", "patch-id", "--verbatim"], cwd=ROOT, input=diff, capture_output=True, check=True
         ).stdout.split()
         series.append(patch_id[0].decode() if patch_id else "empty")
     return series or None
@@ -370,7 +371,9 @@ def _quick_suite(full: bool, start: str | None) -> str:
                 variables = test_map.recording_environment(out, ROOT)
                 suite += list(test_map.RECORDING_ARGUMENTS)
         command, env = _with_variables(_pytest(label, suite, cores), variables)
-        _run("quick suite", command, env=env, passing=frozenset({0, NO_TESTS_COLLECTED}))
+        # Exit 5, nothing collected, is no pass: a selection always holds the contract tests, so
+        # an empty run means a filter (a stale ``-k`` in ``PYTEST_ADDOPTS``) dropped everything.
+        _run("quick suite", command, env=env)
         tests = _junit_tests(junit)
         if variables and _clean_head() != start:
             # The run read whatever the checkout held as it changed: no map of ``start`` from it.
