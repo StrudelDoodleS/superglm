@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from collections.abc import Callable
-from typing import Any, cast
+from collections.abc import Callable, Mapping
+from typing import Any, Literal, cast, get_args
 
 import numpy as np
 from numpy.typing import NDArray
@@ -96,30 +96,38 @@ def existence_certified(
     data_diagonal: NDArray,
     floor: float,
     weak_root: NDArray | None = None,
+    rows: tuple[NDArray, NDArray] | None = None,
+    centre: NDArray | None = None,
 ) -> bool:
     """Whether the fit's score proves its penalised estimate exists (``recession_excluded``).
 
     At the fitted state, with Fisher rows ``W``, ``z`` (one consistent set: the rows the score,
-    the step and the defect all read), the profiled score ``g = X_c' r - S beta``, ``r = W (z -
-    eta)``, takes one Newton step ``v``: the decomposition's inverse on its certified part and
-    the weak directions' ``U U' g`` (their covariance root, ``WeakDirections.root``), with the
-    intercept's ``sum r / sum W - c'v``.  Its residual ``r' = r - W A v`` gives the boundary
-    multipliers ``mu_i = s_i r'_i`` and the defect ``A'r' - S (beta + v)``, computed directly
-    (so any ``v`` serves) and Jacobi-scaled: the intercept by ``sqrt(sum W)``, a slope by its
-    Hessian diagonal's root.  The defect's own rounding is bounded by Cauchy-Schwarz,
-    ``sum_i |x_ij r'_i| <= ||sqrt(W) x_j|| sqrt(sum r'^2 / W)`` (``gamma_(n+p+4)`` per
-    product sum, the penalty's ``gamma_(p+2) |S| |beta + v|``).  ``floor`` is the record's
-    certified curvature (``Identifiability.curvature_floor``); with the intercept's block of
-    one, ``min(1, floor)`` bounds the augmented Hessian's Jacobi eigenvalues.  Any row on the
-    boundary with ``W = 0`` (a mean rounded onto the boundary) leaves no multiplier: not
-    certified, so the rows decide.
+    the step and the defect all read, ``W`` the Hessian's own), the profiled score ``g = X_c' r
+    - S beta``, ``r = W (z - eta)``, takes one Newton step ``v``: the decomposition's inverse on
+    its certified part and the weak directions' ``U U' g`` (their covariance root,
+    ``WeakDirections.root``), with the intercept's ``sum r / sum W - c'v``.  Its residual ``r' =
+    r - W A v`` gives the boundary multipliers ``mu_i = s_i r'_i`` and the defect ``A'r' - S
+    (beta + v)``, computed directly (so any ``v`` serves) and Jacobi-scaled: the intercept by
+    ``sqrt(sum W)``, a slope by its Hessian diagonal's root.  The defect's own rounding is
+    bounded by Cauchy-Schwarz, ``sum_i |x_ij r'_i| <= ||sqrt(W) x_j|| sqrt(sum r'^2 / W)``
+    (``gamma_(n+p+4)`` per product sum, the penalty's ``gamma_(p+2) |S| |beta + v|``); the
+    intercept's recursive sum ``sum r'`` errs by at most ``gamma_(n-1) sum |r'_i| <=
+    gamma_(n-1) sqrt(sum W) sqrt(sum r'^2 / W)`` (Higham 2002, sec. 4.2), inside its
+    ``gamma_(n+2)`` term once scaled.  ``floor`` is the record's certified curvature
+    (``Identifiability.curvature_floor``); with the intercept's block of one, ``min(1,
+    floor)`` bounds the augmented Hessian's Jacobi eigenvalues.  Any row on the boundary with
+    ``W = 0`` (a mean rounded onto the boundary) leaves no multiplier: not certified, so the
+    rows decide.  ``rows`` are the publication's own ``fisher_rows`` (the array its record was
+    decided at), and ``centre`` the weighted column mean that record's Gram was centred at;
+    either is formed here when not given.  Refinement stops once the defect is its own
+    rounding, which no refined step can lower.
     """
     boundary = (sides == 1) | (sides == -1)
     if not np.any(boundary):
         return True
     if not floor > 0.0:
         return False
-    W, residual = fisher_rows(model, solver, weights)
+    W, residual = fisher_rows(model, solver, weights) if rows is None else rows
     live = sides != 2
     W = np.where(live, W, 0.0)
     if np.any(W[boundary] <= 0.0) or not np.all(np.isfinite(residual[live])):
@@ -128,7 +136,12 @@ def existence_certified(
     total = float(np.sum(W))
     if not total > 0.0:
         return False
-    mean = np.asarray(design.rmatvec(W), dtype=np.float64) / total
+    if centre is None:
+        mean = np.asarray(design.rmatvec(W), dtype=np.float64) / total
+    else:
+        mean = np.asarray(centre, dtype=np.float64)
+    root = np.sqrt(W[boundary])
+    signs = sides[boundary]
     beta = np.asarray(solver.beta, dtype=np.float64)[columns]
     applied, _ = penalty(beta[:, None])
 
@@ -143,12 +156,12 @@ def existence_certified(
         return np.where(live, r - W * delta, 0.0)
 
     def defect(moved_rows: NDArray, step: NDArray) -> tuple[float, NDArray]:
-        e0 = math.fsum(moved_rows.tolist())
+        e0 = float(np.sum(moved_rows))
         moved, _ = penalty((beta + step)[:, None])
         es = np.asarray(design.rmatvec(moved_rows), np.float64) - mean * e0 - moved[:, 0]
         return e0, es
 
-    rsum = math.fsum(r.tolist())
+    rsum = float(np.sum(r))
     gradient = np.asarray(design.rmatvec(r), dtype=np.float64) - mean * rsum - applied[:, 0]
     step = solve(gradient)
     intercept = rsum / total - float(mean @ step)
@@ -157,27 +170,32 @@ def existence_certified(
     carried = W > 0.0
     uncentred = np.sqrt(np.maximum(np.asarray(data_diagonal, np.float64), 0.0) + total * mean**2)
     n, p = int(design.n), int(beta.size)
-    curvature, weight = min(1.0, float(floor)), float(np.max(W))
+    curvature = min(1.0, float(floor))
     # iterative refinement (Wilkinson), taken only when the certificate needs it: the step
     # solves ``H v = g`` only to the coupling's and the weak directions' accuracy; any ``v``
     # serves the certificate, and a refined one leaves a smaller defect
     for refinement in range(3):
         moved_rows = residual_rows(step, intercept)
-        margin = float(np.min(sides[boundary] * moved_rows[boundary]))
+        margin = float(np.min(signs * moved_rows[boundary] / root))
         e0, es = defect(moved_rows, step)
-        if margin > 0.0:
-            _, magnitude = penalty((beta + step)[:, None])
-            zeta = math.sqrt(float(np.sum(moved_rows[carried] ** 2 / W[carried])))
-            rounding = np.r_[
-                gamma_up(n + 2) * zeta,
-                (2.0 * gamma_up(n + p + 4) * uncentred * zeta + gamma_up(p + 2) * magnitude[:, 0])
-                / safe,
-            ]
-            scaled = np.r_[e0 / math.sqrt(total), es / safe]
-            bound = float(np.linalg.norm(scaled)) + float(np.linalg.norm(rounding))
-            if recession_excluded(margin, bound, curvature, weight):
-                return True
-        if refinement == 2:
+        _, magnitude = penalty((beta + step)[:, None])
+        zeta = math.sqrt(float(np.sum(moved_rows[carried] ** 2 / W[carried])))
+        rounding = float(
+            np.linalg.norm(
+                np.r_[
+                    gamma_up(n + 2) * zeta,
+                    (
+                        2.0 * gamma_up(n + p + 4) * uncentred * zeta
+                        + gamma_up(p + 2) * magnitude[:, 0]
+                    )
+                    / safe,
+                ]
+            )
+        )
+        scaled = float(np.linalg.norm(np.r_[e0 / math.sqrt(total), es / safe]))
+        if margin > 0.0 and recession_excluded(margin, scaled + rounding, curvature):
+            return True
+        if refinement == 2 or scaled <= rounding:
             return False
         correction = solve(es)
         step = step + correction
@@ -370,10 +388,13 @@ def lift_span(span: NDArray, coordinates: NDArray, width: int) -> NDArray:
     return lifted
 
 
-def separated_labels(model, rows: NDArray, sides: NDArray, coordinates: NDArray) -> tuple:
+def separated_labels(
+    model, rows: NDArray, sides: NDArray, coordinates: NDArray
+) -> tuple[tuple[str, ...], int]:
     """The categorical levels (base levels included) whose live rows are all separated.
 
-    One entry per factor, ``"level E of f"`` or ``"levels D, E of f"``.
+    One entry per factor, ``"level E of f"`` or ``"levels D, E of f"``, and the count of the
+    separated rows those levels hold.
     """
     from superglm._group_matrix._group_matrix_core import CategoricalGroupMatrix
 
@@ -382,21 +403,23 @@ def separated_labels(model, rows: NDArray, sides: NDArray, coordinates: NDArray)
     live = sides != 2
     specs = {**getattr(model, "_specs", {}), **getattr(model, "_interaction_specs", {})}
     labels = []
+    held = np.zeros(sides.size, dtype=bool)
     explicit = set(int(c) for c in coordinates if c >= 0)
     for group, matrix in zip(model._groups, model._dm.group_matrices, strict=True):
         if type(matrix) is not CategoricalGroupMatrix or group.start not in explicit:
             continue
         spec = specs.get(group.feature_name)
         names = list(getattr(spec, "_non_base", ())) + [getattr(spec, "_base_level", "base")]
-        levels = [
-            str(names[int(code)])
+        codes = [
+            int(code)
             for code in np.unique(matrix.codes[separated])
             if code < len(names) and np.all(separated[live & (matrix.codes == code)])
         ]
-        if levels:
-            plural = "levels" if len(levels) > 1 else "level"
-            labels.append(f"{plural} {', '.join(levels)} of {group.name}")
-    return tuple(labels)
+        if codes:
+            held |= separated & np.isin(matrix.codes, codes)
+            plural = "levels" if len(codes) > 1 else "level"
+            labels.append(f"{plural} {', '.join(str(names[c]) for c in codes)} of {group.name}")
+    return tuple(labels), int(np.count_nonzero(held))
 
 
 def coefficient_names(model, span: NDArray) -> tuple[str, ...]:
@@ -427,11 +450,12 @@ def proposal_span(direction: NDArray | None, coordinates: NDArray, width: int) -
 def decide_separation(
     model, *, sides: NDArray, boundaries: tuple[str, ...], certified: bool
 ) -> tuple[Separation, NDArray | None, Any, NDArray]:
-    """The decision before any refit: absent when ``certified``, else the rows' proposal.
+    """The decision before any refit: absent when ``certified``, else the rows' answer.
 
-    Returns the decision (``"absent"``, or ``"unresolved"`` pending the withheld fit), the
-    verified direction's strict rows (``None`` when none verified), the explicit design and its
-    columns' fitted coordinates.
+    Returns the decision (``"absent"``; ``"partial"`` for a verified direction, pending the
+    withheld fit that would show it maximal; ``"unresolved"`` when none verifies or the rows'
+    program exceeds its cap), the verified direction's strict rows (``None`` when none
+    verified), the explicit design and its columns' fitted coordinates.
     """
     from superglm.links import CauchitLink
 
@@ -450,7 +474,9 @@ def decide_separation(
         return (
             Separation(
                 "unresolved",
-                "no direction verifies",
+                "linear program not run: over its cap"
+                if work.get("capped")
+                else "no direction verifies",
                 boundaries=boundaries,
                 unique=unique,
                 work=work,
@@ -460,14 +486,17 @@ def decide_separation(
             coordinates,
         )
     span = proposal_span(direction, coordinates, width)
+    labels, labelled = separated_labels(model, strict, sides, coordinates)
     return (
         Separation(
-            "unresolved",
-            "maximality not shown",
+            "partial",
+            "linear program: maximality not shown",
             rows=strict,
             span=span,
             boundaries=boundaries,
             unique=unique,
+            labels=labels,
+            labelled_rows=labelled,
             names=coefficient_names(model, span),
             work=work,
         ),
@@ -475,3 +504,225 @@ def decide_separation(
         explicit,
         coordinates,
     )
+
+
+# ── What a published fit says about separation ──────────────────────────────
+
+StatementTag = Literal["none", "absent", "present", "partial", "unresolved", "heuristic"]
+
+#: The statement's lifecycle: for each tag, the events it takes and the tag each leads to.
+#: Every publication of a solve writes a fresh statement (``publish <tag>``, from any tag:
+#: the solve's own decision); a revision of the coefficients (an editor edit, Final fit's
+#: carry, a shape repair) either keeps the tag (``revise``) or, for a statement whose ground
+#: the revision removed, drops it (``revise away``).  ``"none"`` is a fit that says nothing.
+STATEMENT_MOVES: Mapping[str, Mapping[str, str]] = {
+    state: {
+        **{f"publish {tag}": tag for tag in get_args(StatementTag)},
+        **revisions,
+    }
+    for state, revisions in {
+        "none": {"revise": "none"},
+        "absent": {"revise": "absent"},
+        "present": {"revise": "present", "revise away": "none"},
+        "partial": {"revise": "partial"},
+        "unresolved": {"revise": "unresolved"},
+        "heuristic": {"revise": "heuristic", "revise away": "none"},
+    }.items()
+}
+
+
+@dataclasses.dataclass(frozen=True)
+class SeparationStatement:
+    """What a published fit says about separation: one tagged value (``STATEMENT_MOVES``).
+
+    ``tag`` is the fit's existence decision (``Separation.state``), or ``"heuristic"`` where no
+    decision is built (a selection penalty, a constrained or SCOP fit, a family with no
+    response boundary reached at infinity) and the solver's backstop found its signature
+    (``PIRLSResult.separation_message``, which stays the raw finding).  ``text`` is the warning
+    the fit gives, ``None`` when it says nothing at fit time.  ``reached`` are the solver slope
+    coordinates and ``intercept`` whether the intercept still carries values from the
+    separating direction, ``rows`` the separated rows, ``levels`` whether the decision names
+    factor levels (whose remedy is grouping them), ``guard_rows`` the weighted rows at the
+    link's guard when the evidence is the guard (zero otherwise: a decision's own proof, or a
+    backstop's exhausted budget), and ``decision`` the record it was read from.  Written only
+    by ``published_statement`` and ``revised_statement``.
+    """
+
+    tag: StatementTag
+    text: str | None = None
+    reached: NDArray = dataclasses.field(default_factory=lambda: np.zeros(0, dtype=np.intp))
+    intercept: bool = False
+    rows: NDArray = dataclasses.field(default_factory=lambda: np.zeros(0, dtype=np.intp))
+    levels: bool = False
+    guard_rows: int = 0
+    decision: Separation | None = None
+
+    @property
+    def source(self) -> str:
+        """``"decision"`` for the exact decision's statement, ``"heuristic"`` for the backstop's."""
+        return "heuristic" if self.tag == "heuristic" else "decision"
+
+
+def _tag(statement: SeparationStatement | None) -> str:
+    return "none" if statement is None else statement.tag
+
+
+def _moved(
+    before: SeparationStatement | None, event: str, after: SeparationStatement | None
+) -> SeparationStatement | None:
+    """``after``, once the table says ``event`` takes ``before``'s tag to ``after``'s."""
+    target = STATEMENT_MOVES[_tag(before)].get(event)
+    if target != _tag(after):
+        raise RuntimeError(
+            f"separation statement: {_tag(before)} --{event}--> {_tag(after)} is not a move"
+        )
+    return after
+
+
+def _linear_predictor(model) -> NDArray | None:
+    """The published fit's linear predictor on its training rows, offset included."""
+    from superglm.solvers.mode_score import linear_predictor
+
+    if getattr(model, "_dm", None) is None:
+        return None
+    solver = model._solver_pirls_result()
+    return np.asarray(linear_predictor(model._dm, solver, model._fit_offset), dtype=np.float64)
+
+
+def _guard_rows(model, eta: NDArray | None) -> int:
+    """The rows of positive prior weight whose linear predictor sits at the link's guard."""
+    from superglm.links import stabilize_eta
+
+    if eta is None:
+        return 0
+    weights = np.asarray(model._fit_weights, dtype=np.float64)
+    return int(np.count_nonzero((stabilize_eta(eta, model._link) != eta) & (weights > 0.0)))
+
+
+def published_statement(model) -> SeparationStatement | None:
+    """The statement the published fit makes, from its decision or, without one, the backstop.
+
+    The decision overrules the backstop: ``"absent"`` proves every estimate finite, so a row at
+    the guard is not separation (an offset that alone holds a row there), and a decided
+    separation states its coefficients, rows and where the fit stopped
+    (``Separation.statement``).  An unresolved decision says so in its own words, with the
+    backstop's evidence (rows at the guard, or an exhausted budget) as the reason to warn;
+    without that evidence it says nothing at fit time.  With no decision built the backstop's
+    finding is the statement, as before the decision existed.
+    """
+    solver = model._solver_pirls_result()
+    raw = getattr(solver, "separation_message", None)
+    decision = published_separation(model)
+    if decision is None:
+        if raw is None:
+            return _moved(None, "publish none", None)
+        eta = _linear_predictor(model)
+        return _moved(
+            None,
+            "publish heuristic",
+            SeparationStatement("heuristic", raw, guard_rows=_guard_rows(model, eta)),
+        )
+    if decision.state == "absent":
+        return _moved(None, "publish absent", SeparationStatement("absent", decision=decision))
+    eta = _linear_predictor(model)
+    if decision.state == "unresolved":
+        guard = None
+        guard_rows = 0
+        if raw is not None:
+            guard_rows = _guard_rows(model, eta)
+            guard = (
+                f"The fit stopped with its linear predictor at the link's guard on {guard_rows} "
+                f"{'row that carries' if guard_rows == 1 else 'rows that carry'} weight"
+                if guard_rows
+                else "The fit exhausted its iteration budget with a stagnant deviance and an "
+                "extreme working-weight range"
+            )
+        statement = SeparationStatement(
+            "unresolved",
+            decision.statement(None, guard),
+            guard_rows=guard_rows,
+            decision=decision,
+        )
+        return _moved(None, "publish unresolved", statement)
+    rows = np.asarray(decision.rows, dtype=np.intp)
+    stops = None
+    if eta is not None and rows.size:
+        stops = (float(np.min(eta[rows])), float(np.max(eta[rows])))
+    statement = SeparationStatement(
+        decision.state,
+        decision.statement(stops, None),
+        reached=decision.reached,
+        intercept=decision.intercept_reached,
+        rows=rows,
+        levels=bool(decision.labels),
+        decision=decision,
+    )
+    return _moved(None, f"publish {decision.state}", statement)
+
+
+def revised_statement(
+    model, statement: SeparationStatement | None, replaced: NDArray
+) -> SeparationStatement | None:
+    """The statement a revision of ``model``'s coefficients leaves (``STATEMENT_MOVES``).
+
+    ``replaced`` are the solver coordinates the revision set to values that read nothing of the
+    fit (a single-coefficient term the edit sets outright); every other coordinate still holds,
+    or reads (a level term's centring, a projection), the fitted values.  A decided separation
+    survives while a reached coordinate, or the intercept, is not replaced, naming only those;
+    a partial one, a lower bound whose full span may reach more, always does.  A statement
+    whose evidence is the link's guard survives while a weighted row of the revised predictor
+    is still there (one from an exhausted budget stands whatever the revision does), and an
+    unresolved decision keeps its tag, its warning only so.  ``model`` holds the revised
+    coefficients.
+    """
+    if statement is None or statement.tag == "absent":
+        return _moved(statement, "revise", statement)
+    if statement.tag == "partial":
+        return _moved(statement, "revise", statement)
+    if statement.tag == "present":
+        decision = cast(Separation, statement.decision)
+        kept = np.setdiff1d(statement.reached, np.asarray(replaced, dtype=np.intp))
+        if not (statement.intercept or kept.size):
+            return _moved(statement, "revise away", None)
+        span = np.zeros((decision.span.shape[0], 1 + kept.size))
+        span[0, 0] = 1.0 if statement.intercept else 0.0
+        span[1 + kept, 1 + np.arange(kept.size)] = 1.0
+        if not statement.intercept:
+            span = span[:, 1:]
+        names = coefficient_names(model, span)
+        text = cast(str, dataclasses.replace(decision, names=names).statement(None, None))
+        listed = ", ".join(names)
+        revised = dataclasses.replace(
+            statement,
+            text=f"The revised coefficients keep the separated fit's values on {listed}: {text}",
+            reached=kept,
+        )
+        return _moved(statement, "revise", revised)
+    eta = _linear_predictor(model)
+    standing = statement.guard_rows == 0 or eta is None or _guard_rows(model, eta) > 0
+    if statement.tag == "unresolved":
+        if standing:
+            return _moved(statement, "revise", statement)
+        return _moved(statement, "revise", dataclasses.replace(statement, text=None))
+    if standing:
+        return _moved(statement, "revise", statement)
+    return _moved(statement, "revise away", None)
+
+
+def disclosed_text(result) -> str | None:
+    """What a fit handed to its caller warns about separation: its statement's text, once.
+
+    A decided separation whose rows this call's build scan already named says nothing more
+    (``separation.named_by_scan``).  A result published before statements existed, or never
+    published, speaks with its solve's finding.
+    """
+    from superglm.diagnostics.separation import named_by_scan
+
+    statement = getattr(result, "separation_statement", None)
+    if statement is None:
+        return getattr(result, "separation_message", None)
+    if statement.text is None:
+        return None
+    if statement.tag in ("present", "partial") and named_by_scan(statement.rows):
+        return None
+    return statement.text

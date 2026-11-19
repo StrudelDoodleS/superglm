@@ -423,17 +423,22 @@ when interactions are on the table.
 
 Separation the design scan cannot see — for example a numeric 0/1 indicator
 column whose active rows have no positive response — is caught on the fitted
-model instead: a fit whose returned linear predictor is pinned at the link's
-overflow guard with an extreme working-weight range reports the same
-`SeparationWarning` once (or `SeparationError` under `separation="error"`).
-The trial solves of a smoothing-parameter, θ or power search are not
-reported; only the fit you get back is. The backstop reads the guard, offset
-included, so a row that its offset alone holds there (an exposure far below the
-rest, say) is reported too, although no coefficient runs off.
-This backstop fires only when the walk reaches the guard or exhausts a
-real iteration budget: a deviance-converged stop at moderate drift, and
-binomial-logit numeric indicators generally (the logit eta clip keeps the
-working-weight range below the trigger), still return quietly.
+model instead. The fit decides from its rows whether every coefficient has a
+finite estimate, and a separated fit warns once with a `SeparationWarning`
+naming the coefficients that have none and the rows that are separated (or
+refuses with `SeparationError` under `separation="error"`), however far its
+iterations walked and for binomial-logit indicators too. The trial solves of a
+smoothing-parameter, θ or power search are not reported; only the fit you get
+back is. A separation on rows the design scan already named is not warned about
+twice. A row that its offset alone holds near the boundary (an exposure far
+below the rest, say) is not separation, and nothing is reported for it.
+
+Where the fit builds no such decision — a fit with a selection penalty, a
+monotone or shape-constrained fit — a fit whose returned linear predictor is
+pinned at the link's overflow guard with an extreme working-weight range
+reports the `SeparationWarning` instead. That check fires only when the walk
+reaches the guard or exhausts a real iteration budget, so a separated indicator
+on such a fit can return quietly.
 
 ### A level's curve over a range where every response is 0
 

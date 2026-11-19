@@ -80,10 +80,45 @@ def disclosure_scope(model: Any) -> Iterator[None]:
         yield
         return
     token = _DISCLOSED.set(set())
+    named = _NAMED_ROWS.set({})
     try:
         yield
     finally:
+        _NAMED_ROWS.reset(named)
         _DISCLOSED.reset(token)
+
+
+#: The rows this public fit call's build scans have named, by row count; ``None`` outside one.
+_NAMED_ROWS: ContextVar[dict[int, NDArray] | None] = ContextVar(
+    "superglm_separation_named_rows", default=None
+)
+
+
+def _record_named_rows(findings: list[SeparatedTerm]) -> None:
+    """Keep the rows ``findings`` name in this call's scope (``named_by_scan``)."""
+    named = _NAMED_ROWS.get()
+    if named is None:
+        return
+    for finding in findings:
+        if finding.rows is None:
+            continue
+        held = named.get(finding.rows.size)
+        named[finding.rows.size] = finding.rows if held is None else held | finding.rows
+
+
+def named_by_scan(rows: NDArray) -> bool:
+    """Whether this call's build scans already named every one of ``rows``.
+
+    A separation the exact decision finds on rows the categorical scan named is the same
+    finding: the fit gives one warning for it, the scan's, and the summary footnote adds which
+    coefficients it reaches.  A row the scans did not name is news, and the decision says so.
+    A scan of other rows (another row count) names none of these.
+    """
+    named = _NAMED_ROWS.get()
+    rows = np.asarray(rows, dtype=np.intp)
+    if not named or not rows.size:
+        return False
+    return any(int(rows.max()) < size and bool(np.all(mask[rows])) for size, mask in named.items())
 
 
 def warn_separation(message: str, *, stacklevel: int) -> None:
@@ -103,6 +138,9 @@ def disclose_runtime_separation(message: str | None, mode: str) -> None:
     (``PIRLSResult.separation_message``) and warn about nothing: a REML
     candidate, a theta or power evaluation, a line-search trial or a discarded
     refit is evidence about that solve, not about the fit the caller receives.
+    A model's fit passes its published statement
+    (``separation_ops.disclosed_text``), which its existence decision makes
+    where one is built.
     """
     if message is None or mode == "ignore":
         return
@@ -136,26 +174,20 @@ def held_runtime_warnings() -> Iterator[list[str]]:
 
 
 def refuses_on_publication(model: Any) -> bool:
-    """Whether a runtime finding on the fit ``model`` is solving now refuses it.
+    """Whether a separation statement on the fit ``model`` is publishing now refuses it.
 
     Under ``"error"``, a fit the caller receives is refused as soon as its
-    state is known, before anything else describes it.  A discarded fit
+    statement is known, before anything else describes it
+    (``runtime_canonicalize.refuse_published_statement``).  A discarded fit
     (``_discarded_fit``) and a refit of an NB2 theta alternation, which a later
-    refit may supersede, are decided where the call publishes
-    (``capture_fit_state``).
+    refit supersedes, are never refused: the alternation's published refit is,
+    once its search flag is cleared.
     """
     return (
         getattr(model, "_separation", "warn") == "error"
         and not getattr(model, "_discarded_fit", False)
         and not getattr(model, "_nb_theta_search", False)
     )
-
-
-def refuse_published_separation(model: Any, result: Any) -> None:
-    """Refuse ``result``, the state ``model``'s fit returns, when it carries a finding."""
-    message = getattr(result, "separation_message", None)
-    if message is not None and refuses_on_publication(model):
-        raise SeparationError(message)
 
 
 def disclose_solver_separation(message: str | None, mode: str) -> None:
@@ -180,8 +212,14 @@ def format_path_runtime_message(lambdas: NDArray, findings: Sequence[str | None]
     )
 
 
-def format_drop1_runtime_message(findings: Sequence[tuple[str, str]]) -> str | None:
-    """One statement for ``drop1``: the dropped features whose comparison fit has a runtime finding."""
+def format_drop1_runtime_message(findings: Sequence[tuple[str, str, str]]) -> str | None:
+    """One statement for ``drop1``: the dropped features whose comparison fit says it is separated.
+
+    Each finding is ``(feature, statement, source)``.  A comparison fit the backstop flagged
+    (``"heuristic"``) is not a maximum-likelihood fit; one whose decision proved separation is
+    the limit fit, whose deviance is the supremum the likelihood approaches while some of its
+    coefficients have no finite estimate.
+    """
     if not findings:
         return None
     if len(findings) == 1:
@@ -190,15 +228,19 @@ def format_drop1_runtime_message(findings: Sequence[tuple[str, str]]) -> str | N
             "finding, so the deviance change and test for dropping it compare"
         )
     else:
-        names = " and ".join(f"without {name!r}" for name, _ in findings)
+        names = " and ".join(f"without {name!r}" for name, _, _ in findings)
         opening = (
             f"the comparison fits {names} each carry the runtime separation finding, so the "
             "deviance change and test for dropping each compare"
         )
-    return (
-        f"drop1: {opening} with a fit that is not a maximum-likelihood fit. "
-        f"Without {findings[0][0]!r}: {findings[0][1]}"
-    )
+    if all(source == "heuristic" for _, _, source in findings):
+        compared = "a fit that is not a maximum-likelihood fit"
+    else:
+        compared = (
+            "the limit of a fit some of whose coefficients have no finite estimate (its "
+            "deviance is the supremum the likelihood approaches)"
+        )
+    return f"drop1: {opening} with {compared}. Without {findings[0][0]!r}: {findings[0][1]}"
 
 
 @dataclass(frozen=True)
@@ -210,6 +252,8 @@ class SeparatedTerm:
     boundary: str  # "zero" or "one"
     labels: list[Any]  # level names, or (level1, level2) pairs
     n_occupied: int  # occupied levels/cells scanned in this term
+    # the positive-weight rows of the cells named, a mask over the fit's rows (``named_by_scan``)
+    rows: NDArray | None = field(default=None, compare=False, repr=False)
 
 
 def response_boundaries(distribution: Any, link: Any) -> tuple[str, ...]:
@@ -297,6 +341,14 @@ def _separated_flags(
     return occupied & ~anchored, int(np.count_nonzero(occupied))
 
 
+def _flagged_rows(codes: NDArray, flags: NDArray, sample_weight: NDArray) -> NDArray:
+    """The positive-weight rows whose cell ``flags`` marks, as a mask."""
+    on = codes >= 0
+    rows = np.zeros(codes.shape, dtype=bool)
+    rows[on] = flags[codes[on]]
+    return rows & (np.asarray(sample_weight) > 0)
+
+
 def scan_categorical_term(
     name: str,
     spec: Any,
@@ -326,6 +378,7 @@ def scan_categorical_term(
                     boundary=boundary,
                     labels=[levels[i] for i in np.flatnonzero(flags)],
                     n_occupied=n_occupied,
+                    rows=_flagged_rows(codes, flags, sample_weight),
                 )
             )
     return findings
@@ -372,6 +425,7 @@ def scan_interaction_term(
                     boundary=boundary,
                     labels=labels,
                     n_occupied=n_occupied,
+                    rows=_flagged_rows(cell_codes, flags, sample_weight),
                 )
             )
     return findings
@@ -541,6 +595,7 @@ def emit_separation_findings(findings: list[SeparatedTerm], mode: str) -> None:
     # stacklevel points past the builder into the user's fit call region; the
     # exact frame depth varies by entrypoint, so the message carries the term
     # names rather than relying on the reported line.
+    _record_named_rows(findings)
     warn_separation(message, stacklevel=3)
 
 
@@ -1225,11 +1280,19 @@ def format_curve_separation(findings: list[SeparatedCurve]) -> str:
 # direction is verified on the rows exactly (``exact_row_signs``), and absence is proved by
 # the fitted score (``recession_excluded``).
 
-SeparationState = Literal["absent", "present", "unresolved"]
+SeparationState = Literal["absent", "present", "partial", "unresolved"]
 
 # Snapping grids tried on a proposed direction before it is verified exactly: the
 # verification is the proof, so any proposal that passes it is a certificate.
 _SNAP_BITS = (0, 1, 2, 3, 4, 6, 8, 12, 16, 20, 24, 30)
+
+#: The largest linear program (rows it reads times candidate directions) the exact path runs.
+#: HiGHS's interior-point method took seven iterations on every logistic case measured, but each
+#: grows faster than its rows (0.9 s at 20,000 rows of nine directions, 4.7 s at 50,000, 56 s at
+#: 200,000): a size, not an iteration count, bounds its work, and one every platform reads
+#: alike.  A healthy fit's score proves existence first (``recession_excluded``), so the
+#: program reads only the rows a candidate moves on fits the score could not certify.
+PROGRAM_CAP = 2**19
 
 
 @dataclass(frozen=True)
@@ -1242,14 +1305,20 @@ class Separation:
     - ``"present"``: certified; ``rows`` (the fit's row indices) are every separated row and
       ``span`` (``(1 + width) x k``, ``[intercept; slopes]`` in fitted coordinates, verified on
       the rows exactly) spans the directions along which the estimate is infinite.
-    - ``"unresolved"``: float64 cannot decide; ``span`` holds the directions a separating ray
-      was proposed along, if any.
+    - ``"partial"``: a separating direction verified on the rows exactly, ``rows`` the rows it
+      separates, a proven lower bound: the fit on the other rows was not shown to separate no
+      further (or not run, for a fit refused under ``"error"``), so more rows may be separated.
+      ``span`` holds the direction, its entries below the square root of eps cut for reporting.
+    - ``"unresolved"``: float64 cannot decide, or the rows' linear program exceeds its cap
+      (``work["capped"]``); no direction verified.
 
     ``decided_by`` names the route, ``boundaries`` the family's response boundaries, and
     ``unique`` is false for a link whose likelihood is not concave (cauchit: the sign test
     proves a maximiser exists, not that it is unique).  ``labels`` names the categorical
     levels whose rows are all separated, ``names`` the coefficients ``span`` moves, and
-    ``work`` counts what the decision read.
+    ``work`` counts what the decision read.  ``complete`` marks a ``"present"`` decision
+    with no row kept, and ``labelled_rows`` counts the separated rows the levels in ``labels``
+    hold.
     """
 
     state: SeparationState
@@ -1261,6 +1330,8 @@ class Separation:
     labels: tuple[str, ...] = ()
     names: tuple[str, ...] = ()
     work: Mapping[str, int] = field(default_factory=dict)
+    complete: bool = False
+    labelled_rows: int = 0
 
     def notes(self) -> tuple[str, ...]:
         """The summary's footnote for this decision (empty when the estimate exists and is unique)."""
@@ -1271,36 +1342,141 @@ class Separation:
                 "The cauchit link's likelihood is not concave: no direction separates the "
                 "responses, so a maximiser exists, but it need not be unique.",
             )
-        listed = ", ".join(self.names[:_MAX_LISTED_LABELS])
-        if len(self.names) > _MAX_LISTED_LABELS:
-            listed += f" and {len(self.names) - _MAX_LISTED_LABELS} more"
-        edges = " or ".join({"zero": "0", "one": "1"}[edge] for edge in self.boundaries)
         if self.state == "unresolved":
-            if not self.names:
-                return (
-                    "Whether every coefficient has a finite estimate is not resolved at "
-                    f"float64: the fit's score does not prove it, and no direction separating the "
-                    f"responses at {edges} verifies exactly on the rows.",
-                )
             return (
-                f"{len(self.names)} standard errors withheld (shown as ---): whether their "
-                f"coefficients are finite is not resolved at float64 ({listed}); responses at "
-                f"{edges} may be separated along a direction float64 cannot verify. Merging "
-                "sparse levels or penalising the term gives every coefficient a finite estimate.",
+                "Whether every coefficient has a finite estimate is not resolved at float64: "
+                f"{self._unresolved_reason()}.",
             )
-        where = "; ".join(self.labels) if self.labels else "rows named in diagnostics()"
-        one = len(self.names) == 1
-        plural = "coefficient has" if one else "coefficients have"
-        moving = "it" if one else "them"
+        words = self._words()
+        if self.complete:
+            unreached = self.span.shape[0] - len(self.names)
+            penalised = (
+                " The standard errors shown come from the penalty alone: no row informs them."
+                if unreached > 0
+                else ""
+            )
+            return (
+                f"{words['count']} {words['has']} no finite estimate (standard error shown as "
+                f"---): {words['listed']}. Every row is separated ({words['rows']} with "
+                f"responses at {words['edges']}): a direction moving {words['them']} fits every "
+                f"row exactly at the boundary, so no row is kept and the coefficients are where "
+                f"the fit stopped.{penalised} {_SEPARATION_REMEDY}",
+            )
+        if self.state == "partial":
+            return (
+                f"{words['count']} {words['has']} no finite estimate (standard error shown as "
+                f"---): {words['listed']}. At least {words['rows']} with responses at "
+                f"{words['edges']} ({words['where']}) {words['are']} separated along a direction moving "
+                f"{words['them']}; the fit on the remaining rows was not shown to separate no "
+                "further, so more rows may be. The coefficients are where the fit stopped, not "
+                f"a fit on the remaining rows. {_SEPARATION_REMEDY}",
+            )
         return (
-            f"{len(self.names)} {plural} no finite estimate (standard error shown as ---): "
-            f"{listed}. {self.rows.size} rows with responses at {edges} ({where}) are "
-            f"separated: a direction moving {moving} fits those rows exactly at the "
-            f"boundary, so {'its estimate is' if one else 'their estimates are'} infinite. "
-            "The other coefficients and their "
-            "standard errors are the fit on the remaining rows. Merging or re-basing the "
-            "levels named, or penalising the term, gives every coefficient a finite estimate.",
+            f"{words['count']} {words['has']} no finite estimate (standard error shown as ---): "
+            f"{words['listed']}. {words['rows']} with responses at {words['edges']} "
+            f"({words['where']}) {words['are']} separated: a direction moving {words['them']} fits those "
+            f"rows exactly at the boundary, so {words['estimate']} infinite. The other "
+            "coefficients and their standard errors are the fit on the remaining rows. "
+            f"{_SEPARATION_REMEDY}",
         )
+
+    def statement(self, stops: tuple[float, float] | None, guard: str | None) -> str | None:
+        """What the fit says about this decision when it is published: the warning, or ``None``.
+
+        ``stops`` is the range of the linear predictor on the separated rows where the fit
+        stopped; ``guard`` the runtime evidence on an unresolved decision (the walk's rows at
+        the link's guard, or an exhausted budget), without which an unresolved decision says
+        nothing at fit time (its footnote still does).
+        """
+        if self.state == "absent":
+            return None
+        if self.state == "unresolved":
+            if guard is None:
+                return None
+            return (
+                "Separation not resolved: whether every coefficient has a finite estimate is "
+                f"not decided at float64 ({self._unresolved_reason()}). {guard}, which "
+                "separation would explain: those rows' predictions may have collapsed to the "
+                f"response boundary. {_SEPARATION_REMEDY} Pass separation='ignore' to silence "
+                "this."
+            )
+        words = self._words()
+        held = f" (linear predictor {_stopping_range(stops)})" if stops is not None else ""
+        if self.complete:
+            return (
+                f"Complete separation: every row's response is at {words['edges']} along a "
+                f"direction moving {words['listed']}, so no row is kept and {words['count']} "
+                f"{words['has']} no finite estimate. The coefficients are where the fit "
+                f"stopped{held}, a finite approximation of a limit at infinity, with no "
+                f"standard error. {_SEPARATION_REMEDY} Pass separation='ignore' to silence this."
+            )
+        if self.state == "partial":
+            return (
+                f"Separation: at least {words['rows']} with responses at {words['edges']} "
+                f"({words['where']}) {words['are']} fitted exactly at the boundary along a direction moving "
+                f"{words['listed']}, so {words['count']} {words['has']} no finite estimate; more "
+                f"rows may be separated. The coefficients are where the fit stopped{held}, not a "
+                f"fit on the other rows, and {words['their']} standard {words['errors']} "
+                f"withheld. {_SEPARATION_REMEDY} Pass separation='ignore' to silence this."
+            )
+        return (
+            f"Separation: {words['rows']} with responses at {words['edges']} "
+            f"({words['where']}) {words['are']} fitted exactly at the boundary along a direction moving "
+            f"{words['listed']}, so {words['count']} {words['has']} no finite estimate. The fit "
+            "returned is the fit on the other rows; the separated rows' linear predictor is "
+            f"held where the fit stopped{held}, and {words['their']} standard {words['errors']} "
+            f"withheld. {_SEPARATION_REMEDY} Pass separation='ignore' to silence this."
+        )
+
+    def _unresolved_reason(self) -> str:
+        edges = " or ".join({"zero": "0", "one": "1"}[edge] for edge in self.boundaries)
+        capped = self.work.get("capped")
+        if capped:
+            return (
+                "the fit's score does not prove it, and the rows' linear program "
+                f"({self.work.get('lp_rows', 0)} rows by {self.work.get('candidates', 0)} "
+                f"directions) exceeds its size cap of {capped} entries, so it was not run"
+            )
+        return (
+            "the fit's score does not prove it, and no direction separating the responses at "
+            f"{edges} verifies exactly on the rows"
+        )
+
+    def _words(self) -> dict[str, str]:
+        """The pieces the decision's texts share: the coefficients, the rows and the edges."""
+        # a term's coordinates share its name: one entry per term, with its count
+        counted: dict[str, int] = {}
+        for name in self.names:
+            counted[name] = counted.get(name, 0) + 1
+        entries = [
+            name if count == 1 else f"{name} ({count} coefficients)"
+            for name, count in counted.items()
+        ]
+        listed = ", ".join(entries[:_MAX_LISTED_LABELS])
+        if len(entries) > _MAX_LISTED_LABELS:
+            listed += f" and {len(entries) - _MAX_LISTED_LABELS} more"
+        one = len(self.names) == 1
+        other = self.rows.size - (self.labelled_rows if self.labels else 0)
+        if other:
+            shown = ", ".join(str(int(row)) for row in self.rows[:6])
+            more = f" and {self.rows.size - 6} more" if self.rows.size > 6 else ""
+            rows = f"{'row' if self.rows.size == 1 else 'rows'} {shown}{more}"
+            where = "; ".join(self.labels) + f", and {other} other rows" if self.labels else rows
+        else:
+            where = "; ".join(self.labels)
+        return {
+            "listed": listed,
+            "count": f"{len(self.names)}",
+            "has": "coefficient has" if one else "coefficients have",
+            "them": "it" if one else "them",
+            "estimate": "its estimate is" if one else "their estimates are",
+            "their": "its" if one else "their",
+            "errors": "error is" if one else "errors are",
+            "edges": " or ".join({"zero": "0", "one": "1"}[edge] for edge in self.boundaries),
+            "where": where,
+            "rows": f"{self.rows.size} row" + ("" if self.rows.size == 1 else "s"),
+            "are": "is" if self.rows.size == 1 else "are",
+        }
 
     @property
     def reached(self) -> NDArray:
@@ -1313,6 +1489,19 @@ class Separation:
     def intercept_reached(self) -> bool:
         """Whether ``span`` moves the intercept."""
         return bool(self.span.shape[1] and np.any(self.span[0] != 0.0))
+
+
+_SEPARATION_REMEDY = (
+    "Merging or re-basing the levels named, or penalising the term, gives every coefficient a "
+    "finite estimate."
+)
+
+
+def _stopping_range(stops: tuple[float, float]) -> str:
+    low, high = (float(f"{value:.4g}") for value in stops)
+    if low == high:
+        return f"at {low:g}"
+    return f"between {low:g} and {high:g}"
 
 
 def response_sides(y: NDArray, prior_weights: NDArray, boundaries: tuple[str, ...]) -> NDArray:
@@ -1335,7 +1524,7 @@ def response_sides(y: NDArray, prior_weights: NDArray, boundaries: tuple[str, ..
     return sides
 
 
-def recession_excluded(margin: float, defect: float, curvature: float, weight: float) -> bool:
+def recession_excluded(margin: float, defect: float, curvature: float) -> bool:
     """Whether a fitted score proves that no direction of recession exists.
 
     Stiemke's alternative (Stiemke 1915; Mangasarian, *Nonlinear Programming*, 1969, ch. 2;
@@ -1344,19 +1533,26 @@ def recession_excluded(margin: float, defect: float, curvature: float, weight: f
     ``mu > 0`` on the boundary rows balances them, never both.  A fit supplies ``mu`` from its
     score after one Newton step ``v``: ``r' = W (z - eta - A v)``, ``mu_i = s_i r'_i``, with
     ``A'r' - S (beta + v) = e`` its defect.  For a separating ``h`` the interior rows and the
-    penalty drop out of ``h'e``, so ``h'e = sum_B mu_i |z_i| >= m ||A h||``, ``m = min mu``;
-    and ``||A h||^2 >= h'H h / max W >= lambda ||h~||^2 / max W`` in Jacobi coordinates
-    ``h~``, ``lambda`` a certified lower bound on the Jacobi-scaled Hessian's smallest
-    eigenvalue.  With ``h'e <= ||h~|| defect`` (``defect`` a bound on the scaled ``e``), a
-    separating ``h`` needs ``m sqrt(lambda / max W) <= defect``; so when the margin clears it
-    no ``h`` separates.  A sufficient test (Sol's gate review): when it fails the exact path
-    decides.
+    penalty drop out of ``h'e``, so with ``margin = c = min_B mu_i / sqrt(W_i)`` (weighted
+    Cauchy-Schwarz, the gate review k3p8)
+
+        h'e = sum_B mu_i |z_i| >= c sum_B sqrt(W_i) |z_i| >= c (sum W_i z_i^2)^(1/2)
+            = c (h'H h)^(1/2) >= c sqrt(lambda) ||h~||
+
+    in Jacobi coordinates ``h~``, ``lambda`` a certified lower bound on the Jacobi-scaled
+    Hessian's smallest eigenvalue (``W`` is the Hessian's own, and positive on every boundary
+    row).  With ``h'e <= ||h~|| defect`` (``defect`` a bound on the scaled ``e``), a separating
+    ``h`` needs ``c sqrt(lambda) <= defect``; so when the margin clears it no ``h`` separates.
+    It is never weaker than ``min mu sqrt(lambda / max W)``, since ``c >= min mu / sqrt(max
+    W)``: a zero-response row's multiplier is about its own working weight, so the unweighted
+    form failed on healthy fits with a row far into the tail.  A sufficient test (Sol's gate
+    review): when it fails the exact path decides.
     """
-    if not (margin > 0.0 and curvature > 0.0 and weight > 0.0):
+    if not (margin > 0.0 and curvature > 0.0):
         return False
-    if not (math.isfinite(margin) and math.isfinite(defect) and math.isfinite(weight)):
+    if not (math.isfinite(margin) and math.isfinite(defect)):
         return False
-    return margin * math.sqrt(curvature / weight) > defect
+    return margin * math.sqrt(curvature) > defect
 
 
 def exact_row_signs(matrix, direction: NDArray) -> NDArray:
@@ -1509,6 +1705,10 @@ def separating_direction(matrix, sides: NDArray) -> tuple[NDArray | None, NDArra
     moved = largest > math.sqrt(UNIT_ROUNDOFF) * np.max(reach, axis=1)
     work["lp_rows"] = int(np.count_nonzero(moved))
     if not np.any(moved):
+        return None, np.zeros(0, dtype=np.intp), work
+    if work["lp_rows"] * candidates.shape[1] > PROGRAM_CAP:
+        # past the cap the program is not run, and the decision is disclosed unresolved
+        work["capped"] = PROGRAM_CAP
         return None, np.zeros(0, dtype=np.intp), work
     signed = (sides[boundary][moved, None] * values[moved]) / largest[moved, None]
     count, width = signed.shape

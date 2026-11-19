@@ -327,6 +327,8 @@ def drop1(
 
     if exponent:
         dev_full = deviance_in_units(model, X)
+    from superglm.model.separation_ops import disclosed_text
+
     rows = []
     separated = []
     for name in model._feature_order:
@@ -344,8 +346,10 @@ def drop1(
         reduced._discarded_fit = True
         reduced_X = _drop1_reduced_frame(reduced, X)
         reduced.fit(reduced_X, y, sample_weight=sample_weight, offset=offset)
-        if reduced.result.separation_message is not None:
-            separated.append((name, reduced.result.separation_message))
+        said = disclosed_text(reduced.result)
+        if said is not None:
+            statement = getattr(reduced.result, "separation_statement", None)
+            separated.append((name, said, "heuristic" if statement is None else statement.source))
         dev_reduced = deviance_in_units(reduced, reduced_X)
         edf_reduced = reduced.result.effective_df
         delta_dev = dev_reduced - dev_full

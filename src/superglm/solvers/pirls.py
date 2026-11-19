@@ -9,7 +9,7 @@ import time
 import warnings
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, fields, is_dataclass, replace
-from typing import Literal, cast, get_args
+from typing import Any, Literal, cast, get_args
 
 import numpy as np
 import scipy.linalg
@@ -348,12 +348,18 @@ class PIRLSResult:
     # Class defaults also restore results saved before these fields existed.
     weight_exponent: int = 0
     solver_phi: float | None = None
-    # The runtime separation backstop's statement about this returned state
-    # (``separation.runtime_finding``), or None.  Recorded by every solve not run
-    # under separation="ignore"; of a model's solves, only the published fit's is
-    # shown (``disclose_runtime_separation``).  A coefficient revision clears it,
-    # since no solve returned the revised state (``publish_revised_coefficients``).
+    # The runtime separation backstop's finding on this returned state
+    # (``separation.runtime_finding``), or None: the raw evidence of this solve.
+    # Recorded by every solve not run under separation="ignore"; a model's fit
+    # says what its ``separation_statement`` says, which this is only where no
+    # existence decision is built.  A coefficient revision clears it, since no
+    # solve returned the revised state (``publish_revised_coefficients``).
     separation_message: str | None = None
+    # What the published fit says about separation (``separation_ops.SeparationStatement``):
+    # its existence decision's statement, or the backstop's where no decision is built.
+    # Written by publication (``runtime_canonicalize.canonicalize_fitted_model``) and moved by
+    # a coefficient revision; ``None`` on a raw solve and on results saved before it existed.
+    separation_statement: Any = None
 
     def __setattr__(self, name: str, value: object) -> None:
         if self.__dict__.get("_publication_locked", False):

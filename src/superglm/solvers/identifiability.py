@@ -234,7 +234,7 @@ class Identifiability:
     at float64), which the existence certificate reads (``separation.recession_excluded``).
     ``separation`` is the fit's existence decision (``diagnostics.separation.Separation``): the
     coefficients a certified separating direction moves have no finite estimate and no standard
-    error, and an unresolved one withholds the standard errors its proposal moves.
+    error, whether it was shown maximal (``"present"``) or not (``"partial"``).
     """
 
     width: int
@@ -318,9 +318,10 @@ class Identifiability:
                     "term": name,
                     "coordinate": None if name == "Intercept" else int(coordinate),
                     "aliased_with": "",
-                    "reason": "no finite estimate: separated"
-                    if self.separation.state == "present"
-                    else "not resolved at float64: may be separated",
+                    "reason": {
+                        "present": "no finite estimate: separated",
+                        "partial": "no finite estimate: separated (more rows may be)",
+                    }.get(self.separation.state, "not resolved at float64: may be separated"),
                     "source": "separation",
                 }
                 for name, coordinate in self._separation_coordinates()

@@ -369,7 +369,15 @@ def separated_numeric_design(seed=7, n=3000, share=0.25):
     return pd.DataFrame({"z": z}), y, np.ones(n)
 
 
-def test_runtime_backstop_warns_on_pinned_predictor():
+@pytest.mark.pins_behaviour
+def test_runtime_backstop_warns_on_pinned_predictor(monkeypatch):
+    """Control: where no existence decision is built, the backstop names the pinned group.
+
+    As on master: the walk of a claim-free indicator stops at the log link's guard and the
+    backstop's finding names ``z``.  A decided fit says so from its decision instead
+    (``test_a_separated_indicator_warns_once_from_the_decision``).
+    """
+    force_decision_not_built(monkeypatch)
     df, y, w = separated_numeric_design()
     with warnings.catch_warnings():
         # convergence='coefficients' carries its own experimental warning.
@@ -390,9 +398,13 @@ def test_runtime_backstop_warns_on_pinned_predictor():
     assert "'z'" in message  # the drifting group is named
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("share", [0.25, 0.6])
-def test_runtime_backstop_names_the_group_that_moves_the_stopped_rows(share):
+def test_runtime_backstop_names_the_group_that_moves_the_stopped_rows(monkeypatch, share):
     """A coefficient's size is no guide across groups; what it moves on the stopped rows is.
+
+    Control, on the route where no existence decision is built: the backstop's naming rule,
+    as on master.
 
     ``x`` is a real effect on a column of scale 1e-3, so its coefficient
     (about 260) dwarfs the separated ``z`` (pinned near -80).  Naming the
@@ -403,10 +415,8 @@ def test_runtime_backstop_names_the_group_that_moves_the_stopped_rows(share):
     moved nothing from it; the move is measured from the rows that did not
     stop.
     """
-    df, y, w = separated_numeric_design(share=share)
-    rng = np.random.default_rng(11)
-    df = df.assign(x=rng.normal(size=len(df)) * 1e-3)
-    y = np.where(df["z"].to_numpy() == 1.0, 0.0, y * np.exp(300.0 * df["x"].to_numpy()))
+    force_decision_not_built(monkeypatch)
+    df, y, w = bystander_design(share)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         model = SuperGLM(
@@ -427,17 +437,35 @@ def test_runtime_backstop_names_the_group_that_moves_the_stopped_rows(share):
     assert "group(s): ['z']" in message
 
 
-def test_runtime_backstop_measures_a_group_from_its_bulk_not_from_zero():
-    """A covariate far from zero carries a large constant the intercept cancels.
+def bystander_design(share):
+    """The claim-free indicator ``z`` beside ``x``, a real effect on a column of scale 1e-3."""
+    df, y, w = separated_numeric_design(share=share)
+    rng = np.random.default_rng(11)
+    df = df.assign(x=rng.normal(size=len(df)) * 1e-3)
+    y = np.where(df["z"].to_numpy() == 1.0, 0.0, y * np.exp(300.0 * df["x"].to_numpy()))
+    return df, y, w
 
-    ``year`` sits near 2015 with a coefficient of 0.1, so its raw contribution
-    is about 212 on every row, beyond the separated ``z`` (pinned near -80).
-    What it moves the stopped rows away from the bulk is under 1.
-    """
+
+def year_design():
+    """The claim-free indicator ``z`` beside ``year``, a covariate near 2015."""
     df, y, w = separated_numeric_design()
     year = 2015.0 + np.random.default_rng(11).integers(-5, 6, size=len(df)).astype(float)
     df = df.assign(year=year)
     y = np.where(df["z"].to_numpy() == 1.0, 0.0, y * np.exp(0.1 * (year - 2015.0)))
+    return df, y, w
+
+
+@pytest.mark.pins_behaviour
+def test_runtime_backstop_measures_a_group_from_its_bulk_not_from_zero(monkeypatch):
+    """A covariate far from zero carries a large constant the intercept cancels.
+
+    ``year`` sits near 2015 with a coefficient of 0.1, so its raw contribution
+    is about 212 on every row, beyond the separated ``z`` (pinned near -80).
+    What it moves the stopped rows away from the bulk is under 1.  Control, on the
+    route where no existence decision is built: the backstop's rule, as on master.
+    """
+    force_decision_not_built(monkeypatch)
+    df, y, w = year_design()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         model = SuperGLM(
@@ -455,12 +483,15 @@ def test_runtime_backstop_measures_a_group_from_its_bulk_not_from_zero():
     assert "group(s): ['z']" in message
 
 
-def test_runtime_backstop_reports_the_expected_curvature_ratio():
+@pytest.mark.pins_behaviour
+def test_runtime_backstop_reports_the_expected_curvature_ratio(monkeypatch):
     """Tweedie/log rows are observed-Newton; the gate compares the Fisher ratio.
 
     The iteration log keeps the observed weights, which are the Fisher weights
     times (2 - p) + (p - 1) y / mu, so their ratio is not the one the warning reports.
+    Control, on the route where no existence decision is built, as on master.
     """
+    force_decision_not_built(monkeypatch)
     df, y, w = separated_numeric_design()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
@@ -481,6 +512,13 @@ def test_runtime_backstop_reports_the_expected_curvature_ratio():
 
 
 def test_runtime_backstop_error_mode_refuses():
+    """Under ``"error"`` the separated indicator is refused with its decision's statement.
+
+    The rows' direction ``z`` is verified exactly, so the refusal names it and the rows it
+    separates, at least: a refused fit runs no withheld fit to show the set maximal.  Master
+    refused with the backstop's guard signature.  Mutation check: with the withheld fit run
+    before the refusal, the statement was the maximal one, without "at least".
+    """
     df, y, w = separated_numeric_design()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
@@ -491,10 +529,53 @@ def test_runtime_backstop_error_mode_refuses():
             convergence="coefficients",
             separation="error",
         )
-    with pytest.raises(SeparationError, match="signature of separation"):
+    with pytest.raises(SeparationError) as refused:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
             model.fit(df, y, sample_weight=w)
+    message = str(refused.value)
+    assert message.startswith("Separation: at least ")
+    assert says_infinite(message, "z")
+    assert not refused.value.levels
+
+
+@pytest.mark.parametrize("design", ["pinned", "share 0.25", "share 0.6", "year"])
+def test_a_separated_indicator_warns_once_from_the_decision(design):
+    """A separation the decision proves is said once, naming exactly the coefficients it moves.
+
+    The claim-free indicator ``z`` walks to the log link's guard beside a bystander whose
+    coefficient is larger (``x``, on a 1e-3 column) or whose raw contribution is (``year`` near
+    2015): the backstop needed its naming rules to point at ``z``; the decision's span names it
+    by its coordinates.  The fit returned is the fit on the rows ``z`` does not touch, its
+    standard error withheld.  At ``07a1401a5`` none of these fits warned: the published fit was
+    the withheld refit, which carries no finding.  Mutation check: with the statement read from
+    the published solve's raw finding, nothing was said.
+    """
+    df, y, w = {
+        "pinned": separated_numeric_design,
+        "share 0.25": lambda: bystander_design(0.25),
+        "share 0.6": lambda: bystander_design(0.6),
+        "year": year_design,
+    }[design]()
+    features = {"z": Numeric(), **{name: Numeric() for name in df.columns if name != "z"}}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        model = SuperGLM(
+            family=Tweedie(p=1.5), features=features, max_iter=150, convergence="coefficients"
+        )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(df, y, sample_weight=w)
+
+    claims = separation_warnings(caught)
+    assert len(claims) == 1
+    assert claims == decision_claims(caught)
+    assert says_infinite(claims[0], "z")
+    separation = published_decision(model)
+    assert separation.state == "present" and separation.names == ("z",)
+    statement = model.result.separation_statement
+    assert (statement.tag, statement.source) == ("present", "decision")
+    assert np.isnan(model.metrics(df, y, sample_weight=w).coefficient_se["z"][0])
 
 
 def test_runtime_backstop_silent_on_healthy_fit():
@@ -599,6 +680,50 @@ def runtime_claims(caught):
     ]
 
 
+#: How the existence decision's statements open (``Separation.statement``).
+DECISION_OPENINGS = ("Separation: ", "Separation not resolved", "Complete separation")
+
+
+def decision_claims(caught):
+    """The separation warnings the fit's existence decision gave."""
+    return [
+        str(c.message)
+        for c in caught
+        if issubclass(c.category, SeparationWarning)
+        and str(c.message).startswith(DECISION_OPENINGS)
+    ]
+
+
+def says_infinite(message, names):
+    """Whether a decision's statement names ``names`` as the coefficients with no finite estimate."""
+    return f"moving {names}," in message and "no finite estimate" in message
+
+
+def separation_warnings(caught):
+    return [str(c.message) for c in caught if issubclass(c.category, SeparationWarning)]
+
+
+def force_decision_not_built(monkeypatch):
+    """Publication builds no existence decision, so the backstop's finding is the fit's statement.
+
+    The route a selection penalty, a constrained or a SCOP fit takes: no response boundary is
+    read (``separation_ops.separation_boundaries``).  Before the decision existed there was none
+    to skip, so this patches nothing there.
+    """
+    import importlib
+    import importlib.util
+
+    if importlib.util.find_spec("superglm.model.separation_ops") is not None:
+        module = importlib.import_module("superglm.model.separation_ops")
+        monkeypatch.setattr(module, "separation_boundaries", lambda model: (), raising=False)
+
+
+def published_decision(model):
+    """The published fit's existence decision, from its identifiability record."""
+    record = model._fit_inference_info.get("identifiability")
+    return getattr(record, "separation", None)
+
+
 def forced_runtime_finding():
     """The backstop's message for a pinned walk, as ``runtime_finding`` formats it."""
     from superglm.diagnostics.separation import format_runtime_message
@@ -610,12 +735,16 @@ def force_runtime_finding(monkeypatch):
     """Every coefficient solve that runs the backstop records a finding, whatever its state.
 
     Both solvers read the one check (``separation.runtime_finding``), so this
-    forces the event on every route without bending the data to reach it.
+    forces the event on every route without bending the data to reach it.  The
+    existence decision is not built (``force_decision_not_built``): it would
+    prove these estimates finite and overrule the forced finding.
     """
     import superglm.diagnostics.separation as separation_module
 
     message = forced_runtime_finding()
     monkeypatch.setattr(separation_module, "runtime_finding", lambda *_a, **_k: message)
+    # these fits' estimates exist, so a decision would overrule the forced finding
+    force_decision_not_built(monkeypatch)
     return message
 
 
@@ -706,13 +835,15 @@ def test_a_search_solve_at_the_guard_does_not_warn_about_the_published_fit(monke
 
 
 def test_a_separated_fit_warns_once_however_many_solves_its_theta_search_ran():
-    """A fit whose own state is at the guard says so once, after its theta search.
+    """A separated fit says so once, after its theta search, from its decision.
 
     ``theta="auto"`` calibrates theta by refitting the mean at each trial
     theta, and each refit of this separated indicator walks to the guard as
-    the published fit does.  The published fit's own finding is the one
-    warning, and its predictions sit at the guard on the separated rows, as
-    the warning says, and nowhere else.  Mutation check: with the calibration
+    the published fit does.  The published fit's decision is the one warning,
+    naming ``z``; the fit on the other rows holds the separated span where the
+    walk stopped, so those rows' predictions sit at the guard, as the warning
+    says, and nowhere else.  At ``07a1401a5`` it said nothing (the published
+    withheld refit carried no finding).  Mutation check: with the calibration
     solves passing the model's mode, each warned (four warnings for one fit).
     """
     from superglm.distributions import NegativeBinomial
@@ -738,9 +869,10 @@ def test_a_separated_fit_warns_once_however_many_solves_its_theta_search_ran():
         warnings.simplefilter("always")
         model.fit(frame, y)
 
-    claims = runtime_claims(caught)
+    claims = separation_warnings(caught)
     assert len(claims) == 1
-    assert "overflow guard" in claims[0] and "'z'" in claims[0]
+    assert claims == decision_claims(caught)
+    assert says_infinite(claims[0], "z")
     log_mean = np.log(model.predict(frame))
     separated = z == 1.0
     np.testing.assert_allclose(log_mean[separated], -LOG_GUARD, rtol=0, atol=64 * U * LOG_GUARD)
@@ -754,10 +886,14 @@ def poisson_curve(seed=3, n=1500):
     return pd.DataFrame({"x": x}), y
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("route", ["fit_reml", "fit_path"])
 @pytest.mark.parametrize("mode", ["warn", "ignore", "error"])
 def test_a_fit_reads_the_models_separation_mode_for_what_it_returns(monkeypatch, route, mode):
     """``fit_reml`` and ``fit_path`` warn once, stay silent or refuse, as ``fit`` does.
+
+    Control, on the route where no existence decision is built (a decision would prove these
+    estimates finite and overrule the forced finding): the backstop's statement, as on master.
 
     The backstop's finding is forced at the check both solvers read: on every
     solve of ``fit_reml``, which publishes its terminal refit's finding, and
@@ -782,6 +918,7 @@ def test_a_fit_reads_the_models_separation_mode_for_what_it_returns(monkeypatch,
         return message if route == "fit_reml" or len(solves) == 1 else None
 
     monkeypatch.setattr(separation_module, "runtime_finding", finding)
+    force_decision_not_built(monkeypatch)
     features = {"x": Spline(kind="cr", k=8)}
     if route == "fit_reml":
         model = SuperGLM(family="poisson", features=features, separation=mode)
@@ -856,18 +993,18 @@ def test_estimate_p_warns_for_its_published_refit_not_for_each_power_it_tried(mo
 @pytest.mark.parametrize("route", ["fit", "fit_reml", "estimate_p", "estimate_theta"])
 @pytest.mark.parametrize("mode", ["warn", "ignore", "error"])
 def test_every_route_decides_a_row_at_the_guard_as_fit_does(route, mode):
-    """Each route reads the backstop on the fit it returns, under the model's mode.
+    """A row only its offset holds at the guard is not separation, on every route and mode.
 
     One claim-free policy's offset sits 100 below the rest, so every solve,
     the published one included, holds that row's predictor at the log link's
-    guard.  The backstop reads the guard as it stands, offset included, so it
-    reports this row although no coefficient runs off (a known false call of
-    the guard heuristic): each route warns once, stays silent or refuses, as
-    ``fit`` does on the same data.  Mutation checks: with the smoothing
-    search's solves passing ``"warn"``, ``fit_reml`` warned once per solve
-    under every mode; with the REML publication refit recording nothing,
-    ``fit_reml``, ``estimate_p`` and ``estimate_theta`` said nothing under
-    ``"warn"`` and returned under ``"error"``.
+    guard, and the backstop reports it although no coefficient runs off (a
+    known false call of the guard heuristic: master warned, or under
+    ``"error"`` refused).  The existence decision proves every estimate finite
+    (no direction of the design separates that row), and a decided absence
+    overrules the heuristic: each route fits and says nothing about separation,
+    under every mode, and the row is still predicted at the guard.  Mutation
+    check: with the heuristic's finding published beside a decided absence,
+    every route warned or refused again.
     """
     from superglm.distributions import NegativeBinomial
 
@@ -896,19 +1033,12 @@ def test_every_route_decides_a_row_at_the_guard_as_fit_does(route, mode):
     }
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        if mode == "error":
-            with pytest.raises(SeparationError, match="overflow guard"):
-                fits[route]()
-        else:
-            fits[route]()
+        fits[route]()
 
-    claims = runtime_claims(caught)
-    if mode == "error":
-        assert claims == []
-        with pytest.raises(RuntimeError, match="Not fitted"):
-            model.result
-        return
-    assert len(claims) == (1 if mode == "warn" else 0)
+    assert separation_warnings(caught) == []
+    assert published_decision(model).state == "absent"
+    assert model.result.separation_statement.tag == "absent"
+    assert model.result.separation_message is not None, "the event: the backstop fired"
     log_mean = np.log(model.predict(frame, offset=offset))
     assert log_mean[0] == pytest.approx(-LOG_GUARD, abs=64 * U * LOG_GUARD)
     assert np.all(np.abs(log_mean[1:]) < LOG_GUARD / 2)
@@ -1057,10 +1187,14 @@ def test_the_exported_solvers_keep_their_separation_keyword(monkeypatch, solver,
     assert result.separation_message == (None if mode == "ignore" else message)
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("dropped", [("x",), ("x", "z")])
 @pytest.mark.parametrize("mode", ["warn", "ignore", "error"])
 def test_drop1_names_the_feature_whose_comparison_fit_is_separated(monkeypatch, mode, dropped):
     """``drop1`` publishes its comparison fits' deviances, so it reports their findings once.
+
+    Control, on the route where no existence decision is built (these estimates exist, so a
+    decision would overrule the forced finding): the backstop's statement, as on master.
 
     The full model fits cleanly; then the backstop's finding is forced on the
     solves of the comparison fit without ``x``, or of both comparison fits.
@@ -1093,6 +1227,7 @@ def test_drop1_names_the_feature_whose_comparison_fit_is_separated(monkeypatch, 
         else "drop1: the comparison fits without 'x' and without 'z' each carry "
     )
     monkeypatch.setattr(separation_module, "runtime_finding", finding)
+    force_decision_not_built(monkeypatch)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         if mode == "error":
@@ -1108,20 +1243,21 @@ def test_drop1_names_the_feature_whose_comparison_fit_is_separated(monkeypatch, 
     assert all(claim.startswith(opening) for claim in claims)
 
 
+@pytest.mark.parametrize("separated", [True, False], ids=["separated", "offset row only"])
 @pytest.mark.parametrize("route", ["fit", "fit_reml", "fit_reml without smooth terms"])
-def test_a_refused_fit_says_nothing_else_about_itself(monkeypatch, route):
+def test_a_refused_fit_says_nothing_else_about_itself(monkeypatch, route, separated):
     """Under ``"error"`` a separated fit is refused before any statement about it is made.
 
-    Unforced: one claim-free row at offset -100 holds its predictor at the log
-    link's guard.  A log-link binomial ``fit`` would also report that row at
-    a probability of 0, and a ``fit_reml`` whose indicator ``z`` has one
-    active, claim-free row would name ``z`` weakly identified; both are
-    refused with no warning, as ``fit`` was on master.  The unresolved-row
-    report, which every route runs after its solve, is forced to speak, and
-    is not reached either.  Mutation checks: with the refusal left to
-    publication, ``fit`` gave a ``ConvergenceWarning``, ``fit_reml`` a
-    ``WeakIdentificationWarning`` and a ``fit_reml`` with no smooth term the
-    unresolved-row report about the fit they refused.
+    Separated: the indicator ``z`` has four active rows, every response 0, so the decision
+    verifies its direction and the fit is refused with its statement.  A ``fit_reml`` would
+    first name ``z`` weakly identified, and the unresolved-row report, which every route runs
+    after its solve, is forced to speak; neither is reached.  The offset row only (one
+    claim-free row at offset -100, at the log link's guard): the decision proves every
+    estimate finite, so nothing refuses and nothing is said about separation; master refused
+    it on the guard heuristic (the log-binomial ``fit`` and both ``fit_reml`` designs), a false
+    call.  Mutation checks: with the weak-identification notice given as the REML finish ran,
+    ``fit_reml`` warned before its refusal; with the decided absence not overruling the
+    backstop, the offset-only fits were refused.
     """
     from superglm.distributions import Binomial
     from superglm.links import LogLink
@@ -1131,38 +1267,52 @@ def test_a_refused_fit_says_nothing_else_about_itself(monkeypatch, route):
         warnings.warn("unresolved rows", UserWarning)
 
     monkeypatch.setattr(fit_ops, "_warn_unresolved_rows", unresolved_rows)
+    z_rows = [1, 2, 3, 4] if separated else []
     if route != "fit_reml":
         rng = np.random.default_rng(4)
         n = 400
         x = rng.uniform(-2.0, 2.0, n)
         y = rng.binomial(1, np.clip(np.exp(-0.5 + 0.4 * x), 0.01, 0.99)).astype(float)
         y[np.argmax(x)] = 1.0
-        frame = pd.DataFrame({"x": x})
+        z = np.zeros(n)
+        z[z_rows] = 1.0
+        y[z_rows] = 0.0
+        frame = pd.DataFrame({"x": x, "z": z})
         model = SuperGLM(
-            family=Binomial(), link=LogLink(), features={"x": Numeric()}, separation="error"
+            family=Binomial(),
+            link=LogLink(),
+            features={"x": Numeric(), **({"z": Numeric()} if separated else {})},
+            separation="error",
         )
     else:
         rng = np.random.default_rng(3)
         n = 1500
         x = rng.uniform(0.0, 1.0, n)
-        z = np.zeros(n)
-        z[1] = 1.0
         y = rng.poisson(np.exp(0.3 + np.sin(3.0 * x))).astype(float)
-        y[1] = 0.0
+        z = np.zeros(n)
+        z[z_rows] = 1.0
+        y[z_rows] = 0.0
         frame = pd.DataFrame({"x": x, "z": z})
         model = SuperGLM(
             family="poisson",
-            features={"x": Spline(kind="cr", k=8), "z": Numeric()},
+            features={"x": Spline(kind="cr", k=8), **({"z": Numeric()} if separated else {})},
             separation="error",
         )
     offset = np.zeros(n)
     offset[0], y[0] = -100.0, 0.0
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        with pytest.raises(SeparationError, match="overflow guard"):
+        if separated:
+            with pytest.raises(SeparationError, match="moving z,"):
+                getattr(model, route.split()[0])(frame, y, offset=offset)
+        else:
             getattr(model, route.split()[0])(frame, y, offset=offset)
 
-    assert [c.category.__name__ for c in caught] == []
+    if separated:
+        assert [c.category.__name__ for c in caught] == []
+    else:
+        assert separation_warnings(caught) == []
+        assert published_decision(model).state == "absent"
 
 
 def test_strict_fit_reml_decides_on_the_theta_refit_it_returns(monkeypatch):
@@ -1304,25 +1454,27 @@ def test_separation_error_takes_the_arguments_a_value_error_does():
     assert (again.args, again.levels) == (("level",), True)
 
 
-def test_a_coefficient_revision_clears_the_solves_separation_finding(monkeypatch):
-    """A revised state is not one a solve returned, so the backstop's statement about it goes.
+def test_a_coefficient_revision_clears_the_solves_separation_finding():
+    """A revised state is not one a solve returned, and an edit that sets ``z`` drops its claim.
 
-    A numeric indicator whose rows have no claim is fitted with the finding
-    forced.  The editor sets its slope to zero, so every revised prediction is
-    the claim rows' mean, and the edited result (``coefficients_revised``)
-    carries no finding, as it carries no convergence.  Mutation check: with the
-    revision keeping the field, the edited model still said its predictions
-    had collapsed.
+    A numeric indicator whose rows have no claim is fitted; its decision says ``z`` has no
+    finite estimate.  The editor sets its slope to zero, so every revised prediction is the
+    claim rows' mean and reads nothing of where the walk stopped: the edited result
+    (``coefficients_revised``) says nothing about separation, as it carries no convergence,
+    and the source model keeps its statement.  At ``07a1401a5`` the source fit said nothing
+    either.  Mutation check: with the revision keeping every statement, the edited model still
+    said ``z`` was separated.
     """
     from superglm.editor import EditorSession
 
     z = np.repeat([0.0, 1.0], 64)
     frame, y = pd.DataFrame({"z": z}), 1.0 - z
-    message = force_runtime_finding(monkeypatch)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", SeparationWarning)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         model = SuperGLM(family="poisson", features={"z": Numeric()}).fit(frame, y)
-    assert model.result.separation_message == message
+    assert len(decision_claims(caught)) == 1
+    source = model.result.separation_statement
+    assert source.tag == "present" and "moving z" in source.text
     session = EditorSession.from_model(model, terms=["z"], train_data=(frame, y))
     session.terms["z"].edited_log_effect = np.array([0.0])
     edited = session.to_model()
@@ -1330,7 +1482,8 @@ def test_a_coefficient_revision_clears_the_solves_separation_finding(monkeypatch
     assert edited.result.termination_reason == "coefficients_revised"
     np.testing.assert_allclose(edited.predict(frame), 1.0, rtol=1e-6)
     assert edited.result.separation_message is None
-    assert model.result.separation_message == message
+    assert edited.result.separation_statement is None
+    assert model.result.separation_statement is source
 
 
 def test_a_levels_anchor_rank_is_read_from_an_economy_factorization(monkeypatch):
@@ -1581,3 +1734,237 @@ def test_a_fit_reports_the_build_warnings_where_master_did():
         ).fit(pd.DataFrame({"c": c}), y)
     attributed = [w for w in record if "falling back" in str(w.message)]
     assert [Path(w.filename).name for w in attributed] == ["dm_builder.py"]
+
+
+# ── The decision's statement: once, under the model's mode, on every route ──
+
+
+def separated_indicator(seed=7, n=2000):
+    """A Poisson response with a claim-free numeric indicator ``z`` beside a real effect ``x``."""
+    rng = np.random.default_rng(seed)
+    z = (rng.uniform(size=n) < 0.25).astype(float)
+    x = rng.uniform(0.0, 1.0, n)
+    y = rng.poisson(np.exp(0.3 + np.sin(3.0 * x))).astype(float)
+    y[z == 1.0] = 0.0
+    return pd.DataFrame({"z": z, "x": x}), y
+
+
+@pytest.mark.parametrize("mode", ["warn", "ignore", "error"])
+@pytest.mark.parametrize("route", ["fit", "fit_reml", "NB2 theta auto", "fit_path", "Final fit"])
+def test_a_decided_separation_reads_the_models_mode_on_every_route(route, mode):
+    """A decided separation warns once, says nothing or refuses, as the model's mode says.
+
+    ``z`` separates its rows; ``fit``, ``fit_reml``, NB2 ``theta="auto"`` (its decision taken
+    on the published refit of the alternation) and Final fit decide it, and under ``"warn"``
+    say so once, from the decision; under ``"error"`` they are refused with that statement and
+    nothing said before (Final fit with its own sentence for a solver's finding).  ``fit_path``
+    builds no decision (a selection penalty is not quadratic): its walk stops short of the
+    guard, so it is silent, as on master; it is listed in the pull request as a known silent
+    case.  At ``07a1401a5`` every decided route was silent under ``"warn"`` and fitted under
+    ``"error"``.  Mutation checks: with the published NB2 refit still marked as a search refit,
+    the strict alternation fitted; with the refusal given where the fit is handed over, the
+    NB2 fit warned that ``z`` was weakly identified before it was refused.
+    """
+    from superglm.distributions import NegativeBinomial
+    from superglm.editor import EditorSession
+    from superglm.editor.cv import capture_final_fit, run_final_fit
+    from superglm.editor.errors import EditorValueError
+
+    frame, y = separated_indicator()
+    features = {"z": Numeric(), "x": Spline(n_knots=6)}
+    options = {"separation": mode}
+    if route == "NB2 theta auto":
+        options["family"] = NegativeBinomial(theta="auto")
+    else:
+        options["family"] = "poisson"
+    if route == "fit_path":
+        options.update(selection_penalty=1e-3, penalty_features="x")
+    model = SuperGLM(features=features, **options)
+
+    def run():
+        if route == "fit":
+            return model.fit(frame, y)
+        if route in ("fit_reml", "NB2 theta auto"):
+            return model.fit_reml(frame, y)
+        if route == "fit_path":
+            return model.fit_path(frame, y, n_lambda=4)
+        # the template is fitted where z's rows have claims; Final fit refits on the rows given
+        claims = np.where(frame["z"].to_numpy() == 1.0, 1.0, y)
+        template = SuperGLM(features=features, family="poisson", separation=mode).fit(frame, claims)
+        session = EditorSession.from_model(template, train_data=(frame, y))
+
+        class Context:
+            def progress(self, *args, **kwargs):
+                pass
+
+            def check(self):
+                pass
+
+        return run_final_fit(capture_final_fit(session), Context())
+
+    refused = (SeparationError, EditorValueError)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        if mode == "error" and route != "fit_path":
+            with pytest.raises(refused) as raised:
+                run()
+        else:
+            run()
+
+    if route == "fit_path":
+        assert separation_warnings(caught) == []
+        assert model.result.separation_statement is None
+        return
+    if mode == "error":
+        assert [c.category.__name__ for c in caught] == []
+        if route == "Final fit":
+            return
+        assert str(raised.value).startswith("Separation: at least ")
+        assert says_infinite(str(raised.value), "z")
+        return
+    claims = separation_warnings(caught)
+    if mode == "ignore":
+        assert claims == []
+        return
+    assert len(claims) == 1 and claims == decision_claims(caught)
+    assert says_infinite(claims[0], "z")
+
+
+def separated_level(seed=11, n=3000, with_indicator=False):
+    """Level D of ``f`` has no claim; with ``with_indicator`` neither has ``z``'s rows."""
+    rng = np.random.default_rng(seed)
+    f = rng.choice(list("ABCD"), n)
+    x = rng.uniform(0.0, 1.0, n)
+    z = (rng.uniform(size=n) < 0.1).astype(float)
+    y = rng.poisson(np.exp(0.2 + np.sin(3.0 * x) + 0.3 * (f == "B"))).astype(float)
+    y[f == "D"] = 0.0
+    if with_indicator:
+        y[z == 1.0] = 0.0
+    frame = pd.DataFrame({"f": f, "x": x, "z": z})
+    return frame, y
+
+
+@pytest.mark.parametrize("overlap", ["the scan's rows", "beyond the scan's rows"])
+def test_a_separation_the_build_scan_named_is_warned_about_once(overlap):
+    """A separation on rows the build scan already named is the scan's one warning.
+
+    The scan names level D before any solve; the decision then separates D's rows (and with
+    the indicator ``z`` claim-free too, ``z``'s rows beyond D).  On D's rows alone the fit warns
+    once, the scan's, and the decision's statement stays on the fit, naming ``f[D]`` (the
+    summary footnote too).  Beyond them the decision adds what the scan could not see, and says
+    so: two warnings, the second the decision's, naming both.  At ``07a1401a5`` the second fit
+    was silent about ``z``.  Mutation check: without the scan's rows kept in the call's scope,
+    the first fit warned twice about D.
+    """
+    beyond = overlap == "beyond the scan's rows"
+    frame, y = separated_level(with_indicator=beyond)
+    model = SuperGLM(
+        family="poisson",
+        features={"f": Categorical(base="A"), "x": Spline(n_knots=6), "z": Numeric()},
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(frame, y)
+
+    claims = separation_warnings(caught)
+    assert claims[0].startswith("Separation detected") and "'f'" in claims[0]
+    statement = model.result.separation_statement
+    assert statement.tag == "present"
+    if not beyond:
+        assert len(claims) == 1
+        assert published_decision(model).names == ("f[D]",)
+        return
+    assert len(claims) == 2 and decision_claims(caught) == claims[1:]
+    assert says_infinite(claims[1], "f[D], z")
+    assert "level D of f" in claims[1] and "other rows" in claims[1]
+
+
+def test_drop1_says_a_separated_comparison_fit_is_the_limit_fit():
+    """A comparison fit whose decision proves separation is the limit fit, and ``drop1`` says so.
+
+    ``z`` separates its rows in the full model and in the comparison fit without ``x``; that
+    fit is discarded, so it says nothing itself, and ``drop1`` names it once.  Its deviance is
+    the supremum the likelihood approaches, not a fit short of the maximum (the backstop's
+    case), so the table compares with that limit.  The comparison fit without ``z`` is not
+    separated.  At ``07a1401a5`` ``drop1`` said nothing.  Mutation check: with every finding
+    worded as the backstop's, the statement called the comparison fit not a maximum-likelihood
+    fit.
+    """
+    frame, y = separated_indicator()
+    frame = frame.assign(x=frame["x"] - 0.5)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SeparationWarning)
+        model = SuperGLM(family="poisson", features={"z": Numeric(), "x": Numeric()}).fit(frame, y)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        table = model.drop1(frame, y)
+
+    claims = separation_warnings(caught)
+    assert sorted(table["feature"]) == ["x", "z"]
+    assert len(claims) == 1
+    assert claims[0].startswith("drop1: the comparison fit without 'x' carries ")
+    assert "the limit of a fit" in claims[0] and "not a maximum-likelihood fit" not in claims[0]
+    assert "moving z" in claims[0]
+
+
+def test_the_separation_statement_moves_only_as_its_table_says(monkeypatch):
+    """The statement is one tagged value; its writers make only the moves its table declares.
+
+    The table itself is checked (every tag is a state, every state is reached from ``"none"``
+    and left by some move), then each declared revision move is made by its writer
+    (``revised_statement``) from a statement of that tag, and an undeclared move is refused.
+    Publication's moves are made by fits throughout this file.  Mutation check: with a
+    partial statement revised away, the writer made a move the table does not declare.
+    """
+    from superglm.diagnostics.separation import Separation
+    from superglm.model import separation_ops as ops
+
+    moves = ops.STATEMENT_MOVES
+    tags = set(moves)
+    assert tags == {"none", "absent", "present", "partial", "unresolved", "heuristic"}
+    for state, events in moves.items():
+        assert set(events.values()) <= tags
+        assert any(target != state for target in events.values())
+    reached, frontier = {"none"}, ["none"]
+    while frontier:
+        for target in moves[frontier.pop()].values():
+            if target not in reached:
+                reached.add(target)
+                frontier.append(target)
+    assert reached == tags
+
+    frame, y = separated_indicator()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = SuperGLM(family="poisson", features={"z": Numeric(), "x": Numeric()}).fit(frame, y)
+    present = model.result.separation_statement
+    assert present.tag == "present"
+    z = int(present.reached[0])
+    partial = ops.SeparationStatement(
+        "partial", "text", reached=present.reached, decision=present.decision
+    )
+    absent = ops.SeparationStatement("absent", decision=Separation("absent", "certificate"))
+    guard = ops.SeparationStatement("heuristic", "the backstop's", guard_rows=3)
+    budget = ops.SeparationStatement("heuristic", "the backstop's")
+    unresolved = ops.SeparationStatement("unresolved", "not decided", guard_rows=3)
+    monkeypatch.setattr(ops, "_guard_rows", lambda model, eta: 0)
+    cases = [
+        (None, (), "revise", None),
+        (absent, (z,), "revise", "absent"),
+        (present, (), "revise", "present"),
+        (present, (z,), "revise away", None),
+        (partial, (z,), "revise", "partial"),
+        (unresolved, (), "revise", "unresolved"),
+        (budget, (), "revise", "heuristic"),
+        (guard, (), "revise away", None),
+    ]
+    for before, replaced, event, tag in cases:
+        after = ops.revised_statement(model, before, np.asarray(replaced, dtype=np.intp))
+        assert (None if after is None else after.tag) == tag
+        assert moves["none" if before is None else before.tag][event] == (
+            "none" if tag is None else tag
+        )
+    revised = ops.revised_statement(model, unresolved, np.zeros(0, dtype=np.intp))
+    assert revised.text is None, "an unresolved decision's warning stands only on its evidence"
+    with pytest.raises(RuntimeError, match="partial --revise away--> none is not a move"):
+        ops._moved(partial, "revise away", None)

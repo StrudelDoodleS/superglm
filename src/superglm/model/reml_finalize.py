@@ -15,7 +15,6 @@ from superglm._reporting_state import (
     StructuredLevelSupport,
     build_reporting_support_state,
 )
-from superglm.diagnostics.separation import refuse_published_separation
 from superglm.distributions import Gamma, Gaussian, Tweedie, clip_mu
 from superglm.links import stabilize_eta
 from superglm.model.base import rebuild_dm_with_lambdas
@@ -423,7 +422,11 @@ def _disclose_weak_identification(
     and the directions the border factor or the observed certificate flagged.
     The fit keeps them all; ``profile["reml_weakly_identified"]`` holds the
     slope indices, ``model.diagnostics()`` their names, and one
-    ``WeakIdentificationWarning`` names them.
+    ``WeakIdentificationWarning`` names them.  The warning is held
+    (``model._held_fit_notices``) until the fit is published
+    (``fit_ops._publish_fit_notices``): a fit refused under
+    ``separation="error"`` there says nothing else about itself, and a refit an
+    NB2 theta alternation supersedes says nothing.
     """
     flagged: set[int] = set()
     if at_mode:
@@ -486,16 +489,17 @@ def _disclose_weak_identification(
             if excluded_labels
             else " None of them is left out of smoothing-parameter selection."
         )
-        warnings.warn(
+        held = (
             "These coefficients carry information only at the noise level of the data "
             "(a factor level or column with little or no weight, observations or "
             f"information): {', '.join(labels)}. They stay in the model, and their "
-            f"estimates and standard errors carry little information.{left_out}{separated}",
-            WeakIdentificationWarning,
-            stacklevel=4,
+            f"estimates and standard errors carry little information.{left_out}{separated}"
         )
     elif separated:
-        warnings.warn(separated.strip(), WeakIdentificationWarning, stacklevel=4)
+        held = separated.strip()
+    else:
+        held = None
+    model._held_fit_notices = [] if held is None else [(held, WeakIdentificationWarning)]
 
 
 def finalize_reml_fit(
@@ -967,8 +971,7 @@ def finalize_reml_fit(
     corrected = replace(final_pirls, phi=phi_fixed)
     model._result = corrected
     model._reml_result.pirls_result = corrected
-    # Under "error" a separated fit is refused before anything describes it.
-    refuse_published_separation(model, corrected)
+    # Its notice waits for publication, which refuses a strict separated fit first.
     _disclose_weak_identification(
         model,
         profile=profile,

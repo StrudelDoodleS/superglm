@@ -2692,6 +2692,21 @@ def test_run_cv_and_final_fit_name_a_separated_design_as_such():
     assert run.value.public_message == cv.FOLD_FAILED.format(fold=1, reason=cv.FOLD_SEPARATED)
 
 
+def _force_decision_not_built(monkeypatch):
+    """Publication builds no existence decision: the backstop's finding is the fit's statement.
+
+    The route a selection penalty or a constrained fit takes.  Before the decision existed
+    there was none to skip, so this patches nothing there.
+    """
+    import importlib
+    import importlib.util
+
+    if importlib.util.find_spec("superglm.model.separation_ops") is not None:
+        module = importlib.import_module("superglm.model.separation_ops")
+        monkeypatch.setattr(module, "separation_boundaries", lambda model: (), raising=False)
+
+
+@pytest.mark.pins_behaviour
 def test_final_fit_gives_level_advice_only_for_a_separated_level(monkeypatch):
     """Grouping a level with a neighbour is the remedy for a level's finding, not the solver's.
 
@@ -2701,6 +2716,8 @@ def test_final_fit_gives_level_advice_only_for_a_separated_level(monkeypatch):
     off and that the log names the terms, not to group a level the model does
     not have.  A fold's sentence is chosen the same way.  Mutation check: with
     level advice for every refusal, Final fit told the user to group a level.
+    Control, on the route where no existence decision is built (it would prove
+    this estimate finite and overrule the forced finding), as on master.
     """
     import superglm.diagnostics.separation as separation_module
     import superglm.editor.cv as cv
@@ -2718,6 +2735,7 @@ def test_final_fit_gives_level_advice_only_for_a_separated_level(monkeypatch):
     session = EditorSession.from_model(template, train_data=train, validation_data=validation)
     message = format_runtime_message(1e35, 5, ["x"], True)
     monkeypatch.setattr(separation_module, "runtime_finding", lambda *_a, **_k: message)
+    _force_decision_not_built(monkeypatch)
 
     with pytest.raises(EditorValueError) as final:
         run_final_fit(capture_final_fit(session), _Context())
@@ -2772,50 +2790,130 @@ def test_run_cv_gives_level_advice_only_for_a_separated_level():
     assert run.value.public_message == cv.FOLD_FAILED.format(fold=1, reason=cv.FOLD_DIVERGED)
 
 
-@pytest.mark.parametrize("slope_scale", [0.0, 1.5])
-def test_final_fit_warns_about_separation_in_the_model_it_returns(slope_scale):
-    """Final fit's runtime warning describes the model after the carried edits.
+def _indicator_beside_x(**kwargs):
+    """A claim-free numeric indicator ``z`` beside a real effect ``x``, fitted."""
+    rng = np.random.default_rng(2)
+    z = np.repeat([0.0, 1.0], 64)
+    x = rng.normal(size=z.size)
+    y = rng.poisson(np.exp(0.3 + 0.4 * x)).astype(float) * (1.0 - z)
+    X = pd.DataFrame({"z": z, "x": x})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = SuperGLM(family="poisson", features={"z": Numeric(), "x": Numeric()}, **kwargs).fit(
+            X, y
+        )
+    return model, X, y
 
-    The refit of a claim-free numeric indicator walks its slope to the log
-    link's guard.  An edit setting the slope to zero makes every returned
-    prediction 1, and Final fit says nothing about collapsed predictions; an
-    edit steeper than the refit's keeps the indicator's rows at the guard,
-    and it warns once.  Mutation check: with the refit's warning given before
-    the edits, the zero-slope model was said to have collapsed.
+
+@pytest.mark.parametrize(
+    "edit", ["z to zero", "z steeper", "z by 1%, short of the guard", "x only"]
+)
+def test_final_fit_warns_about_separation_in_the_model_it_returns(edit):
+    """Final fit warns while the model it returns still holds the separated refit's values.
+
+    The refit's decision says ``z``, a claim-free numeric indicator, has no finite estimate.
+    An edit that sets ``z``'s slope sets the only coordinate the separating direction moves,
+    and reads nothing of where the walk stopped: to zero, steeper, or by 1% on a refit that
+    stopped short of the guard (the decision is the rows', not the walk's), Final fit says
+    nothing, and the model it returns says nothing.  An edit of ``x`` alone leaves ``z``'s
+    walked value in the returned model: Final fit warns once, naming ``z``, and so does the
+    returned model.  At ``07a1401a5`` nothing warned on any of them (the refit's published
+    withheld fit carried no finding), and master warned or not by whether a row sat at the
+    guard.  Mutation checks: with every revision clearing the statement, the ``x``-only edit
+    said nothing; with every revision keeping it, the ``z`` edits warned.
     """
     from superglm import SeparationWarning
     from superglm.editor.cv import capture_final_fit, run_final_fit
 
-    z = np.repeat([0.0, 1.0], 64)
-    X, y = pd.DataFrame({"z": z}), 1.0 - z
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        model = SuperGLM(
-            family="poisson", features={"z": Numeric()}, convergence="coefficients", max_iter=150
-        ).fit(X, y)
-    session = EditorSession.from_model(model, terms=["z"], train_data=(X, y))
-    term = session.terms["z"]
-    term.edited_log_effect = term.original_log_effect * slope_scale
+    short = {"convergence": "coefficients", "max_iter": 30, "tol": 1e-12}
+    model, X, y = _indicator_beside_x(**(short if "short" in edit else {}))
+    session = EditorSession.from_model(model, terms=["z", "x"], train_data=(X, y))
+    if edit == "x only":
+        session.terms["x"].edited_log_effect = session.terms["x"].original_log_effect * 1.2
+    else:
+        scale = {"z to zero": 0.0, "z steeper": 1.5}.get(edit, 1.01)
+        session.terms["z"].edited_log_effect = session.terms["z"].original_log_effect * scale
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         final = run_final_fit(capture_final_fit(session), _Context())
 
-    claims = [c for c in caught if issubclass(c.category, SeparationWarning)]
-    assert final.carried == ("z",)
-    if slope_scale == 0.0:
-        np.testing.assert_allclose(final.model.predict(X), 1.0, rtol=1e-6)
-        assert claims == []
-    else:
+    claims = [str(c.message) for c in caught if issubclass(c.category, SeparationWarning)]
+    statement = final.model.result.separation_statement
+    if edit == "x only":
+        assert final.carried == ("x",)
         assert len(claims) == 1
-        assert "overflow guard" in str(claims[0].message)
+        assert "values on z:" in claims[0]
+        assert statement.tag == "present" and statement.text == claims[0]
+        return
+    assert final.carried == ("z",)
+    assert claims == []
+    assert statement is None
+    if edit == "z to zero":
+        np.testing.assert_allclose(
+            final.model.predict(X), final.model.predict(X.assign(z=0.0)), rtol=1e-12
+        )
+
+
+@pytest.mark.parametrize("edited", ["f", "z", "f and z"])
+def test_final_fit_keeps_a_separated_level_that_a_carried_curve_still_reads(edited):
+    """A carried level curve is centred by the refit's own values, its separated level's among them.
+
+    Level D of ``f`` has no claim; with ``separated_z`` so has the indicator ``z``, whose
+    rows lie in every level.  The build scan names D, and the refit's decision separates D's
+    rows and ``z``'s along ``f[D]`` and ``z``.  Whatever is edited, ``f``'s carried curve moves
+    by the exposure-weighted mean of the refit minus the editor's original curve, which reads
+    ``f[D]``'s walked value: the returned model keeps it, and says so.  Editing ``z`` sets its
+    slope outright, so only ``f[D]`` is named then.  Final fit gives one warning beyond the
+    scan's (whose rows the decision overlaps but does not stop at).  At ``07a1401a5`` only the
+    scan warned.  Mutation check: with a level term's coordinates counted as set outright by
+    the edit, editing ``f`` said nothing.
+    """
+    from superglm import Categorical, SeparationWarning
+    from superglm.editor.cv import capture_final_fit, run_final_fit
+
+    rng = np.random.default_rng(5)
+    n = 1500
+    f = rng.choice(list("ABCD"), n)
+    z = (rng.uniform(size=n) < 0.1).astype(float)
+    y = rng.poisson(np.exp(0.2 + 0.3 * (f == "B"))).astype(float)
+    y[(f == "D") | (z == 1.0)] = 0.0
+    X = pd.DataFrame({"f": f, "z": z})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = SuperGLM(
+            family="poisson", features={"f": Categorical(base="A"), "z": Numeric()}
+        ).fit(X, y)
+    session = EditorSession.from_model(model, terms=["f", "z"], train_data=(X, y))
+    if "f" in edited:
+        term = session.terms["f"]
+        values = np.asarray(term.original_log_effect, dtype=float).copy()
+        values[term.levels.index("B")] += 0.1
+        term.edited_log_effect = values
+    if "z" in edited:
+        session.terms["z"].edited_log_effect = np.array([0.0])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        final = run_final_fit(capture_final_fit(session), _Context())
+
+    claims = [str(c.message) for c in caught if issubclass(c.category, SeparationWarning)]
+    scan = [claim for claim in claims if claim.startswith("Separation detected")]
+    assert len(scan) == 1 and len(claims) == 2
+    statement = final.model.result.separation_statement
+    assert statement.tag == "present"
+    named = claims[1].split(":")[0]
+    assert "f[D]" in named
+    assert ("z" in named.split("values on ")[1].split(", ")) == ("z" not in edited)
 
 
 @pytest.mark.pins_behaviour
-def test_final_fit_keeps_a_finding_from_a_fit_short_of_the_guard_after_an_edit():
+def test_final_fit_keeps_a_finding_from_a_fit_short_of_the_guard_after_an_edit(monkeypatch):
     """A control: a runtime finding from a stagnant fit short of the guard stands after any edit.
 
-    Master warned here too (it held nothing back); this pins that the edit hold-back added
-    with Final fit's post-edit warning does not drop a finding the edit cannot answer.
+    On the route where no existence decision is built, the backstop's finding is the refit's
+    statement, and its evidence is an exhausted budget, not the guard: no edit answers it.
+    Master warned here too (it held nothing back), and so does the revision rule
+    (``separation_ops.revised_statement``).  A decided fit says what its decision says
+    (``test_final_fit_warns_about_separation_in_the_model_it_returns``).
 
     With 30 iterations at ``tol=1e-12`` the refit of a claim-free indicator stops on the
     exhausted-budget signature with its rows' log predictions near -31, short of the guard.
@@ -2825,6 +2923,7 @@ def test_final_fit_keeps_a_finding_from_a_fit_short_of_the_guard_after_an_edit()
     from superglm import SeparationWarning
     from superglm.editor.cv import capture_final_fit, run_final_fit
 
+    _force_decision_not_built(monkeypatch)
     z = np.repeat([0.0, 1.0], 64)
     X, y = pd.DataFrame({"z": z}), 1.0 - z
     with warnings.catch_warnings():

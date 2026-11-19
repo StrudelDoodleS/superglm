@@ -1053,7 +1053,7 @@ def _publication_context(
         full = int(state.profiled_factor.rank) == state.profiled_factor.shape[0]
         if full and not boundaries:
             return None
-        W = _solver_space_working_weights(model)
+        W, rows = _publication_rows(model, boundaries)
         record = _structured_identifiability(
             model, state, W, publish=True, residual=_stepped_residual(model, W), separated=separated
         )
@@ -1079,6 +1079,7 @@ def _publication_context(
             "penalty": _structured_penalty_product(state.penalized_operator),
             "data_diagonal": data_diagonal,
             "floor": floor,
+            "rows": rows,
         }
         return _PublicationContext(record, state, None, None, certificate)
     rank_info = solver.rank_info
@@ -1089,7 +1090,7 @@ def _publication_context(
         or rank_info.face is not None
     ):
         return None
-    W = _solver_space_working_weights(model)
+    W, rows = _publication_rows(model, boundaries)
     design, active_groups = _rank_active_state(model, rank_info)
     if design.p == 0:
         return None
@@ -1112,9 +1113,10 @@ def _publication_context(
     def curvature() -> NDArray:
         return _rank_curvature(model, active_groups)
 
+    certificate_columns = np.asarray(rank_info.selected_columns, dtype=np.intp)
     certificate = {
         "design": design,
-        "columns": np.asarray(rank_info.selected_columns, dtype=np.intp),
+        "columns": certificate_columns,
         "decomposition": functools.partial(
             _dense_base,
             rank_info.augmented,
@@ -1124,10 +1126,32 @@ def _publication_context(
         ),
         "penalty": lambda vectors: (curvature() @ vectors, np.abs(curvature()) @ np.abs(vectors)),
         "data_diagonal": np.diag(data_gram),
-        # the decomposition's floor is the matrix it decomposed: the fit's own Gram
+        # the decomposition's floor is the matrix it decomposed: the fit's own Gram, centred
+        # where the fit centred it
         "floor": record.curvature_floor if own and record is not None else 0.0,
+        "rows": rows,
+        "centre": np.asarray(rank_info.mean_x, dtype=np.float64)[certificate_columns]
+        if own
+        else None,
     }
     return _PublicationContext(record, None, rank_info, data_gram, certificate)
+
+
+def _publication_rows(model, boundaries: tuple[str, ...]) -> tuple[NDArray, Any]:
+    """The publication's working weights, and with a response boundary its Fisher rows.
+
+    One evaluation of the fitted state's rows serves the record and the existence
+    certificate (``separation_ops.fisher_rows``, whose weights are
+    ``_solver_space_working_weights``'s bit for bit), so the certificate reads the very array
+    its record was decided at.  Without a boundary no certificate runs, and only the weights
+    are formed.
+    """
+    if not boundaries:
+        return _solver_space_working_weights(model), None
+    from superglm.model.separation_ops import fisher_rows, withheld_weights
+
+    rows = fisher_rows(model, model._solver_pirls_result(), withheld_weights(model))
+    return rows[0], rows
 
 
 def _install_record(context: _PublicationContext, record: Identifiability) -> None:
@@ -1170,6 +1194,8 @@ def _certified(model, context: _PublicationContext, sides: NDArray, weights: NDA
         data_diagonal=inputs["data_diagonal"],
         floor=float(inputs["floor"]),
         weak_root=None if weak is None else np.asarray(weak.root)[columns],
+        rows=inputs.get("rows"),
+        centre=inputs.get("centre"),
     )
 
 
@@ -1181,10 +1207,14 @@ def _publish_existence(
     The fit's score proves existence where it can (``separation_ops.existence_certified``);
     otherwise the rows decide (``separation_ops.decide_separation``).  A separating direction
     verified exactly is published as the fit on the rows it keeps (``_withheld_publication``)
-    once that fit's own score proves those rows separate no further; anything less is
-    unresolved, and the walked fit is published with the decision on its record.
+    once that fit's own score proves those rows separate no further; short of that it is a
+    proven lower bound (``"partial"``), and the walked fit is published with the decision on
+    its record.  A fit refused under ``"error"`` (``refuses_on_publication``) stops at the
+    verified direction: it publishes nothing, so no withheld fit is run.  The decision is kept
+    on the record whatever it is, ``"absent"`` included, so its readers can tell a decided
+    absence from a decision never built.
     """
-    from superglm.diagnostics.separation import response_sides
+    from superglm.diagnostics.separation import refuses_on_publication, response_sides
     from superglm.model.separation_ops import (
         coefficient_names,
         decide_separation,
@@ -1200,29 +1230,61 @@ def _publish_existence(
     )
     if strict is not None and strict.size == np.count_nonzero(sides != 2):
         # complete separation: every row is separated and none is kept, so no data bound any
-        # coefficient; each has no finite estimate and the walked fit is published as it stopped
-        width = len(model._solver_pirls_result().beta)
-        everything = np.eye(width + 1)
+        # coefficient the penalty leaves free; the walked fit is published as it stopped
+        span = _complete_span(model, context, len(model._solver_pirls_result().beta))
+        labels, labelled = separated_labels(model, strict, sides, coordinates)
         decision = dataclasses.replace(
             decision,
             state="present",
             decided_by="linear program: complete separation",
-            span=everything,
-            names=coefficient_names(model, everything),
-            labels=separated_labels(model, strict, sides, coordinates),
+            span=span,
+            names=coefficient_names(model, span),
+            labels=labels,
+            labelled_rows=labelled,
+            complete=True,
         )
-    elif strict is not None:
+    elif strict is not None and not refuses_on_publication(model):
         published = _withheld_publication(
             model, context, decision, strict, explicit, coordinates, sides, boundaries
         )
         if published is not None:
             return published
-    if decision.state == "unresolved" and not decision.span.shape[1]:
+    if decision.state == "unresolved":
         if _interior_full_rank(model, context, sides):
             decision = dataclasses.replace(decision, state="absent", decided_by="interior rank")
-    if context.record is not None and (decision.state != "absent" or not decision.unique):
+    if context.record is not None:
         _install_record(context, dataclasses.replace(context.record, separation=decision))
     return context
+
+
+def _complete_span(model, context: _PublicationContext, width: int) -> NDArray:
+    """The directions a complete separation drives to infinity: the penalty's null space.
+
+    Every positive-prior row is separated, so a separating direction is strict on all of them
+    and every direction of ``null(S)`` near it separates too: the directions of recession are
+    open in ``null(S)`` and span it, with the intercept (the w5m2 gate review, sec. 3).  A
+    direction the penalty curves is not among them.  ``null(S)`` is read from the fitted
+    penalty (``_rank_curvature``): eigenvalues within ``gamma_p p`` of its largest, and the
+    coordinates its basis reaches past the square root of eps.  A structured fit, whose
+    penalty is held as an operator, reports every coordinate.  ``[intercept; slopes]``.
+    """
+    from superglm._roundoff import gamma
+
+    if context.rank_info is None:
+        return np.eye(width + 1)
+    _, active_groups = _rank_active_state(model, context.rank_info)
+    columns = np.asarray(context.rank_info.selected_columns, dtype=np.intp)
+    curvature = _rank_curvature(model, active_groups)
+    size = curvature.shape[0]
+    values, vectors = np.linalg.eigh(curvature) if size else (np.zeros(0), np.zeros((0, 0)))
+    largest = float(np.max(np.abs(values), initial=0.0))
+    null = vectors[:, values <= gamma(max(size, 1)) * size * largest]
+    reach = np.max(np.abs(null), axis=1, initial=0.0) if null.size else np.zeros(size)
+    reached = columns[reach > SQRT_EPS * float(np.max(reach, initial=0.0))]
+    span = np.zeros((width + 1, 1 + reached.size))
+    span[0, 0] = 1.0
+    span[1 + reached, 1 + np.arange(reached.size)] = 1.0
+    return span
 
 
 def _interior_full_rank(model, context: _PublicationContext, sides: NDArray) -> bool:
@@ -1374,9 +1436,12 @@ def _withheld_publication(
         data_diagonal=inputs["data_diagonal"],
         floor=float(inputs["floor"]),
         weak_root=None if weak is None else np.asarray(weak.root)[inputs["columns"]],
+        rows=inputs.get("rows"),
+        centre=inputs.get("centre"),
     ):
         restore()
         return None
+    labels, labelled = separated_labels(model, strict, sides, coordinates)
     separation = Separation(
         "present",
         "linear program",
@@ -1384,7 +1449,8 @@ def _withheld_publication(
         span=separated,
         boundaries=boundaries,
         unique=decision.unique,
-        labels=separated_labels(model, strict, sides, coordinates),
+        labels=labels,
+        labelled_rows=labelled,
         names=coefficient_names(model, separated),
         work=decision.work,
     )
@@ -1538,7 +1604,8 @@ def _resumed_weak_fit(model, context: _PublicationContext) -> _PublicationContex
     feature_edf[columns] = np.diag(inverse @ system.data_gram)
     M_beta = system.hessian + system.sum_w * np.outer(system.mean_x, system.mean_x)
     coefficient = decompose_gram_if_authoritative(M_beta, psd_by_construction=True)
-    W_final, _ = fisher_rows(model, state, weights)
+    final_rows = fisher_rows(model, state, weights)
+    W_final = final_rows[0]
     resumed_rank = dataclasses.replace(
         rank_info,
         augmented=decomposition,
@@ -1576,6 +1643,8 @@ def _resumed_weak_fit(model, context: _PublicationContext) -> _PublicationContex
         ),
         data_diagonal=np.diag(system.data_gram),
         floor=decided.curvature_floor,
+        rows=final_rows,
+        centre=np.asarray(system.mean_x, dtype=np.float64),
     )
     return dataclasses.replace(
         context,
@@ -1669,7 +1738,15 @@ def publish_identified_fit(model) -> None:
     if boundaries:
         decided = _publish_existence(model, context if resumed is None else resumed, boundaries)
         separation = None if decided.record is None else decided.record.separation
-        if resumed is not None and separation is not None and separation.state == "unresolved":
+        if (
+            resumed is not None
+            and separation is not None
+            and separation.state
+            in (
+                "partial",
+                "unresolved",
+            )
+        ):
             model._result, model._solver_result = walked[0], walked[1]
             _set_reml_pirls(model, walked[2])
             _install_record(

@@ -1293,8 +1293,12 @@ is on the mean space's edge, not at infinity.
   alternative, no separating direction exists if positive weights on the
   boundary rows balance them; the fit's score after one Newton step supplies
   those weights, and a bound on what is left over, together with a certified
-  lower bound on the Hessian's smallest eigenvalue, proves it. This costs about
-  two passes over the rows, a few milliseconds on a 20,000-row fit.
+  lower bound on the Hessian's smallest eigenvalue, proves it. The weights are
+  compared row by row with the square root of each row's working weight
+  (weighted Cauchy–Schwarz), so a healthy fit with rows deep in a tail, where
+  a weight is tiny, is still proved: the freMTPL2 frequency book clears the
+  test about fifty times over. This costs about four passes over the rows,
+  about 30 ms on that 678,000-row book.
 - **Otherwise the rows decide.** The linear program of Correia, Guimarães and
   Zylkin (appendix A.2, after Konis 2007) finds a direction that separates
   every row that can be separated, and the direction is then checked on the
@@ -1303,20 +1307,33 @@ is on the mean space's edge, not at infinity.
   then refitted on the rows it keeps, at its smoothing parameters, and that
   fit's own score must prove those rows separate no further. If the interior
   rows alone identify every coefficient, the estimate exists (Santos Silva and
-  Tenreyro's condition).
+  Tenreyro's condition). The program's work grows faster than its rows, so
+  past a size cap (rows read times candidate directions) it is not run and
+  the decision is reported as not resolved.
 
 A separated fit publishes that refit, as Correia, Guimarães and Zylkin
 recommend: its fitted values on the kept rows, and every coefficient the
 separating direction does not move with its standard error. The separated rows
 keep the walk's predictions near the boundary. Every coefficient the direction
 moves, in the published coordinates, has no finite estimate: it prints with no
-standard error, and the footnote names the levels and what to do. A case
-float64 cannot settle either way, such as a separation along a smooth's
-unpenalized part, which has no entries to check exactly, is reported as not
-resolved at float64; the standard errors of the coefficients a proposed
-direction moves are withheld. The cauchit link's likelihood is not concave,
-so there the decision proves a maximiser exists but not that it is unique, and
-the summary says so.
+standard error, and the footnote names the levels and what to do. A verified
+direction whose refit does not prove the rest unseparated is a lower bound:
+its coefficients have no finite estimate, more rows may be separated, and the
+coefficients are where the fit stopped. Under complete separation no row is
+kept, and only the directions the penalty leaves free run off; a penalised
+term keeps an estimate. A case float64 cannot settle either way, such as a
+separation along a smooth's unpenalized part, which has no entries to check
+exactly, is reported as not resolved at float64. The cauchit link's likelihood
+is not concave, so there the decision proves a maximiser exists but not that
+it is unique, and the summary says so.
+
+The fit's warning comes from the same decision (one statement per fit,
+`PIRLSResult.separation_statement`), so the summary and the warning cannot
+disagree. A proved absence overrules the solver's guard heuristic, which
+speaks only on fits that build no decision. An editor revision moves the
+statement with the coefficients: an edit that sets the only coefficient a
+separation moves (a numeric slope) drops it, while a level curve, whose
+carried values are centred by the refit's own, keeps it.
 
 ### 17.5 Post-fit shape repair and its intercept search
 

@@ -201,7 +201,9 @@ def apply_edits_to_model_copy_with_data(
     for term in changed_terms:
         _apply_term_edit(edited_model, term, keep_pinned=keep_pinned)
     if changed_terms:
-        publish_revised_coefficients(edited_model, beta_before)
+        publish_revised_coefficients(
+            edited_model, beta_before, replaced=_set_outright(edited_model, changed_terms)
+        )
     edited_terms = [term.name for term in changed_terms]
     if edited_terms:
         _stamp_stale_inference(edited_model, edited_terms)
@@ -226,6 +228,21 @@ def apply_edits_to_model_copy_with_data(
 
         _maybe_release_fit_state(edited_model)
     return revision.commit()
+
+
+def _set_outright(model, terms) -> list[int]:
+    """The coordinates an edit sets outright: those of an edited term with one coefficient.
+
+    Its value is the edited curve's slope and reads nothing of the fit.  Any other term's
+    coefficients are projected from its curve, and a carried level curve is centred by the
+    refit's values (``carry._carried_values``), so they still read the fit.
+    """
+    names = {term.name for term in terms}
+    owned: dict[str, list[int]] = {}
+    for group in model._groups:
+        if group.feature_name in names:
+            owned.setdefault(group.feature_name, []).extend(range(group.start, group.end))
+    return [coordinates[0] for coordinates in owned.values() if len(coordinates) == 1]
 
 
 def materialize_edit_request(request):

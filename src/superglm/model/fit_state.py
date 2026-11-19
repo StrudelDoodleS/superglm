@@ -752,7 +752,7 @@ def _carry_revised_columns(model, beta_before) -> None:
     public.centred_sum_compensated = False
 
 
-def publish_revised_coefficients(model, beta_before) -> None:
+def publish_revised_coefficients(model, beta_before, *, replaced=()) -> None:
     """Publish a revision of the fitted coefficients as one predictor in every coordinate.
 
     A revision (an editor edit, a post-fit shape repair) writes ``beta`` into
@@ -765,13 +765,23 @@ def publish_revised_coefficients(model, beta_before) -> None:
     and nothing moves.  The solver state is then read from the published one
     (``_read_solver_state_from_public``) and the fitted mode's identity is
     cleared, with the runtime separation finding, a statement about the state
-    the solve returned.  The pair is carried, never dropped: clearing it
+    the solve returned.  The published separation statement moves as its
+    lifecycle says (``separation_ops.revised_statement``): ``replaced`` are the
+    solver coordinates the revision set outright, reading nothing of the fit.
+    The pair is carried, never dropped: clearing it
     dropped every dense column's centring (Sol's review of #445, P2), and
     keeping the solver's pre-revision pair beside it left the solver predictor
     at the old coefficients (#447).
     """
     _carry_revised_columns(model, beta_before)
     _read_solver_state_from_public(model)
+    from superglm.model.separation_ops import revised_statement
+
+    statement = revised_statement(
+        model,
+        getattr(model._solver_result, "separation_statement", None),
+        np.asarray(replaced, dtype=np.intp),
+    )
 
     updated: set[int] = set()
     for result_name in ("_result", "_solver_result"):
@@ -788,6 +798,7 @@ def publish_revised_coefficients(model, beta_before) -> None:
             ("scop_inference", None),
             ("scop_geometry", None),
             ("separation_message", None),
+            ("separation_statement", statement),
         ):
             if hasattr(result, field_name):
                 setattr(result, field_name, value)
@@ -1111,20 +1122,21 @@ def capture_fit_state(
 ) -> FitCandidate:
     """Transfer one complete workspace into a candidate without row-scale copies.
 
-    Every solved fit is published through here, so this is where its runtime
-    separation finding, read from the coefficient state it publishes, is
-    disclosed under the model's ``separation`` mode.  A call that returns more
-    than that state passes its own ``separation_statement`` (``fit_path``, for
-    every point it returns).  A fit another call runs and discards
-    (``_discarded_fit``: a power-search candidate, a ``drop1`` comparison)
-    discloses nothing.
+    Every solved fit is published through here, so this is where the statement
+    its publication made about separation (``separation_ops.disclosed_text``)
+    is given under the model's ``separation`` mode; a strict fit was refused
+    when it was published.  A call that returns more than that state passes its
+    own ``separation_statement`` (``fit_path``, for every point it returns).  A
+    fit another call runs and discards (``_discarded_fit``: a power-search
+    candidate, a ``drop1`` comparison) discloses nothing.
     """
     if not getattr(public_model, "_discarded_fit", False):
         from superglm.diagnostics.separation import disclose_runtime_separation
+        from superglm.model.separation_ops import disclosed_text
 
         if separation_statement is None:
             result = getattr(workspace.model, "_result", None)
-            separation_statement = getattr(result, "separation_message", None)
+            separation_statement = None if result is None else disclosed_text(result)
         disclose_runtime_separation(
             separation_statement, getattr(workspace.model, "_separation", "warn")
         )

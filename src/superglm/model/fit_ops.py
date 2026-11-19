@@ -17,7 +17,6 @@ from numpy.typing import NDArray
 
 from superglm._group_matrix._lookup_tables import release_lookup_plan
 from superglm._utils import _explained_deviance, weighted_row_sum
-from superglm.diagnostics.separation import refuse_published_separation, refuses_on_publication
 from superglm.distributions import (
     Distribution,
     NegativeBinomial,
@@ -902,11 +901,32 @@ def _resolve_interaction_reml_mode(model, interaction_mode: str, max_reml_iter: 
 
 
 def _canonicalize_fitted_model(model, profile: dict) -> None:
-    """Refuse a strict fit's runtime finding, then canonicalize the public state and profile it."""
-    refuse_published_separation(model, model._result)
+    """Canonicalize the public state and profile it, then say what the fit holds back.
+
+    Publication refuses a strict separated fit (``canonicalize_fitted_model``), so the
+    notices the REML finish held (``model._held_fit_notices``) and the unresolved-row report
+    come after it, and a refused fit says nothing else about itself.  A refit of an NB2 theta
+    alternation (``_defer_rank_info``) is not yet the fit returned: its notices wait for the
+    published one (``_install_deferred_rank_info``).
+    """
     t0 = time.perf_counter()
     runtime_canonicalize.canonicalize_fitted_model(model)
     profile["fit_runtime_canonicalize_s"] = time.perf_counter() - t0
+    if not getattr(model, "_defer_rank_info", False):
+        _publish_fit_notices(model)
+
+
+def _publish_fit_notices(model) -> None:
+    """Give the notices a published fit held until publication, then name its unresolved rows.
+
+    ``model._held_fit_notices`` holds ``(message, category)`` pairs from the REML finish
+    (``reml_finalize._disclose_weak_identification``); its owner is the fit call's model, and
+    it lives from that finish until here.
+    """
+    from superglm._warn import warn_caller
+
+    for message, category in model.__dict__.pop("_held_fit_notices", ()):
+        warn_caller(message, category)
     _warn_unresolved_rows(model)
 
 
@@ -1317,6 +1337,9 @@ def _install_deferred_rank_info(model) -> None:
     model.__dict__.pop("_defer_rank_info", None)
     deferred = model.__dict__.pop("_deferred_rank_info", None)
     if deferred is None:
+        # published already, inside the alternation, which refused nothing
+        runtime_canonicalize.refuse_published_statement(model)
+        _publish_fit_notices(model)
         return
     rank_info = deferred()
     results = (
@@ -1328,6 +1351,7 @@ def _install_deferred_rank_info(model) -> None:
         if result is not None:
             result.rank_info = rank_info
     runtime_canonicalize.canonicalize_fitted_model(model)
+    _publish_fit_notices(model)
 
 
 def _reject_monotone_fit_conflicts(model, penalty, has_lambda1_targets) -> None:
@@ -1462,8 +1486,8 @@ def _solve_coefficients(
     (RandomEffect, FactorSmooth) to the direct solver, whose penalty-matrix
     fallback omits them. ``compute_rank_info=False`` skips the direct
     solver's retained-fit rank metadata, for a fit that is never published.
-    ``separation`` is the solver's mode: ``"record"``, or ``"error"`` for the
-    solve of a fit that refuses its finding at once (``refuses_on_publication``).
+    ``separation`` is the solver's mode, ``"record"`` for every model fit: its
+    publication speaks for it (``runtime_canonicalize.canonicalize_fitted_model``).
     """
     if _uses_direct_solver(model, penalty, has_lambda1_targets):
         result, _ = fit_irls_direct(
@@ -1547,7 +1571,6 @@ def fit(
         max_iter=max_iter,
         convergence=convergence,
         record_diagnostics=record_diagnostics,
-        published=not getattr(model, "_discarded_fit", False),
     )
     candidate = capture_fit_state(
         workspace,
@@ -1573,13 +1596,12 @@ def _fit_in_workspace(
     max_iter=None,
     convergence=None,
     record_diagnostics=False,
-    published=True,
 ):
     """Build, solve, and finalize an ordinary fit on private mutable state.
 
-    The fit of a call that returns it (``published``) refuses a runtime
-    separation finding inside its solve under ``"error"``, before any
-    statement about the fit is made.
+    Its solve records the backstop's finding; publication decides what the fit
+    says about separation, and refuses it there under ``"error"``
+    (``runtime_canonicalize.canonicalize_fitted_model``).
     """
     # Resolve fit controls: explicit kwargs > constructor fallback
     tol = tol if tol is not None else model._tol
@@ -1629,7 +1651,7 @@ def _fit_in_workspace(
         tol=tol,
         record_diagnostics=record_diagnostics,
         convergence=convergence,
-        separation="error" if published and refuses_on_publication(model) else "record",
+        separation="record",
     )
 
     # Fix phi for known-scale families (Poisson): phi is always 1.0.
@@ -1934,9 +1956,10 @@ def fit_reml(
             debug_recorder=debug_recorder,
             refit_kwargs=attempt_kwargs,
         )
-        _install_deferred_rank_info(workspace.model)
-        # The pre-solve flag belongs to the alternation, not the public model.
+        # The pre-solve flag belongs to the alternation, not the public model; the fit
+        # published below is the one the caller receives, so it is refused there if strict.
         workspace.model.__dict__.pop("_nb_theta_search", None)
+        _install_deferred_rank_info(workspace.model)
         if not durable_retain:
             workspace.model._retain_fit_state = False
             _maybe_release_fit_state(workspace.model)

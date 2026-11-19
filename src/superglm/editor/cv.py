@@ -75,9 +75,9 @@ from superglm.features.rebuild import (
     clone_with_replaced_features,
     rebuilt_categorical,
 )
-from superglm.links import stabilize_eta
 from superglm.model.base import NoPredictedMeanError
 from superglm.model.fit_state import configured_family, configured_lambda2, configured_penalty
+from superglm.model.separation_ops import disclosed_text
 from superglm.model_selection import (
     FINGERPRINT_VERSION,
     REFUSED_COLUMN,
@@ -1714,22 +1714,18 @@ def run_final_fit(plan: FinalFitPlan, context) -> FinalFit:
         )
         raise EditorValueError(sentence.format(rows=rows)) from exc
     context.check()
-    # An edit can only answer a finding the refit's rows at the guard gave; one from a
-    # stagnant fit short of the guard stands whatever the edit does.
-    held_back = False
     if plan.edited:
-        refit_at_guard = runtime_warnings and _predictor_at_guard(model, X, sample_weight, offset)
         context.progress("carrying", terms=sorted(plan.edited))
         model = model_with_edited_curves(
             model, plan.edited, X, y, sample_weight, offset, n_points=plan.n_points
         )
         context.check()
-        held_back = bool(refit_at_guard) and not _predictor_at_guard(
-            model, X, sample_weight, offset
-        )
-    if runtime_warnings and not held_back:
-        for message in runtime_warnings:
-            warn_caller(message, SeparationWarning)
+        # The refit's separation statement moved with the carried edits
+        # (``separation_ops.revised_statement``): Final fit warns, once the refit would have,
+        # with what the model it returns still says.
+        returned = disclosed_text(model.result)
+        if runtime_warnings and returned is not None:
+            warn_caller(returned, SeparationWarning)
     return FinalFit(
         model=model,
         model_revision=plan.model_revision,
@@ -1739,15 +1735,6 @@ def run_final_fit(plan: FinalFitPlan, context) -> FinalFit:
         carried=tuple(sorted(plan.edited)),
         pending=plan.pending,
         test_scores=lss_dataset_metrics(model, plan.test) if lss and plan.test else None,
-    )
-
-
-def _predictor_at_guard(model, X, sample_weight, offset) -> bool:
-    """Whether a weighted row's linear predictor sits at the link's overflow guard."""
-    eta = np.asarray(model._predict_eta_raw_exact(X, offset), dtype=np.float64)
-    at_guard = stabilize_eta(eta, model._link) != eta
-    return bool(
-        np.any(at_guard if sample_weight is None else at_guard & (np.asarray(sample_weight) > 0))
     )
 
 

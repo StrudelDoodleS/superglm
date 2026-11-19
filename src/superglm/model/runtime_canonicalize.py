@@ -392,12 +392,20 @@ def canonicalize_fitted_model(model) -> None:
     """Finalize the public runtime result after solver-space fitting completes.
 
     The fit its identifiability record decides is published first
-    (``state_ops.publish_identified_fit``), so the public result carries it.
+    (``state_ops.publish_identified_fit``), so the public result carries it, with the
+    statement it makes about separation (``separation_ops.published_statement``).  Every
+    publication route comes here (``fit``, ``fit_reml``, ``fit_path``'s last point, NB2's
+    published theta refit), so this is the one place a fit is refused under
+    ``separation="error"``: as soon as its statement is known, before anything else describes
+    it.  The warning itself is given where the fit is handed over (``capture_fit_state``).
     """
     from superglm.model import base
+    from superglm.model.separation_ops import published_statement
     from superglm.model.state_ops import publish_identified_fit
 
     publish_identified_fit(model)
+    _write_statement(model, published_statement(model))
+    refuse_published_statement(model)
     solver = model._solver_pirls_result()
     term_states, public_intercept_shift = _compile_runtime_terms(model, solver)
 
@@ -421,6 +429,42 @@ def canonicalize_fitted_model(model) -> None:
         "solver_to_public_complete": solver_to_public_complete,
     }
     base.freeze_prediction_plan(model)
+
+
+def refuse_published_statement(model) -> None:
+    """Refuse the fit ``model`` publishes under ``"error"`` when its statement says anything."""
+    from superglm.diagnostics.separation import SeparationError, refuses_on_publication
+
+    statement = getattr(model._solver_pirls_result(), "separation_statement", None)
+    if statement is not None and statement.text is not None and refuses_on_publication(model):
+        raise SeparationError(statement.text, levels=statement.levels)
+
+
+def _write_statement(model, statement) -> None:
+    """Put the published fit's separation statement on each of its result objects.
+
+    A result published before (a republication) is immutable, so it is replaced by an
+    unpublished copy of itself (``PIRLSResult._mutable_copy``, every attribute kept); results
+    that were one object stay one.
+    """
+    reml = getattr(model, "_reml_result", None)
+    copies: dict[int, Any] = {}
+
+    def written(result):
+        if result is None or not hasattr(result, "separation_statement"):
+            return result
+        if id(result) not in copies:
+            target = result
+            if result.__dict__.get("_publication_locked", False):
+                target = result._mutable_copy()
+            target.separation_statement = statement
+            copies[id(result)] = target
+        return copies[id(result)]
+
+    model._solver_result = written(getattr(model, "_solver_result", None))
+    model._result = written(getattr(model, "_result", None))
+    if reml is not None and getattr(reml, "pirls_result", None) is not None:
+        reml.pirls_result = written(reml.pirls_result)
 
 
 def canonicalize_intercept_path(

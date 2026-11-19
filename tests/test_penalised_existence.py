@@ -165,10 +165,11 @@ def test_the_separation_decision_does_not_depend_on_where_the_walk_stopped():
 def test_a_penalised_factor_keeps_its_estimates_finite():
     """Control: with ``f`` a random effect the separating ray has penalty curvature, so the
     penalised estimate exists and every coefficient keeps its standard error, as at
-    ``92302bc40``."""
+    ``92302bc40``.  The decision, kept on the record, is a proved absence."""
     X, y, _ = _reference_level_frame()
     model = _fit("poisson", {"f": RandomEffect(), "x": Spline(n_knots=8)}, X, y, method="fit_reml")
-    assert published_separation(model) is None
+    separation = published_separation(model)
+    assert separation is None or separation.state == "absent"
     metrics = model.metrics(X, y)
     assert np.isfinite(metrics.intercept_se)
     assert np.all(np.isfinite(metrics.coefficient_se["f"]))
@@ -319,9 +320,11 @@ def test_a_separated_set_short_of_the_whole_face_is_not_certified(monkeypatch):
     """A verified separating direction that separates only some of the rows that can be is not
     the decision: the fit on the rows it keeps must prove they separate no further, and here
     they do (rows 2 and 3 of table 2 still separate).  Forced: the program returns the mixture
-    ``(x2 + x3) / 2 - x4``, which separates row 1 alone.  The outcome is unresolved, with the
-    coefficients that direction moves withheld.  At ``92302bc40`` every coefficient printed an
-    SE."""
+    ``(x2 + x3) / 2 - x4``, which separates row 1 alone.  The outcome is a proven lower bound
+    (``"partial"``): the coefficients that direction moves have no finite estimate and are
+    withheld, and the footnote says more rows may be separated.  At ``92302bc40`` every
+    coefficient printed an SE; at ``07a1401a5`` the footnote called them unresolved, although
+    the verified direction proves them infinite."""
     from scipy import sparse
 
     table = np.array(
@@ -350,8 +353,10 @@ def test_a_separated_set_short_of_the_whole_face_is_not_certified(monkeypatch):
     model = _fit("poisson", {"x2": Numeric(), "x3": Numeric(), "x4": Numeric()}, X, y)
     se = model.metrics(X, y).coefficient_se
     assert all(np.isnan(se[name][0]) for name in ("x2", "x3", "x4"))
-    assert "not resolved at float64" in _notes(model)
-    assert published_separation(model).state == "unresolved"
+    notes = _notes(model)
+    assert "not resolved" not in notes
+    assert "(row 0)" in notes and "more rows may be" in notes
+    assert published_separation(model).state == "partial"
 
 
 # ------------------------------------------------------------------- Sol's gate counterexamples
@@ -501,3 +506,163 @@ def test_a_resumed_fit_that_cannot_reach_stationarity_keeps_the_solvers_coeffici
     assert record is not None and record.weak is not None and not record.weak.fitted
     assert model.result.beta[1] == 0.0
     assert "stay where the solver stopped" in _notes(model)
+
+
+# ------------------------------------------------------------------- the score's proof, at size
+def _strong_logistic(weighted: bool):
+    """A healthy logistic fit with a strong slope: its rows reach far into both tails."""
+    rng = np.random.default_rng(5)
+    n = 20_000
+    x = rng.normal(size=n)
+    f = rng.choice(list("ABCDEFGH"), n)
+    eta = -1.0 + 6.0 * x + 0.3 * (f == "B")
+    y = (rng.uniform(size=n) < 1.0 / (1.0 + np.exp(-eta))).astype(float)
+    weights = rng.uniform(1e-4, 1.0, n) if weighted else None
+    return pd.DataFrame({"x": x, "f": f}), y, weights
+
+
+@pytest.mark.parametrize("weighted", [False, True], ids=["unweighted", "prior weights"])
+def test_a_healthy_logistic_fit_proves_existence_from_its_score(monkeypatch, weighted):
+    """The score proves a healthy logistic estimate finite; the rows' program is not run.
+
+    A row deep in its tail has a multiplier about its own working weight, so the score's old
+    test, ``min mu sqrt(lambda / max W)``, failed here (2e-9 against a defect of 6e-8 at 200,000
+    rows); the weighted Cauchy-Schwarz form, ``min mu_i / sqrt(W_i) sqrt(lambda)``, clears it
+    with room (gate review k3p8).  At ``07a1401a5`` both fits ran the program over all 20,000
+    rows, found no direction, and printed that existence was not resolved at float64.
+    Mutation check: with the unweighted margin the summary printed that note again.
+    """
+    import superglm.model.separation_ops as separation_ops
+
+    ran = []
+    real = separation_ops.separating_direction
+    monkeypatch.setattr(
+        separation_ops,
+        "separating_direction",
+        lambda matrix, sides: ran.append(1) or real(matrix, sides),
+    )
+    X, y, weights = _strong_logistic(weighted)
+    model = SuperGLM(family="binomial", features={"x": Numeric(), "f": Categorical()})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y, sample_weight=weights)
+    assert "not resolved" not in str(model.summary())
+    assert ran == []
+    separation = published_separation(model)
+    assert (separation.state, separation.decided_by) == ("absent", "certificate")
+
+
+def test_a_program_past_its_cap_is_not_run_and_the_summary_says_so(monkeypatch):
+    """The rows' linear program has a size cap; past it the decision is disclosed unresolved.
+
+    Forced: the cap set to eight entries, below the reference-level frame's program.  HiGHS is
+    not called, nothing is withheld, and the footnote says the program exceeded its cap, at
+    how many rows by how many directions.  Its work grows faster than its rows (56 s at
+    200,000 logistic rows of nine directions), so an uncapped program made a fit of that size
+    take a minute.  At ``07a1401a5`` the program ran whatever its size.  Mutation check:
+    without the cap the program ran and the decision was ``"present"``.
+    """
+    import scipy.optimize
+
+    _patch(monkeypatch, "superglm.diagnostics.separation", "PROGRAM_CAP", 8)
+    called = []
+    real = scipy.optimize.linprog
+    monkeypatch.setattr(
+        scipy.optimize, "linprog", lambda *a, **k: called.append(1) or real(*a, **k)
+    )
+    X, y, _ = _reference_level_frame()
+    model = _fit("poisson", {"f": Categorical(), "x": Spline(n_knots=8)}, X, y)
+    assert "size cap of 8 entries" in _notes(model)
+    assert called == []
+    assert published_separation(model).state == "unresolved"
+    assert getattr(model, "_separated_rows", None) is None
+
+
+def test_complete_separation_leaves_a_penalised_term_its_estimate():
+    """Complete separation drives only the penalty's null space to infinity (gate w5m2, sec. 3).
+
+    Every response is ``u > 0.5``, so no row is kept.  A direction strict on every row stays
+    so nearby, so every direction the penalty leaves free recedes: the intercept and ``u``.  A
+    random effect's ridge curves every direction of its levels, so they keep finite estimates
+    and standard errors, from the penalty alone (no row informs them, and the footnote says
+    so).  At ``07a1401a5`` the span was every coordinate: ``g``'s levels too were called
+    infinite and blanked.  Mutation check: with the identity span, ``g`` was named.
+    """
+    rng = np.random.default_rng(3)
+    n = 300
+    u = rng.uniform(size=n)
+    g = rng.choice(list("ABCDEF"), n)
+    X, y = pd.DataFrame({"u": u, "g": g}), (u > 0.5).astype(float)
+    model = _fit("binomial", {"u": Numeric(), "g": RandomEffect()}, X, y, method="fit_reml")
+    metrics = model.metrics(X, y)
+    assert np.all(np.isfinite(metrics.coefficient_se["g"]))
+    assert np.isnan(metrics.intercept_se) and np.isnan(metrics.coefficient_se["u"][0])
+    assert "penalty alone" in _notes(model)
+    separation = published_separation(model)
+    assert separation.state == "present" and separation.complete
+    assert separation.names == ("Intercept", "u")
+
+
+def test_a_publication_reads_its_rows_once_and_refines_no_further_than_its_rounding(monkeypatch):
+    """Work counts: one evaluation of the fitted rows per publication, one solve at its rounding.
+
+    The record and the existence certificate read one evaluation of the fitted state's
+    Fisher rows (``state_ops._publication_rows``), and a certificate whose defect is its own
+    rounding takes no refining step, which could not lower it.  Here five rows sit at offset
+    -95, so their multipliers are about ``e^-40`` and the score cannot prove existence; the
+    interior rows do.  At ``07a1401a5`` the publication evaluated the linear predictor twice
+    and the certificate solved three times.  Mutation checks: with the certificate forming
+    its own rows the count was two; with refinement continuing past the rounding, three solves.
+    """
+    import superglm.model.separation_ops as separation_ops
+    import superglm.model.state_ops as state_ops
+    import superglm.solvers.mode_score as mode_score
+
+    counts = {"eta": 0, "solves": [], "inside": False}
+    real_eta, real_publish = mode_score.linear_predictor, state_ops.publish_identified_fit
+    real_certificate = separation_ops.existence_certified
+
+    def eta(*args, **kwargs):
+        counts["eta"] += counts["inside"]
+        return real_eta(*args, **kwargs)
+
+    def publish(model):
+        counts["inside"] = True
+        try:
+            return real_publish(model)
+        finally:
+            counts["inside"] = False
+
+    class Counted:
+        def __init__(self, inner, tally):
+            self.inner, self.tally = inner, tally
+
+        def solve(self, vector):
+            self.tally.append(1)
+            return self.inner.solve(vector)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    def certificate(*args, **kwargs):
+        tally: list[int] = []
+        kwargs["decomposition"] = Counted(kwargs["decomposition"], tally)
+        certified = real_certificate(*args, **kwargs)
+        counts["solves"].append((len(tally), certified))
+        return certified
+
+    monkeypatch.setattr(mode_score, "linear_predictor", eta)
+    monkeypatch.setattr(state_ops, "publish_identified_fit", publish)
+    monkeypatch.setattr(separation_ops, "existence_certified", certificate)
+    rng = np.random.default_rng(1)
+    n = 3000
+    x = rng.normal(size=n)
+    offset = np.zeros(n)
+    offset[:5] = -95.0
+    y = rng.poisson(np.exp(-0.5 + 0.3 * x + offset)).astype(float)
+    model = SuperGLM(family="poisson", features={"x": Numeric()})
+    model.fit(pd.DataFrame({"x": x}), y, offset=offset)
+
+    assert counts["eta"] == 1
+    assert counts["solves"] == [(1, False)]
+    assert published_separation(model).decided_by == "interior rank"
