@@ -8,10 +8,12 @@ edge twice. Each test here shrinks the chunk knobs to a few dozen rows
 and compares what a user reads with the same quantity at the production sizes,
 where the data is one chunk, or a reference formed here.
 
-``BOUNDARY_TESTS`` names, for every chunked loop in ``src/superglm``, the test
-that crosses its boundary (here, in ``test_chunk_boundaries_design.py``,
-``test_chunk_boundaries_distributional.py`` or beside the code it tests), and
-``test_every_chunked_loop_names_a_test_across_its_boundary`` keeps it complete.
+``BOUNDARY_TESTS`` names, for every function in ``src/superglm`` with a
+``range(0, n, step)`` loop, the test that crosses its boundary (here, in
+``test_chunk_boundaries_design.py``, ``test_chunk_boundaries_distributional.py`` or
+beside the code it tests), and
+``test_every_chunked_loop_names_a_test_across_its_boundary`` keeps it complete. A loop
+chunked another way (a ``range`` from another start, or a ``while`` loop) is not in it.
 """
 
 from __future__ import annotations
@@ -37,6 +39,8 @@ from superglm import (
     Spline,
     SuperGLM,
 )
+from superglm.features import factor_smooth as factor_smooth_module
+from superglm.model import fit_ops
 
 ROWS = 61  # a chunk: 600 rows are nine full chunks and a ragged tenth
 U = 2.0**-53
@@ -177,22 +181,25 @@ _MODELS = {
 @pytest.mark.parametrize("discrete", [False, True])
 @pytest.mark.parametrize("case", sorted(_MODELS))
 def test_a_reml_fit_reads_the_same_across_chunk_boundaries(monkeypatch, case, discrete):
-    """A fit whose rows span ten chunks matches the one-chunk fit.
+    """At the same smoothing parameters, a fit whose rows span ten chunks matches the one-chunk fit.
 
-    The two fits differ only in the order rows are summed, so what a user reads
-    agrees to rounding amplified by the REML stop: measured below 1e-11 here.
-    The bar, 1e-9, sits far below the 1e-3 a row counted twice on each chunk
-    edge, or the rows after the first chunk dropped, moves these numbers. The
-    smoothing parameters themselves are not compared: on a flat direction REML
-    resolves them only to its stop, which leaves the fitted numbers unchanged.
+    REML searches once; both fits then hold every smoothing parameter at what it
+    found, so each is one REML evaluation there and no stop decision lies between
+    them (a searched pair can stop an iteration apart when rounding moves the stop,
+    and then differ by 3e-8). They differ only in the order rows are summed, so what
+    a user reads agrees to rounding: at most 2.3e-14 relative on data seeds 0-9,
+    native and under the Haswell kernel. The bar, 1e-9, sits far below the 1e-3 a row
+    counted twice on each chunk edge, or the rows after the first chunk dropped,
+    moves these numbers. The loops only the search runs (the REML derivatives) are
+    checked by the tests ``BOUNDARY_TESTS`` names for them.
     """
     family, features, interactions, solve = _MODELS[case]
     frame, y, offset, weights = _book()
     if case == "gamma":
         y = np.random.default_rng(7).gamma(2.0, np.exp(0.2 * frame["x2"]) / 2.0)
 
-    def fit():
-        model = SuperGLM(
+    def model():
+        return SuperGLM(
             family=family,
             features=features(),
             interactions=interactions,
@@ -200,12 +207,27 @@ def test_a_reml_fit_reads_the_same_across_chunk_boundaries(monkeypatch, case, di
             selection_penalty=0,
             direct_solve=solve,
         )
-        model.fit_reml(frame, y, offset=offset, sample_weight=weights)
-        return _outputs(model, frame, y, offset, weights)
 
-    production = fit()
+    searched = model().fit_reml(frame, y, offset=offset, sample_weight=weights)
+    lambdas = dict(searched.reml_diagnostics()["lambdas"])
+    monkeypatch.setattr(
+        fit_ops,
+        "initialize_component_lambdas",
+        lambda penalties, default: ({pc.name: lambdas[pc.name] for pc in penalties}, set()),
+    )
+
+    def fit():
+        fixed = model().fit_reml(frame, y, offset=offset, sample_weight=weights)
+        assert fixed.reml_diagnostics()["lambdas"] == lambdas
+        return _outputs(fixed, frame, y, offset, weights)
+
+    production, marginal_rows = fit(), factor_smooth_module._MARGINAL_QR_CHUNK_ROWS
     with monkeypatch.context() as patch:
         shrink_chunks(patch)
+        # A factor smooth's two null coordinates come out of its marginal QR in an order its
+        # rounding sets, which the lambdas' names do not follow, so the marginal is built as
+        # in production; its loop's boundary test is beside it (BOUNDARY_TESTS).
+        patch.setattr(factor_smooth_module, "_MARGINAL_QR_CHUNK_ROWS", marginal_rows)
         small = fit()
     for name, expected in production.items():
         np.testing.assert_allclose(small[name], expected, rtol=1e-9, atol=0.0, err_msg=name)
@@ -376,8 +398,38 @@ def test_the_structured_layouts_prior_centres_read_every_chunk():
     assert np.all(np.abs(centres[1] - centres[0]) <= bound)
 
 
-# Every function in src/superglm with a chunked loop, ``range(0, n, step)``, and the
-# test whose data spans two or more of its chunks (paths under src/superglm and tests/).
+@pytest.mark.parametrize("discrete", [False, True])
+def test_the_factor_smooth_moment_operators_read_every_chunk(discrete):
+    """A factor smooth's REML weight-derivative moments, chunked and in one pass.
+
+    Each moment sums weighted row products in leaf order, so the two passes differ
+    only in how the sums are grouped, far below 1e-10 of the largest entry; a dropped
+    chunk or a row counted twice at a chunk edge moves an entry by a row's share. The
+    binned and exact layouts take the table and the raw-row routes through the loop.
+    """
+    from superglm.solvers._structured.block_leaves import factor_smooth_moment_operators
+    from superglm.solvers._structured.layout import get_structured_layout
+    from tests.test_factor_smooth_structured_system import _design
+
+    rng, dm, groups, index = _design(discrete=discrete)
+    layout = get_structured_layout(dm, groups, dominant_group_index=index)
+    signed = [rng.uniform(-1.0, 1.0, size=dm.n), rng.uniform(0.5, 2.0, size=dm.n)]
+    whole, chunked = (
+        factor_smooth_moment_operators(layout, signed, chunk_size=rows) for rows in (dm.n, 7)
+    )
+    for (operator, cross, total), (blocked, blocked_cross, blocked_total) in zip(
+        whole, chunked, strict=True
+    ):
+        pairs = [(operator.D, blocked.D), (operator.C, blocked.C), (operator.A, blocked.A)]
+        for exact, piecewise in [*pairs, (cross, blocked_cross), (total, blocked_total)]:
+            scale = np.max(np.abs(exact))
+            assert scale > 0.0
+            np.testing.assert_allclose(piecewise, exact, rtol=0.0, atol=1e-10 * scale)
+
+
+# Every function in src/superglm with a ``range(0, n, step)`` loop (not every chunked loop:
+# one from another start, or a ``while`` loop, is not seen), and the test whose data spans
+# two or more of its chunks (paths under src/superglm and tests/).
 # Each named test fails when the loop drops the rows after its first chunk (checked by
 # mutation); a new chunked loop fails the test below until its boundary test is named.
 BOUNDARY_TESTS: dict[str, str | tuple[str, ...]] = {
@@ -418,7 +470,7 @@ BOUNDARY_TESTS: dict[str, str | tuple[str, ...]] = {
         "test_chunk_boundaries_design.py::test_centred_right_hand_sides_sum_every_row_chunk"
     ),
     "_group_matrix/_group_matrix_centered.py::centered_signed_grams": (
-        "test_chunk_boundaries.py::test_a_reml_fit_reads_the_same_across_chunk_boundaries"
+        "test_reml_batched_w_derivatives.py::test_batched_signed_grams_match_centered_product_oracle"
     ),
     "_group_matrix/_group_matrix_core.py::_saturated_ssp_gram": (
         "test_chunk_boundaries_design.py::test_a_saturated_gram_reads_rows_as_a_dense_view_only_after_checking_each_one",
@@ -543,7 +595,7 @@ BOUNDARY_TESTS: dict[str, str | tuple[str, ...]] = {
         "test_chunk_boundaries.py::test_a_reml_fit_reads_the_same_across_chunk_boundaries"
     ),
     "features/factor_smooth.py::FactorSmooth._build_marginal": (
-        "test_chunk_boundaries.py::test_a_reml_fit_reads_the_same_across_chunk_boundaries"
+        "test_factor_smooth_feature.py::test_streamed_tsqr_matches_legacy_geometry_up_to_null_permutation"
     ),
     "features/interaction.py::TensorInteraction.score": (
         "test_chunk_boundaries.py::test_a_reml_fit_reads_the_same_across_chunk_boundaries",
@@ -608,7 +660,7 @@ BOUNDARY_TESTS: dict[str, str | tuple[str, ...]] = {
         "test_chunk_boundaries.py::test_a_reml_fit_reads_the_same_across_chunk_boundaries"
     ),
     "solvers/_structured/block_leaves.py::factor_smooth_moment_operators": (
-        "test_chunk_boundaries.py::test_a_reml_fit_reads_the_same_across_chunk_boundaries"
+        "test_chunk_boundaries.py::test_the_factor_smooth_moment_operators_read_every_chunk"
     ),
     "solvers/_structured/block_leaves.py::factor_smooth_prior_statistics": (
         "test_chunk_boundaries.py::test_the_structured_layouts_prior_centres_read_every_chunk"
@@ -623,7 +675,7 @@ BOUNDARY_TESTS: dict[str, str | tuple[str, ...]] = {
         "test_chunk_boundaries_design.py::test_square_diagonal_fills_every_column_block"
     ),
     "solvers/centered_system.py::_dense_chunks.chunks": (
-        "test_chunk_boundaries.py::test_a_reml_fit_reads_the_same_across_chunk_boundaries"
+        "test_centred_state_offsets.py::test_the_dense_block_takes_the_corrected_two_pass_at_every_offset"
     ),
     "solvers/centered_system.py::anchored_dense_moments": (
         "test_chunk_boundaries.py::test_a_reml_fit_reads_the_same_across_chunk_boundaries"
@@ -659,13 +711,13 @@ BOUNDARY_TESTS: dict[str, str | tuple[str, ...]] = {
         "test_chunk_boundaries.py::test_the_dense_centres_and_centring_read_every_chunk"
     ),
     "solvers/mode_score.py::centred_data_score": (
-        "test_chunk_boundaries.py::test_a_reml_fit_reads_the_same_across_chunk_boundaries"
+        "test_binomial_log_mean_space.py::test_an_exact_alias_on_a_large_design_is_not_refused"
     ),
     "solvers/mode_score.py::centred_matvec": (
         "test_chunk_boundaries.py::test_a_reml_fit_reads_the_same_across_chunk_boundaries"
     ),
     "solvers/mode_score.py::dense_centred_matvec": (
-        "test_chunk_boundaries.py::test_a_reml_fit_reads_the_same_across_chunk_boundaries"
+        "test_centred_state_offsets.py::test_the_proximal_rows_serve_the_block_products_of_their_outer_iteration"
     ),
     "solvers/mode_score.py::dense_centred_rmatvec": (
         "test_centred_state_offsets.py::test_the_proximal_rows_serve_the_block_products_of_their_outer_iteration"

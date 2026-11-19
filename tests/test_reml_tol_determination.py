@@ -1156,8 +1156,11 @@ class TestDeadSearchNewtonDecrement:
         whatever the data gave: the exit is the decrement arm's alone,
         ``converged_at_precision``, where the gradient rule alone (the 0.37.1
         rule, ``predicted_decrease`` withheld) ends ``line_search_failed``, with
-        the same numbers. Mutation: dropping the ``predicted_decrease`` arm from
-        ``classify_dead_feasible_exit`` fails it the same way.
+        the same numbers. The search must still hand the classifier the decrease
+        it computed. Mutation: dropping the ``predicted_decrease`` arm from
+        ``classify_dead_feasible_exit`` fails it the same way, and a search that
+        stops computing the decrease (``newton_predicted_decrease`` returning
+        ``None``) fails it too.
         """
         import warnings
 
@@ -1206,7 +1209,8 @@ class TestDeadSearchNewtonDecrement:
 
         [inputs] = classified
         assert inputs["objective"] == 0.0 and inputs["evaluated_trial"] is True
-        assert "predicted_decrease" in inputs  # the search hands the classifier its decrease
+        # the search hands the classifier the decrease its Newton model predicts
+        assert inputs["predicted_decrease"] is not None and inputs["predicted_decrease"] > 0.0
         assert fixed._reml_result.termination_reason == "converged_at_precision"
         assert fixed._reml_result.converged and not fixed_warnings
         assert reference._reml_result.termination_reason == "line_search_failed"

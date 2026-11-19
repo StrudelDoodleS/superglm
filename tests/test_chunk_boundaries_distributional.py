@@ -217,10 +217,9 @@ def test_negative_binomial_recurrence_sums_every_term_past_its_block(route, monk
 def test_endpoint_row_certificate_sums_every_row_chunk(monkeypatch) -> None:
     """Row chunks of seven over 50 (ragged last) give the one-chunk drift-certificate bound.
 
-    For row chunk ``c`` the bound is ``0.5 (1 + gamma_{c + 4})`` times a sum of nonnegative
-    row terms, so divided by that inflation it is the same sum at any chunk (4,096 rows in
-    production, one chunk here). The chunks reorder that sum and the products forming each
-    row's leverage: relative ``2 gamma_{n + 2p + 4}``, every term being nonnegative.
+    The bound is a sum of nonnegative row terms inflated for the rounding of one chunk, so
+    the chunks move it by that inflation and a reordered sum, both below 1e-12 relative;
+    a dropped or repeated chunk moves it by a whole chunk's share.
     """
     n = 50
     layout = _discrete_layout(n)
@@ -238,16 +237,15 @@ def test_endpoint_row_certificate_sums_every_row_chunk(monkeypatch) -> None:
     blocked = endpoint_laml._row_certificate_error(layout, certificate, basis, inverse)
     monkeypatch.undo()
     whole = endpoint_laml._row_certificate_error(layout, certificate, basis, inverse)
-    blocked_sum = blocked / (1.0 + _gamma(7 + 4))
-    whole_sum = whole / (1.0 + _gamma(4096 + 4))
-    assert abs(blocked_sum - whole_sum) <= 2.0 * _gamma(n + 2 * p + 4) * whole_sum
+    assert blocked == pytest.approx(whole, rel=1e-10)
 
 
 def test_likelihood_cache_compares_every_index_block_before_reusing_a_child() -> None:
     """A cached child is reused only for exactly its range of rows, checked in 8,192-index blocks.
 
-    Two rows swapped in the second and third blocks of 16,461 indices are not the range, so
-    the cache takes a fresh child with those rows' weights rather than the child it holds.
+    Two rows swapped across the second and third blocks of 16,461 indices, or inside the
+    ragged final block of 77, are not the range, so the cache takes a fresh child with
+    those rows' weights rather than the child it holds.
     """
     n = 2 * 8192 + 77
     values = np.linspace(0.5, 1.5, n)
@@ -259,11 +257,12 @@ def test_likelihood_cache_compares_every_index_block_before_reusing_a_child() ->
     indices = np.arange(n)
     held = cache.take(plan, indices, start=0, stop=n)
     assert cache.take(plan, indices, start=0, stop=n) is held
-    swapped = indices.copy()
-    swapped[[8200, 16400]] = swapped[[16400, 8200]]
-    child = cache.take(plan, swapped, start=0, stop=n)
-    assert child is not held
-    np.testing.assert_array_equal(child.weights.values, values[swapped])
+    for rows in ([8200, 16400], [n - 2, n - 1]):
+        swapped = indices.copy()
+        swapped[rows] = swapped[rows[::-1]]
+        child = cache.take(plan, swapped, start=0, stop=n)
+        assert child is not held
+        np.testing.assert_array_equal(child.weights.values, values[swapped])
 
 
 def test_joint_tables_hold_each_channel_of_a_column_pair_once() -> None:

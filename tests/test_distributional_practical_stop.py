@@ -242,7 +242,7 @@ def _noise_random_effect_fit(*, practical: bool, max_lambda: float, levels: int 
     return model, model._require_fitted().smoothing
 
 
-def test_practical_window_replays_non_increasing_steps() -> None:
+def test_practical_window_replays_non_increasing_steps(monkeypatch) -> None:
     """A practical plateau's window is the run of non-increasing accepted steps that stopped it.
 
     The one-observation random effect whose mean sits 1e-12 above its prior
@@ -250,22 +250,46 @@ def test_practical_window_replays_non_increasing_steps() -> None:
     practical parameter tolerance of 1e-3 its search stops on the practical
     plateau's own run, never the outward window (the stop that
     ``test_practical_plateau_stops_an_immaterial_tail_without_certifying_infinity``
-    pins).
+    pins). Its steps contract on their own, so the refit reports the step of the
+    iteration that stopped it half again as long, leaving the lambda it reached,
+    and so the objective and parameter tests, as they were: a step longer than the
+    one before restarts the run, and the stop comes a whole window later.
     """
+    from superglm.distributional.smoothing import loop
     from tests.test_distributional_endpoint_laml import _scalar_efs_fit
 
-    _name, smoothing = _scalar_efs_fit(
-        1.000000000001,
-        maximum_lambda=1.0e10,
-        starting_lambda=0.1,
-        max_iterations=300,
-        practical_convergence=True,
-        practical_parameter_tolerance=1.0e-3,
-    )
-    assert smoothing.convergence_reason == "practical_plateau"
-    window = smoothing.history[-smoothing.config.plateau_iterations :]
-    steps = [item.max_accepted_log_step for item in window]
-    assert steps == sorted(steps, reverse=True)
+    def fit(longer: int | None = None):
+        real, calls = loop._scaled_proposal, []
+
+        def proposal(current, log_steps, names, scale, config):
+            lambdas, steps = real(current, log_steps, names, scale, config)
+            calls.append(scale)
+            if calls.count(1.0) == longer and scale == 1.0:
+                steps = {name: 1.5 * step for name, step in steps.items()}
+            return lambdas, steps
+
+        with monkeypatch.context() as patch:
+            patch.setattr(loop, "_scaled_proposal", proposal)
+            _name, smoothing = _scalar_efs_fit(
+                1.000000000001,
+                maximum_lambda=1.0e10,
+                starting_lambda=0.1,
+                max_iterations=300,
+                practical_convergence=True,
+                practical_parameter_tolerance=1.0e-3,
+            )
+        assert smoothing.convergence_reason == "practical_plateau"
+        assert calls == [1.0] * len(smoothing.history)  # one proposal per iteration, accepted
+        # the run's steps, and the one before it, each no longer than the one before
+        steps = [item.max_accepted_log_step for item in smoothing.history]
+        run = steps[-smoothing.config.plateau_iterations - 1 :]
+        assert run == sorted(run, reverse=True), run
+        return steps, smoothing.config.plateau_iterations
+
+    natural, window = fit()
+    steps, _ = fit(longer=len(natural))
+    assert steps[len(natural) - 1] > steps[len(natural) - 2]  # the step reported longer
+    assert len(steps) >= len(natural) + window
 
 
 def test_lower_bound_pressure_names_components_pinned_at_the_minimum() -> None:
