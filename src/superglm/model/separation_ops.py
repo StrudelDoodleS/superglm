@@ -103,7 +103,8 @@ def existence_certified(
 
     At the fitted state, with Fisher rows ``W``, ``z`` (one consistent set: the rows the score,
     the step and the defect all read, ``W`` the Hessian's own), the profiled score ``g = X_c' r
-    - S beta``, ``r = W (z - eta)``, takes one Newton step ``v``: the decomposition's inverse on
+    - S beta``, ``r = W (z - eta)``, is tried as it stands (``v = 0``, whose defect is ``g``
+    itself), and otherwise takes one Newton step ``v``: the decomposition's inverse on
     its certified part and the weak directions' ``U U' g`` (their covariance root,
     ``WeakDirections.root``), with the intercept's ``sum r / sum W - c'v``.  Its residual ``r' =
     r - W A v`` gives the boundary multipliers ``mu_i = s_i r'_i`` and the defect ``A'r' - S
@@ -163,21 +164,22 @@ def existence_certified(
 
     rsum = float(np.sum(r))
     gradient = np.asarray(design.rmatvec(r), dtype=np.float64) - mean * rsum - applied[:, 0]
-    step = solve(gradient)
-    intercept = rsum / total - float(mean @ step)
+    step, intercept = np.zeros_like(gradient), 0.0
     scale = np.asarray(decomposition.column_scale, dtype=np.float64)
     safe = np.where(scale > 0.0, scale, 1.0)
     carried = W > 0.0
     uncentred = np.sqrt(np.maximum(np.asarray(data_diagonal, np.float64), 0.0) + total * mean**2)
     n, p = int(design.n), int(beta.size)
     curvature = min(1.0, float(floor))
-    # iterative refinement (Wilkinson), taken only when the certificate needs it: the step
+    # the fitted state itself first (``v = 0``: its defect is the score, already formed, so a
+    # converged fit costs no further pass over the rows), then the Newton step and its
+    # iterative refinement (Wilkinson), each taken only when the certificate needs it: the step
     # solves ``H v = g`` only to the coupling's and the weak directions' accuracy; any ``v``
     # serves the certificate, and a refined one leaves a smaller defect
-    for refinement in range(3):
-        moved_rows = residual_rows(step, intercept)
+    for refinement in range(4):
+        moved_rows = residual_rows(step, intercept) if refinement else r
         margin = float(np.min(signs * moved_rows[boundary] / root))
-        e0, es = defect(moved_rows, step)
+        e0, es = defect(moved_rows, step) if refinement else (rsum, gradient)
         _, magnitude = penalty((beta + step)[:, None])
         zeta = math.sqrt(float(np.sum(moved_rows[carried] ** 2 / W[carried])))
         rounding = float(
@@ -195,7 +197,7 @@ def existence_certified(
         scaled = float(np.linalg.norm(np.r_[e0 / math.sqrt(total), es / safe]))
         if margin > 0.0 and recession_excluded(margin, scaled + rounding, curvature):
             return True
-        if refinement == 2 or scaled <= rounding:
+        if refinement == 3 or scaled <= rounding:
             return False
         correction = solve(es)
         step = step + correction

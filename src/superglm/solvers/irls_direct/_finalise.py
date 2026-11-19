@@ -29,6 +29,7 @@ from superglm.solvers.irls_direct._centred import _system_offset_mean
 from superglm.solvers.pirls import REMLGeometrySummary
 from superglm.solvers.rank import (
     SHARED_RANK_POLICY,
+    FittedRows,
     RankDecomposition,
     RankInfo,
     _formation_slack,
@@ -238,6 +239,7 @@ def _retained_rank_info(
     face: NDArray | None,
     face_rows: NDArray | None,
     face_rank: RankDecomposition | None,
+    fitted_rows: FittedRows | None = None,
 ) -> RankInfo:
     """The data-subspace metadata only retained-fit inference reads.
 
@@ -288,6 +290,7 @@ def _retained_rank_info(
         objective_loss=None,
         data_gram=centered_final.data_gram,
         data_gram_weights=weights_fingerprint(W),
+        fitted_rows=fitted_rows,
         face=face,
         face_rows=face_rows,
         face_augmented=face_rank,
@@ -456,6 +459,18 @@ def _finalise_centred(step: _IRLSDirectStep, fit: _IRLSDirectFit) -> _IRLSDirect
             face=face,
             face_rows=face_rows,
             face_rank=face_rank,
+            # the Fisher rows the export geometry was formed at, for the publication to read
+            fitted_rows=None
+            if fit._return_working_system
+            else FittedRows(
+                weights=W,
+                response=fit.z,
+                eta=fit.eta,
+                prior=fit.weights,
+                beta=fit.beta,
+                intercept=float(fit.intercept),
+                centred=(fit.retained.centred_intercept, fit.centred_intercept_lo),
+            ),
         )
 
         if fit.compute_rank_info:

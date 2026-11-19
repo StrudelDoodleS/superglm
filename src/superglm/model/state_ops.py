@@ -656,7 +656,7 @@ def _dense_base(
     )
 
 
-def _stepped_residual(model, W: NDArray) -> NDArray | None:
+def _stepped_residual(model, W: NDArray, rows: Any = None) -> NDArray | None:
     """The working residual a published fit steps its weak directions by, or ``None``.
 
     The rows' one Newton step is the penalised fit along those directions when the objective is
@@ -670,15 +670,22 @@ def _stepped_residual(model, W: NDArray) -> NDArray | None:
     from superglm.links import IdentityLink
 
     if type(model._distribution) is Gaussian and type(model._link) is IdentityLink:
-        return _working_residual(model, W)
+        return _working_residual(model, W, rows)
     return None
 
 
-def _working_residual(model, W: NDArray) -> NDArray:
+def _working_residual(model, W: NDArray, rows: Any = None) -> NDArray:
     """``sqrt(W) (z - eta)`` at the solver's fitted state: the rows' working residual.
 
-    ``z`` is the Fisher working response the fit's last system solved, at its weights ``W``.
+    ``z`` is the Fisher working response the fit's last system solved, at its weights ``W``;
+    ``rows`` (``W``, ``z - eta``) are the publication's, when it has them.
     """
+    weights = np.asarray(W, dtype=np.float64)
+    carried = weights > 0.0
+    result = np.zeros_like(weights)
+    if rows is not None:
+        result[carried] = np.sqrt(weights[carried]) * np.asarray(rows[1])[carried]
+        return result
     from superglm.distributions import clip_mu
     from superglm.links import stabilize_eta
     from superglm.model.separation_ops import withheld_weights
@@ -698,9 +705,6 @@ def _working_residual(model, W: NDArray) -> NDArray:
         prefer_observed=False,
     )
     residual = np.asarray(rows.response, dtype=np.float64) - eta
-    weights = np.asarray(W, dtype=np.float64)
-    carried = weights > 0.0
-    result = np.zeros_like(weights)
     result[carried] = np.sqrt(weights[carried]) * residual[carried]
     return result
 
@@ -1053,9 +1057,14 @@ def _publication_context(
         full = int(state.profiled_factor.rank) == state.profiled_factor.shape[0]
         if full and not boundaries:
             return None
-        W, rows = _publication_rows(model, boundaries)
+        W, rows, _ = _publication_rows(model, boundaries)
         record = _structured_identifiability(
-            model, state, W, publish=True, residual=_stepped_residual(model, W), separated=separated
+            model,
+            state,
+            W,
+            publish=True,
+            residual=_stepped_residual(model, W, rows),
+            separated=separated,
         )
         factor = state.profiled_factor
         operator = _spread_centred_operator(state.centered_data_operator)
@@ -1090,12 +1099,13 @@ def _publication_context(
         or rank_info.face is not None
     ):
         return None
-    W, rows = _publication_rows(model, boundaries)
+    W, rows, solved = _publication_rows(model, boundaries, rank_info)
     design, active_groups = _rank_active_state(model, rank_info)
     if design.p == 0:
         return None
     held = rank_info.data_gram
-    own = held is not None and rank_info.data_gram_weights == weights_fingerprint(W)
+    # the solve's own rows formed its Gram; evaluated rows match it when their bits do
+    own = held is not None and (solved or rank_info.data_gram_weights == weights_fingerprint(W))
     data_gram = held if own else _rank_centered_data_gram(design, W)
     record = _record_identifiability(
         model,
@@ -1105,7 +1115,7 @@ def _publication_context(
         W,
         data_gram,
         publish=True,
-        residual=_stepped_residual(model, W),
+        residual=_stepped_residual(model, W, rows),
         separated=separated,
     )
 
@@ -1137,21 +1147,32 @@ def _publication_context(
     return _PublicationContext(record, None, rank_info, data_gram, certificate)
 
 
-def _publication_rows(model, boundaries: tuple[str, ...]) -> tuple[NDArray, Any]:
-    """The publication's working weights, and with a response boundary its Fisher rows.
+def _publication_rows(
+    model, boundaries: tuple[str, ...], rank_info: RankInfo | None = None
+) -> tuple[NDArray, Any, bool]:
+    """The publication's working weights, its Fisher rows, and whether they are the solve's own.
 
     One evaluation of the fitted state's rows serves the record and the existence
-    certificate (``separation_ops.fisher_rows``, whose weights are
-    ``_solver_space_working_weights``'s bit for bit), so the certificate reads the very array
-    its record was decided at.  Without a boundary no certificate runs, and only the weights
-    are formed.
+    certificate, so the certificate reads the very array its record was decided at.  The
+    solve's own rows (``RankInfo.take_fitted_rows``: the rows its data Gram was formed at, at
+    the coefficients and prior weights published) are read where they hold; otherwise they
+    are evaluated (``separation_ops.fisher_rows``, whose weights are
+    ``_solver_space_working_weights``'s bit for bit), and without a response boundary only the
+    weights are, since no certificate runs.
     """
-    if not boundaries:
-        return _solver_space_working_weights(model), None
-    from superglm.model.separation_ops import fisher_rows, withheld_weights
+    from superglm.model.separation_ops import withheld_weights
 
-    rows = fisher_rows(model, model._solver_pirls_result(), withheld_weights(model))
-    return rows[0], rows
+    solver = model._solver_pirls_result()
+    if rank_info is not None:
+        held = rank_info.take_fitted_rows(solver, solver_weights(withheld_weights(model), solver))
+        if held is not None:
+            return held[0], held, True
+    if not boundaries:
+        return _solver_space_working_weights(model), None, False
+    from superglm.model.separation_ops import fisher_rows
+
+    rows = fisher_rows(model, solver, withheld_weights(model))
+    return rows[0], rows, False
 
 
 def _install_record(context: _PublicationContext, record: Identifiability) -> None:
@@ -1698,6 +1719,23 @@ def _restore_separated(
     moves = np.asarray(context.explicit @ context.separated_explicit, dtype=np.float64)
     step = np.linalg.lstsq(moves, (target - current)[rows], rcond=None)[0]
     return beta + separated[1:] @ step, float(intercept + separated[0] @ step)
+
+
+def release_fitted_rows(model) -> None:
+    """Drop the Fisher rows the model's solves left on their records (``RankInfo.fitted_rows``).
+
+    Their reader is the publication, which has run; a publication that read none (a
+    constrained face, a selection penalty, a SCOP fit) leaves them, and they are not kept.
+    """
+    reml = getattr(model, "_reml_result", None)
+    for result in (
+        getattr(model, "_solver_result", None),
+        getattr(model, "_result", None),
+        getattr(reml, "pirls_result", None),
+    ):
+        rank_info = getattr(result, "rank_info", None)
+        if isinstance(rank_info, RankInfo):
+            rank_info.release_fitted_rows()
 
 
 def publish_identified_fit(model) -> None:

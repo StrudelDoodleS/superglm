@@ -1524,13 +1524,15 @@ def response_sides(y: NDArray, prior_weights: NDArray, boundaries: tuple[str, ..
     interior row (an equality), never separation.
     """
     y = np.asarray(y, dtype=np.float64)
-    live = np.asarray(prior_weights, dtype=np.float64) > 0.0
     sides = np.zeros(y.shape, dtype=np.int8)
+    # one pass per boundary (a boolean mask's scatter costs several)
     if "zero" in boundaries:
-        sides[y <= 0.0] = -1
+        np.subtract(sides, y <= 0.0, out=sides, casting="unsafe")
     if "one" in boundaries:
-        sides[y >= 1.0] = 1
-    sides[~live] = 2
+        np.add(sides, y >= 1.0, out=sides, casting="unsafe")
+    dead = ~(np.asarray(prior_weights, dtype=np.float64) > 0.0)
+    if dead.any():
+        sides[dead] = 2
     return sides
 
 

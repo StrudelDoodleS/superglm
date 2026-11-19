@@ -401,9 +401,10 @@ def canonicalize_fitted_model(model) -> None:
     """
     from superglm.model import base
     from superglm.model.separation_ops import published_statement
-    from superglm.model.state_ops import publish_identified_fit
+    from superglm.model.state_ops import publish_identified_fit, release_fitted_rows
 
     publish_identified_fit(model)
+    release_fitted_rows(model)
     _write_statement(model, published_statement(model))
     refuse_published_statement(model)
     solver = model._solver_pirls_result()

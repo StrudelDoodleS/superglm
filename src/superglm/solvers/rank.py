@@ -1209,6 +1209,39 @@ def weights_fingerprint(W: NDArray) -> bytes:
     return hashlib.blake2b(np.ascontiguousarray(W, dtype=np.float64), digest_size=16).digest()
 
 
+@dataclass(frozen=True, eq=False)
+class FittedRows:
+    """The Fisher rows a solve ended on, and the state it evaluated them at.
+
+    ``weights`` is the array the record's ``data_gram`` was formed at, ``response`` and ``eta``
+    the working response and stabilised predictor, ``prior`` the prior weights in the solve's
+    unit, and ``beta``, ``intercept`` and ``centred`` (centred intercept and its remainder) the
+    retained coefficients.  The solve's own arrays, not copies.
+    """
+
+    weights: NDArray
+    response: NDArray
+    eta: NDArray
+    prior: NDArray
+    beta: NDArray
+    intercept: float
+    centred: tuple[float | None, float | None]
+
+    def at(self, solver, prior: NDArray) -> bool:
+        """Whether these are the rows of ``solver``'s coefficients at prior weights ``prior``."""
+        return (
+            np.array_equal(self.beta, np.asarray(solver.beta))
+            and self.intercept == float(solver.intercept)
+            and self.centred
+            == (
+                getattr(solver, "centred_intercept", None),
+                getattr(solver, "centred_intercept_lo", None),
+            )
+            and not getattr(solver, "centred_sum_compensated", False)
+            and (self.prior is prior or np.array_equal(self.prior, prior))
+        )
+
+
 @dataclass(frozen=True)
 class RankInfo:
     """Compact fitted-subspace metadata in solver coefficient coordinates."""
@@ -1238,6 +1271,13 @@ class RankInfo:
     # built from a dense centred system.
     data_gram: NDArray | None = field(default=None, repr=False, compare=False)
     data_gram_weights: bytes | None = field(default=None, repr=False, compare=False)
+    # The Fisher rows the fit ended on (``FittedRows``), whose weights formed ``data_gram``.
+    # Owner: this record, from the solve until its publication takes them
+    # (``take_fitted_rows``, which clears them; ``runtime_canonicalize`` releases any a
+    # publication left), so the publication reads the rows the solve evaluated instead of
+    # evaluating them again.  Invalidation: the coefficients and prior weights they were
+    # evaluated at (``FittedRows.at``).  Never saved or copied (``__getstate__``).
+    fitted_rows: FittedRows | None = field(default=None, repr=False, compare=False)
     # A constrained fit's active face: the orthonormal basis ``Z`` of the
     # coefficients its binding rows leave free, and the decompositions of
     # ``Z' H Z`` for the ``augmented`` and ``coefficient`` Hessians.  Leverage
@@ -1288,6 +1328,29 @@ class RankInfo:
         if gram.shape != (len(self.mean_x), len(self.mean_x)):
             return None
         return gram if held == weights_fingerprint(W) else None
+
+    def take_fitted_rows(self, solver, prior: NDArray) -> tuple[NDArray, NDArray] | None:
+        """``(W, z - eta)`` the solve ended on, if they are ``solver``'s at ``prior``; then none.
+
+        ``W`` is the very array ``data_gram`` was formed at.  Taking clears the rows whether or
+        not they are returned.
+        """
+        rows = self.fitted_rows
+        if rows is None:
+            return None
+        object.__setattr__(self, "fitted_rows", None)
+        if not rows.at(solver, prior):
+            return None
+        return rows.weights, rows.response - rows.eta
+
+    def release_fitted_rows(self) -> None:
+        """Drop the solve's rows: their publication has passed."""
+        object.__setattr__(self, "fitted_rows", None)
+
+    def __getstate__(self) -> dict[str, object]:
+        state = dict(self.__dict__)
+        state.pop("fitted_rows", None)
+        return state
 
     @property
     def total_edf(self) -> float:

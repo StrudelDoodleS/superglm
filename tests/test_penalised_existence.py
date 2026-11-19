@@ -11,6 +11,7 @@ where it now prints the kept rows'; the controls say so.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import warnings
 from pathlib import Path
@@ -684,6 +685,22 @@ def test_a_capped_program_whose_proposal_does_not_verify_is_disclosed_unresolved
     assert getattr(model, "_separated_rows", None) is None
 
 
+@pytest.mark.pins_behaviour
+def test_each_row_is_coded_by_its_side_of_the_response_support():
+    """Control: ``response_sides`` codes each row as before its one-pass rewrite (6c-2a): -1 at
+    the lower boundary, +1 at the upper, 0 inside, and 2 for a row with no positive prior
+    weight (zero or not a number), whatever its response.  Mutation check: with the weightless
+    rows coded by their response, it fails.
+    """
+    from superglm.diagnostics.separation import response_sides
+
+    y = np.array([0.0, 1.0, 0.5, 0.0, 1.0, 3.0])
+    weights = np.array([1.0, 2.0, 1.0, 0.0, np.nan, 1.0])
+    assert response_sides(y, weights, ("zero", "one")).tolist() == [-1, 1, 0, 2, 2, 1]
+    assert response_sides(y, weights, ("zero",)).tolist() == [-1, 0, 0, 2, 2, 0]
+    assert response_sides(y, weights, ()).tolist() == [0, 0, 0, 2, 2, 0]
+
+
 def test_complete_separation_leaves_a_penalised_term_its_estimate():
     """Complete separation drives only the penalty's null space to infinity (gate w5m2, sec. 3).
 
@@ -710,15 +727,17 @@ def test_complete_separation_leaves_a_penalised_term_its_estimate():
 
 
 def test_a_publication_reads_its_rows_once_and_refines_no_further_than_its_rounding(monkeypatch):
-    """Work counts: one evaluation of the fitted rows per publication, one solve at its rounding.
+    """Work counts: the publication reads the solve's rows, and solves nothing at its rounding.
 
-    The record and the existence certificate read one evaluation of the fitted state's
-    Fisher rows (``state_ops._publication_rows``), and a certificate whose defect is its own
-    rounding takes no refining step, which could not lower it.  Here five rows sit at offset
-    -95, so their multipliers are about ``e^-40`` and the score cannot prove existence; the
-    interior rows do.  At ``07a1401a5`` the publication evaluated the linear predictor twice
-    and the certificate solved three times.  Mutation checks: with the certificate forming
-    its own rows the count was two; with refinement continuing past the rounding, three solves.
+    The record and the existence certificate read the Fisher rows the solve ended on
+    (``RankInfo.fitted_rows``, through ``state_ops._publication_rows``), so the publication
+    evaluates no linear predictor; and a certificate whose defect is its own rounding takes no
+    step, which could not lower it: here the score at the fitted state already is.  Five rows
+    sit at offset -95, so their multipliers are about ``e^-40`` and the score cannot prove
+    existence; the interior rows do.  At ``07a1401a5`` the publication evaluated the linear
+    predictor twice and the certificate solved three times; at ``9ac9df407`` once, and one
+    solve.  Mutation checks: with the certificate forming its own rows, or the solve's rows not
+    kept, the count was one or more; with refinement continuing past the rounding, more solves.
     """
     import superglm.model.separation_ops as separation_ops
     import superglm.model.state_ops as state_ops
@@ -769,6 +788,155 @@ def test_a_publication_reads_its_rows_once_and_refines_no_further_than_its_round
     model = SuperGLM(family="poisson", features={"x": Numeric()})
     model.fit(pd.DataFrame({"x": x}), y, offset=offset)
 
-    assert counts["eta"] == 1
-    assert counts["solves"] == [(1, False)]
+    assert counts["eta"] == 0
+    assert counts["solves"] == [(0, False)]
     assert published_separation(model).decided_by == "interior rank"
+
+
+def _publication_work(monkeypatch) -> dict:
+    """Count, inside each publication, the linear predictors evaluated and the certificate's
+    solves and passes of the design, with each certificate's verdict."""
+    import superglm.model.separation_ops as separation_ops
+    import superglm.model.state_ops as state_ops
+    import superglm.solvers.mode_score as mode_score
+
+    counts = {"eta": 0, "certificates": [], "inside": False}
+    real_eta, real_publish = mode_score.linear_predictor, state_ops.publish_identified_fit
+    real_certificate = separation_ops.existence_certified
+
+    def eta(*args, **kwargs):
+        counts["eta"] += counts["inside"]
+        return real_eta(*args, **kwargs)
+
+    def publish(model):
+        counts["inside"] = True
+        try:
+            return real_publish(model)
+        finally:
+            counts["inside"] = False
+
+    class Counted:
+        def __init__(self, inner, tally, name):
+            self.inner, self.tally, self.name = inner, tally, name
+
+        def __getattr__(self, attribute):
+            if attribute in self.name:
+                inner = getattr(self.inner, attribute)
+                return lambda *a, **k: self.tally.append(attribute) or inner(*a, **k)
+            return getattr(self.inner, attribute)
+
+    def certificate(*args, **kwargs):
+        tally: list[str] = []
+        kwargs["decomposition"] = Counted(kwargs["decomposition"], tally, ("solve",))
+        kwargs["design"] = Counted(kwargs["design"], tally, ("matvec", "rmatvec"))
+        certified = real_certificate(*args, **kwargs)
+        counts["certificates"].append((sorted(tally), certified))
+        return certified
+
+    monkeypatch.setattr(mode_score, "linear_predictor", eta)
+    monkeypatch.setattr(state_ops, "publish_identified_fit", publish)
+    monkeypatch.setattr(separation_ops, "existence_certified", certificate)
+    return counts
+
+
+def test_a_converged_fit_is_certified_from_its_score_and_the_rows_its_solve_ended_on(
+    monkeypatch,
+):
+    """Work counts on the healthy logistic fit (20,000 rows): the publication evaluates no
+    rows, and the certificate reads the design once, for the score, and solves nothing.
+
+    The solve's Fisher rows are the publication's (``RankInfo.fitted_rows``); the score at the
+    converged state already clears the margin (``v = 0``, whose defect is the score), so no
+    Newton step is taken.  At ``9ac9df407`` the publication evaluated the rows again (one
+    linear predictor) and the certificate took a step: one solve, one ``matvec`` and two
+    ``rmatvec``.  Mutation checks: with the solve's rows not kept, one predictor; with the
+    Newton step first, a solve and a ``matvec``.
+    """
+    counts = _publication_work(monkeypatch)
+    X, y, _ = _strong_logistic(False)
+    model = SuperGLM(family="binomial", features={"x": Numeric(), "f": Categorical()})
+    model.fit(X, y)
+    assert counts["eta"] == 0
+    assert counts["certificates"] == [(["rmatvec"], True)]
+    assert published_separation(model).decided_by == "certificate"
+
+
+def test_a_gaussian_publication_reads_the_rows_its_solve_ended_on(monkeypatch):
+    """Work counts on a Gaussian identity fit: its publication evaluates no rows.
+
+    Its record reads the solve's weights, and the working residual it steps weak directions
+    by (``state_ops._stepped_residual``) the solve's ``z - eta``.  At ``9ac9df407`` the
+    publication evaluated the linear predictor twice, once for the weights and once for the
+    residual.  Mutation check: with the residual formed again, one predictor.
+    """
+    counts = _publication_work(monkeypatch)
+    rng = np.random.default_rng(2)
+    n = 2000
+    X = pd.DataFrame({"x": rng.normal(size=n), "f": rng.choice(list("ABC"), n)})
+    y = 1.0 + 0.5 * X["x"].to_numpy() + rng.normal(size=n)
+    model = SuperGLM(family="gaussian", features={"x": Numeric(), "f": Categorical()})
+    model.fit(X, y)
+    assert counts["eta"] == 0
+    assert counts["certificates"] == []
+
+
+def test_the_rows_a_solve_ended_on_are_read_once_at_its_state_and_never_kept(monkeypatch):
+    """The Fisher rows a solve leaves on its record (``RankInfo.fitted_rows``) serve only its
+    publication: they are the rows at its coefficients and prior weights, and at no others;
+    no saved or copied record carries them; and none outlives the fit, even on a constrained
+    face whose publication reads none (forced: an increasing curve fitted to falling data).
+
+    At ``9ac9df407`` the record kept no rows.  Mutation checks: rows accepted at other
+    coefficients; rows saved with the record; the face fit's rows kept after the fit.
+    """
+    import copy
+    import pickle
+
+    import superglm.model.state_ops as state_ops
+    from superglm import Constraint, PSpline
+    from superglm._weight_units import solver_weights
+    from superglm.model.separation_ops import fisher_rows, withheld_weights
+
+    seen = []
+    real_publish = state_ops.publish_identified_fit
+
+    def publish(model):
+        solver = model._solver_pirls_result()
+        rows = solver.rank_info.fitted_rows
+        prior = solver_weights(withheld_weights(model), solver)
+        W, residual = fisher_rows(model, solver, withheld_weights(model))
+        moved = dataclasses.replace(solver, beta=np.asarray(solver.beta) * 2.0 + 1.0)
+        seen.append(
+            {
+                "same": rows.at(solver, prior),
+                "rows": np.array_equal(rows.weights, W)
+                and np.array_equal(rows.response - rows.eta, residual),
+                "moved": rows.at(moved, prior),
+                "reweighted": rows.at(solver, prior * 2.0),
+                "saved": pickle.loads(pickle.dumps(solver.rank_info)).fitted_rows,
+                "copied": copy.deepcopy(solver.rank_info).fitted_rows,
+                "face": solver.rank_info.face is not None,
+            }
+        )
+        return real_publish(model)
+
+    monkeypatch.setattr(state_ops, "publish_identified_fit", publish)
+    X, y, _ = _strong_logistic(False)
+    healthy = SuperGLM(family="binomial", features={"x": Numeric(), "f": Categorical()})
+    healthy.fit(X, y)
+    rng = np.random.default_rng(4)
+    u = rng.uniform(size=1500)
+    falling = rng.poisson(np.exp(1.0 - 1.5 * u)).astype(float)
+    constrained = SuperGLM(
+        family="poisson",
+        features={"u": PSpline(n_knots=8, constraint=Constraint.fit.increasing)},
+    )
+    constrained.fit(pd.DataFrame({"u": u}), falling)
+    assert [entry["face"] for entry in seen] == [False, True]
+    for entry in seen:
+        assert entry["same"] and entry["rows"]
+        assert not entry["moved"] and not entry["reweighted"]
+        assert entry["saved"] is None and entry["copied"] is None
+    for model in (healthy, constrained):
+        for result in (model._result, model._solver_result):
+            assert result.rank_info.fitted_rows is None
