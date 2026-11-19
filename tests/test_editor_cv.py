@@ -2810,8 +2810,12 @@ def test_final_fit_warns_about_separation_in_the_model_it_returns(slope_scale):
         assert "overflow guard" in str(claims[0].message)
 
 
+@pytest.mark.pins_behaviour
 def test_final_fit_keeps_a_finding_from_a_fit_short_of_the_guard_after_an_edit():
-    """A runtime finding from a stagnant fit short of the guard stands after any edit.
+    """A control: a runtime finding from a stagnant fit short of the guard stands after any edit.
+
+    Master warned here too (it held nothing back); this pins that the edit hold-back added
+    with Final fit's post-edit warning does not drop a finding the edit cannot answer.
 
     With 30 iterations at ``tol=1e-12`` the refit of a claim-free indicator stops on the
     exhausted-budget signature with its rows' log predictions near -31, short of the guard.
