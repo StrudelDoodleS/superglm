@@ -575,6 +575,203 @@ def test_the_runtime_gate_reads_expected_curvature_under_observed_newton_rows():
     assert _separation_weight_ratio("fisher", 1e13, weights=weights, **common) == 1e13
 
 
+# ── The runtime warning describes the published fit (maths hunt F13) ──
+
+#: The log link's overflow guard on the linear predictor (``links.stabilize_eta``).
+LOG_GUARD = 80.0
+U = np.finfo(np.float64).eps / 2
+
+
+def runtime_claims(caught):
+    return [
+        str(c.message)
+        for c in caught
+        if issubclass(c.category, SeparationWarning) and "signature of separation" in str(c.message)
+    ]
+
+
+def overdispersed_separated_curve(seed=0, n=2000):
+    """NB2 claim counts on exposure; level C of the spline-by-factor term has no claim past x 22.
+
+    The freMTPL2 witness's shape in small: levels A and B reach the far x
+    values with claims, C's twelve far policies have none, so the build holds
+    C's curve there and names it.
+    """
+    rng = np.random.default_rng(seed)
+    x = np.concatenate(
+        [
+            np.minimum(rng.geometric(0.15, size=n) - 1, 22),
+            rng.uniform(23, 50, size=60).round(),
+            rng.uniform(30, 45, size=12).round(),
+        ]
+    ).astype(float)
+    f = np.concatenate(
+        [rng.choice(["A", "B", "C"], size=n, p=[0.5, 0.3, 0.2]), rng.choice(["A", "B"], 60)]
+        + [["C"] * 12]
+    )
+    exposure = rng.uniform(0.3, 1.0, size=len(x))
+    mean = exposure * np.exp(-1.0 + 0.03 * np.minimum(x, 22) + np.where(f == "B", 0.2, 0.0))
+    counts = rng.poisson(mean * rng.gamma(1.0, 1.0, size=len(x))).astype(float)
+    counts[n : n + 60] = np.maximum(counts[n : n + 60], 1.0)
+    counts[-12:] = 0.0
+    return pd.DataFrame({"x": x, "f": pd.Categorical(f)}), counts, np.log(exposure)
+
+
+def test_a_search_solve_at_the_guard_does_not_warn_about_the_published_fit(monkeypatch):
+    """The separation warning describes the fit returned, not a trial solve of its search.
+
+    On the freMTPL2 NB2 witness (45,000 policies, ``theta="auto"``) the first
+    REML candidate, at theta 8.65, stopped with seven rows pinned at the log
+    link's guard and warned that those rows' predictions were unusable; the
+    published fit, at theta 2.28, converged with their log means between
+    -11.4 and -3.5, which an independent NB2 refit matched to 2e-8.  Here every
+    solve of the smoothing search is forced to the guard (one row's offset 200
+    below its own), and the published refit reads the real offset.  The theta
+    calibration, the REML build and each theta/REML refit also built the design
+    and named C's held curve, four notices on the witness.  Mutation checks:
+    on 5f28e8e80 this fit gave 39 runtime warnings, one per search solve, and
+    named the curve three times; with the solvers fixed and the per-call scope
+    removed it still named the curve more than once.
+    """
+    import superglm.reml.direct as reml_direct
+    from superglm.distributions import NegativeBinomial
+
+    X, counts, offset = overdispersed_separated_curve()
+    solve = reml_direct.fit_irls_direct
+    findings = []
+
+    def at_the_guard(*args, **kwargs):
+        shifted = np.array(kwargs["offset"], dtype=np.float64, copy=True)
+        shifted[0] -= 200.0
+        output = solve(*args, **{**kwargs, "offset": shifted})
+        findings.append(getattr(output[0], "separation_message", None))
+        return output
+
+    monkeypatch.setattr(reml_direct, "fit_irls_direct", at_the_guard)
+    model = SuperGLM(
+        family=NegativeBinomial(theta="auto"),
+        features={"x": Spline(n_knots=12), "f": Categorical()},
+        interactions=[("x", "f")],
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit_reml(X, counts, offset=offset)
+
+    notices = [str(c.message) for c in caught if issubclass(c.category, SeparationWarning)]
+    assert len(notices) == 1
+    assert notices[0].startswith("Separation in a spline-by-factor term")
+    # The event happened: every search solve stopped at the guard and said so.
+    assert findings and all(finding is not None for finding in findings)
+    # What the runtime warning would claim, read from predict: no row is there.
+    log_mean = np.log(model.predict(X, offset=offset))
+    assert np.all(np.abs(log_mean) < LOG_GUARD / 2)
+    assert model.result.separation_message is None
+
+
+def test_a_separated_fit_warns_once_however_many_solves_its_theta_search_ran():
+    """A fit whose own state is at the guard says so once, after its theta search.
+
+    ``theta="auto"`` calibrates theta by refitting the mean at each trial
+    theta, and each refit of this separated indicator walks to the guard as
+    the published fit does.  On 5f28e8e80 every one of them warned (three
+    warnings for one fit); the published fit's own finding is now the one
+    warning, and its predictions sit at the guard on the separated rows, as
+    the warning says, and nowhere else.
+    """
+    from superglm.distributions import NegativeBinomial
+
+    rng = np.random.default_rng(7)
+    n = 2000
+    z = (rng.uniform(size=n) < 0.25).astype(float)
+    x = rng.uniform(0.0, 1.0, n)
+    mean = np.exp(0.3 + np.sin(3.0 * x))
+    y = rng.negative_binomial(2.0, 2.0 / (2.0 + mean)).astype(float)
+    y[z == 1.0] = 0.0
+    frame = pd.DataFrame({"z": z, "x": x})
+    with warnings.catch_warnings():
+        # convergence='coefficients' carries its own experimental warning.
+        warnings.simplefilter("ignore", UserWarning)
+        model = SuperGLM(
+            family=NegativeBinomial(theta="auto"),
+            features={"z": Numeric(), "x": Numeric()},
+            max_iter=150,
+            convergence="coefficients",
+        )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(frame, y)
+
+    claims = runtime_claims(caught)
+    assert len(claims) == 1
+    assert "overflow guard" in claims[0] and "'z'" in claims[0]
+    log_mean = np.log(model.predict(frame))
+    separated = z == 1.0
+    np.testing.assert_allclose(log_mean[separated], -LOG_GUARD, rtol=0, atol=64 * U * LOG_GUARD)
+    assert np.all(np.abs(log_mean[~separated]) < LOG_GUARD / 2)
+
+
+@pytest.mark.parametrize("mode", ["warn", "ignore", "error"])
+def test_fit_reml_reads_the_models_separation_mode_for_its_published_state(mode):
+    """``fit_reml`` warns, stays silent or refuses as ``fit`` does, once.
+
+    One policy's offset sits 100 below the rest, so every solve of the fit,
+    the published one included, holds that row's predictor at the guard.  The
+    smoothing search passed the model's mode to none of its solves: on
+    5f28e8e80 each of ``"warn"``, ``"ignore"`` and ``"error"`` warned seven
+    times and returned the fit.  Under ``"error"`` the refusal publishes
+    nothing.
+    """
+    rng = np.random.default_rng(3)
+    n = 1500
+    x = rng.uniform(0.0, 1.0, n)
+    y = rng.poisson(np.exp(0.3 + np.sin(3.0 * x))).astype(float)
+    offset = np.zeros(n)
+    offset[0], y[0] = -100.0, 0.0
+    frame = pd.DataFrame({"x": x})
+    model = SuperGLM(family="poisson", features={"x": Spline(kind="cr", k=8)}, separation=mode)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        if mode == "error":
+            with pytest.raises(SeparationError, match="overflow guard"):
+                model.fit_reml(frame, y, offset=offset)
+        else:
+            model.fit_reml(frame, y, offset=offset)
+
+    claims = runtime_claims(caught)
+    if mode == "error":
+        assert claims == []
+        with pytest.raises(RuntimeError, match="Not fitted"):
+            model.result
+        return
+    assert len(claims) == (1 if mode == "warn" else 0)
+    log_mean = np.log(model.predict(frame, offset=offset))
+    assert log_mean[0] == pytest.approx(-LOG_GUARD, abs=64 * U * LOG_GUARD)
+
+
+def test_estimate_p_warns_for_its_published_refit_not_for_each_power_it_tried():
+    """A power-search candidate is ranked and discarded, so its fit says nothing.
+
+    The same row at the guard is in every candidate's fit and in the refit at
+    the selected power; the refit is the fit the caller receives, and it warns
+    once.  Mutation check: publishing a candidate's finding warned once per
+    power the search evaluated.
+    """
+    rng = np.random.default_rng(3)
+    n = 1500
+    x = rng.uniform(0.0, 1.0, n)
+    y = _tweedie_response(rng, n, rate=0.6) * np.exp(np.sin(3.0 * x))
+    offset = np.zeros(n)
+    offset[0], y[0] = -100.0, 0.0
+    frame = pd.DataFrame({"x": x})
+    model = SuperGLM(family=Tweedie(p=1.5), features={"x": Spline(kind="cr", k=8)})
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = model.estimate_p(frame, y, offset=offset, fit_mode="reml", search_fit_mode="reml")
+
+    assert len(result.evaluations) > 1
+    assert len(runtime_claims(caught)) == 1
+
+
 def test_a_levels_anchor_rank_is_read_from_an_economy_factorization(monkeypatch):
     """A level with many distinct anchors allocates no square left factor (PR 508 round 4).
 

@@ -1106,7 +1106,20 @@ def capture_fit_state(
     revision: int,
     config_publication: ModelConfigPublication | None = None,
 ) -> FitCandidate:
-    """Transfer one complete workspace into a candidate without row-scale copies."""
+    """Transfer one complete workspace into a candidate without row-scale copies.
+
+    Every solved fit is published through here, so this is where its runtime
+    separation finding, read from the coefficient state it publishes, is
+    disclosed under the model's ``separation`` mode; a power-search
+    candidate is ranked and discarded, and discloses nothing.
+    """
+    if not getattr(public_model, "_in_power_search", False):
+        from superglm.diagnostics.separation import disclose_runtime_separation
+
+        disclose_runtime_separation(
+            getattr(workspace.model, "_result", None),
+            getattr(workspace.model, "_separation", "warn"),
+        )
     design = getattr(workspace.model, "_dm", None)
     release_raw_splines = getattr(design, "release_raw_spline_tabmat_plan", None)
     if release_raw_splines is not None:

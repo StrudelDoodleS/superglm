@@ -224,7 +224,6 @@ def fit_irls_direct(
     _deviance_init: float | None = None,
     trace_run: TraceRun | None = None,
     trace_purpose: str = "fit",
-    separation: str = "warn",
     *,
     weight_semantics: str,
     _weight_unit: bool = False,
@@ -282,7 +281,6 @@ def fit_irls_direct(
             _deviance_init=_deviance_init,
             trace_run=trace_run,
             trace_purpose=trace_purpose,
-            separation=separation,
             weight_semantics=weight_semantics,
             _weight_unit=_weight_unit,
             _initial_data_reuse=_initial_data_reuse,
@@ -597,7 +595,7 @@ class _IRLSDirectFitFields:
         # run's loop, after the verdict
         " deviance_relative_change"
         # _finish
-        " centred_intercept_lo"
+        " centred_intercept_lo separation_message"
         # _terminal_rows
         " export_rows"
     ).split()
@@ -768,7 +766,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
     _deviance_init: float | None = None
     trace_run: TraceRun | None = None
     trace_purpose: str = "fit"
-    separation: str = "warn"
     _: KW_ONLY
     weight_semantics: str
     _weight_unit: bool = False
@@ -1667,14 +1664,15 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         # Both require the extreme working-weight range that a drifting cell
         # produces.  The build-time scan names cell separation before fitting
         # starts; this catches what the design scan cannot see (non-categorical
-        # indicator structure), promoting a debug-level log line to a named
-        # warning or, in strict mode, an error.
-        if self.separation != "ignore" and np.isfinite(dev):
+        # indicator structure).  The finding is recorded on the returned state,
+        # and the fit that publishes it warns or refuses
+        # (``separation.disclose_runtime_separation``): a REML candidate, a theta
+        # or power evaluation or a line-search trial describes only itself.
+        self.separation_message = None
+        if np.isfinite(dev):
             from superglm.diagnostics.separation import (
                 EXTREME_WEIGHT_RATIO,
                 STAGNANT_DEVIANCE_DELTA,
-                SeparationError,
-                SeparationWarning,
                 drifting_groups,
                 format_runtime_message,
             )
@@ -1705,11 +1703,9 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                     drifting = drifting_groups(
                         self.dm, self.groups, beta, eta, eta_unclipped, weights
                     )
-                    message = format_runtime_message(separation_ratio, it + 1, drifting, pinned)
-                    if self.separation == "error":
-                        raise SeparationError(message)
-                    # fit_irls_direct's frame: _finish, run, _fit_irls_direct_once, it
-                    warnings.warn(message, SeparationWarning, stacklevel=4)
+                    self.separation_message = format_runtime_message(
+                        separation_ratio, it + 1, drifting, pinned
+                    )
 
         # A binomial/identity state holding rows at a clipped probability is on the
         # mean-space boundary, whatever stopped the loop
@@ -1889,6 +1885,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             ),
             weight_exponent=exponent,
             solver_phi=solver_phi,
+            separation_message=self.separation_message,
         )
 
         if self.return_xtwx:

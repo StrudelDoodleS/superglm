@@ -17,6 +17,9 @@ only ``selection_penalty`` is consulted, since ``Categorical`` blocks carry no `
 from __future__ import annotations
 
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +27,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._roundoff import gamma
+from superglm._warn import warn_caller
 
 #: Working-weight ratio past which an exhausted, stagnant IRLS run is treated
 #: as the runtime signature of separation (see ``format_runtime_message``).
@@ -41,6 +45,58 @@ class SeparationWarning(UserWarning):
 
 class SeparationError(ValueError):
     """Refusal to fit (or certify) a design containing separated cells."""
+
+
+# What a public fit call says about separation.  A call can build its design
+# several times (a theta or power search, then its publication refit) and run
+# many coefficient solves; it names each design finding once, and the runtime
+# finding of the state it publishes only.
+
+#: The design notices this public fit call has emitted; ``None`` outside one.
+_DISCLOSED: ContextVar[set[str] | None] = ContextVar("superglm_separation_disclosed", default=None)
+
+
+@contextmanager
+def disclosure_scope() -> Iterator[None]:
+    """One public fit call: each distinct separation notice inside it is emitted once.
+
+    A call made inside another (a power-search candidate's ``fit_reml``)
+    shares the outer call's scope.
+    """
+    if _DISCLOSED.get() is not None:
+        yield
+        return
+    token = _DISCLOSED.set(set())
+    try:
+        yield
+    finally:
+        _DISCLOSED.reset(token)
+
+
+def warn_separation(message: str, *, stacklevel: int) -> None:
+    """Warn ``message`` at the caller's ``stacklevel``, unless this fit call already has."""
+    disclosed = _DISCLOSED.get()
+    if disclosed is not None:
+        if message in disclosed:
+            return
+        disclosed.add(message)
+    warnings.warn(message, SeparationWarning, stacklevel=stacklevel + 1)
+
+
+def disclose_runtime_separation(result: Any, mode: str) -> None:
+    """Warn, or refuse under ``"error"``, for the runtime finding a published state carries.
+
+    The solvers record the backstop's finding on the state they return
+    (``PIRLSResult.separation_message``) and warn about nothing: a REML
+    candidate, a theta or power evaluation, a line-search trial or a discarded
+    refit is evidence about that solve, not about the fit the caller receives.
+    """
+    message = getattr(result, "separation_message", None)
+    if message is None or mode == "ignore":
+        return
+    if mode == "error":
+        raise SeparationError(message)
+    warn_caller(message, SeparationWarning)
 
 
 @dataclass(frozen=True)
@@ -354,7 +410,7 @@ def emit_separation_findings(findings: list[SeparatedTerm], mode: str) -> None:
     # stacklevel points past the builder into the user's fit call region; the
     # exact frame depth varies by entrypoint, so the message carries the term
     # names rather than relying on the reported line.
-    warnings.warn(message, SeparationWarning, stacklevel=3)
+    warn_separation(message, stacklevel=3)
 
 
 def emit_curve_separation(curves: list, mode: str) -> None:
@@ -364,7 +420,7 @@ def emit_curve_separation(curves: list, mode: str) -> None:
     message = format_curve_separation(curves)
     if mode == "error" and any(curve.refusable for curve in curves):
         raise SeparationError(message)
-    warnings.warn(message, SeparationWarning, stacklevel=3)
+    warn_separation(message, stacklevel=3)
 
 
 def validate_separation_mode(mode: str) -> str:
@@ -587,13 +643,12 @@ def emit_level_curve_separation(terms: list) -> None:
     """
     if terms:
         lines = "; ".join(f"{name!r} levels {_format_labels(labels)}" for name, labels in terms)
-        warnings.warn(
+        warn_separation(
             "Separation in a varying-coefficient term: these levels' own curves separate the "
             f"response and have no finite estimate: {lines}. Predictions hold each such curve "
             "at its values over the x range of the level's rows, as extrapolation='clip' "
             "does; merging the levels (Categorical(grouping=...)) or a penalized term "
             "(FactorSmooth) gives them finite curves.",
-            SeparationWarning,
             stacklevel=3,
         )
 

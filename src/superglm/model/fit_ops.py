@@ -650,10 +650,10 @@ def _record_unidentified_factor_smooth_levels(model, sample_weight, y=None, *, s
     import warnings
 
     from superglm.diagnostics.separation import (
-        SeparationWarning,
         format_factor_smooth_canonical,
         format_factor_smooth_separation,
         response_boundaries,
+        warn_separation,
     )
     from superglm.features.factor_smooth import FactorSmooth, share_group_levels
     from superglm.group_matrix import FactorSmoothGroupMatrix
@@ -669,9 +669,8 @@ def _record_unidentified_factor_smooth_levels(model, sample_weight, y=None, *, s
         separated = spec._record_unidentified_levels(matrix, sample_weight, y, boundaries)
         if separated and mode != "ignore":
             labels = [spec._levels[code] for code in separated]
-            warnings.warn(
+            warn_separation(
                 format_factor_smooth_separation(group.name, labels, len(spec._levels)),
-                SeparationWarning,
                 stacklevel=level,
             )
         if spec._population_convention == "canonical":
@@ -1455,7 +1454,6 @@ def _solve_coefficients(
             record_diagnostics=record_diagnostics,
             direct_solve=model._direct_solve,
             convergence=convergence,
-            separation=getattr(model, "_separation", "warn"),
             weight_semantics=model_weight_semantics(model),
             reml_penalties=reml_penalties,
             compute_rank_info=compute_rank_info,
@@ -1480,7 +1478,6 @@ def _solve_coefficients(
         lambda2=lambda2,
         record_diagnostics=record_diagnostics,
         convergence=convergence,
-        separation=getattr(model, "_separation", "warn"),
         weight_semantics=model_weight_semantics(model),
     )
 
@@ -1831,11 +1828,9 @@ def fit_reml(
     if getattr(model, "_separation", "warn") != "ignore":
         separation_message = _random_effect_separation_hazard(model, X, y, sample_weight)
         if separation_message is not None:
-            import warnings
+            from superglm.diagnostics.separation import warn_separation
 
-            from superglm.diagnostics.separation import SeparationWarning
-
-            warnings.warn(separation_message, SeparationWarning, stacklevel=3)
+            warn_separation(separation_message, stacklevel=3)
     validated_inputs = (X, y, sample_weight, offset)
     family_intent = configured_family(model)
     nb_auto = isinstance(family_intent, NegativeBinomial) and family_intent.theta == "auto"

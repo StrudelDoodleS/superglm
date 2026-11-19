@@ -227,7 +227,8 @@ class SuperGLM:
             remedies before fitting; ``"error"`` raises ``SeparationError``;
             ``"ignore"`` disables the check. Terms under an active selection
             penalty are exempt. The same mode governs the solver's backstop
-            for separation the build scan cannot see, the hold on a
+            for separation the build scan cannot see (read from the fitted
+            coefficients, not from a search's trial solves), the hold on a
             spline-by-factor level's curve over a boundary-only range, and the
             warning for a ``FactorSmooth(basis="sz")`` level whose line
             separates (warned, never refused; ``select=True`` is the remedy).
@@ -649,7 +650,9 @@ class SuperGLM:
                     stacklevel=2,
                 )
 
-            with solver_blas_threads(), self._parallel_scope():
+            from superglm.diagnostics.separation import disclosure_scope
+
+            with solver_blas_threads(), self._parallel_scope(), disclosure_scope():
                 return fit_ops.fit(
                     self,
                     X,
@@ -682,7 +685,9 @@ class SuperGLM:
         offset (``PathResult``); predict with a fitted model instead.
         """
         with fit_record(self, "fit_path", locals()):
-            with solver_blas_threads(), self._parallel_scope():
+            from superglm.diagnostics.separation import disclosure_scope
+
+            with solver_blas_threads(), self._parallel_scope(), disclosure_scope():
                 return fit_ops.fit_path(
                     self,
                     X,
@@ -837,9 +842,15 @@ class SuperGLM:
                 max_pirls_iter if max_pirls_iter is not None else self._max_iter
             )
 
+            from superglm.diagnostics.separation import disclosure_scope
             from superglm.solvers.centered_system import reuse_data_factors
 
-            with solver_blas_threads(), self._parallel_scope(), reuse_data_factors():
+            with (
+                solver_blas_threads(),
+                self._parallel_scope(),
+                reuse_data_factors(),
+                disclosure_scope(),
+            ):
                 return fit_ops.fit_reml(
                     self,
                     X,
@@ -1480,7 +1491,9 @@ class SuperGLM:
             ``{"profile_estimate": ...}``.
         """
         with fit_record(self, "estimate_p", locals()):
-            with self._parallel_scope():
+            from superglm.diagnostics.separation import disclosure_scope
+
+            with self._parallel_scope(), disclosure_scope():
                 return profile_ops.estimate_p(
                     self,
                     X,
@@ -1547,7 +1560,9 @@ class SuperGLM:
             ``"best_found"`` and ``"final_refit"`` with ``{"profile_estimate": ...}``.
         """
         with fit_record(self, "estimate_theta", locals()):
-            with self._parallel_scope():
+            from superglm.diagnostics.separation import disclosure_scope
+
+            with self._parallel_scope(), disclosure_scope():
                 return profile_ops.estimate_theta(
                     self,
                     X,
