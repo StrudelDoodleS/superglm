@@ -300,9 +300,9 @@ def _face_book(seed: int, n: int, ones: int) -> tuple[pd.DataFrame, np.ndarray]:
 def _face_fit(monkeypatch: pytest.MonkeyPatch, **fit_kwargs) -> SuperGLM:
     """``fit_reml`` at ``_FACE_LAMBDA``, its search's solves stopped after two iterations.
 
-    The witness's search candidate stopped short of the face
-    (``score_stagnated``) and its final refit reached it; the cap forces the
-    same order here, ending every candidate on its budget well inside.
+    A search candidate can stop short of the face (``score_stagnated``)
+    while the final refit at its smoothing parameters reaches it; the cap
+    forces that order here, ending every candidate on its budget well inside.
     """
     import superglm.reml.direct as direct
 
@@ -329,19 +329,23 @@ def test_reml_publishes_a_final_refit_on_the_boundary_as_not_converged(
 ) -> None:
     """A final refit that reaches the face is the fit, published with its stop, on the log link too.
 
-    Hunt F5 (freMTPL2, 45,000 rows): the final observed-mode refit ended
-    ``mean_space_boundary`` and ``finalize_reml_fit`` raised
-    ``ObservedModeNotConvergedError``, installing no model, because the
-    terminal gate admitted that stop only under the identity link.  The
-    state it discarded was feasible and beat the offset-only null on 35,000
-    held-out rows by 3.4% (10,780.7 against 11,162.9).  Here the published
-    fit is the constrained penalized maximum, computed independently by SLSQP
-    on the indicator design under ``X theta <= 0``, and beats the null
-    ``mean(y)`` on held-out rows.  The published state stops inside the face
-    by at most the clip's band and the last steps' halvings (about 1e-6 in
-    ``eta`` here), which moves the held-out deviance by about 1e-10 of
-    itself; 1e-6 leaves room for another BLAS's path.  Mutation check: on
-    5f28e8e80 ``fit_reml`` raised from ``finalize_reml_fit``.
+    A final observed-mode refit can reach a face its search candidates
+    stopped short of.  It ends ``mean_space_boundary`` on a feasible, finite
+    state, which the terminal gate admitted only under the identity link, so
+    ``finalize_reml_fit`` raised ``ObservedModeNotConvergedError`` and
+    installed no model; on a 45,000-row freMTPL2 sample that state beat the
+    offset-only null by 3.4% on held-out rows.  Here the published fit is the
+    constrained penalized maximum, computed independently by SLSQP on the
+    indicator design under ``X theta <= 0``, and beats the null ``mean(y)``
+    on held-out rows.  The published state stops inside the face by at most
+    the clip's band and the last steps' halvings: its training ``eta`` is
+    within about 1.2e-6 of the reference, against 1.4e-3 for an unfinished
+    ``max_pirls_iter=2`` iterate, so 1e-4 tells the two apart.  The held-out
+    rows hold no face level, so their deviance, within 6e-7 of the
+    reference on the kernels measured, cannot.  Mutation checks: on 5f28e8e80
+    ``fit_reml`` raised from ``finalize_reml_fit``; a final refit capped at
+    two iterations and labelled ``mean_space_boundary`` fails the ``eta``
+    bound.
     """
     from scipy.optimize import LinearConstraint, minimize
 
@@ -382,6 +386,7 @@ def test_reml_publishes_a_final_refit_on_the_boundary_as_not_converged(
         options={"ftol": 1e-14, "maxiter": 1000},
     )
     assert reference.success, reference.message
+    assert float(np.max(np.abs(_eta(model) - D @ reference.x))) <= 1e-4
     held_out, y_held_out = _face_book(8, 2000, ones=0)
 
     def deviance(mu: np.ndarray) -> float:

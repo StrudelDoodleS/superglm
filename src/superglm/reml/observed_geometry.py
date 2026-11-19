@@ -651,8 +651,9 @@ def stopped_on_iteration_budget(result: Any, link: Any = None) -> bool:
     halving keeps every binomial mean inside (0, 1), so the state is finite.
     The log link's search restores an interior mode instead
     (``optimize_direct_reml``); its final refit publishes the boundary as the
-    identity link's does (``finalize_reml_fit``). Every other termination reason is something the mode score cannot judge
-    and keeps its own handling.
+    identity link's does (``finalize_reml_fit``). Every other termination
+    reason is something the mode score cannot judge and keeps its own
+    handling.
     """
     return result.termination_reason in ("max_iter", "step_rejected", "score_stagnated") or (
         result.termination_reason == "mean_space_boundary" and isinstance(link, IdentityLink)

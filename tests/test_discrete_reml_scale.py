@@ -412,4 +412,4 @@ def test_binned_binomial_log_at_the_boundary_returns_and_discloses_it():
     assert not model.reml_diagnostics()["converged"]
     assert result.terminal_refit_termination == "mean_space_boundary"
     messages = [str(w.message) for w in caught if issubclass(w.category, ConvergenceWarning)]
-    assert any("no interior optimum" in message for message in messages)
+    assert any("Wald inference" in message for message in messages)
