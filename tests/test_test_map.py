@@ -201,6 +201,28 @@ def test_a_class_attribute_reaches_whoever_reads_it_by_name_anywhere(tmp_path):
     assert selected == {"tests/test_other.py"}
 
 
+COMPUTED = "def helper():\n    return 1\n\n\nclass C:\n    value = helper()\n"
+COMPUTED_TEST = "from superglm.computed import C\n\n\ndef test_value():\n    assert C.value == 1\n"
+
+
+def test_a_class_attribute_computed_at_import_follows_the_function_it_calls(tmp_path):
+    """``value = helper()`` runs at import: a change to ``helper`` changes ``C``.
+
+    Mutation: the attribute's initializer left the class statement, so nothing read ``helper``.
+    """
+    root = _repo(tmp_path)
+    _commit_module(
+        root, {"src/superglm/computed.py": COMPUTED, "tests/test_user.py": COMPUTED_TEST}
+    )
+    # The first file to import the module ran helper(); test_user only reads the attribute.
+    ran = {"src/superglm/computed.py": {"helper": ["tests/test_reader.py"]}}
+    changed = _change(root, "src/superglm/computed.py", COMPUTED.replace("1", "200"))
+    assert _selected(test_map.select(_map(root, ran=ran), changed, root)) == {
+        "tests/test_reader.py",
+        "tests/test_user.py",
+    }
+
+
 def test_a_changed_registration_selects_the_registry_and_the_module(tmp_path):
     root = _repo(tmp_path)
     _commit_module(root, {"src/superglm/registry.py": REGISTRY, "src/superglm/plugin.py": PLUGIN})
@@ -225,6 +247,24 @@ def test_a_changed_name_passes_through_a_lazy_package_reexport(tmp_path):
     # lazily, and nothing recorded ran the new value.
     changed = _change(root, "src/superglm/caller.py", CALLER + "\n\ncall = 3\n")
     assert _selected(test_map.select(_map(root, ran={}), changed, root)) == {"tests/test_caller.py"}
+
+
+def test_a_package_name_reaches_a_module_that_imports_it_relatively(tmp_path):
+    """``from . import LIMIT`` in the package's own module never spells the package's name.
+
+    Mutation: only a file spelling the module's last name was taken for an importer.
+    """
+    root = _repo(tmp_path)
+    consumer = "from . import LIMIT\n\n\ndef use():\n    return LIMIT\n"
+    _commit_module(
+        root,
+        {"src/superglm/__init__.py": PACKAGE + "LIMIT = 1\n", "src/superglm/consumer.py": consumer},
+    )
+    ran = {"src/superglm/consumer.py": {"use": ["tests/test_reader.py"]}}
+    changed = _change(root, "src/superglm/__init__.py", PACKAGE + "LIMIT = 2\n")
+    assert _selected(test_map.select(_map(root, ran=ran), changed, root)) == {
+        "tests/test_reader.py"
+    }
 
 
 @pytest.mark.parametrize("path", ["pyproject.toml", "tests/conftest.py"])
@@ -380,6 +420,46 @@ def test_a_recorded_run_maps_fixtures_and_subprocesses_to_their_test_file(tmp_pa
     }
     fixtures = {f"fixture:tests/test_recorded.py::{name}" for name in ("shared", "lazily")}
     assert contexts == {"tests/test_recorded.py", *fixtures}
+
+
+SESSION_CONFTEST = """from superglm import recorded
+
+
+def pytest_collection_modifyitems(config, items):
+    recorded.helper()
+"""
+
+
+def test_a_hook_after_collection_runs_in_the_session_not_the_last_collected_file(tmp_path):
+    """``pytest_collection_modifyitems`` decides for every test file, so what it runs is the
+    session's: a change to it runs the whole suite.
+
+    Mutation: the context stayed on the last module collected, so only that file was selected.
+    """
+    root = tmp_path / "project"
+    (root / "src" / "superglm").mkdir(parents=True)
+    (root / "src" / "superglm" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "src" / "superglm" / "recorded.py").write_text(RECORDED_MODULE, encoding="utf-8")
+    (root / "pyproject.toml").write_text("[tool.pytest.ini_options]\n", encoding="utf-8")
+    (root / "tests").mkdir()
+    (root / "tests" / "conftest.py").write_text(SESSION_CONFTEST, encoding="utf-8")
+    for name in ("test_a.py", "test_z.py"):
+        (root / "tests" / name).write_text("def test_it():\n    pass\n", encoding="utf-8")
+    out = tmp_path / "out"
+    variables = test_map.recording_environment(out, root)
+    variables["PYTHONPATH"] = os.pathsep.join([variables["PYTHONPATH"], str(root / "src")])
+    run = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:randomly"]
+        + [*test_map.RECORDING_ARGUMENTS, "tests"],
+        cwd=root,
+        env={**os.environ, **variables},
+        capture_output=True,
+        text=True,
+    )
+    assert run.returncode == 0, run.stdout[-2000:]
+    data = test_map.merge(out)
+    assert data["session"].get("src/superglm/recorded.py") == ["helper"]
+    assert "src/superglm/recorded.py" not in data["functions"]
 
 
 def test_build_records_no_map_when_the_checkout_moved_during_its_run(tmp_path, monkeypatch):

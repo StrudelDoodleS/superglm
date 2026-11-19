@@ -50,7 +50,8 @@ formatting do not count), a test file is selected when:
    so they pass through package re-exports; a test file that imports a changed name is selected,
    and so is one that ran a function reading it. An attribute assigned in an undecorated class's
    body is read through instances, so a changed one selects the test files that ran any function,
-   in any Python file, mentioning its name (``getattr(obj, "name")`` included);
+   in any Python file, mentioning its name (``getattr(obj, "name")`` included), and what its value
+   reads or calls at import (``value = helper()``) changes the class;
 5. a module's or class's docstring changed and it ran a function reading docstrings
    (``DOCSTRING_READERS``), or a module's top-level names changed and it ran a function in
    ``tests/`` that lists names (``ENUMERATORS``);
@@ -530,9 +531,11 @@ def shape(text: str | None, tree: ast.Module | None = None) -> Shape | None:
             continue
         stripped = _without_functions(node)
         _strip_docstrings(stripped)
+        initializers: list[ast.AST] = []
         if isinstance(stripped, ast.ClassDef) and not stripped.decorator_list:
             # A class attribute is read through instances anywhere, by its name; the class's
-            # own statement keeps its bases, keywords and everything else in its body.
+            # own statement keeps its bases, keywords and everything else in its body, and
+            # what the attributes' values read and call at import (``value = helper()``).
             kept = []
             for item in stripped.body:
                 targets = [item.target] if isinstance(item, ast.AnnAssign) else []
@@ -541,6 +544,7 @@ def shape(text: str | None, tree: ast.Module | None = None) -> Shape | None:
                     for target in targets:
                         key = f"{stripped.name}.{target.id}"
                         attributes[key] = attributes.get(key, _Dump()) + _Dump(item)
+                    initializers += [item.value] if item.value is not None else []
                 else:
                     kept.append(item)
             stripped.body = kept or [ast.Pass()]
@@ -562,8 +566,10 @@ def shape(text: str | None, tree: ast.Module | None = None) -> Shape | None:
             # re-export table), not read; a function's ``getattr(obj, "name")`` is a read.
             (
                 _bound(stripped),
-                _identifiers(stripped, strings=False),
-                _called(stripped),
+                _identifiers(stripped, strings=False).union(
+                    *(_identifiers(value, strings=False) for value in initializers)
+                ),
+                _called(stripped).union(*(_called(value) for value in initializers)),
                 _Dump(stripped),
             )
         )
@@ -691,16 +697,20 @@ class Modules:
         ``spelling``, only those whose text has one of those words or a star import.
 
         Only a file that spells the module's last name (``from .x import``, ``import a.x``, a
-        lazy table's ``"a.x"``) can import it, and only one that spells a name can read it, so
-        only those are parsed.
+        lazy table's ``"a.x"``) can import it, or, for a package, a module inside it (``from .
+        import name`` spells no package), and only one that spells a name can read it, so only
+        those are parsed.
         """
         module = _module_name(path)
         last = (module or "").rpartition(".")[2]
+        inside = f"{module}." if path.endswith("__init__.py") else None
         wanted = frozenset(spelling)
         found = set()
         for source in self.paths.values():
             words = self.words(source)
-            if source == path or last not in words:
+            if source == path:
+                continue
+            if last not in words and not (inside and _module_name(source).startswith(inside)):
                 continue
             if wanted and not (words & wanted or "import *" in (self.read(source) or "")):
                 continue

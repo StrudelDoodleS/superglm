@@ -1,9 +1,9 @@
 """The pytest side of a test-map build (``-p test_map_plugin``): it names the recorder's contexts.
 
-A test file is the context while its module is collected and while each of its tests runs (setup,
-call and teardown); a fixture broader than a function is its own context while it is set up, and
-each test file notes the ones its tests use, so the tests that read a shared fixture's result reach
-what built it. Each test file's count of tests and their seconds are kept for the map.
+A test file is the context while its module and its classes are collected and while each of its
+tests runs (setup, call and teardown), and the session is again once its collection is done; a
+fixture broader than a function is its own context while it is set up, and each test file notes
+the ones its tests use, so the tests that read a shared fixture's result reach what built it. Each test file's count of tests and their seconds are kept for the map.
 """
 
 from __future__ import annotations
@@ -25,9 +25,17 @@ def _fixture_context(fixturedef) -> str:
 
 @pytest.hookimpl(wrapper=True)
 def pytest_make_collect_report(collector):
-    if isinstance(collector, pytest.Module):
-        recorder.switch(_test_file(collector.path))
-    return (yield)
+    module = collector.getparent(pytest.Module)
+    if module is None:
+        return (yield)
+    # Back to the enclosing context afterwards: the hooks after collection
+    # (``pytest_collection_modifyitems``) decide for every test file, so they are the session's.
+    outer = recorder._context
+    recorder.switch(_test_file(module.path))
+    try:
+        return (yield)
+    finally:
+        recorder.switch(outer)
 
 
 @pytest.hookimpl(wrapper=True)
