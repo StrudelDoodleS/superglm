@@ -283,10 +283,10 @@ which others.
   for reproducible benchmarking.
 - **A thinly observed `sz` level is kept.** A level with fewer distinct values
   than its smooth's unpenalized part stays in the model.
-- **Its standard errors can be missing.** The dense solver blanks only the
-  coefficients such a level's alias falls on, with a footnote. The structured
-  solver spreads the level's free direction over every level, so it blanks
-  every coefficient that direction reaches, also with a footnote.
+- **Its standard errors are those of the fit with the alias held.** Both
+  solvers hold the level's free direction at zero on the same unpenalized part
+  of the term, with a footnote, and report the same coefficients and standard
+  errors.
 - **The structured solver names the level.** It names such a level in a
   warning. The Gram solver fits the same model without that warning.
 - **With `select=True` the term penalizes every level's line.** No level

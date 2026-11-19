@@ -1299,7 +1299,7 @@ class RankInfo:
             return self.augmented.pseudo_inverse()
         return face_pseudo_inverse(self.face_augmented, self.face)
 
-    def covariance_inverse(self) -> NDArray:
+    def covariance_inverse(self, *, weak: bool = True) -> NDArray:
         """The centred slopes' inverse Hessian with no shape row held: the covariance's.
 
         Which rows bind is itself estimated, so a covariance conditional on them gives
@@ -1307,15 +1307,17 @@ class RankInfo:
         models", Statistical Modelling 26(4), section 5.1, p. 397). The covariance is the
         one the fit would report with no row held; leverage and the degrees of freedom stay
         the face fit's (``augmented_inverse``). A record saved before fits held no row
-        keeps the face fit's (``covariance_policy``). A singular fit published in its
-        identifiability gauge reports the covariance in that gauge (``Gauge.covariance``).
+        keeps the face fit's (``covariance_policy``). A fit published with its identifiability
+        record reports the published fit's (``Identifiability.published_covariance``; ``weak``
+        as there).
         """
         if self.covariance_policy == "face":
             inverse = self.augmented_inverse()
         else:
             inverse = self.augmented.pseudo_inverse()
-        gauge = None if self.identifiability is None else self.identifiability.gauge
-        return inverse if gauge is None else gauge.covariance(inverse, self.selected_columns)
+        if self.identifiability is None:
+            return inverse
+        return self.identifiability.published_covariance(inverse, self.selected_columns, weak=weak)
 
     def coefficient_inverse(self) -> NDArray:
         """The raw slopes' inverse Hessian, on the active face when there is one."""

@@ -220,11 +220,12 @@ def test_sz_one_row_levels_fit_as_the_dense_solver_does(one_row, discrete, monke
     neither line is penalised: an exact null of the penalised Hessian, which
     the sum-to-zero constraint spreads over every level.  The tree's own
     split is the minimum-norm one, and the dense solver fixes a coordinate
-    of each direction it chose for conditioning; both publish the latest
-    coordinate of each at zero instead (``identifiability.Gauge``), so both
-    blank one per direction (3 of 191 with four one-row levels, where the
-    minimum-norm split left 58 undetermined) and agree on every coefficient,
-    standard error and footnote, and neither prediction moves.
+    of each direction it chose for conditioning; both hold the latest
+    construction column of each at zero instead (``identifiability.Gauge``),
+    an unpenalised part of an ``sz`` level, so neither blanks a coordinate
+    (the minimum-norm split left 58 undetermined with four one-row levels),
+    both name one held part per direction, and they agree on every
+    coefficient, standard error and footnote, and neither prediction moves.
     Mutations: the balance tree's deferral judged against the stacked
     matrix's own column norm (``_decide``) instead of the unreduced column;
     stage 1's data-only blanks, on coefficients the penalty identifies; no
@@ -250,10 +251,15 @@ def test_sz_one_row_levels_fit_as_the_dense_solver_does(one_row, discrete, monke
     ]
     structured, dense = _metrics(auto, frame, y, weight), _metrics(gram, frame, y, weight)
     assert_one_gauge(structured, dense, frame, before=before, rtol=1e-8)
-    blank = np.isnan(coefficient_ses(structured))
-    # one null direction fewer than the one-row levels
-    assert np.count_nonzero(blank) == one_row - 1
-    assert np.all(reach[blank])
+    assert not np.any(np.isnan(coefficient_ses(structured)))
+    record = auto._fit_inference_info["identifiability"]
+    # one null direction fewer than the one-row levels, each held on an ``sz`` level's part
+    assert len(record.aliases) == one_row - 1
+    assert all(
+        alias.coordinate is None and alias.term.startswith("x:g:sz[") for alias in record.aliases
+    )
+    null = np.abs(record.gauge.null)
+    assert np.all(reach[np.any(null > np.sqrt(np.finfo(float).eps) * null.max(axis=0), axis=1)])
 
 
 @pytest.mark.parametrize("family", ["gaussian", "poisson", "gamma_log"])
@@ -3848,13 +3854,16 @@ def _dense_cross_trace(model: SuperGLM, X, W, rates, rank: int) -> tuple[float, 
 
 
 def test_an_alias_of_vanished_working_weights_keeps_its_fitted_values(monkeypatch) -> None:
-    """A one-row level below the log link's range: the published coefficients do not move.
+    """A one-row level below the log link's range: no fitted value moves.
 
-    Its row's Fisher weight is ``3e-70``, so the penalised Hessian is singular along a direction
-    that moves that row's linear predictor (by ``2.6e5`` here, to an overflowing mean).  The
-    gauge is refused where a row's predictor would move beyond ``sqrt(eps)`` of its size, so the
-    record keeps the factor's split and every fitted value stands.  Mutation: publishing the
-    move overflows the row's mean (and the cross-trace test below raises on it).
+    Its row's Fisher weight is ``3e-70``, so the weighted rows cannot tell a direction that
+    moves that row's linear predictor from zero, while the design on the rows with positive
+    prior weight identifies it (``identifiability._design_null``): it is no alias, so it is
+    never moved along (it would move that row by ``2.6e5``, to an overflowing mean), and its
+    coordinates' standard errors are not resolved at float64.  The design's own alias is
+    gauged, which moves no fitted value.  Mutation: treating every direction the weighted rows
+    put under their bound as an alias overflows the row's mean (and the cross-trace test below
+    raises on it).
     """
     frame, y, weight = _signed_aliased_frame("one_row")
 
@@ -3863,11 +3872,14 @@ def test_an_alias_of_vanished_working_weights_keeps_its_fitted_values(monkeypatc
         return _fit(model, frame, y, weight)
 
     model, before = fit(), without_gauge(monkeypatch, fit)
-    assert model._fit_inference_info["identifiability"].gauge is None
-    np.testing.assert_array_equal(model.result.beta, before.result.beta)
+    record = model._fit_inference_info["identifiability"]
+    assert {alias.source for alias in record.aliases} >= {"float64"}
+    assert record.weak is None
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        assert np.all(np.isfinite(model.predict(frame)))
+        mean, unmoved = model.predict(frame), before.predict(frame)
+    assert np.all(np.isfinite(mean))
+    np.testing.assert_allclose(mean, unmoved, rtol=1e-9)
 
 
 @pytest.mark.parametrize(
@@ -4293,9 +4305,9 @@ def test_a_tiny_weight_level_is_named_not_the_whole_model() -> None:
     columns that move with it, and never an unrelated column; the fit still
     converges (the certificate leaves every moved column ungated).  Both
     solvers truncate the direction, which the rows identify at float64, so
-    each blanks what its own rank decision left undetermined, and says so: the
-    dense solver the coordinate it fixed, the tree every coordinate its
-    minimum-norm split reaches (``solvers.identifiability``).
+    both fit it from the rows and report every standard error
+    (``identifiability.WeakDirections``): neither solver's rank decision blanks
+    a coefficient.
     Mutations: the disclosure reading every column the direction moves; the
     direction's entries kept within its Davis-Kahan resolution; the levels'
     entries read without removing the shift the constraint gives them all.
@@ -4321,13 +4333,11 @@ def test_a_tiny_weight_level_is_named_not_the_whole_model() -> None:
     names = [str(item.message) for item in caught if "noise level" in str(item.message)]
     assert len(names) == 1 and "x:g:sz[" in names[0]
     gram = _fit(_model("gaussian", "gram", lam=None), frame, y, weight)
-    structured_mask = _nan_mask(model, frame, y, weight)
-    dense_mask = _nan_mask(gram, frame, y, weight)
-    assert np.any(dense_mask) and not np.any(dense_mask & ~structured_mask)
-    for fit, mask in ((model, structured_mask), (gram, dense_mask)):
+    for fit in (model, gram):
+        assert not np.any(_nan_mask(fit, frame, y, weight))
         record = fit._fit_inference_info["identifiability"]
-        assert {alias.source for alias in record.aliases} == {"fit"}
-        assert sorted(alias.coordinate for alias in record.aliases) == np.flatnonzero(mask).tolist()
+        assert record.aliases == ()
+        assert record.weak is not None and record.weak.fitted
 
 
 def test_selected_sz_standard_errors_are_reported_as_on_gram() -> None:

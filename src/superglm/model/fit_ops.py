@@ -1309,7 +1309,8 @@ def _install_deferred_rank_info(model) -> None:
     ``finalize_reml_fit`` leaves the computation with the model when
     ``_defer_rank_info`` is set; it is a pure function of the final state, so
     the solver, public and REML results share the ``RankInfo`` the fit would
-    have attached inline.
+    have attached inline.  The fit is then published as an inline record is
+    (``runtime_canonicalize.canonicalize_fitted_model``).
     """
     model.__dict__.pop("_defer_rank_info", None)
     deferred = model.__dict__.pop("_deferred_rank_info", None)
@@ -1324,6 +1325,7 @@ def _install_deferred_rank_info(model) -> None:
     for result in results:
         if result is not None:
             result.rank_info = rank_info
+    runtime_canonicalize.canonicalize_fitted_model(model)
 
 
 def _reject_monotone_fit_conflicts(model, penalty, has_lambda1_targets) -> None:

@@ -878,8 +878,14 @@ def grouped_projected_factor(
     *,
     center: NDArray | None = None,
     center_lo: NDArray | None = None,
+    response: NDArray | None = None,
+    score_out: NDArray | None = None,
 ) -> tuple[NDArray, NDArray, int, NDArray]:
     """``R`` of ``B = A basis`` (a TSQR), ``A'B``, its rounding count and column magnitudes.
+
+    The magnitudes are each column's weighted norm as the pass forms it (centred, and inflated
+    where a centre joins after the product).  With ``response`` (``n`` rows) the same pass adds ``B' response`` into ``score_out``
+    (``k``), summed row block by row block.
 
     ``A = sqrt(W) ((X - c) - c_lo)`` and ``basis`` is ``p x k``. One pass over
     the rows: each group writes its part of ``X basis`` from its compact form
@@ -987,6 +993,13 @@ def grouped_projected_factor(
             codes = second
         table = np.ascontiguousarray(support @ basis[columns])
         supports[column] = support
+        # the centred columns' weighted norms, one bincount of the weights
+        counts = np.bincount(
+            np.asarray(codes, dtype=np.intp),
+            weights=np.asarray(W, dtype=np.float64),
+            minlength=support.shape[0],
+        )[: support.shape[0]]
+        magnitudes[columns] = np.sqrt(np.maximum(counts @ (support * support), 0.0))
         plans.append((columns, "full", table, np.zeros((support.shape[0], width)), codes, None))
     cross = np.zeros((p, width))
     weighted_total = np.zeros(width)
@@ -995,6 +1008,7 @@ def grouped_projected_factor(
     block_rows = min(tsqr_leaf_rows(width), max(_GREY_LEAF_ROWS, 2 * width))
     span_rows = max(block_rows, _GREY_SPAN_ROWS)
     locals_ = {id(plan[3]): np.zeros_like(plan[3]) for plan in plans if plan[3] is not None}
+    squares = np.zeros(p)
 
     def blocks() -> Iterator[tuple[int, int, NDArray]]:
         for start in range(0, n, block_rows):
@@ -1024,6 +1038,8 @@ def grouped_projected_factor(
                     projected += values @ basis[columns]
                     dense.append((columns, values))
             projected *= sqrt_weights[start:stop, None]
+            if response is not None and score_out is not None:
+                score_out[:] += projected.T @ response[start:stop]
             weighted = projected * sqrt_weights[start:stop, None]
             weighted_total[:] += weighted.sum(axis=0)
             level = iter(spans)
@@ -1047,6 +1063,7 @@ def grouped_projected_factor(
                     local[...] = 0.0
             for columns, values in dense:
                 cross[columns] += values.T @ weighted
+                squares[columns] += np.square(values).T @ np.square(sqrt_weights[start:stop])
             yield start, stop, projected
         for columns, kind, _, accumulator, _, _ in plans:
             if kind == "full":
@@ -1070,6 +1087,9 @@ def grouped_projected_factor(
                 cross[columns] += centre.T @ weighted_total[None, :]
 
     factor = streamed_weighted_factor(blocks(), np.ones(n))
+    for columns, kind, *_ in plans:
+        if kind == "rows":
+            magnitudes[columns] = np.sqrt(squares[columns])
     # Roundings an entry of ``A'B`` carries beyond ``|A|' |B|``: centring and
     # table product, group adds, scalings, span sums and the widest support.
     widest = max((plan[2].shape[0] for plan in plans if plan[1] in ("full", "level")), default=0)

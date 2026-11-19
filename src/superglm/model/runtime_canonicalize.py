@@ -391,13 +391,13 @@ def _build_public_result(solver: PIRLSResult, state: dict[str, Any]) -> PIRLSRes
 def canonicalize_fitted_model(model) -> None:
     """Finalize the public runtime result after solver-space fitting completes.
 
-    A singular fit first moves its coefficients to its identifiability gauge
-    (``state_ops.publish_identified_gauge``), so the public result carries them.
+    The fit its identifiability record decides is published first
+    (``state_ops.publish_identified_fit``), so the public result carries it.
     """
     from superglm.model import base
-    from superglm.model.state_ops import publish_identified_gauge
+    from superglm.model.state_ops import publish_identified_fit
 
-    publish_identified_gauge(model)
+    publish_identified_fit(model)
     solver = model._solver_pirls_result()
     term_states, public_intercept_shift = _compile_runtime_terms(model, solver)
 

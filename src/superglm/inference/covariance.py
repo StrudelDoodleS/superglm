@@ -107,50 +107,87 @@ class BinaryScaledCovariance(_SelectedBlockAccess):
 
 
 class _GaugeCorrection:
-    """``P V P'`` read off an ungauged covariance ``V`` (``solvers.identifiability.Gauge``).
+    """``P (V + U U') P'`` read off an unpublished covariance ``V`` (``solvers.identifiability``).
 
-    ``null`` (``n x k``) and ``coordinates`` (``E``, ``k``) are the gauge in the covariance's own
-    coordinates, ``apply`` the ungauged product ``V x``.  With ``L = N (E'N)^-1``, ``P = I - L
-    E'``, so ``P V P'`` at rows ``I`` and columns ``J`` is ``V_IJ - L_I (VE)_J' - (VE)_I L_J' + L_I
-    (E'VE) L_J'``: ``V E`` takes ``k`` solves through the factor, formed once on first read and
-    kept with the accessors that share this correction (its owner; the fit is its lifetime, and it
-    holds nothing a later fit could invalidate).  No ``n x n`` matrix is formed.
+    ``null`` (``n x k``) and ``functionals`` (``G``, ``n x k``) are the gauge in the covariance's
+    own coordinates, ``root`` (``U``, ``n x d``) the weak directions' (``WeakDirections``), and
+    ``apply`` the unpublished product ``V x``.  With ``L = N (G'N)^-1``, ``P = I - L G'``, so with
+    ``M = V + U U'`` the published covariance at rows ``I`` and columns ``J`` is ``M_IJ - L_I
+    (MG)_J' - (MG)_I L_J' + L_I (G'MG) L_J'``: ``M G`` takes ``k`` solves through the factor,
+    formed once on first read and kept with the accessors that share this correction (its owner;
+    the fit is its lifetime, and it holds nothing a later fit could invalidate).  No ``n x n``
+    matrix is formed.  A coordinate held by a unit functional has variance exactly zero.
     """
 
-    def __init__(self, null: NDArray, coordinates: NDArray, apply):
-        self.coordinates = np.asarray(coordinates, dtype=np.intp)
-        self.lift = np.linalg.solve(null[self.coordinates].T, np.asarray(null).T).T
+    def __init__(self, null: NDArray, functionals: NDArray, apply, root: NDArray | None = None):
+        null = np.asarray(null, dtype=np.float64)
+        self.functionals = np.asarray(functionals, dtype=np.float64)
+        self.lift = (
+            np.linalg.solve((self.functionals.T @ null).T, null.T).T
+            if null.shape[1]
+            else np.zeros_like(null)
+        )
+        nonzero = self.functionals != 0.0
+        unit = np.count_nonzero(nonzero, axis=0) == 1
+        self.coordinates = np.sort(np.argmax(nonzero[:, unit], axis=0)).astype(np.intp)
+        self.root = (
+            np.zeros((null.shape[0], 0)) if root is None else np.asarray(root, dtype=np.float64)
+        )
         self._apply = apply
         self._applied: NDArray | None = None
 
+    def published(self, rhs: NDArray) -> NDArray:
+        """``(V + U U') rhs``, before the gauge."""
+        return np.asarray(self._apply(rhs), dtype=np.float64) + self.root @ (self.root.T @ rhs)
+
     @property
     def applied(self) -> NDArray:
-        """``V E`` (``n x k``), ungauged and unscaled."""
+        """``(V + U U') G`` (``n x k``), unscaled."""
         if self._applied is None:
-            units = np.zeros((self.lift.shape[0], self.coordinates.size))
-            units[self.coordinates, np.arange(self.coordinates.size)] = 1.0
-            self._applied = np.asarray(self._apply(units), dtype=np.float64)
+            self._applied = self.published(self.functionals)
         return self._applied
 
+    def mapped(self, rows: NDArray, base: NDArray, columns: NDArray | None = None) -> NDArray:
+        """The published block ``R M' R'`` from the base block ``R V R'``, ``R`` mapping coordinates.
+
+        ``rows`` (``r x n``) and ``columns`` (default ``rows``) are the maps; the gauge's
+        projection and the weak directions' term are read through them.
+        """
+        columns = rows if columns is None else columns
+        U_r, U_c = rows @ self.root, columns @ self.root
+        L_r, L_c = rows @ self.lift, columns @ self.lift
+        MG_r, MG_c = rows @ self.applied, columns @ self.applied
+        GMG = self.functionals.T @ self.applied
+        return base + U_r @ U_c.T - L_r @ MG_c.T - MG_r @ L_c.T + L_r @ GMG @ L_c.T
+
     def block(self, rows: NDArray, columns: NDArray, base: NDArray) -> NDArray:
+        U_r, U_c = self.root[rows], self.root[columns]
         L_r, L_c = self.lift[rows], self.lift[columns]
-        VE_r, VE_c = self.applied[rows], self.applied[columns]
-        EVE = self.applied[self.coordinates]
-        return base - L_r @ VE_c.T - VE_r @ L_c.T + L_r @ EVE @ L_c.T
+        MG_r, MG_c = self.applied[rows], self.applied[columns]
+        GMG = self.functionals.T @ self.applied
+        block = base + U_r @ U_c.T - L_r @ MG_c.T - MG_r @ L_c.T + L_r @ GMG @ L_c.T
+        block[np.isin(rows, self.coordinates), :] = 0.0
+        block[:, np.isin(columns, self.coordinates)] = 0.0
+        return block
 
     def diagonal(self, rows: NDArray, base: NDArray) -> NDArray:
-        L, VE = self.lift[rows], self.applied[rows]
-        EVE = self.applied[self.coordinates]
-        diagonal = base - 2.0 * np.sum(L * VE, axis=1) + np.sum((L @ EVE) * L, axis=1)
+        L, MG, U = self.lift[rows], self.applied[rows], self.root[rows]
+        GMG = self.functionals.T @ self.applied
+        diagonal = (
+            base
+            + np.sum(U * U, axis=1)
+            - 2.0 * np.sum(L * MG, axis=1)
+            + np.sum((L @ GMG) * L, axis=1)
+        )
         diagonal[np.isin(rows, self.coordinates)] = 0.0
         return diagonal
 
     def solve(self, rhs: NDArray, apply) -> NDArray:
-        """``P V P' rhs`` through the ungauged ``apply``."""
+        """``P (V + U U') P' rhs`` through the unpublished ``apply``."""
         values = np.array(rhs, dtype=np.float64, copy=True)
-        values[self.coordinates] -= self.lift.T @ values
-        solved = np.asarray(apply(values), dtype=np.float64)
-        return solved - self.lift @ solved[self.coordinates]
+        values = values - self.functionals @ (self.lift.T @ values)
+        solved = np.asarray(apply(values), dtype=np.float64) + self.root @ (self.root.T @ values)
+        return solved - self.lift @ (self.functionals.T @ solved)
 
 
 class StructuredSlopeCovarianceAccessor(_SelectedBlockAccess):
@@ -202,13 +239,13 @@ class StructuredSlopeCovarianceAccessor(_SelectedBlockAccess):
         block = factor.raw_level_inverse_block(level)
         if self.gauge is not None:
             levels = np.asarray(factor.structured_indices, dtype=np.intp)
+            rows = np.zeros((levels.shape[1], self.shape[0]))
             if level < levels.shape[0]:
-                L, VE = self.gauge.lift[levels[level]], self.gauge.applied[levels[level]]
+                rows[np.arange(levels.shape[1]), levels[level]] = 1.0
             else:  # the last level is minus the sum of the public ones
-                L = -self.gauge.lift[levels].sum(axis=0)
-                VE = -self.gauge.applied[levels].sum(axis=0)
-            EVE = self.gauge.applied[self.gauge.coordinates]
-            block = block - L @ VE.T - VE @ L.T + L @ EVE @ L.T
+                for public in levels:
+                    rows[np.arange(levels.shape[1]), public] = -1.0
+            block = self.gauge.mapped(rows, block)
         return self.scale * block
 
     def trace(self) -> float:
@@ -228,6 +265,8 @@ class StructuredCovarianceAccessor(_SelectedBlockAccess):
     """
 
     backend = "structured"
+    # read by an accessor unpickled from before fits published weak directions
+    weak = None
 
     def __init__(
         self,
@@ -238,6 +277,7 @@ class StructuredCovarianceAccessor(_SelectedBlockAccess):
         intercept_shift: NDArray | None = None,
         scale: float = 1.0,
         gauge=None,
+        weak=None,
         _corrections: tuple[_GaugeCorrection, _GaugeCorrection] | None = None,
     ):
         self.factor = factor
@@ -254,13 +294,24 @@ class StructuredCovarianceAccessor(_SelectedBlockAccess):
         self.shape = (p + 1, p + 1)
         self.ndim = 2
         self.gauge = gauge
-        if _corrections is None and gauge is not None:
-            null = np.asarray(gauge.null, dtype=np.float64)
+        self.weak = weak
+        if _corrections is None and (gauge is not None or weak is not None):
+            null = np.zeros((p, 0)) if gauge is None else np.asarray(gauge.null, dtype=np.float64)
+            functionals = (
+                np.zeros((p, 0))
+                if gauge is None
+                else np.asarray(gauge.functionals, dtype=np.float64)
+            )
+            intercept = np.zeros(0) if gauge is None else np.asarray(gauge.intercept)
+            root = np.zeros((p, 0)) if weak is None else np.asarray(weak.root, dtype=np.float64)
+            root_intercept = np.zeros(0) if weak is None else np.asarray(weak.intercept)
             # the public intercept is the solver's plus ``shift' beta``
-            public = np.vstack(((gauge.intercept + shift @ null)[None, :], null))
+            public = np.vstack(((intercept + shift @ null)[None, :], null))
+            public_root = np.vstack(((root_intercept + shift @ root)[None, :], root))
+            public_functionals = np.vstack((np.zeros((1, functionals.shape[1])), functionals))
             _corrections = (
-                _GaugeCorrection(public, gauge.coordinates + 1, self._ungauged_solve),
-                _GaugeCorrection(null, gauge.coordinates, factor.solve),
+                _GaugeCorrection(public, public_functionals, self._ungauged_solve, public_root),
+                _GaugeCorrection(null, functionals, factor.solve, root),
             )
         self._corrections = _corrections
         self._augmented = None if _corrections is None else _corrections[0]
@@ -274,6 +325,7 @@ class StructuredCovarianceAccessor(_SelectedBlockAccess):
             intercept_shift=self.intercept_shift,
             scale=self.scale * float(scale),
             gauge=self.gauge,
+            weak=self.weak,
             _corrections=self._corrections,
         )
 

@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
+from collections.abc import Callable
 from dataclasses import replace
 from typing import cast
 
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._roundoff import SQRT_EPS
+from superglm._roundoff import SQRT_EPS, gamma_up
 from superglm._weight_units import coefficient_covariance, scale_penalties, solver_weights
 from superglm.group_matrix import DesignMatrix
 from superglm.inference._metrics_design import MappedColumnFactor, factor_from_gram
@@ -29,13 +31,16 @@ from superglm.solvers._structured.state import (
     StructuredLinearSystemState,
 )
 from superglm.solvers.identifiability import (
+    ConstructionColumns,
     Identifiability,
     TruncatedDecomposition,
     certified_identifiability,
     decide_identifiability,
     penalty_null_space,
+    published_edf,
 )
 from superglm.solvers.rank import (
+    RankDecomposition,
     decide_data_rank,
     decompose_factor,
     decompose_gram,
@@ -144,29 +149,16 @@ def _rank_active_state(model, rank_info):
     return design, active_groups
 
 
-def _legacy_rank_state(model, solver, W: NDArray):
-    """The selected grouped design, its centred system at ``W`` and their rank decisions.
+def _rank_curvature(model, active_groups, solver=None) -> NDArray:
+    """The fitted penalty curvature on ``active_groups``, as the fit's centred Hessian holds it.
 
-    Returns ``design, active_groups, centered, coefficient_rank,
-    profile_rank, data_rank``: the raw and centred Hessians' decompositions,
-    decided as the fit decides them, and the data Gram's where it is the
-    centred Hessian (unpenalized; ``None`` otherwise, computed on demand by
-    ``fit_data_rank``), and ``None`` for the last four when no column is
-    selected.
+    The penalty at the fitted lambdas in the solver's weight unit, and the selection penalty's
+    local curvature at the fitted coefficients (``solver``'s, the fit's by default).
     """
     from superglm.inference.covariance import _active_penalty_matrix
-    from superglm.solvers.centered_system import (
-        build_centered_system,
-        grouped_augmented_factor,
-        grouped_weighted_factor,
-    )
+    from superglm.solvers.pirls import _add_selection_local_curvature
 
-    selected_names = selected_group_name_set(
-        solver,
-        model._groups,
-        penalty=fitted_penalty(model),
-    )
-    design, active_groups, _ = _grouped_active_state(model, selected_names)
+    solver = model._solver_pirls_result() if solver is None else solver
     lam2 = scale_penalties(fitted_lambda2(model), getattr(solver, "weight_exponent", 0))
     curvature = np.array(
         _active_penalty_matrix(
@@ -179,17 +171,40 @@ def _legacy_rank_state(model, solver, W: NDArray):
         dtype=np.float64,
         copy=True,
     )
-    from superglm.solvers.pirls import _add_selection_local_curvature
-
     original_by_name = {group.name: group for group in model._groups}
-    original_active_groups = [original_by_name[group.name] for group in active_groups]
     _add_selection_local_curvature(
         curvature=curvature,
         penalty=fitted_penalty(model),
         beta=np.asarray(solver.beta, dtype=np.float64),
-        original_groups=original_active_groups,
+        original_groups=[original_by_name[group.name] for group in active_groups],
         active_groups=active_groups,
     )
+    return curvature
+
+
+def _legacy_rank_state(model, solver, W: NDArray):
+    """The selected grouped design, its centred system at ``W`` and their rank decisions.
+
+    Returns ``design, active_groups, centered, coefficient_rank,
+    profile_rank, data_rank``: the raw and centred Hessians' decompositions,
+    decided as the fit decides them, and the data Gram's where it is the
+    centred Hessian (unpenalized; ``None`` otherwise, computed on demand by
+    ``fit_data_rank``), and ``None`` for the last four when no column is
+    selected.
+    """
+    from superglm.solvers.centered_system import (
+        build_centered_system,
+        grouped_augmented_factor,
+        grouped_weighted_factor,
+    )
+
+    selected_names = selected_group_name_set(
+        solver,
+        model._groups,
+        penalty=fitted_penalty(model),
+    )
+    design, active_groups, _ = _grouped_active_state(model, selected_names)
+    curvature = _rank_curvature(model, active_groups, solver)
     if design.p == 0:
         return design, active_groups, None, None, None, None
 
@@ -368,12 +383,16 @@ def _rank_edf1(rank_info, data_gram: NDArray, edf: NDArray) -> NDArray:
     """Alternative EDF in the decomposition's retained coefficient space.
 
     On a face the factor decided, the record holds it, read off the face's
-    projected rows with the EDF; the formed Gram is not read there.
+    projected rows with the EDF; the formed Gram is not read there.  So does a
+    fit published with its identifiability record (``publish_identified_fit``).
     """
     import scipy.linalg
 
+    record = getattr(rank_info, "identifiability", None)
     if rank_info.face is not None and rank_info.feature_edf1 is not None:
         return rank_info.feature_edf1[rank_info.selected_columns].copy()
+    if record is not None and record.edf1 is not None:
+        return record.edf1[rank_info.selected_columns].copy()
     decomposition = rank_info.augmented
     if decomposition.rank == 0:
         return np.zeros_like(edf)
@@ -397,9 +416,18 @@ def _rank_edf1(rank_info, data_gram: NDArray, edf: NDArray) -> NDArray:
 
 
 def _rank_augmented_covariance(model, rank_info, active_groups):
-    """Transform centered retained covariance to solver and public intercepts."""
+    """Transform centered retained covariance to solver and public intercepts.
+
+    A fit published with weak directions adds their term in low-rank form
+    (``Identifiability.weak_root``): the intercept's variance ``c'Vc`` read through the dense
+    ``1 / C`` entries would carry their rounding.
+    """
     p_active = len(rank_info.selected_columns)
-    feature_covariance = rank_info.covariance_inverse()
+    record = getattr(rank_info, "identifiability", None)
+    root = None if record is None else record.weak_root(rank_info.selected_columns)
+    feature_covariance = (
+        rank_info.covariance_inverse() if root is None else rank_info.covariance_inverse(weak=False)
+    )
     mean_x = rank_info.mean_x[rank_info.selected_columns]
     intercept_cross = -(feature_covariance @ mean_x)
     solver_covariance = np.empty((p_active + 1, p_active + 1), dtype=np.float64)
@@ -409,23 +437,27 @@ def _rank_augmented_covariance(model, rank_info, active_groups):
     solver_covariance[0, 1:] = intercept_cross
     solver_covariance[1:, 0] = intercept_cross
     solver_covariance[1:, 1:] = feature_covariance
+    if root is not None:
+        solver_covariance += root @ root.T
     return _public_augmented_covariance(model, solver_covariance, active_groups)
 
 
-def _penalty_null_spaces(model, active_groups) -> list[NDArray]:
-    """Each selected group's penalty null space ``N_S,g``, without a smoothing parameter in it.
+def _construction_columns(model, active_groups) -> Callable[[int], ConstructionColumns | None]:
+    """Each selected group's construction columns of ``X_F``, formed when the gauge reads them.
 
-    A group with REML components is balanced over the components whose fitted lambda is
-    positive (``identifiability.penalty_null_space``); any other group's penalty is the fitted
-    curvature's block (one lambda each, and the selection penalty's local curvature), as the
-    fit's Hessian holds it.
+    A group's penalty null space ``N_S,g`` holds them, with no smoothing parameter in it: a group
+    with REML components is balanced over the components whose fitted lambda is positive
+    (``identifiability.penalty_null_space``), any other group's penalty is the fitted curvature's
+    block (one lambda each, and the selection penalty's local curvature).  A ridge leaves none;
+    no penalty leaves the group's coordinates, in order.  A factor smooth's ``I kron Omega`` or
+    ``C'C kron Omega`` penalty repeats one level's null space per level (``C'C`` positive
+    definite), found without expanding the term.  A smooth's columns are ordered and projected in
+    its raw basis (``_raw_construction``).
     """
-    from superglm.inference.covariance import _active_penalty_matrix
     from superglm.reml.penalty_algebra import (
         _penalty_component_omega_ssp,
         penalty_component_dense_matrix,
     )
-    from superglm.solvers.pirls import _add_selection_local_curvature
 
     solver = model._solver_pirls_result()
     lam2 = scale_penalties(fitted_lambda2(model), getattr(solver, "weight_exponent", 0))
@@ -435,78 +467,254 @@ def _penalty_null_spaces(model, active_groups) -> list[NDArray]:
         if lam > 0.0:
             components.setdefault(component.group_name, []).append(component)
     matrices = {g.name: gm for g, gm in zip(model._groups, model._dm.group_matrices, strict=True)}
-    # the groups without REML components, in their own compact coordinates
-    missing, column = [], 0
-    for group in active_groups:
-        if group.name not in components:
-            missing.append(dataclasses.replace(group, start=column, end=column + group.size))
-            column += group.size
-    fitted: dict[str, NDArray] = {}
-    if missing:
-        curvature = np.array(
-            _active_penalty_matrix(
-                model._dm.group_matrices,
-                model._groups,
-                missing,
-                lam2,
-                reml_penalties=getattr(model, "_reml_penalties", None),
-            ),
-            dtype=np.float64,
-            copy=True,
-        )
-        original = {group.name: group for group in model._groups}
-        _add_selection_local_curvature(
-            curvature=curvature,
-            penalty=fitted_penalty(model),
-            beta=np.asarray(solver.beta, dtype=np.float64),
-            original_groups=[original[group.name] for group in missing],
-            active_groups=missing,
-        )
-        fitted = {group.name: curvature[group.sl, group.sl] for group in missing}
-    spaces = []
-    for group in active_groups:
+    built: dict[int, ConstructionColumns | None] = {}
+
+    def columns(index: int) -> ConstructionColumns | None:
+        if index in built:
+            return built[index]
+        group = active_groups[index]
+        matrix = matrices[group.name]
         own = components.get(group.name)
+        blocks = 1
         if own is None:
-            spaces.append(penalty_null_space([fitted[group.name]], group.size))
-            continue
-        kinds = {component.penalty_kind for component in own}
-        widths = {component.block_width for component in own}
-        if "identity" in kinds:
+            local = dataclasses.replace(group, start=0, end=group.size)
+            block = _rank_curvature(model, [local])
+            null = penalty_null_space([block], group.size)
+        elif "identity" in {component.penalty_kind for component in own}:
             # a ridge on every coordinate
-            spaces.append(np.zeros((group.size, 0)))
-        elif kinds <= {"repeated", "sum_to_zero"} and len(widths) == 1:
-            # ``I kron Omega`` or ``C'C kron Omega``, ``C'C`` positive definite: the null space
-            # is ``I kron null(Omega)``, found without expanding the term's penalty
-            width = int(next(iter(widths)))
-            omegas = [_penalty_component_omega_ssp(c, matrices[group.name]) for c in own]
-            local = penalty_null_space([omega for omega in omegas if omega is not None], width)
-            spaces.append(np.kron(np.eye(group.size // width), local))
+            null = np.zeros((group.size, 0))
+        elif {c.penalty_kind for c in own} <= {"repeated", "sum_to_zero"} and len(
+            {c.block_width for c in own}
+        ) == 1:
+            width = int(own[0].block_width)
+            omegas = [_penalty_component_omega_ssp(c, matrix) for c in own]
+            null = penalty_null_space([omega for omega in omegas if omega is not None], width)
+            blocks = group.size // width
         else:
-            blocks = [penalty_component_dense_matrix(c, matrices[group.name]) for c in own]
-            spaces.append(penalty_null_space(blocks, group.size))
-    return spaces
+            null = penalty_null_space(
+                [penalty_component_dense_matrix(c, matrix) for c in own], group.size
+            )
+        built[index] = _raw_construction(null, blocks, group, matrix)
+        return built[index]
+
+    return columns
+
+
+def _raw_construction(null: NDArray, blocks: int, group, matrix) -> ConstructionColumns:
+    """A group's construction columns from its penalty null space ``null`` (one block's).
+
+    No penalty, they are the coordinates.  Otherwise the null space is carried to the group's
+    raw basis, ``theta = R beta`` (the SSP map ``R_inv``, a factor smooth's ``natural_map``),
+    whose coordinates the construction fixes; there it is given an orthonormal basis in a fixed
+    order (the projections of the raw-index monomials ``1, t, t^2, ...``, Gram-Schmidt, completed
+    by unit vectors), and a block's construction coefficients are ``Q' theta``.  Neither the rows'
+    weights, the smoothing parameters nor the whitening enter, so a rotation of the solver's
+    coordinates leaves every published constraint where it was.
+    """
+    width = null.shape[0]
+    count = null.shape[1]
+    levels = getattr(matrix, "levels", None) if blocks > 1 else None
+
+    def name(block: int, j: int) -> str:
+        term = group.name
+        if levels is not None and block < len(levels):
+            term = f"{group.name}[{levels[block]}]"
+        part = "unpenalised part" if count == 1 else f"unpenalised part {j + 1}"
+        return f"{term}'s {part}"
+
+    if count == width:
+        identity = np.eye(width)
+        return ConstructionColumns(local=identity, basis=identity, blocks=blocks, name=name)
+    if count == 0:
+        return ConstructionColumns(
+            local=np.zeros((0, width)), basis=np.zeros((width, 0)), blocks=blocks, name=name
+        )
+    raw = getattr(matrix, "natural_map" if blocks > 1 else "R_inv", None)
+    raw = np.asarray(raw, dtype=np.float64) if raw is not None else None
+    if raw is None or raw.ndim != 2 or raw.shape[1] != width:
+        raw = np.eye(width)
+    spanned = np.linalg.qr(raw @ null)[0]
+    length = spanned.shape[0]
+    grid = np.linspace(-1.0, 1.0, length)
+    probes = [grid**degree for degree in range(length)] + list(np.eye(length))
+    ordered: list[NDArray] = []
+    for probe in probes:
+        vector = spanned @ (spanned.T @ probe)
+        for _ in range(2):
+            for accepted in ordered:
+                vector = vector - accepted * float(accepted @ vector)
+        norm = float(np.linalg.norm(vector))
+        if norm > SQRT_EPS * float(np.linalg.norm(probe)):
+            ordered.append(vector / norm)
+        if len(ordered) == count:
+            break
+    local = np.column_stack(ordered).T @ raw
+    basis = null @ np.linalg.inv(local @ null)
+    return ConstructionColumns(local=local, basis=basis, blocks=blocks, name=name)
+
+
+def _dense_base(
+    decomposition: RankDecomposition,
+    data_diagonal: NDArray,
+    rows: int,
+    hessian: Callable[[], NDArray],
+) -> TruncatedDecomposition:
+    """The part of a dense decomposition of the centred Hessian it certified, and the rest.
+
+    The decomposition is of the Hessian as formed (``hessian()``), within ``gamma_(n+2)
+    sqrt(D_ii D_jj)`` entrywise of the exact one (``D`` the data Gram, ``n`` its rows; Higham
+    2002, sec. 3.5): a Jacobi-scaled bound ``e`` (``rank._formation_slack``).  Its kept part is
+    certified when the smallest equilibrated eigenvalue it holds exceeds ``e`` (Weyl): the
+    retained spectrum less the eigensolver's bar, or a Cholesky factor's ``1 /
+    ||L^-1||_F^2`` less its backward error; a factor of the rows decided its own.  Then it
+    inverts ``H`` there and its truncated directions are the undecided ones.  A rank decision
+    that kept an eigenvalue it cannot tell from zero is replaced: the equilibrated spectrum is
+    recomputed, the eigenvalues past the bound are the certified part, and the rest are
+    undecided, read from the rows like any truncated direction.
+    """
+    import scipy.linalg
+
+    from superglm.solvers.rank import _eigensolver_relative_bar, _formation_slack
+
+    scale = np.asarray(decomposition.column_scale, dtype=np.float64)
+    active = np.flatnonzero(scale > 0.0)
+    width = scale.size
+    slack = (
+        _formation_slack(
+            gamma_up(rows + 2) * np.maximum(np.asarray(data_diagonal)[active], 0.0),
+            scale[active] ** 2,
+        )
+        if active.size
+        else 0.0
+    )
+    values = decomposition.retained_values
+    kept = int(decomposition.rank)
+    if kept == 0 or decomposition.method == "qr_svd":
+        floor = float("inf")
+    elif kept < len(decomposition.active_columns) or decomposition.cholesky_factor is None:
+        largest = float(np.max(values)) if values is not None and len(values) else active.size
+        floor = (
+            float(np.min(values)) - _eigensolver_relative_bar(active.size + 1) * largest
+            if values is not None and len(values)
+            else -float("inf")
+        )
+    else:
+        factor = np.asarray(decomposition.cholesky_factor, dtype=np.float64)
+        trtri = scipy.linalg.get_lapack_funcs("trtri", (factor,))
+        inverse, info = trtri(factor, lower=1)
+        floor = (
+            1.0 / float(np.linalg.norm(inverse)) ** 2 - gamma_up(kept + 1) * kept
+            if info == 0
+            else -float("inf")
+        )
+    if floor > slack:
+        pseudo = decomposition.pseudo_inverse()
+        return TruncatedDecomposition(
+            null_vectors=decomposition.null_basis(),
+            rank=kept,
+            column_scale=scale,
+            pre_truncation_condition=float(decomposition.pre_truncation_condition),
+            solve=lambda vectors: pseudo @ vectors,
+        )
+    formed = hessian()
+    equilibrated = formed[np.ix_(active, active)] / np.outer(scale[active], scale[active])
+    equilibrated = 0.5 * (equilibrated + equilibrated.T)
+    spectrum, vectors = np.linalg.eigh(equilibrated)
+    bound = slack + _eigensolver_relative_bar(active.size + 1) * float(np.max(np.abs(spectrum)))
+    trusted = spectrum > bound
+    covariance = np.zeros((width, width))
+    lifted = vectors / scale[active, None]
+    covariance[np.ix_(active, active)] = (lifted[:, trusted] / spectrum[trusted]) @ lifted[
+        :, trusted
+    ].T
+    undecided = np.zeros((width, int(np.count_nonzero(~trusted))))
+    undecided[active] = lifted[:, ~trusted]
+    structural = np.setdiff1d(np.arange(width), active)
+    if structural.size:
+        units = np.zeros((width, structural.size))
+        units[structural, np.arange(structural.size)] = 1.0
+        undecided = np.hstack((undecided, units))
+    condition = float(spectrum[-1] / spectrum[trusted][0]) if np.any(trusted) else float("inf")
+    return TruncatedDecomposition(
+        null_vectors=undecided,
+        rank=int(np.count_nonzero(trusted)),
+        column_scale=scale,
+        pre_truncation_condition=condition,
+        solve=lambda vectors: covariance @ vectors,
+        covariance=covariance,
+    )
+
+
+def _stepped_residual(model, W: NDArray) -> NDArray | None:
+    """The working residual a published fit steps its weak directions by, or ``None``.
+
+    The rows' one Newton step is the penalised fit along those directions when the objective is
+    quadratic in the coefficients, a Gaussian family with the identity link: its weights do not
+    move with the mean.  Under any other family a step from a mode the solver truncated is one
+    iteration of a fit, not its optimum, and where the weights vanish (a mean at the edge of its
+    range) the step leaves the range of the link; those fits keep the solver's coefficients
+    along the directions and report their curvature (``WeakDirections.fitted``).
+    """
+    from superglm.distributions import Gaussian
+    from superglm.links import IdentityLink
+
+    if type(model._distribution) is Gaussian and type(model._link) is IdentityLink:
+        return _working_residual(model, W)
+    return None
+
+
+def _working_residual(model, W: NDArray) -> NDArray:
+    """``sqrt(W) (z - eta)`` at the solver's fitted state: the rows' working residual.
+
+    ``z`` is the Fisher working response the fit's last system solved, at its weights ``W``.
+    """
+    from superglm.distributions import clip_mu
+    from superglm.links import stabilize_eta
+    from superglm.solvers.mode_score import linear_predictor
+    from superglm.solvers.working_rows import coefficient_working_rows
+
+    solver = model._solver_pirls_result()
+    eta = stabilize_eta(linear_predictor(model._dm, solver, model._fit_offset), model._link)
+    mu = clip_mu(model._link.inverse(eta), model._distribution)
+    rows = coefficient_working_rows(
+        distribution=model._distribution,
+        link=model._link,
+        y=np.asarray(model._fit_y_ref, dtype=np.float64),
+        mu=mu,
+        eta=eta,
+        sample_weight=solver_weights(model._fit_weights, solver),
+        prefer_observed=False,
+    )
+    residual = np.asarray(rows.response, dtype=np.float64) - eta
+    weights = np.asarray(W, dtype=np.float64)
+    carried = weights > 0.0
+    result = np.zeros_like(weights)
+    result[carried] = np.sqrt(weights[carried]) * residual[carried]
+    return result
 
 
 def _decided_identifiability(
     model,
-    decomposition,
+    decomposition: TruncatedDecomposition,
     active_groups,
     design,
     W,
-    data_gram,
     *,
-    penalized=True,
-    data_diagonal=None,
-    penalty=None,
-    gauge=False,
+    data_diagonal: NDArray,
+    data_apply: Callable[[NDArray], NDArray],
+    penalty: Callable[[NDArray], tuple[NDArray, NDArray]],
+    published=None,
+    publish: bool = False,
+    residual: NDArray | None = None,
 ) -> Identifiability:
-    """The identifiability of a fit whose centred Hessian is ``decomposition``, in fitted coordinates.
+    """The identifiability of a fit whose centred Hessian's decomposition is ``decomposition``.
 
-    ``decomposition`` is in the coordinates of ``active_groups`` (the selected groups), ``design``
-    their rows, and ``data_gram`` their centred data Gram (or a compact operator of it with its
-    diagonal ``data_diagonal``); ``solvers.identifiability`` decides and explains the record, with
-    the penalty null spaces formed only if it reads them.  ``penalty`` and ``gauge`` are
-    ``decide_identifiability``'s.
+    ``decomposition`` is in the coordinates of ``active_groups`` (the selected groups),
+    ``design`` their rows; ``solvers.identifiability`` decides and explains the record.  A fit
+    that ``publish``-es its coefficients gets the gauge on its terms' construction columns and
+    its weak directions' covariance, and with ``residual`` (``_working_residual``) their Newton
+    step; otherwise the record describes the coefficients as ``published`` (the solver's
+    decomposition) holds them.
     """
     original = {group.name: group for group in model._groups}
     columns = np.zeros(0, dtype=np.intp)
@@ -514,25 +722,32 @@ def _decided_identifiability(
         columns = np.concatenate(
             [np.arange(original[g.name].start, original[g.name].end) for g in active_groups]
         )
+    solver = model._solver_pirls_result()
     return decide_identifiability(
         decomposition,
         columns=columns,
-        width=len(model._solver_pirls_result().beta),
+        width=len(solver.beta),
         groups=active_groups,
-        null_spaces=(
-            (lambda: _penalty_null_spaces(model, active_groups))
-            if penalized
-            else [np.eye(group.size) for group in active_groups]
-        ),
-        data_gram=data_gram,
-        rows=design.n,
         design=design,
-        specs={**getattr(model, "_specs", {}), **getattr(model, "_interaction_specs", {})},
         W=W,
         data_diagonal=data_diagonal,
+        data_apply=data_apply,
         penalty=penalty,
-        gauge=gauge,
+        specs={**getattr(model, "_specs", {}), **getattr(model, "_interaction_specs", {})},
+        published=published,
+        construction=_construction_columns(model, active_groups) if publish else None,
+        residual=residual,
+        beta=None if residual is None else np.asarray(solver.beta, dtype=np.float64)[columns],
+        support=_prior_support(model, design),
     )
+
+
+def _prior_support(model, design) -> NDArray | None:
+    """The rows with positive prior weight, as ``0/1`` weights; ``None`` without the fit's weights."""
+    weights = getattr(model, "_fit_weights", None)
+    if weights is None or np.shape(weights) != (design.n,):
+        return None
+    return (np.asarray(weights, dtype=np.float64) > 0.0).astype(np.float64)
 
 
 def _structured_penalty_diagonal(penalized) -> NDArray:
@@ -620,26 +835,33 @@ def _structured_penalty_product(penalized):
 
 
 def _structured_identifiability(
-    model, state: StructuredLinearSystemState, W, *, gauge: bool = False
+    model,
+    state: StructuredLinearSystemState,
+    W,
+    *,
+    publish: bool = False,
+    residual: NDArray | None = None,
 ) -> Identifiability:
     """The identifiability of a structured fit, read from its retained factor and moments.
 
-    The factor inverts ``H`` off the directions it truncated (``null_directions``); a factor that
-    truncated none certified ``H`` nonsingular (``identifiability.certified_identifiability``).
-    Otherwise the rows are read on its truncated directions (the penalty applied from its parts),
-    and only where they leave one identified is ``X_F``'s Gram formed, through the centred data
-    operator, so no ``p x p`` matrix is formed.  The condition the factor certified is its
-    border's.  The record is kept on ``state``; ``gauge`` is ``decide_identifiability``'s, for the
-    fit that publishes its coefficients.
+    The factor inverts ``H`` off the directions it truncated (``null_directions``) on pivots it
+    certified, so those are the only undecided ones; a factor that truncated none certified ``H``
+    nonsingular (``identifiability.certified_identifiability``).  Otherwise the rows are read on
+    its truncated directions, the penalty applied from its parts and the data Gram through the
+    centred operator, so no ``p x p`` matrix is formed.  The condition the factor certified is
+    its border's.  The record is kept on ``state``; ``publish`` and ``residual`` are
+    ``_decided_identifiability``'s.
     """
     if state.identifiability is not None:
         return state.identifiability
-    record = _structured_record(model, state, W, gauge=gauge)
+    record = _structured_record(model, state, W, publish=publish, residual=residual)
     object.__setattr__(state, "identifiability", record)
     return record
 
 
-def _structured_record(model, state: StructuredLinearSystemState, W, *, gauge: bool):
+def _structured_record(
+    model, state: StructuredLinearSystemState, W, *, publish: bool, residual: NDArray | None
+) -> Identifiability:
     """``_structured_identifiability``'s decision, before it is kept on ``state``."""
     factor = state.profiled_factor
     certified = certified_identifiability(
@@ -661,6 +883,7 @@ def _structured_record(model, state: StructuredLinearSystemState, W, *, gauge: b
         rank=int(factor.rank),
         column_scale=np.sqrt(np.maximum(hessian_diagonal, 0.0)),
         pre_truncation_condition=float(factor.schur_condition_estimate),
+        solve=factor.solve,
     )
     return _decided_identifiability(
         model,
@@ -668,59 +891,102 @@ def _structured_record(model, state: StructuredLinearSystemState, W, *, gauge: b
         list(model._groups),
         model._dm,
         W,
-        operator,
         data_diagonal=data_diagonal,
+        data_apply=operator.matvec,
         penalty=_structured_penalty_product(state.penalized_operator),
-        gauge=gauge,
+        publish=publish,
+        residual=residual,
+    )
+
+
+def _dense_identifiability(
+    model, decomposition, active_groups, design, W, data_gram, *, publish=False, residual=None
+) -> Identifiability:
+    """``_decided_identifiability`` for a dense decomposition of the centred Hessian.
+
+    The fitted penalty curvature is formed only if the decision reads it: an undecided
+    direction's penalty, or a rank decision ``_dense_base`` replaces.
+    """
+
+    @functools.cache
+    def curvature() -> NDArray:
+        return _rank_curvature(model, active_groups)
+
+    return _decided_identifiability(
+        model,
+        _dense_base(decomposition, np.diag(data_gram), design.n, lambda: data_gram + curvature()),
+        active_groups,
+        design,
+        W,
+        data_diagonal=np.diag(data_gram),
+        data_apply=lambda vectors: data_gram @ vectors,
+        penalty=lambda vectors: (
+            curvature() @ vectors,
+            np.abs(curvature()) @ np.abs(vectors),
+        ),
+        published=decomposition,
+        publish=publish,
+        residual=residual,
     )
 
 
 def _record_identifiability(
-    model, rank_info, design, active_groups, W, data_gram, *, gauge: bool = False
+    model,
+    rank_info,
+    design,
+    active_groups,
+    W,
+    data_gram,
+    *,
+    publish: bool = False,
+    residual: NDArray | None = None,
 ) -> Identifiability | None:
-    """The record's identifiability, decided on first inference and kept on the record.
+    """The record's identifiability, decided when the fit publishes it and kept on the record.
 
-    A singular fit decides it when it publishes its coefficients (``publish_identified_gauge``,
-    with ``gauge``).  ``None`` for a record saved before fits recorded it: its standard errors
-    keep their flags (``RankInfo.coefficient_identified``).
+    The fit decides it when it publishes its coefficients (``publish_identified_fit``, with
+    ``publish``); a record it did not publish (a constrained fit's face) decides it on first
+    inference, describing its coefficients.  ``None`` for a record saved before fits recorded
+    it: its standard errors keep their flags (``RankInfo.coefficient_identified``).
     """
     if rank_info.identifiability_policy != "penalised":
         return None
     if rank_info.identifiability is None:
-        decided = _decided_identifiability(
+        decided = _dense_identifiability(
             model,
             rank_info.augmented,
             active_groups,
             design,
             W,
             data_gram,
-            # an unpenalized fit's data rank is its Hessian's (``RankInfo.data``)
-            penalized=rank_info.data is not rank_info.augmented,
-            gauge=gauge,
+            publish=publish,
+            residual=residual,
         )
         object.__setattr__(rank_info, "identifiability", decided)
     return rank_info.identifiability
 
 
-def publish_identified_gauge(model) -> None:
-    """Publish a singular fit's coefficients in its identifiability gauge (``Gauge``).
+def publish_identified_fit(model) -> None:
+    """Publish the fit its identifiability record decides (``solvers.identifiability``).
 
-    Where the published decomposition of the centred Hessian is singular, the fit's
-    identifiability record is decided now rather than on first inference, and the solver's
-    coefficients move along ``null(H)`` to its blanked coordinates' zeros: the dense solver's own
-    zeros where it fixed them there, a structured factor's minimum-norm split otherwise.  No
-    fitted value moves: the solver intercept takes each direction's intercept component, and a
-    centred state's ``alpha`` its offset from the state's centre.  A direction null only because
-    its rows' working weights vanished (a level below a log link's range) would move those rows'
-    linear predictor; where any row's moves by more than ``sqrt(eps)`` of its size, the move is
-    not published and the record keeps the decomposition's own split, every coordinate it reaches
-    blank.  A full-rank fit, a constrained fit and a record saved before fits recorded
-    identifiability are left alone.
+    The record is decided now rather than on first inference, at the fit's working weights.  Its
+    weak directions, which the solver truncated and the penalised fit identifies, are fitted by
+    the one Newton step their rows give (``WeakDirections``): their coefficients, fitted values,
+    EDF and scale move, as the penalised fit has them (mgcv's, not ``lm``'s).  Then the
+    coefficients move along ``null(H)`` onto the record's constraints (``Gauge``): no fitted
+    value moves there, the solver intercept takes each direction's intercept component and a
+    centred state's ``alpha`` its offset from the state's centre.  The EDF is the published
+    fit's (``identifiability.published_edf``).  A constrained fit and a record saved before fits
+    recorded identifiability are left alone; a structured factor that truncated nothing
+    certified full rank.  A selection penalty that can zero a group is not quadratic: moving
+    along a direction its local curvature leaves null changes its value, so such a fit keeps
+    its solver's coefficients and its record describes them.
     """
-    from superglm.solvers.mode_score import linear_predictor
+    from superglm.penalties.base import penalty_can_zero_groups
 
     solver = getattr(model, "_solver_result", None)
     if solver is None or model._dm is None or getattr(solver, "scop_inference", None) is not None:
+        return
+    if penalty_can_zero_groups(fitted_penalty(model)):
         return
     state = retained_linear_state(model)
     if isinstance(state, StructuredLinearSystemState):
@@ -729,7 +995,10 @@ def publish_identified_gauge(model) -> None:
         if int(state.profiled_factor.rank) == state.profiled_factor.shape[0]:
             return
         W = _solver_space_working_weights(model)
-        record = _structured_identifiability(model, state, W, gauge=True)
+        record = _structured_identifiability(
+            model, state, W, publish=True, residual=_stepped_residual(model, W)
+        )
+        rank_info = None
     else:
         rank_info = solver.rank_info
         if (
@@ -737,11 +1006,12 @@ def publish_identified_gauge(model) -> None:
             or rank_info.identifiability_policy != "penalised"
             or rank_info.identifiability is not None
             or rank_info.face is not None
-            or rank_info.augmented.rank == rank_info.augmented.width
         ):
             return
         W = _solver_space_working_weights(model)
         design, active_groups = _rank_active_state(model, rank_info)
+        if design.p == 0:
+            return
         held = rank_info.data_gram
         data_gram = (
             held
@@ -749,36 +1019,211 @@ def publish_identified_gauge(model) -> None:
             else _rank_centered_data_gram(design, W)
         )
         record = _record_identifiability(
-            model, rank_info, design, active_groups, W, data_gram, gauge=True
+            model,
+            rank_info,
+            design,
+            active_groups,
+            W,
+            data_gram,
+            publish=True,
+            residual=_stepped_residual(model, W),
         )
-    gauge = None if record is None else record.gauge
-    if gauge is None:
+    if record is None or (
+        record.gauge is None and record.weak is None and record.covariance is None
+    ):
         return
-    beta, intercept, step = gauge.coefficients(solver.beta, solver.intercept)
-    changes = {"beta": beta, "intercept": intercept}
+    # The EDF moves where the published fit's information differs from its solver's: weak
+    # directions fitted, or a decomposition that kept a direction of ``null(H)`` replaced.  A
+    # gauge alone moves along ``null(H)``, where ``D N = 0``, and leaves the EDF the solver's.
+    refit_edf = record.weak is not None or record.covariance is not None
+    edf_total = None
+    if refit_edf and isinstance(state, StructuredLinearSystemState):
+        factor, operator = state.profiled_factor, state.centered_data_operator
+        base = factor.inverse_operator_diagonal(operator)
+        if _hat_trace_ledger(solver, base):
+            edf, edf1 = published_edf(
+                base,
+                factor.inverse_operator_square_diagonal(operator),
+                factor.solve,
+                operator.matvec,
+                record.weak,
+                np.arange(factor.shape[0]),
+            )
+            record = dataclasses.replace(record, edf=edf, edf1=edf1)
+            object.__setattr__(state, "identifiability", record)
+            edf_total = 1.0 + float(np.sum(edf))
+    elif refit_edf and rank_info is not None:
+        columns = np.asarray(rank_info.selected_columns, dtype=np.intp)
+        inverse = (
+            record.covariance
+            if record.covariance is not None
+            else rank_info.augmented.pseudo_inverse()
+        )
+        influence = inverse @ data_gram
+        if _hat_trace_ledger(solver, rank_info.feature_edf[columns]):
+            selected_edf, selected_edf1 = published_edf(
+                np.diag(influence).copy(),
+                np.einsum("ij,ji->i", influence, influence),
+                lambda vectors: inverse @ vectors,
+                lambda vectors: data_gram @ vectors,
+                record.weak,
+                columns,
+            )
+            edf, edf1 = np.zeros(len(rank_info.mean_x)), np.zeros(len(rank_info.mean_x))
+            edf[columns], edf1[columns] = selected_edf, selected_edf1
+            edf[np.abs(edf) < 100.0 * np.finfo(float).eps] = 0.0
+            for values in (edf, edf1):
+                values.setflags(write=False)
+            record = dataclasses.replace(record, edf=edf, edf1=edf1)
+            rank_info = dataclasses.replace(
+                rank_info,
+                feature_edf=edf,
+                feature_edf1=edf1,
+                group_edf={
+                    group.name: float(np.sum(selected_edf[group.sl])) for group in active_groups
+                },
+            )
+            edf_total = float(rank_info.intercept_edf) + float(np.sum(edf))
+    if rank_info is not None:
+        rank_info = dataclasses.replace(rank_info, identifiability=record)
+    beta = np.asarray(solver.beta, dtype=np.float64)
+    intercept = float(solver.intercept)
+    moved, moved_intercept = beta, intercept
+    if record.weak is not None:
+        moved = beta + record.weak.step
+        moved_intercept = intercept + record.weak.intercept_step
+    if record.gauge is not None:
+        moved, moved_intercept, _ = record.gauge.coefficients(moved, moved_intercept)
+    changes: dict = {"beta": moved, "intercept": moved_intercept}
+    if edf_total is not None:
+        changes["effective_df"] = edf_total
     alpha, centre = solver.centred_intercept, solver.state_center
     if alpha is not None and centre is not None:
-        # ``alpha + (x - c)' beta`` on a fitted row, where ``x' N = -intercept``
-        offset = gauge.intercept + np.asarray(centre, dtype=np.float64) @ gauge.null
-        changes["centred_intercept"] = float(alpha) - float(offset @ step)
+        # ``b0 = alpha - c_s' beta``: a move ``m`` with ``b0`` moving by ``d`` moves ``alpha``
+        # by ``c_s' m + d``
+        changes["centred_intercept"] = (
+            float(alpha)
+            + float(np.asarray(centre, dtype=np.float64) @ (moved - beta))
+            + (moved_intercept - intercept)
+        )
+    if rank_info is not None:
+        changes["rank_info"] = rank_info
+    if solver.reml_hessian_rank is not None and record.rank is not None:
+        # the intercept and every slope direction the published fit identifies
+        changes["reml_hessian_rank"] = 1 + record.rank
     published = dataclasses.replace(solver, **changes)
-    before = linear_predictor(model._dm, solver, None)
-    after = linear_predictor(model._dm, published, None)
-    size = np.maximum(1.0, np.maximum(np.abs(before), np.abs(after)))
-    if not np.all(np.abs(after - before) <= SQRT_EPS * size):
-        if isinstance(state, StructuredLinearSystemState):
-            object.__setattr__(state, "identifiability", None)
-            _structured_identifiability(model, state, W)
-        else:
-            object.__setattr__(rank_info, "identifiability", None)
-            _record_identifiability(model, rank_info, design, active_groups, W, data_gram)
-        return
+    refit = record.weak is not None or published.effective_df != solver.effective_df
+    if record.weak is not None:
+        published = dataclasses.replace(published, deviance=_published_deviance(model, published))
     if model._result is solver:
         model._result = published
     reml = getattr(model, "_reml_result", None)
     if reml is not None and getattr(reml, "pirls_result", None) is solver:
         reml.pirls_result = published
     model._solver_result = published
+    if refit:
+        _refresh_published_scale(model)
+
+
+def _hat_trace_ledger(solver, edf: NDArray) -> bool:
+    """Whether the fit's EDF is its influence trace, ``1 + sum(diag(F))``, which the record can redo.
+
+    A selection penalty's df allocation (Breheny & Huang 2009) is another ledger, and the
+    published fit keeps it.
+    """
+    total = 1.0 + float(np.sum(edf))
+    return abs(float(solver.effective_df) - total) <= 1e-9 * max(1.0, abs(total))
+
+
+def _published_deviance(model, result) -> float:
+    """The deviance of ``result``'s fitted values, in physical units (as the fit reports it)."""
+    from superglm._utils import weighted_row_sum
+    from superglm.distributions import clip_mu
+    from superglm.links import stabilize_eta
+    from superglm.solvers.mode_score import linear_predictor
+
+    eta = stabilize_eta(linear_predictor(model._dm, result, model._fit_offset), model._link)
+    mu = clip_mu(model._link.inverse(eta), model._distribution)
+    weights = solver_weights(model._fit_weights, result)
+    deviance = weighted_row_sum(
+        weights,
+        model._distribution.deviance_unit,
+        np.asarray(model._fit_y_ref, dtype=np.float64),
+        mu,
+    )
+    return float(np.ldexp(deviance, -int(result.weight_exponent)))
+
+
+def _refresh_published_scale(model) -> None:
+    """The fitted means, scale and fit statistics of a fit whose published values moved.
+
+    The scale is the one its route publishes: REML's profile at the penalised mode for a REML
+    fit of a Gaussian or Gamma family (``reml_finalize.compute_profiled_phi``), else the Pearson
+    statistic over the residual degrees of freedom; a known scale stays one.
+    """
+    from superglm.distributions import Gamma, Gaussian, clip_mu
+    from superglm.links import stabilize_eta
+    from superglm.model.fit_ops import _compute_fit_stats
+    from superglm.solvers.dispersion import (
+        model_weight_semantics,
+        pearson_residual_degrees_of_freedom,
+    )
+    from superglm.solvers.mode_score import linear_predictor
+    from superglm.solvers.working_rows import pearson_chi2
+
+    result = model._solver_result
+    eta = stabilize_eta(linear_predictor(model._dm, result, model._fit_offset), model._link)
+    mu = clip_mu(model._link.inverse(eta), model._distribution)
+    y = np.asarray(model._fit_y_ref, dtype=np.float64)
+    weights = np.asarray(model._fit_weights, dtype=np.float64)
+    solver_phi = None
+    if getattr(model._distribution, "scale_known", True):
+        phi = 1.0
+    elif getattr(model, "_reml_lambdas", None) is not None and isinstance(
+        model._distribution, Gaussian | Gamma
+    ):
+        from superglm.model.reml_finalize import compute_profiled_phi
+
+        phi = compute_profiled_phi(
+            model,
+            y=y,
+            sample_weight=weights,
+            lambdas=model._reml_lambdas,
+            reml_penalties=model._reml_penalties,
+            pirls_result=result,
+            boundary_phi=result.phi,
+        )
+    else:
+        scaled = solver_weights(weights, result)
+        pearson = pearson_chi2(distribution=model._distribution, y=y, mu=mu, sample_weight=scaled)
+        phi = pearson / pearson_residual_degrees_of_freedom(
+            weights, result.effective_df, weight_semantics=model_weight_semantics(model)
+        )
+        if result.weight_exponent:
+            solver_phi = phi
+            phi = float(np.ldexp(phi, -int(result.weight_exponent)))
+    refreshed = dataclasses.replace(result, phi=float(phi), solver_phi=solver_phi)
+    if model._result is result:
+        model._result = refreshed
+    reml = getattr(model, "_reml_result", None)
+    if reml is not None and getattr(reml, "pirls_result", None) is result:
+        reml.pirls_result = refreshed
+    model._solver_result = refreshed
+    result = refreshed
+    model._fit_mu = mu
+    model._fit_stats = _compute_fit_stats(
+        y,
+        mu,
+        weights,
+        model._fit_offset,
+        model._distribution,
+        model._link,
+        float(phi),
+        null_mu=model._fit_null_mu,
+        weight_semantics=model_weight_semantics(model),
+        solver_result=result,
+    )
+    model._summary_cache = None
 
 
 def fit_data_rank(model):
@@ -845,8 +1290,8 @@ def _structured_covariance_state(
 ]:
     """Build lazy covariance views over one retained structured fit.
 
-    A singular fit published in its identifiability gauge (``publish_identified_gauge``) reads
-    its covariance in that gauge.
+    A fit published with an identifiability gauge or weak directions
+    (``publish_identified_fit``) reads its covariance as published.
     """
     active_groups = list(model._groups)
     shift = _public_intercept_shift(
@@ -859,6 +1304,7 @@ def _structured_covariance_state(
         state.profiled_factor,
         intercept_shift=shift,
         gauge=None if record is None else record.gauge,
+        weak=None if record is None else record.weak,
     )
     # The slope covariance M_ss, the slope block of the augmented inverse: no
     # raw-coordinate coefficient factor exists.
@@ -1039,15 +1485,19 @@ def fit_inference_info(model):
             model,
             linear_state,
         )
-        edf = linear_state.profiled_factor.inverse_operator_diagonal(
-            linear_state.centered_data_operator,
-        )
-        edf[np.abs(edf) < 100.0 * np.finfo(float).eps] = 0.0
-        edf1 = 2.0 * edf - linear_state.profiled_factor.inverse_operator_square_diagonal(
-            linear_state.centered_data_operator,
-        )
-        group_edf_map = {group.name: float(np.sum(edf[group.sl])) for group in active_groups}
         identifiability = _structured_identifiability(model, linear_state, W)
+        if identifiability.edf is not None and identifiability.edf1 is not None:
+            # the published fit's (``publish_identified_fit``)
+            edf, edf1 = identifiability.edf.copy(), identifiability.edf1.copy()
+        else:
+            edf = linear_state.profiled_factor.inverse_operator_diagonal(
+                linear_state.centered_data_operator,
+            )
+            edf1 = 2.0 * edf - linear_state.profiled_factor.inverse_operator_square_diagonal(
+                linear_state.centered_data_operator,
+            )
+        edf[np.abs(edf) < 100.0 * np.finfo(float).eps] = 0.0
+        group_edf_map = {group.name: float(np.sum(edf[group.sl])) for group in active_groups}
         return {
             "W": W,
             "XtWX_inv": inverse,
@@ -1129,7 +1579,7 @@ def fit_inference_info(model):
     group_edf_map: dict[str, float] = {}
     for ag in active_groups:
         group_edf_map[ag.name] = float(np.sum(edf[ag.sl]))
-    identifiability = _decided_identifiability(
+    identifiability = _dense_identifiability(
         model, profile_rank, active_groups, X_active, W, data_gram
     )
 

@@ -80,6 +80,7 @@ from superglm.types import GroupSlice
 if TYPE_CHECKING:
     from superglm._frame import EagerFrame, FrameLike
     from superglm.model import SuperGLM
+    from superglm.solvers.rank import RankInfo
 
 
 def _active_feature_columns(
@@ -1328,8 +1329,21 @@ class ModelMetrics:
                 # The fit's own rows: leverage is the face fit's, while ``augmented`` is the
                 # covariance, which holds no shape row.
                 slopes = rank_info.augmented_inverse()
+            root = None
+            if rank_info is not None and rank_info.face is None and self._reads_retained_covariance:
+                record = getattr(rank_info, "identifiability", None)
+                root = None if record is None else record.weak_root(rank_info.selected_columns)
+            if root is not None:
+                # the weak directions' term as ``(x' P U)^2``, never through their ``1 / C``
+                # entries (``Identifiability.weak_root``)
+                slopes = cast("RankInfo", rank_info).covariance_inverse(weak=False)
             center = weighted_center(X_a, W)
             h = W / sum_w + W * quadratic_form_diagonal(X_a, slopes, center=center)
+            if root is not None:
+                for start, stop, block in iter_dense_chunks(X_a):
+                    h[start:stop] += W[start:stop] * np.sum(
+                        np.square((block - center) @ root[1:]), axis=1
+                    )
         return np.clip(h, 0.0, 1.0)
 
     @property

@@ -1161,31 +1161,46 @@ null space of $\mathbf{X}\mathbf{N}_S$, where $\mathbf{N}_S$ spans the
 directions no penalty reaches: the intercept, factor levels, numeric columns
 and the unpenalized part of each smooth (Wood, Pya and Säfken 2016, section
 3.1.2). That design is small, and the smoothing parameters do not enter it.
-Only a coefficient in such a direction is shown as missing, with a footnote
-naming what it is aliased with: a factor nested in another, a duplicated
-column, a level seen at one value of its covariate, a basis function with no
-data and no penalty. The later term absorbs the alias, as in R's `lm`; the
-coefficients beside it keep their standard errors
-(`src/superglm/solvers/identifiability.py`). Every backend reads this one
-decision. When the small design's Gram cannot tell a direction from zero,
-the rows are read on those directions alone, the way the data rank reads them
-below. A structured fit (`fs`, `sz`, nested random effects) whose factor
-truncated nothing has certified the Hessian nonsingular, so nothing is aliased
-and the small design is never formed. Otherwise the factor publishes the
-directions it truncated. The rows are read on those directions only, and
-when every one of them is zero to rounding they are the aliases, again
-without forming the small design.
+Only a direction of that null space is unidentified, with a footnote naming
+what it is aliased with: a factor nested in another, a duplicated column, a
+level seen at one value of its covariate, a basis function with no data and no
+penalty (`src/superglm/solvers/identifiability.py`). Counting names the
+reason; it never decides.
 
-Where the Hessian is singular, the fit publishes one coefficient per alias at
-zero, the one shown as missing, whichever backend ran: the latest coefficient
-the alias reaches, as in R. The dense solver usually fixes that coefficient
-at zero already. A structured factor's own split along an alias is the
-minimum-norm one, so its coefficients are moved along the alias to the same
-zeros. That changes no fitted value, and its standard errors are then the
-dense fit's. An alias that exists only because some rows' working weights
-vanished, such as a level whose mean is far below a log link's range, would
-move those rows' fitted values; such a fit keeps its own split, and every
-coefficient the alias reaches is shown as missing.
+Every backend takes the decision the same way, and the solver's own rank is
+only a hint. The solver inverts the Hessian on a part it certified (a
+structured factor's verified pivots, a dense decomposition whose smallest kept
+eigenvalue clears the Gram's formation bound) and leaves the rest undecided.
+One pass over the rows reads those directions alone: a direction whose
+curvature is within the rounding of that pass is null, one that clears it is
+identified. The rounding grows with the rows read together: a column a
+relative $d$ from another is aliased when $d$ is below about $p^{3/2}u$ read
+alone, or about $nku$ for $n$ rows and $k$ directions read beside a strongly
+identified one ($u = 2^{-53}$). A direction inside the uncertainty is reported
+as not resolved at float64. A direction the weighted rows cannot tell from
+zero is an alias only if the unweighted design on the rows with positive
+weight cannot either, since a working weight that vanishes (a level whose mean
+is far below a log link's range) carries no information about which
+coefficients the model can identify.
+
+A direction the solver truncated that the rows identify, such as two columns
+$10^{-8}$ apart, is fitted and reported, as mgcv does: its standard error
+comes from the rows, and its coefficients take the Newton step the rows give,
+which for a Gaussian fit with the identity link is the penalized fit. Under
+other families the coefficients along such a direction stay where the solver
+stopped, and the summary says so.
+
+Where the Hessian is singular, the fit publishes one constraint per alias,
+whichever backend ran. Each alias is written on the terms' construction
+columns (a factor's levels, a numeric column, the unpenalized part of a smooth
+in its own basis), and the latest column it reaches in term order is held at
+zero, so the first-defined term keeps its coefficients, as in R. The choice
+reads no row, weight, smoothing parameter or internal coordinate. It is kept
+unless it would worsen the conditioning by more than $10^7$, the scale at
+which `lm.fit` moves a column aside, and the best-conditioned choice is taken
+then. A held factor level or numeric column is shown as missing; a held part
+of a smooth blanks no coefficient, and the smooth's coefficients have the
+standard errors of the fit with that part at zero. No fitted value moves.
 
 The *data rank* asks whether the data alone, ignoring the penalties, pin a
 direction down. It is a diagnostic, computed on request

@@ -8,43 +8,54 @@ terms vanishes only when each does), so
 
     null(H) = N_S null(X_F),   X_F = X_c N_S,
 
-with ``N_S`` the penalty's null space and ``X_c`` the design centred on the intercept: a direction
-is lost only when neither the data nor any penalty reaches it, whatever the smoothing parameters
-and however a term is parametrised (Wood, Pya & Saefken 2016, JASA 111, sec. 3.1.2; the
-mixed-model split of Ruppert, Wand & Carroll 2003, sec. 4.9).  ``X_F`` holds the intercept, the
-factor dummies, the numeric columns and the unpenalised part of each smooth: small, and on real
-books well conditioned.  A partially aliased coefficient is identified; its standard error is
-only larger, and the summary prints it.
+with ``N_S`` the penalty's null space and ``X_c`` the design centred on the intercept, on the
+rows with positive prior weight: a direction is lost only when neither the data nor any penalty
+reaches it, whatever the smoothing parameters and however a term is parametrised (Wood, Pya &
+Saefken 2016, JASA 111, sec. 3.1.2; the mixed-model split of Ruppert, Wand & Carroll 2003, sec.
+4.9).  A partially aliased coefficient is identified; its standard error is only larger.
 
-**Deciding null(X_F).** Its Gram ``N_S' D N_S`` is a congruence of the centred data Gram ``D``
-the fit already forms.  Jacobi-scaled, every eigenvalue above that Gram's error bound (the
-eigensolver's ``p(n) eps`` and the formation bound ``gamma_n |X|'|X|``, as
-``rank.decompose_gram_deflated`` bounds them) is certainly positive (Weyl), and when all are,
-``X_F`` has full rank with no pass over the rows; on real books it does, by orders of magnitude.
-Otherwise the rows are read on the Gram's undecided directions only, the eigenvectors whose
-eigenvalue it cannot tell from zero, as ``rank.decompose_gram_deflated`` reads them for the data
-rank: a singular value of that block at or below the rounding bound of its computation cannot be
-told from zero in float64, and is a null direction of ``X_F`` by interlacing; one above it clears
-the bound by more than what leaks from the certified directions (Li & Li's quadratic bound, the
-coupling bounded by the Gram's own error) and is identified.  That is a rounding bound, not a
-tolerance: an exactly aliased direction always falls under it, and an identified one above it
-never does.  A structured factor certified its kept pivots itself (``border.factor_border``), so
-its truncated directions are the only undecided ones: when the rows put every one of them under
-the bound, they are ``null(H)`` and neither ``N_S`` nor ``X_F``'s Gram is formed.  Whatever these
-reads leave unresolved, ``X_F`` is factored from the rows whole, which changes the cost of a
-decision and never the decision.
+**One decision, read from the rows.** The solver's decomposition of ``H`` is a speed hint: it
+inverts ``H`` on a part it certified positive definite (a structured factor's verified pivots; a
+dense decomposition whose smallest kept eigenvalue clears the Gram's formation bound, or one
+recomputed so that it does, ``state_ops._dense_base``) and leaves the rest, ``T``, undecided.
+In the basis ``[K, T]`` the nullity of ``H`` is that of the Schur complement on ``T``, which one
+pass over the rows gives (``_read_rows``): ``T'HT = B'B + T'ST``, ``B = sqrt(W) X_c T``, less the
+coupling to ``K`` the same pass reads.  An eigenvalue whose root is within the rounding bound of
+``B``'s singular values cannot be told from zero in float64; one that clears it is identified
+(Weyl); the decision never compares the solver's own rank.  A direction the weighted rows cannot
+tell from zero is an alias only if the design cannot either, read once more at unit weight on the
+rows with positive prior weight (``_design_null``): a vanished working weight carries no
+information about identifiability, so such a direction is never moved along, and its
+coordinates' standard errors are not resolved at float64.  Counting (a level's rows, its distinct
+covariate values) only names the reason for an alias; it decides nothing.
 
-**Which coordinate is blank.** Where ``H`` is singular and its published decomposition's null
-directions ``N`` are ``null(H)``, one coordinate per direction is blank, the latest the direction
-reaches (R's and ``gam.side``'s convention, the later or higher-order term absorbing the alias;
-``rank._earliest_representatives``).  The fit publishes the coefficients with those coordinates
-``E`` at zero and their covariance (``Gauge``), whichever backend it ran on: the dense solver
-fixes them already unless its rank decision chose others for conditioning, and a structured
-factor's minimum-norm split moves along ``N``, which changes no fitted value.  A
-direction the published decomposition kept although ``null(X_F)`` holds it carries a split and a
-variance of rounding, so every coordinate it reaches is blank; a coordinate the fit fixed that the
-penalised problem identifies is blank too, since the fit reports zero there, and the record says
-why.
+**The margin grows with the rows.** In Jacobi-scaled coordinates (unit diagonal of ``H``) the
+rounding bound on ``B``'s singular values is the formation term ``gamma_(p+T+3) || |A| |T| ||``,
+at most about ``(p + T + 3) sqrt(p) u`` with ``u = 2^-53``, plus the triangle's ``gamma_(n k)
+||B||_F`` for ``n`` rows and ``k`` directions read together (Higham 2002, Thm 19.4).  So a
+near-duplicate column separated from another by a relative ``d`` is aliased when ``d`` is under
+about ``p^(3/2) u`` read alone, and under about ``n k u`` when it is read beside a direction of
+unit curvature: at ``n = 10^6`` rows that is ``1e-10``, and ``d = 1e-8`` stays identified.  A
+direction whose root falls inside the coupling's uncertainty is reported as not resolved at
+float64, never decided.
+
+**Directions the solver truncated that the rows identify** are fitted and reported, as mgcv's
+penalised fit has them and ``lm``'s rank decision does not (``WeakDirections``): their
+covariance is ``T C^-1 T'`` on the refined directions, and their coefficients take the Newton
+step their score gives, which for a Gaussian family with the identity link is the penalised fit.
+
+**Which constraint is published.** Where ``H`` is singular, the fit publishes the coefficients
+with one constraint per null direction (``Gauge``): each null direction is written on the terms'
+construction columns of ``X_F`` (``ConstructionColumns``: an unpenalised term's coordinates, a
+smooth's penalty null space in its raw basis), and the latest column each reaches in term order
+is held at zero, so the first-defined term keeps its coefficients (R's and ``gam.side``'s
+convention).  The choice reads no row, weight, smoothing parameter or solver coordinate, so a
+row permutation, a BLAS kernel or a rotation of a spline's coordinates leaves it where it was.
+It is kept while it amplifies the conditioning by at most ``1e7`` (``lm.fit``'s ``tol = 1e-7``),
+and the conditioning-first selector replaces it past that.  A held unpenalised column is blank;
+a held smooth part blanks no coordinate, and the term's coefficients have the standard errors of
+the fit with that part at zero.  The covariance is ``P (V + U U') P'``, with ``V`` the inverse on
+the certified part, never a near-singular inverse's.
 
 **What each alias is.** An alias is named from the model's construction when counting proves it:
 a column with no data and no penalty; factor levels nested in or disconnected from another
@@ -75,79 +86,143 @@ _SHARE_FLOOR = SQRT_EPS
 # Cholesky attains the accuracy of the diagonally scaled matrix); past this the summary says so.
 _ACCURACY_NOTE = 1e-4
 
-# The Gram's undecided directions are extended up to the first eigenvalue spacing of this many
-# errors (``rank._GREY_GAP``), so the certified directions above them clear by a margin; past
-# ``_GREY_CAP`` of them ``X_F`` is factored whole.
-_GREY_GAP = 8.0
-_GREY_CAP = 64
+# The term-order gauge is kept while it amplifies the retained coordinates' conditioning by at
+# most ``1 / tol`` with ``tol = 1e-7``, the scale at which R's ``lm.fit`` moves a column it
+# cannot separate from the earlier ones to the end (``?lm.fit``); past it the conditioning-first
+# selector chooses (threshold pivoting: Arioli, Duff, Gould & Reid, SIAM J. Sci. Stat. Comput.
+# 11(5), 1990).
+_AMPLIFICATION_LIMIT = 1e7
 
 
 @dataclass(frozen=True)
 class Gauge:
-    """The coefficients a singular fit publishes: zero on ``coordinates`` ``E``, along ``null`` ``N``.
+    """The coefficients a singular fit publishes: ``G' beta = 0`` along ``null`` ``N``.
 
     ``null`` (``width x k``, fitted coordinates) spans ``null(H)``; with every lambda positive
     ``X_c N = 0`` and ``S N = 0``, so moving along it changes no fitted value and no penalty.
-    ``E'N`` is nonsingular, so ``P = I - N (E'N)^-1 E'`` maps a coefficient vector to the one
-    with ``E' beta = 0`` and the same fitted values, and a covariance ``V``, any generalised
-    inverse of ``H``, to ``P V P'`` (each row of ``P`` is orthogonal to ``N``, and every
-    generalised inverse has one bilinear form on ``range(H) = null(H)^perp``).  ``intercept``
-    holds each direction's solver-intercept component, ``-c'N`` with ``c`` the fit's weighted
-    column centre.
+    ``functionals`` ``G`` (``width x k``) are the constraints the fit publishes, each a term's
+    construction column (``ConstructionColumns``): a unit coordinate for an unpenalised column,
+    a smooth's unpenalised part otherwise.  ``G'N`` is nonsingular, so ``P = I - N (G'N)^-1 G'``
+    maps a coefficient vector to the one with ``G' beta = 0`` and the same fitted values, and a
+    covariance ``V``, any generalised inverse of ``H``, to ``P V P'`` (each row of ``P`` is
+    orthogonal to ``N``, and every generalised inverse has one bilinear form on ``range(H) =
+    null(H)^perp``).  ``intercept`` holds each direction's solver-intercept component, ``-c'N``
+    with ``c`` the fit's weighted column centre.  ``moved`` marks the directions of ``null(H)``;
+    the others are directions the rows cannot resolve at float64 (``_design_null``), which do
+    move fitted values: the coefficients are never moved along them, and the covariance is the
+    fit's with them held where the fit left them.
     """
 
     null: NDArray
-    coordinates: NDArray
+    functionals: NDArray
     intercept: NDArray
+    moved: NDArray | None = None
+
+    def _moved(self) -> NDArray:
+        count = self.null.shape[1]
+        return np.ones(count, dtype=bool) if self.moved is None else np.asarray(self.moved, bool)
+
+    @property
+    def coordinates(self) -> NDArray:
+        """The coordinates held at exactly zero: those of the unit functionals."""
+        nonzero = self.functionals != 0.0
+        unit = np.count_nonzero(nonzero, axis=0) == 1
+        return np.sort(np.argmax(nonzero[:, unit], axis=0)).astype(np.intp)
 
     def lift(self, columns: NDArray | None = None) -> NDArray:
-        """``N (E'N)^-1`` on the fitted ``columns`` (every coordinate by default)."""
+        """``N (G'N)^-1`` on the fitted ``columns`` (every coordinate by default)."""
         null = self.null if columns is None else self.null[np.asarray(columns, dtype=np.intp)]
-        return np.linalg.solve(self.null[self.coordinates].T, null.T).T
+        return np.linalg.solve((self.functionals.T @ self.null).T, null.T).T
 
     def coefficients(self, beta: NDArray, intercept: float) -> tuple[NDArray, float, NDArray]:
-        """``P beta``, the solver intercept that keeps every fitted value, and the step taken."""
+        """``beta`` moved along ``null(H)`` onto its constraints, the solver intercept that keeps
+        every fitted value, and the step taken (along the moved directions)."""
         beta = np.asarray(beta, dtype=np.float64)
-        step = np.linalg.solve(self.null[self.coordinates], beta[self.coordinates])
-        gauged = beta - self.null @ step
-        gauged[self.coordinates] = 0.0
-        return gauged, float(intercept) - float(self.intercept @ step), step
+        moved = self._moved()
+        if not np.any(moved):
+            return beta.copy(), float(intercept), np.zeros(0)
+        null, functionals = self.null[:, moved], self.functionals[:, moved]
+        step = np.linalg.solve(functionals.T @ null, functionals.T @ beta)
+        gauged = beta - null @ step
+        nonzero = functionals != 0.0
+        unit = np.count_nonzero(nonzero, axis=0) == 1
+        gauged[np.argmax(nonzero[:, unit], axis=0)] = 0.0
+        return gauged, float(intercept) - float(self.intercept[moved] @ step), step
 
     def covariance(self, covariance: NDArray, columns: NDArray) -> NDArray:
         """``P V P'`` of a dense covariance ``V`` held on the fitted ``columns``."""
         columns = np.asarray(columns, dtype=np.intp)
         V = np.asarray(covariance, dtype=np.float64)
-        E = np.searchsorted(columns, self.coordinates)
         lift = self.lift(columns)
-        VE = V[:, E]
-        gauged = V - lift @ VE.T - VE @ lift.T + lift @ V[np.ix_(E, E)] @ lift.T
+        VG = V @ self.functionals[columns]
+        GVG = self.functionals[columns].T @ VG
+        gauged = V - lift @ VG.T - VG @ lift.T + lift @ GVG @ lift.T
         gauged = 0.5 * (gauged + gauged.T)
-        gauged[E, :] = 0.0
-        gauged[:, E] = 0.0
+        fixed = np.searchsorted(columns, self.coordinates)
+        gauged[fixed, :] = 0.0
+        gauged[:, fixed] = 0.0
         return gauged
 
 
 @dataclass(frozen=True)
-class Alias:
-    """One fitted coordinate the fit does not identify, and what it is aliased with."""
+class WeakDirections:
+    """Directions the solver truncated that the penalised fit identifies, fitted from the rows.
 
-    coordinate: int
+    In fitted coordinates: ``root`` ``U`` (``width x d``) with ``U U'`` their covariance,
+    ``T C^-1 T'`` for the refined directions ``T`` and their curvature ``C`` read from the rows
+    (``decide_identifiability``); ``step`` the coefficients' move ``T C^-1 g`` by the score
+    ``g`` along them, the one Newton step that fits them at the fit's working weights;
+    ``intercept`` and ``intercept_step`` the solver intercept's components of each, ``-c'U`` and
+    ``-c' step``.  ``accuracy`` bounds the relative error of their curvature, and ``data`` is
+    ``D U``, the centred data Gram's product read from the rows.  ``fitted`` is false where the
+    fit keeps its solver's coefficients along them (``step`` zero; ``state_ops``).
+    """
+
+    root: NDArray
+    intercept: NDArray
+    step: NDArray
+    intercept_step: float
+    accuracy: float
+    data: NDArray
+    fitted: bool = True
+
+    def covariance(self, covariance: NDArray, columns: NDArray) -> NDArray:
+        """``V + U U'`` of a dense covariance ``V`` held on the fitted ``columns``."""
+        U = self.root[np.asarray(columns, dtype=np.intp)]
+        return np.asarray(covariance, dtype=np.float64) + U @ U.T
+
+
+@dataclass(frozen=True)
+class Alias:
+    """One direction the fit does not identify, and what it is aliased with.
+
+    ``coordinate`` is the fitted coordinate held at zero, without a standard error; ``None``
+    when the published constraint is a smooth's unpenalised part, whose coefficients keep their
+    standard errors in the published gauge.
+    """
+
+    coordinate: int | None
     term: str
     aliased_with: tuple[str, ...]
     reason: str
-    source: Literal["construction", "rank", "fit"]
+    source: Literal["construction", "rank", "float64", "fit"]
 
 
 @dataclass(frozen=True)
 class Identifiability:
     """The identifiability record of one fit, in fitted (solver) coordinates.
 
-    ``aliases`` are the coordinates without a standard error; every other coefficient is
-    identified.  ``penalised_condition`` is the published decomposition's condition number, whose
-    product with ``u`` is the standard errors' relative accuracy, and ``fixed_effect_condition``
-    that of ``X_F`` (NaN when a certificate left ``X_F`` unformed).  ``gauge`` moves a singular
-    fit's coefficients and covariance to the blanked coordinates' zeros where its decomposition
-    did not fix them there; ``row_directions`` counts the directions read from the rows.
+    ``aliases`` are the directions the fit does not identify; every coefficient off their
+    ``coordinate`` is identified.  ``penalised_condition`` is the condition number whose product
+    with ``u`` bounds the standard errors' relative accuracy, and ``fixed_effect_condition`` that
+    of the directions read from the rows (NaN when none were).  ``gauge`` moves a singular fit's
+    coefficients and covariance onto its published constraints, ``weak`` fits the directions
+    its solver truncated that the penalised fit identifies, and ``covariance`` (selected
+    coordinates) replaces a dense decomposition's own inverse where its rank decision kept a
+    direction the rows put in ``null(H)``.  ``edf`` and ``edf1`` (fitted coordinates) are the
+    published fit's, where it differs from its solver's.  ``row_directions`` counts the
+    directions read from the rows, and ``rank`` the slope directions the published fit
+    identifies (``None`` for a record that describes its solver's coefficients).
     """
 
     width: int
@@ -156,11 +231,52 @@ class Identifiability:
     fixed_effect_condition: float
     gauge: Gauge | None = None
     row_directions: int = 0
+    weak: WeakDirections | None = None
+    covariance: NDArray | None = None
+    edf: NDArray | None = None
+    edf1: NDArray | None = None
+    rank: int | None = None
+
+    def weak_root(self, columns: NDArray) -> NDArray | None:
+        """``[-c'PU; PU]`` on ``columns``, the weak directions' published root with its intercept.
+
+        ``P (V + U U') P' = P V P' + (P U)(P U)'``, so a reader forming a quadratic form (the
+        intercept's variance ``c' V c``, a row's leverage) adds this term as ``(r' PU)^2``,
+        never through the ``1 / C`` entries of the dense matrix, whose rounding is larger than
+        the form.  ``None`` without weak directions.
+        """
+        if self.weak is None:
+            return None
+        columns = np.asarray(columns, dtype=np.intp)
+        root = np.vstack((self.weak.intercept[None, :], self.weak.root[columns]))
+        if self.gauge is not None:
+            null = np.vstack((self.gauge.intercept[None, :], self.gauge.null[columns]))
+            functionals = np.vstack((np.zeros((1, null.shape[1])), self.gauge.functionals[columns]))
+            root = root - null @ np.linalg.solve(functionals.T @ null, functionals.T @ root)
+        return root
 
     def coefficient_identified(self) -> NDArray:
         identified = np.ones(self.width, dtype=bool)
-        identified[[alias.coordinate for alias in self.aliases]] = False
+        identified[[alias.coordinate for alias in self.aliases if alias.coordinate is not None]] = (
+            False
+        )
         return identified
+
+    def published_covariance(
+        self, covariance: NDArray, columns: NDArray, *, weak: bool = True
+    ) -> NDArray:
+        """The published fit's slope covariance from its solver's ``covariance`` on ``columns``.
+
+        Without ``weak`` the weak directions' term ``P U U' P'`` is left out, for a reader that
+        adds it in low-rank form (``weak_root``).
+        """
+        if self.covariance is not None:
+            covariance = self.covariance
+        if self.weak is not None and weak:
+            covariance = self.weak.covariance(covariance, columns)
+        if self.gauge is not None:
+            covariance = self.gauge.covariance(covariance, columns)
+        return covariance
 
     def alias_table(self):
         """Every alias, one row per coordinate: R's ``alias()`` "Complete" table."""
@@ -183,18 +299,43 @@ class Identifiability:
     def notes(self) -> tuple[str, ...]:
         """The summary's footnote: each alias with what it is aliased with, and the accuracy."""
         notes: list[str] = []
-        if self.aliases:
-            count = len(self.aliases)
-            plural = "coefficient" if count == 1 else "coefficients"
-            notes.append(f"{count} {plural} not identified (standard error shown as ---):")
+        blank = [alias for alias in self.aliases if alias.coordinate is not None]
+        held = [alias for alias in self.aliases if alias.coordinate is None]
+        for aliases, header in (
+            (blank, "{count} {plural} not identified (standard error shown as ---):"),
+            (
+                held,
+                "{count} smooth-term {plural} not identified, held at zero (the terms' "
+                "standard errors are the fit's with {pronoun} held):",
+            ),
+        ):
+            if not aliases:
+                continue
+            count = len(aliases)
+            if aliases is blank:
+                plural = "coefficient" if count == 1 else "coefficients"
+            else:
+                plural = "part" if count == 1 else "parts"
+            pronoun = "it" if count == 1 else "them"
+            notes.append(header.format(count=count, plural=plural, pronoun=pronoun))
             grouped: dict[tuple[str, tuple[str, ...], str], int] = {}
-            for alias in self.aliases:
+            for alias in aliases:
                 key = (alias.term, alias.aliased_with, alias.reason)
                 grouped[key] = grouped.get(key, 0) + 1
             for (term, others, reason), size in grouped.items():
-                label = term if size == 1 else f"{term} ({size} coefficients)"
+                unit = "coefficients" if aliases is blank else "parts"
+                label = term if size == 1 else f"{term} ({size} {unit})"
                 link = f" is aliased with {', '.join(others)}" if others else ""
                 notes.append(f"  {label}{link}: {reason}.")
+        if self.weak is not None and not self.weak.fitted:
+            count = self.weak.root.shape[1]
+            plural = "direction" if count == 1 else "directions"
+            notes.append(
+                f"{count} {plural} the solver's factorisation truncated "
+                f"{'is' if count == 1 else 'are'} identified by the rows: the standard errors "
+                "include them, and the coefficients along them stay where the solver stopped, "
+                "so those estimates are not the penalised optimum."
+            )
         accuracy = self.penalised_condition * UNIT_ROUNDOFF
         if not self.aliases and accuracy > _ACCURACY_NOTE:
             digits = max(0, int(math.floor(-math.log10(accuracy)))) if accuracy < 1.0 else 0
@@ -207,19 +348,24 @@ class Identifiability:
 
 @dataclass(frozen=True)
 class TruncatedDecomposition:
-    """A published decomposition of ``H`` known by the directions it truncated, rank ``rank``.
+    """A decomposition of ``H`` known by the part it certified and the directions it did not.
 
-    A structured factor inverts ``H`` on the complement of its truncated directions
-    ``null_vectors`` (``width x t``, the Moore-Penrose inverse of its Jacobi-scaled border), so
-    every coordinate they reach is left undetermined, as a spectral decomposition's
-    (``fixed_coordinates``).  ``column_scale`` is ``sqrt(diag H)``, and
-    ``pre_truncation_condition`` the condition number the factor certified.
+    It inverts ``H`` on a part it certified positive definite and leaves the directions
+    ``null_vectors`` (``width x t``) undecided: a structured factor's truncated directions (the
+    Moore-Penrose inverse of its Jacobi-scaled border), or a dense decomposition's truncated and
+    uncertified ones (``state_ops``), so every coordinate they reach is left undetermined, as a
+    spectral decomposition's (``fixed_coordinates``).  ``column_scale`` is ``sqrt(diag H)``,
+    ``pre_truncation_condition`` the condition number of the certified part, ``solve`` the
+    inverse on that part (``x -> V x``) and ``covariance`` that inverse as a matrix where it
+    replaces the published decomposition's own.
     """
 
     null_vectors: NDArray
     rank: int
     column_scale: NDArray
     pre_truncation_condition: float
+    solve: Callable[[NDArray], NDArray] | None = None
+    covariance: NDArray | None = None
 
     @property
     def width(self) -> int:
@@ -317,164 +463,689 @@ def penalty_null_space(blocks: Sequence[NDArray], width: int) -> NDArray:
     return vectors[:, values <= PENALTY_RANK_CUT * values[-1]]
 
 
+@dataclass(frozen=True)
+class ConstructionColumns:
+    """One term's columns of ``X_F`` in its own coordinates, in the order its construction defines.
+
+    ``local`` (``m x w``) maps a block of ``w`` coefficients to the coefficients of the term's
+    unpenalised construction columns on it, and ``basis`` (``w x m``, ``local basis = I``) holds
+    those columns in the term's coordinates; ``blocks`` repeats the block (one per level of a
+    factor smooth), so the term is ``blocks w`` wide and its columns run block by block, ``m``
+    each.  An unpenalised term's columns are its coordinates (``local = I``), a ridge-penalised
+    term has none, and a smooth's are its penalty null space, ordered and projected in the raw
+    basis its construction defines (``state_ops``), so they depend on no row, weight, smoothing
+    parameter or whitening.  ``name(block, j)`` names one.
+    """
+
+    local: NDArray
+    basis: NDArray
+    blocks: int
+    name: Callable[[int, int], str]
+
+    @property
+    def unit(self) -> bool:
+        width = self.local.shape[1]
+        return self.local.shape[0] == width and bool(np.array_equal(self.local, np.eye(width)))
+
+
+@dataclass(frozen=True)
+class _Split:
+    """The undecided directions read from the rows (``_read_rows``), in decomposition coordinates.
+
+    ``refined`` are the directions ``T - V (H T)`` and ``values`` their curvature's eigenvalues
+    in the eigenvectors ``vectors``: ``null`` under the rounding bound, ``identified`` above it
+    by more than the coupling's uncertainty, the rest not resolved at float64.  ``score`` is the
+    penalised score along ``T``, ``data`` the data Gram's product ``D T`` read from the rows.
+    """
+
+    refined: NDArray
+    values: NDArray
+    vectors: NDArray
+    null: NDArray
+    identified: NDArray
+    limit: float
+    score: NDArray | None
+    data: NDArray
+    candidates: NDArray
+    penalised: NDArray
+
+    def directions(self, mask: NDArray) -> NDArray:
+        return self.refined @ self.vectors[:, mask]
+
+
 def decide_identifiability(
-    decomposition,
+    decomposition: TruncatedDecomposition,
     *,
     columns: NDArray,
     width: int,
     groups: Sequence,
-    null_spaces: Sequence[NDArray] | Callable[[], Sequence[NDArray]],
-    data_gram,
-    rows: int,
     design=None,
-    specs: Mapping[Any, Any] | None = None,
     W: NDArray | None = None,
     data_diagonal: NDArray | None = None,
+    data_apply: Callable[[NDArray], NDArray] | None = None,
     penalty: Callable[[NDArray], tuple[NDArray, NDArray]] | None = None,
-    gauge: bool = False,
+    specs: Mapping[Any, Any] | None = None,
+    published=None,
+    construction: Callable[[int], ConstructionColumns | None] | None = None,
+    residual: NDArray | None = None,
+    beta: NDArray | None = None,
+    support: NDArray | None = None,
 ) -> Identifiability:
-    """The identifiability record of a fit with published decomposition ``decomposition`` of ``H``.
+    """The identifiability record of a fit whose decomposition of ``H`` is ``decomposition``.
 
     ``columns`` maps the decomposition's coordinates to the ``width`` fitted ones, ``groups``
-    are its term blocks (``GroupSlice``, in its coordinates) and ``null_spaces`` their penalty
-    null spaces (``penalty_null_space``), or a callable that forms them when they are read.
-    ``data_gram`` is the centred data Gram at the fit's weights, over ``rows`` rows: a dense
-    matrix, or a compact operator (``matvec``) with its diagonal ``data_diagonal``, which a
-    structured fit holds in place of the matrix; only its products with ``N_S`` are read.
-    ``design`` (their rows, a ``DesignMatrix`` of those groups) and ``W`` read the directions the
-    Gram cannot resolve from the rows, and ``specs`` (feature specs by name) name levels; without
-    the rows such a direction counts as aliased.  ``penalty`` applies a structured factor's
-    penalty to its truncated directions (``S T`` and the bound ``|S| |T|``), so that they decide
-    the record alone (``_truncated_null``).  ``gauge`` lets the record move the published
-    coefficients to its blanked coordinates' zeros (``Gauge``, its intercept components from the
-    rows' weighted column means); without it, or without the rows, a split the decomposition did
-    not publish at those zeros keeps every coordinate it reaches blank.
+    are its term blocks (``GroupSlice``, in its coordinates).  ``design`` (their rows) and
+    ``W`` read the undecided directions from the rows, with ``data_diagonal`` the diagonal of
+    the centred data Gram ``D`` and ``data_apply`` its product (``V -> D V``); ``penalty``
+    applies the penalty to them (``S T`` and the bound ``|S| |T|``), and ``specs`` (feature
+    specs by name) name levels.  Without the rows every undecided direction counts as aliased.
+    ``support`` marks the rows with positive prior weight, on which the design decides whether a
+    direction the weighted rows cannot tell from zero is an alias (``_design_null``).
+
+    The decision is ``_read_rows``'s, the one every backend takes.  A fit that publishes its
+    coefficients (``construction`` given, with ``residual``, the working residual
+    ``sqrt(W) (z - eta)``, and ``beta``) gets the gauge of its aliases on its terms'
+    construction columns (``_construction_gauge``) and the fit of its weak directions
+    (``WeakDirections``); one that cannot move them describes them as ``published``, its
+    solver's decomposition, holds them (``_published_blanks``).
     """
     columns = np.asarray(columns, dtype=np.intp)
-    owner_null, fixed_effect_condition, row_directions = None, float("nan"), 0
-    if isinstance(decomposition, TruncatedDecomposition) and penalty is not None:
-        owner_null, row_directions = _truncated_null(
-            decomposition, groups, design, W, penalty, data_diagonal
+    condition = float(decomposition.pre_truncation_condition)
+    candidates = _orthonormal(decomposition, decomposition.null_vectors)
+    if candidates.shape[1] == 0:
+        return Identifiability(width, (), condition, float("nan"))
+    scale = np.asarray(decomposition.column_scale, dtype=np.float64)
+    candidates = candidates / np.where(scale > 0.0, scale, 1.0)[:, None]
+    rows = design is not None and W is not None and data_diagonal is not None
+    split = (
+        _read_rows(decomposition, candidates, groups, design, W, data_diagonal, penalty, residual)
+        if rows and penalty is not None
+        else None
+    )
+    floating = np.zeros((decomposition.width, 0))
+    if split is None:
+        null, weak_mask = candidates, None
+        fixed_effect_condition = float("nan")
+    else:
+        null = split.directions(~split.identified)
+        weak_mask = split.identified
+        kept = split.values[split.identified]
+        fixed_effect_condition = (
+            math.sqrt(float(np.max(split.values)) / float(np.min(kept))) if kept.size else 1.0
         )
-    if owner_null is None:
-        basis = _null_space_basis(
-            groups,
-            cast(Callable[[], Sequence[NDArray]], null_spaces)()
-            if callable(null_spaces)
-            else null_spaces,
-            decomposition.width,
-        )
-        if isinstance(data_gram, np.ndarray):
-            gram_basis, diagonal = data_gram @ basis, np.diag(data_gram)
-        else:
-            gram_basis = data_gram.matvec(basis) if basis.shape[1] else np.zeros_like(basis)
-            diagonal = np.asarray(data_diagonal, dtype=np.float64)
-        owner_null, fixed_effect_condition, read = _fixed_effect_null(
-            basis, basis.T @ gram_basis, diagonal, rows, groups, design, W
-        )
-        row_directions += read
+        if support is not None and null.shape[1]:
+            null, floating = _design_null(
+                decomposition, null, groups, design, support, cast(Callable, penalty)
+            )
     owner = np.empty(decomposition.width, dtype=np.intp)
     for index, group in enumerate(groups):
         owner[group.sl] = index
-    null = _orthonormal(decomposition, owner_null)
-    chosen = _gauge_coordinates(decomposition, null)
-    zeros = np.setdiff1d(np.arange(decomposition.width), decomposition.active_columns)
-    published_gauge = None
-    movable = gauge and design is not None and W is not None
-    if chosen is not None and (movable or np.all(np.isin(chosen, zeros))):
-        blank = chosen
-        if not np.all(np.isin(chosen, zeros)):
-            published_gauge = _gauge(decomposition, chosen, columns, width, design, W)
-    else:
-        fixed = fixed_coordinates(decomposition)
-        # The fit's zeros account for ``null(H)`` when no null direction vanishes on them.
-        spanned = null.shape[1] == 0 or (
-            fixed.size >= null.shape[1]
-            and np.linalg.svd(null[fixed], compute_uv=False)[null.shape[1] - 1] > _SHARE_FLOOR
-        )
-        blank = fixed if spanned else np.union1d(fixed, _reached(null))
     facts = _RowFacts(design, W)
+    weak = None
+    if construction is None:
+        both = np.hstack((null, floating))
+        unresolved = np.r_[np.zeros(null.shape[1], bool), np.ones(floating.shape[1], bool)]
+        chosen = _published_blanks(published, decomposition, both)
+        aliases = _coordinate_aliases(
+            chosen, both, unresolved, decomposition, columns, groups, owner, facts, specs or {}
+        )
+        gauge = None
+    else:
+        held = np.r_[np.zeros(null.shape[1], bool), np.ones(floating.shape[1], bool)]
+        gauge, aliases = _construction_gauge(
+            np.hstack((null, floating)),
+            held,
+            decomposition,
+            columns,
+            width,
+            groups,
+            owner,
+            construction,
+            data_diagonal,
+            design,
+            W,
+            facts,
+            specs or {},
+        )
+        if split is not None and weak_mask is not None and np.any(weak_mask):
+            weak = _weak_directions(
+                split,
+                weak_mask,
+                decomposition,
+                columns,
+                width,
+                design,
+                cast(NDArray, W),
+                beta,
+                data_apply,
+            )
+            accuracy = weak.accuracy / UNIT_ROUNDOFF
+            condition = max(condition, accuracy)
+    return Identifiability(
+        width=width,
+        aliases=tuple(aliases),
+        penalised_condition=condition,
+        fixed_effect_condition=fixed_effect_condition,
+        gauge=gauge,
+        row_directions=0 if split is None else candidates.shape[1],
+        weak=weak,
+        covariance=decomposition.covariance if construction is not None else None,
+        rank=(
+            None
+            if construction is None
+            else int(decomposition.rank) + (0 if weak is None else weak.root.shape[1])
+        ),
+    )
+
+
+def _read_rows(
+    decomposition: TruncatedDecomposition,
+    candidates: NDArray,
+    groups: Sequence,
+    design,
+    W: NDArray,
+    data_diagonal: NDArray,
+    penalty: Callable[[NDArray], tuple[NDArray, NDArray]],
+    residual: NDArray | None,
+) -> _Split:
+    """The decision on the undecided directions ``T``, from one pass over the rows.
+
+    In the basis ``[K, T]``, ``K`` the part the decomposition certified positive definite, ``H``
+    is singular exactly where the Schur complement ``C = T'HT - T'HK (K'HK)^-1 K'HT`` is (a
+    positive definite block's Schur complement carries the nullity).  The rows give ``T'HT =
+    B'B + T'ST``, ``B = sqrt(W) X_c T``, and ``HT = D T + S T`` with ``D T = A'B`` from the same
+    pass (``grouped_projected_factor``); the decomposition's inverse on ``K`` gives ``V H T``, so
+    ``C = T'HT - (HT)' V (HT)`` and ``T - V H T`` are the directions it is the curvature of.
+    The decomposition left ``K'HT`` at its rounding (its own ``HT`` vanishes on ``K``), so the
+    correction is that rounding's square over ``K``'s curvature, and its own error is bounded
+    by ``||HT|| ||V HT||`` (taken as the shift).  An eigenvalue of ``C`` whose root is within
+    the rounding bound of ``B``'s singular values (``_row_bound``) and of ``T'ST`` cannot be told
+    from zero in float64: a direction of ``null(H)``.  One whose root clears it after the shift
+    is identified (Weyl); any other is not resolved at float64.  The bound grows with the rows
+    (``gamma_(n k) ||B||``, Higham 2002, Thm 19.4), so a near-duplicate column separated by
+    about ``n u`` of its norm is aliased on a large book and identified on a small sample.
+    """
+    from superglm.solvers.centered_system import grouped_projected_factor, weighted_mean_pair
+
+    weights = np.asarray(W, dtype=np.float64)
+    _, centre, centre_lo = weighted_mean_pair(design, weights, float(np.sum(weights)))
+    count = candidates.shape[1]
+    score = None if residual is None else np.zeros(count)
+    factor, cross, _, inflated = grouped_projected_factor(
+        design,
+        weights,
+        candidates,
+        center=centre,
+        center_lo=centre_lo,
+        response=None if residual is None else np.asarray(residual, dtype=np.float64),
+        score_out=score,
+    )
+    factor = np.asarray(factor)
+    if factor.shape[0] < count:
+        factor = np.vstack((factor, np.zeros((count - factor.shape[0], count))))
+    bound = _row_bound(candidates, groups, design, factor, data_diagonal, inflated)
+    applied, magnitude = penalty(candidates)
+    hessian = np.asarray(cross, dtype=np.float64) + applied
+    corrected = (
+        np.zeros_like(hessian)
+        if decomposition.solve is None
+        else np.asarray(decomposition.solve(hessian), dtype=np.float64)
+    )
+    curvature = candidates.T @ applied
+    coupling = hessian.T @ corrected
+    schur = factor.T @ factor + 0.5 * (curvature + curvature.T) - 0.5 * (coupling + coupling.T)
+    # ``|fl(T'ST) - T'ST| <= gamma_(2p) |T|'|S||T|`` (Higham 2002, eq. 3.13)
+    rounding = gamma_up(2 * candidates.shape[0]) * float(
+        np.linalg.norm(np.abs(candidates).T @ magnitude)
+    )
+    limit = bound + math.sqrt(rounding)
+    shift = float(np.linalg.norm(hessian, 2)) * float(np.linalg.norm(corrected, 2))
+    values, vectors = np.linalg.eigh(schur)
+    null = np.sqrt(np.maximum(values, 0.0)) <= limit
+    identified = np.sqrt(np.maximum(values - shift, 0.0)) > limit
+    return _Split(
+        refined=candidates - corrected,
+        values=values,
+        vectors=vectors,
+        null=null,
+        identified=identified & ~null,
+        limit=limit,
+        score=score,
+        data=np.asarray(cross, dtype=np.float64),
+        candidates=candidates,
+        penalised=applied,
+    )
+
+
+def _row_bound(
+    candidates: NDArray,
+    groups: Sequence,
+    design,
+    factor: NDArray,
+    data_diagonal: NDArray,
+    inflated: NDArray,
+) -> float:
+    """The rounding bound on the singular values of ``B = sqrt(W) X_c T`` read from the rows.
+
+    One pass forms ``B`` about the exact centre pair and its triangle
+    (``grouped_projected_factor``).  An entry of ``B`` is within ``gamma_(p + T + 3)`` of
+    ``|a_r|' |t_j|`` (``a_r`` a centred row, inflated where a centre is added after the
+    product), and a column of ``|A|`` has norm ``sqrt(D_ii)``; the triangle adds ``gamma_(n k)
+    ||B||_F`` (Higham 2002, Thm 19.4) and the SVD ``gamma_(k^2)``.  A singular value within
+    their sum of zero cannot be told from zero in float64 (Weyl).
+    """
+    width = candidates.shape[1]
+    magnitude = np.maximum(
+        np.sqrt(np.maximum(data_diagonal, 0.0)), np.asarray(inflated, dtype=np.float64)
+    )
+    formation = gamma_up(candidates.shape[0] + len(groups) + 3) * (magnitude @ np.abs(candidates))
+    return float(np.linalg.norm(formation)) + gamma_up(
+        int(design.n) * width + width * width
+    ) * float(np.linalg.norm(factor))
+
+
+def _design_null(
+    decomposition: TruncatedDecomposition,
+    directions: NDArray,
+    groups: Sequence,
+    design,
+    support: NDArray,
+    penalty: Callable[[NDArray], tuple[NDArray, NDArray]],
+) -> tuple[NDArray, NDArray]:
+    """Of the directions the weighted rows cannot tell from zero, those the design cannot either.
+
+    With every lambda positive ``null(H) = N_S null(X N_S)`` on the rows with positive prior
+    weight: a working weight carries no information about identifiability, only about its
+    precision.  So the directions are read once more at unit weight on those rows
+    (``grouped_projected_factor``): the curvature ``B_1'B_1 + T'ST`` of the Hessian at unit
+    weight, and an eigenvalue whose root is within the rounding bound of ``B_1``'s singular
+    values (``_row_bound``, the pass's own column norms) and of ``T'ST`` is an alias of the
+    design, as in ``_read_rows``.  The rest are
+    identified by the design and carry no weighted curvature the fit can resolve: they move
+    fitted values, so they are never a gauge, and their coordinates' standard errors are not
+    resolved at float64.  Returns the aliases and the rest, in decomposition coordinates.
+    """
+    from superglm.solvers.centered_system import grouped_projected_factor, weighted_mean_pair
+
+    oriented = _orthonormal(decomposition, directions)
+    scale = np.asarray(decomposition.column_scale, dtype=np.float64)
+    directions = oriented / np.where(scale > 0.0, scale, 1.0)[:, None]
+    count = directions.shape[1]
+    if count == 0:
+        return directions, directions
+    weights = np.asarray(support, dtype=np.float64)
+    _, centre, centre_lo = weighted_mean_pair(design, weights, float(np.sum(weights)))
+    factor, _, _, magnitudes = grouped_projected_factor(
+        design, weights, directions, center=centre, center_lo=centre_lo
+    )
+    factor = np.asarray(factor)
+    if factor.shape[0] < count:
+        factor = np.vstack((factor, np.zeros((count - factor.shape[0], count))))
+    bound = _row_bound(
+        directions, groups, design, factor, np.zeros(directions.shape[0]), magnitudes
+    )
+    applied, magnitude = penalty(directions)
+    curvature = directions.T @ applied
+    rounding = gamma_up(2 * directions.shape[0]) * float(
+        np.linalg.norm(np.abs(directions).T @ magnitude)
+    )
+    values, vectors = np.linalg.eigh(factor.T @ factor + 0.5 * (curvature + curvature.T))
+    rotated = directions @ vectors
+    null = np.sqrt(np.maximum(values, 0.0)) <= bound + math.sqrt(rounding)
+    return rotated[:, null], rotated[:, ~null]
+
+
+def _weak_directions(
+    split: _Split,
+    mask: NDArray,
+    decomposition: TruncatedDecomposition,
+    columns: NDArray,
+    width: int,
+    design,
+    W: NDArray,
+    beta: NDArray | None,
+    data_apply: Callable[[NDArray], NDArray] | None,
+) -> WeakDirections:
+    """The identified directions the decomposition truncated, fitted from the rows (``WeakDirections``).
+
+    On the refined directions ``T Q`` (``Q`` the eigenvectors of ``C`` they take) the curvature
+    is ``diag(mu)``, so their covariance is ``T Q mu^-1 Q'T'`` and the Newton step at the fit's
+    weights ``T Q mu^-1 Q' g``, ``g = B'r - T'S beta`` the score the pass read (the decomposition
+    solved its part of the score, so ``K``'s share of it is the fit's own tolerance).
+    """
+    from superglm.solvers.centered_system import weighted_mean_pair
+
+    vectors = split.vectors[:, mask]
+    values = split.values[mask]
+    directions = split.refined @ vectors
+    root = directions / np.sqrt(values)
+    step = np.zeros(decomposition.width)
+    fitted = split.score is not None and beta is not None
+    if fitted:
+        # the score along ``T``; along ``T - V H T`` it differs by ``(V H T)' g``, ``V g`` the
+        # decomposition's solve of a score it has already solved
+        score = split.score - split.penalised.T @ np.asarray(beta, dtype=np.float64)
+        step = directions @ ((vectors.T @ score) / values)
+    weights = np.asarray(W, dtype=np.float64)
+    mean, _, _ = weighted_mean_pair(design, weights, float(np.sum(weights)))
+    mean = np.asarray(mean, dtype=np.float64)
+    # ``D (T - V H T)``: ``D T`` from the rows, ``D V H T`` at the formed Gram's rounding
+    data = split.data - (
+        0.0 if data_apply is None else np.asarray(data_apply(split.candidates - split.refined))
+    )
+    fitted_root, fitted_step = np.zeros((width, root.shape[1])), np.zeros(width)
+    fitted_data = np.zeros((width, root.shape[1]))
+    fitted_root[columns], fitted_step[columns] = root, step
+    fitted_data[columns] = (data @ vectors) / np.sqrt(values)
+    return WeakDirections(
+        root=fitted_root,
+        intercept=-(mean @ root),
+        step=fitted_step,
+        intercept_step=-float(mean @ step),
+        accuracy=float(split.limit / np.sqrt(np.min(values))),
+        data=fitted_data,
+        fitted=fitted,
+    )
+
+
+def _construction_gauge(
+    null: NDArray,
+    unresolved: NDArray,
+    decomposition: TruncatedDecomposition,
+    columns: NDArray,
+    width: int,
+    groups: Sequence,
+    owner: NDArray,
+    construction: Callable[[int], ConstructionColumns | None],
+    data_diagonal: NDArray | None,
+    design,
+    W: NDArray | None,
+    facts: _RowFacts,
+    specs: Mapping[Any, Any],
+) -> tuple[Gauge | None, list[Alias]]:
+    """The published constraints on ``null(H)``: the latest construction columns, in term order.
+
+    Each null direction is written on the terms' construction columns of ``X_F``
+    (``ConstructionColumns``), unit-normed by the centred data Gram's diagonal (a column's norm
+    for an unpenalised term, its block's diagonal for a smooth's, the scale the conditioning
+    check reads), and one column per
+    direction is held at zero: the latest each still reaches in term order
+    (``rank._earliest_representatives``, so the first-defined term keeps its coefficients), a
+    choice of the construction alone.  It is kept unless it amplifies the retained columns'
+    conditioning by more than ``_AMPLIFICATION_LIMIT`` (``rank._selection_amplification``); then
+    the conditioning-first choice (``rank._leverage_pivot_representatives``) takes its place.
+    Directions the construction columns cannot represent (an unresolved direction off the
+    penalty null space) are held on the fitted coordinates instead.  The ``unresolved``
+    directions (after the aliases) are held with them but never moved along (``Gauge.moved``).
+    """
+    from superglm.solvers.rank import (
+        _earliest_representatives,
+        _leverage_pivot_representatives,
+        _selection_amplification,
+    )
+
+    aliases_first = _orthonormal(decomposition, null[:, ~unresolved])
+    rest = _orthonormal(decomposition, null[:, unresolved])
+    if rest.shape[1]:
+        # the unresolved directions off the aliases' span, so the aliases keep their own
+        rest = rest - aliases_first @ (aliases_first.T @ rest)
+        left, singular, _ = np.linalg.svd(rest, full_matrices=False)
+        rest = left[:, singular > _SHARE_FLOOR] if singular.size else left
+    oriented = np.hstack((aliases_first, rest))
+    unresolved = np.r_[np.zeros(aliases_first.shape[1], bool), np.ones(rest.shape[1], bool)]
+    k = oriented.shape[1]
+    if k == 0:
+        return None, []
+    scale = np.asarray(decomposition.column_scale, dtype=np.float64)
+    safe = np.where(scale > 0.0, scale, 1.0)
+    null = oriented / safe[:, None]
+    touched = np.einsum("ij,ij->i", oriented, oriented) > float(np.finfo(float).eps) ** 2
+    entries: list[tuple[int, int, int]] = []
+    coefficients: list[NDArray] = []
+    norms: list[NDArray] = []
+    diagonal = (
+        np.ones(decomposition.width)
+        if data_diagonal is None
+        else np.maximum(np.asarray(data_diagonal, dtype=np.float64), 0.0)
+    )
+    for index in np.unique(owner[touched]):
+        group = groups[int(index)]
+        own = construction(int(index))
+        if own is None or own.local.shape[0] == 0:
+            continue
+        block, count = own.local.shape[1], own.local.shape[0]
+        rows = null[group.sl].reshape(own.blocks, block, k)
+        reached = np.flatnonzero(touched[group.sl].reshape(own.blocks, block).any(axis=1))
+        coefficients.append(np.einsum("mw,bwk->bmk", own.local, rows[reached]).reshape(-1, k))
+        local = diagonal[group.sl].reshape(own.blocks, block)[reached]
+        norms.append(np.sqrt(local @ (own.basis * own.basis)).ravel())
+        entries += [(int(index), int(level), j) for level in reached for j in range(count)]
+    norms_array = np.concatenate(norms) if norms else np.zeros(0)
+    norms_array = np.where(norms_array > 0.0, norms_array, 1.0)
+    chosen: list[tuple[int, int, int]] = []
+    if len(entries) >= k:
+        written = np.vstack(coefficients) * norms_array[:, None]
+        left, singular, _ = np.linalg.svd(written, full_matrices=False)
+        if singular[-1] > _SHARE_FLOOR * singular[0]:
+            keep = _earliest_representatives(left, len(entries) - k)
+            if keep is not None and _selection_amplification(left, keep) > _AMPLIFICATION_LIMIT:
+                pivoted = _leverage_pivot_representatives(left, len(entries) - k)
+                if pivoted is not None and _selection_amplification(
+                    left, pivoted
+                ) < _selection_amplification(left, keep):
+                    keep = pivoted
+            if keep is not None:
+                rejected = np.setdiff1d(np.arange(len(entries)), keep)
+                chosen = [entries[int(i)] for i in rejected]
+    functionals = np.zeros((decomposition.width, k))
+    if len(chosen) == k:
+        for i, (index, level, j) in enumerate(chosen):
+            own = cast(ConstructionColumns, construction(index))
+            block = own.local.shape[1]
+            start = groups[index].start + level * block
+            functionals[start : start + block, i] = own.local[j]
+    else:
+        keep = _earliest_representatives(oriented, decomposition.width - k)
+        held = (
+            np.argsort(-np.einsum("ij,ij->i", oriented, oriented))[:k]
+            if keep is None
+            else np.setdiff1d(np.arange(decomposition.width), keep)
+        )
+        functionals[held, np.arange(k)] = 1.0
+        chosen = []
+    if np.linalg.cond(functionals.T @ null) > 1.0 / UNIT_ROUNDOFF:
+        return None, []
+    from superglm.solvers.centered_system import weighted_mean_pair
+
+    intercept = np.zeros(k)
+    if design is not None and W is not None:
+        weights = np.asarray(W, dtype=np.float64)
+        mean, _, _ = weighted_mean_pair(design, weights, float(np.sum(weights)))
+        intercept = -(np.asarray(mean, dtype=np.float64) @ null)
+    fitted_null, fitted_functionals = np.zeros((width, k)), np.zeros((width, k))
+    fitted_null[columns], fitted_functionals[columns] = null, functionals
+    gauge = Gauge(
+        null=fitted_null,
+        functionals=fitted_functionals,
+        intercept=intercept,
+        moved=None if not np.any(unresolved) else ~unresolved,
+    )
+    aliases = []
+    dual_lift = np.linalg.inv(functionals.T @ null)
+    for i in range(k):
+        functional = functionals[:, i]
+        support = np.flatnonzero(functional)
+        dual = functional / safe
+        dual /= float(np.linalg.norm(dual))
+        share = np.abs(oriented @ (oriented.T @ dual))
+        representative = int(support[np.argmax(np.abs(functional[support]))])
+        term = int(owner[representative])
+        if support.size == 1:
+            name = _coordinate_name(representative, groups[term], specs)
+            coordinate: int | None = int(columns[representative])
+        else:
+            index, level, j = chosen[i]
+            name = cast(ConstructionColumns, construction(index)).name(level, j)
+            coordinate = None
+        # the direction this constraint holds, ``N (G'N)^-1 e_i``, and whether it is unresolved
+        held = oriented @ dual_lift[:, i]
+        floating = np.linalg.norm(oriented[:, unresolved].T @ held) > np.linalg.norm(
+            oriented[:, ~unresolved].T @ held
+        )
+        aliases.append(
+            _alias(
+                coordinate,
+                name,
+                representative,
+                term,
+                share,
+                floating,
+                decomposition,
+                groups,
+                owner,
+                facts,
+                specs,
+            )
+        )
+    return gauge, aliases
+
+
+def _published_blanks(published, decomposition, null: NDArray) -> NDArray:
+    """The coordinates a fit that cannot move its coefficients leaves without an SE.
+
+    Its coefficients are its solver's: where the published decomposition's zeros account for
+    ``null(H)`` (no null direction vanishes on them) those zeros; otherwise its split along a
+    null direction is arbitrary, and every coordinate the direction reaches is blank, with the
+    zeros.  A zero the penalised fit identifies stays blank, since the fit reports zero there.
+    """
+    oriented = _orthonormal(decomposition, null)
+    fixed = fixed_coordinates(decomposition if published is None else published)
+    k = oriented.shape[1]
+    spanned = k == 0 or (
+        fixed.size >= k and np.linalg.svd(oriented[fixed], compute_uv=False)[k - 1] > _SHARE_FLOOR
+    )
+    return fixed if spanned else np.union1d(fixed, _reached(oriented))
+
+
+def _coordinate_aliases(
+    blank: NDArray,
+    null: NDArray,
+    unresolved: NDArray,
+    decomposition,
+    columns: NDArray,
+    groups: Sequence,
+    owner: NDArray,
+    facts: _RowFacts,
+    specs: Mapping[Any, Any],
+) -> list[Alias]:
+    """One alias per blank coordinate, as ``_alias`` names it."""
+    oriented = _orthonormal(decomposition, null)
     aliases = []
     for coordinate in blank:
-        share = np.abs(null @ null[coordinate])
-        if not share[coordinate] > _SHARE_FLOOR**2:
+        share = np.abs(oriented @ oriented[coordinate]) if oriented.shape[1] else np.zeros(0)
+        if not share.size or not share[coordinate] > _SHARE_FLOOR**2:
             aliases.append(
                 Alias(
                     coordinate=int(columns[coordinate]),
                     term=groups[owner[coordinate]].name,
                     aliased_with=(),
-                    reason="the fit's rank decision fixed it at zero; the data and the "
+                    reason="the published coefficients hold it at zero; the data and the "
                     "penalty identify it",
                     source="fit",
                 )
             )
             continue
         term = int(owner[coordinate])
-        involved = sorted({term, *(int(owner[i]) for i in _reached_by(share))})
-        name = _coordinate_name(int(coordinate), groups[term], specs or {})
-        reason = _construction_reason(
-            int(coordinate), term, involved, decomposition, groups, facts, specs or {}, share
+        floating = bool(
+            np.any(unresolved)
+            and np.linalg.norm(oriented[coordinate, unresolved])
+            >= 0.5 * np.linalg.norm(oriented[coordinate])
         )
         aliases.append(
-            Alias(
-                coordinate=int(columns[coordinate]),
-                term=name,
-                aliased_with=tuple(groups[i].name for i in involved if i != term),
-                reason="no data separates them at float64" if reason is None else reason,
-                source="rank" if reason is None else "construction",
+            _alias(
+                int(columns[coordinate]),
+                _coordinate_name(int(coordinate), groups[term], specs),
+                int(coordinate),
+                term,
+                share,
+                floating,
+                decomposition,
+                groups,
+                owner,
+                facts,
+                specs,
             )
         )
-    return Identifiability(
-        width=width,
-        aliases=tuple(aliases),
-        penalised_condition=float(decomposition.pre_truncation_condition),
-        fixed_effect_condition=fixed_effect_condition,
-        gauge=published_gauge,
-        row_directions=row_directions,
+    return aliases
+
+
+def _alias(
+    coordinate: int | None,
+    name: str,
+    representative: int,
+    term: int,
+    share: NDArray,
+    floating: bool,
+    decomposition,
+    groups: Sequence,
+    owner: NDArray,
+    facts: _RowFacts,
+    specs: Mapping[Any, Any],
+) -> Alias:
+    """An alias with what it is aliased with and why: counted where the construction proves it."""
+    involved = sorted({term, *(int(owner[i]) for i in _reached_by(share))})
+    others = tuple(groups[i].name for i in involved if i != term)
+    if floating:
+        return Alias(
+            coordinate=coordinate,
+            term=name,
+            aliased_with=others,
+            reason="not resolved at float64: the rows cannot tell its curvature from zero",
+            source="float64",
+        )
+    reason = _construction_reason(
+        representative, term, involved, decomposition, groups, facts, specs, share
+    )
+    return Alias(
+        coordinate=coordinate,
+        term=name,
+        aliased_with=others,
+        reason="no data separates them at float64" if reason is None else reason,
+        source="rank" if reason is None else "construction",
     )
 
 
-def _gauge_coordinates(decomposition, null: NDArray) -> NDArray | None:
-    """The coordinates ``E`` a singular fit publishes at zero, one per direction of ``null(H)``.
+def published_edf(
+    base_edf: NDArray,
+    base_square: NDArray,
+    solve: Callable[[NDArray], NDArray],
+    data_apply: Callable[[NDArray], NDArray],
+    weak: WeakDirections | None,
+    columns: NDArray,
+) -> tuple[NDArray, NDArray]:
+    """``diag(F)`` and ``diag(2F - F^2)`` of the published fit's influence ``F``, on ``columns``.
 
-    ``null`` is the owner's ``null(H)``, orthonormal in Jacobi-scaled coordinates.  The published
-    decomposition's null directions must span it, since they are what its covariance inverts
-    off; then ``E`` holds the latest coordinate each direction reaches, by leverage above the
-    share floor after the later directions are taken out (``rank._earliest_representatives``), so
-    ``E'N`` is nonsingular at float64's resolution.  It reads the null space alone, so every
-    backend makes the same choice.  ``None`` when the spans differ or no choice exists.
+    ``F_b = V D`` is the solver's (``base_edf = diag(F_b)``, ``base_square = diag(F_b^2)``,
+    ``solve`` its ``V``, ``data_apply`` the data Gram ``D``).  The weak directions add ``U (D
+    U)'``, ``U`` their root and ``D U`` read from the rows (``WeakDirections.data``), so ``F =
+    F_b + U Y'`` and both diagonals follow from ``d`` products: Wood's EDF and ``edf1`` (2017,
+    sec. 6.1.2) of the published fit.  The gauge moves along ``null(H)``, where ``D N = 0``, so
+    it leaves the trace and is not read here.
     """
-    k = null.shape[1]
-    if k == 0:
-        return None
-    published = _orthonormal(decomposition, decomposition.null_basis())
-    if published.shape[1] != k:
-        return None
-    if np.linalg.svd(null.T @ published, compute_uv=False)[-1] < 1.0 - _SHARE_FLOOR:
-        return None
-    from superglm.solvers.rank import _earliest_representatives
-
-    keep = _earliest_representatives(published, published.shape[0] - k)
-    if keep is None:
-        return None
-    return np.setdiff1d(np.arange(published.shape[0]), keep)
-
-
-def _gauge(decomposition, chosen: NDArray, columns: NDArray, width: int, design, W) -> Gauge:
-    """The published null directions and ``chosen`` in fitted coordinates (``Gauge``).
-
-    ``X_c N = 0`` on the fit's rows, so ``X N`` is ``c'N`` there, ``c`` the weighted column
-    means of ``design`` at ``W``: the solver intercept moves by ``-c'N`` per unit step.
-    """
-    from superglm.solvers.centered_system import weighted_mean_pair
-
-    raw = np.asarray(decomposition.null_basis(), dtype=np.float64)
-    null = np.zeros((width, raw.shape[1]))
-    null[columns] = raw
-    weights = np.asarray(W, dtype=np.float64)
-    mean, _, _ = weighted_mean_pair(design, weights, float(np.sum(weights)))
-    intercept = -(np.asarray(mean, dtype=np.float64) @ raw)
-    return Gauge(null=null, coordinates=columns[chosen], intercept=intercept)
+    columns = np.asarray(columns, dtype=np.intp)
+    if weak is None:
+        return base_edf.copy(), 2.0 * base_edf - base_square
+    X, Y = weak.root[columns], weak.data[columns]
+    edf = base_edf + np.einsum("ij,ij->i", X, Y)
+    FX = np.asarray(solve(np.asarray(data_apply(X))), dtype=np.float64)
+    FtY = np.asarray(data_apply(np.asarray(solve(Y))), dtype=np.float64)
+    square = (
+        base_square
+        + np.einsum("ij,ij->i", FX, Y)
+        + np.einsum("ij,ij->i", X, FtY)
+        + np.einsum("ij,ij->i", X @ (Y.T @ X), Y)
+    )
+    return edf, 2.0 * edf - square
 
 
 def _coordinate_name(coordinate: int, group, specs: Mapping[Any, Any]) -> str:
@@ -484,196 +1155,6 @@ def _coordinate_name(coordinate: int, group, specs: Mapping[Any, Any]) -> str:
     if group.name == group.feature_name and levels is not None and len(levels) == group.size:
         return f"{group.name}[{levels[local]}]"
     return group.name
-
-
-def _null_space_basis(groups: Sequence, null_spaces: Sequence[NDArray], width: int) -> NDArray:
-    """``N_S``, block diagonal by term, in the decomposition's coordinates."""
-    blocks = [np.asarray(space, dtype=np.float64) for space in null_spaces]
-    basis = np.zeros((width, sum(block.shape[1] for block in blocks)))
-    column = 0
-    for group, block in zip(groups, blocks, strict=True):
-        basis[group.sl, column : column + block.shape[1]] = block
-        column += block.shape[1]
-    return basis
-
-
-def _truncated_null(
-    decomposition: TruncatedDecomposition,
-    groups: Sequence,
-    design,
-    W: NDArray | None,
-    penalty: Callable[[NDArray], tuple[NDArray, NDArray]],
-    data_diagonal: NDArray | None,
-) -> tuple[NDArray | None, int]:
-    """A structured factor's truncated directions when the rows put each under its bound.
-
-    The factor certified its kept pivots (Rump's verified Cholesky on its border, its levels
-    positive definite), so ``nullity(H) <= t``, ``t`` its truncated directions ``T``.  On an
-    orthonormal (Jacobi-scaled) basis of them the rows give the Rayleigh block ``T' H T = B'B +
-    T'ST``, ``B = sqrt(W) X_c T`` (``_row_factor``).  By Courant-Fischer its eigenvalues bound
-    the ``t`` smallest of ``H`` from above, so when every one is under the rounding bound of its
-    computation, ``H`` has ``t`` eigenvalues that cannot be told from zero, and ``span(T)`` is
-    ``null(H)``.  Otherwise (``None``) some truncated direction is identified, and the caller
-    decides ``null(X_F)`` from the rows.  Returns the directions (raw coordinates) and how many
-    were read from the rows.
-    """
-    if design is None or W is None or data_diagonal is None:
-        return None, 0
-    scale = np.asarray(decomposition.column_scale, dtype=np.float64)
-    scaled = _orthonormal(decomposition, decomposition.null_vectors)
-    if scaled.shape[1] == 0:
-        return None, 0
-    candidates = scaled / np.where(scale > 0.0, scale, 1.0)[:, None]
-    factor, bound = _row_factor(candidates, groups, design, W, data_diagonal)
-    applied, magnitude = penalty(candidates)
-    curvature = candidates.T @ applied
-    rayleigh = factor.T @ factor + 0.5 * (curvature + curvature.T)
-    # ``|fl(T'ST) - T'ST| <= gamma_(2p) |T|'|S||T|`` (Higham 2002, eq. 3.13)
-    rounding = gamma_up(2 * candidates.shape[0]) * float(
-        np.linalg.norm(np.abs(candidates).T @ magnitude)
-    )
-    values = np.linalg.eigvalsh(rayleigh)
-    if not np.all(np.sqrt(np.maximum(values, 0.0)) <= bound + math.sqrt(rounding)):
-        return None, candidates.shape[1]
-    return candidates, candidates.shape[1]
-
-
-def _fixed_effect_null(
-    basis: NDArray,
-    gram: NDArray,
-    data_diagonal: NDArray,
-    rows: int,
-    groups: Sequence,
-    design,
-    W: NDArray | None,
-) -> tuple[NDArray, float, int]:
-    """A basis of ``N_S null(X_F)`` in the decomposition's coordinates, ``X_F``'s condition.
-
-    ``gram`` is ``X_F``'s Gram ``N_S' D N_S`` and ``data_diagonal`` the diagonal of ``D``.  A
-    column of ``X_F`` whose Gram diagonal is zero has no data at all.  The rest is decided by
-    the Gram when every Jacobi-scaled eigenvalue clears its error bound, which then certifies
-    full rank (Weyl); otherwise by the rows on the eigenvectors it leaves undecided
-    (``_grey_null``), and failing that by the rows whole (``_row_factor``): an eigenvector below
-    the bound is a null vector only to within that bound over the spectral gap, so it is not
-    read as one.  The condition is ``X_F``'s, in singular values.  The third value counts the
-    directions read from the rows.
-    """
-    gram = 0.5 * (gram + gram.T)
-    diagonal = np.diag(gram)
-    active = np.flatnonzero(diagonal > 0.0)
-    nulls = [basis[:, np.flatnonzero(~(diagonal > 0.0))]]
-    if active.size == 0:
-        return nulls[0], 1.0, 0
-    scale = np.sqrt(diagonal[active])
-    values, vectors = np.linalg.eigh(gram[np.ix_(active, active)] / np.outer(scale, scale))
-    largest = float(values[-1])
-    # ``|dD_ij| <= gamma_n s_i s_j`` (Cauchy-Schwarz on the centred columns), so the
-    # congruence moves entry ``kl`` by at most ``gamma_n r_k r_l``, ``r = |N_S|' s``.
-    from superglm.solvers.rank import _eigensolver_relative_bar, _formation_slack
-
-    reach = (np.abs(basis[:, active]).T @ np.sqrt(np.maximum(data_diagonal, 0.0))) ** 2
-    error = _eigensolver_relative_bar(active.size + 1) * largest + _formation_slack(
-        gamma_up(rows + 2) * reach, diagonal[active]
-    )
-    if values[0] > error:
-        return nulls[0], math.sqrt(largest / float(values[0])), 0
-    columns = basis[:, active] / scale
-    grey = int(np.searchsorted(values, error, side="right"))
-    while grey < values.size and values[grey] - values[grey - 1] < _GREY_GAP * error:
-        grey += 1
-    read = 0
-    if grey <= _GREY_CAP and grey < values.size and design is not None and W is not None:
-        decided = _grey_null(
-            columns @ vectors[:, :grey], values, grey, error, groups, design, W, data_diagonal
-        )
-        read = grey
-        if decided is not None:
-            null, smallest = decided
-            nulls.append(null)
-            return np.hstack(nulls), math.sqrt(largest) / smallest, read
-    if design is None or W is None:
-        return np.hstack((nulls[0], columns)), 1.0, read
-    factor, bound = _row_factor(columns, groups, design, W, data_diagonal)
-    _, singular, right_t = np.linalg.svd(factor)
-    nulls.append(columns @ right_t.T[:, ~(singular > bound)])
-    kept = singular[singular > bound]
-    condition = float(kept[0] / kept[-1]) if kept.size else 1.0
-    return np.hstack(nulls), condition, read + columns.shape[1]
-
-
-def _grey_null(
-    grey: NDArray,
-    values: NDArray,
-    count: int,
-    error: float,
-    groups: Sequence,
-    design,
-    W: NDArray,
-    data_diagonal: NDArray,
-) -> tuple[NDArray, float] | None:
-    """``null(X_F)`` from the rows on the Gram's ``count`` undecided eigenvectors, or ``None``.
-
-    In the computed eigenbasis ``[V_1, V_2]`` (``grey = N_S V_2 / s``) the Jacobi-scaled Gram
-    is ``[[G_1, E], [E', G_2]]``: ``G_1`` has eigenvalues at least ``L_1 = w_(count+1) - e``
-    (Weyl), ``||E|| <= e`` (the computed eigenpairs are exact for a matrix within ``e``), and
-    ``G_2 = B'B`` with ``B = A grey`` read from the rows.  A singular value of ``B`` at or below
-    its rounding bound is a null direction of ``X_F`` by interlacing (Courant-Fischer); one
-    whose square clears the bound's by Li & Li's shift ``2 e^2 / (eta + sqrt(eta^2 + 4 e^2))``
-    (Linear Algebra Appl. 395, 2005; ``eta`` the gap between the blocks) is identified.  Any
-    other leaves the block undecided.  Returns the null directions and ``X_F``'s smallest kept
-    singular value.
-    """
-    from superglm.solvers.rank import _li_li_shift
-
-    factor, bound = _row_factor(grey, groups, design, W, data_diagonal)
-    _, singular, right_t = np.linalg.svd(factor)
-    floor = float(values[count]) - error
-    gap = floor - (float(singular[0]) + bound) ** 2
-    shift = _li_li_shift(2.0 * error, gap)
-    null = singular <= bound
-    identified = np.sqrt(np.maximum(singular * singular - shift, 0.0)) > bound
-    if not np.all(null | identified):
-        return None
-    kept = singular[identified]
-    smallest = min(float(kept[-1]), math.sqrt(floor)) if kept.size else math.sqrt(floor)
-    return grey @ right_t.T[:, null], smallest
-
-
-def _row_factor(
-    columns: NDArray,
-    groups: Sequence,
-    design,
-    W: NDArray,
-    data_diagonal: NDArray,
-) -> tuple[NDArray, float]:
-    """The triangle of ``B = sqrt(W) X_c columns`` from the rows, and its singular values' bound.
-
-    One pass forms ``B`` about the exact centre pair and its triangle
-    (``grouped_projected_factor``).  An entry of ``B`` is within ``gamma_(p + T + 3)`` of
-    ``|a_r|' |n_j|`` (``a_r`` a centred row, inflated where a centre is added after the
-    product), and a column of ``|A|`` has norm ``sqrt(D_ii)``; the triangle adds ``gamma_(n k)
-    ||B||_F`` (Higham 2002, Thm 19.4) and the SVD ``gamma_(k^2)``.  A singular value within
-    their sum of zero cannot be told from zero in float64 (Weyl).
-    """
-    from superglm.solvers.centered_system import grouped_projected_factor, weighted_mean_pair
-
-    width = columns.shape[1]
-    weights = np.asarray(W, dtype=np.float64)
-    _, centre, centre_lo = weighted_mean_pair(design, weights, float(np.sum(weights)))
-    factor, _, _, inflated = grouped_projected_factor(
-        design, weights, columns, center=centre, center_lo=centre_lo
-    )
-    factor = np.asarray(factor)
-    if factor.shape[0] < width:
-        factor = np.vstack((factor, np.zeros((width - factor.shape[0], width))))
-    magnitude = np.maximum(
-        np.sqrt(np.maximum(data_diagonal, 0.0)), np.asarray(inflated, dtype=np.float64)
-    )
-    formation = gamma_up(columns.shape[0] + len(groups) + 3) * (magnitude @ np.abs(columns))
-    bound = float(np.linalg.norm(formation)) + gamma_up(
-        int(design.n) * width + width * width
-    ) * float(np.linalg.norm(factor))
-    return factor, bound
 
 
 def _orthonormal(decomposition, vectors: NDArray) -> NDArray:
@@ -881,13 +1362,16 @@ def _empty_basis_functions(matrix, positive: NDArray) -> int:
 
 __all__ = [
     "Alias",
+    "ConstructionColumns",
     "Gauge",
     "Identifiability",
     "TruncatedDecomposition",
+    "WeakDirections",
     "certified_identifiability",
     "coordinates_identified",
     "decide_identifiability",
     "fixed_coordinates",
     "functional_identified",
     "penalty_null_space",
+    "published_edf",
 ]

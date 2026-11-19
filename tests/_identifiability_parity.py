@@ -5,7 +5,9 @@ backends (``fs``, ``sz``, nested chains) read it from their retained factors and
 backend from its rank record.  On a full-rank penalised Hessian both report every standard
 error, the same footnotes and the same values.  On a singular one both publish one gauge
 (``identifiability.Gauge``): one coordinate per null direction at zero and blank, the rest with
-the same coefficients and standard errors, and no fitted value moved.
+the same coefficients and standard errors, and no fitted value moved.  Each null direction is
+held on a construction column of its term (``identifiability.ConstructionColumns``): a held
+unpenalised column is blank, a held part of a smooth blanks no coordinate.
 """
 
 from __future__ import annotations
@@ -104,18 +106,18 @@ def without_gauge(monkeypatch, fit):
     from superglm.model import state_ops
 
     with monkeypatch.context() as patch:
-        # absent before fits published a gauge (``raising=False``)
-        patch.setattr(state_ops, "publish_identified_gauge", lambda model: None, raising=False)
+        patch.setattr(state_ops, "publish_identified_fit", lambda model: None)
         return fit()
 
 
 def assert_one_gauge(structured_metrics, dense_metrics, frame, *, rtol: float, before=None) -> None:
     """A singular Hessian: both backends publish the same gauge (``identifiability.Gauge``).
 
-    The same blanks, footnotes and standard errors (``assert_same_identifiability``), zero
-    coefficients on the blanks and the same coefficients elsewhere, normwise: in this gauge
-    they reach ``7e3`` beside fitted values of order one, so a solve's error is the vector's,
-    not each entry's.  The structured fit moved its coefficients (its record holds the gauge),
+    The same blanks, footnotes and standard errors (``assert_same_identifiability``), the same
+    constraints, each holding its functional of the coefficients at zero, and the same
+    coefficients, normwise: in this gauge they reach ``7e3`` beside fitted values of order one,
+    so a solve's error is the vector's, not each entry's.  The structured fit moved its
+    coefficients (its record holds the gauge),
     and each backend predicts what the same fit without the gauge (``before``, from
     ``without_gauge``) predicts, to ``1e-12`` of the predictor's own magnitude ``|b_0| + |x|'
     |beta|`` in either gauge: the size of the rounding any evaluation of it carries.  Without
@@ -124,11 +126,17 @@ def assert_one_gauge(structured_metrics, dense_metrics, frame, *, rtol: float, b
     assert_same_identifiability(structured_metrics, dense_metrics, rtol=rtol)
     structured, dense = structured_metrics._model, dense_metrics._model
     blank = ~np.asarray(structured._fit_inference_info["coefficient_identified"])
-    assert np.any(blank)
     beta, reference = structured.result.beta, dense.result.beta
     assert np.all(beta[blank] == 0.0) and np.all(reference[blank] == 0.0)
     assert np.max(np.abs(beta - reference)) <= rtol * np.max(np.abs(reference))
-    assert structured._fit_inference_info["identifiability"].gauge is not None
+    gauges = [model._fit_inference_info["identifiability"].gauge for model in (structured, dense)]
+    assert all(gauge is not None for gauge in gauges)
+    functionals = [gauge.functionals for gauge in gauges]
+    np.testing.assert_allclose(functionals[0], functionals[1], rtol=rtol, atol=rtol)
+    for model, gauge in zip((structured, dense), gauges, strict=True):
+        held = gauge.functionals.T @ model.result.beta
+        scale = np.abs(gauge.functionals).T @ np.abs(model.result.beta)
+        assert np.all(np.abs(held) <= 1e-12 * np.maximum(scale, 1.0))
     X = np.abs(np.asarray(structured._dm.toarray(), dtype=np.float64))
     for model, unmoved in zip((structured, dense), before or (), strict=bool(before)):
         magnitude = np.maximum(

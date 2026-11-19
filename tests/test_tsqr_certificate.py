@@ -587,8 +587,11 @@ def _aliased_tweedie_fit(monkeypatch):
     Two aliased factors keep every PIRLS step, terminal state and observed
     geometry of the fit on the factor certificate.  Returns ``fit()``, which
     fits and returns the coefficients, and the list of ``(inputs, thread)``
-    of every TSQR pass of the last fit.
+    of every TSQR pass of the last fit that factors its rows: the
+    identifiability owner's projections of a few directions
+    (``centered_system.grouped_projected_factor``) are not recorded.
     """
+    import superglm.solvers.centered_system as centered_system
     from superglm import Tweedie
 
     rng = np.random.default_rng(3)
@@ -606,7 +609,11 @@ def _aliased_tweedie_fit(monkeypatch):
     y = rng.gamma(2.0, mu / 2.0) * (rng.uniform(size=n) < 0.3)
     passes: list[tuple[bytes, str]] = []
 
+    projecting: list[bool] = []
+
     def record(*arrays) -> None:
+        if projecting:
+            return
         inputs = b"|".join(
             b"-" if a is None else np.asarray(a, dtype=np.float64).tobytes() for a in arrays
         )
@@ -624,6 +631,16 @@ def _aliased_tweedie_fit(monkeypatch):
 
     monkeypatch.setattr(rank, "streamed_weighted_factor", recorded)
     monkeypatch.setattr(rank, "streamed_weighted_factor_rhs", recorded_rhs)
+    project = centered_system.grouped_projected_factor
+
+    def projected(*args, **kwargs):
+        projecting.append(True)
+        try:
+            return project(*args, **kwargs)
+        finally:
+            projecting.pop()
+
+    monkeypatch.setattr(centered_system, "grouped_projected_factor", projected)
 
     def fit() -> np.ndarray:
         passes.clear()
