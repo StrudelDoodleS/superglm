@@ -537,16 +537,7 @@ def test_a_fit_whose_border_truncates_weak_columns_publishes_a_semidefinite_cova
         selection_penalty=0,
         direct_solve="structured",
     )
-    # null_0 at 1e-22 sits below the REML floor, which a public fit refuses: the
-    # levels' constants alias the intercept.  This reads the border on that fit.
-    from unittest import mock
-
-    import superglm.model.fit_ops as fit_ops
-
-    with (
-        mock.patch.object(fit_ops, "_refuse_aliased_level_constants", lambda *args: None),
-        warnings.catch_warnings(),
-    ):
+    with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         model.fit_reml(frame, y)
     factor = model._linear_system_state.augmented_factor

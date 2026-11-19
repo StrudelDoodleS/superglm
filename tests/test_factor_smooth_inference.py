@@ -434,7 +434,7 @@ def _alias_rows() -> tuple[pd.DataFrame, np.ndarray]:
 
 
 @pytest.mark.parametrize("null_0", [0.0, 1.0e-14])
-def test_null_0_below_the_floor_is_refused_and_above_it_prices_unseen_levels_in_any_level_order(
+def test_null_0_at_zero_is_refused_below_the_floor_disclosed_and_above_it_prices_in_any_order(
     null_0,
 ) -> None:
     """A null_0 below the REML floor leaves the levels' constants free against the intercept.
@@ -442,8 +442,8 @@ def test_null_0_below_the_floor_is_refused_and_above_it_prices_unseen_levels_in_
     The rank treatment kept all but the last-listed level's constant, so listing the
     same levels in another order moved the unseen-level price (9.893 against 6.988 on
     this data, at zero and at 1e-14 alike) and the plotted standard errors.  The fit
-    refuses it; above the floor the penalty identifies the constants, and the declared
-    order does not matter.
+    refuses zero and warns below the floor; above the floor the penalty identifies the
+    constants, and the declared order does not matter.
     """
     from superglm.plotting.interactions import _factor_smooth_curves
 
@@ -464,8 +464,12 @@ def test_null_0_below_the_floor_is_refused_and_above_it_prices_unseen_levels_in_
                 family="gaussian", interactions=[smooth], selection_penalty=0.0, tol=1e-10
             )
 
-        with pytest.raises(ValueError, match="aliased with the fitted intercept"):
-            model(null_0).fit_reml(X, y)
+        if null_0 == 0.0:
+            with pytest.raises(ValueError, match="aliased with the fitted intercept"):
+                model(null_0).fit_reml(X, y)
+        else:
+            with pytest.warns(UserWarning, match="may follow the order the levels"):
+                model(null_0).fit_reml(X, y)
         fitted = model(1.0e-2).fit_reml(X, y)
         prices.append(fitted.predict(unseen)[0])
         curves = _factor_smooth_curves(fitted, "x:group:fs", n_points=7)["per_level"]

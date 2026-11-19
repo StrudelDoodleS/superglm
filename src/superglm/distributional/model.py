@@ -768,8 +768,8 @@ def _fixed_fit_lambdas(
 
     Components of ``select=True`` ``sz`` terms (prefixes in ``selected_lines``)
     refuse zero: an unpenalized level with no rows would make the system singular.
-    An fs ``null_0`` in ``level_constant_floors`` refuses a lambda below its floor
-    (``check_fs_level_constants``).
+    An fs ``null_0`` in ``level_constant_floors`` refuses a zero lambda and warns
+    below its floor (``check_fs_level_constants``).
     """
     values: Mapping[str, float] = {} if supplied is None else supplied
     if not isinstance(values, Mapping):

@@ -334,20 +334,31 @@ def _check_fs_declaration(name: str, k: int, m: int, lambda_policy: Any) -> None
 
 
 def check_fs_level_constants(name: str, null_0: float, floor: float) -> None:
-    """Refuse an fs term's ``null_0`` fixed below ``floor`` beside the intercept.
+    """Refuse an fs term's ``null_0`` fixed at zero beside the intercept; disclose one below ``floor``.
 
     The data cannot tell the levels' constants from the intercept, so only ``null_0``
-    identifies them; below the REML floor (``_lambda_box``) its penalty is lost in the
-    rounding of the data's curvature, and zero leaves them free.
+    identifies them. At zero they are aliased, which the structured route refuses too.
+    Below the REML floor (``_lambda_box``) its penalty can be lost in the rounding of the
+    data's curvature, so the unseen-level price may follow the order the levels are
+    listed in: the fit goes ahead and says so.
     """
-    if null_0 < floor:
+    if null_0 <= 0.0:
         raise ValueError(
             f"FactorSmooth term {name!r} is aliased with the fitted intercept: null_0, each "
-            f"level's constant, is fixed at {null_0:g}, below {floor:g}, the smallest "
-            "smoothing parameter this fit resolves, so the levels' constants and the "
-            "intercept trade off freely, and the unseen-level prediction and the curves' "
-            "standard errors would follow the order the levels are listed in. Estimate "
-            f"null_0, or fix it at {floor:g} or above."
+            "level's constant, is fixed at 0, so the levels' constants and the intercept "
+            "trade off freely, and the unseen-level prediction and the curves' standard "
+            "errors would follow the order the levels are listed in. Estimate null_0, or "
+            "fix it above 0."
+        )
+    if null_0 < floor:
+        warnings.warn(
+            f"FactorSmooth term {name!r}: null_0, each level's constant, is fixed at "
+            f"{null_0:g}, below {floor:g}, the smallest smoothing parameter this fit "
+            "resolves. The data cannot tell the levels' constants from the intercept, so the "
+            "unseen-level prediction and the curves' standard errors may follow the order "
+            f"the levels are listed in. Estimate null_0, or fix it at {floor:g} or above.",
+            UserWarning,
+            stacklevel=3,
         )
 
 
@@ -424,9 +435,9 @@ class FactorSmooth:
         ``"null_0"`` ... ``"null_{m-1}"`` under ``basis="fs"``, ``"wiggle"`` (and
         ``"null"`` with ``select=True``) under ``basis="sz"``, and estimates the
         ones it does not name.  None estimates every component by REML.
-        Under ``basis="fs"`` a fit refuses ``null_0`` fixed below the REML floor
-        (zero included) in a predictor with an intercept: the levels' constants
-        would alias it.
+        Under ``basis="fs"``, in a predictor with an intercept, a fit refuses
+        ``null_0`` fixed at zero (the levels' constants would alias it) and warns
+        when it is fixed below the REML floor.
     name : str or None
         The term's name; defaults to ``"{variable}:{group}:{basis}"``.
     select : bool, default False
