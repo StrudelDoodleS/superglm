@@ -93,10 +93,10 @@ class TestLiftChartWeighted:
         # Exposure shares should sum to ~1
         assert abs(result.bins["exposure_share"].sum() - 1.0) < 1e-6
 
-    @pytest.mark.pins_behaviour
     def test_sample_weight_affects_result(self):
-        """A control: weights change the chart, as they did before. Its comparison was rewritten because
-        a heavy row now fills fewer bins, not because the behaviour it pins changed."""
+        """Weights change the chart: each weighting's occupied bins are the midpoint rule's on its
+        own mass, and each bin's observed mean is weighted by it. A heavy row fills fewer bins, so
+        the bins are those of the midpoint rule (#675), which the chart before it did not draw."""
         y_obs = np.array([1, 2, 3, 4, 5], dtype=float)
         y_pred = np.array([1.1, 1.9, 3.1, 4.2, 4.8], dtype=float)
         w1 = np.ones(5)

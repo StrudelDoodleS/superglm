@@ -2825,7 +2825,9 @@ def test_final_fit_keeps_a_finding_from_a_fit_short_of_the_guard_after_an_edit(m
     """A control: a runtime finding from a stagnant fit short of the guard stands after any edit.
 
     Master warned here too (it held nothing back); this pins that the edit hold-back added
-    with Final fit's post-edit warning does not drop a finding the edit cannot answer.
+    with Final fit's post-edit warning does not drop a finding the edit cannot answer. The
+    finding is forced through ``runtime_finding``, the backstop's one check since #676, so on
+    code before #676 the test fails for want of that name, not of the warning.
 
     The refit's backstop is forced to report the exhausted-budget signature while its
     predictor stays interior: every log prediction lies well inside the guard. An edit
