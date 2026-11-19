@@ -228,7 +228,8 @@ class SuperGLM:
             ``"ignore"`` disables the check. Terms under an active selection
             penalty are exempt. The same mode governs the solver's backstop
             for separation the build scan cannot see (read from the fitted
-            coefficients, not from a search's trial solves), the hold on a
+            coefficients, or each point ``fit_path`` returns, not from a
+            search's trial solves), the hold on a
             spline-by-factor level's curve over a boundary-only range, and the
             warning for a ``FactorSmooth(basis="sz")`` level whose line
             separates (warned, never refused; ``select=True`` is the remedy).
