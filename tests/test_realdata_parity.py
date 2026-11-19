@@ -72,6 +72,9 @@ MGCV_GAMMA = {
     "edf_total": 36.88,
     "intercept": 7.792,
     "pred_mean": 2333.6,
+    # cor(y, fitted): rerun with R 4.5.0, mgcv 1.9.3, which reproduces the
+    # deviance and EDF above to the digits shown
+    "pred_cor_y": 0.09024,
 }
 
 # NB2 with theta=1000 is near-Poisson on this data, so predictions
@@ -517,11 +520,20 @@ class TestGammaGroupLassoSanity:
         assert np.all(mu > 0)
 
     def test_prediction_correlation_with_y(self, model):
+        """The selection fit reads as much of the claim amounts as mgcv's REML fit.
+
+        Severity is noisy: mgcv's fit of the same terms correlates 0.0902 with
+        the amounts. This fit smooths by a fixed penalty and shrinks by
+        ``selection_penalty=0.001`` instead, so it differs from mgcv's by its
+        smoothing, not by rounding: measured 0.0912, 0.0010 above, its
+        predictions correlating 0.998 with mgcv's. The bar, 0.005, is five times
+        the measured gap and a twentieth of the correlation; the 0.01 floor it
+        replaces passed any fit with a signal.
+        """
         m, df, y, *_ = model
         mu = m.predict(df)
         r = np.corrcoef(y, mu)[0, 1]
-        # Severity prediction is inherently weak
-        assert r > 0.01, f"pred-response correlation {r:.3f} too low"
+        assert abs(r - MGCV_GAMMA["pred_cor_y"]) < 0.005, f"pred-response correlation {r:.4f}"
 
 
 # ═══════════════════════════════════════════════════════════════════════
