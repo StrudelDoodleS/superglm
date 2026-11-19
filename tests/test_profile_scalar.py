@@ -385,3 +385,14 @@ def test_re_centring_stops_at_its_budget(monkeypatch):
     cutoff = chi2.isf(0.05, 1)
     for end in (interval.lower, interval.upper):
         assert 2.0 * two_wells(end) == pytest.approx(cutoff, abs=1e-8)
+
+
+def test_a_side_whose_inner_end_already_meets_a_round_off_cutoff_ends_there():
+    """A cutoff inside the profile's round-off (alpha = 1 - 1e-8 gives 1.6e-16) can leave the
+    excess at x_hat itself at or above it, so no bracket has opposite signs: the side ends at
+    x_hat instead of raising from the root finder."""
+    root, censored = _scalar._interval_side(
+        lambda x: 1e-17 + (x - 1.0) ** 2, {1.0: 0.0}, 1.0, 2.0, 1.6e-16, 1e-12
+    )
+
+    assert (root, censored) == (1.0, False)

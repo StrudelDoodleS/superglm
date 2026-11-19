@@ -236,6 +236,10 @@ def _interval_side(excess, recorded, x_hat, bound, cutoff, xtol) -> tuple[float,
             return bound, True
         step *= 2.0
         inner, outer = outer, _toward(x_hat, bound, step)
+    # A cutoff inside the profile's round-off can leave the inner end, x_hat itself, at or
+    # above it: the crossing is then the inner end, to within that round-off.
+    if excess(inner) >= 0.0:
+        return inner, False
     root = float(brentq(excess, min(inner, outer), max(inner, outer), xtol=xtol))
     return root, excess(root) < 0.0 and _infeasible_beyond(recorded, root, bound)
 
