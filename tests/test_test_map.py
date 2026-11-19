@@ -252,6 +252,33 @@ def test_a_selection_that_is_most_of_the_suite_runs_the_whole_suite(tmp_path):
     assert selection.full is not None and "recorded seconds" in selection.full
 
 
+def test_a_deleted_test_file_leaves_the_selection_but_whoever_ran_its_code_stays(tmp_path):
+    root = _repo(tmp_path)
+    ran = {"tests/test_caller.py": {"test_call": ["tests/test_caller.py", "tests/test_reader.py"]}}
+    (root / "tests/test_caller.py").unlink()
+    changed = test_map.changes(_map(root)["commit"], root)
+    # pytest refuses a path that is not there, so the deleted file is never handed to it.
+    assert _selected(test_map.select(_map(root, ran=ran), changed, root)) == {
+        "tests/test_reader.py"
+    }
+
+
+INHERITS = "class Base:\n    def value(self):\n        return 1\n\n\nclass Child(Base):\n    pass\n"
+CHILD_TEST = (
+    "from superglm.shapes import Child\n\n\ndef test_value():\n    assert Child().value() == 1\n"
+)
+
+
+def test_an_added_override_reaches_who_used_the_class_through_its_inherited_method(tmp_path):
+    root = _repo(tmp_path)
+    _commit_module(root, {"src/superglm/shapes.py": INHERITS, "tests/test_user.py": CHILD_TEST})
+    # The map records Base.value: the test ran the inherited method, nothing of Child's own.
+    ran = {"src/superglm/shapes.py": {"Base.value": ["tests/test_user.py"]}}
+    override = INHERITS.replace("    pass\n", "    def value(self):\n        return 200\n")
+    changed = _change(root, "src/superglm/shapes.py", override)
+    assert _selected(test_map.select(_map(root, ran=ran), changed, root)) == {"tests/test_user.py"}
+
+
 def test_merge_folds_a_shared_fixtures_reach_into_each_test_file_that_uses_it(tmp_path):
     record = {
         "reached": {
@@ -279,6 +306,10 @@ RECORDED_MODULE = """def helper():
 
 def in_child():
     return 2
+
+
+def dynamic():
+    return 3
 """
 RECORDED_TESTS = """import os
 import subprocess
@@ -294,8 +325,17 @@ def shared():
     return recorded.helper()
 
 
+@pytest.fixture(scope="module")
+def lazily():
+    return recorded.dynamic()
+
+
 def test_uses_the_fixture(shared):
     assert shared == 1
+
+
+def test_asks_for_a_fixture_while_it_runs(request):
+    assert request.getfixturevalue("lazily") == 3
 
 
 def test_runs_a_child():
@@ -326,8 +366,10 @@ def test_a_recorded_run_maps_fixtures_and_subprocesses_to_their_test_file(tmp_pa
     )
     assert run.returncode == 0, run.stdout[-2000:]
     data = test_map.merge(out)
-    assert data["functions"]["src/superglm/recorded.py"] == {"helper": [0], "in_child": [0]}
-    assert data["tests"]["tests/test_recorded.py"][0] == 2
+    # A fixture asked for by name while a test runs counts like one the test lists.
+    functions = {"helper": [0], "in_child": [0], "dynamic": [0]}
+    assert data["functions"]["src/superglm/recorded.py"] == functions
+    assert data["tests"]["tests/test_recorded.py"][0] == 3
     # Each function shows under its own context: the fixture's and the child's.
     records = [json.loads(path.read_text(encoding="utf-8")) for path in out.glob("*.json")]
     contexts = {
@@ -336,4 +378,5 @@ def test_a_recorded_run_maps_fixtures_and_subprocesses_to_their_test_file(tmp_pa
         for context, files in record["reached"].items()
         if "src/superglm/recorded.py" in files
     }
-    assert contexts == {"tests/test_recorded.py", "fixture:tests/test_recorded.py::shared"}
+    fixtures = {f"fixture:tests/test_recorded.py::{name}" for name in ("shared", "lazily")}
+    assert contexts == {"tests/test_recorded.py", *fixtures}

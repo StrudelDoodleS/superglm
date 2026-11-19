@@ -372,7 +372,10 @@ def _quick_suite(full: bool, start: str | None) -> str:
         command, env = _with_variables(_pytest(label, suite, cores), variables)
         _run("quick suite", command, env=env, passing=frozenset({0, NO_TESTS_COLLECTED}))
         tests = _junit_tests(junit)
-        if variables:
+        if variables and _clean_head() != start:
+            # The run read whatever the checkout held as it changed: no map of ``start`` from it.
+            print(f"pre-push: the checkout moved off {start[:12]} during the run; no map recorded")
+        elif variables:
             data = test_map.merge(out)
             print(
                 f"pre-push: recorded a test map of {start[:12]} in {test_map.save(data, start, ROOT)}"

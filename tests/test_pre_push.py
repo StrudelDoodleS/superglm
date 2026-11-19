@@ -298,3 +298,18 @@ def test_the_quick_suite_runs_the_selection_or_everything_and_records_a_map(tmp_
     assert "--files-from" not in command and "test_map_plugin" in command
     assert test_map.OUT_ENV in " ".join(command) or test_map.OUT_ENV in (env or {})
     assert (test_map.map_directory(pre_push.ROOT) / f"{head}.json").exists()
+
+
+def test_a_map_is_not_kept_when_the_checkout_moved_during_the_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(pre_push, "ROOT", _repo(tmp_path))
+    test_map = pre_push._test_map()
+    monkeypatch.setattr(pre_push, "_test_map", lambda: test_map)
+
+    def run(label, command, env=None, passing=None):
+        # Another session edits a tracked file while the suite runs.
+        (pre_push.ROOT / "tests" / "test_old.py").write_text("x = 2\n", encoding="utf-8")
+
+    monkeypatch.setattr(pre_push, "_run", run)
+    head = pre_push._git("rev-parse", "HEAD")
+    pre_push._quick_suite(full=True, start=head)
+    assert not (test_map.map_directory(pre_push.ROOT) / f"{head}.json").exists()

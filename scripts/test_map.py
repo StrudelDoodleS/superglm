@@ -31,7 +31,9 @@ formatting do not count), a test file is selected when:
 2. it ran a function whose definition (decorators, signature, docstring, body) changed or was
    removed; or it read the changed file (``inspect.getsource`` included), or listed the directory
    the changed file is in (it may hand the file to a process the recorder cannot see);
-3. a method was added to a class whose functions it ran (an override changes dispatch), or a
+3. a method was added to a class whose functions it ran, or whose name it reads, followed as in
+   rule 4 (an override changes dispatch, and a test that ran only an inherited method recorded
+   the base's), or a
    function was added with a decorator other than ``PLAIN`` ones (a decorator can register it)
    to a file it ran; or a module-level statement that binds nothing (a registration call)
    changed in a file it ran, or in a file whose functions that statement calls;
@@ -916,12 +918,16 @@ class _Selector:
             module = (_module_name(path) or "").split(".")
             reach = {*module, "modules", "import_module", "__path__", "walk_packages"}
             self.readers(ENUMERATORS, path, "lists a module's names", True, frozenset(reach))
+        grown = set()
         for method in sorted(added):
             owner, _, _ = method.rpartition(".")
             if owner and "<locals>" not in method:
                 prefix = f"{owner}."
                 ran = [q for q in before.functions if q.startswith(prefix)]
                 self.run_functions(path, ran, f"runs {owner}, which gained {method}")
+                # A test that ran only an inherited method recorded the base's name; the class's
+                # name reaches it.
+                grown.add(owner.split(".")[0])
             if method in after.decorated:
                 self.selection.add(self.ran(path), f"runs {path}, which gained decorated {method}")
         old_bindings, new_bindings = before.bindings(), after.bindings()
@@ -953,7 +959,7 @@ class _Selector:
         if attributes:
             self.attribute_readers(attributes, path)
         timed = modified & set(self.data["import_time"].get(path, ()))
-        names |= {q.split(".")[0] for q in timed}
+        names |= {q.split(".")[0] for q in timed} | grown
         if self.compiles(path):
             names |= {q.split(".")[0] for q in modified | added}
         if _module_name(path) is None and names:
@@ -1043,7 +1049,11 @@ class _Selector:
                 break
         if outside_tests:
             selection.add(data["untracked"], "starts a Python the recorder cannot follow")
-        selection.add((name for name in ALWAYS if (self.root / name).exists()), "contract test")
+        selection.add(ALWAYS, "contract test")
+        # A deleted test file ran its own code, but pytest refuses a path that is not there.
+        selection.files = {
+            name: reason for name, reason in selection.files.items() if (self.root / name).exists()
+        }
         tests = data["tests"]
         selection.map_commit = data["commit"]
         selection.map_tests = sum(count for count, _ in tests.values())
