@@ -380,3 +380,23 @@ def test_a_recorded_run_maps_fixtures_and_subprocesses_to_their_test_file(tmp_pa
     }
     fixtures = {f"fixture:tests/test_recorded.py::{name}" for name in ("shared", "lazily")}
     assert contexts == {"tests/test_recorded.py", *fixtures}
+
+
+def test_build_records_no_map_when_the_checkout_moved_during_its_run(tmp_path, monkeypatch):
+    """A tracked file edited while ``build`` runs the suite leaves no map under the old commit.
+
+    Mutation: ``build`` checked the tree only before the run, and saved the map anyway.
+    """
+    root = _repo(tmp_path)
+    monkeypatch.setattr(test_map, "ROOT", root)
+    commit = _git(root, "rev-parse", "HEAD")
+
+    def suite(*args, **kwargs):
+        (root / "tests" / "test_other.py").write_text("x = 2\n", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(test_map.subprocess, "call", suite)
+    monkeypatch.setattr(test_map, "merge", lambda out: {"tests": {}})
+    with pytest.raises(SystemExit, match="the checkout moved during the run"):
+        test_map.main(["build"])
+    assert not (test_map.map_directory(root) / f"{commit}.json").exists()

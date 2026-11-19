@@ -1115,6 +1115,10 @@ def main(argv: list[str] | None = None) -> int:
         if code != 0:  # a failing test reached less than it would have: no map from it
             sys.exit(f"test_map: the suite exited {code}; no map recorded")
         data = merge(Path(out))
+    if git(ROOT, "rev-parse", "HEAD") != commit or git(
+        ROOT, "status", "--porcelain", "--untracked-files=no"
+    ):
+        sys.exit("test_map: the checkout moved during the run; no map recorded")
     target = save(data, commit)
     print(f"test_map: recorded {len(data['tests'])} test files at {commit[:12]} in {target}")
     return code
