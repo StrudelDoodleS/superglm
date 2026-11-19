@@ -760,6 +760,7 @@ def compile_predictor_design(
                                 penalized=info.penalized,
                                 feature_name=iname,
                                 subgroup_type=info.subgroup_name,
+                                interaction=True,
                                 constraints=info.constraints,
                                 monotone_engine=info.monotone_engine,
                             )
@@ -785,6 +786,8 @@ def compile_predictor_design(
                                 penalty_dim=penalty_dim,
                                 penalized=True,
                                 feature_name=iname,
+                                interaction=True,
+                                level=level,
                                 constraints=info.constraints,
                                 monotone_engine=info.monotone_engine,
                             )
@@ -806,6 +809,7 @@ def compile_predictor_design(
                     penalty_dim=penalty_dim,
                     penalized=True,
                     feature_name=iname,
+                    interaction=True,
                     constraints=result.constraints,
                     monotone_engine=result.monotone_engine,
                 )

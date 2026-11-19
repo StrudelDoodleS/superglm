@@ -371,12 +371,11 @@ def _poisson_deviance(y, mu):
 def test_predict_reproduces_the_fit_for_non_string_partner_levels(level_dtype):
     """An OC x Categorical fit must predict what it fitted, whatever the level type.
 
-    ``update_reml_r_inv`` recovers each level from a group's DISPLAY name, so a
-    non-string level arrives stringified -- integer ``2`` as ``"2"``.
-    ``SplineCategorical.score()`` looks the ORIGINAL key up, so keying the
-    reparametrisation dict on the parsed text drops it for every non-string
-    level and ``predict()`` silently diverges from the design it was fitted on.
-    The string case is the control: it was always correct and must stay so.
+    ``SplineCategorical.score()`` looks each level's fitted reparametrisation up
+    by the ORIGINAL level, so ``update_reml_r_inv`` must key it by the level
+    the group was built for (``GroupSlice.level``), never by text read back out
+    of the group's display name, where integer ``2`` reads as ``"2"``.  The
+    string case is the control: it was always correct and must stay so.
     """
     rng = np.random.default_rng(0)
     n = 4000

@@ -583,6 +583,7 @@ def optimize_direct_reml(
         lambdas,
         estimated_mask,
         dm.group_matrices,
+        groups=groups,
         distribution=distribution,
         link=link,
         y=y,
@@ -743,7 +744,7 @@ def optimize_direct_reml(
         lam_prev = max(float(lambdas.get(pc.name, 1e-4)), box.floor)
         log_prev = np.log(lam_prev)
         log_target = np.log(max(lam_fp, box.floor))
-        if ":" in pc.group_name:
+        if groups[pc.group_index].interaction:
             log_target = np.clip(
                 log_target,
                 log_prev - bootstrap_log_step_cap,

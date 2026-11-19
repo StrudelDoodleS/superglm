@@ -1,9 +1,12 @@
 """Tests for all interaction features."""
 
+import pickle
+
 import numpy as np
 import pandas as pd
 import pytest
 
+from superglm import ConvergenceWarning, interaction, term
 from superglm.features.categorical import Categorical
 from superglm.features.interaction import (
     CategoricalInteraction,
@@ -69,6 +72,28 @@ def simple_model_data():
 
     X = pd.DataFrame({"x": x_cont, "cat": x_cat})
     return X, y
+
+
+def _banded_severity(right: bool):
+    """Weighted log severity whose ``risk`` curve differs by pandas.cut age band.
+
+    Returns the frame with interval levels, the same frame with plain labels
+    in the same order, the response and the weights.
+    """
+    rng = np.random.default_rng(4053)
+    risk = np.tile(np.linspace(0.0, 1.0, 25), 12)
+    age = rng.integers(18, 65, risk.size)
+    bands = pd.cut(age, bins=[17, 24, 39, 64] if right else [18, 25, 40, 65], right=right)
+    shift = np.array([0.0, 0.18, -0.22])[bands.codes]
+    wiggle = np.array([0.34, 0.77, -0.06])[bands.codes]
+    weight = rng.uniform(0.55, 1.7, risk.size)
+    noise = rng.normal(size=risk.size) * 0.16 / np.sqrt(weight)
+    y = 7.4 + 0.55 * risk + wiggle * np.sin(2.0 * np.pi * risk) + shift + noise
+    intervals = pd.DataFrame({"risk": risk, "band": bands})
+    plain = intervals.assign(
+        band=pd.Categorical.from_codes(bands.codes, ["a 18-24", "b 25-39", "c 40-64"])
+    )
+    return intervals, plain, y, weight
 
 
 # ── SplineCategorical build tests ─────────────────────────────
@@ -904,6 +929,67 @@ class TestSplineCategoricalPerLevel:
         assert interaction_groups
         assert all(isinstance(gm, SplineCategoricalGroupMatrix) for gm, _ in interaction_groups)
         assert len(interaction_penalties) == len(interaction_groups)
+
+    @pytest.mark.parametrize("discrete", [False, True], ids=["exact", "binned"])
+    @pytest.mark.parametrize("right", [False, True], ids=["left_closed", "right_closed"])
+    def test_fit_reml_predicts_interval_levels_as_plain_labels(self, right, discrete):
+        """A REML fit's predictions do not depend on how its factor's levels are spelled.
+
+        pandas.cut levels such as ``[25, 40)`` carry brackets and commas into
+        the group names; each level's fitted reparametrisation is still keyed
+        by the level itself.  The reference is the same fit with plain labels,
+        and predict() reproduces the fitted deviance, before and after a save.
+        """
+        intervals, plain, y, weight = _banded_severity(right)
+
+        def fit(X):
+            return SuperGLM(
+                family="gaussian",
+                features={"risk": Spline(n_knots=4), "band": Categorical(base="first")},
+                interactions=[("risk", "band")],
+                selection_penalty=0.0,
+                discrete=discrete,
+                n_bins=32,
+            ).fit_reml(X, y, sample_weight=weight)
+
+        banded, reference = fit(intervals), fit(plain)
+        predicted = banded.predict(intervals)
+
+        np.testing.assert_allclose(predicted, reference.predict(plain), rtol=1e-10)
+        assert np.dot(weight, (y - predicted) ** 2) == pytest.approx(
+            banded.result.deviance, rel=1e-10
+        )
+        restored = pickle.loads(pickle.dumps(banded))
+        np.testing.assert_array_equal(restored.predict(intervals), predicted)
+
+    def test_interaction_and_level_names_do_not_move_a_capped_reml_fit(self):
+        """REML seeds an interaction's smoothing parameters whatever its names say.
+
+        One outer step, forced, so the start shows in the fit: a custom term
+        name without a colon and a level label with one fit exactly as the
+        default-named, plain-labelled term does.
+        """
+        _, plain, y, weight = _banded_severity(right=False)
+        relabelled = plain.assign(band=plain["band"].cat.rename_categories({"b 25-39": "b 25:39"}))
+
+        def fit(X, name):
+            model = SuperGLM(
+                family="gaussian",
+                terms=[
+                    term("risk", Spline(n_knots=4)),
+                    term("band", Categorical(base="first")),
+                    interaction(SplineCategorical("risk", "band"), name=name),
+                ],
+                selection_penalty=0.0,
+            )
+            with pytest.warns(ConvergenceWarning, match="max_reml_iter"):
+                return model.fit_reml(X, y, sample_weight=weight, max_reml_iter=1)
+
+        reference, renamed = fit(plain, None), fit(relabelled, "by_band")
+
+        np.testing.assert_allclose(
+            renamed.predict(relabelled), reference.predict(plain), rtol=1e-10
+        )
 
 
 class TestNaturalSplineModelSpecifics:

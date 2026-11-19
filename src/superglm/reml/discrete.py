@@ -422,6 +422,7 @@ def bootstrap_seed_lambdas(
     estimated_mask: NDArray,
     group_matrices: Sequence[Any],
     *,
+    groups: Sequence[GroupSlice],
     distribution: Any,
     link: Any,
     y: NDArray,
@@ -435,8 +436,8 @@ def bootstrap_seed_lambdas(
     Cold seeds, followed by one Fellner-Schall step: 1e-4 (almost
     unpenalized), except
 
-    - interaction components, 1.0, as rich tensor bases can explode
-      unpenalized;
+    - an interaction's components (``GroupSlice.interaction``), 1.0, as rich
+      tensor bases can explode unpenalized;
     - random effects, their levels' mean information
       (``random_effect_seed_lambda``), since an unidentified level near zero
       penalty makes the Fellner-Schall step return about ``lambda`` times a
@@ -446,7 +447,9 @@ def bootstrap_seed_lambdas(
     fixed-policy components start at their fixed value; every seed is clipped
     to ``box``.
     """
-    seeds = {pc.name: box.clip(1.0 if ":" in pc.group_name else 1e-4) for pc in penalties}
+    seeds = {
+        pc.name: box.clip(1.0 if groups[pc.group_index].interaction else 1e-4) for pc in penalties
+    }
     cold_random_effects = [
         pc
         for index, pc in enumerate(penalties)
@@ -680,6 +683,7 @@ def optimize_discrete_reml_cached_w(
         lambdas,
         estimated_mask,
         dm.group_matrices,
+        groups=groups,
         distribution=distribution,
         link=link,
         y=y,
@@ -883,7 +887,7 @@ def optimize_discrete_reml_cached_w(
         lam_prev = max(float(lambdas.get(pc.name, 1e-4)), box.floor)
         log_prev = np.log(lam_prev)
         log_target = np.log(max(lam_fp, box.floor))
-        if ":" in pc.group_name:
+        if groups[pc.group_index].interaction:
             log_target = np.clip(
                 log_target,
                 log_prev - bootstrap_log_step_cap,

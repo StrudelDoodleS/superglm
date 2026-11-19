@@ -325,6 +325,11 @@ class GroupSlice:
     # Dimension the penalty prices this group at, set only under
     # ``group_pricing="spanned"``; read it through ``penalty_size``.
     penalty_dim: int | None = None
+    # The group's identity is set where the group is built and read from
+    # here, never parsed back out of ``name``: whether an interaction built it,
+    # and a per-level block's own factor level, as the factor holds it.
+    interaction: bool = False
+    level: Hashable | None = None
 
     def __post_init__(self):
         if self.feature_name is _FEATURE_NAME_UNSET:
