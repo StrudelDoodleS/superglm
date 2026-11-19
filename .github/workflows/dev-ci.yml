@@ -220,15 +220,15 @@ jobs:
         run: uv run pytest tests/editor/ -m browser --run-browser -q
 
   fix-tests:
-    # Reports; neither a flag nor a failure of the check itself blocks (continue-on-error). Run
-    # over the last fourteen merged pull requests the check flagged tests in ten of them (77 of
-    # 887 tests), and most that were read pin behaviour that already worked, so a blocking job
-    # would teach authors to add the marker. The job is not a required context in the ruleset:
-    # making a flag block takes dropping --report-only here and adding the job to the ruleset.
-    # It sits last because the contract tests read the workflow between two job names.
+    # Fails a pull request that changes src/ on a test it adds or changes that passes on the
+    # base commit's code (the base's tree with the pull request's tests), unless the test is a
+    # control: marked pins_behaviour, with a docstring saying what it pins. A test the base
+    # cannot import a name for fails there; one it cannot decide otherwise fails the job.
+    # The report lists every control, so a reviewer reads each one. The check failing to run
+    # (its own timeout) fails the job too. It sits last because the contract tests read the
+    # workflow between two job names.
     name: new tests against the base commit's src
     runs-on: ubuntu-latest
-    continue-on-error: true
     timeout-minutes: 45
 
     steps:
@@ -257,7 +257,7 @@ jobs:
           set -o pipefail
           status=0
           timeout --kill-after=60s 30m \
-            uv run --no-sync python scripts/check_fix_tests.py --base HEAD^1 --report-only \
+            uv run --no-sync python scripts/check_fix_tests.py --base HEAD^1 \
             -- -n logical --dist worksteal 2>&1 | tee fix-tests.txt || status=$?
           { echo '```text'; cat fix-tests.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"

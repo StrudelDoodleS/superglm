@@ -181,18 +181,41 @@ jobs:
           retention-days: 1
 
   python-floor:
-    # Preserve the existing required context and gate it on the entire matrix
-    # and the Polars floor.
+    # Preserve the existing required context and gate it on the entire matrix,
+    # the Polars floor and the check that every test ran somewhere.
     name: Python 3.12 · non-browser suite · version floor
     if: ${{ always() }}
-    needs: [test-compatibility, polars-floor]
+    needs: [test-compatibility, polars-floor, never-run]
     runs-on: ubuntu-latest
     steps:
-      - name: Require every compatibility shard and the Polars floor to pass
+      - name: Require every compatibility shard, the Polars floor and the run check to pass
         env:
           TEST_RESULT: ${{ needs.test-compatibility.result }}
           POLARS_FLOOR_RESULT: ${{ needs.polars-floor.result }}
-        run: python -c "import os, sys; sys.exit(any(os.environ[k] != 'success' for k in ('TEST_RESULT', 'POLARS_FLOOR_RESULT')))"
+          NEVER_RUN_RESULT: ${{ needs.never-run.result }}
+        run: python -c "import os, sys; sys.exit(any(os.environ[k] != 'success' for k in ('TEST_RESULT', 'POLARS_FLOOR_RESULT', 'NEVER_RUN_RESULT')))"
+
+  never-run:
+    # A test every platform skipped passed in no shard. The shards' junit reports
+    # name them; scripts/check_never_run_tests.py fails on one unless it names
+    # the workflow that does run it, and unless every one of the matrix's 20
+    # shards (groups times runtimes) reported a test.
+    name: Every test runs on some platform
+    if: ${{ always() }}
+    needs: test-compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Download every shard's results
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: pytest-*
+          path: junit
+
+      - name: Fail on a test skipped on every platform
+        run: python3 scripts/check_never_run_tests.py junit --shards 20
 
   polars-floor:
     # The lock holds the newest Polars, so the matrix never runs the declared

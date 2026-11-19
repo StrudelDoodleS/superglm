@@ -179,7 +179,7 @@ def test_required_workflow_runs_for_pull_requests_and_python_floor() -> None:
     assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in workflow
     assert len(floor) == 1, f"exactly one job must publish {_PYTHON_FLOOR_CHECK!r}"
     assert "if: ${{ always() }}" in floor[0]
-    assert "needs: [test-compatibility, polars-floor]" in floor[0]
+    assert "needs: [test-compatibility, polars-floor, never-run]" in floor[0]
     matrix = _jobs(workflow)["test-compatibility"]
     assert {case for case in _compatibility_cases(matrix) if case[0] == "3.12"} == {
         ("3.12", "ubuntu-latest", group, label, "") for group, label in enumerate("ABCD", start=1)
@@ -407,27 +407,36 @@ def test_suite_runner_stages_report_both_failures(tmp_path: Path, stage: int) ->
     assert "2 failed" in completed.stdout, completed.stdout + completed.stderr
 
 
+@pytest.mark.parametrize("never_run_result", ["success", "failure"])
 @pytest.mark.parametrize("floor_result", ["success", "failure", "cancelled", "skipped"])
 @pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped"])
-def test_python_floor_aggregate_executes_the_matrix_verdict(result: str, floor_result: str) -> None:
-    """The required context passes only when the matrix and the Polars floor both passed."""
+def test_python_floor_aggregate_executes_the_matrix_verdict(
+    result: str, floor_result: str, never_run_result: str
+) -> None:
+    """The required context passes only when the matrix, the Polars floor and the run check passed."""
     workflow = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     aggregate = _jobs(workflow)["python-floor"]
     assert "TEST_RESULT: ${{ needs.test-compatibility.result }}" in aggregate
     assert "POLARS_FLOOR_RESULT: ${{ needs.polars-floor.result }}" in aggregate
+    assert "NEVER_RUN_RESULT: ${{ needs.never-run.result }}" in aggregate
     commands = re.findall(r"(?m)^        run: (.+)$", aggregate)
     assert len(commands) == 1
     command = shlex.split(commands[0])
     assert command[:2] == ["python", "-c"]
     completed = subprocess.run(
         [sys.executable, *command[1:]],
-        env=os.environ | {"TEST_RESULT": result, "POLARS_FLOOR_RESULT": floor_result},
+        env=os.environ
+        | {
+            "TEST_RESULT": result,
+            "POLARS_FLOOR_RESULT": floor_result,
+            "NEVER_RUN_RESULT": never_run_result,
+        },
         capture_output=True,
         text=True,
         timeout=5,
         check=False,
     )
-    passed = result == floor_result == "success"
+    passed = result == floor_result == never_run_result == "success"
     assert (completed.returncode == 0) == passed, completed.stderr
 
 
@@ -497,14 +506,16 @@ def test_type_check_enforces_and_validates_the_accepted_backlog() -> None:
 
 
 @pytest.mark.pins_behaviour
-def test_fix_tests_job_only_reports_and_writes_its_summary_inside_its_limit() -> None:
+def test_fix_tests_job_fails_on_a_flag_and_writes_its_summary_inside_its_limit() -> None:
+    """A test a pull request adds that passes on its base fails the job, after the summary."""
     workflow = (_ROOT / ".github/workflows/dev-ci.yml").read_text(encoding="utf-8")
     job = yaml.safe_load(workflow)["jobs"]["fix-tests"]
     run = next(step["run"] for step in job["steps"] if "check_fix_tests" in step.get("run", ""))
     limit = int(re.search(r"timeout --kill-after=\d+s (\d+)m", run).group(1))
 
-    assert job["continue-on-error"] is True  # neither a flag nor a failed check blocks
-    assert "set -o pipefail" in run and "| tee fix-tests.txt" in run and "--report-only" in run
+    assert "continue-on-error" not in job and "--report-only" not in run
+    assert "set -o pipefail" in run and "| tee fix-tests.txt" in run
+    assert run.rstrip().endswith('exit "$status"')  # the check's own status, flags included
     assert limit < job["timeout-minutes"]  # the summary is written before the job's own limit
     assert run.index("timeout") < run.index("GITHUB_STEP_SUMMARY")
 
@@ -923,3 +934,329 @@ def test_the_durations_refresh_drops_the_runtime_ci_measures_under_coverage() ->
     )
     upload = next(step for step in job["steps"] if step.get("name") == "Upload shard results")
     assert "-py${{ matrix.runtime.python-version }}-" in upload["with"]["name"]
+
+
+def test_the_never_run_check_reads_every_shard_after_the_matrix() -> None:
+    """The check downloads each shard's junit artifact, whatever the shards' verdict, and
+    requires a report from every shard of the matrix."""
+    jobs = yaml.safe_load((_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"]
+    matrix = jobs["test-compatibility"]["strategy"]["matrix"]
+    job, upload = (
+        jobs["never-run"],
+        next(
+            step
+            for step in jobs["test-compatibility"]["steps"]
+            if step.get("name") == "Upload shard results"
+        ),
+    )
+    download = next(step for step in job["steps"] if "download-artifact" in step.get("uses", ""))
+
+    assert job["needs"] == "test-compatibility" and job["if"] == "${{ always() }}"
+    assert (
+        upload["with"]["name"].startswith("pytest-") and download["with"]["pattern"] == "pytest-*"
+    )
+    assert upload["with"]["name"].endswith("-${{ matrix.group }}")  # the platform is the rest
+    shards = len(matrix["group"]) * len(matrix["runtime"])
+    assert any(
+        step.get("run")
+        == f"python3 scripts/check_never_run_tests.py {download['with']['path']} --shards {shards}"
+        for step in job["steps"]
+    )
+    # each shard's two reports, the parallel stage's and the threads stage's, are the ones it reads
+    written = {
+        re.search(r"--junitxml=(\S+)", step["run"])[1]
+        for step in jobs["test-compatibility"]["steps"]
+        if "run_test_suite.py" in step.get("run", "")
+    }
+    assert [(report, _suite_runner()._beside(report)) for report in written] == [_REPORTS]
+
+
+# A shard's reports: run_test_suite.py's parallel stage, then its serial threads stage.
+_REPORTS = ("pytest-results.xml", "pytest-results-threads.xml")
+
+
+def _junit(
+    directory: Path,
+    platform: str,
+    cases: dict[tuple[str, str], str],
+    group: int = 1,
+) -> Path:
+    """One shard's two reports: ``{(classname, name): outcome}`` in its parallel stage's and
+    one passing test in its threads stage's; outcome ``passed``, ``xfail``, ``notrun``
+    (``xfail(run=False)``) or a skip message, in the forms pytest writes."""
+    shard = directory / f"pytest-{platform}-{group}"
+    shard.mkdir(parents=True)
+    threads = {("tests.test_ci_contracts", "test_with_the_default_pools"): "passed"}
+    for report, stage in zip(_REPORTS, (cases, threads), strict=True):
+        body = []
+        for (classname, name), outcome in stage.items():
+            inner = {
+                "passed": "",
+                "xfail": '<skipped type="pytest.xfail" message="declared" />',
+                "notrun": '<skipped type="pytest.xfail" message="[NOTRUN] disabled until fixed" />',
+            }.get(outcome, f'<skipped type="pytest.skip" message="{outcome}" />')
+            body.append(
+                f'<testcase classname="{classname}" name="{name}" time="0.1">{inner}</testcase>'
+            )
+        (shard / report).write_text(
+            f'<testsuites><testsuite name="pytest">{"".join(body)}</testsuite></testsuites>',
+            encoding="utf-8",
+        )
+    return shard
+
+
+def _check_never_run(directory: Path, shards: int = 2) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(_ROOT / "scripts/check_never_run_tests.py"),
+            str(directory),
+            "--shards",
+            str(shards),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+
+def test_the_never_run_check_fails_only_on_a_test_no_platform_ran(tmp_path: Path) -> None:
+    """Skipped on one platform, run on another: fine; skipped on both: named, unless run
+    elsewhere, which a skip's message shows only when every skip of the test has it and
+    the workflow it names runs the test's module."""
+    gamlss = (
+        "tests.test_two_piece_lss_vertical_slice",
+        "test_real_line_family_matches_gamlss_sn2_at_a_parametric_specification",
+    )
+    book = "[dataset] freMTPL2freq.parquet is not readable"
+    cases = {
+        ("tests.test_ci_contracts", "test_one_platform"): "requires Windows",
+        ("tests.test_ci_contracts", "test_declared_failure"): "xfail",
+        ("tests.test_realdata_parity", "test_on_the_book"): book,
+        gamlss: "requires R with mgcv and jsonlite",
+        ("", "tests.docs.test_notebooks"): "collection skipped",
+        ("tests.test_check_fix_tests", "test_runs_on_linux"): "passed",
+    }
+    on_windows = cases | {
+        ("tests.test_ci_contracts", "test_one_platform"): "passed",
+        ("", "tests.test_check_fix_tests"): "collection skipped",  # its tests ran on Linux
+    }
+    del on_windows[("tests.test_check_fix_tests", "test_runs_on_linux")]
+    _junit(tmp_path / "ran", "Linux-X64-py3.12", cases)
+    _junit(tmp_path / "ran", "Windows-X64-py3.13", on_windows)
+    never = {
+        ("tests.test_ci_contracts", "test_waits_for_an_event"): "the fit did not reach it",
+        ("tests.test_ci_contracts", "test_disabled"): "notrun",
+        ("tests.test_ci_contracts", "test_on_a_book_no_workflow_runs"): book,
+        ("tests.test_realdata_parity", "test_skipped_for_two_reasons"): book,
+        ("tests.test_check_fix_tests", "test_skipped_where_its_module_ran"): "requires a GPU",
+    }
+    _junit(tmp_path / "never", "Linux-X64-py3.12", cases | never)
+    _junit(
+        tmp_path / "never",
+        "Windows-X64-py3.13",
+        on_windows
+        | never
+        | {("tests.test_realdata_parity", "test_skipped_for_two_reasons"): "requires a GPU"},
+    )
+
+    ran, never_ran = _check_never_run(tmp_path / "ran"), _check_never_run(tmp_path / "never")
+    assert ran.returncode == 0, ran.stdout + ran.stderr
+    assert "1 in the Real data workflow" in ran.stdout and "1 in the docs workflow" in ran.stdout
+    assert f"tests/test_two_piece_lss_vertical_slice.py::{gamlss[1]}" in ran.stdout
+    assert "test_one_platform" not in ran.stdout and "test_declared_failure" not in ran.stdout
+    assert "test_check_fix_tests" not in ran.stdout
+    assert never_ran.returncode == 1
+    assert f"{len(never)} run on no platform" in never_ran.stdout
+    assert "tests/test_ci_contracts.py::test_waits_for_an_event: the fit did not reach it" in (
+        never_ran.stdout
+    )
+    for (classname, name), _ in never.items():
+        assert f"{classname.replace('.', '/')}.py::{name}: " in never_ran.stdout, name
+
+
+@pytest.mark.parametrize(
+    ("report", "fault"),
+    [(report, fault) for report in _REPORTS for fault in ("missing", "unreadable")]
+    + [(_REPORTS[0], "holds no test"), (None, "no artifact")],
+)
+def test_the_never_run_check_fails_unless_every_shard_sent_both_reports(
+    tmp_path: Path, report, fault
+) -> None:
+    """Either report of a shard missing or truncated, or its parallel one empty, hides what that
+    stage skipped, and the check names the shard and the file; a shard that sent nothing is
+    named by the platform and the group the other shards show, and a whole runtime missing is
+    counted."""
+    for platform in ("Linux-X64-py3.12", "Windows-X64-py3.13"):
+        for group in (1, 2):
+            _junit(tmp_path, platform, {("tests.test_ci_contracts", "test_a"): "passed"}, group)
+    shard = tmp_path / "pytest-Windows-X64-py3.13-2"
+    complete, runtime_missing = _check_never_run(tmp_path, 4), _check_never_run(tmp_path, 6)
+    if fault == "no artifact":
+        for name in _REPORTS:
+            (shard / name).unlink()
+        shard.rmdir()
+    elif fault == "missing":
+        (shard / report).unlink()
+    else:
+        text = (
+            '<testsuites><testsuite name="pytest">' if fault == "unreadable" else "<testsuites />"
+        )
+        (shard / report).write_text(text, encoding="utf-8")
+
+    done = _check_never_run(tmp_path, 4)
+
+    assert complete.returncode == 0, complete.stdout + complete.stderr
+    assert runtime_missing.returncode == 1 and "2 more sent no artifact" in runtime_missing.stdout
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "3 of 4 shards sent both reports, readable, the parallel one holding" in done.stdout
+    faults = [(name, "missing") for name in _REPORTS] if report is None else [(report, fault)]
+    for name, why in faults:
+        assert f"pytest-Windows-X64-py3.13-2/{name} {why}" in done.stdout
+
+
+def test_the_never_run_check_accepts_a_threads_stage_that_selected_nothing(tmp_path: Path) -> None:
+    """A group with no ``threads`` test writes a readable threads report of zero tests, which
+    the suite runner accepts (pytest's exit 5), so the check accepts it too."""
+    for group in (1, 2):
+        _junit(
+            tmp_path, "Linux-X64-py3.12", {("tests.test_ci_contracts", "test_a"): "passed"}, group
+        )
+    (tmp_path / "pytest-Linux-X64-py3.12-2" / _REPORTS[1]).write_text(
+        '<testsuites><testsuite name="pytest" tests="0" /></testsuites>', encoding="utf-8"
+    )
+
+    done = _check_never_run(tmp_path, 2)
+
+    assert done.returncode == 0, done.stdout + done.stderr
+
+
+# A fit's outcome: what an assertion behind ``if <outcome>:`` or a skip waits on.
+_OUTCOMES = {"converged", "convergence_reason", "termination_reason"}
+_ONE_SIDED = "one-sided by design: a certified result must be right, an unconverged one disclosed"
+_IMPLIES = "an implication between two published fields, both outcomes correct behaviour"
+_NEVER_RUN = "never runs locally (test-suite audit 2026-11-19): force the event, a follow-up"
+_TRAJECTORY = "skips where the fit's path misses its event; runs elsewhere, a follow-up"
+_CAPABILITY = "skips on what the machine or a package provides, not on the fit"
+# Each existing instance and why it stays; a new one needs a reason here.
+_OUTCOME_GUARDS = {
+    "test_binomial_log_mean_space.py::test_subnormal_weights_never_certify_a_wrong_maximum": _ONE_SIDED,
+    "test_binomial_log_mean_space.py::test_a_subnormal_weight_level_publishes_finite_degrees_of_freedom": _ONE_SIDED,
+    "test_binomial_log_mean_space.py::test_a_light_level_is_never_certified_away_from_its_own_maximum": _ONE_SIDED,
+    "test_binomial_log_mean_space.py::test_a_weight_ratio_never_certifies_a_level_away_from_its_maximum": _ONE_SIDED,
+    "test_binomial_log_mean_space.py::test_a_light_base_cell_of_an_interaction_is_never_certified_away_from_its_maximum": _ONE_SIDED,
+    "test_binomial_log_mean_space.py::test_weight_and_penalty_scales_never_certify_a_wrong_maximum": _ONE_SIDED,
+    "test_binomial_log_mean_space.py::test_an_intercept_only_fit_at_the_smallest_weight_is_never_certified_wrong": _ONE_SIDED,
+    "test_binomial_log_mean_space.py::test_the_block_coordinate_backstop_does_not_read_a_boundary_stop_as_a_drift": _TRAJECTORY,
+    "test_constrained_qp.py::test_return_projection_only_receives_an_infeasible_point": "counts the converged solves of its sweep and asserts at least 60",
+    "test_constrained_qp.py::test_an_exchange_whose_dual_rows_overflow_when_squared_still_certifies": _ONE_SIDED
+    + "; the warm solve's outcome depends on the BLAS kernel",
+    "test_declared_scalar_vertical_slice.py::test_smooth_reml_starts_backends_compaction_and_serialization": _IMPLIES,
+    "test_distributional_newton_curvature_refresh.py::test_failed_curvature_refresh_keeps_bounded_bfgs_fallback": _IMPLIES,
+    "test_distributional_newton_practical_handoff.py::test_a_finish_that_moved_far_and_was_rejected_does_not_relabel_where_it_stalled": _TRAJECTORY,
+    "test_distributional_newton_practical_handoff.py::test_a_finish_on_a_face_that_cannot_reach_stationary_leaves_the_stop_to_the_strict_test": _IMPLIES,
+    "test_distributional_perf_levers.py::test_narrow_fit_keeps_blas_capped_regardless_of_row_count": _CAPABILITY,
+    "test_factor_smooth_sz_thin_and_influence.py::test_sz_same_x_reml_decisions_do_not_follow_the_blas_thread_count": _CAPABILITY,
+    "test_gamma_ls_family.py::test_gamma_endpoint_polish_reversal_never_certifies_a_nonstationary_fit": _NEVER_RUN,
+    "test_generalized_gamma_lss_vertical_slice.py::test_infinite_mean_data_either_diagnose_or_stop_at_the_boundary": _NEVER_RUN,
+    "test_gram_block_queue.py::test_pooled_gram_under_default_thread_pools_holds_blas_at_one_thread": _CAPABILITY,
+    "test_negative_binomial_lss_efs.py::test_claims_book_shaped_fit_finishes_instead_of_refusing": _NEVER_RUN,
+    "test_negative_binomial_lss_efs.py::test_size_reaching_its_poisson_limit_during_selection_still_converges": _TRAJECTORY,
+    "test_plot_api.py::test_term_dropdown_resets_to_response_scale": "skips on its fixture's term count, not on a fit",
+    "test_probit_link_kernels.py::test_probit_eta_kernels_keep_parity_with_the_scipy_stats_master_used": _CAPABILITY,
+    "test_probit_link_kernels.py::test_probit_deriv_keeps_parity_with_scipy_stats": _CAPABILITY,
+    "test_rank_deficient_complete_fit.py::test_dispatch_comes_from_a_live_process_not_build_metadata": _CAPABILITY,
+    "test_tweedie_lss_vertical_slice.py::test_automatic_smoothing_tweedie_lss_fit": _IMPLIES,
+}
+
+
+_OUTCOME_WORDS = re.compile("|".join([*_OUTCOMES, r"pytest\.skip"]))
+
+
+def _outcome_guards(source: str) -> set[str]:
+    """Test functions that assert behind ``if <fit outcome>:``, assert ``not converged or ...``,
+    or call ``pytest.skip`` under an ``if`` on a value the test computed."""
+    if not _OUTCOME_WORDS.search(source):
+        return set()  # each pattern names an outcome or pytest.skip; most modules do neither
+
+    def names(node) -> set[str]:
+        return {
+            getattr(n, "attr", None) or getattr(n, "id", None) or str(getattr(n, "value", ""))
+            for n in ast.walk(node)
+        }
+
+    def calls(nodes, name) -> bool:
+        return any(
+            isinstance(n, ast.Call) and ast.unparse(n.func) == name
+            for b in nodes
+            for n in ast.walk(b)
+        )
+
+    def asserts(nodes) -> bool:
+        """An ``assert``, ``pytest.fail`` or an ``assert_*`` call, NumPy's (``np.testing.``) or
+        bare; a method or an underscored helper that asserts is not seen."""
+        return any(
+            isinstance(n, ast.Assert)
+            or (
+                isinstance(n, ast.Call)
+                and re.fullmatch(r"pytest\.fail|(np\.testing\.)?assert_\w+", ast.unparse(n.func))
+                is not None
+            )
+            for b in nodes
+            for n in ast.walk(b)
+        )
+
+    flagged = set()
+    for test in ast.walk(ast.parse(source)):
+        if not isinstance(test, ast.FunctionDef) or not test.name.startswith("test"):
+            continue
+        computed = {
+            n.id for n in ast.walk(test) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+        } - {a.arg for a in test.args.args}
+        for node in ast.walk(test):
+            guarded = isinstance(node, ast.If) and (
+                (names(node.test) & _OUTCOMES and asserts(node.body) and not asserts(node.orelse))
+                or (calls(node.body, "pytest.skip") and names(node.test) & computed)
+            )
+            either = (
+                isinstance(node, ast.Assert)
+                and isinstance(node.test, ast.BoolOp)
+                and isinstance(node.test.op, ast.Or)
+                and isinstance(node.test.values[0], ast.UnaryOp)
+                and isinstance(node.test.values[0].op, ast.Not)
+                and names(node.test.values[0]) & _OUTCOMES
+            )
+            if guarded or either:
+                flagged.add(test.name)
+    return flagged
+
+
+def test_no_assertion_waits_on_a_fit_outcome_without_a_reason() -> None:
+    """An assertion behind ``if result.converged:`` checks nothing on a fit that does not
+    converge, and a skip on the fit's path passes where the event never comes (AGENTS.md:
+    a test forces its event). Each one is forced, or carries its reason here."""
+    found = {
+        f"{path.relative_to(_ROOT / 'tests').as_posix()}::{name}"
+        for path in sorted((_ROOT / "tests").rglob("test_*.py"))
+        for name in _outcome_guards(path.read_text(encoding="utf-8"))
+    }
+    assert sorted(found - _OUTCOME_GUARDS.keys()) == [], "force the event, or give a reason"
+    assert sorted(_OUTCOME_GUARDS.keys() - found) == [], "these no longer wait on an outcome"
+
+
+def test_the_outcome_lint_flags_each_pattern_and_spares_forced_events() -> None:
+    flagged = _outcome_guards(
+        "def test_guard(fit):\n    r = fit()\n    if r.converged:\n        assert r.x\n"
+        "def test_either(fit):\n    assert not fit().converged or ok\n"
+        "def test_skip(fit):\n    k = fit().n_iter\n    if k < 10:\n        pytest.skip('early')\n"
+        "def test_forced(fit):\n    r = fit()\n    assert r.converged\n    assert r.x\n"
+        "def test_both(fit):\n    r = fit()\n    if r.converged:\n        assert r.x\n"
+        "    else:\n        assert r.warned\n"
+        "def test_parameter(case):\n    if case == 'n/a':\n        pytest.skip('does not apply')\n"
+        "def test_numpy(fit):\n    r = fit()\n    if r.converged:\n"
+        "        np.testing.assert_allclose(r.beta, 0.0)\n"
+        "def test_imported(fit):\n    r = fit()\n    if r.converged:\n"
+        "        assert_array_equal(r.beta, 0.0)\n"
+    )
+    assert flagged == {"test_guard", "test_either", "test_skip", "test_numpy", "test_imported"}

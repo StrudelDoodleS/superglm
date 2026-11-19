@@ -1,7 +1,8 @@
 """scripts/check_fix_tests.py: which tests it selects, and what it says about each one.
 
-The script is not under ``src/``, so the base run cannot fail these tests: each carries
-``pins_behaviour`` itself, and a test added here later must say so too.
+The base run takes ``scripts/`` from the base as well, so a test here fails on base only
+where the pull request changes the script. Each carries ``pins_behaviour``, since most
+pin what the script already did, and a test added here later must say so too.
 """
 
 from __future__ import annotations
@@ -100,6 +101,32 @@ def test_the_marker_counts_on_a_test_a_class_or_the_module():
 
 
 @pytest.mark.pins_behaviour
+def test_a_control_is_documented_by_whatever_carries_its_mark():
+    """The docstring that counts is the marked test's, class's or module's, never an outer one's."""
+    on_test = _tests(
+        '@pytest.mark.pins_behaviour\ndef test_a():\n    """Pins x."""\n'
+        "@pytest.mark.pins_behaviour\ndef test_b(): pass\n"
+        '@pytest.mark.pins_behaviour\ndef test_c():\n    """ \n    """'
+    )
+    on_class = _tests(
+        '@pytest.mark.pins_behaviour\nclass TestC:\n    """Pins y."""\n    def test_a(self): pass'
+    )
+    on_module = _tests('"""Pins z."""\npytestmark = pytest.mark.pins_behaviour\ndef test_a(): pass')
+    inner = _tests(
+        '"""Pins z."""\n@pytest.mark.pins_behaviour\nclass TestC:\n    def test_a(self):\n'
+        '        """Says nothing of the class."""'
+    )
+
+    assert [on_test[name].documented for name in ("test_a", "test_b", "test_c")] == [
+        True,
+        False,
+        False,  # a blank docstring says nothing
+    ]
+    assert on_class["TestC::test_a"].documented and on_module["test_a"].documented
+    assert not inner["TestC::test_a"].documented
+
+
+@pytest.mark.pins_behaviour
 def test_the_marker_is_read_from_the_marks_a_test_has_not_from_what_a_decorator_mentions():
     tests = _tests(
         """
@@ -153,7 +180,13 @@ def test_vacuous_passes_without_the_fix():
 
 @pytest.mark.pins_behaviour
 def test_deliberate_pin():
+    "A control: double returns an int before and after the fix."
     assert isinstance(double(1), int)
+
+
+@pytest.mark.pins_behaviour
+def test_undocumented_pin():
+    assert double(1) > 0
 
 
 @pytest.mark.parametrize("n", [0, 1, 2])
@@ -181,8 +214,18 @@ class TestGroup:
         assert double(1) == 2
 """
 _NEW_MODULE = (
-    "from tiny import triple\n\n\ndef test_import_fails_on_base():\n    assert triple(2) == 6\n"
+    "from tiny import double, triple\n\n\ndef test_import_fails_on_base():\n"
+    "    assert triple(2) == 6\n\n\ndef test_unchanged_beside_it():\n"
+    "    assert double(0) in (0, 1)\n"
 )
+# A tool the pull request adds beside its src/ change, and its test: the tool is absent on base.
+_NEW_TOOL = {
+    "scripts/tool.py": 'ANSWER = "ok"\n',
+    "tests/test_tool.py": (
+        "import runpy\n\n\ndef test_the_new_tool_answers():\n"
+        '    assert runpy.run_path("scripts/tool.py")["ANSWER"] == "ok"\n'
+    ),
+}
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -205,11 +248,16 @@ def _write(repo: Path, files: dict[str, str]) -> None:
         (repo / name).write_text(text)
 
 
-def _repo(tmp_path: Path, head_files: dict[str, str]) -> tuple[Path, str]:
+def _repo(
+    tmp_path: Path, head_files: dict[str, str], base_files: dict[str, str] | None = None
+) -> tuple[Path, str]:
     repo = tmp_path / "repo"
     repo.mkdir(parents=True)
     _git(repo, "init", "-q", "-b", "master")
-    _write(repo, {"src/tiny/__init__.py": _BASE_SRC, "tests/test_old.py": _OLD_TEST})
+    _write(
+        repo,
+        {"src/tiny/__init__.py": _BASE_SRC, "tests/test_old.py": _OLD_TEST, **(base_files or {})},
+    )
     _git(repo, "add", ".")
     _git(repo, "commit", "-q", "-m", "base")
     base = _git(repo, "rev-parse", "HEAD")
@@ -235,6 +283,36 @@ def _run(repo: Path, base: str, *extra: str, env=None):
     )
 
 
+def test_the_base_run_names_its_tests_through_a_symlinked_temporary_directory(tmp_path):
+    """macOS reaches its temporary directory through a symlink (/var to /private/var). The
+    base tree must be named by its real path, or pytest lists its tests without their file
+    and the check cannot judge them."""
+    real, link = tmp_path / "real", tmp_path / "link"
+    real.mkdir()
+    try:
+        link.symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip("this platform does not let the test create a symlink")
+    project = '[project]\nname = "tiny"\n'
+    repo, base = _repo(
+        tmp_path / "work",
+        {
+            "src/tiny/__init__.py": _FIXED_SRC,
+            "tests/test_new.py": _NEW_TESTS,
+            # The head's pytest table makes the run name the base tree as its --rootdir.
+            "pyproject.toml": project
+            + '\n[tool.pytest.ini_options]\nmarkers = ["pins_behaviour: a control"]\n',
+        },
+        base_files={"pyproject.toml": project},
+    )
+    report = tmp_path / "out.json"
+    done = _run(repo, base, "--json", str(report), env={**os.environ, "TMPDIR": str(link)})
+
+    assert done.returncode == 1, done.stdout + done.stderr
+    names = [row["test"] for row in json.loads(report.read_text())["tests"]]
+    assert names and all(name.startswith("tests/test_new.py::") for name in names)
+
+
 @pytest.mark.pins_behaviour
 def test_a_vacuous_test_is_flagged_and_every_other_outcome_is_told_apart(tmp_path):
     repo, base = _repo(
@@ -245,6 +323,7 @@ def test_a_vacuous_test_is_flagged_and_every_other_outcome_is_told_apart(tmp_pat
             "tests/test_new.py": _NEW_TESTS,
             "tests/test_new_module.py": _NEW_MODULE,
             "tests/_helpers.py": "VALUE = 1\n",
+            **_NEW_TOOL,
         },
     )
     report = tmp_path / "out.json"
@@ -254,7 +333,11 @@ def test_a_vacuous_test_is_flagged_and_every_other_outcome_is_told_apart(tmp_pat
     flagged = {name.split("::", 1)[1] for name, row in verdicts.items() if row["flagged"]}
 
     assert done.returncode == 1, done.stdout + done.stderr
-    assert flagged == {"test_vacuous_passes_without_the_fix", "test_every_case_passes_without_it"}
+    assert flagged == {
+        "test_vacuous_passes_without_the_fix",
+        "test_every_case_passes_without_it",
+        "test_undocumented_pin",  # marked, but says nothing of what it pins
+    }
     assert status["test_fix_fails_without_it"] == status["TestGroup::test_method_fails_without_it"]
     assert status["test_fix_fails_without_it"] == "fails"
     assert status["test_one_case_needs_the_fix"] == "fails"  # one failing case is enough
@@ -263,13 +346,20 @@ def test_a_vacuous_test_is_flagged_and_every_other_outcome_is_told_apart(tmp_pat
     assert status["test_skipped_on_base"] == "skipped"
     assert status["test_needs_a_new_name"] == "fails"
     assert verdicts["tests/test_new.py::test_needs_a_new_name"]["kind"] == "ImportError"
-    assert verdicts["tests/test_new_module.py::test_import_fails_on_base"]["kind"] == "ImportError"
+    # a module that lacks a name on base fails there, each of its tests, counted by module
+    assert status["test_import_fails_on_base"] == status["test_unchanged_beside_it"] == "fails"
+    assert verdicts["tests/test_new_module.py::test_unchanged_beside_it"]["kind"] == "ImportError"
+    assert "tests/test_new_module.py: ImportError x 2" in done.stdout
+    assert status["test_the_new_tool_answers"] == "fails"  # the tool is the base's: absent
     assert status["test_old"] == "fails"  # the changed assertion fails on base's code
     assert "tests/test_new.py::test_vacuous_passes_without_the_fix (added)" in done.stdout
+    assert "control (@pytest.mark.pins_behaviour): tests/test_new.py::test_deliberate_pin" in (
+        done.stdout
+    )
     assert "whatever its reason" in done.stdout  # the caveat travels with the report
 
     report_only = _run(repo, base, "--report-only")
-    assert report_only.returncode == 0 and "FLAGGED: 2 test(s)" in report_only.stdout
+    assert report_only.returncode == 0 and "FLAGGED: 3 test(s)" in report_only.stdout
 
 
 @pytest.mark.pins_behaviour
@@ -334,6 +424,7 @@ def test_a_module_that_skips_itself_at_collection_is_reported_and_never_counted(
                 'import pytest\n\npytest.importorskip("a_package_nobody_installs")\n\n\n'
                 "def test_needs_it():\n    assert True\n"
             ),
+            "tests/test_fresh.py": "from tiny import double\n\n\ndef test_x():\n    assert double(2) == 4\n",
         },
     )
     done = _run(repo, base)
@@ -341,6 +432,113 @@ def test_a_module_that_skips_itself_at_collection_is_reported_and_never_counted(
     assert done.returncode == 0, done.stdout + done.stderr
     assert "tests/test_optional.py: skipped at collection on base" in done.stdout
     assert "tests/test_optional.py::test_needs_it (added)" in done.stdout
+
+
+# Collects on the fixed code only, failing on base for a reason that is not a missing name.
+_KEYED_MODULE = (
+    "from tiny import double\n\nCASE = {0: 'fixed'}[double(0)]  # double(0) is 1 on base\n\n\n"
+    "def test_reads_its_case():\n    assert CASE == 'fixed'\n"
+)
+
+
+@pytest.mark.pins_behaviour
+def test_a_test_the_base_cannot_judge_fails_the_check(tmp_path):
+    """A module that fails to collect on base for a reason other than a missing name leaves its
+    tests undecided, and an undecided test fails the check, listed. A test the run does not
+    judge by design (``threads``, a skip for want of data) is listed as not run, and a pull
+    request whose only new test is one of those passes."""
+    undecided, base = _repo(
+        tmp_path / "a",
+        {
+            "src/tiny/__init__.py": _FIXED_SRC,
+            "tests/test_fresh.py": "from tiny import double\n\n\ndef test_x():\n    assert double(2) == 4\n",
+            "tests/test_keyed.py": _KEYED_MODULE,
+        },
+    )
+    by_design = {
+        "skipped": "import pytest\n\n\ndef test_needs_data():\n    pytest.skip('[dataset] no data')\n",
+        "not_run": (
+            "import pytest\nfrom tiny import double\n\n\n@pytest.mark.threads\n"
+            "def test_needs_the_pools():\n    assert double(2) == 4\n"
+        ),
+    }
+    not_judged = {
+        status: _repo(
+            tmp_path / status,
+            {
+                "src/tiny/__init__.py": _FIXED_SRC,
+                "pytest.ini": "[pytest]\nmarkers = threads: needs the default pools\n",
+                "tests/test_later.py": test,
+            },
+        )
+        for status, test in by_design.items()
+    }
+    report = tmp_path / "out.json"
+    done = _run(undecided, base, "--json", str(report))
+    status = {row["test"]: row["status"] for row in json.loads(report.read_text())["tests"]}
+    judged_nothing = {
+        status: _run(*repo, "--json", str(tmp_path / f"{status}.json"))
+        for status, repo in not_judged.items()
+    }
+
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert status == {
+        "tests/test_fresh.py::test_x": "fails",
+        "tests/test_keyed.py::test_reads_its_case": "collection_error",
+    }
+    assert "UNDECIDED: 1 test(s)" in done.stdout and "FLAGGED" not in done.stdout
+    assert "tests/test_keyed.py::test_reads_its_case (added): KeyError" in done.stdout
+    assert _run(undecided, base, "--report-only").returncode == 0
+    for status, run in judged_nothing.items():
+        rows = json.loads((tmp_path / f"{status}.json").read_text())["tests"]
+        assert run.returncode == 0, run.stdout + run.stderr
+        assert [row["status"] for row in rows] == [status]
+        assert "no test was judged on base" in run.stdout and "UNDECIDED" not in run.stdout
+
+
+@pytest.mark.pins_behaviour
+def test_the_base_run_reads_the_bases_project_metadata_and_the_heads_pytest_options(tmp_path):
+    """A test of project metadata meets the base's ``pyproject.toml``, while the head's
+    ``[tool.pytest.ini_options]`` still reaches the run (here a filter that makes a warning an
+    error, and a relative ``pythonpath`` that resolves inside the base tree), so both floor tests
+    fail on base and the helper's control passes there."""
+    project = '[project]\nname = "tiny"\nrequires-python = ">=3.12"\n'
+    repo, base = _repo(
+        tmp_path,
+        {
+            "src/tiny/__init__.py": _FIXED_SRC,
+            "pyproject.toml": project.replace("3.12", "3.13")
+            + "\n[tool.pytest.ini_options]\n"
+            + 'filterwarnings = ["error::UserWarning"]\npythonpath = ["tests/support"]\n'
+            + 'markers = ["pins_behaviour: a control"]\n',
+            "tests/support/fixture_helper.py": "ONE = 1\n",
+            "tests/test_helper.py": (
+                "import pytest\nfrom fixture_helper import ONE\n\n\n@pytest.mark.pins_behaviour\n"
+                "def test_reads_a_helper_on_the_pythonpath():\n"
+                '    "A control: the head\'s relative pythonpath resolves in the base tree."\n'
+                "    assert ONE == 1\n"
+            ),
+            "tests/test_floor.py": (
+                "import tomllib\nimport warnings\nfrom pathlib import Path\n\n\n"
+                "def test_the_floor_is_raised():\n"
+                '    project = tomllib.loads(Path("pyproject.toml").read_text())["project"]\n'
+                '    assert project["requires-python"] == ">=3.13"\n\n\n'
+                "def test_a_warning_is_an_error():\n"
+                '    warnings.warn("an error under the head\'s options", UserWarning)\n'
+            ),
+        },
+        base_files={"pyproject.toml": project},
+    )
+    report = tmp_path / "out.json"
+    done = _run(repo, base, "--json", str(report))
+    status = {row["test"]: row["status"] for row in json.loads(report.read_text())["tests"]}
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert status == {
+        "tests/test_floor.py::test_the_floor_is_raised": "fails",
+        "tests/test_floor.py::test_a_warning_is_an_error": "fails",
+        "tests/test_helper.py::test_reads_a_helper_on_the_pythonpath": "passes",
+    }
 
 
 @pytest.mark.pins_behaviour
@@ -389,6 +587,7 @@ def test_threads_tests_are_not_run_and_the_pools_are_pinned(tmp_path):
                 "import os\n\nimport pytest\n\n\n@pytest.mark.threads\n"
                 'def test_needs_the_default_pools():\n    assert os.environ["OMP_NUM_THREADS"] != "1"\n\n\n'
                 f"@pytest.mark.pins_behaviour\ndef test_every_pool_is_pinned():\n"
+                '    "A control: the base run pins every pool."\n'
                 f"    assert [os.environ.get(name) for name in {pools!r}] == ['1'] * {len(pools)}\n"
             ),
         },

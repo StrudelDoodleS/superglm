@@ -5,21 +5,37 @@
 
 This is the fail-to-pass criterion of SWT-Bench (arXiv:2406.12952): a test that pins
 a fix fails on the unfixed code and passes on the fixed code. The script takes the
-head commit's tree with ``src/`` replaced by the merge base's, runs only the tests
-the pull request added or changed, and judges each one. It compares committed
-revisions; uncommitted changes are not seen. Each selected test is judged:
+merge base's tree, its ``pyproject.toml`` included, with the head's ``tests/`` and
+pytest configuration (the head's ``[tool.pytest...]`` tables reach pytest through ``-c``),
+so the tests meet the code and project metadata before the change (``src/``, and the
+scripts, workflows and anything else they exercise), runs only the tests the pull
+request added or changed, and judges each one. It compares committed revisions;
+uncommitted changes are not seen. Each selected test is judged:
 
 * fails or errors on base: counts as a pass for this check. The check cannot tell
   the right reason from the wrong one, so the output counts the failures by
   exception type; an ``ImportError`` or ``AttributeError`` says the test fails
   for want of a name, not for the behaviour it asserts.
+* its module fails to import on base for want of a name (``ImportError``,
+  ``AttributeError``): the old code lacks what the test uses, which is what failing
+  on it means, so the test fails on base, counted by module under that exception.
+  Known gap: the credit goes to every selected test in the module, so a changed test
+  beside the one that needs the name, which may pass on base, is credited too; the
+  per-module count is what shows a reviewer that a module failed whole.
+* its module fails to collect on base for any other reason (a syntax error, a
+  conftest or fixture error): undecided. Any undecided test fails the job, and the
+  report lists each one; move what fails on base into the tests that need it.
 * passes on base: the test does not need the change. It is flagged unless it
-  carries ``@pytest.mark.pins_behaviour`` on the test, its class or the module
-  (``pytestmark``), which says "this deliberately pins behaviour that already worked".
-* skipped on base, deselected (``docs``, ``browser`` and ``threads``: the last needs
-  the default thread pools, which this run pins) or not collected (a module that skips
-  itself at collection, say for a missing optional package, is one): reported, never
-  counted as failing.
+  is a control: it carries ``@pytest.mark.pins_behaviour`` on the test, its class
+  or the module (``pytestmark``), which says "this deliberately pins behaviour
+  that already worked", and whatever carries the mark has a docstring saying what
+  it pins. The report lists every control, so a reviewer reads each opt-out.
+* skipped on base (a ``[dataset]`` test: this run fetches no data), deselected (``docs``,
+  ``browser`` and ``threads``: the last needs the default thread pools, which this run
+  pins) or not collected (a module that skips itself at collection, say for a missing
+  optional package, is one): not run by design, so listed as not run, never counted as
+  failing and never undecided. A run whose every test is one of these passes, with a
+  report line saying that nothing in it was judged on base.
 
 A parametrized test counts as passing on base only if every case that ran passes.
 
@@ -38,8 +54,9 @@ The run on base stops after ``--timeout`` seconds (default 1200, inside the work
 ``timeout`` wrapper) with its process tree killed. The check then prints what it collected,
 none of it judged, and exits 2.
 
-Exit status: 0 nothing to check or nothing flagged (or ``--report-only``), 1 a test is
-flagged, 2 the check itself could not run (a timeout included).
+Exit status: 0 nothing to check, or nothing flagged or undecided (or ``--report-only``),
+1 a test is flagged or undecided, 2 the check itself could not run
+(a timeout included).
 """
 
 from __future__ import annotations
@@ -58,6 +75,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,6 +84,11 @@ MARKER = "pins_behaviour"
 ROOT = Path(__file__).resolve().parents[1]
 TEST_FILES = ("test_*.py", "*_test.py")
 PYTEST_ERRORS = {2, 3, 4}  # interrupted, internal error, usage error; 5 is "nothing collected"
+# The head's files that configure pytest, overlaid on base; its pyproject.toml stays the
+# base's (project metadata), and the head's pytest tables in it are read through ``-c``.
+PYTEST_CONFIG = ("pytest.ini", "tox.ini", "setup.cfg", "conftest.py")
+# A module that fails to import for one of these lacks a name the test uses on base.
+NAME_ERRORS = ("ImportError", "ModuleNotFoundError", "AttributeError")
 SHOWN = 20
 RUN_TIMEOUT = 1200  # seconds for the run on base; the workflow's `timeout` wrapper is 30 minutes
 COLLECT_TIMEOUT = 300  # seconds for collecting on base
@@ -84,6 +107,7 @@ class RunTimeoutError(CheckError):
 class Test:
     digest: str
     pinned: bool
+    documented: bool = False  # what carries the mark has a docstring that is not blank
 
 
 def _names_marker(expression: ast.AST) -> bool:
@@ -122,29 +146,35 @@ def _digest(node: ast.FunctionDef | ast.AsyncFunctionDef, context: str) -> str:
 def collect_tests(source: str) -> dict[str, Test]:
     """The test functions of a module by pytest id (``name`` or ``Class::name``)."""
     tree = ast.parse(source)
-    module_pinned = any(_pytestmark_pins(node) for node in tree.body)
     found: dict[str, Test] = {}
 
-    def visit(body, classes, context, pinned):
+    def mark(node, marked: bool, outer: bool | None) -> bool | None:
+        """``None`` unpinned, else whether the innermost node carrying the mark has a docstring
+        that is not blank."""
+        return bool((ast.get_docstring(node) or "").strip()) if marked else outer
+
+    def visit(body, classes, context, pin):
         for node in body:
             if isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
                 header = [*node.decorator_list, *node.bases]
+                marked = any(_names_marker(d) for d in node.decorator_list) or any(
+                    _pytestmark_pins(statement) for statement in node.body
+                )
                 visit(
                     node.body,
                     (*classes, node.name),
                     context + "".join(ast.dump(part) for part in header),
-                    pinned
-                    or any(_names_marker(d) for d in node.decorator_list)
-                    or any(_pytestmark_pins(statement) for statement in node.body),
+                    mark(node, marked, pin),
                 )
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith(
                 "test"
             ):
+                own = mark(node, any(map(_names_marker, node.decorator_list)), pin)
                 found["::".join((*classes, node.name))] = Test(
-                    _digest(node, context), pinned or any(map(_names_marker, node.decorator_list))
+                    _digest(node, context), own is not None, bool(own)
                 )
 
-    visit(tree.body, (), "", module_pinned)
+    visit(tree.body, (), "", mark(tree, any(_pytestmark_pins(node) for node in tree.body), None))
     return found
 
 
@@ -156,8 +186,8 @@ def git(root: Path, *args: str, binary: bool = False):
 
 
 def selected_tests(root: Path, merge_base: str, head: str):
-    """``(src_changed, {(path, id): "added" | "changed"}, pinned ids, notes)`` of the diff."""
-    src_changed, selected, pinned, notes = False, {}, set(), []
+    """``(src_changed, {(path, id): "added" | "changed"}, {pinned id: documented}, notes)``."""
+    src_changed, selected, pinned, notes = False, {}, {}, []
     for line in git(root, "diff", "--name-status", "-M", merge_base, head).splitlines():
         status, *paths = line.split("\t")
         src_changed |= any(path.startswith("src/") for path in paths)
@@ -178,7 +208,7 @@ def selected_tests(root: Path, merge_base: str, head: str):
             elif before[name].digest != test.digest:
                 selected[(new, name)] = "changed"
             if test.pinned:
-                pinned.add((new, name))
+                pinned[(new, name)] = test.documented
     return src_changed, selected, pinned, notes
 
 
@@ -197,13 +227,27 @@ def pinned_pools(base) -> dict[str, str]:
     return stage_environment(True, base)
 
 
-def base_tree(root: Path, merge_base: str, head: str, where: Path, package: str) -> dict[str, str]:
-    """A worktree of ``head`` whose ``src/`` is the merge base's, and the environment to run it in."""
-    git(root, "worktree", "add", "--detach", str(where), head)
-    shutil.rmtree(where / "src")
-    archive = git(root, "archive", merge_base, "src", binary=True)
+def base_tree(root: Path, merge_base: str, head: str, where: Path, package: str):
+    """A worktree of the merge base with the head's ``tests/`` and pytest configuration, the
+    environment to run it in, and the options that hand pytest the head's configuration."""
+    git(root, "worktree", "add", "--detach", str(where), merge_base)
+    for path in (where / name for name in ("tests", *PYTEST_CONFIG)):
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink(missing_ok=True)
+    overlay = git(root, "ls-tree", "--name-only", head, "--", "tests", *PYTEST_CONFIG).split()
+    archive = git(root, "archive", head, *overlay, binary=True)
     with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
         tar.extractall(where, filter="data")
+    # pytest reads only [tool.pytest...] from a -c .toml, and a pytest.ini outranks it. The
+    # file sits at the tree's root: pytest resolves relative options (``pythonpath``) from it.
+    config = []
+    if "pytest.ini" not in overlay and git(root, "ls-tree", head, "--", "pyproject.toml"):
+        text = git(root, "show", f"{head}:pyproject.toml")
+        if "pytest" in tomllib.loads(text).get("tool", {}):
+            (where / "head-pyproject.toml").write_text(text, encoding="utf-8")
+            config = ["-c", str(where / "head-pyproject.toml"), f"--rootdir={where}"]
     path = os.pathsep.join(filter(None, [str(where / "src"), os.environ.get("PYTHONPATH", "")]))
     env = {**pinned_pools(os.environ), "PYTHONPATH": path}
     probe = "import importlib.util as u; print(u.find_spec(sys.argv[1]).origin)"
@@ -217,7 +261,7 @@ def base_tree(root: Path, merge_base: str, head: str, where: Path, package: str)
     ).stdout.strip()
     if not Path(origin).resolve().is_relative_to((where / "src").resolve()):
         raise CheckError(f"`import {package}` resolves to {origin!r}, not the base tree's src/")
-    return env
+    return env, config
 
 
 def _own_group() -> dict:
@@ -315,12 +359,13 @@ def _names_exception(line: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z_][\w.]*", line.split(":", 1)[0].strip()))
 
 
-def collect_on_base(where, env, paths):
+def collect_on_base(where, env, paths, config=()):
     """The function ids pytest finds per module, the modules that fail to import, and the
     modules that skip themselves at collection (with the reason)."""
     done = pytest_run(
         where,
         env,
+        *config,
         "--collect-only",
         "--continue-on-collection-errors",
         "-rs",
@@ -421,7 +466,8 @@ def judge(selected, pinned, collected, broken, ran, unfinished=frozenset()):
     for key, how in selected.items():
         path = key[0]
         if path in broken:
-            status, kind = "fails", _kind(broken[path])
+            kind = _kind(broken[path])
+            status = "fails" if kind in NAME_ERRORS else "collection_error"
         elif key not in collected:
             status, kind = "not_collected", ""
         elif key in unfinished:
@@ -430,13 +476,14 @@ def judge(selected, pinned, collected, broken, ran, unfinished=frozenset()):
             status, kind = "not_run", ""
         else:
             status, kind = ran[key]
-        flagged = status == "passes" and key not in pinned
+        # a control is marked and its docstring says what it pins
+        control = pinned.get(key, False)
         verdicts[key] = {
             "how": how,
             "status": status,
             "kind": kind,
             "pinned": key in pinned,
-            "flagged": flagged,
+            "flagged": status == "passes" and not control,
         }
     return verdicts
 
@@ -449,15 +496,17 @@ def render(verdicts, notes, merge_base, head) -> str:
     for key, verdict in verdicts.items():
         by_status.setdefault(verdict["status"], []).append(key)
     flagged = [key for key, verdict in verdicts.items() if verdict["flagged"]]
+    controls = [k for k, v in verdicts.items() if v["status"] == "passes" and not v["flagged"]]
     kinds: dict[str, int] = {}
     for key in by_status.get("fails", []):
         kinds[verdicts[key]["kind"]] = kinds.get(verdicts[key]["kind"], 0) + 1
     lines = [
-        f"fix-test check: head {head[:10]} against src/ of {merge_base[:10]}",
+        f"fix-test check: the tests of head {head[:10]} against {merge_base[:10]}",
         f"{len(verdicts)} tests added or changed",
         f"  fail or error on base ......... {len(by_status.get('fails', []))}",
-        f"  pass on base, pins_behaviour .. {sum(verdicts[k]['pinned'] and verdicts[k]['status'] == 'passes' for k in verdicts)}",
-        f"  pass on base, unmarked ........ {len(flagged)}",
+        f"  pass on base, controls ........ {len(controls)}",
+        f"  pass on base, flagged ......... {len(flagged)}",
+        f"  undecided, module fails on base {len(by_status.get('collection_error', []))}",
         f"  skipped on base ............... {len(by_status.get('skipped', []))}",
         f"  not run, not collected, timed out {sum(len(by_status.get(s, [])) for s in ('not_run', 'not_collected', 'timed_out'))}",
         *notes,
@@ -484,11 +533,26 @@ def render(verdicts, notes, merge_base, head) -> str:
             lines.append(f"  {title}: {label(key)}")
     for key in by_status.get("not_collected", [])[:SHOWN]:
         lines.append(f"  not collected by pytest: {label(key)}")
+    lines += [f"  control (@pytest.mark.{MARKER}): {label(key)}" for key in controls]
+    if "collection_error" in by_status:
+        lines.append(
+            f"UNDECIDED: {len(by_status['collection_error'])} test(s) were not judged: their "
+            "module fails to collect on base for a reason other than a missing name. Move what "
+            "fails there into the tests or fixtures that need it, so that each test is judged."
+        )
+        lines += [
+            f"  {label(key)}: {verdicts[key]['kind']}" for key in by_status["collection_error"]
+        ]
+    if not by_status.keys() & {"fails", "passes", "timed_out", "collection_error"}:
+        lines.append(
+            "no test was judged on base: each is skipped, not run or not collected there by "
+            "design, so a reviewer reads what each one guards."
+        )
     if flagged:
         lines.append(
-            f"FLAGGED: {len(flagged)} test(s) pass on the code before the change and carry no "
-            f"@pytest.mark.{MARKER}. Either they do not need the change, or they pin behaviour "
-            "that already worked: mark them."
+            f"FLAGGED: {len(flagged)} test(s) pass on the code before the change and are not "
+            f"controls. Either they do not need the change, or they pin behaviour that already "
+            f"worked: mark them @pytest.mark.{MARKER} and say in the docstring what they pin."
         )
         lines += [f"  {label(key)}" for key in flagged]
     else:
@@ -509,11 +573,14 @@ def check(args) -> int:
         return 0
     timed_out = None
     with tempfile.TemporaryDirectory(prefix="fix-tests-") as scratch:
-        where = Path(scratch) / "tree"
+        # Resolved: pytest names each test from its real path relative to ``--rootdir``, and
+        # a temporary directory reached through a symlink (macOS's /var) would leave the
+        # names without their file.
+        where = Path(scratch).resolve() / "tree"
         try:
-            env = base_tree(root, merge_base, head, where, args.package)
+            env, config = base_tree(root, merge_base, head, where, args.package)
             paths = sorted({path for path, _ in selected})
-            collected, broken, skipped = collect_on_base(where, env, paths)
+            collected, broken, skipped = collect_on_base(where, env, paths, config)
             notes += [
                 f"{path}: skipped at collection on base ({reason}); its tests were not run"
                 for path, reason in sorted(skipped.items())
@@ -522,7 +589,7 @@ def check(args) -> int:
             ran = {}
             if good:
                 try:
-                    ran = run_on_base(where, env, good, args.pytest_args, args.timeout)
+                    ran = run_on_base(where, env, good, [*config, *args.pytest_args], args.timeout)
                 except RunTimeoutError as error:
                     timed_out = error
                     notes.append(
@@ -540,8 +607,10 @@ def check(args) -> int:
         )
     if timed_out:
         raise timed_out  # after the report: the check ends as one that could not run
+    statuses = {verdict["status"] for verdict in verdicts.values()}
     flagged = any(verdict["flagged"] for verdict in verdicts.values())
-    return 1 if flagged and not args.report_only else 0
+    undecided = "collection_error" in statuses
+    return 1 if (flagged or undecided) and not args.report_only else 0
 
 
 def main(argv=None) -> int:

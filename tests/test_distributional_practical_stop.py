@@ -13,6 +13,7 @@ import sympy
 from superglm.distributional import GaussianLS, Predictor
 from superglm.distributional import fit_diagnostics as diagnostics_module
 from superglm.distributional.fit_diagnostics import diagnose_distributional_fit
+from superglm.distributional.model import DenseDistributionalModel
 from superglm.distributional.results.iteration import DistributionalEFSConfig
 from superglm.distributional.serialization import pickle_state
 from superglm.distributional.smoothing.evidence import _FreshRawEvidence, _lower_bound_pressure
@@ -241,13 +242,54 @@ def _noise_random_effect_fit(*, practical: bool, max_lambda: float, levels: int 
     return model, model._require_fitted().smoothing
 
 
-def test_practical_window_replays_non_increasing_steps() -> None:
-    _model, smoothing = _noise_random_effect_fit(practical=True, max_lambda=1.0e10)
-    if smoothing.convergence_reason != "practical_plateau":
-        pytest.skip("fixture did not stop on a practical plateau")
-    window = smoothing.history[-smoothing.config.plateau_iterations :]
-    steps = [item.max_accepted_log_step for item in window]
-    assert steps == sorted(steps, reverse=True)
+def test_practical_window_replays_non_increasing_steps(monkeypatch) -> None:
+    """A practical plateau's window is the run of non-increasing accepted steps that stopped it.
+
+    The one-observation random effect whose mean sits 1e-12 above its prior
+    has a harmonic tail toward an infinite smoothing parameter; with a
+    practical parameter tolerance of 1e-3 its search stops on the practical
+    plateau's own run, never the outward window (the stop that
+    ``test_practical_plateau_stops_an_immaterial_tail_without_certifying_infinity``
+    pins). Its steps contract on their own, so the refit reports the step of the
+    iteration that stopped it half again as long, leaving the lambda it reached,
+    and so the objective and parameter tests, as they were: a step longer than the
+    one before restarts the run, and the stop comes a whole window later.
+    """
+    from superglm.distributional.smoothing import loop
+    from tests.test_distributional_endpoint_laml import _scalar_efs_fit
+
+    def fit(longer: int | None = None):
+        real, calls = loop._scaled_proposal, []
+
+        def proposal(current, log_steps, names, scale, config):
+            lambdas, steps = real(current, log_steps, names, scale, config)
+            calls.append(scale)
+            if calls.count(1.0) == longer and scale == 1.0:
+                steps = {name: 1.5 * step for name, step in steps.items()}
+            return lambdas, steps
+
+        with monkeypatch.context() as patch:
+            patch.setattr(loop, "_scaled_proposal", proposal)
+            _name, smoothing = _scalar_efs_fit(
+                1.000000000001,
+                maximum_lambda=1.0e10,
+                starting_lambda=0.1,
+                max_iterations=300,
+                practical_convergence=True,
+                practical_parameter_tolerance=1.0e-3,
+            )
+        assert smoothing.convergence_reason == "practical_plateau"
+        assert calls == [1.0] * len(smoothing.history)  # one proposal per iteration, accepted
+        # the run's steps, and the one before it, each no longer than the one before
+        steps = [item.max_accepted_log_step for item in smoothing.history]
+        run = steps[-smoothing.config.plateau_iterations - 1 :]
+        assert run == sorted(run, reverse=True), run
+        return steps, smoothing.config.plateau_iterations
+
+    natural, window = fit()
+    steps, _ = fit(longer=len(natural))
+    assert steps[len(natural) - 1] > steps[len(natural) - 2]  # the step reported longer
+    assert len(steps) >= len(natural) + window
 
 
 def test_lower_bound_pressure_names_components_pinned_at_the_minimum() -> None:
@@ -362,16 +404,27 @@ def test_residual_severity_bands(residual: float, expected: str) -> None:
     assert diagnostics_module._residual_severity(residual, 1.0e-6) == expected
 
 
-def test_trajectory_unsettled_severity_is_label_independent() -> None:
+@pytest.mark.parametrize("reason", ["practical_plateau", "lambda_change"])
+@pytest.mark.parametrize("residual", [9.0e-3, 1.5e-2, 1.5])
+def test_trajectory_unsettled_severity_is_label_independent(reason, residual) -> None:
+    """The unsettled-trajectory finding's severity is its residual's band, whatever the stop's label.
+
+    The fit settles below tolerance, so the terminal residual and the stop's
+    label are set on its smoothing result: one value in each severity band, under
+    a practical and a strict label.
+    """
     model, smoothing = _noise_random_effect_fit(practical=True, max_lambda=1.0e10)
-    report = diagnose_distributional_fit(model._require_fitted())
-    findings = [f for f in report.findings if f.code == "smoothing.trajectory_unsettled"]
-    if not findings:
-        pytest.skip("fixture settled below tolerance")
-    expected = diagnostics_module._residual_severity(
-        smoothing.terminal_raw_max_log_step, smoothing.config.tolerance
+    fitted = model._require_fitted()
+    unsettled = replace(smoothing)
+    object.__setattr__(unsettled, "convergence_reason", reason)
+    object.__setattr__(unsettled, "terminal_raw_max_log_step", residual)
+    state = replace(fitted.fit_state, smoothing=unsettled)
+    report = diagnose_distributional_fit(
+        DenseDistributionalModel(family=fitted.family, _fit_state=state)
     )
-    assert findings[0].severity == expected
+    findings = [f for f in report.findings if f.code == "smoothing.trajectory_unsettled"]
+    expected = diagnostics_module._residual_severity(residual, smoothing.config.tolerance)
+    assert [f.severity for f in findings] == [expected]
 
 
 def _ridge_outward_window(*, t=0.5, moves=(0.3, 0.4, 0.5), second_moves=None):
