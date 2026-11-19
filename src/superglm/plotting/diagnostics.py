@@ -15,6 +15,7 @@ import numba
 import numpy as np
 from scipy import stats
 
+from superglm._utils import occurrence_rows
 from superglm.plotting.common import (
     _LINE_COLOR,
     _LINE_WIDTH,
@@ -260,6 +261,11 @@ _BIN_COUNT = 50
 _FREQUENCY_EXPANSION_CAP = 100_000
 
 
+def _stream_seed(stream: np.random.SeedSequence) -> int:
+    """Return an integer seed for ``stream``, for APIs that take an integer ``seed``."""
+    return int(stream.generate_state(1, np.uint64)[0])
+
+
 def _diagnostic_rows(
     model,
     y,
@@ -307,23 +313,7 @@ def _diagnostic_rows(
             qresid[positive],
         )
 
-    likelihood_size = float(np.sum(weights, dtype=np.float64))
-    if likelihood_size <= _FREQUENCY_EXPANSION_CAP:
-        counts = rounded.astype(np.intp)
-        row_idx = np.repeat(np.arange(len(weights), dtype=np.intp), counts)
-    else:
-        scaled_weights = weights / float(np.max(weights))
-        probabilities = scaled_weights / float(np.sum(scaled_weights))
-        row_idx = rng.choice(
-            len(weights),
-            size=_FREQUENCY_EXPANSION_CAP,
-            replace=True,
-            p=probabilities,
-        )
-
-    if np.array_equal(row_idx, np.arange(len(weights), dtype=np.intp)):
-        return y, mu, eta, weights, qresid
-
+    row_idx = occurrence_rows(rounded, _FREQUENCY_EXPANSION_CAP, rng)
     from superglm.inference.metrics import ModelMetrics
 
     row_y = y[row_idx]
@@ -496,8 +486,9 @@ def plot_diagnostics(
         Optional observation weights, read under the model's declared
         ``weight_semantics``.  Under ``"frequency"`` integer values are
         represented as literal row replication in the randomized diagnostics
-        up to 100,000 diagnostic rows; larger populations use a reproducible
-        weight-proportional sample.  Under ``"prior"`` the weight is part of
+        up to 100,000 occurrences; larger populations read a reproducible
+        subset of 100,000 occurrences drawn without replacement, and all-unit
+        weights read every row.  Under ``"prior"`` the weight is part of
         the row's distribution through ``phi / w``, and a Tweedie fit
         additionally requires it finite and strictly positive.
     offset : NDArray or None
@@ -533,6 +524,11 @@ def plot_diagnostics(
         figsize = (10, 8)
 
     rng = np.random.default_rng(seed)
+    # A response draw and its quantile-residual jitter must not share uniforms
+    # (for a Bernoulli draw they would coincide), nor the occurrence selection
+    # and the jitter of the occurrences it selects: each gets its own stream.
+    selection_stream, observed_stream, simulation_stream = np.random.SeedSequence(seed).spawn(3)
+    observed_seed = _stream_seed(observed_stream)
 
     family = getattr(model, "_distribution")
     y_input = np.asarray(y)
@@ -557,7 +553,7 @@ def plot_diagnostics(
     original_weights = diagnostic_weights
 
     # Quantile residuals for all panels
-    qresid = m.residuals("quantile", seed=seed)
+    qresid = m.residuals("quantile", seed=observed_seed)
     y_arr, mu, eta, w, qresid = _diagnostic_rows(
         model,
         y_arr,
@@ -565,8 +561,8 @@ def plot_diagnostics(
         eta,
         original_weights,
         qresid,
-        seed,
-        rng,
+        observed_seed,
+        np.random.default_rng(selection_stream),
         weight_semantics=weight_semantics,
     )
     n = len(y_arr)
@@ -596,7 +592,7 @@ def plot_diagnostics(
         qresid,
         n,
         n_sim,
-        seed,
+        simulation_stream,
         rng,
         weight_semantics=weight_semantics,
     )
@@ -649,7 +645,9 @@ def plot_diagnostics(
     return fig
 
 
-def _panel_qq_envelope(ax, model, m, mu, w, qresid, n, n_sim, seed, rng, *, weight_semantics):
+def _panel_qq_envelope(
+    ax, model, m, mu, w, qresid, n, n_sim, simulation_stream, rng, *, weight_semantics
+):
     """Panel 1: Q-Q plot with simulation envelope."""
     family = model._distribution
     phi = m.phi
@@ -689,21 +687,21 @@ def _panel_qq_envelope(ax, model, m, mu, w, qresid, n, n_sim, seed, rng, *, weig
         from superglm.inference.metrics import ModelMetrics
 
         sim_sorted = np.empty((sim_n, n_grid))
-        for i in range(sim_n):
-            sim_rng = np.random.default_rng(seed + i + 1)
+        for i, replicate in enumerate(simulation_stream.spawn(sim_n)):
+            response_stream, jitter_stream = replicate.spawn(2)
             y_sim = _simulate_response(
                 family,
                 sim_mu,
                 phi,
                 sim_w,
-                sim_rng,
+                np.random.default_rng(response_stream),
                 weight_semantics=weight_semantics,
             )
             if y_sim is None:
                 break
             # Compute quantile residuals for simulated data
             m_sim = ModelMetrics(model, y=y_sim, sample_weight=sim_w, _mu=sim_mu)
-            qr_sim = m_sim.residuals("quantile", seed=seed + i + 1)
+            qr_sim = m_sim.residuals("quantile", seed=_stream_seed(jitter_stream))
             sorted_sim = np.sort(qr_sim)
             if effective_n > _QQ_GRID:
                 sim_sorted[i] = sorted_sim[grid_idx]

@@ -1532,7 +1532,10 @@ class SuperLSS:
         bin them and each moment gets a bootstrap band, so a band clear of zero
         (mean), of one (standard deviation) or of zero (skewness) marks the
         region where the fit is wrong and in which moment.  ``sample_weight``
-        is the aggregation weight of the residual payload; further keywords
+        is read as :meth:`residual_set` reads it: a prior weight is inside each
+        row's law and the row counts at most once, a frequency weight
+        replicates the row, and above 100,000 occurrences the bins read a
+        subset of 100,000 drawn without replacement.  Further keywords
         (``n_bins``, ``n_boot``) reach the builder.  ``truncation`` and
         ``censored`` are the bounds the model was fitted with, read as in
         :meth:`fit`; pass them for rows recorded under them.
@@ -1654,9 +1657,13 @@ class SuperLSS:
         expected count of exceedances match the realised one at each threshold,
         does each predicted quantile leave the right fraction of rows above it,
         and is the exceedance forecast reliable (the CORP diagram of
-        Dimitriadis, Gneiting and Jordan 2021).  ``sample_weight`` is the
-        aggregation weight; ``levels``, ``thresholds`` and ``quantile_grid``
-        reach the builder.
+        Dimitriadis, Gneiting and Jordan 2021).  ``sample_weight`` is read as
+        :meth:`residual_set` reads it: a prior weight is inside each row's law
+        and the row counts at most once, and a frequency weight replicates the
+        row.  Above 100,000 occurrences CORP and the randomised coverage and
+        quantiles read a subset of 100,000 drawn without replacement, while
+        continuous coverage and the tail totals read every row.  ``levels``,
+        ``thresholds`` and ``quantile_grid`` reach the builder.
         """
         require_scalar_response(self.family, "calibration")
         self._warn_bounds_unread("calibration", None, None, takes_bounds=False)
@@ -2113,9 +2120,12 @@ class SuperLSS:
         residual density against the standard normal, the residuals against the
         first parameter's linear predictor and their standard deviation in bins
         of the second's: the first three ask whether the family is right, the
-        last three where it is wrong.  ``sample_weight`` is the aggregation
-        weight of the residuals underneath; ``engine`` selects matplotlib or
-        plotly, and only the engine asked for is imported.  ``truncation`` and
+        last three where it is wrong.  ``sample_weight`` is read as
+        :meth:`residual_set` reads it: a prior weight is inside each row's law
+        and the row counts at most once, a frequency weight replicates the row,
+        and above 100,000 occurrences the panels read a subset of 100,000 drawn
+        without replacement.  ``engine`` selects matplotlib or plotly, and only
+        the engine asked for is imported.  ``truncation`` and
         ``censored`` are the bounds the model was fitted with, read as in
         :meth:`fit`; pass them for rows recorded under them.
         """

@@ -691,6 +691,43 @@ def test_pit_payload_replicates_frequency_weights(frequency_case):
     assert payload.expected == pytest.approx(counts.sum() / 10.0)
 
 
+def test_pit_counts_follow_the_band_law_above_the_replication_cap():
+    """A calibrated book larger than the cap still scatters as its band's binomial says.
+
+    Each replicate is 100,500 independent uniform transforms, so the histogram
+    reads a capped sample of 100,000 rows. Drawn with replacement, repeated rows
+    share a transform and every bin's variance grows by ``1 + (m - 1) / N``,
+    about 2 here.
+    """
+    n_rows, bins, replicates = 100_500, 20, 40
+    generator = np.random.default_rng(20261119)
+    pearson = []
+    for _ in range(replicates):
+        pit = generator.uniform(size=n_rows)
+        residuals = ResidualSet(
+            pit=pit,
+            quantile=special.ndtri(pit),
+            theta=np.zeros((n_rows, 1)),
+            eta=np.zeros((n_rows, 1)),
+            y=np.zeros(n_rows),
+            weights=np.ones(n_rows),
+            prior_weights=np.ones(n_rows),
+            clipped_rows=0,
+            randomised_rows=0,
+            weight_semantics="prior",
+        )
+        payload = pit_payload(residuals, n_bins=bins)
+        pearson.append(np.sum((payload.counts - payload.expected) ** 2) / payload.expected)
+    m = payload.n_rows
+    assert m == 100_000
+    band = stats.binom.ppf([0.025, 0.975], m, 1.0 / bins)
+    assert (payload.band_lower, payload.band_upper) == (float(band[0]), float(band[1]))
+    # Pearson's statistic of Multinomial(m, equal cells) has mean k - 1 and
+    # variance 2 (k - 1) (1 - 1 / m).
+    variance = 2 * (bins - 1) * (1 - 1 / m)
+    assert abs(np.mean(pearson) - (bins - 1)) < 6 * np.sqrt(variance / replicates)
+
+
 # ---------------------------------------------------------------- payload guards
 
 

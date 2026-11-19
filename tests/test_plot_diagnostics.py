@@ -433,6 +433,123 @@ class TestWeightContractDiagnostics:
         assert len(frequency_rows[0]) == 2 * (n - 3)
         np.testing.assert_array_equal(frequency_rows[3], np.ones(2 * (n - 3)))
 
+    def test_capped_frequency_rows_read_each_occurrence_at_most_once(self):
+        """Above the expansion cap the panels read a subset of the occurrences, none twice."""
+        rng = np.random.default_rng(3)
+        n = 1_001
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        y = 1.0 + 2.0 * frame["x"].to_numpy() + rng.normal(0.0, 0.2, n)
+        model = SuperGLM(family=Gaussian(), features={"x": Numeric()})
+        model.fit(frame, y)
+        metrics = model.metrics(frame, y)
+        # 100 occurrences per row is 100,100 in all, above the 100,000 cap; eta
+        # carries each row's index so the multiplicities can be read back.
+        weights = np.full(n, 100.0)
+        index = np.arange(n, dtype=np.float64)
+        rows = diagnostics_module._diagnostic_rows(
+            model,
+            y,
+            metrics._mu,
+            index,
+            weights,
+            metrics.residuals("quantile", seed=5),
+            5,
+            rng,
+            weight_semantics="frequency",
+        )
+        multiplicity = np.bincount(rows[2].astype(np.intp), minlength=n)
+        assert multiplicity.sum() == 100_000
+        assert np.all(multiplicity <= weights)
+
+    class _OmitFirstOccurrence:
+        """A legal draw of ``size`` of ``a`` that omits the first value."""
+
+        def choice(self, a, size, **kwargs):
+            return np.arange(a - size, a)
+
+    def test_capped_rows_that_hold_each_row_once_still_read_unit_weights(self, monkeypatch):
+        """A capped draw that reads every row once still reads unit weights."""
+        # Row 0 holds two occurrences, so 11 exceed a cap of 10 and the forced
+        # draw omits one copy of row 0: every row is read exactly once.
+        n = 10
+        monkeypatch.setattr(diagnostics_module, "_FREQUENCY_EXPANSION_CAP", n)
+        weights = np.ones(n)
+        weights[0] = 2.0
+        x = np.linspace(0.0, 1.0, 20)
+        model = SuperGLM(family=Gaussian(), features={"x": Numeric()})
+        model.fit(pd.DataFrame({"x": x}), 1.0 + x + 0.1 * np.sin(10.0 * x))
+        rows = diagnostics_module._diagnostic_rows(
+            model,
+            np.zeros(n),
+            np.zeros(n),
+            np.arange(n, dtype=np.float64),
+            weights,
+            np.zeros(n),
+            0,
+            self._OmitFirstOccurrence(),
+            weight_semantics="frequency",
+        )
+        multiplicity = np.bincount(rows[2].astype(np.intp), minlength=n)
+        assert multiplicity.sum() == n
+        assert np.all(multiplicity <= weights)
+        np.testing.assert_array_equal(rows[3], np.ones(n))
+
+    @staticmethod
+    def _balanced_binary_model():
+        """A Binomial fit whose prediction at ``x = 0`` is exactly 0.5."""
+        model = SuperGLM(family=Binomial(), features={"x": Numeric()}, weight_semantics="frequency")
+        model.fit(pd.DataFrame({"x": np.tile([-1.0, 1.0], 10)}), np.tile([0.0, 0.0, 1.0, 1.0], 5))
+        return model
+
+    def test_binary_qq_envelope_holds_a_calibrated_fit(self):
+        """A simulated Bernoulli response and its jitter use independent uniforms."""
+        # Calibrated outcomes: each row predicts 0.5, and half the outcomes are 1.
+        # A jitter that reuses the response's uniforms puts no simulated PIT in
+        # (0.25, 0.75), pushing the envelope to +-0.94 at theoretical +-0.4.
+        model = self._balanced_binary_model()
+        n = 2_000
+        frame = pd.DataFrame({"x": np.zeros(n)})
+        fig = model.plot_diagnostics(frame, np.tile([0.0, 1.0], n // 2), n_sim=20, seed=42)
+        ax = fig.axes[0]
+        theoretical, observed = ax.lines[0].get_data()
+        envelope = ax.collections[0].get_paths()[0].vertices
+        for target in (-0.4, 0.4):
+            k = int(np.argmin(np.abs(theoretical - target)))
+            band = envelope[envelope[:, 0] == theoretical[k], 1]
+            assert band.min() <= observed[k] <= band.max(), (target, observed[k], band)
+        plt.close(fig)
+
+    def test_capped_selection_is_independent_of_the_observed_jitter(self, monkeypatch):
+        """Which occurrences the cap selects does not share uniforms with their jitter."""
+        # Two rows predicting 0.5 with outcomes 0 and 1, 2**34 occurrences each.
+        # A zero's PIT is u/2 and a one's (1 + u)/2, so the middle quartile counts
+        # differ by (zeros with u > 1/2) - (ones with u < 1/2), whose SD is
+        # sqrt(m/2), about 224, for independent streams. Selection and jitter on
+        # one stream leave it within 1 of 0.
+        captured = []
+        rows = diagnostics_module._diagnostic_rows
+
+        def recording_rows(*args, **kwargs):
+            out = rows(*args, **kwargs)
+            captured.append(out[4])
+            return out
+
+        monkeypatch.setattr(diagnostics_module, "_diagnostic_rows", recording_rows)
+        model = self._balanced_binary_model()
+        frame = pd.DataFrame({"x": [0.0, 0.0]})
+        weights = np.full(2, 2.0**34)
+        for seed in (0, 1, 2):
+            fig = model.plot_diagnostics(
+                frame, np.array([0.0, 1.0]), sample_weight=weights, n_sim=1, seed=seed
+            )
+            plt.close(fig)
+        quartile = 0.6744897501960817  # the standard normal's upper quartile
+        differences = [
+            int(np.sum((q > -quartile) & (q < 0.0)) - np.sum((q > 0.0) & (q < quartile)))
+            for q in captured
+        ]
+        assert max(abs(d) for d in differences) > 3, differences
+
     @pytest.mark.parametrize(
         "family",
         [Gaussian(), Gamma(), Poisson(), NegativeBinomial(theta=2.0), Binomial()],
