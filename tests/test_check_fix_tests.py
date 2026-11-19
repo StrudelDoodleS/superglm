@@ -414,8 +414,9 @@ _KEYED_MODULE = (
 @pytest.mark.pins_behaviour
 def test_a_test_the_base_cannot_judge_fails_the_check(tmp_path):
     """A module that fails to collect on base for a reason other than a missing name leaves its
-    tests undecided, and an undecided test fails the check, listed; so does a run that judges
-    no test at all."""
+    tests undecided, and an undecided test fails the check, listed. A test the run does not
+    judge by design (``threads``, a skip for want of data) is listed as not run, and a pull
+    request whose only new test is one of those passes."""
     undecided, base = _repo(
         tmp_path / "a",
         {
@@ -424,17 +425,31 @@ def test_a_test_the_base_cannot_judge_fails_the_check(tmp_path):
             "tests/test_keyed.py": _KEYED_MODULE,
         },
     )
-    nothing, base_two = _repo(
-        tmp_path / "b",
-        {
-            "src/tiny/__init__.py": _FIXED_SRC,
-            "tests/test_later.py": "import pytest\n\n\ndef test_needs_data():\n    pytest.skip('no data')\n",
-        },
-    )
+    by_design = {
+        "skipped": "import pytest\n\n\ndef test_needs_data():\n    pytest.skip('[dataset] no data')\n",
+        "not_run": (
+            "import pytest\nfrom tiny import double\n\n\n@pytest.mark.threads\n"
+            "def test_needs_the_pools():\n    assert double(2) == 4\n"
+        ),
+    }
+    not_judged = {
+        status: _repo(
+            tmp_path / status,
+            {
+                "src/tiny/__init__.py": _FIXED_SRC,
+                "pytest.ini": "[pytest]\nmarkers = threads: needs the default pools\n",
+                "tests/test_later.py": test,
+            },
+        )
+        for status, test in by_design.items()
+    }
     report = tmp_path / "out.json"
     done = _run(undecided, base, "--json", str(report))
     status = {row["test"]: row["status"] for row in json.loads(report.read_text())["tests"]}
-    judged_nothing = _run(nothing, base_two)
+    judged_nothing = {
+        status: _run(*repo, "--json", str(tmp_path / f"{status}.json"))
+        for status, repo in not_judged.items()
+    }
 
     assert done.returncode == 1, done.stdout + done.stderr
     assert status == {
@@ -444,22 +459,35 @@ def test_a_test_the_base_cannot_judge_fails_the_check(tmp_path):
     assert "UNDECIDED: 1 test(s)" in done.stdout and "FLAGGED" not in done.stdout
     assert "tests/test_keyed.py::test_reads_its_case (added): KeyError" in done.stdout
     assert _run(undecided, base, "--report-only").returncode == 0
-    assert judged_nothing.returncode == 1, judged_nothing.stdout + judged_nothing.stderr
-    assert "no test was judged on base" in judged_nothing.stdout
+    for status, run in judged_nothing.items():
+        rows = json.loads((tmp_path / f"{status}.json").read_text())["tests"]
+        assert run.returncode == 0, run.stdout + run.stderr
+        assert [row["status"] for row in rows] == [status]
+        assert "no test was judged on base" in run.stdout and "UNDECIDED" not in run.stdout
 
 
 @pytest.mark.pins_behaviour
 def test_the_base_run_reads_the_bases_project_metadata_and_the_heads_pytest_options(tmp_path):
     """A test of project metadata meets the base's ``pyproject.toml``, while the head's
     ``[tool.pytest.ini_options]`` still reaches the run (here a filter that makes a warning an
-    error), so both tests fail on base."""
+    error, and a relative ``pythonpath`` that resolves inside the base tree), so both floor tests
+    fail on base and the helper's control passes there."""
     project = '[project]\nname = "tiny"\nrequires-python = ">=3.12"\n'
     repo, base = _repo(
         tmp_path,
         {
             "src/tiny/__init__.py": _FIXED_SRC,
             "pyproject.toml": project.replace("3.12", "3.13")
-            + '\n[tool.pytest.ini_options]\nfilterwarnings = ["error::UserWarning"]\n',
+            + "\n[tool.pytest.ini_options]\n"
+            + 'filterwarnings = ["error::UserWarning"]\npythonpath = ["tests/support"]\n'
+            + 'markers = ["pins_behaviour: a control"]\n',
+            "tests/support/fixture_helper.py": "ONE = 1\n",
+            "tests/test_helper.py": (
+                "import pytest\nfrom fixture_helper import ONE\n\n\n@pytest.mark.pins_behaviour\n"
+                "def test_reads_a_helper_on_the_pythonpath():\n"
+                '    "A control: the head\'s relative pythonpath resolves in the base tree."\n'
+                "    assert ONE == 1\n"
+            ),
             "tests/test_floor.py": (
                 "import tomllib\nimport warnings\nfrom pathlib import Path\n\n\n"
                 "def test_the_floor_is_raised():\n"
@@ -479,6 +507,7 @@ def test_the_base_run_reads_the_bases_project_metadata_and_the_heads_pytest_opti
     assert status == {
         "tests/test_floor.py::test_the_floor_is_raised": "fails",
         "tests/test_floor.py::test_a_warning_is_an_error": "fails",
+        "tests/test_helper.py::test_reads_a_helper_on_the_pythonpath": "passes",
     }
 
 

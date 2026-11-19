@@ -103,7 +103,8 @@ against the unfixed code proves nothing. In a pull request that changes `src/`,
 that passes on its merge base, unless the test is a deliberate control: marked
 `@pytest.mark.pins_behaviour`, with a docstring that says what it pins. A test
 that cannot be decided on the base (a collection error other than a missing
-name) fails the check too. Put
+name) fails the check too; a test it does not run by design (a browser,
+`threads` or dataset test) is listed as not run and fails nothing. Put
 test-only refactors in their own pull request, which the check skips, so that a
 `src/` pull request's changed tests are the ones that guard its change.
 

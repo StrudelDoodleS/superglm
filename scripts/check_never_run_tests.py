@@ -8,9 +8,11 @@ in a module that workflow names, and only when every skip of it has that
 message), or says that nothing runs it and why. Those are listed in the summary,
 so a test no job runs is counted, never passed silently. It also fails unless
 each of the ``--shards`` shards sent both its reports (``REPORTS``: the parallel
-stage's and the serial ``threads`` stage's), each readable and holding a test, so
-a report that is missing, truncated or empty cannot hide a skip. A shard that sent
-nothing is named when its platform and its group each appear in another shard.
+stage's and the serial ``threads`` stage's), each readable, and the parallel one
+holding a test, so a report that is missing or truncated, or a parallel stage that ran
+nothing, cannot hide a skip. A readable ``threads`` report may hold none: a shard's
+``threads`` stage selects nothing when its group has no ``threads`` test. A shard that
+sent nothing is named when its platform and its group each appear in another shard.
 
     python scripts/check_never_run_tests.py junit-dir --shards 20
 
@@ -62,14 +64,15 @@ def platform_of(report: Path) -> str:
 
 
 def cases(report: Path) -> tuple[list[ET.Element], str]:
-    """The test cases of one report, and why there are none ("" when there are some)."""
+    """The test cases of one report, and why it is a fault ("" when it is not): only the
+    parallel report must hold a test."""
     if not report.is_file():
         return [], "missing"
     try:
         found = list(ET.parse(report).getroot().iter("testcase"))
     except ET.ParseError:
         return [], "unreadable"
-    return found, "" if found else "holds no test"
+    return found, "" if found or report.name != REPORTS[0] else "holds no test"
 
 
 def expected_shards(junit: Path) -> list[str]:
@@ -136,7 +139,8 @@ def main(argv: list[str] | None = None) -> int:
     if faults or len(shards) != args.shards:
         whole = len(shards) - len({fault.split("/", 1)[0] for fault in faults})
         print(
-            f"{whole} of {max(args.shards, len(shards))} shards sent both reports, each holding a test."
+            f"{whole} of {max(args.shards, len(shards))} shards sent both reports, readable, "
+            "the parallel one holding a test."
         )
         print("".join(f"  {fault}\n" for fault in faults), end="")
         if len(shards) < args.shards:

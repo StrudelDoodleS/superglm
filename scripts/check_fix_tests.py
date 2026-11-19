@@ -19,6 +19,9 @@ uncommitted changes are not seen. Each selected test is judged:
 * its module fails to import on base for want of a name (``ImportError``,
   ``AttributeError``): the old code lacks what the test uses, which is what failing
   on it means, so the test fails on base, counted by module under that exception.
+  Known gap: the credit goes to every selected test in the module, so a changed test
+  beside the one that needs the name, which may pass on base, is credited too; the
+  per-module count is what shows a reviewer that a module failed whole.
 * its module fails to collect on base for any other reason (a syntax error, a
   conftest or fixture error): undecided. Any undecided test fails the job, and the
   report lists each one; move what fails on base into the tests that need it.
@@ -27,14 +30,14 @@ uncommitted changes are not seen. Each selected test is judged:
   or the module (``pytestmark``), which says "this deliberately pins behaviour
   that already worked", and whatever carries the mark has a docstring saying what
   it pins. The report lists every control, so a reviewer reads each opt-out.
-* skipped on base, deselected (``docs``, ``browser`` and ``threads``: the last needs
-  the default thread pools, which this run pins) or not collected (a module that skips
-  itself at collection, say for a missing optional package, is one): reported, never
-  counted as failing.
+* skipped on base (a ``[dataset]`` test: this run fetches no data), deselected (``docs``,
+  ``browser`` and ``threads``: the last needs the default thread pools, which this run
+  pins) or not collected (a module that skips itself at collection, say for a missing
+  optional package, is one): not run by design, so listed as not run, never counted as
+  failing and never undecided. A run whose every test is one of these passes, with a
+  report line saying that nothing in it was judged on base.
 
-A parametrized test counts as passing on base only if every case that ran passes. A
-run that decides no selected test (each skipped, not run or not collected on base)
-fails too: nothing in it shows that the change is needed.
+A parametrized test counts as passing on base only if every case that ran passes.
 
 Limits. A test is selected when it is new or when its own decorators, signature
 or body changed (found by comparing ``ast`` dumps of the merge base's and the head's
@@ -52,7 +55,7 @@ The run on base stops after ``--timeout`` seconds (default 1200, inside the work
 none of it judged, and exits 2.
 
 Exit status: 0 nothing to check, or nothing flagged or undecided (or ``--report-only``),
-1 a test is flagged or undecided or no test was decided, 2 the check itself could not run
+1 a test is flagged or undecided, 2 the check itself could not run
 (a timeout included).
 """
 
@@ -237,13 +240,14 @@ def base_tree(root: Path, merge_base: str, head: str, where: Path, package: str)
     archive = git(root, "archive", head, *overlay, binary=True)
     with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
         tar.extractall(where, filter="data")
-    # pytest reads only [tool.pytest...] from a -c .toml, and a pytest.ini outranks it
+    # pytest reads only [tool.pytest...] from a -c .toml, and a pytest.ini outranks it. The
+    # file sits at the tree's root: pytest resolves relative options (``pythonpath``) from it.
     config = []
     if "pytest.ini" not in overlay and git(root, "ls-tree", head, "--", "pyproject.toml"):
         text = git(root, "show", f"{head}:pyproject.toml")
         if "pytest" in tomllib.loads(text).get("tool", {}):
-            (where.parent / "head-pyproject.toml").write_text(text, encoding="utf-8")
-            config = ["-c", str(where.parent / "head-pyproject.toml"), f"--rootdir={where}"]
+            (where / "head-pyproject.toml").write_text(text, encoding="utf-8")
+            config = ["-c", str(where / "head-pyproject.toml"), f"--rootdir={where}"]
     path = os.pathsep.join(filter(None, [str(where / "src"), os.environ.get("PYTHONPATH", "")]))
     env = {**pinned_pools(os.environ), "PYTHONPATH": path}
     probe = "import importlib.util as u; print(u.find_spec(sys.argv[1]).origin)"
@@ -539,10 +543,10 @@ def render(verdicts, notes, merge_base, head) -> str:
         lines += [
             f"  {label(key)}: {verdicts[key]['kind']}" for key in by_status["collection_error"]
         ]
-    if not by_status.keys() & {"fails", "passes", "timed_out"}:
+    if not by_status.keys() & {"fails", "passes", "timed_out", "collection_error"}:
         lines.append(
-            "UNDECIDED: no test was judged on base (each was skipped, not run or not collected "
-            "there), so nothing shows that the change is needed."
+            "no test was judged on base: each is skipped, not run or not collected there by "
+            "design, so a reviewer reads what each one guards."
         )
     if flagged:
         lines.append(
@@ -602,7 +606,7 @@ def check(args) -> int:
         raise timed_out  # after the report: the check ends as one that could not run
     statuses = {verdict["status"] for verdict in verdicts.values()}
     flagged = any(verdict["flagged"] for verdict in verdicts.values())
-    undecided = "collection_error" in statuses or not statuses & {"fails", "passes"}
+    undecided = "collection_error" in statuses
     return 1 if (flagged or undecided) and not args.report_only else 0
 
 

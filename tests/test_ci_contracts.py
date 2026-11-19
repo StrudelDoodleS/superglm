@@ -1078,15 +1078,16 @@ def test_the_never_run_check_fails_only_on_a_test_no_platform_ran(tmp_path: Path
 
 @pytest.mark.parametrize(
     ("report", "fault"),
-    [(report, fault) for report in _REPORTS for fault in ("missing", "unreadable", "holds no test")]
-    + [(None, "no artifact")],
+    [(report, fault) for report in _REPORTS for fault in ("missing", "unreadable")]
+    + [(_REPORTS[0], "holds no test"), (None, "no artifact")],
 )
 def test_the_never_run_check_fails_unless_every_shard_sent_both_reports(
     tmp_path: Path, report, fault
 ) -> None:
-    """Either report of a shard missing, truncated or empty hides what that stage skipped, and
-    the check names the shard and the file; a shard that sent nothing is named by the platform
-    and the group the other shards show, and a whole runtime missing is counted."""
+    """Either report of a shard missing or truncated, or its parallel one empty, hides what that
+    stage skipped, and the check names the shard and the file; a shard that sent nothing is
+    named by the platform and the group the other shards show, and a whole runtime missing is
+    counted."""
     for platform in ("Linux-X64-py3.12", "Windows-X64-py3.13"):
         for group in (1, 2):
             _junit(tmp_path, platform, {("tests.test_ci_contracts", "test_a"): "passed"}, group)
@@ -1109,10 +1110,26 @@ def test_the_never_run_check_fails_unless_every_shard_sent_both_reports(
     assert complete.returncode == 0, complete.stdout + complete.stderr
     assert runtime_missing.returncode == 1 and "2 more sent no artifact" in runtime_missing.stdout
     assert done.returncode == 1, done.stdout + done.stderr
-    assert "3 of 4 shards sent both reports, each holding a test" in done.stdout
+    assert "3 of 4 shards sent both reports, readable, the parallel one holding" in done.stdout
     faults = [(name, "missing") for name in _REPORTS] if report is None else [(report, fault)]
     for name, why in faults:
         assert f"pytest-Windows-X64-py3.13-2/{name} {why}" in done.stdout
+
+
+def test_the_never_run_check_accepts_a_threads_stage_that_selected_nothing(tmp_path: Path) -> None:
+    """A group with no ``threads`` test writes a readable threads report of zero tests, which
+    the suite runner accepts (pytest's exit 5), so the check accepts it too."""
+    for group in (1, 2):
+        _junit(
+            tmp_path, "Linux-X64-py3.12", {("tests.test_ci_contracts", "test_a"): "passed"}, group
+        )
+    (tmp_path / "pytest-Linux-X64-py3.12-2" / _REPORTS[1]).write_text(
+        '<testsuites><testsuite name="pytest" tests="0" /></testsuites>', encoding="utf-8"
+    )
+
+    done = _check_never_run(tmp_path, 2)
+
+    assert done.returncode == 0, done.stdout + done.stderr
 
 
 # A fit's outcome: what an assertion behind ``if <outcome>:`` or a skip waits on.
