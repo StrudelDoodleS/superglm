@@ -506,14 +506,16 @@ def test_type_check_enforces_and_validates_the_accepted_backlog() -> None:
 
 
 @pytest.mark.pins_behaviour
-def test_fix_tests_job_only_reports_and_writes_its_summary_inside_its_limit() -> None:
+def test_fix_tests_job_fails_on_a_flag_and_writes_its_summary_inside_its_limit() -> None:
+    """A test a pull request adds that passes on its base fails the job, after the summary."""
     workflow = (_ROOT / ".github/workflows/dev-ci.yml").read_text(encoding="utf-8")
     job = yaml.safe_load(workflow)["jobs"]["fix-tests"]
     run = next(step["run"] for step in job["steps"] if "check_fix_tests" in step.get("run", ""))
     limit = int(re.search(r"timeout --kill-after=\d+s (\d+)m", run).group(1))
 
-    assert job["continue-on-error"] is True  # neither a flag nor a failed check blocks
-    assert "set -o pipefail" in run and "| tee fix-tests.txt" in run and "--report-only" in run
+    assert "continue-on-error" not in job and "--report-only" not in run
+    assert "set -o pipefail" in run and "| tee fix-tests.txt" in run
+    assert run.rstrip().endswith('exit "$status"')  # the check's own status, flags included
     assert limit < job["timeout-minutes"]  # the summary is written before the job's own limit
     assert run.index("timeout") < run.index("GITHUB_STEP_SUMMARY")
 

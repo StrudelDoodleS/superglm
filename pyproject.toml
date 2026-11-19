@@ -160,7 +160,7 @@ markers = [
     "slow: marks tests that fit real models (deselect with '-m \"not slow\"')",
     "docs: executes documentation notebooks (deselect with '-m \"not docs\"')",
     "threads: needs the default thread pools; run serially and unpinned by scripts/run_test_suite.py",
-    "pins_behaviour: deliberately pins behaviour that already worked before the change (read by scripts/check_fix_tests.py)",
+    "pins_behaviour: a control that deliberately pins behaviour that already worked before the change; its docstring says what it pins (scripts/check_fix_tests.py fails a pull request on any other added or changed test that passes on its base)",
 ]
 filterwarnings = [
     "ignore:Spline\\(kind='bs'\\):FutureWarning",

@@ -98,7 +98,10 @@ lists the lifecycles found and what each needs.
 New solver, REML, family, input-boundary or feature behaviour needs a focused
 regression test. An adversarial regression includes a mutation check or a
 demonstration against the unfixed implementation; a test that also passes
-against the unfixed code proves nothing.
+against the unfixed code proves nothing. `scripts/check_fix_tests.py` fails a
+pull request on any test it adds or changes that passes on its merge base,
+unless the test is a deliberate control: marked `@pytest.mark.pins_behaviour`,
+with a docstring that says what it pins.
 
 A change under `src/` runs `uv run python benchmarks/books.py baseline --set smoke
 --counts-only` (which reuses a baseline already stored) and `books.py check --set

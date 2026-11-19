@@ -14,8 +14,10 @@ revisions; uncommitted changes are not seen. Each selected test is judged:
   exception type; an ``ImportError`` or ``AttributeError`` says the test fails
   for want of a name, not for the behaviour it asserts.
 * passes on base: the test does not need the change. It is flagged unless it
-  carries ``@pytest.mark.pins_behaviour`` on the test, its class or the module
-  (``pytestmark``), which says "this deliberately pins behaviour that already worked".
+  is a control: it carries ``@pytest.mark.pins_behaviour`` on the test, its class
+  or the module (``pytestmark``), which says "this deliberately pins behaviour
+  that already worked", and whatever carries the mark has a docstring saying what
+  it pins. The report lists every control, so a reviewer reads each opt-out.
 * skipped on base, deselected (``docs``, ``browser`` and ``threads``: the last needs
   the default thread pools, which this run pins) or not collected (a module that skips
   itself at collection, say for a missing optional package, is one): reported, never
@@ -84,6 +86,7 @@ class RunTimeoutError(CheckError):
 class Test:
     digest: str
     pinned: bool
+    documented: bool = False  # the test, class or module carrying the mark has a docstring
 
 
 def _names_marker(expression: ast.AST) -> bool:
@@ -122,29 +125,34 @@ def _digest(node: ast.FunctionDef | ast.AsyncFunctionDef, context: str) -> str:
 def collect_tests(source: str) -> dict[str, Test]:
     """The test functions of a module by pytest id (``name`` or ``Class::name``)."""
     tree = ast.parse(source)
-    module_pinned = any(_pytestmark_pins(node) for node in tree.body)
     found: dict[str, Test] = {}
 
-    def visit(body, classes, context, pinned):
+    def mark(node, marked: bool, outer: bool | None) -> bool | None:
+        """``None`` unpinned, else whether the innermost node carrying the mark has a docstring."""
+        return ast.get_docstring(node) is not None if marked else outer
+
+    def visit(body, classes, context, pin):
         for node in body:
             if isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
                 header = [*node.decorator_list, *node.bases]
+                marked = any(_names_marker(d) for d in node.decorator_list) or any(
+                    _pytestmark_pins(statement) for statement in node.body
+                )
                 visit(
                     node.body,
                     (*classes, node.name),
                     context + "".join(ast.dump(part) for part in header),
-                    pinned
-                    or any(_names_marker(d) for d in node.decorator_list)
-                    or any(_pytestmark_pins(statement) for statement in node.body),
+                    mark(node, marked, pin),
                 )
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith(
                 "test"
             ):
+                own = mark(node, any(map(_names_marker, node.decorator_list)), pin)
                 found["::".join((*classes, node.name))] = Test(
-                    _digest(node, context), pinned or any(map(_names_marker, node.decorator_list))
+                    _digest(node, context), own is not None, bool(own)
                 )
 
-    visit(tree.body, (), "", module_pinned)
+    visit(tree.body, (), "", mark(tree, any(_pytestmark_pins(node) for node in tree.body), None))
     return found
 
 
@@ -156,8 +164,8 @@ def git(root: Path, *args: str, binary: bool = False):
 
 
 def selected_tests(root: Path, merge_base: str, head: str):
-    """``(src_changed, {(path, id): "added" | "changed"}, pinned ids, notes)`` of the diff."""
-    src_changed, selected, pinned, notes = False, {}, set(), []
+    """``(src_changed, {(path, id): "added" | "changed"}, {pinned id: documented}, notes)``."""
+    src_changed, selected, pinned, notes = False, {}, {}, []
     for line in git(root, "diff", "--name-status", "-M", merge_base, head).splitlines():
         status, *paths = line.split("\t")
         src_changed |= any(path.startswith("src/") for path in paths)
@@ -178,7 +186,7 @@ def selected_tests(root: Path, merge_base: str, head: str):
             elif before[name].digest != test.digest:
                 selected[(new, name)] = "changed"
             if test.pinned:
-                pinned.add((new, name))
+                pinned[(new, name)] = test.documented
     return src_changed, selected, pinned, notes
 
 
@@ -430,13 +438,14 @@ def judge(selected, pinned, collected, broken, ran, unfinished=frozenset()):
             status, kind = "not_run", ""
         else:
             status, kind = ran[key]
-        flagged = status == "passes" and key not in pinned
+        # a control is marked and its docstring says what it pins
+        control = pinned.get(key, False)
         verdicts[key] = {
             "how": how,
             "status": status,
             "kind": kind,
             "pinned": key in pinned,
-            "flagged": flagged,
+            "flagged": status == "passes" and not control,
         }
     return verdicts
 
@@ -449,6 +458,7 @@ def render(verdicts, notes, merge_base, head) -> str:
     for key, verdict in verdicts.items():
         by_status.setdefault(verdict["status"], []).append(key)
     flagged = [key for key, verdict in verdicts.items() if verdict["flagged"]]
+    controls = [k for k, v in verdicts.items() if v["status"] == "passes" and not v["flagged"]]
     kinds: dict[str, int] = {}
     for key in by_status.get("fails", []):
         kinds[verdicts[key]["kind"]] = kinds.get(verdicts[key]["kind"], 0) + 1
@@ -456,8 +466,8 @@ def render(verdicts, notes, merge_base, head) -> str:
         f"fix-test check: head {head[:10]} against src/ of {merge_base[:10]}",
         f"{len(verdicts)} tests added or changed",
         f"  fail or error on base ......... {len(by_status.get('fails', []))}",
-        f"  pass on base, pins_behaviour .. {sum(verdicts[k]['pinned'] and verdicts[k]['status'] == 'passes' for k in verdicts)}",
-        f"  pass on base, unmarked ........ {len(flagged)}",
+        f"  pass on base, controls ........ {len(controls)}",
+        f"  pass on base, flagged ......... {len(flagged)}",
         f"  skipped on base ............... {len(by_status.get('skipped', []))}",
         f"  not run, not collected, timed out {sum(len(by_status.get(s, [])) for s in ('not_run', 'not_collected', 'timed_out'))}",
         *notes,
@@ -484,11 +494,12 @@ def render(verdicts, notes, merge_base, head) -> str:
             lines.append(f"  {title}: {label(key)}")
     for key in by_status.get("not_collected", [])[:SHOWN]:
         lines.append(f"  not collected by pytest: {label(key)}")
+    lines += [f"  control (@pytest.mark.{MARKER}): {label(key)}" for key in controls]
     if flagged:
         lines.append(
-            f"FLAGGED: {len(flagged)} test(s) pass on the code before the change and carry no "
-            f"@pytest.mark.{MARKER}. Either they do not need the change, or they pin behaviour "
-            "that already worked: mark them."
+            f"FLAGGED: {len(flagged)} test(s) pass on the code before the change and are not "
+            f"controls. Either they do not need the change, or they pin behaviour that already "
+            f"worked: mark them @pytest.mark.{MARKER} and say in the docstring what they pin."
         )
         lines += [f"  {label(key)}" for key in flagged]
     else:

@@ -100,6 +100,27 @@ def test_the_marker_counts_on_a_test_a_class_or_the_module():
 
 
 @pytest.mark.pins_behaviour
+def test_a_control_is_documented_by_whatever_carries_its_mark():
+    """The docstring that counts is the marked test's, class's or module's, never an outer one's."""
+    on_test = _tests(
+        '@pytest.mark.pins_behaviour\ndef test_a():\n    """Pins x."""\n'
+        "@pytest.mark.pins_behaviour\ndef test_b(): pass"
+    )
+    on_class = _tests(
+        '@pytest.mark.pins_behaviour\nclass TestC:\n    """Pins y."""\n    def test_a(self): pass'
+    )
+    on_module = _tests('"""Pins z."""\npytestmark = pytest.mark.pins_behaviour\ndef test_a(): pass')
+    inner = _tests(
+        '"""Pins z."""\n@pytest.mark.pins_behaviour\nclass TestC:\n    def test_a(self):\n'
+        '        """Says nothing of the class."""'
+    )
+
+    assert (on_test["test_a"].documented, on_test["test_b"].documented) == (True, False)
+    assert on_class["TestC::test_a"].documented and on_module["test_a"].documented
+    assert not inner["TestC::test_a"].documented
+
+
+@pytest.mark.pins_behaviour
 def test_the_marker_is_read_from_the_marks_a_test_has_not_from_what_a_decorator_mentions():
     tests = _tests(
         """
@@ -153,7 +174,13 @@ def test_vacuous_passes_without_the_fix():
 
 @pytest.mark.pins_behaviour
 def test_deliberate_pin():
+    "A control: double returns an int before and after the fix."
     assert isinstance(double(1), int)
+
+
+@pytest.mark.pins_behaviour
+def test_undocumented_pin():
+    assert double(1) > 0
 
 
 @pytest.mark.parametrize("n", [0, 1, 2])
@@ -254,7 +281,11 @@ def test_a_vacuous_test_is_flagged_and_every_other_outcome_is_told_apart(tmp_pat
     flagged = {name.split("::", 1)[1] for name, row in verdicts.items() if row["flagged"]}
 
     assert done.returncode == 1, done.stdout + done.stderr
-    assert flagged == {"test_vacuous_passes_without_the_fix", "test_every_case_passes_without_it"}
+    assert flagged == {
+        "test_vacuous_passes_without_the_fix",
+        "test_every_case_passes_without_it",
+        "test_undocumented_pin",  # marked, but says nothing of what it pins
+    }
     assert status["test_fix_fails_without_it"] == status["TestGroup::test_method_fails_without_it"]
     assert status["test_fix_fails_without_it"] == "fails"
     assert status["test_one_case_needs_the_fix"] == "fails"  # one failing case is enough
@@ -266,10 +297,13 @@ def test_a_vacuous_test_is_flagged_and_every_other_outcome_is_told_apart(tmp_pat
     assert verdicts["tests/test_new_module.py::test_import_fails_on_base"]["kind"] == "ImportError"
     assert status["test_old"] == "fails"  # the changed assertion fails on base's code
     assert "tests/test_new.py::test_vacuous_passes_without_the_fix (added)" in done.stdout
+    assert "control (@pytest.mark.pins_behaviour): tests/test_new.py::test_deliberate_pin" in (
+        done.stdout
+    )
     assert "whatever its reason" in done.stdout  # the caveat travels with the report
 
     report_only = _run(repo, base, "--report-only")
-    assert report_only.returncode == 0 and "FLAGGED: 2 test(s)" in report_only.stdout
+    assert report_only.returncode == 0 and "FLAGGED: 3 test(s)" in report_only.stdout
 
 
 @pytest.mark.pins_behaviour
@@ -389,6 +423,7 @@ def test_threads_tests_are_not_run_and_the_pools_are_pinned(tmp_path):
                 "import os\n\nimport pytest\n\n\n@pytest.mark.threads\n"
                 'def test_needs_the_default_pools():\n    assert os.environ["OMP_NUM_THREADS"] != "1"\n\n\n'
                 f"@pytest.mark.pins_behaviour\ndef test_every_pool_is_pinned():\n"
+                '    "A control: the base run pins every pool."\n'
                 f"    assert [os.environ.get(name) for name in {pools!r}] == ['1'] * {len(pools)}\n"
             ),
         },
