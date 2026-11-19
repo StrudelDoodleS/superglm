@@ -229,7 +229,9 @@ def split_metrics_payload(
             "n_obs": dataset.n_obs,
             "source": dataset.source,
         }
-        reason = lss_split_reason(model, dataset) if is_lss(model) else edited.get("error")
+        reason = (lss_split_reason(model, dataset) if is_lss(model) else None) or edited.get(
+            "error"
+        )
         if reason is not None:
             rows.append({**identity, "available": False, "error": reason})
             continue

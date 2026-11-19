@@ -21,7 +21,9 @@ from superglm.distributional.weights import (
     UnsupportedLikelihoodContractError,
     resolve_likelihood_weights,
 )
+from superglm.editor.errors import no_quote_message
 from superglm.editor.lss.view import LSSModelView
+from superglm.model.base import NoPredictedMeanError
 
 LSS_METRIC_LABELS = {
     "log_score": "Log score",
@@ -70,7 +72,7 @@ def lss_split_reason(model: Any, dataset) -> str | None:
     return None
 
 
-def lss_dataset_metrics(model: Any, dataset) -> dict[str, float]:
+def lss_dataset_metrics(model: Any, dataset) -> dict[str, Any]:
     """Score ``dataset`` with a SuperLSS (or the editor's view of one).
 
     ``log_score`` is the negative log-likelihood and ``crps`` the CRPS, each the
@@ -82,6 +84,10 @@ def lss_dataset_metrics(model: Any, dataset) -> dict[str, float]:
     whose CRPS has no closed form and either no distribution function or an
     integral that cannot be resolved has no CRPS, which is then NaN. A split
     ``lss_split_reason`` refuses scores NaN throughout.
+
+    Where a weighted row has no value of a parameter (its predictor outside the
+    link's declared domain), the split has no scores: the result is
+    ``{"error": reason}``, as a SuperGLM's split with rows that have no quote.
     """
     lss = _fitted(model)
     if lss_split_reason(lss, dataset) is not None:
@@ -91,6 +97,16 @@ def lss_dataset_metrics(model: Any, dataset) -> dict[str, float]:
     w = np.ones(y.size) if weights is None else np.asarray(weights, dtype=np.float64).ravel()
     kwargs = {"sample_weight": weights, "offsets": dataset.offset}
     rows = _scoring_rows(lss._require_fitted(), dataset.X, y, **kwargs)
+    try:
+        return _scored_split(lss, dataset, y, w, kwargs, rows)
+    except NoPredictedMeanError as refused:
+        # The scores read the split's rows of positive weight: named among the split's own.
+        framed = refused._restated(rows.positions[refused.positions], dataset.n_obs)
+        return {"error": no_quote_message(framed)}
+
+
+def _scored_split(lss, dataset, y, w, kwargs, rows) -> dict[str, float]:
+    """``lss_dataset_metrics`` for a split whose scored rows each have every parameter."""
     mass = float(rows.aggregation_mass.sum())
     family = lss._require_fitted().family
     scores = None

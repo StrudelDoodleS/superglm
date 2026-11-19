@@ -35,6 +35,6 @@ def no_quote_message(error, *, counted: str | None = None) -> str:
     counted = counted or f"{error.positions.size} of {error.n_rows} rows"
     return (
         f"{counted} have no quote under this model (row positions "
-        f"{_shown_positions(error.positions)}): the {error.link} has no mean at their linear "
-        "predictor. These scores are not shown while those rows are in the data."
+        f"{_shown_positions(error.positions)}): the {error.link} has no {error.value} at their "
+        "linear predictor. These scores are not shown while those rows are in the data."
     )

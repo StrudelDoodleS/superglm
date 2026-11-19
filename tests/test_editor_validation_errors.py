@@ -20,7 +20,15 @@ from superglm.editor.summaries import summary_payload
 from superglm.editor.terms import term_offset_values
 from superglm.links import InverseLink
 from superglm.model_selection import fold_adapter
-from tests._no_mean_fixture import CELLS, CELLS_Y, TRAIN, TRAIN_Y, cv_frame, editor_fit
+from tests._no_mean_fixture import (
+    CELLS,
+    CELLS_Y,
+    TRAIN,
+    TRAIN_Y,
+    cv_frame,
+    editor_fit,
+    negative_power_lss,
+)
 
 
 @pytest.fixture
@@ -314,3 +322,109 @@ def test_run_cv_keeps_every_usable_fold_and_says_why_one_has_no_score():
     finally:
         widget.close()
     assert result["folds"][0]["score_refused"] == supplied.fold_scores["score refused"][0]
+
+
+@pytest.mark.pins_behaviour
+def test_a_zero_weight_row_with_no_quote_adds_nothing_to_a_splits_scores():
+    """A control: a zero-weight row added nothing to a split's deviance before, priced at 1e12.
+
+    The validation split's unseen cell has weight zero, and the metric panel and the
+    report score the split as its three priced rows. Mutation: the deviance summed
+    ``0 * NaN`` for that row and both read NaN.
+    """
+    model = editor_fit()
+    y_val = np.array([1.5, 3.0, 5.0, 3.0])
+    session = edit(
+        model,
+        train_data=(TRAIN, TRAIN_Y),
+        validation_data=(CELLS, y_val, np.array([1.0, 1.0, 1.0, 0.0])),
+    )
+    seen = model.metrics(CELLS.iloc[:3], y_val[:3]).deviance
+    widget = session.widget(mode="server")
+    try:
+        panel = widget._metrics("deviance", dataset="validation")
+        _, validation = widget._report("validation")["splits"]
+    finally:
+        widget.close()
+    assert panel["original"] == pytest.approx(seen, rel=1e-12)
+    assert validation["metrics"]["edited"]["deviance"] == pytest.approx(seen, rel=1e-12)
+
+
+_NO_VALUE = _NO_QUOTE + r": the PowerLink has no value of 'mean' at their linear predictor"
+
+
+def test_a_superlss_split_or_edit_with_rows_with_no_value_is_shown_as_such():
+    """A SuperLSS whose mean has ``PowerLink(-1)``: the unseen cell has no value of the mean.
+
+    The validation split holding it is unavailable with the reason, and the training
+    split is still scored. An edit that takes training rows past zero stands:
+    ``to_model()`` returns it, and the report says which training rows have no quote.
+    Mutation: the report raised the library's refusal ("'mean' has no value on 1 of the
+    4 rows read"), so no split was shown, and ``to_model()`` raised it too.
+    """
+    model = negative_power_lss()
+    session = edit(model, train_data=(TRAIN, TRAIN_Y), validation_data=(CELLS, CELLS_Y))
+    widget = session.widget(mode="server")
+    try:
+        train, validation = widget._report("validation")["splits"]
+        assert np.isfinite(train["metrics"]["original"]["log_score"])
+        assert validation["available"] is False
+        assert re.match(_NO_VALUE.format(1, 4, 3), validation["error"])
+
+        # Level 1 of `a` carries the cell (1, 0), whose predictor is 1/4: -0.3 takes it past zero.
+        session.select_indices("mean:a", [1])
+        session.shift("mean:a", -0.3)
+        edited = session.to_model()
+        train, _ = widget._report("validation")["splits"]
+    finally:
+        widget.close()
+    assert edited.predict_link(CELLS).to_numpy()[1, 0] == pytest.approx(-0.05, rel=1e-6)
+    assert train["available"] is False
+    assert re.match(_NO_VALUE.format(10, 30, "2, 3, 8, 9, 14, 15, 20, 21, 26, 27"), train["error"])
+
+
+def test_run_cv_keeps_a_superlss_fold_whose_held_out_rows_have_no_value():
+    """Fold 1 holds out the SuperLSS's unseen cell, row 33; fold 2 scores.
+
+    The replay keeps both folds and their fits, and names the row in the frame.
+    Mutation: the fold scorer's refusal stopped Run CV at fold 1 with no result.
+    """
+    from superglm.editor.cv import capture_cv_run, run_cv
+    from superglm.model_selection import cross_validate
+
+    X, y, splitter = cv_frame()
+    model = negative_power_lss()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        supplied = cross_validate(model, X, y, cv=splitter)
+    session = edit(model, cv=supplied, cv_data=(X, y), train_data=(TRAIN, TRAIN_Y))
+    run = run_cv(capture_cv_run(session), _Context())
+    refused, scored = run.result.fold_scores.to_dict("records")
+    assert refused["converged"] and np.isnan(refused["nll"]) and np.isfinite(scored["nll"])
+    assert re.match(
+        r"1 of fold 1's 4 held-out rows have no quote .*positions 33\)", refused["score refused"]
+    )
+
+
+def test_the_cv_tab_leaves_a_refused_folds_error_score_out():
+    """A supplied result run with a numeric ``error_score``: the refused fold has no score.
+
+    Its cell reads none, with the reason, and the mean is the scored fold's. Mutation:
+    the tab showed fold 1's score as -999, counted it as scored, and its mean was -499.4.
+    """
+    from superglm.editor.cv import cv_report_payload
+    from superglm.model_selection import cross_validate
+
+    X, y, splitter = cv_frame()
+    model = editor_fit()
+    with pytest.warns(UserWarning, match="scored 1 of 2 folds"):
+        supplied = cross_validate(model, X, y, cv=splitter, error_score=-999.0)
+    session = edit(model, cv=supplied, cv_data=(X, y), train_data=(TRAIN, TRAIN_Y))
+    widget = session.widget(mode="server")
+    try:
+        [result] = cv_report_payload(widget)["results"]
+    finally:
+        widget.close()
+    refused, scored = result["folds"]
+    assert refused["scores"]["deviance"] is None and refused["score_refused"]
+    assert result["mean"]["deviance"] == scored["scores"]["deviance"]
