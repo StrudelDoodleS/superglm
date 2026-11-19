@@ -1123,7 +1123,9 @@ class CardinalCRSpline(_SplineBase):
 
 
 #: The spline types that bin at fit time and that the compiled kernels evaluate: exactly these.
-#: A subclass, whatever it overrides, is fitted and predicted through its own methods.
+#: A subclass, whatever it overrides, is fitted and predicted through its own methods. Only
+#: these give interaction margins their extrapolation policy; a subclass's margins read
+#: ``_raw_basis_matrix`` as they always have.
 _BUILT_IN_SPLINES = frozenset(
     {PSpline, BSplineSmooth, NaturalSpline, CubicRegressionSpline, CardinalCRSpline}
 )

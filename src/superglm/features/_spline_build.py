@@ -454,11 +454,22 @@ def tensor_marginal_info(
     if support_counts is not None and support_counts.shape != evaluation_points.shape:
         raise ValueError("counts must match the tensor marginal support")
 
+    from superglm.features.spline import _BUILT_IN_SPLINES
+
+    # A margin of superglm's own spline reads that spline's basis, so past the training range
+    # it continues, holds or refuses as the spline does; a subclass's reads its raw basis.
+    follows_policy = type(spec) in _BUILT_IN_SPLINES
+
+    def raw_rows(points: NDArray) -> NDArray:
+        if follows_policy:
+            return spec._basis_matrix(points).toarray()
+        return spec._raw_basis_matrix(points)
+
     distinct = row_supports.distinct_values(evaluation_points)
     basis_raw = (
-        spec._raw_basis_matrix(evaluation_points)
+        raw_rows(evaluation_points)
         if distinct is None
-        else np.asarray(spec._raw_basis_matrix(distinct[0]))[distinct[1]]
+        else np.asarray(raw_rows(distinct[0]))[distinct[1]]
     )
     omega = spec._build_penalty()
     _, omega_constrained, _, projection_constraints = spec._apply_constraints(
@@ -503,6 +514,7 @@ def tensor_marginal_info(
         raw_basis_eval=spec._raw_basis_matrix,
         normalize_penalty=False,
         structural_penalty=None if structural is None else projection.T @ structural @ projection,
+        follows_policy=follows_policy,
     )
     if distinct is not None:
         info.distinct = distinct

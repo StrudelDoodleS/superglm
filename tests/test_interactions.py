@@ -1,7 +1,10 @@
 """Tests for all interaction features."""
 
+import itertools
+import lzma
 import pickle
 import warnings
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -20,9 +23,16 @@ from superglm.features.interaction import (
 )
 from superglm.features.numeric import Numeric
 from superglm.features.polynomial import Polynomial
-from superglm.features.spline import CubicRegressionSpline, NaturalSpline, Spline
+from superglm.features.spline import CubicRegressionSpline, NaturalSpline, PSpline, Spline
 from superglm.model import SuperGLM
 from superglm.types import GroupInfo
+
+from . import _custom_margin_splines as custom_margins
+from .test_saved_fs_models import assert_predicts_as_saved
+
+# ``scripts/make_saved_interaction_margin_fixtures.py`` run from master 5f28e8e80, the last
+# whose interaction margins were held at the training range under every policy
+SAVED_HELD_MARGINS = Path(__file__).parent / "fixtures" / "saved_master_5f28e8e80"
 
 
 # ── Fixture data ───────────────────────────────────────────────
@@ -1887,6 +1897,323 @@ class TestDirectInteractionPrediction:
         np.testing.assert_allclose(model.predict(X[columns]), baseline, rtol=1e-12, atol=1e-12)
 
 
+# ── Interaction margins outside the training range ─────────────
+
+
+_rating_cells = custom_margins.rating_cells
+
+
+def _rating_model(kind, n_knots, extrapolation, *, boundary=None, discrete=False, m=2):
+    from superglm import cat, interaction, s, ti
+
+    return SuperGLM(
+        family="poisson",
+        terms=[
+            s("age", kind=kind, n_knots=3, extrapolation=extrapolation, boundary=boundary, m=m),
+            s("bonus", kind=kind, n_knots=3, extrapolation=extrapolation, m=m),
+            cat("region", base="A"),
+            ti("age", "bonus", n_knots=n_knots),
+            interaction(SplineCategorical("age", "region")),
+        ],
+        selection_penalty=0.0,
+        spline_penalty=0.03,
+        discrete=discrete,
+        n_jobs=1,
+    )
+
+
+def _interaction_contrasts(model, age):
+    """The log-rate contrasts the tensor and the region-B curve alone move, at ``age``.
+
+    Bonus 95 against 55 at region B leaves the bonus main effect's constant and the
+    tensor; region B against A at bonus 95 leaves the region constant and the B curve.
+    """
+
+    def log_rate(bonus, region):
+        frame = pd.DataFrame({"age": age, "bonus": bonus, "region": region})
+        return np.log(np.asarray(model.predict(frame), dtype=np.float64))
+
+    return log_rate(95.0, "B") - log_rate(55.0, "B"), log_rate(95.0, "B") - log_rate(95.0, "A")
+
+
+def _continuation(model, span, beyond, tail_from=None):
+    """Both contrasts at ``beyond``, and their continuation from four ages on one knot span.
+
+    On one knot span each contrast is a cubic in age plus a constant, so four
+    predictions there give it, continued as the cubic itself (a P-spline's end
+    polynomial) or, with ``tail_from`` the boundary, as its tangent there (the
+    natural linear tail of ``cr`` and ``ns``).
+    """
+    cubics = [
+        np.polynomial.Polynomial.fit(span, curve, 3)
+        for curve in _interaction_contrasts(model, span)
+    ]
+    expected = [
+        cubic(beyond)
+        if tail_from is None
+        else cubic(tail_from) + (beyond - tail_from) * cubic.deriv()(tail_from)
+        for cubic in cubics
+    ]
+    return np.array(_interaction_contrasts(model, beyond)), np.array(expected)
+
+
+class TestInteractionMarginExtrapolation:
+    """An interaction margin continues or refuses past the training range as its spline does."""
+
+    # ``cr`` with m=2 takes the cardinal margin, with m=1 its own linear-tail basis.
+    CASES = [("ps", None, 2), ("ps", (4, 5), 2), ("cr", None, 2), ("ns", None, 2), ("cr", None, 1)]
+    IDS = ["ps", "ps_knot_override", "cr_cardinal", "ns", "cr_m1"]
+
+    @pytest.mark.parametrize(("kind", "n_knots", "m"), CASES, ids=IDS)
+    def test_extend_continues_both_interactions(self, kind, n_knots, m):
+        """Under ``extrapolation="extend"`` both interaction curves continue past the range.
+
+        Every margin here has its end knots at or inside 35 and 65, so the spans
+        read lie on one knot span. A margin held at the boundary moves neither
+        contrast past it, missing the continuation by 0.07 or more. 1e-10 bounds
+        the predictions' rounding, of order 1e-15 on these contrasts of order 1,
+        as the four-point extrapolation amplifies it.
+        """
+        X, y = _rating_cells()
+        model = _rating_model(kind, n_knots, "extend", m=m).fit(X, y)
+        ends = ((75.0, [66.0, 69.0, 72.0, 75.0], 80.0), (25.0, [25.0, 28.0, 31.0, 34.0], 20.0))
+        for edge, span, beyond in ends:
+            tail_from = edge if kind in {"cr", "ns"} else None
+            actual, expected = _continuation(model, np.array(span), np.array([beyond]), tail_from)
+            np.testing.assert_allclose(actual, expected, rtol=0, atol=1e-10)
+
+    @pytest.mark.parametrize(("kind", "n_knots", "m"), CASES, ids=IDS)
+    def test_error_refuses_in_both_interactions(self, kind, n_knots, m):
+        """Under ``extrapolation="error"`` both interactions refuse a row past the range.
+
+        Their own ``transform`` and ``score`` refuse as the spline does, and read
+        a row on the boundary.
+        """
+        X, y = _rating_cells()
+        model = _rating_model(kind, n_knots, "error", m=m).fit(X, y)
+        terms = (("age:bonus", np.array([95.0])), ("age:region", np.array(["B"])))
+        for (name, other), age in itertools.product(terms, (80.0, 20.0)):
+            spec = model._interaction_specs[name]
+            width = spec.transform(np.array([75.0]), other).shape[1]
+            with pytest.raises(ValueError, match="outside training range"):
+                spec.transform(np.array([age]), other)
+            with pytest.raises(ValueError, match="outside training range"):
+                spec.score(np.array([age]), other, np.zeros(width))
+
+    def test_a_boundary_inside_the_data_continues_the_fitted_rows_past_it(self):
+        """Rows past a stated ``boundary`` are fitted on the continued margins, binned or not.
+
+        With ``boundary=(30, 65)`` and ``extend`` the rows at ages 70 and 75 are
+        rated on the end cubic of the span from the last knot, 56.25, to 65. The
+        binned fit, whose bins hold each distinct value, is the exact one to the
+        solve's tolerance, so its tensor block reads the same continued rows. Each
+        fit's deviance is that of its predictions on its own rows, so the rows it was
+        fitted on are the ones it quotes: a region curve fitted on held rows and
+        quoted on continued ones misses it by 0.02 against 0.56. The deviance is of
+        order 1e-8 on these noise-free rates, and the two evaluations agree to about
+        1e-20, so 1e-6 relative leaves only the solve's rounding.
+        """
+        X, y = _rating_cells()
+        fits = [
+            _rating_model("ps", None, "extend", boundary=(30.0, 65.0), discrete=discrete).fit(X, y)
+            for discrete in (False, True)
+        ]
+        for model in fits:
+            actual, expected = _continuation(
+                model, np.array([57.0, 60.0, 62.5, 65.0]), np.array([70.0, 75.0])
+            )
+            np.testing.assert_allclose(actual, expected, rtol=0, atol=1e-10)
+            np.testing.assert_allclose(
+                model.metrics(X, y).deviance, model.result.deviance, rtol=1e-6, atol=0
+            )
+        np.testing.assert_allclose(fits[1].predict(X), fits[0].predict(X), rtol=1e-6, atol=0)
+
+    @pytest.mark.pins_behaviour
+    @pytest.mark.parametrize("kind", ["ps", "cr"])
+    def test_a_model_saved_with_held_margins_quotes_as_saved_until_refitted(self, kind):
+        """A model saved before its interaction margins followed the policy quotes as saved.
+
+        Master 5f28e8e80 fitted the rows past ``boundary=(30, 65)`` on interaction
+        margins held at the boundary, so a term loaded without the mark of a fit here
+        reads them so: the model predicts its rows as it did when saved, and their
+        deviance is the fit's. Read continued, its training quotes moved by up to 104%
+        and the deviance from 0.074 to 1.35 (``ps``). A refit builds the margins
+        anew, and it is a fit made here.
+        """
+        path = SAVED_HELD_MARGINS / f"interactions_past_boundary_{kind}.pkl.xz"
+        with lzma.open(path, "rb") as handle:
+            record = pickle.load(handle)
+        model, X, y = record["model"], record["frame"], record["y"]
+        assert_predicts_as_saved(model, X, record["prediction"])
+        np.testing.assert_allclose(
+            model.metrics(X, y).deviance, model.result.deviance, rtol=1e-9, atol=0
+        )
+        model.fit(X, y)
+        fresh = _rating_model(kind, None, "extend", boundary=(30.0, 65.0)).fit(X, y)
+        np.testing.assert_allclose(model.predict(X), fresh.predict(X), rtol=1e-10, atol=0)
+
+    @pytest.mark.pins_behaviour
+    def test_a_custom_constructor_without_the_policy_builds_a_knot_override(self):
+        """A knot-count override rebuilds a subclass's margin through its constructor as before.
+
+        Only a clone of superglm's own spline is given the parent's policy, so a
+        subclass whose constructor takes only the options it took before builds the
+        override, and under the default ``clip`` the model is the stock spline's.
+        """
+        from superglm import interaction, term
+
+        class FixedOptionsPSpline(PSpline):
+            def __init__(
+                self,
+                n_knots=3,
+                degree=3,
+                knot_strategy="uniform",
+                penalty="ssp",
+                boundary=None,
+                knot_alpha=0.2,
+                m=2,
+            ):
+                super().__init__(
+                    n_knots=n_knots,
+                    degree=degree,
+                    knot_strategy=knot_strategy,
+                    penalty=penalty,
+                    boundary=boundary,
+                    knot_alpha=knot_alpha,
+                    m=m,
+                )
+
+        X, y = _rating_cells()
+
+        def fit(age):
+            return SuperGLM(
+                family="poisson",
+                terms=[
+                    term("age", age),
+                    term("bonus", PSpline(n_knots=3)),
+                    interaction(TensorInteraction("age", "bonus", n_knots=(4, 5))),
+                ],
+                selection_penalty=0.0,
+                spline_penalty=0.03,
+                n_jobs=1,
+            ).fit(X, y)
+
+        custom, stock = fit(FixedOptionsPSpline()), fit(PSpline(n_knots=3))
+        np.testing.assert_allclose(custom.predict(X), stock.predict(X), rtol=1e-10, atol=0)
+
+    @pytest.mark.pins_behaviour
+    @pytest.mark.parametrize("policy", ["clip", "extend", "error"])
+    @pytest.mark.parametrize(
+        "spline",
+        [
+            custom_margins.InRangeRaw,
+            custom_margins.InRangeIngredients,
+            custom_margins.WrappedPSpline,
+            custom_margins.CallableMarginPSpline,
+        ],
+        ids=["raw_basis", "ingredients", "partial", "callable"],
+    )
+    def test_a_custom_tensor_margin_is_handed_the_training_range_under_every_policy(
+        self, spline, policy
+    ):
+        """A custom tensor margin reads its points clamped to the training range, whatever its policy.
+
+        Only the margins of superglm's own splines follow the policy. A subclass's, and
+        the evaluator it hands the tensor (its raw basis, a bound method of its own, the
+        stock one in ``functools.partial``, a callable object declaring the policy),
+        read points as master 5f28e8e80 read them. The first two read only the base
+        interval and refuse a point past it, as SciPy's does without extrapolation. The
+        tensor's rows at ages 75, 80 and 90 are its row at 75 to the rounding of their
+        projection.
+        """
+        from superglm import interaction, s, term
+
+        X, y = _rating_cells()
+        model = SuperGLM(
+            family="poisson",
+            terms=[
+                term("age", spline(n_knots=3, extrapolation=policy)),
+                s("bonus", kind="ps", n_knots=3),
+                interaction(TensorInteraction("age", "bonus")),
+            ],
+            selection_penalty=0.0,
+            spline_penalty=0.03,
+            n_jobs=1,
+        ).fit(X, y)
+        rows = model._interaction_specs["age:bonus"].transform(
+            np.array([75.0, 80.0, 90.0]), np.full(3, 95.0)
+        )
+        np.testing.assert_allclose(
+            rows, rows[[0, 0, 0]], rtol=0, atol=16 * 2.0**-53 * np.abs(rows).max()
+        )
+
+    @pytest.mark.pins_behaviour
+    @pytest.mark.parametrize("case", list(custom_margins.CASES)[1:])
+    def test_a_custom_margin_fits_and_quotes_as_on_master(self, case):
+        """A model with a custom interaction margin under ``extend`` fits and quotes as master's did.
+
+        The cases are the reviews' (``tests/_custom_margin_splines.py``): a tensor margin
+        whose raw basis continues past the range, the same handed to the tensor as a callable
+        object, the stock evaluator in ``functools.partial``, the one-argument signature,
+        evaluators that read only the base interval, and a constructor that configures its
+        evaluator, under a knot-count override; and a region curve on a subclass that keeps
+        the stock raw basis (the first case, saved, is
+        ``test_a_model_saved_with_a_custom_region_curve_quotes_as_saved``). Master
+        5f28e8e80's predictions on the rows and on quotes inside ``boundary=(30, 65)``,
+        past it and past the data are stored with
+        ``scripts/make_saved_interaction_margin_fixtures.py``. A fit stops at the solver's
+        tolerance, so other arithmetic moves these predictions far less than 1e-9. At
+        91add5b6f, which read some of these margins at their policy, they moved by 5% to
+        50%, or were refused.
+        """
+        X, y = _rating_cells()
+        model = custom_margins.custom_margin_model(case).fit(X, y)
+        with np.load(SAVED_HELD_MARGINS / "custom_margins.npz") as master:
+            for key, frame in (("rows", X), ("quotes", custom_margins.quotes())):
+                expected = master[f"{case}/{key}"]
+                np.testing.assert_allclose(model.predict(frame), expected, rtol=1e-9, atol=0)
+
+    @pytest.mark.pins_behaviour
+    def test_a_wrapped_stock_evaluator_is_fitted_on_the_rows_it_quotes(self):
+        """The stock tensor evaluator in ``functools.partial`` is held at the range at fit and quote.
+
+        The fit's deviance is that of its predictions on its own rows, past
+        ``boundary=(30, 65)`` too (see
+        ``test_a_boundary_inside_the_data_continues_the_fitted_rows_past_it``). At
+        91add5b6f, fitted on the continued margin and quoted on the held one, it was 1.036
+        against 1.194.
+        """
+        X, y = _rating_cells()
+        model = custom_margins.custom_margin_model("tensor_wrapped").fit(X, y)
+        np.testing.assert_allclose(
+            model.metrics(X, y).deviance, model.result.deviance, rtol=1e-6, atol=0
+        )
+
+    @pytest.mark.pins_behaviour
+    def test_a_model_saved_with_a_custom_region_curve_quotes_as_saved(self):
+        """A saved model whose region curve is on a custom spline quotes as saved, refitted or not.
+
+        The spline's raw basis continues past ``boundary=(30, 65)`` under every policy,
+        and master 5f28e8e80 handed it the covariate as it is, as this code does: the
+        model saved there predicts its rows and its quotes past the boundary and the data
+        as saved, their deviance is the fit's, and a refit is master's fit. At 91add5b6f,
+        which read it at the boundary, its age-80 region-B quote fell from 0.318 to 0.255.
+        """
+        path = SAVED_HELD_MARGINS / "custom_region_curve_past_boundary.pkl.xz"
+        with lzma.open(path, "rb") as handle:
+            record = pickle.load(handle)
+        model, X, y = record["model"], record["frame"], record["y"]
+        assert_predicts_as_saved(model, X, record["prediction"])
+        assert_predicts_as_saved(model, record["quotes"], record["quote_prediction"])
+        np.testing.assert_allclose(
+            model.metrics(X, y).deviance, model.result.deviance, rtol=1e-9, atol=0
+        )
+        model.fit(X, y)
+        np.testing.assert_allclose(
+            model.predict(record["quotes"]), record["quote_prediction"], rtol=1e-9, atol=0
+        )
+
+
 # ── Tensor marginal parent geometry tests ──────────────────────
 
 
@@ -2236,6 +2563,20 @@ class TestDiscreteTensorRawBand:
         # Z-projected, so the identity holds at round-off rather than bitwise.
         reproduced = self._expand(band.offsets1, band.values1, k_raw) @ ti._marginal1.projection
         assert np.abs(reproduced - result.B1_unique).max() <= 1e-14
+
+    def test_band_continues_the_bins_past_a_boundary_inside_the_data(self):
+        # Under extrapolation="extend" the bins past a stated boundary are fitted
+        # on the continued basis: the last four, past 90, hold four rows, not one
+        # held row, and the band the raw stage reads reproduces them.
+        rng = np.random.default_rng(34)
+        x1 = rng.uniform(0, 100, 3000)
+        x2 = rng.uniform(0, 50, 3000)
+        parent = Spline(kind="ps", k=10, boundary=(10.0, 90.0), extrapolation="extend")
+        ti, result = self._build(parent, x1, Spline(kind="ps", k=10), x2)
+        assert len(np.unique(result.B1_unique[-4:], axis=0)) == 4
+        band = result.raw_channels
+        reproduced = self._expand(band.offsets1, band.values1, 10) @ ti._marginal1.projection
+        assert np.abs(reproduced - result.B1_unique).max() <= 1e-15
 
 
 class TestPolynomialInteractionStoredFactor:

@@ -210,12 +210,12 @@ def cardinal_dense(x: NDArray, knots: NDArray, second_derivative_map: NDArray) -
     return out
 
 
-def _evaluates_by_scipy(spec: Any, spline_base: type, *overrides: type) -> bool:
-    """Whether ``spec._basis_matrix`` is the SciPy B-spline design (``extend`` aside)."""
+def _evaluates_by_scipy(spec: Any, extends: bool, spline_base: type, *overrides: type) -> bool:
+    """Whether ``spec._basis_matrix`` is the SciPy B-spline design (a linear tail aside)."""
     method = type(spec)._basis_matrix
     if method is spline_base._basis_matrix:
         return True
-    return spec.extrapolation != "extend" and any(method is cls._basis_matrix for cls in overrides)
+    return not extends and any(method is cls._basis_matrix for cls in overrides)
 
 
 def _refused_by_scipy(spec: Any, points: NDArray) -> bool:
@@ -242,8 +242,12 @@ def _evaluations(n_rows: int) -> tuple[Any, Any] | None:
     return None
 
 
-def dense_basis(spec: Any, x: NDArray) -> NDArray:
-    """``spec._basis_matrix(x).toarray()``, from the kernels or the Python rows where the spec allows."""
+def dense_basis(spec: Any, x: NDArray, *, in_range: bool = False) -> NDArray:
+    """``spec._basis_matrix(x).toarray()``, from the kernels or the Python rows where the spec allows.
+
+    ``in_range`` states that every point lies in the training range, where ``extend`` gives the
+    rows ``clip`` does, so a linear-tail spline under ``extend`` reads the kernels there too.
+    """
     from superglm.features import _spline_runtime
     from superglm.features.spline import (
         _BUILT_IN_SPLINES,
@@ -257,11 +261,12 @@ def dense_basis(spec: Any, x: NDArray) -> NDArray:
     if getattr(spec, "_scop_Sigma", None) is not None or evaluations is None:
         return spec._basis_matrix(x).toarray()  # a saved SCOP term keeps its exact route
     bspline, cardinal = evaluations
-    if type(spec) is CardinalCRSpline and spec.extrapolation != "extend":
+    extends = spec.extrapolation == "extend" and not in_range
+    if type(spec) is CardinalCRSpline and not extends:
         x_eval, _ = _spline_runtime.prepare_eval_points(spec, x)
         rows = cardinal(x_eval, spec._cr_knots, spec._cr_M)
     elif type(spec) in _BUILT_IN_SPLINES and _evaluates_by_scipy(
-        spec, _SplineBase, CubicRegressionSpline, NaturalSpline
+        spec, extends, _SplineBase, CubicRegressionSpline, NaturalSpline
     ):
         x_eval, _ = _spline_runtime.prepare_eval_points(spec, x)
         if _refused_by_scipy(spec, x_eval):

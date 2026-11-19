@@ -1134,7 +1134,7 @@ def test_a_quote_compiles_no_basis_kernel_and_a_full_block_reads_them(monkeypatc
         original = getattr(kernels, name)
 
         def spy(*args, _original=original, _route=route, **kwargs):
-            reached[_route].append(sys._getframe(1).f_code.co_name)
+            reached[_route].append(sys._getframe(2).f_code.co_name)
             return _original(*args, **kwargs)
 
         monkeypatch.setattr(kernels, name, spy)
@@ -1150,7 +1150,8 @@ def test_a_quote_compiles_no_basis_kernel_and_a_full_block_reads_them(monkeypatc
     for rows in (kernels.SCALAR_MAX_ROWS + 1, 1000, kernels.KERNEL_MIN_ROWS - 1):
         assert routes(rows) == (False, False)
     assert routes(kernels.KERNEL_MIN_ROWS) == (False, True)
-    assert set(reached["kernel"]) == {"dense_basis", "dense_raw_basis"}
+    # The main effect's transform and the tensor margins' raw basis both reach them.
+    assert set(reached["kernel"]) == {"transform", "_margin_rows"}
     whole = model.predict_link(block).to_numpy()
     tolerance = 64 * U * float(np.abs(whole).max())
     for rows in (1, kernels.SCALAR_MAX_ROWS, 1000):
@@ -1274,6 +1275,48 @@ def test_a_tensor_margin_reads_the_kernels_only_for_the_stock_raw_basis(monkeypa
     monkeypatch.setattr(_basis_kernels, "_evaluations", lambda _rows: (lambda *_: marker, None))
     assert _basis_kernels.dense_raw_basis(stock._raw_basis_matrix, points[:1]) is marker
     assert _basis_kernels.dense_raw_basis(spec._raw_basis_matrix, points[:1]) is not marker
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        Spline("cr_cardinal", k=6, extrapolation="extend"),
+        Spline("ns", k=6, extrapolation="extend"),
+        CubicRegressionSpline(n_knots=4, extrapolation="extend"),
+    ],
+    ids=["cr_cardinal", "ns", "cr"],
+)
+def test_an_extend_margin_reads_the_kernels_for_a_block_inside_the_range(monkeypatch, spec):
+    """Under ``extend`` a linear-tail margin's raw block inside the training range reads the kernels.
+
+    There ``extend`` gives the rows ``clip`` does, so a full block of quotes inside the range
+    keeps the compiled route it had when every margin was held at the range; a block with one
+    point past it takes the linear tail. Mutation check: without ``in_range`` the block inside
+    the range takes the library's linear tail and reaches no kernel.
+    """
+    from superglm.features.interaction import _margin_rows
+
+    spec.build(np.linspace(0.0, 1.0, 101))
+    margin = spec.tensor_marginal_ingredients(np.linspace(0.0, 1.0, 101))
+    assert margin.follows_policy
+    reached: list[str] = []
+    for name in ("bspline_dense", "cardinal_dense"):
+        original = getattr(_basis_kernels, name)
+
+        def spy(*args, _original=original, _name=name):
+            reached.append(_name)
+            return _original(*args)
+
+        monkeypatch.setattr(_basis_kernels, name, spy)
+    inside = np.linspace(0.0, 1.0, _basis_kernels.KERNEL_MIN_ROWS)
+    rows = _margin_rows(margin, inside)
+    assert reached
+    reference = spec._basis_matrix(inside).toarray()
+    np.testing.assert_allclose(rows, reference, rtol=0.0, atol=16 * U * np.abs(reference).max())
+    reached.clear()
+    past = np.r_[inside[:-1], 1.5]
+    np.testing.assert_array_equal(_margin_rows(margin, past), spec._basis_matrix(past).toarray())
+    assert not reached
 
 
 def test_a_read_only_column_and_a_writable_one_share_each_kernels_one_signature():
