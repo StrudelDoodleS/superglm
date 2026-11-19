@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 import superglm.profiling.tweedie as tweedie_module
-from superglm import SuperGLM, generate_tweedie_cpg, tweedie_logpdf
+from superglm import RandomEffect, SuperGLM, generate_tweedie_cpg, tweedie_logpdf
 from superglm.distributions import Tweedie as TweedieDistribution
 from superglm.distributions import clip_mu
 from superglm.features.interaction import TensorInteraction
@@ -562,6 +562,90 @@ class TestMaximumLikelihoodPhi:
             interval = result.interval(0.05)
         assert interval.lower < lower < interval.upper
         assert cached_tweedie_profile_ci(result, 0.05)[1] == "caution"
+
+    @staticmethod
+    def _premium_book():
+        """Pure premium over exposure with a random brand intercept, the freMTPL2
+        witness's model on 4,000 policies, a third of them with claims."""
+        rng = np.random.default_rng(4)
+        brand = rng.integers(0, 20, 4000)
+        effect = rng.normal(0.0, 0.3, 20)
+        exposure = rng.uniform(0.1, 1.0, 4000)
+        mu = 800.0 * np.exp(effect)[brand]
+        y = generate_tweedie_cpg(4000, mu, 100.0, 1.55, rng=rng) / exposure
+        return pd.DataFrame({"brand": np.char.add("B", brand.astype(str))}), y, exposure
+
+    def _premium_profile(self, currency, **search):
+        frame, y, exposure = self._premium_book()
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            features={"brand": RandomEffect()},
+            selection_penalty=0,
+            tol=1e-10,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = model.estimate_p(
+                frame, currency * y, sample_weight=exposure, fit_mode="reml", **search
+            )
+            return result, result.interval(0.05)
+
+    def test_a_lower_power_moves_the_interval_alike_in_euros_and_cents(self):
+        """Cents add n_positive log 100 to the NLL and the REML objective at every power,
+        which no likelihood ratio sees but the candidate fits' bounds, read from each
+        REML stop's level, do. A coarse search's interval finds a power below p_hat by
+        more than the euros bounds resolve and less than the cents bounds do: it is
+        the minimum in both units, and both intervals are inverted from it."""
+        coarse = {"p_bounds": (1.3, 1.7), "xatol": 0.05}
+        euros, in_euros = self._premium_profile(1.0, **coarse)
+        cents, in_cents = self._premium_profile(100.0, **coarse)
+
+        lower, lower_nll = cents._objective.best()
+        drop = 2.0 * cents._ll_scale * (cents.search_nll - lower_nll)
+
+        def bounds(result):
+            below = result._objective.best()[0]
+            pair = result._evaluation_error(result.p_hat) + result._evaluation_error(below)
+            return 2.0 * result._ll_scale * pair
+
+        # The witness's case: the same lower power in both units, its drop between
+        # the two units' bounds.
+        assert euros._objective.best()[0] == pytest.approx(lower, abs=1e-9)
+        assert bounds(euros) < drop < bounds(cents)
+        # Verified by the same two powers refitted from cold at a tight REML
+        # tolerance: a real improvement, more than a hundredth of the cutoff.
+        frame, y, exposure = self._premium_book()
+
+        def tight(p):
+            model = SuperGLM(
+                family=TweedieDistribution(p=p),
+                features={"brand": RandomEffect()},
+                selection_penalty=0,
+                tol=1e-10,
+            )
+            model.fit_reml(frame, y, sample_weight=exposure, reml_tol=1e-10)
+            return profile_phi_at(y, model.predict(frame), exposure, p).criterion
+
+        assert 2.0 * (tight(cents.p_hat) - tight(lower)) == pytest.approx(drop, abs=1e-2)
+        # Endpoints are rooted to 1e-4; master's cents interval, inverted from p_hat,
+        # sat 1.2e-3 outside the euros one at each end.
+        np.testing.assert_allclose(
+            [in_cents.lower, in_cents.upper], [in_euros.lower, in_euros.upper], rtol=0, atol=1e-4
+        )
+        assert in_cents.lower < lower < in_cents.upper
+        assert any(f"found p={lower:.6g} below p_hat" in message for message in cents.warnings)
+
+    def test_a_default_search_in_cents_keeps_the_euros_interval(self):
+        """The control: the default search finds no lower power, so both units invert
+        from p_hat, without a caution."""
+        euros, in_euros = self._premium_profile(1.0)
+        cents, in_cents = self._premium_profile(100.0)
+        for result in (euros, cents):
+            assert result._objective.best() == (result.p_hat, result.search_nll)
+            assert result._ci_cautions[0.05] == []
+        np.testing.assert_allclose(
+            [in_cents.lower, in_cents.upper], [in_euros.lower, in_euros.upper], rtol=0, atol=1e-4
+        )
 
     def test_a_candidate_bounds_its_error_by_its_routes_ratio(self):
         """error = ratio tol (1 + |objective|) / n: the REML objective at the search

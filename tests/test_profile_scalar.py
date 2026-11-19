@@ -180,8 +180,9 @@ def test_an_interval_that_finds_a_deeper_well_is_inverted_from_it():
 def error_bounds(x):
     # Per-point bounds on a recorded value's error; the lower point's own
     # dominates, so a comparison that read either bound alone would decide
-    # the two cases below alike.
-    return 3e-4 if x == 0.31 else 1e-4
+    # the two cases below alike. Summed, they stay under the 1.9e-5 a drop
+    # needs to move the interval here (a hundredth of the cutoff over 2 N).
+    return 3e-6 if x == 0.31 else 1e-6
 
 
 def test_a_lower_value_within_both_values_error_leaves_the_centre():
@@ -208,6 +209,27 @@ def test_a_lower_value_beyond_both_values_error_moves_the_centre():
 
     interval, centre, centre_nll = likelihood_ratio_interval(
         objective, 0.3, 0.0, (0.0, 1.0), alpha=0.05, scale=N, xtol=1e-12, error=error_bounds
+    )
+
+    assert (centre, centre_nll) == (0.31, -drop)
+    cutoff = chi2.isf(0.05, 1)
+    for end in (interval.lower, interval.upper):
+        assert 2.0 * N * (quadratic(end) + drop) == pytest.approx(cutoff, abs=1e-8)
+
+
+def test_a_lower_value_that_moves_the_interval_moves_the_centre_within_any_error():
+    # Bounds read from a fit's stopping rule grow with the objective's level,
+    # which a likelihood ratio does not see: a drop of 0.72 in the statistic,
+    # far past a hundredth of the cutoff, moves the centre however loose they are.
+    def loose(x):
+        return 100.0 * error_bounds(x)
+
+    objective = RecordedObjective(quadratic)
+    drop = 0.9 * (loose(0.3) + loose(0.31))
+    objective.values[0.31] = -drop
+
+    interval, centre, centre_nll = likelihood_ratio_interval(
+        objective, 0.3, 0.0, (0.0, 1.0), alpha=0.05, scale=N, xtol=1e-12, error=loose
     )
 
     assert (centre, centre_nll) == (0.31, -drop)

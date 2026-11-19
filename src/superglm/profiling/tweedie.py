@@ -42,6 +42,7 @@ from superglm.profiling._scalar import (
     Interval,
     RecordedObjective,
     censoring_warnings,
+    centre_resolution,
     credible_lower_point,
     likelihood_ratio_interval,
     minimize_profile,
@@ -61,7 +62,8 @@ _SEARCH_REML_TOL = 1e-6
 # A REML fit certifies its objective V, not the likelihood: the NLL errs first
 # order by |J' H_V^-1| times the certificate, J = d(n nll)/d log lambda, a ratio
 # with no theoretical bound, calibrated by benchmarks/tweedie_candidate_noise.py.
-# Too low costs a spurious caution; too high only widens an interval.
+# Too low costs a spurious caution; too high, nothing past the interval's own
+# resolution (`_scalar.centre_resolution`), which moves the centre regardless.
 _CANDIDATE_ERROR_RATIO = 8.0
 # A fit without a REML objective certifies its penalized objective's relative
 # change; the NLL's error ratio follows the solver's rate: fast for Fisher
@@ -445,7 +447,7 @@ class TweedieProfileResult:
     ``search_nll``, the interval and the plot describe. The interval is
     inverted from the lowest point of that curve, which is ``p_hat`` unless an
     interval's own evaluations found one lower by more than the fits' own
-    tolerances resolve; a caution then says so.
+    tolerances resolve, or by enough to move the interval; a caution then says so.
     """
 
     p_hat: float
@@ -511,7 +513,7 @@ class TweedieProfileResult:
             searched = set(self._objective.values)
             interval, centre, centre_nll = likelihood_ratio_interval(
                 self._objective,
-                *self._centre(),
+                *self._centre(alpha),
                 self._ci_bounds,
                 alpha=alpha,
                 scale=self._ll_scale,
@@ -529,11 +531,16 @@ class TweedieProfileResult:
         """Bound on the error of the value recorded at p, from its fit's own certificate."""
         return self._candidates[p].error
 
-    def _centre(self) -> tuple[float, float]:
-        """Where an interval starts and the plot measures from: p_hat, or the lowest
-        recorded power where that lies below p_hat by more than the fits resolve."""
+    def _centre(self, alpha: float) -> tuple[float, float]:
+        """Where an alpha-interval starts and its plot measures from: p_hat, or the
+        lowest recorded power where that lies below p_hat by more than the fits
+        resolve or by enough to move the interval."""
         lower = credible_lower_point(
-            self._objective, self.p_hat, self.search_nll, self._evaluation_error
+            self._objective,
+            self.p_hat,
+            self.search_nll,
+            self._evaluation_error,
+            centre_resolution(alpha, self._ll_scale),
         )
         return (self.p_hat, self.search_nll) if lower is None else lower
 
@@ -543,19 +550,31 @@ class TweedieProfileResult:
         cautions = []
         if centre != self.p_hat:
             drop = 2.0 * self._ll_scale * (self.search_nll - centre_nll)
-            error = self._evaluation_error(self.p_hat) + self._evaluation_error(centre)
+            pair = self._evaluation_error(self.p_hat) + self._evaluation_error(centre)
+            error = 2.0 * self._ll_scale * pair
+            verdict = (
+                f"more than the {error:.3g} its fits resolve: p_hat is a local minimum there, and "
+                "the interval is inverted from that lower power."
+                if drop > error
+                else f"within the {error:.3g} its fits' tolerances allow but enough to move the "
+                "interval, so it is inverted from that lower power; p_hat may still be the minimum."
+            )
             cautions.append(
                 f"the {level} interval's search found p={centre:.6g} below p_hat={self.p_hat:.6g} "
-                f"on the searched curve, by {drop:.3g} in the likelihood-ratio statistic, more "
-                f"than the {2.0 * self._ll_scale * error:.3g} its fits resolve: p_hat is a local "
-                "minimum there, and the interval is inverted from that lower power."
+                f"on the searched curve, by {drop:.3g} in the likelihood-ratio statistic, {verdict}"
             )
-        lower = credible_lower_point(self._objective, centre, centre_nll, self._evaluation_error)
+        lower = credible_lower_point(
+            self._objective,
+            centre,
+            centre_nll,
+            self._evaluation_error,
+            centre_resolution(alpha, self._ll_scale),
+        )
         if lower is not None:
             cautions.append(
                 f"the {level} interval stopped re-centring with p={lower[0]:.6g} still below "
-                f"p={centre:.6g} by more than its fits resolve; it is inverted from p={centre:.6g}, "
-                "not from the lowest power found."
+                f"p={centre:.6g} by more than its fits or its resolution allow; it is inverted "
+                f"from p={centre:.6g}, not from the lowest power found."
             )
         # An infeasible power has no fit to report on.
         fits = {p: self._candidates[p] for p in evaluated if p in self._candidates}
@@ -588,8 +607,8 @@ class TweedieProfileResult:
     def profile_plot(self, alpha: float = 0.05, ax=None):
         """Likelihood-ratio statistic over every evaluated power, with any computed interval."""
         # Measured from the point the interval is inverted from: a lower value
-        # within the fits' error moves neither.
-        centre, centre_nll = self._centre()
+        # within the fits' error and the interval's resolution moves neither.
+        centre, centre_nll = self._centre(alpha)
         ax = profile_plot(
             self._objective.values,
             centre,
@@ -628,7 +647,7 @@ class SavedTweedieProfileResult(TweedieProfileResult):
             )
         return super()._interval(alpha)
 
-    def _centre(self) -> tuple[float, float]:
+    def _centre(self, alpha: float) -> tuple[float, float]:
         return self.p_hat, self.search_nll
 
 
