@@ -248,11 +248,16 @@ def _write(repo: Path, files: dict[str, str]) -> None:
         (repo / name).write_text(text)
 
 
-def _repo(tmp_path: Path, head_files: dict[str, str]) -> tuple[Path, str]:
+def _repo(
+    tmp_path: Path, head_files: dict[str, str], base_files: dict[str, str] | None = None
+) -> tuple[Path, str]:
     repo = tmp_path / "repo"
     repo.mkdir(parents=True)
     _git(repo, "init", "-q", "-b", "master")
-    _write(repo, {"src/tiny/__init__.py": _BASE_SRC, "tests/test_old.py": _OLD_TEST})
+    _write(
+        repo,
+        {"src/tiny/__init__.py": _BASE_SRC, "tests/test_old.py": _OLD_TEST, **(base_files or {})},
+    )
     _git(repo, "add", ".")
     _git(repo, "commit", "-q", "-m", "base")
     base = _git(repo, "rev-parse", "HEAD")
@@ -311,11 +316,10 @@ def test_a_vacuous_test_is_flagged_and_every_other_outcome_is_told_apart(tmp_pat
     assert status["test_skipped_on_base"] == "skipped"
     assert status["test_needs_a_new_name"] == "fails"
     assert verdicts["tests/test_new.py::test_needs_a_new_name"]["kind"] == "ImportError"
-    # a module that fails to import on base decides none of its tests, the unchanged one included
-    assert status["test_import_fails_on_base"] == status["test_unchanged_beside_it"]
-    assert status["test_unchanged_beside_it"] == "collection_error"
-    assert verdicts["tests/test_new_module.py::test_import_fails_on_base"]["kind"] == "ImportError"
-    assert "not decided, its module fails on base (ImportError)" in done.stdout
+    # a module that lacks a name on base fails there, each of its tests, counted by module
+    assert status["test_import_fails_on_base"] == status["test_unchanged_beside_it"] == "fails"
+    assert verdicts["tests/test_new_module.py::test_unchanged_beside_it"]["kind"] == "ImportError"
+    assert "tests/test_new_module.py: ImportError x 2" in done.stdout
     assert status["test_the_new_tool_answers"] == "fails"  # the tool is the base's: absent
     assert status["test_old"] == "fails"  # the changed assertion fails on base's code
     assert "tests/test_new.py::test_vacuous_passes_without_the_fix (added)" in done.stdout
@@ -390,6 +394,7 @@ def test_a_module_that_skips_itself_at_collection_is_reported_and_never_counted(
                 'import pytest\n\npytest.importorskip("a_package_nobody_installs")\n\n\n'
                 "def test_needs_it():\n    assert True\n"
             ),
+            "tests/test_fresh.py": "from tiny import double\n\n\ndef test_x():\n    assert double(2) == 4\n",
         },
     )
     done = _run(repo, base)
@@ -397,6 +402,84 @@ def test_a_module_that_skips_itself_at_collection_is_reported_and_never_counted(
     assert done.returncode == 0, done.stdout + done.stderr
     assert "tests/test_optional.py: skipped at collection on base" in done.stdout
     assert "tests/test_optional.py::test_needs_it (added)" in done.stdout
+
+
+# Collects on the fixed code only, failing on base for a reason that is not a missing name.
+_KEYED_MODULE = (
+    "from tiny import double\n\nCASE = {0: 'fixed'}[double(0)]  # double(0) is 1 on base\n\n\n"
+    "def test_reads_its_case():\n    assert CASE == 'fixed'\n"
+)
+
+
+@pytest.mark.pins_behaviour
+def test_a_test_the_base_cannot_judge_fails_the_check(tmp_path):
+    """A module that fails to collect on base for a reason other than a missing name leaves its
+    tests undecided, and an undecided test fails the check, listed; so does a run that judges
+    no test at all."""
+    undecided, base = _repo(
+        tmp_path / "a",
+        {
+            "src/tiny/__init__.py": _FIXED_SRC,
+            "tests/test_fresh.py": "from tiny import double\n\n\ndef test_x():\n    assert double(2) == 4\n",
+            "tests/test_keyed.py": _KEYED_MODULE,
+        },
+    )
+    nothing, base_two = _repo(
+        tmp_path / "b",
+        {
+            "src/tiny/__init__.py": _FIXED_SRC,
+            "tests/test_later.py": "import pytest\n\n\ndef test_needs_data():\n    pytest.skip('no data')\n",
+        },
+    )
+    report = tmp_path / "out.json"
+    done = _run(undecided, base, "--json", str(report))
+    status = {row["test"]: row["status"] for row in json.loads(report.read_text())["tests"]}
+    judged_nothing = _run(nothing, base_two)
+
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert status == {
+        "tests/test_fresh.py::test_x": "fails",
+        "tests/test_keyed.py::test_reads_its_case": "collection_error",
+    }
+    assert "UNDECIDED: 1 test(s)" in done.stdout and "FLAGGED" not in done.stdout
+    assert "tests/test_keyed.py::test_reads_its_case (added): KeyError" in done.stdout
+    assert _run(undecided, base, "--report-only").returncode == 0
+    assert judged_nothing.returncode == 1, judged_nothing.stdout + judged_nothing.stderr
+    assert "no test was judged on base" in judged_nothing.stdout
+
+
+@pytest.mark.pins_behaviour
+def test_the_base_run_reads_the_bases_project_metadata_and_the_heads_pytest_options(tmp_path):
+    """A test of project metadata meets the base's ``pyproject.toml``, while the head's
+    ``[tool.pytest.ini_options]`` still reaches the run (here a filter that makes a warning an
+    error), so both tests fail on base."""
+    project = '[project]\nname = "tiny"\nrequires-python = ">=3.12"\n'
+    repo, base = _repo(
+        tmp_path,
+        {
+            "src/tiny/__init__.py": _FIXED_SRC,
+            "pyproject.toml": project.replace("3.12", "3.13")
+            + '\n[tool.pytest.ini_options]\nfilterwarnings = ["error::UserWarning"]\n',
+            "tests/test_floor.py": (
+                "import tomllib\nimport warnings\nfrom pathlib import Path\n\n\n"
+                "def test_the_floor_is_raised():\n"
+                '    project = tomllib.loads(Path("pyproject.toml").read_text())["project"]\n'
+                '    assert project["requires-python"] == ">=3.13"\n\n\n'
+                "def test_a_warning_is_an_error():\n"
+                '    warnings.warn("an error under the head\'s options", UserWarning)\n'
+            ),
+        },
+        base_files={"pyproject.toml": project},
+    )
+    report = tmp_path / "out.json"
+    done = _run(repo, base, "--json", str(report))
+    status = {row["test"]: row["status"] for row in json.loads(report.read_text())["tests"]}
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert status == {
+        "tests/test_floor.py::test_the_floor_is_raised": "fails",
+        "tests/test_floor.py::test_a_warning_is_an_error": "fails",
+    }
 
 
 @pytest.mark.pins_behaviour

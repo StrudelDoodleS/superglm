@@ -5,20 +5,23 @@
 
 This is the fail-to-pass criterion of SWT-Bench (arXiv:2406.12952): a test that pins
 a fix fails on the unfixed code and passes on the fixed code. The script takes the
-merge base's tree with the head's ``tests/`` and pytest configuration, so the tests
-meet the code before the change (``src/``, and the scripts, workflows and anything
-else they exercise), runs only the tests the pull request added or changed, and
-judges each one. It compares committed revisions; uncommitted changes are not
-seen. Each selected test is judged:
+merge base's tree, its ``pyproject.toml`` included, with the head's ``tests/`` and
+pytest configuration (the head's ``[tool.pytest...]`` tables reach pytest through ``-c``),
+so the tests meet the code and project metadata before the change (``src/``, and the
+scripts, workflows and anything else they exercise), runs only the tests the pull
+request added or changed, and judges each one. It compares committed revisions;
+uncommitted changes are not seen. Each selected test is judged:
 
 * fails or errors on base: counts as a pass for this check. The check cannot tell
   the right reason from the wrong one, so the output counts the failures by
   exception type; an ``ImportError`` or ``AttributeError`` says the test fails
   for want of a name, not for the behaviour it asserts.
-* its module fails to import or collect on base: not decided, since every test in
-  it fails whatever it asserts. Reported, never counted either way; import a name
-  the base lacks inside the tests that use it, and the module's other tests are
-  judged.
+* its module fails to import on base for want of a name (``ImportError``,
+  ``AttributeError``): the old code lacks what the test uses, which is what failing
+  on it means, so the test fails on base, counted by module under that exception.
+* its module fails to collect on base for any other reason (a syntax error, a
+  conftest or fixture error): undecided. Any undecided test fails the job, and the
+  report lists each one; move what fails on base into the tests that need it.
 * passes on base: the test does not need the change. It is flagged unless it
   is a control: it carries ``@pytest.mark.pins_behaviour`` on the test, its class
   or the module (``pytestmark``), which says "this deliberately pins behaviour
@@ -29,7 +32,9 @@ seen. Each selected test is judged:
   itself at collection, say for a missing optional package, is one): reported, never
   counted as failing.
 
-A parametrized test counts as passing on base only if every case that ran passes.
+A parametrized test counts as passing on base only if every case that ran passes. A
+run that decides no selected test (each skipped, not run or not collected on base)
+fails too: nothing in it shows that the change is needed.
 
 Limits. A test is selected when it is new or when its own decorators, signature
 or body changed (found by comparing ``ast`` dumps of the merge base's and the head's
@@ -46,8 +51,9 @@ The run on base stops after ``--timeout`` seconds (default 1200, inside the work
 ``timeout`` wrapper) with its process tree killed. The check then prints what it collected,
 none of it judged, and exits 2.
 
-Exit status: 0 nothing to check or nothing flagged (or ``--report-only``), 1 a test is
-flagged, 2 the check itself could not run (a timeout included).
+Exit status: 0 nothing to check, or nothing flagged or undecided (or ``--report-only``),
+1 a test is flagged or undecided or no test was decided, 2 the check itself could not run
+(a timeout included).
 """
 
 from __future__ import annotations
@@ -66,6 +72,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
@@ -74,7 +81,11 @@ MARKER = "pins_behaviour"
 ROOT = Path(__file__).resolve().parents[1]
 TEST_FILES = ("test_*.py", "*_test.py")
 PYTEST_ERRORS = {2, 3, 4}  # interrupted, internal error, usage error; 5 is "nothing collected"
-PYTEST_CONFIG = ("pyproject.toml", "pytest.ini", "tox.ini", "setup.cfg", "conftest.py")
+# The head's files that configure pytest, overlaid on base; its pyproject.toml stays the
+# base's (project metadata), and the head's pytest tables in it are read through ``-c``.
+PYTEST_CONFIG = ("pytest.ini", "tox.ini", "setup.cfg", "conftest.py")
+# A module that fails to import for one of these lacks a name the test uses on base.
+NAME_ERRORS = ("ImportError", "ModuleNotFoundError", "AttributeError")
 SHOWN = 20
 RUN_TIMEOUT = 1200  # seconds for the run on base; the workflow's `timeout` wrapper is 30 minutes
 COLLECT_TIMEOUT = 300  # seconds for collecting on base
@@ -213,9 +224,9 @@ def pinned_pools(base) -> dict[str, str]:
     return stage_environment(True, base)
 
 
-def base_tree(root: Path, merge_base: str, head: str, where: Path, package: str) -> dict[str, str]:
-    """A worktree of the merge base with the head's ``tests/`` and pytest configuration, and the
-    environment to run it in."""
+def base_tree(root: Path, merge_base: str, head: str, where: Path, package: str):
+    """A worktree of the merge base with the head's ``tests/`` and pytest configuration, the
+    environment to run it in, and the options that hand pytest the head's configuration."""
     git(root, "worktree", "add", "--detach", str(where), merge_base)
     for path in (where / name for name in ("tests", *PYTEST_CONFIG)):
         if path.is_dir():
@@ -226,6 +237,13 @@ def base_tree(root: Path, merge_base: str, head: str, where: Path, package: str)
     archive = git(root, "archive", head, *overlay, binary=True)
     with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
         tar.extractall(where, filter="data")
+    # pytest reads only [tool.pytest...] from a -c .toml, and a pytest.ini outranks it
+    config = []
+    if "pytest.ini" not in overlay and git(root, "ls-tree", head, "--", "pyproject.toml"):
+        text = git(root, "show", f"{head}:pyproject.toml")
+        if "pytest" in tomllib.loads(text).get("tool", {}):
+            (where.parent / "head-pyproject.toml").write_text(text, encoding="utf-8")
+            config = ["-c", str(where.parent / "head-pyproject.toml"), f"--rootdir={where}"]
     path = os.pathsep.join(filter(None, [str(where / "src"), os.environ.get("PYTHONPATH", "")]))
     env = {**pinned_pools(os.environ), "PYTHONPATH": path}
     probe = "import importlib.util as u; print(u.find_spec(sys.argv[1]).origin)"
@@ -239,7 +257,7 @@ def base_tree(root: Path, merge_base: str, head: str, where: Path, package: str)
     ).stdout.strip()
     if not Path(origin).resolve().is_relative_to((where / "src").resolve()):
         raise CheckError(f"`import {package}` resolves to {origin!r}, not the base tree's src/")
-    return env
+    return env, config
 
 
 def _own_group() -> dict:
@@ -337,12 +355,13 @@ def _names_exception(line: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z_][\w.]*", line.split(":", 1)[0].strip()))
 
 
-def collect_on_base(where, env, paths):
+def collect_on_base(where, env, paths, config=()):
     """The function ids pytest finds per module, the modules that fail to import, and the
     modules that skip themselves at collection (with the reason)."""
     done = pytest_run(
         where,
         env,
+        *config,
         "--collect-only",
         "--continue-on-collection-errors",
         "-rs",
@@ -443,7 +462,8 @@ def judge(selected, pinned, collected, broken, ran, unfinished=frozenset()):
     for key, how in selected.items():
         path = key[0]
         if path in broken:
-            status, kind = "collection_error", _kind(broken[path])
+            kind = _kind(broken[path])
+            status = "fails" if kind in NAME_ERRORS else "collection_error"
         elif key not in collected:
             status, kind = "not_collected", ""
         elif key in unfinished:
@@ -482,7 +502,7 @@ def render(verdicts, notes, merge_base, head) -> str:
         f"  fail or error on base ......... {len(by_status.get('fails', []))}",
         f"  pass on base, controls ........ {len(controls)}",
         f"  pass on base, flagged ......... {len(flagged)}",
-        f"  module fails to collect on base {len(by_status.get('collection_error', []))}",
+        f"  undecided, module fails on base {len(by_status.get('collection_error', []))}",
         f"  skipped on base ............... {len(by_status.get('skipped', []))}",
         f"  not run, not collected, timed out {sum(len(by_status.get(s, [])) for s in ('not_run', 'not_collected', 'timed_out'))}",
         *notes,
@@ -509,16 +529,21 @@ def render(verdicts, notes, merge_base, head) -> str:
             lines.append(f"  {title}: {label(key)}")
     for key in by_status.get("not_collected", [])[:SHOWN]:
         lines.append(f"  not collected by pytest: {label(key)}")
-    for key in by_status.get("collection_error", [])[:SHOWN]:
-        lines.append(
-            f"  not decided, its module fails on base ({verdicts[key]['kind']}): {label(key)}"
-        )
+    lines += [f"  control (@pytest.mark.{MARKER}): {label(key)}" for key in controls]
     if "collection_error" in by_status:
         lines.append(
-            "    import a name the base lacks inside the tests that use it, and the module's "
-            "other tests are judged"
+            f"UNDECIDED: {len(by_status['collection_error'])} test(s) were not judged: their "
+            "module fails to collect on base for a reason other than a missing name. Move what "
+            "fails there into the tests or fixtures that need it, so that each test is judged."
         )
-    lines += [f"  control (@pytest.mark.{MARKER}): {label(key)}" for key in controls]
+        lines += [
+            f"  {label(key)}: {verdicts[key]['kind']}" for key in by_status["collection_error"]
+        ]
+    if not by_status.keys() & {"fails", "passes", "timed_out"}:
+        lines.append(
+            "UNDECIDED: no test was judged on base (each was skipped, not run or not collected "
+            "there), so nothing shows that the change is needed."
+        )
     if flagged:
         lines.append(
             f"FLAGGED: {len(flagged)} test(s) pass on the code before the change and are not "
@@ -546,9 +571,9 @@ def check(args) -> int:
     with tempfile.TemporaryDirectory(prefix="fix-tests-") as scratch:
         where = Path(scratch) / "tree"
         try:
-            env = base_tree(root, merge_base, head, where, args.package)
+            env, config = base_tree(root, merge_base, head, where, args.package)
             paths = sorted({path for path, _ in selected})
-            collected, broken, skipped = collect_on_base(where, env, paths)
+            collected, broken, skipped = collect_on_base(where, env, paths, config)
             notes += [
                 f"{path}: skipped at collection on base ({reason}); its tests were not run"
                 for path, reason in sorted(skipped.items())
@@ -557,7 +582,7 @@ def check(args) -> int:
             ran = {}
             if good:
                 try:
-                    ran = run_on_base(where, env, good, args.pytest_args, args.timeout)
+                    ran = run_on_base(where, env, good, [*config, *args.pytest_args], args.timeout)
                 except RunTimeoutError as error:
                     timed_out = error
                     notes.append(
@@ -575,8 +600,10 @@ def check(args) -> int:
         )
     if timed_out:
         raise timed_out  # after the report: the check ends as one that could not run
+    statuses = {verdict["status"] for verdict in verdicts.values()}
     flagged = any(verdict["flagged"] for verdict in verdicts.values())
-    return 1 if flagged and not args.report_only else 0
+    undecided = "collection_error" in statuses or not statuses & {"fails", "passes"}
+    return 1 if (flagged or undecided) and not args.report_only else 0
 
 
 def main(argv=None) -> int:
