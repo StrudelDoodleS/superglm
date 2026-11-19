@@ -2146,7 +2146,8 @@ def _margin_rows(info: TensorMarginalInfo, x: NDArray, *, kernels: bool = True) 
         if kernels:
             return _basis_kernels.dense_raw_basis(info.raw_basis_eval, held)
         return np.asarray(info.raw_basis_eval(held), dtype=np.float64)
-    spline = info.raw_basis_eval.__self__  # the spline ``tensor_marginal_info`` read
+    evaluator: Any = info.raw_basis_eval  # bound to the spline ``tensor_marginal_info`` read
+    spline = evaluator.__self__
     if kernels:
         in_range = bool(np.all((x >= info.lo) & (x <= info.hi)))
         return _basis_kernels.dense_basis(spline, x, in_range=in_range)

@@ -2028,6 +2028,7 @@ class TestInteractionMarginExtrapolation:
             )
         np.testing.assert_allclose(fits[1].predict(X), fits[0].predict(X), rtol=1e-6, atol=0)
 
+    @pytest.mark.pins_behaviour
     @pytest.mark.parametrize("kind", ["ps", "cr"])
     def test_a_model_saved_with_held_margins_quotes_as_saved_until_refitted(self, kind):
         """A model saved before its interaction margins followed the policy quotes as saved.
@@ -2051,6 +2052,7 @@ class TestInteractionMarginExtrapolation:
         fresh = _rating_model(kind, None, "extend", boundary=(30.0, 65.0)).fit(X, y)
         np.testing.assert_allclose(model.predict(X), fresh.predict(X), rtol=1e-10, atol=0)
 
+    @pytest.mark.pins_behaviour
     def test_a_custom_constructor_without_the_policy_builds_a_knot_override(self):
         """A knot-count override rebuilds a subclass's margin through its constructor as before.
 
@@ -2157,11 +2159,12 @@ class TestInteractionMarginExtrapolation:
         evaluator, under a knot-count override; and a region curve on a subclass that keeps
         the stock raw basis (the first case, saved, is
         ``test_a_model_saved_with_a_custom_region_curve_quotes_as_saved``). Master
-        5f28e8e80's predictions on the rows and on quotes
-        inside ``boundary=(30, 65)``, past it and past the data are stored with
+        5f28e8e80's predictions on the rows and on quotes inside ``boundary=(30, 65)``,
+        past it and past the data are stored with
         ``scripts/make_saved_interaction_margin_fixtures.py``. A fit stops at the solver's
-        tolerance, so other arithmetic moves these predictions far less than 1e-9; a
-        margin following the policy moves them by 10% or more.
+        tolerance, so other arithmetic moves these predictions far less than 1e-9. At
+        91add5b6f, which read some of these margins at their policy, they moved by 5% to
+        50%, or were refused.
         """
         X, y = _rating_cells()
         model = custom_margins.custom_margin_model(case).fit(X, y)
@@ -2176,8 +2179,9 @@ class TestInteractionMarginExtrapolation:
 
         The fit's deviance is that of its predictions on its own rows, past
         ``boundary=(30, 65)`` too (see
-        ``test_a_boundary_inside_the_data_continues_the_fitted_rows_past_it``). Fitted on
-        the continued margin and quoted on the held one, it was 1.036 against 1.194.
+        ``test_a_boundary_inside_the_data_continues_the_fitted_rows_past_it``). At
+        91add5b6f, fitted on the continued margin and quoted on the held one, it was 1.036
+        against 1.194.
         """
         X, y = _rating_cells()
         model = custom_margins.custom_margin_model("tensor_wrapped").fit(X, y)
@@ -2192,8 +2196,8 @@ class TestInteractionMarginExtrapolation:
         The spline's raw basis continues past ``boundary=(30, 65)`` under every policy,
         and master 5f28e8e80 handed it the covariate as it is, as this code does: the
         model saved there predicts its rows and its quotes past the boundary and the data
-        as saved, their deviance is the fit's, and a refit is master's fit. Read at the
-        boundary, its age-80 region-B quote fell from 0.318 to 0.255.
+        as saved, their deviance is the fit's, and a refit is master's fit. At 91add5b6f,
+        which read it at the boundary, its age-80 region-B quote fell from 0.318 to 0.255.
         """
         path = SAVED_HELD_MARGINS / "custom_region_curve_past_boundary.pkl.xz"
         with lzma.open(path, "rb") as handle:
