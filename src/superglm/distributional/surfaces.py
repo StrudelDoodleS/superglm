@@ -21,6 +21,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
+from superglm._utils import bin_rows, score_bins
 from superglm.distributional._common import json_number, readonly
 from superglm.distributional.checks._aggregate import _replicated_quantiles, grouped_ratio
 from superglm.distributional.family import (
@@ -566,44 +567,6 @@ def _resolved_weights(
         raise ValueError(str(exc)) from exc
 
 
-def _equal_count_bins(values: NDArray, n_bins: int) -> tuple[NDArray[np.intp], list[NDArray]]:
-    """Split rows into ``n_bins`` groups of equal count, ordered by ``values``."""
-    order = np.argsort(values, kind="stable")
-    groups = list(np.array_split(order, n_bins))
-    codes = np.empty(len(values), dtype=np.intp)
-    for index, rows in enumerate(groups):
-        codes[rows] = index
-    return codes, groups
-
-
-def _frequency_bin_fragments(
-    values: NDArray, counts: NDArray, n_bins: int
-) -> tuple[NDArray, NDArray, NDArray]:
-    """Stable literal-replication bins in at most rows + bins - 1 fragments."""
-    order = np.argsort(values, kind="stable")
-    quotient, remainder = divmod(int(np.sum(counts, dtype=np.int64)), n_bins)
-    source, codes, mass = [], [], []
-    cursor = 0
-    available = int(counts[order[cursor]])
-    for code in range(n_bins):
-        remaining = quotient + (code < remainder)
-        while remaining:
-            take = min(available, remaining)
-            source.append(order[cursor])
-            codes.append(code)
-            mass.append(take)
-            remaining -= take
-            available -= take
-            if not available and cursor + 1 < len(order):
-                cursor += 1
-                available = int(counts[order[cursor]])
-    return (
-        np.asarray(source, dtype=np.intp),
-        np.asarray(codes, dtype=np.intp),
-        np.asarray(mass, dtype=np.int64),
-    )
-
-
 def parameter_spread(
     fitted: Any,
     X: FrameLike | EagerFrame,
@@ -622,7 +585,8 @@ def parameter_spread(
     ``tail_p`` quantile. The identically-priced table bins rows into ``n_bins``
     equal-count bins of the predicted mean and reports the weighted mean price
     (a ratio of sums) and the 5th and 95th percentiles of ``P(Y > threshold)``
-    with their ratio.
+    with their ratio. Rows of one price share a bin, so tied prices give uneven
+    bins; only filled bins are reported, under their bin index.
 
     Under frequency semantics ``sample_weight`` replicates rows everywhere;
     under prior semantics it weighs the ratio of sums only. Zero-weight rows
@@ -679,41 +643,33 @@ def parameter_spread(
     exceedance = resolve_quantity(family, ("exceedance", float(threshold)), weights=prior)(theta)
 
     histogram_counts = aggregation.astype(np.int64) if frequency else None
-    if frequency:
-        source, codes, aggregation = _frequency_bin_fragments(mean, histogram_counts, bins)
-        groups = np.split(np.arange(len(source)), np.flatnonzero(np.diff(codes)) + 1)
-        bin_counts = np.array([aggregation[group].sum() for group in groups], dtype=np.int64)
-        percentiles = np.array(
-            [
-                _replicated_quantiles(
-                    exceedance[source[group]], aggregation[group], np.asarray(_SPREAD_PERCENTILES)
-                )
-                for group in groups
-            ]
-        )
-    else:
-        source = np.arange(rows)
-        codes, groups = _equal_count_bins(mean, bins)
-        bin_counts = np.bincount(codes, minlength=bins).astype(np.int64)
-        percentiles = np.array(
-            [np.quantile(exceedance[group], _SPREAD_PERCENTILES) for group in groups]
-        )
-    _, exposure, weighted_mean = grouped_ratio(
-        aggregation * mean[source], aggregation, codes, n_groups=bins
+    # A frequency count is that many copies of one row, all at one price.
+    counts = aggregation if frequency else np.ones(rows)
+    codes = score_bins(mean, counts, bins)
+    filled, groups = bin_rows(codes)
+    bin_counts = np.array([counts[group].sum() for group in groups], dtype=np.int64)
+    percentiles = np.array(
+        [
+            _replicated_quantiles(exceedance[group], counts[group], np.asarray(_SPREAD_PERCENTILES))
+            for group in groups
+        ]
     )
-    low = np.array([float(mean[source[group]].min()) for group in groups])
-    high = np.array([float(mean[source[group]].max()) for group in groups])
-    spread_ratio = np.full(bins, np.nan)
+    _, exposure, weighted_mean = grouped_ratio(
+        aggregation * mean, aggregation, codes, n_groups=bins
+    )
+    low = np.array([float(mean[group].min()) for group in groups])
+    high = np.array([float(mean[group].max()) for group in groups])
+    spread_ratio = np.full(len(filled), np.nan)
     np.divide(percentiles[:, 1], percentiles[:, 0], out=spread_ratio, where=percentiles[:, 0] > 0.0)
 
     table = pd.DataFrame(
         {
-            "bin": np.arange(bins, dtype=np.int64),
+            "bin": filled.astype(np.int64),
             "n": bin_counts,
-            "weight": exposure,
+            "weight": exposure[filled],
             "mean_lo": low,
             "mean_hi": high,
-            "mean": weighted_mean,
+            "mean": weighted_mean[filled],
             "p_lo": percentiles[:, 0],
             "p_hi": percentiles[:, 1],
             "ratio": spread_ratio,

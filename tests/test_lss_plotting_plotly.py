@@ -706,6 +706,22 @@ def test_spread_draws_a_histogram_per_parameter_and_the_identically_priced_band(
     assert "ratio" in fig.data[-1].hovertemplate
 
 
+def test_spread_marks_the_percentiles_of_a_single_price(case) -> None:
+    """Rows of one price fill one bin, whose band has zero width: its percentiles are points."""
+    fitted, X, y, _ = case
+    spread = parameter_spread(
+        fitted, X.iloc[np.zeros(20, dtype=int)], threshold=float(np.quantile(y, 0.9)), n_bins=6
+    )
+    (row,) = spread.identically_priced.itertuples()
+    fig = dp.plotly_spread(spread)
+    assert fig.layout.title.text.endswith(" over 1 price bin")
+    upper, lower = fig.data[-2:]
+    for trace, value in ((upper, row.p_hi), (lower, row.p_lo)):
+        assert trace.mode == "markers"
+        np.testing.assert_array_equal(trace.x, [row.mean])
+        np.testing.assert_array_equal(trace.y, [value])
+
+
 def test_portfolio_draws_the_total_and_the_segments(book) -> None:
     fig = dp.plotly_portfolio(book)
     assert_editor_template(fig)
@@ -863,6 +879,17 @@ def test_diagnostics_figure_boxes_the_worm_q_statistics_in_the_corner(qq, worm, 
     assert note.xref == "x2 domain" and note.yref == "y2 domain"
     assert note.xanchor == "left" and note.yanchor == "top"
     assert "mean" in note.text and "kurt" in note.text
+
+
+def test_residual_sd_trace_reads_each_tied_scale_tier_whole() -> None:
+    """Rows sharing a fitted scale share a bin: one sd per tier, in any row order."""
+    x = np.repeat([-1.0, 0.0, 0.5], [30, 50, 20])
+    y = np.random.default_rng(6).normal(size=100)
+    expected = [np.std(y[:30], ddof=1), np.std(y[30:80], ddof=1), np.std(y[80:], ddof=1)]
+    for rows in (np.arange(100), np.random.default_rng(7).permutation(100)):
+        centers, spreads = dp._equal_count_sd(x[rows], y[rows])
+        np.testing.assert_array_equal(centers, [-1.0, 0.0, 0.5])
+        np.testing.assert_allclose(spreads, expected, rtol=1e-13)
 
 
 def test_diagnostics_figure_bins_the_scatter_panels_above_max_points(qq, worm, pit, case) -> None:

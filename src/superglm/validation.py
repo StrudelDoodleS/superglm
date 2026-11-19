@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 
 from superglm._roundoff import gamma
-from superglm._utils import _default_weights, _ensure_array
+from superglm._utils import _default_weights, _ensure_array, score_bins
 
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
@@ -32,7 +32,7 @@ class LiftChartResult:
     Attributes
     ----------
     bins : pd.DataFrame
-        One row per quantile bin with columns: ``bin``, ``exposure_share``,
+        One row per filled quantile bin with columns: ``bin``, ``exposure_share``,
         ``observed``, ``predicted``, ``obs_pred_ratio``.
     figure : matplotlib.figure.Figure or None
         The generated figure, or ``None`` if an external ``ax`` was provided.
@@ -49,7 +49,7 @@ class DoubleLiftChartResult:
     Attributes
     ----------
     bins : pd.DataFrame
-        One row per quantile bin with columns: ``bin``, ``n_rows``,
+        One row per filled quantile bin with columns: ``bin``, ``n_rows``,
         ``exposure_sum``, ``exposure_share``, ``target_sum``,
         ``actual_avg``, ``model_avg``, ``current_avg``,
         ``actual_index``, ``model_index``, ``current_index``,
@@ -97,7 +97,7 @@ class LossRatioChartResult:
     Attributes
     ----------
     bins : pd.DataFrame
-        One row per quantile bin with columns: ``bin``, ``exposure_share``,
+        One row per filled quantile bin with columns: ``bin``, ``exposure_share``,
         ``observed``, ``predicted``.
     figure : matplotlib.figure.Figure or None
         The generated figure, or ``None`` if an external ``ax`` was provided.
@@ -296,6 +296,17 @@ def _validated_n_bins(n_bins) -> int:
     return int(n_bins)
 
 
+def _bin_mass(w: NDArray, exp: NDArray) -> NDArray:
+    """Return the mass a chart bins by: weight times exposure.
+
+    One exposure shared by every row cancels from every tier's share of the
+    mass, so it is left out, and integer weights are then summed exactly.
+    """
+    if len(exp) and np.all(exp == exp[0]):
+        return w
+    return w * exp
+
+
 def _validated_chart_inputs(
     y_obs,
     *,
@@ -388,27 +399,6 @@ def _finite_ratio(numerator: float, denominator: float, name: str) -> float:
         result = float(np.float64(numerator) / np.float64(denominator))
     if not np.isfinite(result):
         raise ValueError(f"{name} must be finite")
-    return result
-
-
-def _quantile_bins(sort_values: NDArray, weights: NDArray, n_bins: int) -> NDArray:
-    """Assign observations to equal-weight quantile bins.
-
-    Returns an integer array of bin indices (0-based).
-    """
-    n = len(sort_values)
-    order = np.argsort(sort_values, kind="stable")
-    cum_w = np.cumsum(weights[order])
-    total_w = cum_w[-1]
-    if total_w <= 0:
-        return np.zeros(n, dtype=int)
-    bin_edges = np.linspace(0, total_w, n_bins + 1)
-    # Assign each observation to the appropriate bin
-    bins = np.searchsorted(bin_edges[1:], cum_w, side="left")
-    bins = np.clip(bins, 0, n_bins - 1)
-    # Map back to original order
-    result = np.empty(n, dtype=int)
-    result[order] = bins
     return result
 
 
@@ -590,7 +580,16 @@ def lift_chart(
         Exposure measure for rate models. When provided, bins are
         equal-exposure quantiles and averages are exposure-weighted.
     n_bins : int
-        Number of quantile bins.
+        Number of quantile bins. Rows with equal predictions share a bin,
+        placed by the middle of their exposure, so tied predictions give uneven
+        bins; bins left empty are omitted. When the weights are integers, the
+        exposures are integers or one value shared by every row, and
+        ``n_bins`` times the total binned mass is below 2**52, a frequency
+        weight bins exactly as its literal copies. With other fractional
+        exposures, a prediction whose exposure middle lies on a bin edge to
+        within rounding takes the side its float64 sums give, so a weighted
+        row and its literal copies, summed differently, can then sit in
+        neighbouring bins.
     ax : matplotlib Axes or None
         If provided, plot onto this axes (``figure`` in result will be None).
 
@@ -612,8 +611,7 @@ def lift_chart(
     exp = vectors.get("exposure", np.ones(n, dtype=float))
 
     # Bin by predicted value, using exposure as bin weights
-    bin_weights = w * exp
-    bins_idx = _quantile_bins(y_pred, bin_weights, n_bins)
+    bins_idx = score_bins(y_pred, _bin_mass(w, exp), n_bins)
 
     rows = []
     total_exp = (w * exp).sum()
@@ -694,7 +692,9 @@ def double_lift_chart(
     exposure : array-like or None
         Exposure measure for rate models.
     n_bins : int
-        Number of equal-exposure quantile bins.
+        Number of equal-exposure quantile bins. Rows with equal sort ratios
+        share a bin, so tied ratios give uneven bins; bins left empty are
+        omitted.
     labels : tuple of (str, str, str)
         Display labels as ``(Actual, Model, Current)``. Each element
         names the corresponding series in the plot legend and axis labels.
@@ -734,7 +734,7 @@ def double_lift_chart(
 
     # Equal-exposure bins based on sort score
     bin_weights = w * exp
-    bins_idx = _quantile_bins(sort_score, bin_weights, n_bins)
+    bins_idx = score_bins(sort_score, _bin_mass(w, exp), n_bins)
 
     # Overall exposure-weighted averages (for indexing)
     total_we = bin_weights.sum()
@@ -1111,7 +1111,8 @@ def loss_ratio_chart(
     exposure : array-like or None
         Exposure measure for rate models.
     n_bins : int
-        Number of quantile bins.
+        Number of quantile bins. Rows with equal sort values share a bin, so
+        tied values give uneven bins; bins left empty are omitted.
     feature_values : array-like or None
         If provided, bin by this feature's values instead of predicted values.
     feature_name : str or None
@@ -1146,7 +1147,7 @@ def loss_ratio_chart(
         x_label = "Predicted value"
 
     bin_weights = w * exp
-    bins_idx = _quantile_bins(sort_vals, bin_weights, n_bins)
+    bins_idx = score_bins(sort_vals, _bin_mass(w, exp), n_bins)
 
     rows = []
     total_exp = bin_weights.sum()

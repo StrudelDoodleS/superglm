@@ -884,13 +884,14 @@ def test_frequency_atom_calibration_uses_occurrences_and_cap(count):
             assert np.sum(deciles.realised * deciles.n) == pytest.approx(expected)
 
 
-def test_tied_forecasts_above_the_cap_split_their_outcomes_at_random():
-    """Copies of one row must not sit together, or equal means split into pure deciles.
+def test_tied_forecasts_above_the_cap_share_one_decile():
+    """Copies of one row are one forecast, so they fill one decile, never pure ones.
 
     Two rows share one Tweedie law, one observed at its median (inside the 50%
     interval) and one at its 99.5% quantile (outside), 100,000 times each.
-    Every mean decile of the capped sample then holds both outcomes about
-    equally, so each realised coverage is a binomial proportion near one half.
+    The one mean decile, the fifth, where the middle of the count lies, holds the
+    whole capped sample, so its realised coverage is a binomial proportion near
+    one half.
     """
     family = TweedieLSS()
     model = SuperLSS(family, family.mu(), family.phi(), family.p(), weight_semantics="frequency")
@@ -907,8 +908,62 @@ def test_tied_forecasts_above_the_cap_split_their_outcomes_at_random():
         quantile_grid=(),
     ).coverage
     deciles = table[table.group.str.startswith("mean:")]
-    assert len(deciles) == 10
+    assert deciles.group.tolist() == ["mean:decile 5"]
+    np.testing.assert_array_equal(deciles.n, table[table.group == "all"].n)
     assert np.all(np.abs(deciles.realised - 0.5) < 6 * np.sqrt(0.25 / deciles.n))
+
+
+def _tier_deciles(values: NDArray) -> NDArray:
+    """Each distinct value's rows, whole, in decile ``ceil(10 * F) - 1`` at their middle."""
+    _, tier, counts = np.unique(values, return_inverse=True, return_counts=True)
+    twice_middle = 2 * np.cumsum(counts) - counts
+    return (-(-10 * twice_middle // (2 * len(values))) - 1)[tier]
+
+
+def test_deciles_keep_rows_sharing_a_law_together_whatever_their_order(gaussian_case):
+    """Three covariate rows repeated, as a coarse tariff repeats them.
+
+    Each parameter then has three tied tiers. Each tier sits whole in the decile
+    holding the middle of its count, a decile's coverage and tail counts
+    are those of its tiers' rows, and no row order changes either table.
+    """
+    fitted, X, _ = gaussian_case
+    frame = X.iloc[np.repeat([3, 40, 77], [130, 250, 220])].reset_index(drop=True)
+    theta = np.asarray(fitted.predict_parameters(frame), dtype=np.float64)
+    rng = np.random.default_rng(11)
+    y = rng.normal(theta[:, 0], theta[:, 1])
+    threshold = float(np.quantile(y, 0.8))
+
+    def tables(rows):
+        payload = calibration_payload(
+            fitted, frame.iloc[rows], y[rows], levels=(0.8,), thresholds=(threshold,)
+        )
+        return payload.coverage, payload.tails
+
+    coverage, tails = tables(np.arange(len(y)))
+    for got, want in zip(tables(rng.permutation(len(y))), (coverage, tails), strict=True):
+        pd.testing.assert_frame_equal(got, want, check_exact=False, rtol=1e-13)
+
+    lower, upper = stats.norm.ppf([[0.1], [0.9]], theta[:, 0], theta[:, 1])
+    covered = (y >= lower) & (y <= upper)
+    exceedance = stats.norm.sf(threshold, theta[:, 0], theta[:, 1])
+    for name, values, table, event in (
+        ("location", theta[:, 0], coverage, covered),
+        ("scale", theta[:, 1], coverage, covered),
+        ("exceedance", exceedance, tails, y > threshold),
+    ):
+        deciles = _tier_deciles(values)
+        filled = np.unique(deciles)
+        rows = table[table.group.str.startswith(name + ":")]
+        assert rows.group.tolist() == [f"{name}:decile {d + 1}" for d in filled]
+        np.testing.assert_array_equal(rows.n, [np.sum(deciles == d) for d in filled])
+        realised = [np.sum(event[deciles == d]) for d in filled]
+        if table is coverage:
+            np.testing.assert_allclose(rows.realised, np.divide(realised, rows.n), rtol=1e-14)
+        else:
+            np.testing.assert_array_equal(rows.realised, realised)
+            expected = [math.fsum(exceedance[deciles == d]) for d in filled]
+            np.testing.assert_allclose(rows.expected, expected, rtol=1e-9)
 
 
 def test_atom_binned_checks_keep_values_and_both_covariates_aligned():

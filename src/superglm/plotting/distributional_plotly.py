@@ -17,6 +17,7 @@ from typing import Any
 
 import numpy as np
 
+from superglm._utils import bin_rows, score_bins
 from superglm.plotting.editor_style import (
     BODY_PT,
     CHART,
@@ -353,9 +354,11 @@ def _equal_count_sd(x: Any, y: Any, n_bins: int = _TREND_BINS) -> tuple[np.ndarr
     """Bin ``x`` into equal-count bins and take the standard deviation of ``y``."""
     horizontal = np.asarray(x, dtype=np.float64)
     vertical = np.asarray(y, dtype=np.float64)
-    order = np.argsort(horizontal)
+    codes = score_bins(
+        horizontal, np.ones(len(horizontal)), min(int(n_bins), max(len(horizontal), 1))
+    )
     centers, spreads = [], []
-    for chunk in np.array_split(order, min(int(n_bins), max(len(order), 1))):
+    for chunk in bin_rows(codes)[1]:
         if len(chunk) < 2:
             continue
         centers.append(float(np.median(horizontal[chunk])))
@@ -1498,13 +1501,16 @@ def plotly_spread(payload: Any) -> go.Figure:
     row, col = divmod(len(names) + 1, cols)
     cell = dict(row=row + 1, col=col + 1)
     fig.add_trace(_band_trace(mean, low, high, name="within-bin spread", showlegend=False), **cell)
+    # One filled bin is a band of zero width: its percentiles are drawn as points.
+    mode = "lines" if len(table) > 1 else "markers"
     for bound, label in ((high, "upper percentile"), (low, "lower percentile")):
         fig.add_trace(
             go.Scatter(
                 x=mean,
                 y=bound,
-                mode="lines",
+                mode=mode,
                 line=_line(_OUTLINE),
+                marker=_point_marker() if mode == "markers" else None,
                 name=label,
                 showlegend=False,
                 customdata=np.column_stack([ratio, counts]),
@@ -1516,14 +1522,12 @@ def plotly_spread(payload: Any) -> go.Figure:
             **cell,
         )
     _style_titles(fig)
+    bins = f"{len(table)} price bin" + ("" if len(table) == 1 else "s")
     return _finalise(
         fig,
         rows=rows,
         cols=cols,
-        title=(
-            f"Parameter spread — exceedance of {payload.threshold:,.4g} "
-            f"over {payload.n_bins} price bins"
-        ),
+        title=f"Parameter spread — exceedance of {payload.threshold:,.4g} over {bins}",
     )
 
 

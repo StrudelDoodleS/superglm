@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import warnings
+from fractions import Fraction
 
 import matplotlib
 import numpy as np
@@ -720,3 +722,193 @@ class TestWeightContractDiagnostics:
         finally:
             plt.close(weighted_figure)
             plt.close(repeated_figure)
+
+
+class TestTiedPredictions:
+    """Rows sharing a prediction share every bin and neighbourhood, whatever their order."""
+
+    def test_calibration_puts_one_prediction_in_one_bin(self):
+        """Two rows predicting one rate, 2,000 copies each, one without an event and one with."""
+        rng = np.random.default_rng(5)
+        X, y = _make_binomial_data(rng, n=200)
+        model = SuperGLM(
+            family="binomial",
+            features={"x": Numeric()},
+            selection_penalty=0.0,
+            weight_semantics="frequency",
+        ).fit(X, y)
+        frame = pd.DataFrame({"x": [0.3, 0.3]})
+        fig = model.plot_diagnostics(
+            frame, np.array([0.0, 1.0]), sample_weight=np.full(2, 2000.0), n_sim=1
+        )
+        try:
+            points = fig.get_axes()[1].collections[0].get_offsets()
+            np.testing.assert_allclose(points, [[model.predict(frame)[0], 0.5]], rtol=1e-12)
+            assert fig.get_axes()[1].get_title() == "Calibration (1 score bin, ties kept together)"
+        finally:
+            plt.close(fig)
+
+    def test_calibration_bins_prior_weights_by_their_mass(self):
+        """Under prior weights the panel's bins are equal-weight: each row sits by the middle
+        of its weight, ``ceil(20 F) - 1`` with exact ``F``, and a bin's point is its
+        weighted mean prediction and outcome."""
+        rng = np.random.default_rng(12)
+        x = np.linspace(-1.0, 1.0, 60)
+        X = pd.DataFrame({"x": x})
+        y = 0.5 + x + rng.normal(scale=0.3, size=60)
+        w = rng.uniform(0.05, 1.0, 60) ** 3
+        model = SuperGLM(
+            family="gaussian",
+            features={"x": Numeric()},
+            selection_penalty=0.0,
+            weight_semantics="prior",
+        ).fit(X, y, sample_weight=w)
+        mu = model.predict(X)
+        order = np.argsort(mu)
+        mass = [Fraction(value) for value in w[order]]
+        total = sum(mass)
+        below = np.cumsum([Fraction(0), *mass[:-1]])
+        bins = np.empty(60, dtype=int)
+        bins[order] = [
+            max(math.ceil(20 * (low + m / 2) / total) - 1, 0)
+            for low, m in zip(below, mass, strict=True)
+        ]
+        expected = [
+            [
+                math.fsum(w[bins == b] * values[bins == b]) / math.fsum(w[bins == b])
+                for values in (mu, y)
+            ]
+            for b in np.unique(bins)
+        ]
+        fig = model.plot_diagnostics(X, y, sample_weight=w, n_sim=1)
+        try:
+            points = fig.get_axes()[1].collections[0].get_offsets()
+            np.testing.assert_allclose(points, expected, rtol=1e-12)
+        finally:
+            plt.close(fig)
+
+    def test_median_trend_reads_whole_tiers(self):
+        x = np.repeat([0.0, 1.0, 2.0], [30, 50, 20])
+        y = np.random.default_rng(6).normal(size=100)
+        tiers = [y[:30], y[30:80], y[80:]]
+        for rows in (np.arange(100), np.random.default_rng(7).permutation(100)):
+            fig, ax = plt.subplots()
+            diagnostics_module._binned_median_line(ax, x[rows], y[rows], n_bins=20)
+            line = ax.get_lines()[0]
+            np.testing.assert_array_equal(line.get_xdata(), [0.0, 1.0, 2.0])
+            np.testing.assert_allclose(line.get_ydata(), [np.median(t) for t in tiers])
+            plt.close(fig)
+
+    def test_median_trend_marks_a_single_tier(self):
+        """One prediction for every row (an intercept-only model) is one bin: a point, not a line."""
+        y = np.random.default_rng(6).normal(size=100)
+        fig, ax = plt.subplots()
+        try:
+            diagnostics_module._binned_median_line(ax, np.full(100, 0.3), y)
+            (line,) = ax.get_lines()
+            assert line.get_marker() == "o"
+            np.testing.assert_array_equal(line.get_xydata(), [[0.3, np.median(y)]])
+        finally:
+            plt.close(fig)
+
+    def test_lowess_neighbourhood_holds_every_tied_row(self):
+        """At one shared x every row is at distance zero, so all of them enter the local fit."""
+        y = np.random.default_rng(8).standard_t(3, size=60)
+        weights = np.ones(60)
+        for _ in range(3):  # Cleveland (1979): a fit, then two bisquare reweightings
+            fit = np.sum(weights * y) / np.sum(weights)
+            u = (y - fit) / (6.0 * np.median(np.abs(y - fit)))
+            weights = np.where(np.abs(u) < 1.0, (1.0 - u * u) ** 2, 0.0)
+        rows = np.random.default_rng(9).permutation(60)
+        for values in (y, y[rows]):
+            smooth = diagnostics_module._lowess(np.zeros(60), values)
+            np.testing.assert_allclose(smooth, fit, rtol=1e-13)
+
+    @pytest.mark.parametrize(
+        ("counts", "values"),
+        [
+            # Each reviewer's case: a calm tier, then a tier whose residuals all lie
+            # beyond six median absolute residuals of its first fit.
+            ([20, 18, 18, 22, 22], [0.0, -1.0, 1.0, -10.0, 10.0]),
+            ([36, 12, 12, 20, 20], [0.0, -0.25, 0.25, -2.5, 2.5]),
+        ],
+    )
+    def test_lowess_keeps_a_tiers_fit_when_its_robustness_weights_vanish(self, counts, values):
+        """Reversing the rows at one x leaves the plotted trend where it was.
+
+        Each tier is symmetric about its mean, where the first pass fits it. The reweighting
+        then gives every row of the outlying tier weight zero, and its fit stays at that mean
+        rather than at each row's own value, which the order of the rows would pick for the
+        line: R's ``lowess`` draws the first case's tier at -10 or +10 by that order.
+        """
+        y = np.repeat(values, counts)
+        x = np.repeat([0.0, 1.0], [sum(counts[:3]), sum(counts[3:])])
+        outlying = x == 1.0
+        reversed_rows = np.r_[np.flatnonzero(~outlying), np.flatnonzero(outlying)[::-1]]
+        for rows in (np.arange(len(y)), reversed_rows):
+            fig, ax = plt.subplots()
+            try:
+                diagnostics_module._trend_line(ax, x[rows], y[rows], len(y), None)
+                (line,) = ax.get_lines()
+                expected = np.where(np.sort(x) == 1.0, np.mean(y[outlying]), np.mean(y[~outlying]))
+                np.testing.assert_allclose(line.get_ydata(), expected, atol=1e-12)
+            finally:
+                plt.close(fig)
+
+    @pytest.mark.parametrize("gap", [1e-11, 1e-10, 1e-8, 1e-6])
+    @pytest.mark.parametrize(
+        ("first", "second"),
+        [
+            # Ten rows at each prediction: a 12-row window takes two of the second tier's
+            # ten rows unless it takes every row tied with its end.
+            (np.tile([-1.0, 1.0], 5), np.repeat([-2.0, 2.0], 5)),
+            # Every robustness weight of the second tier vanishes.
+            (np.repeat([0.0, -1.0, 1.0], [20, 18, 18]), np.repeat([-10.0, 10.0], 22)),
+        ],
+    )
+    def test_lowess_window_holds_every_row_tied_with_either_end(self, gap, first, second):
+        """Two close predictions, each tier's outcomes symmetric about zero.
+
+        A row tied with an end of a window is as near as that end, so the window holds all of
+        them. The smoother is odd in the outcomes, whose multiset is symmetric, so an
+        order-free trend is zero at both tiers (R's ``lowess`` draws zero on the first case);
+        reversing either tier leaves it there.
+        """
+        a, b = len(first), len(second)
+        x = np.repeat([0.0, gap], [a, b])
+        y = np.r_[first, second]
+        for rows in (
+            np.arange(a + b),
+            np.r_[np.arange(a), np.arange(a + b - 1, a - 1, -1)],
+            np.r_[np.arange(a - 1, -1, -1), np.arange(a, a + b)],
+        ):
+            fig, ax = plt.subplots()
+            try:
+                diagnostics_module._trend_line(ax, x[rows], y[rows], a + b, None)
+                (line,) = ax.get_lines()
+                np.testing.assert_allclose(line.get_ydata(), 0.0, atol=1e-12)
+            finally:
+                plt.close(fig)
+
+    @pytest.mark.parametrize("sampled", [False, True])
+    def test_lowess_trend_marks_a_single_tier(self, sampled, monkeypatch):
+        """One prediction for every row (an intercept-only model) is one point, not a line,
+        on the full and the sampled LOWESS route: Cleveland's robust local constant."""
+        if sampled:
+            monkeypatch.setattr(diagnostics_module, "_LARGE_N", 50)
+            monkeypatch.setattr(diagnostics_module, "_LOWESS_CAP", 40)
+        y = np.random.default_rng(13).standard_t(3, size=100)
+        read = np.random.default_rng(14).choice(100, 40, replace=False) if sampled else slice(None)
+        weights = np.ones_like(y[read])
+        for _ in range(3):  # Cleveland (1979): a fit, then two bisquare reweightings
+            fit = np.sum(weights * y[read]) / np.sum(weights)
+            u = (y[read] - fit) / (6.0 * np.median(np.abs(y[read] - fit)))
+            weights = np.where(np.abs(u) < 1.0, (1.0 - u * u) ** 2, 0.0)
+        fig, ax = plt.subplots()
+        try:
+            diagnostics_module._trend_line(ax, np.full(100, 0.3), y, 100, np.random.default_rng(14))
+            (line,) = ax.get_lines()
+            assert line.get_marker() == "o"
+            np.testing.assert_allclose(line.get_xydata(), [[0.3, fit]], rtol=1e-13)
+        finally:
+            plt.close(fig)

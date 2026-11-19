@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 
 import numpy as np
@@ -128,6 +129,69 @@ def occurrence_rows(counts, cap: int, generator: np.random.Generator) -> NDArray
         return np.repeat(np.arange(len(occurrences), dtype=np.intp), occurrences)
     chosen = generator.choice(total, size=cap, replace=False)
     return np.searchsorted(ends, chosen, side="right").astype(np.intp, copy=False)
+
+
+def score_bins(scores, mass, n_bins: int) -> NDArray[np.intp]:
+    """Return each row's equal-mass bin of ``scores``, with every tied score in one bin.
+
+    Rows sharing a score form a tier, placed whole by the middle of its mass: in
+    bin ``ceil(n_bins * F) - 1``, clipped to ``[0, n_bins - 1]``, where
+    ``F = (mass below the tier + half the tier's mass) / total mass`` is the
+    sample mid-distribution function (Parzen, "Quantile probability and
+    statistical data modeling", Statistical Science 19, 2004). With unit mass
+    ``F = (mean rank - 1/2) / n``, so ties take their mean rank, as under the
+    default ``TIES=MEAN`` of SAS PROC RANK, whose ``GROUPS=`` "always assigns
+    observations with the same value to the same group". A tier holding more
+    than one bin's mass leaves bins empty and the bins uneven, as Stata's
+    ``estat gof, group()`` also does. Distinct unit-mass scores fill bins whose
+    sizes differ by at most one. Every table and plot that cuts rows by score
+    bins through here.
+
+    A tier whose mass ends on an edge has half its mass on the inner side, so
+    rounding in the sums moves only a tier whose middle lies on an edge to
+    within rounding, which fractional masses can reach. Integer masses with
+    ``n_bins * total < 2**52`` are summed and compared exactly, so a frequency
+    weight bins as its literal copies. A zero-mass tier sits at the mass below
+    it: in the lower bin at an edge, and in bin 0 at the bottom. Masses are
+    scaled by a power of two so the largest is below 1, which is exact, so
+    large finite masses bin as their unit-scale equivalents; a non-finite
+    mass is refused.
+    """
+    values = np.asarray(scores, dtype=np.float64)
+    weights = np.asarray(mass, dtype=np.float64)
+    # Mass is the second sort key, so a tier's sums are the same whatever
+    # order its rows arrive in.
+    order = np.lexsort((weights, values))
+    ordered = values[order]
+    # Dividing by 2**exponent of the largest mass leaves every mass below 1,
+    # so the total stays below the row count and n_bins * (below + through)
+    # cannot overflow; a power of two changes no rounding in the normal range.
+    _, exponent = math.frexp(float(np.max(np.abs(weights), initial=0.0)))
+    cumulative = np.concatenate(([0.0], np.cumsum(np.ldexp(weights[order], -exponent))))
+    total = cumulative[-1]
+    if not math.isfinite(total):
+        raise ValueError(
+            "score bins need finite masses, but a weight or exposure is infinite or NaN; "
+            "pass finite weights and exposures"
+        )
+    codes = np.zeros(len(values), dtype=np.intp)
+    if not total > 0.0:
+        return codes
+    below = cumulative[np.searchsorted(ordered, ordered, side="left")]
+    through = cumulative[np.searchsorted(ordered, ordered, side="right")]
+    # n_bins * F = n_bins * (below + through) / (2 * total), in one rounding.
+    position = np.ceil(n_bins * (below + through) / (2.0 * total))
+    codes[order] = np.clip(position - 1.0, 0, n_bins - 1).astype(np.intp)
+    return codes
+
+
+def bin_rows(codes: NDArray[np.intp]) -> tuple[NDArray[np.intp], list[NDArray[np.intp]]]:
+    """Return the filled bins of ``codes`` in order, and the rows in each."""
+    sizes = np.bincount(codes)
+    filled = np.flatnonzero(sizes)
+    order = np.argsort(codes, kind="stable")
+    ends = np.cumsum(sizes[filled])
+    return filled, [order[end - size : end] for end, size in zip(ends, sizes[filled], strict=True)]
 
 
 def _ulp_size(values: NDArray) -> NDArray:

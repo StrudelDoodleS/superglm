@@ -25,6 +25,7 @@ from matplotlib.patheffects import withStroke
 from numpy.typing import NDArray
 from scipy import stats
 
+from superglm._utils import bin_rows, score_bins
 from superglm.distributional.checks.binned import BinnedCheck, BinnedCheck2D
 from superglm.distributional.checks.calibration import ActualExpected, CalibrationPayload
 from superglm.distributional.checks.compare import Comparison
@@ -897,6 +898,11 @@ def plot_spread(payload: Spread, *, fig: Figure | None = None) -> Figure:
             colors=[_colour(CHART["ci_whisker"])],
             linewidths=CHART["ci_whisker"]["width"],
         )
+        # Coincident percentiles make a whisker of zero height, which draws
+        # nothing: those bins are marked as points.
+        flat = low == high
+        if np.any(flat):
+            ax.scatter(mean[flat], low[flat], **_points(CHART["point"]))
         for center, top, ratio in zip(mean, high, table["ratio"], strict=True):
             if np.isfinite(ratio):
                 # Upright labels: a bin whose cheapest row is near-impossible
@@ -912,7 +918,8 @@ def plot_spread(payload: Spread, *, fig: Figure | None = None) -> Figure:
                     rotation=90,
                 )
         ax.set_title(f"identically priced rows: spread of P(Y > {payload.threshold:.3g})")
-        ax.set_xlabel(f"predicted {payload.by} in {payload.n_bins} equal-count bins")
+        bins = f"{len(table)} score bin" + ("" if len(table) == 1 else "s")
+        ax.set_xlabel(f"predicted {payload.by} in {bins}, ties kept together")
         ax.set_ylabel("exceedance probability")
         return _finish(fig, axes)
 
@@ -1011,9 +1018,9 @@ def _draw_residuals_against(ax: Axes, x: NDArray, y: NDArray, max_points: int) -
 
 def _draw_residual_sd(ax: Axes, x: NDArray, y: NDArray, n_bins: int = 20) -> int:
     """Draw the residual spread in equal-count bins of ``x``; return the bin count."""
-    order = np.argsort(x)
     # Two rows to a bin at least: a standard deviation of one row is not one.
-    groups = np.array_split(order, max(1, min(n_bins, len(order) // 2)))
+    codes = score_bins(x, np.ones(len(x)), max(1, min(n_bins, len(x) // 2)))
+    groups = [group for group in bin_rows(codes)[1] if len(group) >= 2]
     centers = np.array([float(np.mean(x[group])) for group in groups])
     spread = np.array([float(np.std(y[group], ddof=1)) for group in groups])
     ax.axhline(1.0, **_line(CHART["zero"]))

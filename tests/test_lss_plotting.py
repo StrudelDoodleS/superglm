@@ -559,6 +559,21 @@ def test_spread_panels_cover_parameters_and_the_priced_alike(case) -> None:
     assert len(priced.texts) == int(np.isfinite(payload.identically_priced["ratio"]).sum())
 
 
+@pytest.mark.parametrize("far", [False, True])
+def test_spread_marks_a_bin_whose_percentiles_coincide(case, far) -> None:
+    """Rows of one price share one tail probability, so its bin's whisker has zero height and
+    is drawn as a point, labelled or not (far above the data, both percentiles are zero)."""
+    fitted, frame, y, _ = case
+    threshold = float(np.max(y) + 1e3 * np.std(y)) if far else float(np.quantile(y, 0.9))
+    payload = parameter_spread(fitted, frame.iloc[np.zeros(20, dtype=int)], threshold=threshold)
+    (row,) = payload.identically_priced.itertuples()
+    assert row.p_lo == row.p_hi
+    ax = plot_spread(payload).axes[-1]
+    (points,) = [c for c in ax.collections if isinstance(c, PathCollection)]
+    np.testing.assert_array_equal(points.get_offsets(), [[row.mean, row.p_lo]])
+    assert ax.get_xlabel().endswith(" in 1 score bin, ties kept together")
+
+
 def test_portfolio_rows_and_the_total_histogram(case) -> None:
     fitted, frame, _, _ = case
     payload = portfolio(fitted, frame, n_draws=40, by="g", seed=4, return_draws=True)
@@ -746,6 +761,22 @@ def test_diagnostics_worm_annotation_sits_in_a_halo_box(case) -> None:
     assert to_rgba(box.get_edgecolor()) == to_rgba("#d0d7de")
     assert annotation.get_position()[1] > 0.5
     assert annotation.get_va() == "top"
+
+
+def test_residual_sd_panel_reads_each_tied_scale_tier_whole() -> None:
+    """Rows sharing a fitted scale share a bin: one sd per tier, in any row order."""
+    from superglm.plotting.distributional import _draw_residual_sd
+
+    x = np.repeat([-1.0, 0.0, 0.5], [30, 50, 20])
+    y = np.random.default_rng(6).normal(size=100)
+    expected = [np.std(y[:30], ddof=1), np.std(y[30:80], ddof=1), np.std(y[80:], ddof=1)]
+    for rows in (np.arange(100), np.random.default_rng(7).permutation(100)):
+        fig, ax = plt.subplots()
+        assert _draw_residual_sd(ax, x[rows], y[rows]) == 3
+        line = ax.get_lines()[-1]
+        np.testing.assert_array_equal(line.get_xdata(), [-1.0, 0.0, 0.5])
+        np.testing.assert_allclose(line.get_ydata(), expected, rtol=1e-13)
+        plt.close(fig)
 
 
 def test_diagnostics_figure_hexbins_above_max_points(case) -> None:

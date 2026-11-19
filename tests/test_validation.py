@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
+import itertools
+import math
+from fractions import Fraction
 
 import matplotlib
 import numpy as np
@@ -90,7 +93,10 @@ class TestLiftChartWeighted:
         # Exposure shares should sum to ~1
         assert abs(result.bins["exposure_share"].sum() - 1.0) < 1e-6
 
+    @pytest.mark.pins_behaviour
     def test_sample_weight_affects_result(self):
+        """A control: weights change the chart, as they did before. Its comparison was rewritten because
+        a heavy row now fills fewer bins, not because the behaviour it pins changed."""
         y_obs = np.array([1, 2, 3, 4, 5], dtype=float)
         y_pred = np.array([1.1, 1.9, 3.1, 4.2, 4.8], dtype=float)
         w1 = np.ones(5)
@@ -98,8 +104,8 @@ class TestLiftChartWeighted:
         r1 = lift_chart(y_obs, y_pred, sample_weight=w1, n_bins=3)
         r2 = lift_chart(y_obs, y_pred, sample_weight=w2, n_bins=3)
         # Different weights should generally produce different results
-        # At minimum, the weighted means should differ
-        assert not np.allclose(r1.bins["observed"].values, r2.bins["observed"].values)
+        # At minimum, the weighted means should differ (the heavy row also fills fewer bins)
+        assert r1.bins["observed"].tolist() != r2.bins["observed"].tolist()
 
     def test_consistency_weighted_mean(self):
         """sum(bins.observed * bins.exposure_share) ≈ overall observed mean."""
@@ -424,6 +430,177 @@ class TestEdgeCases:
         y_pred = rng.normal(0, 1, 100)  # some negative
         result = lift_chart(y_obs, y_pred, n_bins=5)
         assert isinstance(result, LiftChartResult)
+
+
+def _tier_bins(score, mass, n_bins):
+    """Each distinct score's rows, whole, in bin ``ceil(n_bins * F) - 1`` at its middle (exact F)."""
+    levels, tier = np.unique(score, return_inverse=True)
+    tier_mass = np.array(
+        [sum(map(Fraction, mass[tier == j].tolist())) for j in range(len(levels))], dtype=object
+    )
+    middle = np.cumsum(tier_mass) - tier_mass / 2
+    bins = [max(math.ceil(n_bins * mid / sum(tier_mass)) - 1, 0) for mid in middle]
+    return np.asarray(bins)[tier]
+
+
+@pytest.mark.parametrize(
+    ("chart", "observed_name"),
+    [
+        (lambda y, pred, e: lift_chart(y, pred, exposure=e).bins, "observed"),
+        (
+            lambda y, pred, e: double_lift_chart(y, pred, np.full_like(y, 0.1), exposure=e).bins,
+            "actual_avg",
+        ),
+        (lambda y, pred, e: loss_ratio_chart(y, pred, exposure=e).bins, "observed"),
+    ],
+)
+def test_rows_sharing_a_score_share_a_bin_whatever_their_order(chart, observed_name):
+    """Six tariff rates, as an area-only tariff gives, on exposure that cuts every rate.
+
+    A within-rate reordering moves nothing, and each bin holds exactly the rates whose
+    exposure share has its middle in it, with their exposure-weighted observed rate.
+    """
+    rng = np.random.default_rng(20261119)
+    rates = np.array([0.05, 0.07, 0.09, 0.11, 0.14, 0.18])
+    tier = rng.choice(6, size=240, p=[0.1, 0.25, 0.2, 0.2, 0.15, 0.1])
+    predicted, exposure = rates[tier], rng.uniform(0.05, 1.0, 240)
+    observed = rng.poisson(4 * predicted * exposure) / exposure
+
+    table = chart(observed, predicted, exposure)
+    rows = rng.permutation(240)
+    pd.testing.assert_frame_equal(
+        chart(observed[rows], predicted[rows], exposure[rows]), table, check_exact=False, rtol=1e-13
+    )
+    bins = _tier_bins(predicted, exposure, 10)
+    filled = np.unique(bins)
+    np.testing.assert_array_equal(table["bin"], filled + 1)
+    np.testing.assert_allclose(
+        table[observed_name],
+        [
+            math.fsum(exposure[bins == b] * observed[bins == b]) / exposure[bins == b].sum()
+            for b in filled
+        ],
+        rtol=1e-13,
+    )
+    np.testing.assert_allclose(
+        table["exposure_share"],
+        [math.fsum(exposure[bins == b]) / math.fsum(exposure) for b in filled],
+        rtol=1e-13,
+    )
+
+
+@pytest.mark.parametrize(
+    ("counts", "predicted", "observed", "exposure", "n_bins", "bins"),
+    [
+        # The first rate's count ends on the 15th of 20 edges.
+        ([123, 4, 37], [1.0, 2.0, 3.0], [1.0, 3.0, 5.0], 1.0, 20, [8, 16, 18]),
+        # Each rate holds half the exposure, and three 0.1s sum to 0.30000000000000004.
+        ([3, 3], [0.25, 0.75], [0.0, 1.0], 0.1, 2, [1, 2]),
+    ],
+)
+def test_a_rate_ending_on_an_edge_keeps_its_own_bin(
+    counts, predicted, observed, exposure, n_bins, bins
+):
+    """A rate sits by the middle of its exposure, half its exposure from an edge it ends on,
+    so a rounded prefix cannot merge two rates and hide their A/E."""
+    table = lift_chart(
+        np.repeat(observed, counts),
+        np.repeat(predicted, counts),
+        exposure=np.full(sum(counts), exposure),
+        n_bins=n_bins,
+    ).bins
+    np.testing.assert_array_equal(table["bin"], bins)
+    np.testing.assert_allclose(table["observed"], observed, rtol=1e-15)
+    np.testing.assert_allclose(table["obs_pred_ratio"], np.divide(observed, predicted), rtol=1e-15)
+
+
+@pytest.mark.parametrize(
+    ("observed", "predicted", "weight", "exposure", "n_bins"),
+    [
+        ([1.0, 3.0], [1.0, 2.0], [5, 5], 0.3, 2),
+        ([0.0, 0.0, 1.0, 1.0], [0.25, 0.25, 0.75, 0.75], [2, 2, 2, 2], 0.1, 2),
+        ([1.0, 3.0, 5.0], [1.0, 2.0, 3.0], [123, 4, 37], 1.0, 20),
+        # Integer weights on one shared fractional exposure, each rate's middle on an edge:
+        # forty-five 0.2s summed one by one leave the middle rate's on the other side.
+        ([0.0, 6.0, 0.0], [1.0, 2.0, 3.0], [5, 20, 20], 0.2, 3),
+        ([1.0, 3.0], [1.0, 2.0], [5, 5], 0.2, 4),
+    ],
+)
+def test_frequency_weights_draw_the_lift_chart_of_their_literal_copies(
+    observed, predicted, weight, exposure, n_bins
+):
+    """Two rows of weight 5 on exposure 0.3 hold 3.0 in all, their ten copies 2.9999999999999996.
+
+    Where each rate's middle lies far from every edge, both draw one chart whatever the
+    rounding. Where it lies on an edge, one exposure shared by every row cancels from the
+    bin positions, so integer weights and their copies are placed by exact counts.
+    """
+    copies = np.repeat(np.arange(len(weight)), weight)
+    weighted = lift_chart(
+        observed,
+        predicted,
+        sample_weight=weight,
+        exposure=np.full(len(weight), exposure),
+        n_bins=n_bins,
+    ).bins
+    literal = lift_chart(
+        np.asarray(observed)[copies],
+        np.asarray(predicted)[copies],
+        exposure=np.full(len(copies), exposure),
+        n_bins=n_bins,
+    ).bins
+    pd.testing.assert_frame_equal(weighted, literal, check_exact=False, rtol=1e-13)
+
+
+@pytest.mark.parametrize(
+    ("chart", "observed_name"),
+    [
+        (lambda y, pred, w: lift_chart(y, pred, sample_weight=w).bins, "observed"),
+        (
+            lambda y, pred, w: double_lift_chart(y, pred, np.ones_like(y), sample_weight=w).bins,
+            "actual_avg",
+        ),
+        (lambda y, pred, w: loss_ratio_chart(y, pred, sample_weight=w).bins, "observed"),
+    ],
+)
+@pytest.mark.parametrize("scale", [2.0**1020, 2.0**1021, 1e307, 4e307])
+@pytest.mark.pins_behaviour
+def test_large_finite_weights_bin_as_their_unit_scale(chart, observed_name, scale):
+    """A control: a common factor on the weights moves no bin, up to totals near the float64 maximum.
+    The old binning already held this; it guards the midpoint rule's sums against overflow."""
+    observed = np.array([0.25, 0.75, 1.0, 2.0])
+    predicted = np.array([1.0, 2.0, 3.0, 4.0])
+    unit = chart(observed, predicted, np.ones(4))
+    large = chart(observed, predicted, np.full(4, scale))
+    np.testing.assert_array_equal(large["bin"], unit["bin"])
+    np.testing.assert_allclose(large["exposure_share"], unit["exposure_share"], rtol=1e-15)
+    np.testing.assert_allclose(large[observed_name], unit[observed_name], rtol=1e-15)
+
+
+@pytest.mark.parametrize("bad", [np.inf, np.nan])
+def test_score_bins_refuses_a_non_finite_mass(bad):
+    from superglm._utils import score_bins
+
+    with pytest.raises(ValueError, match="score bins need finite masses"):
+        score_bins(np.array([0.0, 1.0]), np.array([1.0, bad]), 2)
+
+
+def test_a_rates_rows_sum_in_one_order():
+    """Masses 0.1, 0.2 and 0.3 sum to 0.6 or 0.6000000000000001 by their order.
+
+    Here that rounding sits on an edge of ten, so only sorting a rate's rows by mass, as
+    well as by score, gives every order of them the same bins.
+    """
+    exposure = np.array([0.1, 0.2, 0.3, 0.1, 0.3])
+    predicted = np.array([1.0, 1.0, 1.0, 2.0, 3.0])
+    observed = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    tables = [
+        lift_chart(observed[rows], predicted[rows], exposure=exposure[rows]).bins
+        for rows in (np.r_[list(order), 3, 4] for order in itertools.permutations(range(3)))
+    ]
+    for table in tables[1:]:
+        np.testing.assert_array_equal(table["bin"], tables[0]["bin"])
+        np.testing.assert_allclose(table["observed"], tables[0]["observed"], rtol=1e-15)
 
 
 @pytest.mark.parametrize(
