@@ -618,14 +618,21 @@ def _stand_in_record(model, directions, W, B, S):
     )
 
 
+@pytest.mark.pins_behaviour
 def test_a_structured_fit_reads_its_truncated_directions_alone(monkeypatch):
-    """Five one-row ``sz`` levels among 60: the rows are read on the factor's 4 truncated directions.
+    """Five one-row ``sz`` levels among 60: the rows are read on the factor's truncated directions alone.
 
-    The factor certified its kept pivots, so its truncated directions are the only undecided
-    ones; the weighted rows put each under its rounding bound and so does the design at unit
-    weight, so they are ``null(H)``: two passes of 4 columns, and construction columns only for
-    the terms they reach.  At ``633289397`` the owner formed the Gram of every level's line and
-    factored ``X_F`` whole (120 columns), which took 54 s and 1.4 GiB at 1000 levels.
+    Pins the work the owner does on a structured fit, which already held; forced so that it no
+    longer rests on the fit's own factor truncating exactly 4: a stand-in factor
+    (``_stand_in_record``) truncates exactly the dense Hessian's null
+    directions, the right singular vectors of the Jacobi-scaled ``[B; S]`` under ``gamma_n`` of
+    its largest (each one-row level's line is one), with a gap to the next above ``sqrt(u)``, so
+    the count is the design's and not the fit's factor's.  Those are the only undecided
+    directions; the weighted rows put each under its rounding bound and so does the design at
+    unit weight, so they are ``null(H)``: two passes of that many columns, one alias each, and
+    construction columns only for the terms they reach.  At ``633289397`` the owner formed the
+    Gram of every level's line and factored ``X_F`` whole (120 columns), which took 54 s and
+    1.4 GiB at 1000 levels.
     """
     from superglm import FactorSmooth, LambdaPolicy
     from superglm.model import state_ops
@@ -654,8 +661,15 @@ def test_a_structured_fit_reads_its_truncated_directions_alone(monkeypatch):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         model.fit_reml(frame, y)
-    truncated = state_ops.retained_linear_state(model).profiled_factor.null_directions().shape[1]
-    assert truncated == 4
+    W = np.array(state_ops._solver_space_working_weights(model), dtype=np.float64)
+    B, S = _structured_rows(model, W)
+    jacobi = np.sqrt(np.diag(B.T @ B + S))
+    _, singular, right = np.linalg.svd(np.vstack((B, S)) / jacobi, full_matrices=False)
+    exact = singular <= _gamma(len(y)) * singular[0]
+    assert np.min(singular[~exact]) > np.sqrt(U) * singular[0]
+    directions = right[exact].T / jacobi[:, None]
+    truncated = directions.shape[1]
+    assert truncated > 0
 
     formed: list[str] = []
     construction = state_ops._raw_construction
@@ -666,7 +680,7 @@ def test_a_structured_fit_reads_its_truncated_directions_alone(monkeypatch):
 
     monkeypatch.setattr(state_ops, "_raw_construction", counted)
     widths = _row_passes(monkeypatch)
-    record = _redecide(model)
+    record = _stand_in_record(model, directions, W, B, S)
     assert widths == [truncated, truncated] and record.row_directions == truncated
     assert len(record.aliases) == truncated and record.gauge is not None
     assert set(formed) <= {"x", "x:g:sz"}
@@ -897,8 +911,11 @@ def test_a_near_duplicate_column_is_fitted_as_mgcv_fits_it():
     (``paraPen``).  The dense solver truncates the pair's difference (its Gram eigenvalue is
     below the formation bound); the rows identify it, so the fit takes their step along it and
     reports its variance (``identifiability.WeakDirections``): no blank, every SE^2 / phi
-    mgcv's ``Vp / sig2`` and the EDF and scale mgcv's (rtol 1e-6: the direction's curvature is
-    read from the rows to ``kappa u`` ~ 1e-8).  The coefficients near ``+-9e5`` cancel in every
+    mgcv's ``Vp / sig2`` and the EDF and scale mgcv's (rtol 1e-6).  The direction's curvature is
+    read from the rows to the record's bound ``WeakDirections.accuracy``, ``3.8e-7`` here
+    (``kappa u`` with ``kappa = 3.4e9``, the penalised Hessian's condition), so 1e-6 is about
+    ``2.7 kappa u``; measured, the SEs^2 agree to ``6.0e-9``, the scale to ``2.5e-13`` and the
+    EDF to ``3.3e-10``.  The coefficients near ``+-9e5`` cancel in every
     prediction, so the fit is compared where a user reads it: the link predictions on the
     training rows and on held-out rows are mgcv's to about ``kappa u`` of their size (``kappa``
     the Jacobi-scaled design's condition, ``2.5e8``; Higham 2002, Thm 20.1), each engine
