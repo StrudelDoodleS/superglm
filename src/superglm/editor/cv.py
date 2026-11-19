@@ -1661,13 +1661,20 @@ def run_final_fit(plan: FinalFitPlan, context) -> FinalFit:
         )
         raise EditorValueError(sentence.format(rows=rows)) from exc
     context.check()
+    # An edit can only answer a finding the refit's rows at the guard gave; one from a
+    # stagnant fit short of the guard stands whatever the edit does.
+    held_back = False
     if plan.edited:
+        refit_at_guard = runtime_warnings and _predictor_at_guard(model, X, sample_weight, offset)
         context.progress("carrying", terms=sorted(plan.edited))
         model = model_with_edited_curves(
             model, plan.edited, X, y, sample_weight, offset, n_points=plan.n_points
         )
         context.check()
-    if runtime_warnings and _predictor_at_guard(model, X, sample_weight, offset):
+        held_back = bool(refit_at_guard) and not _predictor_at_guard(
+            model, X, sample_weight, offset
+        )
+    if runtime_warnings and not held_back:
         for message in runtime_warnings:
             warn_caller(message, SeparationWarning)
     return FinalFit(

@@ -2810,6 +2810,40 @@ def test_final_fit_warns_about_separation_in_the_model_it_returns(slope_scale):
         assert "overflow guard" in str(claims[0].message)
 
 
+def test_final_fit_keeps_a_finding_from_a_fit_short_of_the_guard_after_an_edit():
+    """A runtime finding from a stagnant fit short of the guard stands after any edit.
+
+    With 30 iterations at ``tol=1e-12`` the refit of a claim-free indicator stops on the
+    exhausted-budget signature with its rows' log predictions near -31, short of the guard.
+    An edit steepening the slope by 1% cannot answer that finding, so Final fit still warns.
+    Mutation check: holding the warning back unless a row sits at the guard drops it.
+    """
+    from superglm import SeparationWarning
+    from superglm.editor.cv import capture_final_fit, run_final_fit
+
+    z = np.repeat([0.0, 1.0], 64)
+    X, y = pd.DataFrame({"z": z}), 1.0 - z
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = SuperGLM(
+            family="poisson",
+            features={"z": Numeric()},
+            convergence="coefficients",
+            max_iter=30,
+            tol=1e-12,
+        ).fit(X, y)
+    session = EditorSession.from_model(model, terms=["z"], train_data=(X, y))
+    term = session.terms["z"]
+    term.edited_log_effect = term.original_log_effect * 1.01
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        final = run_final_fit(capture_final_fit(session), _Context())
+
+    claims = [c for c in caught if issubclass(c.category, SeparationWarning)]
+    assert final.carried == ("z",)
+    assert len(claims) == 1
+
+
 @pytest.mark.parametrize(
     "error",
     [
