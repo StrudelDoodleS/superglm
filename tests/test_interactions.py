@@ -1,6 +1,7 @@
 """Tests for all interaction features."""
 
 import pickle
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -962,33 +963,65 @@ class TestSplineCategoricalPerLevel:
         restored = pickle.loads(pickle.dumps(banded))
         np.testing.assert_array_equal(restored.predict(intervals), predicted)
 
-    def test_interaction_and_level_names_do_not_move_a_capped_reml_fit(self):
-        """REML seeds an interaction's smoothing parameters whatever its names say.
+    def test_saved_model_with_text_keyed_maps_warns_on_load(self):
+        """A saved model whose fitted maps are keyed by text, not level, says so on load.
 
-        One outer step, forced, so the start shows in the fit: a custom term
-        name without a colon and a level label with one fit exactly as the
-        default-named, plain-labelled term does.
+        Before the maps were keyed by level, a REML fit parsed each key from
+        its group name: ``risk:band[[25, 40)]`` gave ``""`` for both bands.
+        """
+        intervals, _, y, weight = _banded_severity(right=False)
+        model = SuperGLM(
+            family="gaussian",
+            features={"risk": Spline(n_knots=4), "band": Categorical(base="first")},
+            interactions=[("risk", "band")],
+            selection_penalty=0.0,
+        ).fit_reml(intervals, y, sample_weight=weight)
+        spec = model._interaction_specs["risk:band"]
+        state = dict(spec.__dict__, _R_inv_dict={"": spec._R_inv_dict[spec._non_base[-1]]})
+
+        stale = SplineCategorical.__new__(SplineCategorical)
+        with pytest.warns(UserWarning, match=r"no fitted map for levels \[Interval\(25, 40"):
+            stale.__setstate__(state)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            pickle.loads(pickle.dumps(spec))
+
+    @pytest.mark.parametrize("discrete", [False, True], ids=["exact", "binned"])
+    @pytest.mark.parametrize("lambda2_init", [None, 1e-8], ids=["seed", "step_cap"])
+    def test_names_do_not_move_a_capped_reml_fit(self, lambda2_init, discrete):
+        """REML starts an interaction's smoothing parameters by what built them, not by name.
+
+        One outer step, forced, so the start shows in the fit: a custom
+        interaction name without a colon, and a main effect whose column name
+        has one, fit exactly as the default-named terms on plain columns.  The
+        small ``lambda2_init`` sends the first step past the interaction step
+        cap, so the cap clips.
         """
         _, plain, y, weight = _banded_severity(right=False)
-        relabelled = plain.assign(band=plain["band"].cat.rename_categories({"b 25-39": "b 25:39"}))
+        renamed_columns = plain.rename(columns={"risk": "risk:score"})
 
-        def fit(X, name):
+        def fit(X, risk, name):
             model = SuperGLM(
                 family="gaussian",
                 terms=[
-                    term("risk", Spline(n_knots=4)),
+                    term(risk, Spline(n_knots=4)),
                     term("band", Categorical(base="first")),
-                    interaction(SplineCategorical("risk", "band"), name=name),
+                    interaction(SplineCategorical(risk, "band"), name=name),
                 ],
                 selection_penalty=0.0,
+                discrete=discrete,
+                n_bins=32,
             )
             with pytest.warns(ConvergenceWarning, match="max_reml_iter"):
-                return model.fit_reml(X, y, sample_weight=weight, max_reml_iter=1)
+                return model.fit_reml(
+                    X, y, sample_weight=weight, max_reml_iter=1, lambda2_init=lambda2_init
+                )
 
-        reference, renamed = fit(plain, None), fit(relabelled, "by_band")
+        reference = fit(plain, "risk", None)
+        renamed = fit(renamed_columns, "risk:score", "by_band")
 
         np.testing.assert_allclose(
-            renamed.predict(relabelled), reference.predict(plain), rtol=1e-10
+            renamed.predict(renamed_columns), reference.predict(plain), rtol=1e-10
         )
 
 

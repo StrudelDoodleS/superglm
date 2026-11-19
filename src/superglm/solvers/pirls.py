@@ -1910,16 +1910,7 @@ def _fit_pirls_inner(
         selected_gms.append(gm)
         selected_original_groups.append(group)
         selected_groups.append(
-            GroupSlice(
-                name=group.name,
-                start=selected_offset,
-                end=selected_offset + group.size,
-                weight=group.weight,
-                penalty_dim=group.penalty_dim,
-                penalized=group.penalized,
-                feature_name=group.feature_name,
-                subgroup_type=group.subgroup_type,
-            )
+            replace(group, start=selected_offset, end=selected_offset + group.size)
         )
         selected_offset += group.size
 

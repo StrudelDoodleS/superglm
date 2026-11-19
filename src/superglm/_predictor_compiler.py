@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import copy
 import warnings
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Hashable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -770,7 +770,7 @@ def compile_predictor_design(
                     if r_inv_parts_i and hasattr(ispec, "set_reparametrisation"):
                         ispec.set_reparametrisation(np.hstack(r_inv_parts_i))
                 else:
-                    r_inv_dict: dict[str, NDArray] = {}
+                    r_inv_dict: dict[Hashable, NDArray] = {}
                     for level, info, gm, r_inv, n_cols in term.processed:
                         if r_inv is not None:
                             r_inv_dict[level] = r_inv

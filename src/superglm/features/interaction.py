@@ -17,7 +17,7 @@ import copy
 import inspect
 import itertools
 import warnings
-from collections.abc import Iterator
+from collections.abc import Hashable, Iterator
 from dataclasses import replace
 from typing import Any
 
@@ -432,7 +432,7 @@ class SplineCategorical:
         self._hi: float = 1.0
         self._non_base: list[str] = []
         self._base_level: str = ""
-        self._R_inv_dict: dict[str, NDArray] | NDArray = {}
+        self._R_inv_dict: dict[Hashable, NDArray] | NDArray = {}
         self._projection: NDArray | None = None
         self._cat_grouping = None
         self._cat_levels: list = []
@@ -445,6 +445,20 @@ class SplineCategorical:
     def __setstate__(self, state: dict) -> None:
         _restore_parent_policy(state, "_cat", "_non_base", "_base_level")
         self.__dict__.update(state)
+        # Each fitted map is keyed by its level. A key that is no level is
+        # text an earlier superglm parsed from a REML group's name (a
+        # pandas.cut band's, say), and the levels it missed score without
+        # their fitted map.
+        maps = self._R_inv_dict
+        if isinstance(maps, dict) and any(key not in self._non_base for key in maps):
+            unmapped = [level for level in self._non_base if level not in maps]
+            warnings.warn(
+                f"The saved interaction of {self.spline_name!r} by {self.cat_name!r} has no "
+                f"fitted map for levels {unmapped}, so its predictions for them are wrong. "
+                "Refit the model with this version of superglm.",
+                UserWarning,
+                stacklevel=2,
+            )
 
     @property
     def parent_names(self) -> tuple[str, str]:
@@ -825,7 +839,7 @@ class SplineCategorical:
         self._separated_curves = tuple(found)
         return held_groups
 
-    def set_reparametrisation(self, R_inv_dict: dict[str, NDArray] | NDArray) -> None:
+    def set_reparametrisation(self, R_inv_dict: dict[Hashable, NDArray] | NDArray) -> None:
         if isinstance(R_inv_dict, dict):
             self._R_inv_dict = R_inv_dict
             return
