@@ -971,7 +971,12 @@ class TestSplineCategoricalPerLevel:
             banded.result.deviance, rel=1e-10
         )
         restored = pickle.loads(pickle.dumps(banded))
-        np.testing.assert_array_equal(restored.predict(intervals), predicted)
+        spec, kept = (
+            banded._interaction_specs["risk:band"],
+            restored._interaction_specs["risk:band"],
+        )
+        assert list(kept._R_inv_dict) == list(spec._R_inv_dict) == list(spec._non_base)
+        assert_predicts_as_saved(restored, intervals, predicted)
 
     def test_saved_model_with_text_keyed_maps_warns_on_load(self):
         """A saved model whose fitted maps are keyed by text, not level, says so on load.
@@ -2575,8 +2580,15 @@ class TestDiscreteTensorRawBand:
         ti, result = self._build(parent, x1, Spline(kind="ps", k=10), x2)
         assert len(np.unique(result.B1_unique[-4:], axis=0)) == 4
         band = result.raw_channels
-        reproduced = self._expand(band.offsets1, band.values1, 10) @ ti._marginal1.projection
-        assert np.abs(reproduced - result.B1_unique).max() <= 1e-15
+        raw = self._expand(band.offsets1, band.values1, 10)
+        projection = ti._marginal1.projection
+        # Each side is a cubic B-spline row (de Boor's recursion, a few roundings per level)
+        # times the projection, a dot product over the band's width: two evaluations differ
+        # by twice gamma_{width + 16} of the absolute terms, |raw| @ |projection|.
+        u = np.finfo(np.float64).eps / 2
+        k = band.values1.shape[1] + 16
+        bound = 2.0 * k * u / (1.0 - k * u) * (np.abs(raw) @ np.abs(projection))
+        assert np.all(np.abs(raw @ projection - result.B1_unique) <= bound)
 
 
 class TestPolynomialInteractionStoredFactor:
