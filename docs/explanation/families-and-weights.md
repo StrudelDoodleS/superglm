@@ -346,15 +346,20 @@ says so. Either way the interval is still computed. It inverts the profile that
 was searched, around that profile's own value at `p_hat` (recorded as
 `result.search_nll`), so it describes the regime named by `search_fit_mode`;
 `result.nll` describes the published fit's re-profiled dispersion. If the
-interval's own evaluations find a power below that value by more than the fits'
-own tolerances can resolve, or by more than a hundredth of the likelihood-ratio
-cutoff, the interval is inverted from the lower power, and a caution says which.
-The second test keeps the decision the same in any units of the response: the
-fits' tolerances grow with the size of the log-likelihood, which a change of
-currency moves, but no likelihood ratio does. A smaller difference is numerical
-noise from the fits and changes the interval's width by at most 0.5%.
-`profile_plot` measures against the same reference. Summaries show a cautioned
-interval as "caution", or "censored with caution" when it is also censored.
+interval's own evaluations find a power below that value, and the drop is real,
+the interval is inverted from the lower power, and a caution says so. A drop
+larger than the two fits' own tolerances can resolve is real. A smaller one can
+be noise from the fits or a real difference, so both powers are refitted from
+cold, each to within a quarter of the drop, and the refitted values decide;
+when they cannot, both are refitted again at tolerance 1e-12. The fits'
+tolerances grow with the size of the log-likelihood, which a change of currency
+moves but no likelihood ratio does. Because the refits are set by the drop
+itself, the decision is the same in any units of the response. If even those
+refits cannot tell the two powers apart, the interval stays inverted from
+`p_hat`, with a caution that the fits cannot confirm that `p_hat` is not the
+minimum. `profile_plot` measures each interval from the power it was inverted
+from. Summaries show a cautioned interval as "caution", or "censored with
+caution" when it is also censored.
 
 ### Profile confidence interval
 

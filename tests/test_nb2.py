@@ -741,6 +741,26 @@ class TestNB2WeightedProfile:
         # The recursive-summation bound over n rows, in the objective's units.
         assert bounds == [n * np.finfo(float).eps * abs(optimum[1])]
 
+    def test_a_cutoff_inside_the_round_off_leaves_the_score_root_the_centre(self):
+        """At alpha = 1 - 1e-8 the cutoff is 1.6e-16 in the statistic, far inside the
+        profile's round-off: a drop no larger than round-off moves no centre, however
+        small the cutoff."""
+        rng = np.random.default_rng(3)
+        x = rng.standard_normal(50)
+        mean = np.exp(0.5 + 0.3 * x)
+        y = rng.negative_binomial(4, 4 / (mean + 4)).astype(float)
+        model = SuperGLM(
+            family=NegativeBinomial(theta=1.0), features={"x": Numeric()}, selection_penalty=0
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = model.estimate_theta(pd.DataFrame({"x": x}), y)
+            optimum = result._optimum()
+            result.interval(0.99999999)
+
+        assert result._optimum() == optimum
+        assert not any("score root" in message for message in result._ci_cautions[0.99999999])
+
 
 class TestNB2AutoTheta:
     def test_reml_mode_rejects_selection_before_profile_work(self, monkeypatch):

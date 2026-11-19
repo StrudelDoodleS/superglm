@@ -21,9 +21,6 @@ _INFEASIBLE = 1e50
 # Times one interval re-centres on a lower point, a budget like maxiter: each
 # pass inverts both sides again, a model fit per evaluation.
 _MAX_RECENTRINGS = 2
-# The share of the cutoff a lower point's drop must exceed to move the centre
-# whatever the values' error bounds (`centre_resolution`).
-_CENTRE_RESOLUTION = 0.01
 
 
 class RecordedObjective:
@@ -103,17 +100,17 @@ def censoring_warnings(
     ]
 
 
-def centre_resolution(alpha: float, scale: float) -> float:
-    """The drop below the centre, in the objective's units, that moves the alpha-interval.
+@dataclass(frozen=True)
+class LowerPoint:
+    """The lowest recorded point, below the centre on the recorded curve.
 
-    A fixed share of the cutoff, so a likelihood-ratio quantity: unchanged by a
-    constant added to the objective, such as the Jacobian a change of the
-    response's units adds. Left unused, a drop d widens a quadratic profile's
-    interval by the factor sqrt(1 + d / cutoff), here at most 0.5%.
+    ``resolved``: its values' errors, or refined values, show it lower; otherwise
+    even values refined to the caller's floor cannot tell which point is lower.
     """
-    from scipy.stats import chi2
 
-    return _CENTRE_RESOLUTION * float(chi2.isf(alpha, 1)) / (2.0 * scale)
+    x: float
+    nll: float
+    resolved: bool
 
 
 def credible_lower_point(
@@ -121,24 +118,40 @@ def credible_lower_point(
     x_hat: float,
     nll_hat: float,
     error: Callable[[float], float],
-    resolution: float,
-) -> tuple[float, float] | None:
-    """The lowest recorded point, when it lies below x_hat by more than both values'
-    error or by more than ``resolution`` (`centre_resolution`).
+    refine: Callable[[float, float], tuple[float, float]] | None = None,
+) -> LowerPoint | None:
+    """The lowest recorded point when it lies below x_hat, or None when it does not.
 
     ``error(x)`` bounds the error of the value recorded at x. Values known only
     to a tolerance are told apart only beyond their noise (Moré & Wild 2011);
     the two bounds summed are the 2 eps_f of Shi, Xie, Byrd & Nocedal (2022).
-    A bound read from a fit's stopping rule grows with the objective's level,
-    which a likelihood ratio does not see, so the comparison never waits past
-    ``resolution``: inverted from a lower point the bounds do not resolve, the
-    interval errs by no more than its endpoints' values already may; ignored,
-    the drop widens it.
+    A drop D within that noise is either noise or a real drop, which no
+    threshold on D can tell apart. Without ``refine`` it is taken as noise.
+    ``refine(x, target)`` returns the value at x to within ``target``, or as
+    close as its caller's floor allows, with its bound. Both points are refined
+    to within D / 4, so each value errs by a fraction of the drop it is to
+    certify, the dynamic-accuracy rule of trust-region methods (Conn, Gould &
+    Toint 2000, section 10.6; Cartis, Gould & Toint 2020). The refined pair
+    is compared by the same test, and a pair it leaves undecided is refined
+    again at the floor. The refined values decide only which point is lower:
+    a lower point found is returned with its recorded value, the curve the
+    interval inverts.
     """
     x_best, nll_best = objective.best()
-    if nll_hat - nll_best > min(error(x_hat) + error(x_best), resolution):
-        return x_best, nll_best
-    return None
+    drop = nll_hat - nll_best
+    if drop <= 0.0:
+        return None
+    if drop > error(x_hat) + error(x_best):
+        return LowerPoint(x_best, nll_best, resolved=True)
+    if refine is None:
+        return None
+    for target in (drop / 4.0, 0.0):
+        value_hat, error_hat = refine(x_hat, target)
+        value_best, error_best = refine(x_best, target)
+        # A refined value without a bound (inf) or a value (nan) decides nothing.
+        if abs(value_hat - value_best) > error_hat + error_best:
+            return LowerPoint(x_best, nll_best, resolved=True) if value_best < value_hat else None
+    return LowerPoint(x_best, nll_best, resolved=False)
 
 
 def likelihood_ratio_interval(
@@ -151,6 +164,7 @@ def likelihood_ratio_interval(
     scale: float,
     xtol: float,
     error: Callable[[float], float],
+    refine: Callable[[float, float], tuple[float, float]] | None = None,
 ) -> tuple[Interval, float, float]:
     """{x : 2 scale (nll(x) - nll_min) <= chi2_1(1 - alpha)} (Venzon & Moolgavkar 1988),
     with the minimum it is measured from.
@@ -159,18 +173,17 @@ def likelihood_ratio_interval(
     ``xtol``; a side with no crossing before its bound, or whose crossing is a
     jump into infeasible points, is censored where it stopped. A point either
     side evaluates below ``nll_hat`` by more than the two values' ``error``, or
-    by more than a hundredth of the cutoff (`credible_lower_point`), is the
-    centre instead, so the interval is inverted again from the lowest point
-    recorded, at most ``_MAX_RECENTRINGS`` times; a smaller drop is evaluation
-    error too small to move the interval and leaves x_hat the centre. Like
-    the search, a side assumes one crossing: a profile that dips back under the
-    cutoff within one step of its outward walk joins that dip to the interval.
+    by less but confirmed by values ``refine`` recomputes (`credible_lower_point`),
+    shows x_hat is not the minimum, so the interval is inverted again from the
+    lowest point recorded, at most ``_MAX_RECENTRINGS`` times; a drop neither
+    resolves leaves x_hat the centre. Like the search, a side assumes one
+    crossing: a profile that dips back under the cutoff within one step of its
+    outward walk joins that dip to the interval.
     """
     # The upper tail directly: 1 - alpha rounds to 1 for alpha below 1.1e-16.
     from scipy.stats import chi2
 
     cutoff = float(chi2.isf(alpha, 1))
-    resolution = centre_resolution(alpha, scale)
     recorded = objective.values
     recentrings = 0
     while True:
@@ -181,10 +194,10 @@ def likelihood_ratio_interval(
 
         lower, lower_censored = _interval_side(excess, recorded, x_hat, bounds[0], cutoff, xtol)
         upper, upper_censored = _interval_side(excess, recorded, x_hat, bounds[1], cutoff, xtol)
-        below = credible_lower_point(objective, x_hat, nll_hat, error, resolution)
-        if below is None or recentrings == _MAX_RECENTRINGS:
+        below = credible_lower_point(objective, x_hat, nll_hat, error, refine)
+        if below is None or not below.resolved or recentrings == _MAX_RECENTRINGS:
             return Interval(lower, upper, lower_censored, upper_censored), x_hat, nll_hat
-        (x_hat, nll_hat), recentrings = below, recentrings + 1
+        x_hat, nll_hat, recentrings = below.x, below.nll, recentrings + 1
 
 
 def _interval_side(excess, recorded, x_hat, bound, cutoff, xtol) -> tuple[float, bool]:

@@ -5,7 +5,9 @@ from scipy.stats import chi2
 
 from superglm.profiling import _scalar
 from superglm.profiling._scalar import (
+    LowerPoint,
     RecordedObjective,
+    credible_lower_point,
     likelihood_ratio_interval,
     minimize_profile,
 )
@@ -180,9 +182,8 @@ def test_an_interval_that_finds_a_deeper_well_is_inverted_from_it():
 def error_bounds(x):
     # Per-point bounds on a recorded value's error; the lower point's own
     # dominates, so a comparison that read either bound alone would decide
-    # the two cases below alike. Summed, they stay under the 1.9e-5 a drop
-    # needs to move the interval here (a hundredth of the cutoff over 2 N).
-    return 3e-6 if x == 0.31 else 1e-6
+    # the two cases below alike.
+    return 3e-4 if x == 0.31 else 1e-4
 
 
 def test_a_lower_value_within_both_values_error_leaves_the_centre():
@@ -217,25 +218,115 @@ def test_a_lower_value_beyond_both_values_error_moves_the_centre():
         assert 2.0 * N * (quadratic(end) + drop) == pytest.approx(cutoff, abs=1e-8)
 
 
-def test_a_lower_value_that_moves_the_interval_moves_the_centre_within_any_error():
-    # Bounds read from a fit's stopping rule grow with the objective's level,
-    # which a likelihood ratio does not see: a drop of 0.72 in the statistic,
-    # far past a hundredth of the cutoff, moves the centre however loose they are.
-    def loose(x):
-        return 100.0 * error_bounds(x)
-
+def _lower_point(share):
+    """The quadratic with 0.31 recorded below x_hat by ``share`` of both values' error."""
     objective = RecordedObjective(quadratic)
-    drop = 0.9 * (loose(0.3) + loose(0.31))
+    drop = share * (error_bounds(0.3) + error_bounds(0.31))
     objective.values[0.31] = -drop
+    return objective, drop
+
+
+@pytest.mark.parametrize("share", [0.9, 1.1])
+def test_only_a_drop_within_both_values_error_asks_for_refined_values(share):
+    # Refined values, to within the target asked, confirm the recorded drop.
+    objective, drop = _lower_point(share)
+    asked = []
+
+    def refine(x, target):
+        asked.append((x, target))
+        return objective.values.get(x, 0.0), target
 
     interval, centre, centre_nll = likelihood_ratio_interval(
-        objective, 0.3, 0.0, (0.0, 1.0), alpha=0.05, scale=N, xtol=1e-12, error=loose
+        objective,
+        0.3,
+        0.0,
+        (0.0, 1.0),
+        alpha=0.05,
+        scale=N,
+        xtol=1e-12,
+        error=error_bounds,
+        refine=refine,
     )
 
     assert (centre, centre_nll) == (0.31, -drop)
-    cutoff = chi2.isf(0.05, 1)
-    for end in (interval.lower, interval.upper):
-        assert 2.0 * N * (quadratic(end) + drop) == pytest.approx(cutoff, abs=1e-8)
+    # Past the bounds the recorded values decide; within them both points are
+    # refined to a quarter of the drop, which resolves a real one.
+    assert asked == ([] if share > 1.0 else [(0.3, drop / 4.0), (0.31, drop / 4.0)])
+
+
+def test_refined_values_that_put_x_hat_lower_leave_the_centre():
+    # The recorded drop is fit error: the exact values put 0.31 above x_hat, by
+    # less than the quarter-drop targets resolve, so both are refined again to
+    # the floor, where they decide.
+    objective, drop = _lower_point(0.9)
+    expected = likelihood_ratio_interval(
+        RecordedObjective(quadratic),
+        0.3,
+        0.0,
+        (0.0, 1.0),
+        alpha=0.05,
+        scale=N,
+        xtol=1e-12,
+        error=error_bounds,
+    )
+    asked = []
+
+    def refine(x, target):
+        asked.append((x, target))
+        return quadratic(x), target
+
+    found = likelihood_ratio_interval(
+        objective,
+        0.3,
+        0.0,
+        (0.0, 1.0),
+        alpha=0.05,
+        scale=N,
+        xtol=1e-12,
+        error=error_bounds,
+        refine=refine,
+    )
+
+    assert quadratic(0.31) < drop / 2.0
+    assert asked == [(0.3, drop / 4.0), (0.31, drop / 4.0), (0.3, 0.0), (0.31, 0.0)]
+    assert found == expected
+
+
+@pytest.mark.parametrize(
+    "refined", [(0.0, 1e-9), (math.nan, math.inf)], ids=["tied at the floor", "refit failed"]
+)
+def test_refined_values_that_cannot_tell_the_points_apart_leave_it_unresolved(refined):
+    objective, drop = _lower_point(0.9)
+    expected = likelihood_ratio_interval(
+        RecordedObjective(quadratic),
+        0.3,
+        0.0,
+        (0.0, 1.0),
+        alpha=0.05,
+        scale=N,
+        xtol=1e-12,
+        error=error_bounds,
+    )
+
+    def refine(x, target):
+        return refined
+
+    found = likelihood_ratio_interval(
+        objective,
+        0.3,
+        0.0,
+        (0.0, 1.0),
+        alpha=0.05,
+        scale=N,
+        xtol=1e-12,
+        error=error_bounds,
+        refine=refine,
+    )
+
+    # The interval stays inverted from x_hat, and the comparison says it could not decide.
+    assert found == expected
+    unresolved = LowerPoint(0.31, -drop, resolved=False)
+    assert credible_lower_point(objective, 0.3, 0.0, error_bounds, refine) == unresolved
 
 
 def test_re_centring_stops_at_its_budget(monkeypatch):
