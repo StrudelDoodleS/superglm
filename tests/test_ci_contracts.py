@@ -1112,9 +1112,14 @@ _OUTCOME_GUARDS = {
 }
 
 
+_OUTCOME_WORDS = re.compile("|".join([*_OUTCOMES, r"pytest\.skip"]))
+
+
 def _outcome_guards(source: str) -> set[str]:
     """Test functions that assert behind ``if <fit outcome>:``, assert ``not converged or ...``,
     or call ``pytest.skip`` under an ``if`` on a value the test computed."""
+    if not _OUTCOME_WORDS.search(source):
+        return set()  # each pattern names an outcome or pytest.skip; most modules do neither
 
     def names(node) -> set[str]:
         return {
@@ -1130,8 +1135,17 @@ def _outcome_guards(source: str) -> set[str]:
         )
 
     def asserts(nodes) -> bool:
-        return calls(nodes, "pytest.fail") or any(
-            isinstance(n, ast.Assert) for b in nodes for n in ast.walk(b)
+        """An ``assert``, ``pytest.fail`` or an ``assert_*`` call, NumPy's (``np.testing.``) or
+        bare; a method or an underscored helper that asserts is not seen."""
+        return any(
+            isinstance(n, ast.Assert)
+            or (
+                isinstance(n, ast.Call)
+                and re.fullmatch(r"pytest\.fail|(np\.testing\.)?assert_\w+", ast.unparse(n.func))
+                is not None
+            )
+            for b in nodes
+            for n in ast.walk(b)
         )
 
     flagged = set()
@@ -1181,5 +1195,9 @@ def test_the_outcome_lint_flags_each_pattern_and_spares_forced_events() -> None:
         "def test_both(fit):\n    r = fit()\n    if r.converged:\n        assert r.x\n"
         "    else:\n        assert r.warned\n"
         "def test_parameter(case):\n    if case == 'n/a':\n        pytest.skip('does not apply')\n"
+        "def test_numpy(fit):\n    r = fit()\n    if r.converged:\n"
+        "        np.testing.assert_allclose(r.beta, 0.0)\n"
+        "def test_imported(fit):\n    r = fit()\n    if r.converged:\n"
+        "        assert_array_equal(r.beta, 0.0)\n"
     )
-    assert flagged == {"test_guard", "test_either", "test_skip"}
+    assert flagged == {"test_guard", "test_either", "test_skip", "test_numpy", "test_imported"}

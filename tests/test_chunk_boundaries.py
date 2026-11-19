@@ -17,8 +17,10 @@ that crosses its boundary (here, in ``test_chunk_boundaries_design.py``,
 from __future__ import annotations
 
 import ast
+import functools
 import importlib
 import math
+import re
 from pathlib import Path
 
 import numpy as np
@@ -686,6 +688,9 @@ def _chunked_functions() -> set[str]:
     """``path::qualname`` of every function holding a ``range(0, n, step)``, step not 1, 2 or -1."""
     found = set()
     for path in sorted(_SRC.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        if not re.search(r"\brange\(\s*0\s*,", source):
+            continue  # no range(0, ...) to parse for
         stack: list[str] = []
 
         def visit(node, path=path, stack=stack):
@@ -709,14 +714,19 @@ def _chunked_functions() -> set[str]:
             if named:
                 stack.pop()
 
-        visit(ast.parse(path.read_text(encoding="utf-8")))
+        visit(ast.parse(source))
     return found
+
+
+@functools.cache
+def _module_body(file: str) -> list[ast.stmt]:
+    return ast.parse((_TESTS / file).read_text(encoding="utf-8")).body
 
 
 def _defines(node_id: str) -> bool:
     """Whether the test module of ``node_id`` defines its (class and) test function."""
     file, *names = node_id.split("::")
-    scope = ast.parse((_TESTS / file).read_text(encoding="utf-8")).body
+    scope = _module_body(file)
     for name in names:
         match = [n for n in scope if getattr(n, "name", None) == name]
         if not match:
