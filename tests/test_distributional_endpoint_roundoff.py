@@ -557,7 +557,7 @@ def test_the_rich_generalized_gamma_book_ends_stationary_with_its_exact_faces_ke
     assert smoothing.convergence_reason == "stationary"
     assert smoothing.converged is True
     assert smoothing.unresolved_upper_bound == ()
-    assert set(model.result_.exact_face_components) == promoted
+    assert promoted and set(model.result_.exact_face_components) == promoted, promoted
     fitted = model._require_fitted()
     # the positive-definiteness gate's verdict on a near-zero curvature varies by platform
     fallbacks = _corrected_covariance_fallbacks(fitted)

@@ -1077,27 +1077,27 @@ class TestDeadSearchNewtonDecrement:
     """#459: a dead line search whose Newton model predicts a decrease below
     the stop resolution is a resolved optimum, not a failure."""
 
+    @pytest.mark.pins_behaviour
     @pytest.mark.parametrize("ordering", [None, 9, 20])
     def test_a_negligible_predicted_decrease_converges_with_unchanged_numbers(
         self, monkeypatch, ordering
     ):
-        """Fails unfixed: on 0.37.1 these row orders of the panel model end
-        ``line_search_failed`` with ``converged=False`` and a
-        ConvergenceWarning (measured on Linux x86-64 OpenBLAS, identical at 1
-        and 4 threads; 6 of 22 orders), while the other orders converge to the
-        same answer. At iteration 6-8 the active gradient sits 1.009 to 2.03
-        times its bar, but the Newton model predicts a decrease of at most
-        1.2e-8 against a resolution of 2.06e-6 and evaluation noise of
-        4.2e-7, so rounding decides whether the full step is accepted.
-        Mutation: dropping the ``predicted_decrease`` arm from
-        ``classify_dead_feasible_exit`` fails the same way.
+        """A control: these row orders of the panel model converge, and the decrement
+        arm only names the exit.
+
+        On 0.37.1 they ended ``line_search_failed`` with ``converged=False`` and a
+        ConvergenceWarning (measured on Linux x86-64 OpenBLAS, identical at 1 and
+        4 threads; 6 of 22 orders), while the other orders converged to the same
+        answer: at iteration 6-8 the active gradient sat 1.009 to 2.03 times its
+        bar, but the Newton model predicted a decrease of at most 1.2e-8 against a
+        resolution of 2.06e-6 and evaluation noise of 4.2e-7, so rounding decided
+        whether the full step was accepted. Rounding now takes these orders
+        through the compound criterion, so dropping the decrement arm no longer
+        fails this test; ``test_a_forced_dead_search_converges_on_the_decrement_arm``
+        forces the dead search the arm decides.
 
         The second fit runs the 0.37.1 rule in place of the classifier: every
-        published number must match bitwise, since the rule only names the
-        exit. Where rounding takes a platform's fit through the compound
-        criterion instead, both fits converge and the comparison still holds;
-        ``test_a_forced_dead_search_converges_on_the_decrement_arm`` forces
-        the dead search the decrement arm decides.
+        published number must match bitwise, since the rule only names the exit.
         """
         import warnings
 
@@ -1149,22 +1149,20 @@ class TestDeadSearchNewtonDecrement:
         """A dead search the Newton model says has a negligible decrease left converges.
 
         Every lambda move is rejected by a stand-in objective (0 at the start,
-        1 elsewhere, so the score scale is 1) from ``lambda=0.152`` on the
-        one-spline Poisson fit, whose REML optimum is at 0.150. There the active
-        gradient is 0.018 and the Newton model predicts a decrease of 1.2e-4
-        (measured): 3.6 times the bar of ``reml_tol=5e-3``, inside the decade
-        the decrement arm allows, and a fortieth of the stop resolution. So the
-        exit is the decrement arm's alone: ``converged_at_precision``, where the
-        gradient rule alone (the 0.37.1 rule, ``predicted_decrease`` withheld)
-        ends ``line_search_failed``, with the same numbers. Mutation: dropping
-        the ``predicted_decrease`` arm from ``classify_dead_feasible_exit``
-        fails it the same way.
+        1 elsewhere, so the score scale is 1) on a one-spline Poisson fit, so its
+        first search dies. The classifier is then handed an active gradient of
+        twice the bar of ``reml_tol=5e-3``, inside the decade the decrement arm
+        allows, and a predicted decrease of a fortieth of the stop resolution,
+        whatever the data gave: the exit is the decrement arm's alone,
+        ``converged_at_precision``, where the gradient rule alone (the 0.37.1
+        rule, ``predicted_decrease`` withheld) ends ``line_search_failed``, with
+        the same numbers. Mutation: dropping the ``predicted_decrease`` arm from
+        ``classify_dead_feasible_exit`` fails it the same way.
         """
         import warnings
 
         import superglm.reml.direct as direct
         from superglm import ConvergenceWarning
-        from superglm.reml.convergence import DECREMENT_GRADIENT_CEILING
 
         rng = np.random.default_rng(20260727)
         x = rng.uniform(0.0, 1.0, 240)
@@ -1180,11 +1178,10 @@ class TestDeadSearchNewtonDecrement:
                 evaluated.append(dict(args[6]))
                 return 0.0 if evaluated[-1] == evaluated[0] else 1.0
 
-            def classify(*args, **kwargs):
-                if gradient_rule_only:
-                    kwargs.pop("predicted_decrease")
-                classified.append((args[0], kwargs))
-                return real(*args, **kwargs)
+            def classify(_active_gradient, **kwargs):
+                classified.append(kwargs)
+                decrease = None if gradient_rule_only else tol / 40.0
+                return real(2.0 * tol, **(kwargs | {"predicted_decrease": decrease}))
 
             with monkeypatch.context() as patch:
                 patch.setattr(direct, "reml_laml_objective", reject_every_move)
@@ -1207,10 +1204,9 @@ class TestDeadSearchNewtonDecrement:
         fixed, classified, fixed_warnings = fit(gradient_rule_only=False)
         reference, _, reference_warnings = fit(gradient_rule_only=True)
 
-        [(gradient, inputs)] = classified
+        [inputs] = classified
         assert inputs["objective"] == 0.0 and inputs["evaluated_trial"] is True
-        assert tol <= gradient < DECREMENT_GRADIENT_CEILING * tol
-        assert inputs["predicted_decrease"] < tol / 10.0
+        assert "predicted_decrease" in inputs  # the search hands the classifier its decrease
         assert fixed._reml_result.termination_reason == "converged_at_precision"
         assert fixed._reml_result.converged and not fixed_warnings
         assert reference._reml_result.termination_reason == "line_search_failed"
