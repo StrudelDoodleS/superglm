@@ -222,7 +222,8 @@ jobs:
   fix-tests:
     # Fails a pull request that changes src/ on a test it adds or changes that passes on the
     # base commit's code (the base's tree with the pull request's tests), unless the test is a
-    # control: marked pins_behaviour, with a docstring saying what it pins.
+    # control: marked pins_behaviour, with a docstring saying what it pins. A test the base
+    # cannot import a name for fails there; one it cannot decide otherwise fails the job.
     # The report lists every control, so a reviewer reads each one. The check failing to run
     # (its own timeout) fails the job too. It sits last because the contract tests read the
     # workflow between two job names.

@@ -101,7 +101,9 @@ demonstration against the unfixed implementation; a test that also passes
 against the unfixed code proves nothing. In a pull request that changes `src/`,
 `scripts/check_fix_tests.py` fails on any test the pull request adds or changes
 that passes on its merge base, unless the test is a deliberate control: marked
-`@pytest.mark.pins_behaviour`, with a docstring that says what it pins. Put
+`@pytest.mark.pins_behaviour`, with a docstring that says what it pins. A test
+that cannot be decided on the base (a collection error other than a missing
+name) fails the check too. Put
 test-only refactors in their own pull request, which the check skips, so that a
 `src/` pull request's changed tests are the ones that guard its change.
 
