@@ -23,8 +23,6 @@ from superglm.solvers.centered_system import (
     CenteredSystem,
     grouped_augmented_factor,
     grouped_projected_factor,
-    grouped_structural_nulls,
-    grouped_weighted_factor,
     penalty_factor,
 )
 from superglm.solvers.irls_direct._centred import _system_offset_mean
@@ -34,7 +32,6 @@ from superglm.solvers.rank import (
     RankDecomposition,
     RankInfo,
     _formation_slack,
-    decide_data_rank,
     decompose_factor,
     decompose_gram_if_authoritative,
     diagonal_of_square,
@@ -237,8 +234,6 @@ def _retained_rank_info(
     dm: DesignMatrix,
     groups: list[GroupSlice],
     p: int,
-    step_data_rank: Callable[[CenteredSystem, NDArray], RankDecomposition] | None,
-    _return_working_system: bool,
     certify_centered_factor: Callable[..., _CenteredFactorCertification],
     face: NDArray | None,
     face_rows: NDArray | None,
@@ -269,43 +264,6 @@ def _retained_rank_info(
     coefficient_rank = decompose_gram_if_authoritative(M_beta)
     if coefficient_rank is None:
         coefficient_rank = decompose_factor(raw_factor())
-    if step_data_rank is not None:
-        data_rank = step_data_rank(centered_final, W)
-    else:
-        # The export rows are Fisher (``prefer_observed=False``), whose
-        # weights are nonnegative: the data Gram is PSD by construction,
-        # so a negative eigenvalue at its null is formation rounding and
-        # sends the rank to the factor below instead of raising.
-        final_centre, final_centre_lo = centered_final.centre_pair()
-
-        def data_factor_rank() -> RankDecomposition:
-            if not np.any(centered_final.penalty):
-                return certify_centered_factor(centered_final, W).decomposition
-            return decompose_factor(
-                grouped_weighted_factor(
-                    dm,
-                    W,
-                    center=final_centre,
-                    center_lo=final_centre_lo,
-                )
-            )
-
-        # Unpenalized, the data Gram is the Hessian, whose factor
-        # certificate the fit already holds for its standard
-        # errors (``reml_slope_rank``); reading it costs nothing.
-        data_rank = decide_data_rank(
-            centered_final.data_gram,
-            data_factor_rank,
-            project=lambda basis: grouped_projected_factor(
-                dm, W, basis, center=final_centre, center_lo=final_centre_lo
-            ),
-            structural=lambda: grouped_structural_nulls(
-                dm, W, center=final_centre, center_lo=final_centre_lo
-            ),
-            rows=dm.n,
-            psd_by_construction=not _return_working_system,
-            certify=not np.any(centered_final.penalty),
-        )
     group_edf = {g.name: float(np.sum(feature_edf[g.sl])) for g in groups}
     selected_columns = np.arange(p, dtype=int)
     selected_columns.setflags(write=False)
@@ -320,7 +278,9 @@ def _retained_rank_info(
         sum_w=centered_final.sum_w,
         mean_x=centered_final.mean_x,
         intercept_edf=1.0,
-        data=data_rank,
+        # Unpenalized, the data Gram is the Hessian, decided already; penalized, the data rank
+        # is a diagnostic computed on demand (``state_ops.fit_data_rank``).
+        data=None if np.any(centered_final.penalty) else augmented_rank,
         augmented=augmented_rank,
         coefficient=coefficient_rank,
         feature_edf=feature_edf,
@@ -336,6 +296,7 @@ def _retained_rank_info(
         ),
         feature_edf1=feature_edf1,
         covariance_policy="rule_free",
+        identifiability_policy="penalised",
     )
 
 
@@ -391,9 +352,7 @@ def _finalise_centred(step: _IRLSDirectStep, fit: _IRLSDirectFit) -> _IRLSDirect
 
     The retained centred system, its profiled slope decomposition, ``log det
     H``, the REML summary, the EDF and ``RankInfo`` (computed here or
-    deferred).  A constrained fit's statistics are its active face's.  A
-    step's own data rank is computed here, never deferred, so no deferred
-    callable keeps the step.
+    deferred).  A constrained fit's statistics are its active face's.
     """
     centered_final, XtWX, XtW1 = _final_centred_system(fit)
     W, dm = fit.W, fit.dm
@@ -483,7 +442,6 @@ def _finalise_centred(step: _IRLSDirectStep, fit: _IRLSDirectFit) -> _IRLSDirect
         feature_edf[np.abs(feature_edf) < 100.0 * np.finfo(float).eps] = 0.0
         p_eff = 1.0 + float(np.sum(feature_edf))
 
-        step_data_rank = step.data_rank
         retained_rank_info = partial(
             _retained_rank_info,
             centered_final,
@@ -494,17 +452,13 @@ def _finalise_centred(step: _IRLSDirectStep, fit: _IRLSDirectFit) -> _IRLSDirect
             dm=dm,
             groups=fit.groups,
             p=fit.p,
-            step_data_rank=step_data_rank,
-            _return_working_system=fit._return_working_system,
             certify_centered_factor=fit.certify_centered_factor,
             face=face,
             face_rows=face_rows,
             face_rank=face_rank,
         )
 
-        if fit.compute_rank_info or (_defer_rank_info is not None and step_data_rank is not None):
-            # Deferring a step's own data rank would keep the step (and the QR
-            # step's dense design) alive until install.
+        if fit.compute_rank_info:
             rank_info = retained_rank_info()
         else:
             rank_info = None

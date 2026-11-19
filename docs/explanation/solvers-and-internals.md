@@ -1151,14 +1151,28 @@ The QR path is basically saying:
 
 > I want a reliable factorization of the penalized weighted design, even if the active design is a bit awkward or nearly rank-deficient
 
-#### 17.3.2 Which coefficients the data can estimate
+#### 17.3.2 Which coefficients have a standard error
 
-After the fit, superglm decides which coefficients the data alone can
-identify. This is the *data rank*. A coefficient outside it, such as a spline
-basis function over a corner of a tensor term with no rows, is reported as not
-estimable, and its standard error is shown as missing. Its fitted value and the
-model's predictions do not depend on this decision, which is made after the
-coefficients are solved.
+A fit reports the penalized estimate, so a coefficient has a standard error
+whenever the penalized fit pins it down, by the data or by a penalty. The
+Hessian $\mathbf{X}^\top\mathbf{W}\mathbf{X} + \mathbf{S}$ misses a direction
+only when both the data and every penalty miss it. Those directions are the
+null space of $\mathbf{X}\mathbf{N}_S$, where $\mathbf{N}_S$ spans the
+directions no penalty reaches: the intercept, factor levels, numeric columns
+and the unpenalized part of each smooth (Wood, Pya and Säfken 2016, section
+3.1.2). That design is small, and the smoothing parameters do not enter it.
+Only a coefficient in such a direction is shown as missing, with a footnote
+naming what it is aliased with: a factor nested in another, a duplicated
+column, a level seen at one value of its covariate, a basis function with no
+data and no penalty. The later term absorbs the alias, as in R's `lm`; the
+coefficients beside it keep their standard errors
+(`src/superglm/solvers/identifiability.py`). The dense solver applies this;
+the structured solvers still apply the data rank below.
+
+The *data rank* asks whether the data alone, ignoring the penalties, pin a
+direction down. It is a diagnostic, computed on request
+(`state_ops.fit_data_rank`): the editor's free levels read it, and no standard
+error does.
 
 The decision is the numerical rank of the weighted design
 $\mathbf{W}^{1/2}\mathbf{X}$. Columns are scaled to unit length, and a
@@ -1180,8 +1194,8 @@ largest.
   that the other directions cannot change the answer. Where it cannot confirm
   this, the fit factors every row instead.
 
-`metrics()` on rows, weights or offsets other than the fit's and a fit's
-rebuilt inference state decide the data rank the same way.
+A fit without penalty uses its Hessian, which is then the data Gram, and
+decides it the same way.
 
 On the freMTPL2 frequency book with ten interaction pairs, $p = 1535$. Of
 its 230 directions outside the data rank, 164 are read off the tables, and

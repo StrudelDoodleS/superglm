@@ -401,6 +401,7 @@ def _summary_notes(
     inference_stale = bool(info.get("editor_inference_stale", False))
     notes.extend(_editor_notes(info))
     notes.extend(info.get("shared_cell_rows") or ())
+    notes.extend(info.get("identifiability_notes") or ())
     if not inference_stale:
         if any(row.kind.startswith("smooth") for row in terms):
             notes.append(_SMOOTH_WOOD_NOTE)

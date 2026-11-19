@@ -405,7 +405,8 @@ def _centred_scale(geometry, pirls_result, sum_w: float | None, p: int) -> NDArr
     """Per column ``sqrt(diag(X_c' W X_c) / sum_w)`` at the weights ``W`` the centre is the mean of.
 
     Read from the record ``mean_x`` comes from: the geometry's centred Gram,
-    the rank record's ``column_scale`` or the geometry summary's scales.
+    the rank record's data ``column_scale`` where it holds the data rank, or
+    the geometry summary's scales (the same final centred system's).
     ``None`` without a profiled intercept or such a record.
     """
     if sum_w is None:
@@ -416,7 +417,7 @@ def _centred_scale(geometry, pirls_result, sum_w: float | None, p: int) -> NDArr
             np.diag(gram) if isinstance(gram, np.ndarray) else compact_operator_diagonal(gram)
         )
         scale = np.sqrt(np.abs(diagonal))
-    elif pirls_result.rank_info is not None:
+    elif pirls_result.rank_info is not None and pirls_result.rank_info.data is not None:
         record = pirls_result.rank_info
         selected = np.asarray(record.selected_columns, dtype=np.intp)
         if record.data.column_scale.shape != selected.shape:

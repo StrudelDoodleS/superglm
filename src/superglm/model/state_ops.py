@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import replace
 from typing import cast
 
@@ -28,6 +29,11 @@ from superglm.solvers._structured.operators import (
 )
 from superglm.solvers._structured.state import (
     StructuredLinearSystemState,
+)
+from superglm.solvers.identifiability import (
+    Identifiability,
+    decide_identifiability,
+    penalty_null_space,
 )
 from superglm.solvers.rank import (
     decide_data_rank,
@@ -141,16 +147,16 @@ def _legacy_rank_state(model, solver, W: NDArray):
     """The selected grouped design, its centred system at ``W`` and their rank decisions.
 
     Returns ``design, active_groups, centered, coefficient_rank,
-    profile_rank, data_rank``: the raw and centred Hessians' and the data
-    Gram's decompositions, decided as the fit decides them, and ``None`` for
-    the last four when no column is selected.
+    profile_rank, data_rank``: the raw and centred Hessians' decompositions,
+    decided as the fit decides them, and the data Gram's where it is the
+    centred Hessian (unpenalized; ``None`` otherwise, computed on demand by
+    ``fit_data_rank``), and ``None`` for the last four when no column is
+    selected.
     """
     from superglm.inference.covariance import _active_penalty_matrix
     from superglm.solvers.centered_system import (
         build_centered_system,
         grouped_augmented_factor,
-        grouped_projected_factor,
-        grouped_structural_nulls,
         grouped_weighted_factor,
     )
 
@@ -196,25 +202,21 @@ def _legacy_rank_state(model, solver, W: NDArray):
     coefficient_rank = decompose_gram_if_authoritative(raw_gram + curvature)
     # rows centred about the system's exact centre pair
     centre, centre_lo = centered.centre_pair()
-    # The fit's route (``rank.decide_data_rank``); unpenalized, the data rank
-    # is also the profile rank below, so the full factor decides it, as in
-    # the fit.
-    data_rank = decide_data_rank(
-        centered.data_gram,
-        lambda: decompose_factor(
-            grouped_weighted_factor(design, W, center=centre, center_lo=centre_lo)
-        ),
-        project=lambda basis: grouped_projected_factor(
-            design, W, basis, center=centre, center_lo=centre_lo
-        ),
-        structural=lambda: grouped_structural_nulls(design, W, center=centre, center_lo=centre_lo),
-        rows=design.n,
-        certify=not np.any(curvature),
-    )
     if coefficient_rank is None:
         certified = decompose_factor(grouped_augmented_factor(design, W, curvature))
         coefficient_rank = certified
+    data_rank = None
     if not np.any(curvature):
+        # The fit's route (``rank.decide_data_rank``): the data rank is the
+        # profile rank, so the full factor decides it, as in the fit.
+        data_rank = decide_data_rank(
+            centered.data_gram,
+            lambda: decompose_factor(
+                grouped_weighted_factor(design, W, center=centre, center_lo=centre_lo)
+            ),
+            rows=design.n,
+            certify=True,
+        )
         profile_rank = data_rank
     else:
         profile_rank = decompose_gram_if_authoritative(centered.data_gram + curvature)
@@ -233,14 +235,18 @@ def _legacy_rank_state(model, solver, W: NDArray):
 
 
 def _legacy_active_state(model, solver, W: NDArray):
-    """Rebuild old fit inference with grouped, centered coefficient algebra."""
-    design, active_groups, centered, coefficient_rank, profile_rank, data_rank = _legacy_rank_state(
+    """Rebuild old fit inference with grouped, centered coefficient algebra.
+
+    The last value is the decomposition of the centred Hessian whose inverse
+    the covariance is: which coordinates it fixes at zero is what the fit
+    leaves unidentified (``solvers.identifiability``).
+    """
+    design, active_groups, centered, coefficient_rank, profile_rank, _ = _legacy_rank_state(
         model, solver, W
     )
     if centered is None:
         sum_w = float(np.sum(W))
         augmented = np.array([[1.0 / sum_w]]) if sum_w > 0.0 else np.array([[0.0]])
-        data_rank = decompose_gram(np.empty((0, 0)))
         return (
             design,
             active_groups,
@@ -248,7 +254,7 @@ def _legacy_active_state(model, solver, W: NDArray):
             _public_augmented_covariance(model, augmented, active_groups),
             np.empty((0, 0)),
             np.empty((0, 0)),
-            data_rank,
+            decompose_gram(np.empty((0, 0))),
         )
     _, xtw1, _, _ = centered.raw_weighted_moments()
     coefficient_inverse = coefficient_rank.pseudo_inverse()
@@ -268,7 +274,7 @@ def _legacy_active_state(model, solver, W: NDArray):
         augmented,
         centered.data_gram,
         profile_inverse,
-        data_rank,
+        profile_rank,
     )
 
 
@@ -329,6 +335,7 @@ def face_record_at(model, W: NDArray):
         sum_w=centered.sum_w,
         mean_x=centered.mean_x,
         data=data,
+        identifiability=None,
         augmented=augmented,
         coefficient=coefficient,
         feature_edf=feature_edf,
@@ -402,6 +409,192 @@ def _rank_augmented_covariance(model, rank_info, active_groups):
     solver_covariance[1:, 0] = intercept_cross
     solver_covariance[1:, 1:] = feature_covariance
     return _public_augmented_covariance(model, solver_covariance, active_groups)
+
+
+def _penalty_null_spaces(model, active_groups) -> list[NDArray]:
+    """Each selected group's penalty null space ``N_S,g``, without a smoothing parameter in it.
+
+    A group with REML components is balanced over the components whose fitted lambda is
+    positive (``identifiability.penalty_null_space``); any other group's penalty is the fitted
+    curvature's block (one lambda each, and the selection penalty's local curvature), as the
+    fit's Hessian holds it.
+    """
+    from superglm.inference.covariance import _active_penalty_matrix
+    from superglm.reml.penalty_algebra import (
+        _penalty_component_omega_ssp,
+        penalty_component_dense_matrix,
+    )
+    from superglm.solvers.pirls import _add_selection_local_curvature
+
+    solver = model._solver_pirls_result()
+    lam2 = scale_penalties(fitted_lambda2(model), getattr(solver, "weight_exponent", 0))
+    components: dict[str, list] = {}
+    for component in getattr(model, "_reml_penalties", None) or ():
+        lam = lam2.get(component.name, 0.0) if isinstance(lam2, dict) else lam2
+        if lam > 0.0:
+            components.setdefault(component.group_name, []).append(component)
+    matrices = {g.name: gm for g, gm in zip(model._groups, model._dm.group_matrices, strict=True)}
+    # the groups without REML components, in their own compact coordinates
+    missing, column = [], 0
+    for group in active_groups:
+        if group.name not in components:
+            missing.append(dataclasses.replace(group, start=column, end=column + group.size))
+            column += group.size
+    fitted: dict[str, NDArray] = {}
+    if missing:
+        curvature = np.array(
+            _active_penalty_matrix(
+                model._dm.group_matrices,
+                model._groups,
+                missing,
+                lam2,
+                reml_penalties=getattr(model, "_reml_penalties", None),
+            ),
+            dtype=np.float64,
+            copy=True,
+        )
+        original = {group.name: group for group in model._groups}
+        _add_selection_local_curvature(
+            curvature=curvature,
+            penalty=fitted_penalty(model),
+            beta=np.asarray(solver.beta, dtype=np.float64),
+            original_groups=[original[group.name] for group in missing],
+            active_groups=missing,
+        )
+        fitted = {group.name: curvature[group.sl, group.sl] for group in missing}
+    spaces = []
+    for group in active_groups:
+        own = components.get(group.name)
+        if own is None:
+            spaces.append(penalty_null_space([fitted[group.name]], group.size))
+            continue
+        kinds = {component.penalty_kind for component in own}
+        widths = {component.block_width for component in own}
+        if "identity" in kinds:
+            # a ridge on every coordinate
+            spaces.append(np.zeros((group.size, 0)))
+        elif kinds <= {"repeated", "sum_to_zero"} and len(widths) == 1:
+            # ``I kron Omega`` or ``C'C kron Omega``, ``C'C`` positive definite: the null space
+            # is ``I kron null(Omega)``, found without expanding the term's penalty
+            width = int(next(iter(widths)))
+            omegas = [_penalty_component_omega_ssp(c, matrices[group.name]) for c in own]
+            local = penalty_null_space([omega for omega in omegas if omega is not None], width)
+            spaces.append(np.kron(np.eye(group.size // width), local))
+        else:
+            blocks = [penalty_component_dense_matrix(c, matrices[group.name]) for c in own]
+            spaces.append(penalty_null_space(blocks, group.size))
+    return spaces
+
+
+def _decided_identifiability(
+    model, decomposition, active_groups, design, W, data_gram, *, penalized=True
+) -> Identifiability:
+    """The identifiability of a fit whose centred Hessian is ``decomposition``, in fitted coordinates.
+
+    ``decomposition`` is in the coordinates of ``active_groups`` (the selected groups), ``design``
+    their rows; ``solvers.identifiability`` decides and explains the record.
+    """
+    original = {group.name: group for group in model._groups}
+    columns = np.zeros(0, dtype=np.intp)
+    if active_groups:
+        columns = np.concatenate(
+            [np.arange(original[g.name].start, original[g.name].end) for g in active_groups]
+        )
+    return decide_identifiability(
+        decomposition,
+        columns=columns,
+        width=len(model._solver_pirls_result().beta),
+        groups=active_groups,
+        null_spaces=(
+            _penalty_null_spaces(model, active_groups)
+            if penalized
+            else [np.eye(group.size) for group in active_groups]
+        ),
+        data_gram=data_gram,
+        rows=design.n,
+        design=design,
+        specs={**getattr(model, "_specs", {}), **getattr(model, "_interaction_specs", {})},
+        W=W,
+    )
+
+
+def _record_identifiability(
+    model, rank_info, design, active_groups, W, data_gram
+) -> Identifiability | None:
+    """The record's identifiability, decided on first inference and kept on the record.
+
+    ``None`` for a record saved before fits recorded it: its standard errors keep their flags
+    (``RankInfo.coefficient_identified``).
+    """
+    if rank_info.identifiability_policy != "penalised":
+        return None
+    if rank_info.identifiability is None:
+        decided = _decided_identifiability(
+            model,
+            rank_info.augmented,
+            active_groups,
+            design,
+            W,
+            data_gram,
+            # an unpenalized fit's data rank is its Hessian's (``RankInfo.data``)
+            penalized=rank_info.data is not rank_info.augmented,
+        )
+        object.__setattr__(rank_info, "identifiability", decided)
+    return rank_info.identifiability
+
+
+def fit_data_rank(model):
+    """The fit's rank record with its data-only rank, computed on first request and kept on it.
+
+    The data rank answers whether the data alone, ignoring the penalty, determine a direction:
+    a diagnostic (the editor's free levels, ``diagnose``) that no standard error reads, so a fit
+    no longer computes it. It is decided by the fit's route (``rank.decide_data_rank``) at the
+    fit's working weights, and the REML profile records which route decided it
+    (``data_rank_route``). ``None`` without a rank record; a record whose design was released
+    keeps ``data`` unset.
+    """
+    from superglm.solvers.centered_system import (
+        build_centered_system,
+        grouped_projected_factor,
+        grouped_structural_nulls,
+        grouped_weighted_factor,
+    )
+
+    solver = model._solver_pirls_result()
+    record = getattr(solver, "rank_info", None)
+    if record is None or record.data is not None or model._dm is None:
+        return record
+    design, _ = _rank_active_state(model, record)
+    W = _solver_space_working_weights(model)
+    centered = build_centered_system(
+        dm=design, W=W, z_off=np.zeros(design.n), penalty=np.zeros((design.p, design.p))
+    )
+    centre, centre_lo = centered.centre_pair()
+    data = decide_data_rank(
+        centered.data_gram,
+        lambda: decompose_factor(
+            grouped_weighted_factor(design, W, center=centre, center_lo=centre_lo)
+        ),
+        project=lambda basis: grouped_projected_factor(
+            design, W, basis, center=centre, center_lo=centre_lo
+        ),
+        structural=lambda: grouped_structural_nulls(design, W, center=centre, center_lo=centre_lo),
+        rows=design.n,
+        # Fisher weights are nonnegative, so the data Gram is PSD by construction
+        psd_by_construction=True,
+        certify=False,
+    )
+    object.__setattr__(record, "data", data)
+    profile = getattr(model, "_reml_profile", None)
+    if isinstance(profile, dict):
+        # ``"gram"`` (the Gram certified itself), ``"grey_subspace"`` (the Gram plus a row
+        # factor of its ``k`` grey directions, ``data_rank_grey_k``) or ``"row_factor"``.
+        if data.grey_subspace is not None:
+            profile["data_rank_route"] = "grey_subspace"
+            profile["data_rank_grey_k"] = int(data.grey_subspace["k"])
+        else:
+            profile["data_rank_route"] = "row_factor" if data.method == "qr_svd" else "gram"
+    return record
 
 
 def _structured_covariance_state(
@@ -517,6 +710,15 @@ def _structured_small_data_factor(operator: CenteredBlockOperator) -> MappedColu
     return MappedColumnFactor(factor_from_gram(data_gram), small_indices, operator.shape[0])
 
 
+def inference_identified(inference: dict) -> NDArray | None:
+    """Which coefficients an inference record identifies.
+
+    A record saved before the penalised rule names its data-only flags
+    ``coefficient_estimable``; such a model keeps them (``RankInfo.coefficient_identified``).
+    """
+    return inference.get("coefficient_identified", inference.get("coefficient_estimable"))
+
+
 def fit_inference_info(model):
     """All coefficient-space inference quantities for model.summary().
 
@@ -543,13 +745,13 @@ def fit_inference_info(model):
         if rank_info is not None:
             X_active, active_groups = _rank_active_state(model, rank_info)
             selected = np.asarray(rank_info.selected_columns, dtype=np.intp)
-            coefficient_estimable = rank_info.coefficient_estimable()
+            coefficient_identified = rank_info.coefficient_identified()
         else:
             X_active, active_groups, selected = _grouped_active_state(
                 model,
                 {group.name for group in model._groups},
             )
-            coefficient_estimable = np.ones(len(solver.beta), dtype=bool)
+            coefficient_identified = np.ones(len(solver.beta), dtype=bool)
         inverse = np.asarray(scop_inference.coefficient_inverse)[np.ix_(selected, selected)]
         augmented_indices = np.concatenate(([0], selected + 1))
         augmented = np.asarray(scop_inference.augmented_inverse)[
@@ -567,6 +769,11 @@ def fit_inference_info(model):
             if data_gram is None:
                 data_gram = _rank_centered_data_gram(X_active, W)
             R_a = factor_from_gram(data_gram)
+        identifiability = (
+            None
+            if rank_info is None or X_active.p == 0
+            else _record_identifiability(model, rank_info, X_active, active_groups, W, data_gram)
+        )
         return {
             "W": W,
             "XtWX_inv": inverse,
@@ -576,7 +783,12 @@ def fit_inference_info(model):
             "edf": edf,
             "edf1": edf1,
             "group_edf_map": dict(scop_inference.group_edf),
-            "coefficient_estimable": coefficient_estimable,
+            "identifiability": identifiability,
+            "coefficient_identified": (
+                coefficient_identified
+                if identifiability is None
+                else identifiability.coefficient_identified()
+            ),
         }
     if isinstance(linear_state, StructuredLinearSystemState):
         inverse, augmented, active_groups = _structured_covariance_state(
@@ -600,9 +812,10 @@ def fit_inference_info(model):
             "edf": edf,
             "edf1": edf1,
             "group_edf_map": group_edf_map,
-            # an sz factor reads the data's null space on the balance tree of
-            # the data (SumToZeroTreeFactor.coefficient_estimable)
-            "coefficient_estimable": (
+            # The structured solvers still flag the data's null space (an sz
+            # factor's on the balance tree, SumToZeroTreeFactor.coefficient_estimable);
+            # their fits move to the penalised rule with their own solvers.
+            "coefficient_identified": (
                 linear_state.profiled_factor.coefficient_estimable()
                 if isinstance(linear_state.profiled_factor, ProfiledSumToZeroTreeFactor)
                 else centered_operator_coefficient_estimable(linear_state.centered_data_operator)
@@ -627,7 +840,8 @@ def fit_inference_info(model):
                 "edf": np.array([]),
                 "edf1": np.array([]),
                 "group_edf_map": dict(rank_info.group_edf),
-                "coefficient_estimable": rank_info.coefficient_estimable(),
+                "coefficient_identified": rank_info.coefficient_identified(),
+                "identifiability": None,
             }
         if data_gram is None:
             data_gram = _rank_centered_data_gram(X_active, W)
@@ -643,10 +857,14 @@ def fit_inference_info(model):
             "edf": edf,
             "edf1": edf1,
             "group_edf_map": dict(rank_info.group_edf),
-            "coefficient_estimable": rank_info.coefficient_estimable(),
+            "identifiability": _record_identifiability(
+                model, rank_info, X_active, active_groups, W, data_gram
+            ),
+            # after the record's identifiability, which it reads
+            "coefficient_identified": rank_info.coefficient_identified(),
         }
 
-    X_active, active_groups, inverse, augmented, data_gram, profile_inverse, data_rank = (
+    X_active, active_groups, inverse, augmented, data_gram, profile_inverse, profile_rank = (
         _legacy_active_state(model, solver, W)
     )
     if X_active.p == 0:
@@ -659,7 +877,8 @@ def fit_inference_info(model):
             "edf": np.array([]),
             "edf1": np.array([]),
             "group_edf_map": {},
-            "coefficient_estimable": np.zeros(len(solver.beta), dtype=bool),
+            "coefficient_identified": np.zeros(len(solver.beta), dtype=bool),
+            "identifiability": None,
         }
 
     F = profile_inverse @ data_gram
@@ -671,13 +890,9 @@ def fit_inference_info(model):
     group_edf_map: dict[str, float] = {}
     for ag in active_groups:
         group_edf_map[ag.name] = float(np.sum(edf[ag.sl]))
-    coefficient_estimable = np.zeros(len(solver.beta), dtype=bool)
-    active_estimable = data_rank.coefficient_estimable()
-    original_by_name = {group.name: group for group in model._groups}
-    for active_group in active_groups:
-        coefficient_estimable[original_by_name[active_group.name].sl] = active_estimable[
-            active_group.sl
-        ]
+    identifiability = _decided_identifiability(
+        model, profile_rank, active_groups, X_active, W, data_gram
+    )
 
     return {
         "W": W,
@@ -688,7 +903,8 @@ def fit_inference_info(model):
         "edf": edf,
         "edf1": edf1,
         "group_edf_map": group_edf_map,
-        "coefficient_estimable": coefficient_estimable,
+        "coefficient_identified": identifiability.coefficient_identified(),
+        "identifiability": identifiability,
     }
 
 

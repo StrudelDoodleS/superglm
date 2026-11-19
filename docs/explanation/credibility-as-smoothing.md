@@ -283,18 +283,20 @@ which others.
   for reproducible benchmarking.
 - **A thinly observed `sz` level is kept.** A level with fewer distinct values
   than its smooth's unpenalized part stays in the model.
-- **Its standard errors can be missing.** Such a level can leave every
-  standard error of the term and of its main effect missing (NaN).
+- **Its standard errors can be missing.** The dense solver blanks only the
+  coefficients such a level's alias falls on, with a footnote. The structured
+  solver can leave every standard error of the term and of its main effect
+  missing (NaN).
 - **The structured solver names the level.** It names such a level in a
   warning. The Gram solver fits the same model without that warning.
 - **With `select=True` the term penalizes every level's line.** No level
   keeps an unpenalized direction, and neither solver names a thin level at
-  fit. Coefficient standard errors still follow the data rule: a direction
-  only the penalty pins, such as a thin level's line or the block of a level
-  without weight, is not estimable from the data, so those standard errors
-  can still be missing (NaN), as a random effect's are. A level without
-  weight is still predicted at the population curve, and the report's
-  `thin_levels` and `predict` name it.
+  fit. The penalty then pins a thin level's line and the block of a level
+  without weight, so the dense solver reports their standard errors, as it
+  does a random effect's. The structured solver still treats a direction
+  only a penalty pins as not estimable from the data, so there those standard
+  errors can be missing (NaN). A level without weight is still predicted at
+  the population curve, and the report's `thin_levels` and `predict` name it.
 
 `discrete=True` bins the continuous spline support and reuses cached
 sufficient statistics across REML iterations; factor identities and the SZ

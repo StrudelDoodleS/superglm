@@ -1,13 +1,13 @@
 """Fits that are discarded skip the retained-fit rank metadata; the published fit keeps it.
 
 The data-subspace rank decomposition (a TSQR over every row once the data
-Gram cannot certify itself) is read only by retained-fit inference.  The
-Tweedie power search's candidate fits and the NB2 auto-theta mean fits are
-never published, and an auto-theta REML refit is published only if no later
-refit replaces it, so only the published fit may pay for it.  The tests
-force the factor route (no Gram, no grey-subspace certificate) and count the
-data-rank factorisations; master paid one per candidate and per mean fit, and
-fails both counts.
+Gram cannot certify itself) is a diagnostic: no fit computes it, and the
+published fit's is computed on request (``state_ops.fit_data_rank``), once.
+The Tweedie power search's candidate fits and the NB2 auto-theta mean fits
+are never published, and an auto-theta REML refit is published only if no
+later refit replaces it.  The tests force the factor route (no Gram, no
+grey-subspace certificate) and count the data-rank factorisations; master
+paid one per candidate and per mean fit, then one for the published fit.
 """
 
 import dataclasses
@@ -18,11 +18,13 @@ import pandas as pd
 import pytest
 
 import superglm.model.reml_finalize as reml_finalize
+import superglm.solvers.centered_system as centered_system
 import superglm.solvers.irls_direct._finalise as irls_finalise
 import superglm.solvers.rank as rank
 from superglm import Constraint, NegativeBinomial, SuperGLM, Tweedie
 from superglm.features.categorical import Categorical
 from superglm.features.spline import Spline
+from superglm.model import state_ops
 
 
 def _without_condition_estimate(rank_info):
@@ -32,6 +34,7 @@ def _without_condition_estimate(rank_info):
         **{
             name: dataclasses.replace(getattr(rank_info, name), pre_truncation_condition=0.0)
             for name in ("data", "augmented", "coefficient")
+            if getattr(rank_info, name) is not None
         },
     )
 
@@ -69,14 +72,14 @@ def _record_terminal_refits(patch, *, inline=False):
 def data_rank_factorisations(monkeypatch):
     """Send the data rank to its TSQR route on every fit and count the factorisations."""
     calls = []
-    factor = irls_finalise.grouped_weighted_factor
+    factor = centered_system.grouped_weighted_factor
 
     def counted(*args, **kwargs):
         calls.append(1)
         return factor(*args, **kwargs)
 
     _force_factor_route(monkeypatch)
-    monkeypatch.setattr(irls_finalise, "grouped_weighted_factor", counted)
+    monkeypatch.setattr(centered_system, "grouped_weighted_factor", counted)
     return calls
 
 
@@ -100,9 +103,10 @@ def test_power_search_candidates_skip_the_data_rank_factorisation(data_rank_fact
     model = SuperGLM(family=Tweedie(p=1.5), features=_features())
     result = model.estimate_p(frame, y, sample_weight=weights, fit_mode="reml")
     assert len(result.evaluations) > 2
-    # The published refit at p_hat, and nothing else.
+    # No fit factors its data rank; the published refit's, at p_hat, on request.
+    assert len(data_rank_factorisations) == 0
+    assert state_ops.fit_data_rank(model).data is not None
     assert len(data_rank_factorisations) == 1
-    assert model.result.rank_info is not None
 
 
 def _nb_auto(seed=3, n=600):
@@ -119,9 +123,10 @@ def test_nb_auto_theta_pays_the_data_rank_factorisation_once(data_rank_factorisa
     # Precondition: a later theta refit replaced a REML fit, so deferral is
     # what spares the first one (mean fits alone do not show it).
     assert terminal.count("reml_final") >= 2
-    # Two mean fits and two REML fits ran; only the published one factors.
+    # Two mean fits and two REML fits ran; none factors, and the published one on request.
+    assert len(data_rank_factorisations) == 0
+    assert state_ops.fit_data_rank(model).data is not None
     assert len(data_rank_factorisations) == 1
-    assert model.result.rank_info is not None
     assert "_deferred_rank_info" not in model.__dict__
     assert "_defer_rank_info" not in model.__dict__
 
@@ -156,7 +161,8 @@ def test_deferred_rank_metadata_is_what_the_fit_computes_inline(monkeypatch, fac
     # differ in its last bit between runs (alignment-dependent BLAS); it is
     # compared as finite only, and every other field byte for byte.
     for result in (deferred.result, inline.result):
-        for name in ("data", "augmented", "coefficient"):
+        assert result.rank_info.data is None
+        for name in ("augmented", "coefficient"):
             assert np.isfinite(getattr(result.rank_info, name).pre_truncation_condition)
     assert pickle.dumps(_without_condition_estimate(deferred.result.rank_info)) == pickle.dumps(
         _without_condition_estimate(inline.result.rank_info)
@@ -168,10 +174,10 @@ def test_deferred_rank_metadata_is_what_the_fit_computes_inline(monkeypatch, fac
 def test_qp_passthrough_factors_the_data_rank_for_its_constrained_refit_only(monkeypatch):
     """The unconstrained terminal refit only warm-starts the published QP refit.
 
-    Its rank metadata is never read, so only the QP refit factors the data
-    rank, and the published fit is byte for byte the one that computes both
-    (``inline``). Mutation check: the terminal refit computing its rank
-    metadata again counts two factorisations.
+    Its rank metadata is never read, so only the QP refit computes it, and the
+    published fit is byte for byte the one that computes both (``inline``).
+    Mutation check: the terminal refit computing its rank metadata again counts
+    two.
     """
 
     def fit(inline):
@@ -183,15 +189,15 @@ def test_qp_passthrough_factors_the_data_rank_for_its_constrained_refit_only(mon
         }
         model = SuperGLM(family="poisson", features=features)
         calls = []
-        factor = irls_finalise.grouped_weighted_factor
+        retained = irls_finalise._retained_rank_info
 
         def counted(*args, **kwargs):
             calls.append(1)
-            return factor(*args, **kwargs)
+            return retained(*args, **kwargs)
 
         with monkeypatch.context() as patch:
             _force_factor_route(patch)
-            patch.setattr(irls_finalise, "grouped_weighted_factor", counted)
+            patch.setattr(irls_finalise, "_retained_rank_info", counted)
             terminal = _record_terminal_refits(patch, inline=inline)
             model.fit_reml(frame, y)
         assert model._last_fit_meta["lambda_strategy"] == "qp_passthrough"
@@ -208,11 +214,12 @@ def test_qp_passthrough_factors_the_data_rank_for_its_constrained_refit_only(mon
 
 
 def test_qr_backend_never_defers_so_the_dense_design_is_not_kept(monkeypatch):
-    """The QR backend's data rank reads the dense (n, p) design: it is computed inline.
+    """The QR backend's deferred rank metadata keeps no dense (n, p) design.
 
-    A deferred closure there would keep that design alive through the
-    terminal objective, canonicalisation and the theta solve. Mutation check:
-    deferring on the QR backend leaves a closure at install time.
+    Its data rank, which read that design, is computed on request, so a
+    deferred closure holds only the compact system; it would otherwise keep the
+    design alive through the terminal objective, canonicalisation and the theta
+    solve. Mutation check: a closure holding the QR step's design.
     """
     import superglm.model.fit_ops as fit_ops
 
@@ -227,5 +234,8 @@ def test_qr_backend_never_defers_so_the_dense_design_is_not_kept(monkeypatch):
     frame, y = _nb_auto()
     model = SuperGLM(family=NegativeBinomial(theta="auto"), features=_features(), direct_solve="qr")
     model.fit_reml(frame, y)
-    assert held == [None]
+    assert len(held) == 1 and held[0] is not None
+    shape = (len(y), model._dm.p)
+    bound = [*held[0].args, *held[0].keywords.values()]
+    assert not any(isinstance(value, np.ndarray) and value.shape == shape for value in bound)
     assert model.result.rank_info is not None

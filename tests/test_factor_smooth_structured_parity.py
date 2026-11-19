@@ -34,6 +34,7 @@ from superglm.group_matrix import (
     SparseSSPGroupMatrix,
 )
 from superglm.links import IdentityLink, LogLink
+from superglm.model import state_ops
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
 from superglm.reml.penalty_algebra import build_penalty_matrix
@@ -1165,12 +1166,14 @@ def test_factor_smooth_estimability_and_summary_match_dense_centered_geometry():
         y,
     )
 
+    # The structured backend still applies the data-only rule: the dense fit's on request.
+    structured_flags = structured._fit_inference_info["coefficient_identified"]
     np.testing.assert_array_equal(
-        structured._fit_inference_info["coefficient_estimable"],
-        dense._fit_inference_info["coefficient_estimable"],
+        structured_flags, state_ops.fit_data_rank(dense).data.coefficient_estimable()
     )
+    assert np.all(dense._fit_inference_info["coefficient_identified"][structured_flags])
     factor_group = next(group for group in structured._groups if group.name == "x:group:fs")
-    assert np.any(~structured._fit_inference_info["coefficient_estimable"][factor_group.sl])
+    assert np.any(~structured_flags[factor_group.sl])
     row = next(row for row in structured.summary()._coef_rows if row.name == "x:group:fs")
     assert row.coef is None
     assert row.structured_kind == "factor_smooth_fs"
@@ -1764,6 +1767,7 @@ def test_an_exactly_singular_data_gram_rounded_negative_is_not_refused(monkeypat
     (``ValueError``).
     """
     reference, _ = _thin_level_fit("fs", "gram", True, None, 1.0)
+    reference_rank = state_ops.fit_data_rank(reference).data.rank
     original = irls_finalise.decompose_gram_if_authoritative
     eps = np.finfo(np.float64).eps
     n = 4000
@@ -1791,5 +1795,6 @@ def test_an_exactly_singular_data_gram_rounded_negative_is_not_refused(monkeypat
     # The data rank's own Gram check (``rank.decide_data_rank``).
     monkeypatch.setattr(rank, "decompose_gram_if_authoritative", rounded_negative)
     gram, _ = _thin_level_fit("fs", "gram", True, None, 1.0)
+    # the data rank, computed on request, under the same moved Grams
+    assert state_ops.fit_data_rank(gram).data.rank == reference_rank
     assert moved
-    assert gram.result.rank_info.data.rank == reference.result.rank_info.data.rank

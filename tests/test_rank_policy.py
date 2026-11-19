@@ -2130,7 +2130,19 @@ def test_rank_inference_edf1_spectral_branch_matches_direct_influence(
     np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
 
 
-def test_alias_covariance_and_summary_suppress_nonestimable_coefficients() -> None:
+def _single_column_se(frame, y, name):
+    """The standard error of ``name`` fitted alone: what an exact duplicate leaves it."""
+    alone = SuperGLM(family="gaussian", selection_penalty=0.0, features={name: Numeric()})
+    alone.fit(frame[[name]], y)
+    return next(row.se for row in alone.summary()._coef_rows if row.name == name)
+
+
+def test_alias_covariance_and_summary_blank_only_the_aliased_coefficient() -> None:
+    """An exact duplicate is blank with its footnote; the column it duplicates keeps its SE.
+
+    R's convention: the later column absorbs the alias and the earlier one is the fit
+    without it.  Mutation: master blanked both.
+    """
     x = np.linspace(-2.0, 2.0, 80)
     frame = pd.DataFrame({"x": x, "duplicate": x})
     y = 1.0 + 3.0 * x + 0.03 * np.sin(5.0 * x)
@@ -2143,16 +2155,18 @@ def test_alias_covariance_and_summary_suppress_nonestimable_coefficients() -> No
 
     rank_info = model._solver_pirls_result().rank_info
     assert rank_info is not None
-    np.testing.assert_array_equal(rank_info.coefficient_estimable(), [False, False])
+    np.testing.assert_array_equal(rank_info.coefficient_identified(), [True, False])
     assert rank_info.is_estimable(np.array([1.0, 1.0]))
     covariance, active_groups = model._coef_covariance
     assert [group.name for group in active_groups] == ["x", "duplicate"]
     assert np.linalg.matrix_rank(covariance) == 1
-    rows = {row.name: row for row in model.summary()._coef_rows}
-    for name in ("x", "duplicate"):
-        assert not rows[name].estimable
-        assert np.isnan(rows[name].se)
-        assert np.isnan(rows[name].p)
+    summary = model.summary()
+    rows = {row.name: row for row in summary._coef_rows}
+    assert not rows["duplicate"].estimable
+    assert np.isnan(rows["duplicate"].se) and np.isnan(rows["duplicate"].p)
+    assert rows["x"].estimable
+    assert rows["x"].se == pytest.approx(_single_column_se(frame, y, "x"), rel=1e-8)
+    assert "duplicate is aliased with x" in str(summary)
 
 
 @pytest.mark.parametrize("alias_scale", [1.0, 1e8, 1e12])
@@ -2170,8 +2184,8 @@ def test_alias_estimability_is_invariant_to_column_scale(alias_scale: float) -> 
 
 
 @pytest.mark.parametrize("alias_scale", [1e4, 1e6, 1e10])
-def test_scaled_alias_summary_suppresses_both_coefficients(alias_scale: float) -> None:
-    """Scale-invariant rank metadata propagates through fitted summaries."""
+def test_scaled_alias_summary_blanks_only_the_scaled_duplicate(alias_scale: float) -> None:
+    """Scale-invariant rank metadata propagates through fitted summaries, rebuilt state too."""
     x = np.linspace(-2.0, 2.0, 120)
     frame = pd.DataFrame({"x": x, "scaled_duplicate": alias_scale * x})
     y = 1.0 + 2.5 * x + 0.03 * np.sin(4.0 * x)
@@ -2182,19 +2196,18 @@ def test_scaled_alias_summary_suppresses_both_coefficients(alias_scale: float) -
     )
     model.fit(frame, y)
     assert model.result.beta[1] == pytest.approx(0.0, abs=1e-14)
+    alone = _single_column_se(frame, y, "x")
 
     rows = {row.name: row for row in model.summary()._coef_rows}
-
-    for name in ("x", "scaled_duplicate"):
-        assert not rows[name].estimable
-        assert np.isnan(rows[name].se)
+    assert not rows["scaled_duplicate"].estimable and np.isnan(rows["scaled_duplicate"].se)
+    assert rows["x"].se == pytest.approx(alone, rel=1e-8)
 
     _publish_result_revision(model, rank_info=None)
     model._summary_cache = None
     legacy_rows = {row.name: row for row in model.summary()._coef_rows}
-    for name in ("x", "scaled_duplicate"):
-        assert not legacy_rows[name].estimable
-        assert np.isnan(legacy_rows[name].se)
+    assert not legacy_rows["scaled_duplicate"].estimable
+    assert np.isnan(legacy_rows["scaled_duplicate"].se)
+    assert legacy_rows["x"].se == pytest.approx(alone, rel=1e-8)
 
 
 def test_coefficient_estimability_mask_is_vectorized(monkeypatch) -> None:
@@ -2216,7 +2229,7 @@ def test_coefficient_estimability_mask_is_vectorized(monkeypatch) -> None:
         lambda *_args, **_kwargs: pytest.fail("repeated scalar null-space projection"),
     )
 
-    np.testing.assert_array_equal(rank_info.coefficient_estimable(), [False, False])
+    np.testing.assert_array_equal(rank_info.data.coefficient_estimable(), [False, False])
 
 
 def test_diagonal_of_square_matches_matmul_without_forming_product() -> None:

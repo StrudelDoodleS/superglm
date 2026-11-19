@@ -269,7 +269,8 @@ class TestDirectSolverBasic:
             **common, weight_semantics="frequency"
         )
         assert retained.rank_info is not None
-        assert retained.rank_info.data.rank == 1
+        # penalized, the data rank is a diagnostic computed on request
+        assert retained.rank_info.data is None
         assert retained.rank_info.augmented.rank == 2
 
         monkeypatch.setattr(
@@ -553,10 +554,8 @@ class TestDirectSolverBasic:
 
             return counted
 
-        # The data rank's entry point (``rank.decide_data_rank``) counts too,
-        # and so does every Gram decomposition, in whichever module takes it.
+        # Every Gram decomposition counts, in whichever module takes it.
         gram_calls = _count_gram_decompositions(monkeypatch)
-        monkeypatch.setattr(irls_finalise, "decide_data_rank", _counting("decide_data_rank"))
         retained, _, _ = irls_direct.fit_irls_direct(**common, weight_semantics="frequency")
         retained_geometry_calls = decomposition_calls + len(gram_calls)
         assert retained.rank_info is not None
@@ -580,9 +579,10 @@ class TestDirectSolverBasic:
         )
 
         # The retained fit's REML slope decomposition is its last solve's (a
-        # Gaussian identity Hessian is one object every iteration), so the
-        # candidate skips the coefficient and data-rank decompositions.
-        assert retained_geometry_calls - (decomposition_calls + len(gram_calls)) == 2
+        # Gaussian identity Hessian is one object every iteration), and its data
+        # rank is computed on request, so the candidate skips the coefficient
+        # decomposition.
+        assert retained_geometry_calls - (decomposition_calls + len(gram_calls)) == 1
         assert omitted_inverse.shape == (0, 0)
         assert candidate.log_det_H is None
         assert candidate.reml_hessian_rank is None

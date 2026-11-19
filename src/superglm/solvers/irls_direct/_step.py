@@ -7,12 +7,8 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from numpy.typing import NDArray
-
-    from superglm.solvers.centered_system import CenteredSystem
     from superglm.solvers.irls_direct._finalise import _IRLSDirectFinalGeometry
     from superglm.solvers.irls_direct._fit import _IRLSDirectFit
-    from superglm.solvers.rank import RankDecomposition
 
 # One logger for the whole package, so every submodule's records share its name.
 logger = logging.getLogger(__package__)
@@ -25,15 +21,12 @@ class _IRLSDirectStep(Protocol):
     method is handed the fit, so the two are freed by reference counting, not
     by the collector.  ``backend`` is published as
     ``PIRLSResult.direct_backend``.  ``finalise(fit)`` fills ``cache_out`` after
-    the loop and returns the retained geometry.  ``data_rank(centered_final, W)``
-    factors the retained data rank from the step's own design; ``None`` takes
-    the module route (``_retained_rank_info``).
+    the loop and returns the retained geometry.
     """
 
     __slots__ = ()
     backend: str
     finalise: Callable[[_IRLSDirectFit], _IRLSDirectFinalGeometry]
-    data_rank: Callable[[CenteredSystem, NDArray], RankDecomposition] | None = None
 
     def propose(self, fit: _IRLSDirectFit, it: int) -> bool | None:
         """Iteration ``it``'s full step from the fit's working rows (``W``, ``z``, ``newton_score``).

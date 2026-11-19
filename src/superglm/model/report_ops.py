@@ -19,6 +19,7 @@ from superglm.inference._term_helpers import (
 from superglm.inference.covariance import covariance_selected_diagonal
 from superglm.inference.summary import _CoefRow
 from superglm.model.fit_state import fitted_lambda2, fitted_penalty
+from superglm.model.state_ops import inference_identified
 from superglm.penalties.base import selection_shrunk_group_names
 from superglm.profiling._reporting import (
     cached_tweedie_profile_ci,
@@ -368,6 +369,9 @@ def summary(
         return summary_obj
 
     inf = model._fit_inference_info
+    identifiability = inf.get("identifiability")
+    if identifiability is not None:
+        model_info["identifiability_notes"] = list(identifiability.notes())
     XtWX_inv = inf["XtWX_inv"]
     XtWX_inv_aug = inf["XtWX_inv_aug"]
     active_groups = inf["active_groups"]
@@ -393,7 +397,7 @@ def summary(
         precomputed_R_a=inf["R_a"],
         precomputed_edf=inf["edf"],
         precomputed_edf1=inf["edf1"],
-        coefficient_estimable_override=inf.get("coefficient_estimable"),
+        coefficient_identified_override=inference_identified(inf),
         selected_group_names=selected_names,
         group_matrices=model._dm.group_matrices if model._dm is not None else None,
         sample_weights=model._fit_weights,
@@ -445,7 +449,7 @@ def summary(
         active_groups=active_groups,
         known_scale=known_scale,
         alpha=alpha,
-        coefficient_estimable_override=inf.get("coefficient_estimable"),
+        coefficient_identified_override=inference_identified(inf),
         selected_group_names=selected_names,
     )
     _drop_repaired_basis_detail(basis_detail, model._groups, shape_repaired_feature_names(model))

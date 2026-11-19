@@ -39,6 +39,7 @@ from superglm import (
     Spline,
     SuperGLM,
 )
+from superglm.model import state_ops
 from superglm.reml.penalty_algebra import (
     _penalty_component_omega_ssp,
     build_penalty_matrix,
@@ -157,6 +158,18 @@ def _nan_mask(model: SuperGLM, frame, y, weight) -> np.ndarray:
     )
 
 
+def _data_only_mask(model) -> np.ndarray:
+    """The data-only rule's blanks on a fit (``state_ops.fit_data_rank``).
+
+    The structured backend still blanks these; a dense fit blanks only what its penalised
+    Hessian leaves free (``solvers.identifiability``), a subset of them.
+    """
+    record = state_ops.fit_data_rank(model)
+    mask = np.zeros(len(record.mean_x), dtype=bool)
+    mask[record.selected_columns] = ~record.data.coefficient_estimable()
+    return mask
+
+
 def _structurally_non_estimable(model: SuperGLM, weight) -> np.ndarray:
     """Slopes a null vector of ``[1, X]`` over the positive-weight rows touches.
 
@@ -220,7 +233,8 @@ def test_sz_one_row_levels_fit_as_the_dense_solver_does(one_row, discrete) -> No
     assert len(auto._reml_profile["structured_thin_levels"]) == one_row
     nan = _nan_mask(auto, frame, y, weight)
     np.testing.assert_array_equal(nan, _structurally_non_estimable(auto, weight))
-    np.testing.assert_array_equal(nan, _nan_mask(gram, frame, y, weight))
+    np.testing.assert_array_equal(nan, _data_only_mask(gram))
+    assert not np.any(_nan_mask(gram, frame, y, weight) & ~nan)
 
 
 @pytest.mark.parametrize("family", ["gaussian", "poisson", "gamma_log"])
@@ -4177,18 +4191,23 @@ def test_sz_standard_errors_are_nan_only_on_exact_aliases(numerics) -> None:
     assert models["auto"]._reml_profile["direct_backend"] == "structured"
     assert models["gram"]._reml_profile["direct_backend"] == "gram"
     mask = _nan_mask(models["auto"], frame, y, weight)
-    np.testing.assert_array_equal(mask, _nan_mask(models["gram"], frame, y, weight))
+    np.testing.assert_array_equal(mask, _data_only_mask(models["gram"]))
     np.testing.assert_array_equal(mask, _structurally_non_estimable(models["auto"], weight))
+    # the dense fit blanks the alias's absorber alone: the later duplicate
+    dense = _nan_mask(models["gram"], frame, y, weight)
+    assert not np.any(dense & ~mask)
+    columns = {g.name: g.start for g in models["gram"]._groups}
+    if "x1dup" in numerics:
+        assert dense[columns["x1dup"]] and not dense[columns["x1"]]
 
 
 def test_sz_random_effect_levels_are_non_estimable_as_on_gram() -> None:
-    """A random effect's levels sum to the intercept: NaN on every one, as the dense solver.
+    """A random effect's levels sum to the intercept: the data alone leave that direction free.
 
-    The ridge penalty identifies that direction, so it is no alias of the
-    fit's Hessian, but estimability reads the data alone (the package's rule,
-    and v0.35.0's on the models saved with this shape).  Mutation:
-    estimability read from the fit's own (penalized) aliases, which reported
-    the twelve levels' standard errors finite.
+    The ridge penalty identifies it, so it is no alias of the fit's Hessian: the dense fit
+    reports every level's standard error (``solvers.identifiability``), while the structured
+    backend still applies the data-only rule, the dense fit's on request.  Mutation: master's
+    dense fit blanked all twelve.
     """
     frame, eta, rng, _ = _frame()
     frame["h"] = np.array([f"h{v:02d}" for v in rng.integers(0, 12, len(frame))], dtype=object)
@@ -4202,8 +4221,9 @@ def test_sz_random_effect_levels_are_non_estimable_as_on_gram() -> None:
     mask = _nan_mask(models["auto"], frame, y, weight)
     h = next(group for group in models["auto"]._groups if group.name == "h")
     assert np.all(mask[h.sl]) and h.end - h.start == 12
-    np.testing.assert_array_equal(mask, _nan_mask(models["gram"], frame, y, weight))
+    np.testing.assert_array_equal(mask, _data_only_mask(models["gram"]))
     np.testing.assert_array_equal(mask, _structurally_non_estimable(models["auto"], weight))
+    assert not np.any(_nan_mask(models["gram"], frame, y, weight)[h.sl])
 
 
 # ------------------------------------------------------ weak identification
@@ -4243,23 +4263,22 @@ def test_a_tiny_weight_level_is_named_not_the_whole_model() -> None:
     names = [str(item.message) for item in caught if "noise level" in str(item.message)]
     assert len(names) == 1 and "x:g:sz[" in names[0]
     gram = _fit(_model("gaussian", "gram", lam=None), frame, y, weight)
-    np.testing.assert_array_equal(
-        _nan_mask(model, frame, y, weight), _nan_mask(gram, frame, y, weight)
-    )
+    structured_mask = _nan_mask(model, frame, y, weight)
+    np.testing.assert_array_equal(structured_mask, _data_only_mask(gram))
+    assert not np.any(_nan_mask(gram, frame, y, weight) & ~structured_mask)
 
 
 @pytest.mark.parametrize("solve", ["structured", "gram"])
 def test_selected_sz_standard_errors_follow_the_data_rule(solve) -> None:
-    """``select=True`` adds a penalty, not data, so standard errors keep the data-only estimability rule.
+    """``select=True`` pins each level's line with a penalty: the dense fit reports every SE.
 
     Every level of Sol's all-thin fixture sits at one ``x``: the data alias
     each level's line with the main effect, and the ``null`` penalty alone
-    pins it.  A direction only a penalty pins is not estimable, so its
-    standard errors are missing (NaN), on exactly the coordinates a null
-    vector of ``[1, X]`` touches, as without ``select`` and as a random
-    effect's ridge-identified directions are.  The credibility page says so.
-    Mutation: estimability read from the fit's penalized system, which
-    ``select=True`` makes positive definite, reports every one finite.
+    pins it.  The penalised fit identifies it, so the dense fit's standard
+    errors are all finite (``solvers.identifiability``); the structured
+    backend still applies the data-only rule, missing (NaN) on exactly the
+    coordinates a null vector of ``[1, X]`` touches.  Mutation: master's
+    dense fit read the data-only rule.
     """
     frame, y = _all_thin_frame()
     weight = np.ones(len(y))
@@ -4268,6 +4287,9 @@ def test_selected_sz_standard_errors_follow_the_data_rule(solve) -> None:
         model = _all_thin_model(solve, select=True).fit_reml(frame, y)
     assert model._reml_profile["direct_backend"] == solve
     missing = _nan_mask(model, frame, y, weight)
+    if solve == "gram":
+        assert not missing.any()
+        return
     assert missing.any()
     assert np.array_equal(missing, _structurally_non_estimable(model, weight))
 

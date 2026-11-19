@@ -38,8 +38,6 @@ from superglm.solvers.centered_system import (
     build_centered_system,
     dense_anchor,
     grouped_augmented_factor,
-    grouped_projected_factor,
-    grouped_structural_nulls,
     grouped_weighted_factor,
     two_pass_centred_gram,
 )
@@ -1961,33 +1959,26 @@ def _fit_pirls_inner(
     # The certificates centre their rows exactly as the Gram did: a dense
     # column about its exact pair (issue #430), so both decide the same rank.
     centre, centre_lo = centered.centre_pair()
-    # Unpenalized, the data rank is also the Hessian's, whose decomposition
-    # the standard errors read: it keeps the full factor route.
-    data_rank = decide_data_rank(
-        centered.data_gram,
-        lambda: decompose_factor(
-            grouped_weighted_factor(
-                selected_dm,
-                W_final,
-                center=centre,
-                center_lo=centre_lo,
-            )
-        ),
-        project=lambda basis: grouped_projected_factor(
-            selected_dm, W_final, basis, center=centre, center_lo=centre_lo
-        ),
-        structural=lambda: grouped_structural_nulls(
-            selected_dm, W_final, center=centre, center_lo=centre_lo
-        ),
-        rows=selected_dm.n,
-        certify=not np.any(selected_penalty),
-    )
-    # Reusing ``data_rank`` cannot need certifying: unpenalized, it is either
-    # a factor certificate or a Gram the predicate already accepted.
+    # Unpenalized, the data rank is the Hessian's, whose decomposition the
+    # standard errors read: it keeps the full factor route.  Penalized, the
+    # data rank is a diagnostic computed on demand (``state_ops.fit_data_rank``).
+    data_rank = None
+    if not np.any(selected_penalty):
+        data_rank = decide_data_rank(
+            centered.data_gram,
+            lambda: decompose_factor(
+                grouped_weighted_factor(
+                    selected_dm,
+                    W_final,
+                    center=centre,
+                    center_lo=centre_lo,
+                )
+            ),
+            rows=selected_dm.n,
+            certify=True,
+        )
     augmented_rank = (
-        data_rank
-        if not np.any(selected_penalty)
-        else decompose_gram_if_authoritative(centered.hessian)
+        data_rank if data_rank is not None else decompose_gram_if_authoritative(centered.hessian)
     )
     if augmented_rank is None:
         certified = decompose_factor(
@@ -2059,6 +2050,7 @@ def _fit_pirls_inner(
         group_edf=group_edf,
         objective_loss=None,
         covariance_policy="rule_free",
+        identifiability_policy="penalised",
     )
     p_eff = rank_info.total_edf
 

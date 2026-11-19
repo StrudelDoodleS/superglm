@@ -179,7 +179,7 @@ def build_coef_rows(
     precomputed_edf: NDArray | None = None,
     precomputed_edf1: NDArray | None = None,
     precomputed_design_moments: tuple[NDArray, NDArray, NDArray] | None = None,
-    coefficient_estimable_override: NDArray | None = None,
+    coefficient_identified_override: NDArray | None = None,
     selected_group_names: set[str] | None = None,
     group_matrices: list | None = None,
     sample_weights: NDArray | None = None,
@@ -242,11 +242,12 @@ def build_coef_rows(
         if selected_group_names is None
         else set(selected_group_names)
     )
-    coefficient_estimable = (
-        np.asarray(coefficient_estimable_override, dtype=bool)
-        if coefficient_estimable_override is not None
+    # Blank only what the fit does not identify (``solvers.identifiability``).
+    coefficient_identified = (
+        np.asarray(coefficient_identified_override, dtype=bool)
+        if coefficient_identified_override is not None
         else (
-            result.rank_info.coefficient_estimable()
+            result.rank_info.coefficient_identified()
             if getattr(result, "rank_info", None) is not None
             else np.ones(len(beta), dtype=bool)
         )
@@ -312,7 +313,7 @@ def build_coef_rows(
                 se_dict[g.name] = standard_errors(var_diag, result, known_scale=known_scale)
         if g.name in selected_names:
             se_dict[g.name] = se_dict[g.name].astype(float, copy=True)
-            se_dict[g.name][~coefficient_estimable[g.sl]] = np.nan
+            se_dict[g.name][~coefficient_identified[g.sl]] = np.nan
 
     # Ordered spline effects are displayed relative to their chosen base levels.
     # Apply the same affine transformation to the intercept and its covariance.
@@ -1165,7 +1166,7 @@ def build_coef_rows(
                     p=p,
                     ci_low=ci_lo,
                     ci_high=ci_hi,
-                    estimable=bool(coefficient_estimable[g.start]),
+                    estimable=bool(coefficient_identified[g.start]),
                 )
             )
 
@@ -1252,7 +1253,7 @@ def build_coef_rows(
                     p=p,
                     ci_low=ci_lo,
                     ci_high=ci_hi,
-                    estimable=bool(coefficient_estimable[g.start]),
+                    estimable=bool(coefficient_identified[g.start]),
                 )
             )
 
@@ -1306,7 +1307,7 @@ def build_basis_detail(
     active_groups,
     known_scale,
     alpha=0.05,
-    coefficient_estimable_override=None,
+    coefficient_identified_override=None,
     selected_group_names=None,
 ):
     """Build per-coefficient detail for active 1-D spline groups.
@@ -1322,11 +1323,12 @@ def build_basis_detail(
         if selected_group_names is None
         else set(selected_group_names)
     )
-    coefficient_estimable = (
-        np.asarray(coefficient_estimable_override, dtype=bool)
-        if coefficient_estimable_override is not None
+    # Blank only what the fit does not identify (``solvers.identifiability``).
+    coefficient_identified = (
+        np.asarray(coefficient_identified_override, dtype=bool)
+        if coefficient_identified_override is not None
         else (
-            result.rank_info.coefficient_estimable()
+            result.rank_info.coefficient_identified()
             if getattr(result, "rank_info", None) is not None
             else np.ones(len(beta), dtype=bool)
         )
@@ -1358,7 +1360,7 @@ def build_basis_detail(
             augmented_indices,
         )
         se_arr = standard_errors(var_diag, result, known_scale=known_scale)
-        se_arr[~coefficient_estimable[g.sl]] = np.nan
+        se_arr[~coefficient_identified[g.sl]] = np.nan
 
         rows = []
         for i in range(g.size):

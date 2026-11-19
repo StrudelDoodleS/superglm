@@ -16,6 +16,7 @@ from superglm import (
     Spline,
     SuperGLM,
 )
+from superglm.model import state_ops
 from superglm.solvers._structured.state import (
     FactorSmoothLevelSupport,
 )
@@ -558,7 +559,7 @@ def test_factor_smooth_standard_errors_survive_a_near_singular_level() -> None:
     y = 0.2 * z + 0.4 * np.sin(2 * np.pi * x) + rng.normal(0, 0.3, n_levels)[codes]
     y = y + rng.normal(0, 0.4, n)
     X = pd.DataFrame({"x": x, "z": z, "g": np.array([f"g{c:02d}" for c in codes], dtype=object)})
-    se = {}
+    se, models = {}, {}
     for direct_solve in ("gram", "auto"):
         model = SuperGLM(
             family="gaussian",
@@ -568,13 +569,19 @@ def test_factor_smooth_standard_errors_survive_a_near_singular_level() -> None:
             direct_solve=direct_solve,
         )
         model.fit_reml(X, y)
+        models[direct_solve] = model
         se[direct_solve] = {
             term: np.asarray(value, dtype=float)
             for term, value in model.metrics(X, y).coefficient_se.items()
         }
     assert np.all(np.isfinite(se["gram"]["z"]))
     assert np.all(np.isfinite(se["auto"]["z"]))
-    gram_nan = np.isnan(se["gram"]["x:g:fs"]).reshape(n_levels, 5)
+    # The structured backend still applies the data-only rule: compare it with the dense
+    # fit's, computed on request; the dense fit's own blanks are a subset of it.
+    record = state_ops.fit_data_rank(models["gram"])
+    group = next(g for g in models["gram"]._groups if g.name == "x:g:fs")
+    gram_nan = ~record.data.coefficient_estimable()[group.sl].reshape(n_levels, 5)
+    assert np.all(gram_nan[np.isnan(se["gram"]["x:g:fs"]).reshape(n_levels, 5)])
     auto_nan = np.isnan(se["auto"]["x:g:fs"]).reshape(n_levels, 5)
     assert np.all(auto_nan[gram_nan])
     assert np.count_nonzero((auto_nan & ~gram_nan).any(axis=1)) <= 1

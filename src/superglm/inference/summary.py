@@ -848,6 +848,11 @@ class ModelSummary:
             lines.append(note)
         for note in info.get("shared_cell_rows") or ():
             lines.extend(textwrap.wrap(note, width=max(60, min(W + 2, 100))))
+        for note in info.get("identifiability_notes") or ():
+            indent = " " * (len(note) - len(note.lstrip()))
+            lines.extend(
+                textwrap.wrap(note, width=max(60, min(W + 2, 100)), subsequent_indent=indent + "  ")
+            )
         has_smooth = any(_is_smooth_group_row(r) for r in self._coef_rows)
         if not info.get("editor_inference_stale", False):
             if has_smooth:
@@ -1290,6 +1295,11 @@ class ModelSummary:
             parts.append(
                 f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
                 f'white-space:normal;border:none;">{html_escape(note)}</td></tr>'
+            )
+        for note in info.get("identifiability_notes") or ():
+            parts.append(
+                f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
+                f'white-space:pre-wrap;border:none;">{html_escape(note)}</td></tr>'
             )
         has_smooth = any(_is_smooth_group_row(r) for r in self._coef_rows)
         if not info.get("editor_inference_stale", False):

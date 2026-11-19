@@ -10,7 +10,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
-from typing import Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 import numpy as np
 import scipy.linalg
@@ -20,6 +20,10 @@ from superglm._roundoff import EPS as _EPS
 from superglm._roundoff import SMALLEST_SUBNORMAL as _ETA
 from superglm._roundoff import UNIT_ROUNDOFF as _U
 from superglm._roundoff import gamma_up as _gamma_up
+from superglm.solvers.identifiability import coordinates_identified
+
+if TYPE_CHECKING:
+    from superglm.solvers.identifiability import Identifiability
 
 
 @dataclass(frozen=True)
@@ -1216,7 +1220,10 @@ class RankInfo:
     sum_w: float
     mean_x: NDArray
     intercept_edf: float
-    data: RankDecomposition
+    # The data-only rank, a diagnostic: the editor's free levels and ``diagnose`` read it, and
+    # no standard error does. Unpenalized it is ``augmented`` itself; penalized it is computed
+    # on demand (``state_ops.fit_data_rank``), ``None`` until then.
+    data: RankDecomposition | None
     augmented: RankDecomposition
     coefficient: RankDecomposition
     feature_edf: NDArray
@@ -1254,6 +1261,14 @@ class RankInfo:
     # every fit now records, and ``"face"``, the face fit's, for a record saved before fits did:
     # it reads this default on unpickling and keeps that covariance in every reader until refit.
     covariance_policy: Literal["face", "rule_free"] = field(default="face", compare=False)
+    # What blanks a standard error: ``"penalised"``, the coordinates the published decomposition
+    # of the penalised Hessian fixes at zero (``identifiability``), which every fit now records,
+    # and ``"data"``, the data-only flags of a record saved before fits did, which it reads on
+    # unpickling unless its Hessian is full rank. ``identifiability`` is the explained record,
+    # formed on first inference (``state_ops.fit_inference_info``) and kept with this one; a
+    # record replaced at other weights starts without it.
+    identifiability_policy: Literal["data", "penalised"] = field(default="data", compare=False)
+    identifiability: Identifiability | None = field(default=None, repr=False, compare=False)
 
     def take_data_gram(self, W: NDArray) -> NDArray | None:
         """Hand the fit's data Gram to its one reader, leaving none behind.
@@ -1305,9 +1320,12 @@ class RankInfo:
         return face_pseudo_inverse(self.face_coefficient, self.face)
 
     def is_estimable(self, contrast: NDArray) -> bool:
+        """Whether the data alone determine ``contrast``: the data-only diagnostic."""
         contrast = np.asarray(contrast, dtype=float)
         if contrast.shape != self.mean_x.shape:
             raise ValueError("contrast width does not match fitted coefficient space")
+        if self.data is None:
+            raise RuntimeError("the data rank is computed on demand: use state_ops.fit_data_rank")
         unselected = np.ones(len(contrast), dtype=bool)
         unselected[self.selected_columns] = False
         tolerance = SHARED_RANK_POLICY.factor_rcond * max(1.0, float(np.linalg.norm(contrast)))
@@ -1315,9 +1333,23 @@ class RankInfo:
             return False
         return self.data.is_estimable(contrast[self.selected_columns])
 
-    def coefficient_estimable(self) -> NDArray:
+    def coefficient_identified(self) -> NDArray:
+        """Whether the fit identifies each fitted coefficient (``identifiability``'s rule).
+
+        The explained record when formed; before that, the published decomposition's zeros, or
+        a saved record's flags.
+        """
+        if self.identifiability is not None:
+            return self.identifiability.coefficient_identified()
         result = np.zeros(len(self.mean_x), dtype=bool)
-        result[self.selected_columns] = self.data.coefficient_estimable()
+        if (
+            self.identifiability_policy == "data"
+            and self.augmented.rank < self.augmented.width
+            and self.data is not None
+        ):
+            result[self.selected_columns] = self.data.coefficient_estimable()
+        else:
+            result[self.selected_columns] = coordinates_identified(self.augmented)
         return result
 
 

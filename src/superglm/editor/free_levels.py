@@ -336,8 +336,11 @@ def _determined(model, name: str, labels: list[str]) -> tuple[list[str], list[st
     and a mean over levels of two classes is not estimable: the gaps are
     measured within the largest class.
     """
-    rank = getattr(model.result, "rank_info", None)
-    if rank is None or _term_covariance(model, name) is None:
+    from superglm.model.state_ops import fit_data_rank
+
+    # The data-only question, which a fit computes on demand (``fit_data_rank``).
+    rank = fit_data_rank(model)
+    if rank is None or rank.data is None or _term_covariance(model, name) is None:
         return labels, []
     starts = [group.start for group in model._groups if group.feature_name == name]
     column = {str(level): starts[0] + j for j, level in enumerate(model._specs[name]._non_base)}

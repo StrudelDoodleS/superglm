@@ -629,7 +629,7 @@ def test_a_recentred_column_keeps_its_centre_through_the_projection():
     mean = _repaired_system(dm, y, columns=2).mean_x[k]
     assert abs(Fraction(float(mean)) - Fraction(8, 5)) <= Fraction(_gamma(2) * (2 + 0.4))
     assert fit.rank_info.data.rank == dm.p - 1
-    assert not fit.rank_info.coefficient_estimable()[[indicator, k]].any()
+    assert not fit.rank_info.data.coefficient_estimable()[[indicator, k]].any()
 
 
 def test_an_integer_support_is_recentred_in_float64():

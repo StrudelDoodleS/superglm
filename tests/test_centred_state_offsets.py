@@ -37,6 +37,7 @@ from superglm import (
     SuperGLM,
 )
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+from superglm.model import state_ops
 from superglm.solvers.mode_score import linear_predictor
 from tests.test_factor_smooth_sz_thin_and_influence import _frame, _model, _penalized_objective
 
@@ -1467,11 +1468,12 @@ def test_metrics_certify_the_rank_about_the_exact_pair():
     """``metrics()`` on new rows certifies rank about the exact pair, like the fit.
 
     Sol's two Numeric columns at 1e16, one a translate of the other: the fit
-    reads slope rank 1 and NaN standard errors for both.  The streamed
-    certificates of ``metrics`` (data rank and profiled covariance) centred
-    their rows about the one-float ``X'W1 / sum W`` and read rank 2, so
-    ``metrics(X.copy(), y)`` published finite standard errors.  Mutation: the
-    one-float centre in either certificate.
+    reads slope rank 1, keeps ``a`` and fixes ``b`` at zero, so ``b`` alone
+    has no standard error.  The streamed certificates of ``metrics`` (data
+    rank and profiled covariance) centred their rows about the one-float
+    ``X'W1 / sum W`` and read rank 2, so ``metrics(X.copy(), y)`` published a
+    finite standard error for ``b``.  Mutation: the one-float centre in either
+    certificate.
     """
     from superglm.inference import metrics as metrics_module
     from superglm.inference._metrics_design import weighted_moments
@@ -1482,19 +1484,17 @@ def test_metrics_certify_the_rank_about_the_exact_pair():
     model = SuperGLM(
         family="gaussian", features={"a": Numeric(), "b": Numeric()}, selection_penalty=0
     ).fit(X, y)
-    for name in ("a", "b"):
-        assert np.all(np.isnan(model.metrics(X, y).coefficient_se[name]))
-        assert np.all(np.isnan(model.metrics(X.copy(), y).coefficient_se[name]))
+    for rows in (X, X.copy()):
+        se = model.metrics(rows, y).coefficient_se
+        assert np.all(np.isnan(se["b"])) and np.all(np.isfinite(se["a"]))
 
     s = np.tile([0.1, 0.7, 0.3, 0.9, 0.5], 80)
     design = np.column_stack((1e16 + z, 1e16 + z + 2.0, s))
     W = np.ones(len(z))
     _, xtw1, data_gram = weighted_moments(design, W)
     penalty = np.diag([0.0, 0.0, 1.0])
-    data_rank = metrics_module._certified_data_rank(design, W, data_gram, xtw1, penalty)
-    profile_rank = metrics_module._certified_profile_rank(
-        design, W, data_gram, xtw1, penalty, data_rank
-    )
+    data_rank = metrics_module._certified_data_rank(design, W, data_gram)
+    profile_rank = metrics_module._certified_profile_rank(design, W, data_gram, xtw1, penalty, None)
     assert data_rank.rank == 2
     assert profile_rank.rank == 2
 
@@ -1511,8 +1511,9 @@ def test_aliased_columns_at_1e16_certify_the_rank_of_the_fit_at_zero(fit):
     (``pirls``) and the metrics certificates.  Each centres its rows about
     the exact pair, as the Gram does; about the one-float means ``2 m_a -
     m_b`` rounds away from the offset and the pair stops aliasing (the proximal certificate
-    read rank 9 against 8 at no offset, Codex).  The certified rank and the
-    NaN standard errors of the pair match the fit at no offset.  Mutation:
+    read rank 9 against 8 at no offset, Codex).  The certified rank (the data rank on
+    request, ``state_ops.fit_data_rank``) and the pair's standard errors (``b`` blank, the
+    alias's absorber) match the fit at no offset.  Mutation:
     the one-float centre at a certification site.  ``scop_reml`` takes
     ``b = a + 2`` with a monotone spline and unit weights: the means
     ``1e16 + 1`` and ``1e16 + 3`` then tie and round apart, so the one-float
@@ -1557,11 +1558,12 @@ def test_aliased_columns_at_1e16_certify_the_rank_of_the_fit_at_zero(fit):
                 model.fit_reml(frame, y)
             else:
                 model.fit(frame, y)
-        info = model.result.rank_info
+        info = state_ops.fit_data_rank(model)
         ranks.append((int(info.data.rank), info.augmented and int(info.augmented.rank)))
         for rows in (frame, frame.copy()):
             se = model.metrics(rows, y).coefficient_se
-            assert np.all(np.isnan(se["a"])) and np.all(np.isnan(se["b"]))
+            # ``b`` absorbs the alias; ``a`` is the fit without it
+            assert np.all(np.isnan(se["b"])) and np.all(np.isfinite(se["a"]))
     assert ranks[1] == ranks[0]
 
 

@@ -80,6 +80,7 @@ from superglm import (
     Tweedie,
 )
 from superglm.inference.covariance import StructuredCovarianceAccessor
+from superglm.model import state_ops
 from superglm.model.reml_setup import collect_reml_groups
 from superglm.reml._leverage_rows import reads_row_supports
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
@@ -381,6 +382,18 @@ def _assert_nested(model: SuperGLM) -> None:
     assert factor._is_centered_data(*factor._pieces(state.centered_data_operator))
 
 
+def _data_only_identified(model: SuperGLM) -> np.ndarray:
+    """A fit's data-only estimability (``state_ops.fit_data_rank``), which the nested backend reports.
+
+    A dense fit reports more: everything its penalised Hessian identifies
+    (``solvers.identifiability``).
+    """
+    record = state_ops.fit_data_rank(model)
+    identified = np.zeros(len(record.mean_x), dtype=bool)
+    identified[record.selected_columns] = record.data.coefficient_estimable()
+    return identified
+
+
 def _assert_same_fit(nested: SuperGLM, dense: SuperGLM, frame, y, offset, weight, budget) -> None:
     """Every published quantity of two fits at the same smoothing parameters."""
     scale = budget / (1.0 + float(np.max(np.abs(nested._dm.toarray()).sum(axis=1))))
@@ -402,10 +415,9 @@ def _assert_same_fit(nested: SuperGLM, dense: SuperGLM, frame, y, offset, weight
     dense_metrics = dense.metrics(frame, y, sample_weight=weight, offset=offset)
     # the nested fit's inference reads its retained factors, not a dense rebuild
     assert isinstance(nested_metrics._active_info[3], StructuredCovarianceAccessor)
-    np.testing.assert_array_equal(
-        nested_metrics._current_coefficient_estimable,
-        dense_metrics._current_coefficient_estimable,
-    )
+    nested_identified = nested_metrics._current_coefficient_identified
+    np.testing.assert_array_equal(nested_identified, _data_only_identified(dense))
+    assert np.all(dense_metrics._current_coefficient_identified[nested_identified])
     for nested_edf, dense_edf in zip(
         nested_metrics._influence_edf, dense_metrics._influence_edf, strict=True
     ):
@@ -1019,9 +1031,9 @@ def _assert_chain_of_one_is_gram(chain: SuperGLM, gram: SuperGLM, extra, weight)
     assert abs(chain.result.log_det_H - gram.result.log_det_H) <= rank * gamma
     chain_metrics = chain.metrics(frame, y, sample_weight=weight)
     gram_metrics = gram.metrics(frame, y, sample_weight=weight)
-    np.testing.assert_array_equal(
-        chain_metrics._current_coefficient_estimable, gram_metrics._current_coefficient_estimable
-    )
+    chain_identified = chain_metrics._current_coefficient_identified
+    np.testing.assert_array_equal(chain_identified, _data_only_identified(gram))
+    assert np.all(gram_metrics._current_coefficient_identified[chain_identified])
 
 
 def _lone_level_pair(extra, lam, weight_scale=1.0):
@@ -1054,7 +1066,7 @@ def test_a_chain_of_one_drops_a_constant_column_as_gram_does(lam) -> None:
     chain, gram, weight = _lone_level_pair("constant", lam)
     const = next(group.sl for group in chain._groups if group.name == "const")
     frame, y, _ = _lone_level_data("constant")
-    estimable = chain.metrics(frame, y, sample_weight=weight)._current_coefficient_estimable
+    estimable = chain.metrics(frame, y, sample_weight=weight)._current_coefficient_identified
     assert not estimable[const][0]
     _assert_chain_of_one_is_gram(chain, gram, "constant", weight)
 
@@ -1078,13 +1090,10 @@ def test_a_chain_of_one_certifies_an_observed_mode_beside_a_constant_column() ->
     assert chain.result.reml_hessian_rank == gram.result.reml_hessian_rank
     objective = gram._reml_result.objective
     assert abs(chain._reml_result.objective - objective) <= REML_TOL * (1.0 + abs(objective))
-    estimable = chain.metrics(frame, y, sample_weight=weight)._current_coefficient_estimable
+    estimable = chain.metrics(frame, y, sample_weight=weight)._current_coefficient_identified
     const = next(group.sl for group in chain._groups if group.name == "const")
     assert not estimable[const][0]
-    np.testing.assert_array_equal(
-        np.delete(estimable, const),
-        gram.metrics(reduced, y, sample_weight=weight)._current_coefficient_estimable,
-    )
+    np.testing.assert_array_equal(np.delete(estimable, const), _data_only_identified(gram))
 
 
 def test_a_chain_of_one_fits_a_column_offset_by_a_million() -> None:

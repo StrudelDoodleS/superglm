@@ -267,8 +267,8 @@ class TestMetricsCaching:
         np.testing.assert_allclose(refreshed.leverage, independent.leverage)
         np.testing.assert_allclose(refreshed._active_info[2], independent._active_info[2])
         np.testing.assert_array_equal(
-            refreshed._current_coefficient_estimable,
-            independent._current_coefficient_estimable,
+            refreshed._current_coefficient_identified,
+            independent._current_coefficient_identified,
         )
 
     def test_mutated_fit_weights_invalidate_identity_cache(self, fitted_poisson):
@@ -728,7 +728,12 @@ class TestMetricsCaching:
         np.testing.assert_allclose(metrics._mu, model.predict(X), rtol=0.0, atol=0.0)
 
     def test_evaluation_aliases_override_fit_time_estimability(self):
-        """Rank loss on evaluation rows must mark individual aliases non-estimable."""
+        """Rank loss on evaluation rows blanks the alias; the column it duplicates keeps its SE.
+
+        ``x2`` absorbs the alias (the later column); ``x1``'s standard error is the
+        evaluation rows' fit without ``x2``, ``sqrt(phi / sum (x1 - mean)^2)``.  Mutation:
+        master blanked both.
+        """
         rng = np.random.default_rng(20260716)
         x1 = rng.normal(size=240)
         x2 = rng.normal(size=240)
@@ -744,9 +749,9 @@ class TestMetricsCaching:
         metrics = model.metrics(X_eval, 0.5 + 0.5 * x1)
         rows = {row.name: row for row in metrics._build_coef_rows()}
 
-        for name in ("x1", "x2"):
-            assert not rows[name].estimable
-            assert np.isnan(rows[name].se)
+        assert not rows["x2"].estimable and np.isnan(rows["x2"].se)
+        alone = np.sqrt(model.result.phi / np.sum((x1 - x1.mean()) ** 2))
+        assert rows["x1"].estimable and rows["x1"].se == pytest.approx(alone, rel=1e-8)
         # the influence diagonal sums to the edf with the intercept: 1 + one slope.
         # The alias is truncated, so the retained slope block is one-dimensional
         # and each row's quadratic form rounds within 8 u of its value; the sum
@@ -770,9 +775,10 @@ class TestMetricsCaching:
         metrics = model.metrics(X_eval, 1.0 + 2.0 * x)
         rows = {row.name: row for row in metrics._build_coef_rows()}
 
-        for name in ("x1", "x2"):
-            assert not rows[name].estimable
-            assert np.isnan(rows[name].se)
+        # ``x2`` absorbs the alias at every scale; ``x1`` is the fit without it
+        assert not rows["x2"].estimable and np.isnan(rows["x2"].se)
+        alone = np.sqrt(model.result.phi / np.sum((x - x.mean()) ** 2))
+        assert rows["x1"].estimable and rows["x1"].se == pytest.approx(alone, rel=1e-8)
         # the influence diagonal sums to the edf with the intercept: 1 + one slope.
         # The alias is truncated, so the retained slope block is one-dimensional
         # and each row's quadratic form rounds within 8 u of its value; the sum

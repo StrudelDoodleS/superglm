@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 
 from superglm import FactorSmooth, LambdaPolicy, Spline, SuperGLM
+from superglm.model import state_ops
 
 
 def _data(
@@ -318,7 +319,7 @@ def test_sz_structured_estimability_is_the_data_s():
     }
     structured = models["structured"]
     assert structured._reml_profile["direct_backend"] == "structured"
-    estimable = structured._fit_inference_info["coefficient_estimable"]
+    estimable = structured._fit_inference_info["coefficient_identified"]
     eps = np.finfo(float).eps
     A = np.column_stack((np.ones(structured._dm.n), structured._dm.toarray()))
     A = A / np.linalg.norm(A, axis=0)
@@ -332,7 +333,14 @@ def test_sz_structured_estimability_is_the_data_s():
         mask = np.concatenate(
             [np.isnan(np.atleast_1d(np.asarray(se[g.name], dtype=float))) for g in model._groups]
         )
-        np.testing.assert_array_equal(mask, structural, err_msg=solve)
+        if solve == "structured":
+            np.testing.assert_array_equal(mask, structural, err_msg=solve)
+            continue
+        # The dense fit blanks only what its penalised Hessian leaves free; its data-only
+        # rule, on request, is the structured backend's (``state_ops.fit_data_rank``).
+        record = state_ops.fit_data_rank(model)
+        np.testing.assert_array_equal(record.data.coefficient_estimable(), ~structural)
+        assert not np.any(mask & ~structural)
 
 
 def test_sz_summary_uses_one_structured_group_row():

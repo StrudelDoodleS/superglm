@@ -1,7 +1,8 @@
 """The published data rank without a TSQR of every row: the Gram, then its grey subspace.
 
 The data rank (``RankInfo.data``: rank, representatives, estimability flags)
-is decided at the factor route's resolution.  The Gram decides it when it can
+is a diagnostic a penalized fit computes on first request
+(``state_ops.fit_data_rank``), decided at the factor route's resolution.  The Gram decides it when it can
 certify itself; otherwise ``rank.decompose_gram_deflated`` factors only the
 rows projected onto the Gram's grey subspace (``n x k``) and certifies the
 rest from the Gram, and only a failed certificate pays for the TSQR of every
@@ -25,6 +26,7 @@ from superglm import SuperGLM
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
+from superglm.model import state_ops
 
 
 def _assert_same_decisions(left, right):
@@ -113,16 +115,18 @@ FIXTURES = {
 
 
 def _fit(kind, full_factor):
-    """Fit ``kind``; ``full_factor`` fails the grey-subspace certificate, so the full factor decides."""
+    """Fit ``kind`` and decide its data rank; ``full_factor`` fails the grey-subspace certificate."""
     frame, y, features, interactions = FIXTURES[kind]()
     model = SuperGLM(family="poisson", features=features, interactions=interactions)
     if not full_factor:
         model.fit_reml(frame, y)
+        state_ops.fit_data_rank(model)
         return model
     original = rank.decompose_gram_deflated
     rank.decompose_gram_deflated = lambda *args, **kwargs: (None, {})
     try:
         model.fit_reml(frame, y)
+        state_ops.fit_data_rank(model)
     finally:
         rank.decompose_gram_deflated = original
     return model
@@ -180,9 +184,7 @@ def test_grey_subspace_and_gram_tolerance_side_by_side(monkeypatch):
         grams.append(np.array(gram))
         return decide(gram, *args, **kwargs)
 
-    import superglm.solvers.irls_direct._finalise as irls_finalise
-
-    monkeypatch.setattr(irls_finalise, "decide_data_rank", recorded)
+    monkeypatch.setattr(state_ops, "decide_data_rank", recorded)
     for kind in sorted(FIXTURES):
         grams.clear()
         deflated = _fit(kind, full_factor=False).result.rank_info.data
@@ -217,8 +219,6 @@ def test_a_data_gram_with_a_diagonal_no_semidefinite_gram_has_is_decided_by_the_
     a grey-subspace route that refuses only a negative diagonal publishes the
     zeroed column as a structural alias.
     """
-    import superglm.solvers.irls_direct._finalise as irls_finalise
-
     decide = rank.decide_data_rank
     factor_calls = []
 
@@ -236,9 +236,9 @@ def test_a_data_gram_with_a_diagonal_no_semidefinite_gram_has_is_decided_by_the_
 
         return decide(gram, counted, **kwargs)
 
-    monkeypatch.setattr(irls_finalise, "decide_data_rank", rounded)
+    monkeypatch.setattr(state_ops, "decide_data_rank", rounded)
     forced = _fit("thin_level_curve", full_factor=False).result.rank_info.data
-    monkeypatch.setattr(irls_finalise, "decide_data_rank", decide)
+    monkeypatch.setattr(state_ops, "decide_data_rank", decide)
     full = _fit("thin_level_curve", full_factor=True).result.rank_info.data
     _assert_same_decisions(forced, full)
     assert forced.grey_subspace is None
@@ -602,13 +602,13 @@ def _forced_full_factor(monkeypatch):
 
 
 @pytest.mark.parametrize("rows", ["new_rows", "new_weights"])
-def test_metrics_decides_the_data_rank_as_the_fit_does(rows, monkeypatch):
-    """``metrics()`` off the fit's geometry decides its data rank by the fit's route, no row factor.
+def test_metrics_off_the_fits_geometry_reads_no_data_rank(rows, monkeypatch):
+    """``metrics()`` off the fit's geometry decides no data rank and makes no row factor.
 
-    New rows read an evaluation design (dense blocks, ``chunked_projected_factor``);
-    the fit's rows under other weights read the grouped design.  Each makes
-    no TSQR of every row, and its decisions are the full factor's.
-    Mutation: on the base both ran ``streamed_weighted_factor`` over every row.
+    New rows read an evaluation design, the fit's rows under other weights the grouped design;
+    a penalized covariance reads which coefficients its Hessian identifies, not the data rank.
+    Mutation: on the base both decided one, and before the grey subspace each ran
+    ``streamed_weighted_factor`` over every row.
     """
     import superglm.inference.metrics as metrics_module
 
@@ -631,32 +631,32 @@ def test_metrics_decides_the_data_rank_as_the_fit_does(rows, monkeypatch):
         "streamed_weighted_factor",
         lambda *args, **kwargs: passes.append(1) or factor(*args, **kwargs),
     )
-    model.metrics(frame, y, sample_weight=weights).coefficient_se
-    assert passes == [] and decided[0].grey_subspace is not None
-    _forced_full_factor(monkeypatch)
-    model.metrics(frame, y, sample_weight=weights).coefficient_se
-    assert len(passes) == 1
-    _assert_same_decisions(decided[0], decided[1])
+    se = model.metrics(frame, y, sample_weight=weights).coefficient_se
+    assert decided == [] and passes == []
+    assert all(np.all(np.isfinite(values)) for values in se.values())
 
 
-def test_rebuilt_inference_state_decides_the_data_rank_as_the_fit_does(monkeypatch):
-    """A fit without rank metadata (``state_ops._legacy_active_state``) takes the fit's route.
+def test_the_fits_data_rank_on_request_takes_the_fits_route(monkeypatch):
+    """``fit_data_rank`` decides from the grey subspace, as the full factor; a rebuilt state reads none.
 
-    It is what a shape repair rebuilds; its data rank is the fit's, from the
-    grey subspace.  Mutation: on the base it factored every row.
+    A fit without rank metadata (``state_ops._legacy_active_state``, what a shape repair
+    rebuilds) needs no data rank when penalized.  Mutation: on the base the fit decided the data
+    rank itself and the rebuilt state decided it again.
     """
-    from superglm.model import state_ops
-
     model = _fit("thin_level_curve", full_factor=False)
+    data = model.result.rank_info.data
+    assert data.grey_subspace is not None
+    assert model._reml_profile["data_rank_route"] == "grey_subspace"
     solver = model._solver_pirls_result()
     W = state_ops._solver_space_working_weights(model)
-    data = state_ops._legacy_active_state(model, solver, W)[-1]
-    assert data.grey_subspace is not None
-    _forced_full_factor(monkeypatch)
-    reference = state_ops._legacy_active_state(model, solver, W)[-1]
+    calls = []
+    monkeypatch.setattr(state_ops, "decide_data_rank", lambda *args, **kwargs: calls.append(1))
+    state_ops._legacy_active_state(model, solver, W)
+    assert calls == []
+    monkeypatch.undo()
+    reference = _fit("thin_level_curve", full_factor=True).result.rank_info.data
     assert reference.grey_subspace is None and reference.method == "qr_svd"
     _assert_same_decisions(data, reference)
-    _assert_same_decisions(data, model.result.rank_info.data)
 
 
 def test_unpenalized_fits_keep_the_data_rank_on_the_full_factor(monkeypatch):
@@ -701,13 +701,10 @@ def test_unpenalized_fits_keep_the_data_rank_on_the_full_factor(monkeypatch):
     W = state_ops._solver_space_working_weights(model)
     state_ops._legacy_active_state(model, solver, W)
     assert len(calls) == 2
-    # the precondition: the Gram is not authoritative and the grey certificate would pass
+    # the precondition: the Gram is not authoritative, so the rows decide
     for gram, kwargs, _ in calls:
         assert rank.decompose_gram_if_authoritative(gram, psd_by_construction=True) is None
-        deflated, _ = rank.decompose_gram_deflated(
-            gram, kwargs["project"], rows=kwargs["rows"], structural=kwargs["structural"]()
-        )
-        assert deflated is not None
+        assert kwargs["certify"]
     # the routes: both keep the data rank on the full factor
     for _, _, decided in calls:
         assert decided.grey_subspace is None

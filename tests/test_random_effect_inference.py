@@ -456,10 +456,13 @@ def test_structured_estimability_uses_centered_data_geometry():
         y,
     )
 
-    dense_mask = dense._fit_inference_info["coefficient_estimable"]
-    structured_mask = structured._fit_inference_info["coefficient_estimable"]
+    dense_mask = dense._fit_inference_info["coefficient_identified"]
+    structured_mask = structured._fit_inference_info["coefficient_identified"]
 
-    np.testing.assert_array_equal(structured_mask, dense_mask)
+    # The penalised fit identifies every level (the ridge holds each one) and not the
+    # constant, which is the intercept's.  The structured backend still flags the data's own
+    # null space until its solvers read ``solvers.identifiability``.
+    np.testing.assert_array_equal(dense_mask, [False] + [True] * n_levels)
     assert not np.any(structured_mask)
 
 

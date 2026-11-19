@@ -99,9 +99,3 @@ class _IRLSDirectQRStep(_IRLSDirectStep):
     def certificate_inputs(self) -> tuple:
         """The iteration's decomposition: the certificate judges its truncated directions."""
         return self._held_rank, None
-
-    def data_rank(self, centered_final: CenteredSystem, W: NDArray) -> RankDecomposition:
-        """The retained fit's data rank, from the factor of its weighted, centred dense rows."""
-        sqrtW = np.sqrt(W)
-        A_data_final = sqrtW[:, None] * _centred_rows(self._X_full, centered_final)
-        return decompose_factor(A_data_final)

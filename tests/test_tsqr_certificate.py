@@ -822,16 +822,18 @@ def test_retained_support_tables_are_charged_to_every_pooled_section(monkeypatch
 
 
 def test_discrete_reml_builds_the_data_rank_factor_once(monkeypatch):
-    """Only the published state certifies its data rank with observation rows.
+    """Only the published state certifies its data rank with observation rows, and only on request.
 
     Two aliased factors leave the unpenalised data Gram unable to certify its
-    own rank, so the fit reads the observation rows for its data rank (the
-    grey-subspace pass, else the O(n p^2) factor).  The REML optimizer's
+    own rank, so its data rank reads the observation rows (the grey-subspace
+    pass, else the O(n p^2) factor); the data rank is a diagnostic computed on
+    request (``state_ops.fit_data_rank``).  The REML optimizer's
     terminal refit used to do so as well, for a ``rank_info`` that
     ``finalize_reml_fit`` replaced unread; now only the terminal refit that is
     published does, and its decomposition is on the factor route's rule.
     """
-    import superglm.solvers.irls_direct._finalise as irls_finalise
+    import superglm.solvers.centered_system as centered_system
+    from superglm.model import state_ops
 
     rng = np.random.default_rng(3)
     n = 4_000
@@ -846,8 +848,8 @@ def test_discrete_reml_builds_the_data_rank_factor_once(monkeypatch):
     )
     y = rng.poisson(np.exp(0.3 * np.sin(2.0 * x) + 0.2 * level)).astype(float)
     calls: list[int] = []
-    original = irls_finalise.grouped_weighted_factor
-    original_projection = irls_finalise.grouped_projected_factor
+    original = centered_system.grouped_weighted_factor
+    original_projection = centered_system.grouped_projected_factor
 
     def counted(dm, W, **kwargs):
         calls.append(len(W))
@@ -861,8 +863,8 @@ def test_discrete_reml_builds_the_data_rank_factor_once(monkeypatch):
     # rows once; a failed certificate would add the full factor's pass, so
     # ``[n]`` also says the certificate passes here (the nulls are exact
     # aliases, far from the cut).
-    monkeypatch.setattr(irls_finalise, "grouped_weighted_factor", counted)
-    monkeypatch.setattr(irls_finalise, "grouped_projected_factor", projected)
+    monkeypatch.setattr(centered_system, "grouped_weighted_factor", counted)
+    monkeypatch.setattr(centered_system, "grouped_projected_factor", projected)
     model = SuperGLM(
         family="poisson",
         selection_penalty=0.0,
@@ -872,8 +874,11 @@ def test_discrete_reml_builds_the_data_rank_factor_once(monkeypatch):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         model.fit_reml(frame, y)
-    assert calls == [n]
-    data = model.result.rank_info.data
+    # The fit decides no data rank; asked for, it reads the rows once.
+    assert model.result.rank_info.data is None
+    fitted = len(calls)
+    data = state_ops.fit_data_rank(model).data
+    assert calls[fitted:] == [n]
     assert data.method == "qr_svd"
     # Two aliased three-level factors: their second factor's two columns are
     # the first's, so the data rank is the width less two.
@@ -948,8 +953,9 @@ def test_direct_reml_bootstrap_builds_no_data_rank_factor(monkeypatch):
     candidates and trials already skip it), so against it the rows below
     are read twice.
     """
-    import superglm.solvers.irls_direct._finalise as irls_finalise
+    import superglm.solvers.centered_system as centered_system
     from superglm import RandomEffect, Tweedie
+    from superglm.model import state_ops
 
     rng = np.random.default_rng(8)
     n = 3_000
@@ -966,8 +972,8 @@ def test_direct_reml_bootstrap_builds_no_data_rank_factor(monkeypatch):
     mu = np.exp(0.3 * np.sin(2.0 * frame["x"].to_numpy()) + 0.1 * a - 0.1 * b)
     y = rng.gamma(2.0, mu / 2.0) * (rng.uniform(size=n) < 0.3)
     calls: list[int] = []
-    original = irls_finalise.grouped_weighted_factor
-    original_projection = irls_finalise.grouped_projected_factor
+    original = centered_system.grouped_weighted_factor
+    original_projection = centered_system.grouped_projected_factor
 
     def counted(dm, W, **kwargs):
         calls.append(len(W))
@@ -981,8 +987,8 @@ def test_direct_reml_bootstrap_builds_no_data_rank_factor(monkeypatch):
     # rows once; a failed certificate would add the full factor's pass, so
     # ``[n]`` also says the certificate passes here (the nulls are exact
     # aliases, far from the cut).
-    monkeypatch.setattr(irls_finalise, "grouped_weighted_factor", counted)
-    monkeypatch.setattr(irls_finalise, "grouped_projected_factor", projected)
+    monkeypatch.setattr(centered_system, "grouped_weighted_factor", counted)
+    monkeypatch.setattr(centered_system, "grouped_projected_factor", projected)
     model = SuperGLM(
         family=Tweedie(p=1.5),
         link="log",
@@ -997,6 +1003,8 @@ def test_direct_reml_bootstrap_builds_no_data_rank_factor(monkeypatch):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         model.fit_reml(frame, y)
+    # The fit reads no row for the data rank; asked for, it reads them once.
+    assert calls == []
+    data = state_ops.fit_data_rank(model).data
     assert calls == [n]
-    data = model.result.rank_info.data
     assert data.method == "qr_svd" and data.rank < model.result.beta.size
