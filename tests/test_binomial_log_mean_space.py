@@ -9,7 +9,8 @@ Marschner 2018, J. Stat. Softw. 86(9), section 3.2), rather than letting
 ``clip_mu`` rewrite its means; a state holding rows at the boundary is never a
 converged mode; and REML, whose Laplace approximation needs an interior
 stationary maximum (Wood, Pya & Saefken 2016, section 3.1), restores an interior
-start or says why none exists.
+start or says why none exists, and publishes a final refit that reaches the
+boundary as not converged.
 """
 
 from __future__ import annotations
@@ -273,6 +274,156 @@ def test_reml_says_why_a_maximum_on_the_boundary_has_no_criterion() -> None:
     )
     with pytest.raises(ObservedModeNotConvergedError, match="no interior maximum"):
         model.fit_reml(X, y)
+
+
+_FACE_LAMBDA = 0.2
+
+
+def _face_book(seed: int, n: int, ones: int) -> tuple[pd.DataFrame, np.ndarray]:
+    """Twelve levels of a random effect beside a slope, plus ``ones`` one-row levels whose row is an event.
+
+    A one-row event level's coefficient would be ``1 / lambda = 5``
+    (``_thin_event_levels``), past its row's distance ``|eta_0| < 2.4`` to the
+    boundary, so at ``_FACE_LAMBDA`` the penalized maximum holds those rows at
+    probability 1: a face of ``{beta : X beta < 0}``, not a stationary point.
+    """
+    rng = np.random.default_rng(seed)
+    effect = np.random.default_rng(99).normal(0.0, 0.4, 12)
+    g = rng.integers(0, 12, n)
+    x = rng.uniform(size=n)
+    y = (rng.uniform(size=n) < np.exp(-2.3 + x + effect[g])).astype(float)
+    levels = [f"g{c:02d}" for c in g] + [f"s{j}" for j in range(ones)]
+    frame = pd.DataFrame({"x": np.append(x, rng.uniform(size=ones)), "g": levels})
+    return frame, np.append(y, np.ones(ones))
+
+
+def _face_fit(monkeypatch: pytest.MonkeyPatch, **fit_kwargs) -> SuperGLM:
+    """``fit_reml`` at ``_FACE_LAMBDA``, its search's solves stopped after two iterations.
+
+    The witness's search candidate stopped short of the face
+    (``score_stagnated``) and its final refit reached it; the cap forces the
+    same order here, ending every candidate on its budget well inside.
+    """
+    import superglm.reml.direct as direct
+
+    def short(*args, **kwargs):
+        return fit_irls_direct(*args, **{**kwargs, "max_iter": 2})
+
+    monkeypatch.setattr(direct, "fit_irls_direct", short)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        features={
+            "x": Numeric(),
+            "g": RandomEffect(lambda_policy=LambdaPolicy.fixed(_FACE_LAMBDA)),
+        },
+    )
+    frame, y = _face_book(7, 1500, ones=4)
+    model.fit_reml(frame, y, **fit_kwargs)
+    return model
+
+
+def test_reml_publishes_a_final_refit_on_the_boundary_as_not_converged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A final refit that reaches the face is the fit, published with its stop, on the log link too.
+
+    Hunt F5 (freMTPL2, 45,000 rows): the final observed-mode refit ended
+    ``mean_space_boundary`` and ``finalize_reml_fit`` raised
+    ``ObservedModeNotConvergedError``, installing no model, because the
+    terminal gate admitted that stop only under the identity link.  The
+    state it discarded was feasible and beat the offset-only null on 35,000
+    held-out rows by 3.4% (10,780.7 against 11,162.9).  Here the published
+    fit is the constrained penalized maximum, computed independently by SLSQP
+    on the indicator design under ``X theta <= 0``, and beats the null
+    ``mean(y)`` on held-out rows.  The published state stops inside the face
+    by at most the clip's band and the last steps' halvings (about 1e-6 in
+    ``eta`` here), which moves the held-out deviance by about 1e-10 of
+    itself; 1e-6 leaves room for another BLAS's path.  Mutation check: on
+    5f28e8e80 ``fit_reml`` raised from ``finalize_reml_fit``.
+    """
+    from scipy.optimize import LinearConstraint, minimize
+
+    from superglm import ConvergenceWarning
+
+    with pytest.warns(ConvergenceWarning, match="boundary of the family's mean space"):
+        model = _face_fit(monkeypatch)
+    info = model.reml_diagnostics()
+    assert info["converged"] is False
+    assert info["terminal_refit_termination"] == "mean_space_boundary"
+    assert float(_eta(model).max()) < 0.0
+
+    frame, y = _face_book(7, 1500, ones=4)
+    names = sorted(set(frame["g"]))
+
+    def design(rows: pd.DataFrame) -> np.ndarray:
+        indicators = [(rows["g"].to_numpy() == name).astype(float) for name in names]
+        return np.column_stack([np.ones(len(rows)), rows["x"].to_numpy(), *indicators])
+
+    D = design(frame)
+
+    def penalized(theta: np.ndarray) -> tuple[float, np.ndarray]:
+        eta = np.minimum(D @ theta, -1e-300)
+        rows = np.where(y > 0.0, eta, np.log(-np.expm1(eta)))
+        score = np.where(y > 0.0, 1.0, np.exp(eta) / np.expm1(eta))
+        gradient = -D.T @ score
+        gradient[2:] += _FACE_LAMBDA * theta[2:]
+        return -float(rows.sum()) + 0.5 * _FACE_LAMBDA * float(theta[2:] @ theta[2:]), gradient
+
+    start = np.zeros(D.shape[1])
+    start[0] = math.log(y.mean()) - 1.0
+    reference = minimize(
+        penalized,
+        start,
+        jac=True,
+        method="SLSQP",
+        constraints=[LinearConstraint(D, -np.inf, 0.0)],
+        options={"ftol": 1e-14, "maxiter": 1000},
+    )
+    assert reference.success, reference.message
+    held_out, y_held_out = _face_book(8, 2000, ones=0)
+
+    def deviance(mu: np.ndarray) -> float:
+        return -2.0 * float(np.sum(np.where(y_held_out > 0.0, np.log(mu), np.log1p(-mu))))
+
+    published = deviance(model.predict(held_out))
+    assert abs(published - deviance(np.exp(design(held_out) @ reference.x))) <= 1e-6 * published
+    assert published < deviance(np.full(len(y_held_out), y.mean()))
+
+
+@pytest.mark.parametrize("stop", ["max_iter", "nonfinite_deviance"])
+def test_reml_still_tells_an_unfinished_final_refit_from_a_failed_one(
+    monkeypatch: pytest.MonkeyPatch, stop: str
+) -> None:
+    """The boundary's admission takes nothing else with it, at the same face.
+
+    A final refit out of iterations short of the face (``max_pirls_iter=2``)
+    is published, disclosed as that stop; one whose deviance went non-finite
+    (forced) is still refused, as every structural failure is.
+    """
+    from dataclasses import replace
+
+    import superglm.model.reml_finalize as reml_finalize
+    from superglm import ConvergenceWarning
+
+    if stop == "nonfinite_deviance":
+
+        def failed(*args, **kwargs):
+            result, *rest = fit_irls_direct(*args, **kwargs)
+            return (replace(result, converged=False, termination_reason=stop), *rest)
+
+        monkeypatch.setattr(reml_finalize, "fit_irls_direct", failed)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(ObservedModeNotConvergedError, match="did not converge"):
+                _face_fit(monkeypatch)
+        return
+    with pytest.warns(ConvergenceWarning, match="'max_iter'.*larger max_pirls_iter"):
+        model = _face_fit(monkeypatch, max_pirls_iter=2)
+    info = model.reml_diagnostics()
+    assert info["converged"] is False
+    assert info["terminal_refit_termination"] == "max_iter"
 
 
 def _offset_fit(offset: float, *, plain: bool, direct_solve: str) -> SuperGLM:

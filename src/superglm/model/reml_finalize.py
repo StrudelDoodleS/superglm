@@ -753,10 +753,16 @@ def finalize_reml_fit(
         terminal_evaluation = terminal_value
         best.objective = terminal_evaluation.value
     if terminal_curvature == "observed" and not qp_passthrough:
-        if not final_pirls.converged and not stopped_on_iteration_budget(final_pirls, model._link):
-            # Typed: a structural failure is one more point a power search
-            # scores infeasible; a mode short of the certificate is published
-            # as not converged (``terminal_certified``).
+        # A mode short of the certificate is published as not converged
+        # (``terminal_certified``). So is one on the mean-space boundary, on
+        # every link: the line search keeps every mean inside the space, so
+        # the state is finite and its stop is disclosed. Typed: a structural
+        # failure is one more point a power search scores infeasible.
+        if not (
+            final_pirls.converged
+            or final_pirls.termination_reason == "mean_space_boundary"
+            or stopped_on_iteration_budget(final_pirls)
+        ):
             raise ObservedModeNotConvergedError(
                 "terminal observed REML refit did not converge to a penalized coefficient mode",
                 hint=mode_certification_hint(model._distribution),
