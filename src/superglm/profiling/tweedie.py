@@ -247,6 +247,10 @@ class _PowerProfile:
         # Nor does it take the cached-W pre-solve: a changed start would move the
         # selected power.
         clone._in_power_search = True
+        # It is ranked and discarded: it makes no separation statement of its
+        # own, and names each design finding within the search's call
+        # (``capture_fit_state``, ``disclosure_scope``).
+        clone._discarded_fit = True
         self.X, self.y, self.w, self.offset = X, y, sample_weight, offset
         # fit_reml refuses a selection penalty.
         self.selecting = False

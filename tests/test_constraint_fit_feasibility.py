@@ -213,7 +213,7 @@ def test_primal_feasibility_cannot_replace_the_inner_qp_kkt_certificate(
     ]
 
 
-@pytest.mark.parametrize("separation", ["warn", "error"])
+@pytest.mark.parametrize("separation", ["warn", "error", "record"])
 def test_a_strict_separation_stop_raises_before_the_constraint_refusal(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
@@ -226,8 +226,10 @@ def test_a_strict_separation_stop_raises_before_the_constraint_refusal(
     separation bar: one fit carries the backstop's exhausted-budget signature
     and a state without a KKT certificate.  Under ``"warn"`` it reports both.
     Under ``"error"`` the backstop raises first, and the refusal of a state the
-    fit never returns is not reported.  Mutation check: the final refusal run
-    before the backstop logged that refusal and then raised.
+    fit never returns is not reported.  Under ``"record"``, which a model's
+    own solves pass, the solver warns about nothing: the finding rides on the
+    result and the refusal is logged once.  Mutation check: the final refusal
+    run before the backstop logged that refusal and then raised.
     """
     import superglm.solvers.irls_direct._fit as irls_direct
     import superglm.solvers.irls_direct._qp as irls_direct_qp
@@ -265,15 +267,21 @@ def test_a_strict_separation_stop_raises_before_the_constraint_refusal(
             with pytest.warns(SeparationWarning, match="exhausted its iteration budget"):
                 result, _ = fit()
             assert result.termination_reason == "constraint_kkt_incomplete"
-        else:
+        elif separation == "error":
             with pytest.raises(SeparationError, match="exhausted its iteration budget"):
                 fit()
+        else:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", SeparationWarning)
+                result, _ = fit()
+            assert "exhausted its iteration budget" in result.separation_message
+            assert result.termination_reason == "constraint_kkt_incomplete"
     refusals = [
         record
         for record in caplog.records
         if "no complete constrained-QP KKT certificate" in record.getMessage()
     ]
-    assert len(refusals) == (1 if separation == "warn" else 0)
+    assert len(refusals) == (0 if separation == "error" else 1)
 
 
 def test_rejected_poisson_proposal_cannot_reuse_the_previous_working_kkt_certificate(

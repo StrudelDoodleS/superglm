@@ -328,6 +328,7 @@ def drop1(
     if exponent:
         dev_full = deviance_in_units(model, X)
     rows = []
+    separated = []
     for name in model._feature_order:
         drop_set = {name}
         for iname in model._interaction_order:
@@ -337,8 +338,14 @@ def drop1(
                 drop_set.add(iname)
 
         reduced = model._clone_without_features(drop_set, smoothing_resolved=True)
+        # A comparison fit is read for its deviance and discarded, so it does not
+        # publish its runtime separation finding (``capture_fit_state``); the
+        # table does, naming the dropped feature, below.
+        reduced._discarded_fit = True
         reduced_X = _drop1_reduced_frame(reduced, X)
         reduced.fit(reduced_X, y, sample_weight=sample_weight, offset=offset)
+        if reduced.result.separation_message is not None:
+            separated.append((name, reduced.result.separation_message))
         dev_reduced = deviance_in_units(reduced, reduced_X)
         edf_reduced = reduced.result.effective_df
         delta_dev = dev_reduced - dev_full
@@ -392,6 +399,14 @@ def drop1(
             }
         )
 
+    from superglm.diagnostics.separation import (
+        disclose_runtime_separation,
+        format_drop1_runtime_message,
+    )
+
+    disclose_runtime_separation(
+        format_drop1_runtime_message(separated), getattr(model, "_separation", "warn")
+    )
     return pd.DataFrame(rows).sort_values("p_value").reset_index(drop=True)
 
 

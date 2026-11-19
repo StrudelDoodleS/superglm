@@ -17,6 +17,9 @@ only ``selection_penalty`` is consulted, since ``Categorical`` blocks carry no `
 from __future__ import annotations
 
 import warnings
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +27,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._roundoff import gamma
+from superglm._warn import warn_caller
 
 #: Working-weight ratio past which an exhausted, stagnant IRLS run is treated
 #: as the runtime signature of separation (see ``format_runtime_message``).
@@ -40,7 +44,160 @@ class SeparationWarning(UserWarning):
 
 
 class SeparationError(ValueError):
-    """Refusal to fit (or certify) a design containing separated cells."""
+    """Refusal to fit (or certify) a design containing separated cells.
+
+    ``levels`` is true when the finding names factor levels or crossed cells
+    (the build-time scans), whose remedy is grouping them; an intercept-only
+    finding and the runtime backstop's, which names model terms, are not.
+    """
+
+    def __init__(self, *args: object, levels: bool = False) -> None:
+        super().__init__(*args)
+        self.levels = levels
+
+
+# What a public fit call says about separation.  A call can build its design
+# several times (a theta or power search, then its publication refit) and run
+# many coefficient solves; it names each design finding once, and the runtime
+# finding of the state it publishes only.
+
+#: The design notices this public fit call has emitted; ``None`` outside one.
+_DISCLOSED: ContextVar[set[str] | None] = ContextVar("superglm_separation_disclosed", default=None)
+
+
+@contextmanager
+def disclosure_scope(model: Any) -> Iterator[None]:
+    """``model``'s public fit call: each distinct separation notice inside it is emitted once.
+
+    Each call opens its own scope, restoring the enclosing one on exit, so an
+    independent fit started inside another call (from a progress callback)
+    reports what it finds.  A fit the enclosing call runs and discards
+    (``_discarded_fit``: a power-search candidate's ``fit_reml``, a ``drop1``
+    comparison fit) shares that call's scope.
+    """
+    if getattr(model, "_discarded_fit", False) and _DISCLOSED.get() is not None:
+        yield
+        return
+    token = _DISCLOSED.set(set())
+    try:
+        yield
+    finally:
+        _DISCLOSED.reset(token)
+
+
+def warn_separation(message: str, *, stacklevel: int) -> None:
+    """Warn ``message`` at the caller's ``stacklevel``, unless this fit call already has."""
+    disclosed = _DISCLOSED.get()
+    if disclosed is not None:
+        if message in disclosed:
+            return
+        disclosed.add(message)
+    warnings.warn(message, SeparationWarning, stacklevel=stacklevel + 1)
+
+
+def disclose_runtime_separation(message: str | None, mode: str) -> None:
+    """Warn, or refuse under ``"error"``, with the runtime finding of a fit the caller receives.
+
+    The solvers record the backstop's finding on the state they return
+    (``PIRLSResult.separation_message``) and warn about nothing: a REML
+    candidate, a theta or power evaluation, a line-search trial or a discarded
+    refit is evidence about that solve, not about the fit the caller receives.
+    """
+    if message is None or mode == "ignore":
+        return
+    if mode == "error":
+        raise SeparationError(message)
+    held = _HELD.get()
+    if held is not None:
+        held.append(message)
+        return
+    warn_caller(message, SeparationWarning)
+
+
+#: The runtime warnings a caller holds back to decide on later; ``None`` when none does.
+_HELD: ContextVar[list[str] | None] = ContextVar("superglm_separation_held", default=None)
+
+
+@contextmanager
+def held_runtime_warnings() -> Iterator[list[str]]:
+    """Collect, rather than emit, the runtime warnings of the fits run inside.
+
+    For a caller that revises the fit before returning it (the editor's Final
+    fit carrying edits), which then warns about what it returns.  A refusal
+    under ``"error"`` is not held.
+    """
+    held: list[str] = []
+    token = _HELD.set(held)
+    try:
+        yield held
+    finally:
+        _HELD.reset(token)
+
+
+def refuses_on_publication(model: Any) -> bool:
+    """Whether a runtime finding on the fit ``model`` is solving now refuses it.
+
+    Under ``"error"``, a fit the caller receives is refused as soon as its
+    state is known, before anything else describes it.  A discarded fit
+    (``_discarded_fit``) and a refit of an NB2 theta alternation, which a later
+    refit may supersede, are decided where the call publishes
+    (``capture_fit_state``).
+    """
+    return (
+        getattr(model, "_separation", "warn") == "error"
+        and not getattr(model, "_discarded_fit", False)
+        and not getattr(model, "_nb_theta_search", False)
+    )
+
+
+def refuse_published_separation(model: Any, result: Any) -> None:
+    """Refuse ``result``, the state ``model``'s fit returns, when it carries a finding."""
+    message = getattr(result, "separation_message", None)
+    if message is not None and refuses_on_publication(model):
+        raise SeparationError(message)
+
+
+def disclose_solver_separation(message: str | None, mode: str) -> None:
+    """An exported optimizer's own disclosure of the state it returns, as a solver's.
+
+    ``"warn"`` warns at the optimizer's caller, ``"error"`` refuses, and
+    ``"ignore"`` and ``"record"`` say nothing.
+    """
+    if mode != "record":
+        disclose_runtime_separation(message, mode)
+
+
+def format_path_runtime_message(lambdas: NDArray, findings: Sequence[str | None]) -> str | None:
+    """One statement for a regularization path: the points whose solve has a runtime finding."""
+    hit = [i for i, finding in enumerate(findings) if finding is not None]
+    if not hit:
+        return None
+    points = ", ".join(f"{float(lambdas[i]):.4g}" for i in hit)
+    return (
+        f"fit_path: {len(hit)} of {len(findings)} path points (lambda {points}) carry the "
+        f"runtime separation finding. At lambda {float(lambdas[hit[0]]):.4g}: {findings[hit[0]]}"
+    )
+
+
+def format_drop1_runtime_message(findings: Sequence[tuple[str, str]]) -> str | None:
+    """One statement for ``drop1``: the dropped features whose comparison fit has a runtime finding."""
+    if not findings:
+        return None
+    if len(findings) == 1:
+        opening = (
+            f"the comparison fit without {findings[0][0]!r} carries the runtime separation "
+            "finding, so the deviance change and test for dropping it compare"
+        )
+    else:
+        names = " and ".join(f"without {name!r}" for name, _ in findings)
+        opening = (
+            f"the comparison fits {names} each carry the runtime separation finding, so the "
+            "deviance change and test for dropping each compare"
+        )
+    return (
+        f"drop1: {opening} with a fit that is not a maximum-likelihood fit. "
+        f"Without {findings[0][0]!r}: {findings[0][1]}"
+    )
 
 
 @dataclass(frozen=True)
@@ -261,6 +418,35 @@ def format_separation_message(findings: list[SeparatedTerm]) -> str:
     return "\n".join(lines)
 
 
+def runtime_finding(
+    design: Any,
+    groups: list,
+    beta: NDArray,
+    *,
+    ratio: float,
+    n_iter: int,
+    exhausted_stagnant: bool,
+    eta: NDArray,
+    eta_unclipped: NDArray,
+    weights: NDArray,
+) -> str | None:
+    """The runtime backstop's finding on one coefficient state, or ``None`` (issue #341).
+
+    Under an extreme working-weight range (``ratio``), two terminal signatures
+    mark a coefficient walking toward +/-infinity: the linear predictor pinned
+    at the link's guard on rows that carry weight, and an exhausted budget at a
+    stagnant deviance (``exhausted_stagnant``).  The guard is read as it
+    stands, offset included, so a row its offset alone holds there counts too.
+    """
+    if not ratio > EXTREME_WEIGHT_RATIO:
+        return None
+    pinned = bool(np.any((eta != eta_unclipped) & (weights > 0)))
+    if not (pinned or exhausted_stagnant):
+        return None
+    drifting = drifting_groups(design, groups, beta, eta, eta_unclipped, weights)
+    return format_runtime_message(ratio, n_iter, drifting, pinned)
+
+
 def drifting_groups(
     design: Any,
     groups: list,
@@ -350,11 +536,11 @@ def emit_separation_findings(findings: list[SeparatedTerm], mode: str) -> None:
         return
     message = format_separation_message(findings)
     if mode == "error":
-        raise SeparationError(message)
+        raise SeparationError(message, levels=True)
     # stacklevel points past the builder into the user's fit call region; the
     # exact frame depth varies by entrypoint, so the message carries the term
     # names rather than relying on the reported line.
-    warnings.warn(message, SeparationWarning, stacklevel=3)
+    warn_separation(message, stacklevel=3)
 
 
 def emit_curve_separation(curves: list, mode: str) -> None:
@@ -363,8 +549,8 @@ def emit_curve_separation(curves: list, mode: str) -> None:
         return
     message = format_curve_separation(curves)
     if mode == "error" and any(curve.refusable for curve in curves):
-        raise SeparationError(message)
-    warnings.warn(message, SeparationWarning, stacklevel=3)
+        raise SeparationError(message, levels=True)
+    warn_separation(message, stacklevel=3)
 
 
 def validate_separation_mode(mode: str) -> str:
@@ -372,6 +558,13 @@ def validate_separation_mode(mode: str) -> str:
 
     if mode not in ("warn", "error", "ignore"):
         raise ValueError(f"separation must be 'warn', 'error', or 'ignore', got {mode!r}")
+    return mode
+
+
+def validate_solver_separation_mode(mode: str) -> str:
+    """``validate_separation_mode`` for an exported solver, which also takes ``"record"``."""
+    if mode not in ("warn", "error", "ignore", "record"):
+        raise ValueError(f"separation must be 'warn', 'error', 'ignore', or 'record', got {mode!r}")
     return mode
 
 
@@ -587,13 +780,12 @@ def emit_level_curve_separation(terms: list) -> None:
     """
     if terms:
         lines = "; ".join(f"{name!r} levels {_format_labels(labels)}" for name, labels in terms)
-        warnings.warn(
+        warn_separation(
             "Separation in a varying-coefficient term: these levels' own curves separate the "
             f"response and have no finite estimate: {lines}. Predictions hold each such curve "
             "at its values over the x range of the level's rows, as extrapolation='clip' "
             "does; merging the levels (Categorical(grouping=...)) or a penalized term "
             "(FactorSmooth) gives them finite curves.",
-            SeparationWarning,
             stacklevel=3,
         )
 

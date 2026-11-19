@@ -17,6 +17,7 @@ from numpy.typing import NDArray
 
 from superglm._group_matrix._lookup_tables import release_lookup_plan
 from superglm._utils import _explained_deviance, weighted_row_sum
+from superglm.diagnostics.separation import refuse_published_separation, refuses_on_publication
 from superglm.distributions import (
     Distribution,
     NegativeBinomial,
@@ -106,7 +107,10 @@ class PathResult:
     seconds or less) loses visible digits.  The fitted model predicts at the
     last point with the centred predictor; to predict at point ``i``, refit at
     ``selection_penalty=lambda_seq[i]``, which reproduces the point to the
-    solver's ``tol``.
+    solver's ``tol``.  ``separation_path`` holds each point's runtime
+    separation finding, ``None`` where its solve had none; ``fit_path`` warns
+    once naming the points that have one, or refuses under
+    ``separation="error"``.
     """
 
     lambda_seq: NDArray  # shape (n_lambda,)
@@ -116,6 +120,7 @@ class PathResult:
     n_iter_path: NDArray  # shape (n_lambda,) — PIRLS iters per lambda
     converged_path: NDArray  # shape (n_lambda,) — bool
     edf_path: NDArray | None = None  # shape (n_lambda,) — effective df
+    separation_path: tuple[str | None, ...] | None = None  # per point, or None
 
     def __post_init__(self) -> None:
         normalized = {
@@ -129,6 +134,9 @@ class PathResult:
                 None
                 if self.edf_path is None
                 else _immutable_path_array(self.edf_path, dtype=np.float64)
+            ),
+            "separation_path": (
+                None if self.separation_path is None else tuple(self.separation_path)
             ),
         }
         for name, value in normalized.items():
@@ -146,6 +154,7 @@ class PathResult:
                 self.n_iter_path,
                 self.converged_path,
                 self.edf_path,
+                self.separation_path,
             ),
         )
 
@@ -369,6 +378,7 @@ def _compute_null_mu(
             _return_working_system=True,
             _compute_fit_statistics=False,
             _compute_reml_geometry=False,
+            separation="ignore",
             weight_semantics=weight_semantics,
         )
         eta_null = stabilize_eta(null_result.intercept + offset, link)
@@ -650,10 +660,10 @@ def _record_unidentified_factor_smooth_levels(model, sample_weight, y=None, *, s
     import warnings
 
     from superglm.diagnostics.separation import (
-        SeparationWarning,
         format_factor_smooth_canonical,
         format_factor_smooth_separation,
         response_boundaries,
+        warn_separation,
     )
     from superglm.features.factor_smooth import FactorSmooth, share_group_levels
     from superglm.group_matrix import FactorSmoothGroupMatrix
@@ -669,9 +679,8 @@ def _record_unidentified_factor_smooth_levels(model, sample_weight, y=None, *, s
         separated = spec._record_unidentified_levels(matrix, sample_weight, y, boundaries)
         if separated and mode != "ignore":
             labels = [spec._levels[code] for code in separated]
-            warnings.warn(
+            warn_separation(
                 format_factor_smooth_separation(group.name, labels, len(spec._levels)),
-                SeparationWarning,
                 stacklevel=level,
             )
         if spec._population_convention == "canonical":
@@ -860,7 +869,8 @@ def _resolve_interaction_reml_mode(model, interaction_mode: str, max_reml_iter: 
 
 
 def _canonicalize_fitted_model(model, profile: dict) -> None:
-    """Canonicalize the public runtime state and profile its cost."""
+    """Refuse a strict fit's runtime finding, then canonicalize the public state and profile it."""
+    refuse_published_separation(model, model._result)
     t0 = time.perf_counter()
     runtime_canonicalize.canonicalize_fitted_model(model)
     profile["fit_runtime_canonicalize_s"] = time.perf_counter() - t0
@@ -1430,6 +1440,7 @@ def _solve_coefficients(
     reml_penalties=None,
     compute_rank_info=True,
     _weight_unit=True,
+    separation="record",
 ):
     """Apply the ordinary fit policy for selecting the coefficient solver.
 
@@ -1437,6 +1448,8 @@ def _solve_coefficients(
     (RandomEffect, FactorSmooth) to the direct solver, whose penalty-matrix
     fallback omits them. ``compute_rank_info=False`` skips the direct
     solver's retained-fit rank metadata, for a fit that is never published.
+    ``separation`` is the solver's mode: ``"record"``, or ``"error"`` for the
+    solve of a fit that refuses its finding at once (``refuses_on_publication``).
     """
     if _uses_direct_solver(model, penalty, has_lambda1_targets):
         result, _ = fit_irls_direct(
@@ -1455,7 +1468,7 @@ def _solve_coefficients(
             record_diagnostics=record_diagnostics,
             direct_solve=model._direct_solve,
             convergence=convergence,
-            separation=getattr(model, "_separation", "warn"),
+            separation=separation,
             weight_semantics=model_weight_semantics(model),
             reml_penalties=reml_penalties,
             compute_rank_info=compute_rank_info,
@@ -1480,7 +1493,7 @@ def _solve_coefficients(
         lambda2=lambda2,
         record_diagnostics=record_diagnostics,
         convergence=convergence,
-        separation=getattr(model, "_separation", "warn"),
+        separation=separation,
         weight_semantics=model_weight_semantics(model),
     )
 
@@ -1520,6 +1533,7 @@ def fit(
         max_iter=max_iter,
         convergence=convergence,
         record_diagnostics=record_diagnostics,
+        published=not getattr(model, "_discarded_fit", False),
     )
     candidate = capture_fit_state(
         workspace,
@@ -1545,8 +1559,14 @@ def _fit_in_workspace(
     max_iter=None,
     convergence=None,
     record_diagnostics=False,
+    published=True,
 ):
-    """Build, solve, and finalize an ordinary fit on private mutable state."""
+    """Build, solve, and finalize an ordinary fit on private mutable state.
+
+    The fit of a call that returns it (``published``) refuses a runtime
+    separation finding inside its solve under ``"error"``, before any
+    statement about the fit is made.
+    """
     # Resolve fit controls: explicit kwargs > constructor fallback
     tol = tol if tol is not None else model._tol
     max_iter = max_iter if max_iter is not None else model._max_iter
@@ -1595,6 +1615,7 @@ def _fit_in_workspace(
         tol=tol,
         record_diagnostics=record_diagnostics,
         convergence=convergence,
+        separation="error" if published and refuses_on_publication(model) else "record",
     )
 
     # Fix phi for known-scale families (Poisson): phi is always 1.0.
@@ -1660,10 +1681,15 @@ def fit_path(
         lambda_ratio=lambda_ratio,
         lambda_seq=lambda_seq,
     )
+    from superglm.diagnostics.separation import format_path_runtime_message
+
     candidate = capture_fit_state(
         workspace,
         model,
         revision=model._fit_revision + 1,
+        separation_statement=format_path_runtime_message(
+            path_result.lambda_seq, path_result.separation_path
+        ),
     )
     _install_fit_state(model, candidate)
     return path_result
@@ -1759,6 +1785,7 @@ def _fit_path_in_workspace(
         n_iter_path=path_data["n_iter_path"],
         converged_path=path_data["converged_path"],
         edf_path=path_data["edf_path"],
+        separation_path=tuple(path_data["separation_path"]),
     )
     return path_result
 
@@ -1831,11 +1858,9 @@ def fit_reml(
     if getattr(model, "_separation", "warn") != "ignore":
         separation_message = _random_effect_separation_hazard(model, X, y, sample_weight)
         if separation_message is not None:
-            import warnings
+            from superglm.diagnostics.separation import warn_separation
 
-            from superglm.diagnostics.separation import SeparationWarning
-
-            warnings.warn(separation_message, SeparationWarning, stacklevel=3)
+            warn_separation(separation_message, stacklevel=3)
     validated_inputs = (X, y, sample_weight, offset)
     family_intent = configured_family(model)
     nb_auto = isinstance(family_intent, NegativeBinomial) and family_intent.theta == "auto"

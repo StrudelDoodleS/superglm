@@ -764,10 +764,11 @@ def publish_revised_coefficients(model, beta_before) -> None:
     c_pub') beta`` predicts the same rows; every other column carries no centre
     and nothing moves.  The solver state is then read from the published one
     (``_read_solver_state_from_public``) and the fitted mode's identity is
-    cleared.  The pair is carried, never dropped: clearing it dropped every
-    dense column's centring (Sol's review of #445, P2), and keeping the
-    solver's pre-revision pair beside it left the solver predictor at the old
-    coefficients (#447).
+    cleared, with the runtime separation finding, a statement about the state
+    the solve returned.  The pair is carried, never dropped: clearing it
+    dropped every dense column's centring (Sol's review of #445, P2), and
+    keeping the solver's pre-revision pair beside it left the solver predictor
+    at the old coefficients (#447).
     """
     _carry_revised_columns(model, beta_before)
     _read_solver_state_from_public(model)
@@ -786,6 +787,7 @@ def publish_revised_coefficients(model, beta_before) -> None:
             ("termination_reason", "coefficients_revised"),
             ("scop_inference", None),
             ("scop_geometry", None),
+            ("separation_message", None),
         ):
             if hasattr(result, field_name):
                 setattr(result, field_name, value)
@@ -1105,8 +1107,27 @@ def capture_fit_state(
     *,
     revision: int,
     config_publication: ModelConfigPublication | None = None,
+    separation_statement: str | None = None,
 ) -> FitCandidate:
-    """Transfer one complete workspace into a candidate without row-scale copies."""
+    """Transfer one complete workspace into a candidate without row-scale copies.
+
+    Every solved fit is published through here, so this is where its runtime
+    separation finding, read from the coefficient state it publishes, is
+    disclosed under the model's ``separation`` mode.  A call that returns more
+    than that state passes its own ``separation_statement`` (``fit_path``, for
+    every point it returns).  A fit another call runs and discards
+    (``_discarded_fit``: a power-search candidate, a ``drop1`` comparison)
+    discloses nothing.
+    """
+    if not getattr(public_model, "_discarded_fit", False):
+        from superglm.diagnostics.separation import disclose_runtime_separation
+
+        if separation_statement is None:
+            result = getattr(workspace.model, "_result", None)
+            separation_statement = getattr(result, "separation_message", None)
+        disclose_runtime_separation(
+            separation_statement, getattr(workspace.model, "_separation", "warn")
+        )
     design = getattr(workspace.model, "_dm", None)
     release_raw_splines = getattr(design, "release_raw_spline_tabmat_plan", None)
     if release_raw_splines is not None:

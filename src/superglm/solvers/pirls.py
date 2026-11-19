@@ -350,6 +350,12 @@ class PIRLSResult:
     # Class defaults also restore results saved before these fields existed.
     weight_exponent: int = 0
     solver_phi: float | None = None
+    # The runtime separation backstop's statement about this returned state
+    # (``separation.runtime_finding``), or None.  Recorded by every solve not run
+    # under separation="ignore"; of a model's solves, only the published fit's is
+    # shown (``disclose_runtime_separation``).  A coefficient revision clears it,
+    # since no solve returned the revised state (``publish_revised_coefficients``).
+    separation_message: str | None = None
 
     def __setattr__(self, name: str, value: object) -> None:
         if self.__dict__.get("_publication_locked", False):
@@ -1842,20 +1848,25 @@ def _fit_pirls_inner(
 
     # Runtime separation backstop (issue #341): a predictor pinned at the link's
     # overflow guard, or an exhausted budget with a frozen objective, under an
-    # exploded weight range, marks a coefficient drifting to infinity.
+    # exploded weight range, marks a coefficient drifting to infinity
+    # (``separation.runtime_finding``).  Recorded on the returned state, and
+    # warned or refused here under "warn" or "error", as irls_direct does.
+    separation_message = None
     if separation != "ignore" and np.isfinite(dev):
         from superglm.diagnostics.separation import (
-            EXTREME_WEIGHT_RATIO,
             STAGNANT_DEVIANCE_DELTA,
             SeparationError,
             SeparationWarning,
-            drifting_groups,
-            format_runtime_message,
+            runtime_finding,
         )
 
-        if w_ratio > EXTREME_WEIGHT_RATIO:
-            pinned = bool(np.any((retained.eta != retained.eta_unclipped) & (weights > 0)))
-            exhausted_stagnant = (
+        separation_message = runtime_finding(
+            dm,
+            groups,
+            beta,
+            ratio=w_ratio,
+            n_iter=outer + 1,
+            exhausted_stagnant=(
                 not converged
                 # A mean-space boundary stop sits at a finite constrained
                 # maximum, not a drift; 0.37.1 read it converged here, and the
@@ -1869,15 +1880,15 @@ def _fit_pirls_inner(
                 and not step_rejected
                 and objective_relative_change is not None
                 and objective_relative_change < STAGNANT_DEVIANCE_DELTA
-            )
-            if pinned or exhausted_stagnant:
-                drifting = drifting_groups(
-                    dm, groups, beta, retained.eta, retained.eta_unclipped, weights
-                )
-                message = format_runtime_message(w_ratio, outer + 1, drifting, pinned)
-                if separation == "error":
-                    raise SeparationError(message)
-                warnings.warn(message, SeparationWarning, stacklevel=2)
+            ),
+            eta=retained.eta,
+            eta_unclipped=retained.eta_unclipped,
+            weights=weights,
+        )
+        if separation_message is not None and separation == "error":
+            raise SeparationError(separation_message)
+        if separation_message is not None and separation == "warn":
+            warnings.warn(separation_message, SeparationWarning, stacklevel=2)
     extra = ""
     if active_set:
         total_group_updates = total_inner_iters * n_groups
@@ -2083,6 +2094,7 @@ def _fit_pirls_inner(
         centred_intercept=None if state_center is None else retained.centred_intercept,
         state_center=None if state_center is None else state_center.copy(),
         mean_space_boundary_rows=boundary_rows,
+        separation_message=separation_message,
     )
 
 
@@ -2122,7 +2134,15 @@ def fit_pirls(
     1. Fit with uniform weights → beta_init
     2. Flavor adjusts group weights based on beta_init
     3. Refit with adjusted weights (warm started from stage 1)
+
+    ``separation`` governs the runtime separation backstop as in
+    ``fit_irls_direct``: ``"warn"`` (default), ``"error"``, ``"ignore"``, or
+    ``"record"``, under which the finding only rides on the result, for the
+    fit that publishes it.
     """
+    from superglm.diagnostics.separation import validate_solver_separation_mode
+
+    validate_solver_separation_mode(separation)
     if max_iter_outer < 1:
         raise ValueError(f"max_iter_outer must be at least 1, got {max_iter_outer}")
     if max_iter_inner < 1:

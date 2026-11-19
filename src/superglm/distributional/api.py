@@ -29,6 +29,7 @@ from superglm.diagnostics.convergence import (
     lss_nonconvergence_message,
 )
 from superglm.diagnostics.fit_report import FitDiagnosticReport
+from superglm.diagnostics.separation import disclosure_scope
 from superglm.distributional._common import json_number, row_index
 from superglm.distributional.binding import (
     BoundPredictor,
@@ -585,7 +586,14 @@ class SuperLSS:
         # The profile is the fit's own stretch of the recorder: a caller's
         # phases open around it stay out, and its measurements during it count once.
         positions: list[np.ndarray] = []
-        with solver_blas_threads(), fit_pool(), recorder._fit_window() as window:
+        # A fit call of its own, inside another model's (a progress callback's
+        # fit): it names its own separation findings (``disclosure_scope``).
+        with (
+            solver_blas_threads(),
+            fit_pool(),
+            disclosure_scope(self),
+            recorder._fit_window() as window,
+        ):
             candidate = fit_dense_distributional(
                 X,
                 y,

@@ -309,9 +309,9 @@ therefore the same model.
   population curve, and `predict` names it.
 - No level's line is unpenalized, so the fit gives no `SeparationWarning`
   that names this term's levels, and no warning for thin levels.
-- A fit can still report a separation warning from the solver during the
-  smoothing-parameter search, before the lines' smoothing parameter grows.
-  The final curves are bounded.
+- The solver's separation warning describes the fitted model only, so a
+  trial of the smoothing-parameter search that lets a line run off before its
+  smoothing parameter grows does not report one. The final curves are bounded.
 - The penalty shrinks every level's line, not just the separated ones, so it
   changes the other levels' curves and the term's effective degrees of
   freedom.
@@ -422,10 +422,14 @@ when interactions are on the table.
 ```
 
 Separation the design scan cannot see — for example a numeric 0/1 indicator
-column whose active rows have no positive response — is caught at the end of
-the solve instead: a fit whose linear predictor is pinned at the link's
+column whose active rows have no positive response — is caught on the fitted
+model instead: a fit whose returned linear predictor is pinned at the link's
 overflow guard with an extreme working-weight range reports the same
-`SeparationWarning` (or `SeparationError` under `separation="error"`).
+`SeparationWarning` once (or `SeparationError` under `separation="error"`).
+The trial solves of a smoothing-parameter, θ or power search are not
+reported; only the fit you get back is. The backstop reads the guard, offset
+included, so a row that its offset alone holds there (an exposure far below the
+rest, say) is reported too, although no coefficient runs off.
 This backstop fires only when the walk reaches the guard or exhausts a
 real iteration budget: a deviance-converged stop at moderate drift, and
 binomial-logit numeric indicators generally (the logit eta clip keeps the

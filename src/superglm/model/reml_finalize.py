@@ -15,6 +15,7 @@ from superglm._reporting_state import (
     StructuredLevelSupport,
     build_reporting_support_state,
 )
+from superglm.diagnostics.separation import refuse_published_separation
 from superglm.distributions import Gamma, Gaussian, Tweedie, clip_mu
 from superglm.links import stabilize_eta
 from superglm.model.base import rebuild_dm_with_lambdas
@@ -371,6 +372,7 @@ def maybe_qp_passthrough_refit(
         reml_penalties=reml_penalties,
         trace_run=trace_run,
         trace_purpose="reml_qp_final",
+        separation="record",
         weight_semantics=model_weight_semantics(model),
     )
     return qp_output[0]
@@ -634,6 +636,7 @@ def finalize_reml_fit(
         reml_penalties=reml_penalties,
         trace_run=trace_run,
         trace_purpose="reml_final",
+        separation="record",
         weight_semantics=model_weight_semantics(model),
         _laplace_excluded=tuple(int(index) for index in identified.weak),
         _mode_bar=terminal_bar,
@@ -967,6 +970,8 @@ def finalize_reml_fit(
     corrected = replace(final_pirls, phi=phi_fixed)
     model._result = corrected
     model._reml_result.pirls_result = corrected
+    # Under "error" a separated fit is refused before anything describes it.
+    refuse_published_separation(model, corrected)
     _disclose_weak_identification(
         model,
         profile=profile,

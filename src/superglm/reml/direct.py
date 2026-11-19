@@ -21,6 +21,10 @@ from numpy.typing import NDArray
 from superglm._fit_trace import TraceRun
 from superglm._lambda_box import LambdaBox, bound_pressure, glm_lambda_box
 from superglm._roundoff import NEWTON_EIGENVALUE_FLOOR
+from superglm.diagnostics.separation import (
+    disclose_solver_separation,
+    validate_solver_separation_mode,
+)
 from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
 from superglm.group_matrix import DesignMatrix
 from superglm.links import CloglogLink, LogitLink, LogLink, ProbitLink
@@ -278,6 +282,7 @@ def optimize_direct_reml(
     warm_lambdas: Mapping[str, float] | None = None,
     presolve: bool | None = None,
     lambda_box: LambdaBox | None = None,
+    separation: str = "warn",
 ) -> REMLResult:
     """Optimize the direct REML objective via damped Newton (Wood 2011).
 
@@ -297,7 +302,13 @@ def optimize_direct_reml(
     ``discrete=False`` runs W(rho)-corrected direct REML; ``discrete=True``
     delegates to ``optimize_discrete_reml_cached_w``, the bam-style cached-W
     optimizer.
+
+    ``separation`` governs the runtime separation finding on the returned
+    state as ``fit_irls_direct``'s keyword does: ``"warn"`` (default) warns
+    at the caller, ``"error"`` refuses, ``"ignore"`` and ``"record"`` say
+    nothing.  Its trial and candidate solves only record.
     """
+    validate_solver_separation_mode(separation)
 
     # The declared contract's likelihood size (``lazy_likelihood_size``).
     _contract_size = lazy_likelihood_size(sample_weight, weight_semantics=weight_semantics)
@@ -352,6 +363,7 @@ def optimize_direct_reml(
             trace_run=trace_run,
             warm_lambdas=warm_lambdas,
             lambda_box=box,
+            separation=separation,
         )
 
     scale_known = getattr(distribution, "scale_known", True)
@@ -534,6 +546,7 @@ def optimize_direct_reml(
             start_out=presolve_start,
             start_objective_tol=_PRESOLVE_OBJECTIVE_TOL,
             lambda_box=box,
+            separation="record",
         )
         warm_lambdas = {
             **(warm_lambdas or {}),
@@ -637,6 +650,7 @@ def optimize_direct_reml(
             trace_run=trace_run,
             trace_purpose="reml_bootstrap",
             _compensate_centred_intercept=False,
+            separation="record",
             weight_semantics=weight_semantics,
             _initial_data_reuse=initial_data_reuse,
             _raw_moment_policy=raw_moment_policy,
@@ -801,6 +815,7 @@ def optimize_direct_reml(
             trace_run=trace_run,
             trace_purpose="reml_candidate",
             _compensate_centred_intercept=False,
+            separation="record",
             weight_semantics=weight_semantics,
             _initial_data_reuse=initial_data_reuse,
             _raw_moment_policy=raw_moment_policy,
@@ -1639,6 +1654,7 @@ def optimize_direct_reml(
                     trace_run=trace_run,
                     trace_purpose="reml_line_search",
                     _compensate_centred_intercept=False,
+                    separation="record",
                     weight_semantics=weight_semantics,
                     _initial_data_reuse=initial_data_reuse,
                     _raw_moment_policy=raw_moment_policy,
@@ -2059,6 +2075,7 @@ def optimize_direct_reml(
         profile["reml_laplace_excluded"] = identified.disclosed
         profile["reml_laplace_exclusion_unsupported"] = int(identified.unsupported)
 
+    disclose_solver_separation(getattr(best_pirls, "separation_message", None), separation)
     return REMLResult(
         lambdas=best_lambdas,
         pirls_result=best_pirls,
