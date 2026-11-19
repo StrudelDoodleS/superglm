@@ -15,7 +15,7 @@ import numba
 import numpy as np
 from scipy import stats
 
-from superglm._utils import occurrence_rows
+from superglm._utils import bin_rows, occurrence_rows, score_bins
 from superglm.plotting.common import (
     _LINE_COLOR,
     _LINE_WIDTH,
@@ -55,13 +55,20 @@ def _lowess_core(x_s, y_s, k, n_steps):
 
             right = min(left + k, n)
             h = max(x_s[i] - x_s[left], x_s[right - 1] - x_s[i]) + 1e-10
+            # The weights are a function of distance: a row tied with an end
+            # of the window is as near as that end and joins it.
+            lo, hi = left, right
+            while lo > 0 and x_s[lo - 1] == x_s[left]:
+                lo -= 1
+            while hi < n and x_s[hi] == x_s[right - 1]:
+                hi += 1
 
             sw = 0.0
             swx = 0.0
             swy = 0.0
             swxx = 0.0
             swxy = 0.0
-            for j in range(left, right):
+            for j in range(lo, hi):
                 u = abs(x_s[j] - x_s[i]) / h
                 if u < 1.0:
                     u3 = u * u * u
@@ -351,15 +358,9 @@ def _trend_line(ax, x, y, n, rng):
 
 def _binned_median_line(ax, x, y, n_bins=_BIN_COUNT):
     """Plot median trend using equal-count bins."""
-    order = np.argsort(x)
-    x_s, y_s = x[order], y[order]
-    edges = np.array_split(np.arange(len(x_s)), n_bins)
-    mids, medians = [], []
-    for e in edges:
-        if len(e) == 0:
-            continue
-        mids.append(np.median(x_s[e]))
-        medians.append(np.median(y_s[e]))
+    _, groups = bin_rows(score_bins(x, np.ones(len(x)), n_bins))
+    mids = [np.median(x[group]) for group in groups]
+    medians = [np.median(y[group]) for group in groups]
     ax.plot(mids, medians, color=_SPECIAL_COLOR, linewidth=_LINE_WIDTH)
 
 
@@ -403,33 +404,11 @@ def _stratified_sample(mu, n_sample, rng):
 
 def _panel_calibration(ax, y, mu, w, n_bins=20):
     """Panel 2: Weight-balanced calibration by predicted-value bins."""
-    order = np.argsort(mu)
-    mu_s, y_s, w_s = mu[order], y[order], w[order]
-
-    # Equal-weight-mass bins
-    cum_w = np.cumsum(w_s)
-    total_w = cum_w[-1]
-    bin_edges = np.linspace(0, total_w, n_bins + 1)
-    bin_idx = np.searchsorted(cum_w, bin_edges[1:], side="left")
-    bin_idx = np.clip(bin_idx, 0, len(mu_s) - 1)
-
-    pred_means, obs_means = [], []
-    start = 0
-    for end in bin_idx:
-        end = min(end + 1, len(mu_s))
-        if end <= start:
-            start = end
-            continue
-        sl = slice(start, end)
-        wb = w_s[sl]
-        wb_sum = wb.sum()
-        if wb_sum > 0:
-            pred_means.append(float(np.sum(wb * mu_s[sl]) / wb_sum))
-            obs_means.append(float(np.sum(wb * y_s[sl]) / wb_sum))
-        start = end
-
-    pred_means = np.array(pred_means)
-    obs_means = np.array(obs_means)
+    codes = score_bins(mu, w, n_bins)
+    mass = np.bincount(codes, weights=w, minlength=n_bins)
+    filled = mass > 0
+    pred_means = np.bincount(codes, weights=w * mu, minlength=n_bins)[filled] / mass[filled]
+    obs_means = np.bincount(codes, weights=w * y, minlength=n_bins)[filled] / mass[filled]
 
     # Calibration scatter + y=x
     ax.scatter(
@@ -442,7 +421,7 @@ def _panel_calibration(ax, y, mu, w, n_bins=20):
     ax.plot(lims, lims, color=_REF_COLOR, linewidth=0.8, linestyle="--", label="y = x")
     ax.set_xlabel("Predicted (bin mean)")
     ax.set_ylabel("Observed (bin mean)")
-    ax.set_title(f"Calibration ({n_bins} equal-weight bins)")
+    ax.set_title(f"Calibration ({len(pred_means)} equal-weight bins)")
     ax.legend(fontsize=7, loc="upper left")
 
 
@@ -469,8 +448,9 @@ def plot_diagnostics(
     1. **Q-Q with simulation envelope** — observed quantile residuals vs
        simulated reference, with 95% pointwise envelope.
     2. **Calibration** — observed vs predicted values in equal-weight bins.
-       Integer replication weights are represented as replicated rows; prior
-       weights are used as mass.
+       Rows with one predicted value share a bin, so tied predictions give
+       fewer, uneven bins. Integer replication weights are represented as
+       replicated rows; prior weights are used as mass.
     3. **Residuals vs Linear Predictor** — quantile residuals vs eta.
     4. **Residual distribution** — histogram with N(0,1) overlay.
 

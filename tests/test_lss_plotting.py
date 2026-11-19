@@ -748,6 +748,22 @@ def test_diagnostics_worm_annotation_sits_in_a_halo_box(case) -> None:
     assert annotation.get_va() == "top"
 
 
+def test_residual_sd_panel_reads_each_tied_scale_tier_whole() -> None:
+    """Rows sharing a fitted scale share a bin: one sd per tier, in any row order."""
+    from superglm.plotting.distributional import _draw_residual_sd
+
+    x = np.repeat([-1.0, 0.0, 0.5], [30, 50, 20])
+    y = np.random.default_rng(6).normal(size=100)
+    expected = [np.std(y[:30], ddof=1), np.std(y[30:80], ddof=1), np.std(y[80:], ddof=1)]
+    for rows in (np.arange(100), np.random.default_rng(7).permutation(100)):
+        fig, ax = plt.subplots()
+        assert _draw_residual_sd(ax, x[rows], y[rows]) == 3
+        line = ax.get_lines()[-1]
+        np.testing.assert_array_equal(line.get_xdata(), [-1.0, 0.0, 0.5])
+        np.testing.assert_allclose(line.get_ydata(), expected, rtol=1e-13)
+        plt.close(fig)
+
+
 def test_diagnostics_figure_hexbins_above_max_points(case) -> None:
     fitted, frame, _, residuals = case
     qq = qq_payload(fitted, residuals, n_sim=20, X=frame, seed=3)

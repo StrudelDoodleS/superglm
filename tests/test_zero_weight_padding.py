@@ -107,11 +107,6 @@ BINNING = (
     "actual_expected bins the covariate into equal counts of physical rows, so a frequency "
     "weight does not move the bin edges the way a replicated row does"
 )
-LIFT_BINNING = (
-    "lift_chart cuts its equal-exposure bins on row boundaries, so a row of weight 3 sits whole "
-    "in one bin where three replicated rows can fall in two (bin exposure shares move by 0.004 "
-    "on 0.1, observed rates by 0.09 on 4.9)"
-)
 
 
 # ---- reading outputs --------------------------------------------------------------------------
@@ -630,9 +625,8 @@ def _cases(frequency):
             if name in CENTERING:
                 reason = f"{_CONVENTION}: {CENTERING[name]}"
                 marks = [pytest.mark.xfail(strict=True, raises=AssertionError, reason=reason)]
-            if frequency and name in ("actual_expected", "lift_chart"):
-                reason = BINNING if name == "actual_expected" else LIFT_BINNING
-                marks = [pytest.mark.xfail(strict=True, raises=AssertionError, reason=reason)]
+            if frequency and name == "actual_expected":
+                marks = [pytest.mark.xfail(strict=True, raises=AssertionError, reason=BINNING)]
             yield pytest.param(case, name, call, marks=marks, id=f"{case}-{name}")
 
 

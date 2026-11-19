@@ -34,6 +34,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
+from superglm._utils import score_bins
 from superglm.distributional._common import readonly
 from superglm.distributional.checks._aggregate import grouped_ratio
 
@@ -65,12 +66,8 @@ from superglm.distributional.residuals import (
     compute_residuals,
 )
 from superglm.distributional.response import require_scalar_response
-
-# ``_equal_count_bins`` splits by rank, so a decile table stays ten rows wide
-# even for a constant parameter.
 from superglm.distributional.surfaces import (
     SCHEMA_VERSION,
-    _equal_count_bins,
     _json_frame,
     _json_vector,
 )
@@ -582,10 +579,12 @@ def _overall(rows: int) -> _Grouping:
 
 
 def _decile_grouping(values: NDArray, name: str) -> _Grouping:
-    codes, _ = _equal_count_bins(np.asarray(values, dtype=np.float64), _DECILES)
+    """The filled equal-count deciles of ``values``; rows of one value share a decile."""
+    deciles = score_bins(values, np.ones(len(values)), _DECILES)
+    filled, codes = np.unique(deciles, return_inverse=True)
     return _Grouping(
-        tuple(f"{name}:decile {index}" for index in range(1, _DECILES + 1)),
-        np.asarray(codes, dtype=np.intp),
+        tuple(f"{name}:decile {index + 1}" for index in filled.tolist()),
+        codes.astype(np.intp),
     )
 
 
@@ -607,11 +606,12 @@ def calibration_payload(
 
     ``by_parameter_deciles`` adds one row per decile of each predicted
     parameter to the coverage table and per decile of the predicted
-    exceedance probability to the tail table. Passed ``residuals`` are reused
-    after checking they match this model, sample and weights. Coverage and
-    quantile calibration read the randomised PIT when the family declares an
-    atom (or the residuals are randomised), else the response;
-    ``calibration_law`` records which.
+    exceedance probability to the tail table. Rows sharing a predicted value
+    share a decile, so tied values give uneven deciles, and a decile left empty
+    has no row. Passed ``residuals`` are reused after checking they match this
+    model, sample and weights. Coverage and quantile calibration read the
+    randomised PIT when the family declares an atom (or the residuals are
+    randomised), else the response; ``calibration_law`` records which.
     """
     asked_levels = tuple(_validated_probability("level", value) for value in levels)
     asked_grid = tuple(_validated_probability("p", value) for value in quantile_grid)

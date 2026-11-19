@@ -720,3 +720,52 @@ class TestWeightContractDiagnostics:
         finally:
             plt.close(weighted_figure)
             plt.close(repeated_figure)
+
+
+class TestTiedPredictions:
+    """Rows sharing a prediction share every bin and neighbourhood, whatever their order."""
+
+    def test_calibration_puts_one_prediction_in_one_bin(self):
+        """Two rows predicting one rate, 2,000 copies each, one without an event and one with."""
+        rng = np.random.default_rng(5)
+        X, y = _make_binomial_data(rng, n=200)
+        model = SuperGLM(
+            family="binomial",
+            features={"x": Numeric()},
+            selection_penalty=0.0,
+            weight_semantics="frequency",
+        ).fit(X, y)
+        frame = pd.DataFrame({"x": [0.3, 0.3]})
+        fig = model.plot_diagnostics(
+            frame, np.array([0.0, 1.0]), sample_weight=np.full(2, 2000.0), n_sim=1
+        )
+        try:
+            points = fig.get_axes()[1].collections[0].get_offsets()
+            np.testing.assert_allclose(points, [[model.predict(frame)[0], 0.5]], rtol=1e-12)
+        finally:
+            plt.close(fig)
+
+    def test_median_trend_reads_whole_tiers(self):
+        x = np.repeat([0.0, 1.0, 2.0], [30, 50, 20])
+        y = np.random.default_rng(6).normal(size=100)
+        tiers = [y[:30], y[30:80], y[80:]]
+        for rows in (np.arange(100), np.random.default_rng(7).permutation(100)):
+            fig, ax = plt.subplots()
+            diagnostics_module._binned_median_line(ax, x[rows], y[rows], n_bins=20)
+            line = ax.get_lines()[0]
+            np.testing.assert_array_equal(line.get_xdata(), [0.0, 1.0, 2.0])
+            np.testing.assert_allclose(line.get_ydata(), [np.median(t) for t in tiers])
+            plt.close(fig)
+
+    def test_lowess_neighbourhood_holds_every_tied_row(self):
+        """At one shared x every row is at distance zero, so all of them enter the local fit."""
+        y = np.random.default_rng(8).standard_t(3, size=60)
+        weights = np.ones(60)
+        for _ in range(3):  # Cleveland (1979): a fit, then two bisquare reweightings
+            fit = np.sum(weights * y) / np.sum(weights)
+            u = (y - fit) / (6.0 * np.median(np.abs(y - fit)))
+            weights = np.where(np.abs(u) < 1.0, (1.0 - u * u) ** 2, 0.0)
+        rows = np.random.default_rng(9).permutation(60)
+        for values in (y, y[rows]):
+            smooth = diagnostics_module._lowess(np.zeros(60), values)
+            np.testing.assert_allclose(smooth, fit, rtol=1e-13)

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import math
+from fractions import Fraction
 
 import matplotlib
 import numpy as np
@@ -424,6 +426,61 @@ class TestEdgeCases:
         y_pred = rng.normal(0, 1, 100)  # some negative
         result = lift_chart(y_obs, y_pred, n_bins=5)
         assert isinstance(result, LiftChartResult)
+
+
+def _tier_bins(score, mass, n_bins):
+    """Each distinct score's rows, whole, in bin ``ceil(n_bins * F) - 1`` (exact F)."""
+    levels, tier = np.unique(score, return_inverse=True)
+    tier_mass = [sum(map(Fraction, mass[tier == j].tolist())) for j in range(len(levels))]
+    through = np.cumsum(np.array(tier_mass, dtype=object))
+    bins = [math.ceil(n_bins * end / through[-1]) - 1 for end in through]
+    return np.asarray(bins)[tier]
+
+
+@pytest.mark.parametrize(
+    ("chart", "observed_name"),
+    [
+        (lambda y, pred, e: lift_chart(y, pred, exposure=e).bins, "observed"),
+        (
+            lambda y, pred, e: double_lift_chart(y, pred, np.full_like(y, 0.1), exposure=e).bins,
+            "actual_avg",
+        ),
+        (lambda y, pred, e: loss_ratio_chart(y, pred, exposure=e).bins, "observed"),
+    ],
+)
+def test_rows_sharing_a_score_share_a_bin_whatever_their_order(chart, observed_name):
+    """Six tariff rates, as an area-only tariff gives, on exposure that cuts every rate.
+
+    A within-rate reordering moves nothing, and each bin holds exactly the rates whose
+    exposure share ends in it, with their exposure-weighted observed rate.
+    """
+    rng = np.random.default_rng(20261119)
+    rates = np.array([0.05, 0.07, 0.09, 0.11, 0.14, 0.18])
+    tier = rng.choice(6, size=240, p=[0.1, 0.25, 0.2, 0.2, 0.15, 0.1])
+    predicted, exposure = rates[tier], rng.uniform(0.05, 1.0, 240)
+    observed = rng.poisson(4 * predicted * exposure) / exposure
+
+    table = chart(observed, predicted, exposure)
+    rows = rng.permutation(240)
+    pd.testing.assert_frame_equal(
+        chart(observed[rows], predicted[rows], exposure[rows]), table, check_exact=False, rtol=1e-13
+    )
+    bins = _tier_bins(predicted, exposure, 10)
+    filled = np.unique(bins)
+    np.testing.assert_array_equal(table["bin"], filled + 1)
+    np.testing.assert_allclose(
+        table[observed_name],
+        [
+            math.fsum(exposure[bins == b] * observed[bins == b]) / exposure[bins == b].sum()
+            for b in filled
+        ],
+        rtol=1e-13,
+    )
+    np.testing.assert_allclose(
+        table["exposure_share"],
+        [math.fsum(exposure[bins == b]) / math.fsum(exposure) for b in filled],
+        rtol=1e-13,
+    )
 
 
 @pytest.mark.parametrize(

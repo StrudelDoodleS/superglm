@@ -17,6 +17,7 @@ from typing import Any
 
 import numpy as np
 
+from superglm._utils import bin_rows, score_bins
 from superglm.plotting.editor_style import (
     BODY_PT,
     CHART,
@@ -353,9 +354,11 @@ def _equal_count_sd(x: Any, y: Any, n_bins: int = _TREND_BINS) -> tuple[np.ndarr
     """Bin ``x`` into equal-count bins and take the standard deviation of ``y``."""
     horizontal = np.asarray(x, dtype=np.float64)
     vertical = np.asarray(y, dtype=np.float64)
-    order = np.argsort(horizontal)
+    codes = score_bins(
+        horizontal, np.ones(len(horizontal)), min(int(n_bins), max(len(horizontal), 1))
+    )
     centers, spreads = [], []
-    for chunk in np.array_split(order, min(int(n_bins), max(len(order), 1))):
+    for chunk in bin_rows(codes)[1]:
         if len(chunk) < 2:
             continue
         centers.append(float(np.median(horizontal[chunk])))
@@ -1522,7 +1525,7 @@ def plotly_spread(payload: Any) -> go.Figure:
         cols=cols,
         title=(
             f"Parameter spread — exceedance of {payload.threshold:,.4g} "
-            f"over {payload.n_bins} price bins"
+            f"over {len(table)} price bins"
         ),
     )
 

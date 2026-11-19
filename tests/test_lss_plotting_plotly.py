@@ -865,6 +865,17 @@ def test_diagnostics_figure_boxes_the_worm_q_statistics_in_the_corner(qq, worm, 
     assert "mean" in note.text and "kurt" in note.text
 
 
+def test_residual_sd_trace_reads_each_tied_scale_tier_whole() -> None:
+    """Rows sharing a fitted scale share a bin: one sd per tier, in any row order."""
+    x = np.repeat([-1.0, 0.0, 0.5], [30, 50, 20])
+    y = np.random.default_rng(6).normal(size=100)
+    expected = [np.std(y[:30], ddof=1), np.std(y[30:80], ddof=1), np.std(y[80:], ddof=1)]
+    for rows in (np.arange(100), np.random.default_rng(7).permutation(100)):
+        centers, spreads = dp._equal_count_sd(x[rows], y[rows])
+        np.testing.assert_array_equal(centers, [-1.0, 0.0, 0.5])
+        np.testing.assert_allclose(spreads, expected, rtol=1e-13)
+
+
 def test_diagnostics_figure_bins_the_scatter_panels_above_max_points(qq, worm, pit, case) -> None:
     _, _, _, residuals = case
     fig = dp.plotly_diagnostics_figure(qq, worm, pit, residuals, max_points=10)

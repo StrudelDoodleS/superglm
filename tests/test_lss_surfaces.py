@@ -178,15 +178,16 @@ def _spread_stub(semantics="frequency"):
     )
 
 
-def test_review_frequency_spread_hand_calculated_fragments():
+def test_review_frequency_spread_hand_calculated_bins():
+    """A row's five copies are one price, so they share a bin."""
     X = pd.DataFrame({"mean": [0.0, 10.0, 20.0, 30.0], "tail": [0.1, 0.2, 0.8, 0.9]})
     counts = np.array([1, 5, 1, 1])
     result = parameter_spread(_spread_stub(), X, threshold=1, n_bins=2, sample_weight=counts)
     table = result.identically_priced
-    np.testing.assert_array_equal(table["n"], [4, 4])
+    np.testing.assert_array_equal(table["n"], [1, 7])
     np.testing.assert_allclose(
         table[["weight", "mean_lo", "mean_hi", "mean", "p_lo", "p_hi"]],
-        [[4, 0, 10, 7.5, 0.115, 0.2], [4, 10, 30, 17.5, 0.2, 0.885]],
+        [[1, 0, 0, 0, 0.1, 0.1], [7, 10, 30, 100 / 7, 0.2, 0.87]],
     )
     assert table["n"].dtype == np.int64
     for histogram, values in [
@@ -197,6 +198,31 @@ def test_review_frequency_spread_hand_calculated_fragments():
         np.testing.assert_array_equal(histogram.counts, expected)
         np.testing.assert_array_equal(histogram.edges, edges)
         assert histogram.counts.dtype == np.int64
+
+
+@pytest.mark.parametrize("semantics", ["frequency", "prior"])
+def test_rows_of_one_price_share_a_bin_whatever_their_order(semantics):
+    """One price, two tail risks (two fuels at one area rate), and a second price.
+
+    Each price's rows sit whole in the bin holding the top of its count, and the
+    bin's percentiles are those of the price's pooled tail probabilities, in any
+    row order.
+    """
+    tails = np.r_[np.full(60, 0.30), np.full(40, 0.36), np.full(25, 0.5)]
+    X = pd.DataFrame({"mean": np.r_[np.full(100, 10.0), np.full(25, 20.0)], "tail": tails})
+    rows = np.random.default_rng(7).permutation(len(X))
+    for frame in (X, X.iloc[rows]):
+        table = parameter_spread(
+            _spread_stub(semantics), frame, threshold=1, n_bins=20
+        ).identically_priced
+        np.testing.assert_array_equal(table["bin"], [15, 19])
+        np.testing.assert_array_equal(table["n"], [100, 25])
+        np.testing.assert_array_equal(table["mean"], [10.0, 20.0])
+        np.testing.assert_allclose(
+            table[["p_lo", "p_hi"]],
+            [np.quantile(tails[:100], [0.05, 0.95]), [0.5, 0.5]],
+            rtol=1e-15,
+        )
 
 
 @pytest.mark.parametrize("counts,bins", [([3, 2, 4], 4), ([1, 5, 1], 2)])
@@ -385,35 +411,6 @@ def test_review_prior_spread_keeps_physical_geometry_and_drops_extremes():
     np.testing.assert_allclose(table[["p_lo", "p_hi"]], [[0.105, 0.195], [0.805, 0.895]])
     assert result.tail_quantile.counts.sum() == 4
     assert result.parameters["mean"].edges[-1] == 30.0
-
-
-def test_review_frequency_fragments_bound_storage():
-    import tracemalloc
-
-    from superglm.distributional.surfaces import _frequency_bin_fragments
-
-    n, bins = 2000, 1999
-    values = np.arange(n, dtype=float) % 13
-    counts = np.arange(n, dtype=np.int64) + 10**10
-    tracemalloc.start()
-    try:
-        source, codes, mass = _frequency_bin_fragments(values, counts, bins)
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
-    # Conservative linear budget covers Python lists and array conversion;
-    # even one int64 row-by-bin overlap matrix exceeds it by a factor of four.
-    assert peak < 2048 * (n + bins)
-    assert len(source) == len(codes) == len(mass) <= n + bins - 1
-    restored = np.zeros(n, dtype=np.int64)
-    np.add.at(restored, source, mass)
-    np.testing.assert_array_equal(restored, counts)
-    quotient, remainder = divmod(int(counts.sum()), bins)
-    sizes = np.full(bins, quotient, dtype=np.int64)
-    sizes[:remainder] += 1
-    actual = np.zeros(bins, dtype=np.int64)
-    np.add.at(actual, codes, mass)
-    np.testing.assert_array_equal(actual, sizes)
 
 
 def test_review_nonfinite_density_refuses():

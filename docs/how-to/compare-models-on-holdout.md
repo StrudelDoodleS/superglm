@@ -109,7 +109,8 @@ result = double_lift_chart(
 
 The chart sorts by the challenger/current relativity ratio, bins to equal
 exposure, and shows whether the challenger tracks Actual more closely than the
-baseline.
+baseline. Rows with the same ratio stay in one bin, so a tariff with few
+distinct ratios gives fewer bins of uneven exposure.
 
 ## Diagnostic Plots
 

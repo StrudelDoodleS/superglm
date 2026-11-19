@@ -130,6 +130,40 @@ def occurrence_rows(counts, cap: int, generator: np.random.Generator) -> NDArray
     return np.searchsorted(ends, chosen, side="right").astype(np.intp, copy=False)
 
 
+def score_bins(scores, mass, n_bins: int) -> NDArray[np.intp]:
+    """Return each row's equal-mass bin of ``scores``, with every tied score in one bin.
+
+    A row's bin is ``ceil(n_bins * F) - 1``, where ``F`` is the share of ``mass``
+    on rows scoring at most its score. Distinct scores fill bins of equal mass
+    by their cumulative share; rows sharing a score share ``F``, so row order
+    never decides their bin. A tied tier holding more than one bin's mass leaves
+    bins empty, and the bins hold uneven mass, as in SAS PROC RANK's ``GROUPS=``
+    and Stata's ``estat gof, group()``. Every table and plot that cuts rows by
+    score bins through here.
+    """
+    values = np.asarray(scores, dtype=np.float64)
+    weights = np.asarray(mass, dtype=np.float64)
+    # Mass is the second sort key, so a tier's cumulative mass is one sum
+    # whatever order its rows arrive in.
+    order = np.lexsort((weights, values))
+    ordered = values[order]
+    cumulative = np.cumsum(weights[order])
+    through = cumulative[np.searchsorted(ordered, ordered, side="right") - 1]
+    edges = np.linspace(0.0, cumulative[-1] if len(cumulative) else 0.0, n_bins + 1)[1:]
+    codes = np.empty(len(values), dtype=np.intp)
+    codes[order] = np.minimum(np.searchsorted(edges, through, side="left"), n_bins - 1)
+    return codes
+
+
+def bin_rows(codes: NDArray[np.intp]) -> tuple[NDArray[np.intp], list[NDArray[np.intp]]]:
+    """Return the filled bins of ``codes`` in order, and the rows in each."""
+    sizes = np.bincount(codes)
+    filled = np.flatnonzero(sizes)
+    order = np.argsort(codes, kind="stable")
+    ends = np.cumsum(sizes[filled])
+    return filled, [order[end - size : end] for end, size in zip(ends, sizes[filled], strict=True)]
+
+
 def _ulp_size(values: NDArray) -> NDArray:
     """Return the local float64 spacing without overflowing at max-float."""
     magnitude = np.abs(np.asarray(values, dtype=np.float64))
