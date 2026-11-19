@@ -702,46 +702,47 @@ def test_a_search_solve_at_the_guard_does_not_warn_about_the_published_fit(monke
     assert model.result.separation_message is None
 
 
-def test_a_separated_fit_warns_once_however_many_solves_its_theta_search_ran():
+def test_a_separated_fit_warns_once_however_many_solves_its_theta_search_ran(monkeypatch):
     """A fit whose own state is at the guard says so once, after its theta search.
 
-    ``theta="auto"`` calibrates theta by refitting the mean at each trial
-    theta, and each refit of this separated indicator walks to the guard as
-    the published fit does.  The published fit's own finding is the one
-    warning, and its predictions sit at the guard on the separated rows, as
-    the warning says, and nowhere else.  Mutation check: with the calibration
-    solves passing the model's mode, each warned (four warnings for one fit).
+    ``theta="auto"`` calibrates theta by refitting the mean at each trial theta.
+    Every solve's backstop records a finding (forced at the check, each one
+    naming its own solve), so the calibration's disposable findings and the
+    published fit's are told apart: the one warning is the published fit's
+    finding, the one its result carries. That the predictions then sit at the
+    guard is the clamp's, checked on a forced predictor in
+    ``test_every_route_decides_a_row_at_the_guard_as_fit_does``.
+    Mutation check: with the calibration solves passing the model's mode, each
+    warned (four warnings for one fit).
     """
+    import superglm.diagnostics.separation as separation_module
+    from superglm.diagnostics.separation import format_runtime_message
     from superglm.distributions import NegativeBinomial
 
     rng = np.random.default_rng(7)
     n = 2000
     z = (rng.uniform(size=n) < 0.25).astype(float)
     x = rng.uniform(0.0, 1.0, n)
-    mean = np.exp(0.3 + np.sin(3.0 * x))
+    mean = np.exp(0.3 + np.sin(3.0 * x) - 0.5 * z)
     y = rng.negative_binomial(2.0, 2.0 / (2.0 + mean)).astype(float)
-    y[z == 1.0] = 0.0
     frame = pd.DataFrame({"z": z, "x": x})
-    with warnings.catch_warnings():
-        # convergence='coefficients' carries its own experimental warning.
-        warnings.simplefilter("ignore", UserWarning)
-        model = SuperGLM(
-            family=NegativeBinomial(theta="auto"),
-            features={"z": Numeric(), "x": Numeric()},
-            max_iter=150,
-            convergence="coefficients",
-        )
+    findings: list[str] = []
+
+    def finding(*_args, **_kwargs):
+        findings.append(format_runtime_message(1e35, len(findings) + 1, ["z"], True))
+        return findings[-1]
+
+    monkeypatch.setattr(separation_module, "runtime_finding", finding)
+    model = SuperGLM(
+        family=NegativeBinomial(theta="auto"), features={"z": Numeric(), "x": Numeric()}
+    )
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         model.fit(frame, y)
 
-    claims = runtime_claims(caught)
-    assert len(claims) == 1
-    assert "overflow guard" in claims[0] and "'z'" in claims[0]
-    log_mean = np.log(model.predict(frame))
-    separated = z == 1.0
-    np.testing.assert_allclose(log_mean[separated], -LOG_GUARD, rtol=0, atol=64 * U * LOG_GUARD)
-    assert np.all(np.abs(log_mean[~separated]) < LOG_GUARD / 2)
+    assert len(set(findings)) > 1, "the theta search's calibration solves ran the backstop"
+    assert model.result.separation_message in findings
+    assert runtime_claims(caught) == [model.result.separation_message]
 
 
 def poisson_curve(seed=3, n=1500):
