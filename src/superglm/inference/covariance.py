@@ -9,6 +9,8 @@ factorisation handed to them; coefficient covariance is published by
 
 from __future__ import annotations
 
+from typing import cast
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -195,9 +197,11 @@ class StructuredSlopeCovarianceAccessor(_SelectedBlockAccess):
 
     def raw_level_block(self, level: int) -> NDArray:
         """One raw level's ``sz`` block (``ProfiledSumToZeroTreeFactor.raw_level_inverse_block``)."""
-        block = self.factor.raw_level_inverse_block(level)
+        # reached only through ``covariance_factor_smooth_raw_level_block``, which checks the factor
+        factor = cast(ProfiledSumToZeroTreeFactor, self.factor)
+        block = factor.raw_level_inverse_block(level)
         if self.gauge is not None:
-            levels = np.asarray(self.factor.structured_indices, dtype=np.intp)
+            levels = np.asarray(factor.structured_indices, dtype=np.intp)
             if level < levels.shape[0]:
                 L, VE = self.gauge.lift[levels[level]], self.gauge.applied[levels[level]]
             else:  # the last level is minus the sum of the public ones

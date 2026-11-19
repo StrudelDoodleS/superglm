@@ -945,7 +945,7 @@ def grouped_projected_factor(
             plans.append((columns, "level", table, np.zeros((raw.shape[0], width)), rows, codes))
             continue
         if kind == "rows" and type(group) is FactorSmoothGroupMatrix:
-            smooth = cast(FactorSmoothGroupMatrix, group)
+            smooth = group
             columns = slice(column, column + int(smooth.shape[1]))
             centre = _centred_support(np.zeros((1, smooth.shape[1])), center, center_lo, columns)
             base += (centre @ basis[columns])[0]
@@ -953,7 +953,11 @@ def grouped_projected_factor(
             if smooth.factor_basis == "sz":
                 blocks = np.concatenate((blocks, -blocks.sum(axis=0)[None]))
             # each row's natural basis, as ``toarray`` places it
-            raw = smooth.B_unique[smooth.bin_idx] if smooth.is_discrete else smooth.B
+            raw = (
+                cast(NDArray, smooth.B_unique)[cast(NDArray, smooth.bin_idx)]
+                if smooth.is_discrete
+                else cast(scipy.sparse.csr_matrix, smooth.B)
+            )
             natural = np.ascontiguousarray(raw @ smooth.natural_map, dtype=np.float64)
             squares = np.zeros((smooth.n_levels, smooth.block_size))
             np.add.at(squares, smooth.codes, np.asarray(W, dtype=np.float64)[:, None] * natural**2)

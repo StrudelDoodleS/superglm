@@ -58,7 +58,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -358,7 +358,11 @@ def decide_identifiability(
         )
     if owner_null is None:
         basis = _null_space_basis(
-            groups, null_spaces() if callable(null_spaces) else null_spaces, decomposition.width
+            groups,
+            cast(Callable[[], Sequence[NDArray]], null_spaces)()
+            if callable(null_spaces)
+            else null_spaces,
+            decomposition.width,
         )
         if isinstance(data_gram, np.ndarray):
             gram_basis, diagonal = data_gram @ basis, np.diag(data_gram)
@@ -719,7 +723,7 @@ class _RowFacts:
             RandomEffectGroupMatrix,
         )
 
-        matrix = self.matrices[index]
+        matrix = cast(Sequence, self.matrices)[index]
         return isinstance(matrix, CategoricalGroupMatrix) and not isinstance(
             matrix, RandomEffectGroupMatrix
         )
@@ -727,14 +731,14 @@ class _RowFacts:
     def codes(self, index: int) -> NDArray:
         """The factor's codes on the positive-weight rows."""
         if index not in self._codes:
-            codes = np.asarray(self.matrices[index].codes, dtype=np.intp)
-            self._codes[index] = codes[self.positive]
+            codes = np.asarray(cast(Sequence, self.matrices)[index].codes, dtype=np.intp)
+            self._codes[index] = codes[cast(NDArray, self.positive)]
         return self._codes[index]
 
     def level_rows(self, index: int, level: int) -> NDArray:
         """The positive-weight rows of one level of a factor."""
         if index not in self._levels:
-            rows = np.flatnonzero(self.positive)
+            rows = np.flatnonzero(cast(NDArray, self.positive))
             order = np.argsort(self.codes(index), kind="stable")
             self._levels[index] = (self.codes(index)[order], rows[order])
         codes, rows = self._levels[index]
@@ -743,7 +747,9 @@ class _RowFacts:
 
     def empty_basis_functions(self, index: int) -> int:
         if index not in self._empty:
-            self._empty[index] = _empty_basis_functions(self.matrices[index], self.positive)
+            self._empty[index] = _empty_basis_functions(
+                cast(Sequence, self.matrices)[index], cast(NDArray, self.positive)
+            )
         return self._empty[index]
 
 
@@ -841,7 +847,9 @@ def _level_reason(term, factor, groups, facts: _RowFacts, specs, share) -> str |
     distinct = (
         0
         if rows.size == 0
-        else np.unique(facts.matrices[term].row_subset(rows).toarray(), axis=0).shape[0]
+        else np.unique(
+            cast(Sequence, facts.matrices)[term].row_subset(rows).toarray(), axis=0
+        ).shape[0]
     )
     # ``distinct`` points carry at most that many independent functions, and with the level's
     # dummy the alias spans ``spanned + 1`` of them: the count proves the dependence.

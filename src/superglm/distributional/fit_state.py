@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from inspect import signature
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -57,6 +57,7 @@ from superglm.distributional.weights import (
     WeightProvenance,
 )
 from superglm.solvers.identifiability import functional_identified
+from superglm.solvers.rank import RankDecomposition
 
 
 def _positive_integer(value: Any, *, name: str) -> int:
@@ -506,7 +507,9 @@ def _block_coefficients_identified(solver_result: DenseSolverResult, block: slic
     if face is None:
         decomposition, functionals = solver_result.terminal_rank, None
     else:
-        decomposition, functionals = solver_result.terminal_reduced_rank, face.null_basis
+        # a fit on a face always keeps its reduced decomposition
+        reduced = cast(RankDecomposition, solver_result.terminal_reduced_rank)
+        decomposition, functionals = reduced, face.null_basis
     width = decomposition.width
     for j in range(block.start, block.stop):
         contrast = np.eye(width)[j] if functionals is None else functionals[j]
