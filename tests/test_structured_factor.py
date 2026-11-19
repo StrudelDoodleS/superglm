@@ -2,11 +2,13 @@
 
 import importlib.util
 import re
+import warnings
 from collections import Counter
 from dataclasses import FrozenInstanceError
 from importlib import import_module
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from superglm.distributions import Poisson
@@ -626,6 +628,193 @@ def test_the_pairwise_hessian_traces_the_w_rho_operators_of_a_non_dense_factor(c
     # The operators move the Hessian far beyond that bound.
     without = reml_direct_hessian([], Poisson(), stub(), lambdas, dH_extra=None, **common)
     assert np.max(np.abs(hessian - without)) > 1e3 * np.max(tolerance)
+
+
+# ------------------------------------------------ structured geometries under the penalised rule
+_U = 2.0**-53
+
+
+def _structured_geometry(name: str):
+    """A Gaussian structured fit whose penalised Hessian has a null space known by construction.
+
+    The ``sz`` term leaves each level's line unpenalised, so a numeric that is a function of the
+    level alone (``a[g]``) is an exact alias of the levels' constants, lifted through the
+    sum-to-zero contrast onto every level; a numeric pair with one a multiple of the other is an
+    alias in the border alone.  Returns the model, the frame, the response, the null dimension
+    ``k``, the terms the null space reaches, the coordinates the published gauge holds blank
+    and the ``sz`` levels whose unpenalised part it holds.
+    """
+    from superglm import FactorSmooth, LambdaPolicy, Numeric, RandomEffect, Spline, SuperGLM
+    from superglm.terms import interaction, term
+
+    K, per, distinct = {"wide": (129, 12, 3), "multiple": (129, 12, None)}.get(name, (12, 60, None))
+    rows = np.random.default_rng(len(name))
+    g = np.repeat(np.arange(K), per)
+    x = rows.uniform(size=g.size)
+    if distinct is not None:
+        # every level's rows sit at three values of x: its five basis columns have data rank 3
+        x = rows.uniform(size=(K, distinct))[g, rows.integers(0, distinct, g.size)]
+    h, a = rows.normal(size=g.size), rows.normal(size=(3, K))
+    columns = {"w": rows.normal(size=g.size)}
+    blank, held = (), ()
+    if name == "wide":
+        columns["z"] = a[0][g]
+        reached, held = {"z", "x:g:sz"}, (K - 2,)
+    elif name in ("schur", "separated", "multiple"):
+        scales = {"schur": (1.0, 1.0, 1.0), "separated": (1.0, 1e-5, 1e-10)}
+        for i, scale in enumerate(scales.get(name, np.geomspace(8e-6, 2e5, 3))):
+            columns[f"z{i}"] = scale * a[i][g]
+        reached, held = {"z0", "z1", "z2", "x:g:sz"}, (K - 4, K - 3, K - 2)
+    elif name == "offset":
+        columns["z"] = 1e9 + h
+        columns["z2"] = 2.0 * (columns["z"] - 1e9)  # exact: Sterbenz
+        reached, blank = {"z", "z2"}, ("z2",)
+    elif name == "mixed":
+        columns.update(big=1e8 * rows.normal(size=g.size), z1=h, z2=1e8 * h)
+        reached, blank = {"z1", "z2"}, ("z2",)
+    elif name == "lifted":
+        # ``z - zw = 1e-10 a[g]``: the alias's sz part is 1e-10 of it in raw coordinates and
+        # 1e-4 of it in the Jacobi-scaled ones, where the share floor reads it
+        columns.update(z=1e-6 * h + 1e-10 * a[0][g], zw=1e-6 * h)
+        reached, held = {"z", "zw", "x:g:sz"}, (K - 2,)
+    y = (
+        np.sin(3 * x)
+        + 0.3 * np.sin(5 * x + g % 7)
+        + 0.1 * columns["w"]
+        + rows.normal(0, 0.3, g.size)
+    )
+    frame = pd.DataFrame({"x": x, **columns, "g": [f"g{v:03d}" for v in g]})
+    if name == "offset":
+        model = SuperGLM(
+            family="gaussian",
+            features={**{c: Numeric() for c in columns}, "g": RandomEffect()},
+            selection_penalty=0,
+            direct_solve="structured",
+        )
+    else:
+        smooth = FactorSmooth(
+            "x", group="g", basis="sz", k=5, lambda_policy={"wiggle": LambdaPolicy.fixed(0.7)}
+        )
+        spline = Spline(kind="ps", n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0))
+        model = SuperGLM(
+            family="gaussian",
+            terms=[term("x", spline), *(term(c, Numeric()) for c in columns), interaction(smooth)],
+            selection_penalty=0,
+            direct_solve="structured",
+        )
+    return model, frame, y, len(blank) + len(held), reached, blank, held
+
+
+@pytest.mark.parametrize(
+    "name", ["wide", "offset", "schur", "separated", "mixed", "multiple", "lifted"]
+)
+def test_a_structured_fit_publishes_the_dense_oracles_gauge_and_standard_errors(
+    name, monkeypatch
+) -> None:
+    """Each geometry's structured fit against the dense rows' penalised Hessian ``H``.
+
+    ``wide``: 129 levels whose data leave two of each level's five columns free, with one
+    alias across all of them.  ``offset``: a numeric at ``1e9`` and a multiple of its centred
+    values beside a random effect.  ``schur``: three numerics in the span of the levels'
+    constants.  ``separated``: the same at scales ``1``, ``1e-5`` and ``1e-10``.  ``mixed``: an
+    alias of a ``1e8``-scale column with an ordinary one, beside an identified ``1e8``-scale
+    column.  ``multiple``: three such aliases at scales ``8e-6`` to ``2e5`` past 512 columns.
+    ``lifted``: an alias whose ``sz`` part is ``1e-10`` of it in raw coordinates.
+
+    The oracle reads ``H = X_c'X_c + S`` (unit Gaussian weights) from the dense design: its
+    Jacobi-scaled eigenvalues have exactly ``k`` under ``n p u`` (the Gram's formation bound),
+    and its null space reaches the terms the construction says.  The fit publishes ``k``
+    constraints, each on the latest construction column the null space reaches
+    (``identifiability.Gauge``): the later numeric's coordinate, blank, or the last ``sz``
+    levels' unpenalised part, named in the footnote; ``G'N`` stays within the gauge's
+    amplification limit.  Every other standard error is ``sqrt(diag Z (Z'HZ)^-1 Z')``,
+    ``Z = null(G')``, to the Cholesky accuracy of the Jacobi-scaled ``Z'HZ`` (Demmel, LAWN 14).
+    Deciding again from the retained factor reads the ``k`` truncated directions from the
+    rows, never all the columns, and forms no dense design.
+
+    Mutations: every coordinate handed over as undecided (``X_F`` read whole) or the retired
+    data-only rule fails every case; the hand-off keeping one truncated direction fails
+    ``schur``, ``separated`` and ``multiple``; ``_orthonormal`` without each direction's
+    normalisation fails ``separated`` and ``multiple``; reach read in raw coordinates fails
+    ``separated``, ``mixed`` and ``lifted``; the row pass centred without the mean's low part
+    finds no alias in ``offset``.
+    """
+    from superglm.model import state_ops
+    from superglm.model.fit_state import fitted_lambda2
+    from superglm.reml.penalty_algebra import build_penalty_matrix
+    from superglm.solvers.identifiability import _AMPLIFICATION_LIMIT, _SHARE_FLOOR
+    from tests.test_penalised_identifiability import _redecide, _row_passes
+
+    model, frame, y, k, reached, blank, held = _structured_geometry(name)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y)
+        metrics = model.metrics(frame, y)
+        se = np.concatenate(
+            [np.atleast_1d(np.asarray(metrics.coefficient_se_raw[g.name])) for g in model._groups]
+        )
+    assert model._reml_profile["direct_backend"] == "structured"
+    assert model._fit_inference_info.get("structured_covariance")
+    groups = {g.name: g for g in model._groups}
+
+    n, p = model._dm.n, model._dm.p
+    X = np.asarray(model._dm.toarray(), dtype=np.float64)
+    X = X - X[0]  # exact for a column at 1e9 (Sterbenz), so the mean is taken at the spread
+    X = X - X.mean(axis=0)
+    S = build_penalty_matrix(
+        list(model._dm.group_matrices),
+        list(model._groups),
+        fitted_lambda2(model),
+        p,
+        reml_penalties=getattr(model, "_reml_penalties", None),
+    )
+    H = X.T @ X + S
+    jacobi = 1.0 / np.sqrt(np.diag(H))
+    values, vectors = np.linalg.eigh(jacobi[:, None] * H * jacobi[None, :])
+    cut = n * p * _U
+    assert np.all(values[:k] <= cut) and values[k] > cut
+    share = np.einsum("ij,ij->i", vectors[:, :k], vectors[:, :k])
+    assert {g.name for g in model._groups if np.max(share[g.sl]) > _SHARE_FLOOR**2} == reached
+    null = jacobi[:, None] * vectors[:, :k]
+
+    record = model._fit_inference_info["identifiability"]
+    assert record.gauge is not None
+    G = record.gauge.functionals
+    assert G.shape[1] == k and len(record.aliases) == k
+    assert np.linalg.cond(G.T @ null) <= _AMPLIFICATION_LIMIT
+    units = np.zeros((p, len(blank)))
+    units[[groups[term].start for term in blank], np.arange(len(blank))] = 1.0
+    np.testing.assert_array_equal(G[:, : len(blank)], units)
+    for column, level in zip(G.T[len(blank) :], held, strict=True):
+        smooth = groups["x:g:sz"]
+        block = np.arange(smooth.start + 5 * level, smooth.start + 5 * level + 5)
+        assert set(np.flatnonzero(column)) <= set(block)
+    named = [alias.term for alias in record.aliases]
+    assert named == [*blank, *(f"x:g:sz[g{level:03d}]'s unpenalised part 1" for level in held)]
+
+    Z = np.linalg.svd(G.T, full_matrices=True)[2][k:].T
+    reduced = Z.T @ H @ Z
+    covariance = Z @ np.linalg.inv(reduced) @ Z.T
+    oracle = np.sqrt(np.maximum(np.diag(covariance), 0.0))
+    shown = ~np.any(units, axis=1)
+    np.testing.assert_array_equal(~np.isnan(se), shown)
+    assert np.all(oracle[~shown] <= np.sqrt(p * _U) * np.max(oracle))
+    scale = 1.0 / np.sqrt(np.diag(reduced))
+    kappa = np.linalg.cond(scale[:, None] * reduced * scale[None, :])
+    np.testing.assert_allclose(se[shown], oracle[shown], rtol=4.0 * np.sqrt(p) * kappa * _U)
+
+    import superglm.group_matrix as group_matrix
+
+    def dense(_self):
+        raise AssertionError("the owner reads the truncated directions, never the dense design")
+
+    monkeypatch.setattr(group_matrix.DesignMatrix, "toarray", dense)
+    widths = _row_passes(monkeypatch)
+    redecided = _redecide(model)
+    truncated = state_ops.retained_linear_state(model).profiled_factor.null_directions()
+    assert truncated.shape[1] == k and redecided.row_directions == k
+    assert widths == [k, k]
+    assert [alias.term for alias in redecided.aliases] == named
 
 
 def _geometry_pairs() -> dict:
