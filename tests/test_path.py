@@ -130,6 +130,31 @@ class TestPathResult:
         np.testing.assert_array_equal(m.result.beta, result.coef_path[-1])
         assert m.result.intercept == result.intercept_path[-1]
 
+    @pytest.mark.pins_behaviour
+    def test_the_final_point_is_the_published_fit(self, poisson_data):
+        """Every field of the path's last point is the published result's.
+
+        Pins the rule that the final point is read from the fit published, not from the path's
+        last solve: its coefficients, intercept, deviance, EDF, iteration count, convergence and
+        separation statement.  It already held on these fits, whose selection penalty publishes
+        its solve as it stopped; it now holds by construction, wherever publication moves the
+        result.  Mutation: the deviance read from the solve while publication moves it by one
+        ulp fails here.
+        """
+        df, y, w = poisson_data
+        m = _make_model()
+        result = m.fit_path(df, y, sample_weight=w, n_lambda=10, lambda_ratio=1e-2)
+        published = m.result
+        np.testing.assert_array_equal(result.coef_path[-1], published.beta)
+        assert result.intercept_path[-1] == published.intercept
+        assert result.deviance_path[-1] == published.deviance
+        assert result.edf_path[-1] == published.effective_df
+        assert result.n_iter_path[-1] == published.n_iter
+        assert result.converged_path[-1] == published.converged
+        statement = published.separation_statement
+        expected = published.separation_message if statement is None else statement.text
+        assert result.separation_path[-1] == expected
+
     def test_fit_still_works(self, poisson_data):
         df, y, w = poisson_data
         m = _make_model(lambda1=0.01)

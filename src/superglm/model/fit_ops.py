@@ -1810,18 +1810,29 @@ def _fit_path_in_workspace(
         path_data["coef_path"],
         path_data["intercept_path"],
     )
-    intercept_path[-1] = model.result.intercept
+    # The final point is the fit published, so every field of it is read from the published
+    # result; the other points are their solves'.
+    published = model.result
+    coef_path, separation_path = path_data["coef_path"], list(path_data["separation_path"])
+    coef_path[-1] = published.beta
+    intercept_path[-1] = published.intercept
+    path_data["deviance_path"][-1] = published.deviance
+    path_data["n_iter_path"][-1] = published.n_iter
+    path_data["converged_path"][-1] = published.converged
+    path_data["edf_path"][-1] = published.effective_df
+    statement = getattr(published, "separation_statement", None)
+    separation_path[-1] = published.separation_message if statement is None else statement.text
     _maybe_release_fit_state(model)
 
     path_result = PathResult(
         lambda_seq=lambda_seq,
-        coef_path=path_data["coef_path"],
+        coef_path=coef_path,
         intercept_path=intercept_path,
         deviance_path=path_data["deviance_path"],
         n_iter_path=path_data["n_iter_path"],
         converged_path=path_data["converged_path"],
         edf_path=path_data["edf_path"],
-        separation_path=tuple(path_data["separation_path"]),
+        separation_path=tuple(separation_path),
     )
     return path_result
 
