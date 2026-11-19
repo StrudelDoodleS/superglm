@@ -91,9 +91,15 @@ def _unseen_frame(case: dict) -> tuple[pd.DataFrame, np.ndarray | None]:
     return frame, offset
 
 
+@pytest.mark.pins_behaviour
 def test_reference_fixture_is_pinned_to_documented_mgcv_release(mgcv_fixture: dict) -> None:
-    # oracles/factor_smooth_mgcv_reference.R: mgcv fits fs's penalties through paraPen,
-    # as its bs="fs" names its null columns in an eigensolver's order.
+    """Control: the fixture records the R, mgcv and model that generated its references.
+
+    It reads only the fixture's metadata, so it passes on any source.
+    ``oracles/factor_smooth_mgcv_reference.R`` fits fs's penalties through paraPen, as
+    mgcv's ``bs="fs"`` names its null columns in an eigensolver's order; the parity
+    tests below are the guards.
+    """
     assert mgcv_fixture["metadata"]["r_version"] == "R version 4.5.0 (2025-04-11)"
     assert mgcv_fixture["metadata"]["mgcv_version"] == "1.9.3"
     assert mgcv_fixture["metadata"]["factor_smooth"].startswith(

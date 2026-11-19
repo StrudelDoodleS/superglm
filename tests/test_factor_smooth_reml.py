@@ -228,8 +228,14 @@ def test_fixed_null_lambdas_penalize_each_polynomial_degree_in_any_row_order(
         np.testing.assert_allclose(model.predict(test), expected, rtol=0.0, atol=atol)
 
 
+@pytest.mark.pins_behaviour
 def test_high_order_null_axes_leave_out_the_penalized_contrast() -> None:
-    """At ``m = k - 1`` the null space is every direction but the binomial contrast.
+    """Control: at ``m = k - 1`` the null space is every direction but the binomial contrast.
+
+    Master's eigenbasis spanned it too, and with equal null lambdas its basis does not
+    matter, so this pins the span the degree-ordered frame must keep at high order;
+    the degree-by-degree guard is
+    ``test_fixed_null_lambdas_penalize_each_polynomial_degree_in_any_row_order``.
 
     Equal null lambdas make the model independent of the null axes' basis, so it is
     the reference's: unit-penalty least squares on the complement, over the rows, of

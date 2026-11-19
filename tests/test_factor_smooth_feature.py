@@ -60,7 +60,14 @@ def _legacy_natural_parameterization(basis, penalty, *, rank):
     return natural_map, tuple(components)
 
 
+@pytest.mark.pins_behaviour
 def test_default_fs_and_sz_discrete_builds_keep_only_the_support_basis():
+    """Control: default fs and sz discrete builds keep the basis on the support, not per row.
+
+    Master's default already streamed; this keeps the memory contract once the
+    backend name it used to assert is gone.  The declarations master built densely
+    are guarded by ``test_streamed_discrete_marginal_bounds_basis_evaluation``.
+    """
     fs, fs_info = _built_discrete_spec()
     sz, sz_info = _built_discrete_spec(basis="sz")
 

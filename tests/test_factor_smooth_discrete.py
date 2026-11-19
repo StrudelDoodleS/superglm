@@ -416,7 +416,13 @@ def test_discrete_factor_smooth_matches_exact_at_full_support_resolution() -> No
     ],
     ids=["symmetric", "asymmetric"],
 )
+@pytest.mark.pins_behaviour
 def test_factor_smooth_discrete_marginal_preserves_exact_fit(lambda_policy) -> None:
+    """Control: a discrete build fits what the exact build fits, equal or unequal null lambdas.
+
+    Master held this on its two QR routes; the unequal-policy declaration now streams
+    through the one route the default takes, and must keep the exact build's fit.
+    """
     X, y, weights, offset = _data()
     exact = _fixed_policy_model(
         discrete=False,

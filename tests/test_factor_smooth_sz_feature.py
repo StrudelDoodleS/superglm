@@ -87,8 +87,9 @@ def test_sz_build_has_k_minus_one_blocks_and_one_wiggle_component() -> None:
     assert info.repeated_penalty_components[0][1].shape == (6, 6)
 
 
+@pytest.mark.pins_behaviour
 def test_sz_takes_the_fs_natural_parameterization() -> None:
-    """One-engine design §3.5, decision 5: sz on fs's natural parameterization.
+    """Control. One-engine design §3.5, decision 5: sz on fs's natural parameterization.
 
     The same per-level change of basis as fs (its natural map), under which
     the raw second-difference penalty is exactly the diagonal wiggle
@@ -97,7 +98,8 @@ def test_sz_takes_the_fs_natural_parameterization() -> None:
     null coordinates by degree, as each has its own smoothing parameter, and
     builds its wiggle columns by an SVD in their complement; sz penalizes the
     null block as one, so it keeps the eigenbasis, whose wiggle columns are
-    fs's up to sign and rounding.
+    fs's up to sign and rounding.  Master held this exactly, as fs and sz shared
+    one map; the test pins that the change keeps sz on fs's wiggle space.
     """
     x = np.tile(np.linspace(-1.0, 1.0, 12), 3)
     group = np.repeat(["a", "b", "c"], 12)

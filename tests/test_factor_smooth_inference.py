@@ -390,7 +390,13 @@ def test_factor_smooth_zero_weight_level_has_no_information() -> None:
     assert report.diagnostics["n_levels_without_information"] >= 1
 
 
+@pytest.mark.pins_behaviour
 def test_unpenalized_factor_smooth_reports_infinite_variance_components() -> None:
+    """Control: a component with its smoothing parameter off reports an infinite variance.
+
+    Master reported it for every component; null_0 now stays penalized, since a zero
+    null_0 beside the intercept is refused, and the off components still report it.
+    """
     X, y = _data()
     # A zero null_0 aliases the levels' constants with the intercept and is refused.
     policies = {
