@@ -5,7 +5,9 @@ from scipy.stats import chi2
 
 from superglm.profiling import _scalar
 from superglm.profiling._scalar import (
+    LowerPoint,
     RecordedObjective,
+    credible_lower_point,
     likelihood_ratio_interval,
     minimize_profile,
 )
@@ -216,6 +218,158 @@ def test_a_lower_value_beyond_both_values_error_moves_the_centre():
         assert 2.0 * N * (quadratic(end) + drop) == pytest.approx(cutoff, abs=1e-8)
 
 
+def _lower_point(share):
+    """The quadratic with 0.31 recorded below x_hat by ``share`` of both values' error."""
+    objective = RecordedObjective(quadratic)
+    drop = share * (error_bounds(0.3) + error_bounds(0.31))
+    objective.values[0.31] = -drop
+    return objective, drop
+
+
+@pytest.mark.parametrize("share", [0.9, 1.1])
+def test_only_a_drop_within_both_values_error_asks_for_refined_values(share):
+    # Refined values, to within the target asked, confirm the recorded drop.
+    objective, drop = _lower_point(share)
+    asked = []
+
+    def refine(x, target):
+        asked.append((x, target))
+        return objective.values.get(x, 0.0), target
+
+    interval, centre, centre_nll = likelihood_ratio_interval(
+        objective,
+        0.3,
+        0.0,
+        (0.0, 1.0),
+        alpha=0.05,
+        scale=N,
+        xtol=1e-12,
+        error=error_bounds,
+        refine=refine,
+    )
+
+    assert (centre, centre_nll) == (0.31, -drop)
+    # Past the bounds the recorded values decide; within them both points are
+    # refined to a quarter of the drop, which resolves a real one.
+    assert asked == ([] if share > 1.0 else [(0.3, drop / 4.0), (0.31, drop / 4.0)])
+
+
+def test_refined_values_that_put_x_hat_lower_leave_the_centre():
+    # The recorded drop is fit error: the exact values put 0.31 above x_hat, by
+    # less than the quarter-drop targets resolve, so both are refined again to
+    # the floor, where they decide.
+    objective, drop = _lower_point(0.9)
+    expected = likelihood_ratio_interval(
+        RecordedObjective(quadratic),
+        0.3,
+        0.0,
+        (0.0, 1.0),
+        alpha=0.05,
+        scale=N,
+        xtol=1e-12,
+        error=error_bounds,
+    )
+    asked = []
+
+    def refine(x, target):
+        asked.append((x, target))
+        return quadratic(x), target
+
+    found = likelihood_ratio_interval(
+        objective,
+        0.3,
+        0.0,
+        (0.0, 1.0),
+        alpha=0.05,
+        scale=N,
+        xtol=1e-12,
+        error=error_bounds,
+        refine=refine,
+    )
+
+    assert quadratic(0.31) < drop / 2.0
+    assert asked == [(0.3, drop / 4.0), (0.31, drop / 4.0), (0.3, 0.0), (0.31, 0.0)]
+    assert found == expected
+
+
+@pytest.mark.parametrize(
+    "refined", [(0.0, 1e-9), (math.nan, math.inf)], ids=["tied at the floor", "refit failed"]
+)
+def test_refined_values_that_cannot_tell_the_points_apart_leave_it_unresolved(refined):
+    objective, drop = _lower_point(0.9)
+    expected = likelihood_ratio_interval(
+        RecordedObjective(quadratic),
+        0.3,
+        0.0,
+        (0.0, 1.0),
+        alpha=0.05,
+        scale=N,
+        xtol=1e-12,
+        error=error_bounds,
+    )
+
+    def refine(x, target):
+        return refined
+
+    found = likelihood_ratio_interval(
+        objective,
+        0.3,
+        0.0,
+        (0.0, 1.0),
+        alpha=0.05,
+        scale=N,
+        xtol=1e-12,
+        error=error_bounds,
+        refine=refine,
+    )
+
+    # The interval stays inverted from x_hat, and the comparison says it could not
+    # decide, and whether that is because a refit did not converge.
+    assert found == expected
+    unresolved = LowerPoint(0.31, -drop, resolved=False, settled=math.isfinite(refined[1]))
+    assert credible_lower_point(objective, 0.3, 0.0, error_bounds, refine) == unresolved
+
+
+def test_a_lowest_point_the_refined_values_put_above_x_hat_hands_on_to_the_next():
+    # The profile 30 (x - 0.65)^2 has x_hat = 0.5 recorded at its exact value and
+    # two lower points recorded within their errors: 0.85, the lowest, is fit noise
+    # and 0.65 the true minimum. Exact refined values rule out 0.85, and the
+    # comparison moves on to 0.65, which they confirm; inverted from 0.65, the
+    # interval rules out 0.85 again and finds nothing lower.
+    def profile(x):
+        return 30.0 * (x - 0.65) ** 2
+
+    objective = RecordedObjective(profile)
+    nll_hat = objective(0.5)
+    objective.values[0.85] = nll_hat - 0.9
+    objective.values[0.65] = nll_hat - 0.8
+    errors = {0.85: 1.5, 0.65: 1.0}
+    asked = []
+
+    def refine(x, target):
+        asked.append(x)
+        return profile(x), 0.0
+
+    interval, centre, centre_nll = likelihood_ratio_interval(
+        objective,
+        0.5,
+        nll_hat,
+        (0.0, 1.4),
+        alpha=0.05,
+        scale=1.0,
+        xtol=1e-12,
+        error=lambda x: errors.get(x, 0.0),
+        refine=refine,
+    )
+
+    assert asked == [0.5, 0.85, 0.5, 0.65, 0.65, 0.85]
+    assert (centre, centre_nll) == (0.65, nll_hat - 0.8)
+    # Inverted from 0.65's recorded value: 2 (30 (x - 0.65)^2 - centre_nll) = cutoff.
+    half_width = math.sqrt((0.5 * chi2.isf(0.05, 1) + centre_nll) / 30.0)
+    assert interval.lower == pytest.approx(0.65 - half_width, abs=1e-9)
+    assert interval.upper == pytest.approx(0.65 + half_width, abs=1e-9)
+
+
 def test_re_centring_stops_at_its_budget(monkeypatch):
     # Allowed no re-centring, the two-well interval stays inverted from x_hat,
     # with the deeper well recorded but not chased.
@@ -231,3 +385,14 @@ def test_re_centring_stops_at_its_budget(monkeypatch):
     cutoff = chi2.isf(0.05, 1)
     for end in (interval.lower, interval.upper):
         assert 2.0 * two_wells(end) == pytest.approx(cutoff, abs=1e-8)
+
+
+def test_a_side_whose_inner_end_already_meets_a_round_off_cutoff_ends_there():
+    """A cutoff inside the profile's round-off (alpha = 1 - 1e-8 gives 1.6e-16) can leave the
+    excess at x_hat itself at or above it, so no bracket has opposite signs: the side ends at
+    x_hat instead of raising from the root finder."""
+    root, censored = _scalar._interval_side(
+        lambda x: 1e-17 + (x - 1.0) ** 2, {1.0: 0.0}, 1.0, 2.0, 1.6e-16, 1e-12
+    )
+
+    assert (root, censored) == (1.0, False)

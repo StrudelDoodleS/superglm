@@ -346,12 +346,31 @@ says so. Either way the interval is still computed. It inverts the profile that
 was searched, around that profile's own value at `p_hat` (recorded as
 `result.search_nll`), so it describes the regime named by `search_fit_mode`;
 `result.nll` describes the published fit's re-profiled dispersion. If the
-interval's own evaluations find a power below that value by more than the fits'
-own tolerances can resolve, `p_hat` was a local minimum: the interval is
-inverted from the lower power, and a caution says so. A smaller difference is
-numerical noise from the fits and changes nothing.
-`profile_plot` measures against the same reference. Summaries show a cautioned
-interval as "caution", or "censored with caution" when it is also censored.
+interval's own evaluations find a power below that value, and the drop is real,
+the interval is inverted from the lower power, and a caution says so. A drop
+larger than the two fits' own error bounds is real. A smaller one can be noise
+from the fits or a real difference, so both powers are refitted from cold, each
+to within a quarter of the drop, and the refitted values decide; when they
+cannot, both are refitted again at tolerance 1e-12. A fit that did not converge
+has no error bound, so its power is always refitted. If the refits put the
+lowest power above `p_hat`, the next lowest power below `p_hat` is compared in
+the same way, until one is confirmed or none is left. If even the 1e-12 refits
+cannot tell two powers apart, the interval stays inverted from `p_hat`, with a
+caution that the fits cannot confirm that `p_hat` is not the minimum; if those
+refits did not converge, the caution says that instead.
+
+The fits' error bounds grow with the size of the log-likelihood, which a change
+of currency moves but no likelihood ratio does. Because the refits are set by
+the drop itself, these decisions agree in any units of the response while the
+fits' error bounds hold. At 1e-12 the bounds still grow with the
+log-likelihood, so a drop that small can be resolved in one unit and left
+undecided, with its caution, in another. Where a penalty or smoothing parameter
+is fixed rather than estimated, the likelihood ratio itself changes with the
+response's units, because a fixed penalty weighs differently against a rescaled
+deviance, so no agreement across units is claimed there. `profile_plot`
+measures each interval from the power it was inverted from. Summaries show a
+cautioned interval as "caution", or "censored with caution" when it is also
+censored.
 
 ### Profile confidence interval
 
