@@ -1311,10 +1311,14 @@ def _theta_blocks(
     (``_posterior_blocks``).
     """
     if parameter_uncertainty:
+        # A row with no value at the fitted coefficients has none in its draws either. This
+        # whole-frame prediction also gives the unseen-level notices, so the blocks do not.
+        _, at_fit = fitted._predicted_parameters(frame, offsets, warn=False)
         draws = posterior_draws(fitted, n_draws, covariance=covariance, seed=seed)
         for rows, block, outside in _posterior_blocks(
-            fitted, frame, draws, offsets=offsets, chunk_rows=chunk_rows, name_levels=True
+            fitted, frame, draws, offsets=offsets, chunk_rows=chunk_rows, name_levels=False
         ):
+            outside |= at_fit[rows][None, :, :]
             yield rows, block.reshape(-1, block.shape[2]), outside.reshape(-1, block.shape[2])
         return
     theta, outside = fitted._predicted_parameters(frame, offsets, warn=False)

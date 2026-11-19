@@ -681,15 +681,16 @@ def test_the_sklearn_score_is_the_r2_of_the_estimators_own_predict():
     assert est.score(TRAIN, TRAIN_Y) == pytest.approx(r2_score(TRAIN_Y, est.predict(TRAIN)))
 
 
-def test_a_custom_scorer_that_reorders_its_rows_still_names_them_in_the_frame():
-    """The refused rows are read from the held-out frame, not from the scorer's positions.
+def test_a_custom_scorer_that_reorders_or_reprices_its_rows_has_them_named_among_its_own():
+    """A refusal names frame rows only where the scorer read the held-out rows as given.
 
-    A scorer reverses its held-out rows, another repeats two before the unseen
-    cell; both refuse row 33, and the result says it scored 1 of 2 folds, with
-    the mean and pooled scores covering only that fold. Mutation: the
-    scorer's own positions were mapped onto the held-out rows: the reversed
-    scorer named row 30, and the repeating one raised ``IndexError`` and failed
-    its fold.
+    One scorer reverses its held-out rows, another repeats two before the unseen
+    cell, and a third reads them in order with offsets ``[-2, 0, 0, 2]``, which
+    takes away cell 0's mean and gives cell 3 one. Each refusal names its rows
+    among those its scorer read (positions 0, 4 and 0), and the result says it
+    scored 1 of 2 folds, with the mean and pooled scores covering only that fold.
+    Mutation: a refusal of as many rows as the frame has without a mean was named
+    as those frame rows, so the repricing scorer named row 33, which it priced.
     """
     X, y, splitter = cv_frame()
 
@@ -700,11 +701,22 @@ def test_a_custom_scorer_that_reorders_its_rows_still_names_them_in_the_frame():
         rows = [0, 1, 2, 0, len(y) - 1]
         return model.metrics(X.iloc[rows], y[rows]).deviance
 
-    for scorer in (reversed_rows, repeated_rows):
+    def repriced_rows(model, X, y, *, sample_weight=None, offset=None):
+        # Fold 0 holds out the four cells; fold 1's three rows are read unshifted.
+        shift = np.array([-2.0, 0.0, 0.0, 2.0]) if len(y) == 4 else np.zeros(len(y))
+        return model.metrics(X, y, offset=shift).deviance
+
+    for scorer, position, n_read in [
+        (reversed_rows, 0, 4),
+        (repeated_rows, 4, 5),
+        (repriced_rows, 0, 4),
+    ]:
         with pytest.warns(UserWarning) as caught:
             result = cross_validate(editor_fit(), X, y, cv=splitter, scoring=scorer)
         refused, scored = result.fold_scores.to_dict("records")
-        assert re.search(r"positions 33 in the frame\)", refused["score refused"])
+        assert f"of the {n_read} rows fold 0's scorer read" in refused["score refused"]
+        assert re.search(rf"positions {position} among them\)", refused["score refused"])
+        assert "in the frame" not in refused["score refused"]
         name = scorer.__name__
         assert refused["converged"] and np.isfinite(scored[name])
         [summary] = [str(w.message) for w in caught if "folds" in str(w.message)]
@@ -827,6 +839,51 @@ def test_a_row_whose_posterior_draws_cross_the_domain_has_no_posterior_summary()
     with pytest.raises(NoPredictedMeanError, match="so the Q-Q envelope cannot be computed") as e:
         model.plot_data("qq", X=frame, y=y, parameter_uncertainty=True, n_sim=200)
     assert 29 in e.value.positions
+
+
+def test_a_row_with_no_value_at_the_fit_has_no_predictive_draws_whatever_its_draws_give():
+    """An offset puts the row's fitted predictor at ``-1e-8`` under ``PowerLink(-1)``.
+
+    The seed is chosen so both posterior draws of that predictor land inside the
+    domain, so only the fit lacks the value: the row's predictive draws read NaN with
+    one warning, and ``reduce="sum"`` refuses it by name. Mutation: the draws alone
+    decided, so the row was drawn and summed with no warning.
+    """
+    from superglm import GammaLS, SuperLSS, term
+    from superglm.distributional.posterior import posterior_draws, posterior_parameters
+    from superglm.links import PowerLink
+
+    x = np.linspace(0.0, 1.0, 30)
+    family = GammaLS()
+    model = SuperLSS(
+        family, family.mean(term("x", Numeric()), link=PowerLink(-1.0)), family.scale()
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(pd.DataFrame({"x": x}), np.tile([0.9, 1.1], 15) / (1.0 + x))
+    fitted = model._require_fitted()
+    row = pd.DataFrame({"x": [0.5]})
+    eta_hat = float(fitted.predict_eta(row)[0, 0])
+    offsets = {"mean": np.array([-eta_hat - 1e-8]), "scale": np.zeros(1)}
+    seed = next(
+        seed
+        for seed in range(200)
+        for [(_, block)] in [
+            list(
+                posterior_parameters(
+                    fitted, row, posterior_draws(fitted, 2, seed=seed), offsets=offsets
+                )
+            )
+        ]
+        if np.all(np.isfinite(block))
+    )
+    drawn = _warned_once(
+        lambda: model.posterior_predictive(row, n_draws=2, offsets=offsets, seed=seed),
+        r"1 of 1 rows have no predicted value of 'mean'",
+    )
+    assert drawn.shape == (2, 1) and np.all(np.isnan(drawn))
+    with pytest.raises(NoPredictedMeanError, match="so the reduced draws cannot be computed"):
+        model.posterior_predictive(row, n_draws=2, offsets=offsets, seed=seed, reduce="sum")
 
 
 def test_superlss_readers_of_a_row_with_no_value_refuse_it_by_name():

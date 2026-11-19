@@ -52,8 +52,9 @@ class CrossValidationResult:
         ``n_reml_iter`` (outer REML iterations) and ``warm_started``. A
         ``"score refused"`` column appears when a fold's held-out rows of
         positive weight had no predicted mean: it holds the reason, naming
-        the rows by their position in the frame, and that fold's refused
-        scores hold ``error_score``.
+        the rows by their position in the frame (a custom scorer that reads
+        other rows, or changes their offsets, has them named among the rows
+        it read), and that fold's refused scores hold ``error_score``.
     mean_scores : dict
         Equal-weight mean of each per-fold metric across folds. Built-in
         deviance and negative log-likelihood are normalized within each fold
@@ -479,14 +480,14 @@ def refusal_in_frame(
 ) -> NoPredictedMeanError:
     """A scorer's refusal on fold ``fold``'s held-out ``rows``, naming them in the frame.
 
-    The rows are read from the held-out frame itself, in its order, whatever rows
-    the scorer passed on (a custom one may reorder, select or repeat them): those
-    of positive weight with no predicted mean (a SuperLSS: no value of a
-    parameter), or every one with none where the scorer weighed the rows itself.
-    They are named so only where the scorer refused as many rows, which it then
-    read: a scorer that read fewer, or changed their offsets, has its rows named
-    among those it read, with the fold. Where the held-out frame has none, the
-    scorer scored other rows, and its own error stands.
+    The held-out frame's own rows with no predicted mean (a SuperLSS: no value
+    of a parameter) are those of positive weight, or every one where the scorer
+    weighed the rows itself. They are named in the frame only where the scorer
+    read the held-out rows as given, refusing exactly those positions; a custom
+    scorer that reorders, selects or repeats the rows, or changes their offsets,
+    has its rows named among those it read, with the fold, since a count alone
+    does not say which frame rows they are. Where the held-out frame has none,
+    the scorer scored other rows, and its own error stands.
     """
     weights = None if sample_weight is None else np.asarray(sample_weight)
     missing = _held_out_without_value(model, X_val, offset, weights)
@@ -496,7 +497,7 @@ def refusal_in_frame(
     held = weighted if np.any(weighted) else missing
     if not np.any(held):
         return refused
-    if np.count_nonzero(held) != refused.positions.size:
+    if refused.n_rows != len(rows) or not np.array_equal(np.flatnonzero(held), refused.positions):
         return refused.in_scorer(fold)
     return refused.in_frame(np.asarray(rows)[held], n_rows, fold, len(rows))
 
@@ -906,7 +907,8 @@ def cross_validate(
         refused because held-out rows of positive weight have no predicted mean
         (``NoPredictedMeanError``) is assigned it too, with the reason in
         ``fold_scores``' ``"score refused"`` column; ``"raise"`` raises it, its
-        ``positions`` those rows' positions in the frame. That fold is not failed: it keeps its
+        ``positions`` those rows' positions in the frame (or, for a custom scorer
+        that reads other rows, among the rows it read). That fold is not failed: it keeps its
         fit record, its estimator and its out-of-fold predictions, its other scores
         stand, and one warning says how many folds were scored.
     fit_kwargs : mapping, optional
