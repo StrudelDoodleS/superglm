@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+from dataclasses import replace
 from functools import cache, cached_property, partial
 from typing import TYPE_CHECKING, Any, cast
 
@@ -114,21 +115,7 @@ def _selected_group_state(
         if group.name not in selected_names:
             continue
         selected_columns.extend(range(group.start, group.end))
-        active_groups.append(
-            GroupSlice(
-                name=group.name,
-                start=column,
-                end=column + group.size,
-                weight=group.weight,
-                penalty_dim=group.penalty_dim,
-                penalized=group.penalized,
-                feature_name=group.feature_name,
-                subgroup_type=group.subgroup_type,
-                constraints=group.constraints,
-                monotone_engine=group.monotone_engine,
-                scop_reparameterization=group.scop_reparameterization,
-            )
-        )
+        active_groups.append(replace(group, start=column, end=column + group.size))
         column += group.size
     selected_columns_array = np.asarray(selected_columns, dtype=np.intp)
     rank_info = getattr(result, "rank_info", None)

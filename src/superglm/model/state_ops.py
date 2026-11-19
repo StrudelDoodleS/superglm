@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import cast
 
 import numpy as np
@@ -113,21 +114,7 @@ def _grouped_active_state(model, selected_names: set[str]):
             continue
         active_matrices.append(gm)
         rebuilt_columns.extend(range(group.start, group.end))
-        active_groups.append(
-            GroupSlice(
-                name=group.name,
-                start=col,
-                end=col + group.size,
-                weight=group.weight,
-                penalty_dim=group.penalty_dim,
-                penalized=group.penalized,
-                feature_name=group.feature_name,
-                subgroup_type=group.subgroup_type,
-                constraints=group.constraints,
-                monotone_engine=group.monotone_engine,
-                scop_reparameterization=group.scop_reparameterization,
-            )
-        )
+        active_groups.append(replace(group, start=col, end=col + group.size))
         col += group.size
     return (
         DesignMatrix(active_matrices, n=model._dm.n, p=col),
@@ -294,8 +281,6 @@ def face_record_at(model, W: NDArray):
     the centre are formed at ``W`` as the fit forms them; the data Gram is
     left for the first inference at ``W`` to take.
     """
-    from dataclasses import replace
-
     from superglm.solvers.centered_system import grouped_augmented_factor, grouped_projected_factor
     from superglm.solvers.irls_direct import _face_decomposition, _feature_edf
     from superglm.solvers.rank import weights_fingerprint
