@@ -805,16 +805,48 @@ test("each fold holds out its own piece, and the picture needs folds that split 
   assert.doesNotMatch(foldTableMarkup(payload), /Held out/);
 });
 
+/** The fold table's body rows as cells, each its text and attributes, keyed by column header. */
+function foldTable(html) {
+  const headers = [...html.matchAll(/<th[^>]*>([\s\S]*?)<\/th>/g)].map((match) => text(match[1]));
+  const body = html.slice(html.indexOf("<tbody>"));
+  return [...body.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/g)].map((row) => {
+    const cells = [...row[1].matchAll(/<td([^>]*)>([\s\S]*?)<\/td>/g)].map((cell) => ({
+      text: text(cell[2]),
+      attributes: Object.fromEntries([...cell[1].matchAll(/([\w-]+)="([^"]*)"/g)].map((a) => [a[1], a[2]])),
+    }));
+    return Object.fromEntries(headers.map((header, index) => [header, cells[index]]));
+  });
+}
+
+/** The performance cards: each metric's title, and each run's label and shown value. */
+function performanceCards(html) {
+  return html.split('<div class="cv-card">').slice(1).map((card) => ({
+    title: text(/cv-card-title">([\s\S]*?)<span/.exec(card)[1]),
+    rows: [...card.matchAll(/cv-card-label">([\s\S]*?)<\/span>\s*<strong>([\s\S]*?)<\/strong>/g)].map(
+      (row) => ({ label: text(row[1]), value: Number(text(row[2])) }),
+    ),
+  }));
+}
+
+function text(markup) {
+  return markup.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+}
+
 test("a fold whose held-out rows have no quote shows why it has no score", () => {
   const payload = cvPayload();
   const [refused] = payload.results[0].folds;
   refused.scores = { deviance: null, gini: null };
   refused.score_refused = "1 of fold 1's 4 held-out rows have no quote under this model (row positions 33).";
-  const html = foldTableMarkup(payload);
-  assert.equal(count(html, /data-popover-title="No score"/g), 2);
-  assert.match(html, /data-popover-body="1 of fold 1's 4 held-out rows have no quote[^"]*">--<\/td>/);
-  // The scored fold has no reason to show.
-  assert.match(html, /<td>0\.3000<\/td>/);
+  const [first, second] = foldTable(foldTableMarkup(payload));
+  for (const header of ["Deviance", "Gini"]) {
+    // No number stands in for the refused score; the cell carries the reason.
+    assert.ok(Number.isNaN(Number.parseFloat(first[header].text)), first[header].text);
+    assert.equal(first[header].attributes["data-popover-body"], refused.score_refused);
+    // The scored fold has no reason to show, and its score survives.
+    assert.equal(second[header].attributes["data-popover-body"], undefined);
+  }
+  assert.equal(Number(second.Deviance.text), 0.3);
+  assert.equal(Number(second.Gini.text), 0.22);
 });
 
 test("a result with a refused fold says how many folds its mean and pooled score cover", () => {
@@ -824,9 +856,16 @@ test("a result with a refused fold says how many folds its mean and pooled score
   refused.score_refused = "1 of fold 1's 4 held-out rows have no quote under this model (row positions 33).";
   payload.results[0].mean = { deviance: 0.3, gini: 0.22 };
   payload.results[0].pooled = { deviance: 0.3 };
-  const html = performanceMarkup(payload);
-  assert.equal(count(html, /As supplied, 1 of 2 folds scored/g), payload.metrics.length);
-  assert.doesNotMatch(performanceMarkup(cvPayload()), /folds scored/);
+  const cards = performanceCards(performanceMarkup(payload));
+  assert.deepEqual(cards.map((card) => card.title), payload.metrics.map((metric) => metric.label));
+  cards.forEach((card, index) => {
+    const [row] = card.rows;
+    assert.deepEqual(/\b(\d+) of (\d+) folds\b/.exec(row.label)?.slice(1).map(Number), [1, 2], row.label);
+    assert.equal(row.value, payload.results[0].mean[payload.metrics[index].name]);
+  });
+  for (const card of performanceCards(performanceMarkup(cvPayload()))) {
+    assert.doesNotMatch(card.rows[0].label, /\d+ of \d+ folds/);
+  }
 });
 
 /** @param {number[]} rounds */

@@ -28,6 +28,7 @@ from superglm.links import (
     stabilize_eta,
 )
 from tests._no_mean_fixture import CELLS, THREE_CELL_LINKS, three_cell_fit
+from tests.test_saved_fs_models import _prediction_rounding
 
 
 class TestLogLink:
@@ -791,10 +792,13 @@ def test_predict_gives_no_mean_for_a_new_combination_outside_the_inverse_links_d
         predicted = model.predict(CELLS)
 
     assert np.flatnonzero(np.isnan(predicted)).tolist() == [3]
-    # The other rows are what predict has always returned: the stabilized inverse.
+    # The other rows are what predict has always returned, the stabilized inverse, and what
+    # predicting them alone returns, each within two evaluations' rounding of eta at the
+    # inverse link's slope.
     expected = clip_mu(model._link.inverse(stabilize_eta(eta[:3], model._link)), Gamma())
-    np.testing.assert_array_equal(predicted[:3], expected)
-    np.testing.assert_array_equal(predicted[:3], model.predict(CELLS.iloc[:3]))
+    rounding = _prediction_rounding(model, CELLS)[:3]
+    for reference in (expected, model.predict(CELLS.iloc[:3])):
+        assert np.all(np.abs(predicted[:3] - reference) <= rounding), predicted[:3] - reference
     assert_allclose(predicted[:3], [1.0, np.mean(y_level), np.mean(y_level)], rtol=1e-6)
 
 

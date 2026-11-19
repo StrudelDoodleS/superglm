@@ -97,9 +97,17 @@ def test_sz_takes_the_fs_natural_parameterization() -> None:
     is the raw basis's.  sz keeps the wiggle component alone.  fs sets its
     null coordinates by degree, as each has its own smoothing parameter, and
     builds its wiggle columns by an SVD in their complement; sz penalizes the
-    null block as one, so it keeps the eigenbasis, whose wiggle columns are
-    fs's up to sign and rounding.  Master held this exactly, as fs and sz shared
-    one map; the test pins that the change keeps sz on fs's wiggle space.
+    null block as one, so it keeps the eigenbasis.  Master held this exactly,
+    as fs and sz shared one map; the test pins that the change keeps sz on
+    fs's wiggle space.  Wiggle columns are free within a repeated whitened
+    eigenvalue, so the comparison is on what does not rotate: the wiggle and
+    null subspaces, the reconstructed penalty, and a diagonal row Gram with
+    fs's column norms in the same order.  Tolerances are ``u`` times the
+    magnitudes read and ``cond`` of the factor each check depends on: the raw
+    basis for the maps' construction, the sz null block for its projection.
+    Mutation checks: mixing a tenth of a null column into sz's wiggle fails
+    the wiggle subspace (the penalty cannot see it); adding a wiggle column
+    to sz's null block fails the null projection.
     """
     x = np.tile(np.linspace(-1.0, 1.0, 12), 3)
     group = np.repeat(["a", "b", "c"], 12)
@@ -108,12 +116,27 @@ def test_sz_takes_the_fs_natural_parameterization() -> None:
     info = sz.build(x, group, {})
     fs_info = fs.build(x, group, {})
 
+    import scipy.linalg as la
+
+    u = np.finfo(np.float64).eps / 2
     sz_map, fs_map = info.factor_smooth_transform, fs_info.factor_smooth_transform
-    signs = np.sign(np.sum(sz_map[:, :4] * fs_map[:, :4], axis=0))
-    scale = np.max(np.abs(fs_map[:, :4]))
-    np.testing.assert_allclose(sz_map[:, :4] * signs, fs_map[:, :4], rtol=0.0, atol=1e-12 * scale)
-    rotation = np.linalg.solve(sz_map[:, 4:].T @ sz_map[:, 4:], sz_map[:, 4:].T @ fs_map[:, 4:])
-    np.testing.assert_allclose(sz_map[:, 4:] @ rotation, fs_map[:, 4:], rtol=0.0, atol=1e-12)
+    raw = np.asarray(sz._spline._raw_basis_matrix(x), dtype=np.float64)
+    construction = 64 * 6 * u * np.linalg.cond(raw)
+    assert float(np.max(la.subspace_angles(sz_map[:, :4], fs_map[:, :4]))) <= construction
+    sz_null, fs_null = sz_map[:, 4:], fs_map[:, 4:]
+    rotation = np.linalg.lstsq(sz_null, fs_null, rcond=None)[0]
+    projection = 64 * 6 * u * np.linalg.cond(sz_null) * float(np.max(np.abs(fs_null)))
+    np.testing.assert_allclose(sz_null @ rotation, fs_null, rtol=0.0, atol=projection)
+    sz_gram = (raw @ sz_map).T @ (raw @ sz_map)
+    sz_norms = np.sqrt(np.diag(sz_gram))
+    np.testing.assert_allclose(
+        sz_gram[:4, :4] / np.outer(sz_norms[:4], sz_norms[:4]),
+        np.eye(4),
+        rtol=0.0,
+        atol=construction,
+    )
+    fs_norms = np.linalg.norm(raw @ fs_map[:, :4], axis=0)
+    np.testing.assert_allclose(sz_norms[:4], fs_norms, rtol=construction, atol=0.0)
     wiggle = info.repeated_penalty_components[0][1]
     np.testing.assert_allclose(wiggle, fs_info.repeated_penalty_components[0][1], rtol=1e-12)
     assert np.count_nonzero(np.diag(wiggle)) == 4

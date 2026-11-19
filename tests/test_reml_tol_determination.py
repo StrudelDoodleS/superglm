@@ -1166,6 +1166,9 @@ class TestDeadSearchNewtonDecrement:
 
         import superglm.reml.direct as direct
         from superglm import ConvergenceWarning
+        from superglm._frame import as_eager_frame
+        from superglm.model.base import _prediction_plan
+        from tests.test_saved_fs_models import _gamma, _se_tolerance, _term_magnitude
 
         rng = np.random.default_rng(20260727)
         x = rng.uniform(0.0, 1.0, 240)
@@ -1215,8 +1218,20 @@ class TestDeadSearchNewtonDecrement:
         assert fixed._reml_result.converged and not fixed_warnings
         assert reference._reml_result.termination_reason == "line_search_failed"
         assert not reference._reml_result.converged and reference_warnings
-        np.testing.assert_array_equal(fixed.result.beta, reference.result.beta)
+        # Both publish the one inner solve at the starting lambda, so their linear predictors
+        # agree within that solve's forward error, gamma_n kappa of the absolute terms a_i,
+        # and two evaluations' rounding, 2 gamma_{p+1} a_i.
         assert fixed._reml_result.lambdas == reference._reml_result.lambdas
+        frame = pd.DataFrame({"x": x})
+        beta = np.asarray(fixed.result.beta, dtype=np.float64)
+        plan = _prediction_plan(fixed)
+        magnitude = abs(float(fixed.result.intercept)) + sum(
+            _term_magnitude(term, as_eager_frame(frame), beta)
+            for term in plan["features"] + plan["interactions"]
+        )
+        allowance = (_se_tolerance(fixed) + 2.0 * _gamma(beta.size + 1)) * magnitude
+        eta_fixed = fixed._predict_eta_raw_exact(frame)
+        assert np.all(np.abs(eta_fixed - reference._predict_eta_raw_exact(frame)) <= allowance)
 
     def test_a_capped_newton_step_withholds_the_decrement(self, monkeypatch):
         """The decrement is the quadratic model's prediction for the Newton

@@ -102,12 +102,24 @@ def test_qq_envelope_is_the_same_in_simulation_blocks(monkeypatch) -> None:
     """Blocks of three simulated vectors over ten (ragged last) give the one-block envelope.
 
     Tweedie has an atom at zero, so every simulated cell takes a uniform from one stream for
-    its randomised PIT: blocks must take the stream's draws in order, each once. Every cell
-    is then the same elementwise transform of the same draw and uniform in either case, so
-    the envelopes are equal exactly.
+    its randomised PIT: blocks must take the stream's draws in order, each once, and read the
+    same simulated responses, which the spies check exactly. The distribution function is a
+    series whose term window is shared by the rows of a slab, so a block can sum a row over
+    another window: each window omits at most ``_POISSON_TAIL_TOLERANCE`` of the mass and
+    rounds within ``gamma_N`` for ``N <= _MAX_POISSON_TERMS`` terms, so the two sides' PIT
+    values differ by at most twice that, plus the jitter's rounding. ``ndtri`` turns that
+    into ``1 / phi`` at the farther of the two residuals; sorting a vector and a pointwise
+    percentile are 1-Lipschitz in the sup norm, so the envelopes agree within the largest
+    cell's bound.
     """
+    from types import SimpleNamespace
+
+    from scipy import special, stats
+
+    from superglm.distributional.families import tweedie
+
     rng = np.random.default_rng(138)
-    n = 40
+    n, n_sim = 40, 10
     frame = pd.DataFrame({"x": np.linspace(-1.0, 1.0, n)})
     jumps = rng.poisson(1.5, n)
     y = np.array([rng.gamma(2.0 * count, 0.5) if count else 0.0 for count in jumps])
@@ -118,44 +130,127 @@ def test_qq_envelope_is_the_same_in_simulation_blocks(monkeypatch) -> None:
     ).fit(frame, y)
     fitted = model._require_fitted()
     residuals = compute_residuals(fitted, frame, y)
-    monkeypatch.setattr(qq, "_BLOCK_CELLS", 3 * n)
-    blocked = qq.qq_payload(fitted, residuals, n_sim=10, X=frame, seed=3)
-    monkeypatch.undo()
-    whole = qq.qq_payload(fitted, residuals, n_sim=10, X=frame, seed=3)
-    np.testing.assert_array_equal(blocked.envelope_lower, whole.envelope_lower)
-    np.testing.assert_array_equal(blocked.envelope_upper, whole.envelope_upper)
+
+    real_rng, real_cdf = np.random.default_rng, TweedieLSS.cdf
+    record: dict[str, list[np.ndarray]] = {}
+
+    class Recording(np.random.Generator):
+        def uniform(self, *args, **kwargs):
+            out = super().uniform(*args, **kwargs)
+            record["uniforms"].append(np.ravel(out).copy())
+            return out
+
+    def cdf(self, values, theta):
+        record["responses"].append(np.asarray(values, dtype=np.float64).copy())
+        return real_cdf(self, values, theta)
+
+    real_envelope = qq._simulated_envelope
+    inside: list[bool] = []
+
+    def envelope(*args, **kwargs):
+        inside.append(True)
+        try:
+            return real_envelope(*args, **kwargs)
+        finally:
+            inside.pop()
+
+    def ndtri(p):
+        if inside:  # the simulated cells' PIT values, not the plotting positions
+            record["pit"].append(np.asarray(p, dtype=np.float64).copy())
+        return special.ndtri(p)
+
+    monkeypatch.setattr(
+        np.random, "default_rng", lambda seed=None: Recording(real_rng(seed).bit_generator)
+    )
+    monkeypatch.setattr(TweedieLSS, "cdf", cdf)
+    monkeypatch.setattr(qq, "special", SimpleNamespace(ndtri=ndtri))
+    monkeypatch.setattr(qq, "_simulated_envelope", envelope)
+
+    def payload(block_cells: int):
+        record.update(uniforms=[], responses=[], pit=[])
+        with monkeypatch.context() as patch:
+            patch.setattr(qq, "_BLOCK_CELLS", block_cells)
+            out = qq.qq_payload(fitted, residuals, n_sim=n_sim, X=frame, seed=3)
+        return (
+            out,
+            {name: np.concatenate(parts) for name, parts in record.items()},
+            len(record["pit"]),
+        )
+
+    blocked, blocked_streams, blocks = payload(3 * n)
+    whole, whole_streams, one = payload(qq._BLOCK_CELLS)
+    assert (blocks, one) == (4, 1)
+    np.testing.assert_array_equal(blocked_streams["uniforms"], whole_streams["uniforms"])
+    np.testing.assert_array_equal(blocked_streams["responses"], whole_streams["responses"])
+
+    pit_blocked, pit_whole = blocked_streams["pit"], whole_streams["pit"]
+    window = tweedie._POISSON_TAIL_TOLERANCE + _gamma(tweedie._MAX_POISSON_TERMS)
+    pit_error = 2.0 * window + 4.0 * U
+    assert np.all(np.abs(pit_blocked - pit_whole) <= pit_error)
+    r_blocked, r_whole = special.ndtri(pit_blocked), special.ndtri(pit_whole)
+    farther = np.maximum(np.abs(r_blocked), np.abs(r_whole))
+    cell = pit_error / stats.norm.pdf(farther) + 4.0 * U * farther
+    assert np.all(np.abs(r_blocked - r_whole) <= cell)
+    for side in ("envelope_lower", "envelope_upper"):
+        difference = np.abs(getattr(blocked, side) - getattr(whole, side))
+        assert np.all(difference <= cell.max()), side
 
 
 def test_gaussian_carrier_formed_in_weight_blocks_is_the_eager_carrier(monkeypatch) -> None:
     """A chunk-prepared plan's carrier, formed in blocks of eight rows over 37, is the eager one.
 
-    ``0.5 log w`` is the same elementwise arithmetic in a block, so the carrier, its rounding
-    scale and its digest (streamed in the same blocks) are equal exactly.
+    ``0.5 log w`` is one ``log`` per row, which a SIMD loop and its tail may round apart, so
+    the carrier and its rounding scale agree within the bound the likelihood identity
+    certifies for two evaluations of one row, ``gamma_{2 kappa + 8} a_i``. The digest streams
+    the carrier block by block, so with the eager rows handed to every block it is the eager
+    digest, whatever the boundaries.
     """
+    from superglm.distributional.likelihood_identity import LOG_ERROR_UNITS
+
     n = 37
     weights = resolve_likelihood_weights(
         np.linspace(0.25, 4.0, n), n_observations=n, contract=WeightContract("prior")
     )
     response = np.linspace(-0.5, 0.75, n)
     family = GaussianLS()
+    eager = family.bind_likelihood(response, weights, COMPLETE_OBSERVATION)
+    reference = eager.carrier_rounding()
     monkeypatch.setattr(gaussian, "_CARRIER_BLOCK_ROWS", 8)
     root = family.bind_chunked_likelihood(response, weights, COMPLETE_OBSERVATION)
     assert root.parameter_independent_carrier is None
     blocked = root.carrier_rounding()
-    eager = family.bind_likelihood(response, weights, COMPLETE_OBSERVATION)
-    np.testing.assert_array_equal(blocked.carrier, eager.parameter_independent_carrier)
-    np.testing.assert_array_equal(blocked.scale, eager.carrier_rounding().scale)
-    assert root.carrier_digest == eager.carrier_digest
+    tolerance = _gamma(2 * LOG_ERROR_UNITS + 8) * reference.scale
+    assert np.all(np.abs(blocked.carrier - eager.parameter_independent_carrier) <= tolerance)
+    assert np.all(np.abs(blocked.scale - reference.scale) <= tolerance)
+    assert blocked.error_units == reference.error_units == LOG_ERROR_UNITS
+
+    rows = weights.values
+
+    def eager_rows(values, semantics):
+        return eager.parameter_independent_carrier[np.searchsorted(rows, values)]
+
+    monkeypatch.setattr(gaussian, "_carrier_block", eager_rows)
+    for block in (8, 5, n):
+        monkeypatch.setattr(gaussian, "_CARRIER_BLOCK_ROWS", block)
+        streamed = family.bind_chunked_likelihood(response, weights, COMPLETE_OBSERVATION)
+        assert streamed.carrier_digest == eager.carrier_digest, block
 
 
 def test_generalized_pareto_third_derivatives_are_the_same_in_row_blocks(monkeypatch) -> None:
     """Second curvature directions whose third derivatives are formed in blocks of seven rows
-    over 37 (ragged last) are the one-block directions.
+    over 37 (ragged last) are the one-block directions: stacked axis pairs (the LAML
+    Hessian's call) and one direction pair per row.
 
-    Each row's third derivatives come from that row's ``dH(e_k)`` alone, the same arithmetic
-    in any block, so the directions agree exactly: stacked axis pairs (the LAML Hessian's
-    call) and one direction pair per row.
+    Each row's third derivatives come from that row's ``dH(e_k)`` alone, but through ``pow``,
+    ``log1p`` and series that a block of another length may round apart by a few ulps. The
+    directions are linear in a row's thirds, so the map from each third to each output, read
+    off by feeding unit thirds, carries those ulps: the blocked and one-block outputs agree
+    within ``gamma_{4 kappa}`` of the thirds' absolute contributions, ``|A| |third|``, and
+    a block that read or wrote another row's thirds moves an output by a whole contribution.
     """
+    import superglm.distributional.families.generalized_pareto as gpd_family
+    from superglm.distributional.likelihood_identity import LOG_ERROR_UNITS
+
     family = GeneralizedParetoLSS()
     links = tuple(spec.default_link for spec in family.parameters)
     n = 37
@@ -170,6 +265,12 @@ def test_generalized_pareto_third_derivatives_are_the_same_in_row_blocks(monkeyp
         first[index, :, q] = second[index, :, r] = 1.0
     per_row = np.random.default_rng(287).normal(size=(2, n, 2))
     pairs = ((first, second), (per_row[0], per_row[1]))
+    real_third = gpd_family.natural_third_from_direction
+    thirds: list[np.ndarray] = []
+
+    def recorded(*args, **kwargs):
+        thirds.append(real_third(*args, **kwargs))
+        return thirds[-1]
 
     def directions():
         return [
@@ -177,11 +278,29 @@ def test_generalized_pareto_third_derivatives_are_the_same_in_row_blocks(monkeyp
             for a, b in pairs
         ]
 
+    monkeypatch.setattr(gpd_family, "natural_third_from_direction", recorded)
     monkeypatch.setattr(_curvature_direction, "STACKED_ROW_CHUNK", 7)
     blocked = directions()
-    monkeypatch.undo()
-    for got, want in zip(blocked, directions(), strict=True):
-        np.testing.assert_array_equal(got, want)
+    monkeypatch.setattr(_curvature_direction, "STACKED_ROW_CHUNK", n)
+    whole = directions()
+    third = thirds[-1]
+
+    def with_third(fixed):
+        monkeypatch.setattr(gpd_family, "natural_third_from_direction", lambda *a, **k: fixed)
+        return directions()
+
+    base = with_third(np.zeros_like(third))
+    magnitude = [np.zeros_like(out) for out in whole]
+    for column in range(third.shape[1]):
+        unit = np.zeros_like(third)
+        unit[:, column] = 1.0
+        for index, (out, zero) in enumerate(zip(with_third(unit), base, strict=True)):
+            # Row i of the output reads only row i of the thirds.
+            contribution = np.abs(out - zero) * np.abs(third[:, column])[:, None]
+            magnitude[index] += contribution
+    for got, want, scale in zip(blocked, whole, magnitude, strict=True):
+        assert np.all(scale > 0.0)
+        assert np.all(np.abs(got - want) <= _gamma(4 * LOG_ERROR_UNITS) * scale)
 
 
 @pytest.mark.parametrize("route", ["compiled", "array"])

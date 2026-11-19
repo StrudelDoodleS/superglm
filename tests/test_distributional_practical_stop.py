@@ -243,30 +243,54 @@ def _noise_random_effect_fit(*, practical: bool, max_lambda: float, levels: int 
 
 
 def test_practical_window_replays_non_increasing_steps(monkeypatch) -> None:
-    """A practical plateau's window is the run of non-increasing accepted steps that stopped it.
+    """A practical plateau's window is a full run of non-increasing accepted steps after the last longer one.
 
     The one-observation random effect whose mean sits 1e-12 above its prior
-    has a harmonic tail toward an infinite smoothing parameter; with a
-    practical parameter tolerance of 1e-3 its search stops on the practical
-    plateau's own run, never the outward window (the stop that
+    has a harmonic tail toward an infinite smoothing parameter.  Its ordinary
+    fit, with a practical parameter tolerance of 1e-3, stops on the practical
+    plateau's own run (the stop that
     ``test_practical_plateau_stops_an_immaterial_tail_without_certifying_infinity``
-    pins). Its steps contract on their own, so the refit reports the step of the
-    iteration that stopped it half again as long, leaving the lambda it reached,
-    and so the objective and parameter tests, as they were: a step longer than the
-    one before restarts the run, and the stop comes a whole window later.
+    pins), and the history it records ends in that run.
+
+    The rule itself is driven with controlled steps: each iteration's
+    proposal keeps the lambdas it reached but reports a scripted step,
+    ``1 / (1 + i)`` at iteration ``i`` with one longer step (10) at
+    iteration ``jump``, and the objective and parameter tests are opened
+    (``plateau_tolerance=1``, ``practical_parameter_tolerance=1e300``) so
+    the step test alone decides.  A longer step restarts the run, so the stop
+    comes a whole window after it, at ``jump + 1 + plateau_iterations``
+    iterations; with no longer step inside the first window it comes at
+    ``plateau_iterations``.  Mutation check: dropping ``max_accepted_step <=
+    previous_accepted_step`` from the practical run stops every scripted fit
+    at ``plateau_iterations``.
     """
     from superglm.distributional.smoothing import loop
     from tests.test_distributional_endpoint_laml import _scalar_efs_fit
 
-    def fit(longer: int | None = None):
-        real, calls = loop._scaled_proposal, []
+    _name, ordinary = _scalar_efs_fit(
+        1.000000000001,
+        maximum_lambda=1.0e10,
+        starting_lambda=0.1,
+        max_iterations=300,
+        practical_convergence=True,
+        practical_parameter_tolerance=1.0e-3,
+    )
+    assert ordinary.convergence_reason == "practical_plateau"
+    window = ordinary.config.plateau_iterations
+    assert all(item.accepted for item in ordinary.history)
+    steps = [item.max_accepted_log_step for item in ordinary.history]
+    run = steps[-window - 1 :]
+    assert run == sorted(run, reverse=True), run
+
+    def scripted(jump: int | None) -> list[float]:
+        real, full_scale = loop._scaled_proposal, []
 
         def proposal(current, log_steps, names, scale, config):
             lambdas, steps = real(current, log_steps, names, scale, config)
-            calls.append(scale)
-            if calls.count(1.0) == longer and scale == 1.0:
-                steps = {name: 1.5 * step for name, step in steps.items()}
-            return lambdas, steps
+            full_scale.append(scale == 1.0)
+            i = sum(full_scale) - 1  # every iteration's first proposal is at full scale
+            step = 10.0 if i == jump else 1.0 / (1.0 + i)
+            return lambdas, {name: step for name in steps}
 
         with monkeypatch.context() as patch:
             patch.setattr(loop, "_scaled_proposal", proposal)
@@ -276,20 +300,17 @@ def test_practical_window_replays_non_increasing_steps(monkeypatch) -> None:
                 starting_lambda=0.1,
                 max_iterations=300,
                 practical_convergence=True,
-                practical_parameter_tolerance=1.0e-3,
+                practical_parameter_tolerance=1.0e300,
+                plateau_tolerance=1.0,
             )
         assert smoothing.convergence_reason == "practical_plateau"
-        assert calls == [1.0] * len(smoothing.history)  # one proposal per iteration, accepted
-        # the run's steps, and the one before it, each no longer than the one before
-        steps = [item.max_accepted_log_step for item in smoothing.history]
-        run = steps[-smoothing.config.plateau_iterations - 1 :]
-        assert run == sorted(run, reverse=True), run
-        return steps, smoothing.config.plateau_iterations
+        return [item.max_accepted_log_step for item in smoothing.history]
 
-    natural, window = fit()
-    steps, _ = fit(longer=len(natural))
-    assert steps[len(natural) - 1] > steps[len(natural) - 2]  # the step reported longer
-    assert len(steps) >= len(natural) + window
+    assert len(scripted(None)) == window
+    for jump in range(1, window):
+        steps = scripted(jump)
+        assert steps[jump] == 10.0
+        assert len(steps) == jump + 1 + window, (jump, steps)
 
 
 def test_lower_bound_pressure_names_components_pinned_at_the_minimum() -> None:

@@ -409,7 +409,29 @@ def test_unpenalized_wiggle_admits_any_order_and_gives_least_squares() -> None:
 
 
 def test_estimated_null_lambdas_keep_their_names_in_any_row_order() -> None:
-    """REML estimates each named ``null_j`` the same, whatever order the rows arrive in."""
+    """Each named ``null_j`` is the same penalty, fixed or estimated, whatever order the rows arrive in.
+
+    At fixed, unequal lambdas the two row orders fit the same model: their
+    forecasts and EDF agree to ``p u cond(H)`` of their magnitude, ``H`` the
+    penalized Hessian (``cond`` read from the fit's covariance).  A null axis
+    that moved with row order (the eigenbasis null of 5f28e8e80) prices the
+    same rows differently at the same lambdas.
+
+    Estimated, each search stops near the one REML optimum, so the two fits
+    are compared on what that stop resolves.  Every coordinate here has
+    curvature well above the freeze bar, so each log lambda lies within about
+    ``|g_i| / H_ii`` of the optimum (the fit's own projected outer gradient and
+    curvature, ``reml_freeze_decision``); the two fits' lambdas agree within
+    four times the sum of those Newton distances, the four for the coupling a
+    diagonal leaves out.  The objectives agree within the same coupling factor
+    times ``g_i**2 / H_ii`` plus ``n u`` of their magnitude, and the forecasts
+    and EDF within the lambda bound times their measured sensitivity to each
+    log lambda (fixed-lambda refits a step ``h`` apart, doubled for the
+    linearization), plus the fixed-lambda rounding bound.  Mutation check:
+    building fs's null axes from the eigenbasis (``difference_order = None``
+    in ``_natural_parameterization_from_r``) fails the fixed-lambda forecasts
+    and the estimated lambdas.
+    """
     rng = np.random.default_rng(20261119)
     n = 600
     x = rng.uniform(-1.0, 1.0, n)
@@ -425,19 +447,67 @@ def test_estimated_null_lambdas_keep_their_names_in_any_row_order() -> None:
     test = pd.DataFrame(
         {"x": np.tile(np.linspace(-0.9, 0.9, 5), 4), "group": np.repeat(["a", "b", "c", "d"], 5)}
     )
-    fits = []
-    for order in (np.arange(n), np.random.default_rng(7).permutation(n)):
+    u = np.finfo(np.float64).eps / 2
+    names = ("wiggle", "null_0", "null_1", "null_2")
+    orders = (np.arange(n), np.random.default_rng(7).permutation(n))
+
+    def fit(order: np.ndarray, lambdas: dict[str, float] | None = None) -> SuperGLM:
+        policy = None if lambdas is None else {k: LambdaPolicy.fixed(v) for k, v in lambdas.items()}
         model = SuperGLM(
             family="gaussian",
-            interactions=[FactorSmooth("x", group="group", k=6, m=3)],
+            interactions=[FactorSmooth("x", group="group", k=6, m=3, lambda_policy=policy)],
             selection_penalty=0.0,
             tol=1e-12,
         )
         model.fit_reml(X.iloc[order], y[order], max_reml_iter=100, reml_tol=1e-10)
-        assert model.reml_diagnostics()["converged"]
-        fits.append(model)
-    first, second = (model.factor_smooth("x:group:fs") for model in fits)
-    for name in ("wiggle", "null_0", "null_1", "null_2"):
-        assert second.lambdas[name] == pytest.approx(first.lambdas[name], rel=1e-5)
-    assert fits[1].result.effective_df == pytest.approx(fits[0].result.effective_df, abs=1e-6)
-    np.testing.assert_allclose(fits[1].predict(test), fits[0].predict(test), rtol=0.0, atol=1e-7)
+        return model
+
+    def rounding(model: SuperGLM) -> tuple[float, float]:
+        """``p u cond(H)`` of the forecasts' and the EDF's magnitudes."""
+        covariance = np.asarray(model._coef_covariance[0])
+        relative = covariance.shape[0] * u * np.linalg.cond(covariance)
+        return relative * float(np.max(np.abs(model.predict(test)))), relative * covariance.shape[0]
+
+    fixed = {"wiggle": 0.01, "null_0": 1.4, "null_1": 0.19, "null_2": 25.0}
+    first, second = (fit(order, fixed) for order in orders)
+    forecast_rounding, edf_rounding = rounding(first)
+    np.testing.assert_allclose(
+        second.predict(test), first.predict(test), rtol=0.0, atol=forecast_rounding
+    )
+    assert abs(second.result.effective_df - first.result.effective_df) <= edf_rounding
+
+    fits = [fit(order) for order in orders]
+    lambdas = [model.factor_smooth("x:group:fs").lambdas for model in fits]
+    newton = np.zeros(len(names))
+    objective_slack = 0.0
+    for model in fits:
+        decision = model.reml_diagnostics()["profile"]["reml_freeze_decision"]
+        assert decision["names"] == [f"x:group:fs:{name}" for name in names]
+        assert not any(decision["frozen"])
+        gradient = np.abs(np.asarray(decision["proj_grad"]))
+        curvature = np.asarray(decision["hess_diag"])
+        assert np.all(np.asarray(decision["normalized_curvature"]) > decision["curvature_bar"])
+        newton += gradient / curvature
+        objective_slack += 4.0 * float(np.sum(gradient**2 / curvature))
+    movement = 4.0 * newton
+    for index, name in enumerate(names):
+        assert abs(np.log(lambdas[1][name]) - np.log(lambdas[0][name])) <= movement[index], name
+
+    objectives = [model.reml_diagnostics()["objective"] for model in fits]
+    objective_slack += n * u * (1.0 + abs(objectives[0]))
+    assert abs(objectives[1] - objectives[0]) <= objective_slack
+
+    base = fit(orders[0], lambdas[0])
+    forecast_rounding, edf_rounding = rounding(base)
+    step = 1e-3
+    forecast_bound, edf_bound = forecast_rounding, edf_rounding
+    for index, name in enumerate(names):
+        nudged = fit(orders[0], {**lambdas[0], name: lambdas[0][name] * np.exp(step)})
+        forecast_slope = np.max(np.abs(nudged.predict(test) - base.predict(test))) / step
+        edf_slope = abs(nudged.result.effective_df - base.result.effective_df) / step
+        forecast_bound += 2.0 * forecast_slope * movement[index]
+        edf_bound += 2.0 * edf_slope * movement[index]
+    np.testing.assert_allclose(
+        fits[1].predict(test), fits[0].predict(test), rtol=0.0, atol=forecast_bound
+    )
+    assert abs(fits[1].result.effective_df - fits[0].result.effective_df) <= edf_bound

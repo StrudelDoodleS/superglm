@@ -676,90 +676,149 @@ class TestMaximumLikelihoodPhi:
         plt.close(ax.figure)
         return centre, dict(zip(powers, statistic, strict=True))
 
+    def _premium_search(self, currency):
+        """The premium book's searched profile in ``currency``, before any interval."""
+        frame, y, exposure = self._premium_book()
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            features={"brand": RandomEffect()},
+            selection_penalty=0,
+            tol=1e-10,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return model.estimate_p(frame, currency * y, sample_weight=exposure, fit_mode="reml")
+
+    @staticmethod
+    def _pair_bound(result):
+        """Two candidates' summed bounds at p_hat's error, in the likelihood-ratio statistic."""
+        return 2.0 * result._ll_scale * 2.0 * result._candidates[result.p_hat].error
+
+    @staticmethod
+    def _plant_lower(result, drop, offset, *, converged=True):
+        """Record a power ``offset`` below p_hat, ``drop`` below it in the statistic, with
+        p_hat's fit record (its error bound; marked unsettled unless ``converged``)."""
+        p_low = result.p_hat - offset
+        candidate = result._candidates[result.p_hat]
+        if not converged:
+            candidate = replace(candidate, pirls_converged=False)
+            result._candidates[result.p_hat] = candidate
+        result._candidates[p_low] = candidate
+        result._objective.values[p_low] = result.search_nll - drop / (2.0 * result._ll_scale)
+        return p_low
+
+    @staticmethod
+    def _drive_refits(result, planted=None, *, converged=True):
+        """Run the profile's real refits, recording each (p, tol), but report ``planted``
+        values where given, and no bound (inf) unless ``converged``. Undo with
+        ``del result._objective._objective.refit``."""
+        profile = result._objective._objective
+        real = type(profile).refit.__get__(profile)
+        calls = []
+
+        def refit(p, tol):
+            calls.append((p, tol))
+            nll, error = real(p, tol)
+            return (planted or {}).get(p, nll), error if converged else math.inf
+
+        profile.refit = refit
+        return calls
+
+    @staticmethod
+    def _expected_refit_tol(result, p_low):
+        """The tolerance `_refined_value` asks of a refit to a quarter of the planted drop:
+        linear in its fit's tolerance, never looser than the candidate's own."""
+        tolerance = result._objective._objective.tolerance
+        target = (result.search_nll - result._objective.values[p_low]) / 4.0
+        wanted = tolerance * target / result._candidates[result.p_hat].error
+        return min(max(tweedie_module._REFIT_TOL_FLOOR, wanted), tolerance)
+
+    @staticmethod
+    def _assert_rooted(result, alpha):
+        """Each end is a root of the statistic measured from the recorded centre, to the
+        rooting tolerance times the secant slope to the end's bracket partner (an upper
+        bound on the slope there for a profile convex beyond its centre)."""
+        centre, centre_nll = result._ci_centres[alpha]
+        interval = result._ci_cache[alpha]
+        assert not (interval.lower_censored or interval.upper_censored)
+        assert interval.lower < centre < interval.upper
+        values = result._objective.values
+        cutoff = chi2.isf(alpha, 1)
+
+        def statistic(p):
+            return 2.0 * result._ll_scale * (values[p] - centre_nll)
+
+        for end, outward in ((interval.lower, -1.0), (interval.upper, 1.0)):
+            partner = min(
+                (p for p in values if (p - end) * outward > 0.0 and math.isfinite(values[p])),
+                key=lambda p: abs(p - end),
+            )
+            slope = abs(statistic(partner) - statistic(end)) / abs(partner - end)
+            assert abs(statistic(end) - cutoff) <= 2.0 * slope * tweedie_module._CI_XTOL
+
     def test_a_lower_power_moves_the_interval_alike_in_euros_and_cents(self, monkeypatch):
         """Cents add n_positive log 100 to the NLL and the REML objective at every power,
         which no likelihood ratio sees but the candidate fits' bounds, read from each
-        REML stop's level, do. A coarse search's interval finds a power below p_hat by
-        more than the euros bounds resolve and less than the cents bounds do. In cents
-        both powers are refitted from cold to a quarter of the drop, which confirms it:
-        it is the minimum in both units, and both intervals are inverted from it."""
-        received = []
+        REML stop's level, do: the cents bounds are the wider.  A power planted below
+        p_hat by a drop between the two units' pair bounds (their geometric mean, a
+        deliberate margin to each) is resolved by the euros bounds alone and needs
+        refits in cents; the refits run for real, at the tolerance a quarter of the
+        drop asks, and report the planted value at the lower power, so they confirm
+        it.  Both intervals are then inverted from that power, rooted on the real
+        profile, and agree to their rooting; each says once that it moved.  Mutation
+        check: an interval without refits (``_refiner`` returning None, the rule before
+        #672) inverts the cents interval from p_hat."""
+        euros, cents = self._premium_search(1.0), self._premium_search(100.0)
+        assert self._pair_bound(euros) < self._pair_bound(cents)
+        drop = math.sqrt(self._pair_bound(euros) * self._pair_bound(cents))
+        received, calls, lows = [], {}, {}
         fit_reml = SuperGLM.fit_reml
 
         def spy(model, *args, reml_tol=None, pirls_tol=None, **kwargs):
             received.append((reml_tol, pirls_tol))
             return fit_reml(model, *args, reml_tol=reml_tol, pirls_tol=pirls_tol, **kwargs)
 
-        monkeypatch.setattr(SuperGLM, "fit_reml", spy)
-        coarse = {"p_bounds": (1.3, 1.7), "xatol": 0.05}
-        euros, in_euros = self._premium_profile(1.0, **coarse)
-        in_euros_calls = len(received)
-        cents, in_cents = self._premium_profile(100.0, **coarse)
-        monkeypatch.undo()
+        for name, result in (("euros", euros), ("cents", cents)):
+            lows[name] = self._plant_lower(result, drop, 0.01)
+            planted = {lows[name]: result._objective.values[lows[name]]}
+            calls[name] = self._drive_refits(result, planted)
+            with monkeypatch.context() as patch, warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                patch.setattr(SuperGLM, "fit_reml", spy)
+                if name == "cents":
+                    received.clear()
+                result.interval(0.05)
+            del result._objective._objective.refit
 
-        lower, lower_nll = cents._objective.best()
-        drop = 2.0 * cents._ll_scale * (cents.search_nll - lower_nll)
-
-        def bounds(result):
-            below = result._objective.best()[0]
-            pair = result._evaluation_error(result.p_hat) + result._evaluation_error(below)
-            return 2.0 * result._ll_scale * pair
-
-        # The witness's case: the same lower power in both units, its drop between
-        # the two units' bounds.
-        assert euros._objective.best()[0] == pytest.approx(lower, abs=1e-9)
-        assert bounds(euros) < drop < bounds(cents)
-        # Verified by the same two powers refitted from cold at a tight REML
-        # tolerance: a real improvement.
-        frame, y, exposure = self._premium_book()
-
-        def tight(p):
-            model = SuperGLM(
-                family=TweedieDistribution(p=p),
-                features={"brand": RandomEffect()},
-                selection_penalty=0,
-                tol=1e-10,
-            )
-            model.fit_reml(frame, y, sample_weight=exposure, reml_tol=1e-10)
-            return profile_phi_at(y, model.predict(frame), exposure, p).criterion
-
-        assert 2.0 * (tight(cents.p_hat) - tight(lower)) == pytest.approx(drop, abs=1e-2)
-        # Endpoints are rooted to 1e-4; master's cents interval, inverted from p_hat,
-        # sat 1.2e-3 outside the euros one at each end.
+        for name, result in (("euros", euros), ("cents", cents)):
+            p_low = lows[name]
+            assert result._ci_centres[0.05] == (p_low, result._objective.values[p_low])
+            self._assert_rooted(result, 0.05)
+            (caution,) = result._ci_cautions[0.05]
+            assert f"p={p_low:.6g}" in caution and f"p_hat={result.p_hat:.6g}" in caution
+            assert "inverted from that lower power" in caution
         np.testing.assert_allclose(
-            [in_cents.lower, in_cents.upper], [in_euros.lower, in_euros.upper], rtol=0, atol=1e-4
+            [cents._ci_cache[0.05].lower, cents._ci_cache[0.05].upper],
+            [euros._ci_cache[0.05].lower, euros._ci_cache[0.05].upper],
+            rtol=0,
+            atol=2 * tweedie_module._CI_XTOL,
         )
-        assert in_cents.lower < lower < in_cents.upper
-        # One caution, word for word in either unit.
-        caution = (
-            f"the 95% interval's search found p={lower:.6g} below p_hat={cents.p_hat:.6g} on the "
-            f"searched curve, by {drop:.3g} in the likelihood-ratio statistic, more than its "
-            "fits resolve: p_hat is a local minimum there, and the interval is inverted from "
-            "that lower power."
-        )
-        assert euros._ci_cautions[0.05] == cents._ci_cautions[0.05] == [caution]
-        # Saved and loaded, each plot measures from the power its interval is inverted
-        # from: the lowest point is 0, and the shaded ends sit on the cutoff, to the
-        # 0.05 their 1e-4 rooting allows where the statistic climbs about 440 per unit p.
-        cutoff = chi2.isf(0.05, 1)
-        for result, interval in ((euros, in_euros), (cents, in_cents)):
-            centre, statistic = self._plotted(pickle.loads(pickle.dumps(result)))
-            assert centre == pytest.approx(lower, abs=1e-9)
-            assert min(statistic.values()) == 0.0
-            for end in (interval.lower, interval.upper):
-                assert statistic[end] == pytest.approx(cutoff, abs=0.05)
-        # Only the cents comparison needed refits, of the two powers it compared, each
-        # with its REML stop at the tolerance recorded for it and its inner fits at
-        # that or the model's tighter tol.
-        assert euros._refits == {} and set(cents._refits) == {cents.p_hat, lower}
-
-        def refits(calls):
-            return sorted(call for call in calls if call[1] is not None)
-
-        assert refits(received[:in_euros_calls]) == []
-        assert refits(received[in_euros_calls:]) == sorted(
+        # Only the cents comparison needed refits, of the two powers it compared, each at
+        # the tolerance a quarter of the drop asks, its REML stop there and its inner
+        # fits at that or the model's tighter tol.
+        assert calls["euros"] == [] and euros._refits == {}
+        wanted = self._expected_refit_tol(cents, lows["cents"])
+        assert sorted(p for p, _ in calls["cents"]) == sorted([cents.p_hat, lows["cents"]])
+        assert [tol for _, tol in calls["cents"]] == pytest.approx([wanted, wanted], rel=1e-12)
+        assert set(cents._refits) == {cents.p_hat, lows["cents"]}
+        assert sorted(call for call in received if call[1] is not None) == sorted(
             (tol, min(1e-10, tol)) for tol, _, _ in cents._refits.values()
         )
+        # Saved and loaded, each plot measures from the power its interval is inverted from.
+        for result, p_low in ((euros, lows["euros"]), (cents, lows["cents"])):
+            centre, statistic = self._plotted(pickle.loads(pickle.dumps(result)))
+            assert centre == p_low
+            assert min(statistic.values()) == 0.0
 
     def test_an_interval_saved_before_centres_were_recorded_keeps_its_plot(self, monkeypatch):
         """Saved before intervals recorded their centres, a result's intervals were inverted
@@ -784,10 +843,15 @@ class TestMaximumLikelihoodPhi:
             assert statistic[end] == pytest.approx(cutoff, abs=0.05)
 
     def test_euros_and_cents_agree_where_the_fits_bounds_sit_under_a_small_drop(self):
-        """120 intercept-only records at model tol 2e-3, a coarse search, and the 10%
-        interval before the 95% one: a lower power whose drop the euros bounds resolve
-        and the cents bounds do not. The cents fits are refitted, and both units report
-        the same intervals and cautions."""
+        """120 intercept-only records at model tol 2e-3, and the 10% interval before the
+        95% one: a power planted 1e-3 below p_hat (where the profile has risen far less
+        than the 10% cutoff, 0.016, so each end is a crossing of the profile rather than
+        of the planted point) by a drop between the euros and the cents
+        pair bounds (their geometric mean) is resolved by the euros bounds and refitted in
+        cents, whose real refits report the planted value and confirm it.  Both units
+        then invert both intervals from that power, with one caution each, and agree to
+        their rooting.  Mutation check: an interval without refits (``_refiner``
+        returning None) inverts the cents intervals from p_hat."""
         rng = np.random.default_rng(13)
         y = generate_tweedie_cpg(120, 10.0, 3.0, 1.55, rng=rng)
         frame = pd.DataFrame(index=np.arange(120))
@@ -798,46 +862,48 @@ class TestMaximumLikelihoodPhi:
             )
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                result = model.estimate_p(frame, currency * y, p_bounds=(1.3, 1.7), xatol=0.05)
+                results.append(model.estimate_p(frame, currency * y))
+        euros, cents = results
+        assert self._pair_bound(euros) < self._pair_bound(cents)
+        drop = math.sqrt(self._pair_bound(euros) * self._pair_bound(cents))
+        lows, calls = [], []
+        for result in results:
+            p_low = self._plant_lower(result, drop, 1e-3)
+            lows.append(p_low)
+            calls.append(self._drive_refits(result, {p_low: result._objective.values[p_low]}))
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
                 result.interval(0.9)
                 result.interval(0.05)
-            results.append(result)
-        euros, cents = results
+            del result._objective._objective.refit
 
-        lower, lower_nll = cents._objective.best()
-        drop = 2.0 * 120 * (cents.search_nll - lower_nll)
-
-        def pair(result):
-            below = result._objective.best()[0]
-            return (
-                2.0
-                * 120
-                * (result._evaluation_error(result.p_hat) + result._evaluation_error(below))
-            )
-
-        # The same lower power in both units, to the round-off their searches differ by.
-        assert euros._objective.best()[0] == pytest.approx(lower, abs=1e-9)
-        assert lower != cents.p_hat and pair(euros) < drop < pair(cents)
+        assert calls[0] == [] and euros._refits == {}
+        assert set(cents._refits) == {cents.p_hat, lows[1]}
         for alpha in (0.9, 0.05):
-            # One caution, word for word, where master's cents interval had none.
-            assert euros._ci_cautions[alpha] == cents._ci_cautions[alpha]
-            assert len(cents._ci_cautions[alpha]) == 1
-            assert f"found p={lower:.6g} below p_hat" in cents._ci_cautions[alpha][0]
-            assert euros._ci_centres[alpha][0] == pytest.approx(lower, abs=1e-9)
-            assert cents._ci_centres[alpha][0] == pytest.approx(lower, abs=1e-9)
-            # Each end is rooted to 1e-4, so two inversions from the same centre agree
-            # to 2e-4.
+            for result, p_low in zip(results, lows, strict=True):
+                assert result._ci_centres[alpha] == (p_low, result._objective.values[p_low])
+                self._assert_rooted(result, alpha)
+                (caution,) = result._ci_cautions[alpha]
+                assert f"found p={p_low:.6g} below p_hat" in caution
             np.testing.assert_allclose(
                 [euros._ci_cache[alpha].lower, euros._ci_cache[alpha].upper],
                 [cents._ci_cache[alpha].lower, cents._ci_cache[alpha].upper],
                 rtol=0,
-                atol=2e-4,
+                atol=2 * tweedie_module._CI_XTOL,
             )
 
     def test_a_lower_power_that_cold_refits_put_above_p_hat_leaves_the_interval(self):
-        """Loose coefficient fits (tol 0.02, a selection penalty) and a coarse search: the
-        intervals find a power recorded below p_hat by less than the fits' bounds. Cold
-        refits put it above p_hat, so both intervals stay inverted from p_hat."""
+        """Loose coefficient fits (tol 0.02, a selection penalty): a power planted 0.05
+        below p_hat, recorded below it by half the pair bound, is within the fits'
+        noise, so both powers are refitted from cold, for real: to a quarter of the drop,
+        which cannot tell them apart, then at the 1e-12 floor, whose bounds sit far
+        inside the profile's real rise 0.05 from p_hat.  The refits put the planted
+        power above p_hat and both intervals stay inverted from p_hat, without a
+        caution.  The 95% interval is
+        checked against the profile with every power fitted at tol 1e-12, minimised and
+        rooted to 1e-9: [1.417440, 1.568783].  Mutation check: a comparison that takes
+        any recorded drop as resolved (``drop > 0`` in ``credible_lower_point``) moves
+        the centre to the planted power."""
         rng = np.random.default_rng(9)
         x = rng.uniform(0.0, 1.0, 500)
         level = rng.integers(0, 5, 500)
@@ -856,16 +922,12 @@ class TestMaximumLikelihoodPhi:
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            result = model(1.5, 0.02).estimate_p(frame, y, p_bounds=(1.3, 1.7), xatol=0.05)
+            result = model(1.5, 0.02).estimate_p(frame, y, p_bounds=(1.3, 1.7))
+        lower = self._plant_lower(result, 0.5 * self._pair_bound(result), 0.05)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
             result.interval(0.9)
             interval = result.interval(0.05)
-
-        lower, lower_nll = result._objective.best()
-        drop = 2.0 * 500 * (result.search_nll - lower_nll)
-        bounds = (
-            2.0 * 500 * (result._evaluation_error(result.p_hat) + result._evaluation_error(lower))
-        )
-        assert 0.0 < drop < bounds
 
         def tight(p):
             fitted = model(p, 1e-12).fit(frame, y)
@@ -880,11 +942,8 @@ class TestMaximumLikelihoodPhi:
         assert {result.p_hat, lower} <= set(result._refits)
         for p, (_, nll, error) in result._refits.items():
             assert abs(500 * nll - tight(p)) <= 500 * error
-        # The profile with every power fitted at tol 1e-12, minimised and rooted to 1e-9,
-        # has its 95% interval at [1.417440, 1.568783]. The recorded curve's fits err
-        # by up to about 0.07 in the statistic (p_hat's value sits 0.066 above its tight
-        # refit), which moves an end by up to 1.5e-3 where the statistic climbs about
-        # 100 per unit p.
+        # The recorded curve's fits err by up to about 0.07 in the statistic, which
+        # moves an end by up to 1.5e-3 where the statistic climbs about 100 per unit p.
         np.testing.assert_allclose(
             [interval.lower, interval.upper], [1.417440, 1.568783], rtol=0, atol=1.5e-3
         )
@@ -898,107 +957,126 @@ class TestMaximumLikelihoodPhi:
         return pd.DataFrame({"x": x}), y
 
     @staticmethod
-    def _slope_profile(frame, y, fit_mode, max_iter):
+    def _slope_search(frame, y, fit_mode):
         model = SuperGLM(
             family=TweedieDistribution(p=1.5),
             features={"x": Numeric()},
             selection_penalty=0,
             tol=2e-3,
-            max_iter=max_iter,
         )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            result = model.estimate_p(frame, y, fit_mode=fit_mode, p_bounds=(1.3, 1.7), xatol=0.05)
-            result.interval(0.9)
-        return result
-
-    @staticmethod
-    def _tight_slope_nll(frame, y, p):
-        """n nll at p with the coefficients fitted to 1e-12."""
-        fitted = SuperGLM(
-            family=TweedieDistribution(p=p),
-            features={"x": Numeric()},
-            selection_penalty=0,
-            tol=1e-12,
-        ).fit(frame, y)
-        assert fitted.result.converged
-        return profile_phi_at(y, fitted.predict(frame), np.ones(len(y)), p).criterion
+            return model.estimate_p(frame, y, fit_mode=fit_mode, p_bounds=(1.3, 1.7))
 
     def test_fit_reml_without_a_reml_term_refits_at_the_tolerance_its_bounds_are_read_from(
         self,
     ):
         """With no REML-eligible term, fit_reml runs an ordinary fit at the model's tol,
         which each candidate's bound is read from, so a refit runs at that tol scaled to
-        the drop's quarter, as under explicit ML. Here (tol 2e-3, max_iter 3, a coarse
-        search) the comparison needs refits in both units, which converge within
-        max_iter and confirm the lower power: one interval and caution in both units."""
+        the drop's quarter, as under explicit ML, not at the search's REML stop (2,000
+        times tighter at tol 2e-3).  A power planted below p_hat by half the smaller
+        pair bound needs refits in both units; they run for real through the fallback
+        and report the planted value, so they confirm it: one centre and one caution in
+        both units, and the same refit tolerances as explicit ML.  Mutation check: a
+        profile whose tolerance is the REML stop's for every fit_reml search (the check
+        for a REML objective removed from ``_PowerProfile.tolerance``) asks for refits
+        2,000 times tighter."""
         frame, y = self._slope_book(17, 1.5)
-        euros = self._slope_profile(frame, y, "reml", 3)
-        cents = self._slope_profile(frame, 100.0 * y, "reml", 3)
-        ml = self._slope_profile(frame, 100.0 * y, "fit", 3)
+        euros = self._slope_search(frame, y, "reml")
+        cents = self._slope_search(frame, 100.0 * y, "reml")
+        ml = self._slope_search(frame, 100.0 * y, "fit")
+        drop = 0.5 * min(self._pair_bound(result) for result in (euros, cents, ml))
+        lows, calls = {}, {}
+        for name, result in (("euros", euros), ("cents", cents), ("ml", ml)):
+            assert result._objective._objective.tolerance == 2e-3
+            lows[name] = self._plant_lower(result, drop, 0.01)
+            planted = {lows[name]: result._objective.values[lows[name]]}
+            calls[name] = self._drive_refits(result, planted)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                result.interval(0.9)
+            del result._objective._objective.refit
 
-        lower = cents._objective.best()[0]
-        # A real improvement, by 0.00336 in the statistic.
-        assert self._tight_slope_nll(frame, y, lower) < self._tight_slope_nll(frame, y, cents.p_hat)
-        # Each unit refits its own two powers, which agree to the searches' round-off.
-        assert len(euros._refits) == 2 and set(cents._refits) == {cents.p_hat, lower}
-        # The fallback refits at the tolerances an explicit ML refit asks for, 2.4e-4.
-        refits = sorted(cents._refits.values())
-        assert [tol for tol, _, _ in refits] == pytest.approx(
-            [tol for tol, _, _ in sorted(ml._refits.values())], rel=1e-6
+        for name, result in (("euros", euros), ("cents", cents), ("ml", ml)):
+            wanted = self._expected_refit_tol(result, lows[name])
+            assert sorted(p for p, _ in calls[name]) == sorted([result.p_hat, lows[name]])
+            assert [tol for _, tol in calls[name]] == pytest.approx([wanted, wanted], rel=1e-12)
+            assert all(math.isfinite(error) for _, _, error in result._refits.values())
+            assert result._ci_centres[0.9] == (lows[name], result._objective.values[lows[name]])
+            (caution,) = result._ci_cautions[0.9]
+            assert "more than its fits resolve" in caution
+        assert [tol for _, tol in calls["cents"]] == pytest.approx(
+            [tol for _, tol in calls["ml"]], rel=1e-6
         )
-        assert all(math.isfinite(error) for _, _, error in refits)
-        for result in (euros, cents):
-            assert result._ci_centres[0.9][0] == pytest.approx(lower, abs=1e-9)
-        assert len(cents._ci_cautions[0.9]) == 1
-        assert "more than its fits resolve" in cents._ci_cautions[0.9][0]
-        assert euros._ci_cautions[0.9] == cents._ci_cautions[0.9]
         np.testing.assert_allclose(
             [cents._ci_cache[0.9].lower, cents._ci_cache[0.9].upper],
             [euros._ci_cache[0.9].lower, euros._ci_cache[0.9].upper],
             rtol=0,
-            atol=2e-4,
+            atol=2 * tweedie_module._CI_XTOL,
         )
 
     def test_fits_that_did_not_converge_certify_no_lower_power(self):
-        """max_iter 1: every candidate stops at its iteration limit, so its recorded value
-        bounds nothing, and a power recorded below p_hat is refitted. The refits stop at
-        the limit as well, so the interval stays inverted from p_hat in both units and
-        says the refits did not converge. Fits to 1e-12 put p_hat lower, by 0.43 in the
-        statistic."""
+        """A fit that stopped at its iteration limit bounds nothing, so a power recorded
+        below p_hat is refitted however far its value drops.  Both candidates are marked
+        unsettled, the lower one planted twice the cents pair bound below p_hat (a drop
+        their recorded bounds would resolve), and every refit, run for real, reports no
+        bound, as one that also stopped at its limit does.  The interval stays inverted
+        from p_hat in both units, and its one caution names the lower power, says the
+        refits did not converge and how to make them.  The refits are asked at the
+        candidate's own tolerance (a quarter of the drop exceeds its bound), then at the
+        floor, and none is kept.  Mutation check:
+        reading an unsettled candidate's error as a bound (``_evaluation_error``
+        ignoring ``fit_converged``) resolves the drop and moves the centre."""
         from superglm.profiling._reporting import cached_tweedie_profile_ci
 
         frame, y = self._slope_book(13, 2.25)
-        euros = self._slope_profile(frame, y, "reml", 1)
-        cents = self._slope_profile(frame, 100.0 * y, "reml", 1)
-
-        lower = cents._objective.best()[0]
-        assert lower != cents.p_hat
-        assert not cents._candidates[cents.p_hat].fit_converged
-        assert not cents._candidates[lower].fit_converged
-        assert self._tight_slope_nll(frame, y, cents.p_hat) < self._tight_slope_nll(frame, y, lower)
+        euros = self._slope_search(frame, y, "reml")
+        cents = self._slope_search(frame, 100.0 * y, "reml")
+        drop = 2.0 * self._pair_bound(cents)
         for result in (euros, cents):
+            lower = self._plant_lower(result, drop, 0.01, converged=False)
+            calls = self._drive_refits(result, converged=False)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                result.interval(0.9)
+            del result._objective._objective.refit
             assert result._ci_centres[0.9] == (result.p_hat, result.search_nll)
-            caution = result._ci_cautions[0.9][0]
-            assert "a refit at tol=1e-12 to tell the two apart did not converge" in caution
+            assert calls and {p for p, _ in calls} == {result.p_hat, lower}
+            tolerance = result._objective._objective.tolerance
+            floor = tweedie_module._REFIT_TOL_FLOOR
+            # Each time the comparison is asked (each side's re-centring check and the
+            # caution's), unkept refits run again in that order.
+            cycle = [tolerance, tolerance, floor, floor]
+            assert len(calls) % 4 == 0
+            assert [tol for _, tol in calls] == cycle * (len(calls) // 4)
+            assert result._refits == {}
+            (caution,) = result._ci_cautions[0.9]
+            assert f"p={lower:.6g}" in caution
+            assert "did not converge" in caution and "raise max_iter" in caution
             assert cached_tweedie_profile_ci(result, 0.9)[1] == "caution"
         np.testing.assert_allclose(
             [cents._ci_cache[0.9].lower, cents._ci_cache[0.9].upper],
             [euros._ci_cache[0.9].lower, euros._ci_cache[0.9].upper],
             rtol=0,
-            atol=2e-4,
+            atol=2 * tweedie_module._CI_XTOL,
         )
 
     @pytest.mark.pins_behaviour
     def test_a_default_search_in_cents_keeps_the_euros_interval(self):
-        """Pins master's default search, which the refit rule leaves alone: it records
-        no power below p_hat, so both units invert from p_hat, without a caution, to the
-        same interval."""
+        """Pins master's default search, which the refit rule leaves alone: both units
+        invert from the same centre, with the same cautions, to the same interval.  The
+        centre is the rule's, whatever powers the search sampled: p_hat, or a recorded
+        power below the searched value at p_hat, which a caution then names."""
         euros, in_euros = self._premium_profile(1.0)
         cents, in_cents = self._premium_profile(100.0)
         for result in (euros, cents):
-            assert result._objective.best() == (result.p_hat, result.search_nll)
-            assert result._ci_cautions[0.05] == []
+            centre, centre_nll = result._ci_centres[0.05]
+            below = {p for p, nll in result._objective.values.items() if nll < result.search_nll}
+            assert centre in {result.p_hat} | below
+            assert centre_nll == result._objective.values[centre]
+            assert len(result._ci_cautions[0.05]) == int(centre != result.p_hat)
+        assert cents._ci_centres[0.05][0] == pytest.approx(euros._ci_centres[0.05][0], abs=1e-9)
+        assert len(cents._ci_cautions[0.05]) == len(euros._ci_cautions[0.05])
         np.testing.assert_allclose(
             [in_cents.lower, in_cents.upper], [in_euros.lower, in_euros.upper], rtol=0, atol=1e-4
         )

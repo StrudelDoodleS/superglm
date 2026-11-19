@@ -271,6 +271,39 @@ def test_review_frequency_spread_huge_counts_stay_compact(monkeypatch):
     assert result.tail_quantile.counts.sum() == 2 * 10**12 + 3
 
 
+def test_frequency_spread_bins_in_linear_space():
+    """Two thousand weighted rows into 1,999 bins: the spread's peak memory stays linear in rows
+    plus bins, while a rows-by-bins boolean indicator alone is twice the budget."""
+    import tracemalloc
+
+    n, bins = 2000, 1999
+    rng = np.random.default_rng(1999)
+    counts = 10**8 + rng.permutation(n).astype(np.int64)
+    X = pd.DataFrame({"mean": rng.permutation(n).astype(float), "tail": np.linspace(0.01, 0.99, n)})
+    stub = _spread_stub()
+    parameter_spread(stub, X, threshold=1, n_bins=bins, sample_weight=counts)  # warm imports
+    tracemalloc.start()
+    try:
+        table = parameter_spread(
+            stub, X, threshold=1, n_bins=bins, sample_weight=counts
+        ).identically_priced
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 512 * (n + bins)
+    # Each distinct price is one tier, binned by the middle of its count, in exact integers.
+    order = np.argsort(X["mean"].to_numpy())
+    through = np.cumsum([int(c) for c in counts[order]])
+    total = int(through[-1])
+    codes = np.empty(n, dtype=np.int64)
+    for row, end, size in zip(order, through.tolist(), counts[order].tolist(), strict=True):
+        codes[row] = min(max(-(-bins * (2 * end - size) // (2 * total)) - 1, 0), bins - 1)
+    filled = np.unique(codes)
+    np.testing.assert_array_equal(table["bin"], filled)
+    np.testing.assert_array_equal(table["n"], [counts[codes == b].sum() for b in filled])
+    assert table["n"].sum() == counts.sum()
+
+
 def test_review_spread_zero_rows_and_offsets_at_builder_boundary():
     X = pd.DataFrame({"mean": [0.0, np.nan, 20.0], "tail": [0.1, np.nan, 0.9]})
     result = parameter_spread(

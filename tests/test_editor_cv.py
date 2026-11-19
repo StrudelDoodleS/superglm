@@ -2729,47 +2729,57 @@ def test_final_fit_gives_level_advice_only_for_a_separated_level(monkeypatch):
     assert (fold, level) == sentences[::-1]
 
 
-def test_run_cv_gives_level_advice_only_for_a_separated_level():
+def test_run_cv_gives_level_advice_only_for_a_separated_level(monkeypatch):
     """A fold refused for a coefficient run off is told so, not to group a level it lacks.
 
-    The editor's model is one numeric indicator whose active rows have no
-    claim in the supplied folds; strict, a fold's fit walks that slope to the
-    log link's guard and is refused by the runtime backstop.  Mutation check:
-    with Run CV passing the level sentence for both refusals, it told the user
-    to group a level.
+    The editor's model is strict about separation. The runtime backstop's finding
+    (a slope pinned at the log link's guard) is forced on the second fold's fit
+    alone, so that fold is refused, named, and told its coefficient diverged; that a
+    real walk reaches the guard is the backstop's own test
+    (``test_every_route_decides_a_row_at_the_guard_as_fit_does``). Mutation check:
+    with Run CV passing the level sentence for both refusals, it told the user to
+    group a level.
     """
+    import superglm.diagnostics.separation as separation_module
     import superglm.editor.cv as cv
+    from superglm.diagnostics.separation import format_runtime_message
     from superglm.editor.cv import capture_cv_run, run_cv
     from superglm.editor.errors import EditorValueError
 
     x = np.tile([0.0, 1.0], 64)
-    X, y = pd.DataFrame({"x": x}), 1.0 - x
+    X, y = pd.DataFrame({"x": x}), 1.0 + x
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         supplied = cross_validate(
-            SuperGLM(
-                family="poisson",
-                features={"x": Numeric()},
-                selection_penalty=1.0,
-                separation="ignore",
-            ),
+            SuperGLM(family="poisson", features={"x": Numeric()}, selection_penalty=1.0),
             X,
             y,
             cv=KFold(3),
             scoring=("deviance",),
         )
-        model = SuperGLM(
-            family="poisson",
-            features={"x": Numeric()},
-            separation="error",
-            convergence="coefficients",
-            max_iter=150,
-        ).fit(X, np.ones(len(X)))
-        session = EditorSession.from_model(model, cv=supplied, cv_data=(X, y), train_data=(X, y))
-        with pytest.raises(EditorValueError) as run:
-            run_cv(capture_cv_run(session), _Context())
+        model = SuperGLM(family="poisson", features={"x": Numeric()}, separation="error").fit(X, y)
+    session = EditorSession.from_model(model, cv=supplied, cv_data=(X, y), train_data=(X, y))
+    message = format_runtime_message(1e35, 5, ["x"], True)
+    real_fit, real_finding = SuperGLM.fit, separation_module.runtime_finding
+    fits: list[bool] = []
 
-    assert run.value.public_message == cv.FOLD_FAILED.format(fold=1, reason=cv.FOLD_DIVERGED)
+    def fold_fit(self, *args, **kwargs):
+        fits.append(len(fits) == 1)  # the second fold's
+        try:
+            return real_fit(self, *args, **kwargs)
+        finally:
+            fits[-1] = False
+
+    def finding(*args, **kwargs):
+        return message if fits and fits[-1] else real_finding(*args, **kwargs)
+
+    monkeypatch.setattr(SuperGLM, "fit", fold_fit)
+    monkeypatch.setattr(separation_module, "runtime_finding", finding)
+    with pytest.raises(EditorValueError) as run:
+        run_cv(capture_cv_run(session), _Context())
+
+    assert len(fits) == 2
+    assert run.value.public_message == cv.FOLD_FAILED.format(fold=2, reason=cv.FOLD_DIVERGED)
 
 
 @pytest.mark.parametrize("slope_scale", [0.0, 1.5])
@@ -2811,41 +2821,41 @@ def test_final_fit_warns_about_separation_in_the_model_it_returns(slope_scale):
 
 
 @pytest.mark.pins_behaviour
-def test_final_fit_keeps_a_finding_from_a_fit_short_of_the_guard_after_an_edit():
+def test_final_fit_keeps_a_finding_from_a_fit_short_of_the_guard_after_an_edit(monkeypatch):
     """A control: a runtime finding from a stagnant fit short of the guard stands after any edit.
 
     Master warned here too (it held nothing back); this pins that the edit hold-back added
-    with Final fit's post-edit warning does not drop a finding the edit cannot answer.
+    with Final fit's post-edit warning does not drop a finding the edit cannot answer. The
+    finding is forced through ``runtime_finding``, the backstop's one check since #676, so on
+    code before #676 the test fails for want of that name, not of the warning.
 
-    With 30 iterations at ``tol=1e-12`` the refit of a claim-free indicator stops on the
-    exhausted-budget signature with its rows' log predictions near -31, short of the guard.
-    An edit steepening the slope by 1% cannot answer that finding, so Final fit still warns.
-    Mutation check: holding the warning back unless a row sits at the guard drops it.
+    The refit's backstop is forced to report the exhausted-budget signature while its
+    predictor stays interior: every log prediction lies well inside the guard. An edit
+    steepening the slope by 1% cannot answer that finding, so Final fit still warns, with
+    the refit's finding. Mutation check: holding the warning back unless a row sits at the
+    guard drops it.
     """
+    import superglm.diagnostics.separation as separation_module
     from superglm import SeparationWarning
+    from superglm.diagnostics.separation import format_runtime_message
     from superglm.editor.cv import capture_final_fit, run_final_fit
 
     z = np.repeat([0.0, 1.0], 64)
-    X, y = pd.DataFrame({"z": z}), 1.0 - z
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        model = SuperGLM(
-            family="poisson",
-            features={"z": Numeric()},
-            convergence="coefficients",
-            max_iter=30,
-            tol=1e-12,
-        ).fit(X, y)
+    X, y = pd.DataFrame({"z": z}), 1.0 + np.tile([0.0, 2.0], 64) + z
+    model = SuperGLM(family="poisson", features={"z": Numeric()}).fit(X, y)
     session = EditorSession.from_model(model, terms=["z"], train_data=(X, y))
     term = session.terms["z"]
     term.edited_log_effect = term.original_log_effect * 1.01
+    message = format_runtime_message(1e35, 30, ["z"], False)
+    monkeypatch.setattr(separation_module, "runtime_finding", lambda *_a, **_k: message)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         final = run_final_fit(capture_final_fit(session), _Context())
 
-    claims = [c for c in caught if issubclass(c.category, SeparationWarning)]
+    claims = [str(c.message) for c in caught if issubclass(c.category, SeparationWarning)]
     assert final.carried == ("z",)
-    assert len(claims) == 1
+    assert np.all(np.abs(np.log(final.model.predict(X))) < 5.0)  # interior, far from the guard
+    assert claims == [message]
 
 
 @pytest.mark.parametrize(

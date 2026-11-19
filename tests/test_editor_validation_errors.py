@@ -350,7 +350,11 @@ def test_a_zero_weight_row_with_no_quote_adds_nothing_to_a_splits_scores():
     assert validation["metrics"]["edited"]["deviance"] == pytest.approx(seen, rel=1e-12)
 
 
-_NO_VALUE = _NO_QUOTE + r": the PowerLink has no value of 'mean' at their linear predictor"
+def _says_no_value(error, count, total, positions):
+    """What the user acts on: how many rows, which, the parameter and the link lacking it."""
+    assert re.search(rf"\b{count} of {total} rows\b", error), error
+    assert re.search(rf"\(row positions {re.escape(positions)}\)", error), error
+    assert "'mean'" in error and "PowerLink" in error, error
 
 
 def test_a_superlss_split_or_edit_with_rows_with_no_value_is_shown_as_such():
@@ -369,7 +373,7 @@ def test_a_superlss_split_or_edit_with_rows_with_no_value_is_shown_as_such():
         train, validation = widget._report("validation")["splits"]
         assert np.isfinite(train["metrics"]["original"]["log_score"])
         assert validation["available"] is False
-        assert re.match(_NO_VALUE.format(1, 4, 3), validation["error"])
+        _says_no_value(validation["error"], 1, 4, "3")
 
         # Level 1 of `a` carries the cell (1, 0), whose predictor is 1/4: -0.3 takes it past zero.
         session.select_indices("mean:a", [1])
@@ -380,7 +384,7 @@ def test_a_superlss_split_or_edit_with_rows_with_no_value_is_shown_as_such():
         widget.close()
     assert edited.predict_link(CELLS).to_numpy()[1, 0] == pytest.approx(-0.05, rel=1e-6)
     assert train["available"] is False
-    assert re.match(_NO_VALUE.format(10, 30, "2, 3, 8, 9, 14, 15, 20, 21, 26, 27"), train["error"])
+    _says_no_value(train["error"], 10, 30, "2, 3, 8, 9, 14, 15, 20, 21, 26, 27")
 
 
 def test_run_cv_keeps_a_superlss_fold_whose_held_out_rows_have_no_value():

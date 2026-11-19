@@ -8,6 +8,7 @@ labels and the ``.ci`` fill at alpha 0.13 wherever a band is drawn.
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 
 import matplotlib
@@ -562,7 +563,11 @@ def test_spread_panels_cover_parameters_and_the_priced_alike(case) -> None:
 @pytest.mark.parametrize("far", [False, True])
 def test_spread_marks_a_bin_whose_percentiles_coincide(case, far) -> None:
     """Rows of one price share one tail probability, so its bin's whisker has zero height and
-    is drawn as a point, labelled or not (far above the data, both percentiles are zero)."""
+    is drawn as a point, labelled or not (far above the data, both percentiles are zero).
+
+    Mutation checks: drawing the whisker as a zero-height line leaves no point; a label
+    that counts the requested bins, or drops the tie notice, fails the label.
+    """
     fitted, frame, y, _ = case
     threshold = float(np.max(y) + 1e3 * np.std(y)) if far else float(np.quantile(y, 0.9))
     payload = parameter_spread(fitted, frame.iloc[np.zeros(20, dtype=int)], threshold=threshold)
@@ -571,7 +576,10 @@ def test_spread_marks_a_bin_whose_percentiles_coincide(case, far) -> None:
     ax = plot_spread(payload).axes[-1]
     (points,) = [c for c in ax.collections if isinstance(c, PathCollection)]
     np.testing.assert_array_equal(points.get_offsets(), [[row.mean, row.p_lo]])
-    assert ax.get_xlabel().endswith(" in 1 score bin, ties kept together")
+    # The label says the rows fill one bin and that ties share it, in whatever words.
+    label = ax.get_xlabel()
+    assert [int(n) for n in re.findall(r"(\d+)\s+(?:\w+\s+)?bins?\b", label)] == [1], label
+    assert re.search(r"\bties?\b", label, re.IGNORECASE), label
 
 
 def test_portfolio_rows_and_the_total_histogram(case) -> None:
