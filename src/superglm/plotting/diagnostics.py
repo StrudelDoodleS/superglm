@@ -309,9 +309,6 @@ def _diagnostic_rows(
         )
 
     row_idx = occurrence_rows(rounded, _FREQUENCY_EXPANSION_CAP, rng)
-    if np.array_equal(row_idx, np.arange(len(weights), dtype=np.intp)):
-        return y, mu, eta, weights, qresid
-
     from superglm.inference.metrics import ModelMetrics
 
     row_y = y[row_idx]

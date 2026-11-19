@@ -211,8 +211,12 @@ def _interval_payload(counts):
     return ResidualSet(**kwargs)
 
 
-def test_capped_atom_mixture_has_conditional_uniform_draws_and_alignment():
-    residuals = _interval_payload([200000, 800000])
+_ATOM_COUNTS = {"integer": [200000, 800000], "fractional": [200000.5, 800000.5]}
+
+
+@pytest.mark.parametrize("counts", _ATOM_COUNTS.values(), ids=_ATOM_COUNTS)
+def test_capped_atom_mixture_has_conditional_uniform_draws_and_alignment(counts):
+    residuals = _interval_payload(counts)
     sample = _sample_residuals(residuals, max_rows=20000, seed=19)
     assert len(sample.rows) == 20000
     np.testing.assert_array_equal(
@@ -237,6 +241,17 @@ def test_capped_atom_mixture_has_conditional_uniform_draws_and_alignment():
     np.testing.assert_array_equal(
         _sample_residuals(changed, max_rows=20000, seed=19).pit, sample.pit
     )
+
+
+def test_conditional_uniformity_regression_detects_restarted_selection_stream(monkeypatch):
+    """A weight-proportional draw picks each row with the uniform a restarted stream reuses."""
+    from superglm.distributional import residuals as module
+
+    monkeypatch.setattr(module, "_residual_rng", lambda seed, domain: np.random.default_rng(seed))
+    with pytest.raises(AssertionError):
+        test_capped_atom_mixture_has_conditional_uniform_draws_and_alignment(
+            _ATOM_COUNTS["fractional"]
+        )
 
 
 def test_integer_atom_sampling_matches_literal_expansion_in_distribution(frequency_case):
@@ -427,6 +442,14 @@ def test_capped_replication_reads_each_occurrence_at_most_once() -> None:
             drawn = multiplicity[weights == count].sum()
             sd = np.sqrt(cap * share * (1 - share) * (total - cap) / (total - 1))
             assert abs(drawn - cap * share) <= 6 * sd
+
+
+@pytest.mark.parametrize("counts", [[2.0**62, 2.0**62], [2.0**63, 1.0]], ids=["wraps", "too-wide"])
+def test_replication_refuses_counts_past_the_exact_count_bound(counts) -> None:
+    kwargs = _residual_kwargs(n=2)
+    kwargs.update(weights=np.array(counts), weight_semantics="frequency")
+    with pytest.raises(ValueError, match=r"more than 2\*\*53 occurrences"):
+        replication_sample(ResidualSet(**kwargs), max_rows=10)
 
 
 def test_fractional_replication_weights_are_resampled() -> None:

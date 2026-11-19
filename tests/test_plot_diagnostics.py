@@ -461,6 +461,33 @@ class TestWeightContractDiagnostics:
         assert multiplicity.sum() == 100_000
         assert np.all(multiplicity <= weights)
 
+    def test_capped_rows_that_hold_each_row_once_still_read_unit_weights(self):
+        """A capped draw omitting one copy of the only doubled row is not the original rows."""
+        n, seed = 100_000, 42
+        drawn = np.random.default_rng(seed).choice(n + 1, size=n, replace=False)
+        omitted = int(np.setdiff1d(np.arange(n + 1), drawn)[0])
+        weights = np.ones(n)
+        weights[omitted] = 2.0
+        y = np.zeros(n)
+        frame = pd.DataFrame({"x": np.linspace(0.0, 1.0, 20)})
+        model = SuperGLM(family=Gaussian(), features={"x": Numeric()})
+        x = frame["x"].to_numpy()
+        model.fit(frame, 1.0 + x + 0.1 * np.sin(10.0 * x))
+        rows = diagnostics_module._diagnostic_rows(
+            model,
+            y,
+            np.zeros(n),
+            np.arange(n, dtype=np.float64),
+            weights,
+            np.zeros(n),
+            seed,
+            np.random.default_rng(seed),
+            weight_semantics="frequency",
+        )
+        multiplicity = np.bincount(rows[2].astype(np.intp), minlength=n)
+        np.testing.assert_array_equal(multiplicity, np.ones(n))
+        np.testing.assert_array_equal(rows[3], np.ones(n))
+
     @pytest.mark.parametrize(
         "family",
         [Gaussian(), Gamma(), Poisson(), NegativeBinomial(theta=2.0), Binomial()],

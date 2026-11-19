@@ -21,7 +21,7 @@ import pytest
 from numpy.typing import NDArray
 from scipy import stats
 
-from superglm import Categorical, Spline
+from superglm import Categorical, Spline, SuperLSS
 from superglm._frame import as_eager_frame
 from superglm.distributional import Predictor
 from superglm.distributional.checks.binned import (
@@ -882,6 +882,33 @@ def test_frequency_atom_calibration_uses_occurrences_and_cap(count):
             margin = (1 - level) / 2
             expected = np.count_nonzero((sample.pit >= margin) & (sample.pit <= 1 - margin))
             assert np.sum(deciles.realised * deciles.n) == pytest.approx(expected)
+
+
+def test_tied_forecasts_above_the_cap_split_their_outcomes_at_random():
+    """Copies of one row must not sit together, or equal means split into pure deciles.
+
+    Two rows share one Tweedie law, one observed at its median (inside the 50%
+    interval) and one at its 99.5% quantile (outside), 100,000 times each.
+    Every mean decile of the capped sample then holds both outcomes about
+    equally, so each realised coverage is a binomial proportion near one half.
+    """
+    family = TweedieLSS()
+    model = SuperLSS(family, family.mu(), family.phi(), family.p(), weight_semantics="frequency")
+    rng = np.random.default_rng(100)
+    model.fit(pd.DataFrame({"x": np.ones(300)}), rng.gamma(rng.poisson(2, size=300), 0.5))
+    frame = pd.DataFrame({"x": [1.0, 1.0]})
+    outcomes = family.quantile(np.array([0.5, 0.995]), model.predict_parameters(frame).to_numpy())
+    table = model.calibration(
+        frame,
+        outcomes,
+        sample_weight=np.full(2, 100_000.0),
+        levels=(0.5,),
+        thresholds=(),
+        quantile_grid=(),
+    ).coverage
+    deciles = table[table.group.str.startswith("mean:")]
+    assert len(deciles) == 10
+    assert np.all(np.abs(deciles.realised - 0.5) < 6 * np.sqrt(0.25 / deciles.n))
 
 
 def test_atom_binned_checks_keep_values_and_both_covariates_aligned():
