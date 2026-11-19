@@ -1277,6 +1277,46 @@ def test_a_tensor_margin_reads_the_kernels_only_for_the_stock_raw_basis(monkeypa
     assert _basis_kernels.dense_raw_basis(spec._raw_basis_matrix, points[:1]) is not marker
 
 
+@pytest.mark.parametrize(
+    "spec",
+    [
+        Spline("cr_cardinal", k=6, extrapolation="extend"),
+        Spline("ns", k=6, extrapolation="extend"),
+        CubicRegressionSpline(n_knots=4, extrapolation="extend"),
+    ],
+    ids=["cr_cardinal", "ns", "cr"],
+)
+def test_an_extend_margin_reads_the_kernels_for_a_block_inside_the_range(monkeypatch, spec):
+    """Under ``extend`` a linear-tail margin's raw block inside the training range reads the kernels.
+
+    There ``extend`` gives the rows ``clip`` does, so a full block of quotes inside the range
+    keeps the compiled route it had when every margin was held at the range; a block with one
+    point past it takes the linear tail. Mutation check: without ``in_range`` the block inside
+    the range takes the library's linear tail and reaches no kernel.
+    """
+    spec.build(np.linspace(0.0, 1.0, 101))
+    reached: list[str] = []
+    for name in ("bspline_dense", "cardinal_dense"):
+        original = getattr(_basis_kernels, name)
+
+        def spy(*args, _original=original, _name=name):
+            reached.append(_name)
+            return _original(*args)
+
+        monkeypatch.setattr(_basis_kernels, name, spy)
+    inside = np.linspace(0.0, 1.0, _basis_kernels.KERNEL_MIN_ROWS)
+    rows = _basis_kernels.dense_raw_basis(spec._raw_basis_matrix, inside)
+    assert reached
+    reference = spec._raw_basis_matrix(inside)
+    np.testing.assert_allclose(rows, reference, rtol=0.0, atol=16 * U * np.abs(reference).max())
+    reached.clear()
+    past = np.r_[inside[:-1], 1.5]
+    np.testing.assert_array_equal(
+        _basis_kernels.dense_raw_basis(spec._raw_basis_matrix, past), spec._raw_basis_matrix(past)
+    )
+    assert not reached
+
+
 def test_a_read_only_column_and_a_writable_one_share_each_kernels_one_signature():
     """Numba compiles one version of a kernel per argument type, read-only arrays included.
 

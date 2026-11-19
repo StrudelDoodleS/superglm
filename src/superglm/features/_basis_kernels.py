@@ -210,12 +210,12 @@ def cardinal_dense(x: NDArray, knots: NDArray, second_derivative_map: NDArray) -
     return out
 
 
-def _evaluates_by_scipy(spec: Any, spline_base: type, *overrides: type) -> bool:
-    """Whether ``spec._basis_matrix`` is the SciPy B-spline design (``extend`` aside)."""
+def _evaluates_by_scipy(spec: Any, extends: bool, spline_base: type, *overrides: type) -> bool:
+    """Whether ``spec._basis_matrix`` is the SciPy B-spline design (a linear tail aside)."""
     method = type(spec)._basis_matrix
     if method is spline_base._basis_matrix:
         return True
-    return spec.extrapolation != "extend" and any(method is cls._basis_matrix for cls in overrides)
+    return not extends and any(method is cls._basis_matrix for cls in overrides)
 
 
 def _refused_by_scipy(spec: Any, points: NDArray) -> bool:
@@ -242,8 +242,12 @@ def _evaluations(n_rows: int) -> tuple[Any, Any] | None:
     return None
 
 
-def dense_basis(spec: Any, x: NDArray) -> NDArray:
-    """``spec._basis_matrix(x).toarray()``, from the kernels or the Python rows where the spec allows."""
+def dense_basis(spec: Any, x: NDArray, *, in_range: bool = False) -> NDArray:
+    """``spec._basis_matrix(x).toarray()``, from the kernels or the Python rows where the spec allows.
+
+    ``in_range`` states that every point lies in the training range, where ``extend`` gives the
+    rows ``clip`` does, so a linear-tail spline under ``extend`` reads the kernels there too.
+    """
     from superglm.features import _spline_runtime
     from superglm.features.spline import (
         _BUILT_IN_SPLINES,
@@ -257,11 +261,12 @@ def dense_basis(spec: Any, x: NDArray) -> NDArray:
     if getattr(spec, "_scop_Sigma", None) is not None or evaluations is None:
         return spec._basis_matrix(x).toarray()  # a saved SCOP term keeps its exact route
     bspline, cardinal = evaluations
-    if type(spec) is CardinalCRSpline and spec.extrapolation != "extend":
+    extends = spec.extrapolation == "extend" and not in_range
+    if type(spec) is CardinalCRSpline and not extends:
         x_eval, _ = _spline_runtime.prepare_eval_points(spec, x)
         rows = cardinal(x_eval, spec._cr_knots, spec._cr_M)
     elif type(spec) in _BUILT_IN_SPLINES and _evaluates_by_scipy(
-        spec, _SplineBase, CubicRegressionSpline, NaturalSpline
+        spec, extends, _SplineBase, CubicRegressionSpline, NaturalSpline
     ):
         x_eval, _ = _spline_runtime.prepare_eval_points(spec, x)
         if _refused_by_scipy(spec, x_eval):
@@ -278,14 +283,20 @@ def dense_raw_basis(evaluator: Any, x: NDArray) -> NDArray:
     """``evaluator(x)``, read as ``dense_basis`` where it is a built-in spline's own raw basis.
 
     A built-in spline's raw basis is its ``_basis_matrix``, dense, extrapolation policy included.
+    A block inside the training range reads the kernels under any policy, as it did when every
+    margin was held at that range.
     """
     from superglm.features.spline import _BUILT_IN_SPLINES
 
     spec: Any = getattr(evaluator, "__self__", None)
     method = getattr(evaluator, "__func__", None)
-    if type(spec) in _BUILT_IN_SPLINES and method is type(spec)._raw_basis_matrix:
-        return dense_basis(spec, x)
-    return np.asarray(evaluator(x), dtype=np.float64)
+    if type(spec) not in _BUILT_IN_SPLINES or method is not type(spec)._raw_basis_matrix:
+        return np.asarray(evaluator(x), dtype=np.float64)
+    points = np.asarray(x, dtype=np.float64)
+    in_range = spec.extrapolation == "extend" and bool(
+        np.all((points >= spec._lo) & (points <= spec._hi))
+    )
+    return dense_basis(spec, points, in_range=in_range)
 
 
 def _warmup_basis_kernels() -> None:
