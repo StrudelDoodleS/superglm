@@ -845,7 +845,7 @@ class SplineCategorical:
         self._separated_curves = tuple(found)
         return held_groups
 
-    def _raw_rows(self, x: NDArray) -> NDArray:
+    def _raw_rows(self, x: NDArray) -> Any:
         """The spline's raw basis at ``x``, clamped to the training range for a term fitted so."""
         if not self._margins_follow_policy:
             x = np.clip(np.asarray(x, dtype=np.float64), self._lo, self._hi)
