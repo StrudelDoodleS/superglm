@@ -207,7 +207,7 @@ def test_a_direction_that_cannot_be_verified_is_disclosed_unresolved(monkeypatch
         monkeypatch,
         "superglm.model.separation_ops",
         "separating_direction",
-        lambda matrix, sides: (None, np.zeros(0, dtype=np.intp), {}),
+        lambda matrix, sides, priority=None: (None, np.zeros(0, dtype=np.intp), {}),
     )
     X, y, _ = _reference_level_frame()
     model = _fit("poisson", {"f": Categorical(), "x": Spline(n_knots=8)}, X, y)
@@ -343,7 +343,7 @@ def test_a_separated_set_short_of_the_whole_face_is_not_certified(monkeypatch):
     )
     partial = np.array([0.0, 0.5, 0.5, -1.0])
 
-    def short(matrix, sides):
+    def short(matrix, sides, priority=None):
         assert sparse.issparse(matrix)
         return partial, np.array([0]), {}
 
@@ -539,7 +539,7 @@ def test_a_healthy_logistic_fit_proves_existence_from_its_score(monkeypatch, wei
     monkeypatch.setattr(
         separation_ops,
         "separating_direction",
-        lambda matrix, sides: ran.append(1) or real(matrix, sides),
+        lambda matrix, sides, priority=None: ran.append(1) or real(matrix, sides, priority),
     )
     X, y, weights = _strong_logistic(weighted)
     model = SuperGLM(family="binomial", features={"x": Numeric(), "f": Categorical()})
@@ -552,29 +552,135 @@ def test_a_healthy_logistic_fit_proves_existence_from_its_score(monkeypatch, wei
     assert (separation.state, separation.decided_by) == ("absent", "certificate")
 
 
-def test_a_program_past_its_cap_is_not_run_and_the_summary_says_so(monkeypatch):
-    """The rows' linear program has a size cap; past it the decision is disclosed unresolved.
-
-    Forced: the cap set to eight entries, below the reference-level frame's program.  HiGHS is
-    not called, nothing is withheld, and the footnote says the program exceeded its cap, at
-    how many rows by how many directions.  Its work grows faster than its rows (56 s at
-    200,000 logistic rows of nine directions), so an uncapped program made a fit of that size
-    take a minute.  At ``07a1401a5`` the program ran whatever its size.  Mutation check:
-    without the cap the program ran and the decision was ``"present"``.
-    """
+def _counted_program(monkeypatch) -> list[int]:
+    """Patch HiGHS so each call records the rows its program reads."""
     import scipy.optimize
 
-    _patch(monkeypatch, "superglm.diagnostics.separation", "PROGRAM_CAP", 8)
-    called = []
+    rows: list[int] = []
     real = scipy.optimize.linprog
-    monkeypatch.setattr(
-        scipy.optimize, "linprog", lambda *a, **k: called.append(1) or real(*a, **k)
+
+    def counted(*args, **kwargs):
+        rows.append(int(kwargs["A_ub"].shape[0]))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(scipy.optimize, "linprog", counted)
+    return rows
+
+
+def _separated_indicator_frame(n: int):
+    """6b's ``dense-binomial-sep`` case at ``n`` rows: ``w = +-1`` on 2% of them separates them.
+
+    A healthy logistic in a factor, a spline and a slope, and an indicator ``w`` whose rows all
+    have response 1 where it is ``+1`` and 0 where it is ``-1``: ``w`` alone has no finite
+    estimate.
+    """
+    rng = np.random.default_rng(7)
+    f = rng.choice(list("ABCDEFGH"), n)
+    x, z = rng.uniform(size=n), rng.normal(size=n)
+    eta = -1.5 + 0.3 * (f == "B") + np.sin(2 * np.pi * x) + 0.2 * z
+    y = (rng.uniform(size=n) < 1 / (1 + np.exp(-eta))).astype(float)
+    w = np.where(rng.uniform(size=n) < 0.02, rng.choice([-1.0, 1.0], n), 0.0)
+    y = np.where(w > 0, 1.0, np.where(w < 0, 0.0, y))
+    X = pd.DataFrame({"f": f, "x": x, "z": z, "w": w})
+    features = {"f": Categorical(), "x": Spline(n_knots=10), "z": Numeric(), "w": Numeric()}
+    return X, y, features
+
+
+def _decided_past_the_cap(model, X, rows_read, cap):
+    """What a user reads of a separation decided from a capped program, and its work."""
+    se = _summary_se(model)
+    assert np.isnan(se["w"]) and np.isfinite(se["z"])
+    separation = published_separation(model)
+    assert separation.state == "present" and separation.names == ("w",)
+    np.testing.assert_array_equal(separation.rows, np.flatnonzero(X["w"].to_numpy() != 0))
+    assert "not resolved" not in _notes(model)
+    # one program, of at most the cap's entries, over a subset of the rows
+    width = separation.work["candidates"]
+    assert len(rows_read) == 1 and rows_read[0] * width <= cap
+    assert separation.work["lp_rows"] * width > cap
+    assert rows_read[0] == separation.work["sampled"] < separation.work["lp_rows"]
+
+
+@pytest.mark.slow
+def test_a_separation_past_the_programs_cap_is_decided_from_a_subset_of_its_rows(monkeypatch):
+    """6b's ``dense-binomial-sep`` case, 200,000 rows by ten directions, is decided again.
+
+    Its program (2,000,000 entries) exceeds the cap (``PROGRAM_CAP``, 524,288), so it reads
+    52,428 of the rows (``program_rows``); the direction it proposes is verified on all
+    200,000 exactly, and the fit on the rows it keeps certifies that it separates no more.  So
+    ``w`` has no standard error, the fit warns once naming it, and the work is one program of
+    at most the cap.  At ``9ac9df407`` the program was not run past the cap: the decision was
+    unresolved and the summary printed ``w``'s walked standard error (17,835 at 4,000 rows).
+    Mutation check: with the program not run past the cap, unresolved again.
+    """
+    from superglm.diagnostics.separation import PROGRAM_CAP
+
+    rows_read = _counted_program(monkeypatch)
+    X, y, features = _separated_indicator_frame(200_000)
+    model = SuperGLM(family="binomial", features=features, selection_penalty=0.0)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit_reml(X, y)
+    _decided_past_the_cap(model, X, rows_read, PROGRAM_CAP)
+    stated = [str(w.message) for w in caught if str(w.message).startswith("Separation:")]
+    assert len(stated) == 1 and "direction moving w" in stated[0]
+
+
+def test_a_capped_program_reads_the_rows_the_walk_drove_to_the_boundary(monkeypatch):
+    """Three of 4,000 rows are separated (``w = 1``, response 1); a cap of 80 entries lets the
+    program read 40 rows, half of them the ones the walk drove nearest their boundary.
+
+    The walk drives the three rows' predictor up, so they are among those 20, and the program
+    finds ``w`` on 40 rows; the direction verifies on all 4,000, and ``w`` has no standard
+    error.  An evenly strided sample of 40 rows holds none of the three.  At ``9ac9df407`` the
+    program was not run past the cap: unresolved, and ``w``'s walked standard error printed.
+    Mutation check: with the strided rows alone, no proposal and unresolved.
+    """
+    _patch(monkeypatch, "superglm.diagnostics.separation", "PROGRAM_CAP", 80)
+    rows_read = _counted_program(monkeypatch)
+    rng = np.random.default_rng(11)
+    n = 4000
+    w = np.zeros(n)
+    w[[17, 1234, 3501]] = 1.0
+    y = np.where(w > 0, 1.0, (rng.uniform(size=n) < 0.3).astype(float))
+    X = pd.DataFrame({"w": w, "z": rng.normal(size=n)})
+    model = _fit("binomial", {"w": Numeric(), "z": Numeric()}, X, y)
+    _decided_past_the_cap(model, X, rows_read, 80)
+
+
+def test_a_capped_program_whose_proposal_does_not_verify_is_disclosed_unresolved(monkeypatch):
+    """Past its cap the program reads a subset of the rows; a direction that separates the
+    subset but not every row leaves the decision unresolved, and the summary says how.
+
+    Forced: the healthy logistic fit's score is kept from certifying it, and the cap is 8
+    entries, so the program reads 4 of the 20,000 rows (two of each sign, by the walk's
+    predictor), which the slope separates.  The proposal fails on the other rows, so nothing is
+    withheld, and the footnote names the program's size, its cap and the rows it read.  Its
+    work grows faster than its rows (56 s at 200,000 logistic rows of nine directions), so an
+    uncapped program made a fit of that size take a minute.  At ``9ac9df407`` the program was
+    not run past the cap, and the footnote said so.  Mutation checks: with the proposal checked
+    on the rows it read only, the slope was called infinite; without the cap the program read
+    every row.
+    """
+    _patch(monkeypatch, "superglm.diagnostics.separation", "PROGRAM_CAP", 8)
+    _patch(
+        monkeypatch, "superglm.model.separation_ops", "existence_certified", lambda *a, **k: False
     )
-    X, y, _ = _reference_level_frame()
-    model = _fit("poisson", {"f": Categorical(), "x": Spline(n_knots=8)}, X, y)
-    assert "size cap of 8 entries" in _notes(model)
-    assert called == []
-    assert published_separation(model).state == "unresolved"
+    rows_read = _counted_program(monkeypatch)
+    X, y, _ = _strong_logistic(False)
+    model = SuperGLM(family="binomial", features={"x": Numeric()})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y)
+    separation = published_separation(model)
+    assert separation.state == "unresolved"
+    assert rows_read == [4] and separation.work["sampled"] == 4
+    assert (
+        "linear program (20000 rows by 2 directions) exceeds its size cap of 8 entries; no "
+        "direction it proposed from 4 of those rows separates the responses at 0 or 1 on every "
+        "row" in _notes(model)
+    )
+    assert np.isfinite(_summary_se(model)["x"])
     assert getattr(model, "_separated_rows", None) is None
 
 

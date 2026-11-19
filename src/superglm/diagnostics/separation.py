@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 import warnings
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -1291,7 +1291,9 @@ _SNAP_BITS = (0, 1, 2, 3, 4, 6, 8, 12, 16, 20, 24, 30)
 #: grows faster than its rows (0.9 s at 20,000 rows of nine directions, 4.7 s at 50,000, 56 s at
 #: 200,000): a size, not an iteration count, bounds its work, and one every platform reads
 #: alike.  A healthy fit's score proves existence first (``recession_excluded``), so the
-#: program reads only the rows a candidate moves on fits the score could not certify.
+#: program reads only the rows a candidate moves on fits the score could not certify.  Past the
+#: cap it reads a subset of the cap's size (``program_rows``): its answer is a proposal like any
+#: other, verified on every row exactly, so the subset bounds the work, never the proof.
 PROGRAM_CAP = 2**19
 
 
@@ -1309,8 +1311,9 @@ class Separation:
       separates, a proven lower bound: the fit on the other rows was not shown to separate no
       further (or not run, for a fit refused under ``"error"``), so more rows may be separated.
       ``span`` holds the direction, its entries below the square root of eps cut for reporting.
-    - ``"unresolved"``: float64 cannot decide, or the rows' linear program exceeds its cap
-      (``work["capped"]``); no direction verified.
+    - ``"unresolved"``: float64 cannot decide; no direction verified.  Past the program's cap
+      (``work["capped"]``) the direction proposed from ``work["sampled"]`` of its rows did not
+      verify on every row.
 
     ``decided_by`` names the route, ``boundaries`` the family's response boundaries, and
     ``unique`` is false for a link whose likelihood is not concave (cauchit: the sign test
@@ -1432,10 +1435,17 @@ class Separation:
         edges = " or ".join({"zero": "0", "one": "1"}[edge] for edge in self.boundaries)
         capped = self.work.get("capped")
         if capped:
+            sampled = self.work.get("sampled", 0)
             return (
                 "the fit's score does not prove it, and the rows' linear program "
                 f"({self.work.get('lp_rows', 0)} rows by {self.work.get('candidates', 0)} "
-                f"directions) exceeds its size cap of {capped} entries, so it was not run"
+                f"directions) exceeds its size cap of {capped} entries"
+                + (
+                    f"; no direction it proposed from {sampled} of those rows separates the "
+                    f"responses at {edges} on every row"
+                    if sampled
+                    else ", so it was not run"
+                )
             )
         return (
             "the fit's score does not prove it, and no direction separating the responses at "
@@ -1673,7 +1683,31 @@ def interior_null_directions(matrix, interior: NDArray) -> NDArray:
     return candidates
 
 
-def separating_direction(matrix, sides: NDArray) -> tuple[NDArray | None, NDArray, dict]:
+def program_rows(rows: NDArray, budget: int, priority: NDArray | None = None) -> NDArray:
+    """The ``budget`` of ``rows`` (ascending row indices) a capped program reads, ascending.
+
+    Half are the rows nearest their boundary at the walk (largest ``priority``, ``s_i eta_i``:
+    a separated row is driven there, however few they are), ties in row order; the rest an
+    evenly strided sample of the others, whose overlap keeps a direction that merely separates
+    the first half from verifying.  Row positions only, so every platform reads the same rows
+    wherever the priorities do not tie at the cut.
+    """
+    budget = max(int(budget), 0)
+    if rows.size <= budget:
+        return rows
+    first = np.zeros(0, dtype=np.intp)
+    if priority is not None:
+        order = np.argsort(-np.asarray(priority, dtype=np.float64), kind="stable")
+        first = np.sort(order[: budget // 2])
+    rest = np.setdiff1d(np.arange(rows.size), first, assume_unique=True)
+    count = budget - first.size
+    strided = rest[(np.arange(count, dtype=np.int64) * rest.size) // max(count, 1)]
+    return rows[np.sort(np.concatenate((first, strided)))]
+
+
+def separating_direction(
+    matrix, sides: NDArray, priority: Callable[[], NDArray | None] | None = None
+) -> tuple[NDArray | None, NDArray, dict]:
     """A direction of recession of the rows of ``matrix``, verified exactly, with its rows.
 
     ``matrix`` (CSR) holds the rows' explicit columns, ``sides`` each row's side
@@ -1687,6 +1721,14 @@ def separating_direction(matrix, sides: NDArray) -> tuple[NDArray | None, NDArra
     are verified on every row exactly (``_verified_separation``), and the one separating the
     most rows is returned with them.  ``None`` when no proposal verifies.  The third value
     counts the work.
+
+    A program past ``PROGRAM_CAP`` reads ``program_rows`` of its rows, ``priority`` (each row's
+    ``s_i eta_i`` at the walk, formed only then; ``None`` for row order alone) choosing half:
+    constraint sampling
+    for a linear program of few variables and many constraints (Clarkson, *Las Vegas algorithms
+    for linear and integer programming when the dimension is small*, J. ACM 42(2), 1995).  Its
+    answer is verified on every row like any other, so a sample changes the work, not what a
+    verified direction proves; a proposal that does not verify leaves the decision unresolved.
     """
     from scipy import sparse
     from scipy.optimize import linprog
@@ -1706,11 +1748,18 @@ def separating_direction(matrix, sides: NDArray) -> tuple[NDArray | None, NDArra
     work["lp_rows"] = int(np.count_nonzero(moved))
     if not np.any(moved):
         return None, np.zeros(0, dtype=np.intp), work
-    if work["lp_rows"] * candidates.shape[1] > PROGRAM_CAP:
-        # past the cap the program is not run, and the decision is disclosed unresolved
+    read = np.flatnonzero(moved)
+    if read.size * candidates.shape[1] > PROGRAM_CAP:
+        # past the cap the program reads a subset of the cap's size; its proposal is verified
+        # on every row below, as any proposal is
         work["capped"] = PROGRAM_CAP
-        return None, np.zeros(0, dtype=np.intp), work
-    signed = (sides[boundary][moved, None] * values[moved]) / largest[moved, None]
+        ranked = None if priority is None else priority()
+        ranked = None if ranked is None else np.asarray(ranked)[boundary][read]
+        read = program_rows(read, PROGRAM_CAP // candidates.shape[1], ranked)
+        work["sampled"] = int(read.size)
+        if read.size == 0:
+            return None, np.zeros(0, dtype=np.intp), work
+    signed = (sides[boundary][read, None] * values[read]) / largest[read, None]
     count, width = signed.shape
     # HiGHS's interior-point method: on 200,000 boundary rows its dual simplex took minutes
     program = linprog(

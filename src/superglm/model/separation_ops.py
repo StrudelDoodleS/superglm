@@ -468,13 +468,19 @@ def decide_separation(
             np.zeros(0, dtype=np.intp),
         )
     explicit, coordinates = explicit_design(model)
-    direction, strict, work = separating_direction(explicit, sides)
+
+    def priority() -> NDArray | None:
+        # past its cap the program reads the rows the walk drove nearest their boundary first
+        eta = _linear_predictor(model)
+        return None if eta is None else sides * np.where(np.isfinite(eta), eta, 0.0)
+
+    direction, strict, work = separating_direction(explicit, sides, priority)
     width = len(model._solver_pirls_result().beta)
     if direction is None:
         return (
             Separation(
                 "unresolved",
-                "linear program not run: over its cap"
+                "linear program over its cap: no proposal verifies"
                 if work.get("capped")
                 else "no direction verifies",
                 boundaries=boundaries,
