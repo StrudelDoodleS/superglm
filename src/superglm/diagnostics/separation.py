@@ -422,7 +422,9 @@ def _interior_rows_identify(
     when the intercept and the design columns have full column rank on them
     it is zero.  The test is their centred Gram, accepted only when its
     Cholesky factor is certified (``try_decompose_verified_spd_gram``): an
-    uncertified Gram rules nothing out.  It runs only once the backstop fires.
+    uncertified Gram rules nothing out.  It runs only once the backstop fires,
+    and once per design and set of rows (``DesignMatrix._separation_identified``,
+    keyed by those rows): the solves of a search share their design.
     """
     interior = live & (y > 0) if "zero" in boundaries else live.copy()
     if "one" in boundaries:
@@ -431,16 +433,22 @@ def _interior_rows_identify(
         return False
     if design.p == 0:
         return True
+    import hashlib
+
     from superglm.solvers.centered_system import build_centered_system
     from superglm.solvers.rank import try_decompose_verified_spd_gram
 
-    gram = build_centered_system(
-        dm=design,
-        W=interior.astype(np.float64),
-        z_off=np.zeros(design.n),
-        penalty=np.zeros((design.p, design.p)),
-    ).data_gram
-    return try_decompose_verified_spd_gram(gram) is not None
+    known = getattr(design, "_separation_identified", {})
+    key = hashlib.blake2b(np.packbits(interior).tobytes(), digest_size=16).digest()
+    if key not in known:
+        gram = build_centered_system(
+            dm=design,
+            W=interior.astype(np.float64),
+            z_off=np.zeros(design.n),
+            penalty=np.zeros((design.p, design.p)),
+        ).data_gram
+        known[key] = try_decompose_verified_spd_gram(gram) is not None
+    return known[key]
 
 
 def drifting_groups(

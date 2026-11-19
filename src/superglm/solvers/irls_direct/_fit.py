@@ -239,6 +239,12 @@ def fit_irls_direct(
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit by direct IRLS (``_IRLSDirectFit``, whose docstring documents the parameters).
 
+    ``separation`` governs the runtime separation backstop: ``"warn"``
+    (default) warns, ``"error"`` raises ``SeparationError``, ``"ignore"`` skips
+    it, and ``"record"`` only records its finding on the result
+    (``PIRLSResult.separation_message``), which a model's own solves pass so
+    that only the fit it publishes speaks.
+
     A structured factor that cannot proceed raises ``StructuredSolverError``
     under every ``direct_solve`` (one-engine design §6, decision 6): no fit is
     rerun on another solver.  A Fisher-data reuse cache is cleared when the
@@ -726,11 +732,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         ``_build_penalty_matrix`` call entirely.
     reml_penalties : list of PenaltyComponent, optional
         Forwarded to ``_build_penalty_matrix`` for the multi-penalty path.
-    separation : {"warn", "error", "ignore", "record"}
-        The runtime separation backstop: warn, raise ``SeparationError``,
-        skip it, or only record its finding on the result
-        (``PIRLSResult.separation_message``), which a model's solves pass so
-        that only the fit it publishes speaks.
 
     Returns
     -------

@@ -2139,8 +2139,9 @@ def fit_pirls(
     3. Refit with adjusted weights (warm started from stage 1)
 
     ``separation`` governs the runtime separation backstop as in
-    ``fit_irls_direct``: "warn", "error", "ignore", or "record" (the finding
-    only rides on the result, for the fit that publishes it).
+    ``fit_irls_direct``: ``"warn"`` (default), ``"error"``, ``"ignore"``, or
+    ``"record"``, under which the finding only rides on the result, for the
+    fit that publishes it.
     """
     if max_iter_outer < 1:
         raise ValueError(f"max_iter_outer must be at least 1, got {max_iter_outer}")

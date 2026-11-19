@@ -895,6 +895,41 @@ def test_the_backstop_reads_the_linear_part_against_the_responses(row):
     assert log_mean[at_guard] == pytest.approx(-LOG_GUARD, abs=64 * U * LOG_GUARD)
 
 
+def test_a_designs_identification_is_built_once_per_set_of_rows(monkeypatch):
+    """The identification test depends on the design and the rows, not on a solve's state.
+
+    The solves of a search share their design, so its Gram is built once per
+    set of rows off the boundary; another set builds its own, and a pickled
+    design starts without them.  On the freMTPL2 Tweedie power search, 21
+    candidate solves reached the backstop and each built the 542,406-row Gram
+    before the cache.
+    """
+    import pickle
+
+    import superglm.solvers.centered_system as centered_system
+    from superglm.diagnostics.separation import _interior_rows_identify
+
+    frame, y = poisson_curve(n=400)
+    model = SuperGLM(family="poisson", features={"x": Spline(kind="cr", k=8)}).fit(frame, y)
+    design, live = model._dm, np.ones(len(y), dtype=bool)
+    built = []
+    build = centered_system.build_centered_system
+    monkeypatch.setattr(
+        centered_system,
+        "build_centered_system",
+        lambda **kwargs: built.append(1) or build(**kwargs),
+    )
+
+    assert _interior_rows_identify(design, y, live, ("zero",))
+    assert _interior_rows_identify(design, y, live, ("zero",))
+    assert len(built) == 1
+    fewer = live.copy()
+    fewer[: len(y) // 2] = False
+    assert _interior_rows_identify(design, y, fewer, ("zero",))
+    assert len(built) == 2
+    assert pickle.loads(pickle.dumps(design))._separation_identified == {}
+
+
 def test_an_independent_fit_inside_a_progress_callback_reports_its_own_findings():
     """Each public fit call names its design findings once; a search's candidates share its call.
 
