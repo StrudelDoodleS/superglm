@@ -96,10 +96,16 @@ def _dotted(node: ast.expr) -> list[str]:
     return [node.id, *reversed(parts)] if isinstance(node, ast.Name) else []
 
 
-def scan(name: str, path: Path, modules: dict[str, Path]) -> tuple[bool, set[str]]:
-    """Whether module ``name`` compiles with numba, and the superglm modules it imports."""
+def scan(
+    name: str, path: Path, modules: dict[str, Path], source: str | bytes | None = None
+) -> tuple[bool, set[str]]:
+    """Whether module ``name`` compiles with numba, and the superglm modules it imports.
+
+    ``source`` is the module's text when it is not ``path``'s current content.
+    """
     package = name if path.name == "__init__.py" else name.rpartition(".")[0]
-    nodes = list(_nodes(ast.parse(path.read_bytes(), filename=str(path))))
+    text = path.read_bytes() if source is None else source
+    nodes = list(_nodes(ast.parse(text, filename=str(path))))
     compiles, imported, numba_names = False, set(), set()
     for node in nodes:
         if isinstance(node, ast.Import):

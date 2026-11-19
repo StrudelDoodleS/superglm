@@ -1,0 +1,466 @@
+{
+ "total_count": 25,
+ "jobs": [
+  {
+   "id": 135418023926,
+   "name": "Polars 1.42.1 floor \u00b7 Polars-touching tests",
+   "conclusion": "success",
+   "runner_name": "GitHub Actions 1000064005",
+   "steps": [
+    {
+     "name": "Set up job",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "conclusion": "success"
+    },
+    {
+     "name": "Install uv",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 135418024232,
+   "name": "Python 3.13 \u00b7 non-browser regression suite \u00b7 balanced A \u00b7 Windows",
+   "conclusion": "success",
+   "runner_name": "GitHub Actions 1000064013",
+   "steps": [
+    {
+     "name": "Set up job",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "conclusion": "success"
+    },
+    {
+     "name": "Install uv",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 135418024403,
+   "name": "Python 3.14 \u00b7 non-browser regression suite \u00b7 balanced A",
+   "conclusion": "success",
+   "runner_name": "GitHub Actions 1000064029",
+   "steps": [
+    {
+     "name": "Set up job",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "conclusion": "success"
+    },
+    {
+     "name": "Install uv",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 135418024432,
+   "name": "Python 3.12 \u00b7 non-browser regression suite \u00b7 balanced A",
+   "conclusion": "success",
+   "runner_name": "GitHub Actions 1000064031",
+   "steps": [
+    {
+     "name": "Set up job",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "conclusion": "success"
+    },
+    {
+     "name": "Install uv",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 135418024449,
+   "name": "Python 3.13 \u00b7 non-browser regression suite \u00b7 balanced A \u00b7 macOS ARM64",
+   "conclusion": "success",
+   "runner_name": "GitHub Actions 1000064010",
+   "steps": [
+    {
+     "name": "Set up job",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "conclusion": "success"
+    },
+    {
+     "name": "Install uv",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 135418024464,
+   "name": "Python 3.13 \u00b7 non-browser regression suite \u00b7 balanced B \u00b7 macOS ARM64",
+   "conclusion": "failure",
+   "runner_name": "GitHub Actions 1000064038",
+   "steps": [
+    {
+     "name": "Set up job",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "conclusion": "success"
+    },
+    {
+     "name": "Install uv",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 135418024468,
+   "name": "Python 3.13 \u00b7 non-browser regression suite \u00b7 balanced B \u00b7 Linux ARM64",
+   "conclusion": "success",
+   "runner_name": "GitHub Actions 1000064004",
+   "steps": [
+    {
+     "name": "Set up job",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "conclusion": "success"
+    },
+    {
+     "name": "Install uv",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 135418024509,
+   "name": "Python 3.14 \u00b7 non-browser regression suite \u00b7 balanced D",
+   "conclusion": "success",
+   "runner_name": "GitHub Actions 1000064035",
+   "steps": [
+    {
+     "name": "Set up job",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "conclusion": "success"
+    },
+    {
+     "name": "Install uv",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 135418024529,
+   "name": "Python 3.14 \u00b7 non-browser regression suite \u00b7 balanced B",
+   "conclusion": "success",
+   "runner_name": "GitHub Actions 1000064036",
+   "steps": [
+    {
+     "name": "Set up job",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "conclusion": "success"
+    },
+    {
+     "name": "Install uv",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 135418024530,
+   "name": "Python 3.13 \u00b7 non-browser regression suite \u00b7 balanced D \u00b7 Linux ARM64",
+   "conclusion": "success",
+   "runner_name": "GitHub Actions 1000064028",
+   "steps": [
+    {
+     "name": "Set up job",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "conclusion": "success"
+    },
+    {
+     "name": "Install uv",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 135418024542,
+   "name": "Python 3.12 \u00b7 non-browser regression suite \u00b7 balanced D",
+   "conclusion": "success",
+   "runner_name": "GitHub Actions 1000064037",
+   "steps": [
+    {
+     "name": "Set up job",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "conclusion": "success"
+    },
+    {
+     "name": "Install uv",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 135418024559,
+   "name": "Python 3.14 \u00b7 non-browser regression suite \u00b7 balanced C",
+   "conclusion": "success",
+   "runner_name": "GitHub Actions 1000064033",
+   "steps": [
+    {
+     "name": "Set up job",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "conclusion": "success"
+    },
+    {
+     "name": "Install uv",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 135418024563,
+   "name": "Python 3.13 \u00b7 non-browser regression suite \u00b7 balanced C \u00b7 Linux ARM64",
+   "conclusion": "success",
+   "runner_name": "GitHub Actions 1000064022",
+   "steps": [
+    {
+     "name": "Set up job",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "conclusion": "success"
+    },
+    {
+     "name": "Install uv",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 135418024576,
+   "name": "Python 3.13 \u00b7 non-browser regression suite \u00b7 balanced B \u00b7 Windows",
+   "conclusion": "success",
+   "runner_name": "GitHub Actions 1000064014",
+   "steps": [
+    {
+     "name": "Set up job",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "conclusion": "success"
+    },
+    {
+     "name": "Install uv",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 135418024603,
+   "name": "Python 3.13 \u00b7 non-browser regression suite \u00b7 balanced D \u00b7 macOS ARM64",
+   "conclusion": "success",
+   "runner_name": "GitHub Actions 1000064012",
+   "steps": [
+    {
+     "name": "Set up job",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "conclusion": "success"
+    },
+    {
+     "name": "Install uv",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 135418024606,
+   "name": "Python 3.13 \u00b7 non-browser regression suite \u00b7 balanced C \u00b7 Windows",
+   "conclusion": "success",
+   "runner_name": "GitHub Actions 1000064019",
+   "steps": [
+    {
+     "name": "Set up job",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "conclusion": "success"
+    },
+    {
+     "name": "Install uv",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 135418024611,
+   "name": "Python 3.13 \u00b7 non-browser regression suite \u00b7 balanced C \u00b7 macOS ARM64",
+   "conclusion": "success",
+   "runner_name": "GitHub Actions 1000064016",
+   "steps": [
+    {
+     "name": "Set up job",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "conclusion": "success"
+    },
+    {
+     "name": "Install uv",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 135418024622,
+   "name": "Python 3.13 \u00b7 non-browser regression suite \u00b7 balanced A \u00b7 Linux ARM64",
+   "conclusion": "success",
+   "runner_name": "GitHub Actions 1000064032",
+   "steps": [
+    {
+     "name": "Set up job",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "conclusion": "success"
+    },
+    {
+     "name": "Install uv",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 135418024734,
+   "name": "Python 3.12 \u00b7 non-browser regression suite \u00b7 balanced C",
+   "conclusion": "success",
+   "runner_name": "GitHub Actions 1000064040",
+   "steps": [
+    {
+     "name": "Set up job",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "conclusion": "success"
+    },
+    {
+     "name": "Install uv",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 135418024780,
+   "name": "Python 3.13 \u00b7 non-browser regression suite \u00b7 balanced D \u00b7 Windows",
+   "conclusion": "success",
+   "runner_name": "GitHub Actions 1000064025",
+   "steps": [
+    {
+     "name": "Set up job",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "conclusion": "success"
+    },
+    {
+     "name": "Install uv",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 135418024825,
+   "name": "Python 3.12 \u00b7 non-browser regression suite \u00b7 balanced B",
+   "conclusion": "success",
+   "runner_name": "GitHub Actions 1000064039",
+   "steps": [
+    {
+     "name": "Set up job",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "conclusion": "success"
+    },
+    {
+     "name": "Install uv",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 135418025689,
+   "name": "frontend-browser",
+   "conclusion": "skipped",
+   "runner_name": null,
+   "steps": []
+  },
+  {
+   "id": 135418026059,
+   "name": "lint",
+   "conclusion": "skipped",
+   "runner_name": null,
+   "steps": []
+  },
+  {
+   "id": 135423857258,
+   "name": "Python 3.12 \u00b7 non-browser suite \u00b7 version floor",
+   "conclusion": "failure",
+   "runner_name": "GitHub Actions 1000064042",
+   "steps": [
+    {
+     "name": "Set up job",
+     "conclusion": "success"
+    },
+    {
+     "name": "Require every compatibility shard and the Polars floor to pass",
+     "conclusion": "failure"
+    },
+    {
+     "name": "Complete job",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 135423858883,
+   "name": "Python 3.12 \u00b7 combined branch coverage",
+   "conclusion": "skipped",
+   "runner_name": null,
+   "steps": []
+  }
+ ]
+}

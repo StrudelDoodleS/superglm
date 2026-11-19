@@ -13,7 +13,9 @@ assert on thread counts or need a pool with more than one thread.
 
 Every other argument goes to both stages; no ``--`` separator is needed, so
 the same command line works under PowerShell. Select tests with ``-m`` or
-``-k``: the runner always runs ``tests/``, so it refuses a file path or node ID.
+``-k``: the runner runs ``tests/``, so it refuses a file path or node ID.
+``--files-from PATH`` runs the test files ``PATH`` lists, one per line,
+instead of ``tests/`` (``scripts/pre_push.py`` passes its selection so).
 A junit report from stage 2 is written beside stage 1's (``-threads``
 suffix), whether it is named here or in ``PYTEST_ADDOPTS``. One named in
 the pytest config file is not renamed, so stage 2 would overwrite stage
@@ -84,9 +86,14 @@ def _threads_arguments(passthrough: list[str]) -> list[str]:
     return ["--cov-append", *_junit_beside(passthrough)]
 
 
-def stage_commands(markers: str, passthrough: list[str]) -> list[tuple[list[str], bool]]:
-    """The two pytest invocations, each with whether its thread pools are pinned."""
-    base = [sys.executable, "-m", "pytest", "tests/", "-q", "--maxfail=0"]
+def stage_commands(
+    markers: str, passthrough: list[str], files: list[str] | None = None
+) -> list[tuple[list[str], bool]]:
+    """The two pytest invocations, each with whether its thread pools are pinned.
+
+    They run ``files`` when given, else all of ``tests/``.
+    """
+    base = [sys.executable, "-m", "pytest", *(files or ["tests/"]), "-q", "--maxfail=0"]
     parallel = [*base, "-m", f"({markers}) and not threads", "-n", "logical", "--dist", "worksteal"]
     threaded = [*base, "-m", f"({markers}) and threads"]
     return [
@@ -179,6 +186,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     # Only -m: pytest's own --markers lists the registered markers.
     parser.add_argument("-m", dest="markers", default=DEFAULT_MARKERS, help="pytest -m expression")
+    parser.add_argument(
+        "--files-from", type=Path, help="run the test files this file lists instead of tests/"
+    )
     # Drop "--" before parsing: a -m after it would reach pytest and override both stages.
     argv = [arg for arg in (sys.argv[1:] if argv is None else argv) if arg != "--"]
     args, passthrough = parser.parse_known_args(argv)
@@ -189,9 +199,14 @@ def main(argv: list[str] | None = None) -> int:
             "suite; select with -k or -m, give an option's path value as --option=value, or run "
             "`uv run python -m pytest <file>` directly"
         )
+    files = None
+    if args.files_from is not None:
+        files = args.files_from.read_text(encoding="utf-8").split()
+        if not files:
+            return NO_TESTS_COLLECTED
     codes = [
         subprocess.call(command, cwd=ROOT, env=stage_environment(pinned, os.environ))
-        for command, pinned in stage_commands(args.markers, passthrough)
+        for command, pinned in stage_commands(args.markers, passthrough, files)
     ]
     # Either stage may be empty (a shard without ``threads`` tests, a threads-only
     # selection); both empty means the selection matched nothing.

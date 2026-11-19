@@ -160,6 +160,7 @@ def _quiet_gate(monkeypatch):
     for name in ("_run", "_ty"):
         monkeypatch.setattr(pre_push, name, lambda *a, **k: None)
     monkeypatch.setattr(pre_push, "_changed_tests", lambda: [])
+    monkeypatch.setattr(pre_push, "_quick_suite", lambda full, start: "the whole quick suite")
 
 
 def test_a_passing_gate_stamps_a_clean_head_and_only_a_clean_one(tmp_path, monkeypatch):
@@ -217,3 +218,145 @@ def test_git_push_through_the_hook_waits_for_a_stamp(tmp_path, monkeypatch):
         ["git", "push", "-q", "origin", "v9.9.9"], cwd=repo, capture_output=True, text=True
     )
     assert tagged.returncode == 0, tagged.stderr
+
+
+def test_the_stamp_says_which_suite_passed_and_the_hook_repeats_it(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pre_push, "ROOT", _repo(tmp_path))
+    _quiet_gate(monkeypatch)
+    monkeypatch.setattr(pre_push, "_quick_suite", lambda full, start: "a selection of 7 tests")
+    pre_push.main([])
+    head = pre_push._git("rev-parse", "HEAD")
+    assert pre_push._stamp_fields(pre_push._stamp(head))["passed"] == "a selection of 7 tests"
+    pre_push._verify_push([f"refs/heads/b {head} refs/heads/b {pre_push.NO_COMMIT}"])
+    assert f"{head[:12]} passed a selection of 7 tests" in capsys.readouterr().out
+
+
+def _commit(repo: Path, name: str, text: str, message: str) -> str:
+    (repo / name).write_text(text, encoding="utf-8")
+    subprocess.run(["git", "add", name], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", message], cwd=repo, check=True)
+    return pre_push._git("rev-parse", "HEAD")
+
+
+def test_a_clean_rebase_carries_the_stamp_and_a_conflicted_one_needs_the_gate(
+    tmp_path, monkeypatch, capsys
+):
+    repo = _repo(tmp_path)
+    monkeypatch.setattr(pre_push, "ROOT", repo)
+    git = lambda *args: subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)  # noqa: E731
+    git("update-ref", "refs/remotes/origin/master", "HEAD")
+    git("checkout", "-q", "-b", "branch")
+    stamped = _commit(repo, "notes.txt", "one\ntwo\nthree\n", "branch work")
+    pre_push._stamp(stamped).parent.mkdir()
+    pre_push._stamp(stamped).write_text(
+        pre_push._stamp_text("a selection of 3 tests", pre_push._series(stamped)), "utf-8"
+    )
+    # master moves on elsewhere; the branch rebases onto it without a conflict.
+    git("checkout", "-q", "master")
+    moved = _commit(repo, "other.txt", "unrelated\n", "master work")
+    git("update-ref", "refs/remotes/origin/master", moved)
+    git("checkout", "-q", "branch")
+    git("rebase", "-q", "master")
+    rebased = pre_push._git("rev-parse", "HEAD")
+    assert rebased != stamped and not pre_push._stamp(rebased).exists()
+    pre_push._verify_push([f"refs/heads/branch {rebased} refs/heads/branch {pre_push.NO_COMMIT}"])
+    out = capsys.readouterr().out
+    assert f"carries the stamp of {stamped[:12]}" in out and "a selection of 3 tests" in out
+    # master edits the line the branch added: the rebase resolves a conflict, changing the diff.
+    git("checkout", "-q", "master")
+    clash = _commit(repo, "notes.txt", "one\nTWO\n", "master edits notes")
+    git("update-ref", "refs/remotes/origin/master", clash)
+    git("checkout", "-q", "-B", "resolved", clash)
+    resolved = _commit(repo, "notes.txt", "one\ntwo\nthree\n", "branch work")
+    with pytest.raises(SystemExit, match=resolved[:12]):
+        pre_push._verify_push([f"refs/heads/r {resolved} refs/heads/r {pre_push.NO_COMMIT}"])
+
+
+def test_the_quick_suite_runs_the_selection_or_everything_and_records_a_map(tmp_path, monkeypatch):
+    monkeypatch.setattr(pre_push, "ROOT", _repo(tmp_path))
+    test_map = pre_push._test_map()
+    monkeypatch.setattr(pre_push, "_test_map", lambda: test_map)
+    commands = []
+
+    def run(label, command, env=None, passing=None):
+        commands.append((command, env))
+        listed = [word for word in command if word.endswith("selected.txt")]
+        if listed:
+            commands.append(Path(listed[0]).read_text(encoding="utf-8").split())
+
+    monkeypatch.setattr(pre_push, "_run", run)
+    chosen = test_map.Selection(files={"tests/test_a.py": "changed"}, map_commit="c" * 40)
+    monkeypatch.setattr(test_map, "choose", lambda root: chosen)
+    passed = pre_push._quick_suite(full=False, start=None)
+    (command, env), listed = commands
+    assert "--files-from" in command and listed == ["tests/test_a.py"]
+    assert "test_map_plugin" not in command and "a selection of 0 tests" in passed
+    commands.clear()
+    head = pre_push._git("rev-parse", "HEAD")
+    assert "whole quick suite" in pre_push._quick_suite(full=True, start=head)
+    ((command, env),) = commands
+    assert "--files-from" not in command and "test_map_plugin" in command
+    assert test_map.OUT_ENV in " ".join(command) or test_map.OUT_ENV in (env or {})
+    assert (test_map.map_directory(pre_push.ROOT) / f"{head}.json").exists()
+
+
+def test_a_map_is_not_kept_when_the_checkout_moved_during_the_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(pre_push, "ROOT", _repo(tmp_path))
+    test_map = pre_push._test_map()
+    monkeypatch.setattr(pre_push, "_test_map", lambda: test_map)
+
+    def run(label, command, env=None, passing=None):
+        # Another session edits a tracked file while the suite runs.
+        (pre_push.ROOT / "tests" / "test_old.py").write_text("x = 2\n", encoding="utf-8")
+
+    monkeypatch.setattr(pre_push, "_run", run)
+    head = pre_push._git("rev-parse", "HEAD")
+    pre_push._quick_suite(full=True, start=head)
+    assert not (test_map.map_directory(pre_push.ROOT) / f"{head}.json").exists()
+
+
+def test_a_quick_suite_that_collects_nothing_fails_and_records_no_map(tmp_path, monkeypatch):
+    """A stale ``-k`` in ``PYTEST_ADDOPTS`` empties the run: pytest exits 5, and nothing passed.
+
+    Mutation: the quick suite accepted exit 5, so the gate stamped a commit no test had checked.
+    """
+    monkeypatch.setattr(pre_push, "ROOT", _repo(tmp_path))
+    test_map = pre_push._test_map()
+    monkeypatch.setattr(pre_push, "_test_map", lambda: test_map)
+    real = pre_push._run
+    empty = [sys.executable, "-c", "raise SystemExit(5)"]
+    monkeypatch.setattr(
+        pre_push, "_run", lambda label, command, env=None, **kwargs: real(label, empty, **kwargs)
+    )
+    head = pre_push._git("rev-parse", "HEAD")
+    with pytest.raises(SystemExit, match="exit 5"):
+        pre_push._quick_suite(full=True, start=head)
+    assert not test_map.map_directory(pre_push.ROOT).exists()
+    # A selection always holds the contract tests, so an empty run of one is no pass either.
+    chosen = test_map.Selection(files={"tests/test_a.py": "changed"}, map_commit="c" * 40)
+    monkeypatch.setattr(test_map, "choose", lambda root: chosen)
+    with pytest.raises(SystemExit, match="exit 5"):
+        pre_push._quick_suite(full=False, start=None)
+
+
+def test_a_rebase_that_changed_only_indentation_does_not_carry_the_stamp(tmp_path, monkeypatch):
+    """Two siblings change ``return 2`` to ``return 3``; one also moves it into the ``if``.
+
+    Mutation: ``git patch-id --stable`` ignores whitespace, so both had the same series and the
+    second carried the first's stamp although it returns something else.
+    """
+    repo = _repo(tmp_path)
+    monkeypatch.setattr(pre_push, "ROOT", repo)
+    git = lambda *args: subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)  # noqa: E731
+    base = _commit(repo, "f.py", "def f(x):\n    if x:\n        pass\n    return 2\n", "base f")
+    git("update-ref", "refs/remotes/origin/master", base)
+    git("checkout", "-q", "-b", "flat")
+    stamped = _commit(repo, "f.py", "def f(x):\n    if x:\n        pass\n    return 3\n", "f")
+    pre_push._stamp(stamped).parent.mkdir()
+    pre_push._stamp(stamped).write_text(
+        pre_push._stamp_text("a selection of 3 tests", pre_push._series(stamped)), "utf-8"
+    )
+    git("checkout", "-q", "-b", "nested", base)
+    nested = _commit(repo, "f.py", "def f(x):\n    if x:\n        pass\n        return 3\n", "f")
+    with pytest.raises(SystemExit, match=nested[:12]):
+        pre_push._verify_push([f"refs/heads/n {nested} refs/heads/n {pre_push.NO_COMMIT}"])

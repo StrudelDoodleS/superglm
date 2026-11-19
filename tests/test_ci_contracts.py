@@ -1259,3 +1259,107 @@ def test_the_outcome_lint_flags_each_pattern_and_spares_forced_events() -> None:
         "        assert_array_equal(r.beta, 0.0)\n"
     )
     assert flagged == {"test_guard", "test_either", "test_skip", "test_numpy", "test_imported"}
+
+
+_RERUN_WORKFLOW = _ROOT / ".github/workflows/rerun-starved-shards.yml"
+_RERUN_FIXTURES = _ROOT / "tests/fixtures/ci_rerun"
+# Recorded from the API: run 44552382922's first attempt, whose macOS ARM64 shard C GitHub
+# cancelled without a runner, and run 44482549977's, which failed on a test.
+_STARVED_RUN, _STARVED_JOB = "44552382922", 135659280345
+_FAILED_RUN = "44482549977"
+
+
+def test_the_starved_shard_rerun_fires_once_on_a_failed_ci_run_and_runs_no_code() -> None:
+    workflow = yaml.safe_load(_RERUN_WORKFLOW.read_text(encoding="utf-8"))
+    ci = yaml.safe_load((_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    # PyYAML reads the bare key ``on`` as True.
+    assert workflow[True] == {"workflow_run": {"workflows": [ci["name"]], "types": ["completed"]}}
+    assert workflow["permissions"] == {"contents": "read"}
+    (job,) = workflow["jobs"].values()
+    assert job["permissions"] == {"actions": "write"}
+    assert "github.event.workflow_run.run_attempt == 1" in job["if"]
+    assert "github.event.workflow_run.conclusion == 'failure'" in job["if"]
+    assert all("uses" not in step for step in job["steps"])  # no checkout, no action
+    # The check it unblocks stays strict: every shard must still report.
+    (never_run,) = [step["run"] for step in ci["jobs"]["never-run"]["steps"] if "run" in step]
+    assert "--shards 20" in never_run
+
+
+_FAKE_GH = """#!{python}
+import json, pathlib, sys
+fixtures = pathlib.Path({fixtures!r})
+with open(fixtures / "calls.jsonl", "a", encoding="utf-8") as log:
+    log.write(json.dumps(sys.argv[1:]) + "\\n")
+if sys.argv[1] == "api":
+    name = "jobs.json" if "/jobs" in sys.argv[2] else sys.argv[2].split("/")[-2] + ".json"
+    path = fixtures / name
+    print(path.read_text(encoding="utf-8") if path.exists() else "[]")
+"""
+
+
+def _rerun_calls(tmp_path: Path, run: str, jobs: dict, annotations: dict[int, list]) -> list:
+    """The ``gh`` calls the workflow's script makes against recorded responses."""
+    fixtures = tmp_path / "gh"
+    fixtures.mkdir()
+    (fixtures / "jobs.json").write_text(json.dumps(jobs), encoding="utf-8")
+    for job_id, notes in annotations.items():
+        (fixtures / f"{job_id}.json").write_text(json.dumps(notes), encoding="utf-8")
+    gh = fixtures / "gh"
+    gh.write_text(_FAKE_GH.format(python=sys.executable, fixtures=str(fixtures)), "utf-8")
+    gh.chmod(0o755)
+    workflow = yaml.safe_load(_RERUN_WORKFLOW.read_text(encoding="utf-8"))
+    ((step,),) = [job["steps"] for job in workflow["jobs"].values()]
+    script = tmp_path / "rerun.py"
+    script.write_text(step["run"], encoding="utf-8")
+    env = {
+        **os.environ,
+        "PATH": f"{fixtures}{os.pathsep}{os.environ['PATH']}",
+        "GH_REPO": "owner/repo",
+        "RUN_ID": run,
+    }
+    subprocess.run([sys.executable, str(script)], env=env, check=True, capture_output=True)
+    lines = (fixtures / "calls.jsonl").read_text(encoding="utf-8").splitlines()
+    return [json.loads(line) for line in lines]
+
+
+def _recorded(name: str):
+    return json.loads((_RERUN_FIXTURES / name).read_text(encoding="utf-8"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the stand-in gh is a script with a #! line")
+def test_the_rerun_filter_reruns_a_run_whose_shard_never_got_a_runner(tmp_path: Path) -> None:
+    jobs = _recorded("jobs_starved.json")
+    annotations = {_STARVED_JOB: _recorded("annotations_starved.json")}
+    calls = _rerun_calls(tmp_path, _STARVED_RUN, jobs, annotations)
+    assert ["run", "rerun", _STARVED_RUN, "--failed"] in calls
+    assert sum(call[:2] == ["run", "rerun"] for call in calls) == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the stand-in gh is a script with a #! line")
+def test_the_rerun_filter_leaves_a_run_that_failed_on_a_test(tmp_path: Path) -> None:
+    calls = _rerun_calls(tmp_path, _FAILED_RUN, _recorded("jobs_failed.json"), {})
+    assert not any(call[:2] == ["run", "rerun"] for call in calls)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the stand-in gh is a script with a #! line")
+@pytest.mark.parametrize(
+    ("started", "annotated", "reran"),
+    [
+        (True, True, True),  # the annotation alone identifies it
+        (False, False, True),  # a cancelled job that never started a step had no runner
+        (True, False, False),  # cancelled after it started: not starvation
+    ],
+)
+def test_the_rerun_filter_reads_either_sign_of_a_starved_job(
+    tmp_path: Path, started: bool, annotated: bool, reran: bool
+) -> None:
+    jobs = _recorded("jobs_starved.json")
+    (starved,) = [job for job in jobs["jobs"] if job["id"] == _STARVED_JOB]
+    if started:
+        starved["steps"] = [
+            {"name": "Set up job", "status": "completed", "conclusion": "cancelled"}
+        ]
+        starved["runner_name"] = "GitHub Actions 1"
+    notes = _recorded("annotations_starved.json") if annotated else []
+    calls = _rerun_calls(tmp_path, _STARVED_RUN, jobs, {_STARVED_JOB: notes})
+    assert any(call[:2] == ["run", "rerun"] for call in calls) == reran
