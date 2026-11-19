@@ -355,8 +355,11 @@ def test_bunched_rows_build_the_wiggle_at_a_high_admitted_order() -> None:
     its Cholesky factorization raised on every OpenBLAS kernel.  The image's QR gives
     the same triangular factor without forming the Gram.  The wiggle columns stay
     orthogonal over the rows to each other and to the null axes, and the whitened
-    fixed-lambda smoother does not depend on the row order, each to ``u cond(R)``
-    (cond(R) is 1.9e13 here; measured 6e-4 and 3e-8).
+    fixed-lambda smoother does not depend on the row order: the columns' Gram to
+    ``16 u cond(R)``, since an orthogonalisation errs by a modest multiple of ``u`` times
+    the conditioning (Higham 2002, ch. 19) and the multiple differs by BLAS kernel, and the
+    smoother to ``u cond(R)`` (cond(R) is 1.9e13 here; the Gram measured 6e-4 on x86-64
+    and 2.2e-3 on Linux ARM64, the smoother 3e-8).
     """
     k, m = 120, 101
     x = _bunched_rows(k, 0)
@@ -373,7 +376,7 @@ def test_bunched_rows_build_the_wiggle_at_a_high_admitted_order() -> None:
         rows = basis @ natural
         scale = np.linalg.norm(rows, axis=0)
         gram = (rows.T @ rows) / np.outer(scale, scale)
-        assert np.max(np.abs(gram[:rank] - np.eye(k)[:rank])) < tolerance
+        assert np.max(np.abs(gram[:rank] - np.eye(k)[:rank])) < 16.0 * tolerance
         (_, wiggle), *nulls = spec._base_penalty_components
         penalty = np.diag(2.0 * wiggle + sum(null for _, null in nulls))
         smoothers.append(rows @ np.linalg.solve(rows.T @ rows + np.diag(penalty), rows.T))
