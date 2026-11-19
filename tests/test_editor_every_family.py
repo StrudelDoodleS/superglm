@@ -184,10 +184,13 @@ def _job(widget, kind):
     return status
 
 
-def _walk(session, *, lss: bool, cv_rows=None, rating_tables: bool = True) -> None:
+def _walk(
+    session, *, lss: bool, cv_rows=None, rating_tables: bool = True, shift: float = 0.05
+) -> None:
     """Drive every editor step on ``session``; ``cv_rows`` adds the fold curves.
 
     Each log-link term previews its rating table unless ``rating_tables`` is False.
+    Each term's edit moves its curve by ``shift`` on the link scale.
     """
     payload = session_payload(session)
     assert payload
@@ -198,7 +201,7 @@ def _walk(session, *, lss: bool, cv_rows=None, rating_tables: bool = True) -> No
     # An edit on each term moves its curve; undo puts the last one back.
     for key, term in session.terms.items():
         session.select_indices(key, list(range(term.size // 3, 2 * term.size // 3 + 1)))
-        session.shift(key, 0.05)
+        session.shift(key, shift)
         assert not np.allclose(term.edited_log_effect, term.original_log_effect), key
     last = list(session.terms)[-1]
     session.undo()
@@ -257,13 +260,23 @@ def _walk(session, *, lss: bool, cv_rows=None, rating_tables: bool = True) -> No
 @pytest.mark.parametrize(
     ("name", "link"), GLM_CASES, ids=[f"{n}-{link or 'default'}" for n, link in GLM_CASES]
 )
+@pytest.mark.pins_behaviour
 def test_superglm_family_works_in_the_editor(name, link, glm_rows):
+    """A control: every family's editor walk already worked; it pins that for each.
+
+    The inverse link's shift is sized to its predictor (1/mean, about 1e-3
+    here): the walk's 0.05 put 101 of 300 training rows past ``eta = 0``, which
+    master priced at the 1e12 clip and the walk's finiteness checks let pass.
+    """
     model, X, y = _glm_case(name, link, glm_rows)
     session = edit(model, train_data=(X, y))
     assert list(session.terms) == ["x", "g"]
     cv_rows = (model, X, y) if ("glm", name, link) in CV_CASES else None
     # The Excel export refuses a binomial: its predictions are clamped, and a clamp is no factor.
-    _walk(session, lss=False, cv_rows=cv_rows, rating_tables=name != "Binomial")
+    # An inverse-link predictor is 1/mean, 1e-3 here: a 0.05 shift would put a third of the
+    # rows past eta = 0, where the model has no mean and gives no quote.
+    shift = 5e-5 if link == "inverse" else 0.05
+    _walk(session, lss=False, cv_rows=cv_rows, rating_tables=name != "Binomial", shift=shift)
 
 
 @pytest.mark.parametrize("name", EXAMPLE_FAMILIES)

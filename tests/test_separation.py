@@ -150,14 +150,18 @@ def test_main_effect_level_detected():
     assert "'c6'" in message
 
 
+@pytest.mark.pins_behaviour
 def test_predict_names_a_separated_categorical_level_it_meets():
     """``predict`` names a main-effect level that had only zero responses at fit (sz_explosion round 2).
 
     The fit warns at build; the level has no finite effect, and its
     predictions sit near zero wherever the walk stopped.  ``predict`` said
     nothing.  It now names the level when its rows reach it, at the caller's
-    line, and stays silent on rows of other levels.  Mutation: no record of
-    the level; then a fixed stack level one frame too deep, past the caller.
+    line, and stays silent on rows of other levels.  The caller's line is a
+    control: master's fixed stack level already found it, and it pins that for
+    the deeper prediction path that reads the raw predictor (``warn_caller``).
+    Mutation: no record of the level; then the fixed stack level, one frame
+    too deep on that path.
     """
     rng = np.random.default_rng(5)
     n = 2500
