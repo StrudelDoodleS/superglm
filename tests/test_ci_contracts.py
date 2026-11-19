@@ -1020,3 +1020,115 @@ def test_the_never_run_check_fails_only_on_a_test_no_platform_ran(tmp_path: Path
     assert "tests/test_ci_contracts.py::test_waits_for_an_event: the fit did not reach it" in (
         never_ran.stdout
     )
+
+
+# A fit's outcome: what an assertion behind ``if <outcome>:`` or a skip waits on.
+_OUTCOMES = {"converged", "convergence_reason", "termination_reason"}
+_ONE_SIDED = "one-sided by design: a certified result must be right, an unconverged one disclosed"
+_IMPLIES = "an implication between two published fields, both outcomes correct behaviour"
+_NEVER_RUN = "never runs locally (test-suite audit 2026-11-19): force the event, a follow-up"
+_TRAJECTORY = "skips where the fit's path misses its event; runs elsewhere, a follow-up"
+_CAPABILITY = "skips on what the machine or a package provides, not on the fit"
+# Each existing instance and why it stays; a new one needs a reason here.
+_OUTCOME_GUARDS = {
+    "test_binomial_log_mean_space.py::test_subnormal_weights_never_certify_a_wrong_maximum": _ONE_SIDED,
+    "test_binomial_log_mean_space.py::test_a_subnormal_weight_level_publishes_finite_degrees_of_freedom": _ONE_SIDED,
+    "test_binomial_log_mean_space.py::test_a_light_level_is_never_certified_away_from_its_own_maximum": _ONE_SIDED,
+    "test_binomial_log_mean_space.py::test_a_weight_ratio_never_certifies_a_level_away_from_its_maximum": _ONE_SIDED,
+    "test_binomial_log_mean_space.py::test_a_light_base_cell_of_an_interaction_is_never_certified_away_from_its_maximum": _ONE_SIDED,
+    "test_binomial_log_mean_space.py::test_weight_and_penalty_scales_never_certify_a_wrong_maximum": _ONE_SIDED,
+    "test_binomial_log_mean_space.py::test_an_intercept_only_fit_at_the_smallest_weight_is_never_certified_wrong": _ONE_SIDED,
+    "test_binomial_log_mean_space.py::test_the_block_coordinate_backstop_does_not_read_a_boundary_stop_as_a_drift": _TRAJECTORY,
+    "test_constrained_qp.py::test_return_projection_only_receives_an_infeasible_point": "counts the converged solves of its sweep and asserts at least 60",
+    "test_constrained_qp.py::test_an_exchange_whose_dual_rows_overflow_when_squared_still_certifies": _ONE_SIDED
+    + "; the warm solve's outcome depends on the BLAS kernel",
+    "test_declared_scalar_vertical_slice.py::test_smooth_reml_starts_backends_compaction_and_serialization": _IMPLIES,
+    "test_distributional_newton_curvature_refresh.py::test_failed_curvature_refresh_keeps_bounded_bfgs_fallback": _IMPLIES,
+    "test_distributional_newton_practical_handoff.py::test_a_finish_that_moved_far_and_was_rejected_does_not_relabel_where_it_stalled": _TRAJECTORY,
+    "test_distributional_newton_practical_handoff.py::test_a_finish_on_a_face_that_cannot_reach_stationary_leaves_the_stop_to_the_strict_test": _IMPLIES,
+    "test_distributional_perf_levers.py::test_narrow_fit_keeps_blas_capped_regardless_of_row_count": _CAPABILITY,
+    "test_factor_smooth_sz_thin_and_influence.py::test_sz_same_x_reml_decisions_do_not_follow_the_blas_thread_count": _CAPABILITY,
+    "test_gamma_ls_family.py::test_gamma_endpoint_polish_reversal_never_certifies_a_nonstationary_fit": _NEVER_RUN,
+    "test_generalized_gamma_lss_vertical_slice.py::test_infinite_mean_data_either_diagnose_or_stop_at_the_boundary": _NEVER_RUN,
+    "test_gram_block_queue.py::test_pooled_gram_under_default_thread_pools_holds_blas_at_one_thread": _CAPABILITY,
+    "test_negative_binomial_lss_efs.py::test_claims_book_shaped_fit_finishes_instead_of_refusing": _NEVER_RUN,
+    "test_negative_binomial_lss_efs.py::test_size_reaching_its_poisson_limit_during_selection_still_converges": _TRAJECTORY,
+    "test_plot_api.py::test_term_dropdown_resets_to_response_scale": "skips on its fixture's term count, not on a fit",
+    "test_probit_link_kernels.py::test_probit_eta_kernels_keep_parity_with_the_scipy_stats_master_used": _CAPABILITY,
+    "test_probit_link_kernels.py::test_probit_deriv_keeps_parity_with_scipy_stats": _CAPABILITY,
+    "test_rank_deficient_complete_fit.py::test_dispatch_comes_from_a_live_process_not_build_metadata": _CAPABILITY,
+    "test_tweedie_lss_vertical_slice.py::test_automatic_smoothing_tweedie_lss_fit": _IMPLIES,
+}
+
+
+def _outcome_guards(source: str) -> set[str]:
+    """Test functions that assert behind ``if <fit outcome>:``, assert ``not converged or ...``,
+    or call ``pytest.skip`` under an ``if`` on a value the test computed."""
+
+    def names(node) -> set[str]:
+        return {
+            getattr(n, "attr", None) or getattr(n, "id", None) or str(getattr(n, "value", ""))
+            for n in ast.walk(node)
+        }
+
+    def calls(nodes, name) -> bool:
+        return any(
+            isinstance(n, ast.Call) and ast.unparse(n.func) == name
+            for b in nodes
+            for n in ast.walk(b)
+        )
+
+    def asserts(nodes) -> bool:
+        return calls(nodes, "pytest.fail") or any(
+            isinstance(n, ast.Assert) for b in nodes for n in ast.walk(b)
+        )
+
+    flagged = set()
+    for test in ast.walk(ast.parse(source)):
+        if not isinstance(test, ast.FunctionDef) or not test.name.startswith("test"):
+            continue
+        computed = {
+            n.id for n in ast.walk(test) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+        } - {a.arg for a in test.args.args}
+        for node in ast.walk(test):
+            guarded = isinstance(node, ast.If) and (
+                (names(node.test) & _OUTCOMES and asserts(node.body) and not asserts(node.orelse))
+                or (calls(node.body, "pytest.skip") and names(node.test) & computed)
+            )
+            either = (
+                isinstance(node, ast.Assert)
+                and isinstance(node.test, ast.BoolOp)
+                and isinstance(node.test.op, ast.Or)
+                and isinstance(node.test.values[0], ast.UnaryOp)
+                and isinstance(node.test.values[0].op, ast.Not)
+                and names(node.test.values[0]) & _OUTCOMES
+            )
+            if guarded or either:
+                flagged.add(test.name)
+    return flagged
+
+
+def test_no_assertion_waits_on_a_fit_outcome_without_a_reason() -> None:
+    """An assertion behind ``if result.converged:`` checks nothing on a fit that does not
+    converge, and a skip on the fit's path passes where the event never comes (AGENTS.md:
+    a test forces its event). Each one is forced, or carries its reason here."""
+    found = {
+        f"{path.relative_to(_ROOT / 'tests').as_posix()}::{name}"
+        for path in sorted((_ROOT / "tests").rglob("test_*.py"))
+        for name in _outcome_guards(path.read_text(encoding="utf-8"))
+    }
+    assert sorted(found - _OUTCOME_GUARDS.keys()) == [], "force the event, or give a reason"
+    assert sorted(_OUTCOME_GUARDS.keys() - found) == [], "these no longer wait on an outcome"
+
+
+def test_the_outcome_lint_flags_each_pattern_and_spares_forced_events() -> None:
+    flagged = _outcome_guards(
+        "def test_guard(fit):\n    r = fit()\n    if r.converged:\n        assert r.x\n"
+        "def test_either(fit):\n    assert not fit().converged or ok\n"
+        "def test_skip(fit):\n    k = fit().n_iter\n    if k < 10:\n        pytest.skip('early')\n"
+        "def test_forced(fit):\n    r = fit()\n    assert r.converged\n    assert r.x\n"
+        "def test_both(fit):\n    r = fit()\n    if r.converged:\n        assert r.x\n"
+        "    else:\n        assert r.warned\n"
+        "def test_parameter(case):\n    if case == 'n/a':\n        pytest.skip('does not apply')\n"
+    )
+    assert flagged == {"test_guard", "test_either", "test_skip"}
