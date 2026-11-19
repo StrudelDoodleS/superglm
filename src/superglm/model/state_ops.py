@@ -1940,11 +1940,14 @@ def _refresh_published_scale(model) -> None:
 
     The scale is the one its route publishes: REML's profile at the penalised mode for a REML
     fit of a Gaussian or Gamma family (``reml_finalize.compute_profiled_phi``), else the Pearson
-    statistic over the residual degrees of freedom; a known scale stays one.
+    statistic over the residual degrees of freedom; a known scale stays one.  Either is the
+    kept rows' (``separation_ops.withheld_weights``): a row a certified separation withholds is
+    predicted where the walk stopped, so its residual is the walk's, not the fit's.
     """
     from superglm.distributions import Gamma, Gaussian, clip_mu
     from superglm.links import stabilize_eta
     from superglm.model.fit_ops import _compute_fit_stats
+    from superglm.model.separation_ops import withheld_weights
     from superglm.solvers.dispersion import (
         model_weight_semantics,
         pearson_residual_degrees_of_freedom,
@@ -1957,6 +1960,7 @@ def _refresh_published_scale(model) -> None:
     mu = clip_mu(model._link.inverse(eta), model._distribution)
     y = np.asarray(model._fit_y_ref, dtype=np.float64)
     weights = np.asarray(model._fit_weights, dtype=np.float64)
+    kept = withheld_weights(model, weights)
     solver_phi = None
     if getattr(model._distribution, "scale_known", True):
         phi = 1.0
@@ -1968,17 +1972,17 @@ def _refresh_published_scale(model) -> None:
         phi = compute_profiled_phi(
             model,
             y=y,
-            sample_weight=weights,
+            sample_weight=kept,
             lambdas=model._reml_lambdas,
             reml_penalties=model._reml_penalties,
             pirls_result=result,
             boundary_phi=result.phi,
         )
     else:
-        scaled = solver_weights(weights, result)
+        scaled = solver_weights(kept, result)
         pearson = pearson_chi2(distribution=model._distribution, y=y, mu=mu, sample_weight=scaled)
         phi = pearson / pearson_residual_degrees_of_freedom(
-            weights, result.effective_df, weight_semantics=model_weight_semantics(model)
+            kept, result.effective_df, weight_semantics=model_weight_semantics(model)
         )
         if result.weight_exponent:
             solver_phi = phi

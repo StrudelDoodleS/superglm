@@ -1446,22 +1446,34 @@ class ModelMetrics:
 
     @cached_property
     def _coefficient_dispersion(self) -> float:
-        """Dispersion used by the explicitly quasi-likelihood SE accessor."""
+        """Dispersion used by the explicitly quasi-likelihood SE accessor.
+
+        On the fit's own rows it is the kept rows' (``separation_ops.withheld_weights``): a row
+        a certified separation withholds is predicted where the walk stopped, so its Pearson
+        residual is the walk's, not the fit's.
+        """
         if not self._known_scale:
             return max(float(solver_dispersion(self._result)), 0.0)
+        from superglm.model.separation_ops import withheld_weights
         from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
 
+        weights = (
+            withheld_weights(self._model, self._weights)
+            if self._fit_geometry_matches
+            else self._weights
+        )
         residual_df = pearson_residual_degrees_of_freedom(
-            self._weights,
+            weights,
             self.effective_df,
             weight_semantics=self._weight_semantics,
         )
-        if self._geometry_weight_exponent:
+        exponent = self._geometry_weight_exponent
+        if exponent or weights is not self._weights:
             pearson = pearson_chi2(
                 distribution=self._family,
                 y=self._y,
                 mu=self._mu,
-                sample_weight=self._geometry_prior_weights,
+                sample_weight=np.ldexp(weights, exponent) if exponent else weights,
                 variance_floor=0.0,
             )
         else:

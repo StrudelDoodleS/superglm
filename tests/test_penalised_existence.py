@@ -207,10 +207,11 @@ def test_the_separation_decision_does_not_depend_on_where_the_walk_stopped(monke
     rows and coefficients, and the kept rows' fit is the fit on those rows, so their
     predictions agree to the rounding of the shifted coefficients, and the exact-family
     standard errors of ``x`` to ``64 u`` times the kept rows' Hessian's condition on its
-    range.  The quasi-likelihood SEs scale by the Pearson dispersion, to which each separated
-    row adds its fitted mean, so they agree to half the shallower walk's separated mass over
-    the kept rows' chi-squared.  The separated rows sit where each walk was put: 8 apart.  At
-    ``92302bc40`` the level SEs were the walk's, and moved with its depth.
+    range.  The quasi-likelihood SEs scale by the kept rows' Pearson dispersion, so they agree
+    to the same bound: a separated row, predicted where its walk stopped, adds nothing to it.
+    The separated rows sit where each walk was put: 8 apart.  At ``92302bc40`` the level SEs
+    were the walk's, and moved with its depth; at ``253c6d353`` each separated row added its
+    walked mean to the dispersion, and the quasi SEs of ``x`` moved by ``2.1e-5``.
     """
     X, y, kept = _reference_level_frame()
     fits = []
@@ -245,13 +246,48 @@ def test_the_separation_decision_does_not_depend_on_where_the_walk_stopped(monke
     condition = values[-1] / np.min(values[rank])
     raw = [model.metrics(X, y).coefficient_se_raw["x"] for model in fits]
     np.testing.assert_allclose(raw[0], raw[1], rtol=64 * U * condition)
-    chi2 = float(np.sum((y[kept] - mu[kept]) ** 2 / mu[kept]))
-    mass = float(np.sum(shallow.predict(X[~kept])))
     np.testing.assert_allclose(
         shallow.metrics(X, y).coefficient_se["x"],
         deep.metrics(X, y).coefficient_se["x"],
-        rtol=0.5 * mass / chi2 + 64 * U * condition,
+        rtol=64 * U * condition,
     )
+
+
+def test_a_separated_fits_scale_is_its_kept_rows(monkeypatch):
+    """A Tweedie fit separated on E publishes the kept rows' Pearson scale, at any walk depth.
+
+    Forced as above (``_walked_to``, E's rows at -8 and at -16).  The published scale is the
+    Pearson statistic of the rows the fit keeps over their residual degrees of freedom,
+    ``sum_kept (y - mu)^2 / mu^p / (n_kept - edf)``, recomputed here from the published
+    predictions to the rounding of one sum (``gamma_n``); a separated row, predicted where the
+    walk stopped, enters neither, so the two depths publish one scale and one set of standard
+    errors (to ``64 u`` times the kept rows' Fisher Hessian's condition, as above).  At ``253c6d353`` each separated row counted in ``n`` with its walked residual: the
+    scale was 1.245 at depth 8 and 1.243 at 16 (the kept rows' is 1.607), and every standard
+    error moved with it.
+    """
+    from superglm import families
+
+    X, y, kept = _reference_level_frame()
+    fits = []
+    for depth in (8.0, 16.0):
+        with monkeypatch.context() as patch:
+            _walked_to(patch, kept, depth)
+            family = families.tweedie(p=1.5)
+            fits.append(_fit(family, {"f": Categorical(), "x": Spline(n_knots=8)}, X, y))
+    for model in fits:
+        assert published_separation(model).state == "present"
+        mu = model.predict(X)[kept]
+        pearson = float(np.sum((y[kept] - mu) ** 2 / mu**1.5))
+        oracle = pearson / (int(np.sum(kept)) - float(model.result.effective_df))
+        np.testing.assert_allclose(model.result.phi, oracle, rtol=4 * _gamma(len(y)))
+    shallow, deep = fits
+    np.testing.assert_allclose(shallow.result.phi, deep.result.phi, rtol=4 * _gamma(len(y)))
+    design, penalty = _design_and_penalty(deep)
+    mu = deep.predict(X)[kept]
+    values = np.linalg.eigvalsh(design[kept].T @ (mu[:, None] ** 0.5 * design[kept]) + penalty)
+    condition = values[-1] / np.min(values[values > 1e-10 * values[-1]])
+    se = [model.metrics(X, y).coefficient_se["x"] for model in fits]
+    np.testing.assert_allclose(se[0], se[1], rtol=64 * U * condition)
 
 
 def test_a_penalised_factor_keeps_its_estimates_finite():
