@@ -93,7 +93,10 @@ class TestLiftChartWeighted:
         # Exposure shares should sum to ~1
         assert abs(result.bins["exposure_share"].sum() - 1.0) < 1e-6
 
+    @pytest.mark.pins_behaviour
     def test_sample_weight_affects_result(self):
+        """A control: weights change the chart, as they did before. Its comparison was rewritten because
+        a heavy row now fills fewer bins, not because the behaviour it pins changed."""
         y_obs = np.array([1, 2, 3, 4, 5], dtype=float)
         y_pred = np.array([1.1, 1.9, 3.1, 4.2, 4.8], dtype=float)
         w1 = np.ones(5)
@@ -561,8 +564,10 @@ def test_frequency_weights_draw_the_lift_chart_of_their_literal_copies(
     ],
 )
 @pytest.mark.parametrize("scale", [2.0**1020, 2.0**1021, 1e307, 4e307])
+@pytest.mark.pins_behaviour
 def test_large_finite_weights_bin_as_their_unit_scale(chart, observed_name, scale):
-    """A common factor on the weights moves no bin, up to totals near the float64 maximum."""
+    """A control: a common factor on the weights moves no bin, up to totals near the float64 maximum.
+    The old binning already held this; it guards the midpoint rule's sums against overflow."""
     observed = np.array([0.25, 0.75, 1.0, 2.0])
     predicted = np.array([1.0, 2.0, 3.0, 4.0])
     unit = chart(observed, predicted, np.ones(4))
