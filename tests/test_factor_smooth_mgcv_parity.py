@@ -1,4 +1,4 @@
-"""Pinned predictive parity against mgcv's ``bs="fs"`` factor smooth."""
+"""Pinned parity against mgcv fitting the ``bs="fs"`` factor smooth's penalties."""
 
 from __future__ import annotations
 
@@ -92,10 +92,12 @@ def _unseen_frame(case: dict) -> tuple[pd.DataFrame, np.ndarray | None]:
 
 
 def test_reference_fixture_is_pinned_to_documented_mgcv_release(mgcv_fixture: dict) -> None:
-    assert mgcv_fixture["metadata"]["r_version"] == "R version 4.5.3 (2026-03-11)"
-    assert mgcv_fixture["metadata"]["mgcv_version"] == "1.9.4"
-    assert mgcv_fixture["metadata"]["factor_smooth"] == (
-        's(x, f, bs="fs", k=6, xt=list(bs="ps"), m=2)'
+    # oracles/factor_smooth_mgcv_reference.R: mgcv fits fs's penalties through paraPen,
+    # as its bs="fs" names its null columns in an eigensolver's order.
+    assert mgcv_fixture["metadata"]["r_version"] == "R version 4.5.0 (2025-04-11)"
+    assert mgcv_fixture["metadata"]["mgcv_version"] == "1.9.3"
+    assert mgcv_fixture["metadata"]["factor_smooth"].startswith(
+        'paraPen on s(x, bs="ps", k=6, m=2) per level of f'
     )
 
 
@@ -143,41 +145,16 @@ def test_factor_smooth_fit_matches_mgcv_reml_and_freml(
     assert report.effective_df == pytest.approx(reference["factor_smooth_edf"], abs=edf_atol)
     assert model.result.phi == pytest.approx(reference["scale"], rel=3.0e-4, abs=2.0e-8)
 
-    # mgcv rescales every smooth penalty before optimization.  The fixture
-    # divides its reported sp by S.scale so these values multiply the same
-    # unscaled natural penalties that SuperGLM retains.
-    actual_wiggle = report.lambdas["wiggle"]
-    expected_wiggle = reference["unscaled_lambdas"]["wiggle"]
-    assert actual_wiggle == pytest.approx(expected_wiggle, rel=2.5e-2)
-    # The two null penalties occupy a shallow, nearly exchangeable REML
-    # optimum, so their optimizer coordinates are allowed to move or swap.
-    # Predictions, deviance, EDF, and scale are pinned much more tightly above
-    # and below; this broad tolerance does not relax fitted-model parity.
-    np.testing.assert_allclose(
-        np.sort([report.lambdas["null_0"], report.lambdas["null_1"]]),
-        np.sort(
-            [
-                reference["unscaled_lambdas"]["null_0"],
-                reference["unscaled_lambdas"]["null_1"],
-            ]
-        ),
-        rtol=0.12,
-    )
-    np.testing.assert_allclose(
-        np.sort(
-            [
-                report.variance_components["null_0"],
-                report.variance_components["null_1"],
-            ]
-        ),
-        np.sort(
-            [
-                reference["variance_components"]["null_0"],
-                reference["variance_components"]["null_1"],
-            ]
-        ),
-        rtol=0.12,
-    )
+    # paraPen penalties are not rescaled, so mgcv's sp multiply the same
+    # penalties SuperGLM retains, each null_j by name: the level's constant and
+    # its line.
+    for component in ("wiggle", "null_0", "null_1"):
+        assert report.lambdas[component] == pytest.approx(
+            reference["unscaled_lambdas"][component], rel=2.5e-2
+        )
+        assert report.variance_components[component] == pytest.approx(
+            reference["variance_components"][component], rel=2.5e-2
+        )
 
     np.testing.assert_allclose(
         model.predict(prediction_frame, offset=offset),

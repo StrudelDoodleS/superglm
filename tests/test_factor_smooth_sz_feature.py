@@ -93,7 +93,9 @@ def test_sz_takes_the_fs_natural_parameterization() -> None:
     The same per-level change of basis as fs (its natural map), under which
     the raw second-difference penalty is exactly the diagonal wiggle
     component, zero on the ``m`` polynomial coordinates, and the column space
-    is the raw basis's.  sz keeps the wiggle component alone.
+    is the raw basis's.  sz keeps the wiggle component alone.  fs sets its
+    null coordinates by degree, as each has its own smoothing parameter; sz
+    penalizes them as one block, so it keeps the eigenbasis of the same span.
     """
     x = np.tile(np.linspace(-1.0, 1.0, 12), 3)
     group = np.repeat(["a", "b", "c"], 12)
@@ -102,7 +104,10 @@ def test_sz_takes_the_fs_natural_parameterization() -> None:
     info = sz.build(x, group, {})
     fs_info = fs.build(x, group, {})
 
-    np.testing.assert_array_equal(info.factor_smooth_transform, fs_info.factor_smooth_transform)
+    sz_map, fs_map = info.factor_smooth_transform, fs_info.factor_smooth_transform
+    np.testing.assert_array_equal(sz_map[:, :4], fs_map[:, :4])
+    rotation = np.linalg.solve(sz_map[:, 4:].T @ sz_map[:, 4:], sz_map[:, 4:].T @ fs_map[:, 4:])
+    np.testing.assert_allclose(sz_map[:, 4:] @ rotation, fs_map[:, 4:], rtol=0.0, atol=1e-12)
     wiggle = info.repeated_penalty_components[0][1]
     np.testing.assert_array_equal(wiggle, fs_info.repeated_penalty_components[0][1])
     assert np.count_nonzero(np.diag(wiggle)) == 4

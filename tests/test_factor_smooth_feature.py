@@ -60,18 +60,31 @@ def _legacy_natural_parameterization(basis, penalty, *, rank):
     return natural_map, tuple(components)
 
 
-def test_default_fs_and_sz_use_streamed_marginal_qr():
+def test_default_fs_and_sz_discrete_builds_keep_only_the_support_basis():
     fs, fs_info = _built_discrete_spec()
     sz, sz_info = _built_discrete_spec(basis="sz")
 
-    assert fs._marginal_build_backend == "streamed_tsqr"
-    assert sz._marginal_build_backend == "streamed_tsqr"
     assert fs_info.factor_smooth_basis is None
     assert fs_info.factor_smooth_basis_unique.shape == (256, fs.k)
     assert sz_info.factor_smooth_basis_unique.shape == (256, sz.k)
 
 
-def test_streamed_discrete_marginal_bounds_basis_evaluation(monkeypatch):
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        {},
+        {"m": 3},
+        {
+            "lambda_policy": {
+                "wiggle": LambdaPolicy.fixed(1.0),
+                "null_0": LambdaPolicy.fixed(0.7),
+                "null_1": LambdaPolicy.fixed(1.3),
+            }
+        },
+    ],
+    ids=["default", "m3", "unequal_null_policies"],
+)
+def test_streamed_discrete_marginal_bounds_basis_evaluation(monkeypatch, declaration):
     chunk_rows = 64
     monkeypatch.setattr(
         factor_smooth_module,
@@ -94,24 +107,23 @@ def test_streamed_discrete_marginal_bounds_basis_evaluation(monkeypatch):
     monkeypatch.setattr(PSpline, "_basis_matrix", bounded_basis)
     monkeypatch.setattr(PSpline, "_raw_basis_matrix", bounded_raw_basis)
 
-    spec, info = _built_discrete_spec()
+    spec, info = _built_discrete_spec(**declaration)
 
-    assert spec._marginal_build_backend == "streamed_tsqr"
     assert len(basis_rows) > 1
     assert max(basis_rows) <= chunk_rows
     assert raw_basis_rows == [256]
     assert info.factor_smooth_basis is None
 
 
-def test_streamed_tsqr_matches_legacy_geometry_up_to_null_permutation(monkeypatch):
+def test_streamed_tsqr_keeps_the_legacy_wiggle_and_puts_null_j_on_degree_j(monkeypatch):
     monkeypatch.setattr(
         factor_smooth_module,
         "_MARGINAL_QR_CHUNK_ROWS",
         64,
     )
-    x = np.linspace(-2.0, 2.0, 5000)
+    x = np.linspace(-2.0, 2.0, 5000) ** 3
     group = np.arange(len(x), dtype=np.intp) % 20
-    spec = FactorSmooth("x", group="group", k=6)
+    spec = FactorSmooth("x", group="group", k=7, m=3)
     spec.build_discrete(x, group, {}, 256)
     raw = np.asarray(spec._spline._raw_basis_matrix(x), dtype=np.float64)
     penalty = np.asarray(spec._spline._build_penalty(), dtype=np.float64)
@@ -134,63 +146,12 @@ def test_streamed_tsqr_matches_legacy_geometry_up_to_null_permutation(monkeypatc
         atol=2e-11,
     )
 
-    streamed_null, _ = np.linalg.qr(streamed_basis[:, rank:], mode="reduced")
-    legacy_null, _ = np.linalg.qr(legacy_basis[:, rank:], mode="reduced")
-    null_alignment = np.abs(streamed_null.T @ legacy_null)
-    np.testing.assert_allclose(null_alignment.max(axis=0), 1.0, atol=2e-11)
-    np.testing.assert_allclose(null_alignment.max(axis=1), 1.0, atol=2e-11)
-    np.testing.assert_allclose(null_alignment.min(axis=0), 0.0, atol=2e-11)
-    np.testing.assert_allclose(null_alignment.min(axis=1), 0.0, atol=2e-11)
-
-
-def test_asymmetric_or_high_order_fs_uses_dense_compatibility_qr():
-    asymmetric = {
-        "wiggle": LambdaPolicy.fixed(1.0),
-        "null_0": LambdaPolicy.fixed(0.7),
-        "null_1": LambdaPolicy.fixed(1.3),
-    }
-
-    custom, _ = _built_discrete_spec(lambda_policy=asymmetric)
-    high_order, _ = _built_discrete_spec(m=3)
-
-    assert custom._marginal_build_backend == "dense_qr_compat"
-    assert high_order._marginal_build_backend == "dense_qr_compat"
-
-
-def test_dense_qr_compat_matches_legacy_transform_and_penalties():
-    x = np.linspace(-2.0, 2.0, 5000)
-    group = np.arange(len(x), dtype=np.intp) % 20
-    policies = {
-        "wiggle": LambdaPolicy.fixed(1.0),
-        "null_0": LambdaPolicy.fixed(0.7),
-        "null_1": LambdaPolicy.fixed(1.3),
-    }
-    spec = FactorSmooth(
-        "x",
-        group="group",
-        k=6,
-        m=2,
-        lambda_policy=policies,
-    )
-    spec.build_discrete(x, group, {}, 256)
-    raw = np.asarray(spec._spline._raw_basis_matrix(x), dtype=np.float64)
-    penalty = np.asarray(spec._spline._build_penalty(), dtype=np.float64)
-    expected_map, expected_components = _legacy_natural_parameterization(
-        raw,
-        penalty,
-        rank=spec.k - spec.m,
-    )
-
-    np.testing.assert_allclose(spec._natural_map, expected_map, atol=2e-12)
-    assert [name for name, _ in spec._base_penalty_components] == [
-        name for name, _ in expected_components
-    ]
-    for (_, actual), (_, expected) in zip(
-        spec._base_penalty_components,
-        expected_components,
-        strict=True,
-    ):
-        np.testing.assert_allclose(actual, expected, atol=2e-12)
+    # null_j: the degree-j coefficient polynomial's curve, orthogonalized against the
+    # lower degrees over the rows, with unit mean square and a positive leading term.
+    degrees = np.vander(np.arange(spec.k, dtype=np.float64), spec.m, increasing=True)
+    curves, triangle = np.linalg.qr(raw @ degrees)
+    expected = curves * np.sign(np.diag(triangle)) * np.sqrt(len(x))
+    np.testing.assert_allclose(streamed_basis[:, rank:], expected, rtol=0.0, atol=2e-11)
 
 
 def test_factor_smooth_constructor_contract() -> None:

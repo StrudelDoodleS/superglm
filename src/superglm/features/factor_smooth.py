@@ -31,7 +31,6 @@ SZ_POPULATION_PREDICTION = (
     "estimate; levels without weight, or whose every row separates, are predicted at the "
     "population value: "
 )
-_MarginalBuildBackend = Literal["streamed_tsqr", "dense_qr_compat"]
 # Warnings about a declaration point at the first frame outside the package.
 _PACKAGE_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # The values each enumerated option of ``FactorSmooth`` takes.
@@ -62,8 +61,15 @@ def _natural_parameterization_from_r(
     rank: int,
     n_rows: int,
     normalization_mass: float | None = None,
+    polynomial_null_axes: bool = False,
 ) -> tuple[NDArray, tuple[tuple[str, NDArray], ...]]:
-    """Build a QR-whitened natural parameterization without materializing ``Q``."""
+    """Build a QR-whitened natural parameterization without materializing ``Q``.
+
+    ``polynomial_null_axes`` sets the null coordinates by degree, for a penalty that
+    gives each its own smoothing parameter (``fs``).  Otherwise any basis of the null
+    space gives the same model (``sz`` penalizes it as one block), and the eigenbasis
+    is kept.
+    """
     R_array = np.asarray(R, dtype=np.float64)
     S = np.asarray(penalty, dtype=np.float64)
     if R_array.ndim != 2 or R_array.shape[0] != R_array.shape[1]:
@@ -82,9 +88,6 @@ def _natural_parameterization_from_r(
 
     R_inv = la.solve_triangular(R_array, np.eye(k), lower=False)
     transformed_penalty = R_inv.T @ S @ R_inv
-    # The zero-eigenvalue eigenspace can rotate freely and each FS null coordinate
-    # has its own smoothing parameter, so the MRRR driver is selected explicitly to
-    # keep the coordinate system deterministic.
     eigenvalues, eigenvectors = la.eigh(
         0.5 * (transformed_penalty + transformed_penalty.T),
         driver="evr",
@@ -96,11 +99,21 @@ def _natural_parameterization_from_r(
     if rank < 1 or rank > k or np.any(positive <= 0.0):
         raise ValueError("FactorSmooth marginal penalty has an invalid numerical rank")
 
+    null_dim = k - rank
+    if null_dim and polynomial_null_axes:
+        # The penalty's null space is the coefficient sequences polynomial below degree
+        # null_dim in the index.  An eigensolver leaves the basis of that repeated zero
+        # eigenvalue free, so null_j is the degree-j member of the degree-ordered frame
+        # orthonormalized over the weighted rows (Gram-Schmidt in the metric R'R with a
+        # positive diagonal): one curve for every frame of those degrees, row order, QR
+        # route and platform.
+        frame = np.polynomial.legendre.legvander(np.linspace(-1.0, 1.0, k), null_dim - 1)
+        whitened, triangle = np.linalg.qr(R_array @ frame)
+        eigenvectors[:, rank:] = whitened * np.sign(np.diag(triangle))
     natural_map = R_inv @ eigenvectors
     natural_map[:, :rank] /= np.sqrt(positive)
     penalized_scale = np.sqrt(mass * rank / np.sum(1.0 / positive))
     natural_map[:, :rank] *= penalized_scale
-    null_dim = k - rank
     if null_dim:
         natural_map[:, rank:] *= np.sqrt(mass)
 
@@ -201,7 +214,9 @@ class FactorSmooth:
         The grouping column; one curve per level.
     basis : {"fs", "sz"}, default "fs"
         ``"fs"`` penalizes every level's curve fully, its polynomial part through
-        one ``null_j`` component per coordinate.  ``"sz"`` fits sum-to-zero
+        one ``null_j`` component per degree: ``null_0`` the level's constant,
+        ``null_1`` its line, and so on, each orthogonal over the training rows to
+        the lower degrees.  ``"sz"`` fits sum-to-zero
         deviations from a population curve and leaves each level's polynomial part
         (its line, with ``m=2``) unpenalized, as mgcv's ``sz`` does.
     kind : {"ps"}, default "ps"
@@ -362,7 +377,6 @@ class FactorSmooth:
         self._spline: PSpline | None = None
         self._natural_map = None
         self._base_penalty_components: tuple[tuple[str, Any], ...] = ()
-        self._marginal_build_backend: _MarginalBuildBackend | None = None
         # What the fit's data identify of each sz level (``_record_unidentified_levels``;
         # ``_free_directions`` None until a fit records it): thin levels, the null-space
         # directions each leaves free, weightless levels, and levels whose unpenalized
@@ -520,22 +534,6 @@ class FactorSmooth:
             return {name: self._lambda_policy for name in names}
         return {name: self._lambda_policy.get(name, LambdaPolicy.estimate()) for name in names}
 
-    def _streaming_safe(self) -> bool:
-        """Return whether QR sign/null rotations preserve the declared penalty geometry."""
-        if self.basis == "sz":
-            return True
-        if self.m > 2:
-            return False
-        if self.m <= 1:
-            return True
-        if self._lambda_policy is None or isinstance(self._lambda_policy, LambdaPolicy):
-            return True
-        policies = [
-            self._lambda_policy.get(f"null_{index}", LambdaPolicy.estimate())
-            for index in range(self.m)
-        ]
-        return all(policy == policies[0] for policy in policies[1:])
-
     def _initialize_marginal_spline(
         self,
         x: NDArray,
@@ -572,7 +570,7 @@ class FactorSmooth:
         retain_basis: bool,
         geometry_weight: NDArray | None,
     ) -> sp.csr_matrix | None:
-        """Build the marginal with bounded QR memory when its coordinates permit it."""
+        """Build the marginal from a streamed QR of its rows, in bounded memory."""
         if geometry_weight is None:
             weights = None
             normalization_mass = float(len(x))
@@ -586,42 +584,28 @@ class FactorSmooth:
                 raise ValueError("FactorSmooth geometry weights must retain at least one row.")
             normalization_mass = float(np.sum(weights, dtype=np.float64))
         spline, penalty = self._initialize_marginal_spline(x, weights)
-        exact_basis: sp.csr_matrix | None
-
-        if self._streaming_safe():
-            qr_r: NDArray | None = None
-            chunks: list[sp.csr_matrix] | None = [] if retain_basis else None
-            for start in range(0, len(x), _MARGINAL_QR_CHUNK_ROWS):
-                basis_chunk = sp.csr_matrix(
-                    spline._basis_matrix(x[start : start + _MARGINAL_QR_CHUNK_ROWS]),
-                    dtype=np.float64,
-                )
-                if weights is None:
-                    qr_basis = basis_chunk
-                else:
-                    row_scale = np.sqrt(weights[start : start + _MARGINAL_QR_CHUNK_ROWS])
-                    qr_basis = basis_chunk.multiply(row_scale[:, None]).tocsr()
-                qr_r = _combine_qr_r(qr_r, qr_basis)
-                if chunks is not None:
-                    chunks.append(basis_chunk)
-            if qr_r is None:  # pragma: no cover - group validation rejects zero rows
-                raise RuntimeError("FactorSmooth marginal QR received no rows.")
-            exact_basis = (
-                sp.csr_matrix(sp.vstack(chunks, format="csr"), dtype=np.float64)
-                if chunks is not None
-                else None
+        qr_r: NDArray | None = None
+        chunks: list[sp.csr_matrix] | None = [] if retain_basis else None
+        for start in range(0, len(x), _MARGINAL_QR_CHUNK_ROWS):
+            basis_chunk = sp.csr_matrix(
+                spline._basis_matrix(x[start : start + _MARGINAL_QR_CHUNK_ROWS]),
+                dtype=np.float64,
             )
-            self._marginal_build_backend = "streamed_tsqr"
-        else:
-            if retain_basis:
-                exact_basis = sp.csr_matrix(spline._basis_matrix(x), dtype=np.float64)
-                raw_dense = exact_basis.toarray()
+            if weights is None:
+                qr_basis = basis_chunk
             else:
-                exact_basis = None
-                raw_dense = np.asarray(spline._raw_basis_matrix(x), dtype=np.float64)
-            qr_basis = raw_dense if weights is None else raw_dense * np.sqrt(weights[:, None])
-            qr_r = np.asarray(np.linalg.qr(qr_basis, mode="r"), dtype=np.float64)
-            self._marginal_build_backend = "dense_qr_compat"
+                row_scale = np.sqrt(weights[start : start + _MARGINAL_QR_CHUNK_ROWS])
+                qr_basis = basis_chunk.multiply(row_scale[:, None]).tocsr()
+            qr_r = _combine_qr_r(qr_r, qr_basis)
+            if chunks is not None:
+                chunks.append(basis_chunk)
+        if qr_r is None:  # pragma: no cover - group validation rejects zero rows
+            raise RuntimeError("FactorSmooth marginal QR received no rows.")
+        exact_basis = (
+            sp.csr_matrix(sp.vstack(chunks, format="csr"), dtype=np.float64)
+            if chunks is not None
+            else None
+        )
 
         if (
             qr_r.shape != (self.k, self.k)
@@ -638,6 +622,7 @@ class FactorSmooth:
             rank=self.k - self.m,
             n_rows=len(x),
             normalization_mass=normalization_mass,
+            polynomial_null_axes=self.basis == "fs",
         )
         if self.basis == "sz":
             # sz takes fs's natural parameterization: its sum-to-zero constraint is
