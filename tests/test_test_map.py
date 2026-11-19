@@ -425,16 +425,21 @@ def test_a_recorded_run_maps_fixtures_and_subprocesses_to_their_test_file(tmp_pa
 SESSION_CONFTEST = """from superglm import recorded
 
 
-def pytest_collection_modifyitems(config, items):
+def {hook}:
     recorded.helper()
 """
 
 
-def test_a_hook_after_collection_runs_in_the_session_not_the_last_collected_file(tmp_path):
-    """``pytest_collection_modifyitems`` decides for every test file, so what it runs is the
-    session's: a change to it runs the whole suite.
+@pytest.mark.parametrize(
+    "hook",
+    ["pytest_collection_modifyitems(config, items)", "pytest_sessionfinish(session, exitstatus)"],
+)
+def test_a_hook_after_collection_runs_in_the_session_not_the_last_collected_file(tmp_path, hook):
+    """A hook after collection, or after the last test, runs for every test file, so what it runs
+    is the session's: a change to it runs the whole suite.
 
-    Mutation: the context stayed on the last module collected, so only that file was selected.
+    Mutation: the context stayed on the last module collected, or on the last test file run, so
+    only that file was selected.
     """
     root = tmp_path / "project"
     (root / "src" / "superglm").mkdir(parents=True)
@@ -442,7 +447,9 @@ def test_a_hook_after_collection_runs_in_the_session_not_the_last_collected_file
     (root / "src" / "superglm" / "recorded.py").write_text(RECORDED_MODULE, encoding="utf-8")
     (root / "pyproject.toml").write_text("[tool.pytest.ini_options]\n", encoding="utf-8")
     (root / "tests").mkdir()
-    (root / "tests" / "conftest.py").write_text(SESSION_CONFTEST, encoding="utf-8")
+    (root / "tests" / "conftest.py").write_text(
+        SESSION_CONFTEST.format(hook=hook), encoding="utf-8"
+    )
     for name in ("test_a.py", "test_z.py"):
         (root / "tests" / name).write_text("def test_it():\n    pass\n", encoding="utf-8")
     out = tmp_path / "out"

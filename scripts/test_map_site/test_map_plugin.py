@@ -41,6 +41,9 @@ def pytest_make_collect_report(collector):
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_protocol(item, nextitem):
     test_file = _test_file(item.path)
+    # As in collection: the session's context comes back afterwards, so the hooks after the last
+    # test (``pytest_sessionfinish``) are the session's, not the last test file's.
+    outer = recorder._context
     recorder.switch(test_file)
     used = recorder.fixtures.setdefault(test_file, set())
     # The request outlives the protocol (pytest drops the item's reference at teardown). It holds
@@ -58,6 +61,7 @@ def pytest_runtest_protocol(item, nextitem):
         count = recorder.tests.setdefault(test_file, [0, 0.0])
         count[0] += 1
         count[1] += time.perf_counter() - started
+        recorder.switch(outer)
 
 
 @pytest.hookimpl(wrapper=True)
