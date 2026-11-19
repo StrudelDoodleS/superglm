@@ -517,6 +517,10 @@ def test_a_rate_ending_on_an_edge_keeps_its_own_bin(
         ([1.0, 3.0], [1.0, 2.0], [5, 5], 0.3, 2),
         ([0.0, 0.0, 1.0, 1.0], [0.25, 0.25, 0.75, 0.75], [2, 2, 2, 2], 0.1, 2),
         ([1.0, 3.0, 5.0], [1.0, 2.0, 3.0], [123, 4, 37], 1.0, 20),
+        # Integer weights on one shared fractional exposure, each rate's middle on an edge:
+        # forty-five 0.2s summed one by one leave the middle rate's on the other side.
+        ([0.0, 6.0, 0.0], [1.0, 2.0, 3.0], [5, 20, 20], 0.2, 3),
+        ([1.0, 3.0], [1.0, 2.0], [5, 5], 0.2, 4),
     ],
 )
 def test_frequency_weights_draw_the_lift_chart_of_their_literal_copies(
@@ -524,7 +528,9 @@ def test_frequency_weights_draw_the_lift_chart_of_their_literal_copies(
 ):
     """Two rows of weight 5 on exposure 0.3 hold 3.0 in all, their ten copies 2.9999999999999996.
 
-    Each rate's middle lies far from every edge, so both draw one chart.
+    Where each rate's middle lies far from every edge, both draw one chart whatever the
+    rounding. Where it lies on an edge, one exposure shared by every row cancels from the
+    bin positions, so integer weights and their copies are placed by exact counts.
     """
     copies = np.repeat(np.arange(len(weight)), weight)
     weighted = lift_chart(
@@ -541,6 +547,37 @@ def test_frequency_weights_draw_the_lift_chart_of_their_literal_copies(
         n_bins=n_bins,
     ).bins
     pd.testing.assert_frame_equal(weighted, literal, check_exact=False, rtol=1e-13)
+
+
+@pytest.mark.parametrize(
+    ("chart", "observed_name"),
+    [
+        (lambda y, pred, w: lift_chart(y, pred, sample_weight=w).bins, "observed"),
+        (
+            lambda y, pred, w: double_lift_chart(y, pred, np.ones_like(y), sample_weight=w).bins,
+            "actual_avg",
+        ),
+        (lambda y, pred, w: loss_ratio_chart(y, pred, sample_weight=w).bins, "observed"),
+    ],
+)
+@pytest.mark.parametrize("scale", [2.0**1020, 2.0**1021, 1e307, 4e307])
+def test_large_finite_weights_bin_as_their_unit_scale(chart, observed_name, scale):
+    """A common factor on the weights moves no bin, up to totals near the float64 maximum."""
+    observed = np.array([0.25, 0.75, 1.0, 2.0])
+    predicted = np.array([1.0, 2.0, 3.0, 4.0])
+    unit = chart(observed, predicted, np.ones(4))
+    large = chart(observed, predicted, np.full(4, scale))
+    np.testing.assert_array_equal(large["bin"], unit["bin"])
+    np.testing.assert_allclose(large["exposure_share"], unit["exposure_share"], rtol=1e-15)
+    np.testing.assert_allclose(large[observed_name], unit[observed_name], rtol=1e-15)
+
+
+@pytest.mark.parametrize("bad", [np.inf, np.nan])
+def test_score_bins_refuses_a_non_finite_mass(bad):
+    from superglm._utils import score_bins
+
+    with pytest.raises(ValueError, match="score bins need finite masses"):
+        score_bins(np.array([0.0, 1.0]), np.array([1.0, bad]), 2)
 
 
 def test_a_rates_rows_sum_in_one_order():

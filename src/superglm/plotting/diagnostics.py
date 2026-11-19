@@ -55,19 +55,21 @@ def _lowess_core(x_s, y_s, k, n_steps):
 
             right = min(left + k, n)
             h = max(x_s[i] - x_s[left], x_s[right - 1] - x_s[i]) + 1e-10
-            # A window inside one tier takes the whole tier, every row of which
-            # is at distance zero. The slide stops at the tier's first row, so
-            # only the right end can cut it.
-            if x_s[left] == x_s[right - 1]:
-                while right < n and x_s[right] == x_s[left]:
-                    right += 1
+            # The weights are a function of distance: a row tied with either
+            # end of the window is as near as that end and joins it, so which
+            # rows of a tier the window holds never depends on their order.
+            lo, hi = left, right
+            while lo > 0 and x_s[lo - 1] == x_s[left]:
+                lo -= 1
+            while hi < n and x_s[hi] == x_s[right - 1]:
+                hi += 1
 
             sw = 0.0
             swx = 0.0
             swy = 0.0
             swxx = 0.0
             swxy = 0.0
-            for j in range(left, right):
+            for j in range(lo, hi):
                 u = abs(x_s[j] - x_s[i]) / h
                 if u < 1.0:
                     u3 = u * u * u
@@ -345,26 +347,36 @@ def _trend_line(ax, x, y, n, rng):
         # Full LOWESS
         sm = _lowess(x, y)
         order = np.argsort(x)
-        ax.plot(x[order], sm[order], color=_SPECIAL_COLOR, linewidth=_LINE_WIDTH)
+        _plot_trend(ax, x[order], sm[order])
     elif n <= _VERY_LARGE_N:
         # Sampled LOWESS
         idx = rng.choice(n, _LOWESS_CAP, replace=False)
         sm = _lowess(x[idx], y[idx])
         order = np.argsort(x[idx])
-        ax.plot(x[idx][order], sm[order], color=_SPECIAL_COLOR, linewidth=_LINE_WIDTH)
+        _plot_trend(ax, x[idx][order], sm[order])
     else:
         # Bin medians, in score bins with ties kept together
         _binned_median_line(ax, x, y)
 
 
+def _plot_trend(ax, x_sorted, trend):
+    """Draw a trend through points sorted by x; one distinct x is drawn as a point.
+
+    Rows sharing an x share their trend value, and a line through one
+    coordinate draws nothing, so a single tier is marked instead.
+    """
+    if x_sorted[0] == x_sorted[-1]:
+        ax.plot(x_sorted[:1], trend[:1], color=_SPECIAL_COLOR, marker="o")
+    else:
+        ax.plot(x_sorted, trend, color=_SPECIAL_COLOR, linewidth=_LINE_WIDTH)
+
+
 def _binned_median_line(ax, x, y, n_bins=_BIN_COUNT):
     """Plot the median trend in score bins of ``x``, ties kept together."""
     _, groups = bin_rows(score_bins(x, np.ones(len(x)), n_bins))
-    mids = [np.median(x[group]) for group in groups]
-    medians = [np.median(y[group]) for group in groups]
-    # One filled bin is one point, which a line alone does not draw.
-    marker = "o" if len(groups) == 1 else "None"
-    ax.plot(mids, medians, color=_SPECIAL_COLOR, linewidth=_LINE_WIDTH, marker=marker)
+    mids = np.array([np.median(x[group]) for group in groups])
+    medians = np.array([np.median(y[group]) for group in groups])
+    _plot_trend(ax, mids, medians)
 
 
 def _scatter_or_hexbin(ax, x, y, n, max_points):
@@ -424,7 +436,8 @@ def _panel_calibration(ax, y, mu, w, n_bins=20):
     ax.plot(lims, lims, color=_REF_COLOR, linewidth=0.8, linestyle="--", label="y = x")
     ax.set_xlabel("Predicted (bin mean)")
     ax.set_ylabel("Observed (bin mean)")
-    ax.set_title(f"Calibration ({len(pred_means)} score bins, ties kept together)")
+    bins = f"{len(pred_means)} score bin" + ("" if len(pred_means) == 1 else "s")
+    ax.set_title(f"Calibration ({bins}, ties kept together)")
     ax.legend(fontsize=7, loc="upper left")
 
 

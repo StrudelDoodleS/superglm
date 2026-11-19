@@ -1522,14 +1522,12 @@ def plotly_spread(payload: Any) -> go.Figure:
             **cell,
         )
     _style_titles(fig)
+    bins = f"{len(table)} price bin" + ("" if len(table) == 1 else "s")
     return _finalise(
         fig,
         rows=rows,
         cols=cols,
-        title=(
-            f"Parameter spread — exceedance of {payload.threshold:,.4g} "
-            f"over {len(table)} price bins"
-        ),
+        title=f"Parameter spread — exceedance of {payload.threshold:,.4g} over {bins}",
     )
 
 

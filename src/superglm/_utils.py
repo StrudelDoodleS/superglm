@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 
 import numpy as np
@@ -151,7 +152,10 @@ def score_bins(scores, mass, n_bins: int) -> NDArray[np.intp]:
     within rounding, which fractional masses can reach. Integer masses with
     ``n_bins * total < 2**52`` are summed and compared exactly, so a frequency
     weight bins as its literal copies. A zero-mass tier sits at the mass below
-    it: in the lower bin at an edge, and in bin 0 at the bottom.
+    it: in the lower bin at an edge, and in bin 0 at the bottom. Masses are
+    scaled by a power of two so the largest is below 1, which is exact, so
+    large finite masses bin as their unit-scale equivalents; a non-finite
+    mass is refused.
     """
     values = np.asarray(scores, dtype=np.float64)
     weights = np.asarray(mass, dtype=np.float64)
@@ -159,8 +163,17 @@ def score_bins(scores, mass, n_bins: int) -> NDArray[np.intp]:
     # order its rows arrive in.
     order = np.lexsort((weights, values))
     ordered = values[order]
-    cumulative = np.concatenate(([0.0], np.cumsum(weights[order])))
+    # Dividing by 2**exponent of the largest mass leaves every mass below 1,
+    # so the total stays below the row count and n_bins * (below + through)
+    # cannot overflow; a power of two changes no rounding in the normal range.
+    _, exponent = math.frexp(float(np.max(np.abs(weights), initial=0.0)))
+    cumulative = np.concatenate(([0.0], np.cumsum(np.ldexp(weights[order], -exponent))))
     total = cumulative[-1]
+    if not math.isfinite(total):
+        raise ValueError(
+            "score bins need finite masses, but a weight or exposure is infinite or NaN; "
+            "pass finite weights and exposures"
+        )
     codes = np.zeros(len(values), dtype=np.intp)
     if not total > 0.0:
         return codes

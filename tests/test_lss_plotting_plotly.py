@@ -713,7 +713,9 @@ def test_spread_marks_the_percentiles_of_a_single_price(case) -> None:
         fitted, X.iloc[np.zeros(20, dtype=int)], threshold=float(np.quantile(y, 0.9)), n_bins=6
     )
     (row,) = spread.identically_priced.itertuples()
-    upper, lower = dp.plotly_spread(spread).data[-2:]
+    fig = dp.plotly_spread(spread)
+    assert fig.layout.title.text.endswith(" over 1 price bin")
+    upper, lower = fig.data[-2:]
     for trace, value in ((upper, row.p_hi), (lower, row.p_lo)):
         assert trace.mode == "markers"
         np.testing.assert_array_equal(trace.x, [row.mean])

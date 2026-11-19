@@ -296,6 +296,17 @@ def _validated_n_bins(n_bins) -> int:
     return int(n_bins)
 
 
+def _bin_mass(w: NDArray, exp: NDArray) -> NDArray:
+    """Return the mass a chart bins by: weight times exposure.
+
+    One exposure shared by every row cancels from every tier's share of the
+    mass, so it is left out, and integer weights are then summed exactly.
+    """
+    if len(exp) and np.all(exp == exp[0]):
+        return w
+    return w * exp
+
+
 def _validated_chart_inputs(
     y_obs,
     *,
@@ -571,12 +582,14 @@ def lift_chart(
     n_bins : int
         Number of quantile bins. Rows with equal predictions share a bin,
         placed by the middle of their exposure, so tied predictions give uneven
-        bins; bins left empty are omitted. When weight times exposure is an
-        integer, a frequency weight bins exactly as its literal copies. With
-        fractional exposure, a prediction whose exposure middle lies on a bin
-        edge to within rounding takes the side its float64 sums give, so a
-        weighted row and its literal copies, summed differently, can then sit
-        in neighbouring bins.
+        bins; bins left empty are omitted. When the weights are integers, the
+        exposures are integers or one value shared by every row, and
+        ``n_bins`` times the total binned mass is below 2**52, a frequency
+        weight bins exactly as its literal copies. With other fractional
+        exposures, a prediction whose exposure middle lies on a bin edge to
+        within rounding takes the side its float64 sums give, so a weighted
+        row and its literal copies, summed differently, can then sit in
+        neighbouring bins.
     ax : matplotlib Axes or None
         If provided, plot onto this axes (``figure`` in result will be None).
 
@@ -598,8 +611,7 @@ def lift_chart(
     exp = vectors.get("exposure", np.ones(n, dtype=float))
 
     # Bin by predicted value, using exposure as bin weights
-    bin_weights = w * exp
-    bins_idx = score_bins(y_pred, bin_weights, n_bins)
+    bins_idx = score_bins(y_pred, _bin_mass(w, exp), n_bins)
 
     rows = []
     total_exp = (w * exp).sum()
@@ -722,7 +734,7 @@ def double_lift_chart(
 
     # Equal-exposure bins based on sort score
     bin_weights = w * exp
-    bins_idx = score_bins(sort_score, bin_weights, n_bins)
+    bins_idx = score_bins(sort_score, _bin_mass(w, exp), n_bins)
 
     # Overall exposure-weighted averages (for indexing)
     total_we = bin_weights.sum()
@@ -1135,7 +1147,7 @@ def loss_ratio_chart(
         x_label = "Predicted value"
 
     bin_weights = w * exp
-    bins_idx = score_bins(sort_vals, bin_weights, n_bins)
+    bins_idx = score_bins(sort_vals, _bin_mass(w, exp), n_bins)
 
     rows = []
     total_exp = bin_weights.sum()

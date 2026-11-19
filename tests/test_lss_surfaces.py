@@ -241,6 +241,21 @@ def test_review_frequency_spread_stable_ties_match_expansion(counts, bins):
     pd.testing.assert_frame_equal(compact.identically_priced, expanded.identically_priced)
 
 
+def test_frequency_spread_bins_by_the_counts():
+    """Ten copies at the cheapest price hold the first bin alone, as their literal rows do;
+    binned by rows, the first two prices would share the first bin."""
+    X = pd.DataFrame({"mean": [0.0, 10.0, 20.0], "tail": [0.1, 0.5, 0.9]})
+    counts = np.array([10, 1, 1])
+    compact = parameter_spread(_spread_stub(), X, threshold=1, n_bins=2, sample_weight=counts)
+    expanded = parameter_spread(
+        _spread_stub(), X.iloc[np.repeat(np.arange(3), counts)], threshold=1, n_bins=2
+    )
+    table = compact.identically_priced
+    pd.testing.assert_frame_equal(table, expanded.identically_priced)
+    np.testing.assert_array_equal(table["n"], [10, 2])
+    np.testing.assert_array_equal(table["mean"], [0.0, 15.0])
+
+
 def test_review_frequency_spread_huge_counts_stay_compact(monkeypatch):
     def no_repeat(*args, **kwargs):
         raise AssertionError("frequency spread must not expand rows")

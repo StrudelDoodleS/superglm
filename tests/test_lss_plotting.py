@@ -559,6 +559,21 @@ def test_spread_panels_cover_parameters_and_the_priced_alike(case) -> None:
     assert len(priced.texts) == int(np.isfinite(payload.identically_priced["ratio"]).sum())
 
 
+@pytest.mark.parametrize("far", [False, True])
+def test_spread_marks_a_bin_whose_percentiles_coincide(case, far) -> None:
+    """Rows of one price share one tail probability, so its bin's whisker has zero height and
+    is drawn as a point, labelled or not (far above the data, both percentiles are zero)."""
+    fitted, frame, y, _ = case
+    threshold = float(np.max(y) + 1e3 * np.std(y)) if far else float(np.quantile(y, 0.9))
+    payload = parameter_spread(fitted, frame.iloc[np.zeros(20, dtype=int)], threshold=threshold)
+    (row,) = payload.identically_priced.itertuples()
+    assert row.p_lo == row.p_hi
+    ax = plot_spread(payload).axes[-1]
+    (points,) = [c for c in ax.collections if isinstance(c, PathCollection)]
+    np.testing.assert_array_equal(points.get_offsets(), [[row.mean, row.p_lo]])
+    assert ax.get_xlabel().endswith(" in 1 score bin, ties kept together")
+
+
 def test_portfolio_rows_and_the_total_histogram(case) -> None:
     fitted, frame, _, _ = case
     payload = portfolio(fitted, frame, n_draws=40, by="g", seed=4, return_draws=True)

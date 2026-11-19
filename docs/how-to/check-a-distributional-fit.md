@@ -199,9 +199,9 @@ calibration.reliability   # CORP reliability curve per threshold
 interval against its nominal level — a 90 % interval that holds 78 % of
 rows is a model that is too confident, and the per-decile rows say for
 which kinds of row (rows sharing a predicted value share a decile, so a
-parameter with few distinct values has fewer, uneven deciles). *Tails*: `Σ P(Y > t)` against the realised count, with
-a Poisson-binomial standard error; this is the number a reinsurance
-conversation actually turns on. *Quantiles*: each predicted `p`-quantile
+parameter with few distinct values has fewer, uneven deciles). *Tails*:
+`Σ P(Y > t)` against the realised count, with a Poisson-binomial standard
+error; this is the number a reinsurance conversation actually turns on. *Quantiles*: each predicted `p`-quantile
 should leave `1 - p` of the rows above it. On a family with a point mass
 (a Tweedie burn-cost model is mostly zeros) both of these are read on the
 randomised PIT rather than on the response: a zero response would
@@ -369,8 +369,9 @@ With frequency semantics, the spread matches literal replication:
 equal-count bins of the predicted mean, linear-interpolated percentiles, and
 integer histogram counts. Rows of one price, and so a row's copies, always
 share a bin; tied prices give uneven bins, and the table lists the filled
-bins under their index. Large counts stay compact. With prior semantics the bins, percentiles, and
-histogram counts use retained physical rows, while mean prices are weighted.
+bins under their index. Large counts stay compact. With prior semantics the
+bins, percentiles, and histogram counts use retained physical rows, while mean
+prices are weighted.
 `parameter_spread` and `portfolio` accept `offsets=` aligned to the input book.
 Zero-weight rows are removed before prediction or simulation, together with
 their offsets and external segment labels; call-time weights belong to this

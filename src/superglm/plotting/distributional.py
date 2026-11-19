@@ -898,6 +898,11 @@ def plot_spread(payload: Spread, *, fig: Figure | None = None) -> Figure:
             colors=[_colour(CHART["ci_whisker"])],
             linewidths=CHART["ci_whisker"]["width"],
         )
+        # Coincident percentiles make a whisker of zero height, which draws
+        # nothing: those bins are marked as points.
+        flat = low == high
+        if np.any(flat):
+            ax.scatter(mean[flat], low[flat], **_points(CHART["point"]))
         for center, top, ratio in zip(mean, high, table["ratio"], strict=True):
             if np.isfinite(ratio):
                 # Upright labels: a bin whose cheapest row is near-impossible
@@ -913,7 +918,8 @@ def plot_spread(payload: Spread, *, fig: Figure | None = None) -> Figure:
                     rotation=90,
                 )
         ax.set_title(f"identically priced rows: spread of P(Y > {payload.threshold:.3g})")
-        ax.set_xlabel(f"predicted {payload.by} in {len(table)} score bins, ties kept together")
+        bins = f"{len(table)} score bin" + ("" if len(table) == 1 else "s")
+        ax.set_xlabel(f"predicted {payload.by} in {bins}, ties kept together")
         ax.set_ylabel("exceedance probability")
         return _finish(fig, axes)
 
