@@ -1094,9 +1094,10 @@ class TestDeadSearchNewtonDecrement:
 
         The second fit runs the 0.37.1 rule in place of the classifier: every
         published number must match bitwise, since the rule only names the
-        exit. Where rounding takes another platform's fit through the compound
-        criterion instead, both fits converge, the comparison still holds,
-        and the test skips: the arm was not exercised there.
+        exit. Where rounding takes a platform's fit through the compound
+        criterion instead, both fits converge and the comparison still holds;
+        ``test_a_forced_dead_search_converges_on_the_decrement_arm`` forces
+        the dead search the decrement arm decides.
         """
         import warnings
 
@@ -1143,13 +1144,79 @@ class TestDeadSearchNewtonDecrement:
         np.testing.assert_array_equal(
             fixed.predict(X, offset=offset), reference.predict(X, offset=offset)
         )
-        if reference._reml_result.termination_reason != "line_search_failed":
-            pytest.skip(
-                "the gradient-only rule ended this row order "
-                f"{reference._reml_result.termination_reason!r} here, not at a dead line "
-                "search, so the decrement arm was not exercised"
-            )
+
+    def test_a_forced_dead_search_converges_on_the_decrement_arm(self, monkeypatch):
+        """A dead search the Newton model says has a negligible decrease left converges.
+
+        Every lambda move is rejected by a stand-in objective (0 at the start,
+        1 elsewhere, so the score scale is 1) from ``lambda=0.152`` on the
+        one-spline Poisson fit, whose REML optimum is at 0.150. There the active
+        gradient is 0.018 and the Newton model predicts a decrease of 1.2e-4
+        (measured): 3.6 times the bar of ``reml_tol=5e-3``, inside the decade
+        the decrement arm allows, and a fortieth of the stop resolution. So the
+        exit is the decrement arm's alone: ``converged_at_precision``, where the
+        gradient rule alone (the 0.37.1 rule, ``predicted_decrease`` withheld)
+        ends ``line_search_failed``, with the same numbers. Mutation: dropping
+        the ``predicted_decrease`` arm from ``classify_dead_feasible_exit``
+        fails it the same way.
+        """
+        import warnings
+
+        import superglm.reml.direct as direct
+        from superglm import ConvergenceWarning
+        from superglm.reml.convergence import DECREMENT_GRADIENT_CEILING
+
+        rng = np.random.default_rng(20260727)
+        x = rng.uniform(0.0, 1.0, 240)
+        y = rng.poisson(np.exp(0.2 + np.sin(2.0 * np.pi * x))).astype(float)
+        tol = 5e-3
+        real = direct.classify_dead_feasible_exit
+
+        def fit(gradient_rule_only: bool):
+            evaluated: list[dict[str, float]] = []
+            classified: list[tuple] = []
+
+            def reject_every_move(*args, **kwargs):
+                evaluated.append(dict(args[6]))
+                return 0.0 if evaluated[-1] == evaluated[0] else 1.0
+
+            def classify(*args, **kwargs):
+                if gradient_rule_only:
+                    kwargs.pop("predicted_decrease")
+                classified.append((args[0], kwargs))
+                return real(*args, **kwargs)
+
+            with monkeypatch.context() as patch:
+                patch.setattr(direct, "reml_laml_objective", reject_every_move)
+                patch.setattr(direct, "classify_dead_feasible_exit", classify)
+                model = SuperGLM(
+                    family="poisson", features={"x": Spline(kind="ps", k=7)}, selection_penalty=0
+                )
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    model.fit_reml(
+                        pd.DataFrame({"x": x}),
+                        y,
+                        lambda2_init={"x": 0.152},
+                        reml_tol=tol,
+                        max_reml_iter=5,
+                    )
+            warned = [w for w in caught if issubclass(w.category, ConvergenceWarning)]
+            return model, classified, warned
+
+        fixed, classified, fixed_warnings = fit(gradient_rule_only=False)
+        reference, _, reference_warnings = fit(gradient_rule_only=True)
+
+        [(gradient, inputs)] = classified
+        assert inputs["objective"] == 0.0 and inputs["evaluated_trial"] is True
+        assert tol <= gradient < DECREMENT_GRADIENT_CEILING * tol
+        assert inputs["predicted_decrease"] < tol / 10.0
         assert fixed._reml_result.termination_reason == "converged_at_precision"
+        assert fixed._reml_result.converged and not fixed_warnings
+        assert reference._reml_result.termination_reason == "line_search_failed"
+        assert not reference._reml_result.converged and reference_warnings
+        np.testing.assert_array_equal(fixed.result.beta, reference.result.beta)
+        assert fixed._reml_result.lambdas == reference._reml_result.lambdas
 
     def test_a_capped_newton_step_withholds_the_decrement(self, monkeypatch):
         """The decrement is the quadratic model's prediction for the Newton

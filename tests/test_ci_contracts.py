@@ -179,7 +179,7 @@ def test_required_workflow_runs_for_pull_requests_and_python_floor() -> None:
     assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in workflow
     assert len(floor) == 1, f"exactly one job must publish {_PYTHON_FLOOR_CHECK!r}"
     assert "if: ${{ always() }}" in floor[0]
-    assert "needs: [test-compatibility, polars-floor]" in floor[0]
+    assert "needs: [test-compatibility, polars-floor, never-run]" in floor[0]
     matrix = _jobs(workflow)["test-compatibility"]
     assert {case for case in _compatibility_cases(matrix) if case[0] == "3.12"} == {
         ("3.12", "ubuntu-latest", group, label, "") for group, label in enumerate("ABCD", start=1)
@@ -407,27 +407,36 @@ def test_suite_runner_stages_report_both_failures(tmp_path: Path, stage: int) ->
     assert "2 failed" in completed.stdout, completed.stdout + completed.stderr
 
 
+@pytest.mark.parametrize("never_run_result", ["success", "failure"])
 @pytest.mark.parametrize("floor_result", ["success", "failure", "cancelled", "skipped"])
 @pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped"])
-def test_python_floor_aggregate_executes_the_matrix_verdict(result: str, floor_result: str) -> None:
-    """The required context passes only when the matrix and the Polars floor both passed."""
+def test_python_floor_aggregate_executes_the_matrix_verdict(
+    result: str, floor_result: str, never_run_result: str
+) -> None:
+    """The required context passes only when the matrix, the Polars floor and the run check passed."""
     workflow = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     aggregate = _jobs(workflow)["python-floor"]
     assert "TEST_RESULT: ${{ needs.test-compatibility.result }}" in aggregate
     assert "POLARS_FLOOR_RESULT: ${{ needs.polars-floor.result }}" in aggregate
+    assert "NEVER_RUN_RESULT: ${{ needs.never-run.result }}" in aggregate
     commands = re.findall(r"(?m)^        run: (.+)$", aggregate)
     assert len(commands) == 1
     command = shlex.split(commands[0])
     assert command[:2] == ["python", "-c"]
     completed = subprocess.run(
         [sys.executable, *command[1:]],
-        env=os.environ | {"TEST_RESULT": result, "POLARS_FLOOR_RESULT": floor_result},
+        env=os.environ
+        | {
+            "TEST_RESULT": result,
+            "POLARS_FLOOR_RESULT": floor_result,
+            "NEVER_RUN_RESULT": never_run_result,
+        },
         capture_output=True,
         text=True,
         timeout=5,
         check=False,
     )
-    passed = result == floor_result == "success"
+    passed = result == floor_result == never_run_result == "success"
     assert (completed.returncode == 0) == passed, completed.stderr
 
 
@@ -923,3 +932,89 @@ def test_the_durations_refresh_drops_the_runtime_ci_measures_under_coverage() ->
     )
     upload = next(step for step in job["steps"] if step.get("name") == "Upload shard results")
     assert "-py${{ matrix.runtime.python-version }}-" in upload["with"]["name"]
+
+
+def test_the_never_run_check_reads_every_shard_after_the_matrix() -> None:
+    """The check downloads each shard's junit artifact, whatever the shards' verdict."""
+    jobs = yaml.safe_load((_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"]
+    job, upload = (
+        jobs["never-run"],
+        next(
+            step
+            for step in jobs["test-compatibility"]["steps"]
+            if step.get("name") == "Upload shard results"
+        ),
+    )
+    download = next(step for step in job["steps"] if "download-artifact" in step.get("uses", ""))
+
+    assert job["needs"] == "test-compatibility" and job["if"] == "${{ always() }}"
+    assert (
+        upload["with"]["name"].startswith("pytest-") and download["with"]["pattern"] == "pytest-*"
+    )
+    assert upload["with"]["name"].endswith("-${{ matrix.group }}")  # the platform is the rest
+    assert any(
+        step.get("run") == f"python3 scripts/check_never_run_tests.py {download['with']['path']}"
+        for step in job["steps"]
+    )
+
+
+def _junit(directory: Path, platform: str, cases: dict[tuple[str, str], str]) -> None:
+    """One shard's report: ``{(classname, name): outcome}``, outcome ``passed``, ``xfail`` or a skip message."""
+    shard = directory / f"pytest-{platform}-1"
+    shard.mkdir(parents=True)
+    body = []
+    for (classname, name), outcome in cases.items():
+        inner = {
+            "passed": "",
+            "xfail": '<skipped type="pytest.xfail" message="declared" />',
+        }.get(outcome, f'<skipped type="pytest.skip" message="{outcome}" />')
+        body.append(
+            f'<testcase classname="{classname}" name="{name}" time="0.1">{inner}</testcase>'
+        )
+    (shard / "pytest-results.xml").write_text(
+        f'<testsuites><testsuite name="pytest">{"".join(body)}</testsuite></testsuites>',
+        encoding="utf-8",
+    )
+
+
+def test_the_never_run_check_fails_only_on_a_test_no_platform_ran(tmp_path: Path) -> None:
+    """Skipped on one platform, run on another: fine; skipped on both: named, unless run elsewhere."""
+    gamlss = (
+        "tests.test_two_piece_lss_vertical_slice",
+        "test_real_line_family_matches_gamlss_sn2_at_a_parametric_specification",
+    )
+    cases = {
+        ("tests.test_ci_contracts", "test_one_platform"): "requires Windows",
+        ("tests.test_ci_contracts", "test_declared_failure"): "xfail",
+        (
+            "tests.test_ci_contracts",
+            "test_on_the_book",
+        ): "[dataset] freMTPL2freq.parquet is not readable",
+        gamlss: "requires R with mgcv and jsonlite",
+        ("", "tests.docs.test_notebooks"): "collection skipped",
+    }
+    on_windows = cases | {("tests.test_ci_contracts", "test_one_platform"): "passed"}
+    _junit(tmp_path / "ran", "Linux-X64-py3.12", cases)
+    _junit(tmp_path / "ran", "Windows-X64-py3.13", on_windows)
+    never = {("tests.test_ci_contracts", "test_waits_for_an_event"): "the fit did not reach it"}
+    _junit(tmp_path / "never", "Linux-X64-py3.12", cases | never)
+    _junit(tmp_path / "never", "Windows-X64-py3.13", on_windows | never)
+
+    def check(directory: Path) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(_ROOT / "scripts/check_never_run_tests.py"), str(directory)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+    ran, never_ran = check(tmp_path / "ran"), check(tmp_path / "never")
+    assert ran.returncode == 0, ran.stdout + ran.stderr
+    assert "1 in the Real data workflow" in ran.stdout and "1 in the docs workflow" in ran.stdout
+    assert f"tests/test_two_piece_lss_vertical_slice.py::{gamlss[1]}" in ran.stdout
+    assert "test_one_platform" not in ran.stdout and "test_declared_failure" not in ran.stdout
+    assert never_ran.returncode == 1
+    assert "tests/test_ci_contracts.py::test_waits_for_an_event: the fit did not reach it" in (
+        never_ran.stdout
+    )

@@ -129,14 +129,20 @@ def test_empty_levels_work_and_duplicate_lookup_declines_range(kind, rows):
         np.testing.assert_array_equal(values, np.zeros(16))
 
 
-@pytest.mark.parametrize("kind", _CATEGORIES)
+@pytest.mark.parametrize(
+    ("name", "kind"),
+    [
+        (name, kind)
+        for name in ("_sorted_rows", "_row_order")
+        for kind in _CATEGORIES
+        # the exact spline category lookup keeps no permutation
+        if (name, kind.__name__) != ("_row_order", "SplineCategoricalGroupMatrix")
+    ],
+)
 @pytest.mark.parametrize("mutation", ["replace", "setstate", "reshape", "custom"])
-@pytest.mark.parametrize("name", ["_sorted_rows", "_row_order"])
 def test_changed_lookup_storage_or_metadata_declines_range(kind, mutation, name):
     group = _group(kind)
     group.row_subset(np.arange(16))
-    if not hasattr(group, name):
-        pytest.skip("The exact spline category lookup needs no permutation")
     original = getattr(group, name)
     assert ranges.group_range_matvec(group, 3, 19, np.ones(2)) is not None
     if mutation == "replace":

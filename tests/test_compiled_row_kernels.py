@@ -622,16 +622,17 @@ _GATE_CASES = {
 _UNIT_FREE = ("gamma", "generalized_pareto", "log_normal", "two_piece_log_normal")
 
 
-@pytest.mark.parametrize("case", sorted(_GATE_CASES))
-@pytest.mark.parametrize("units", [1.0, _declared._MAX_INPUT / 2.0])
-def test_a_fit_reads_the_same_down_either_route_of_the_range_gate(case, units):
+@pytest.mark.parametrize(
+    ("units", "case"),
+    [(1.0, case) for case in sorted(_GATE_CASES)]
+    + [(_declared._MAX_INPUT / 2.0, case) for case in _UNIT_FREE],
+)
+def test_a_fit_reads_the_same_down_either_route_of_the_range_gate(units, case):
     """The gate at ``2^200`` picks the route of a call, not the fit: on a response inside it and on
     one past it, a fit with the gate shipped and with it forced the other way agrees on its stop,
     EDF, predictions and standard errors.  Iteration counts are left out: the routes agree to
     rounding, which can flip one backtrack.  Mutation checks: a gate that admits every input fails
     the route counts, and a compiled Hessian 1e-4 too large fails the comparison."""
-    if units != 1.0 and case not in _UNIT_FREE:
-        pytest.skip("an identity-link location is not unit-free: its penalty and bounds are not")
     make, helpers = _GATE_CASES[case]
     x, y = _gate_data(case)
     frame = pd.DataFrame({"x": x})
