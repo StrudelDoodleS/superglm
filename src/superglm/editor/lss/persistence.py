@@ -52,8 +52,29 @@ def lss_prediction_rows(model: SuperLSS, dataset: Any, max_rows: int) -> NDArray
     """Every parameter's prediction on at most ``max_rows`` rows spread across ``dataset``.
 
     Rows of zero weight are left out, as scoring leaves them out. The offsets are
-    the dataset's, a dict keyed by parameter name, cut to the same rows.
+    the dataset's, a dict keyed by parameter name, cut to the same rows. A
+    parameter with no value on a row reads NaN there, without prediction's
+    warning: ``lss_no_value_rows`` reads where, for the check to compare.
     """
+    from superglm.model.base import no_mean_warning_quiet
+
+    rows, offsets = _spread_rows(dataset, max_rows)
+    with no_mean_warning_quiet():
+        return model.predict_parameters(rows, offsets=offsets).to_numpy(dtype=np.float64)
+
+
+def lss_no_value_rows(model: SuperLSS, dataset: Any, max_rows: int) -> NDArray[np.bool_]:
+    """Where ``lss_prediction_rows`` has no value: a predictor outside its link's domain.
+
+    Read from the raw predictors, not from the predictions' NaNs.
+    """
+    rows, offsets = _spread_rows(dataset, max_rows)
+    fitted = model._require_fitted()
+    return fitted.outside_domain(fitted.predict_eta(rows, offsets=offsets))
+
+
+def _spread_rows(dataset: Any, max_rows: int) -> tuple[Any, dict[str, NDArray] | None]:
+    """``lss_prediction_rows``' rows and their offsets."""
     weights = dataset.sample_weight
     kept = (
         np.arange(dataset.n_obs)
@@ -66,5 +87,4 @@ def lss_prediction_rows(model: SuperLSS, dataset: Any, max_rows: int) -> NDArray
         if dataset.offset is None
         else {name: np.asarray(values)[indices] for name, values in dataset.offset.items()}
     )
-    rows = _slice_rows(dataset.X, indices)
-    return model.predict_parameters(rows, offsets=offsets).to_numpy(dtype=np.float64)
+    return _slice_rows(dataset.X, indices), offsets

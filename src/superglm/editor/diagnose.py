@@ -391,7 +391,11 @@ def worst_rows(
         None if weights is None else weights[kept],
         _take_offset(offset, kept),
     )
-    ranked = np.argsort(-costs)[:WORST_ROWS]
+    # A row the model gives no quote ranks first: no price is the worst one. Its cost is
+    # NaN, as its mean is (``unpriced_rows``).
+    from superglm.model.base import unpriced_rows
+
+    ranked = np.argsort(np.where(unpriced_rows(model, costs), -np.inf, -costs))[:WORST_ROWS]
     order = kept[ranked]
     predicted = adapter.predict(model, frame.take_rows(order), _take_offset(offset, order))
     values = {name: frame.column_array(name)[order] for name in columns}
@@ -402,7 +406,7 @@ def worst_rows(
                 "row": int(row_numbers[position]),
                 "cost": float(costs[rank]) if np.isfinite(costs[rank]) else None,
                 "response": float(y[position]),
-                "predicted": float(predicted[index]),
+                "predicted": float(predicted[index]) if np.isfinite(predicted[index]) else None,
                 "weight": None if weights is None else float(weights[position]),
                 "values": [_plain(values[name][index]) for name in columns],
             }

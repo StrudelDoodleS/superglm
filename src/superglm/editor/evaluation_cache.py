@@ -66,8 +66,8 @@ class EvaluationCache:
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._original: dict[EvaluationKey, dict[str, float]] = {}
-        self._current: dict[EvaluationKey, dict[str, float]] = {}
+        self._original: dict[EvaluationKey, dict[str, float | str]] = {}
+        self._current: dict[EvaluationKey, dict[str, float | str]] = {}
         self._current_revision: int | None = None
 
     def advance_current_revision(self, revision: int) -> None:
@@ -78,7 +78,7 @@ class EvaluationCache:
                 self._current.clear()
                 self._current_revision = revision
 
-    def get(self, key: EvaluationKey) -> dict[str, float] | None:
+    def get(self, key: EvaluationKey) -> dict[str, float | str] | None:
         """Return an isolated copy of a cached metric dictionary, if present."""
         with self._lock:
             target = self._original if key.role == "original" else self._current
@@ -86,8 +86,14 @@ class EvaluationCache:
             return None if payload is None else dict(payload)
 
     def put(self, key: EvaluationKey, values: dict[str, Any]) -> bool:
-        """Store scalarized values unless a current-model key is superseded."""
-        payload = {str(name): float(value) for name, value in values.items()}
+        """Store scalarized values unless a current-model key is superseded.
+
+        A text value is kept as text: it is the reason a split has no scores.
+        """
+        payload = {
+            str(name): value if isinstance(value, str) else float(value)
+            for name, value in values.items()
+        }
         with self._lock:
             if key.role == "current" and key.model_revision != self._current_revision:
                 return False

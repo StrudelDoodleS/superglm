@@ -143,29 +143,38 @@ def serialize_validated_model(
 
     indices = _spread_row_indices(n_rows, max_rows)
     try:
+        # The rows with no quote are read from the raw predictor, apart from the NaNs checked
+        # here: they must be NaN after the round trip as before it, and every other row a
+        # finite price.
         if isinstance(model, SuperLSS):
-            from superglm.editor.lss.persistence import lss_prediction_rows
+            from superglm.editor.lss.persistence import lss_no_value_rows, lss_prediction_rows
 
             original_predictions = lss_prediction_rows(model, dataset, max_rows)
             loaded_predictions = lss_prediction_rows(loaded_model, dataset, max_rows)
+            no_quote = lss_no_value_rows(model, dataset, max_rows)
         else:
+            from superglm.model.base import _no_mean_rows, predict_eta_raw_exact, predict_priced
+
             X_rows = _slice_rows(dataset.X, indices)
             offset_rows = None if dataset.offset is None else _slice_rows(dataset.offset, indices)
             original_predictions = np.asarray(
-                model.predict(X_rows, offset=offset_rows),
-                dtype=np.float64,
+                predict_priced(model, X_rows, offset_rows), dtype=np.float64
             )
             loaded_predictions = np.asarray(
-                loaded_model.predict(X_rows, offset=offset_rows),
-                dtype=np.float64,
+                predict_priced(loaded_model, X_rows, offset_rows), dtype=np.float64
+            )
+            no_quote = _no_mean_rows(
+                model, predict_eta_raw_exact(model, X_rows, offset_rows, warn=False)
             )
         valid_predictions = (
-            original_predictions.shape == loaded_predictions.shape
-            and np.all(np.isfinite(original_predictions))
-            and np.all(np.isfinite(loaded_predictions))
+            original_predictions.shape == loaded_predictions.shape == no_quote.shape
+            and np.array_equal(np.isnan(original_predictions), no_quote)
+            and np.array_equal(np.isnan(loaded_predictions), no_quote)
+            and np.all(np.isfinite(original_predictions[~no_quote]))
+            and np.all(np.isfinite(loaded_predictions[~no_quote]))
             and np.allclose(
-                original_predictions,
-                loaded_predictions,
+                original_predictions[~no_quote],
+                loaded_predictions[~no_quote],
                 rtol=1e-12,
                 atol=1e-12,
             )

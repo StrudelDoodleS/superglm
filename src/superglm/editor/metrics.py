@@ -6,8 +6,9 @@ from typing import Any
 
 import numpy as np
 
-from superglm._utils import _explained_deviance
+from superglm._utils import _explained_deviance, weighted_row_sum
 from superglm._weight_units import unit_log_likelihood
+from superglm.editor.errors import no_quote_message
 from superglm.editor.evaluation import (
     EvaluationDataset,
     _validate_evaluation_weights,
@@ -31,20 +32,48 @@ METRIC_LABELS = {
 }
 
 
+ORIGINAL_UNSCORED = (
+    "The original model has no quote for some of these rows, so the change against it is not shown."
+)
+
+
 def metric_comparison_payload(
     metric: str,
     dataset: EvaluationDataset,
-    original_metrics: dict[str, float],
-    edited_metrics: dict[str, float],
+    original_metrics: dict[str, Any],
+    edited_metrics: dict[str, Any],
     *,
     model_revision: int,
     request_sequence: int | None = None,
 ) -> dict[str, Any]:
-    """Assemble one comparison payload from already-computed scalar dictionaries."""
+    """Assemble one comparison payload from already-computed scalar dictionaries.
+
+    A dictionary holding an ``"error"`` (a split with rows that have no quote) is
+    not compared. Where it is the edited model's, the payload is unavailable and
+    says why; where only the original's, the edited scores are shown, the
+    original's read None and the ``note`` says why there is no change.
+    """
     selected_metric = metric if metric in METRIC_LABELS else "deviance"
+    reason = edited_metrics.get("error")
+    if reason is not None:
+        return {
+            "available": False,
+            "model_revision": int(model_revision),
+            "request_sequence": request_sequence,
+            "metric": selected_metric,
+            "dataset": dataset.name,
+            "dataset_label": dataset.label,
+            "n_obs": dataset.n_obs,
+            "error": reason,
+        }
+    # An edit can restore the quotes the original model lacks: its scores are shown, and
+    # only the comparison with the original, which has none, is withheld.
+    unscored = "error" in original_metrics
+    if unscored:
+        original_metrics = dict.fromkeys(edited_metrics)
     original = original_metrics[selected_metric]
     edited = edited_metrics[selected_metric]
-    return {
+    payload = {
         "available": True,
         "model_revision": int(model_revision),
         "request_sequence": request_sequence,
@@ -55,9 +84,12 @@ def metric_comparison_payload(
         "n_obs": dataset.n_obs,
         "original": original,
         "edited": edited,
-        "delta": edited - original,
+        "delta": None if unscored else edited - original,
         "metrics": {"original": original_metrics, "edited": edited_metrics},
     }
+    if unscored:
+        payload["note"] = ORIGINAL_UNSCORED
+    return payload
 
 
 def metrics_payload(
@@ -116,7 +148,7 @@ def metrics_payload(
     )
 
 
-def compute_dataset_metrics(model, dataset: EvaluationDataset) -> dict[str, float]:
+def compute_dataset_metrics(model, dataset: EvaluationDataset) -> dict[str, Any]:
     """Score ``dataset`` with the model's predictions, as ``model.metrics`` does.
 
     A dataset holding the fit's own objects is scored the same way: the fit's
@@ -126,6 +158,9 @@ def compute_dataset_metrics(model, dataset: EvaluationDataset) -> dict[str, floa
     gave are not repeated (weight-contract check, custom-family prior-weight
     report, ``predict``'s warnings), as in ``model.metrics``.  The predicted
     values are the same either way.
+
+    Where a SuperGLM gives a weighted row no quote (``predict`` returns NaN for
+    it), the dataset has no scores: the result is ``{"error": reason}``.
     """
     if is_lss(model):
         return lss_dataset_metrics(model, dataset)
@@ -138,14 +173,19 @@ def compute_dataset_metrics(model, dataset: EvaluationDataset) -> dict[str, floa
     weights = validated_weights
     if weights is None:
         weights = np.ones(dataset.n_obs, dtype=np.float64)
-    return _compute_metrics(
-        model,
-        dataset.X,
-        dataset.y,
-        weights,
-        dataset.offset,
-        contract_checked=_same_fit_dataset(model, dataset),
-    )
+    from superglm.model.base import NoPredictedMeanError
+
+    try:
+        return _compute_metrics(
+            model,
+            dataset.X,
+            dataset.y,
+            weights,
+            dataset.offset,
+            contract_checked=_same_fit_dataset(model, dataset),
+        )
+    except NoPredictedMeanError as exc:
+        return {"error": no_quote_message(exc)}
 
 
 def _same_fit_dataset(model, dataset: EvaluationDataset) -> bool:
@@ -183,30 +223,31 @@ def _same_fit_dataset(model, dataset: EvaluationDataset) -> bool:
 def _compute_metrics(
     model, X, y, weights, offset, *, contract_checked: bool = False
 ) -> dict[str, float]:
+    from superglm.model import base
+
     y_arr = np.asarray(y, dtype=np.float64).ravel()
     w = np.asarray(weights, dtype=np.float64).ravel()
     offset_arg = None if offset is None else np.asarray(offset, dtype=np.float64).ravel()
-    if contract_checked:
-        from superglm.model import base
-
-        # ``predict``'s values without its warnings, as ``model.metrics`` scores.
-        predicted = base.predict_exact(model, X, offset=offset_arg, warn=False)
-    else:
-        predicted = model.predict(X, offset=offset_arg)
-    mu = np.asarray(predicted, dtype=np.float64).ravel()
     if w.size != y_arr.size:
         raise ValueError(f"sample_weight has length {w.size}, expected {y_arr.size}.")
     if offset_arg is not None and offset_arg.size != y_arr.size:
         raise ValueError(f"offset has length {offset_arg.size}, expected {y_arr.size}.")
-    if mu.size != y_arr.size:
-        raise ValueError(f"Predictions have length {mu.size}, expected {y_arr.size}.")
+    # ``predict``'s values, refused where a weighted row has none (the split's reason).
+    if contract_checked:
+        # Without its warnings, as ``model.metrics`` scores the fit's own objects.
+        predicted = base.predict_exact(model, X, offset=offset_arg, warn=False)
+        base.require_priced_rows(model, predicted, w, "the scores")
+    else:
+        predicted = base.predict_priced(model, X, offset_arg, w, "the scores")
+    mu = np.asarray(predicted, dtype=np.float64).ravel()
     family = model._distribution
     edf = float(model.result.effective_df)
     likelihood_size = dispersion_likelihood_size(
         w,
         weight_semantics=model_weight_semantics(model),
     )
-    deviance = float(np.sum(w * family.deviance_unit(y_arr, mu)))
+    # A zero-weight row adds an exact 0, even where it has no quote (NaN).
+    deviance = weighted_row_sum(w, family.deviance_unit, y_arr, mu)
     # `compute_dataset_metrics` bypasses `ModelMetrics` entirely, so the
     # evaluation-boundary check is repeated here for editor validation and
     # test splits.  The fit's own objects were checked by the fit.

@@ -536,7 +536,12 @@ function metricCard(metric, results) {
       : "";
     const pooledText = isNumber(pooled) ? ` · pooled ${metricText(pooled)}` : "";
     const named = result.stale ? `${result.label}, earlier model` : result.label;
-    const label = result.live ? `${named}, ${result.folds.length} of ${result.n_folds}` : named;
+    // A fold whose held-out rows have no quote has no score: the mean and pooled score are
+    // those of the folds scored, so the label counts them.
+    const refused = result.folds.some((fold) => fold.score_refused);
+    const label = result.live
+      ? `${named}, ${result.folds.length} of ${result.n_folds}`
+      : refused ? `${named}, ${values.length} of ${result.folds.length} folds scored` : named;
     return `<div class="cv-card-row" data-origin="${result.origin}"${result.live ? " data-live" : ""}>
       <div class="cv-card-value"><span class="cv-card-label">${escapeHTML(label)}</span>
         <strong>${metricText(mean)}</strong>
@@ -579,6 +584,17 @@ function heldOutCells(count, fold, stage) {
 }
 
 /**
+ * A fold's score cell: -- where it has none, saying why when its held-out
+ * rows have no quote.
+ * @param {CVFoldRow} fold @param {string} name
+ */
+function scoreCell(fold, name) {
+  const value = fold.scores[name];
+  if (isNumber(value) || !fold.score_refused) return `<td>${metricText(value)}</td>`;
+  return `<td data-popover-title="No score" data-popover-body="${escapeHTML(fold.score_refused)}">--</td>`;
+}
+
+/**
  * The latest run's folds: rows, scores, EDF, fit time and convergence. A
  * score a fold could not compute reads as --. While Run CV runs, the folds to
  * come have a row each, and the one fitting shows its time so far.
@@ -606,7 +622,7 @@ export function foldTableMarkup(payload, job = null) {
       <td><span class="cv-fold-swatch" style="${foldSwatchStyle(foldNumber(fold, index))}"></span>Fold ${fold.fold + 1}</td>
       ${heldCell(foldNumber(fold, index), "done")}
       <td>${countText(fold.n_train)}</td><td>${countText(fold.n_test)}</td>
-      ${names.map((name) => `<td>${metricText(fold.scores[name])}</td>`).join("")}
+      ${names.map((name) => scoreCell(fold, name)).join("")}
       <td>${fixedText(fold.effective_df, 1)}</td>
       ${roundsCell(fold.n_reml_iter, fold.fold)}
       <td>${isNumber(fold.fit_time_s) ? `${fold.fit_time_s.toFixed(2)} s` : "--"}</td>

@@ -805,6 +805,30 @@ test("each fold holds out its own piece, and the picture needs folds that split 
   assert.doesNotMatch(foldTableMarkup(payload), /Held out/);
 });
 
+test("a fold whose held-out rows have no quote shows why it has no score", () => {
+  const payload = cvPayload();
+  const [refused] = payload.results[0].folds;
+  refused.scores = { deviance: null, gini: null };
+  refused.score_refused = "1 of fold 1's 4 held-out rows have no quote under this model (row positions 33).";
+  const html = foldTableMarkup(payload);
+  assert.equal(count(html, /data-popover-title="No score"/g), 2);
+  assert.match(html, /data-popover-body="1 of fold 1's 4 held-out rows have no quote[^"]*">--<\/td>/);
+  // The scored fold has no reason to show.
+  assert.match(html, /<td>0\.3000<\/td>/);
+});
+
+test("a result with a refused fold says how many folds its mean and pooled score cover", () => {
+  const payload = cvPayload();
+  const [refused] = payload.results[0].folds;
+  refused.scores = { deviance: null, gini: null };
+  refused.score_refused = "1 of fold 1's 4 held-out rows have no quote under this model (row positions 33).";
+  payload.results[0].mean = { deviance: 0.3, gini: 0.22 };
+  payload.results[0].pooled = { deviance: 0.3 };
+  const html = performanceMarkup(payload);
+  assert.equal(count(html, /As supplied, 1 of 2 folds scored/g), payload.metrics.length);
+  assert.doesNotMatch(performanceMarkup(cvPayload()), /folds scored/);
+});
+
 /** @param {number[]} rounds */
 function roundsPayload(rounds) {
   const payload = cvPayload();

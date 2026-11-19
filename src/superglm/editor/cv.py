@@ -51,7 +51,7 @@ from superglm.editor.diagnose import (
     worst_rows,
 )
 from superglm.editor.display import FoldTermDisplay, fold_chart_display, is_edited
-from superglm.editor.errors import EditorClientError, EditorValueError
+from superglm.editor.errors import EditorClientError, EditorValueError, no_quote_message
 from superglm.editor.evaluation import EvaluationDataset, training_export_dataset
 from superglm.editor.jobs import JobCancelledError
 from superglm.editor.lss.availability import session_refit_reason
@@ -76,6 +76,7 @@ from superglm.features.rebuild import (
     rebuilt_categorical,
 )
 from superglm.links import stabilize_eta
+from superglm.model.base import NoPredictedMeanError
 from superglm.model.fit_state import configured_family, configured_lambda2, configured_penalty
 from superglm.model_selection import (
     FINGERPRINT_VERSION,
@@ -86,6 +87,7 @@ from superglm.model_selection import (
     _take_offset,
     cross_validate,
     fold_adapter,
+    refusal_in_frame,
 )
 from superglm.plotting.comparison import _feature_beta, _score_levels
 from superglm.plotting.curve_similarity import _summarize_against_fold_mean
@@ -250,6 +252,8 @@ _FOLD_COLUMNS = (
     "n_iter",
     "effective_df",
     "n_reml_iter",
+    # Why a fold has no score where its held-out rows have no quote (``cross_validate``).
+    "score_refused",
 )
 
 
@@ -1440,9 +1444,13 @@ def run_cv(plan: CVRunPlan, context) -> CVRun:
         ) from exc
     context.check()
     context.progress("curves")
+    fold_scores = result.fold_scores
+    if recorder.refused:
+        fold_scores = fold_scores.assign(score_refused=fold_scores["fold"].map(recorder.refused))
     return CVRun(
         result=replace(
             result,
+            fold_scores=fold_scores,
             pooled_scores=recorder.pooled_scores(),
             splitter=plan.splitter,
             builtin_scores=plan.scoring,
@@ -1481,6 +1489,8 @@ class _FoldRecorder:
         self._columns = _fingerprint_columns(plan.template, self._frame)
         self.curves: dict[int, dict[str, NDArray[np.float64]]] = {}
         self.fold_fits: list[dict[str, Any]] = []
+        # By fold: why its scores are missing, where its held-out rows have no quote.
+        self.refused: dict[int, str] = {}
 
     @property
     def fold_number(self) -> int:
@@ -1511,14 +1521,33 @@ class _FoldRecorder:
         scores: dict[str, float] = {}
         parts: dict[str, tuple[float, float]] = {}
         for name in self._plan.scoring:
-            pooled = self._scorers.pooled_parts.get(name)
-            if pooled is None:
-                scorer = self._scorers.scorers[name]
-                scores[name] = float(
-                    scorer(model, X, y, sample_weight=sample_weight, offset=offset)
+            try:
+                pooled = self._scorers.pooled_parts.get(name)
+                if pooled is None:
+                    scorer = self._scorers.scorers[name]
+                    scores[name] = float(
+                        scorer(model, X, y, sample_weight=sample_weight, offset=offset)
+                    )
+                    continue
+                numerator, denominator = pooled(
+                    model, X, y, sample_weight=sample_weight, offset=offset
+                )
+            except NoPredictedMeanError as exc:
+                # Held-out rows with no quote take this score, not the fold: its fit, curves
+                # and trace stand, it stays out of the pooled totals, and the page says why.
+                scores[name] = float("nan")
+                framed = refusal_in_frame(
+                    exc, model, X, offset, sample_weight, test, len(self._y), self._fold
+                )
+                self.refused.setdefault(
+                    self._fold,
+                    no_quote_message(
+                        framed,
+                        counted=f"{framed.positions.size} of fold {self.fold_number}'s "
+                        f"{len(test)} held-out rows",
+                    ),
                 )
                 continue
-            numerator, denominator = pooled(model, X, y, sample_weight=sample_weight, offset=offset)
             parts[name] = (numerator, denominator)
             scores[name] = parts_ratio(numerator, denominator)
         # Only a fold that scored completely joins the pooled totals.

@@ -16,7 +16,7 @@ import { clockText, foldColour } from "./cv_tab.js";
  * @property {number} row
  * @property {number|null} cost
  * @property {number} response
- * @property {number} predicted
+ * @property {number | null} predicted null where the model gives the row no quote
  * @property {number|null} weight
  * @property {(string|number|boolean|null)[]} values
  */
@@ -415,7 +415,7 @@ export function worstRowsMarkup(payload, fit) {
   }
   const columns = fit.worst_rows.columns.map((name) => `<th>${escapeHTML(name)}</th>`).join("");
   const rows = fit.worst_rows.rows.map((row) => `<tr><td>${row.row}</td><td>${fixed(row.cost, 3)}</td><td>${escapeHTML(fmt(row.response))}</td>
-      <td>${escapeHTML(fmt(row.predicted))}</td><td>${row.weight === null ? "--" : escapeHTML(fmt(row.weight))}</td>
+      <td>${row.predicted === null ? "no quote" : escapeHTML(fmt(row.predicted))}</td><td>${row.weight === null ? "--" : escapeHTML(fmt(row.weight))}</td>
       ${row.values.map((value) => `<td>${escapeHTML(typeof value === "number" ? fmt(value) : String(value))}</td>`).join("")}</tr>`).join("");
   return `<section class="report-section">
     ${textHead("Rows that cost the most", whole

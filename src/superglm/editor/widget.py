@@ -607,7 +607,7 @@ class EditorWidget:
         )
         if original_metrics is None:
             return _superseded_payload(revision, request_sequence, model_source.token)
-        edited_metrics: dict[str, float]
+        edited_metrics: dict[str, float | str]
         if selected_source == "original":
             edited_metrics = original_metrics
         else:
@@ -637,7 +637,7 @@ class EditorWidget:
         model,
         dataset,
         source: InForce,
-    ) -> dict[str, float] | None:
+    ) -> dict[str, float | str] | None:
         """``model``'s scores on ``dataset``, or None once ``source`` is no longer in force.
 
         The scores are cached for the revision they were asked at, and returned while their
@@ -820,7 +820,7 @@ class EditorWidget:
                 if summary_model is None or summary_source.token != source.token:
                     return _superseded_payload(revision, request_sequence, source.token)
 
-        metric_pairs: dict[str, tuple[dict[str, float], dict[str, float]]] = {}
+        metric_pairs: dict[str, tuple[dict[str, float | str], dict[str, float | str]]] = {}
         for eval_dataset in datasets:
             original = self._dataset_metrics_for_evidence(
                 "original", reference_model, eval_dataset, source

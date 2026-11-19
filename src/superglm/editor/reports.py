@@ -207,14 +207,17 @@ def report_payload(
 
 def split_metrics_payload(
     datasets,
-    metric_pairs: dict[str, tuple[dict[str, float], dict[str, float]]],
+    metric_pairs: dict[str, tuple[dict[str, float | str], dict[str, float | str]]],
     metrics: Iterable[str] = _REPORT_METRICS,
     model=None,
 ) -> list[dict[str, Any]]:
     """Assemble split rows from cached original/current scalar pairs.
 
-    A split a SuperLSS ``model`` cannot score is a row with ``available``
-    False and the reason as ``error``.
+    A split a SuperLSS ``model`` cannot score, or one with rows the edited
+    SuperGLM gives no quote (an ``"error"`` in its scalar dictionary), is a row
+    with ``available`` False and the reason as ``error``. Where only the original
+    model has no quote for some rows, the edited scores are shown and the
+    original's and the change read None.
     """
     metrics = tuple(metrics)
     rows: list[dict[str, Any]] = []
@@ -226,17 +229,25 @@ def split_metrics_payload(
             "n_obs": dataset.n_obs,
             "source": dataset.source,
         }
-        reason = lss_split_reason(model, dataset) if is_lss(model) else None
+        reason = lss_split_reason(model, dataset) if is_lss(model) else edited.get("error")
         if reason is not None:
             rows.append({**identity, "available": False, "error": reason})
             continue
+        compared = "error" not in original
         rows.append(
             {
                 **identity,
                 "metrics": {
-                    "original": {metric: original[metric] for metric in metrics},
+                    "original": {
+                        metric: original[metric] if compared else None for metric in metrics
+                    },
                     "edited": {metric: edited[metric] for metric in metrics},
-                    "delta": {metric: edited[metric] - original[metric] for metric in metrics},
+                    "delta": {
+                        metric: float(edited[metric]) - float(original[metric])
+                        if compared
+                        else None
+                        for metric in metrics
+                    },
                 },
             }
         )
@@ -248,7 +259,7 @@ def _split_metrics(session) -> list[dict[str, Any]]:
     if reference_model is None:
         return []
     edited_model = session.to_model()
-    metric_pairs: dict[str, tuple[dict[str, float], dict[str, float]]] = {}
+    metric_pairs: dict[str, tuple[dict[str, float | str], dict[str, float | str]]] = {}
     for dataset in evaluation_datasets(session):
         original = compute_dataset_metrics(reference_model, dataset)
         edited = compute_dataset_metrics(edited_model, dataset)
