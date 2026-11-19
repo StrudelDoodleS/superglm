@@ -13,6 +13,7 @@ before the rule reached its reader.
 import pickle
 import re
 import warnings
+from dataclasses import replace
 
 import matplotlib
 import numpy as np
@@ -97,23 +98,64 @@ def test_the_named_error_keeps_its_rows_through_a_pickle_round_trip():
     assert copy.positions.tolist() == [3] and copy.n_rows == 4 and copy.link == "InverseLink"
 
 
-def test_a_zero_weight_row_with_no_mean_reads_nan_in_residuals_and_its_raw_eta():
+def test_a_zero_weight_row_with_no_mean_reads_nan_in_residuals_and_its_raw_eta(monkeypatch):
     """Poisson quantile residuals and the diagnostic plot leave the row out instead of crashing.
 
-    The other rows keep their seeded draws, and ``eta`` reports the row's raw
-    linear predictor. Mutation: the NaN mean reached ``rng.uniform`` and raised
-    ``OverflowError``, and ``eta`` read the clipped ``1e-12``.
+    The other rows keep their seeded draws, exactly, and so their residuals, within what two
+    evaluations of their mean can move them: the mean's rounding moves the PIT interval
+    ``[F(y - 1), F(y)]`` at the slope ``dF(k) / dmu = -pmf(k)``, and ``ndtri`` carries that at
+    ``1 / phi`` of the farther residual. ``eta`` reports the row's raw linear predictor, and
+    the other rows' within two evaluations' rounding. Mutation: the NaN mean reached
+    ``rng.uniform`` and raised ``OverflowError``, and ``eta`` read the clipped ``1e-12``.
     """
+    from scipy import special, stats
+
+    from superglm.model.base import _prediction_plan
+    from tests.test_saved_fs_models import _gamma, _prediction_rounding, _term_magnitude
+
     counts = np.array([0.0, 2.0, 2.0, 6.0, 2.0, 6.0] * 5)
     model = editor_fit("poisson", counts)
+    real_rng = np.random.default_rng
+    streams: list[np.ndarray] = []
+
+    class Recording(np.random.Generator):
+        def uniform(self, low=0.0, high=1.0, size=None):
+            twin = np.random.Generator(type(self.bit_generator)())
+            twin.bit_generator.state = self.bit_generator.state
+            out = super().uniform(low, high, size)
+            streams.append(twin.random(np.shape(out)))  # the standard draws it consumed
+            return out
+
+    monkeypatch.setattr(
+        np.random, "default_rng", lambda seed=None: Recording(real_rng(seed).bit_generator)
+    )
     metrics = model.metrics(CELLS, CELLS_Y, sample_weight=_IGNORE_LAST)
     seen = model.metrics(CELLS.iloc[:3], CELLS_Y[:3])
 
     residuals = metrics.residuals("quantile")
+    reference = seen.residuals("quantile")
     assert np.isnan(residuals[3])
-    np.testing.assert_array_equal(residuals[:3], seen.residuals("quantile"))
-    assert metrics.eta[3] == model._predict_eta_raw_exact(CELLS)[3] < 0.0
-    np.testing.assert_array_equal(metrics.eta[:3], seen.eta)
+    assert [len(stream) for stream in streams] == [4, 3]
+    np.testing.assert_array_equal(streams[0][:3], streams[1])
+    u = 0.5 * np.finfo(np.float64).eps
+    mu, d_mu = model.predict(CELLS.iloc[:3]), _prediction_rounding(model, CELLS.iloc[:3])
+    below, at = stats.poisson.pmf(CELLS_Y[:3] - 1, mu), stats.poisson.pmf(CELLS_Y[:3], mu)
+    # Each CDF and the jittered PIT round within a few ulps of their unit scale.
+    d_pit = (below + streams[1] * np.abs(at - below)) * d_mu + 64.0 * u
+    pit = stats.norm.cdf(reference)
+    farther = np.maximum(np.abs(reference), np.abs(special.ndtri(np.clip(pit + d_pit, 0, 1))))
+    assert np.all(np.abs(residuals[:3] - reference) <= d_pit / stats.norm.pdf(farther))
+
+    raw = model._predict_eta_raw_exact(CELLS)
+    beta, plan = np.asarray(model.result.beta, dtype=np.float64), _prediction_plan(model)
+    magnitude = abs(float(model.result.intercept)) + sum(
+        _term_magnitude(term, as_eager_frame(CELLS), beta)
+        for term in plan["features"] + plan["interactions"]
+    )
+    # eta_i is a dot product of p + 1 terms: two evaluations differ by 2 gamma_{p+1} a_i.
+    d_eta = 2.0 * _gamma(beta.size + 1) * magnitude
+    assert raw[3] < 0.0 and abs(metrics.eta[3] - raw[3]) <= d_eta[3]
+    assert np.all(np.abs(metrics.eta[:3] - seen.eta) <= d_eta[:3])
     assert np.isnan(metrics.residuals("deviance")[3])
     assert isinstance(
         model.plot_diagnostics(CELLS, CELLS_Y, sample_weight=_IGNORE_LAST, n_sim=2), Figure
@@ -801,9 +843,11 @@ def test_superlss_posterior_readers_give_a_row_with_no_value_nan_and_refuse_its_
     assert bounds.iloc[3].isna().all() and np.all(np.isfinite(bounds.iloc[:3].to_numpy()))
 
 
-def test_a_row_whose_posterior_draws_cross_the_domain_has_no_posterior_summary():
-    """At ``x = 1`` the fit's mean predictor is 0.135, and 4 of 200 posterior draws cross zero.
+def test_a_row_whose_posterior_draws_cross_the_domain_has_no_posterior_summary(monkeypatch):
+    """At ``x = 1`` the fit's mean predictor is 0.135; four posterior draws are put at -0.01.
 
+    Every draw is the fit's coefficients except those four, whose slope moves the mean
+    predictor at ``x = 1`` alone across zero (it is 0.02 at the next training row, 28/29).
     There the mean is infinite on part of the posterior, so the row's posterior mean,
     sd and band read NaN, with one warning, and its plug-in estimate stands; the risk
     curves read NaN at that point alone, with one warning for the three quantiles; the
@@ -812,6 +856,7 @@ def test_a_row_whose_posterior_draws_cross_the_domain_has_no_posterior_summary()
     curve's band reached 3.7e15, and the envelope was drawn from them, with no warning.
     """
     from superglm import GammaLS, SuperLSS, term
+    from superglm.distributional import posterior
     from superglm.links import PowerLink
 
     x = np.linspace(0.0, 1.0, 30)
@@ -823,6 +868,21 @@ def test_a_row_whose_posterior_draws_cross_the_domain_has_no_posterior_summary()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         model.fit(frame, y)
+    fitted = model._require_fitted()
+    names = fitted.layout.coefficient_names
+    intercept, slope = names.index("mean:(intercept)"), names.index("mean:x")
+    beta = np.asarray(fitted.prediction_coefficients, dtype=np.float64)
+    crossing = -0.01 - beta[intercept]  # the slope that puts the predictor at x = 1 on -0.01
+    assert beta[intercept] + beta[slope] > 0.1 and beta[intercept] + crossing * 28 / 29 > 0.0
+    real_draws = posterior._posterior_draws_from_covariance
+
+    def injected(fitted, matrix, count, **options):
+        draws = real_draws(fitted, matrix, count, **options)
+        coefficients = np.tile(beta, (count, 1))
+        coefficients[:4, slope] = crossing
+        return replace(draws, coefficients=coefficients)
+
+    monkeypatch.setattr(posterior, "_posterior_draws_from_covariance", injected)
     bounds = _warned_once(
         lambda: model.posterior_bounds(
             pd.DataFrame({"x": [0.0, 1.0]}), quantity="mean", n_draws=200, seed=0
@@ -835,10 +895,11 @@ def test_a_row_whose_posterior_draws_cross_the_domain_has_no_posterior_summary()
         lambda: model.risk_curves({}, "x", n_points=5, n_draws=200, level=0.98, seed=0),
         _NO_VALUE.format(5, "posterior summaries", 4),
     )
-    assert np.all(np.isnan(curves.upper[:, 4])) and np.all(np.isfinite(curves.upper[:, :4]))
+    assert np.flatnonzero(np.isnan(curves.upper).any(axis=0)).tolist() == [4]
+    assert np.all(np.isnan(curves.upper[:, 4]))
     with pytest.raises(NoPredictedMeanError, match="so the Q-Q envelope cannot be computed") as e:
         model.plot_data("qq", X=frame, y=y, parameter_uncertainty=True, n_sim=200)
-    assert 29 in e.value.positions
+    assert e.value.positions.tolist() == [29]
 
 
 def test_a_row_with_no_value_at_the_fit_has_no_predictive_draws_whatever_its_draws_give():
