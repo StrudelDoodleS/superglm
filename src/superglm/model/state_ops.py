@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import math
 from collections.abc import Callable
 from dataclasses import replace
-from typing import cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -41,6 +42,7 @@ from superglm.solvers.identifiability import (
 )
 from superglm.solvers.rank import (
     RankDecomposition,
+    RankInfo,
     decide_data_rank,
     decompose_factor,
     decompose_gram,
@@ -52,11 +54,18 @@ from superglm.solvers.rank import (
 from superglm.solvers.working_rows import fisher_working_weights
 from superglm.types import GroupSlice
 
+if TYPE_CHECKING:
+    from superglm.model.separation_ops import WithheldFit
+
 
 def _solver_space_working_weights(model) -> NDArray:
-    """Working weights computed against the solver-space fit state."""
+    """Working weights computed against the solver-space fit state.
+
+    Rows a certified separation withholds carry no prior weight (``separation_ops``).
+    """
     from superglm.distributions import clip_mu
     from superglm.links import stabilize_eta
+    from superglm.model.separation_ops import withheld_weights
     from superglm.solvers.mode_score import linear_predictor
 
     solver = model._solver_pirls_result()
@@ -68,7 +77,7 @@ def _solver_space_working_weights(model) -> NDArray:
         link=model._link,
         mu=mu,
         eta=eta,
-        sample_weight=solver_weights(model._fit_weights, solver),
+        sample_weight=solver_weights(withheld_weights(model), solver),
     )
 
 
@@ -615,6 +624,7 @@ def _dense_base(
             column_scale=scale,
             pre_truncation_condition=float(decomposition.pre_truncation_condition),
             solve=lambda vectors: pseudo @ vectors,
+            floor=float(floor - slack),
         )
     formed = hessian()
     equilibrated = formed[np.ix_(active, active)] / np.outer(scale[active], scale[active])
@@ -642,6 +652,7 @@ def _dense_base(
         pre_truncation_condition=condition,
         solve=lambda vectors: covariance @ vectors,
         covariance=covariance,
+        floor=float(spectrum[trusted][0] - bound) if np.any(trusted) else 0.0,
     )
 
 
@@ -651,9 +662,9 @@ def _stepped_residual(model, W: NDArray) -> NDArray | None:
     The rows' one Newton step is the penalised fit along those directions when the objective is
     quadratic in the coefficients, a Gaussian family with the identity link: its weights do not
     move with the mean.  Under any other family a step from a mode the solver truncated is one
-    iteration of a fit, not its optimum, and where the weights vanish (a mean at the edge of its
-    range) the step leaves the range of the link; those fits keep the solver's coefficients
-    along the directions and report their curvature (``WeakDirections.fitted``).
+    iteration of a fit, not its optimum, so the record keeps the solver's coefficients along the
+    directions (``WeakDirections.fitted``) and the publication resumes penalised IRLS on them
+    (``_resumed_weak_fit``).
     """
     from superglm.distributions import Gaussian
     from superglm.links import IdentityLink
@@ -670,6 +681,7 @@ def _working_residual(model, W: NDArray) -> NDArray:
     """
     from superglm.distributions import clip_mu
     from superglm.links import stabilize_eta
+    from superglm.model.separation_ops import withheld_weights
     from superglm.solvers.mode_score import linear_predictor
     from superglm.solvers.working_rows import coefficient_working_rows
 
@@ -682,7 +694,7 @@ def _working_residual(model, W: NDArray) -> NDArray:
         y=np.asarray(model._fit_y_ref, dtype=np.float64),
         mu=mu,
         eta=eta,
-        sample_weight=solver_weights(model._fit_weights, solver),
+        sample_weight=solver_weights(withheld_weights(model), solver),
         prefer_observed=False,
     )
     residual = np.asarray(rows.response, dtype=np.float64) - eta
@@ -706,6 +718,7 @@ def _decided_identifiability(
     published=None,
     publish: bool = False,
     residual: NDArray | None = None,
+    separated: NDArray | None = None,
 ) -> Identifiability:
     """The identifiability of a fit whose centred Hessian's decomposition is ``decomposition``.
 
@@ -739,15 +752,21 @@ def _decided_identifiability(
         residual=residual,
         beta=None if residual is None else np.asarray(solver.beta, dtype=np.float64)[columns],
         support=_prior_support(model, design),
+        separated=separated,
     )
 
 
 def _prior_support(model, design) -> NDArray | None:
-    """The rows with positive prior weight, as ``0/1`` weights; ``None`` without the fit's weights."""
+    """The rows with positive prior weight, as ``0/1`` weights; ``None`` without the fit's weights.
+
+    Rows a certified separation withholds are off the support (``separation_ops``).
+    """
+    from superglm.model.separation_ops import withheld_weights
+
     weights = getattr(model, "_fit_weights", None)
     if weights is None or np.shape(weights) != (design.n,):
         return None
-    return (np.asarray(weights, dtype=np.float64) > 0.0).astype(np.float64)
+    return (withheld_weights(model, weights) > 0.0).astype(np.float64)
 
 
 def _structured_penalty_diagonal(penalized) -> NDArray:
@@ -841,6 +860,7 @@ def _structured_identifiability(
     *,
     publish: bool = False,
     residual: NDArray | None = None,
+    separated: NDArray | None = None,
 ) -> Identifiability:
     """The identifiability of a structured fit, read from its retained factor and moments.
 
@@ -854,13 +874,21 @@ def _structured_identifiability(
     """
     if state.identifiability is not None:
         return state.identifiability
-    record = _structured_record(model, state, W, publish=publish, residual=residual)
+    record = _structured_record(
+        model, state, W, publish=publish, residual=residual, separated=separated
+    )
     object.__setattr__(state, "identifiability", record)
     return record
 
 
 def _structured_record(
-    model, state: StructuredLinearSystemState, W, *, publish: bool, residual: NDArray | None
+    model,
+    state: StructuredLinearSystemState,
+    W,
+    *,
+    publish: bool,
+    residual: NDArray | None,
+    separated: NDArray | None = None,
 ) -> Identifiability:
     """``_structured_identifiability``'s decision, before it is kept on ``state``."""
     factor = state.profiled_factor
@@ -878,12 +906,16 @@ def _structured_record(
     operator = _spread_centred_operator(state.centered_data_operator)
     data_diagonal = compact_operator_diagonal(operator)
     hessian_diagonal = data_diagonal + _structured_penalty_diagonal(state.penalized_operator)
+    from superglm.model.separation_ops import separation_boundaries, structured_floor
+
     decomposition = TruncatedDecomposition(
         null_vectors=factor.null_directions(),
         rank=int(factor.rank),
         column_scale=np.sqrt(np.maximum(hessian_diagonal, 0.0)),
         pre_truncation_condition=float(factor.schur_condition_estimate),
         solve=factor.solve,
+        # the existence certificate reads it (``separation_ops.existence_certified``)
+        floor=structured_floor(factor, hessian_diagonal) if separation_boundaries(model) else 0.0,
     )
     return _decided_identifiability(
         model,
@@ -896,11 +928,21 @@ def _structured_record(
         penalty=_structured_penalty_product(state.penalized_operator),
         publish=publish,
         residual=residual,
+        separated=separated,
     )
 
 
 def _dense_identifiability(
-    model, decomposition, active_groups, design, W, data_gram, *, publish=False, residual=None
+    model,
+    decomposition,
+    active_groups,
+    design,
+    W,
+    data_gram,
+    *,
+    publish=False,
+    residual=None,
+    separated=None,
 ) -> Identifiability:
     """``_decided_identifiability`` for a dense decomposition of the centred Hessian.
 
@@ -927,6 +969,7 @@ def _dense_identifiability(
         published=decomposition,
         publish=publish,
         residual=residual,
+        separated=separated,
     )
 
 
@@ -940,6 +983,7 @@ def _record_identifiability(
     *,
     publish: bool = False,
     residual: NDArray | None = None,
+    separated: NDArray | None = None,
 ) -> Identifiability | None:
     """The record's identifiability, decided when the fit publishes it and kept on the record.
 
@@ -960,9 +1004,631 @@ def _record_identifiability(
             data_gram,
             publish=publish,
             residual=residual,
+            separated=separated,
         )
         object.__setattr__(rank_info, "identifiability", decided)
     return rank_info.identifiability
+
+
+@dataclasses.dataclass
+class _PublicationContext:
+    """What ``publish_identified_fit`` publishes from: the record and the state it was read on.
+
+    ``certificate`` holds the existence certificate's inputs (``separation_ops.
+    existence_certified``): the design, its columns' fitted coordinates, the decomposition, the
+    penalty, the data Gram's diagonal and the certified curvature floor.  ``withheld`` is set
+    when a certified separation's rows are withheld, with ``separated`` (``[intercept; slopes]``)
+    the span the published coefficients keep at the walked fit's values (``walk``) and
+    ``explicit`` the separated rows' explicit columns, the span's coordinates there.
+    """
+
+    record: Identifiability | None
+    state: StructuredLinearSystemState | None
+    rank_info: RankInfo | None
+    data_gram: NDArray | None
+    certificate: dict
+    withheld: WithheldFit | None = None
+    separated: NDArray | None = None
+    walk: Any = None
+    explicit: Any = None
+    separated_explicit: NDArray | None = None
+
+
+def _publication_context(
+    model, boundaries: tuple[str, ...], *, separated: NDArray | None = None
+) -> _PublicationContext | None:
+    """The fit's identifiability record, decided at its working weights, and the certificate's inputs.
+
+    ``None`` when the fit publishes nothing: a constrained face, a record saved before fits
+    recorded identifiability, a structured factor that certified full rank on a family with no
+    response boundary (with one the existence certificate still reads it).
+    """
+    from superglm.model.separation_ops import structured_floor
+
+    solver = model._solver_pirls_result()
+    state = retained_linear_state(model)
+    if isinstance(state, StructuredLinearSystemState):
+        if state.identifiability is not None:
+            return None
+        full = int(state.profiled_factor.rank) == state.profiled_factor.shape[0]
+        if full and not boundaries:
+            return None
+        W = _solver_space_working_weights(model)
+        record = _structured_identifiability(
+            model, state, W, publish=True, residual=_stepped_residual(model, W), separated=separated
+        )
+        factor = state.profiled_factor
+        operator = _spread_centred_operator(state.centered_data_operator)
+        data_diagonal = compact_operator_diagonal(operator)
+        hessian_diagonal = data_diagonal + _structured_penalty_diagonal(state.penalized_operator)
+        floor = (
+            structured_floor(factor, hessian_diagonal)
+            if full and boundaries
+            else record.curvature_floor
+        )
+        certificate = {
+            "design": model._dm,
+            "columns": np.arange(factor.shape[0]),
+            "decomposition": TruncatedDecomposition(
+                null_vectors=factor.null_directions(),
+                rank=int(factor.rank),
+                column_scale=np.sqrt(np.maximum(hessian_diagonal, 0.0)),
+                pre_truncation_condition=float(factor.schur_condition_estimate),
+                solve=factor.solve,
+            ),
+            "penalty": _structured_penalty_product(state.penalized_operator),
+            "data_diagonal": data_diagonal,
+            "floor": floor,
+        }
+        return _PublicationContext(record, state, None, None, certificate)
+    rank_info = solver.rank_info
+    if (
+        rank_info is None
+        or rank_info.identifiability_policy != "penalised"
+        or rank_info.identifiability is not None
+        or rank_info.face is not None
+    ):
+        return None
+    W = _solver_space_working_weights(model)
+    design, active_groups = _rank_active_state(model, rank_info)
+    if design.p == 0:
+        return None
+    held = rank_info.data_gram
+    own = held is not None and rank_info.data_gram_weights == weights_fingerprint(W)
+    data_gram = held if own else _rank_centered_data_gram(design, W)
+    record = _record_identifiability(
+        model,
+        rank_info,
+        design,
+        active_groups,
+        W,
+        data_gram,
+        publish=True,
+        residual=_stepped_residual(model, W),
+        separated=separated,
+    )
+
+    @functools.cache
+    def curvature() -> NDArray:
+        return _rank_curvature(model, active_groups)
+
+    certificate = {
+        "design": design,
+        "columns": np.asarray(rank_info.selected_columns, dtype=np.intp),
+        "decomposition": functools.partial(
+            _dense_base,
+            rank_info.augmented,
+            np.diag(data_gram),
+            design.n,
+            lambda: data_gram + curvature(),
+        ),
+        "penalty": lambda vectors: (curvature() @ vectors, np.abs(curvature()) @ np.abs(vectors)),
+        "data_diagonal": np.diag(data_gram),
+        # the decomposition's floor is the matrix it decomposed: the fit's own Gram
+        "floor": record.curvature_floor if own and record is not None else 0.0,
+    }
+    return _PublicationContext(record, None, rank_info, data_gram, certificate)
+
+
+def _install_record(context: _PublicationContext, record: Identifiability) -> None:
+    """Keep ``record`` where readers find it: on the structured state or the rank record."""
+    context.record = record
+    if context.state is not None:
+        object.__setattr__(context.state, "identifiability", record)
+    elif context.rank_info is not None:
+        object.__setattr__(context.rank_info, "identifiability", record)
+
+
+def _certified(model, context: _PublicationContext, sides: NDArray, weights: NDArray) -> bool:
+    """``separation_ops.existence_certified`` on the context's fit and record.
+
+    The certificate bounds the Hessian on the record's quotient by its null directions, so each
+    must be exact lineality, not a near-alias that could separate: one on the explicit columns
+    is verified to vanish on every live row exactly (``separation_ops.aliases_exact``).
+    """
+    from superglm.model.separation_ops import aliases_exact, existence_certified
+
+    record, inputs = context.record, context.certificate
+    if record is None:
+        return False
+    if record.gauge is not None and not aliases_exact(model, record.gauge, sides):
+        return False
+    decomposition = inputs["decomposition"]
+    if callable(decomposition):
+        decomposition = decomposition()
+    columns = inputs["columns"]
+    weak = record.weak
+    return existence_certified(
+        model,
+        solver=model._solver_pirls_result(),
+        sides=sides,
+        weights=weights,
+        decomposition=decomposition,
+        columns=columns,
+        design=inputs["design"],
+        penalty=inputs["penalty"],
+        data_diagonal=inputs["data_diagonal"],
+        floor=float(inputs["floor"]),
+        weak_root=None if weak is None else np.asarray(weak.root)[columns],
+    )
+
+
+def _publish_existence(
+    model, context: _PublicationContext, boundaries: tuple[str, ...]
+) -> _PublicationContext:
+    """Decide whether the fit's estimate exists, and publish the fit that decision gives.
+
+    The fit's score proves existence where it can (``separation_ops.existence_certified``);
+    otherwise the rows decide (``separation_ops.decide_separation``).  A separating direction
+    verified exactly is published as the fit on the rows it keeps (``_withheld_publication``)
+    once that fit's own score proves those rows separate no further; anything less is
+    unresolved, and the walked fit is published with the decision on its record.
+    """
+    from superglm.diagnostics.separation import response_sides
+    from superglm.model.separation_ops import (
+        coefficient_names,
+        decide_separation,
+        separated_labels,
+    )
+
+    model._separated_rows = None
+    weights = np.asarray(model._fit_weights, dtype=np.float64)
+    sides = response_sides(model._fit_y_ref, weights, boundaries)
+    certified = _certified(model, context, sides, weights)
+    decision, strict, explicit, coordinates = decide_separation(
+        model, sides=sides, boundaries=boundaries, certified=certified
+    )
+    if strict is not None and strict.size == np.count_nonzero(sides != 2):
+        # complete separation: every row is separated and none is kept, so no data bound any
+        # coefficient; each has no finite estimate and the walked fit is published as it stopped
+        width = len(model._solver_pirls_result().beta)
+        everything = np.eye(width + 1)
+        decision = dataclasses.replace(
+            decision,
+            state="present",
+            decided_by="linear program: complete separation",
+            span=everything,
+            names=coefficient_names(model, everything),
+            labels=separated_labels(model, strict, sides, coordinates),
+        )
+    elif strict is not None:
+        published = _withheld_publication(
+            model, context, decision, strict, explicit, coordinates, sides, boundaries
+        )
+        if published is not None:
+            return published
+    if decision.state == "unresolved" and not decision.span.shape[1]:
+        if _interior_full_rank(model, context, sides):
+            decision = dataclasses.replace(decision, state="absent", decided_by="interior rank")
+    if context.record is not None and (decision.state != "absent" or not decision.unique):
+        _install_record(context, dataclasses.replace(context.record, separation=decision))
+    return context
+
+
+def _interior_full_rank(model, context: _PublicationContext, sides: NDArray) -> bool:
+    """Whether the interior rows alone identify every coefficient: then no direction separates.
+
+    A direction of recession is zero on every interior row and in the penalty's null space, so
+    when the Hessian of the interior rows, ``X_I'X_I + S`` at unit weight, is nonsingular there
+    is none (Santos Silva & Tenreyro 2010; Correia, Guimaraes & Zylkin 2019, sec. 3.2).  The
+    decision is the owner's two-step rule on that Hessian (``_dense_base``'s formation bound,
+    then the rows on what it leaves undecided, ``decide_identifiability``): certified when no
+    direction is null and none unresolved.  Dense fits; a structured fit leaves it unresolved.
+    """
+    if context.rank_info is None:
+        return False
+    interior = ((sides == 0) & (np.asarray(model._fit_weights) > 0.0)).astype(np.float64)
+    if not np.any(interior):
+        return False
+    design, active_groups = _rank_active_state(model, context.rank_info)
+    curvature = _rank_curvature(model, active_groups)
+    gram = _rank_centered_data_gram(design, interior)
+    hessian = gram + curvature
+    decomposition = decompose_gram_if_authoritative(hessian, psd_by_construction=True)
+    if decomposition is None:
+        decomposition = decompose_gram(hessian, allow_indefinite=True)
+    diagonal = np.diag(gram)
+    record = decide_identifiability(
+        _dense_base(decomposition, diagonal, design.n, lambda: hessian),
+        columns=np.asarray(context.rank_info.selected_columns, dtype=np.intp),
+        width=len(model._solver_pirls_result().beta),
+        groups=active_groups,
+        design=design,
+        W=interior,
+        data_diagonal=diagonal,
+        data_apply=lambda vectors: gram @ vectors,
+        penalty=lambda vectors: (curvature @ vectors, np.abs(curvature) @ np.abs(vectors)),
+        support=interior,
+    )
+    # a "fit" alias is a coordinate the decomposition truncated and the rows identify: not null
+    return record.curvature_floor > 0.0 and all(alias.source == "fit" for alias in record.aliases)
+
+
+def _withheld_publication(
+    model,
+    context: _PublicationContext,
+    decision,
+    strict: NDArray,
+    explicit,
+    coordinates: NDArray,
+    sides: NDArray,
+    boundaries: tuple[str, ...],
+) -> _PublicationContext | None:
+    """The fit with the separated rows withheld, if it certifies them as every separated row.
+
+    The withheld fit (``separation_ops.withheld_refit``) is installed, its record decided on the
+    rows it keeps, and its null directions written exactly on the explicit columns
+    (``separation_ops.separated_span``): those nonzero on a withheld row are the separated span,
+    held where the walk left them.  Its own score must prove existence on the kept rows
+    (maximality: every separated row is withheld); otherwise the walked fit is restored and
+    ``None`` returned.
+    """
+    from superglm.diagnostics.separation import Separation
+    from superglm.model.separation_ops import (
+        coefficient_names,
+        existence_certified,
+        lift_span,
+        separated_labels,
+        separated_span,
+        withheld_refit,
+        withheld_weights,
+    )
+
+    walk = model._solver_pirls_result()
+    saved = (
+        model._result,
+        model._solver_result,
+        getattr(model, "_linear_system_state", None),
+        getattr(getattr(model, "_reml_result", None), "pirls_result", None),
+    )
+
+    def restore() -> None:
+        model._result, model._solver_result = saved[0], saved[1]
+        model._linear_system_state = saved[2]
+        reml = getattr(model, "_reml_result", None)
+        if reml is not None:
+            reml.pirls_result = saved[3]
+        model._separated_rows = None
+
+    try:
+        fit = withheld_refit(model, strict)
+    except Exception:  # pragma: no cover - a refit the solver refuses leaves it unresolved
+        return None
+    # the published fit is the fit the caller ran, its coefficients on the kept rows refined:
+    # its iterations, stop and convergence are the walk's (and the refit's convergence)
+    fit.result = dataclasses.replace(
+        fit.result,
+        n_iter=walk.n_iter,
+        converged=bool(walk.converged and fit.result.converged),
+        iteration_log=walk.iteration_log,
+        termination_reason=walk.termination_reason,
+        mean_space_boundary_rows=walk.mean_space_boundary_rows,
+        mean_space_boundary_unresolved=walk.mean_space_boundary_unresolved,
+    )
+    model._separated_rows = strict
+    model._result = model._solver_result = fit.result
+    if fit.state is not None:
+        model._linear_system_state = fit.state
+    reml = getattr(model, "_reml_result", None)
+    if reml is not None:
+        reml.pirls_result = fit.result
+    width = len(walk.beta)
+    live = np.flatnonzero(sides != 2)
+    kept = np.setdiff1d(live, strict)
+    first = _publication_context(model, boundaries)
+    gauge = None if first is None or first.record is None else first.record.gauge
+    if first is None or gauge is None:
+        restore()
+        return None
+    null = np.vstack((np.asarray(gauge.intercept)[None, :], np.asarray(gauge.null)))
+    spans = separated_span(explicit, coordinates, null, strict, kept)
+    if spans is None or spans[1].shape[1] == 0:
+        restore()
+        return None
+    separated = lift_span(spans[1], coordinates, width)
+    # the record again, with the separated span held where the walk left it
+    if first.state is not None:
+        object.__setattr__(first.state, "identifiability", None)
+    elif first.rank_info is not None:
+        object.__setattr__(first.rank_info, "identifiability", None)
+    context_r = _publication_context(model, boundaries, separated=separated[1:])
+    if context_r is None or context_r.record is None:
+        restore()
+        return None
+    sides_r = sides.copy()
+    sides_r[strict] = 2
+    inputs = context_r.certificate
+    decomposition = inputs["decomposition"]
+    if callable(decomposition):
+        decomposition = decomposition()
+    weak = context_r.record.weak
+    if not existence_certified(
+        model,
+        solver=fit.result,
+        sides=sides_r,
+        weights=withheld_weights(model),
+        decomposition=decomposition,
+        columns=inputs["columns"],
+        design=inputs["design"],
+        penalty=inputs["penalty"],
+        data_diagonal=inputs["data_diagonal"],
+        floor=float(inputs["floor"]),
+        weak_root=None if weak is None else np.asarray(weak.root)[inputs["columns"]],
+    ):
+        restore()
+        return None
+    separation = Separation(
+        "present",
+        "linear program",
+        rows=np.asarray(strict, dtype=np.intp),
+        span=separated,
+        boundaries=boundaries,
+        unique=decision.unique,
+        labels=separated_labels(model, strict, sides, coordinates),
+        names=coefficient_names(model, separated),
+        work=decision.work,
+    )
+    _install_record(context_r, dataclasses.replace(context_r.record, separation=separation))
+    context_r.withheld = fit
+    context_r.separated = separated
+    context_r.walk = walk
+    context_r.explicit = explicit[strict]
+    context_r.separated_explicit = spans[1]
+    return context_r
+
+
+# The resumed fit's budget: its iterations and the step halvings each may take.
+_RESUME_ITERATIONS = 50
+_RESUME_HALVINGS = 30
+# The resumed fit stops when its Newton decrement is under this fraction of the objective.
+_RESUME_TOLERANCE = 1e-13
+
+
+def _resumed_weak_fit(model, context: _PublicationContext) -> _PublicationContext | None:
+    """D6 under any family: penalised IRLS resumed on the identified subspace, at the fit's lambda.
+
+    The solver truncated directions ``T`` the rows identify (``WeakDirections``), so its
+    coefficients are not the penalised optimum along them, and one Newton step from a mode
+    whose weights move with the mean is not it either.  Each iteration rebuilds the centred
+    system at the current Fisher weights (``build_centered_system``, the fit's penalty), its
+    decomposition and the owner's row read, and takes the joint Newton step on the identified
+    subspace: ``V g`` on the certified part and ``U C^-1 U'g`` on the weak directions (their
+    covariance root, ``WeakDirections.root``; ``U = T - V H T``, so ``U'g = T'g - (H T)'V g``
+    carries the coupling the old one-step form assumed away), with the intercept's own.  A step
+    is halved until the penalised deviance ``D + beta'S beta`` does not rise, at most
+    ``_RESUME_HALVINGS`` times, and the resumption stops when the Newton decrement
+    ``g' H^+ g`` falls under the fit's tolerance (stationarity), or after
+    ``_RESUME_ITERATIONS``.  The last accepted state's record, covariance and EDF are published,
+    with the rank record rebuilt at its weights.  ``None`` (6a's coefficients kept, the summary
+    saying so) when a step cannot be accepted or stationarity is not reached.  Dense fits only.
+    """
+    from superglm.model.separation_ops import fisher_rows, withheld_weights
+    from superglm.solvers.centered_system import build_centered_system
+
+    record, rank_info = context.record, context.rank_info
+    if record is None or rank_info is None or record.weak is None or record.weak.fitted:
+        return None
+    solver = model._solver_pirls_result()
+    design, active_groups = _rank_active_state(model, rank_info)
+    columns = np.asarray(rank_info.selected_columns, dtype=np.intp)
+    curvature = _rank_curvature(model, active_groups)
+    weights = withheld_weights(model)
+    # stationarity tighter than any fit's tolerance: Newton converges quadratically there, so
+    # it costs an iteration, and a looser stop would leave the weak directions short of the mode
+    tol = min(float(getattr(model, "_tol", 1e-8)), _RESUME_TOLERANCE)
+    width = len(solver.beta)
+
+    def raw(beta: NDArray, intercept: float):
+        return dataclasses.replace(
+            solver, beta=beta, intercept=intercept, centred_intercept=None, state_center=None
+        )
+
+    def objective(state) -> float:
+        from superglm._utils import weighted_row_sum
+        from superglm.distributions import clip_mu
+        from superglm.links import stabilize_eta
+        from superglm.solvers.mode_score import linear_predictor
+
+        eta = stabilize_eta(linear_predictor(model._dm, state, model._fit_offset), model._link)
+        mu = clip_mu(model._link.inverse(eta), model._distribution)
+        deviance = weighted_row_sum(
+            solver_weights(weights, state),
+            model._distribution.deviance_unit,
+            np.asarray(model._fit_y_ref, dtype=np.float64),
+            mu,
+        )
+        slopes = np.asarray(state.beta, dtype=np.float64)[columns]
+        return float(deviance + slopes @ curvature @ slopes)
+
+    def decide(state):
+        W, residual = fisher_rows(model, state, weights)
+        system = build_centered_system(dm=design, W=W, z_off=np.zeros(design.n), penalty=curvature)
+        decomposition = decompose_gram_if_authoritative(system.hessian, psd_by_construction=True)
+        if decomposition is None:
+            decomposition = decompose_gram(system.hessian, allow_indefinite=True)
+        diagonal = np.diag(system.data_gram)
+        truncated = _dense_base(decomposition, diagonal, design.n, lambda: system.hessian)
+        carried = W > 0.0
+        stepped = np.zeros_like(W)
+        stepped[carried] = np.sqrt(W[carried]) * residual[carried]
+        decided = decide_identifiability(
+            truncated,
+            columns=columns,
+            width=width,
+            groups=active_groups,
+            design=design,
+            W=W,
+            data_diagonal=diagonal,
+            data_apply=lambda vectors: system.data_gram @ vectors,
+            penalty=lambda vectors: (curvature @ vectors, np.abs(curvature) @ np.abs(vectors)),
+            specs={**getattr(model, "_specs", {}), **getattr(model, "_interaction_specs", {})},
+            construction=_construction_columns(model, active_groups),
+            residual=stepped,
+            beta=np.asarray(state.beta, dtype=np.float64)[columns],
+            support=_prior_support(model, design),
+        )
+        r = W * residual
+        rsum = math.fsum(r.tolist())
+        slopes = np.asarray(state.beta, dtype=np.float64)[columns]
+        gradient = (
+            np.asarray(design.rmatvec(r), dtype=np.float64)
+            - system.mean_x * rsum
+            - curvature @ slopes
+        )
+        step = np.asarray(cast(Callable, truncated.solve)(gradient), dtype=np.float64)
+        if decided.weak is not None:
+            root = np.asarray(decided.weak.root)[columns]
+            step = step + root @ (root.T @ gradient)
+        intercept_step = rsum / system.sum_w - float(system.mean_x @ step)
+        decrement = float(gradient @ step + rsum * intercept_step)
+        return system, decomposition, decided, step, intercept_step, decrement
+
+    beta = np.asarray(solver.beta, dtype=np.float64).copy()
+    intercept = float(solver.intercept)
+    state = raw(beta, intercept)
+    current = objective(state)
+    stationary = False
+    for _ in range(_RESUME_ITERATIONS):
+        system, decomposition, decided, step, intercept_step, decrement = decide(state)
+        if not (math.isfinite(decrement) and math.isfinite(current)):
+            return None
+        if decrement <= tol * (abs(current) + tol):
+            stationary = True
+            break
+        accepted = False
+        scale = 1.0
+        for _ in range(_RESUME_HALVINGS):
+            moved = beta.copy()
+            moved[columns] += scale * step
+            trial = raw(moved, intercept + scale * intercept_step)
+            value = objective(trial)
+            if math.isfinite(value) and value <= current + 1e-12 * abs(current):
+                accepted = True
+                break
+            scale *= 0.5
+        if not accepted:
+            return None
+        beta, intercept, state, current = moved, intercept + scale * intercept_step, trial, value
+    if not stationary:
+        return None
+    feature_edf = np.zeros(len(rank_info.mean_x))
+    inverse = (
+        decided.covariance if decided.covariance is not None else decomposition.pseudo_inverse()
+    )
+    feature_edf[columns] = np.diag(inverse @ system.data_gram)
+    M_beta = system.hessian + system.sum_w * np.outer(system.mean_x, system.mean_x)
+    coefficient = decompose_gram_if_authoritative(M_beta, psd_by_construction=True)
+    W_final, _ = fisher_rows(model, state, weights)
+    resumed_rank = dataclasses.replace(
+        rank_info,
+        augmented=decomposition,
+        coefficient=coefficient if coefficient is not None else decompose_gram(M_beta),
+        sum_w=float(system.sum_w),
+        mean_x=_spread(system.mean_x, columns, len(rank_info.mean_x)),
+        data_gram=system.data_gram,
+        data_gram_weights=weights_fingerprint(W_final),
+        feature_edf=feature_edf,
+        feature_edf1=None,
+        group_edf={
+            group.name: float(np.sum(feature_edf[columns][group.sl])) for group in active_groups
+        },
+        identifiability=decided,
+    )
+    resumed = dataclasses.replace(
+        solver,
+        beta=beta,
+        intercept=intercept,
+        centred_intercept=None,
+        state_center=None,
+        rank_info=resumed_rank,
+        effective_df=1.0 + float(np.sum(feature_edf)),
+    )
+    if model._result is solver:
+        model._result = resumed
+    reml = getattr(model, "_reml_result", None)
+    if reml is not None and getattr(reml, "pirls_result", None) is solver:
+        reml.pirls_result = resumed
+    model._solver_result = resumed
+    certificate = dict(
+        context.certificate,
+        decomposition=_dense_base(
+            decomposition, np.diag(system.data_gram), design.n, lambda: system.hessian
+        ),
+        data_diagonal=np.diag(system.data_gram),
+        floor=decided.curvature_floor,
+    )
+    return dataclasses.replace(
+        context,
+        record=decided,
+        rank_info=resumed_rank,
+        data_gram=system.data_gram,
+        certificate=certificate,
+    )
+
+
+def _reml_pirls(model):
+    reml = getattr(model, "_reml_result", None)
+    return None if reml is None else getattr(reml, "pirls_result", None)
+
+
+def _set_reml_pirls(model, result) -> None:
+    reml = getattr(model, "_reml_result", None)
+    if reml is not None:
+        reml.pirls_result = result
+
+
+def _spread(values: NDArray, columns: NDArray, width: int) -> NDArray:
+    """``values`` on ``columns`` of a ``width`` vector, zero elsewhere."""
+    spread = np.zeros(width)
+    spread[columns] = values
+    return spread
+
+
+def _restore_separated(
+    model, solver, beta: NDArray, intercept: float, context: _PublicationContext
+) -> tuple[NDArray, float]:
+    """The withheld fit's coefficients moved along the separated span to the walk's predictor.
+
+    The span is exactly null on the kept rows, so no kept fitted value moves; on the separated
+    rows the move is the least-squares match of the walked fit's predictor (the walk stopped
+    near the boundary, where the estimate's limit puts those rows).
+    """
+    from superglm.solvers.mode_score import linear_predictor
+
+    walk, separated = context.walk, cast(NDArray, context.separated)
+    rows = np.asarray(cast("WithheldFit", context.withheld).rows, dtype=np.intp)
+    target = np.asarray(linear_predictor(model._dm, walk, model._fit_offset), dtype=np.float64)
+    provisional = dataclasses.replace(
+        solver,
+        beta=beta,
+        intercept=intercept,
+        centred_intercept=None,
+        state_center=None,
+    )
+    current = np.asarray(linear_predictor(model._dm, provisional, model._fit_offset), np.float64)
+    moves = np.asarray(context.explicit @ context.separated_explicit, dtype=np.float64)
+    step = np.linalg.lstsq(moves, (target - current)[rows], rcond=None)[0]
+    return beta + separated[1:] @ step, float(intercept + separated[0] @ step)
 
 
 def publish_identified_fit(model) -> None:
@@ -988,48 +1654,44 @@ def publish_identified_fit(model) -> None:
         return
     if penalty_can_zero_groups(fitted_penalty(model)):
         return
-    state = retained_linear_state(model)
-    if isinstance(state, StructuredLinearSystemState):
-        if state.identifiability is not None:
-            return
-        if int(state.profiled_factor.rank) == state.profiled_factor.shape[0]:
-            return
-        W = _solver_space_working_weights(model)
-        record = _structured_identifiability(
-            model, state, W, publish=True, residual=_stepped_residual(model, W)
-        )
-        rank_info = None
-    else:
-        rank_info = solver.rank_info
-        if (
-            rank_info is None
-            or rank_info.identifiability_policy != "penalised"
-            or rank_info.identifiability is not None
-            or rank_info.face is not None
-        ):
-            return
-        W = _solver_space_working_weights(model)
-        design, active_groups = _rank_active_state(model, rank_info)
-        if design.p == 0:
-            return
-        held = rank_info.data_gram
-        data_gram = (
-            held
-            if held is not None and rank_info.data_gram_weights == weights_fingerprint(W)
-            else _rank_centered_data_gram(design, W)
-        )
-        record = _record_identifiability(
-            model,
-            rank_info,
-            design,
-            active_groups,
-            W,
-            data_gram,
-            publish=True,
-            residual=_stepped_residual(model, W),
-        )
+    from superglm.model.separation_ops import separation_boundaries
+
+    boundaries = separation_boundaries(model)
+    context = _publication_context(model, boundaries)
+    if context is None:
+        return
+    # D6: the weak directions are fitted first, by the resumed IRLS (bounded: a direction whose
+    # estimate diverges does not reach stationarity and is left as 6a left it); the existence
+    # decision is then taken at the state published, and a resumption it cannot certify finite
+    # is undone
+    walked = (model._result, model._solver_result, _reml_pirls(model))
+    resumed = _resumed_weak_fit(model, context)
+    if boundaries:
+        decided = _publish_existence(model, context if resumed is None else resumed, boundaries)
+        separation = None if decided.record is None else decided.record.separation
+        if resumed is not None and separation is not None and separation.state == "unresolved":
+            model._result, model._solver_result = walked[0], walked[1]
+            _set_reml_pirls(model, walked[2])
+            _install_record(
+                context,
+                dataclasses.replace(cast(Identifiability, context.record), separation=separation),
+            )
+        else:
+            context = decided
+    elif resumed is not None:
+        context = resumed
+    solver = model._solver_pirls_result()
+    record, state, rank_info, data_gram = (
+        context.record,
+        context.state,
+        context.rank_info,
+        context.data_gram,
+    )
     if record is None or (
-        record.gauge is None and record.weak is None and record.covariance is None
+        record.gauge is None
+        and record.weak is None
+        and record.covariance is None
+        and context.withheld is None
     ):
         return
     # The EDF moves where the published fit's information differs from its solver's: weak
@@ -1054,6 +1716,7 @@ def publish_identified_fit(model) -> None:
             edf_total = 1.0 + float(np.sum(edf))
     elif refit_edf and rank_info is not None:
         columns = np.asarray(rank_info.selected_columns, dtype=np.intp)
+        _, active_groups = _rank_active_state(model, rank_info)
         inverse = (
             record.covariance
             if record.covariance is not None
@@ -1094,6 +1757,8 @@ def publish_identified_fit(model) -> None:
         moved_intercept = intercept + record.weak.intercept_step
     if record.gauge is not None:
         moved, moved_intercept, _ = record.gauge.coefficients(moved, moved_intercept)
+    if context.withheld is not None:
+        moved, moved_intercept = _restore_separated(model, solver, moved, moved_intercept, context)
     changes: dict = {"beta": moved, "intercept": moved_intercept}
     if edf_total is not None:
         changes["effective_df"] = edf_total
@@ -1112,8 +1777,9 @@ def publish_identified_fit(model) -> None:
         # the intercept and every slope direction the published fit identifies
         changes["reml_hessian_rank"] = 1 + record.rank
     published = dataclasses.replace(solver, **changes)
-    refit = record.weak is not None or published.effective_df != solver.effective_df
-    if record.weak is not None:
+    withheld = context.withheld is not None
+    refit = record.weak is not None or published.effective_df != solver.effective_df or withheld
+    if record.weak is not None or withheld:
         published = dataclasses.replace(published, deviance=_published_deviance(model, published))
     if model._result is solver:
         model._result = published
@@ -1407,6 +2073,12 @@ def inference_identified(inference: dict) -> NDArray | None:
     ``coefficient_estimable``; such a model keeps them (``RankInfo.coefficient_identified``).
     """
     return inference.get("coefficient_identified", inference.get("coefficient_estimable"))
+
+
+def inference_intercept_identified(inference: dict) -> bool:
+    """Whether an inference record's fit has a finite intercept (false when separation moves it)."""
+    record = inference.get("identifiability")
+    return True if record is None else bool(record.intercept_identified())
 
 
 def fit_inference_info(model):

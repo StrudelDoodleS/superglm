@@ -180,6 +180,7 @@ def build_coef_rows(
     precomputed_edf1: NDArray | None = None,
     precomputed_design_moments: tuple[NDArray, NDArray, NDArray] | None = None,
     coefficient_identified_override: NDArray | None = None,
+    intercept_identified: bool = True,
     selected_group_names: set[str] | None = None,
     group_matrices: list | None = None,
     sample_weights: NDArray | None = None,
@@ -344,6 +345,9 @@ def build_coef_rows(
         augmented_reference_contrast,
     )
     icpt_se = float(standard_errors(icpt_var, result, known_scale=known_scale))
+    if not intercept_identified:
+        # separation moves the intercept: no finite estimate, no standard error
+        icpt_se = float("nan")
 
     rows: list[_CoefRow] = []
 

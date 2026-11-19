@@ -6,6 +6,7 @@ finite garbage on a separated design).
 """
 
 import re
+import sys
 import warnings
 from pathlib import Path
 
@@ -227,7 +228,9 @@ def program_sizes(monkeypatch):
     real = optimize.linprog
 
     def spy(c, *, A_ub, **kwargs):
-        stored.append((A_ub.nnz if sparse.issparse(A_ub) else A_ub.size, A_ub.shape[0]))
+        # the build-time scans' programs; the published fit's existence test is its own
+        if sys._getframe(1).f_code.co_name != "separating_direction":
+            stored.append((A_ub.nnz if sparse.issparse(A_ub) else A_ub.size, A_ub.shape[0]))
         return real(c, A_ub=A_ub, **kwargs)
 
     monkeypatch.setattr(optimize, "linprog", spy)

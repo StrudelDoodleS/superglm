@@ -19,7 +19,7 @@ from superglm.inference._term_helpers import (
 from superglm.inference.covariance import covariance_selected_diagonal
 from superglm.inference.summary import _CoefRow
 from superglm.model.fit_state import fitted_lambda2, fitted_penalty
-from superglm.model.state_ops import inference_identified
+from superglm.model.state_ops import inference_identified, inference_intercept_identified
 from superglm.penalties.base import selection_shrunk_group_names
 from superglm.profiling._reporting import (
     cached_tweedie_profile_ci,
@@ -398,6 +398,7 @@ def summary(
         precomputed_edf=inf["edf"],
         precomputed_edf1=inf["edf1"],
         coefficient_identified_override=inference_identified(inf),
+        intercept_identified=inference_intercept_identified(inf),
         selected_group_names=selected_names,
         group_matrices=model._dm.group_matrices if model._dm is not None else None,
         sample_weights=model._fit_weights,

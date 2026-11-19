@@ -16,17 +16,18 @@ only ``selection_penalty`` is consulted, since ``Categorical`` blocks carry no `
 
 from __future__ import annotations
 
+import math
 import warnings
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._roundoff import gamma
+from superglm._roundoff import UNIT_ROUNDOFF, gamma
 from superglm._warn import warn_caller
 
 #: Working-weight ratio past which an exhausted, stagnant IRLS run is treated
@@ -1205,3 +1206,345 @@ def format_curve_separation(findings: list[SeparatedCurve]) -> str:
         )
     )
     return "\n".join([head, *lines, tail])
+
+
+# ── Existence of the penalised estimate ────────────────────────────────────
+#
+# A fit maximises ``sum_i w_i l_i(eta_i) - beta'S beta / 2`` with ``S`` semidefinite.  For the
+# families ``response_boundaries`` names every row's log-likelihood is bounded above, so along
+# a direction with ``S gamma != 0`` the objective falls like ``-t^2``: only ``gamma`` in
+# ``null(S)`` can recede.  There the maximiser exists unless some ``z = A gamma != 0`` has
+# ``z_i = 0`` on the interior rows, ``z_i <= 0`` where ``y_i`` is at the lower boundary and
+# ``z_i >= 0`` where it is at the upper one (Verbeek 1989; Santos Silva & Tenreyro 2010;
+# Correia, Guimaraes & Zylkin 2019, arXiv:1903.01633, Prop. 1; for the binomial, Albert &
+# Anderson 1984 and Silvapulle 1981).  Withholding the rows such a direction separates
+# leaves the fitted values of the others and every coefficient the direction does not move
+# unchanged (Prop. 3), so a separated fit publishes the fit on the rows it keeps.
+#
+# Every decision here is certified or reported unresolved, never guessed: a separating
+# direction is verified on the rows exactly (``exact_row_signs``), and absence is proved by
+# the fitted score (``recession_excluded``).
+
+SeparationState = Literal["absent", "present", "unresolved"]
+
+# Snapping grids tried on a proposed direction before it is verified exactly: the
+# verification is the proof, so any proposal that passes it is a certificate.
+_SNAP_BITS = (0, 1, 2, 3, 4, 6, 8, 12, 16, 20, 24, 30)
+
+
+@dataclass(frozen=True)
+class Separation:
+    """Whether a fit's penalised estimate exists, decided from its responses and design.
+
+    ``state`` is one of:
+
+    - ``"absent"``: certified; every coefficient has a finite estimate.
+    - ``"present"``: certified; ``rows`` (the fit's row indices) are every separated row and
+      ``span`` (``(1 + width) x k``, ``[intercept; slopes]`` in fitted coordinates, verified on
+      the rows exactly) spans the directions along which the estimate is infinite.
+    - ``"unresolved"``: float64 cannot decide; ``span`` holds the directions a separating ray
+      was proposed along, if any.
+
+    ``decided_by`` names the route, ``boundaries`` the family's response boundaries, and
+    ``unique`` is false for a link whose likelihood is not concave (cauchit: the sign test
+    proves a maximiser exists, not that it is unique).  ``labels`` names the categorical
+    levels whose rows are all separated, ``names`` the coefficients ``span`` moves, and
+    ``work`` counts what the decision read.
+    """
+
+    state: SeparationState
+    decided_by: str
+    rows: NDArray = field(default_factory=lambda: np.zeros(0, dtype=np.intp))
+    span: NDArray = field(default_factory=lambda: np.zeros((1, 0)))
+    boundaries: tuple[str, ...] = ()
+    unique: bool = True
+    labels: tuple[str, ...] = ()
+    names: tuple[str, ...] = ()
+    work: Mapping[str, int] = field(default_factory=dict)
+
+    def notes(self) -> tuple[str, ...]:
+        """The summary's footnote for this decision (empty when the estimate exists and is unique)."""
+        if self.state == "absent":
+            if self.unique:
+                return ()
+            return (
+                "The cauchit link's likelihood is not concave: no direction separates the "
+                "responses, so a maximiser exists, but it need not be unique.",
+            )
+        listed = ", ".join(self.names[:_MAX_LISTED_LABELS])
+        if len(self.names) > _MAX_LISTED_LABELS:
+            listed += f" and {len(self.names) - _MAX_LISTED_LABELS} more"
+        edges = " or ".join({"zero": "0", "one": "1"}[edge] for edge in self.boundaries)
+        if self.state == "unresolved":
+            if not self.names:
+                return (
+                    "Whether every coefficient has a finite estimate is not resolved at "
+                    f"float64: the fit's score does not prove it, and no direction separating the "
+                    f"responses at {edges} verifies exactly on the rows.",
+                )
+            return (
+                f"{len(self.names)} standard errors withheld (shown as ---): whether their "
+                f"coefficients are finite is not resolved at float64 ({listed}); responses at "
+                f"{edges} may be separated along a direction float64 cannot verify. Merging "
+                "sparse levels or penalising the term gives every coefficient a finite estimate.",
+            )
+        where = "; ".join(self.labels) if self.labels else "rows named in diagnostics()"
+        one = len(self.names) == 1
+        plural = "coefficient has" if one else "coefficients have"
+        moving = "it" if one else "them"
+        return (
+            f"{len(self.names)} {plural} no finite estimate (standard error shown as ---): "
+            f"{listed}. {self.rows.size} rows with responses at {edges} ({where}) are "
+            f"separated: a direction moving {moving} fits those rows exactly at the "
+            f"boundary, so {'its estimate is' if one else 'their estimates are'} infinite. "
+            "The other coefficients and their "
+            "standard errors are the fit on the remaining rows. Merging or re-basing the "
+            "levels named, or penalising the term, gives every coefficient a finite estimate.",
+        )
+
+    @property
+    def reached(self) -> NDArray:
+        """The slope coordinates ``span`` moves: the coefficients with no finite estimate."""
+        if self.span.shape[1] == 0:
+            return np.zeros(0, dtype=np.intp)
+        return np.flatnonzero(np.any(self.span[1:] != 0.0, axis=1)).astype(np.intp)
+
+    @property
+    def intercept_reached(self) -> bool:
+        """Whether ``span`` moves the intercept."""
+        return bool(self.span.shape[1] and np.any(self.span[0] != 0.0))
+
+
+def response_sides(y: NDArray, prior_weights: NDArray, boundaries: tuple[str, ...]) -> NDArray:
+    """Each row's side of the response's support, as an ``int8``.
+
+    ``-1`` on the lower boundary (``y <= 0`` where ``"zero"`` is a boundary), ``+1`` on the
+    upper (``y >= 1`` where ``"one"`` is), ``0`` inside, and ``2`` for a row with no prior
+    weight, which carries no likelihood.  Log-binomial's boundaries are ``("zero",)``: a
+    success sits at the mean space's finite edge, reached at a finite predictor, so it is an
+    interior row (an equality), never separation.
+    """
+    y = np.asarray(y, dtype=np.float64)
+    live = np.asarray(prior_weights, dtype=np.float64) > 0.0
+    sides = np.zeros(y.shape, dtype=np.int8)
+    if "zero" in boundaries:
+        sides[y <= 0.0] = -1
+    if "one" in boundaries:
+        sides[y >= 1.0] = 1
+    sides[~live] = 2
+    return sides
+
+
+def recession_excluded(margin: float, defect: float, curvature: float, weight: float) -> bool:
+    """Whether a fitted score proves that no direction of recession exists.
+
+    Stiemke's alternative (Stiemke 1915; Mangasarian, *Nonlinear Programming*, 1969, ch. 2;
+    the form Konis 2007, ch. 4 uses): either some ``h`` with ``S h = 0`` and ``z = A h``
+    separates (``z_i = 0`` inside, ``s_i z_i >= 0`` on the boundary, ``z != 0``), or a vector
+    ``mu > 0`` on the boundary rows balances them, never both.  A fit supplies ``mu`` from its
+    score after one Newton step ``v``: ``r' = W (z - eta - A v)``, ``mu_i = s_i r'_i``, with
+    ``A'r' - S (beta + v) = e`` its defect.  For a separating ``h`` the interior rows and the
+    penalty drop out of ``h'e``, so ``h'e = sum_B mu_i |z_i| >= m ||A h||``, ``m = min mu``;
+    and ``||A h||^2 >= h'H h / max W >= lambda ||h~||^2 / max W`` in Jacobi coordinates
+    ``h~``, ``lambda`` a certified lower bound on the Jacobi-scaled Hessian's smallest
+    eigenvalue.  With ``h'e <= ||h~|| defect`` (``defect`` a bound on the scaled ``e``), a
+    separating ``h`` needs ``m sqrt(lambda / max W) <= defect``; so when the margin clears it
+    no ``h`` separates.  A sufficient test (Sol's gate review): when it fails the exact path
+    decides.
+    """
+    if not (margin > 0.0 and curvature > 0.0 and weight > 0.0):
+        return False
+    if not (math.isfinite(margin) and math.isfinite(defect) and math.isfinite(weight)):
+        return False
+    return margin * math.sqrt(curvature / weight) > defect
+
+
+def exact_row_signs(matrix, direction: NDArray) -> NDArray:
+    """The exact sign of each row of ``matrix @ direction``, as an ``int8``.
+
+    ``matrix`` is a SciPy CSR matrix.  Every product is split exactly (Dekker's TwoProduct,
+    ``mode_score.two_product``).  A row whose plain sum clears its rounding bound,
+    ``gamma_(2k) sum |terms|`` over its ``2k`` addends (Higham 2002, eq. 4.4), has that sum's
+    sign; every other row is summed exactly by ``math.fsum`` (Shewchuk's algorithm, correctly
+    rounded, so its sign is the exact sum's).  A row whose product leaves the normal range
+    (``0 < |p| < 2^-969``, where TwoProduct's tail is lost) is ``2``: not decidable here.
+    """
+    from superglm.solvers.mode_score import two_product
+
+    indptr = np.asarray(matrix.indptr, dtype=np.intp)
+    rows = indptr.size - 1
+    signs = np.zeros(rows, dtype=np.int8)
+    if matrix.nnz == 0:
+        return signs
+    direction = np.asarray(direction, dtype=np.float64)
+    high, low = two_product(np.asarray(matrix.data, dtype=np.float64), direction[matrix.indices])
+    counts = np.diff(indptr)
+    owner = np.repeat(np.arange(rows), counts)
+    plain = np.zeros(rows)
+    magnitude = np.zeros(rows)
+    np.add.at(plain, owner, high + low)
+    np.add.at(magnitude, owner, np.abs(high) + np.abs(low))
+    lost = np.zeros(rows, dtype=bool)
+    np.logical_or.at(lost, owner, (high != 0.0) & (np.abs(high) < 2.0**-969))
+    bound = gamma(2 * counts + 2) * magnitude
+    clear = np.abs(plain) > bound
+    signs[clear] = np.sign(plain[clear]).astype(np.int8)
+    for row in np.flatnonzero(~clear & ~lost & (counts > 0)):
+        lo, hi = indptr[row], indptr[row + 1]
+        total = math.fsum(np.concatenate((high[lo:hi], low[lo:hi])).tolist())
+        signs[row] = int(np.sign(total))
+    signs[lost & ~clear] = 2
+    return signs
+
+
+def _verified_separation(matrix, sides: NDArray, direction: NDArray) -> NDArray | None:
+    """The rows ``direction`` separates, if it is exactly a direction of recession; else ``None``.
+
+    Exact (``exact_row_signs``): zero on every interior row, the boundary's sign or zero on
+    every boundary row, and strictly the boundary's sign on at least one.
+    """
+    signs = exact_row_signs(matrix, direction)
+    live = sides != 2
+    if np.any(signs[live] == 2) or np.any(signs[sides == 0] != 0):
+        return None
+    boundary = np.flatnonzero((sides == 1) | (sides == -1))
+    signed = sides[boundary].astype(np.int16) * signs[boundary]
+    if np.any(signed < 0):
+        return None
+    strict = boundary[signed > 0]
+    return strict if strict.size else None
+
+
+def _snapped(direction: NDArray) -> list[NDArray]:
+    """Proposals near ``direction``: itself scaled to unit maximum, and on dyadic grids."""
+    largest = float(np.max(np.abs(direction), initial=0.0))
+    if not (largest > 0.0 and math.isfinite(largest)):
+        return []
+    unit = direction / largest
+    proposals = [unit]
+    for bits in _SNAP_BITS:
+        scale = float(2**bits)
+        proposals.append(np.round(unit * scale) / scale)
+    return proposals
+
+
+def interior_null_directions(matrix, interior: NDArray) -> NDArray:
+    """Directions the interior rows of ``matrix`` cannot tell from zero: the candidates.
+
+    The first step of Correia, Guimaraes & Zylkin's App. A.2 (after Larch et al. 2019): a
+    direction of recession is zero on every interior row, so it lies in the null space of
+    their rows.  Read from the column-equilibrated Gram; a direction whose eigenvalue clears
+    ``gamma_(n + 2) q`` of the largest is certainly not null (Weyl, the Gram's formation
+    bound), and the rest are proposed.  The candidates only steer the linear program: the
+    direction it finds is verified exactly (``_verified_separation``), so a candidate kept in
+    excess costs work, never a decision.
+    """
+    width = matrix.shape[1]
+    rows = matrix[np.flatnonzero(interior)]
+    if rows.shape[0] == 0:
+        return np.eye(width)
+    gram = np.asarray((rows.T @ rows).todense(), dtype=np.float64)
+    scale = np.sqrt(np.maximum(np.diag(gram), 0.0))
+    untouched = scale == 0.0
+    safe = np.where(untouched, 1.0, scale)
+    values, vectors = np.linalg.eigh(gram / np.outer(safe, safe))
+    largest = float(np.max(np.abs(values), initial=0.0))
+    kept = values <= gamma(rows.shape[0] + 2) * width * max(largest, 1.0)
+    candidates = vectors[:, kept] / safe[:, None]
+    # an eigenvector's entries at its own rounding are a structural zero's noise: cut them, so a
+    # row the candidates do not reach gives an exact zero and constrains no proposal
+    reach = np.max(np.abs(candidates), axis=0, initial=0.0)
+    candidates[np.abs(candidates) <= 2.0**-40 * reach] = 0.0
+    return candidates
+
+
+def separating_direction(matrix, sides: NDArray) -> tuple[NDArray | None, NDArray, dict]:
+    """A direction of recession of the rows of ``matrix``, verified exactly, with its rows.
+
+    ``matrix`` (CSR) holds the rows' explicit columns, ``sides`` each row's side
+    (``response_sides``).  The linear program is Correia, Guimaraes & Zylkin's App. A.2
+    (eq. 19) on the candidates ``Phi`` (``interior_null_directions``): with ``Z = M_B Phi`` on
+    the boundary rows, maximise ``sum t`` under ``t_i <= s_i Z_i phi / ||Z_i||``, ``0 <= t <= 1``
+    and ``phi`` free.  Summing separating rays gives one strict on every separable row, and
+    scaling it makes every such ``t_i`` one, so the optimum separates every row that can be
+    separated (Silvapulle & Burridge 1986; Konis 2007; the capped-slack form Sol's gate review
+    checks).  The program's answer is a proposal: ``Phi phi``, and its snaps to dyadic grids,
+    are verified on every row exactly (``_verified_separation``), and the one separating the
+    most rows is returned with them.  ``None`` when no proposal verifies.  The third value
+    counts the work.
+    """
+    from scipy import sparse
+    from scipy.optimize import linprog
+
+    work = {"rows": int(matrix.shape[0]), "columns": int(matrix.shape[1])}
+    candidates = interior_null_directions(matrix, sides == 0)
+    work["candidates"] = int(candidates.shape[1])
+    boundary = np.flatnonzero((sides == 1) | (sides == -1))
+    if candidates.shape[1] == 0 or boundary.size == 0:
+        return None, np.zeros(0, dtype=np.intp), work
+    rows = matrix[boundary]
+    values = np.asarray(rows @ candidates, dtype=np.float64)
+    reach = np.asarray(abs(rows) @ np.abs(candidates), dtype=np.float64)
+    largest = np.max(np.abs(values), axis=1)
+    # a row the candidates move only at their own rounding constrains no proposal
+    moved = largest > math.sqrt(UNIT_ROUNDOFF) * np.max(reach, axis=1)
+    work["lp_rows"] = int(np.count_nonzero(moved))
+    if not np.any(moved):
+        return None, np.zeros(0, dtype=np.intp), work
+    signed = (sides[boundary][moved, None] * values[moved]) / largest[moved, None]
+    count, width = signed.shape
+    program = linprog(
+        np.concatenate((np.zeros(width), -np.ones(count))),
+        A_ub=sparse.hstack(
+            (sparse.csr_matrix(-signed), sparse.identity(count, format="csr")), format="csr"
+        ),
+        b_ub=np.zeros(count),
+        bounds=[(None, None)] * width + [(0.0, 1.0)] * count,
+        method="highs",
+    )
+    work["lp_status"] = int(program.status)
+    if program.status != 0 or program.x is None:
+        return None, np.zeros(0, dtype=np.intp), work
+    proposal = candidates @ np.asarray(program.x[:width], dtype=np.float64)
+    best: tuple[NDArray, NDArray] | None = None
+    for direction in _snapped(proposal):
+        strict = _verified_separation(matrix, sides, direction)
+        if strict is not None and (best is None or strict.size > best[1].size):
+            best = (direction, strict)
+    work["verified"] = int(best is not None)
+    if best is None:
+        return None, np.zeros(0, dtype=np.intp), work
+    return best[0], best[1], work
+
+
+def exactly_null(matrix, direction: NDArray, rows: NDArray) -> bool:
+    """Whether ``direction`` is exactly zero on ``rows`` of ``matrix`` (``exact_row_signs``)."""
+    if rows.size == 0:
+        return True
+    return bool(np.all(exact_row_signs(matrix[rows], direction) == 0))
+
+
+def exact_null_basis(matrix, directions: NDArray, rows: NDArray) -> NDArray | None:
+    """A basis of ``span(directions)`` verified to vanish exactly on ``rows``, or ``None``.
+
+    Each direction is reduced to a row-echelon basis of the span (pivoted on its largest
+    entries, so a structural direction becomes small integers or dyadic fractions) and snapped
+    (``_snapped``); the snap that vanishes exactly on ``rows`` is kept.  ``None`` when some
+    direction has no exact snap: the span is then not known exactly at float64.
+    """
+    count = directions.shape[1]
+    if count == 0:
+        return np.zeros((directions.shape[0], 0))
+    import scipy.linalg
+
+    # an echelon basis: pivot on the largest entries, unit there and zero on the others' pivots
+    _, _, pivots = scipy.linalg.qr(directions.T, pivoting=True, mode="economic")
+    pivots = np.asarray(pivots[:count])
+    echelon = directions @ np.linalg.solve(directions[pivots], np.eye(count))
+    basis = []
+    for column in echelon.T:
+        exact = next((snap for snap in _snapped(column) if exactly_null(matrix, snap, rows)), None)
+        if exact is None:
+            return None
+        basis.append(exact)
+    return np.column_stack(basis)

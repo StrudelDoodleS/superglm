@@ -1438,6 +1438,13 @@ class ModelMetrics:
         return np.ones(len(self._result.beta), dtype=bool)
 
     @cached_property
+    def _fit_intercept_identified(self) -> bool:
+        """Whether the fit's intercept has a finite estimate: separation is the fit's decision."""
+        from superglm.model.state_ops import inference_intercept_identified
+
+        return inference_intercept_identified(self._model._fit_inference_info)
+
+    @cached_property
     def _coefficient_dispersion(self) -> float:
         """Dispersion used by the explicitly quasi-likelihood SE accessor."""
         if not self._known_scale:
@@ -1560,6 +1567,8 @@ class ModelMetrics:
         families. Rendered coefficient tables retain fitted-family scale.
         """
         _, _, _, XtWX_inv_aug, _ = self._active_info
+        if not self._fit_intercept_identified:
+            return float("nan")
         icpt_var = float(XtWX_inv_aug[0, 0])
         if icpt_var <= 0:
             return 0.0
@@ -1569,6 +1578,8 @@ class ModelMetrics:
     def intercept_se_raw(self) -> float:
         """Exact-family intercept SE for known scale, otherwise assuming phi=1."""
         _, _, _, XtWX_inv_aug, _ = self._active_info
+        if not self._fit_intercept_identified:
+            return float("nan")
         icpt_var = float(XtWX_inv_aug[0, 0])
         if icpt_var <= 0:
             return 0.0

@@ -42,7 +42,13 @@ float64, never decided.
 **Directions the solver truncated that the rows identify** are fitted and reported, as mgcv's
 penalised fit has them and ``lm``'s rank decision does not (``WeakDirections``): their
 covariance is ``T C^-1 T'`` on the refined directions, and their coefficients take the Newton
-step their score gives, which for a Gaussian family with the identity link is the penalised fit.
+step their score gives, which for a Gaussian family with the identity link is the penalised fit;
+under any other family the publication resumes penalised IRLS on the identified subspace
+(``state_ops._resumed_weak_fit``).
+
+**Whether each estimate is finite** is the fit's existence decision
+(``model.separation_ops``, ``Identifiability.separation``): every coefficient a certified
+separating direction moves has no finite estimate and no standard error.
 
 **Which constraint is published.** Where ``H`` is singular, the fit publishes the coefficients
 with one constraint per null direction (``Gauge``): each null direction is written on the terms'
@@ -223,6 +229,12 @@ class Identifiability:
     published fit's, where it differs from its solver's.  ``row_directions`` counts the
     directions read from the rows, and ``rank`` the slope directions the published fit
     identifies (``None`` for a record that describes its solver's coefficients).
+    ``curvature_floor`` is a certified lower bound on the Jacobi-scaled Hessian's eigenvalues on
+    the directions the record identifies (zero where none is certified: a direction not resolved
+    at float64), which the existence certificate reads (``separation.recession_excluded``).
+    ``separation`` is the fit's existence decision (``diagnostics.separation.Separation``): the
+    coefficients a certified separating direction moves have no finite estimate and no standard
+    error, and an unresolved one withholds the standard errors its proposal moves.
     """
 
     width: int
@@ -236,6 +248,8 @@ class Identifiability:
     edf: NDArray | None = None
     edf1: NDArray | None = None
     rank: int | None = None
+    curvature_floor: float = 0.0
+    separation: Any = None
 
     def weak_root(self, columns: NDArray) -> NDArray | None:
         """``[-c'PU; PU]`` on ``columns``, the weak directions' published root with its intercept.
@@ -260,7 +274,13 @@ class Identifiability:
         identified[[alias.coordinate for alias in self.aliases if alias.coordinate is not None]] = (
             False
         )
+        if self.separation is not None:
+            identified[np.asarray(self.separation.reached, dtype=np.intp)] = False
         return identified
+
+    def intercept_identified(self) -> bool:
+        """Whether the intercept has a finite estimate: false when separation moves it."""
+        return self.separation is None or not self.separation.intercept_reached
 
     def published_covariance(
         self, covariance: NDArray, columns: NDArray, *, weak: bool = True
@@ -292,9 +312,29 @@ class Identifiability:
                     "source": alias.source,
                 }
                 for alias in self.aliases
+            ]
+            + [
+                {
+                    "term": name,
+                    "coordinate": None if name == "Intercept" else int(coordinate),
+                    "aliased_with": "",
+                    "reason": "no finite estimate: separated"
+                    if self.separation.state == "present"
+                    else "not resolved at float64: may be separated",
+                    "source": "separation",
+                }
+                for name, coordinate in self._separation_coordinates()
             ],
             columns=["term", "coordinate", "aliased_with", "reason", "source"],
         )
+
+    def _separation_coordinates(self) -> list[tuple[str, int]]:
+        """``(name, fitted coordinate)`` of each coefficient separation withholds, intercept first."""
+        if self.separation is None:
+            return []
+        coordinates = [-1] if self.separation.intercept_reached else []
+        coordinates += [int(c) for c in self.separation.reached]
+        return list(zip(self.separation.names, coordinates, strict=False))
 
     def notes(self) -> tuple[str, ...]:
         """The summary's footnote: each alias with what it is aliased with, and the accuracy."""
@@ -336,8 +376,13 @@ class Identifiability:
                 "include them, and the coefficients along them stay where the solver stopped, "
                 "so those estimates are not the penalised optimum."
             )
+        if self.separation is not None:
+            notes.extend(self.separation.notes())
         accuracy = self.penalised_condition * UNIT_ROUNDOFF
-        if not self.aliases and accuracy > _ACCURACY_NOTE:
+        # a held separated span is null on the kept rows, as an alias is: its condition is not
+        # the standard errors'
+        separated = self.separation is not None and self.separation.state == "present"
+        if not self.aliases and not separated and accuracy > _ACCURACY_NOTE:
             digits = max(0, int(math.floor(-math.log10(accuracy)))) if accuracy < 1.0 else 0
             notes.append(
                 f"Standard errors carry about {digits} significant digits: the penalised "
@@ -357,7 +402,8 @@ class TruncatedDecomposition:
     spectral decomposition's (``fixed_coordinates``).  ``column_scale`` is ``sqrt(diag H)``,
     ``pre_truncation_condition`` the condition number of the certified part, ``solve`` the
     inverse on that part (``x -> V x``) and ``covariance`` that inverse as a matrix where it
-    replaces the published decomposition's own.
+    replaces the published decomposition's own.  ``floor`` is a certified lower bound on the
+    certified part's Jacobi-scaled eigenvalues (zero when none is stated).
     """
 
     null_vectors: NDArray
@@ -366,6 +412,7 @@ class TruncatedDecomposition:
     pre_truncation_condition: float
     solve: Callable[[NDArray], NDArray] | None = None
     covariance: NDArray | None = None
+    floor: float = 0.0
 
     @property
     def width(self) -> int:
@@ -508,6 +555,7 @@ class _Split:
     data: NDArray
     candidates: NDArray
     penalised: NDArray
+    shift: float = 0.0
 
     def directions(self, mask: NDArray) -> NDArray:
         return self.refined @ self.vectors[:, mask]
@@ -530,6 +578,7 @@ def decide_identifiability(
     residual: NDArray | None = None,
     beta: NDArray | None = None,
     support: NDArray | None = None,
+    separated: NDArray | None = None,
 ) -> Identifiability:
     """The identifiability record of a fit whose decomposition of ``H`` is ``decomposition``.
 
@@ -548,12 +597,21 @@ def decide_identifiability(
     construction columns (``_construction_gauge``) and the fit of its weak directions
     (``WeakDirections``); one that cannot move them describes them as ``published``, its
     solver's decomposition, holds them (``_published_blanks``).
+
+    ``separated`` (``width x k``, fitted slope coordinates) spans the directions a certified
+    separation leaves infinite (``diagnostics.separation.Separation``) on a fit whose separated
+    rows are withheld, where they are null: they are held where the fit left them, never moved,
+    and no alias names them (the separation record does).  The record's ``curvature_floor`` is
+    the certified part's (``TruncatedDecomposition.floor``), with the weak directions' curvature
+    over their Jacobi norm, halved, where they are read; zero when a direction is not resolved.
     """
     columns = np.asarray(columns, dtype=np.intp)
     condition = float(decomposition.pre_truncation_condition)
     candidates = _orthonormal(decomposition, decomposition.null_vectors)
     if candidates.shape[1] == 0:
-        return Identifiability(width, (), condition, float("nan"))
+        return Identifiability(
+            width, (), condition, float("nan"), curvature_floor=float(decomposition.floor)
+        )
     scale = np.asarray(decomposition.column_scale, dtype=np.float64)
     candidates = candidates / np.where(scale > 0.0, scale, 1.0)[:, None]
     rows = design is not None and W is not None and data_diagonal is not None
@@ -577,6 +635,11 @@ def decide_identifiability(
             null, floating = _design_null(
                 decomposition, null, groups, design, support, cast(Callable, penalty)
             )
+    floor = _curvature_floor(decomposition, split, scale, floating.shape[1])
+    quiet = 0
+    if separated is not None and np.shape(separated)[1] and null.shape[1] and not floating.shape[1]:
+        null, floating = _hold_separated(np.asarray(separated)[columns], null, scale)
+        quiet = floating.shape[1]
     owner = np.empty(decomposition.width, dtype=np.intp)
     for index, group in enumerate(groups):
         owner[group.sl] = index
@@ -607,6 +670,9 @@ def decide_identifiability(
             facts,
             specs or {},
         )
+        if quiet:
+            # the held separated directions follow the aliases; the separation record names them
+            aliases = aliases[: _orthonormal(decomposition, null).shape[1]]
         if split is not None and weak_mask is not None and np.any(weak_mask):
             weak = _weak_directions(
                 split,
@@ -635,7 +701,51 @@ def decide_identifiability(
             if construction is None
             else int(decomposition.rank) + (0 if weak is None else weak.root.shape[1])
         ),
+        curvature_floor=floor,
     )
+
+
+def _curvature_floor(
+    decomposition: TruncatedDecomposition, split: _Split | None, scale: NDArray, floating: int
+) -> float:
+    """A certified lower bound on the Jacobi-scaled Hessian on the directions the record identifies.
+
+    The certified part's is the decomposition's (``TruncatedDecomposition.floor``).  The weak
+    directions ``U`` (``T - V H T``, H-orthogonal to it) have curvature at least their smallest
+    Schur eigenvalue less the coupling's uncertainty, ``mu - shift``, per unit of ``c`` in
+    ``U Q c``, so per Jacobi unit at least ``(mu - shift) / ||D^1/2 U Q||^2``; and for
+    ``h = k + U Q c``, ``||h~||^2 <= 2 (||k~||^2 + ||U~ c||^2)``, so the joint bound is half the
+    smaller.  A direction not resolved at float64 (``split``'s, or one the design identifies
+    and the weights do not) leaves no bound: zero.  The null directions are the quotient.
+    """
+    floor = float(decomposition.floor)
+    if split is None:
+        return 0.0 if decomposition.null_vectors.shape[1] else floor
+    unresolved = ~split.null & ~split.identified
+    if floating or np.any(unresolved):
+        return 0.0
+    if not np.any(split.identified):
+        return floor
+    jacobi = scale[:, None] * split.directions(split.identified)
+    norm = float(np.linalg.norm(jacobi, 2))
+    if not norm > 0.0:
+        return 0.0
+    weak = (float(np.min(split.values[split.identified])) - split.shift) / norm**2
+    return 0.5 * min(floor, weak) if weak > 0.0 else 0.0
+
+
+def _hold_separated(separated: NDArray, null: NDArray, scale: NDArray) -> tuple[NDArray, NDArray]:
+    """``null`` less the separated span, and the separated span, held (``decide_identifiability``).
+
+    In Jacobi coordinates the separated directions' orthonormal basis ``Q`` is projected out of
+    ``null``, and what keeps a singular value above the share floor stays an alias.
+    """
+    safe = np.where(scale > 0.0, scale, 1.0)[:, None]
+    basis = np.linalg.qr(separated * safe)[0]
+    rest = null * safe
+    rest = rest - basis @ (basis.T @ rest)
+    left, singular, _ = np.linalg.svd(rest, full_matrices=False)
+    return left[:, singular > _SHARE_FLOOR] / safe, np.asarray(separated, dtype=np.float64)
 
 
 def _read_rows(
@@ -714,6 +824,7 @@ def _read_rows(
         data=np.asarray(cross, dtype=np.float64),
         candidates=candidates,
         penalised=applied,
+        shift=shift,
     )
 
 

@@ -1187,8 +1187,14 @@ A direction the solver truncated that the rows identify, such as two columns
 $10^{-8}$ apart, is fitted and reported, as mgcv does: its standard error
 comes from the rows, and its coefficients take the Newton step the rows give,
 which for a Gaussian fit with the identity link is the penalized fit. Under
-other families the coefficients along such a direction stay where the solver
-stopped, and the summary says so.
+other families the fit resumes penalized IRLS on the directions it identifies,
+at its smoothing parameters: each step is the Newton step on the part the
+solver certified and on the truncated directions together, halved until the
+penalized deviance does not rise, until the Newton decrement is under
+$10^{-13}$ of the objective. The coefficients, standard errors and EDF are
+those of the last accepted step; a Poisson pair $10^{-8}$ apart then matches
+mgcv to $10^{-7}$. A resumption that cannot reach that stop keeps the solver's
+coefficients along those directions, and the summary says so.
 
 Where the Hessian is singular, the fit publishes one constraint per alias,
 whichever backend ran. Each alias is written on the terms' construction
@@ -1266,6 +1272,51 @@ So the design build scans for it before the solver runs
 What the fit does with a separated level (`separation="warn"`, `"error"` or
 `"ignore"`) is described in
 [the spline-by-factor separation migration note](../development/migrations/spline-factor-separation-hold.md).
+
+#### 17.4.1 Whether the published estimate is finite
+
+After the fit, one decision says whether every coefficient it publishes has a
+finite estimate (`src/superglm/model/separation_ops.py`). It is read from the
+responses and the design alone, so it is the same whichever BLAS kernel ran and
+wherever IRLS stopped. Each row's log-likelihood is bounded above for the
+families with a boundary at infinite $\eta$ (Poisson, negative binomial and
+Tweedie with $1 \le p < 2$ under a log link; binomial), so a direction a penalty
+reaches cannot run off to infinity. The estimate fails to exist exactly when a
+combination $\mathbf{z} = \mathbf{X}\boldsymbol{\gamma} \ne 0$ of the
+unpenalized directions is zero on every row inside the response's range, at
+most zero where $y = 0$ and at least zero where $y = 1$ (Verbeek 1989; Santos
+Silva and Tenreyro 2010; Correia, Guimarães and Zylkin 2019, Proposition 1).
+Log-binomial's mean reaches 1 at a finite $\eta$, so a level of successes there
+is on the mean space's edge, not at infinity.
+
+- **The fit's own score proves the estimate exists** when it can. By Stiemke's
+  alternative, no separating direction exists if positive weights on the
+  boundary rows balance them; the fit's score after one Newton step supplies
+  those weights, and a bound on what is left over, together with a certified
+  lower bound on the Hessian's smallest eigenvalue, proves it. This costs about
+  two passes over the rows, a few milliseconds on a 20,000-row fit.
+- **Otherwise the rows decide.** The linear program of Correia, Guimarães and
+  Zylkin (appendix A.2, after Konis 2007) finds a direction that separates
+  every row that can be separated, and the direction is then checked on the
+  rows in exact arithmetic (error-free products and an exactly rounded sum),
+  so a row one unit in the last place on the wrong side is caught. The fit is
+  then refitted on the rows it keeps, at its smoothing parameters, and that
+  fit's own score must prove those rows separate no further. If the interior
+  rows alone identify every coefficient, the estimate exists (Santos Silva and
+  Tenreyro's condition).
+
+A separated fit publishes that refit, as Correia, Guimarães and Zylkin
+recommend: its fitted values on the kept rows, and every coefficient the
+separating direction does not move with its standard error. The separated rows
+keep the walk's predictions near the boundary. Every coefficient the direction
+moves, in the published coordinates, has no finite estimate: it prints with no
+standard error, and the footnote names the levels and what to do. A case
+float64 cannot settle either way, such as a separation along a smooth's
+unpenalized part, which has no entries to check exactly, is reported as not
+resolved at float64; the standard errors of the coefficients a proposed
+direction moves are withheld. The cauchit link's likelihood is not concave,
+so there the decision proves a maximiser exists but not that it is unique, and
+the summary says so.
 
 ### 17.5 Post-fit shape repair and its intercept search
 

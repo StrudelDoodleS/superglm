@@ -3212,7 +3212,7 @@ class TestSummaryInferenceCache:
                 )
 
     def test_summary_sparse_categorical_se_matches_metrics(self):
-        """Rare weakly-identified factor levels must keep large summary SEs."""
+        """The summary's and metrics' SEs are one decision, a separated level's absence included."""
         rng = np.random.default_rng(0)
         levels = list("ABCDEFGHIJ")
         n = 8000
@@ -3245,13 +3245,17 @@ class TestSummaryInferenceCache:
         s_model = model.summary()
         s_metrics = model.metrics(X, y, sample_weight=w).summary()
 
+        # every response of level J is zero: the level is separated (its estimate is -inf),
+        # so neither reader prints it a standard error, and both read the one decision
         row_model = next(r for r in s_model._coef_rows if r.name == "cat[J]")
         row_metrics = next(r for r in s_metrics._coef_rows if r.name == "cat[J]")
-
-        assert row_metrics.se > 1.0
-        assert np.isfinite(row_model.se)
-        assert row_model.se == pytest.approx(row_metrics.se, rel=1e-6, abs=1e-8)
-        assert row_model.p == pytest.approx(row_metrics.p, rel=1e-6, abs=1e-8)
+        assert np.isnan(row_model.se) and np.isnan(row_metrics.se)
+        for level in "BCDEFGHI":
+            row_model = next(r for r in s_model._coef_rows if r.name == f"cat[{level}]")
+            row_metrics = next(r for r in s_metrics._coef_rows if r.name == f"cat[{level}]")
+            assert np.isfinite(row_model.se)
+            assert row_model.se == pytest.approx(row_metrics.se, rel=1e-6, abs=1e-8)
+            assert row_model.p == pytest.approx(row_metrics.p, rel=1e-6, abs=1e-8)
 
     def test_metrics_summary_uses_own_edf_not_fit_cache(self):
         """ModelMetrics.summary() must compute EDF from its own weights, not fit cache."""

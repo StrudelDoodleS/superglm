@@ -609,6 +609,8 @@ def _clear_fit_inference_caches(model) -> None:
     model._reporting_support_state = None
     model._runtime_canonical_state = None
     model._prediction_plan = None
+    # the rows a certified separation withheld (``separation_ops``), the last fit's
+    model._separated_rows = None
     model._fit_mu = None
     model._fit_null_mu = None
     model._fit_X_ref = None
