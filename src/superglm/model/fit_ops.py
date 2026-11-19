@@ -692,6 +692,37 @@ def _record_unidentified_factor_smooth_levels(model, sample_weight, y=None, *, s
     share_group_levels(specs.values())
 
 
+def _refuse_aliased_level_constants(
+    model, reml_penalties, lambdas, estimated_names, y, sample_weight, offset
+):
+    """Refuse an fs term whose fixed ``null_0`` sits below this fit's REML floor.
+
+    SuperGLM always fits an intercept, which the levels' constants alias.
+    """
+    from superglm._lambda_box import glm_lambda_box
+    from superglm.features.factor_smooth import check_fs_level_constants
+
+    held = [
+        component
+        for component in reml_penalties
+        if component.name not in estimated_names
+        and component.name == f"{component.group_name}:null_0"
+        and getattr(model._dm.group_matrices[component.group_index], "factor_basis", None) == "fs"
+    ]
+    if not held:
+        return
+    floor = glm_lambda_box(
+        distribution=model._distribution,
+        link=model._link,
+        y=y,
+        sample_weight=sample_weight,
+        offset=offset if offset is not None else np.zeros(len(y)),
+        weight_semantics=model_weight_semantics(model),
+    ).floor
+    for component in held:
+        check_fs_level_constants(component.group_name, lambdas[component.name], floor)
+
+
 def _ensure_factor_smooth_levels_recorded(model) -> None:
     """Record the ``sz`` levels of a model pickled before the record existed.
 
@@ -2121,6 +2152,9 @@ def _fit_reml_in_workspace(
         other_names=[group.name for group in model._groups],
     )
     lambdas.update(warm_lambdas)
+    _refuse_aliased_level_constants(
+        model, reml_penalties, lambdas, estimated_names, y, sample_weight, offset
+    )
 
     # QP monotone with auto lambda → two-stage passthrough heuristic:
     # Stage 1: run unconstrained REML (temporarily strip QP constraints)

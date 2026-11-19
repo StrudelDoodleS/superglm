@@ -178,12 +178,13 @@ def test_factor_smooth_constructor_contract() -> None:
         ({"unseen": "base"}, "unseen"),
         ({"missing": "population"}, "missing"),
         ({"name": ""}, "name"),
-        # cond(D) >= 2^51: rounding swamps the penalty on the smoothest curves.
-        ({"k": 100, "m": 50}, r"k=100 cannot represent an m=50 .* use m <= 19 or m >= 72"),
-        ({"k": 90, "m": 30}, r"k=90 cannot represent an m=30 .* use m <= 22 or m >= 59"),
-        # Each level's unpenalized constant trades off against the intercept.
-        ({"lambda_policy": {"null_0": LambdaPolicy.off()}}, "aliased with the fitted intercept"),
-        ({"lambda_policy": LambdaPolicy.fixed(0.0)}, "aliased with the fitted intercept"),
+        # cond(D) >= 2^47: rounding swamps the penalty on the smoothest curves.
+        ({"k": 100, "m": 50}, r"k=100 cannot represent an m=50 .* use m <= 16 or m >= 76"),
+        ({"k": 90, "m": 30}, r"k=90 cannot represent an m=30 .* use m <= 18 or m >= 64"),
+        # Admitted at 2^51; bunched rows broke its re-whitening on SkylakeX.
+        ({"k": 100, "m": 72}, r"k=100 cannot represent an m=72 .* use m <= 16 or m >= 76"),
+        # The penalty's scale, about k 4^m, overflows beside the REML ceiling.
+        ({"k": 500, "m": 499}, r"its scale, about 2\^1007, .* use m <= 7, or a smaller k"),
     ],
 )
 def test_factor_smooth_rejects_invalid_configuration(kwargs, message) -> None:

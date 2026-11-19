@@ -285,12 +285,12 @@ def test_high_order_null_axes_leave_out_the_penalized_contrast() -> None:
 def test_high_order_coordinates_give_the_raw_penalized_smoother(wiggle_lambda) -> None:
     """``k=60, m=30``: the natural coordinates' fixed-lambda smoother is the raw penalty's.
 
-    The difference matrix's condition number is 5e11, so a float64 difference of a
-    smooth column loses about ``u 2^m`` of its scale: the weakly penalized wiggle
-    directions, which a large lambda prices, carried a penalty off by up to 1.8e-4
-    until their penalty Gram was formed in double-word arithmetic.  The reference,
-    in mpmath, is ``R (R'R + lambda D'D + S_null)^-1 R'`` with ``S_null`` the
-    projection onto the polynomials of degree below m over the rows (equal null
+    The difference matrix's condition number is 5e11, and its SVD leaves the weakly
+    penalized wiggle directions, which a large lambda prices, a penalty that moved this
+    smoother by up to 1.4e-6 until the triangular factor of their penalty image
+    re-whitened them.  The
+    reference, in mpmath, is ``R (R'R + lambda D'D + S_null)^-1 R'`` with ``S_null``
+    the projection onto the polynomials of degree below m over the rows (equal null
     lambdas of 1, so any basis of them).
     """
     import math
@@ -329,6 +329,74 @@ def test_high_order_coordinates_give_the_raw_penalized_smoother(wiggle_lambda) -
     u = np.finfo(np.float64).eps / 2
     atol = 64.0 * (2 * k * u / (1.0 - 2 * k * u)) * np.linalg.cond(stacked)
     np.testing.assert_allclose(rows @ rows.T, expected, rtol=0.0, atol=atol)
+
+
+def _bunched_rows(k: int, seed: int) -> np.ndarray:
+    """A jittered row near every knot plus ``2k`` rows bunched in a random sub-interval."""
+    rng = np.random.default_rng(seed)
+    lo, hi = sorted(rng.uniform(-0.8, 0.8, 2))
+    grid = np.linspace(-1.0, 1.0, k)
+    spread = np.r_[-1.0, grid[1:-1] + rng.uniform(-0.23, 0.23, k - 2) / (k - 3), 1.0]
+    return np.r_[spread, rng.uniform(lo, hi, 2 * k)]
+
+
+def test_bunched_rows_build_the_wiggle_at_a_high_admitted_order() -> None:
+    """``k=120, m=101`` on unweighted bunched rows builds, in any row order.
+
+    Bunching tilts the complement of the null axes away from ``D``'s row space, so
+    the difference operator on it is far worse conditioned than ``D`` (lower bound
+    2^42): the Gram of the weak directions' penalty image was singular in float64 and
+    its Cholesky factorization raised on every OpenBLAS kernel.  The image's QR gives
+    the same triangular factor without forming the Gram.  The wiggle columns stay
+    orthogonal over the rows to each other and to the null axes, and the whitened
+    fixed-lambda smoother does not depend on the row order, each to ``u cond(R)``
+    (cond(R) is 1.9e13 here; measured 6e-4 and 3e-8).
+    """
+    k, m = 120, 101
+    x = _bunched_rows(k, 0)
+    rank = k - m
+    u = np.finfo(np.float64).eps / 2
+    smoothers = []
+    for order in (np.arange(len(x)), np.random.default_rng(630).permutation(len(x))):
+        spec = FactorSmooth("x", group="group", k=k, m=m)
+        spec.build(x[order], np.full(len(x), "a", dtype=object), {})
+        natural = spec._natural_map
+        assert np.all(np.isfinite(natural))
+        basis = spec._spline._basis_matrix(x).toarray()
+        tolerance = u * np.linalg.cond(np.linalg.qr(basis, mode="r"))
+        rows = basis @ natural
+        scale = np.linalg.norm(rows, axis=0)
+        gram = (rows.T @ rows) / np.outer(scale, scale)
+        assert np.max(np.abs(gram[:rank] - np.eye(k)[:rank])) < tolerance
+        (_, wiggle), *nulls = spec._base_penalty_components
+        penalty = np.diag(2.0 * wiggle + sum(null for _, null in nulls))
+        smoothers.append(rows @ np.linalg.solve(rows.T @ rows + np.diag(penalty), rows.T))
+    np.testing.assert_allclose(smoothers[1], smoothers[0], rtol=0.0, atol=tolerance)
+
+
+def test_unpenalized_wiggle_admits_any_order_and_gives_least_squares() -> None:
+    """With the wiggle fixed at zero ``D``'s conditioning does not enter, so the refused
+    ``k=79, m=35`` fits: one level, ``null_0`` at one and every other component off
+    leave ordinary least squares on the spline design (condition 36), as ``m=1`` does.
+    """
+    from scipy.interpolate import BSpline
+
+    k, m = 79, 35
+    x = np.linspace(-1.0, 1.0, 320)
+    X = pd.DataFrame({"x": x, "group": "a"})
+    basis = BSpline.design_matrix(x, -1.002 + 2.004 / (k - 3) * np.arange(-3, k + 1), 3).toarray()
+    y = 2.0 + np.sin(9.0 * x) + 0.2 * np.cos(92.0 * x)
+    coefficients, *_ = np.linalg.lstsq(basis, y, rcond=None)
+    with pytest.raises(ValueError, match="cannot represent an m=35"):
+        FactorSmooth("x", group="group", k=k, m=m)
+    policy = {"wiggle": LambdaPolicy.off(), "null_0": LambdaPolicy.fixed(1.0)}
+    policy.update({f"null_{j}": LambdaPolicy.off() for j in range(1, m)})
+    smooth = FactorSmooth("x", group="group", k=k, m=m, lambda_policy=policy)
+    model = SuperGLM(family="gaussian", interactions=[smooth], selection_penalty=0.0)
+    u = np.finfo(np.float64).eps / 2
+    np.testing.assert_allclose(
+        model.fit_reml(X, y).predict(X), basis @ coefficients, rtol=0.0, atol=1e3 * u * np.max(y)
+    )
 
 
 def test_estimated_null_lambdas_keep_their_names_in_any_row_order() -> None:

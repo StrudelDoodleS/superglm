@@ -14,6 +14,7 @@ import scipy.linalg as la
 import scipy.sparse as sp
 from numpy.typing import NDArray
 
+from superglm._lambda_box import LAMBDA_CEILING
 from superglm.factor_smooth_geometry import expand_sum_to_zero_blocks
 from superglm.types import GroupInfo, LambdaPolicy
 
@@ -55,44 +56,19 @@ def _combine_qr_r(
     )
 
 
-def _two_sum(a: NDArray, b: NDArray) -> tuple[NDArray, NDArray]:
-    """``fl(a + b)`` and its rounding error, so that the two sum to ``a + b`` exactly (TwoSum)."""
-    total = a + b
-    b_part = total - a
-    return total, (a - (total - b_part)) + (b - b_part)
-
-
-def _difference_double_word(values: NDArray, m: int) -> NDArray:
-    """``np.diff(values, n=m, axis=0)`` in double-word arithmetic, rounded once.
-
-    Each pass subtracts neighbouring double words by AccurateDWPlusDW (Joldes, Muller &
-    Popescu, ACM TOMS 44(2), 2017, Alg. 6), so a smooth column, whose m-th difference
-    float64 differencing loses to cancellation at ``u 2^m`` of its scale, keeps it to
-    about ``u`` of the difference itself.
-    """
-    high, low = values, np.zeros_like(values)
-    for _ in range(m):
-        sum_high, sum_low = _two_sum(high[1:], -high[:-1])
-        low_high, low_low = _two_sum(low[1:], -low[:-1])
-        carry = sum_low + low_high
-        partial = sum_high + carry
-        carry = low_low + (carry - (partial - sum_high))
-        high = partial + carry
-        low = carry - (high - partial)
-    return high + low
-
-
-def _fs_coordinates(R: NDArray, m: int) -> tuple[NDArray, NDArray]:
+def _fs_coordinates(
+    R: NDArray, m: int, *, penalized_wiggle: bool = True
+) -> tuple[NDArray, NDArray]:
     """fs's coordinates in the metric ``R'R``: unit-penalty wiggle columns, then ``null_j``.
 
     Returns the map and each wiggle column's squared norm over the weighted rows.
-    ``null_j`` is degree ``j`` of the coefficient polynomials, the m-th difference
-    penalty's null space, orthonormal over the weighted rows with a positive leading
-    term: one curve for every frame of those degrees, row order, QR route and platform.
-    The wiggle spans their complement in the same metric and keeps the raw penalty
-    ``D'D``.  The construction applies ``R`` and ``D`` forward and inverts neither, so
-    it holds when the rows leave a knot span all but empty (``R`` ill conditioned) and
-    when a high order spreads ``D``'s singular values over many orders of magnitude.
+    ``null_j`` is degree ``j`` of the coefficient polynomials (the m-th difference
+    penalty's null space), orthonormal over the weighted rows with a positive leading
+    term, whatever the frame, row order, QR route or platform.  The wiggle spans their
+    complement in that metric with the raw penalty ``D'D``, applying ``R`` and ``D``
+    forward only, so it holds for rows that leave a knot span all but empty and for a
+    high order.  With ``penalized_wiggle`` False (its lambda fixed at zero) it is the
+    complement's row-orthonormal basis, built without ``D``.
     """
     k = R.shape[0]
     # For m=2 this is Wood, Scheipl & Faraway's (2013, sec. 2.5) null-space
@@ -122,20 +98,24 @@ def _fs_coordinates(R: NDArray, m: int) -> tuple[NDArray, NDArray]:
     # the rows (Van Loan, SIAM J. Numer. Anal. 13(1), 1976), the SVD of R B^-1 for B the
     # difference operator on an orthonormal basis of that complement, the vectors
     # orthogonal to R'R null_j.  B^-1 is applied through B's own SVD, so the directions are
-    # exact for D perturbed by u ||D||: the strongly penalized ones keep their penalty to
+    # exact for B perturbed by u ||B||: the strongly penalized ones keep their penalty to
     # rounding, where an explicit inverse of D loses cond(D) u on them, and the weakest
-    # carry u cond(D) (hence _DIFFERENCE_CONDITION_LIMIT_LOG2).  Their penalty Gram, from
-    # D applied in double-word arithmetic, is the identity up to that error, and its
-    # Cholesky factor re-whitens them, as mixed-precision CholeskyQR does (Yamazaki, Tomov
-    # & Dongarra, SIAM J. Sci. Comput. 37(3), 2015): strongest first, so each column takes
-    # in only the smaller, more strongly penalized ones before it.  An orthogonal rotation,
+    # carry u cond(B), which rows bunched or weighted toward part of the range make far
+    # larger than cond(D).  The triangular factor of a QR of their penalty image, the
+    # Cholesky factor of its Gram without forming the Gram (which squares its condition),
+    # re-whitens them strongest first, so each column takes in only the smaller, more
+    # strongly penalized ones before it; the rounding of the float64 differences it reads
+    # is rough, and that order leaves it on the strong columns.  An orthogonal rotation,
     # which leaves every penalty alone, then diagonalizes them over the rows.
     complement = np.linalg.qr(R.T @ whitened_null, mode="complete")[0][:, m:]
+    if not penalized_wiggle:
+        _, row_norms, rotation = la.svd(R @ complement, full_matrices=False)
+        wiggle = (complement @ rotation.T) / row_norms
+        return np.column_stack((wiggle, null)), np.ones(k - m)
     _, singular_values, right = la.svd(np.diff(np.eye(k), n=m, axis=0) @ complement)
     unit_penalty = complement @ (right.T / singular_values)
-    image = _difference_double_word(unit_penalty, m)
-    gram_factor = np.linalg.cholesky(image.T @ image)
-    unit_penalty = la.solve_triangular(gram_factor, unit_penalty.T, lower=True).T
+    triangle = np.linalg.qr(np.diff(unit_penalty, n=m, axis=0), mode="r")
+    unit_penalty = la.solve_triangular(triangle, unit_penalty.T, trans="T").T
     _, row_norms, rotation = la.svd(R @ unit_penalty, full_matrices=False)
     # Ascending norm over the rows: the order of descending whitened-penalty eigenvalues.
     natural_map = np.column_stack(((unit_penalty @ rotation.T)[:, ::-1], null))
@@ -150,6 +130,7 @@ def _natural_parameterization_from_r(
     n_rows: int,
     normalization_mass: float | None = None,
     difference_order: int | None = None,
+    penalized_wiggle: bool = True,
 ) -> tuple[NDArray, tuple[tuple[str, NDArray], ...]]:
     """Build a QR-whitened natural parameterization without materializing ``Q``.
 
@@ -158,7 +139,8 @@ def _natural_parameterization_from_r(
     standard difference penalty ``D'D`` of that order, which fs's evenly spaced knots
     give and ``_fs_coordinates`` rebuilds ``D`` for.  Without it any basis of the null
     space gives the same model (``sz`` penalizes it as one block), and the eigenbasis
-    is kept.
+    is kept.  ``penalized_wiggle`` False says fs's wiggle smoothing parameter is fixed
+    at zero (``_fs_coordinates``).
     """
     R_array = np.asarray(R, dtype=np.float64)
     S = np.asarray(penalty, dtype=np.float64)
@@ -188,7 +170,9 @@ def _natural_parameterization_from_r(
             raise ValueError(
                 "FactorSmooth fs coordinates need the standard difference penalty of order m"
             )
-        natural_map, wiggle_squared_norms = _fs_coordinates(R_array, difference_order)
+        natural_map, wiggle_squared_norms = _fs_coordinates(
+            R_array, difference_order, penalized_wiggle=penalized_wiggle
+        )
     else:
         R_inv = la.solve_triangular(R_array, np.eye(k), lower=False)
         transformed_penalty = R_inv.T @ S @ R_inv
@@ -284,11 +268,18 @@ def check_terms_on_factor_smooth_groups(
         )
 
 
-# fs refuses an m-th difference penalty whose condition number reaches 2^51.  Below it
-# the SVD leaves every wiggle direction's penalty within about u cond(D) < 1/2 of one,
-# so their penalty Gram is positive definite and well conditioned and one Cholesky
-# step re-whitens it (``_fs_coordinates``); beyond about 1/u nothing guarantees that.
-_DIFFERENCE_CONDITION_LIMIT_LOG2 = 51.0
+# fs refuses an m-th difference penalty when a closed-form lower bound on its condition
+# number reaches 2^47, 1/(64u) (``_difference_condition_log2``), a decision every platform
+# makes alike.  The rows set how much worse conditioned the difference operator is on the
+# null axes' complement than D itself, and the QR that re-whitens the weak directions
+# (``_fs_coordinates``) holds while their penalty image's condition number stays below
+# 1/u.  Measured at the orders next to the refused band for k <= 300, over uniform,
+# bunched and steeply weighted rows and four OpenBLAS kernels, it reached 2.4e6 below the
+# band and 1.2e13 above it (k=120, rows bunched into part of the range), where the
+# whitened smoother still matched a 100-digit raw-penalty one to 2.2e-8 (cond(R) 1.9e13).
+_DIFFERENCE_CONDITION_LIMIT_LOG2 = 47.0
+# Nor may the wiggle penalty's scale, about k 4^m, overflow beside the REML ceiling.
+_PENALTY_SCALE_LIMIT_LOG2 = 1000.0
 
 
 def _difference_condition_log2(k: int, m: int) -> float:
@@ -297,9 +288,7 @@ def _difference_condition_log2(k: int, m: int) -> float:
     The square root of the ratio of two Rayleigh quotients of ``D'D``: the alternating
     sequence's, ``4^m (k - m) / k``, and the degree-m discrete Chebyshev (Gram)
     polynomial's, whose m-th difference is constant, ``(2m + 1) ((2m)! / m!)^2 (k - m)! /
-    (k + m)!``.  Measured at the edges of the refused band for k <= 1000, ``cond(D)`` is
-    1.5 to 6 times the bound, and every order the limit admits there has ``cond(D) <
-    2^52.4``, below ``1/u = 2^53``.
+    (k + m)!``.
     """
     log_smoothest = (
         math.log(2 * m + 1)
@@ -311,35 +300,62 @@ def _difference_condition_log2(k: int, m: int) -> float:
     return 0.5 * (log_roughest - log_smoothest) / math.log(2.0)
 
 
-def _check_fs_declaration(name: str, k: int, m: int, lambda_policy: Any) -> None:
-    """Refuse an fs declaration float64 cannot represent or whose constants alias the intercept."""
+def _fs_order_refusal(k: int, m: int) -> str | None:
+    """Why float64 cannot hold fs's m-th difference penalty on k basis functions, or None."""
     log2_condition = _difference_condition_log2(k, m)
     if log2_condition >= _DIFFERENCE_CONDITION_LIMIT_LOG2:
-        refused = [
-            order
-            for order in range(1, k)
-            if _difference_condition_log2(k, order) >= _DIFFERENCE_CONDITION_LIMIT_LOG2
-        ]
-        raise ValueError(
-            f"FactorSmooth {name!r}: basis='fs' with k={k} cannot represent an m={m} "
-            f"difference penalty reliably in float64; its condition number is at least "
-            f"2^{log2_condition:.1f}, past 2^51, where rounding can swamp the penalty on "
-            f"its smoothest curves. With k={k}, use m <= {refused[0] - 1} or "
-            f"m >= {refused[-1] + 1}, or a smaller k."
+        return (
+            f"a lower bound on its condition number is 2^{log2_condition:.1f}, past "
+            f"2^{_DIFFERENCE_CONDITION_LIMIT_LOG2:g}, where rounding can swamp the penalty "
+            "on its smoothest curves"
         )
-    null_0 = (
-        lambda_policy
-        if isinstance(lambda_policy, LambdaPolicy)
-        else (lambda_policy or {}).get("null_0")
+    log2_scale = 2 * m + math.log2(k)
+    if log2_scale + math.log2(LAMBDA_CEILING) >= _PENALTY_SCALE_LIMIT_LOG2:
+        return (
+            f"its scale, about 2^{log2_scale:.0f}, times the largest smoothing parameter "
+            "leaves float64's range"
+        )
+    return None
+
+
+def _check_fs_declaration(name: str, k: int, m: int, lambda_policy: Any) -> None:
+    """Refuse an fs difference order float64 cannot represent, unless its wiggle is off."""
+    reason = _fs_order_refusal(k, m)
+    if reason is None or _fixed_at_zero(_declared_policy(lambda_policy, "wiggle")):
+        return
+    refused = [order for order in range(1, k) if _fs_order_refusal(k, order)]
+    supported = f"m <= {refused[0] - 1}"
+    if refused[-1] < k - 1:
+        supported += f" or m >= {refused[-1] + 1}"
+    raise ValueError(
+        f"FactorSmooth {name!r}: basis='fs' with k={k} cannot represent an m={m} difference "
+        f"penalty reliably in float64; {reason}. With k={k}, use {supported}, or a smaller k."
     )
-    if _fixed_at_zero(null_0):
+
+
+def check_fs_level_constants(name: str, null_0: float, floor: float) -> None:
+    """Refuse an fs term's ``null_0`` fixed below ``floor`` beside the intercept.
+
+    The data cannot tell the levels' constants from the intercept, so only ``null_0``
+    identifies them; below the REML floor (``_lambda_box``) its penalty is lost in the
+    rounding of the data's curvature, and zero leaves them free.
+    """
+    if null_0 < floor:
         raise ValueError(
-            f"FactorSmooth term {name!r} is aliased with the fitted intercept: lambda_policy "
-            "fixes null_0, each level's constant, at zero, so the levels' constants and the "
+            f"FactorSmooth term {name!r} is aliased with the fitted intercept: null_0, each "
+            f"level's constant, is fixed at {null_0:g}, below {floor:g}, the smallest "
+            "smoothing parameter this fit resolves, so the levels' constants and the "
             "intercept trade off freely, and the unseen-level prediction and the curves' "
             "standard errors would follow the order the levels are listed in. Estimate "
-            "null_0, or fix it above zero."
+            f"null_0, or fix it at {floor:g} or above."
         )
+
+
+def _declared_policy(lambda_policy: Any, component: str) -> LambdaPolicy | None:
+    """The policy a declaration's ``lambda_policy`` gives ``component``, None to estimate."""
+    if isinstance(lambda_policy, LambdaPolicy):
+        return lambda_policy
+    return (lambda_policy or {}).get(component)
 
 
 def _fixed_at_zero(policy: LambdaPolicy | None) -> bool:
@@ -382,10 +398,13 @@ class FactorSmooth:
     m : int, default 2
         Difference order of the wiggle penalty, between 1 and ``k - 1``; each
         level's polynomial part has ``m`` coordinates.  ``basis="fs"`` refuses an
-        ``m`` whose difference penalty has a condition number of ``2^51`` or more,
-        which float64 does not reliably represent: none below ``k=79``, then a band of middle
-        orders (``k=100``: ``20 <= m <= 71``), and the error names the orders ``k``
-        supports.
+        ``m`` that float64 does not reliably represent, where a closed-form lower
+        bound on its difference penalty's condition number reaches ``2^47``: none
+        below ``k=73``, then a band of middle orders (``k=100``: ``17 <= m <= 75``),
+        and orders near 480 and above, whose penalty's scale leaves float64's range;
+        the error names the orders ``k`` supports.  With the wiggle's smoothing
+        parameter fixed at zero the penalty's condition does not enter, and every
+        ``m`` is accepted.
     levels : list | tuple | Series | ndarray | CategoricalDtype, optional
         The grouping column's level universe.  Under ``basis="fs"`` a declared
         level with no training rows keeps its curve block and shrinks to zero
@@ -405,8 +424,9 @@ class FactorSmooth:
         ``"null_0"`` ... ``"null_{m-1}"`` under ``basis="fs"``, ``"wiggle"`` (and
         ``"null"`` with ``select=True``) under ``basis="sz"``, and estimates the
         ones it does not name.  None estimates every component by REML.
-        ``basis="fs"`` refuses ``null_0`` fixed at zero: the levels' unpenalized
-        constants would alias the model intercept.
+        Under ``basis="fs"`` a fit refuses ``null_0`` fixed below the REML floor
+        (zero included) in a predictor with an intercept: the levels' constants
+        would alias it.
     name : str or None
         The term's name; defaults to ``"{variable}:{group}:{basis}"``.
     select : bool, default False
@@ -503,11 +523,7 @@ class FactorSmooth:
             unpenalized = [
                 component
                 for component in ("wiggle", "null")
-                if _fixed_at_zero(
-                    lambda_policy
-                    if isinstance(lambda_policy, LambdaPolicy)
-                    else (lambda_policy or {}).get(component)
-                )
+                if _fixed_at_zero(_declared_policy(lambda_policy, component))
             ]
             if unpenalized:
                 raise ValueError(
@@ -790,6 +806,7 @@ class FactorSmooth:
             n_rows=len(x),
             normalization_mass=normalization_mass,
             difference_order=self.m if self.basis == "fs" else None,
+            penalized_wiggle=not _fixed_at_zero(_declared_policy(self._lambda_policy, "wiggle")),
         )
         if self.basis == "sz":
             # sz takes a natural parameterization like fs's, from the eigenbasis: its

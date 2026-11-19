@@ -384,10 +384,12 @@ credibility and curve tables, and `credibility_demo.png`.
   final support basis, for every `m` and null-component policy.
 - `fit()` and `fit_path()` reject factor smooths.
 - Factor-smooth `k` must be at least 5.
-- `basis="fs"` refuses a difference order `m` whose penalty has a condition
-  number of 2^51 or more, which float64 does not reliably represent (none below `k=79`;
-  at `k=100`, `20 <= m <= 71`), and refuses `null_0` fixed at zero, which would
-  alias the levels' constants with the model intercept.
+- `basis="fs"` refuses a difference order `m` that float64 does not reliably
+  represent, where a closed-form lower bound on its penalty's condition number
+  reaches 2^47 (none below `k=73`; at `k=100`, `17 <= m <= 75`), unless the
+  wiggle's smoothing parameter is fixed at zero. A fit refuses `null_0` fixed
+  below the REML floor (zero included) beside an intercept, which the levels'
+  constants would alias.
 - Missing numeric or grouping values are rejected.
 - The FS and SZ Gaussian, Poisson, construction, unseen-level, and discrete
   reference cases are pinned against mgcv in the test suite. The FS cases fit

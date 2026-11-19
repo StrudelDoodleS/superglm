@@ -1581,7 +1581,17 @@ def _thin_level_fit(basis: str, direct_solve: str, discrete: bool, lam, weight: 
         direct_solve=direct_solve,
         discrete=discrete,
     )
-    with warnings.catch_warnings(record=True) as caught:
+    # Fixed at ``lam`` beside the intercept, fs's ``null_0`` sits below the REML floor,
+    # which a fit refuses: the levels' constants alias the intercept.  These tests read
+    # the solver on the directions only lambda pins, so they step past that refusal.
+    from unittest import mock
+
+    import superglm.model.fit_ops as fit_ops
+
+    with (
+        mock.patch.object(fit_ops, "_refuse_aliased_level_constants", lambda *args: None),
+        warnings.catch_warnings(record=True) as caught,
+    ):
         warnings.simplefilter("always")
         model.fit_reml(frame, y, sample_weight=np.full(n, weight), pirls_tol=1e-10, reml_tol=1e-9)
     return model, [str(item.message) for item in caught if item.category is UserWarning]

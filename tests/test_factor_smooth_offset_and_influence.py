@@ -78,7 +78,20 @@ def _model(family, link=None, *, k=6, lam=None, discrete=False, numerics=("x1",)
 
 
 def _fit(model, frame, y, weight):
-    with warnings.catch_warnings():
+    """``fit_reml``, past the refusal of an fs ``null_0`` below the REML floor.
+
+    These tests read the solver where tiny lambdas or large weights leave each
+    level's constant pinned by lambda alone, aliased with the intercept, which a
+    public fit refuses (``check_fs_level_constants``).
+    """
+    from unittest import mock
+
+    import superglm.model.fit_ops as fit_ops
+
+    with (
+        mock.patch.object(fit_ops, "_refuse_aliased_level_constants", lambda *args: None),
+        warnings.catch_warnings(),
+    ):
         warnings.simplefilter("ignore")
         return model.fit_reml(frame, y, sample_weight=weight)
 
