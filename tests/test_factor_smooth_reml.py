@@ -98,9 +98,12 @@ def _polynomial_null_reference(X, y, test, lambdas, *, k, m):
     """Penalized least squares with ``null_j`` on degree ``j``, built without SuperGLM.
 
     Its own cubic B-spline design on FactorSmooth's knot rule (equal spacing over
-    the range widened by 0.1% per side), the m-th difference penalty for the
-    wiggle, and ``null_j`` the degree-``j`` coefficient polynomial orthonormalized
-    over the rows (Gram-Schmidt in ``B'B / n``): its penalty is ``(n_j' G beta)^2``.
+    the range widened by 0.1% per side), augmented per level with the rows of the
+    m-th difference penalty for the wiggle and, for ``null_j``, the row
+    ``q_j' B / sqrt(n)``, ``q_j`` the degree-``j`` coefficient polynomial on the rows
+    orthonormalized by QR, so its penalty is ``(n_j' G beta)^2`` with ``n_j``
+    orthonormal in ``G = B'B / n``.  Returns the predictions and the augmented
+    design's condition number.
     """
     from scipy.interpolate import BSpline
 
@@ -110,13 +113,13 @@ def _polynomial_null_reference(X, y, test, lambdas, *, k, m):
     step = (hi - lo + 2.0 * edge) / (k - 3)
     knots = lo - edge + step * np.arange(-3, k + 1)
     basis = BSpline.design_matrix(x, knots, 3).toarray()
-    G = basis.T @ basis / len(x)
-    frame = np.vander(np.linspace(-1.0, 1.0, k), m, increasing=True)
-    null = frame @ np.linalg.inv(np.linalg.cholesky(frame.T @ G @ frame)).T
-    D = np.diff(np.eye(k), n=m, axis=0)
-    block = lambdas[0] * D.T @ D
-    for lam, direction in zip(lambdas[1:], (G @ null).T, strict=True):
-        block += lam * np.outer(direction, direction)
+    q, _ = np.linalg.qr(basis @ np.vander(np.linspace(-1.0, 1.0, k), m, increasing=True))
+    rows = np.vstack(
+        (
+            np.sqrt(lambdas[0]) * np.diff(np.eye(k), n=m, axis=0),
+            np.sqrt(np.asarray(lambdas[1:]))[:, None] * q.T @ basis / np.sqrt(len(x)),
+        )
+    )
     levels = sorted(X["group"].unique())
 
     def design(frame_rows):
@@ -125,12 +128,10 @@ def _polynomial_null_reference(X, y, test, lambdas, *, k, m):
         blocks = [raw * (groups == level)[:, None] for level in levels]
         return np.column_stack([np.ones(len(frame_rows)), *blocks])
 
-    A = design(X)
-    penalty = np.zeros((A.shape[1], A.shape[1]))
-    penalty[1:, 1:] = np.kron(np.eye(len(levels)), block)
-    hessian = A.T @ A + penalty
-    beta = np.linalg.solve(hessian, A.T @ y)
-    return design(test) @ beta, np.linalg.cond(hessian)
+    augmented = np.vstack((design(X), np.pad(np.kron(np.eye(len(levels)), rows), ((0, 0), (1, 0)))))
+    target = np.r_[y, np.zeros(len(augmented) - len(y))]
+    beta = np.linalg.lstsq(augmented, target, rcond=None)[0]
+    return design(test) @ beta, np.linalg.cond(augmented)
 
 
 def _smooth_case() -> tuple[pd.DataFrame, np.ndarray, pd.DataFrame]:
@@ -151,13 +152,47 @@ def _two_band_case() -> tuple[pd.DataFrame, np.ndarray, pd.DataFrame]:
     return X, y, X
 
 
+def _bunched_case() -> tuple[pd.DataFrame, np.ndarray, pd.DataFrame]:
+    """Three levels with 20 rows across the range and 300 within 3% of it.
+
+    The rows leave knot spans nearly empty, so the row factor's condition number is
+    about 1e13: a wiggle built through its inverse missed the reference by 2e-5.
+    """
+    u = np.random.default_rng(316).uniform(-1.0, 1.0, 320)
+    support = np.r_[u[:20], 0.03 * u[20:]]
+    code = np.repeat(np.arange(3), len(support))
+    x = np.tile(support, 3)
+    X = pd.DataFrame({"x": x, "group": np.array(["a", "b", "c"], dtype=object)[code]})
+    y = np.sin(2.0 * x) * (1 + code) + 0.3 * code + 0.1 * np.cos(40.0 * x)
+    return X, y, X
+
+
+def _wide_case() -> tuple[pd.DataFrame, np.ndarray, pd.DataFrame]:
+    """Two levels on uniform rows for ``k=150, m=12``: 138 wiggle contrasts.
+
+    The difference matrix's singular values span 14 orders of magnitude, so a wiggle
+    built from its explicit right inverse missed the reference by 2.9e-4.
+    """
+    rng = np.random.default_rng(316)
+    n = 1800
+    x = rng.uniform(-1.0, 1.0, n)
+    group = np.resize(np.array(["a", "b"], dtype=object), n)
+    a = group == "a"
+    y = np.sin(2.0 * x) + 0.25 * a + 0.35 * np.cos(35.0 * x) * a + 0.25 * rng.standard_normal(n)
+    X = pd.DataFrame({"x": x, "group": group})
+    test = pd.DataFrame({"x": np.linspace(x.min(), x.max(), 301), "group": np.resize(group, 301)})
+    return X, y, test
+
+
 @pytest.mark.parametrize(
     ("case", "k", "m", "lambdas"),
     [
         (_smooth_case, 6, 3, (10.0, 1.0, 5.0e4, 1.0e3)),
         (_two_band_case, 10, 2, (2.0, 1.0, 50.0)),
+        (_bunched_case, 20, 2, (3.0, 1.0, 30.0)),
+        (_wide_case, 150, 12, (1.0,) * 13),
     ],
-    ids=["m3", "two_bands"],
+    ids=["m3", "two_bands", "bunched", "wide"],
 )
 def test_fixed_null_lambdas_penalize_each_polynomial_degree_in_any_row_order(
     case, k, m, lambdas
@@ -170,14 +205,15 @@ def test_fixed_null_lambdas_penalize_each_polynomial_degree_in_any_row_order(
     that was, and the same rows in another order or on another platform priced
     differently.  With two bands of rows the whitened penalty's eigenvectors also
     mixed the null space into the wiggle columns, so the wiggle is built in the
-    complement of the null axes over the rows.
+    complement of the null axes over the rows, applying the row factor and the
+    difference matrix forward only (the bunched and wide cases).
     """
     X, y, test = case()
     names = ("wiggle", *(f"null_{j}" for j in range(m)))
     policies = {name: LambdaPolicy.fixed(value) for name, value in zip(names, lambdas, strict=True)}
     expected, condition = _polynomial_null_reference(X, y, test, lambdas, k=k, m=m)
-    # The reference solve and the fit each round row sums of n terms and a
-    # small solve with this conditioning (Higham 2002, sections 3.1 and 7.2).
+    # The reference and the fit each round row sums of n terms and a least-squares
+    # solve with this conditioning (Higham 2002, section 3.1 and chapter 20).
     n = len(X)
     u = np.finfo(np.float64).eps / 2
     atol = 64.0 * (n * u / (1.0 - n * u)) * condition * np.max(np.abs(expected))
@@ -243,6 +279,56 @@ def test_high_order_null_axes_leave_out_the_penalized_contrast() -> None:
         )
         model.fit_reml(X.iloc[order], y[order])
         np.testing.assert_allclose(model.predict(test), expected, rtol=0.0, atol=atol)
+
+
+@pytest.mark.parametrize("wiggle_lambda", [1.0e6, 1.0e10])
+def test_high_order_coordinates_give_the_raw_penalized_smoother(wiggle_lambda) -> None:
+    """``k=60, m=30``: the natural coordinates' fixed-lambda smoother is the raw penalty's.
+
+    The difference matrix's condition number is 5e11, so a float64 difference of a
+    smooth column loses about ``u 2^m`` of its scale: the weakly penalized wiggle
+    directions, which a large lambda prices, carried a penalty off by up to 1.8e-4
+    until their penalty Gram was formed in double-word arithmetic.  The reference,
+    in mpmath, is ``R (R'R + lambda D'D + S_null)^-1 R'`` with ``S_null`` the
+    projection onto the polynomials of degree below m over the rows (equal null
+    lambdas of 1, so any basis of them).
+    """
+    import math
+
+    from scipy.interpolate import BSpline
+
+    mp = pytest.importorskip("mpmath")
+    k, m, n = 60, 30, 720
+    x = np.random.default_rng(316).uniform(-1.0, 1.0, n)
+    spec = FactorSmooth("x", group="group", k=k, m=m)
+    spec.build(x, np.resize(np.array(["a", "b"], dtype=object), n), {})
+    lo, hi = x.min(), x.max()
+    edge = 0.001 * (hi - lo)
+    knots = lo - edge + (hi - lo + 2.0 * edge) / (k - 3) * np.arange(-3, k + 1)
+    R = np.linalg.qr(BSpline.design_matrix(x, knots, 3).toarray(), mode="r")
+
+    mp.mp.dps = 50
+    R_mp = mp.matrix(R.tolist())
+    gram = R_mp.T * R_mp
+    powers = mp.matrix([[(mp.mpf(2) * i / (k - 1) - 1) ** j for j in range(m)] for i in range(k)])
+    projected = gram * powers
+    penalty = projected * mp.inverse(powers.T * projected) * projected.T / n
+    stencil = [(-1) ** (m - j) * math.comb(m, j) for j in range(m + 1)]
+    for row in range(k - m):
+        for a, left in enumerate(stencil):
+            for b, right in enumerate(stencil):
+                penalty[row + a, row + b] += mp.mpf(left * right) * wiggle_lambda
+    expected = np.array((R_mp * mp.inverse(gram + penalty) * R_mp.T).tolist(), dtype=float)
+
+    natural = R @ spec._natural_map
+    (_, wiggle), *nulls = spec._base_penalty_components
+    diagonal = np.diag(wiggle_lambda * wiggle + sum(null for _, null in nulls))
+    stacked = np.vstack((natural, np.diag(np.sqrt(diagonal))))
+    stacked /= np.linalg.norm(stacked, axis=0)
+    rows = np.linalg.qr(stacked)[0][:k]
+    u = np.finfo(np.float64).eps / 2
+    atol = 64.0 * (2 * k * u / (1.0 - 2 * k * u)) * np.linalg.cond(stacked)
+    np.testing.assert_allclose(rows @ rows.T, expected, rtol=0.0, atol=atol)
 
 
 def test_estimated_null_lambdas_keep_their_names_in_any_row_order() -> None:

@@ -1217,8 +1217,9 @@ def test_auto_factor_smooth_falls_back_for_unsupported_local_geometry(
     policies = {"wiggle": LambdaPolicy.off()}
     features = {"z": Numeric()}
     if basis == "fs":
+        # A zero null_0 aliases the levels' constants with the intercept and is refused.
         policies.update(
-            null_0=LambdaPolicy.off(),
+            null_0=LambdaPolicy.fixed(1.0),
             null_1=LambdaPolicy.off(),
         )
     else:
@@ -1342,9 +1343,10 @@ def test_zero_penalty_fs_falls_back_or_rejects_but_gram_fits() -> None:
         }
     )
     y = np.sin(2.5 * x) + rng.normal(scale=0.05, size=len(x))
+    # A zero null_0 aliases the levels' constants with the intercept and is refused.
     policies = {
         "wiggle": LambdaPolicy.off(),
-        "null_0": LambdaPolicy.off(),
+        "null_0": LambdaPolicy.fixed(1.0),
         "null_1": LambdaPolicy.off(),
     }
     common = {

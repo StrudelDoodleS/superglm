@@ -124,8 +124,8 @@ orthogonal over the training rows to the lower degrees. A `null_j` smoothing
 parameter therefore means the same curve whatever the row order or platform.
 The degree is that of the B-spline coefficients as a polynomial in their
 index: through `null_3` it is the curve's degree in x, and from `null_4`
-(`m >= 5`) the curve stays piecewise cubic. An fs model saved by 0.43.0 or
-earlier keeps the null axes it was fitted on and predicts as before, but its
+(`m >= 5`) the curve stays piecewise cubic. An fs model saved before 0.44.0
+keeps the null axes it was fitted on and predicts as before, but its
 `null_j` smoothing parameters belong to those axes, not to the degrees, and do
 not compare with a fresh fit's.
 
@@ -384,6 +384,10 @@ credibility and curve tables, and `credibility_demo.png`.
   final support basis, for every `m` and null-component policy.
 - `fit()` and `fit_path()` reject factor smooths.
 - Factor-smooth `k` must be at least 5.
+- `basis="fs"` refuses a difference order `m` whose penalty has a condition
+  number of 2^51 or more, which float64 does not reliably represent (none below `k=79`;
+  at `k=100`, `20 <= m <= 71`), and refuses `null_0` fixed at zero, which would
+  alias the levels' constants with the model intercept.
 - Missing numeric or grouping values are rejected.
 - The FS and SZ Gaussian, Poisson, construction, unseen-level, and discrete
   reference cases are pinned against mgcv in the test suite. The FS cases fit
