@@ -386,7 +386,10 @@ def _install_tweedie_profile(final_model, *, X, y, offset, result) -> None:
         final_model, y, base.predict_exact(final_model, X, offset, warn=False), result
     )
     result.converged = _published_converged(final_model, result.converged)
-    final_model._tweedie_profile_result = _detached_copy(result)
+    installed = _detached_copy(result)
+    # The centre each cached interval was inverted from belongs with that cache.
+    installed._ci_centres = dict(result._ci_centres)
+    final_model._tweedie_profile_result = installed
 
 
 def _published_converged(final_model, converged: bool) -> bool:

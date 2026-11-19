@@ -741,10 +741,12 @@ class TestNB2WeightedProfile:
         # The recursive-summation bound over n rows, in the objective's units.
         assert bounds == [n * np.finfo(float).eps * abs(optimum[1])]
 
+    @pytest.mark.pins_behaviour
     def test_a_cutoff_inside_the_round_off_leaves_the_score_root_the_centre(self):
-        """At alpha = 1 - 1e-8 the cutoff is 1.6e-16 in the statistic, far inside the
-        profile's round-off: a drop no larger than round-off moves no centre, however
-        small the cutoff."""
+        """Pins master's round-off comparison for NB2, which takes no refits: at
+        alpha = 1 - 1e-8 the cutoff is 1.6e-16 in the statistic, far inside the
+        profile's round-off, and a drop no larger than round-off moves no centre,
+        however small the cutoff."""
         rng = np.random.default_rng(3)
         x = rng.standard_normal(50)
         mean = np.exp(0.5 + 0.3 * x)

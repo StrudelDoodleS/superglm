@@ -146,9 +146,12 @@ class _PowerProfile:
 
     @property
     def tolerance(self) -> float:
-        """The tolerance search candidates are fitted to: the model's under ML, the
-        search's REML stop's under REML."""
-        return _SEARCH_REML_TOL if self._fit == self._fit_reml else self.clone._tol
+        """The tolerance a search candidate's bound is read from: the search's REML stop's
+        for a fit with a REML objective, else the model's, under ML or where fit_reml
+        has no REML-eligible term and runs an ordinary fit at it."""
+        if self._fit == self._fit_reml and getattr(self.clone, "_reml_result", None) is not None:
+            return _SEARCH_REML_TOL
+        return self.clone._tol
 
     def refit(self, p: float, tol: float) -> tuple[float, float]:
         """The profile at p refitted from cold at ``tol``, and the bound on its error.
@@ -573,8 +576,10 @@ class TweedieProfileResult:
         return self._ci_cache[alpha]
 
     def _evaluation_error(self, p: float) -> float:
-        """Bound on the error of the value recorded at p, from its fit's own certificate."""
-        return self._candidates[p].error
+        """Bound on the error of the value recorded at p, from its fit's own certificate;
+        a fit that did not settle certifies nothing (inf)."""
+        candidate = self._candidates[p]
+        return candidate.error if candidate.fit_converged else math.inf
 
     def _refiner(self) -> Callable[[float, float], tuple[float, float]] | None:
         """`_refined_value`, where the searched profile can still fit a power."""
@@ -583,25 +588,30 @@ class TweedieProfileResult:
     def _refined_value(self, p: float, target: float) -> tuple[float, float]:
         """The profile at p to within ``target`` in mean NLL, and the bound on its error.
 
-        The recorded value where its bound meets the target; otherwise a refit
-        from cold at the loosest tolerance that does, a certificate being linear
-        in its fit's tolerance, never below ``_REFIT_TOL_FLOOR``. Refits are
-        kept, so a comparison asked again is decided again by the same values.
+        The recorded value where its fit settled and its bound meets the target;
+        otherwise a refit from cold at the loosest tolerance that does, a
+        certificate being linear in its fit's tolerance, never looser than the
+        candidate's own nor tighter than ``_REFIT_TOL_FLOOR``. Settled refits
+        are kept, so a comparison asked again is decided again by the same
+        values; one that failed is tried again when next asked.
         """
         profile = self._objective._objective
         candidate = self._candidates[p]
         tol = profile.tolerance
         wanted = max(_REFIT_TOL_FLOOR, tol * target / candidate.error)
-        if wanted >= tol:
+        if wanted >= tol and candidate.fit_converged:
             return self._objective.values[p], candidate.error
+        wanted = min(wanted, tol)
         known = self._refits.get(p)
         if known is None or known[0] > wanted:
-            known = self._refits[p] = (wanted, *profile.refit(p, wanted))
+            known = (wanted, *profile.refit(p, wanted))
+            if math.isfinite(known[2]):
+                self._refits[p] = known
         return known[1], known[2]
 
     def _centre(self, refine: bool = True) -> tuple[float, float]:
-        """Where an interval starts: p_hat, or the lowest recorded power where that is
-        lower, by more than the fits resolve or confirmed by refits (``refine``)."""
+        """Where an interval starts: p_hat, or a recorded power below it by more than the
+        fits resolve or confirmed by refits (``refine``)."""
         below = credible_lower_point(
             self._objective,
             self.p_hat,
@@ -625,7 +635,7 @@ class TweedieProfileResult:
                 "than its fits resolve: p_hat is a local minimum there, and the interval is "
                 "inverted from that lower power."
             )
-        # The interval's last comparison, asked again: its refits are kept.
+        # The interval's last comparison, asked again: its settled refits are kept.
         lower = credible_lower_point(
             self._objective, centre, centre_nll, self._evaluation_error, self._refiner()
         )
@@ -639,13 +649,23 @@ class TweedieProfileResult:
             name = "p_hat" if centre == self.p_hat else "p"
             floor = min(_REFIT_TOL_FLOOR, self._objective._objective.tolerance)
             drop = 2.0 * self._ll_scale * (centre_nll - lower.nll)
-            cautions.append(
+            caution = (
                 f"the {level} interval's search found p={lower.x:.6g} below {name}={centre:.6g} "
-                f"on the searched curve, by {drop:.3g} in the likelihood-ratio statistic, which "
-                f"fits of both powers at tol={floor:g} cannot resolve: the fits cannot confirm "
-                f"that {name} is not the minimum, so the interval is inverted from "
-                f"{name}={centre:.6g}."
+                f"on the searched curve, by {drop:.3g} in the likelihood-ratio statistic, "
             )
+            if lower.settled:
+                caution += (
+                    f"which fits of both powers at tol={floor:g} cannot resolve: the fits cannot "
+                    f"confirm that {name} is not the minimum, so the interval is inverted from "
+                    f"{name}={centre:.6g}."
+                )
+            else:
+                caution += (
+                    f"and a refit at tol={floor:g} to tell the two apart did not converge, so "
+                    f"the interval is inverted from {name}={centre:.6g}, which may not be the "
+                    "minimum; raise max_iter for refits that converge."
+                )
+            cautions.append(caution)
         # An infeasible power has no fit to report on.
         fits = {p: self._candidates[p] for p in evaluated if p in self._candidates}
         by_cause = (

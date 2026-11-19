@@ -323,10 +323,51 @@ def test_refined_values_that_cannot_tell_the_points_apart_leave_it_unresolved(re
         refine=refine,
     )
 
-    # The interval stays inverted from x_hat, and the comparison says it could not decide.
+    # The interval stays inverted from x_hat, and the comparison says it could not
+    # decide, and whether that is because a refit did not converge.
     assert found == expected
-    unresolved = LowerPoint(0.31, -drop, resolved=False)
+    unresolved = LowerPoint(0.31, -drop, resolved=False, settled=math.isfinite(refined[1]))
     assert credible_lower_point(objective, 0.3, 0.0, error_bounds, refine) == unresolved
+
+
+def test_a_lowest_point_the_refined_values_put_above_x_hat_hands_on_to_the_next():
+    # The profile 30 (x - 0.65)^2 has x_hat = 0.5 recorded at its exact value and
+    # two lower points recorded within their errors: 0.85, the lowest, is fit noise
+    # and 0.65 the true minimum. Exact refined values rule out 0.85, and the
+    # comparison moves on to 0.65, which they confirm; inverted from 0.65, the
+    # interval rules out 0.85 again and finds nothing lower.
+    def profile(x):
+        return 30.0 * (x - 0.65) ** 2
+
+    objective = RecordedObjective(profile)
+    nll_hat = objective(0.5)
+    objective.values[0.85] = nll_hat - 0.9
+    objective.values[0.65] = nll_hat - 0.8
+    errors = {0.85: 1.5, 0.65: 1.0}
+    asked = []
+
+    def refine(x, target):
+        asked.append(x)
+        return profile(x), 0.0
+
+    interval, centre, centre_nll = likelihood_ratio_interval(
+        objective,
+        0.5,
+        nll_hat,
+        (0.0, 1.4),
+        alpha=0.05,
+        scale=1.0,
+        xtol=1e-12,
+        error=lambda x: errors.get(x, 0.0),
+        refine=refine,
+    )
+
+    assert asked == [0.5, 0.85, 0.5, 0.65, 0.65, 0.85]
+    assert (centre, centre_nll) == (0.65, nll_hat - 0.8)
+    # Inverted from 0.65's recorded value: 2 (30 (x - 0.65)^2 - centre_nll) = cutoff.
+    half_width = math.sqrt((0.5 * chi2.isf(0.05, 1) + centre_nll) / 30.0)
+    assert interval.lower == pytest.approx(0.65 - half_width, abs=1e-9)
+    assert interval.upper == pytest.approx(0.65 + half_width, abs=1e-9)
 
 
 def test_re_centring_stops_at_its_budget(monkeypatch):

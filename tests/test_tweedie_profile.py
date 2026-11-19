@@ -5,6 +5,7 @@ import math
 import pickle
 import re
 import warnings
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -546,6 +547,52 @@ class TestMaximumLikelihoodPhi:
         assert interval == expected
         assert cached_tweedie_profile_ci(result, 0.05)[1] == "caution"
 
+    def test_a_fit_that_did_not_converge_is_refitted_however_far_its_value_drops(self):
+        """A recorded value whose fit did not converge bounds nothing, so a drop ten times
+        its nominal bound is refitted, not taken as real: the refits put the planted
+        power above p_hat, and the interval stays inverted from p_hat."""
+        expected = self._settled_search().interval(0.05)
+        result = self._settled_search()
+        lower = result.p_hat + 0.05
+        unsettled = replace(result._candidates[result.p_hat], pirls_converged=False)
+        result._candidates[result.p_hat] = result._candidates[lower] = unsettled
+        result._objective.values[lower] = result.search_nll - 10.0 * unsettled.error
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            interval = result.interval(0.05)
+        assert set(result._refits) == {result.p_hat, lower}
+        assert result._ci_centres[0.05] == (result.p_hat, result.search_nll)
+        assert result._ci_cautions[0.05] == []
+        assert interval == expected
+
+    def test_a_refit_that_did_not_converge_is_tried_again_by_the_next_interval(self, monkeypatch):
+        """A refit that did not converge bounds nothing, so it is not kept: the next
+        interval refits both powers, and refits that converge decide."""
+        unplanted = self._settled_search()
+        unplanted.interval(0.05)
+        expected = unplanted.interval(0.1)
+        result = self._settled_search()
+        profile = result._objective._objective
+        lower = result.p_hat + 0.05
+        result._candidates[lower] = result._candidates[result.p_hat]
+        # Within the pair's bounds, so both powers are refitted.
+        result._objective.values[lower] = result.search_nll - result._evaluation_error(lower)
+        refit, failing = profile.refit, [True]
+        monkeypatch.setattr(
+            profile, "refit", lambda p, tol: (math.nan, math.inf) if failing[0] else refit(p, tol)
+        )
+        with pytest.warns(UserWarning, match="to tell the two apart did not converge"):
+            result.interval(0.05)
+        assert result._refits == {}
+
+        failing[0] = False
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            interval = result.interval(0.1)
+        assert set(result._refits) == {result.p_hat, lower}
+        assert result._ci_cautions[0.1] == []
+        assert interval == expected
+
     def test_an_interval_out_of_re_centrings_says_a_lower_power_remains(self, monkeypatch):
         from superglm.profiling import _scalar
         from superglm.profiling._reporting import cached_tweedie_profile_ci
@@ -629,16 +676,26 @@ class TestMaximumLikelihoodPhi:
         plt.close(ax.figure)
         return centre, dict(zip(powers, statistic, strict=True))
 
-    def test_a_lower_power_moves_the_interval_alike_in_euros_and_cents(self):
+    def test_a_lower_power_moves_the_interval_alike_in_euros_and_cents(self, monkeypatch):
         """Cents add n_positive log 100 to the NLL and the REML objective at every power,
         which no likelihood ratio sees but the candidate fits' bounds, read from each
         REML stop's level, do. A coarse search's interval finds a power below p_hat by
         more than the euros bounds resolve and less than the cents bounds do. In cents
         both powers are refitted from cold to a quarter of the drop, which confirms it:
         it is the minimum in both units, and both intervals are inverted from it."""
+        received = []
+        fit_reml = SuperGLM.fit_reml
+
+        def spy(model, *args, reml_tol=None, pirls_tol=None, **kwargs):
+            received.append((reml_tol, pirls_tol))
+            return fit_reml(model, *args, reml_tol=reml_tol, pirls_tol=pirls_tol, **kwargs)
+
+        monkeypatch.setattr(SuperGLM, "fit_reml", spy)
         coarse = {"p_bounds": (1.3, 1.7), "xatol": 0.05}
         euros, in_euros = self._premium_profile(1.0, **coarse)
+        in_euros_calls = len(received)
         cents, in_cents = self._premium_profile(100.0, **coarse)
+        monkeypatch.undo()
 
         lower, lower_nll = cents._objective.best()
         drop = 2.0 * cents._ll_scale * (cents.search_nll - lower_nll)
@@ -691,8 +748,18 @@ class TestMaximumLikelihoodPhi:
             assert min(statistic.values()) == 0.0
             for end in (interval.lower, interval.upper):
                 assert statistic[end] == pytest.approx(cutoff, abs=0.05)
-        # Only the cents comparison needed refits, of the two powers it compared.
+        # Only the cents comparison needed refits, of the two powers it compared, each
+        # with its REML stop at the tolerance recorded for it and its inner fits at
+        # that or the model's tighter tol.
         assert euros._refits == {} and set(cents._refits) == {cents.p_hat, lower}
+
+        def refits(calls):
+            return sorted(call for call in calls if call[1] is not None)
+
+        assert refits(received[:in_euros_calls]) == []
+        assert refits(received[in_euros_calls:]) == sorted(
+            (tol, min(1e-10, tol)) for tol, _, _ in cents._refits.values()
+        )
 
     def test_an_interval_saved_before_centres_were_recorded_keeps_its_plot(self, monkeypatch):
         """Saved before intervals recorded their centres, a result's intervals were inverted
@@ -809,6 +876,10 @@ class TestMaximumLikelihoodPhi:
         for alpha in (0.9, 0.05):
             assert result._ci_cautions[alpha] == []
             assert result._ci_centres[alpha] == (result.p_hat, result.search_nll)
+        # Each refit is as accurate as it claims: within its bound of a fit at 1e-12.
+        assert {result.p_hat, lower} <= set(result._refits)
+        for p, (_, nll, error) in result._refits.items():
+            assert abs(500 * nll - tight(p)) <= 500 * error
         # The profile with every power fitted at tol 1e-12, minimised and rooted to 1e-9,
         # has its 95% interval at [1.417440, 1.568783]. The recorded curve's fits err
         # by up to about 0.07 in the statistic (p_hat's value sits 0.066 above its tight
@@ -818,9 +889,111 @@ class TestMaximumLikelihoodPhi:
             [interval.lower, interval.upper], [1.417440, 1.568783], rtol=0, atol=1.5e-3
         )
 
+    @staticmethod
+    def _slope_book(seed, slope):
+        """120 records with one numeric term, mean 10 exp(slope x)."""
+        rng = np.random.default_rng(seed)
+        x = rng.uniform(-1.0, 1.0, 120)
+        y = generate_tweedie_cpg(120, 10.0 * np.exp(slope * x), 3.0, 1.55, rng=rng)
+        return pd.DataFrame({"x": x}), y
+
+    @staticmethod
+    def _slope_profile(frame, y, fit_mode, max_iter):
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            features={"x": Numeric()},
+            selection_penalty=0,
+            tol=2e-3,
+            max_iter=max_iter,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = model.estimate_p(frame, y, fit_mode=fit_mode, p_bounds=(1.3, 1.7), xatol=0.05)
+            result.interval(0.9)
+        return result
+
+    @staticmethod
+    def _tight_slope_nll(frame, y, p):
+        """n nll at p with the coefficients fitted to 1e-12."""
+        fitted = SuperGLM(
+            family=TweedieDistribution(p=p),
+            features={"x": Numeric()},
+            selection_penalty=0,
+            tol=1e-12,
+        ).fit(frame, y)
+        assert fitted.result.converged
+        return profile_phi_at(y, fitted.predict(frame), np.ones(len(y)), p).criterion
+
+    def test_fit_reml_without_a_reml_term_refits_at_the_tolerance_its_bounds_are_read_from(
+        self,
+    ):
+        """With no REML-eligible term, fit_reml runs an ordinary fit at the model's tol,
+        which each candidate's bound is read from, so a refit runs at that tol scaled to
+        the drop's quarter, as under explicit ML. Here (tol 2e-3, max_iter 3, a coarse
+        search) the comparison needs refits in both units, which converge within
+        max_iter and confirm the lower power: one interval and caution in both units."""
+        frame, y = self._slope_book(17, 1.5)
+        euros = self._slope_profile(frame, y, "reml", 3)
+        cents = self._slope_profile(frame, 100.0 * y, "reml", 3)
+        ml = self._slope_profile(frame, 100.0 * y, "fit", 3)
+
+        lower = cents._objective.best()[0]
+        # A real improvement, by 0.00336 in the statistic.
+        assert self._tight_slope_nll(frame, y, lower) < self._tight_slope_nll(frame, y, cents.p_hat)
+        # Each unit refits its own two powers, which agree to the searches' round-off.
+        assert len(euros._refits) == 2 and set(cents._refits) == {cents.p_hat, lower}
+        # The fallback refits at the tolerances an explicit ML refit asks for, 2.4e-4.
+        refits = sorted(cents._refits.values())
+        assert [tol for tol, _, _ in refits] == pytest.approx(
+            [tol for tol, _, _ in sorted(ml._refits.values())], rel=1e-6
+        )
+        assert all(math.isfinite(error) for _, _, error in refits)
+        for result in (euros, cents):
+            assert result._ci_centres[0.9][0] == pytest.approx(lower, abs=1e-9)
+        assert len(cents._ci_cautions[0.9]) == 1
+        assert "more than its fits resolve" in cents._ci_cautions[0.9][0]
+        assert euros._ci_cautions[0.9] == cents._ci_cautions[0.9]
+        np.testing.assert_allclose(
+            [cents._ci_cache[0.9].lower, cents._ci_cache[0.9].upper],
+            [euros._ci_cache[0.9].lower, euros._ci_cache[0.9].upper],
+            rtol=0,
+            atol=2e-4,
+        )
+
+    def test_fits_that_did_not_converge_certify_no_lower_power(self):
+        """max_iter 1: every candidate stops at its iteration limit, so its recorded value
+        bounds nothing, and a power recorded below p_hat is refitted. The refits stop at
+        the limit as well, so the interval stays inverted from p_hat in both units and
+        says the refits did not converge. Fits to 1e-12 put p_hat lower, by 0.43 in the
+        statistic."""
+        from superglm.profiling._reporting import cached_tweedie_profile_ci
+
+        frame, y = self._slope_book(13, 2.25)
+        euros = self._slope_profile(frame, y, "reml", 1)
+        cents = self._slope_profile(frame, 100.0 * y, "reml", 1)
+
+        lower = cents._objective.best()[0]
+        assert lower != cents.p_hat
+        assert not cents._candidates[cents.p_hat].fit_converged
+        assert not cents._candidates[lower].fit_converged
+        assert self._tight_slope_nll(frame, y, cents.p_hat) < self._tight_slope_nll(frame, y, lower)
+        for result in (euros, cents):
+            assert result._ci_centres[0.9] == (result.p_hat, result.search_nll)
+            caution = result._ci_cautions[0.9][0]
+            assert "a refit at tol=1e-12 to tell the two apart did not converge" in caution
+            assert cached_tweedie_profile_ci(result, 0.9)[1] == "caution"
+        np.testing.assert_allclose(
+            [cents._ci_cache[0.9].lower, cents._ci_cache[0.9].upper],
+            [euros._ci_cache[0.9].lower, euros._ci_cache[0.9].upper],
+            rtol=0,
+            atol=2e-4,
+        )
+
+    @pytest.mark.pins_behaviour
     def test_a_default_search_in_cents_keeps_the_euros_interval(self):
-        """The control: the default search finds no lower power, so both units invert
-        from p_hat, without a caution."""
+        """Pins master's default search, which the refit rule leaves alone: it records
+        no power below p_hat, so both units invert from p_hat, without a caution, to the
+        same interval."""
         euros, in_euros = self._premium_profile(1.0)
         cents, in_cents = self._premium_profile(100.0)
         for result in (euros, cents):
@@ -1454,6 +1627,7 @@ class TestEstimatePFitMode:
         assert model._retain_fit_state is retain_fit_state
         assert model._tweedie_profile_result is not result
         assert model._tweedie_profile_result._ci_cache is not result._ci_cache
+        assert model._tweedie_profile_result._ci_centres is not result._ci_centres
         # The model's compaction runs after the published dispersion is
         # restated, so the released covariance is scaled at that phi.
         expected_release_flags = [True] if retain_fit_state else [True, False]
