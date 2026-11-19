@@ -2692,6 +2692,42 @@ def test_run_cv_and_final_fit_name_a_separated_design_as_such():
     assert run.value.public_message == cv.FOLD_FAILED.format(fold=1, reason=cv.FOLD_SEPARATED)
 
 
+def test_final_fit_gives_level_advice_only_for_a_separated_level(monkeypatch):
+    """Grouping a level with a neighbour is the remedy for a level's finding, not the solver's.
+
+    A strict template of one numeric spline is refitted with every solve
+    recording the runtime backstop's finding (forced at the check both solvers
+    read), so the refit is refused.  Final fit says the fit ran a coefficient
+    off and that the log names the terms; db1d1ac19 told the user to group a
+    level the model does not have.  A fold's sentence is chosen the same way.
+    """
+    import superglm.diagnostics.separation as separation_module
+    import superglm.editor.cv as cv
+    from superglm.diagnostics.separation import SeparationError, format_runtime_message
+    from superglm.editor.cv import capture_final_fit, run_final_fit
+    from superglm.editor.errors import EditorValueError
+
+    rng = np.random.default_rng(3)
+    frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, 600)})
+    y = rng.poisson(np.exp(0.3 + np.sin(3.0 * frame["x"].to_numpy()))).astype(float)
+    train, validation = (frame.iloc[:500], y[:500]), (frame.iloc[500:], y[500:])
+    template = SuperGLM(
+        family="poisson", features={"x": Spline(kind="cr", k=8)}, separation="error"
+    ).fit_reml(*train)
+    session = EditorSession.from_model(template, train_data=train, validation_data=validation)
+    message = format_runtime_message(1e35, 5, ["x"], True)
+    monkeypatch.setattr(separation_module, "runtime_finding", lambda *_a, **_k: message)
+
+    with pytest.raises(EditorValueError) as final:
+        run_final_fit(capture_final_fit(session), _Context())
+
+    assert final.value.public_message == cv.FINAL_DIVERGED.format(rows="train and validation")
+    sentences = (cv.FOLD_SEPARATED, cv.FOLD_DIVERGED)
+    fold = cv._fit_failure(SeparationError(message), sentences, "", "")
+    level = cv._fit_failure(SeparationError("level", levels=True), sentences, "", "")
+    assert (fold, level) == sentences[::-1]
+
+
 @pytest.mark.parametrize(
     "error",
     [

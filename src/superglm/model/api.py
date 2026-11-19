@@ -652,7 +652,7 @@ class SuperGLM:
 
             from superglm.diagnostics.separation import disclosure_scope
 
-            with solver_blas_threads(), self._parallel_scope(), disclosure_scope():
+            with solver_blas_threads(), self._parallel_scope(), disclosure_scope(self):
                 return fit_ops.fit(
                     self,
                     X,
@@ -687,7 +687,7 @@ class SuperGLM:
         with fit_record(self, "fit_path", locals()):
             from superglm.diagnostics.separation import disclosure_scope
 
-            with solver_blas_threads(), self._parallel_scope(), disclosure_scope():
+            with solver_blas_threads(), self._parallel_scope(), disclosure_scope(self):
                 return fit_ops.fit_path(
                     self,
                     X,
@@ -849,7 +849,7 @@ class SuperGLM:
                 solver_blas_threads(),
                 self._parallel_scope(),
                 reuse_data_factors(),
-                disclosure_scope(),
+                disclosure_scope(self),
             ):
                 return fit_ops.fit_reml(
                     self,
@@ -1493,7 +1493,7 @@ class SuperGLM:
         with fit_record(self, "estimate_p", locals()):
             from superglm.diagnostics.separation import disclosure_scope
 
-            with self._parallel_scope(), disclosure_scope():
+            with self._parallel_scope(), disclosure_scope(self):
                 return profile_ops.estimate_p(
                     self,
                     X,
@@ -1562,7 +1562,7 @@ class SuperGLM:
         with fit_record(self, "estimate_theta", locals()):
             from superglm.diagnostics.separation import disclosure_scope
 
-            with self._parallel_scope(), disclosure_scope():
+            with self._parallel_scope(), disclosure_scope(self):
                 return profile_ops.estimate_theta(
                     self,
                     X,

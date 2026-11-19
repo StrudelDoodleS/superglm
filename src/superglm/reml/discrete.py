@@ -746,6 +746,7 @@ def optimize_discrete_reml_cached_w(
         debug_context={"phase": "bootstrap", "reml_iteration": 0},
         trace_run=trace_run,
         trace_purpose="reml_bootstrap",
+        separation="record",
         weight_semantics=weight_semantics,
     )
     _t_pirls += _time.perf_counter() - _pirls_start
@@ -965,6 +966,7 @@ def optimize_discrete_reml_cached_w(
             debug_context={"phase": "candidate", "reml_iteration": poi_iter + 1},
             trace_run=trace_run,
             trace_purpose="reml_candidate",
+            separation="record",
             weight_semantics=weight_semantics,
         )
         _t_pirls += _time.perf_counter() - _t0
@@ -1867,6 +1869,7 @@ def optimize_discrete_reml_cached_w(
         debug_context={"phase": "optimizer_final", "reml_iteration": poi_iter + 1},
         trace_run=trace_run,
         trace_purpose="reml_optimizer_final",
+        separation="record",
         weight_semantics=weight_semantics,
         cache_out=final_cache,
         compute_rank_info=False,

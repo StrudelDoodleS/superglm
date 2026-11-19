@@ -71,6 +71,7 @@ def run_lambda_path(
     edf_path = np.zeros(n_lambda)
     n_iter_path = np.zeros(n_lambda, dtype=int)
     converged_path = np.zeros(n_lambda, dtype=bool)
+    separation_path: list[str | None] = []
 
     beta_warm = None
     intercept_warm = None
@@ -93,6 +94,7 @@ def run_lambda_path(
             intercept_init=intercept_warm,
             active_set=model._active_set,
             lambda2=lambda2,
+            separation="record",
             weight_semantics=model_weight_semantics(model),
         )
         coef_path[i] = result.beta
@@ -101,6 +103,7 @@ def run_lambda_path(
         edf_path[i] = result.effective_df
         n_iter_path[i] = result.n_iter
         converged_path[i] = result.converged
+        separation_path.append(result.separation_message)
         beta_warm = result.beta
         intercept_warm = result.intercept
 
@@ -111,5 +114,6 @@ def run_lambda_path(
         "edf_path": edf_path,
         "n_iter_path": n_iter_path,
         "converged_path": converged_path,
+        "separation_path": separation_path,
         "result": result,
     }

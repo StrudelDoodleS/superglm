@@ -44,7 +44,16 @@ class SeparationWarning(UserWarning):
 
 
 class SeparationError(ValueError):
-    """Refusal to fit (or certify) a design containing separated cells."""
+    """Refusal to fit (or certify) a design containing separated cells.
+
+    ``levels`` is true when the finding names factor levels or crossed cells
+    (the build-time scans), whose remedy is grouping them; the runtime
+    backstop's finding names model terms.
+    """
+
+    def __init__(self, message: str = "", *, levels: bool = False) -> None:
+        super().__init__(message)
+        self.levels = levels
 
 
 # What a public fit call says about separation.  A call can build its design
@@ -57,13 +66,16 @@ _DISCLOSED: ContextVar[set[str] | None] = ContextVar("superglm_separation_disclo
 
 
 @contextmanager
-def disclosure_scope() -> Iterator[None]:
-    """One public fit call: each distinct separation notice inside it is emitted once.
+def disclosure_scope(model: Any) -> Iterator[None]:
+    """``model``'s public fit call: each distinct separation notice inside it is emitted once.
 
-    A call made inside another (a power-search candidate's ``fit_reml``)
-    shares the outer call's scope.
+    Each call opens its own scope, restoring the enclosing one on exit, so an
+    independent fit started inside another call (from a progress callback)
+    reports what it finds.  A fit the enclosing call runs and discards
+    (``_discarded_fit``: a power-search candidate's ``fit_reml``) shares that
+    call's scope.
     """
-    if _DISCLOSED.get() is not None:
+    if getattr(model, "_discarded_fit", False) and _DISCLOSED.get() is not None:
         yield
         return
     token = _DISCLOSED.set(set())
@@ -97,6 +109,18 @@ def disclose_runtime_separation(result: Any, mode: str) -> None:
     if mode == "error":
         raise SeparationError(message)
     warn_caller(message, SeparationWarning)
+
+
+def format_path_runtime_message(lambdas: NDArray, findings: list[str | None]) -> str | None:
+    """One statement for a regularization path: the points whose solve has a runtime finding."""
+    hit = [i for i, finding in enumerate(findings) if finding is not None]
+    if not hit:
+        return None
+    points = ", ".join(f"{float(lambdas[i]):.4g}" for i in hit)
+    return (
+        f"fit_path: {len(hit)} of {len(findings)} path points (lambda {points}) carry the "
+        f"runtime separation finding. At lambda {float(lambdas[hit[0]]):.4g}: {findings[hit[0]]}"
+    )
 
 
 @dataclass(frozen=True)
@@ -317,27 +341,130 @@ def format_separation_message(findings: list[SeparatedTerm]) -> str:
     return "\n".join(lines)
 
 
+def runtime_finding(
+    design: Any,
+    groups: list,
+    beta: NDArray,
+    *,
+    ratio: float,
+    n_iter: int,
+    exhausted_stagnant: bool,
+    eta: NDArray,
+    eta_unclipped: NDArray,
+    offset: NDArray | None,
+    y: NDArray,
+    weights: NDArray,
+    family: Any,
+    link: Any,
+) -> str | None:
+    """The runtime backstop's finding on one coefficient state, or ``None`` (issue #341).
+
+    Under an extreme working-weight range (``ratio``), two terminal signatures
+    mark a coefficient walking toward +/-infinity: rows pinned at the link's
+    guard, and an exhausted budget at a stagnant deviance
+    (``exhausted_stagnant``).  Separation is the coefficients diverging, so
+    both are read on the model's own linear part (``eta`` less the offset)
+    against the response:
+
+    * a pinned row counts only when its linear part lies past that of every
+      live row whose response is off that boundary.  A direction of recession
+      never moves those rows toward the boundary (Haberman 1974; Albert and
+      Anderson 1984), so a row the coefficients place among them was taken to
+      the guard by its offset;
+    * nothing is found when the rows off every boundary identify all the
+      coefficients (``_interior_rows_identify``): no direction of recession
+      exists, so the maximum-likelihood estimate is finite.
+
+    A family whose boundaries sit at finite eta (``response_boundaries`` is
+    empty) gives the response nothing to say: its pinned rows count as the
+    guard reports them.
+    """
+    if not ratio > EXTREME_WEIGHT_RATIO:
+        return None
+    live = weights > 0
+    linear = eta_unclipped if offset is None else eta_unclipped - offset
+    pinned = (eta != eta_unclipped) & live
+    boundaries = response_boundaries(family, link)
+    if boundaries:
+        pinned &= _carried_past_the_response(linear, eta_unclipped > eta, y, live, boundaries)
+    if not (pinned.any() or exhausted_stagnant):
+        return None
+    if boundaries and _interior_rows_identify(design, y, live, boundaries):
+        return None
+    drifting = drifting_groups(design, groups, beta, linear, pinned, weights)
+    return format_runtime_message(ratio, n_iter, drifting, bool(pinned.any()))
+
+
+def _carried_past_the_response(
+    linear: NDArray, above: NDArray, y: NDArray, live: NDArray, boundaries: tuple[str, ...]
+) -> NDArray:
+    """Rows whose linear part lies past that of every live row off the boundary they face.
+
+    ``above`` marks the rows pinned at the upper guard, which face the binomial
+    ``"one"`` boundary; the others face ``"zero"``.
+    """
+    carried = np.zeros(linear.shape, dtype=bool)
+    if "zero" in boundaries:
+        floor = np.min(linear[live & (y > 0)], initial=np.inf)
+        carried |= ~above & (linear < floor)
+    if "one" in boundaries:
+        ceiling = np.max(linear[live & (y < 1)], initial=-np.inf)
+        carried |= above & (linear > ceiling)
+    return carried
+
+
+def _interior_rows_identify(
+    design: Any, y: NDArray, live: NDArray, boundaries: tuple[str, ...]
+) -> bool:
+    """Whether the live rows with a response off every boundary identify all the coefficients.
+
+    A direction of recession leaves those rows' linear predictor unchanged, so
+    when the intercept and the design columns have full column rank on them
+    it is zero.  The test is their centred Gram, accepted only when its
+    Cholesky factor is certified (``try_decompose_verified_spd_gram``): an
+    uncertified Gram rules nothing out.  It runs only once the backstop fires.
+    """
+    interior = live & (y > 0) if "zero" in boundaries else live.copy()
+    if "one" in boundaries:
+        interior &= y < 1
+    if not interior.any():
+        return False
+    if design.p == 0:
+        return True
+    from superglm.solvers.centered_system import build_centered_system
+    from superglm.solvers.rank import try_decompose_verified_spd_gram
+
+    gram = build_centered_system(
+        dm=design,
+        W=interior.astype(np.float64),
+        z_off=np.zeros(design.n),
+        penalty=np.zeros((design.p, design.p)),
+    ).data_gram
+    return try_decompose_verified_spd_gram(gram) is not None
+
+
 def drifting_groups(
     design: Any,
     groups: list,
     beta: NDArray,
-    eta: NDArray,
-    eta_unclipped: NDArray,
+    linear: NDArray,
+    pinned: NDArray,
     weights: NDArray,
 ) -> list[str]:
     """The groups that carry the linear predictor to where the walk stopped.
 
-    The rows are those pinned at the link's guard; with none pinned, the rows whose predictor
-    lies farthest from the bulk (at least half as far as the farthest). A group is scored by
-    how far its own contribution moves those rows from where it puts the bulk (its median over
-    rows whose weight did not stop). Coefficient size is not comparable across groups (each is
-    in its own reparametrised scale) and the raw contribution includes a constant the intercept
-    cancels. Groups reaching at least half the farthest are named, at most five.
+    The rows are the ``pinned`` ones; with none, the rows whose linear part (eta less the
+    offset) lies farthest from the bulk (at least half as far as the farthest). A group is
+    scored by how far its own contribution moves those rows from where it puts the bulk (its
+    median over rows whose weight did not stop). Coefficient size is not comparable across
+    groups (each is in its own reparametrised scale) and the raw contribution includes a
+    constant the intercept cancels. Groups reaching at least half the farthest are named, at
+    most five.
     """
     live = weights > 0
-    rows = np.flatnonzero((eta != eta_unclipped) & live)
+    rows = np.flatnonzero(pinned)
     if not rows.size and np.any(live):
-        spread = np.abs(eta_unclipped - np.median(eta_unclipped[live]))
+        spread = np.abs(linear - np.median(linear[live]))
         spread[~live] = 0.0
         top = float(np.max(spread))
         rows = np.flatnonzero(spread >= 0.5 * top) if top > 0.0 else rows
@@ -406,7 +533,7 @@ def emit_separation_findings(findings: list[SeparatedTerm], mode: str) -> None:
         return
     message = format_separation_message(findings)
     if mode == "error":
-        raise SeparationError(message)
+        raise SeparationError(message, levels=True)
     # stacklevel points past the builder into the user's fit call region; the
     # exact frame depth varies by entrypoint, so the message carries the term
     # names rather than relying on the reported line.
@@ -419,7 +546,7 @@ def emit_curve_separation(curves: list, mode: str) -> None:
         return
     message = format_curve_separation(curves)
     if mode == "error" and any(curve.refusable for curve in curves):
-        raise SeparationError(message)
+        raise SeparationError(message, levels=True)
     warn_separation(message, stacklevel=3)
 
 

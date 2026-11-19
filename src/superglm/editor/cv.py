@@ -162,6 +162,11 @@ FOLD_SEPARATED = (
     "responses, such as no claims, so its effect is infinite and the model refuses it "
     "(separation='error'); group that level with a neighbour."
 )
+FOLD_DIVERGED = (
+    "That fold's fit stopped with fitted values at the response boundary, such as no claims, "
+    "and a coefficient heading to infinity, so the model refuses it (separation='error'); the "
+    "editor's log names the terms that carry it."
+)
 FOLD_SOLVER_FAILED = (
     "The solver failed numerically on that fold's training rows; the editor's log records "
     "where it failed."
@@ -202,6 +207,12 @@ FINAL_SEPARATED = (
     "Final fit could not fit the {rows} rows: a level or crossed cell there has exposure but "
     "only boundary responses, such as no claims, so its effect is infinite and the model "
     "refuses it (separation='error'); group that level with a neighbour, or leave those rows out."
+)
+FINAL_DIVERGED = (
+    "Final fit could not fit the {rows} rows: the fit stopped with fitted values at the "
+    "response boundary, such as no claims, and a coefficient heading to infinity, so the model "
+    "refuses it (separation='error'); the editor's log names the terms that carry it, or leave "
+    "those rows out."
 )
 FINAL_SOLVER_FAILED = (
     "The solver failed numerically while Final fit fitted the {rows} rows, so no model was "
@@ -1414,7 +1425,9 @@ def run_cv(plan: CVRunPlan, context) -> CVRun:
             reason = exc.public_message
         else:
             _LOGGER.warning("Run CV fold %d failed.", recorder.fold_number, exc_info=True)
-            reason = _fit_failure(exc, FOLD_SEPARATED, FOLD_SOLVER_FAILED, FOLD_NOT_FITTED)
+            reason = _fit_failure(
+                exc, (FOLD_SEPARATED, FOLD_DIVERGED), FOLD_SOLVER_FAILED, FOLD_NOT_FITTED
+            )
         raise EditorValueError(
             FOLD_FAILED.format(fold=recorder.fold_number, reason=reason)
         ) from exc
@@ -1632,7 +1645,9 @@ def run_final_fit(plan: FinalFitPlan, context) -> FinalFit:
             raise
         _LOGGER.warning("Final fit failed.", exc_info=True)
         rows = "train and validation" if len(plan.datasets) > 1 else "train"
-        sentence = _fit_failure(exc, FINAL_SEPARATED, FINAL_SOLVER_FAILED, FINAL_NOT_FITTED)
+        sentence = _fit_failure(
+            exc, (FINAL_SEPARATED, FINAL_DIVERGED), FINAL_SOLVER_FAILED, FINAL_NOT_FITTED
+        )
         raise EditorValueError(sentence.format(rows=rows)) from exc
     context.check()
     if plan.edited:
@@ -1662,10 +1677,14 @@ _SOLVER_FAILURES = (
 )
 
 
-def _fit_failure(exc: BaseException, separated: str, solver: str, other: str) -> str:
-    """The sentence for a refit that raised ``exc``: ``separated``, ``solver`` or ``other``."""
+def _fit_failure(exc: BaseException, separated: tuple[str, str], solver: str, other: str) -> str:
+    """The sentence for a refit that raised ``exc``: one of ``separated``, ``solver`` or ``other``.
+
+    ``separated`` is the sentence for separated factor levels or cells, then the
+    one for any other separation finding (the solver's runtime backstop).
+    """
     if isinstance(exc, SeparationError):
-        return separated
+        return separated[0] if exc.levels else separated[1]
     if isinstance(exc, _SOLVER_FAILURES):
         return solver
     return other

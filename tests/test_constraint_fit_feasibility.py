@@ -213,24 +213,27 @@ def test_primal_feasibility_cannot_replace_the_inner_qp_kkt_certificate(
     ]
 
 
-def test_the_separation_finding_and_the_constraint_refusal_describe_one_returned_state(
+@pytest.mark.parametrize("separation", ["warn", "error", "record"])
+def test_a_strict_separation_stop_raises_before_the_constraint_refusal(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
+    separation: str,
 ) -> None:
-    """The separation backstop records its finding on the state the solve returns.
+    """The separation backstop runs before the QP contract's final refusal.
 
     The inner QP never certifies, so the fit spends its ten iterations at an
     unchanged deviance, and the working-weight ratio is forced past the
     separation bar: one fit carries the backstop's exhausted-budget signature
-    and a state without a KKT certificate.  The solver warns about neither:
-    the finding rides on the result, for the fit that publishes it to
-    disclose, and the refusal is the result's termination reason and one log
-    record.  Mutation check: a solver that still warned fails under the
-    ``"error"`` filter.
+    and a state without a KKT certificate.  Under ``"warn"`` it reports both.
+    Under ``"error"`` the backstop raises first, and the refusal of a state the
+    fit never returns is not reported.  Under ``"record"``, which a model's
+    own solves pass, the solver warns about nothing: the finding rides on the
+    result and the refusal is logged once.  Mutation check: the final refusal
+    run before the backstop logged that refusal and then raised.
     """
     import superglm.solvers.irls_direct._fit as irls_direct
     import superglm.solvers.irls_direct._qp as irls_direct_qp
-    from superglm.diagnostics.separation import SeparationWarning
+    from superglm.diagnostics.separation import SeparationError, SeparationWarning
     from superglm.distributions import Gaussian
     from superglm.links import IdentityLink
     from superglm.solvers.constrained_qp import QPResult
@@ -243,30 +246,42 @@ def test_the_separation_finding_and_the_constraint_refusal_describe_one_returned
     )
     monkeypatch.setattr(irls_direct, "_separation_weight_ratio", lambda *_args, **_kwargs: 1e13)
 
+    def fit():
+        return irls_direct.fit_irls_direct(
+            design,
+            y,
+            weights,
+            Gaussian(),
+            IdentityLink(),
+            groups,
+            lambda2=0.0,
+            max_iter=10,
+            tol=1e-10,
+            convergence="coefficients",
+            separation=separation,
+            weight_semantics="frequency",
+        )
+
     with caplog.at_level(logging.WARNING, logger="superglm.solvers.irls_direct"):
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", SeparationWarning)
-            result, _ = irls_direct.fit_irls_direct(
-                design,
-                y,
-                weights,
-                Gaussian(),
-                IdentityLink(),
-                groups,
-                lambda2=0.0,
-                max_iter=10,
-                tol=1e-10,
-                convergence="coefficients",
-                weight_semantics="frequency",
-            )
-    assert "exhausted its iteration budget" in result.separation_message
-    assert result.termination_reason == "constraint_kkt_incomplete"
+        if separation == "warn":
+            with pytest.warns(SeparationWarning, match="exhausted its iteration budget"):
+                result, _ = fit()
+            assert result.termination_reason == "constraint_kkt_incomplete"
+        elif separation == "error":
+            with pytest.raises(SeparationError, match="exhausted its iteration budget"):
+                fit()
+        else:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", SeparationWarning)
+                result, _ = fit()
+            assert "exhausted its iteration budget" in result.separation_message
+            assert result.termination_reason == "constraint_kkt_incomplete"
     refusals = [
         record
         for record in caplog.records
         if "no complete constrained-QP KKT certificate" in record.getMessage()
     ]
-    assert len(refusals) == 1
+    assert len(refusals) == (0 if separation == "error" else 1)
 
 
 def test_rejected_poisson_proposal_cannot_reuse_the_previous_working_kkt_certificate(

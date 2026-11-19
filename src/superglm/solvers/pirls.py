@@ -6,6 +6,7 @@ import copy
 import logging
 import math
 import time
+import warnings
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, fields, is_dataclass, replace
 from typing import Literal, cast, get_args
@@ -350,8 +351,9 @@ class PIRLSResult:
     weight_exponent: int = 0
     solver_phi: float | None = None
     # The runtime separation backstop's statement about this returned state
-    # (``separation.format_runtime_message``), or None.  Recorded by every solve;
-    # only the published fit's is shown (``disclose_runtime_separation``).
+    # (``separation.runtime_finding``), or None.  Recorded by every solve not run
+    # under separation="ignore"; of a model's solves, only the published fit's is
+    # shown (``disclose_runtime_separation``).
     separation_message: str | None = None
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -1095,6 +1097,7 @@ def _fit_pirls_inner(
     trace_run: TraceRun | None = None,
     trace_basis_id: int | None = None,
     trace_purpose: str = "fit",
+    separation: str = "warn",
     *,
     weight_semantics: str,
 ) -> PIRLSResult:
@@ -1844,20 +1847,25 @@ def _fit_pirls_inner(
 
     # Runtime separation backstop (issue #341): a predictor pinned at the link's
     # overflow guard, or an exhausted budget with a frozen objective, under an
-    # exploded weight range, marks a coefficient drifting to infinity.  Recorded
-    # on the returned state; the fit that publishes it warns (as irls_direct).
+    # exploded weight range, marks a coefficient drifting to infinity
+    # (``separation.runtime_finding``).  Recorded on the returned state, and
+    # warned or refused here under "warn" or "error", as irls_direct does.
     separation_message = None
-    if np.isfinite(dev):
+    if separation != "ignore" and np.isfinite(dev):
         from superglm.diagnostics.separation import (
-            EXTREME_WEIGHT_RATIO,
             STAGNANT_DEVIANCE_DELTA,
-            drifting_groups,
-            format_runtime_message,
+            SeparationError,
+            SeparationWarning,
+            runtime_finding,
         )
 
-        if w_ratio > EXTREME_WEIGHT_RATIO:
-            pinned = bool(np.any((retained.eta != retained.eta_unclipped) & (weights > 0)))
-            exhausted_stagnant = (
+        separation_message = runtime_finding(
+            dm,
+            groups,
+            beta,
+            ratio=w_ratio,
+            n_iter=outer + 1,
+            exhausted_stagnant=(
                 not converged
                 # A mean-space boundary stop sits at a finite constrained
                 # maximum, not a drift; 0.37.1 read it converged here, and the
@@ -1871,12 +1879,19 @@ def _fit_pirls_inner(
                 and not step_rejected
                 and objective_relative_change is not None
                 and objective_relative_change < STAGNANT_DEVIANCE_DELTA
-            )
-            if pinned or exhausted_stagnant:
-                drifting = drifting_groups(
-                    dm, groups, beta, retained.eta, retained.eta_unclipped, weights
-                )
-                separation_message = format_runtime_message(w_ratio, outer + 1, drifting, pinned)
+            ),
+            eta=retained.eta,
+            eta_unclipped=retained.eta_unclipped,
+            offset=offset,
+            y=y,
+            weights=weights,
+            family=family,
+            link=link,
+        )
+        if separation_message is not None and separation == "error":
+            raise SeparationError(separation_message)
+        if separation_message is not None and separation == "warn":
+            warnings.warn(separation_message, SeparationWarning, stacklevel=2)
     extra = ""
     if active_set:
         total_group_updates = total_inner_iters * n_groups
@@ -2112,6 +2127,7 @@ def fit_pirls(
     record_diagnostics: bool = False,
     convergence: str = "deviance",
     trace_run: TraceRun | None = None,
+    separation: str = "warn",
     *,
     weight_semantics: str,
 ) -> PIRLSResult:
@@ -2121,6 +2137,10 @@ def fit_pirls(
     1. Fit with uniform weights → beta_init
     2. Flavor adjusts group weights based on beta_init
     3. Refit with adjusted weights (warm started from stage 1)
+
+    ``separation`` governs the runtime separation backstop as in
+    ``fit_irls_direct``: "warn", "error", "ignore", or "record" (the finding
+    only rides on the result, for the fit that publishes it).
     """
     if max_iter_outer < 1:
         raise ValueError(f"max_iter_outer must be at least 1, got {max_iter_outer}")
@@ -2162,6 +2182,9 @@ def fit_pirls(
         trace_run=trace_run,
         trace_basis_id=trace_basis_id,
         trace_purpose="initial_flavor_fit" if penalty.flavor is not None else "fit",
+        # A flavored stage-1 fit is discarded scaffolding; only the final
+        # returned fit carries the separation backstop.
+        separation="ignore" if penalty.flavor is not None else separation,
         weight_semantics=weight_semantics,
     )
 
@@ -2191,6 +2214,7 @@ def fit_pirls(
             trace_run=trace_run,
             trace_basis_id=trace_basis_id,
             trace_purpose="adjusted_flavor_fit",
+            separation=separation,
             weight_semantics=weight_semantics,
         )
 

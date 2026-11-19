@@ -224,6 +224,7 @@ def fit_irls_direct(
     _deviance_init: float | None = None,
     trace_run: TraceRun | None = None,
     trace_purpose: str = "fit",
+    separation: str = "warn",
     *,
     weight_semantics: str,
     _weight_unit: bool = False,
@@ -281,6 +282,7 @@ def fit_irls_direct(
             _deviance_init=_deviance_init,
             trace_run=trace_run,
             trace_purpose=trace_purpose,
+            separation=separation,
             weight_semantics=weight_semantics,
             _weight_unit=_weight_unit,
             _initial_data_reuse=_initial_data_reuse,
@@ -724,6 +726,11 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         ``_build_penalty_matrix`` call entirely.
     reml_penalties : list of PenaltyComponent, optional
         Forwarded to ``_build_penalty_matrix`` for the multi-penalty path.
+    separation : {"warn", "error", "ignore", "record"}
+        The runtime separation backstop: warn, raise ``SeparationError``,
+        skip it, or only record its finding on the result
+        (``PIRLSResult.separation_message``), which a model's solves pass so
+        that only the fit it publishes speaks.
 
     Returns
     -------
@@ -766,6 +773,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
     _deviance_init: float | None = None
     trace_run: TraceRun | None = None
     trace_purpose: str = "fit"
+    separation: str = "warn"
     _: KW_ONLY
     weight_semantics: str
     _weight_unit: bool = False
@@ -1664,31 +1672,36 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         # Both require the extreme working-weight range that a drifting cell
         # produces.  The build-time scan names cell separation before fitting
         # starts; this catches what the design scan cannot see (non-categorical
-        # indicator structure).  The finding is recorded on the returned state,
-        # and the fit that publishes it warns or refuses
-        # (``separation.disclose_runtime_separation``): a REML candidate, a theta
-        # or power evaluation or a line-search trial describes only itself.
+        # indicator structure; ``separation.runtime_finding`` reads both on the
+        # model's own linear part).  The finding is recorded on the returned
+        # state; ``separation`` "warn" and "error" also warn or refuse here, for
+        # a direct caller, and "record" leaves it to the fit that publishes the
+        # state (``separation.disclose_runtime_separation``): a REML candidate, a
+        # theta or power evaluation or a line-search trial describes only itself.
         self.separation_message = None
-        if np.isfinite(dev):
+        if self.separation != "ignore" and np.isfinite(dev):
             from superglm.diagnostics.separation import (
-                EXTREME_WEIGHT_RATIO,
                 STAGNANT_DEVIANCE_DELTA,
-                drifting_groups,
-                format_runtime_message,
+                SeparationError,
+                SeparationWarning,
+                runtime_finding,
             )
 
-            separation_ratio = _separation_weight_ratio(
-                self.working_rows.curvature_source,
-                self.w_ratio,
-                family=family,
-                link=link,
-                mu=self.working_mu,
-                eta=self.working_eta,
-                weights=weights,
-            )
-            if separation_ratio > EXTREME_WEIGHT_RATIO:
-                pinned = bool(np.any((eta != eta_unclipped) & (weights > 0)))
-                exhausted_stagnant = (
+            self.separation_message = runtime_finding(
+                self.dm,
+                self.groups,
+                beta,
+                ratio=_separation_weight_ratio(
+                    self.working_rows.curvature_source,
+                    self.w_ratio,
+                    family=family,
+                    link=link,
+                    mu=self.working_mu,
+                    eta=self.working_eta,
+                    weights=weights,
+                ),
+                n_iter=it + 1,
+                exhausted_stagnant=(
                     not converged
                     # A warm-started micro-budget solve (REML performance
                     # iterations run max_iter=1) exhausts its budget by
@@ -1698,14 +1711,20 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                     and it + 1 >= self.max_iter
                     and not self.step_rejected
                     and self.deviance_relative_change < STAGNANT_DEVIANCE_DELTA
-                )
-                if pinned or exhausted_stagnant:
-                    drifting = drifting_groups(
-                        self.dm, self.groups, beta, eta, eta_unclipped, weights
-                    )
-                    self.separation_message = format_runtime_message(
-                        separation_ratio, it + 1, drifting, pinned
-                    )
+                ),
+                eta=eta,
+                eta_unclipped=eta_unclipped,
+                offset=self.offset,
+                y=self.y,
+                weights=weights,
+                family=family,
+                link=link,
+            )
+            if self.separation_message is not None and self.separation == "error":
+                raise SeparationError(self.separation_message)
+            if self.separation_message is not None and self.separation == "warn":
+                # fit_irls_direct's frame: _finish, run, _fit_irls_direct_once, it
+                warnings.warn(self.separation_message, SeparationWarning, stacklevel=4)
 
         # A binomial/identity state holding rows at a clipped probability is on the
         # mean-space boundary, whatever stopped the loop

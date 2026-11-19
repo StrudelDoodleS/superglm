@@ -590,6 +590,26 @@ def runtime_claims(caught):
     ]
 
 
+def forced_runtime_finding():
+    """The backstop's message for a pinned walk, as ``runtime_finding`` formats it."""
+    from superglm.diagnostics.separation import format_runtime_message
+
+    return format_runtime_message(1e35, 5, ["x"], True)
+
+
+def force_runtime_finding(monkeypatch):
+    """Every coefficient solve that runs the backstop records a finding, whatever its state.
+
+    Both solvers read the one check (``separation.runtime_finding``), so this
+    forces the event on every route without bending the data to reach it.
+    """
+    import superglm.diagnostics.separation as separation_module
+
+    message = forced_runtime_finding()
+    monkeypatch.setattr(separation_module, "runtime_finding", lambda *_a, **_k: message)
+    return message
+
+
 def overdispersed_separated_curve(seed=0, n=2000):
     """NB2 claim counts on exposure; level C of the spline-by-factor term has no claim past x 22.
 
@@ -625,27 +645,28 @@ def test_a_search_solve_at_the_guard_does_not_warn_about_the_published_fit(monke
     link's guard and warned that those rows' predictions were unusable; the
     published fit, at theta 2.28, converged with their log means between
     -11.4 and -3.5, which an independent NB2 refit matched to 2e-8.  Here every
-    solve of the smoothing search is forced to the guard (one row's offset 200
-    below its own), and the published refit reads the real offset.  The theta
+    solve of the smoothing search returns a state carrying the backstop's
+    finding, and the published refit is left to its own.  The theta
     calibration, the REML build and each theta/REML refit also built the design
     and named C's held curve, four notices on the witness.  Mutation checks:
     on 5f28e8e80 this fit gave 39 runtime warnings, one per search solve, and
     named the curve three times; with the solvers fixed and the per-call scope
     removed it still named the curve more than once.
     """
+    from dataclasses import replace
+
     import superglm.reml.direct as reml_direct
     from superglm.distributions import NegativeBinomial
 
     X, counts, offset = overdispersed_separated_curve()
     solve = reml_direct.fit_irls_direct
-    findings = []
+    message = forced_runtime_finding()
+    forced = []
 
     def at_the_guard(*args, **kwargs):
-        shifted = np.array(kwargs["offset"], dtype=np.float64, copy=True)
-        shifted[0] -= 200.0
-        output = solve(*args, **{**kwargs, "offset": shifted})
-        findings.append(getattr(output[0], "separation_message", None))
-        return output
+        output = solve(*args, **kwargs)
+        forced.append(kwargs.get("separation"))
+        return (replace(output[0], separation_message=message), *output[1:])
 
     monkeypatch.setattr(reml_direct, "fit_irls_direct", at_the_guard)
     model = SuperGLM(
@@ -660,8 +681,8 @@ def test_a_search_solve_at_the_guard_does_not_warn_about_the_published_fit(monke
     notices = [str(c.message) for c in caught if issubclass(c.category, SeparationWarning)]
     assert len(notices) == 1
     assert notices[0].startswith("Separation in a spline-by-factor term")
-    # The event happened: every search solve stopped at the guard and said so.
-    assert findings and all(finding is not None for finding in findings)
+    # The event happened, on solves that only record what they find.
+    assert forced and set(forced) == {"record"}
     # What the runtime warning would claim, read from predict: no row is there.
     log_mean = np.log(model.predict(X, offset=offset))
     assert np.all(np.abs(log_mean) < LOG_GUARD / 2)
@@ -710,32 +731,51 @@ def test_a_separated_fit_warns_once_however_many_solves_its_theta_search_ran():
     assert np.all(np.abs(log_mean[~separated]) < LOG_GUARD / 2)
 
 
-@pytest.mark.parametrize("mode", ["warn", "ignore", "error"])
-def test_fit_reml_reads_the_models_separation_mode_for_its_published_state(mode):
-    """``fit_reml`` warns, stays silent or refuses as ``fit`` does, once.
-
-    One policy's offset sits 100 below the rest, so every solve of the fit,
-    the published one included, holds that row's predictor at the guard.  The
-    smoothing search passed the model's mode to none of its solves: on
-    5f28e8e80 each of ``"warn"``, ``"ignore"`` and ``"error"`` warned seven
-    times and returned the fit.  Under ``"error"`` the refusal publishes
-    nothing.
-    """
-    rng = np.random.default_rng(3)
-    n = 1500
+def poisson_curve(seed=3, n=1500):
+    rng = np.random.default_rng(seed)
     x = rng.uniform(0.0, 1.0, n)
     y = rng.poisson(np.exp(0.3 + np.sin(3.0 * x))).astype(float)
-    offset = np.zeros(n)
-    offset[0], y[0] = -100.0, 0.0
-    frame = pd.DataFrame({"x": x})
-    model = SuperGLM(family="poisson", features={"x": Spline(kind="cr", k=8)}, separation=mode)
+    return pd.DataFrame({"x": x}), y
+
+
+@pytest.mark.parametrize("route", ["fit_reml", "fit_path"])
+@pytest.mark.parametrize("mode", ["warn", "ignore", "error"])
+def test_a_fit_reads_the_models_separation_mode_for_what_it_returns(monkeypatch, route, mode):
+    """``fit_reml`` and ``fit_path`` warn once, stay silent or refuse, as ``fit`` does.
+
+    Every solve records the backstop's finding (forced at the check both
+    solvers read).  ``fit_reml`` publishes its terminal refit's finding;
+    ``fit_path`` returns every point, so each point carries its own and the
+    call warns once, naming the points.  On 5f28e8e80 the smoothing search
+    passed the model's mode to none of its solves (``fit_reml`` warned seven
+    times under each mode and returned under ``"error"``), and the path warned
+    at every point under every mode.  Under ``"error"`` the refusal publishes
+    nothing.  Mutation check: with the BCD solver recording no finding the
+    path warned nothing.
+    """
+    frame, y = poisson_curve()
+    message = force_runtime_finding(monkeypatch)
+    features = {"x": Spline(kind="cr", k=8)}
+    if route == "fit_reml":
+        model = SuperGLM(family="poisson", features=features, separation=mode)
+
+        def fit():
+            return model.fit_reml(frame, y)
+    else:
+        model = SuperGLM(
+            family="poisson", features=features, selection_penalty=1e-3, separation=mode
+        )
+
+        def fit():
+            return model.fit_path(frame, y, n_lambda=4)
+
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         if mode == "error":
             with pytest.raises(SeparationError, match="overflow guard"):
-                model.fit_reml(frame, y, offset=offset)
+                fit()
         else:
-            model.fit_reml(frame, y, offset=offset)
+            returned = fit()
 
     claims = runtime_claims(caught)
     if mode == "error":
@@ -744,32 +784,247 @@ def test_fit_reml_reads_the_models_separation_mode_for_its_published_state(mode)
             model.result
         return
     assert len(claims) == (1 if mode == "warn" else 0)
-    log_mean = np.log(model.predict(frame, offset=offset))
-    assert log_mean[0] == pytest.approx(-LOG_GUARD, abs=64 * U * LOG_GUARD)
+    if route == "fit_path":
+        assert returned.separation_path == (message,) * 4
+        assert all(claim.startswith("fit_path: 4 of 4 path points (lambda ") for claim in claims)
 
 
-def test_estimate_p_warns_for_its_published_refit_not_for_each_power_it_tried():
+def test_estimate_p_warns_for_its_published_refit_not_for_each_power_it_tried(monkeypatch):
     """A power-search candidate is ranked and discarded, so its fit says nothing.
 
-    The same row at the guard is in every candidate's fit and in the refit at
-    the selected power; the refit is the fit the caller receives, and it warns
-    once.  Mutation check: publishing a candidate's finding warned once per
-    power the search evaluated.
+    Every candidate's fit and the refit at the selected power record the
+    backstop's finding (forced); the refit is the fit the caller receives, and
+    it warns once.  On 5f28e8e80 a row held at the guard in every solve gave
+    62 warnings.  Mutation check: publishing a candidate's finding warned once
+    per power the search evaluated.
     """
     rng = np.random.default_rng(3)
     n = 1500
     x = rng.uniform(0.0, 1.0, n)
     y = _tweedie_response(rng, n, rate=0.6) * np.exp(np.sin(3.0 * x))
-    offset = np.zeros(n)
-    offset[0], y[0] = -100.0, 0.0
     frame = pd.DataFrame({"x": x})
+    force_runtime_finding(monkeypatch)
     model = SuperGLM(family=Tweedie(p=1.5), features={"x": Spline(kind="cr", k=8)})
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        result = model.estimate_p(frame, y, offset=offset, fit_mode="reml", search_fit_mode="reml")
+        result = model.estimate_p(frame, y, fit_mode="reml", search_fit_mode="reml")
 
     assert len(result.evaluations) > 1
     assert len(runtime_claims(caught)) == 1
+
+
+@pytest.mark.parametrize("discrete", [False, True])
+def test_strict_reml_fits_a_row_that_only_its_offset_takes_to_the_guard(discrete):
+    """An offset is not a coefficient running off, and rows with claims rule separation out here.
+
+    Each of the 30 x values has policies with claims, so those rows identify
+    the curve and no direction of recession exists.  One claim-free policy's
+    offset is -100, which holds its predictor at the log link's guard in every
+    solve.  At db1d1ac19 strict REML refused this finite fit on both routes,
+    naming the spline; the binned route also refused one whose binned
+    predictor alone crossed the guard.
+    """
+    rng = np.random.default_rng(3)
+    x = np.tile(np.linspace(0.0, 1.0, 30), 50)
+    y = rng.poisson(np.exp(0.3 + np.sin(3.0 * x))).astype(float)
+    y[:30] = 1.0
+    y[-1] = 0.0
+    offset = np.zeros(x.size)
+    offset[-1] = -100.0
+    frame = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="poisson",
+        features={"x": Spline(kind="cr", k=8)},
+        separation="error",
+        discrete=discrete,
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit_reml(frame, y, offset=offset)
+
+    assert runtime_claims(caught) == []
+    log_mean = np.log(model.predict(frame, offset=offset))
+    # The event: the row is at the guard; nothing else is near it.
+    assert log_mean[-1] == pytest.approx(-LOG_GUARD, abs=64 * U * LOG_GUARD)
+    assert np.all(np.abs(log_mean[:-1]) < LOG_GUARD / 2)
+
+
+@pytest.mark.parametrize("row", ["offset_only", "extrapolated"])
+def test_the_backstop_reads_the_linear_part_against_the_responses(row):
+    """A guard hit is separation only where the coefficients, not an offset, took the row there.
+
+    One claim-free policy's offset holds its predictor at the log link's guard.
+
+    * ``offset_only``: the coefficients put the row among the rows with
+      claims, so its offset took it to the guard.  A column ``w``, nonzero only
+      on two claim-free rows (+1 and -1, so its estimate is 0), leaves the
+      rows with claims short of identifying every coefficient: the linear
+      part alone decides.
+    * ``extrapolated``: the row is at x = 3, past the claims' x, so its linear
+      part lies below theirs; but the rows with claims identify both
+      coefficients, so no direction of recession exists.
+
+    Mutation checks: without the linear-part rule ``offset_only`` was refused,
+    and without the identification rule ``extrapolated`` was, as 5f28e8e80's
+    ``fit`` and db1d1ac19 refused both under ``separation="error"``.
+    """
+    rng = np.random.default_rng(11)
+    n = 400
+    x = rng.uniform(0.0, 1.0, n)
+    y = rng.poisson(np.exp(1.0 - 2.0 * x)).astype(float)
+    offset = np.zeros(n)
+    if row == "offset_only":
+        x[:3], y[:3], offset[2] = 0.5, 0.0, -100.0
+        w = np.zeros(n)
+        w[0], w[1] = 1.0, -1.0
+        frame = pd.DataFrame({"x": x, "w": w})
+        features = {"x": Numeric(), "w": Numeric()}
+        at_guard = 2
+    else:
+        x[0], y[0], offset[0] = 3.0, 0.0, -90.0
+        frame = pd.DataFrame({"x": x})
+        features = {"x": Numeric()}
+        at_guard = 0
+    model = SuperGLM(family="poisson", features=features, separation="error")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(frame, y, offset=offset)
+
+    assert runtime_claims(caught) == []
+    log_mean = np.log(model.predict(frame, offset=offset))
+    assert log_mean[at_guard] == pytest.approx(-LOG_GUARD, abs=64 * U * LOG_GUARD)
+
+
+def test_an_independent_fit_inside_a_progress_callback_reports_its_own_findings():
+    """Each public fit call names its design findings once; a search's candidates share its call.
+
+    ``estimate_p`` runs one ``fit_reml`` per power it tries, and each checks the
+    random effect beside the claim-free level: the search names that hazard,
+    and the level, once.  A separate model fitted from its progress callback is
+    a call of its own, and names its claim-free level as it does when fitted
+    alone.  At db1d1ac19 every nested call shared the outer one's notices, so
+    the callback's fit named nothing.  Mutation check: a candidate opening its
+    own scope named the hazard once per power.
+    """
+    from superglm import RandomEffect
+
+    rng = np.random.default_rng(5)
+    n = 440
+    c = np.where(np.arange(n) < 25, "zero", "positive")
+    count = rng.poisson(0.9, size=n)
+    y = np.where(count > 0, rng.gamma(2 * count + 1e-12, 0.6), 0.0)
+    y[c == "zero"] = 0.0
+    frame = pd.DataFrame({"c": c, "r": rng.choice([f"R{i}" for i in range(12)], size=n)})
+
+    def notices(caught, start):
+        return [
+            c
+            for c in caught
+            if issubclass(c.category, SeparationWarning) and str(c.message).startswith(start)
+        ]
+
+    inner = []
+
+    def progress(phase, payload):
+        if not inner:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                SuperGLM(family=Tweedie(p=1.5), features={"c": Categorical()}).fit(frame, y)
+            inner.append(notices(caught, "Separation detected"))
+
+    model = SuperGLM(family=Tweedie(p=1.5), features={"c": Categorical(), "r": RandomEffect()})
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = model.estimate_p(
+            frame,
+            y,
+            fit_mode="reml",
+            search_fit_mode="reml",
+            p_bounds=(1.3, 1.7),
+            xatol=0.1,
+            progress_callback=progress,
+        )
+
+    assert len(result.evaluations) > 1
+    assert [len(found) for found in inner] == [1]
+    assert len(notices(caught, "RandomEffect variance component(s) 'r'")) == 1
+    assert len(notices(caught, "Separation detected")) == 1
+
+
+@pytest.mark.parametrize("solver", ["fit_irls_direct", "fit_pirls"])
+@pytest.mark.parametrize("mode", [None, "warn", "error", "ignore", "record"])
+def test_the_exported_solvers_keep_their_separation_keyword(monkeypatch, solver, mode):
+    """``fit_irls_direct`` and ``fit_pirls`` take ``separation=`` as they did, default ``"warn"``.
+
+    Called directly on a state carrying the backstop's finding (forced), a
+    solve warns by default and under ``"warn"``, refuses under ``"error"`` and
+    is silent under ``"ignore"``; ``"record"``, which a model's own solves
+    pass, leaves the finding on the result and says nothing.  db1d1ac19 had
+    deleted the keyword: passing it raised ``TypeError``, and omitting it
+    gave no warning.
+    """
+    import superglm.solvers as solvers
+    from superglm import GroupLasso
+    from superglm.distributions import Poisson
+    from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+    from superglm.links import LogLink
+    from superglm.types import GroupSlice
+
+    message = force_runtime_finding(monkeypatch)
+    x = np.tile([-1.0, 1.0], 40)[:, None]
+    y = np.ones(len(x))
+    arguments = {
+        "X": DesignMatrix([DenseGroupMatrix(x)], n=len(x), p=1),
+        "y": y,
+        "weights": np.ones_like(y),
+        "family": Poisson(),
+        "link": LogLink(),
+        "groups": [GroupSlice("x", 0, 1)],
+        "weight_semantics": "frequency",
+        **(
+            {"lambda2": 0.0}
+            if solver == "fit_irls_direct"
+            else {"penalty": GroupLasso(lambda1=0.0)}
+        ),
+        **({} if mode is None else {"separation": mode}),
+    }
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        if mode == "error":
+            with pytest.raises(SeparationError, match="overflow guard"):
+                getattr(solvers, solver)(**arguments)
+            return
+        result = getattr(solvers, solver)(**arguments)
+
+    result = result[0] if isinstance(result, tuple) else result
+    assert len(runtime_claims(caught)) == (1 if mode in (None, "warn") else 0)
+    assert result.separation_message == (None if mode == "ignore" else message)
+
+
+@pytest.mark.parametrize("mode", ["warn", "error"])
+def test_drop1_publishes_nothing_about_its_comparison_fits(monkeypatch, mode):
+    """A ``drop1`` comparison fit is read for its deviance and discarded, so it says nothing.
+
+    The full model fits cleanly; then every solve records the backstop's
+    finding (forced), so each reduced fit carries one.  db1d1ac19 warned that
+    "the returned coefficients" were unusable, about a fit drop1 never
+    returns and without naming the dropped term, and under ``"error"``
+    refused the comparison.
+    """
+    rng = np.random.default_rng(0)
+    n = 400
+    frame = pd.DataFrame({"x": rng.normal(size=n), "z": rng.normal(size=n)})
+    y = rng.poisson(np.exp(0.2 + 0.3 * frame["x"].to_numpy())).astype(float)
+    model = SuperGLM(
+        family="poisson", features={"x": Numeric(), "z": Numeric()}, separation=mode
+    ).fit(frame, y)
+    force_runtime_finding(monkeypatch)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        table = model.drop1(frame, y)
+
+    assert runtime_claims(caught) == []
+    assert sorted(table["feature"]) == ["x", "z"]
 
 
 def test_a_levels_anchor_rank_is_read_from_an_economy_factorization(monkeypatch):

@@ -424,7 +424,7 @@ def apply_separation_policy(
         return
     message = formatter(list(findings))
     if policy == "error":
-        raise SeparationError(message)
+        raise SeparationError(message, levels=True)
     warnings.warn(message, SeparationWarning, stacklevel=stacklevel)
 
 

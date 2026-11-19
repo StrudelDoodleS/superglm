@@ -337,6 +337,9 @@ def drop1(
                 drop_set.add(iname)
 
         reduced = model._clone_without_features(drop_set, smoothing_resolved=True)
+        # A comparison fit is read for its deviance and discarded: it publishes
+        # no runtime separation finding (``capture_fit_state``).
+        reduced._discarded_fit = True
         reduced_X = _drop1_reduced_frame(reduced, X)
         reduced.fit(reduced_X, y, sample_weight=sample_weight, offset=offset)
         dev_reduced = deviance_in_units(reduced, reduced_X)

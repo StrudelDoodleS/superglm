@@ -106,7 +106,10 @@ class PathResult:
     seconds or less) loses visible digits.  The fitted model predicts at the
     last point with the centred predictor; to predict at point ``i``, refit at
     ``selection_penalty=lambda_seq[i]``, which reproduces the point to the
-    solver's ``tol``.
+    solver's ``tol``.  ``separation_path`` holds each point's runtime
+    separation finding, ``None`` where its solve had none; ``fit_path`` warns
+    once naming the points that have one, or refuses under
+    ``separation="error"``.
     """
 
     lambda_seq: NDArray  # shape (n_lambda,)
@@ -116,6 +119,7 @@ class PathResult:
     n_iter_path: NDArray  # shape (n_lambda,) — PIRLS iters per lambda
     converged_path: NDArray  # shape (n_lambda,) — bool
     edf_path: NDArray | None = None  # shape (n_lambda,) — effective df
+    separation_path: tuple[str | None, ...] | None = None  # per point, or None
 
     def __post_init__(self) -> None:
         normalized = {
@@ -129,6 +133,9 @@ class PathResult:
                 None
                 if self.edf_path is None
                 else _immutable_path_array(self.edf_path, dtype=np.float64)
+            ),
+            "separation_path": (
+                None if self.separation_path is None else tuple(self.separation_path)
             ),
         }
         for name, value in normalized.items():
@@ -146,6 +153,7 @@ class PathResult:
                 self.n_iter_path,
                 self.converged_path,
                 self.edf_path,
+                self.separation_path,
             ),
         )
 
@@ -369,6 +377,7 @@ def _compute_null_mu(
             _return_working_system=True,
             _compute_fit_statistics=False,
             _compute_reml_geometry=False,
+            separation="ignore",
             weight_semantics=weight_semantics,
         )
         eta_null = stabilize_eta(null_result.intercept + offset, link)
@@ -1454,6 +1463,7 @@ def _solve_coefficients(
             record_diagnostics=record_diagnostics,
             direct_solve=model._direct_solve,
             convergence=convergence,
+            separation="record",
             weight_semantics=model_weight_semantics(model),
             reml_penalties=reml_penalties,
             compute_rank_info=compute_rank_info,
@@ -1478,6 +1488,7 @@ def _solve_coefficients(
         lambda2=lambda2,
         record_diagnostics=record_diagnostics,
         convergence=convergence,
+        separation="record",
         weight_semantics=model_weight_semantics(model),
     )
 
@@ -1723,10 +1734,15 @@ def _fit_path_in_workspace(
         offset=offset,
         lambda_seq=lambda_seq,
     )
-    result = path_data["result"]
+    # Set model state to the last (least-regularized) fit.  It publishes the
+    # path, so it carries the path's one separation statement, for every point
+    # the path returns.
+    from superglm.diagnostics.separation import format_path_runtime_message
 
-    # Set model state to the last (least-regularized) fit
-    model._result = result
+    model._result = replace(
+        path_data["result"],
+        separation_message=format_path_runtime_message(lambda_seq, path_data["separation_path"]),
+    )
 
     _publish_fit_statistics(
         model,
@@ -1756,6 +1772,7 @@ def _fit_path_in_workspace(
         n_iter_path=path_data["n_iter_path"],
         converged_path=path_data["converged_path"],
         edf_path=path_data["edf_path"],
+        separation_path=tuple(path_data["separation_path"]),
     )
     return path_result
 

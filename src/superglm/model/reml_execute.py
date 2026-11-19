@@ -143,6 +143,7 @@ def run_fixed_monotone_reml(
         reml_penalties=reml_penalties if reml_penalties else None,
         debug_recorder=debug_recorder,
         debug_context={"phase": "fixed_constraint"},
+        separation="record",
         weight_semantics=model_weight_semantics(model),
     )
     # Typed like the observed-geometry gates: to a power search a QP

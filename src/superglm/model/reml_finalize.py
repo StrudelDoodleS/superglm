@@ -371,6 +371,7 @@ def maybe_qp_passthrough_refit(
         reml_penalties=reml_penalties,
         trace_run=trace_run,
         trace_purpose="reml_qp_final",
+        separation="record",
         weight_semantics=model_weight_semantics(model),
     )
     return qp_output[0]
@@ -634,6 +635,7 @@ def finalize_reml_fit(
         reml_penalties=reml_penalties,
         trace_run=trace_run,
         trace_purpose="reml_final",
+        separation="record",
         weight_semantics=model_weight_semantics(model),
         _laplace_excluded=tuple(int(index) for index in identified.weak),
         _mode_bar=terminal_bar,

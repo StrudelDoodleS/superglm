@@ -1110,10 +1110,11 @@ def capture_fit_state(
 
     Every solved fit is published through here, so this is where its runtime
     separation finding, read from the coefficient state it publishes, is
-    disclosed under the model's ``separation`` mode; a power-search
-    candidate is ranked and discarded, and discloses nothing.
+    disclosed under the model's ``separation`` mode.  A fit another call runs
+    and discards (``_discarded_fit``: a power-search candidate, a ``drop1``
+    comparison) discloses nothing.
     """
-    if not getattr(public_model, "_in_power_search", False):
+    if not getattr(public_model, "_discarded_fit", False):
         from superglm.diagnostics.separation import disclose_runtime_separation
 
         disclose_runtime_separation(
