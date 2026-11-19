@@ -229,12 +229,9 @@ class _SplineBase:
         return _spline_runtime.basis_matrix(self, x)
 
     def _raw_basis_matrix(self, x: NDArray) -> NDArray:
-        """Evaluate the raw (pre-projection) basis under the extrapolation policy.
+        """Evaluate the raw (pre-projection) basis at points clipped to training range.
 
-        Returns a dense ``(n, n_basis)`` array: the rows of this class's own
-        ``_basis_matrix``, read past any subclass override of it, so an
-        interaction margin continues, holds or refuses outside the training
-        range as its spline does.  All code outside spline.py
+        Returns a dense ``(n, n_basis)`` array.  All code outside spline.py
         that needs to evaluate a spline's basis should call this method
         rather than constructing a ``BSpline.design_matrix`` directly, so
         that non-B-spline subclasses (e.g. :class:`CardinalCRSpline`) get
@@ -863,9 +860,6 @@ class NaturalSpline(_SplineBase):
             return super()._basis_matrix(x)
         return self._linear_tail_basis_matrix(x)
 
-    def _raw_basis_matrix(self, x: NDArray) -> NDArray:
-        return NaturalSpline._basis_matrix(self, x).toarray()
-
     def _constraint_rows(self) -> NDArray:
         if self.degree < 3:
             return super()._constraint_rows()
@@ -966,9 +960,6 @@ class CubicRegressionSpline(_IntegratedPenaltySpline):
         if self.extrapolation != "extend":
             return super()._basis_matrix(x)
         return self._linear_tail_basis_matrix(x)
-
-    def _raw_basis_matrix(self, x: NDArray) -> NDArray:
-        return CubicRegressionSpline._basis_matrix(self, x).toarray()
 
     def _build_monotone_constraints_raw(self) -> LinearConstraintSet:
         """Build fit-time shape constraints on raw B-spline coefficients.
@@ -1132,7 +1123,9 @@ class CardinalCRSpline(_SplineBase):
 
 
 #: The spline types that bin at fit time and that the compiled kernels evaluate: exactly these.
-#: A subclass, whatever it overrides, is fitted and predicted through its own methods.
+#: A subclass, whatever it overrides, is fitted and predicted through its own methods. Only
+#: these give interaction margins their extrapolation policy; a subclass's margins read
+#: ``_raw_basis_matrix`` as they always have.
 _BUILT_IN_SPLINES = frozenset(
     {PSpline, BSplineSmooth, NaturalSpline, CubicRegressionSpline, CardinalCRSpline}
 )

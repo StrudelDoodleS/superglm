@@ -72,11 +72,10 @@ def basis_matrix(spec: Any, x: NDArray) -> sp.csr_matrix:
 
 
 def raw_basis_matrix(spec: Any, x: NDArray) -> NDArray:
-    """Evaluate the raw cardinal basis under the extrapolation policy, dense."""
-    x_eval, extrapolate = _spline_runtime.prepare_eval_points(spec, x)
-    if not extrapolate:
-        return _spline_cardinal.eval_cardinal_dense(x_eval, spec._cr_knots, spec._cr_M)
-    return linear_tail_cardinal_basis(spec, x_eval).toarray()
+    """Evaluate the raw cardinal basis at points clipped to training range."""
+    x = np.asarray(x, dtype=np.float64).ravel()
+    x_clip = np.clip(x, spec._lo, spec._hi)
+    return _spline_cardinal.eval_cardinal_dense(x_clip, spec._cr_knots, spec._cr_M)
 
 
 def linear_tail_cardinal_basis(spec: Any, x: NDArray) -> sp.csr_matrix:

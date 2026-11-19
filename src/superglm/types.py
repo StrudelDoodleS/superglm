@@ -409,6 +409,12 @@ class TensorMarginalInfo:
     # (K_eff, K_eff) penalty with ``penalty``'s null space and no knot-spacing
     # spread, when the spec knows one (``_structural_penalty_for_order``)
     structural_penalty: NDArray | None = None
+    # Whether the margin follows its spline's extrapolation policy, reading the basis of the
+    # spline ``raw_basis_eval`` is bound to at points as they are: ``tensor_marginal_info``
+    # decides, true for superglm's own spline classes. Any other margin, a custom one or one
+    # pickled before this (which reads the default), reads ``raw_basis_eval`` at points
+    # clamped to ``[lo, hi]``, as every margin did.
+    follows_policy: bool = False
     # ``(values, index)``: the distinct points the basis was evaluated on and
     # each row's index into them (``distinct_values``).  Set only on a margin
     # ``tensor_marginal_info`` evaluated so, and read with ``getattr``;

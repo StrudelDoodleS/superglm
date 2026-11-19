@@ -1151,7 +1151,7 @@ def test_a_quote_compiles_no_basis_kernel_and_a_full_block_reads_them(monkeypatc
         assert routes(rows) == (False, False)
     assert routes(kernels.KERNEL_MIN_ROWS) == (False, True)
     # The main effect's transform and the tensor margins' raw basis both reach them.
-    assert set(reached["kernel"]) == {"transform", "dense_raw_basis"}
+    assert set(reached["kernel"]) == {"transform", "_margin_rows"}
     whole = model.predict_link(block).to_numpy()
     tolerance = 64 * U * float(np.abs(whole).max())
     for rows in (1, kernels.SCALAR_MAX_ROWS, 1000):
@@ -1294,7 +1294,11 @@ def test_an_extend_margin_reads_the_kernels_for_a_block_inside_the_range(monkeyp
     point past it takes the linear tail. Mutation check: without ``in_range`` the block inside
     the range takes the library's linear tail and reaches no kernel.
     """
+    from superglm.features.interaction import _margin_rows
+
     spec.build(np.linspace(0.0, 1.0, 101))
+    margin = spec.tensor_marginal_ingredients(np.linspace(0.0, 1.0, 101))
+    assert margin.follows_policy
     reached: list[str] = []
     for name in ("bspline_dense", "cardinal_dense"):
         original = getattr(_basis_kernels, name)
@@ -1305,15 +1309,13 @@ def test_an_extend_margin_reads_the_kernels_for_a_block_inside_the_range(monkeyp
 
         monkeypatch.setattr(_basis_kernels, name, spy)
     inside = np.linspace(0.0, 1.0, _basis_kernels.KERNEL_MIN_ROWS)
-    rows = _basis_kernels.dense_raw_basis(spec._raw_basis_matrix, inside)
+    rows = _margin_rows(margin, inside)
     assert reached
-    reference = spec._raw_basis_matrix(inside)
+    reference = spec._basis_matrix(inside).toarray()
     np.testing.assert_allclose(rows, reference, rtol=0.0, atol=16 * U * np.abs(reference).max())
     reached.clear()
     past = np.r_[inside[:-1], 1.5]
-    np.testing.assert_array_equal(
-        _basis_kernels.dense_raw_basis(spec._raw_basis_matrix, past), spec._raw_basis_matrix(past)
-    )
+    np.testing.assert_array_equal(_margin_rows(margin, past), spec._basis_matrix(past).toarray())
     assert not reached
 
 

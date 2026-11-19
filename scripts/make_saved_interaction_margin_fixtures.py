@@ -4,17 +4,24 @@ Run it with master 5f28e8e80 on the path, the last master whose tensor and
 spline-by-category margins were held at the training range under every
 extrapolation policy, for example from ``git worktree add --detach <dir> 5f28e8e80``:
 
-    PYTHONPATH=<dir>/src python scripts/make_saved_interaction_margin_fixtures.py \\
+    PYTHONPATH=<dir>/src:. python scripts/make_saved_interaction_margin_fixtures.py \\
         tests/fixtures/saved_master_5f28e8e80
 
 Each case writes ``<case>.pkl.xz``, an xz-compressed pickle of a record holding
 the fitted model, its rows and response, and the predictions that master made on
 those rows. Both cases are Poisson fits on the rating cells of
-``tests/test_interactions.py`` (``_rating_cells``) under ``extrapolation="extend"``,
-with ``boundary=(30, 65)`` on age inside the ages 25 to 75 of the data, a tensor
-``ti("age", "bonus")`` and a region curve over age: a P-spline (``ps``) and a
-cubic regression spline (``cr``, whose interaction margins are cardinal). The
-rows past the boundary were fitted on interaction margins held at it.
+``tests/_custom_margin_splines.py`` (``rating_cells``, the ``.`` on the path)
+under ``extrapolation="extend"``, with ``boundary=(30, 65)`` on age inside the
+ages 25 to 75 of the data, a tensor ``ti("age", "bonus")`` and a region curve
+over age: a P-spline (``ps``) and a cubic regression spline (``cr``, whose
+interaction margins are cardinal). The rows past the boundary were fitted on
+interaction margins held at it.
+
+The custom-margin cases of that module give ``custom_margins.npz``: each case's
+predictions on its rows and on ``quotes()``, keyed ``<case>/rows`` and
+``<case>/quotes``. ``custom_region_curve_past_boundary.pkl.xz`` saves the
+``region_curve_continuing`` model as the two cases above are saved, with its
+quotes.
 """
 
 from __future__ import annotations
@@ -25,22 +32,9 @@ import pickle
 import sys
 
 import numpy as np
-import pandas as pd
+from tests import _custom_margin_splines as custom
 
 import superglm as sg
-
-
-def rating_cells() -> tuple[pd.DataFrame, np.ndarray]:
-    """``tests/test_interactions.py::_rating_cells``."""
-    age, bonus, region = (
-        grid.ravel()
-        for grid in np.meshgrid(
-            np.linspace(25, 75, 21), np.linspace(50, 100, 11), ["A", "B"], indexing="ij"
-        )
-    )
-    a, b = (age - 50) / 25, (bonus - 75) / 25
-    eta = -2.2 + 0.35 * a + 0.14 * b + 0.51 * a * b + (region == "B") * (0.08 + 0.37 * a)
-    return pd.DataFrame({"age": age, "bonus": bonus, "region": region}), np.exp(eta)
 
 
 def model(kind: str) -> sg.SuperGLM:
@@ -62,7 +56,7 @@ def model(kind: str) -> sg.SuperGLM:
 
 def main(out: str) -> None:
     os.makedirs(out, exist_ok=True)
-    frame, y = rating_cells()
+    frame, y = custom.rating_cells()
     for kind in ("ps", "cr"):
         fitted = model(kind).fit(frame, y)
         record = {
@@ -75,6 +69,27 @@ def main(out: str) -> None:
         }
         with lzma.open(os.path.join(out, f"interactions_past_boundary_{kind}.pkl.xz"), "wb") as f:
             pickle.dump(record, f, protocol=pickle.HIGHEST_PROTOCOL)
+    quotes = custom.quotes()
+    predictions = {}
+    for case in custom.CASES:
+        fitted = custom.custom_margin_model(case).fit(frame, y)
+        predictions[f"{case}/rows"] = np.asarray(fitted.predict(frame), dtype=np.float64)
+        predictions[f"{case}/quotes"] = np.asarray(fitted.predict(quotes), dtype=np.float64)
+        if case == "region_curve_continuing":
+            record = {
+                "version": sg.__version__,
+                "model": fitted,
+                "fit": "fit",
+                "frame": frame,
+                "y": y,
+                "prediction": predictions[f"{case}/rows"],
+                "quotes": quotes,
+                "quote_prediction": predictions[f"{case}/quotes"],
+            }
+            path = os.path.join(out, "custom_region_curve_past_boundary.pkl.xz")
+            with lzma.open(path, "wb") as f:
+                pickle.dump(record, f, protocol=pickle.HIGHEST_PROTOCOL)
+    np.savez_compressed(os.path.join(out, "custom_margins.npz"), **predictions)
 
 
 if __name__ == "__main__":

@@ -280,23 +280,23 @@ def dense_basis(spec: Any, x: NDArray, *, in_range: bool = False) -> NDArray:
 
 
 def dense_raw_basis(evaluator: Any, x: NDArray) -> NDArray:
-    """``evaluator(x)``, read as ``dense_basis`` where it is a built-in spline's own raw basis.
+    """``evaluator(x)``, read from the kernels only where it is the spec's stock raw basis."""
+    from superglm.features.spline import _BUILT_IN_SPLINES, CardinalCRSpline, _SplineBase
 
-    A built-in spline's raw basis is its ``_basis_matrix``, dense, extrapolation policy included.
-    A block inside the training range reads the kernels under any policy, as it did when every
-    margin was held at that range.
-    """
-    from superglm.features.spline import _BUILT_IN_SPLINES
-
+    evaluations = _evaluations(np.size(x))
+    if evaluations is None:
+        return np.asarray(evaluator(x), dtype=np.float64)
+    bspline, cardinal = evaluations
     spec: Any = getattr(evaluator, "__self__", None)
     method = getattr(evaluator, "__func__", None)
-    if type(spec) not in _BUILT_IN_SPLINES or method is not type(spec)._raw_basis_matrix:
-        return np.asarray(evaluator(x), dtype=np.float64)
-    points = np.asarray(x, dtype=np.float64)
-    in_range = spec.extrapolation == "extend" and bool(
-        np.all((points >= spec._lo) & (points <= spec._hi))
-    )
-    return dense_basis(spec, points, in_range=in_range)
+    rows = None
+    if type(spec) is CardinalCRSpline and method is CardinalCRSpline._raw_basis_matrix:
+        rows = cardinal(np.clip(x, spec._lo, spec._hi), spec._cr_knots, spec._cr_M)
+    elif type(spec) in _BUILT_IN_SPLINES and method is _SplineBase._raw_basis_matrix:
+        rows = bspline(np.clip(x, spec._lo, spec._hi), spec._knots, spec.degree)
+    if rows is not None and np.isfinite(rows).all():
+        return rows
+    return np.asarray(evaluator(x), dtype=np.float64)
 
 
 def _warmup_basis_kernels() -> None:

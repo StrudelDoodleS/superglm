@@ -421,9 +421,10 @@ class SplineCategorical:
     is absorbed into the main spline term.
     """
 
-    # Set when the term is built: its curves follow the spline's extrapolation policy. A term
-    # pickled before that reads it unset, and its curves as held at the training range, as
-    # they were fitted, until refitted (``_raw_rows``).
+    # Whether the curves follow the spline's extrapolation policy, decided when the term is
+    # built: they do on superglm's own spline classes (``tensor_marginal_info`` decides so for a
+    # tensor margin). The curves of a subclass, or of a term pickled before this (which reads
+    # the default), read the spline's ``_raw_basis_matrix`` as they always have (``_raw_rows``).
     _margins_follow_policy = False
 
     def __init__(self, spline_name: str, cat_name: str):
@@ -478,7 +479,7 @@ class SplineCategorical:
     ) -> tuple[Any, NDArray, NDArray]:
         """Record the parents' resolved state and return the spline spec and both columns."""
         from superglm.features.categorical import Categorical
-        from superglm.features.spline import _SplineBase
+        from superglm.features.spline import _BUILT_IN_SPLINES, _SplineBase
 
         spline_spec = parent_specs[self.spline_name]
         cat_spec = parent_specs[self.cat_name]
@@ -497,7 +498,7 @@ class SplineCategorical:
         )
 
         self._spline_spec = spline_spec
-        self._margins_follow_policy = True
+        self._margins_follow_policy = type(spline_spec) in _BUILT_IN_SPLINES
         self._knots = spline_spec._knots
         self._n_basis = spline_spec._n_basis
         self._degree = spline_spec.degree
@@ -535,13 +536,13 @@ class SplineCategorical:
         # The basis once per distinct covariate value; its rows only on a decline.
         distinct = distinct_values(x_spline)
         if distinct is None:
-            B = sp.csr_matrix(spline_spec._raw_basis_matrix(x_spline))
+            B = sp.csr_matrix(self._raw_rows(x_spline))
             compressed = _plan_spline_cat_support(
                 B, x_spline, active_rows, n_levels=len(self._non_base)
             )
         else:
             values, index = distinct
-            values_basis = spline_spec._raw_basis_matrix(values)
+            values_basis = self._raw_rows(values)
             compressed = _plan_spline_cat_support(
                 sp.csr_matrix(values_basis),
                 x_spline,
@@ -612,7 +613,7 @@ class SplineCategorical:
         support, bin_idx = discretize_positive_support(
             x_spline, int(n_bins), sample_weight, bin_knots(spline_spec, x_spline, sample_weight)
         )
-        B_unique = np.asarray(spline_spec._raw_basis_matrix(support), dtype=np.float64)
+        B_unique = np.asarray(self._raw_rows(support), dtype=np.float64)
 
         omega = spline_spec._build_penalty()
         if self._projection is not None:
@@ -700,7 +701,7 @@ class SplineCategorical:
             if binned is None:
                 values, idx = np.unique(x_spline[rows], return_inverse=True)
                 idx = np.ravel(idx).astype(np.intp)
-                support = np.asarray(self._spline_spec._raw_basis_matrix(values), np.float64)
+                support = np.asarray(self._raw_rows(values), np.float64)
             else:
                 support, idx = binned[0], binned[1][rows]
             flags = _support_flags(idx, rows, len(support), rows_by_kind)
@@ -846,9 +847,9 @@ class SplineCategorical:
         return held_groups
 
     def _raw_rows(self, x: NDArray) -> Any:
-        """The spline's raw basis at ``x``, clamped to the training range for a term fitted so."""
-        if not self._margins_follow_policy:
-            x = np.clip(np.asarray(x, dtype=np.float64), self._lo, self._hi)
+        """The spline's raw basis at ``x``: its own basis, policy included, where the curves follow it."""
+        if self._margins_follow_policy:
+            return self._spline_spec._basis_matrix(x).toarray()
         return self._spline_spec._raw_basis_matrix(x)
 
     def set_reparametrisation(self, R_inv_dict: dict[Hashable, NDArray] | NDArray) -> None:
@@ -2130,20 +2131,26 @@ def _raw_band(raw: NDArray) -> tuple[NDArray, NDArray]:
     return offsets, np.take_along_axis(raw, offsets[:, None] + np.arange(width), axis=1)
 
 
-def _margin_points(info: TensorMarginalInfo, x: NDArray, *, follows_policy: bool = True) -> NDArray:
-    """``x`` as a margin's raw basis is handed it: as it is, or clamped to the training range.
+def _margin_rows(info: TensorMarginalInfo, x: NDArray, *, kernels: bool = True) -> NDArray:
+    """A margin's raw basis at ``x``, dense, from the compiled kernels where they serve it.
 
-    A margin under ``extend`` or ``error`` reads ``x`` as it is, and its raw basis continues or
-    refuses past the range (a built-in spline's does, as the spline does). One under ``clip``, or
-    whose evaluator carries no policy, reads it clamped, as does every margin of a term fitted
-    before its margins followed their policy (``follows_policy=False``): such a term was fitted on
-    margins held at the range.
+    ``kernels=False`` gives the library's rows instead, from which a fit's bases are built. A
+    margin following its spline's extrapolation policy (``TensorMarginalInfo.follows_policy``)
+    reads that spline's basis at ``x`` as it is, so past the training range it continues, holds
+    or refuses as the spline does. Any other margin reads ``raw_basis_eval`` at ``x`` clamped to
+    the range, as every margin did before.
     """
     x = np.asarray(x, dtype=np.float64)
-    policy = getattr(getattr(info.raw_basis_eval, "__self__", None), "extrapolation", "clip")
-    if follows_policy and policy != "clip":
-        return x
-    return np.clip(x, info.lo, info.hi)
+    if not info.follows_policy:
+        held = np.clip(x, info.lo, info.hi)
+        if kernels:
+            return _basis_kernels.dense_raw_basis(info.raw_basis_eval, held)
+        return np.asarray(info.raw_basis_eval(held), dtype=np.float64)
+    spline = info.raw_basis_eval.__self__  # the spline ``tensor_marginal_info`` read
+    if kernels:
+        in_range = bool(np.all((x >= info.lo) & (x <= info.hi)))
+        return _basis_kernels.dense_basis(spline, x, in_range=in_range)
+    return spline._basis_matrix(x).toarray()
 
 
 def _tensor_raw_channels(
@@ -2160,8 +2167,8 @@ def _tensor_raw_channels(
     row (the cardinal ``cr`` basis).  A custom spline whose ``raw_basis_eval``
     disagrees with its basis is not re-checked here.
     """
-    raw1 = np.asarray(info1.raw_basis_eval(_margin_points(info1, support1)), dtype=np.float64)
-    raw2 = np.asarray(info2.raw_basis_eval(_margin_points(info2, support2)), dtype=np.float64)
+    raw1 = _margin_rows(info1, support1, kernels=False)
+    raw2 = _margin_rows(info2, support2, kernels=False)
     offsets1, values1 = _raw_band(raw1)
     offsets2, values2 = _raw_band(raw2)
     if values1.shape[1] * values2.shape[1] >= info1.K_eff * info2.K_eff:
@@ -2206,11 +2213,6 @@ class TensorInteraction:
         space to be selectable/shrinkable separately from the higher-order
         interaction surface.
     """
-
-    # Set when the margins are built: they follow their spline's extrapolation policy. A
-    # term pickled before that reads it unset, and its margins as held at the training range,
-    # as it was fitted, until refitted (``_margin_points``).
-    _margins_follow_policy = False
 
     def __init__(
         self,
@@ -2279,6 +2281,8 @@ class TensorInteraction:
         for a knot-count override certifies its ranges on the support that
         build bins it to, on its own knots, as the parent certified its own.
         """
+        from superglm.features.spline import _BUILT_IN_SPLINES
+
         # Reject unsupported parent configs before cloning
         reasons: list[str] = []
         if getattr(spec, "select", False):
@@ -2330,6 +2334,10 @@ class TensorInteraction:
             # clone would bend the interaction inside them.
             if keep_ranges and getattr(spec, "polynomial_ranges", ()):
                 kwargs["polynomial_ranges"] = spec.polynomial_ranges
+            # A margin of superglm's own spline follows its policy (``tensor_marginal_info``);
+            # a subclass's clone is built as before.
+            if type(spec) in _BUILT_IN_SPLINES:
+                kwargs["extrapolation"] = spec.extrapolation
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", SplineOptionWarning)
@@ -2340,8 +2348,6 @@ class TensorInteraction:
                     f"through its constructor, which failed: {exc}. Give the main effect the "
                     "knot count itself, or drop the override."
                 ) from exc
-            # Set, not passed: a subclass's constructor need not take the policy.
-            clone.extrapolation = spec.extrapolation
             clone._place_knots(x, geometry_weight, n_bins)
             return clone, False
         return spec, False
@@ -2373,8 +2379,10 @@ class TensorInteraction:
             raise RuntimeError("tensor marginal geometry mass is unavailable")
 
         def compact_legacy(legacy: TensorMarginalInfo) -> TensorMarginalInfo:
-            support_values = _margin_points(legacy, effective_support)
-            compact_basis = np.asarray(legacy.raw_basis_eval(support_values), dtype=np.float64)
+            support_clipped = np.clip(
+                np.asarray(effective_support, dtype=np.float64), legacy.lo, legacy.hi
+            )
+            compact_basis = np.asarray(legacy.raw_basis_eval(support_clipped), dtype=np.float64)
             compact_basis = compact_basis @ legacy.projection
             return replace(legacy, basis=compact_basis)
 
@@ -2404,9 +2412,7 @@ class TensorInteraction:
         return compact_legacy(method(rows))
 
     def _centered_marginal_dense(self, x: NDArray, info: TensorMarginalInfo) -> NDArray:
-        """The centred margin at ``x``, read outside the training range as ``_margin_points`` says."""
-        x = _margin_points(info, np.ravel(x), follows_policy=self._margins_follow_policy)
-        return _basis_kernels.dense_raw_basis(info.raw_basis_eval, x) @ info.projection
+        return _margin_rows(info, np.ravel(x)) @ info.projection
 
     def _centered_marginal_basis(self, x: NDArray, info: TensorMarginalInfo) -> sp.csr_matrix:
         return sp.csr_matrix(self._centered_marginal_dense(x, info))
@@ -2462,7 +2468,6 @@ class TensorInteraction:
                 info.normalize_penalty = True
             margins.append(info)
         self._marginal1, self._marginal2 = margins
-        self._margins_follow_policy = True
 
         self._p1 = self._marginal1.K_eff
         self._p2 = self._marginal2.K_eff

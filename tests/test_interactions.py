@@ -9,7 +9,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from scipy.interpolate import BSpline
 
 from superglm import ConvergenceWarning, interaction, term
 from superglm.features.categorical import Categorical
@@ -28,6 +27,7 @@ from superglm.features.spline import CubicRegressionSpline, NaturalSpline, PSpli
 from superglm.model import SuperGLM
 from superglm.types import GroupInfo
 
+from . import _custom_margin_splines as custom_margins
 from .test_saved_fs_models import assert_predicts_as_saved
 
 # ``scripts/make_saved_interaction_margin_fixtures.py`` run from master 5f28e8e80, the last
@@ -1900,17 +1900,7 @@ class TestDirectInteractionPrediction:
 # ── Interaction margins outside the training range ─────────────
 
 
-def _rating_cells():
-    """Equal-exposure Poisson frequencies on an age x bonus x region grid, ages 25 to 75."""
-    age, bonus, region = (
-        grid.ravel()
-        for grid in np.meshgrid(
-            np.linspace(25, 75, 21), np.linspace(50, 100, 11), ["A", "B"], indexing="ij"
-        )
-    )
-    a, b = (age - 50) / 25, (bonus - 75) / 25
-    eta = -2.2 + 0.35 * a + 0.14 * b + 0.51 * a * b + (region == "B") * (0.08 + 0.37 * a)
-    return pd.DataFrame({"age": age, "bonus": bonus, "region": region}), np.exp(eta)
+_rating_cells = custom_margins.rating_cells
 
 
 def _rating_model(kind, n_knots, extrapolation, *, boundary=None, discrete=False, m=2):
@@ -2062,11 +2052,11 @@ class TestInteractionMarginExtrapolation:
         np.testing.assert_allclose(model.predict(X), fresh.predict(X), rtol=1e-10, atol=0)
 
     def test_a_custom_constructor_without_the_policy_builds_a_knot_override(self):
-        """A knot-count override rebuilds its margin through a constructor that takes no policy.
+        """A knot-count override rebuilds a subclass's margin through its constructor as before.
 
-        The clone is given the parent's policy once built, so a subclass whose
-        constructor takes only the options it took before builds the override, and
-        the model is the stock spline's.
+        Only a clone of superglm's own spline is given the parent's policy, so a
+        subclass whose constructor takes only the options it took before builds the
+        override, and under the default ``clip`` the model is the stock spline's.
         """
         from superglm import interaction, term
 
@@ -2109,38 +2099,38 @@ class TestInteractionMarginExtrapolation:
         custom, stock = fit(FixedOptionsPSpline()), fit(PSpline(n_knots=3))
         np.testing.assert_allclose(custom.predict(X), stock.predict(X), rtol=1e-10, atol=0)
 
-    @pytest.mark.parametrize("route", ["raw_basis", "ingredients"])
-    def test_a_custom_margin_under_clip_is_handed_the_training_range(self, route):
-        """Under the default ``clip`` a custom tensor evaluator reads points inside the range.
+    @pytest.mark.pins_behaviour
+    @pytest.mark.parametrize("policy", ["clip", "extend", "error"])
+    @pytest.mark.parametrize(
+        "spline",
+        [
+            custom_margins.InRangeRaw,
+            custom_margins.InRangeIngredients,
+            custom_margins.WrappedPSpline,
+            custom_margins.CallableMarginPSpline,
+        ],
+        ids=["raw_basis", "ingredients", "partial", "callable"],
+    )
+    def test_a_custom_tensor_margin_is_handed_the_training_range_under_every_policy(
+        self, spline, policy
+    ):
+        """A custom tensor margin reads its points clamped to the training range, whatever its policy.
 
-        Each evaluator here reads the base interval only, as SciPy's does without
-        extrapolation, and refuses a point past it: one as the spline's
-        ``_raw_basis_matrix``, one handed to the tensor by ``tensor_marginal_ingredients``.
-        The tensor holds a quote past the range at the boundary, as every term does
-        under ``clip``.
+        Only the margins of superglm's own splines follow the policy. A subclass's, and
+        the evaluator it hands the tensor (its raw basis, a bound method of its own, the
+        stock one in ``functools.partial``, a callable object declaring the policy),
+        read points as master 5f28e8e80 read them. The first two read only the base
+        interval and refuse a point past it, as SciPy's does without extrapolation. The
+        tensor's rows at ages 75, 80 and 90 are its row at 75 to the rounding of their
+        projection.
         """
-        from dataclasses import replace
-
         from superglm import interaction, s, term
 
-        class InRangeRaw(PSpline):
-            def _raw_basis_matrix(self, x):
-                return BSpline.design_matrix(x, self._knots, self.degree).toarray()
-
-        class InRangeIngredients(PSpline):
-            def _interior_rows(self, x):
-                return BSpline.design_matrix(x, self._knots, self.degree).toarray()
-
-            def tensor_marginal_ingredients(self, x, **kwargs):
-                ingredients = super().tensor_marginal_ingredients(x, **kwargs)
-                return replace(ingredients, raw_basis_eval=self._interior_rows)
-
-        spline = (InRangeRaw if route == "raw_basis" else InRangeIngredients)(n_knots=3)
         X, y = _rating_cells()
         model = SuperGLM(
             family="poisson",
             terms=[
-                term("age", spline),
+                term("age", spline(n_knots=3, extrapolation=policy)),
                 s("bonus", kind="ps", n_knots=3),
                 interaction(TensorInteraction("age", "bonus")),
             ],
@@ -2148,42 +2138,75 @@ class TestInteractionMarginExtrapolation:
             spline_penalty=0.03,
             n_jobs=1,
         ).fit(X, y)
-        quotes = model.predict(pd.DataFrame({"age": [75.0, 80.0, 90.0], "bonus": 95.0}))
-        np.testing.assert_allclose(quotes, quotes[0], rtol=1e-12, atol=0)
+        rows = model._interaction_specs["age:bonus"].transform(
+            np.array([75.0, 80.0, 90.0]), np.full(3, 95.0)
+        )
+        np.testing.assert_allclose(
+            rows, rows[[0, 0, 0]], rtol=0, atol=16 * 2.0**-53 * np.abs(rows).max()
+        )
 
-    def test_a_one_argument_custom_margin_is_fitted_on_the_rows_it_quotes(self):
-        """A custom margin of the one-argument signature is fitted on its continued rows.
+    @pytest.mark.pins_behaviour
+    @pytest.mark.parametrize("case", list(custom_margins.CASES)[1:])
+    def test_a_custom_margin_fits_and_quotes_as_on_master(self, case):
+        """A model with a custom interaction margin under ``extend`` fits and quotes as master's did.
 
-        Its evaluator continues past ``boundary=(30, 65)`` under ``extend``, and the
-        adapter for that signature hands it the rows past the boundary as they are, so
-        the fit's deviance is that of the model's predictions on its own rows (see
-        ``test_a_boundary_inside_the_data_continues_the_fitted_rows_past_it``).
+        The cases are the reviews' (``tests/_custom_margin_splines.py``): a tensor margin
+        whose raw basis continues past the range, the same handed to the tensor as a callable
+        object, the stock evaluator in ``functools.partial``, the one-argument signature,
+        evaluators that read only the base interval, and a constructor that configures its
+        evaluator, under a knot-count override; and a region curve on a subclass that keeps
+        the stock raw basis (the first case, saved, is
+        ``test_a_model_saved_with_a_custom_region_curve_quotes_as_saved``). Master
+        5f28e8e80's predictions on the rows and on quotes
+        inside ``boundary=(30, 65)``, past it and past the data are stored with
+        ``scripts/make_saved_interaction_margin_fixtures.py``. A fit stops at the solver's
+        tolerance, so other arithmetic moves these predictions far less than 1e-9; a
+        margin following the policy moves them by 10% or more.
         """
-        from superglm import interaction, term
-
-        class OneArgumentTail(PSpline):
-            def _raw_basis_matrix(self, x):
-                design = BSpline.design_matrix(x, self._knots, self.degree, extrapolate=True)
-                return design.toarray()
-
-            def tensor_marginal_ingredients(self, x):
-                return super().tensor_marginal_ingredients(x)
-
         X, y = _rating_cells()
-        age = OneArgumentTail(n_knots=5, boundary=(30.0, 65.0), extrapolation="extend")
-        model = SuperGLM(
-            family="poisson",
-            terms=[
-                term("age", age),
-                term("bonus", PSpline(n_knots=5)),
-                interaction(TensorInteraction("age", "bonus")),
-            ],
-            selection_penalty=0.0,
-            spline_penalty=0.01,
-            n_jobs=1,
-        ).fit(X, y)
+        model = custom_margins.custom_margin_model(case).fit(X, y)
+        with np.load(SAVED_HELD_MARGINS / "custom_margins.npz") as master:
+            for key, frame in (("rows", X), ("quotes", custom_margins.quotes())):
+                expected = master[f"{case}/{key}"]
+                np.testing.assert_allclose(model.predict(frame), expected, rtol=1e-9, atol=0)
+
+    @pytest.mark.pins_behaviour
+    def test_a_wrapped_stock_evaluator_is_fitted_on_the_rows_it_quotes(self):
+        """The stock tensor evaluator in ``functools.partial`` is held at the range at fit and quote.
+
+        The fit's deviance is that of its predictions on its own rows, past
+        ``boundary=(30, 65)`` too (see
+        ``test_a_boundary_inside_the_data_continues_the_fitted_rows_past_it``). Fitted on
+        the continued margin and quoted on the held one, it was 1.036 against 1.194.
+        """
+        X, y = _rating_cells()
+        model = custom_margins.custom_margin_model("tensor_wrapped").fit(X, y)
         np.testing.assert_allclose(
             model.metrics(X, y).deviance, model.result.deviance, rtol=1e-6, atol=0
+        )
+
+    @pytest.mark.pins_behaviour
+    def test_a_model_saved_with_a_custom_region_curve_quotes_as_saved(self):
+        """A saved model whose region curve is on a custom spline quotes as saved, refitted or not.
+
+        The spline's raw basis continues past ``boundary=(30, 65)`` under every policy,
+        and master 5f28e8e80 handed it the covariate as it is, as this code does: the
+        model saved there predicts its rows and its quotes past the boundary and the data
+        as saved, their deviance is the fit's, and a refit is master's fit. Read at the
+        boundary, its age-80 region-B quote fell from 0.318 to 0.255.
+        """
+        path = SAVED_HELD_MARGINS / "custom_region_curve_past_boundary.pkl.xz"
+        with lzma.open(path, "rb") as handle:
+            record = pickle.load(handle)
+        model, X, y = record["model"], record["frame"], record["y"]
+        assert_predicts_as_saved(model, X, record["prediction"])
+        assert_predicts_as_saved(model, record["quotes"], record["quote_prediction"])
+        np.testing.assert_allclose(
+            model.metrics(X, y).deviance, model.result.deviance, rtol=1e-9, atol=0
+        )
+        model.fit(X, y)
+        np.testing.assert_allclose(
+            model.predict(record["quotes"]), record["quote_prediction"], rtol=1e-9, atol=0
         )
 
 
