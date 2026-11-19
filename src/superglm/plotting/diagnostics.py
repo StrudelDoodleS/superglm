@@ -481,8 +481,9 @@ def plot_diagnostics(
         Optional observation weights, read under the model's declared
         ``weight_semantics``.  Under ``"frequency"`` integer values are
         represented as literal row replication in the randomized diagnostics
-        up to 100,000 diagnostic rows; larger populations use a reproducible
-        sample of 100,000 occurrences drawn without replacement.  Under ``"prior"`` the weight is part of
+        up to 100,000 occurrences; larger populations read a reproducible
+        subset of 100,000 occurrences drawn without replacement, and all-unit
+        weights read every row.  Under ``"prior"`` the weight is part of
         the row's distribution through ``phi / w``, and a Tweedie fit
         additionally requires it finite and strictly positive.
     offset : NDArray or None

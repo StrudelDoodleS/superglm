@@ -571,11 +571,18 @@ Which slot a `sample_weight` reaches depends on the model's declared
 
 | Method | Under `"prior"` | Under `"frequency"` |
 |---|---|---|
-| `residuals`, `check`, `check_2d`, `calibration` | inside each row's own law; each retained row counts once in the tables | replication: the row counts `w` times |
+| `residuals`, `check`, `check_2d`, `calibration` | inside each row's own law; each retained row counts at most once (see the cap below) | replication: the row counts `w` times |
 | `actual_expected` | inside each row's own law, and as the aggregation weight of its sums | replication: the row counts `w` times |
 | `scores`, `compare` | every requested score that the family supports reads the prior-weighted row law; comparisons give each retained physical row one observation | every requested score that the family supports reads the unit law and uses `w` as literal replication mass, including tail scores, Murphy diagrams, paired standard errors and default thresholds; unsupported score or quantile requests refuse |
 | `posterior_bounds`, `posterior_predictive`, `portfolio` | inside each row's own law — a policy at a fifth of a year's exposure is simulated on its own law | refused: a replication count is not part of a row's law, so expand the rows or declare prior semantics |
 | `parameter_spread` | both: it weighs the ratio of sums *and* it is part of the law; retained physical rows determine bins, percentiles and histogram counts | literal replication for bins, counts, percentiles, histograms and weighted means; each copy keeps the unit row law |
+
+The sampling checks have a cap. Above 100,000 occurrences (retained prior rows,
+or the total of the frequency counts) the PIT histogram, Q-Q, worm, binned
+checks, CORP reliability and the randomised coverage and quantiles read a
+reproducible subset of 100,000 occurrences drawn without replacement, so none is
+read twice. Continuous coverage, the tail totals and the `residuals` array read
+every row.
 
 A family that cannot express its weighted law refuses rather than quietly
 inverting the unit-weight one. A comparison between candidates with different
