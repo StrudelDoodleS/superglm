@@ -15,6 +15,7 @@ import numba
 import numpy as np
 from scipy import stats
 
+from superglm._utils import occurrence_rows
 from superglm.plotting.common import (
     _LINE_COLOR,
     _LINE_WIDTH,
@@ -307,20 +308,7 @@ def _diagnostic_rows(
             qresid[positive],
         )
 
-    likelihood_size = float(np.sum(weights, dtype=np.float64))
-    if likelihood_size <= _FREQUENCY_EXPANSION_CAP:
-        counts = rounded.astype(np.intp)
-        row_idx = np.repeat(np.arange(len(weights), dtype=np.intp), counts)
-    else:
-        scaled_weights = weights / float(np.max(weights))
-        probabilities = scaled_weights / float(np.sum(scaled_weights))
-        row_idx = rng.choice(
-            len(weights),
-            size=_FREQUENCY_EXPANSION_CAP,
-            replace=True,
-            p=probabilities,
-        )
-
+    row_idx = occurrence_rows(rounded, _FREQUENCY_EXPANSION_CAP, rng)
     if np.array_equal(row_idx, np.arange(len(weights), dtype=np.intp)):
         return y, mu, eta, weights, qresid
 
@@ -497,7 +485,7 @@ def plot_diagnostics(
         ``weight_semantics``.  Under ``"frequency"`` integer values are
         represented as literal row replication in the randomized diagnostics
         up to 100,000 diagnostic rows; larger populations use a reproducible
-        weight-proportional sample.  Under ``"prior"`` the weight is part of
+        sample of 100,000 occurrences drawn without replacement.  Under ``"prior"`` the weight is part of
         the row's distribution through ``phi / w``, and a Tweedie fit
         additionally requires it finite and strictly positive.
     offset : NDArray or None

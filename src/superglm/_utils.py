@@ -103,6 +103,24 @@ def weighted_row_sum(weights, row_term: Callable[..., NDArray], *rows) -> float:
     return float(np.sum(terms))
 
 
+def occurrence_rows(counts, cap: int, generator: np.random.Generator) -> NDArray[np.intp]:
+    """Return the row of every literal occurrence, or of ``cap`` of them drawn without replacement.
+
+    ``counts`` are exact non-negative integer occurrence counts per row.  A
+    subset drawn without replacement from independent occurrences is itself
+    independent, so a check reading it keeps the reference law of ``cap``
+    independent trials; a draw with replacement would read some occurrences
+    twice.  Rows come back in ascending order.
+    """
+    occurrences = np.asarray(counts, dtype=np.int64)
+    ends = np.cumsum(occurrences)
+    total = int(ends[-1]) if len(ends) else 0
+    if total <= cap:
+        return np.repeat(np.arange(len(occurrences), dtype=np.intp), occurrences)
+    chosen = np.sort(generator.choice(total, size=cap, replace=False, shuffle=False))
+    return np.searchsorted(ends, chosen, side="right").astype(np.intp, copy=False)
+
+
 def _ulp_size(values: NDArray) -> NDArray:
     """Return the local float64 spacing without overflowing at max-float."""
     magnitude = np.abs(np.asarray(values, dtype=np.float64))

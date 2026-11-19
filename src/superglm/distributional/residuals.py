@@ -23,6 +23,7 @@ from numpy.typing import NDArray
 from scipy import special
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
+from superglm._utils import occurrence_rows
 from superglm.distributional._common import json_floats, readonly_float
 from superglm.distributional.family import (
     AtomFamily,
@@ -58,7 +59,7 @@ ResidualKind = Literal["pit", "quantile"]
 #: ``u`` is clipped into this closed interval before the normal inverse.
 _PROBABILITY_FLOOR = 1.0e-12
 _PROBABILITY_CEILING = 1.0 - _PROBABILITY_FLOOR
-#: Row cap on the literal replication a frequency-weighted check expands into.
+#: Most occurrences a row-level check reads; above it a subset without replacement.
 _MAX_REPLICATION_ROWS = 100_000
 
 
@@ -461,10 +462,10 @@ def _sample_residuals(
 ) -> _ResidualSample:
     """Return aligned physical rows and occurrence PIT/quantile values.
 
-    Integer frequency counts below the cap expand literally; above it (or for
-    fractional counts) rows are a weighted mixture with fresh atom draws.
-    Prior and continuous observations keep their stored transforms. Selection
-    and sampled atoms use independent streams of ``seed``.
+    Rows are :func:`replication_sample`'s. Each frequency occurrence of an atom
+    or censored row takes a fresh draw; prior and continuous observations keep
+    their stored transforms. Selection and sampled atoms use independent
+    streams of ``seed``.
     """
     rows = replication_sample(residuals, max_rows=max_rows, seed=seed)
     pit, quantile = residuals.pit[rows], residuals.quantile[rows]
@@ -504,9 +505,12 @@ def replication_sample(
 ) -> NDArray[np.intp]:
     """Return the row indices a row-level check should read.
 
-    Integer frequency weights become literal repeated rows; above ``max_rows``
-    (and for fractional weights) a seeded weight-proportional sample stands in.
-    Under the prior contract this is the identity.
+    Integer frequency weights become literal repeated rows, and under the
+    prior contract each row is read once. Above ``max_rows`` occurrences a
+    seeded subset of ``max_rows`` of them, drawn without replacement, stands
+    in, so a check's reference law of independent rows still holds. Fractional
+    weights, which have no literal occurrences, take a seeded
+    weight-proportional sample.
     """
     if not isinstance(residuals, ResidualSet):
         raise TypeError("residuals must be a ResidualSet")
@@ -517,10 +521,10 @@ def replication_sample(
     weights = residuals.weights
     n_rows = len(weights)
     counts = np.rint(weights)
-    total = float(np.sum(weights, dtype=np.float64))
-    if total <= cap and np.array_equal(weights, counts):
-        return np.repeat(np.arange(n_rows, dtype=np.intp), counts.astype(np.intp))
     generator = np.random.default_rng(seed)
+    if np.array_equal(weights, counts):
+        return occurrence_rows(counts, cap, generator)
+    total = float(np.sum(weights, dtype=np.float64))
     size = cap if total > cap else n_rows
     chosen = generator.choice(n_rows, size=size, replace=True, p=weights / total)
     return np.asarray(chosen, dtype=np.intp)

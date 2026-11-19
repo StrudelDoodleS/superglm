@@ -433,6 +433,34 @@ class TestWeightContractDiagnostics:
         assert len(frequency_rows[0]) == 2 * (n - 3)
         np.testing.assert_array_equal(frequency_rows[3], np.ones(2 * (n - 3)))
 
+    def test_capped_frequency_rows_read_each_occurrence_at_most_once(self):
+        """Above the expansion cap the panels read a subset of the occurrences, none twice."""
+        rng = np.random.default_rng(3)
+        n = 1_001
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        y = 1.0 + 2.0 * frame["x"].to_numpy() + rng.normal(0.0, 0.2, n)
+        model = SuperGLM(family=Gaussian(), features={"x": Numeric()})
+        model.fit(frame, y)
+        metrics = model.metrics(frame, y)
+        # 100 occurrences per row is 100,100 in all, above the 100,000 cap; eta
+        # carries each row's index so the multiplicities can be read back.
+        weights = np.full(n, 100.0)
+        index = np.arange(n, dtype=np.float64)
+        rows = diagnostics_module._diagnostic_rows(
+            model,
+            y,
+            metrics._mu,
+            index,
+            weights,
+            metrics.residuals("quantile", seed=5),
+            5,
+            rng,
+            weight_semantics="frequency",
+        )
+        multiplicity = np.bincount(rows[2].astype(np.intp), minlength=n)
+        assert multiplicity.sum() == 100_000
+        assert np.all(multiplicity <= weights)
+
     @pytest.mark.parametrize(
         "family",
         [Gaussian(), Gamma(), Poisson(), NegativeBinomial(theta=2.0), Binomial()],

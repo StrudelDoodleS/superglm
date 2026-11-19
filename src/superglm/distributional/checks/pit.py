@@ -74,7 +74,8 @@ def pit_payload(residuals: ResidualSet, *, n_bins: int = 20, alpha: float = 0.05
     Rows are the ones
     :func:`superglm.distributional.residuals.replication_sample` gives, so a
     frequency-weighted row contributes its count of observations to the
-    histogram and to the band's ``n``, exactly as literal replication would.
+    histogram and to the band's ``n``, exactly as literal replication would;
+    above that sampler's cap both are its subset drawn without replacement.
     """
     from scipy import stats
 

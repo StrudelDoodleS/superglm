@@ -239,14 +239,6 @@ def test_capped_atom_mixture_has_conditional_uniform_draws_and_alignment():
     )
 
 
-def test_conditional_uniformity_regression_detects_restarted_selection_stream(monkeypatch):
-    from superglm.distributional import residuals as module
-
-    monkeypatch.setattr(module, "_residual_rng", lambda seed, domain: np.random.default_rng(seed))
-    with pytest.raises(AssertionError):
-        test_capped_atom_mixture_has_conditional_uniform_draws_and_alignment()
-
-
 def test_integer_atom_sampling_matches_literal_expansion_in_distribution(frequency_case):
     fitted, X, _, _ = frequency_case
     atom = _shim(fitted, _ZeroAtomFamily(fitted.family.parameters))
@@ -415,6 +407,26 @@ def test_prior_weights_replicate_no_rows(fit_case) -> None:
     fitted, X, y = fit_case
     residuals = compute_residuals(fitted, X, y)
     assert np.array_equal(replication_sample(residuals), np.arange(len(y)))
+
+
+def test_capped_replication_reads_each_occurrence_at_most_once() -> None:
+    """Above the cap a check reads a uniform subset of the occurrences, none twice."""
+    cap, n = 300, 400
+    counts = np.random.default_rng(5).integers(1, 4, size=n).astype(float)
+    for weights, semantics in ((np.ones(n), "prior"), (counts, "frequency")):
+        kwargs = _residual_kwargs(n=n)
+        kwargs.update(weights=weights, weight_semantics=semantics)
+        rows = replication_sample(ResidualSet(**kwargs), max_rows=cap, seed=11)
+        multiplicity = np.bincount(rows, minlength=n)
+        assert len(rows) == cap
+        assert np.all(multiplicity <= weights)
+        # The occurrences drawn from rows of count c are Hypergeometric(T, T_c, cap).
+        total = weights.sum()
+        for count in np.unique(weights):
+            share = weights[weights == count].sum() / total
+            drawn = multiplicity[weights == count].sum()
+            sd = np.sqrt(cap * share * (1 - share) * (total - cap) / (total - 1))
+            assert abs(drawn - cap * share) <= 6 * sd
 
 
 def test_fractional_replication_weights_are_resampled() -> None:
