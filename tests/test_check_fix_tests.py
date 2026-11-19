@@ -283,6 +283,36 @@ def _run(repo: Path, base: str, *extra: str, env=None):
     )
 
 
+def test_the_base_run_names_its_tests_through_a_symlinked_temporary_directory(tmp_path):
+    """macOS reaches its temporary directory through a symlink (/var to /private/var). The
+    base tree must be named by its real path, or pytest lists its tests without their file
+    and the check cannot judge them."""
+    real, link = tmp_path / "real", tmp_path / "link"
+    real.mkdir()
+    try:
+        link.symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip("this platform does not let the test create a symlink")
+    project = '[project]\nname = "tiny"\n'
+    repo, base = _repo(
+        tmp_path / "work",
+        {
+            "src/tiny/__init__.py": _FIXED_SRC,
+            "tests/test_new.py": _NEW_TESTS,
+            # The head's pytest table makes the run name the base tree as its --rootdir.
+            "pyproject.toml": project
+            + '\n[tool.pytest.ini_options]\nmarkers = ["pins_behaviour: a control"]\n',
+        },
+        base_files={"pyproject.toml": project},
+    )
+    report = tmp_path / "out.json"
+    done = _run(repo, base, "--json", str(report), env={**os.environ, "TMPDIR": str(link)})
+
+    assert done.returncode == 1, done.stdout + done.stderr
+    names = [row["test"] for row in json.loads(report.read_text())["tests"]]
+    assert names and all(name.startswith("tests/test_new.py::") for name in names)
+
+
 @pytest.mark.pins_behaviour
 def test_a_vacuous_test_is_flagged_and_every_other_outcome_is_told_apart(tmp_path):
     repo, base = _repo(

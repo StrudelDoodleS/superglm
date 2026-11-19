@@ -573,7 +573,10 @@ def check(args) -> int:
         return 0
     timed_out = None
     with tempfile.TemporaryDirectory(prefix="fix-tests-") as scratch:
-        where = Path(scratch) / "tree"
+        # Resolved: pytest names each test from its real path relative to ``--rootdir``, and
+        # a temporary directory reached through a symlink (macOS's /var) would leave the
+        # names without their file.
+        where = Path(scratch).resolve() / "tree"
         try:
             env, config = base_tree(root, merge_base, head, where, args.package)
             paths = sorted({path for path, _ in selected})
