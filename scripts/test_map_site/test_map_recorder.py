@@ -216,6 +216,10 @@ def _child_environment(env):
     """``env`` with what a child needs to record; one that names its own map build keeps it."""
     child = dict(env)
     if OUT_ENV in child:
+        if child[OUT_ENV] != os.environ.get(OUT_ENV):
+            # A build of its own starts at its own session, not at the context copied from ours.
+            child.pop(CONTEXT_ENV, None)
+            child.pop(CONTEXT_FILE_ENV, None)
         return child
     for name in (OUT_ENV, ROOT_ENV, CONTEXT_FILE_ENV):
         if name in os.environ:
