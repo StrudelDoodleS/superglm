@@ -10,6 +10,7 @@ whole module skips when it is absent.
 from __future__ import annotations
 
 import importlib
+import re
 from dataclasses import replace
 
 import numpy as np
@@ -707,14 +708,20 @@ def test_spread_draws_a_histogram_per_parameter_and_the_identically_priced_band(
 
 
 def test_spread_marks_the_percentiles_of_a_single_price(case) -> None:
-    """Rows of one price fill one bin, whose band has zero width: its percentiles are points."""
+    """Rows of one price fill one bin, whose band has zero width: its percentiles are points.
+
+    The title says how many bins the band spans, in whatever words.  Mutation checks:
+    drawing the band's percentiles as lines fails the markers; a title that counts the
+    requested bins (6) fails the count.
+    """
     fitted, X, y, _ = case
     spread = parameter_spread(
         fitted, X.iloc[np.zeros(20, dtype=int)], threshold=float(np.quantile(y, 0.9)), n_bins=6
     )
     (row,) = spread.identically_priced.itertuples()
     fig = dp.plotly_spread(spread)
-    assert fig.layout.title.text.endswith(" over 1 price bin")
+    title = fig.layout.title.text
+    assert [int(n) for n in re.findall(r"(\d+)\s+(?:\w+\s+)?bins?\b", title)] == [1], title
     upper, lower = fig.data[-2:]
     for trace, value in ((upper, row.p_hi), (lower, row.p_lo)):
         assert trace.mode == "markers"
