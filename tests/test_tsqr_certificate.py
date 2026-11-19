@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import sys
 import threading
 import time
 import tracemalloc
@@ -848,6 +849,12 @@ def test_discrete_reml_builds_the_data_rank_factor_once(monkeypatch):
     terminal refit used to do so as well, for a ``rank_info`` that
     ``finalize_reml_fit`` replaced unread; now only the terminal refit that is
     published does, and its decomposition is on the factor route's rule.
+
+    ``decide_data_rank`` is counted wherever it is called, apart from
+    the row reads the penalised-identifiability projections also make: the
+    fit decides no data rank at all (a decision whose result it discarded
+    would still be counted), the first request decides it once from one read
+    of the rows, and the second reads the kept record.
     """
     import superglm.solvers.centered_system as centered_system
     from superglm.model import state_ops
@@ -882,6 +889,20 @@ def test_discrete_reml_builds_the_data_rank_factor_once(monkeypatch):
     # aliases, far from the cut).
     monkeypatch.setattr(centered_system, "grouped_weighted_factor", counted)
     monkeypatch.setattr(centered_system, "grouped_projected_factor", projected)
+    decisions: list[str] = []
+    decide = rank.decide_data_rank
+
+    def decided(*args, **kwargs):
+        decisions.append(sys._getframe(1).f_globals["__name__"])
+        return decide(*args, **kwargs)
+
+    # every module bound to it, and the defining one for an import at call time
+    for module in [rank, *(m for m in list(sys.modules.values()) if m is not None)]:
+        if (
+            module.__name__.startswith("superglm")
+            and vars(module).get("decide_data_rank") is decide
+        ):
+            monkeypatch.setattr(module, "decide_data_rank", decided)
     model = SuperGLM(
         family="poisson",
         selection_penalty=0.0,
@@ -893,10 +914,16 @@ def test_discrete_reml_builds_the_data_rank_factor_once(monkeypatch):
         model.fit_reml(frame, y)
     # The fit decides no data rank; asked for, it reads the rows once.
     assert model.result.rank_info.data is None
+    assert decisions == []
     fitted = len(calls)
     data = state_ops.fit_data_rank(model).data
+    assert decisions == [state_ops.__name__]
     assert calls[fitted:] == [n]
     assert data.method == "qr_svd"
+    requested = len(calls)
+    assert state_ops.fit_data_rank(model).data is data
+    assert decisions == [state_ops.__name__]
+    assert calls[requested:] == []
     # Two aliased three-level factors: their second factor's two columns are
     # the first's, so the data rank is the width less two.
     assert data.rank == model.result.beta.size - 2
