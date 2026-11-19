@@ -105,18 +105,41 @@ def test_every_severity_book_coefficient_has_mgcvs_bayesian_standard_error(book)
     assert model._fit_inference_info["identifiability"].aliases == ()
 
 
-def test_the_frequency_book_proves_existence_from_its_score(monkeypatch) -> None:
-    """The freMTPL2 frequency book's estimate is proved finite by its score, without the program.
+def _whole_frequency_book():
+    """Every row of the corrected freMTPL2 frequency book, with the gate review's main effects."""
+    spec = importlib.util.spec_from_file_location(
+        "_fremtpl2_identifiability", _ROOT / "examples" / "fremtpl2_data.py"
+    )
+    assert spec is not None and spec.loader is not None
+    data = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(data)
+    path = _datasets.find("freMTPL2freq.parquet")
+    assert path is not None
+    freq = data.load_corrected_freq(path.parent)
+    freq["LogDensity"] = np.log1p(freq["Density"].to_numpy(float))
+    for name in ("DrivAge", "VehAge", "BonusMalus"):
+        freq[name] = freq[name].astype(float)
+    for name in ("VehBrand", "Region"):
+        freq[name] = freq[name].astype(str)
+    X = freq[["DrivAge", "VehAge", "BonusMalus", "LogDensity", "VehBrand", "Region"]]
+    exposure = freq["Exposure"].to_numpy(float)
+    return X, freq["ClaimNb"].to_numpy(float) / exposure, exposure
 
-    The books case ``std_mains`` (Poisson claim rate on exposure, the standard main effects):
-    about 96% of its rows have no claim, and a row deep in the tail has a multiplier about its
-    own working weight, so the score's unweighted test failed by 2.5 times (gate review k3p8);
-    the weighted form ``min mu_i / sqrt(W_i) sqrt(lambda)`` clears it about fifty times over.
-    Nothing a user reads differs from ``07a1401a5`` (no footnote either way): what moves is
-    the route, there the rows' program and the interior rank (0.29 s of a 5.3 s fit).
-    Mutation check: with the unweighted margin the program ran.
+
+def test_the_frequency_book_proves_existence_from_its_score(monkeypatch) -> None:
+    """The whole freMTPL2 frequency book's estimate is proved finite by its score.
+
+    The gate review k3p8's fit: all 678,007 rows, Poisson claim rate on exposure, splines in
+    driver age, vehicle age and bonus-malus, log density, brand and region.  Most rows have no
+    claim, and a row deep in the tail has a multiplier about its own working weight, so the
+    score's unweighted test, ``min mu sqrt(lambda / max W)``, failed by 2.5 times; the weighted
+    form, ``min mu_i / sqrt(W_i) sqrt(lambda)``, clears it about fifty times over.  Nothing a
+    user reads differs from ``07a1401a5`` (no footnote either way): what moves is the route,
+    there the rows' program and the interior rank (0.29 s of a 5.3 s fit).  Mutation check:
+    with the unweighted margin the program ran.
     """
     import superglm.model.separation_ops as separation_ops
+    from superglm import Categorical, Numeric, Spline, SuperGLM
 
     ran = []
     real = separation_ops.separating_direction
@@ -125,15 +148,23 @@ def test_the_frequency_book_proves_existence_from_its_score(monkeypatch) -> None
         "separating_direction",
         lambda matrix, sides: ran.append(1) or real(matrix, sides),
     )
-    books = _books()
-    case = books.CASES["std_mains"]
-    train, _ = books.load_book(case["dataset"])
-    X, y, weights, offset = books._glm_inputs(case, train)
-    model = books._glm_model(case)
+    X, rate, exposure = _whole_frequency_book()
+    model = SuperGLM(
+        family="poisson",
+        weight_semantics="frequency",
+        features={
+            "DrivAge": Spline(n_knots=8),
+            "VehAge": Spline(n_knots=12),
+            "BonusMalus": Spline(n_knots=12),
+            "LogDensity": Numeric(),
+            "VehBrand": Categorical(),
+            "Region": Categorical(),
+        },
+    )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model.fit_reml(X, y, sample_weight=weights, offset=offset)
+        model.fit_reml(X, rate, sample_weight=exposure)
+    assert "not resolved" not in str(model.summary())
+    assert ran == []
     record = model._fit_inference_info["identifiability"]
     assert (record.separation.state, record.separation.decided_by) == ("absent", "certificate")
-    assert ran == []
-    assert "not resolved" not in str(model.summary())
