@@ -277,6 +277,13 @@ def test_reml_says_why_a_maximum_on_the_boundary_has_no_criterion() -> None:
 
 
 _FACE_LAMBDA = 0.2
+# Rows within this of the face are the active set; at _FACE_LAMBDA the face
+# rows stop within about 1e-6 of zero and the next row sits near -0.77.
+_FACE_BAND = 1e-2
+# A boundary stop carries no mode certificate (MODE_CERTIFICATION_BAR, 1e-8,
+# is the interior one), so its relative projected KKT residual is held to a
+# hundred times that bar.
+_KKT_BAR = 100 * MODE_CERTIFICATION_BAR
 
 
 def _face_book(seed: int, n: int, ones: int) -> tuple[pd.DataFrame, np.ndarray]:
@@ -327,36 +334,88 @@ def _face_fit(monkeypatch: pytest.MonkeyPatch, **fit_kwargs) -> SuperGLM:
 def test_reml_publishes_a_final_refit_on_the_boundary_as_not_converged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A final refit that reaches the face is the fit, published with its stop, on the log link too.
+    """A final refit that stops on the face is the fit, published with its stop, on the log link too.
 
     A final observed-mode refit can reach a face its search candidates
     stopped short of.  It ends ``mean_space_boundary`` on a feasible, finite
     state, which the terminal gate admitted only under the identity link, so
     ``finalize_reml_fit`` raised ``ObservedModeNotConvergedError`` and
     installed no model; on a 45,000-row freMTPL2 sample that state beat the
-    offset-only null by 3.4% on held-out rows.  Here the published fit is the
-    constrained penalized maximum, computed independently by SLSQP on the
-    indicator design under ``X theta <= 0``, and beats the null ``mean(y)``
-    on held-out rows.  The published state stops inside the face by at most
-    the clip's band and the last steps' halvings: its training ``eta`` is
-    within about 1.2e-6 of the reference, against 1.4e-3 for an unfinished
-    ``max_pirls_iter=2`` iterate, so 1e-4 tells the two apart.  The held-out
-    rows hold no face level, so their deviance, within 6e-7 of the
-    reference on the kernels measured, cannot.  Mutation checks: on 5f28e8e80
-    ``fit_reml`` raised from ``finalize_reml_fit``; a final refit capped at
-    two iterations and labelled ``mean_space_boundary`` fails the ``eta``
-    bound.
+    offset-only null by 3.4% on held-out rows.  The stop is forced here: the
+    final refit's own feasible state is returned labelled
+    ``mean_space_boundary``, whichever stop this BLAS's trajectory reached,
+    and that state is what the model publishes.  Mutation check: restoring
+    the identity-link-only gate in ``finalize_reml_fit`` (5f28e8e80) raises
+    ``ObservedModeNotConvergedError``.
     """
-    from scipy.optimize import LinearConstraint, minimize
+    from dataclasses import replace
 
+    import superglm.model.reml_finalize as reml_finalize
     from superglm import ConvergenceWarning
 
+    forced = {}
+
+    def on_the_face(*args, **kwargs):
+        result, *rest = fit_irls_direct(*args, **kwargs)
+        forced["result"] = replace(
+            result, converged=False, termination_reason="mean_space_boundary"
+        )
+        return (forced["result"], *rest)
+
+    monkeypatch.setattr(reml_finalize, "fit_irls_direct", on_the_face)
     with pytest.warns(ConvergenceWarning, match="boundary of the family's mean space"):
         model = _face_fit(monkeypatch)
     info = model.reml_diagnostics()
     assert info["converged"] is False
     assert info["terminal_refit_termination"] == "mean_space_boundary"
+    np.testing.assert_array_equal(model.result.beta, forced["result"].beta)
     assert float(_eta(model).max()) < 0.0
+
+
+def test_reml_final_refit_at_a_face_is_the_constrained_penalized_maximum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The published fit at the face is the constrained penalized maximum, whatever stop it reached.
+
+    No interior mode exists at ``_FACE_LAMBDA`` (``_face_book``), so the fit
+    is disclosed as not converged on every trajectory; which stop the final
+    refit records (``mean_space_boundary``, ``score_stagnated``) is the
+    trajectory's, and the forced test above owns the boundary stop's
+    publication.  Optimality is checked on the indicator design ``D`` under
+    ``D theta <= 0``, independently of any optimizer's success flag:
+
+    - feasibility, ``max(eta) < 0``;
+    - the projected KKT residual ``g + D_A' mu`` with ``mu >= 0`` (NNLS) on
+      the rows within ``_FACE_BAND`` of the face, relative to each column's
+      absolute score mass, is at most ``_KKT_BAR`` for both the published
+      fit and the SLSQP reference;
+    - the penalized objective ``f`` is convex, so the likelihood gap
+      ``f(theta) - f(ref)`` is at most ``-mu' eta_A(theta) + r'(theta -
+      ref)``, what the fit's stand-off inside the face costs, and at least
+      ``mu_ref' eta_A(ref) + r_ref'(theta - ref)``, widened by the rounding
+      of the two sums (``gamma_n`` times their absolute terms).  Convexity
+      makes these hold at any point, so they check the oracle's evaluation
+      and the face's multipliers; the residual bound is what tells a
+      finished fit from an unfinished one.
+
+    The published fit measured a relative residual of 7e-9 and the reference
+    8e-8; an unfinished ``max_pirls_iter=2`` iterate measured 8e-4, and its
+    training ``eta`` is 1.4e-3 from the reference against 1.2e-6 for the
+    fit, which the 1e-4 ``eta`` bound tells apart.  The held-out rows hold
+    no face level, so their deviance, within 6e-7 of the reference on the
+    kernels measured, beats the null ``mean(y)``.  Mutation check: a final
+    refit capped at two iterations (``max_iter=2`` in ``finalize_reml_fit``)
+    fails the KKT and ``eta`` bounds.
+    """
+    from scipy.optimize import LinearConstraint, minimize, nnls
+
+    from superglm import ConvergenceWarning
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model = _face_fit(monkeypatch)
+    assert any(issubclass(w.category, ConvergenceWarning) for w in caught)
+    assert model.reml_diagnostics()["converged"] is False
 
     frame, y = _face_book(7, 1500, ones=4)
     names = sorted(set(frame["g"]))
@@ -367,13 +426,28 @@ def test_reml_publishes_a_final_refit_on_the_boundary_as_not_converged(
 
     D = design(frame)
 
-    def penalized(theta: np.ndarray) -> tuple[float, np.ndarray]:
+    def terms(theta: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Per-row log-likelihood, its score in ``eta``, and the penalty's per-coefficient gradient."""
         eta = np.minimum(D @ theta, -1e-300)
         rows = np.where(y > 0.0, eta, np.log(-np.expm1(eta)))
         score = np.where(y > 0.0, 1.0, np.exp(eta) / np.expm1(eta))
-        gradient = -D.T @ score
-        gradient[2:] += _FACE_LAMBDA * theta[2:]
-        return -float(rows.sum()) + 0.5 * _FACE_LAMBDA * float(theta[2:] @ theta[2:]), gradient
+        prior = np.zeros_like(theta)
+        prior[2:] = _FACE_LAMBDA * theta[2:]
+        return rows, score, prior
+
+    def penalized(theta: np.ndarray) -> tuple[float, np.ndarray]:
+        rows, score, prior = terms(theta)
+        return -float(rows.sum()) + 0.5 * float(prior @ theta), prior - D.T @ score
+
+    def kkt(theta: np.ndarray) -> tuple[float, np.ndarray, np.ndarray]:
+        """Largest relative projected residual, the face multipliers, and the residual vector."""
+        rows, score, prior = terms(theta)
+        gradient = prior - D.T @ score
+        face = D @ theta > -_FACE_BAND
+        mu, _ = nnls(D[face].T, -gradient)
+        residual = gradient + D[face].T @ mu
+        mass = np.abs(D).T @ np.abs(score) + np.abs(prior)
+        return float(np.max(np.abs(residual) / mass)), mu, residual
 
     start = np.zeros(D.shape[1])
     start[0] = math.log(y.mean()) - 1.0
@@ -384,16 +458,36 @@ def test_reml_publishes_a_final_refit_on_the_boundary_as_not_converged(
         method="SLSQP",
         constraints=[LinearConstraint(D, -np.inf, 0.0)],
         options={"ftol": 1e-14, "maxiter": 1000},
-    )
-    assert reference.success, reference.message
-    assert float(np.max(np.abs(_eta(model) - D @ reference.x))) <= 1e-4
+    ).x
+    theta = np.concatenate([[model.result.intercept], model.result.beta])
+    np.testing.assert_allclose(D @ theta, _eta(model), rtol=0.0, atol=64 * _U)
+
+    assert float(np.max(D @ theta)) < 0.0
+    fit_residual, mu, r = kkt(theta)
+    reference_residual, mu_ref, r_ref = kkt(reference)
+    assert fit_residual <= _KKT_BAR
+    assert reference_residual <= _KKT_BAR
+
+    def objective_rounding(point: np.ndarray) -> float:
+        rows, _, prior = terms(point)
+        n = rows.size + point.size
+        return n * _U / (1 - n * _U) * (float(np.abs(rows).sum()) + float(np.abs(prior @ point)))
+
+    eta_fit, eta_ref = D @ theta, D @ reference
+    on_face, on_face_ref = eta_fit > -_FACE_BAND, eta_ref > -_FACE_BAND
+    gap = penalized(theta)[0] - penalized(reference)[0]
+    slack = objective_rounding(theta) + objective_rounding(reference)
+    assert gap <= -float(mu @ eta_fit[on_face]) + float(r @ (theta - reference)) + slack
+    assert gap >= float(mu_ref @ eta_ref[on_face_ref]) + float(r_ref @ (theta - reference)) - slack
+
+    assert float(np.max(np.abs(eta_fit - eta_ref))) <= 1e-4
     held_out, y_held_out = _face_book(8, 2000, ones=0)
 
     def deviance(mu: np.ndarray) -> float:
         return -2.0 * float(np.sum(np.where(y_held_out > 0.0, np.log(mu), np.log1p(-mu))))
 
     published = deviance(model.predict(held_out))
-    assert abs(published - deviance(np.exp(design(held_out) @ reference.x))) <= 1e-6 * published
+    assert abs(published - deviance(np.exp(design(held_out) @ reference))) <= 1e-6 * published
     assert published < deviance(np.full(len(y_held_out), y.mean()))
 
 
