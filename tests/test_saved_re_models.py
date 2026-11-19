@@ -17,12 +17,11 @@ import pickle
 import warnings
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 from superglm.solvers._structured.nested import NestedSchurFactor
 
-from .test_saved_fs_models import _se_tolerance, assert_predicts_as_saved, saved_se_scale
+from .test_saved_fs_models import assert_predicts_as_saved, assert_rebuilt_se
 
 FIXTURES = Path(__file__).parent / "fixtures" / "saved_v0_35_0"
 NOTICE = "rebuilt with the current solver"
@@ -43,9 +42,9 @@ def test_a_random_effect_model_saved_by_v0_35_0_loads_predicts_and_rebuilds(name
     evaluations' rounding (``assert_predicts_as_saved``).  The first
     inference call rebuilds it once, with the notice, as the random effect's
     chain of one on the nested factor at the saved coefficients and smoothing
-    parameters; its standard errors agree with the ones v0.35.0 reported
-    within the variances' ``n u kappa_s`` (``_se_tolerance``), none of them
-    lost, and the summary is formed.
+    parameters; every standard error is the penalised Hessian's, including
+    the levels v0.35.0's data-only rule blanked, and agrees with v0.35.0's
+    where it reported one (``assert_rebuilt_se``), and the summary is formed.
     """
     record = _load(name)
     assert record["version"] == "0.35.0"
@@ -62,17 +61,7 @@ def test_a_random_effect_model_saved_by_v0_35_0_loads_predicts_and_rebuilds(name
     assert isinstance(factor, NestedSchurFactor)
     assert factor.chain_group_names == ("g",)
 
-    tolerance = _se_tolerance(model)
-    scale = saved_se_scale(model, frame, y)
-    for term, saved in record["se"].items():
-        saved = scale * np.asarray(saved, dtype=float)
-        rebuilt = np.asarray(se[term], dtype=float)
-        # every error v0.35.0 reported, and the ones its data-only rule blanked that the
-        # penalised fit identifies (``solvers.identifiability``)
-        assert np.all(np.isfinite(rebuilt)[np.isfinite(saved)])
-        finite = np.isfinite(saved)
-        relative = np.abs(rebuilt[finite] - saved[finite]) / np.abs(saved[finite])
-        assert np.all(relative <= tolerance), (term, float(np.max(relative)), tolerance)
+    assert_rebuilt_se(model, frame, y, se, record["se"])
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")

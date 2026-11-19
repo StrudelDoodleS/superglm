@@ -55,6 +55,61 @@ def _se_tolerance(model) -> float:
     return float(dm.n * u / (1.0 - dm.n * u) * kappa)
 
 
+def dense_unit_se(model, se: dict) -> dict:
+    """``sqrt(diag(H^-1))`` per term, ``H`` the penalised Hessian of the model's own design rows.
+
+    An oracle independent of the solver: the dense design at the saved
+    coefficients' working weights, ``X'WX`` plus the saved smoothing
+    parameters' penalty, inverted densely.  ``coefficient_se_raw`` reads the
+    same covariance at unit dispersion.
+    """
+    from superglm.model.state_ops import _solver_space_working_weights
+
+    dm = model._dm
+    X = np.hstack([np.ones((dm.n, 1)), dm.toarray()])
+    weights = _solver_space_working_weights(model)
+    H = X.T @ (weights[:, None] * X)
+    H[1:, 1:] += build_penalty_matrix(
+        dm.group_matrices, model._groups, model._reml_lambdas, dm.p, model._reml_penalties
+    )
+    unit = np.sqrt(np.diag(np.linalg.inv(H))[1:])
+    offsets = np.cumsum([0] + [np.asarray(value).size for value in se.values()])
+    assert offsets[-1] == unit.size
+    return {term: unit[offsets[i] : offsets[i + 1]] for i, term in enumerate(se)}
+
+
+def assert_rebuilt_se(model, frame, y, se: dict, saved: dict) -> None:
+    """The rebuilt errors are the penalised Hessian's, on every coordinate, and v0.35.0's where it reported one.
+
+    The penalised Hessian of these fits is positive definite, so every
+    coefficient is identified (``solvers.identifiability``) and every error is
+    finite: the mask is the whole vector, including the coordinates v0.35.0's
+    data-only rule blanked.  Every error at unit dispersion is the dense
+    oracle's within ``_se_tolerance``; the dispersion ``coefficient_se``
+    applies is pinned by v0.35.0's own reported errors (``saved_se_scale``).
+    """
+    tolerance = _se_tolerance(model)
+    raw = model.metrics(frame, y).coefficient_se_raw
+    oracle = dense_unit_se(model, se)
+    scale = saved_se_scale(model, frame, y)
+    for term, expected in oracle.items():
+        assert np.all(np.isfinite(expected)), term
+        for values in (se[term], raw[term]):
+            assert np.array_equal(
+                np.isfinite(np.asarray(values, dtype=float)), np.isfinite(expected)
+            )
+        relative = np.abs(np.asarray(raw[term], dtype=float) - expected) / expected
+        assert np.all(relative <= tolerance), (term, float(np.max(relative)), tolerance)
+        reported = scale * np.asarray(saved[term], dtype=float)
+        finite = np.isfinite(reported)
+        rebuilt = np.asarray(se[term], dtype=float)
+        relative = np.abs(rebuilt[finite] - reported[finite]) / np.abs(reported[finite])
+        assert np.all(relative <= tolerance), (term, float(np.max(relative)), tolerance)
+        # the dispersion of the restored errors is the reported ones' dispersion
+        ratio = rebuilt / np.asarray(raw[term], dtype=float)
+        assert np.all(np.abs(ratio - ratio[0]) <= tolerance * ratio[0]), term
+
+
 _U = np.finfo(np.float64).eps / 2
 # numpy's documented worst case for a float64 SIMD transcendental (its SVML
 # kernels, numpy PR #19478); its own tests hold exp and log to 2 (PR #20991)
@@ -154,8 +209,10 @@ def test_an_fs_model_saved_by_v0_35_0_loads_predicts_and_rebuilds_its_inference(
     Predictions never read the solver state: they are v0.35.0's within two
     evaluations' rounding (``assert_predicts_as_saved``).  The first
     inference call rebuilds it with the fs leaf factor at the saved
-    coefficients and smoothing parameters, once, with the notice; its standard
-    errors agree with the ones v0.35.0 reported.
+    coefficients and smoothing parameters, once, with the notice; every
+    standard error is the penalised Hessian's, including those v0.35.0's
+    data-only rule blanked, and agrees with v0.35.0's where it reported one
+    (``assert_rebuilt_se``).
     """
     record = _load(name)
     assert record["version"] == "0.35.0"
@@ -170,17 +227,7 @@ def test_an_fs_model_saved_by_v0_35_0_loads_predicts_and_rebuilds_its_inference(
     assert sum(NOTICE in str(item.message) for item in caught) == 1
     assert isinstance(model._linear_system_state.augmented_factor, FactorSmoothLeafFactor)
 
-    tolerance = _se_tolerance(model)
-    scale = saved_se_scale(model, frame, y)
-    for term, saved in record["se"].items():
-        saved = scale * np.asarray(saved, dtype=float)
-        rebuilt = np.asarray(se[term], dtype=float)
-        # every error v0.35.0 reported, and the ones its data-only rule blanked that the
-        # penalised fit identifies (``solvers.identifiability``)
-        assert np.all(np.isfinite(rebuilt)[np.isfinite(saved)])
-        finite = np.isfinite(saved)
-        relative = np.abs(rebuilt[finite] - saved[finite]) / np.abs(saved[finite])
-        assert np.all(relative <= tolerance), (term, float(np.max(relative)), tolerance)
+    assert_rebuilt_se(model, frame, y, se, record["se"])
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
