@@ -72,6 +72,17 @@ def summary_payload(
             "error": "No fitted model is available.",
         }
 
+    if getattr(model, "_fit_stats", False) is None:
+        # An edit scored on rows with no quote (``apply_edits_to_model_copy_with_data``).
+        return {
+            "available": False,
+            "source": source,
+            "label": label,
+            "level_display": level_display,
+            "error": "This model has no fit statistics: some of the rows it is scored on have "
+            "no quote under its link. Each split's scores name those rows.",
+        }
+
     summary = model.summary(level_display=level_display)
     compact = _compact_summary_payload(summary, source, offset_terms, offset_labels)
     return {

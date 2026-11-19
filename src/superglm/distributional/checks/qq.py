@@ -117,17 +117,28 @@ def _simulated_envelope(
     row_weights = np.asarray(residuals.prior_weights[envelope_rows], dtype=np.float64)
     weighted = not bool(np.all(row_weights == 1.0))
     width = len(envelope_rows)
-    simulated = posterior_predictive(
-        fitted,
-        as_eager_frame(frame.take_rows(envelope_rows)),
-        n_sim,
-        parameter_uncertainty=parameter_uncertainty,
-        offsets=take_prediction_replacements(
-            fitted.fit_state.predictor_templates, frame, offsets, envelope_rows
-        ),
-        seed=seed,
-        weights=row_weights,
-    )
+    from superglm.model.base import NoPredictedMeanError
+
+    try:
+        simulated = posterior_predictive(
+            fitted,
+            as_eager_frame(frame.take_rows(envelope_rows)),
+            n_sim,
+            parameter_uncertainty=parameter_uncertainty,
+            # The draws as they are, through ``reduce``: a reduction refuses a row with no
+            # value at a draw, as the envelope of the fitted rows must, where the draws
+            # alone would read it NaN.
+            reduce=lambda block: block,
+            offsets=take_prediction_replacements(
+                fitted.fit_state.predictor_templates, frame, offsets, envelope_rows
+            ),
+            seed=seed,
+            weights=row_weights,
+        )
+    except NoPredictedMeanError as refused:
+        raise refused._restated(
+            envelope_rows[refused.positions], len(frame), what="the Q-Q envelope"
+        ) from None
 
     # The atom draws take a third stream from ``seed``: the coefficient draws
     # consume the seed itself and the predictive uniforms its second child, so

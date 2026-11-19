@@ -550,6 +550,9 @@ class ModelMetrics:
                 f"y has {len(self._y)} rows but X predicts {len(self._mu)}; "
                 "they must describe the same observations"
             )
+        from superglm.model.base import require_priced_rows
+
+        require_priced_rows(model, self._mu, self._weights, "the deviance and likelihood")
 
         # `explain_ops.metrics` sets `_contract_checked` when the caller passed the verified
         # training arrays: the fit already checked them, so do not report the condition twice.
@@ -587,11 +590,25 @@ class ModelMetrics:
         ``eta`` depend on object identity (#441).
         """
         from superglm.distributions import clip_mu
-        from superglm.model import base
+        from superglm.links import interior_eta, stabilize_eta
 
-        eta = base.predict_eta_exact(self._model, self._X, offset=self._offset, warn=False)
+        raw = self._raw_eta
+        missing = self._unpriced
+        if np.any(missing):
+            # A row with no mean, only a zero-weight one here, is inverted and differentiated
+            # at a stand-in inside the domain: at its clipped predictor a power near zero
+            # overflows. Its residuals read NaN through ``mu``, and ``eta`` its raw predictor.
+            raw = np.where(missing, interior_eta(self._link), raw)
+        eta = stabilize_eta(raw, self._link)
         mu = clip_mu(self._link.inverse(eta), self._family)
         return eta, mu
+
+    @cached_property
+    def _raw_eta(self) -> NDArray:
+        """``predict``'s linear predictor on these rows before the stabilizer, without its warning."""
+        from superglm.model import base
+
+        return base.predict_eta_raw_exact(self._model, self._X, self._offset, warn=False)
 
     # ── Scalar properties ─────────────────────────────────────────
 
@@ -789,8 +806,21 @@ class ModelMetrics:
 
     @cached_property
     def eta(self) -> NDArray:
-        """Linear predictor (link-scale fitted values)."""
-        return self._working_eta_mu[0]
+        """Linear predictor (link-scale fitted values).
+
+        A row with no predicted mean, which only a row of weight zero can be
+        here, reads its raw linear predictor, not the stabilized value.
+        """
+        eta = self._working_eta_mu[0]
+        missing = self._unpriced
+        return np.where(missing, self._raw_eta, eta) if np.any(missing) else eta
+
+    @cached_property
+    def _unpriced(self) -> NDArray:
+        """The rows with no predicted mean (``base.unpriced_rows``): only zero-weight ones here."""
+        from superglm.model.base import unpriced_rows
+
+        return unpriced_rows(self._model, self._mu)
 
     # ── Residuals ─────────────────────────────────────────────────
 
@@ -829,7 +859,9 @@ class ModelMetrics:
             return y - mu
 
         if kind == "working":
-            dmu_deta = self._link.deriv_inverse(self.eta)
+            # At the working predictor: a row with no mean reads NaN through ``mu``, and its
+            # raw predictor is outside the derivative's domain.
+            dmu_deta = self._link.deriv_inverse(self._working_eta_mu[0])
             return (y - mu) / dmu_deta
 
         if kind == "quantile":
@@ -861,6 +893,14 @@ class ModelMetrics:
         )
 
         y, mu, w = self._y, self._mu, self._weights
+        # A row with no predicted mean (only a zero-weight row can be one here) is drawn at a
+        # stand-in mean inside every family's mean space, and at unit weight, which keeps a prior
+        # weight's family parameters valid: every other row keeps its seeded draw, and its
+        # residual reads NaN.
+        missing = self._unpriced
+        if np.any(missing):
+            mu = np.where(missing, 0.5, mu)
+            w = np.where(missing, 1.0, w)
         rng = np.random.default_rng(seed)
         # A randomized quantile residual is a probability-integral transform of the row's own
         # marginal. A replicated row has the unit-weight marginal (CDFs below use w = 1); a prior
@@ -1004,7 +1044,7 @@ class ModelMetrics:
             )
 
         u = np.clip(u, 1e-10, 1.0 - 1e-10)
-        return norm.ppf(u)
+        return np.where(missing, np.nan, norm.ppf(u))
 
     # ── Influence diagnostics (lazy) ──────────────────────────────
 

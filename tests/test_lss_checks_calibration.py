@@ -506,6 +506,13 @@ class _StubFitted:
     def _predict_eta_resolved(self, coefficients, X, offsets):
         return self.predict_parameters(X, offsets=offsets)
 
+    def predict_eta(self, X: Any, offsets: Any = None) -> NDArray:
+        return self.predict_parameters(X, offsets=offsets)
+
+    def _predicted_parameters(self, X: Any, offsets: Any = None, *, warn: bool = True):
+        theta = self.predict_parameters(X, offsets=offsets)
+        return theta, np.zeros(theta.shape, dtype=bool)
+
     @staticmethod
     def parameters_from_eta(eta):
         return eta

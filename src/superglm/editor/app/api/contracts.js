@@ -628,6 +628,7 @@
  * @property {boolean} converged
  * @property {number|null} effective_df
  * @property {number|null} [n_reml_iter] rounds of smoothing search, under fit_reml
+ * @property {string|null} [score_refused] why the fold has no scores: its held-out rows have no quote
  * @property {Record<string, number|null>} scores
  */
 /**

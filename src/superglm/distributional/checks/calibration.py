@@ -513,8 +513,10 @@ def actual_expected_check(
     binning = _covariate_bins(grouped, n_bins)
     width = binning.n_groups
 
+    # A row with no value of a parameter is refused by name: its bin's ratio would read it.
     theta = np.asarray(
-        fitted.predict_parameters(rows.frame, offsets=rows.offsets), dtype=np.float64
+        fitted.parameters_from_eta(fitted.predict_eta(rows.frame, offsets=rows.offsets)),
+        dtype=np.float64,
     )
     mean = np.asarray(family.default_prediction(theta), dtype=np.float64)
     weights = rows.weights

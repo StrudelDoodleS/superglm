@@ -68,10 +68,19 @@ class VuongTestResult:
 
 # ── Private helpers ──────────────────────────────────────────────
 
+_VUONG_A = "the Vuong test's log-likelihood of model_a"
+_VUONG_B = "the Vuong test's log-likelihood of model_b"
 
-def _get_mu(model: SuperGLM, X, y, offset=None) -> NDArray:
-    """Get predicted mu from a fitted model."""
-    return np.asarray(model.predict(X, offset=offset), dtype=float)
+
+def _get_mu(model: SuperGLM, X, y, offset=None, *, sample_weight=None, what: str) -> NDArray:
+    """``predict``'s means for ``what``, refused where a weighted row has none.
+
+    ``base.predict_priced``: a test statistic read from a row with no mean
+    would be NaN, or a number from the clipped one.
+    """
+    from superglm.model.base import predict_priced
+
+    return np.asarray(predict_priced(model, X, offset, sample_weight, what), dtype=float)
 
 
 def _check_family(model: SuperGLM, allowed: set[str], func_name: str) -> str:
@@ -167,6 +176,8 @@ def _per_obs_log_likelihood(
     offset=None,
     *,
     sample_weight=None,
+    measure=None,
+    what: str = "the log-likelihood",
 ) -> NDArray:
     """Compute per-observation log-likelihood for any supported family.
 
@@ -175,8 +186,30 @@ def _per_obs_log_likelihood(
     the rows itself.  With a prior weight supplied, the weight is part of each
     row's density -- through ``phi / w_i``, or through the equivalent scaling
     of the family's own parameters -- and the rows come back already carrying
-    it.
+    it.  ``measure`` weighs the rows as the caller reads them (``sample_weight``
+    when omitted): a row it gives weight has to have a mean, and a row it gives
+    none is not evaluated and reads 0, whatever its mean or response, so it
+    cannot reach the caller's sums as an overflow or a NaN.
     """
+    measure = sample_weight if measure is None else measure
+    mu = _get_mu(model, X, y, offset, sample_weight=measure, what=what)
+    y = np.asarray(y, dtype=float)
+    carried = None if measure is None else np.asarray(measure, dtype=np.float64) > 0.0
+    if carried is not None and not np.all(carried):
+        # Each row's density is its own, so the carried rows' are the same evaluated alone.
+        density = np.zeros(y.shape, dtype=np.float64)
+        density[carried] = _row_log_densities(
+            model,
+            y[carried],
+            np.asarray(mu)[carried],
+            None if sample_weight is None else np.asarray(sample_weight)[carried],
+        )
+        return density
+    return _row_log_densities(model, y, mu, sample_weight)
+
+
+def _row_log_densities(model: SuperGLM, y: NDArray, mu: NDArray, sample_weight) -> NDArray:
+    """``_per_obs_log_likelihood``'s per-row log densities of ``y`` at the means ``mu``."""
     from superglm.distributions import (
         Binomial,
         Gamma,
@@ -187,8 +220,6 @@ def _per_obs_log_likelihood(
         prior_weight_log_density,
     )
 
-    mu = _get_mu(model, X, y, offset)
-    y = np.asarray(y, dtype=float)
     family = getattr(model, "_distribution")
     result = model.result
     if getattr(result, "weight_exponent", 0) and getattr(result, "solver_phi", None) is not None:
@@ -342,6 +373,12 @@ def score_test_zi(
     Returns
     -------
     ScoreTestZIResult
+
+    Raises
+    ------
+    NoPredictedMeanError
+        Where the model gives a row no predicted mean: the statistic would be
+        read from a mean that does not exist.
     """
     from scipy import stats
 
@@ -354,7 +391,7 @@ def score_test_zi(
         )
 
     y = np.asarray(y, dtype=float)
-    mu = _get_mu(model, X, y, offset)
+    mu = _get_mu(model, X, y, offset, what="the zero-inflation score test")
 
     p0 = np.exp(-mu)  # P(Y=0|mu) under Poisson
     indicator = (y == 0).astype(float)
@@ -415,6 +452,12 @@ def dispersion_test(
     Returns
     -------
     DispersionTestResult
+
+    Raises
+    ------
+    NoPredictedMeanError
+        Where the model gives a row no predicted mean: the statistic would be
+        read from a mean that does not exist.
     """
     from scipy import stats
 
@@ -432,7 +475,7 @@ def dispersion_test(
         )
 
     y = np.asarray(y, dtype=float)
-    mu = _get_mu(model, X, y, offset)
+    mu = _get_mu(model, X, y, offset, what="the dispersion test")
     n = len(y)
 
     # Auxiliary regression: ((y - mu)^2 - y) / mu  on  mu  (no intercept)
@@ -503,6 +546,12 @@ def vuong_test(
     Returns
     -------
     VuongTestResult
+
+    Raises
+    ------
+    NoPredictedMeanError
+        Where either model gives a row of positive weight no predicted mean:
+        its log-likelihood, and so the comparison, does not exist.
     """
     from scipy import stats
 
@@ -548,6 +597,7 @@ def vuong_test(
             y_arr,
             offset,
             sample_weight=prior_weights,
+            what=_VUONG_A,
         )
         ll_b = _per_obs_log_likelihood(
             model_b,
@@ -555,6 +605,7 @@ def vuong_test(
             y_arr,
             offset,
             sample_weight=prior_weights,
+            what=_VUONG_B,
         )
         # A zero prior weight is an unobserved row with density exactly 0; it must
         # leave the mean and variance, as ``likelihood_size`` below counts only
@@ -581,8 +632,8 @@ def vuong_test(
         # model, so this arm is checked like the others.
         evaluated_weights = np.ones(n, dtype=np.float64)
         measure = evaluated_weights
-        ll_a = _per_obs_log_likelihood(model_a, X, y_arr, offset)
-        ll_b = _per_obs_log_likelihood(model_b, X, y_arr, offset)
+        ll_a = _per_obs_log_likelihood(model_a, X, y_arr, offset, what=_VUONG_A)
+        ll_b = _per_obs_log_likelihood(model_b, X, y_arr, offset, what=_VUONG_B)
         d = ll_a - ll_b
         mean_m = float(np.mean(d))
         omega = float(np.std(d, ddof=1))
@@ -590,8 +641,12 @@ def vuong_test(
     else:
         frequency_weights, likelihood_size = _frequency_weights(sample_weight, n)
         evaluated_weights = measure = frequency_weights
-        ll_a = _per_obs_log_likelihood(model_a, X, y_arr, offset)
-        ll_b = _per_obs_log_likelihood(model_b, X, y_arr, offset)
+        ll_a = _per_obs_log_likelihood(
+            model_a, X, y_arr, offset, measure=frequency_weights, what=_VUONG_A
+        )
+        ll_b = _per_obs_log_likelihood(
+            model_b, X, y_arr, offset, measure=frequency_weights, what=_VUONG_B
+        )
         d = ll_a - ll_b
         mean_m = float(np.sum(frequency_weights * d) / likelihood_size)
         if likelihood_size <= 1.0:

@@ -51,7 +51,7 @@ from superglm.editor.diagnose import (
     worst_rows,
 )
 from superglm.editor.display import FoldTermDisplay, fold_chart_display, is_edited
-from superglm.editor.errors import EditorClientError, EditorValueError
+from superglm.editor.errors import EditorClientError, EditorValueError, no_quote_message
 from superglm.editor.evaluation import EvaluationDataset, training_export_dataset
 from superglm.editor.jobs import JobCancelledError
 from superglm.editor.lss.availability import session_refit_reason
@@ -76,9 +76,11 @@ from superglm.features.rebuild import (
     rebuilt_categorical,
 )
 from superglm.links import stabilize_eta
+from superglm.model.base import NoPredictedMeanError
 from superglm.model.fit_state import configured_family, configured_lambda2, configured_penalty
 from superglm.model_selection import (
     FINGERPRINT_VERSION,
+    REFUSED_COLUMN,
     CrossValidationResult,
     _data_fingerprint,
     _fingerprint_columns,
@@ -86,6 +88,7 @@ from superglm.model_selection import (
     _take_offset,
     cross_validate,
     fold_adapter,
+    refusal_in_frame,
 )
 from superglm.plotting.comparison import _feature_beta, _score_levels
 from superglm.plotting.curve_similarity import _summarize_against_fold_mean
@@ -1081,7 +1084,14 @@ def _result_payload(
     folds = [
         {
             **{column: record.get(column) for column in _FOLD_COLUMNS},
-            "scores": {name: record.get(name) for name in names},
+            # Why a fold has a score refused where its held-out rows have no quote
+            # (``cross_validate``): a refused score is shown as none, whatever ``error_score``
+            # it reads, and the fold's other scores stand.
+            "score_refused": _refusal(record),
+            "scores": {
+                name: None if _score_refused(result, record, name) else record.get(name)
+                for name in names
+            },
         }
         for record in result.fold_scores.to_dict("records")
     ]
@@ -1098,6 +1108,19 @@ def _result_payload(
             name: result.pooled_scores[name] for name in names if name in result.pooled_scores
         },
     }
+
+
+def _refusal(record: dict[str, Any]) -> str | None:
+    """Why a fold's scores were refused, from its ``fold_scores`` record; None if they were not."""
+    reason = record.get(REFUSED_COLUMN)
+    return reason if isinstance(reason, str) else None
+
+
+def _score_refused(result: CrossValidationResult, record: dict[str, Any], name: str) -> bool:
+    """Whether the fold's score ``name`` was refused: by its cell, or its fold without that record."""
+    if result.refused_scores is None:
+        return _refusal(record) is not None
+    return (record.get("fold"), name) in result.refused_scores
 
 
 def _folds_partition_rows(result: CrossValidationResult) -> bool:
@@ -1440,12 +1463,19 @@ def run_cv(plan: CVRunPlan, context) -> CVRun:
         ) from exc
     context.check()
     context.progress("curves")
+    fold_scores = result.fold_scores
+    if recorder.refused:
+        fold_scores = fold_scores.assign(
+            **{REFUSED_COLUMN: fold_scores["fold"].map(recorder.refused)}
+        )
     return CVRun(
         result=replace(
             result,
+            fold_scores=fold_scores,
             pooled_scores=recorder.pooled_scores(),
             splitter=plan.splitter,
             builtin_scores=plan.scoring,
+            refused_scores=tuple(sorted(recorder.refused_scores)),
         ),
         terms=fold_term_items(
             plan.terms, recorder.curves, held=plan.edited, display=_term_display(plan.model)
@@ -1481,6 +1511,9 @@ class _FoldRecorder:
         self._columns = _fingerprint_columns(plan.template, self._frame)
         self.curves: dict[int, dict[str, NDArray[np.float64]]] = {}
         self.fold_fits: list[dict[str, Any]] = []
+        # By fold: why its scores are missing, where its held-out rows have no quote.
+        self.refused: dict[int, str] = {}
+        self.refused_scores: set[tuple[int, str]] = set()
 
     @property
     def fold_number(self) -> int:
@@ -1511,14 +1544,34 @@ class _FoldRecorder:
         scores: dict[str, float] = {}
         parts: dict[str, tuple[float, float]] = {}
         for name in self._plan.scoring:
-            pooled = self._scorers.pooled_parts.get(name)
-            if pooled is None:
-                scorer = self._scorers.scorers[name]
-                scores[name] = float(
-                    scorer(model, X, y, sample_weight=sample_weight, offset=offset)
+            try:
+                pooled = self._scorers.pooled_parts.get(name)
+                if pooled is None:
+                    scorer = self._scorers.scorers[name]
+                    scores[name] = float(
+                        scorer(model, X, y, sample_weight=sample_weight, offset=offset)
+                    )
+                    continue
+                numerator, denominator = pooled(
+                    model, X, y, sample_weight=sample_weight, offset=offset
+                )
+            except NoPredictedMeanError as exc:
+                # Held-out rows with no quote take this score, not the fold: its fit, curves
+                # and trace stand, it stays out of the pooled totals, and the page says why.
+                scores[name] = float("nan")
+                self.refused_scores.add((self._fold, name))
+                framed = refusal_in_frame(
+                    exc, model, X, offset, sample_weight, test, len(self._y), self._fold
+                )
+                self.refused.setdefault(
+                    self._fold,
+                    no_quote_message(
+                        framed,
+                        counted=f"{framed.positions.size} of fold {self.fold_number}'s "
+                        f"{len(test)} held-out rows",
+                    ),
                 )
                 continue
-            numerator, denominator = pooled(model, X, y, sample_weight=sample_weight, offset=offset)
             parts[name] = (numerator, denominator)
             scores[name] = parts_ratio(numerator, denominator)
         # Only a fold that scored completely joins the pooled totals.

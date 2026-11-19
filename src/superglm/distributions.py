@@ -486,7 +486,9 @@ class Binomial:
         """Bernoulli log-likelihood."""
         mu_safe = np.clip(mu, 1e-15, 1 - 1e-15)
         ll = y * np.log(mu_safe) + (1 - y) * np.log(1 - mu_safe)
-        return float(np.sum(weights * ll))
+        # A zero-weight row adds an exact 0 whatever its mean, as for the other families,
+        # including a row with none (NaN).
+        return float(np.sum(np.where(weights != 0.0, weights * ll, 0.0)))
 
 
 class Tweedie:
@@ -772,9 +774,17 @@ def _frequency_weight_log_likelihood(
         from superglm._tweedie import tweedie_logpdf
 
         w = np.asarray(weights, dtype=np.float64)
-        unit = np.ones_like(w)
-        logpdf = tweedie_logpdf(y, mu, phi, family.p, weights=unit)
-        return float(np.sum(w * logpdf))
+        # A zero-weight row adds an exact 0 whatever its mean (NaN where it has none) or
+        # response, so its density is not evaluated: each row's density is its own.
+        carried = w != 0.0
+        if not np.any(carried):
+            return 0.0
+        y_carried = np.asarray(y, dtype=np.float64)[carried]
+        mu_carried = np.asarray(mu, dtype=np.float64)[carried]
+        logpdf = tweedie_logpdf(
+            y_carried, mu_carried, phi, family.p, weights=np.ones(y_carried.size)
+        )
+        return float(np.sum(w[carried] * logpdf))
     return float(family.log_likelihood(y, mu, weights, phi))
 
 

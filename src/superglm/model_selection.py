@@ -24,6 +24,7 @@ from superglm._weight_units import unit_log_likelihood
 from superglm.distributional.api import SuperLSS
 from superglm.distributional.cross_validation import LSSFolds, parts_ratio
 from superglm.distributions import Tweedie
+from superglm.model.base import NoPredictedMeanError, unpriced_rows
 
 # The full-frame binding pass lives in a neutral module so the public
 # SuperGLM.bind_levels runs this exact resolution without importing this one.
@@ -48,18 +49,29 @@ class CrossValidationResult:
         ``fit_mode="fit_reml"`` a fold is ``converged`` only when both its
         smoothing-parameter selection and its final coefficient fit
         converged, and two more columns say how it got there:
-        ``n_reml_iter`` (outer REML iterations) and ``warm_started``.
+        ``n_reml_iter`` (outer REML iterations) and ``warm_started``. A
+        ``"score refused"`` column appears when a fold's held-out rows of
+        positive weight had no predicted mean: it holds the reason, naming
+        the rows by their position in the frame (a custom scorer that reads
+        other rows, or changes their offsets, has them named among the rows
+        it read), and that fold's refused scores hold ``error_score``.
     mean_scores : dict
         Equal-weight mean of each per-fold metric across folds. Built-in
         deviance and negative log-likelihood are normalized within each fold
         by the likelihood size the model's declared ``weight_semantics``
         implies: ``sum(sample_weight)`` under ``"frequency"``, the count of
-        positive-weight validation rows under ``"prior"``.
+        positive-weight validation rows under ``"prior"``. A refused score
+        (``"score refused"``) is not in it, whatever ``error_score`` it
+        reads: the mean is of the folds scored, and ``cross_validate`` warns
+        how many those are. The fold left out is one whose held-out rows have
+        no predicted mean, so compare two runs' means only on the same folds.
     pooled_scores : dict
         Supported overall pooled metrics, computed as ratio-of-sums rather than
-        mean-of-fold-ratios, with the same denominator.
+        mean-of-fold-ratios, with the same denominator. Like ``mean_scores``,
+        they leave out the refused scores.
     std_scores : dict
-        Standard deviation of each metric across folds.
+        Standard deviation of each metric across folds, without the refused
+        scores, as ``mean_scores``.
     fold_indices : list[tuple[ndarray, ndarray]] or None
         Per-fold ``(train_idx, test_idx)`` pairs from the CV splitter.
     curve_similarity : dict or None
@@ -73,7 +85,8 @@ class CrossValidationResult:
     oof_predictions : ndarray or None
         Out-of-fold predictions (response scale; a SuperLSS's conditional
         mean), same length as *y*. ``None`` unless ``return_oof=True``. A SuperLSS's
-        held-out row of weight zero that cannot be priced reads NaN.
+        held-out row of weight zero that cannot be priced reads NaN, as does a
+        held-out row with no predicted mean (a SuperLSS's: no value of a parameter).
         Vector means have shape ``(n, K)`` in the family's component order;
         an unpriced vector row has NaN in all its components.
     estimators : list or None
@@ -114,8 +127,11 @@ class CrossValidationResult:
         The ``warm_start`` the folds were fitted with.
     fit_kwargs : dict or None
         The ``fit_kwargs`` every fold's fit received, copied.
+    refused_scores : tuple of (int, str) or None
+        The ``(fold, score)`` cells whose score was refused (``"score
+        refused"``), in fold order. A fold's other scores stand.
 
-    ``n_rows`` through ``fit_kwargs`` are ``None`` on a result made before
+    ``n_rows`` through ``refused_scores`` are ``None`` on a result made before
     they were recorded; such a result without ``warm_start`` and
     ``fit_kwargs`` was fitted cold, with no extra fit arguments.
     """
@@ -137,6 +153,7 @@ class CrossValidationResult:
     builtin_scores: tuple[str, ...] | None = None
     warm_start: bool | None = None
     fit_kwargs: dict[str, Any] | None = None
+    refused_scores: tuple[tuple[int, str], ...] | None = None
 
     def plot_terms_by_fold(
         self,
@@ -446,16 +463,81 @@ def _scoring_weights(model, sample_weight, n_rows: int) -> tuple[NDArray, float]
     return weights, denominator
 
 
+#: ``fold_scores``' column holding why a fold's score was refused. A scorer named by its
+#: Python name cannot take it.
+REFUSED_COLUMN = "score refused"
+
+
+def _scored_mean(model, X_val, sample_weight, offset, what: str) -> NDArray:
+    """``predict``'s means on the validation rows, refused if a scored row has none.
+
+    ``base.predict_priced``: the named ``NoPredictedMeanError``, and no
+    warning about those rows, which under ``-W error`` would be raised in its place.
+    """
+    from superglm.model.base import predict_priced
+
+    return predict_priced(model, X_val, offset, sample_weight, what)
+
+
+def refusal_in_frame(
+    refused: NoPredictedMeanError, model, X_val, offset, sample_weight, rows, n_rows: int, fold: int
+) -> NoPredictedMeanError:
+    """A scorer's refusal on fold ``fold``'s held-out ``rows``, naming them in the frame.
+
+    The held-out frame's own rows with no predicted mean (a SuperLSS: no value
+    of a parameter) are those of positive weight, or every one where the scorer
+    weighed the rows itself. They are named in the frame only where the scorer
+    read the held-out rows as given, refusing exactly those positions; a custom
+    scorer that reorders, selects or repeats the rows, or changes their offsets,
+    has its rows named among those it read, with the fold, since a count alone
+    does not say which frame rows they are. Where the held-out frame has none,
+    the scorer scored other rows, and its own error stands.
+    """
+    weights = None if sample_weight is None else np.asarray(sample_weight)
+    missing = _held_out_without_value(model, X_val, offset, weights)
+    if missing is None:
+        return refused
+    weighted = missing if weights is None else missing & (weights != 0.0)
+    held = weighted if np.any(weighted) else missing
+    if not np.any(held):
+        return refused
+    if refused.n_rows != len(rows) or not np.array_equal(np.flatnonzero(held), refused.positions):
+        return refused.in_scorer(fold)
+    return refused.in_frame(np.asarray(rows)[held], n_rows, fold, len(rows))
+
+
+def _held_out_without_value(model, X_val, offset, weights) -> NDArray[np.bool_] | None:
+    """The held-out rows with no predicted mean, or no value of a SuperLSS parameter.
+
+    A SuperLSS reads only its rows of positive weight, as its scores do: a
+    zero-weight row may hold a label no fitted row has. None for a model with
+    neither.
+    """
+    from superglm.model.base import _no_mean_rows, predict_eta_raw_exact
+
+    if isinstance(model, SuperLSS):
+        fitted = model._require_fitted()
+        kept = np.arange(len(X_val)) if weights is None else np.flatnonzero(weights > 0.0)
+        frame = as_eager_frame(X_val).take_rows(kept)
+        missing = np.zeros(len(X_val), dtype=bool)
+        eta = fitted.predict_eta(frame, offsets=_take_offset(offset, kept))
+        missing[kept] = fitted.outside_domain(eta).any(axis=1)
+        return missing
+    if getattr(model, "_link", None) is None:
+        return None
+    return _no_mean_rows(model, predict_eta_raw_exact(model, X_val, offset, warn=False))
+
+
 def _score_deviance(model, X_val, y_val, *, sample_weight=None, offset=None):
     """Mean unit deviance under the family's sample-weight contract."""
-    mu = model.predict(X_val, offset=offset)
+    mu = _scored_mean(model, X_val, sample_weight, offset, "the deviance")
     weights, denominator = _scoring_weights(model, sample_weight, len(y_val))
     return weighted_row_sum(weights, model._distribution.deviance_unit, y_val, mu) / denominator
 
 
 def _score_nll(model, X_val, y_val, *, sample_weight=None, offset=None):
     """Mean negative log-likelihood under the family's weight contract."""
-    mu = model.predict(X_val, offset=offset)
+    mu = _scored_mean(model, X_val, sample_weight, offset, "the negative log-likelihood")
     weights, denominator = _scoring_weights(model, sample_weight, len(y_val))
     # A predefined or custom split can put an off-lattice row only in
     # validation, so no fold's fit ever warns while both the per-fold and the
@@ -481,20 +563,20 @@ def _score_nll(model, X_val, y_val, *, sample_weight=None, offset=None):
 
 def _score_gini(model, X_val, y_val, *, sample_weight=None, offset=None):
     """Tie-collapsed normalized Gini for binary/frequency models."""
-    mu = model.predict(X_val, offset=offset)
+    mu = _scored_mean(model, X_val, sample_weight, offset, "the Gini")
     return _normalized_gini(y_val, mu, sample_weight)
 
 
 def _pooled_deviance_parts(model, X_val, y_val, *, sample_weight=None, offset=None):
     """Return numerator and denominator for pooled deviance aggregation."""
-    mu = model.predict(X_val, offset=offset)
+    mu = _scored_mean(model, X_val, sample_weight, offset, "the deviance")
     weights, denominator = _scoring_weights(model, sample_weight, len(y_val))
     return weighted_row_sum(weights, model._distribution.deviance_unit, y_val, mu), denominator
 
 
 def _pooled_nll_parts(model, X_val, y_val, *, sample_weight=None, offset=None):
     """Return numerator and denominator for pooled negative log-likelihood."""
-    mu = model.predict(X_val, offset=offset)
+    mu = _scored_mean(model, X_val, sample_weight, offset, "the negative log-likelihood")
     weights, denominator = _scoring_weights(model, sample_weight, len(y_val))
     # A predefined or custom split can put an off-lattice row only in
     # validation, so no fold's fit ever warns while both the per-fold and the
@@ -530,6 +612,7 @@ _RESERVED_COLUMNS = frozenset(
         "effective_df",
         "n_reml_iter",
         "warm_started",
+        REFUSED_COLUMN,
     }
 )
 
@@ -627,13 +710,23 @@ class _GLMFolds:
         return None if getattr(est, "_reml_result", None) is None else live_reml_lambdas(est)
 
     def row_costs(self, est, X, y, sample_weight, offset) -> NDArray[np.float64]:
-        """Each row's weighted unit deviance."""
-        mu = est.predict(X, offset=offset)
+        """Each row's weighted unit deviance; NaN for a row with no mean, which ranks it."""
+        from superglm.model.base import predict_priced
+
+        mu = predict_priced(est, X, offset)
         unit = est._distribution.deviance_unit(np.asarray(y, dtype=np.float64), mu)
         return unit if sample_weight is None else np.asarray(sample_weight) * unit
 
     def predict(self, est, X, offset) -> NDArray[np.float64]:
-        return est.predict(X, offset=offset)
+        """``est.predict``, without its warning for rows with no mean: ``cross_validate`` names
+        them once, by their position in the whole frame."""
+        from superglm.model.base import predict_priced
+
+        return predict_priced(est, X, offset)
+
+    def no_value_rows(self, est, predictions) -> NDArray[np.bool_]:
+        """The rows of ``predict``'s values that have no mean (``base.unpriced_rows``)."""
+        return unpriced_rows(est, predictions)
 
     def curve_similarity(self, estimators, X, sample_weight) -> dict[str, Any]:
         from superglm.plotting.curve_similarity import build_cv_curve_similarity
@@ -810,8 +903,18 @@ def cross_validate(
     return_oof : bool
         If True, collect out-of-fold predictions. For a SuperLSS, a held-out row of weight
         zero that cannot be priced reads NaN, with a warning, and does not fail its fold.
+        A held-out row with no predicted mean (``SuperGLM.predict``; for a SuperLSS, no
+        value of a parameter) reads NaN, and one warning names every such row by its
+        position in the frame.
     error_score : float or "raise"
-        Value to assign when a fold fails. ``"raise"`` propagates the error.
+        Value to assign when a fold fails. ``"raise"`` propagates the error. A score
+        refused because held-out rows of positive weight have no predicted mean
+        (``NoPredictedMeanError``) is assigned it too, with the reason in
+        ``fold_scores``' ``"score refused"`` column; ``"raise"`` raises it, its
+        ``positions`` those rows' positions in the frame (or, for a custom scorer
+        that reads other rows, among the rows it read). That fold is not failed: it keeps its
+        fit record, its estimator and its out-of-fold predictions, its other scores
+        stand, and one warning says how many folds were scored.
     fit_kwargs : mapping, optional
         Extra keyword arguments for every fold's fit call, for example
         ``{"max_reml_iter": 100}``. ``sample_weight`` and ``offset`` come
@@ -923,6 +1026,8 @@ def cross_validate(
     estimators_list: list | None = [] if return_estimators else None
     oof: NDArray | None = np.full((n, *folds.prediction_shape), np.nan) if return_oof else None
     unpriced_oof = np.zeros(n, dtype=bool) if return_oof else None
+    # A SuperGLM's held-out row with no predicted mean reads NaN, named once below.
+    no_mean_oof = np.zeros(n, dtype=bool) if return_oof else None
     pooled_numerators: dict[str, float] = {
         name: 0.0 for name in score_names if name in folds.pooled_parts
     }
@@ -935,6 +1040,9 @@ def cross_validate(
         name for name, scorer in scorers.items() if scorer is not folds.scorers.get(name)
     }
 
+    n_failed = 0
+    # (fold, score) pairs whose score was refused: they read ``error_score`` and leave the means.
+    refused_cells: set[tuple[int, str]] = set()
     for fold_i, (train_idx, test_idx) in enumerate(cv.split(X, y, groups)):
         train_idx = np.asarray(train_idx)
         test_idx = np.asarray(test_idx)
@@ -988,50 +1096,66 @@ def cross_validate(
             written_by_builtin: dict[str, bool] = {}
             fold_parts: dict[str, tuple[float, float]] = {}
             for sname, sfn in scorers.items():
-                pooled_fn = folds.pooled_parts.get(sname)
-                if pooled_fn is not None and sfn is folds.scorers.get(sname):
-                    # One evaluation per fold: the per-fold score is the pooled
-                    # parts' quotient. Only the built-in scorer itself takes
-                    # this route, never a custom callable of the same name.
-                    numerator, denominator = pooled_fn(
-                        est,
-                        X_test,
-                        y_test,
-                        sample_weight=sw_test,
-                        offset=off_test,
-                    )
-                    record[sname] = parts_ratio(numerator, denominator)
-                    written_by_builtin[sname] = True
-                    fold_parts[sname] = (numerator, denominator)
-                    continue
-                result = sfn(
-                    est,
-                    X_test,
-                    y_test,
-                    sample_weight=sw_test,
-                    offset=off_test,
-                )
-                if isinstance(result, dict):
-                    for k, v in result.items():
-                        if k in _RESERVED_COLUMNS:
-                            raise ValueError(
-                                f"Scorer returned reserved column name {k!r}. "
-                                f"Reserved: {_RESERVED_COLUMNS}"
-                            )
-                        record[k] = v
-                    written_by_builtin.update(dict.fromkeys(result, False))
-                else:
-                    record[sname] = float(result)
-                    written_by_builtin[sname] = sfn is folds.scorers.get(sname)
+                try:
                     pooled_fn = folds.pooled_parts.get(sname)
-                    if pooled_fn is not None and written_by_builtin[sname]:
-                        fold_parts[sname] = pooled_fn(
+                    if pooled_fn is not None and sfn is folds.scorers.get(sname):
+                        # One evaluation per fold: the per-fold score is the pooled
+                        # parts' quotient. Only the built-in scorer itself takes
+                        # this route, never a custom callable of the same name.
+                        numerator, denominator = pooled_fn(
                             est,
                             X_test,
                             y_test,
                             sample_weight=sw_test,
                             offset=off_test,
                         )
+                        record[sname] = parts_ratio(numerator, denominator)
+                        written_by_builtin[sname] = True
+                        fold_parts[sname] = (numerator, denominator)
+                        continue
+                    result = sfn(
+                        est,
+                        X_test,
+                        y_test,
+                        sample_weight=sw_test,
+                        offset=off_test,
+                    )
+                    if isinstance(result, dict):
+                        for k, v in result.items():
+                            if k in _RESERVED_COLUMNS:
+                                raise ValueError(
+                                    f"Scorer returned reserved column name {k!r}. "
+                                    f"Reserved: {_RESERVED_COLUMNS}"
+                                )
+                            record[k] = v
+                        written_by_builtin.update(dict.fromkeys(result, False))
+                    else:
+                        record[sname] = float(result)
+                        written_by_builtin[sname] = sfn is folds.scorers.get(sname)
+                        pooled_fn = folds.pooled_parts.get(sname)
+                        if pooled_fn is not None and written_by_builtin[sname]:
+                            fold_parts[sname] = pooled_fn(
+                                est,
+                                X_test,
+                                y_test,
+                                sample_weight=sw_test,
+                                offset=off_test,
+                            )
+                except NoPredictedMeanError as refused:
+                    # A score refused because held-out rows of positive weight have no mean
+                    # is that score's failure, not the fold's: the fit, its estimator and its
+                    # out-of-fold predictions stand. The rows are named in the whole frame.
+                    exc = refusal_in_frame(
+                        refused, est, X_test, off_test, sw_test, test_idx, n, fold_i
+                    )
+                    if error_score == "raise":
+                        raise exc from refused
+                    logger.warning(
+                        f"Fold {fold_i}: {sname} refused: {exc} Setting it to {error_score}."
+                    )
+                    record[sname] = error_score
+                    record.setdefault(REFUSED_COLUMN, str(exc))
+                    refused_cells.add((fold_i, sname))
             record["score_time_s"] = time.perf_counter() - t1
 
             # OOF predictions
@@ -1040,6 +1164,12 @@ def cross_validate(
                     folds, est, frame, test_idx, offset, sw_test
                 )
                 oof[test_idx] = predictions
+                if no_mean_oof is not None:
+                    # As ``oof``: a row a later fold holds out again takes that fold's reading.
+                    # A zero-weight row no fitted row prices is counted on its own, below.
+                    without = folds.no_value_rows(est, predictions)
+                    without[fold_unpriced] = False
+                    no_mean_oof[test_idx] = without
 
             # Only a fold that scored completely joins the pooled totals.
             for sname, (numerator, denominator) in fold_parts.items():
@@ -1058,6 +1188,9 @@ def cross_validate(
             if error_score == "raise":
                 raise
             logger.warning(f"Fold {fold_i} failed: {exc!r}. Setting scores to {error_score}.")
+            record.pop(REFUSED_COLUMN, None)
+            refused_cells = {cell for cell in refused_cells if cell[0] != fold_i}
+            n_failed += 1
             record["fit_time_s"] = np.nan
             record["score_time_s"] = np.nan
             record["converged"] = False
@@ -1085,6 +1218,30 @@ def cross_validate(
             "the fit saw, or leave them out of the frame.",
             stacklevel=2,
         )
+    if no_mean_oof is not None and np.any(no_mean_oof):
+        from superglm.model.base import _shown_positions
+
+        positions = np.flatnonzero(no_mean_oof)
+        warnings.warn(
+            f"{positions.size} held-out rows have no predicted mean under their fold's model, "
+            f"so their out-of-fold predictions are NaN (row positions "
+            f"{_shown_positions(positions)}). Check those rows' levels and values.",
+            stacklevel=2,
+        )
+    refused = [record for record in fold_records if REFUSED_COLUMN in record]
+    if refused:
+        numbers = ", ".join(str(record["fold"]) for record in refused)
+        warnings.warn(
+            f"cross_validate scored {len(fold_records) - len(refused) - n_failed} of "
+            f"{len(fold_records)} folds. Fold{'s' if len(refused) > 1 else ''} {numbers} "
+            f"refused a score because held-out rows of positive weight have no predicted mean "
+            f"({refused[0][REFUSED_COLUMN]}) Those scores read "
+            f"error_score={error_score!r} and are left out of mean_scores, std_scores and "
+            "pooled_scores: the folds left out are the ones the model cannot price, so compare "
+            "runs on the same folds. Each such fold keeps its fit, its estimator and its "
+            f"out-of-fold predictions, and fold_scores' {REFUSED_COLUMN!r} column says why.",
+            stacklevel=2,
+        )
 
     # ── Assemble result ───────────────────────────────────────────
     fold_scores = pd.DataFrame(fold_records)
@@ -1097,13 +1254,18 @@ def cross_validate(
     ]
     all_score_cols = present_score_cols + extra_cols
 
-    mean_scores = {c: float(fold_scores[c].mean()) for c in all_score_cols}
+    def scored(column: str) -> pd.Series:
+        """The folds' values of ``column``, without the ones refused."""
+        left_out = [fold for fold, name in refused_cells if name == column]
+        return fold_scores[column].drop(index=left_out)
+
+    mean_scores = {c: float(scored(c).mean()) for c in all_score_cols}
     pooled_scores = {
         name: pooled_numerators[name] / pooled_denominators[name]
         for name in pooled_numerators
         if pooled_denominators[name] != 0.0
     }
-    std_scores = {c: float(fold_scores[c].std(ddof=0)) for c in all_score_cols}
+    std_scores = {c: float(scored(c).std(ddof=0)) for c in all_score_cols}
 
     curve_similarity = None
     if estimators_list is not None:
@@ -1140,4 +1302,5 @@ def cross_validate(
             key: dict(value) if isinstance(value, Mapping) else value
             for key, value in fit_kwargs.items()
         },
+        refused_scores=tuple(sorted(refused_cells)),
     )

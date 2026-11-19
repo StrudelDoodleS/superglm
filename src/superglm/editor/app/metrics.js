@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { fmt, fmtSigned } from "./format.js";
+import { escapeHTML, fmt, fmtSigned } from "./format.js";
 
 const metricKeys = [
   "deviance",
@@ -55,17 +55,22 @@ export function renderMetricGrid(payload, { metricGrid, metricSelect }) {
     return;
   }
   const datasetLabel = payload.dataset_label || "Original";
-  const caption = `<div class="metric-caption">${datasetLabel} data, change against the original model</div>`;
+  // The original model can have no score here (no quote for some rows): the edited scores
+  // are shown without a change, and the note says why.
+  const caption = payload.note
+    ? `<div class="metric-caption">${datasetLabel} data. ${escapeHTML(payload.note)}</div>`
+    : `<div class="metric-caption">${datasetLabel} data, change against the original model</div>`;
   metricGrid.innerHTML = caption + metricKeys.map((metric) => {
     const original = payload.metrics.original[metric];
     const edited = payload.metrics.edited[metric];
-    const delta = edited - original;
+    const compared = Number.isFinite(original);
+    const delta = compared ? edited - original : NaN;
     const label = metricLabel(metric, metricSelect);
     return `
       <div class="metric-item" data-direction="${metricDirection(metric, delta)}">
         <div class="metric-item-name" title="${label}">${label}</div>
-        <div class="metric-item-delta">${arrow(delta)}<span>${fmtSigned(delta)}</span></div>
-        <div class="metric-item-values"><span class="metric-item-value">${fmt(edited)}</span><span class="metric-item-origin">was ${fmt(original)}</span></div>
+        <div class="metric-item-delta">${arrow(delta)}<span>${compared ? fmtSigned(delta) : "--"}</span></div>
+        <div class="metric-item-values"><span class="metric-item-value">${fmt(edited)}</span><span class="metric-item-origin">was ${compared ? fmt(original) : "--"}</span></div>
       </div>
     `;
   }).join("");

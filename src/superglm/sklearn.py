@@ -791,6 +791,27 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
             offset=offset_array,
         )
 
+    def score(self, X, y, sample_weight=None) -> float:
+        """R² of ``predict`` on ``X``, as scikit-learn's ``RegressorMixin.score``.
+
+        A row of positive weight with no predicted mean is refused with
+        ``NoPredictedMeanError``, naming it; one of weight zero is left out.
+        """
+        from sklearn.metrics import r2_score
+
+        from superglm.model.base import no_mean_warning_quiet, require_priced_rows, unpriced_rows
+
+        # ``predict`` checks the fit first, so an unfitted estimator raises ``NotFittedError``.
+        with no_mean_warning_quiet():
+            mu = np.asarray(self.predict(X), dtype=np.float64)
+        model = self._model
+        require_priced_rows(model, mu, sample_weight, "the R² score")
+        kept = ~unpriced_rows(model, mu)
+        if np.all(kept):
+            return float(r2_score(y, mu, sample_weight=sample_weight))
+        weights = np.asarray(sample_weight, dtype=np.float64)[kept]
+        return float(r2_score(np.asarray(y)[kept], mu[kept], sample_weight=weights))
+
     def diagnostics(self) -> dict[str, Any]:
         check_is_fitted(self)
         return self._model.diagnostics()

@@ -169,7 +169,11 @@ def revised_model(
     earlier repair record (a term holds one current repair), and every difference
     is judged against the fit's coefficients. The
     retained fitted rows are recomputed from the revision, which needs the
-    training rows.
+    training rows. Where the revision leaves a retained row with no value of a
+    parameter (its predictor outside the link's declared domain), the revision
+    stands without retained rows, as a SuperGLM edit scored on rows with no
+    quote stands without fit statistics: a reader that needs the rows is given
+    them, and a score of that row is refused by name.
     """
     if isinstance(edited_terms, str):
         raise TypeError("edited_terms must be a sequence of term names, not one string")
@@ -185,7 +189,12 @@ def revised_model(
     check_hand_edit(edit, state.layout, state.result.coefficients)
     rows = state.retained_rows
     if rows is not None:
-        rows = _recomputed_rows(model, rows, edit, X_train)
+        from superglm.model.base import NoPredictedMeanError
+
+        try:
+            rows = _recomputed_rows(model, rows, edit, X_train)
+        except NoPredictedMeanError:
+            rows = None
     return replace(model, _fit_state=replace(state, hand_edit=edit, retained_rows=rows))
 
 

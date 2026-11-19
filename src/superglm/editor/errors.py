@@ -23,3 +23,18 @@ class EditorTypeError(EditorClientError, TypeError):
 
 class EditorIndexError(EditorClientError, IndexError):
     """Out-of-range editor selection; remains an IndexError for Python callers."""
+
+
+def no_quote_message(error, *, counted: str | None = None) -> str:
+    """The page's message for rows ``predict`` gave no mean (``NoPredictedMeanError``).
+
+    ``counted`` words their count, as a fold's held-out rows.
+    """
+    from superglm.model.base import _shown_positions
+
+    counted = counted or f"{error.positions.size} of {error.n_rows} rows"
+    return (
+        f"{counted} have no quote under this model (row positions "
+        f"{_shown_positions(error.positions)}): the {error.link} has no {error.value} at their "
+        "linear predictor. These scores are not shown while those rows are in the data."
+    )

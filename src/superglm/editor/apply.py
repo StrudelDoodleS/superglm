@@ -157,6 +157,9 @@ def apply_edits_to_model_copy_with_data(
     where such a level is one that fit never saw: it keeps its pin and the
     rest of the term is edited.
 
+    Where a scoring row of positive weight has no quote (``predict`` gives it
+    NaN), the edit stands without fit statistics (``_fit_stats`` None).
+
     A SuperLSS is revised from the rows its view holds; ``X``, ``y``,
     ``sample_weight`` and ``offset`` are not read.
     """
@@ -204,13 +207,20 @@ def apply_edits_to_model_copy_with_data(
         _stamp_stale_inference(edited_model, edited_terms)
         _invalidate_model_caches(edited_model)
     if edited_terms or has_scoring_data:
-        _refresh_fit_statistics(
-            edited_model,
-            X=X,
-            y=y,
-            sample_weight=sample_weight,
-            offset=offset,
-        )
+        from superglm.model.base import NoPredictedMeanError
+
+        try:
+            _refresh_fit_statistics(
+                edited_model,
+                X=X,
+                y=y,
+                sample_weight=sample_weight,
+                offset=offset,
+            )
+        except NoPredictedMeanError:
+            # No statistics exist for rows with no quote; the summary says so, and each
+            # split's scores name the rows.
+            edited_model._fit_stats = None
     if not getattr(edited_model, "_retain_fit_state", True):
         from superglm.model.fit_ops import _maybe_release_fit_state
 
@@ -603,9 +613,17 @@ def _refresh_fit_statistics(
     """Refresh fitted means and statistics; ``frame`` is the caller's adapter of ``X``.
 
     ``statistics=False`` leaves ``_fit_stats`` empty, for a caller that forms them itself.
+
+    A row of positive weight with no mean (NaN, as ``predict`` gives it) is
+    refused with ``NoPredictedMeanError`` before anything is refreshed; a
+    zero-weight one adds nothing to the statistics.
     """
-    from superglm.distributions import clip_mu
-    from superglm.links import stabilize_eta
+    from superglm.model.base import (
+        predict_priced,
+        require_priced_rows,
+        response_mean,
+        unpriced_rows,
+    )
     from superglm.model.fit_ops import (
         _compute_fit_stats,
         _compute_null_mu,
@@ -711,13 +729,13 @@ def _refresh_fit_statistics(
         and (X_ref is retained_X_ref or X_ref is None)
     )
     if X_ref is not None and not can_use_fitted_design:
-        mu = model.predict(X_ref, offset=offset_arr)
+        # The check below names any row without a mean, so predict's warning would repeat it.
+        mu = predict_priced(model, X_ref, offset_arr)
     elif getattr(model, "_dm", None) is not None and model._dm.n == y_arr.size:
         solver_result = (
             model._solver_pirls_result() if model._solver_result is not None else model.result
         )
-        eta = stabilize_eta(linear_predictor(model._dm, solver_result, offset_arr), model._link)
-        mu = clip_mu(model._link.inverse(eta), model._distribution)
+        mu = response_mean(model, linear_predictor(model._dm, solver_result, offset_arr))
     else:
         model._fit_stats = None
         return
@@ -725,6 +743,13 @@ def _refresh_fit_statistics(
     mu = np.asarray(mu, dtype=np.float64).ravel()
     if mu.size != y_arr.size:
         raise ValueError(f"Predictions have length {mu.size}, expected {y_arr.size}.")
+    require_priced_rows(model, mu, weights, "the fit statistics")
+    no_mean = unpriced_rows(model, mu)
+    if np.any(no_mean):
+        # Only zero-weight rows are left with no mean, and they add nothing: each is read at a
+        # stand-in inside every family's mean space, as ``ModelMetrics`` draws it, so no
+        # density refuses its NaN.
+        mu = np.where(no_mean, 0.5, mu)
 
     from superglm._weight_units import evaluation_weight_exponent
 

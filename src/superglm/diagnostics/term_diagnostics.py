@@ -293,9 +293,9 @@ def _drop_term_holdout(
     if model._result is None:
         raise RuntimeError("Model must be fitted.")
 
-    from superglm._utils import contract_weights
-    from superglm.distributions import clip_mu, validate_response
-    from superglm.links import stabilize_eta
+    from superglm._utils import contract_weights, weighted_row_sum
+    from superglm._warn import warn_caller
+    from superglm.distributions import validate_response
     from superglm.model import base
     from superglm.model.input_validation import _finite_vector
     from superglm.solvers.dispersion import model_weight_semantics
@@ -397,26 +397,49 @@ def _drop_term_holdout(
             contributions[term["name"]].append(constant_addend(pieces, centre_shifts[term["name"]]))
             centre_shifts[term["name"]] = 0.0
 
-    eta_full = stabilize_eta(accumulated.finish() + offset_arr, model._link)
-    mu_full = clip_mu(model._link.inverse(eta_full), dist)
-    dev_full = float(np.sum(w * dist.deviance_unit(y_arr, mu_full)))
-
+    # Each predictor's means as predict forms them (``base.response_mean``). A weighted
+    # row the full model gives no mean leaves every comparison, named in a warning, so
+    # each term's delta is read on the same rows. A term whose removal leaves further
+    # rows with no mean reports its delta as unavailable (NaN) with their count: read
+    # without them, it would leave out the rows that removing the term prices worst.
+    mu_full, unpriced = base._response_mean_and_missing(model, accumulated.finish() + offset_arr)
+    left_out = unpriced & (w != 0.0)
+    if np.any(left_out):
+        if not np.any(w[~left_out]):
+            base.require_priced_rows(model, mu_full, w, "the holdout deviances", missing=unpriced)
+        warn_caller(base.left_out_message(model, left_out, "the holdout term drop"))
+        w = np.where(left_out, 0.0, w)
+    carried = w != 0.0
+    dev_full = weighted_row_sum(w, dist.deviance_unit, y_arr, mu_full)
     rows = []
+    unavailable = []
     for term in terms:
-        eta_drop = stabilize_eta(
+        mu_drop, missing = base._response_mean_and_missing(
+            model,
             accumulated.finish(without=contributions[term["name"]])
             - centre_shifts[term["name"]]
             + offset_arr,
-            model._link,
         )
-        mu_drop = clip_mu(model._link.inverse(eta_drop), dist)
-        dev_drop = float(np.sum(w * dist.deviance_unit(y_arr, mu_drop)))
-
+        n_missing = int(np.count_nonzero(missing & carried))
+        if n_missing:
+            unavailable.append(f"{term['name']!r} ({n_missing})")
         rows.append(
             {
                 "feature": term["name"],
-                "delta_deviance": dev_drop - dev_full,
+                "delta_deviance": np.nan
+                if n_missing
+                else weighted_row_sum(w, dist.deviance_unit, y_arr, mu_drop) - dev_full,
+                "rows_without_mean": n_missing,
             }
         )
-
-    return pd.DataFrame(rows)
+    table = pd.DataFrame(rows)
+    if not unavailable:
+        return table.drop(columns="rows_without_mean", errors="ignore")
+    warn_caller(
+        f"Without {', '.join(unavailable)} the model has no predicted mean under the "
+        f"{type(model._link).__name__} on that many held-out rows of positive weight that "
+        "the full model prices, so those terms' delta_deviance is unavailable (NaN) and "
+        "rows_without_mean counts the rows: without them it would leave out the rows that "
+        "removing the term prices worst."
+    )
+    return table

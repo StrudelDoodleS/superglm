@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import copy
+import functools
 import logging
 import math
 import warnings
@@ -14,7 +17,8 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
-from superglm.distributions import Distribution, clip_mu
+from superglm._warn import warn_caller
+from superglm.distributions import Binomial, Distribution, clip_mu
 from superglm.dm_builder import (
     add_interaction,
     auto_detect_features,
@@ -24,7 +28,7 @@ from superglm.dm_builder import (
 )
 from superglm.features.ordered_categorical import resolve_interaction_parent_of
 from superglm.group_matrix import DesignMatrix
-from superglm.links import Link, stabilize_eta
+from superglm.links import Link, eta_domain_text, interior_eta, stabilize_eta
 from superglm.model.fit_state import (
     configured_family,
     configured_lambda2,
@@ -45,6 +49,7 @@ from superglm.penalties.group_lasso import GroupLasso
 from superglm.penalties.ridge import Ridge
 from superglm.penalties.sparse_group_lasso import SparseGroupLasso
 from superglm.solvers.dispersion import model_weight_semantics, validate_weight_semantics
+from superglm.solvers.irls_state import link_domain_rows
 from superglm.solvers.pirls import PIRLSResult
 from superglm.terms import TermInput, check_column_label, check_column_texts, normalize_terms
 from superglm.types import FeatureSpec, FitStats, GroupSlice
@@ -177,11 +182,6 @@ def _score_prediction_term_exact(
         X,
         beta_all[term["beta_idx"]],
     )
-
-
-# ``model.predict`` -> ``_predict_exact`` -> ``predict_exact`` -> ``predict_eta_exact``
-# -> ``_predict_eta``: a prediction warning names the caller of ``predict``.
-_PREDICTION_WARNING_STACKLEVEL = 6
 
 
 def _held_level_shift(term: dict[str, Any], X: EagerFrame, score, interaction_specs) -> NDArray:
@@ -502,14 +502,13 @@ def _predict_eta(
             named = [label for label in held if label in met]
             if named:
                 separated_levels.append(f"{term['name']!r} levels {', '.join(map(str, named))}")
+    # A prediction warning names the caller of ``predict``, however deep the call.
     if separated_levels:
-        warnings.warn(
+        warn_caller(
             "Categorical levels that had exposure but only boundary responses at fit have no "
             "finite effect; the fit's value for them is where its walk stopped, so their "
             "predictions sit near the response boundary: " + "; ".join(separated_levels) + ". "
-            "Merge them into similar levels (Categorical(grouping=...)) or use re() on the term.",
-            UserWarning,
-            stacklevel=_PREDICTION_WARNING_STACKLEVEL,
+            "Merge them into similar levels (Categorical(grouping=...)) or use re() on the term."
         )
 
     if not fitted:
@@ -541,11 +540,7 @@ def _predict_eta(
             continue
         score(term)
     if unidentified and warn:
-        warnings.warn(
-            SZ_POPULATION_PREDICTION + "; ".join(unidentified) + ".",
-            UserWarning,
-            stacklevel=_PREDICTION_WARNING_STACKLEVEL,
-        )
+        warn_caller(SZ_POPULATION_PREDICTION + "; ".join(unidentified) + ".")
 
     total = eta.finish(consume=True)
     if offset is not None:
@@ -582,20 +577,372 @@ def predict_eta_raw_exact(
     offset: NDArray | None = None,
     *,
     random_effects: str = "conditional",
+    warn: bool = True,
 ) -> NDArray[np.floating]:
-    """Predict an unstabilized linear predictor through the exact design path."""
-    return _predict_eta(
-        model,
-        X,
-        offset,
-        random_effects=random_effects,
-        stabilize=False,
+    """Predict an unstabilized linear predictor through the exact design path.
+
+    ``warn`` as ``_predict_eta``'s.  Under a link whose domain is bounded, a
+    predictor that overflows, or is NaN as ``inf - inf``, has no mean, which
+    its readers disclose by name: NumPy's floating-point warning would repeat
+    it, or under ``-W error`` be raised in its place.
+    """
+    quiet = (
+        np.errstate(over="ignore", invalid="ignore")
+        if link_domain_rows(model._link) is not None
+        else contextlib.nullcontext()
     )
+    with quiet:
+        return _predict_eta(
+            model,
+            X,
+            offset,
+            random_effects=random_effects,
+            stabilize=False,
+            warn=warn,
+        )
 
 
 def _eta_to_mu(model, eta: NDArray[np.floating]) -> NDArray:
     """Map stabilized eta to the public response scale."""
     return clip_mu(model._link.inverse(eta), model._distribution)
+
+
+def _no_mean_rows(model, eta: NDArray[np.floating]) -> NDArray[np.bool_]:
+    """The rows whose raw linear predictor lies outside the link inverse's domain.
+
+    The domain the link declares (``links.declared_eta_domain``): the inverse,
+    inverse-squared and negative-power links have a mean only on
+    ``0 < eta < inf``, whatever the family (``link_domain_rows``, given no
+    family).  The fit holds its positive-weight rows inside, but a new row can
+    combine covariate values that cross, and ``stabilize_eta`` would clip it to
+    ``1e-12`` and report a mean of ``1e12`` for it; a predictor that overflows
+    (covariate values or offsets too large for float64) would be clipped to
+    ``1e12`` and read ``1e-12``.
+    """
+    eta = np.asarray(eta, dtype=np.float64)
+    outside_rows = link_domain_rows(model._link)
+    if outside_rows is None:
+        return np.zeros(eta.shape, dtype=bool)
+    return outside_rows(eta)
+
+
+def response_mean(model, eta: NDArray[np.floating]) -> NDArray[np.float64]:
+    """The response mean of a raw linear predictor, as ``predict`` returns it.
+
+    NaN on the rows with no mean (``_no_mean_rows``); every other row is the
+    stabilized inverse ``predict`` has always returned.  This is the one
+    conversion for every reader that forms its own linear predictor.
+    """
+    return _response_mean_and_missing(model, eta)[0]
+
+
+def _response_mean_and_missing(model, eta) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
+    """``response_mean`` and the ``_no_mean_rows`` mask it was formed with."""
+    missing = _no_mean_rows(model, eta)
+    if not np.any(missing):
+        return _eta_to_mu(model, stabilize_eta(eta, model._link)), missing
+    # The rows with no mean are inverted at a stand-in inside the domain and then set to
+    # NaN: at their clipped predictor a power near zero would overflow and warn.
+    stand_in = interior_eta(model._link)
+    mu = np.array(
+        _eta_to_mu(model, stabilize_eta(np.where(missing, stand_in, eta), model._link)),
+        dtype=np.float64,
+        copy=True,
+    )
+    mu[missing] = np.nan
+    return mu, missing
+
+
+def unpriced_rows(model, mu: NDArray) -> NDArray[np.bool_]:
+    """The rows of ``predict``'s means ``mu`` that have no mean (``_no_mean_rows``).
+
+    Under a link whose domain is bounded these are ``mu``'s NaNs: ``predict``
+    gives NaN to the rows outside the domain and a finite stabilized mean to
+    every row inside it, unless a custom link that declares the domain has no
+    value inside it either.  Under any other link there are none, and a NaN is a
+    different fault, left to the reader as it always was; so too for a model
+    with no ``_link`` (a SuperLSS reads each parameter's, ``outside_domain``).
+    """
+    mu = np.asarray(mu, dtype=np.float64)
+    link = getattr(model, "_link", None)
+    if link is None or link_domain_rows(link) is None:
+        return np.zeros(mu.shape, dtype=bool)
+    return np.isnan(mu)
+
+
+def _shown_positions(positions: NDArray[np.intp]) -> str:
+    """The first few row positions, as a message names them."""
+    return ", ".join(map(str, positions[:10])) + (", ..." if positions.size > 10 else "")
+
+
+def _refit_advice(model) -> str:
+    """The refit that removes a bounded domain, or nothing for a link without one."""
+    if link_domain_rows(model._link) is None:
+        return ""
+    link = "logit" if isinstance(model._distribution, Binomial) else "log"
+    return f", or refit with a {link} link"
+
+
+def _no_mean_warning(model, eta: NDArray[np.floating], missing: NDArray[np.bool_]) -> str:
+    """``predict``'s warning for the rows ``missing`` marks, saying why each kind has no mean."""
+    positions = np.flatnonzero(missing)
+    link = type(model._link).__name__
+    overflowed = int(np.count_nonzero(~np.isfinite(np.asarray(eta)[positions])))
+    reasons = []
+    if overflowed < positions.size:
+        reasons.append(
+            f"The link has a mean only at a linear predictor {eta_domain_text(model._link)}, and "
+            "the model extrapolates outside that on these rows' combination of covariate values "
+            "or offsets."
+        )
+    if overflowed:
+        reasons.append(
+            f"{'All' if overflowed == positions.size else overflowed} of them have a linear "
+            "predictor that is not finite: their covariate values or offsets are too large "
+            "for float64."
+        )
+    refit = _refit_advice(model)
+    advice = (
+        f"Check those rows' levels and values{refit}{', which has a mean everywhere' if refit else ''}."
+        if overflowed < positions.size
+        else "Check those rows' values."
+    )
+    return (
+        f"{positions.size} of {missing.size} rows have no predicted mean under the {link}, "
+        f"so predict returns NaN for them (row positions {_shown_positions(positions)}). "
+        + " ".join(reasons)
+        + f" {advice}"
+    )
+
+
+class NoPredictedMeanError(ValueError):
+    """A score was asked of weighted rows that have no predicted mean.
+
+    ``predict`` gives such a row NaN: under the inverse, inverse-squared or a
+    negative-power link, a row whose linear predictor is at or below zero, or
+    overflows.  ``metrics``, the cross-validation scores, the statistical
+    tests and the other readers that score rows raise this ``ValueError``
+    instead of reading the row.  Give those rows weight zero, leave them
+    out, or refit with a log link (logit for a binomial).
+
+    ``positions`` are those rows' positions among ``n_rows`` (the message
+    names the first ten), ``link`` names the link that has no mean for them,
+    ``what`` the score refused and ``value`` what the rows lack: ``"mean"``, or
+    a SuperLSS parameter's value (``"value of 'mean'"``).  The details survive a
+    pickle round trip, as when the error crosses a process boundary from a fold.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        positions: NDArray[np.intp],
+        n_rows: int,
+        link: str,
+        what: str = "",
+        advice: str = "",
+        value: str = "mean",
+    ):
+        super().__init__(message)
+        self.positions = positions
+        self.n_rows = n_rows
+        self.link = link
+        self.what = what
+        self.advice = advice
+        self.value = value
+
+    def __reduce__(self):
+        # ``BaseException`` rebuilds from ``args`` alone, the message.
+        rebuild = functools.partial(
+            type(self),
+            positions=self.positions,
+            n_rows=self.n_rows,
+            link=self.link,
+            what=self.what,
+            advice=self.advice,
+            value=self.value,
+        )
+        return rebuild, self.args, self.__dict__
+
+    def in_frame(
+        self, positions: NDArray[np.intp], n_rows: int, fold: int, n_held_out: int
+    ) -> NoPredictedMeanError:
+        """The refusal for fold ``fold``, naming its rows by their ``positions`` in the frame."""
+        return self._restated(
+            np.asarray(positions),
+            n_rows,
+            counted=f"fold {fold}'s {n_held_out} held-out rows",
+            where=" in the frame",
+        )
+
+    def in_scorer(self, fold: int) -> NoPredictedMeanError:
+        """The refusal for fold ``fold``, naming its rows among those its scorer read."""
+        return self._restated(
+            self.positions,
+            self.n_rows,
+            counted=f"the {self.n_rows} rows fold {fold}'s scorer read",
+            where=" among them",
+        )
+
+    def _restated(
+        self,
+        positions: NDArray[np.intp],
+        n_rows: int,
+        *,
+        counted: str | None = None,
+        where: str = "",
+        what: str | None = None,
+    ) -> NoPredictedMeanError:
+        """This refusal for its rows at ``positions`` among ``n_rows``, and for ``what``."""
+        return _no_mean_error(
+            np.asarray(positions),
+            n_rows,
+            self.link,
+            self.what if what is None else what,
+            self.advice,
+            counted=counted,
+            where=where,
+            value=self.value,
+        )
+
+
+def _no_mean_error(
+    positions: NDArray[np.intp],
+    n_rows: int,
+    link: str,
+    what: str,
+    advice: str,
+    *,
+    counted: str | None = None,
+    where: str = "",
+    value: str = "mean",
+) -> NoPredictedMeanError:
+    """``NoPredictedMeanError`` for ``positions`` among ``n_rows``, ``counted`` as the message counts them."""
+    every = f"; the error's .positions holds all {positions.size}" if positions.size > 10 else ""
+    return NoPredictedMeanError(
+        f"{positions.size} of {counted or f'{n_rows} rows'} have no predicted {value} under the "
+        f"{link} (row positions {_shown_positions(positions)}{where}{every}), so {what} cannot "
+        f"be computed on them. Give those rows weight zero or leave them out{advice}.",
+        positions=positions,
+        n_rows=n_rows,
+        link=link,
+        what=what,
+        advice=advice,
+        value=value,
+    )
+
+
+def left_out_message(model, left_out: NDArray[np.bool_], what: str) -> str:
+    """The warning for weighted rows with no predicted mean that ``what`` leaves out.
+
+    A comparison reads every predictor it compares without them, so it stays on
+    one footing.
+    """
+    positions = np.flatnonzero(left_out)
+    return (
+        f"{positions.size} of {left_out.size} rows of positive weight have no predicted mean "
+        f"under the {type(model._link).__name__} (row positions {_shown_positions(positions)}), "
+        f"so {what} leaves them out of every predictor it compares."
+    )
+
+
+def require_priced_rows(
+    model, mu: NDArray, weights: NDArray | None, what: str, *, missing: NDArray | None = None
+) -> None:
+    """The one check for every reader that scores, tests or ranks rows of ``mu``.
+
+    Raises ``NoPredictedMeanError`` naming the rows of positive weight that
+    have no mean, with how to proceed; ``what`` names the score.  A row of
+    weight zero adds nothing to it, so it may stay NaN.  ``weights=None``
+    weighs every row.  The rows with no mean are ``unpriced_rows`` of ``mu``,
+    or ``missing`` for a reader that formed the predictor itself
+    (``_no_mean_rows``); any other NaN is left to the score.
+    """
+    mu = np.asarray(mu, dtype=np.float64)
+    missing = unpriced_rows(model, mu) if missing is None else np.asarray(missing, dtype=bool)
+    if weights is not None:
+        weights = np.asarray(weights, dtype=np.float64)
+        if weights.shape != mu.shape:
+            raise ValueError(f"Predictions have length {mu.size}, expected {weights.size}.")
+        missing = missing & (weights != 0.0)
+    positions = np.flatnonzero(missing)
+    if positions.size:
+        raise _no_mean_error(
+            positions, int(missing.size), type(model._link).__name__, what, _refit_advice(model)
+        )
+
+
+def priced_mean(model, eta: NDArray[np.floating], weights: NDArray | None, what: str) -> NDArray:
+    """``response_mean`` of a raw linear predictor, refused where a weighted row has none.
+
+    ``require_priced_rows`` with ``weights`` and ``what``, on the rows outside
+    the link's domain (``_no_mean_rows``).
+    """
+    mu, missing = _response_mean_and_missing(model, eta)
+    require_priced_rows(model, mu, weights, what, missing=missing)
+    return mu
+
+
+# Set while a reader that checks its rows itself calls ``model.predict``: predict's
+# warning about rows with no mean would repeat the check, or under ``-W error`` be
+# raised in place of its named error. A context variable, so one thread's reader
+# does not silence another's ``predict``.
+_NO_MEAN_WARNING_QUIET: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "superglm_no_mean_warning_quiet", default=False
+)
+
+
+@contextlib.contextmanager
+def no_mean_warning_quiet():
+    """Within the block, ``predict`` gives rows with no mean NaN without its warning."""
+    token = _NO_MEAN_WARNING_QUIET.set(True)
+    try:
+        yield
+    finally:
+        _NO_MEAN_WARNING_QUIET.reset(token)
+
+
+def warn_no_value(
+    rows: NDArray[np.bool_],
+    parameters: str,
+    *,
+    what: str = "their predictions are NaN",
+    predictor: str = "Their linear predictor",
+) -> None:
+    """A SuperLSS prediction's warning for ``rows``, which have no value of ``parameters``.
+
+    ``parameters`` names each parameter, its link and where that link has a
+    value; ``what`` says what the rows read and ``predictor`` which of their
+    predictors leaves the domain. Silent where ``no_mean_warning_quiet`` is in
+    force, as ``predict``'s warning is.
+    """
+    if _NO_MEAN_WARNING_QUIET.get():
+        return
+    positions = np.flatnonzero(rows)
+    warn_caller(
+        f"{positions.size} of {rows.size} rows have no predicted value of {parameters}, so "
+        f"{what} (row positions {_shown_positions(positions)}). {predictor} is outside that "
+        "domain, or not finite: the model extrapolates outside it on these rows' combination "
+        "of covariate values or offsets. Check those rows' levels and values, or use a log "
+        "link, which has a value everywhere."
+    )
+
+
+def predict_priced(
+    model, X: EagerFrame | FrameLike, offset: NDArray | None, weights=None, what: str | None = None
+) -> NDArray:
+    """``model.predict``'s means for a reader, without its warning about rows with no mean.
+
+    With ``what`` the rows are checked (``require_priced_rows``): a weighted
+    one raises the named error, and a zero-weight one is left out of the
+    score.  Without it the reader handles them itself (``unpriced_rows``).
+    ``predict``'s other disclosures, about partly identified levels, stand.
+    """
+    with no_mean_warning_quiet():
+        mu = model.predict(X, offset=offset)
+    if what is not None:
+        require_priced_rows(model, mu, weights, what)
+    return mu
 
 
 def predict_exact(
@@ -606,11 +953,17 @@ def predict_exact(
     random_effects: str = "conditional",
     warn: bool = True,
 ) -> NDArray:
-    """Predict the response mean through the exact canonical contract."""
-    return _eta_to_mu(
-        model,
-        predict_eta_exact(model, X, offset, random_effects=random_effects, warn=warn),
-    )
+    """Predict the response mean through the exact canonical contract.
+
+    A row with no mean (``_no_mean_rows``, read on the raw linear predictor
+    before the fit's stabilizer can move it) predicts NaN, with one warning
+    unless ``warn`` is false; every other row is unchanged.
+    """
+    eta = predict_eta_raw_exact(model, X, offset, random_effects=random_effects, warn=warn)
+    mu, missing = _response_mean_and_missing(model, eta)
+    if warn and np.any(missing) and not _NO_MEAN_WARNING_QUIET.get():
+        warn_caller(_no_mean_warning(model, eta, missing))
+    return mu
 
 
 def resolve_penalty(

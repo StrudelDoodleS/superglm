@@ -1275,6 +1275,16 @@ class SuperGLM:
         :meth:`summary` instead reports the fit's own statistics from its
         fitting design.  On a ``discrete=True`` fit that design is the binned
         one, so the two differ slightly on the training data.
+
+        Raises
+        ------
+        NoPredictedMeanError
+            A ``ValueError`` naming the rows of positive weight that
+            :meth:`predict` gives no mean (NaN), such as rows past an inverse
+            link's ``eta = 0``: no deviance or likelihood exists for them. Give
+            those rows weight zero or leave them out; a zero-weight row is
+            scored as before, its residuals and Cook's distance read NaN, and
+            ``eta`` reports its raw linear predictor.
         """
         with self._parallel_scope():
             return explain_ops.metrics(self, X, y, sample_weight, offset)
@@ -1959,6 +1969,25 @@ class SuperGLM:
         -------
         NDArray
             Predicted mean on the response scale (inverse-link of eta).
+
+        Warns
+        -----
+        UserWarning
+            When a row has no mean, it predicts NaN and every other row is
+            unaffected: the warning counts those rows and names the first.
+            Under the ``"inverse"`` or ``"inverse_squared"`` link or a
+            ``PowerLink`` of negative power, a row has a mean only at
+            ``0 < eta < inf``: not at ``eta <= 0``, nor where the predictor
+            overflows (covariate values or offsets too large for float64).
+            A custom link declares such a domain as ``eta_domain``
+            (``links.declared_eta_domain``).
+            Those links are fitted on their positive branch, so this holds for
+            a Gaussian too, whose negative reciprocal the fit never reaches.
+            Every other link is unchanged. The fit keeps every row it uses
+            inside on its own design (the binned one, for ``discrete=True``),
+            but a new combination of covariate values or offsets can cross, and
+            so can the exact design on the training rows of a coarsely binned
+            fit.
         """
         return self._predict_exact(X, offset, random_effects=random_effects)
 
@@ -2081,6 +2110,14 @@ class SuperGLM:
             validation objects require ``sample_weight_val`` when
             ``sample_weight`` is supplied and require ``offset_val`` for an
             offset-fitted model.
+
+        In holdout mode a validation row of positive weight that the full
+        model gives no predicted mean (:meth:`predict` gives it NaN) is left
+        out of every comparison, with a warning naming it.  A term whose
+        removal leaves further such rows has ``delta_deviance`` NaN, and a
+        ``rows_without_mean`` column counts those rows, with a warning saying
+        why: without them the delta would leave out the rows that removing
+        the term prices worst.
         """
         with self._parallel_scope():
             return explain_ops.term_drop_diagnostics(
@@ -2118,7 +2155,13 @@ class SuperGLM:
 
         Spline and polynomial main effects into bins, and a
         continuous-by-continuous interaction onto the grid its rating-table
-        block is sampled on."""
+        block is sampled on.
+
+        A row with no predicted mean reads NaN in that prediction array. A
+        row of positive weight the fitted terms give none is left out of the
+        comparison, with a warning naming it; one only the binned terms leave
+        with none makes the comparison unavailable: its metrics are NaN and
+        ``metrics["rows_without_binned_mean"]`` counts those rows."""
         with self._parallel_scope():
             return explain_ops.discretization_impact(self, X, y, sample_weight, **kwargs)
 
