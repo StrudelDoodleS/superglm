@@ -96,18 +96,19 @@ def reml_nonconvergence_message(reml_result: Any) -> str | None:
             "constrained optimum: the inner quadratic program did not finish its optimality "
             f"(KKT) check (termination_reason={refit_reason!r})"
         )
-    # The penalized maximum on the mean-space boundary at the published
-    # smoothing parameters: the model has no interior optimum there, which
-    # no iteration budget changes.  Smoothing parameters the search tried and
-    # left (the exact engine's restorations) say nothing of the ones it
-    # selected, so they are reported beside the advice, never instead of it.
+    # The final refit stopped on the mean-space boundary at the published
+    # smoothing parameters, which says where the iterate stopped, not whether
+    # an interior optimum exists; Wald inference is unreliable at a boundary.
+    # Smoothing parameters the search tried and left (the exact engine's
+    # restorations) say nothing of the ones it selected, so they are reported
+    # beside the advice, never instead of it.
     boundary = refit_reason == "mean_space_boundary"
     restorations = int(getattr(reml_result, "mean_space_restorations", 0) or 0)
     if boundary:
         refit = (
-            "the final coefficient fit at the selected smoothing parameters holds fitted "
-            "means on the boundary of the family's mean space "
-            f"(termination_reason={refit_reason!r})"
+            "the final coefficient fit at the selected smoothing parameters stopped on the "
+            "boundary of the family's mean space (a binomial fitted probability of 0 or 1) "
+            f"before its coefficients converged (termination_reason={refit_reason!r})"
         )
     if reason in _REML_CONVERGED_REASONS:
         message = (
@@ -143,11 +144,10 @@ def reml_nonconvergence_message(reml_result: Any) -> str | None:
         )
     if boundary:
         message += (
-            " The penalized maximum lies on the boundary of the family's mean space (a "
-            "binomial fitted probability of 0 or 1) at the selected smoothing "
-            "parameters: the model has no interior optimum there, so more iterations will "
-            "not make it converge. A link whose means stay inside (0, 1), such as logit, "
-            "has one."
+            " Standard errors and intervals (Wald inference) are unreliable for the terms "
+            "whose fitted probabilities reach the boundary. Coarser levels, more data in "
+            "those cells, or a link whose means stay inside (0, 1), such as logit, keep "
+            "the fit off it."
         )
     elif reason == "max_reml_iter":
         message += (

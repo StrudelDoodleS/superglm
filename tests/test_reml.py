@@ -2739,9 +2739,9 @@ class TestREMLNonConvergenceDisclosure:
         assert "max_pirls_iter" not in message
 
     def test_a_maximum_on_the_mean_space_boundary_is_named_not_given_more_budget(self):
-        """A log-binomial whose final refit holds a probability of 1 has no
-        interior optimum at the selected smoothing parameters: the statement
-        says so, and does not advise a larger budget.  Smoothing parameters
+        """A log-binomial whose final refit stopped on a probability of 1 is
+        told where it stopped and that its Wald inference is unreliable
+        there, and is not advised a larger budget.  Smoothing parameters
         the search tried and left (the exact engine's restorations) are not
         that claim: such a fit keeps the advice its own stop calls for, with
         the restorations reported beside it.  Mutation checks: before the
@@ -2760,7 +2760,7 @@ class TestREMLNonConvergenceDisclosure:
         capped.terminal_refit_termination = "mean_space_boundary"
         message = reml_nonconvergence_message(capped)
         assert "boundary of the family's mean space" in message
-        assert "no interior optimum" in message
+        assert "Wald inference" in message
         assert "lambda2_init" not in message
 
         restored = REMLResult(
@@ -2774,7 +2774,7 @@ class TestREMLNonConvergenceDisclosure:
         message = reml_nonconvergence_message(restored)
         assert "no smoothing step improved" in message
         assert "At 4 smoothing parameters the search tried" in message
-        assert "no interior optimum" not in message
+        assert "Wald inference" not in message
         assert "model.reml_diagnostics() holds the iteration history" in message
 
         restored_capped = REMLResult(
@@ -2788,7 +2788,7 @@ class TestREMLNonConvergenceDisclosure:
         restored_capped.terminal_refit_termination = "max_iter"
         message = reml_nonconvergence_message(restored_capped)
         assert "At 1 smoothing parameter the search tried" in message
-        assert "no interior optimum" not in message
+        assert "Wald inference" not in message
         assert "Refit with a larger max_reml_iter and a larger max_pirls_iter" in message
         assert "lambda2_init" in message
 
