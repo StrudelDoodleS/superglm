@@ -408,8 +408,10 @@ def test_under_warnings_as_errors_a_built_in_score_raises_the_named_error():
     assert np.all(np.isfinite(result.fold_scores[["deviance", "nll", "gini"]].to_numpy()))
 
 
+@pytest.mark.pins_behaviour
 def test_a_nan_from_a_link_with_no_declared_domain_is_not_a_missing_mean():
-    """The rows with no mean are the link's domain's: a custom link's NaN keeps v0.36.0's reading.
+    """A control: the rows with no mean are the link's domain's, so a custom link's NaN keeps
+    master's reading.
 
     ``metrics`` scores it (a NaN deviance, as before) and ``discretization_impact``
     raises its named ``OverflowError``. Mutation: every NaN was a missing mean, so
@@ -548,11 +550,14 @@ class _RepeatedHoldout:
         yield np.r_[0:30, 34:38], np.arange(30, 34)
 
 
+@pytest.mark.pins_behaviour
 def test_a_repeated_split_does_not_call_a_finite_out_of_fold_prediction_nan():
     """Row 33 has no mean under the first fold's fit and a price under the second's, which stands.
 
-    Mutation: the mask of NaN predictions kept the first fold's reading, so the
-    warning named row 33 as NaN beside its finite prediction.
+    A control: master had no such warning and a finite prediction there; it pins
+    both for the new warning about out-of-fold NaNs. Mutation: the mask of NaN
+    predictions kept the first fold's reading, so the warning named row 33 as
+    NaN beside its finite prediction.
     """
     X = pd.concat([TRAIN, CELLS, CELLS], ignore_index=True)
     y = np.r_[TRAIN_Y, CELLS_Y, CELLS_Y]
