@@ -16,11 +16,10 @@ from superglm.group_matrix import DesignMatrix
 from superglm.links import (
     _BINOMIAL_CLIP_MU_EPS,
     IdentityLink,
-    InverseLink,
-    InverseSquaredLink,
     Link,
     LogLink,
     SqrtLink,
+    declared_eta_domain,
     stabilize_eta,
 )
 
@@ -171,13 +170,16 @@ def mean_space_violation(
     return None
 
 
-def link_domain_violation(
+def link_domain_rows(
     link: Link, family: Distribution | None = None
-) -> Callable[[NDArray, NDArray], bool] | None:
-    """The test that a linear predictor leaves the link inverse's domain, or ``None``.
+) -> Callable[[NDArray], NDArray] | None:
+    """The rows whose linear predictor leaves the link inverse's domain, or ``None``.
 
-    The inverse and inverse-squared links map only ``eta > 0`` to a positive
-    mean.  ``stabilize_eta`` clips a non-positive ``eta`` to ``1e-12``, so a
+    The domain is the one the link declares (``links.declared_eta_domain``).
+    The inverse and inverse-squared links, and every power link of negative
+    power ``p`` (``mu = eta**(1/p)``; ``PowerLink(-1)`` and ``PowerLink(-2)``
+    are those two again), map only ``0 < eta < inf`` to a positive mean.
+    ``stabilize_eta`` clips a non-positive ``eta`` to ``1e-12``, so a
     row that crosses zero gets a mean of ``1e12`` whose Gamma or inverse
     Gaussian deviance grows only like ``log mu``: a line search reading that
     clipped deviance accepts the crossing, and the row is then pinned at the
@@ -198,21 +200,32 @@ def link_domain_violation(
     ``1e50``.  The inverse is evaluated on a copy of ``eta``: a state's
     ``eta`` is read-only, and a subclass's inverse may write in place.
     """
-    if isinstance(link, InverseLink | InverseSquaredLink):
-
-        def violates(eta_unclipped: NDArray, weights: NDArray) -> bool:
-            return bool(np.any((eta_unclipped <= 0.0) & (weights > 0.0)))
-
-        return violates
+    domain = declared_eta_domain(link)
+    if domain is not None:
+        low, high = domain
+        # An open interval: a NaN predictor is outside it, and so is an overflowed one.
+        return lambda eta_unclipped: (
+            ~((np.asarray(eta_unclipped) > low) & (np.asarray(eta_unclipped) < high))
+        )
     if family is not None and isinstance(link, IdentityLink) and not isinstance(family, Gaussian):
         upper = 1.0 if isinstance(family, Binomial) else np.inf
 
-        def mean_outside(eta_unclipped: NDArray, weights: NDArray) -> bool:
+        def mean_outside(eta_unclipped: NDArray) -> NDArray:
             mean = link.inverse(np.array(eta_unclipped, dtype=float))
-            return bool(np.any(((mean <= 0.0) | (mean >= upper)) & (weights > 0.0)))
+            return (mean <= 0.0) | (mean >= upper)
 
         return mean_outside
     return None
+
+
+def link_domain_violation(
+    link: Link, family: Distribution | None = None
+) -> Callable[[NDArray, NDArray], bool] | None:
+    """The test that a positive-weight row is one of ``link_domain_rows``, or ``None``."""
+    rows = link_domain_rows(link, family)
+    if rows is None:
+        return None
+    return lambda eta_unclipped, weights: bool(np.any(rows(eta_unclipped) & (weights > 0.0)))
 
 
 # ``clip_mu`` caps a binomial mean at ``1 - _BINOMIAL_CLIP_MU_EPS``: under the

@@ -1277,9 +1277,12 @@ def discretization_impact(
     band_max_error = _positive_finite("band_max_error", band_max_error)
 
     beta = result.beta
+    from superglm._utils import weighted_row_sum
+    from superglm._warn import warn_caller
     from superglm.distributions import clip_mu
     from superglm.links import LogLink, stabilize_eta
     from superglm.model import base
+    from superglm.solvers.irls_state import link_domain_rows
 
     plan = base._prediction_plan(model)
     terms_by_name = {term["name"]: term for term in plan["features"]}
@@ -1365,9 +1368,22 @@ def discretization_impact(
     frame.require_columns(tuple(required))
     validate_x_columns(frame, required)
     # predict's predictor, without its warning (#440 review): the deltas below
-    # read only the binned main effects and continuous interactions
-    eta_orig = base.predict_eta_exact(model, frame, offset=offset, warn=False)
-    original_predictions = clip_mu(model._link.inverse(eta_orig), model._distribution)
+    # read only the binned main effects and continuous interactions. Its means
+    # are predict's (``base.response_mean``).
+    eta_raw = base.predict_eta_raw_exact(model, frame, offset, warn=False)
+    eta_orig = stabilize_eta(eta_raw, model._link)
+    original_predictions, no_mean = base._response_mean_and_missing(model, eta_raw)
+    # A weighted row the fitted terms give no mean is left out, from the bins too, as at
+    # weight zero, and named: the comparison is the same for every term without it.
+    left_out = no_mean & (evaluation_weight != 0.0)
+    if np.any(left_out):
+        if not np.any(evaluation_weight[~left_out]):
+            base.require_priced_rows(
+                model, original_predictions, evaluation_weight, "the comparison", missing=no_mean
+            )
+        warn_caller(base.left_out_message(model, left_out, "discretization_impact"))
+        evaluation_weight = np.where(left_out, 0.0, evaluation_weight)
+        geometry_weight = np.where(left_out, 0.0, geometry_weight)
 
     # For each target feature, compute the delta (binned - smooth)
     tables: dict[str, pd.DataFrame] = {}
@@ -1653,15 +1669,21 @@ def discretization_impact(
     # A log-link workbook multiplies its factors with no clip on the predictor
     # or the mean, so neither is clipped here: clipping would hide the error
     # where binning removes cancellation between terms.
-    eta_disc = eta_orig + total_delta
-    if isinstance(model._link, LogLink):
+    link, dist = model._link, model._distribution
+    if isinstance(link, LogLink):
         with np.errstate(over="ignore", under="ignore"):
-            predictions = np.exp(eta_disc)
+            predictions = np.exp(eta_orig + total_delta)
         unusable = ~np.isfinite(predictions) | (predictions == 0.0)
+        binned_no_mean = no_mean
+    elif link_domain_rows(link) is not None:
+        # The binned predictor's means as predict forms them, its domain read on the raw
+        # binned predictor before any clip: binning can move a row across ``eta = 0`` either
+        # way.  On every row with ``1e-12 <= eta <= 1e12`` this is the stabilized sum below.
+        predictions, binned_no_mean = base._response_mean_and_missing(model, eta_raw + total_delta)
+        unusable = ~np.isfinite(predictions) & ~binned_no_mean
     else:
-        predictions = clip_mu(
-            model._link.inverse(stabilize_eta(eta_disc, model._link)), model._distribution
-        )
+        predictions = clip_mu(link.inverse(stabilize_eta(eta_orig + total_delta, link)), dist)
+        binned_no_mean = no_mean
         unusable = ~np.isfinite(predictions)
     if np.any(unusable):
         raise OverflowError(
@@ -1671,40 +1693,61 @@ def discretization_impact(
             "terms."
         )
 
-    # Compute metrics
-    dist = model._distribution
-    dev_orig_unit = dist.deviance_unit(y, original_predictions)
-    dev_disc_unit = dist.deviance_unit(y, predictions)
-    deviance_original = float(np.sum(evaluation_weight * dev_orig_unit))
-    deviance_discretized = float(np.sum(evaluation_weight * dev_disc_unit))
-    deviance_change = deviance_discretized - deviance_original
-    deviance_change_pct = (
-        100.0 * deviance_change / deviance_original if deviance_original > 0 else 0.0
-    )
+    # A row only the binned terms leave with no mean makes the comparison unavailable,
+    # rather than read without the rows binning prices worst.
+    unpriced = binned_no_mean & ~no_mean & (evaluation_weight != 0.0)
 
-    # Prediction-only summaries follow the geometry mass: replication rows
-    # under the frequency contract, physical rows under the prior one.
-    safe_orig = np.maximum(np.abs(original_predictions), 1e-300)
-    abs_pct_change = np.abs(predictions - original_predictions) / safe_orig * 100.0
-    summary_active = geometry_weight > 0.0
-    summary_weight = geometry_weight[summary_active]
-    mean_abs_prediction_change_pct = float(
-        np.average(abs_pct_change[summary_active], weights=summary_weight)
+    # Compute metrics
+    deviance_original = weighted_row_sum(
+        evaluation_weight, dist.deviance_unit, y, original_predictions
     )
+    summary_active = geometry_weight > 0.0
+    if np.any(unpriced):
+        warn_caller(
+            f"Discretizing at n_bins={n_bins} leaves {np.count_nonzero(unpriced)} rows of "
+            f"positive weight that the fitted terms price with no predicted mean under the "
+            f"{type(link).__name__} (row positions "
+            f"{base._shown_positions(np.flatnonzero(unpriced))}): the binned predictor is "
+            "past the link's domain there, so the comparison is unavailable (NaN) and "
+            "metrics['rows_without_binned_mean'] counts them. Increase n_bins or exclude the "
+            "terms that move them."
+        )
+        nan = float("nan")
+        deviance_discretized = deviance_change = deviance_change_pct = nan
+        max_abs_prediction_change_pct = mean_abs_prediction_change_pct = nan
+        prediction_correlation = nan
+    else:
+        deviance_discretized = weighted_row_sum(
+            evaluation_weight, dist.deviance_unit, y, predictions
+        )
+        deviance_change = deviance_discretized - deviance_original
+        deviance_change_pct = (
+            100.0 * deviance_change / deviance_original if deviance_original > 0 else 0.0
+        )
+        # Prediction-only summaries follow the geometry mass: replication rows
+        # under the frequency contract, physical rows under the prior one.
+        safe_orig = np.maximum(np.abs(original_predictions), 1e-300)
+        abs_pct_change = np.abs(predictions - original_predictions) / safe_orig * 100.0
+        summary_weight = geometry_weight[summary_active]
+        mean_abs_prediction_change_pct = float(
+            np.average(abs_pct_change[summary_active], weights=summary_weight)
+        )
+        max_abs_prediction_change_pct = float(np.max(abs_pct_change[summary_active]))
+        prediction_correlation = _weighted_correlation(
+            original_predictions, predictions, geometry_weight
+        )
 
     metrics = {
         "deviance_original": deviance_original,
         "deviance_discretized": deviance_discretized,
         "deviance_change": deviance_change,
         "deviance_change_pct": deviance_change_pct,
-        "max_abs_prediction_change_pct": float(np.max(abs_pct_change[summary_active])),
+        "max_abs_prediction_change_pct": max_abs_prediction_change_pct,
         "mean_abs_prediction_change_pct": mean_abs_prediction_change_pct,
-        "prediction_correlation": _weighted_correlation(
-            original_predictions,
-            predictions,
-            geometry_weight,
-        ),
+        "prediction_correlation": prediction_correlation,
     }
+    if np.any(unpriced):
+        metrics["rows_without_binned_mean"] = float(np.count_nonzero(unpriced))
 
     return DiscretizationResult(
         tables=tables,

@@ -134,6 +134,7 @@ if _typing.TYPE_CHECKING:
         SqrtLink,
     )
     from superglm.model import PathResult, SuperGLM
+    from superglm.model.base import NoPredictedMeanError
     from superglm.model.input_validation import (
         FractionalFrequencyWeightWarning,
         PriorWeightLatticeWarning,
@@ -283,6 +284,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
         "SqrtLink",
     ),
     "superglm.model": ("PathResult", "SuperGLM"),
+    "superglm.model.base": ("NoPredictedMeanError",),
     "superglm.model.input_validation": (
         "FractionalFrequencyWeightWarning",
         "PriorWeightLatticeWarning",
@@ -491,6 +493,7 @@ __all__ = [
     "Predictor",
     "PathResult",
     "NearPoissonDispersionError",
+    "NoPredictedMeanError",
     "PublicationModeError",
     "DiscretizationResult",
     "discretization_impact",

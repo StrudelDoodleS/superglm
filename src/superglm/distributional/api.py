@@ -1201,6 +1201,13 @@ class SuperLSS:
         Custom families define their own default prediction quantity. Use
         ``predict_parameters`` for the complete parameter table and
         ``predict_quantile`` for a chosen conditional quantile.
+
+        A row whose predictor for a parameter leaves its link's domain has no
+        value of that parameter (``eta <= 0`` under a negative-power
+        ``PowerLink``): it predicts NaN, with one warning naming it, as
+        ``SuperGLM.predict`` does; so do ``predict_parameters`` (in that
+        parameter's column), ``predict_cdf`` and ``predict_quantile``. A score
+        of such a row is refused.
         """
         model = self._require_fitted()
         values = model.predict(X, offsets=offsets)

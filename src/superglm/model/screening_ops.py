@@ -660,10 +660,14 @@ def screen_interactions(
             raise ValueError("offset must contain only finite values")
     # Use the stabilized predictor directly, not link(predict(X)): for a
     # non-injective link (sqrt) the round trip flips the sign of negative-eta rows.
-    # It is predict's predictor without its warning.
+    # It is predict's predictor without its warning, and a weighted row it gives no
+    # mean is refused (``base.priced_mean``); a zero-weight one adds nothing.
+    from superglm.links import stabilize_eta
     from superglm.model import base
 
-    eta = np.asarray(base.predict_eta_exact(model, X, offset, warn=False), dtype=np.float64)
+    eta_raw = np.asarray(base.predict_eta_raw_exact(model, X, offset, warn=False), dtype=np.float64)
+    base.priced_mean(model, eta_raw, weights, "the interaction screening scores")
+    eta = stabilize_eta(eta_raw, link)
     mu = np.asarray(link.inverse(eta), dtype=np.float64)
     score = working_score(y, mu, eta, weights, distribution, link)
     from superglm.solvers.working_rows import fisher_working_weights, pearson_chi2

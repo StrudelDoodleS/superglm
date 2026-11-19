@@ -1,5 +1,7 @@
 """Tests for Link protocol and all link implementations."""
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -25,6 +27,7 @@ from superglm.links import (
     resolve_link,
     stabilize_eta,
 )
+from tests._no_mean_fixture import CELLS, THREE_CELL_LINKS, three_cell_fit
 
 
 class TestLogLink:
@@ -766,3 +769,117 @@ def test_power_one_fit_matches_identity_with_negative_fitted_values():
 
     assert np.min(predictions[1]) < 0.0
     assert_allclose(predictions[1], predictions[0], atol=1e-12)
+
+
+@THREE_CELL_LINKS
+def test_predict_gives_no_mean_for_a_new_combination_outside_the_inverse_links_domain(
+    link, y_level
+):
+    """A combination of seen levels at ``eta <= 0`` predicts NaN with a warning, not a clamp.
+
+    The freMTPL2 Gamma/inverse severity split scores seven held-out rows like the
+    fourth cell. ``PowerLink(-1)`` and ``PowerLink(-2)`` are the same two links.
+    Mutation: before the fix the fit's stabilizer clipped the row to
+    ``eta = 1e-12`` and predict returned 1e12 (inverse) and 1e6 (inverse-squared)
+    for it, without a warning; the power links did so until they were declared.
+    """
+    model, _, _, _ = three_cell_fit(link, y_level)
+    eta = model._predict_eta_raw_exact(CELLS)
+    assert_allclose(eta[3], -0.5, rtol=1e-6)
+
+    with pytest.warns(UserWarning, match=r"1 of 4 rows have no predicted mean.*positions 3\)"):
+        predicted = model.predict(CELLS)
+
+    assert np.flatnonzero(np.isnan(predicted)).tolist() == [3]
+    # The other rows are what predict has always returned: the stabilized inverse.
+    expected = clip_mu(model._link.inverse(stabilize_eta(eta[:3], model._link)), Gamma())
+    np.testing.assert_array_equal(predicted[:3], expected)
+    np.testing.assert_array_equal(predicted[:3], model.predict(CELLS.iloc[:3]))
+    assert_allclose(predicted[:3], [1.0, np.mean(y_level), np.mean(y_level)], rtol=1e-6)
+
+
+@THREE_CELL_LINKS
+def test_a_score_refuses_a_weighted_row_with_no_mean_and_skips_a_zero_weight_one(link, y_level):
+    """``metrics`` and the built-in CV scorers name a scored row that has no mean.
+
+    A NaN mean would make the deviance NaN, so the score is refused, naming the
+    row. A row of weight zero adds nothing to a score: it may have no mean and the
+    scores stay those of the other rows. Neither warns, so under warnings as
+    errors the named error is what a scorer raises. Mutation: before the fix the
+    row read 1e12 and the held-out deviance was a finite number dominated by it;
+    with predict's warning in the scorer, ``-W error`` raised that instead.
+    """
+    from superglm.model.base import NoPredictedMeanError
+    from superglm.model_selection import _score_deviance
+
+    model, X, y, _ = three_cell_fit(link, y_level)
+    y_cells = np.array([1.0, 4.0, 4.0, 3.0])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        with pytest.raises(NoPredictedMeanError, match=r"1 of 4 rows .*positions 3\)"):
+            model.metrics(CELLS, y_cells)
+        with pytest.raises(NoPredictedMeanError, match=r"1 of 4 rows .*positions 3\)"):
+            _score_deviance(model, CELLS, y_cells)
+        unweighted = model.metrics(CELLS, y_cells, sample_weight=np.array([1.0, 1, 1, 0]))
+        cv_score = _score_deviance(model, CELLS, y_cells, sample_weight=np.array([1.0, 1, 1, 0]))
+    seen = model.metrics(CELLS.iloc[:3], y_cells[:3])
+    assert_allclose(unweighted.deviance, seen.deviance, rtol=1e-12)
+    assert_allclose(cv_score, seen.deviance / 3, rtol=1e-12)
+
+    # The same cell as a zero-weight training row leaves the fit and its statistics unchanged.
+    weighted, X_w, y_w, w = three_cell_fit(link, y_level, unseen_weight=0.0)
+    assert_allclose(weighted.result.beta, model.result.beta, rtol=1e-10, atol=1e-12)
+    training = weighted.metrics(X_w, y_w, sample_weight=w)
+    assert_allclose(training.deviance, model.metrics(X, y).deviance, rtol=1e-10)
+    assert np.isfinite(training.log_likelihood)
+
+
+class _KeepsTheInverse(InverseLink):
+    """An inverse link under another name: it keeps the inverse, so it keeps the domain."""
+
+
+class _DeclaresItsOwn(InverseLink):
+    """Overrides the inverse with the same curve and declares the domain itself."""
+
+    eta_domain = (0.0, np.inf)
+
+    def inverse(self, eta):
+        return 1.0 / np.asarray(eta)
+
+
+class _LogViaInverse(LogLink, InverseLink):
+    """Inherits ``InverseLink`` but inverts as the log link, which has a mean everywhere."""
+
+
+def test_a_link_has_the_domain_declared_with_its_inverse():
+    """The domain is the one declared at least as far down the classes as ``inverse``.
+
+    A subclass that keeps the inverse keeps the domain, one that overrides it
+    has the domain it declares, and ``_LogViaInverse``, whose inverse is the log
+    link's, has none: its row at ``eta < 0`` predicts ``exp(eta)``, and
+    SuperLSS builds with it. Mutation: before the fix the first two predicted
+    1e12 for the unseen cell; with the domain read by inheritance,
+    ``_LogViaInverse`` predicted NaN and SuperLSS refused it.
+    """
+    from superglm import GammaLS, SuperLSS
+    from superglm.links import declared_eta_domain
+
+    for link in (_KeepsTheInverse(), _DeclaresItsOwn()):
+        model, _, _, _ = three_cell_fit(link, [2.0, 6.0])
+        with pytest.warns(UserWarning, match=r"1 of 4 rows have no predicted mean"):
+            assert np.flatnonzero(np.isnan(model.predict(CELLS))).tolist() == [3]
+
+    assert declared_eta_domain(_LogViaInverse()) is None
+    x = pd.DataFrame({"x": np.arange(30.0)})
+    y = np.exp(1.0 + 0.01 * np.arange(30.0)) * np.tile([0.9, 1.1], 15)
+    model = SuperGLM(
+        family="gamma", link=_LogViaInverse(), selection_penalty=0.0, features={"x": Numeric()}
+    ).fit(x, y)
+    offset = np.array([-2.0, 0.0])
+    eta = model._predict_eta_raw_exact(x.iloc[:2], offset)
+    assert eta[0] < 0.0
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert_allclose(model.predict(x.iloc[:2], offset=offset), np.exp(eta), rtol=1e-12)
+    family = GammaLS()
+    SuperLSS(family, family.mean(link=_LogViaInverse()), family.scale())

@@ -155,8 +155,9 @@ def test_predict_names_a_separated_categorical_level_it_meets():
 
     The fit warns at build; the level has no finite effect, and its
     predictions sit near zero wherever the walk stopped.  ``predict`` said
-    nothing.  It now names the level when its rows reach it, and stays
-    silent on rows of other levels.  Mutation: no record of the level.
+    nothing.  It now names the level when its rows reach it, at the caller's
+    line, and stays silent on rows of other levels.  Mutation: no record of
+    the level; then a fixed stack level one frame too deep, past the caller.
     """
     rng = np.random.default_rng(5)
     n = 2500
@@ -171,6 +172,7 @@ def test_predict_names_a_separated_categorical_level_it_meets():
         model.predict(pd.DataFrame({"c": ["c6", "c1"]}))
     named = [x for x in caught if "only boundary responses at fit" in str(x.message)]
     assert len(named) == 1 and "'c' levels c6" in str(named[0].message)
+    assert named[0].filename == __file__
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         model.predict(pd.DataFrame({"c": ["c1", "c2"]}))

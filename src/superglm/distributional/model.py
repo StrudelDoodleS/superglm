@@ -96,18 +96,29 @@ from superglm.distributional.weights import (
 )
 
 
-def _readonly(values: NDArray) -> NDArray[np.float64]:
+def _readonly(values: NDArray, missing: NDArray | None = None) -> NDArray[np.float64]:
+    """Freeze finite values; ``missing`` marks the rows with no value, set to NaN."""
     result = np.array(values, dtype=np.float64, copy=True)
-    if not np.all(np.isfinite(result)):
+    if missing is not None:
+        result[missing] = np.nan
+    if not np.all(np.isfinite(result if missing is None else result[~missing])):
         raise ValueError("prediction produced non-finite values")
     result.setflags(write=False)
     return result
 
 
-def _readonly_default_prediction(values: NDArray) -> NDArray[np.float64]:
-    """Freeze a default prediction while preserving a legitimate infinite mean."""
+def _readonly_default_prediction(
+    values: NDArray, missing: NDArray | None = None
+) -> NDArray[np.float64]:
+    """Freeze a default prediction while preserving a legitimate infinite mean.
+
+    ``missing`` marks the rows with no value, set to NaN.
+    """
     result = np.array(values, dtype=np.float64, copy=True)
-    if np.any(np.isnan(result)) or np.any(np.isneginf(result)):
+    if missing is not None:
+        result[missing] = np.nan
+    kept = result if missing is None else result[~missing]
+    if np.any(np.isnan(kept)) or np.any(np.isneginf(kept)):
         raise ValueError("prediction produced NaN or negative infinity")
     result.setflags(write=False)
     return result
@@ -664,22 +675,101 @@ class DenseDistributionalModel:
         *,
         offsets: Mapping[str, NDArray] | None = None,
     ) -> NDArray[np.float64]:
-        """Return fitted natural parameters in family order."""
-        return self.parameters_from_eta(self.predict_eta(X, offsets=offsets))
+        """Return fitted natural parameters in family order.
 
-    def parameters_from_eta(self, eta: NDArray[np.float64]) -> NDArray[np.float64]:
+        A row whose predictor leaves its link's declared domain has no value of
+        that parameter (``eta <= 0`` under a negative-power ``PowerLink``): it
+        reads NaN, with one warning naming it, as ``SuperGLM.predict`` does.
+        """
+        theta, outside = self._predicted_parameters(X, offsets)
+        return _readonly(theta, outside)
+
+    def _predicted_parameters(
+        self, X: FrameLike | EagerFrame, offsets: Mapping[str, NDArray] | None
+    ) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
+        """The rows' parameters, a stand-in where one has no value, and where that is.
+
+        The stand-in is a valid parameter (``parameter_from_eta``'s ``"interior"``),
+        so a prediction formed from the parameters reads every row and then sets
+        those rows to NaN. One warning names them.
+        """
+        eta = self.predict_eta(X, offsets=offsets)
+        outside = self.outside_domain(eta)
+        theta = self.parameters_from_eta(eta, outside_domain="interior")
+        if np.any(outside):
+            from superglm.model.base import warn_no_value
+
+            warn_no_value(
+                outside.any(axis=1),
+                ", ".join(
+                    f"{state.name!r} under the {type(state.link).__name__}"
+                    for state, column in zip(self.layout.predictors, outside.T, strict=True)
+                    if np.any(column)
+                ),
+            )
+        return theta, outside
+
+    def outside_domain(self, eta: NDArray[np.float64]) -> NDArray[np.bool_]:
+        """Per row and parameter, whether ``eta`` leaves the link's declared domain.
+
+        ``links.declared_eta_domain``: there the parameter has no value.
+        """
+        outside = np.zeros(np.shape(eta), dtype=bool)
+        for index in range(len(self.layout.predictors)):
+            outside[:, index] = self._outside_domain(eta, index)
+        return outside
+
+    def _outside_domain(self, eta: NDArray[np.float64], parameter_index: int) -> NDArray[np.bool_]:
+        """``outside_domain``'s column for one parameter."""
+        from superglm.solvers.irls_state import link_domain_rows
+
+        rows = link_domain_rows(self.layout.predictors[parameter_index].link)
+        if rows is None:
+            return np.zeros(len(eta), dtype=bool)
+        return np.asarray(rows(eta[:, parameter_index]), dtype=bool)
+
+    def parameters_from_eta(
+        self, eta: NDArray[np.float64], *, outside_domain: str = "raise"
+    ) -> NDArray[np.float64]:
         """Apply each parameter's inverse link to its linear predictor column."""
         theta = np.empty_like(eta)
         for parameter_index in range(len(self.layout.predictors)):
-            theta[:, parameter_index] = self.parameter_from_eta(eta, parameter_index)
+            theta[:, parameter_index] = self.parameter_from_eta(
+                eta, parameter_index, outside_domain=outside_domain
+            )
         return _readonly(theta)
 
-    def parameter_from_eta(self, eta: NDArray[np.float64], parameter_index: int) -> NDArray:
-        """One parameter's column of ``parameters_from_eta(eta)``, by the same operations."""
+    def parameter_from_eta(
+        self, eta: NDArray[np.float64], parameter_index: int, *, outside_domain: str = "raise"
+    ) -> NDArray:
+        """One parameter's column of ``parameters_from_eta(eta)``, by the same operations.
+
+        A row whose predictor leaves the link's declared domain has no value
+        (``outside_domain``): ``"raise"`` refuses it, as a value outside the
+        support is refused, for a reader that would score it; ``"interior"``
+        gives it the value at a predictor inside the domain, for prediction to
+        replace with NaN.
+        """
         state = self.layout.predictors[parameter_index]
+        column = eta[:, parameter_index]
+        outside = self._outside_domain(eta, parameter_index)
+        if np.any(outside):
+            if outside_domain != "interior":
+                from superglm.model.base import _shown_positions
+
+                raise ValueError(
+                    f"prediction parameter {state.name!r} has no value on "
+                    f"{np.count_nonzero(outside)} of the {outside.size} rows read (positions "
+                    f"among them {_shown_positions(np.flatnonzero(outside))}): the "
+                    f"{type(state.link).__name__} has none at their linear predictor"
+                )
+            from superglm.links import interior_eta
+
+            # At their own predictor the inverse can overflow, or a floor in it quote a value.
+            column = np.where(outside, interior_eta(state.link), column)
         # Overflow is refused by the support check immediately below.
         with np.errstate(over="ignore", invalid="ignore"):
-            values = np.asarray(state.link.inverse(eta[:, parameter_index]), dtype=np.float64)
+            values = np.asarray(state.link.inverse(column), dtype=np.float64)
         if values.shape != (len(eta),):
             raise ValueError(f"inverse link for {state.name!r} returned an invalid shape")
         if not np.all(self.family.parameters[parameter_index].support.contains(values)):
@@ -697,8 +787,9 @@ class DenseDistributionalModel:
             raise NotImplementedError(
                 "this distributional family has no default prediction; use predict_parameters()"
             )
-        values = self.family.default_prediction(self.predict_parameters(X, offsets=offsets))
-        return _readonly_default_prediction(np.asarray(values, dtype=np.float64))
+        theta, outside = self._predicted_parameters(X, offsets)
+        values = self.family.default_prediction(theta)
+        return _readonly_default_prediction(np.asarray(values, dtype=np.float64), outside.any(1))
 
     def _distribution_function_family(self) -> DistributionFunctionFamily:
         if not isinstance(self.family, DistributionFunctionFamily):
@@ -717,9 +808,9 @@ class DenseDistributionalModel:
         """Return ``P(Y <= y)`` per row from the fitted natural parameters."""
         require_scalar_response(self.family, "CDF")
         family = self._distribution_function_family()
-        theta = self.predict_parameters(X, offsets=offsets)
+        theta, outside = self._predicted_parameters(X, offsets)
         values = np.broadcast_to(np.asarray(y, dtype=np.float64), (len(theta),))
-        return _readonly(np.asarray(family.cdf(values, theta), dtype=np.float64))
+        return _readonly(np.asarray(family.cdf(values, theta), dtype=np.float64), outside.any(1))
 
     def predict_quantile(
         self,
@@ -731,9 +822,10 @@ class DenseDistributionalModel:
         """Return the ``p``-quantile per row from the fitted natural parameters."""
         require_scalar_response(self.family, "quantile")
         family = self._distribution_function_family()
-        theta = self.predict_parameters(X, offsets=offsets)
+        theta, outside = self._predicted_parameters(X, offsets)
         probabilities = np.broadcast_to(np.asarray(p, dtype=np.float64), (len(theta),))
-        return _readonly(np.asarray(family.quantile(probabilities, theta), dtype=np.float64))
+        quantiles = np.asarray(family.quantile(probabilities, theta), dtype=np.float64)
+        return _readonly(quantiles, outside.any(1))
 
 
 def _clone_predictor_templates(predictors: Sequence[Predictor]) -> tuple[Predictor, ...]:

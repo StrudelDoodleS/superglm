@@ -34,6 +34,14 @@ class Link(Protocol):
         without it those derivatives are differenced. A subclass that
         overrides ``inverse`` or a lower derivative must override it too,
         or it is treated as absent (:func:`_own_deriv4_inverse`).
+
+    Optional attribute:
+        eta_domain — ``(low, high)``, the open interval of linear predictors
+        the inverse has a mean on, for a link whose inverse has none outside
+        it; ``None`` or absent for every real eta. ``predict`` gives a row
+        outside it NaN, and the fit keeps its rows inside. It counts only
+        where it is declared at least as far down the class hierarchy as
+        ``inverse`` (:func:`declared_eta_domain`).
     """
 
     def link(self, mu: NDArray) -> NDArray:
@@ -68,18 +76,60 @@ def _own_deriv4_inverse(link: object) -> Callable[[NDArray], NDArray] | None:
     method = getattr(link, "deriv4_inverse", None)
     if not callable(method):
         return None
+    return method if _declared_with(link, "deriv4_inverse", _LOWER_INVERSE_METHODS) else None
+
+
+def _declared_with(link: object, name: str, methods: tuple[str, ...]) -> bool:
+    """Whether ``link``'s ``name`` is defined at least as far down its classes as each of ``methods``.
+
+    A definition on the instance is the lowest. A subclass that overrides one of
+    ``methods`` but inherits ``name`` would read its base class's ``name`` for a
+    different curve.
+    """
     instance = getattr(link, "__dict__", {})
     mro = type(link).__mro__
 
-    def depth(name: str) -> int:
-        if name in instance:
+    def depth(attribute: str) -> int:
+        if attribute in instance:
             return -1
-        return next((index for index, klass in enumerate(mro) if name in vars(klass)), len(mro))
+        return next(
+            (index for index, klass in enumerate(mro) if attribute in vars(klass)), len(mro)
+        )
 
-    supplied = depth("deriv4_inverse")
-    if any(depth(name) < supplied for name in _LOWER_INVERSE_METHODS):
+    supplied = depth(name)
+    return not any(depth(method) < supplied for method in methods)
+
+
+def declared_eta_domain(link: object) -> tuple[float, float] | None:
+    """The open interval of linear predictors ``link`` declares a mean on, or ``None`` for all.
+
+    The link's ``eta_domain``: ``(0, inf)`` for the inverse and inverse-squared
+    links and a negative-power ``PowerLink``. It counts only where it is declared
+    at least as far down the class hierarchy (or on the instance) as ``inverse``,
+    so a subclass that overrides the inverse has the domain it declares itself,
+    not its base class's.
+    """
+    domain = getattr(link, "eta_domain", None)
+    if domain is None or not _declared_with(link, "eta_domain", ("inverse",)):
         return None
-    return method
+    low, high = domain
+    return float(low), float(high)
+
+
+def interior_eta(link: object) -> float:
+    """A linear predictor inside ``link``'s declared domain (``1.0`` for ``(0, inf)``).
+
+    A reader evaluates a row with no mean here and then discards the value: at the
+    row's own predictor, or at its clipped one, the inverse can overflow.
+    """
+    low, high = declared_eta_domain(link) or (-np.inf, np.inf)
+    if np.isfinite(low) and np.isfinite(high):
+        return low + 0.5 * (high - low)
+    if np.isfinite(low):
+        return low + max(1.0, abs(low))
+    if np.isfinite(high):
+        return high - max(1.0, abs(high))
+    return 0.0
 
 
 class LogLink:
@@ -377,6 +427,9 @@ class InverseLink:
     Canonical link for the Gamma distribution.
     """
 
+    #: A mean only at ``eta > 0``, the branch the fit uses.
+    eta_domain = (0.0, np.inf)
+
     def link(self, mu: NDArray) -> NDArray:
         return 1.0 / mu
 
@@ -406,6 +459,9 @@ class InverseSquaredLink:
 
     Canonical link for the inverse Gaussian distribution.
     """
+
+    #: A mean only at ``eta > 0``.
+    eta_domain = (0.0, np.inf)
 
     def link(self, mu: NDArray) -> NDArray:
         return 1.0 / mu**2
@@ -479,6 +535,11 @@ class PowerLink:
         if power == 0:
             raise ValueError("PowerLink(power=0) is the log link — use LogLink instead.")
         self.power = power
+
+    @property
+    def eta_domain(self) -> tuple[float, float] | None:
+        """``(0, inf)`` for a negative power, whose inverse has no mean at ``eta <= 0``."""
+        return (0.0, np.inf) if self.power < 0.0 else None
 
     def link(self, mu: NDArray) -> NDArray:
         return np.power(mu, self.power)
