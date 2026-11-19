@@ -19,11 +19,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from scipy.optimize import linprog
 
 from superglm import Categorical, Numeric, RandomEffect, Spline, SuperGLM
 
 FIXTURES = Path(__file__).parent / "fixtures"
+U = 2.0**-53  # unit roundoff
+
+
+def _gamma(n: int) -> float:
+    """Higham's ``gamma_n = n u / (1 - n u)``."""
+    return n * U / (1.0 - n * U)
 
 
 def published_separation(model):
@@ -55,6 +60,32 @@ def _summary_se(model) -> dict[str, float]:
 def _notes(model) -> str:
     record = model._fit_inference_info.get("identifiability")
     return "" if record is None else "\n".join(record.notes())
+
+
+def _design_and_penalty(model) -> tuple[np.ndarray, np.ndarray]:
+    """The fit's explicit design ``[1, X]`` and its penalty ``S`` at the fitted lambdas, dense."""
+    from superglm.inference.covariance import _active_penalty_matrix
+    from superglm.model.fit_state import fitted_lambda2
+
+    n = model._dm.n
+    design = np.hstack(
+        [np.ones((n, 1))]
+        + [np.asarray(g.toarray(), float).reshape(n, -1) for g in model._dm.group_matrices]
+    )
+    penalty = np.zeros((design.shape[1],) * 2)
+    penalty[1:, 1:] = _active_penalty_matrix(
+        model._dm.group_matrices,
+        model._groups,
+        model._groups,
+        fitted_lambda2(model),
+        reml_penalties=getattr(model, "_reml_penalties", None),
+    )
+    return design, penalty
+
+
+def _poisson_deviance(y, mean) -> np.ndarray:
+    """The Poisson unit deviances ``2 (y log(y / mu) - (y - mu))``."""
+    return 2.0 * (np.where(y > 0, y * np.log(np.where(y > 0, y, 1.0) / mean), 0.0) - (y - mean))
 
 
 def _kept_row_variance(model, rows) -> tuple[np.ndarray, np.ndarray]:
@@ -131,50 +162,118 @@ def test_a_reference_level_with_every_response_zero_has_no_standard_error_but_a_
     np.testing.assert_allclose(published, oracle, rtol=1e-10)
 
 
-def test_the_separation_decision_does_not_depend_on_where_the_walk_stopped():
+def _walked_to(monkeypatch, kept, depth: float) -> None:
+    """Publish the fit with its walk stopped where E's rows' largest linear predictor is ``-depth``.
+
+    The solver's coefficients are moved along the separating direction (the intercept down,
+    each of ``f``'s level indicators up, by one amount) before publication: every kept row's
+    predictor stays as it was, so this is the same fit with its walk at a known depth.
+    """
+    import dataclasses
+
+    import superglm.model.state_ops as state_ops
+
+    real = state_ops.publish_identified_fit
+
+    def publish(model):
+        solver = model._solver_pirls_result()
+        design, _ = _design_and_penalty(model)
+        levels = next(g for g in model._groups if g.name == "f").sl
+        assert np.array_equal(design[:, 1:][:, levels].sum(axis=1), kept), "E is the reference"
+        eta = solver.intercept + design[:, 1:] @ solver.beta
+        shift = depth + float(np.max(eta[~kept]))
+        direction = np.zeros_like(solver.beta)
+        direction[levels] = 1.0
+        walked = dataclasses.replace(
+            solver,
+            beta=solver.beta + shift * direction,
+            intercept=solver.intercept - shift,
+            centred_intercept=None,
+            state_center=None,
+        )
+        if model._result is solver:
+            model._result = walked
+        model._solver_result = walked
+        return real(model)
+
+    monkeypatch.setattr(state_ops, "publish_identified_fit", publish)
+
+
+def test_the_separation_decision_does_not_depend_on_where_the_walk_stopped(monkeypatch):
     """The same separation, decided at two depths of the walk, publishes one fit.
 
-    A loose and a tight PIRLS tolerance stop the walk along E's direction at different depths
-    (the event is forced, not left to a BLAS kernel's rounding): both decide the same rows and
-    the same coefficients, and the kept rows' fit, standard errors and predictions agree, since
-    they come from the fit on those rows.  At ``92302bc40`` the level SEs were the walk's, and
-    moved with its depth.
+    Forced: the fit is published with its walk along E's direction stopped where E's rows'
+    largest linear predictor is -8, and again at -16 (``_walked_to``).  Both decide the same
+    rows and coefficients, and the kept rows' fit is the fit on those rows, so their
+    predictions agree to the rounding of the shifted coefficients, and the exact-family
+    standard errors of ``x`` to ``64 u`` times the kept rows' Hessian's condition on its
+    range.  The quasi-likelihood SEs scale by the Pearson dispersion, to which each separated
+    row adds its fitted mean, so they agree to half the shallower walk's separated mass over
+    the kept rows' chi-squared.  The separated rows sit where each walk was put: 8 apart.  At
+    ``92302bc40`` the level SEs were the walk's, and moved with its depth.
     """
     X, y, kept = _reference_level_frame()
-    loose = _fit("poisson", {"f": Categorical(), "x": Spline(n_knots=8)}, X, y, tol=1e-5)
-    tight = _fit("poisson", {"f": Categorical(), "x": Spline(n_knots=8)}, X, y, tol=1e-12)
-    assert abs(loose.result.intercept - tight.result.intercept) > 1.0, "the walks must differ"
-    for model in (loose, tight):
+    fits = []
+    for depth in (8.0, 16.0):
+        with monkeypatch.context() as patch:
+            _walked_to(patch, kept, depth)
+            fits.append(_fit("poisson", {"f": Categorical(), "x": Spline(n_knots=8)}, X, y))
+    shallow, deep = fits
+    magnitude = abs(deep.result.intercept) + np.max(np.abs(deep.result.beta))
+    np.testing.assert_allclose(
+        np.log(shallow.predict(X[~kept])) - np.log(deep.predict(X[~kept])),
+        8.0,
+        atol=64 * U * magnitude,
+    )
+    for model in fits:
         se = _summary_se(model)
         assert all(np.isnan(se[name]) for name in ("Intercept", "f[A]", "f[B]", "f[C]", "f[D]"))
-    first, second = published_separation(loose), published_separation(tight)
+    first, second = published_separation(shallow), published_separation(deep)
     assert first.state == second.state == "present"
     assert first.names == second.names
     np.testing.assert_array_equal(first.rows, second.rows)
-    assert _summary_se(loose).keys() == _summary_se(tight).keys()
-    for name, value in _summary_se(loose).items():
-        assert np.isnan(value) == np.isnan(_summary_se(tight)[name])
+    assert _summary_se(shallow).keys() == _summary_se(deep).keys()
+    for name, value in _summary_se(shallow).items():
+        assert np.isnan(value) == np.isnan(_summary_se(deep)[name])
     np.testing.assert_allclose(
-        loose.metrics(X, y).coefficient_se["x"], tight.metrics(X, y).coefficient_se["x"], rtol=1e-6
+        np.log(shallow.predict(X[kept])), np.log(deep.predict(X[kept])), atol=64 * U * magnitude
     )
+    design, penalty = _design_and_penalty(deep)
+    mu = deep.predict(X)
+    values = np.linalg.eigvalsh(design[kept].T @ (mu[kept, None] * design[kept]) + penalty)
+    rank = values > 1e-10 * values[-1]
+    condition = values[-1] / np.min(values[rank])
+    raw = [model.metrics(X, y).coefficient_se_raw["x"] for model in fits]
+    np.testing.assert_allclose(raw[0], raw[1], rtol=64 * U * condition)
+    chi2 = float(np.sum((y[kept] - mu[kept]) ** 2 / mu[kept]))
+    mass = float(np.sum(shallow.predict(X[~kept])))
     np.testing.assert_allclose(
-        np.log(loose.predict(X[kept])), np.log(tight.predict(X[kept])), rtol=0, atol=1e-6
+        shallow.metrics(X, y).coefficient_se["x"],
+        deep.metrics(X, y).coefficient_se["x"],
+        rtol=0.5 * mass / chi2 + 64 * U * condition,
     )
 
 
-@pytest.mark.pins_behaviour
 def test_a_penalised_factor_keeps_its_estimates_finite():
-    """Control: with ``f`` a random effect the separating ray has penalty curvature, so the
-    penalised estimate exists and every coefficient keeps its standard error, as at
-    ``92302bc40``.  The decision, kept on the record, is a proved absence."""
+    """With ``f`` a random effect the separating ray has penalty curvature, so the penalised
+    estimate exists: no separation is decided, and each level's standard error is the inverse
+    penalised Hessian's, ``(A'WA + S)^-1`` at the fit's Fisher weights (``W = mu``), formed
+    here from the explicit design, to ``64 u`` times its condition number.  At ``a4a7a64cd``
+    every level's standard error was NaN."""
     X, y, _ = _reference_level_frame()
     model = _fit("poisson", {"f": RandomEffect(), "x": Spline(n_knots=8)}, X, y, method="fit_reml")
     separation = published_separation(model)
     assert separation is None or separation.state == "absent"
-    metrics = model.metrics(X, y)
-    assert np.isfinite(metrics.intercept_se)
-    assert np.all(np.isfinite(metrics.coefficient_se["f"]))
     assert "no finite estimate" not in _notes(model)
+    design, penalty = _design_and_penalty(model)
+    hessian = design.T @ (model.predict(X)[:, None] * design) + penalty
+    oracle = np.sqrt(np.diag(np.linalg.inv(hessian)))[1:]
+    metrics = model.metrics(X, y)
+    levels = next(g for g in model._groups if g.name == "f").sl
+    np.testing.assert_allclose(
+        metrics.coefficient_se_raw["f"], oracle[levels], rtol=64 * U * np.linalg.cond(hessian)
+    )
+    assert np.isfinite(metrics.intercept_se)
 
 
 def test_a_zero_working_weight_on_a_separated_row_is_judged_by_the_rows(monkeypatch):
@@ -218,54 +317,54 @@ def test_a_direction_that_cannot_be_verified_is_disclosed_unresolved(monkeypatch
 
 
 # ------------------------------------------------------------------- binomial, against Konis's LP
-def _konis_infinite(design: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """Which coefficients Konis's linear program (2007, ch. 4) finds infinite, from its definition.
-
-    Maximise ``sum_i s_i a_i'b`` under ``s_i a_i'b >= 0`` and ``-1 <= b <= 1`` (``s = 2y - 1``):
-    the data are separated exactly when the optimum is positive, and a coefficient is infinite
-    where the solution's ``b_j`` is not zero (R ``detectseparation``'s convention; the package is
-    not installed here, so its program is written out).
-    """
-    signed = (2.0 * y - 1.0)[:, None] * design
-    program = linprog(
-        -signed.sum(axis=0),
-        A_ub=-signed,
-        b_ub=np.zeros(len(y)),
-        bounds=[(-1.0, 1.0)] * design.shape[1],
-        method="highs",
-    )
-    assert program.status == 0
-    return np.abs(program.x) > 1e-9
-
-
 def _complete_frame():
+    """Every row strictly on its side of ``x1 + x2 / 2 = 0.6``, checked in exact arithmetic.
+
+    The directions of recession (``s_i a_i'b >= 0``, ``s = 2y - 1``, ``a_i = (1, x1, x2)``)
+    then hold an open cone, so one moves every coefficient: all three are infinite (Konis
+    2007, ch. 4: infinite where some direction of recession is not zero).
+    """
+    from fractions import Fraction
+
     rng = np.random.default_rng(3)
     x1, x2 = rng.uniform(size=300), rng.uniform(size=300)
     y = (x1 + 0.5 * x2 > 0.6).astype(float)
-    return pd.DataFrame({"x1": x1, "x2": x2}), y
+    margin = [
+        (2 * int(yi) - 1) * (Fraction(a) + Fraction(b) / 2 - Fraction(3, 5))
+        for a, b, yi in zip(x1, x2, y, strict=True)
+    ]
+    assert min(margin) > 0
+    return pd.DataFrame({"x1": x1, "x2": x2}), y, np.array([True, True, True])
 
 
 def _quasi_complete_frame():
+    """``x1`` separates every row off ``x1 = 0`` (``s_i x1_i > 0`` there), and the ties at
+    ``x1 = 0`` carry both outcomes on overlapping ``x2``, so no ``(b0, b2)`` other than zero
+    keeps ``s_i (b0 + b2 x2_i) >= 0`` on them (a threshold in ``x2`` would split the outcomes).
+    The directions of recession are ``(0, b1, 0)``, ``b1 >= 0``: only ``x1`` is infinite."""
     rng = np.random.default_rng(3)
     x1 = np.r_[rng.uniform(0.1, 1, 100), -rng.uniform(0.1, 1, 100), np.zeros(40)]
     x2 = rng.normal(size=240)
     y = np.r_[np.ones(100), np.zeros(100), (np.arange(40) % 2).astype(float)]
-    return pd.DataFrame({"x1": x1, "x2": x2}), y
+    assert np.all((2 * y - 1)[x1 != 0] * x1[x1 != 0] > 0)
+    ties, outcome = x2[x1 == 0], y[x1 == 0]
+    one, zero = ties[outcome == 1], ties[outcome == 0]
+    assert one.max() > zero.min() and zero.max() > one.min()
+    return pd.DataFrame({"x1": x1, "x2": x2}), y, np.array([False, True, False])
 
 
 @pytest.mark.parametrize("frame", [_complete_frame, _quasi_complete_frame])
 def test_binomial_separation_withholds_what_konis_program_finds_infinite(frame):
     """Logistic regression on complete and quasi-complete separation: the coefficients without a
-    standard error are exactly those Konis's program finds infinite.
+    standard error are exactly those Konis's program finds infinite, derived for each frame
+    from its rows (the frame's docstring).
 
     Complete: every coefficient (no row is kept).  Quasi-complete: the ties at ``x1 = 0`` carry
     both outcomes, so the intercept and ``x2`` are finite and fitted on those rows, ``x1`` is
     infinite.  At ``92302bc40`` every coefficient printed a finite SE.
     """
-    X, y = frame()
+    X, y, infinite = frame()
     model = _fit("binomial", {"x1": Numeric(), "x2": Numeric()}, X, y)
-    design = np.column_stack([np.ones(len(y)), X["x1"], X["x2"]])
-    infinite = _konis_infinite(design, y)
     metrics = model.metrics(X, y)
     blank = np.array(
         [
@@ -285,6 +384,13 @@ def test_quasi_complete_poisson_separation_along_two_rays_is_found_whole():
     are separated and ``x2``, ``x3`` and ``x4`` are infinite; the intercept is finite and is the
     maximum-likelihood fit of the kept rows (``x2 = x3 = x4`` there).  At ``92302bc40`` all four
     printed SEs.
+
+    The kept rows' fit is stationary at the fit's tolerance, 1e-12 here (score ``g``, curvature
+    ``H``: ``g'H^-1 g <= tol D``, the deviance's decrease to the maximum), and agrees with a Newton
+    reference's on ``(1, x)``: a fit is ``H^-1 g`` from the maximum, so a row's linear predictor
+    is within ``sqrt(a'H^-1 a) sqrt(g'H^-1 g)`` of it (Cauchy-Schwarz) and the log-likelihood
+    within ``g'H^-1 g``, for the reference and the published fit each, plus the rounding of
+    the published predictors (``2 gamma_4 |a| |beta|``, ``beta``'s slopes cancelling).
     """
     table = np.array(
         [
@@ -302,7 +408,7 @@ def test_quasi_complete_poisson_separation_along_two_rays_is_found_whole():
     )
     X = pd.DataFrame(table[:, 1:], columns=["x2", "x3", "x4"])
     y = table[:, 0]
-    model = _fit("poisson", {"x2": Numeric(), "x3": Numeric(), "x4": Numeric()}, X, y)
+    model = _fit("poisson", {"x2": Numeric(), "x3": Numeric(), "x4": Numeric()}, X, y, tol=1e-12)
     se = model.metrics(X, y).coefficient_se
     assert all(np.isnan(se[name][0]) for name in ("x2", "x3", "x4"))
     separation = published_separation(model)
@@ -314,7 +420,20 @@ def test_quasi_complete_poisson_separation_along_two_rays_is_found_whole():
     for _ in range(100):
         mu = np.exp(A @ b)
         b = b + np.linalg.solve(A.T @ (mu[:, None] * A), A.T @ (y[3:] - mu))
-    assert model.result.intercept == pytest.approx(b[0], abs=1e-6)
+    mu = np.exp(A @ b)
+    inverse = np.linalg.inv(A.T @ (mu[:, None] * A))
+    published = np.r_[model.result.intercept, model.result.beta]
+    rows = np.abs(np.column_stack([np.ones(6), table[3:, 1:]]))
+    rounding = 2 * _gamma(4) * (rows @ np.abs(published))
+    fitted = model.predict(X)[3:]
+    scores = [A.T @ (y[3:] - mean) for mean in (fitted, mu)]
+    decrements = [float(g @ inverse @ g) for g in scores]
+    assert decrements[0] <= 1e-12 * float(np.sum(_poisson_deviance(y[3:], fitted)))
+    reach = np.sqrt(np.einsum("ij,jk,ik->i", A, inverse, A)) * sum(np.sqrt(decrements))
+    assert np.all(np.abs(np.log(fitted) - A @ b) <= reach + rounding)
+    terms = [y[3:] * np.log(mean) - mean for mean in (fitted, mu)]
+    loss = sum(decrements) + np.abs(y[3:] - fitted) @ rounding + _gamma(12) * np.sum(np.abs(terms))
+    assert abs(np.sum(terms[0]) - np.sum(terms[1])) <= loss
 
 
 def test_a_separated_set_short_of_the_whole_face_is_not_certified(monkeypatch):
@@ -377,20 +496,43 @@ def test_a_separating_ray_one_unit_in_the_last_place_from_an_alias_is_found():
     np.testing.assert_array_equal(separation.rows, [2])
 
 
-def test_a_proposal_that_violates_a_row_by_one_unit_in_the_last_place_is_rejected():
-    """Sol's second counterexample, on the program itself: signed rows ``(1, 1), (-1, -1),
-    (1, 1 + 2^-52), (0, -1)`` admit no separating direction, though HiGHS reports one, ``(1,
-    -1)``, whose third row is ``-2^-52``.  The exact verification rejects it (a check within the
-    evaluation's rounding bound accepts it).  Control: the program is new in this change."""
+def test_a_proposal_that_violates_a_row_by_one_unit_in_the_last_place_is_rejected(monkeypatch):
+    """Sol's second counterexample, at the verification: signed rows ``(1, 1), (-1, -1),
+    (1, 1 + 2^-52), (0, -1)`` admit no separating direction, and the proposal ``(1, -1)``, whose
+    third row is exactly ``-2^-52``, is rejected (a check within the evaluation's rounding
+    bound accepts it).  With the third row ``(1, 1 - 2^-52)`` the same proposal is exactly a
+    direction of recession, strict on rows 2 and 3, and is returned.  Forced: the linear
+    program is stubbed to propose ``(1, -1)``, so the verification is reached whatever HiGHS
+    would propose; the witnesses are the rows' products in exact arithmetic."""
+    from fractions import Fraction
+
+    import scipy.optimize
     from scipy import sparse
 
     from superglm.diagnostics.separation import separating_direction
 
+    proposals = []
+
+    def propose(c, **program):
+        proposals.append(1)
+        count = program["A_ub"].shape[0]
+        return scipy.optimize.OptimizeResult(status=0, x=np.r_[1.0, -1.0, np.ones(count)])
+
+    monkeypatch.setattr(scipy.optimize, "linprog", propose)
     delta = 2.0**-52
-    rows = np.array([[1.0, 1.0], [-1.0, -1.0], [1.0, 1.0 + delta], [0.0, -1.0]])
-    # at the upper boundary every row's sign is its own
-    direction, strict, _ = separating_direction(sparse.csr_matrix(rows), np.ones(4, np.int8))
-    assert direction is None and strict.size == 0
+    for third, verified in ((1.0 + delta, None), (1.0 - delta, [2, 3])):
+        rows = np.array([[1.0, 1.0], [-1.0, -1.0], [1.0, third], [0.0, -1.0]])
+        exact = [Fraction(a) - Fraction(b) for a, b in rows]
+        sign = -1 if verified is None else 1
+        assert exact == [0, 0, sign * Fraction(delta), 1]
+        # at the upper boundary every row's sign is its own
+        direction, strict, _ = separating_direction(sparse.csr_matrix(rows), np.ones(4, np.int8))
+        if verified is None:
+            assert direction is None and strict.size == 0
+        else:
+            np.testing.assert_array_equal(direction, [1.0, -1.0])
+            np.testing.assert_array_equal(strict, verified)
+    assert len(proposals) == 2
 
 
 def test_an_untouched_slope_takes_its_standard_error_from_the_kept_rows():
@@ -470,43 +612,106 @@ def test_a_poisson_near_duplicate_is_fitted_as_mgcv_fits_it():
     The fixture is mgcv 1.9-3 run on superglm's own design and penalty at the pinned lambda
     (``paraPen``).  The solver truncates the pair's difference; the rows identify it, and the
     resumed fit takes joint Newton steps (the certified part's and the weak directions') to
-    stationarity, so the coefficients (near ``+-3.1e6``), every SE^2 (mgcv's ``Vp``) and the EDF
-    agree to 1e-6.  At ``92302bc40`` the coefficients stayed where the solver stopped (``x2 =
-    0``) and the EDF was 9.7354 against mgcv's 9.7349.
+    stationarity.  Its coefficients, near ``+-3.1e6``, cancel in every predictor, so both fits
+    are read in the basis ``(1, x1, t, z)``, ``t = x2 - x1`` (exact, Sterbenz) scaled to unit
+    size, where the Hessian ``H`` is well conditioned and the difference's coefficient is
+    identified.  There the published fit is stationary at the fit's tolerance, ``g'H^-1 g <=
+    tol P`` (score ``g``, penalised deviance ``P``), and a fit is ``H^-1 g`` from the mode, so
+    each linear predictor and coefficient agrees with mgcv's within ``sqrt(a'H^-1 a)`` times
+    the sum of the two fits' ``sqrt(g'H^-1 g)`` (Cauchy-Schwarz), and ``P`` within the sum of
+    their decrements, plus the rounding of the published predictors' cancelling sums
+    (``2 gamma_13 |a| |beta|``).  Every SE^2 and the EDF are the dense ``R^-1 H^-1 R^-T`` and
+    ``tr(H^-1 G'WG)`` at the published fit, to ``64 u max|x1| / max|t|`` (the rows carry the
+    pair's difference to that relative rounding), and mgcv's ``Vp`` and EDF to 1e-6.  At
+    ``92302bc40`` the coefficients stayed where the solver stopped (``x2 = 0``) and the EDF was
+    9.7354 against mgcv's 9.7349.
     """
     oracle = json.loads((FIXTURES / "mgcv_poisson_near_duplicate.json").read_text())
     model, X, y = _poisson_near_duplicate(oracle)
-    design = np.hstack(
-        [np.asarray(m.toarray(), float).reshape(model._dm.n, -1) for m in model._dm.group_matrices]
+    design, penalty = _design_and_penalty(model)
+    assert float(np.sum(np.abs(design[:, 1:]))) == pytest.approx(
+        oracle["design_abs_sum"], rel=1e-12
     )
-    assert float(np.sum(np.abs(design))) == pytest.approx(oracle["design_abs_sum"], rel=1e-12)
     assert oracle["rank"] == oracle["width"]
+    assert not penalty[1:3].any(), "the pair is unpenalised"
+    t = design[:, 2] - design[:, 1]
+    G = design.copy()
+    G[:, 2] = t / np.max(np.abs(t))
+    R = np.eye(design.shape[1])  # G's coefficients are R beta
+    R[1, 2], R[2, 2] = 1.0, np.max(np.abs(t))
+    beta, mgcv = np.r_[model.result.intercept, model.result.beta], np.asarray(oracle["coef"])
+    coefficients = [R @ beta, R @ mgcv]
+    means = [np.exp(G @ c) for c in coefficients]
+    hessian = G.T @ (means[0][:, None] * G) + penalty
+    inverse = np.linalg.inv(hessian)
+    scores = [G.T @ (y - mean) - penalty @ c for mean, c in zip(means, coefficients, strict=True)]
+    decrements = [float(g @ inverse @ g) for g in scores]
+    objective = [
+        float(np.sum(_poisson_deviance(y, mean)) + c @ penalty @ c)
+        for mean, c in zip(means, coefficients, strict=True)
+    ]
+    assert decrements[0] <= 1e-12 * objective[0]
+    reach = sum(np.sqrt(decrements))
+    rounding = 2 * _gamma(13) * (np.abs(design) @ np.abs(beta))
+    eta = np.log(model.predict(X))
+    spread = np.sqrt(np.einsum("ij,jk,ik->i", G, inverse, G))
+    assert np.all(np.abs(eta - G @ coefficients[1]) <= spread * reach + rounding)
+    gap = np.abs(coefficients[0] - coefficients[1])
+    assert np.all(gap <= np.sqrt(np.diag(inverse)) * reach + 4 * U * np.abs(coefficients).sum(0))
+    published = model.result.deviance + beta @ penalty @ beta
+    loss = sum(decrements) + 2 * np.abs(y - means[0]) @ rounding + 2 * _gamma(len(y)) * objective[1]
+    assert abs(published - objective[1]) <= loss
     metrics = model.metrics(X, y)
     se = np.concatenate(
         [[metrics.intercept_se_raw]]
         + [np.atleast_1d(metrics.coefficient_se_raw[g.name]) for g in model._groups]
     )
+    back = np.linalg.inv(R)
+    pair = 64 * U * np.max(np.abs(design[:, 1])) / np.max(np.abs(t))
+    np.testing.assert_allclose(se**2, np.diag(back @ inverse @ back.T), rtol=pair)
+    edf = float(np.trace(inverse @ (G.T @ (means[0][:, None] * G))))
+    assert model.result.effective_df == pytest.approx(edf, rel=pair)
     np.testing.assert_allclose(se**2, oracle["Vp_diagonal"], rtol=1e-6)
-    beta = np.r_[model.result.intercept, model.result.beta]
-    mgcv = np.asarray(oracle["coef"])
-    assert np.max(np.abs(beta - mgcv)) <= 1e-6 * np.max(np.abs(mgcv))
     assert model.result.effective_df == pytest.approx(oracle["edf"], rel=1e-6)
 
 
-@pytest.mark.pins_behaviour
 def test_a_resumed_fit_that_cannot_reach_stationarity_keeps_the_solvers_coefficients(
     monkeypatch,
 ):
-    """Control: a resumption cut short (forced: one iteration) is not published; the fit keeps
-    6a's coefficients along the weak direction (``x2 = 0``, where the solver stopped) and says
-    so, as at ``92302bc40``."""
+    """A resumption cut short (forced: one iteration) is not published: the summary says the
+    weak direction's coefficients stay where the solver stopped, and the published
+    coefficients and predictions are the retained solve's (``x2 = 0`` there), captured as the
+    resumption starts, to the rounding of reading them back (``2 gamma_12 |beta|``) and of
+    evaluating the predictors (``2 gamma_13 |a| |beta|``).  At
+    ``a4a7a64cd`` no resumption ran and nothing was said."""
+    import superglm.model.state_ops as state_ops
+
+    retained = []
+    real = getattr(state_ops, "_resumed_weak_fit", None)
+
+    def resumed(model, context):
+        solver = model._solver_pirls_result()
+        retained.append(np.r_[solver.intercept, solver.beta])
+        return real(model, context)
+
     _patch(monkeypatch, "superglm.model.state_ops", "_RESUME_ITERATIONS", 1)
+    _patch(monkeypatch, "superglm.model.state_ops", "_resumed_weak_fit", resumed)
     oracle = json.loads((FIXTURES / "mgcv_poisson_near_duplicate.json").read_text())
-    model, _, _ = _poisson_near_duplicate(oracle)
+    model, X, _ = _poisson_near_duplicate(oracle)
+    notes = _notes(model)
+    assert "stay where the solver stopped" in notes and "not the penalised optimum" in notes
     record = model._fit_inference_info.get("identifiability")
     assert record is not None and record.weak is not None and not record.weak.fitted
-    assert model.result.beta[1] == 0.0
-    assert "stay where the solver stopped" in _notes(model)
+    assert len(retained) == 1
+    solve = retained[0]
+    assert solve[2] == 0.0
+    published = np.r_[model.result.intercept, model.result.beta]
+    # the intercept is re-read from the centred state, ``b0 = alpha - c'beta``
+    atol = 2 * _gamma(solve.size) * np.sum(np.abs(solve))
+    np.testing.assert_allclose(published, solve, rtol=0, atol=atol)
+    design, _ = _design_and_penalty(model)
+    rounding = 2 * _gamma(13) * (np.abs(design) @ np.abs(solve))
+    assert np.all(np.abs(np.log(model.predict(X)) - design @ solve) <= rounding)
 
 
 # ------------------------------------------------------------------- the score's proof, at size
