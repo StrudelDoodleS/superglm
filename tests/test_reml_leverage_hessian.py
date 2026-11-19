@@ -204,12 +204,17 @@ def test_leverage_terms_match_derivative_grams_within_rounding(monkeypatch, prod
     """Both row producers reproduce the Gram route's gradient and cross terms.
 
     The bound is in ``u`` (``_rounding_bounds``) and sharp: it is below a
-    millionth of the terms, so a dropped or mis-weighted term fails it.
+    millionth of the terms, so a dropped or mis-weighted term fails it. The
+    chunked producer reads the 1,500 rows in chunks of 97, sixteen chunks with
+    a ragged last one, so a row dropped or counted twice at a chunk edge fails
+    it too.
     """
     import superglm.reml._leverage_rows as leverage_rows
+    import superglm.solvers.centered_system as centered_system
 
     _solved_rows_only(monkeypatch)
     model = _poisson_model(offset)
+    monkeypatch.setattr(centered_system, "_FACTOR_CHUNK_ROWS", 97)
     gradient, reference_cross, gradient_bound, cross_bound = _rounding_bounds(model)
     planned = []
     original_plan = leverage_rows._support_plan
@@ -999,7 +1004,7 @@ def _nested_iterate() -> tuple:
     return dm, groups, penalties, lambdas, result, factor, weight, offset
 
 
-def test_the_nested_factor_takes_the_leverage_route_within_rounding():
+def test_the_nested_factor_takes_the_leverage_route_within_rounding(monkeypatch):
     """The nested factor's leverage route against the derivative operators at one PIRLS iterate.
 
     Its gradient reads each row's ``[1, x] H_aug^-1 [1, x]'`` from the
@@ -1012,14 +1017,19 @@ def test_the_nested_factor_takes_the_leverage_route_within_rounding():
     and ``K``, ``kappa_s`` the Jacobi-scaled condition number of ``H``), and
     the two within twice that.  The stop's cross terms (``lookup_tables=False``)
     are within ``gamma_K kappa_s(H) (F + F')`` of ``-(P + P') / 2`` formed from
-    the materialised inverse and operators.  Mutations (each fails here): the
-    row channel without its ``1 / sum_w``; the cross block read as ``[:m, :m]``.
+    the materialised inverse and operators.  The row forms are read in chunks
+    of 97 rows, so the rows span several chunks with a ragged last one.
+    Mutations (each fails here): the row channel without its ``1 / sum_w``; the
+    cross block read as ``[:m, :m]``; the rows after the first chunk dropped.
     """
+    import superglm.solvers.centered_system as centered_system
     from superglm.solvers._structured.operators import (
         materialize_compact_operator,
     )
 
     dm, groups, penalties, lambdas, result, factor, weight, offset = _nested_iterate()
+    monkeypatch.setattr(centered_system, "_FACTOR_CHUNK_ROWS", 97)
+    assert dm.n > 2 * 97
     assert isinstance(factor, ProfiledNestedSchurFactor)
     args = (dm, LogitLink(), groups, result, factor, lambdas)
     kwargs = {
