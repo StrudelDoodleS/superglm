@@ -1,0 +1,2439 @@
+{
+ "total_count": 25,
+ "jobs": [
+  {
+   "id": 135418023926,
+   "run_id": 44482549977,
+   "run_attempt": 1,
+   "name": "Polars 1.42.1 floor \u00b7 Polars-touching tests",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-19T07:49:41Z",
+   "completed_at": "2026-11-19T07:51:04Z",
+   "runner_name": "GitHub Actions 1000064005",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Set up Python 3.13",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Install the locked environment with the matrix's optional dependencies",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Run the Polars-touching tests on the Polars floor",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Post Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 11
+    },
+    {
+     "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 13
+    }
+   ]
+  },
+  {
+   "id": 135418024232,
+   "run_id": 44482549977,
+   "run_attempt": 1,
+   "name": "Python 3.13 \u00b7 non-browser regression suite \u00b7 balanced A \u00b7 Windows",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-19T07:50:41Z",
+   "completed_at": "2026-11-19T08:01:55Z",
+   "runner_name": "GitHub Actions 1000064013",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Set up Python 3.13",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Install all tested optional dependencies",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Record native numerical platform",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Name the host CPU for the numba kernel cache",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "Hash the sources numba's kernels are compiled from",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Run duration-balanced regression shard",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Run duration-balanced coverage shard",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 11
+    },
+    {
+     "name": "Upload shard results",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Upload coverage database",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 13
+    },
+    {
+     "name": "Post Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 24
+    },
+    {
+     "name": "Post Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 25
+    },
+    {
+     "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 26
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 27
+    }
+   ]
+  },
+  {
+   "id": 135418024403,
+   "run_id": 44482549977,
+   "run_attempt": 1,
+   "name": "Python 3.14 \u00b7 non-browser regression suite \u00b7 balanced A",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-19T07:52:25Z",
+   "completed_at": "2026-11-19T07:58:09Z",
+   "runner_name": "GitHub Actions 1000064029",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Set up Python 3.14",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Install all tested optional dependencies",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Record native numerical platform",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Name the host CPU for the numba kernel cache",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "Hash the sources numba's kernels are compiled from",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Run duration-balanced regression shard",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Run duration-balanced coverage shard",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 11
+    },
+    {
+     "name": "Upload shard results",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Upload coverage database",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 13
+    },
+    {
+     "name": "Post Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 24
+    },
+    {
+     "name": "Post Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 25
+    },
+    {
+     "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 26
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 27
+    }
+   ]
+  },
+  {
+   "id": 135418024432,
+   "run_id": 44482549977,
+   "run_attempt": 1,
+   "name": "Python 3.12 \u00b7 non-browser regression suite \u00b7 balanced A",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-19T07:53:21Z",
+   "completed_at": "2026-11-19T07:58:31Z",
+   "runner_name": "GitHub Actions 1000064031",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Set up Python 3.12",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Install all tested optional dependencies",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Record native numerical platform",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Name the host CPU for the numba kernel cache",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "Hash the sources numba's kernels are compiled from",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Run duration-balanced regression shard",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Run duration-balanced coverage shard",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 11
+    },
+    {
+     "name": "Upload shard results",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Upload coverage database",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 13
+    },
+    {
+     "name": "Post Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 24
+    },
+    {
+     "name": "Post Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 25
+    },
+    {
+     "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 26
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 27
+    }
+   ]
+  },
+  {
+   "id": 135418024449,
+   "run_id": 44482549977,
+   "run_attempt": 1,
+   "name": "Python 3.13 \u00b7 non-browser regression suite \u00b7 balanced A \u00b7 macOS ARM64",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-19T07:50:15Z",
+   "completed_at": "2026-11-19T07:57:28Z",
+   "runner_name": "GitHub Actions 1000064010",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Set up Python 3.13",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Install all tested optional dependencies",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Record native numerical platform",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Name the host CPU for the numba kernel cache",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "Hash the sources numba's kernels are compiled from",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Run duration-balanced regression shard",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Run duration-balanced coverage shard",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 11
+    },
+    {
+     "name": "Upload shard results",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Upload coverage database",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 13
+    },
+    {
+     "name": "Post Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 24
+    },
+    {
+     "name": "Post Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 25
+    },
+    {
+     "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 26
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 27
+    }
+   ]
+  },
+  {
+   "id": 135418024464,
+   "run_id": 44482549977,
+   "run_attempt": 1,
+   "name": "Python 3.13 \u00b7 non-browser regression suite \u00b7 balanced B \u00b7 macOS ARM64",
+   "status": "completed",
+   "conclusion": "failure",
+   "started_at": "2026-11-19T07:55:15Z",
+   "completed_at": "2026-11-19T08:00:56Z",
+   "runner_name": "GitHub Actions 1000064038",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Set up Python 3.13",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Install all tested optional dependencies",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Record native numerical platform",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Name the host CPU for the numba kernel cache",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "Hash the sources numba's kernels are compiled from",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Run duration-balanced regression shard",
+     "status": "completed",
+     "conclusion": "failure",
+     "number": 10
+    },
+    {
+     "name": "Run duration-balanced coverage shard",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 11
+    },
+    {
+     "name": "Upload shard results",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Upload coverage database",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 13
+    },
+    {
+     "name": "Post Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 24
+    },
+    {
+     "name": "Post Install uv",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 25
+    },
+    {
+     "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 26
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 27
+    }
+   ]
+  },
+  {
+   "id": 135418024468,
+   "run_id": 44482549977,
+   "run_attempt": 1,
+   "name": "Python 3.13 \u00b7 non-browser regression suite \u00b7 balanced B \u00b7 Linux ARM64",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-19T07:49:31Z",
+   "completed_at": "2026-11-19T07:54:01Z",
+   "runner_name": "GitHub Actions 1000064004",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Set up Python 3.13",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Install all tested optional dependencies",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Record native numerical platform",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Name the host CPU for the numba kernel cache",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "Hash the sources numba's kernels are compiled from",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Run duration-balanced regression shard",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Run duration-balanced coverage shard",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 11
+    },
+    {
+     "name": "Upload shard results",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Upload coverage database",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 13
+    },
+    {
+     "name": "Post Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 24
+    },
+    {
+     "name": "Post Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 25
+    },
+    {
+     "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 26
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 27
+    }
+   ]
+  },
+  {
+   "id": 135418024509,
+   "run_id": 44482549977,
+   "run_attempt": 1,
+   "name": "Python 3.14 \u00b7 non-browser regression suite \u00b7 balanced D",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-19T07:54:02Z",
+   "completed_at": "2026-11-19T08:01:01Z",
+   "runner_name": "GitHub Actions 1000064035",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Set up Python 3.14",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Install all tested optional dependencies",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Record native numerical platform",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Name the host CPU for the numba kernel cache",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "Hash the sources numba's kernels are compiled from",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Run duration-balanced regression shard",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Run duration-balanced coverage shard",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 11
+    },
+    {
+     "name": "Upload shard results",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Upload coverage database",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 13
+    },
+    {
+     "name": "Post Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 24
+    },
+    {
+     "name": "Post Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 25
+    },
+    {
+     "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 26
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 27
+    }
+   ]
+  },
+  {
+   "id": 135418024529,
+   "run_id": 44482549977,
+   "run_attempt": 1,
+   "name": "Python 3.14 \u00b7 non-browser regression suite \u00b7 balanced B",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-19T07:54:06Z",
+   "completed_at": "2026-11-19T08:01:10Z",
+   "runner_name": "GitHub Actions 1000064036",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Set up Python 3.14",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Install all tested optional dependencies",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Record native numerical platform",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Name the host CPU for the numba kernel cache",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "Hash the sources numba's kernels are compiled from",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Run duration-balanced regression shard",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Run duration-balanced coverage shard",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 11
+    },
+    {
+     "name": "Upload shard results",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Upload coverage database",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 13
+    },
+    {
+     "name": "Post Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 24
+    },
+    {
+     "name": "Post Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 25
+    },
+    {
+     "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 26
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 27
+    }
+   ]
+  },
+  {
+   "id": 135418024530,
+   "run_id": 44482549977,
+   "run_attempt": 1,
+   "name": "Python 3.13 \u00b7 non-browser regression suite \u00b7 balanced D \u00b7 Linux ARM64",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-19T07:52:14Z",
+   "completed_at": "2026-11-19T07:57:02Z",
+   "runner_name": "GitHub Actions 1000064028",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Set up Python 3.13",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Install all tested optional dependencies",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Record native numerical platform",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Name the host CPU for the numba kernel cache",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "Hash the sources numba's kernels are compiled from",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Run duration-balanced regression shard",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Run duration-balanced coverage shard",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 11
+    },
+    {
+     "name": "Upload shard results",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Upload coverage database",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 13
+    },
+    {
+     "name": "Post Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 24
+    },
+    {
+     "name": "Post Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 25
+    },
+    {
+     "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 26
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 27
+    }
+   ]
+  },
+  {
+   "id": 135418024542,
+   "run_id": 44482549977,
+   "run_attempt": 1,
+   "name": "Python 3.12 \u00b7 non-browser regression suite \u00b7 balanced D",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-19T07:54:59Z",
+   "completed_at": "2026-11-19T08:01:11Z",
+   "runner_name": "GitHub Actions 1000064037",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Set up Python 3.12",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Install all tested optional dependencies",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Record native numerical platform",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Name the host CPU for the numba kernel cache",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "Hash the sources numba's kernels are compiled from",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Run duration-balanced regression shard",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Run duration-balanced coverage shard",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 11
+    },
+    {
+     "name": "Upload shard results",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Upload coverage database",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 13
+    },
+    {
+     "name": "Post Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 24
+    },
+    {
+     "name": "Post Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 25
+    },
+    {
+     "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 26
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 27
+    }
+   ]
+  },
+  {
+   "id": 135418024559,
+   "run_id": 44482549977,
+   "run_attempt": 1,
+   "name": "Python 3.14 \u00b7 non-browser regression suite \u00b7 balanced C",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-19T07:53:55Z",
+   "completed_at": "2026-11-19T07:59:27Z",
+   "runner_name": "GitHub Actions 1000064033",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Set up Python 3.14",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Install all tested optional dependencies",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Record native numerical platform",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Name the host CPU for the numba kernel cache",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "Hash the sources numba's kernels are compiled from",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Run duration-balanced regression shard",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Run duration-balanced coverage shard",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 11
+    },
+    {
+     "name": "Upload shard results",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Upload coverage database",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 13
+    },
+    {
+     "name": "Post Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 24
+    },
+    {
+     "name": "Post Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 25
+    },
+    {
+     "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 26
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 27
+    }
+   ]
+  },
+  {
+   "id": 135418024563,
+   "run_id": 44482549977,
+   "run_attempt": 1,
+   "name": "Python 3.13 \u00b7 non-browser regression suite \u00b7 balanced C \u00b7 Linux ARM64",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-19T07:51:36Z",
+   "completed_at": "2026-11-19T07:56:18Z",
+   "runner_name": "GitHub Actions 1000064022",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Set up Python 3.13",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Install all tested optional dependencies",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Record native numerical platform",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Name the host CPU for the numba kernel cache",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "Hash the sources numba's kernels are compiled from",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Run duration-balanced regression shard",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Run duration-balanced coverage shard",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 11
+    },
+    {
+     "name": "Upload shard results",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Upload coverage database",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 13
+    },
+    {
+     "name": "Post Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 24
+    },
+    {
+     "name": "Post Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 25
+    },
+    {
+     "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 26
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 27
+    }
+   ]
+  },
+  {
+   "id": 135418024576,
+   "run_id": 44482549977,
+   "run_attempt": 1,
+   "name": "Python 3.13 \u00b7 non-browser regression suite \u00b7 balanced B \u00b7 Windows",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-19T07:50:54Z",
+   "completed_at": "2026-11-19T08:01:21Z",
+   "runner_name": "GitHub Actions 1000064014",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Set up Python 3.13",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Install all tested optional dependencies",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Record native numerical platform",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Name the host CPU for the numba kernel cache",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "Hash the sources numba's kernels are compiled from",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Run duration-balanced regression shard",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Run duration-balanced coverage shard",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 11
+    },
+    {
+     "name": "Upload shard results",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Upload coverage database",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 13
+    },
+    {
+     "name": "Post Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 24
+    },
+    {
+     "name": "Post Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 25
+    },
+    {
+     "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 26
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 27
+    }
+   ]
+  },
+  {
+   "id": 135418024603,
+   "run_id": 44482549977,
+   "run_attempt": 1,
+   "name": "Python 3.13 \u00b7 non-browser regression suite \u00b7 balanced D \u00b7 macOS ARM64",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-19T07:50:38Z",
+   "completed_at": "2026-11-19T07:58:11Z",
+   "runner_name": "GitHub Actions 1000064012",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Set up Python 3.13",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Install all tested optional dependencies",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Record native numerical platform",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Name the host CPU for the numba kernel cache",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "Hash the sources numba's kernels are compiled from",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Run duration-balanced regression shard",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Run duration-balanced coverage shard",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 11
+    },
+    {
+     "name": "Upload shard results",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Upload coverage database",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 13
+    },
+    {
+     "name": "Post Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 24
+    },
+    {
+     "name": "Post Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 25
+    },
+    {
+     "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 26
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 27
+    }
+   ]
+  },
+  {
+   "id": 135418024606,
+   "run_id": 44482549977,
+   "run_attempt": 1,
+   "name": "Python 3.13 \u00b7 non-browser regression suite \u00b7 balanced C \u00b7 Windows",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-19T07:51:21Z",
+   "completed_at": "2026-11-19T08:00:44Z",
+   "runner_name": "GitHub Actions 1000064019",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Set up Python 3.13",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Install all tested optional dependencies",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Record native numerical platform",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Name the host CPU for the numba kernel cache",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "Hash the sources numba's kernels are compiled from",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Run duration-balanced regression shard",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Run duration-balanced coverage shard",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 11
+    },
+    {
+     "name": "Upload shard results",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Upload coverage database",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 13
+    },
+    {
+     "name": "Post Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 24
+    },
+    {
+     "name": "Post Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 25
+    },
+    {
+     "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 26
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 27
+    }
+   ]
+  },
+  {
+   "id": 135418024611,
+   "run_id": 44482549977,
+   "run_attempt": 1,
+   "name": "Python 3.13 \u00b7 non-browser regression suite \u00b7 balanced C \u00b7 macOS ARM64",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-19T07:51:05Z",
+   "completed_at": "2026-11-19T07:56:22Z",
+   "runner_name": "GitHub Actions 1000064016",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Set up Python 3.13",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Install all tested optional dependencies",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Record native numerical platform",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Name the host CPU for the numba kernel cache",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "Hash the sources numba's kernels are compiled from",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Run duration-balanced regression shard",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Run duration-balanced coverage shard",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 11
+    },
+    {
+     "name": "Upload shard results",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Upload coverage database",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 13
+    },
+    {
+     "name": "Post Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 24
+    },
+    {
+     "name": "Post Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 25
+    },
+    {
+     "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 26
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 27
+    }
+   ]
+  },
+  {
+   "id": 135418024622,
+   "run_id": 44482549977,
+   "run_attempt": 1,
+   "name": "Python 3.13 \u00b7 non-browser regression suite \u00b7 balanced A \u00b7 Linux ARM64",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-19T07:53:35Z",
+   "completed_at": "2026-11-19T07:58:42Z",
+   "runner_name": "GitHub Actions 1000064032",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Set up Python 3.13",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Install all tested optional dependencies",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Record native numerical platform",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Name the host CPU for the numba kernel cache",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "Hash the sources numba's kernels are compiled from",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Run duration-balanced regression shard",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Run duration-balanced coverage shard",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 11
+    },
+    {
+     "name": "Upload shard results",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Upload coverage database",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 13
+    },
+    {
+     "name": "Post Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 24
+    },
+    {
+     "name": "Post Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 25
+    },
+    {
+     "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 26
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 27
+    }
+   ]
+  },
+  {
+   "id": 135418024734,
+   "run_id": 44482549977,
+   "run_attempt": 1,
+   "name": "Python 3.12 \u00b7 non-browser regression suite \u00b7 balanced C",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-19T07:56:19Z",
+   "completed_at": "2026-11-19T08:01:04Z",
+   "runner_name": "GitHub Actions 1000064040",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Set up Python 3.12",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Install all tested optional dependencies",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Record native numerical platform",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Name the host CPU for the numba kernel cache",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "Hash the sources numba's kernels are compiled from",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Run duration-balanced regression shard",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Run duration-balanced coverage shard",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 11
+    },
+    {
+     "name": "Upload shard results",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Upload coverage database",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 13
+    },
+    {
+     "name": "Post Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 24
+    },
+    {
+     "name": "Post Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 25
+    },
+    {
+     "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 26
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 27
+    }
+   ]
+  },
+  {
+   "id": 135418024780,
+   "run_id": 44482549977,
+   "run_attempt": 1,
+   "name": "Python 3.13 \u00b7 non-browser regression suite \u00b7 balanced D \u00b7 Windows",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-19T07:51:55Z",
+   "completed_at": "2026-11-19T08:02:43Z",
+   "runner_name": "GitHub Actions 1000064025",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Set up Python 3.13",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Install all tested optional dependencies",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Record native numerical platform",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Name the host CPU for the numba kernel cache",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "Hash the sources numba's kernels are compiled from",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Run duration-balanced regression shard",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Run duration-balanced coverage shard",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 11
+    },
+    {
+     "name": "Upload shard results",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Upload coverage database",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 13
+    },
+    {
+     "name": "Post Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 24
+    },
+    {
+     "name": "Post Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 25
+    },
+    {
+     "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 26
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 27
+    }
+   ]
+  },
+  {
+   "id": 135418024825,
+   "run_id": 44482549977,
+   "run_attempt": 1,
+   "name": "Python 3.12 \u00b7 non-browser regression suite \u00b7 balanced B",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-19T07:55:26Z",
+   "completed_at": "2026-11-19T08:01:45Z",
+   "runner_name": "GitHub Actions 1000064039",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 2
+    },
+    {
+     "name": "Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    },
+    {
+     "name": "Set up Python 3.12",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 4
+    },
+    {
+     "name": "Install all tested optional dependencies",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 5
+    },
+    {
+     "name": "Record native numerical platform",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 6
+    },
+    {
+     "name": "Name the host CPU for the numba kernel cache",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 7
+    },
+    {
+     "name": "Hash the sources numba's kernels are compiled from",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 8
+    },
+    {
+     "name": "Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 9
+    },
+    {
+     "name": "Run duration-balanced regression shard",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 10
+    },
+    {
+     "name": "Run duration-balanced coverage shard",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 11
+    },
+    {
+     "name": "Upload shard results",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 12
+    },
+    {
+     "name": "Upload coverage database",
+     "status": "completed",
+     "conclusion": "skipped",
+     "number": 13
+    },
+    {
+     "name": "Post Restore numba's compiled kernels for identical sources",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 24
+    },
+    {
+     "name": "Post Install uv",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 25
+    },
+    {
+     "name": "Post Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 26
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 27
+    }
+   ]
+  },
+  {
+   "id": 135418025689,
+   "run_id": 44482549977,
+   "run_attempt": 1,
+   "name": "frontend-browser",
+   "status": "completed",
+   "conclusion": "skipped",
+   "started_at": "2026-11-19T07:49:15Z",
+   "completed_at": "2026-11-19T07:49:14Z",
+   "runner_name": null,
+   "steps": []
+  },
+  {
+   "id": 135418026059,
+   "run_id": 44482549977,
+   "run_attempt": 1,
+   "name": "lint",
+   "status": "completed",
+   "conclusion": "skipped",
+   "started_at": "2026-11-19T07:49:15Z",
+   "completed_at": "2026-11-19T07:49:14Z",
+   "runner_name": null,
+   "steps": []
+  },
+  {
+   "id": 135423857258,
+   "run_id": 44482549977,
+   "run_attempt": 1,
+   "name": "Python 3.12 \u00b7 non-browser suite \u00b7 version floor",
+   "status": "completed",
+   "conclusion": "failure",
+   "started_at": "2026-11-19T08:02:45Z",
+   "completed_at": "2026-11-19T08:02:48Z",
+   "runner_name": "GitHub Actions 1000064042",
+   "steps": [
+    {
+     "name": "Set up job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 1
+    },
+    {
+     "name": "Require every compatibility shard and the Polars floor to pass",
+     "status": "completed",
+     "conclusion": "failure",
+     "number": 2
+    },
+    {
+     "name": "Complete job",
+     "status": "completed",
+     "conclusion": "success",
+     "number": 3
+    }
+   ]
+  },
+  {
+   "id": 135423858883,
+   "run_id": 44482549977,
+   "run_attempt": 1,
+   "name": "Python 3.12 \u00b7 combined branch coverage",
+   "status": "completed",
+   "conclusion": "skipped",
+   "started_at": "2026-11-19T08:02:43Z",
+   "completed_at": "2026-11-19T08:02:43Z",
+   "runner_name": null,
+   "steps": []
+  }
+ ]
+}

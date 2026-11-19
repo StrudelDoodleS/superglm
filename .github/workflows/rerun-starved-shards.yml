@@ -1,0 +1,63 @@
+name: Rerun runner-starved shards
+
+# GitHub sometimes cancels a queued job it could not hand to a runner, with the annotation "The job
+# was not acquired by Runner of type hosted even after multiple attempts" (most often a macOS ARM64
+# shard when that pool is short). The shard then reports no tests, so "Every test runs on some
+# platform" and the version floor fail although no test did. When the CI workflow's first attempt
+# fails with such a job, this reruns its failed jobs once, as `gh run rerun --failed` by hand did.
+# It reruns nothing else and changes no check: a second attempt with a starved shard fails as
+# before. It reads the run's jobs through the API, checks out no code and runs none from the pull
+# request, and holds `actions: write` only, which a rerun needs.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  rerun-starved:
+    name: Rerun the failed jobs once when a shard never got a runner
+    if: github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Find the jobs GitHub cancelled without a runner, and rerun the failed jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        shell: python
+        run: |
+          import json
+          import os
+          import subprocess
+
+          STARVED = "was not acquired by Runner"
+          repo, run = os.environ["GH_REPO"], os.environ["RUN_ID"]
+
+
+          def api(path):
+              return json.loads(subprocess.run(
+                  ["gh", "api", path], check=True, capture_output=True, text=True
+              ).stdout)
+
+
+          # The CI workflow has 26 jobs; one page holds 100.
+          jobs = api(f"repos/{repo}/actions/runs/{run}/attempts/1/jobs?per_page=100")["jobs"]
+          starved = []
+          for job in jobs:
+              if job["conclusion"] != "cancelled":
+                  continue
+              notes = api(f"repos/{repo}/check-runs/{job['id']}/annotations")
+              never_started = not job["steps"] and not job["runner_name"]
+              if never_started or any(STARVED in note["message"] for note in notes):
+                  starved.append(job["name"])
+          if not starved:
+              print("No job was cancelled for want of a runner; nothing to rerun.")
+          else:
+              print("Cancelled without a runner:", *starved, sep="\n  ")
+              subprocess.run(["gh", "run", "rerun", run, "--failed"], check=True)
