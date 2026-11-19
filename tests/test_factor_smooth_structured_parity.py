@@ -1191,11 +1191,17 @@ def test_factor_smooth_estimability_and_summary_match_dense_centered_geometry():
     ],
 )
 @pytest.mark.parametrize("discrete", [False, True])
+@pytest.mark.pins_behaviour
 def test_auto_factor_smooth_falls_back_for_unsupported_local_geometry(
     basis: str,
     fallback_reason: str,
     discrete: bool,
 ) -> None:
+    """Control: the structured solver falls back, with its reason, on geometry it does not take.
+
+    Master did; fs keeps null_0 penalized now, as a zero null_0 beside the intercept
+    is refused, and the other zero components still give the fallback.
+    """
     rng = np.random.default_rng(20260726)
     n_levels = 10
     repeats = 12
@@ -1217,8 +1223,9 @@ def test_auto_factor_smooth_falls_back_for_unsupported_local_geometry(
     policies = {"wiggle": LambdaPolicy.off()}
     features = {"z": Numeric()}
     if basis == "fs":
+        # A zero null_0 aliases the levels' constants with the intercept and is refused.
         policies.update(
-            null_0=LambdaPolicy.off(),
+            null_0=LambdaPolicy.fixed(1.0),
             null_1=LambdaPolicy.off(),
         )
     else:
@@ -1329,7 +1336,13 @@ def test_reml_never_latches_a_later_fit_onto_gram(
     assert result.pirls_result.direct_fallback_reason is None
 
 
+@pytest.mark.pins_behaviour
 def test_zero_penalty_fs_falls_back_or_rejects_but_gram_fits() -> None:
+    """Control: zero fs penalty components fall back or are refused by structured, and Gram fits.
+
+    Master did; null_0 stays penalized now, as a zero null_0 beside the intercept is
+    refused, and the wiggle and null_1 at zero still exercise the route.
+    """
     rng = np.random.default_rng(20260727)
     n_levels = 10
     repeats = 16
@@ -1342,9 +1355,10 @@ def test_zero_penalty_fs_falls_back_or_rejects_but_gram_fits() -> None:
         }
     )
     y = np.sin(2.5 * x) + rng.normal(scale=0.05, size=len(x))
+    # A zero null_0 aliases the levels' constants with the intercept and is refused.
     policies = {
         "wiggle": LambdaPolicy.off(),
-        "null_0": LambdaPolicy.off(),
+        "null_0": LambdaPolicy.fixed(1.0),
         "null_1": LambdaPolicy.off(),
     }
     common = {

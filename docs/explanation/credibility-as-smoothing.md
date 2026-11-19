@@ -117,7 +117,17 @@ model.fit_reml(
 One shared P-spline basis is repeated implicitly for every factor level. The
 term has shared `wiggle` and null-space smoothing parameters, but each level
 gets its own coefficient block. The null-space penalties make the deviations
-fully penalized, matching the role of mgcv's `bs="fs"` basis.
+fully penalized, matching the role of mgcv's `bs="fs"` basis. Each `null_j`
+shrinks one degree of every level's polynomial part: `null_0` its constant,
+`null_1` its straight line, `null_2` (with `m=3`) its quadratic, each
+orthogonal over the training rows to the lower degrees. A `null_j` smoothing
+parameter therefore means the same curve whatever the row order or platform.
+The degree is that of the B-spline coefficients as a polynomial in their
+index: through `null_3` it is the curve's degree in x, and from `null_4`
+(`m >= 5`) the curve stays piecewise cubic. An fs model saved before 0.44.0
+keeps the null axes it was fitted on and predicts as before, but its
+`null_j` smoothing parameters belong to those axes, not to the degrees, and do
+not compare with a fresh fit's.
 
 For level $j$, the scalar summary generalizes ordinary credibility to the
 whole coefficient block:
@@ -370,13 +380,21 @@ credibility and curve tables, and `credibility_demo.png`.
 
 - `FactorSmooth` supports `basis="fs"` and `basis="sz"`, currently with
   `kind="ps"`, and requires `fit_reml()`.
-- Discrete FS/SZ constructs the normal `m <= 2` marginal in bounded QR
-  chunks before evaluating the final support basis. FS declarations with
-  asymmetric null-component policies or `m > 2` retain a reduced-memory dense
-  compatibility construction so those custom penalty coordinates do not
-  change silently.
+- FS/SZ construct the marginal in bounded QR chunks before evaluating the
+  final support basis, for every `m` and null-component policy.
 - `fit()` and `fit_path()` reject factor smooths.
 - Factor-smooth `k` must be at least 5.
+- `basis="fs"` refuses a difference order `m` that float64 does not reliably
+  represent, where a closed-form lower bound on its penalty's condition number
+  reaches 2^47 (none below `k=73`; at `k=100`, `17 <= m <= 75`), unless the
+  wiggle's smoothing parameter is fixed at zero. A fit refuses `null_0` fixed
+  at zero beside an intercept, which the levels' constants would alias, and warns
+  when it is fixed below the REML floor.
 - Missing numeric or grouping values are rejected.
-- The mgcv 1.9-4 FS and SZ Gaussian, Poisson, construction, unseen-level, and
-  discrete reference cases are pinned in the test suite.
+- The FS and SZ Gaussian, Poisson, construction, unseen-level, and discrete
+  reference cases are pinned against mgcv in the test suite. The FS cases fit
+  the same penalties in mgcv 1.9-3 through `paraPen`
+  (`tests/oracles/factor_smooth_mgcv_reference.R`), because mgcv's own
+  `bs="fs"` penalizes whichever basis of the null space its eigensolver
+  returns, and a shuffle of the rows can permute, flip or rotate that basis.
+  The SZ cases are pinned against mgcv 1.9-4's own `bs="sz"`.

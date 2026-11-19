@@ -595,7 +595,7 @@ BOUNDARY_TESTS: dict[str, str | tuple[str, ...]] = {
         "test_chunk_boundaries.py::test_a_reml_fit_reads_the_same_across_chunk_boundaries"
     ),
     "features/factor_smooth.py::FactorSmooth._build_marginal": (
-        "test_factor_smooth_feature.py::test_streamed_tsqr_matches_legacy_geometry_up_to_null_permutation"
+        "test_factor_smooth_feature.py::test_streamed_tsqr_keeps_the_legacy_wiggle_and_puts_null_j_on_degree_j"
     ),
     "features/interaction.py::TensorInteraction.score": (
         "test_chunk_boundaries.py::test_a_reml_fit_reads_the_same_across_chunk_boundaries",

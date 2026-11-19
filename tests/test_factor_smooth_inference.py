@@ -390,11 +390,18 @@ def test_factor_smooth_zero_weight_level_has_no_information() -> None:
     assert report.diagnostics["n_levels_without_information"] >= 1
 
 
+@pytest.mark.pins_behaviour
 def test_unpenalized_factor_smooth_reports_infinite_variance_components() -> None:
+    """Control: a component with its smoothing parameter off reports an infinite variance.
+
+    Master reported it for every component; null_0 now stays penalized, since a zero
+    null_0 beside the intercept is refused, and the off components still report it.
+    """
     X, y = _data()
+    # A zero null_0 aliases the levels' constants with the intercept and is refused.
     policies = {
         "wiggle": LambdaPolicy.off(),
-        "null_0": LambdaPolicy.off(),
+        "null_0": LambdaPolicy.fixed(1.0),
         "null_1": LambdaPolicy.off(),
     }
     model = SuperGLM(
@@ -417,8 +424,101 @@ def test_unpenalized_factor_smooth_reports_infinite_variance_components() -> Non
 
     report = model.factor_smooth("x:segment:fs", grid=5)
 
-    assert set(report.lambdas.values()) == {0.0}
-    assert all(np.isinf(value) for value in report.variance_components.values())
+    unpenalized = ("wiggle", "null_1")
+    assert {name: report.lambdas[name] for name in unpenalized} == dict.fromkeys(unpenalized, 0.0)
+    assert all(np.isinf(report.variance_components[name]) for name in unpenalized)
+    assert np.isfinite(report.variance_components["null_0"])
+
+
+def _alias_rows() -> tuple[pd.DataFrame, np.ndarray]:
+    rng = np.random.default_rng(203)
+    n = 240
+    group = np.repeat(np.array(["a", "b", "c"], dtype=object), n // 3)
+    x = rng.uniform(-1.0, 1.0, n)
+    y = 6.0 + np.sin(2.0 * x) + np.repeat([1.0, 2.0, 4.0], n // 3) + 0.1 * rng.normal(size=n)
+    return pd.DataFrame({"x": x, "group": group}), y
+
+
+@pytest.mark.parametrize("null_0", [0.0, 1.0e-14])
+def test_null_0_at_zero_is_refused_below_the_floor_disclosed_and_above_it_prices_in_any_order(
+    null_0,
+) -> None:
+    """A null_0 below the REML floor leaves the levels' constants free against the intercept.
+
+    The rank treatment kept all but the last-listed level's constant, so listing the
+    same levels in another order moved the unseen-level price (9.893 against 6.988 on
+    this data, at zero and at 1e-14 alike) and the plotted standard errors.  The fit
+    refuses zero and warns below the floor; above the floor the penalty identifies the
+    constants, and the declared order does not matter.
+    """
+    from superglm.plotting.interactions import _factor_smooth_curves
+
+    X, y = _alias_rows()
+    unseen = pd.DataFrame({"x": [0.0], "group": ["unseen"]})
+    policy = {"wiggle": LambdaPolicy.fixed(2.0), "null_1": LambdaPolicy.fixed(30.0)}
+    prices, errors = [], []
+    for levels in (["a", "b", "c"], ["c", "b", "a"]):
+
+        def model(value, levels=levels):
+            smooth = FactorSmooth(
+                "x",
+                group="group",
+                levels=levels,
+                lambda_policy={**policy, "null_0": LambdaPolicy.fixed(value)},
+            )
+            return SuperGLM(
+                family="gaussian", interactions=[smooth], selection_penalty=0.0, tol=1e-10
+            )
+
+        if null_0 == 0.0:
+            with pytest.raises(ValueError, match="aliased with the fitted intercept"):
+                model(null_0).fit_reml(X, y)
+        else:
+            with pytest.warns(UserWarning, match="may follow the order the levels"):
+                model(null_0).fit_reml(X, y)
+        fitted = model(1.0e-2).fit_reml(X, y)
+        prices.append(fitted.predict(unseen)[0])
+        curves = _factor_smooth_curves(fitted, "x:group:fs", n_points=7)["per_level"]
+        errors.append(np.concatenate([curves[level]["se_log_relativity"] for level in "abc"]))
+
+    assert prices[1] == pytest.approx(prices[0], rel=1e-9)
+    np.testing.assert_allclose(errors[1], errors[0], rtol=1e-9)
+
+
+def test_superlss_refuses_a_zero_null_0_beside_an_intercept_and_fits_it_without_one() -> None:
+    """SuperLSS: a zero null_0 is refused through ``fit(lambdas=...)`` and a declaration
+    beside the intercept, and fitted without one, where the level constants are identified.
+
+    Through ``fit(lambdas=...)`` the unseen-level price followed the level order
+    (9.943 against 6.962); without an intercept both orders give the same fit.
+    """
+    from superglm import GaussianLS, SuperLSS, interaction
+
+    X, y = _alias_rows()
+    family = GaussianLS()
+    lambdas = {"wiggle": 2.0, "null_0": 0.0, "null_1": 30.0}
+    by_order = []
+    for levels in (["a", "b", "c"], ["c", "b", "a"]):
+
+        def model(intercept, declared, levels=levels):
+            policy = {name: LambdaPolicy.fixed(value) for name, value in lambdas.items()}
+            smooth = FactorSmooth(
+                "x", group="group", levels=levels, lambda_policy=policy if declared else None
+            )
+            return SuperLSS(
+                family, family.location(interaction(smooth), intercept=intercept), family.scale()
+            )
+
+        fixed = {f"location:x:group:fs#{name}": value for name, value in lambdas.items()}
+        with pytest.raises(ValueError, match="aliased with the fitted intercept"):
+            model(True, False).fit(X, y, lambdas=fixed)
+        with pytest.raises(ValueError, match="aliased with the fitted intercept"):
+            model(True, True).fit(X, y)
+        with pytest.raises(ValueError, match="aliased with the fitted intercept"):
+            model(True, True).fit_reml(X, y)
+        by_order.append(model(False, True).fit(X, y).predict(X))
+
+    np.testing.assert_allclose(by_order[1], by_order[0], rtol=1e-12)
 
 
 def test_factor_smooth_upper_boundary_reports_collapse() -> None:

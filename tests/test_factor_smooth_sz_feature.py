@@ -87,13 +87,19 @@ def test_sz_build_has_k_minus_one_blocks_and_one_wiggle_component() -> None:
     assert info.repeated_penalty_components[0][1].shape == (6, 6)
 
 
+@pytest.mark.pins_behaviour
 def test_sz_takes_the_fs_natural_parameterization() -> None:
-    """One-engine design §3.5, decision 5: sz on fs's natural parameterization.
+    """Control. One-engine design §3.5, decision 5: sz on fs's natural parameterization.
 
     The same per-level change of basis as fs (its natural map), under which
     the raw second-difference penalty is exactly the diagonal wiggle
     component, zero on the ``m`` polynomial coordinates, and the column space
-    is the raw basis's.  sz keeps the wiggle component alone.
+    is the raw basis's.  sz keeps the wiggle component alone.  fs sets its
+    null coordinates by degree, as each has its own smoothing parameter, and
+    builds its wiggle columns by an SVD in their complement; sz penalizes the
+    null block as one, so it keeps the eigenbasis, whose wiggle columns are
+    fs's up to sign and rounding.  Master held this exactly, as fs and sz shared
+    one map; the test pins that the change keeps sz on fs's wiggle space.
     """
     x = np.tile(np.linspace(-1.0, 1.0, 12), 3)
     group = np.repeat(["a", "b", "c"], 12)
@@ -102,9 +108,14 @@ def test_sz_takes_the_fs_natural_parameterization() -> None:
     info = sz.build(x, group, {})
     fs_info = fs.build(x, group, {})
 
-    np.testing.assert_array_equal(info.factor_smooth_transform, fs_info.factor_smooth_transform)
+    sz_map, fs_map = info.factor_smooth_transform, fs_info.factor_smooth_transform
+    signs = np.sign(np.sum(sz_map[:, :4] * fs_map[:, :4], axis=0))
+    scale = np.max(np.abs(fs_map[:, :4]))
+    np.testing.assert_allclose(sz_map[:, :4] * signs, fs_map[:, :4], rtol=0.0, atol=1e-12 * scale)
+    rotation = np.linalg.solve(sz_map[:, 4:].T @ sz_map[:, 4:], sz_map[:, 4:].T @ fs_map[:, 4:])
+    np.testing.assert_allclose(sz_map[:, 4:] @ rotation, fs_map[:, 4:], rtol=0.0, atol=1e-12)
     wiggle = info.repeated_penalty_components[0][1]
-    np.testing.assert_array_equal(wiggle, fs_info.repeated_penalty_components[0][1])
+    np.testing.assert_allclose(wiggle, fs_info.repeated_penalty_components[0][1], rtol=1e-12)
     assert np.count_nonzero(np.diag(wiggle)) == 4
     np.testing.assert_array_equal(wiggle, np.diag(np.diag(wiggle)))
     raw_penalty = sz._spline._build_penalty()

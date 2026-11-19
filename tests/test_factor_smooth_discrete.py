@@ -405,24 +405,24 @@ def test_discrete_factor_smooth_matches_exact_at_full_support_resolution() -> No
 
 
 @pytest.mark.parametrize(
-    ("lambda_policy", "backend"),
+    "lambda_policy",
     [
-        (LambdaPolicy.fixed(1.0), "streamed_tsqr"),
-        (
-            {
-                "wiggle": LambdaPolicy.fixed(1.0),
-                "null_0": LambdaPolicy.fixed(0.7),
-                "null_1": LambdaPolicy.fixed(1.3),
-            },
-            "dense_qr_compat",
-        ),
+        LambdaPolicy.fixed(1.0),
+        {
+            "wiggle": LambdaPolicy.fixed(1.0),
+            "null_0": LambdaPolicy.fixed(0.7),
+            "null_1": LambdaPolicy.fixed(1.3),
+        },
     ],
     ids=["symmetric", "asymmetric"],
 )
-def test_factor_smooth_marginal_backend_preserves_exact_discrete_fit(
-    lambda_policy,
-    backend: str,
-) -> None:
+@pytest.mark.pins_behaviour
+def test_factor_smooth_discrete_marginal_preserves_exact_fit(lambda_policy) -> None:
+    """Control: a discrete build fits what the exact build fits, equal or unequal null lambdas.
+
+    Master held this on its two QR routes; the unequal-policy declaration now streams
+    through the one route the default takes, and must keep the exact build's fit.
+    """
     X, y, weights, offset = _data()
     exact = _fixed_policy_model(
         discrete=False,
@@ -443,8 +443,6 @@ def test_factor_smooth_marginal_backend_preserves_exact_discrete_fit(
         offset=offset,
     )
 
-    assert exact._interaction_specs["x:segment:fs"]._marginal_build_backend == backend
-    assert discrete._interaction_specs["x:segment:fs"]._marginal_build_backend == backend
     np.testing.assert_allclose(
         discrete.predict(X),
         exact.predict(X),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import warnings
 from collections.abc import Hashable
@@ -13,6 +14,7 @@ import scipy.linalg as la
 import scipy.sparse as sp
 from numpy.typing import NDArray
 
+from superglm._lambda_box import LAMBDA_CEILING
 from superglm.factor_smooth_geometry import expand_sum_to_zero_blocks
 from superglm.types import GroupInfo, LambdaPolicy
 
@@ -31,7 +33,6 @@ SZ_POPULATION_PREDICTION = (
     "estimate; levels without weight, or whose every row separates, are predicted at the "
     "population value: "
 )
-_MarginalBuildBackend = Literal["streamed_tsqr", "dense_qr_compat"]
 # Warnings about a declaration point at the first frame outside the package.
 _PACKAGE_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # The values each enumerated option of ``FactorSmooth`` takes.
@@ -55,6 +56,72 @@ def _combine_qr_r(
     )
 
 
+def _fs_coordinates(
+    R: NDArray, m: int, *, penalized_wiggle: bool = True
+) -> tuple[NDArray, NDArray]:
+    """fs's coordinates in the metric ``R'R``: unit-penalty wiggle columns, then ``null_j``.
+
+    Returns the map and each wiggle column's squared norm over the weighted rows.
+    ``null_j`` is degree ``j`` of the coefficient polynomials (the m-th difference
+    penalty's null space), orthonormal over the weighted rows with a positive leading
+    term, whatever the frame, row order, QR route or platform.  The wiggle spans their
+    complement in that metric with the raw penalty ``D'D``, applying ``R`` and ``D``
+    forward only, so it holds for rows that leave a knot span all but empty and for a
+    high order.  With ``penalized_wiggle`` False (its lambda fixed at zero) it is the
+    complement's row-orthonormal basis, built without ``D``.
+    """
+    k = R.shape[0]
+    # For m=2 this is Wood, Scheipl & Faraway's (2013, sec. 2.5) null-space
+    # reparameterization; for m >= 3 degree order departs on purpose from their
+    # centred-null-Gram eigenvectors, which are free within a repeated eigenvalue.
+    # Weighted Arnoldi in the design inner product (Vandermonde with Arnoldi: Brubeck,
+    # Nakatsukasa & Trefethen, SIAM Rev. 63(2), 2021, in the metric R'R): degree j is the
+    # index, scaled to [-1, 1], times degree j - 1, orthogonalized over the rows against
+    # the lower degrees.  The recurrence keeps the high degrees that a sampled power or
+    # Legendre frame loses as m nears k; the second Gram-Schmidt pass keeps the columns
+    # orthogonal to rounding.
+    grid = np.linspace(-1.0, 1.0, k)
+    null = np.empty((k, m))
+    whitened_null = np.empty((k, m))
+    for degree in range(m):
+        direction = grid * null[:, degree - 1] if degree else np.ones(k)
+        whitened = R @ direction
+        for _ in range(2):
+            overlap = whitened_null[:, :degree].T @ whitened
+            whitened -= whitened_null[:, :degree] @ overlap
+            direction -= null[:, :degree] @ overlap
+        norm = np.linalg.norm(whitened)
+        null[:, degree] = direction / norm
+        whitened_null[:, degree] = whitened / norm
+
+    # The wiggle: the generalized SVD of (R, D) on the complement of the null axes over
+    # the rows (Van Loan, SIAM J. Numer. Anal. 13(1), 1976), the SVD of R B^-1 for B the
+    # difference operator on an orthonormal basis of that complement, the vectors
+    # orthogonal to R'R null_j.  B^-1 is applied through B's own SVD, so the directions are
+    # exact for B perturbed by u ||B||: the strongly penalized ones keep their penalty to
+    # rounding, where an explicit inverse of D loses cond(D) u on them, and the weakest
+    # carry u cond(B), which rows bunched or weighted toward part of the range make far
+    # larger than cond(D).  The triangular factor of a QR of their penalty image, the
+    # Cholesky factor of its Gram without forming the Gram (which squares its condition),
+    # re-whitens them strongest first, so each column takes in only the smaller, more
+    # strongly penalized ones before it; the rounding of the float64 differences it reads
+    # is rough, and that order leaves it on the strong columns.  An orthogonal rotation,
+    # which leaves every penalty alone, then diagonalizes them over the rows.
+    complement = np.linalg.qr(R.T @ whitened_null, mode="complete")[0][:, m:]
+    if not penalized_wiggle:
+        _, row_norms, rotation = la.svd(R @ complement, full_matrices=False)
+        wiggle = (complement @ rotation.T) / row_norms
+        return np.column_stack((wiggle, null)), np.ones(k - m)
+    _, singular_values, right = la.svd(np.diff(np.eye(k), n=m, axis=0) @ complement)
+    unit_penalty = complement @ (right.T / singular_values)
+    triangle = np.linalg.qr(np.diff(unit_penalty, n=m, axis=0), mode="r")
+    unit_penalty = la.solve_triangular(triangle, unit_penalty.T, trans="T").T
+    _, row_norms, rotation = la.svd(R @ unit_penalty, full_matrices=False)
+    # Ascending norm over the rows: the order of descending whitened-penalty eigenvalues.
+    natural_map = np.column_stack(((unit_penalty @ rotation.T)[:, ::-1], null))
+    return natural_map, row_norms[::-1] ** 2
+
+
 def _natural_parameterization_from_r(
     R: NDArray,
     penalty: NDArray,
@@ -62,8 +129,19 @@ def _natural_parameterization_from_r(
     rank: int,
     n_rows: int,
     normalization_mass: float | None = None,
+    difference_order: int | None = None,
+    penalized_wiggle: bool = True,
 ) -> tuple[NDArray, tuple[tuple[str, NDArray], ...]]:
-    """Build a QR-whitened natural parameterization without materializing ``Q``."""
+    """Build a QR-whitened natural parameterization without materializing ``Q``.
+
+    ``difference_order`` (fs's ``m``) sets the null coordinates by degree, for a penalty
+    that gives each its own smoothing parameter, and requires ``penalty`` to be the
+    standard difference penalty ``D'D`` of that order, which fs's evenly spaced knots
+    give and ``_fs_coordinates`` rebuilds ``D`` for.  Without it any basis of the null
+    space gives the same model (``sz`` penalizes it as one block), and the eigenbasis
+    is kept.  ``penalized_wiggle`` False says fs's wiggle smoothing parameter is fixed
+    at zero (``_fs_coordinates``).
+    """
     R_array = np.asarray(R, dtype=np.float64)
     S = np.asarray(penalty, dtype=np.float64)
     if R_array.ndim != 2 or R_array.shape[0] != R_array.shape[1]:
@@ -79,28 +157,40 @@ def _natural_parameterization_from_r(
     mass = float(n_rows) if normalization_mass is None else float(normalization_mass)
     if not np.isfinite(mass) or mass <= 0.0:
         raise ValueError("factor-smooth normalization mass must be finite and positive")
-
-    R_inv = la.solve_triangular(R_array, np.eye(k), lower=False)
-    transformed_penalty = R_inv.T @ S @ R_inv
-    # The zero-eigenvalue eigenspace can rotate freely and each FS null coordinate
-    # has its own smoothing parameter, so the MRRR driver is selected explicitly to
-    # keep the coordinate system deterministic.
-    eigenvalues, eigenvectors = la.eigh(
-        0.5 * (transformed_penalty + transformed_penalty.T),
-        driver="evr",
-    )
-    order = np.argsort(eigenvalues)[::-1]
-    eigenvalues = eigenvalues[order]
-    eigenvectors = eigenvectors[:, order]
-    positive = eigenvalues[:rank]
-    if rank < 1 or rank > k or np.any(positive <= 0.0):
+    if rank < 1 or rank > k:
         raise ValueError("FactorSmooth marginal penalty has an invalid numerical rank")
 
-    natural_map = R_inv @ eigenvectors
-    natural_map[:, :rank] /= np.sqrt(positive)
-    penalized_scale = np.sqrt(mass * rank / np.sum(1.0 / positive))
-    natural_map[:, :rank] *= penalized_scale
     null_dim = k - rank
+    if difference_order is not None:
+        from superglm.features._spline_penalties import build_difference_penalty
+
+        if null_dim != difference_order or not np.array_equal(
+            S, build_difference_penalty(k, difference_order)
+        ):
+            raise ValueError(
+                "FactorSmooth fs coordinates need the standard difference penalty of order m"
+            )
+        natural_map, wiggle_squared_norms = _fs_coordinates(
+            R_array, difference_order, penalized_wiggle=penalized_wiggle
+        )
+    else:
+        R_inv = la.solve_triangular(R_array, np.eye(k), lower=False)
+        transformed_penalty = R_inv.T @ S @ R_inv
+        eigenvalues, eigenvectors = la.eigh(
+            0.5 * (transformed_penalty + transformed_penalty.T),
+            driver="evr",
+        )
+        order = np.argsort(eigenvalues)[::-1]
+        eigenvalues = eigenvalues[order]
+        eigenvectors = eigenvectors[:, order]
+        positive = eigenvalues[:rank]
+        if np.any(positive <= 0.0):
+            raise ValueError("FactorSmooth marginal penalty has an invalid numerical rank")
+        natural_map = R_inv @ eigenvectors
+        natural_map[:, :rank] /= np.sqrt(positive)
+        wiggle_squared_norms = 1.0 / positive
+    penalized_scale = np.sqrt(mass * rank / np.sum(wiggle_squared_norms))
+    natural_map[:, :rank] *= penalized_scale
     if null_dim:
         natural_map[:, rank:] *= np.sqrt(mass)
 
@@ -178,6 +268,107 @@ def check_terms_on_factor_smooth_groups(
         )
 
 
+# fs refuses an m-th difference penalty when a closed-form lower bound on its condition
+# number reaches 2^47, 1/(64u) (``_difference_condition_log2``), a decision every platform
+# makes alike.  The rows set how much worse conditioned the difference operator is on the
+# null axes' complement than D itself, and the QR that re-whitens the weak directions
+# (``_fs_coordinates``) holds while their penalty image's condition number stays below
+# 1/u.  Measured at the orders next to the refused band for k <= 300, over uniform,
+# bunched and steeply weighted rows and four OpenBLAS kernels, it reached 2.4e6 below the
+# band and 1.2e13 above it (k=120, rows bunched into part of the range), where the
+# whitened smoother still matched a 100-digit raw-penalty one to 2.2e-8 (cond(R) 1.9e13).
+_DIFFERENCE_CONDITION_LIMIT_LOG2 = 47.0
+# Nor may the wiggle penalty's scale, about k 4^m, overflow beside the REML ceiling.
+_PENALTY_SCALE_LIMIT_LOG2 = 1000.0
+
+
+def _difference_condition_log2(k: int, m: int) -> float:
+    """``log2`` of a lower bound on the condition number of ``D``, the m-th difference of k.
+
+    The square root of the ratio of two Rayleigh quotients of ``D'D``: the alternating
+    sequence's, ``4^m (k - m) / k``, and the degree-m discrete Chebyshev (Gram)
+    polynomial's, whose m-th difference is constant, ``(2m + 1) ((2m)! / m!)^2 (k - m)! /
+    (k + m)!``.
+    """
+    log_smoothest = (
+        math.log(2 * m + 1)
+        + 2.0 * (math.lgamma(2 * m + 1) - math.lgamma(m + 1))
+        + math.lgamma(k - m + 1)
+        - math.lgamma(k + m + 1)
+    )
+    log_roughest = m * math.log(4.0) + math.log((k - m) / k)
+    return 0.5 * (log_roughest - log_smoothest) / math.log(2.0)
+
+
+def _fs_order_refusal(k: int, m: int) -> str | None:
+    """Why float64 cannot hold fs's m-th difference penalty on k basis functions, or None."""
+    log2_condition = _difference_condition_log2(k, m)
+    if log2_condition >= _DIFFERENCE_CONDITION_LIMIT_LOG2:
+        return (
+            f"a lower bound on its condition number is 2^{log2_condition:.1f}, past "
+            f"2^{_DIFFERENCE_CONDITION_LIMIT_LOG2:g}, where rounding can swamp the penalty "
+            "on its smoothest curves"
+        )
+    log2_scale = 2 * m + math.log2(k)
+    if log2_scale + math.log2(LAMBDA_CEILING) >= _PENALTY_SCALE_LIMIT_LOG2:
+        return (
+            f"its scale, about 2^{log2_scale:.0f}, times the largest smoothing parameter "
+            "leaves float64's range"
+        )
+    return None
+
+
+def _check_fs_declaration(name: str, k: int, m: int, lambda_policy: Any) -> None:
+    """Refuse an fs difference order float64 cannot represent, unless its wiggle is off."""
+    reason = _fs_order_refusal(k, m)
+    if reason is None or _fixed_at_zero(_declared_policy(lambda_policy, "wiggle")):
+        return
+    refused = [order for order in range(1, k) if _fs_order_refusal(k, order)]
+    supported = f"m <= {refused[0] - 1}"
+    if refused[-1] < k - 1:
+        supported += f" or m >= {refused[-1] + 1}"
+    raise ValueError(
+        f"FactorSmooth {name!r}: basis='fs' with k={k} cannot represent an m={m} difference "
+        f"penalty reliably in float64; {reason}. With k={k}, use {supported}, or a smaller k."
+    )
+
+
+def check_fs_level_constants(name: str, null_0: float, floor: float) -> None:
+    """Refuse an fs term's ``null_0`` fixed at zero beside the intercept; disclose one below ``floor``.
+
+    The data cannot tell the levels' constants from the intercept, so only ``null_0``
+    identifies them. At zero they are aliased, which the structured route refuses too.
+    Below the REML floor (``_lambda_box``) its penalty can be lost in the rounding of the
+    data's curvature, so the unseen-level price may follow the order the levels are
+    listed in: the fit goes ahead and says so.
+    """
+    if null_0 <= 0.0:
+        raise ValueError(
+            f"FactorSmooth term {name!r} is aliased with the fitted intercept: null_0, each "
+            "level's constant, is fixed at 0, so the levels' constants and the intercept "
+            "trade off freely, and the unseen-level prediction and the curves' standard "
+            "errors would follow the order the levels are listed in. Estimate null_0, or "
+            "fix it above 0."
+        )
+    if null_0 < floor:
+        warnings.warn(
+            f"FactorSmooth term {name!r}: null_0, each level's constant, is fixed at "
+            f"{null_0:g}, below {floor:g}, the smallest smoothing parameter this fit "
+            "resolves. The data cannot tell the levels' constants from the intercept, so the "
+            "unseen-level prediction and the curves' standard errors may follow the order "
+            f"the levels are listed in. Estimate null_0, or fix it at {floor:g} or above.",
+            UserWarning,
+            stacklevel=3,
+        )
+
+
+def _declared_policy(lambda_policy: Any, component: str) -> LambdaPolicy | None:
+    """The policy a declaration's ``lambda_policy`` gives ``component``, None to estimate."""
+    if isinstance(lambda_policy, LambdaPolicy):
+        return lambda_policy
+    return (lambda_policy or {}).get(component)
+
+
 def _fixed_at_zero(policy: LambdaPolicy | None) -> bool:
     """Whether ``policy`` fixes its smoothing parameter at zero (``LambdaPolicy.off()``)."""
     return policy is not None and policy.mode == "fixed" and float(cast(float, policy.value)) == 0.0
@@ -201,7 +392,14 @@ class FactorSmooth:
         The grouping column; one curve per level.
     basis : {"fs", "sz"}, default "fs"
         ``"fs"`` penalizes every level's curve fully, its polynomial part through
-        one ``null_j`` component per coordinate.  ``"sz"`` fits sum-to-zero
+        one ``null_j`` component per degree: ``null_0`` the level's constant,
+        ``null_1`` its line, and so on, each orthogonal over the training rows to
+        the lower degrees.  The degree is that of the B-spline coefficients as a
+        polynomial in their index, which through ``null_3`` is the curve's degree
+        in x; from ``null_4`` (``m >= 5``) the curve stays piecewise cubic.  An fs
+        model saved before 0.44.0 keeps the null axes it was fitted on and
+        predicts as before, but its ``null_j`` smoothing parameters belong to those
+        axes and do not compare with a fresh fit's.  ``"sz"`` fits sum-to-zero
         deviations from a population curve and leaves each level's polynomial part
         (its line, with ``m=2``) unpenalized, as mgcv's ``sz`` does.
     kind : {"ps"}, default "ps"
@@ -210,7 +408,14 @@ class FactorSmooth:
         Basis functions per level, at least 5.
     m : int, default 2
         Difference order of the wiggle penalty, between 1 and ``k - 1``; each
-        level's polynomial part has ``m`` coordinates.
+        level's polynomial part has ``m`` coordinates.  ``basis="fs"`` refuses an
+        ``m`` that float64 does not reliably represent, where a closed-form lower
+        bound on its difference penalty's condition number reaches ``2^47``: none
+        below ``k=73``, then a band of middle orders (``k=100``: ``17 <= m <= 75``),
+        and orders near 480 and above, whose penalty's scale leaves float64's range;
+        the error names the orders ``k`` supports.  With the wiggle's smoothing
+        parameter fixed at zero the penalty's condition does not enter, and every
+        ``m`` is accepted.
     levels : list | tuple | Series | ndarray | CategoricalDtype, optional
         The grouping column's level universe.  Under ``basis="fs"`` a declared
         level with no training rows keeps its curve block and shrinks to zero
@@ -230,6 +435,9 @@ class FactorSmooth:
         ``"null_0"`` ... ``"null_{m-1}"`` under ``basis="fs"``, ``"wiggle"`` (and
         ``"null"`` with ``select=True``) under ``basis="sz"``, and estimates the
         ones it does not name.  None estimates every component by REML.
+        Under ``basis="fs"``, in a predictor with an intercept, a fit refuses
+        ``null_0`` fixed at zero (the levels' constants would alias it) and warns
+        when it is fixed below the REML floor.
     name : str or None
         The term's name; defaults to ``"{variable}:{group}:{basis}"``.
     select : bool, default False
@@ -326,11 +534,7 @@ class FactorSmooth:
             unpenalized = [
                 component
                 for component in ("wiggle", "null")
-                if _fixed_at_zero(
-                    lambda_policy
-                    if isinstance(lambda_policy, LambdaPolicy)
-                    else (lambda_policy or {}).get(component)
-                )
+                if _fixed_at_zero(_declared_policy(lambda_policy, component))
             ]
             if unpenalized:
                 raise ValueError(
@@ -352,6 +556,8 @@ class FactorSmooth:
         self.select = select
         self._lambda_policy = lambda_policy
         self.name = name or f"{variable}:{group}:{basis}"
+        if basis == "fs":
+            _check_fs_declaration(self.name, k, m, lambda_policy)
 
         self._declared_levels: list | None = (
             None if levels is None else resolve_level_source(levels, context="FactorSmooth")
@@ -362,7 +568,6 @@ class FactorSmooth:
         self._spline: PSpline | None = None
         self._natural_map = None
         self._base_penalty_components: tuple[tuple[str, Any], ...] = ()
-        self._marginal_build_backend: _MarginalBuildBackend | None = None
         # What the fit's data identify of each sz level (``_record_unidentified_levels``;
         # ``_free_directions`` None until a fit records it): thin levels, the null-space
         # directions each leaves free, weightless levels, and levels whose unpenalized
@@ -520,22 +725,6 @@ class FactorSmooth:
             return {name: self._lambda_policy for name in names}
         return {name: self._lambda_policy.get(name, LambdaPolicy.estimate()) for name in names}
 
-    def _streaming_safe(self) -> bool:
-        """Return whether QR sign/null rotations preserve the declared penalty geometry."""
-        if self.basis == "sz":
-            return True
-        if self.m > 2:
-            return False
-        if self.m <= 1:
-            return True
-        if self._lambda_policy is None or isinstance(self._lambda_policy, LambdaPolicy):
-            return True
-        policies = [
-            self._lambda_policy.get(f"null_{index}", LambdaPolicy.estimate())
-            for index in range(self.m)
-        ]
-        return all(policy == policies[0] for policy in policies[1:])
-
     def _initialize_marginal_spline(
         self,
         x: NDArray,
@@ -572,7 +761,10 @@ class FactorSmooth:
         retain_basis: bool,
         geometry_weight: NDArray | None,
     ) -> sp.csr_matrix | None:
-        """Build the marginal with bounded QR memory when its coordinates permit it."""
+        """Build the marginal from a streamed QR of its rows, in bounded memory."""
+        if self.basis == "fs":
+            # A model saved before the declaration checks existed meets them on a refit.
+            _check_fs_declaration(self.name, self.k, self.m, self._lambda_policy)
         if geometry_weight is None:
             weights = None
             normalization_mass = float(len(x))
@@ -586,42 +778,28 @@ class FactorSmooth:
                 raise ValueError("FactorSmooth geometry weights must retain at least one row.")
             normalization_mass = float(np.sum(weights, dtype=np.float64))
         spline, penalty = self._initialize_marginal_spline(x, weights)
-        exact_basis: sp.csr_matrix | None
-
-        if self._streaming_safe():
-            qr_r: NDArray | None = None
-            chunks: list[sp.csr_matrix] | None = [] if retain_basis else None
-            for start in range(0, len(x), _MARGINAL_QR_CHUNK_ROWS):
-                basis_chunk = sp.csr_matrix(
-                    spline._basis_matrix(x[start : start + _MARGINAL_QR_CHUNK_ROWS]),
-                    dtype=np.float64,
-                )
-                if weights is None:
-                    qr_basis = basis_chunk
-                else:
-                    row_scale = np.sqrt(weights[start : start + _MARGINAL_QR_CHUNK_ROWS])
-                    qr_basis = basis_chunk.multiply(row_scale[:, None]).tocsr()
-                qr_r = _combine_qr_r(qr_r, qr_basis)
-                if chunks is not None:
-                    chunks.append(basis_chunk)
-            if qr_r is None:  # pragma: no cover - group validation rejects zero rows
-                raise RuntimeError("FactorSmooth marginal QR received no rows.")
-            exact_basis = (
-                sp.csr_matrix(sp.vstack(chunks, format="csr"), dtype=np.float64)
-                if chunks is not None
-                else None
+        qr_r: NDArray | None = None
+        chunks: list[sp.csr_matrix] | None = [] if retain_basis else None
+        for start in range(0, len(x), _MARGINAL_QR_CHUNK_ROWS):
+            basis_chunk = sp.csr_matrix(
+                spline._basis_matrix(x[start : start + _MARGINAL_QR_CHUNK_ROWS]),
+                dtype=np.float64,
             )
-            self._marginal_build_backend = "streamed_tsqr"
-        else:
-            if retain_basis:
-                exact_basis = sp.csr_matrix(spline._basis_matrix(x), dtype=np.float64)
-                raw_dense = exact_basis.toarray()
+            if weights is None:
+                qr_basis = basis_chunk
             else:
-                exact_basis = None
-                raw_dense = np.asarray(spline._raw_basis_matrix(x), dtype=np.float64)
-            qr_basis = raw_dense if weights is None else raw_dense * np.sqrt(weights[:, None])
-            qr_r = np.asarray(np.linalg.qr(qr_basis, mode="r"), dtype=np.float64)
-            self._marginal_build_backend = "dense_qr_compat"
+                row_scale = np.sqrt(weights[start : start + _MARGINAL_QR_CHUNK_ROWS])
+                qr_basis = basis_chunk.multiply(row_scale[:, None]).tocsr()
+            qr_r = _combine_qr_r(qr_r, qr_basis)
+            if chunks is not None:
+                chunks.append(basis_chunk)
+        if qr_r is None:  # pragma: no cover - group validation rejects zero rows
+            raise RuntimeError("FactorSmooth marginal QR received no rows.")
+        exact_basis = (
+            sp.csr_matrix(sp.vstack(chunks, format="csr"), dtype=np.float64)
+            if chunks is not None
+            else None
+        )
 
         if (
             qr_r.shape != (self.k, self.k)
@@ -638,16 +816,19 @@ class FactorSmooth:
             rank=self.k - self.m,
             n_rows=len(x),
             normalization_mass=normalization_mass,
+            difference_order=self.m if self.basis == "fs" else None,
+            penalized_wiggle=not _fixed_at_zero(_declared_policy(self._lambda_policy, "wiggle")),
         )
         if self.basis == "sz":
-            # sz takes fs's natural parameterization: its sum-to-zero constraint is
-            # coefficientwise, so the per-level change of basis preserves it, the wiggle
-            # penalty becomes diagonal and the polynomial null coordinates separate.  sz
-            # penalizes the wiggle alone, unless the term selects its lines (#444): then one
-            # ``"null"`` component, the indicator of the null coordinates (Marra & Wood 2011
-            # null-space penalty; the sum of fs's ``null_j``), penalizes them all.  Those
-            # coordinates are orthonormal over the weighted rows, so ``beta_l' S* beta_l`` is
-            # the mean square of level ``l``'s line over the data.
+            # sz takes a natural parameterization like fs's, from the eigenbasis: its
+            # sum-to-zero constraint is coefficientwise, so the per-level change of basis
+            # preserves it, the wiggle penalty becomes diagonal and the polynomial null
+            # coordinates separate.  sz penalizes the wiggle alone, unless the term selects
+            # its lines (#444): then one ``"null"`` component, the indicator of the null
+            # coordinates (Marra & Wood 2011 null-space penalty; the sum of fs's
+            # ``null_j``), penalizes them all.  Those coordinates are orthonormal over the
+            # weighted rows, so ``beta_l' S* beta_l`` is the mean square of level ``l``'s
+            # line over the data.
             lines = [component for _, component in components[1:]]
             components = components[:1]
             if self._selects_lines:

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from itertools import groupby
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -762,11 +762,14 @@ def _fixed_fit_lambdas(
     layout: StackedLayout,
     supplied: Mapping[str, float] | None,
     selected_lines: tuple[str, ...] = (),
+    level_constant_floors: Mapping[str, float] | None = None,
 ) -> dict[str, float]:
     """The fit's lambda for every penalty component, in layout order.
 
     Components of ``select=True`` ``sz`` terms (prefixes in ``selected_lines``)
     refuse zero: an unpenalized level with no rows would make the system singular.
+    An fs ``null_0`` in ``level_constant_floors`` refuses a zero lambda and warns
+    below its floor (``check_fs_level_constants``).
     """
     values: Mapping[str, float] = {} if supplied is None else supplied
     if not isinstance(values, Mapping):
@@ -805,7 +808,74 @@ def _fixed_fit_lambdas(
         )
     if missing:
         raise ValueError(f"missing penalty lambda names: {sorted(missing)}")
+    _refuse_aliased_level_constants(resolved, level_constant_floors or {})
     return resolved
+
+
+def _refuse_aliased_level_constants(
+    lambdas: Mapping[str, float], floors: Mapping[str, float]
+) -> None:
+    """Refuse each fs ``null_0`` in ``floors`` whose lambda sits below its floor."""
+    from superglm.features.factor_smooth import check_fs_level_constants
+
+    for name, floor in floors.items():
+        if name in lambdas:
+            check_fs_level_constants(name.removesuffix("#null_0"), lambdas[name], floor)
+
+
+def _level_constant_floors(
+    family: DistributionalFamily,
+    layout: StackedLayout,
+    compiled: Sequence[CompiledPredictor],
+    y: NDArray,
+    likelihood_plan: FamilyLikelihoodPlan,
+    lambdas: Mapping[str, float] | None,
+) -> dict[str, float]:
+    """The REML floor of each fixed fs ``null_0`` whose levels' constants alias an intercept.
+
+    ``LAMBDA_FLOOR`` times its predictor's information unit (``_lambda_box``) at the
+    family's starting parameters, or at the prior weights for a family without expected
+    information. A predictor without an intercept identifies the constants itself.
+    """
+    from superglm._lambda_box import LAMBDA_FLOOR, information_unit
+    from superglm.distributional.family import expected_information_provider
+    from superglm.distributional.solver.derivatives import transform_natural_information
+    from superglm.distributional.solver.packing import packed_pairs
+    from superglm.features.factor_smooth import FactorSmooth
+
+    fixed = {
+        component.name
+        for component in layout.penalties
+        if component.lambda_policy is not None and component.lambda_policy.mode == "fixed"
+    } | set(lambdas or ())
+    held = {
+        f"{predictor.name}:{name}#null_0": predictor.parameter_index
+        for predictor in compiled
+        if predictor.intercept
+        for name, spec in predictor.compiled.interaction_specs.items()
+        if isinstance(spec, FactorSmooth) and spec.basis == "fs"
+    }
+    held = {name: index for name, index in held.items() if name in fixed}
+    if not held:
+        return {}
+    weights = likelihood_plan.weights.values
+    size = float(likelihood_plan.weights.likelihood_count)
+    provider = expected_information_provider(family, likelihood_plan)
+    if provider is None:
+        return {name: LAMBDA_FLOOR * information_unit(weights, size) for name in held}
+    theta = family.initialize(y, likelihood_plan).theta
+    links = [state.link for state in layout.predictors]
+    eta = np.column_stack([link.link(theta[:, index]) for index, link in enumerate(links)])
+    information = transform_natural_information(
+        provider.expected_information_natural(theta, likelihood_plan), eta, links
+    )
+    diagonal = {
+        left: at for at, (left, right) in enumerate(packed_pairs(len(links))) if left == right
+    }
+    return {
+        name: LAMBDA_FLOOR * information_unit(information[:, diagonal[index]], size)
+        for name, index in held.items()
+    }
 
 
 def _selected_line_prefixes(compiled: Sequence[CompiledPredictor]) -> tuple[str, ...]:
@@ -995,9 +1065,19 @@ def _fit_candidate(
     with measure_phase(phase_recorder, "layout_penalty_assembly"):
         layout = build_stacked_layout(compiled)
     allow_wide_design(layout.n_coefficients)
+    floors = _level_constant_floors(
+        family,
+        layout,
+        compiled,
+        retained_y,
+        likelihood_plan,
+        lambdas if efs_config is None else None,
+    )
     if efs_config is None:
         with measure_phase(phase_recorder, "layout_penalty_assembly"):
-            ordered_lambdas = _fixed_fit_lambdas(layout, lambdas, _selected_line_prefixes(compiled))
+            ordered_lambdas = _fixed_fit_lambdas(
+                layout, lambdas, _selected_line_prefixes(compiled), floors
+            )
             penalty = layout.penalty_matrix(ordered_lambdas)
         result = fit_dense_fixed_lambda(
             family,
@@ -1012,6 +1092,14 @@ def _fit_candidate(
         )
         smoothing = None
     else:
+        _refuse_aliased_level_constants(
+            {
+                component.name: float(cast(float, component.lambda_policy.value))
+                for component in layout.penalties
+                if component.name in floors and component.lambda_policy is not None
+            },
+            floors,
+        )
         smoothing = fit_distributional_efs(
             family,
             layout,
