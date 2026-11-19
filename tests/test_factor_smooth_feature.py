@@ -123,42 +123,99 @@ def test_streamed_discrete_marginal_bounds_basis_evaluation(monkeypatch, declara
 
 
 def test_streamed_tsqr_keeps_the_legacy_wiggle_and_puts_null_j_on_degree_j(monkeypatch):
+    """The streamed fs map spans the legacy wiggle, with its penalty and row norms, and null_j is degree j.
+
+    Individual wiggle columns are free within a repeated whitened-penalty
+    eigenvalue, so the comparison with the legacy eigenbasis is on what does
+    not rotate: the wiggle's curve subspace, the raw penalty in the map's
+    coordinates (exactly the declared components: ``penalized_scale**2`` on
+    the wiggle, zero on the null block), a row Gram that is diagonal with the
+    legacy column norms in ascending order (descending penalty eigenvalues),
+    and the penalized smoother at fixed lambdas, against the raw basis with
+    the raw penalty.  ``null_j`` is the degree-``j`` coefficient polynomial's
+    curve, orthogonalized against the lower degrees over the rows, with unit
+    mean square and a positive leading term, checked against a QR of the
+    sampled polynomial curves.
+
+    Tolerances are ``u`` times the magnitudes involved and the conditioning
+    of the factor each check reads: ``cond(raw)`` for the map's construction
+    (the subspace, the column cosines and norms), ``gamma_2k`` products of
+    ``|M|'|P||M|`` for the penalty, ``cond`` of the penalized normal matrix for
+    the smoother and ``n u cond(A)`` for the QR of the polynomial curves
+    (Higham 2002, Thm 19.4 with the QR perturbation bound).  Measured errors
+    sit 40 to 250 times inside them.  Mutation checks: reversing the null
+    columns in ``_fs_coordinates`` fails the degree check; dropping the
+    final row rotation of the wiggle fails the diagonal row Gram; leaving the
+    wiggle un-whitened by the penalty fails the declared penalty's scale.
+    """
+    import scipy.linalg as la
+
     monkeypatch.setattr(
         factor_smooth_module,
         "_MARGINAL_QR_CHUNK_ROWS",
         64,
     )
+    u = np.finfo(np.float64).eps / 2
     x = np.linspace(-2.0, 2.0, 5000) ** 3
     group = np.arange(len(x), dtype=np.intp) % 20
     spec = FactorSmooth("x", group="group", k=7, m=3)
     spec.build_discrete(x, group, {}, 256)
     raw = np.asarray(spec._spline._raw_basis_matrix(x), dtype=np.float64)
     penalty = np.asarray(spec._spline._build_penalty(), dtype=np.float64)
-    legacy_map, _components = _legacy_natural_parameterization(
-        raw,
-        penalty,
-        rank=spec.k - spec.m,
-    )
-    streamed_basis = raw @ spec._natural_map
+    k, m = spec.k, spec.m
+    rank = k - m
+    legacy_map, legacy_components = _legacy_natural_parameterization(raw, penalty, rank=rank)
+    streamed_map = np.asarray(spec._natural_map, dtype=np.float64)
+    streamed_basis = raw @ streamed_map
     legacy_basis = raw @ legacy_map
-    rank = spec.k - spec.m
+    construction = 64 * k * u * np.linalg.cond(raw)
 
-    streamed_penalized = streamed_basis[:, :rank]
-    streamed_penalized /= np.linalg.norm(streamed_penalized, axis=0)
-    legacy_penalized = legacy_basis[:, :rank]
-    legacy_penalized /= np.linalg.norm(legacy_penalized, axis=0)
+    # The wiggle's curves span the legacy wiggle's.
+    angles = la.subspace_angles(streamed_basis[:, :rank], legacy_basis[:, :rank])
+    assert float(np.max(angles)) <= construction
+
+    # The raw penalty in the streamed coordinates is the declared components.
+    components = dict(spec._base_penalty_components)
+    declared = components["wiggle"]
     np.testing.assert_allclose(
-        np.abs(streamed_penalized.T @ legacy_penalized),
-        np.eye(rank),
-        atol=2e-11,
+        declared[:rank, :rank], legacy_components[0][1][:rank, :rank], rtol=construction, atol=0.0
     )
+    magnitude = np.abs(streamed_map).T @ np.abs(penalty) @ np.abs(streamed_map)
+    np.testing.assert_allclose(
+        streamed_map.T @ penalty @ streamed_map,
+        declared,
+        rtol=0.0,
+        atol=8 * k * u * float(np.max(magnitude)),
+    )
+
+    # Diagonal over the rows, the wiggle in the legacy order of its column norms.
+    gram = streamed_basis.T @ streamed_basis
+    norms = np.sqrt(np.diag(gram))
+    np.testing.assert_allclose(
+        gram / np.outer(norms, norms), np.eye(k), rtol=0.0, atol=construction
+    )
+    legacy_norms = np.linalg.norm(legacy_basis[:, :rank], axis=0)
+    np.testing.assert_allclose(norms[:rank], legacy_norms, rtol=construction, atol=0.0)
+
+    # The penalized smoother at the declared wiggle penalty is the raw basis's at the raw penalty.
+    response = np.sin(x) + np.random.default_rng(0).normal(size=len(x))
+    for lam in (1e-2, 1.0, 1e2):
+        normal = raw.T @ raw + lam * penalty
+        raw_fit = raw @ np.linalg.solve(normal, raw.T @ response)
+        streamed_fit = streamed_basis @ np.linalg.solve(
+            gram + lam * declared, streamed_basis.T @ response
+        )
+        bound = k * u * np.linalg.cond(normal) * float(np.max(np.abs(raw_fit)))
+        np.testing.assert_allclose(streamed_fit, raw_fit, rtol=0.0, atol=bound)
 
     # null_j: the degree-j coefficient polynomial's curve, orthogonalized against the
     # lower degrees over the rows, with unit mean square and a positive leading term.
-    degrees = np.vander(np.arange(spec.k, dtype=np.float64), spec.m, increasing=True)
-    curves, triangle = np.linalg.qr(raw @ degrees)
+    degrees = np.vander(np.arange(k, dtype=np.float64), m, increasing=True)
+    sampled = raw @ degrees
+    curves, triangle = np.linalg.qr(sampled)
     expected = curves * np.sign(np.diag(triangle)) * np.sqrt(len(x))
-    np.testing.assert_allclose(streamed_basis[:, rank:], expected, rtol=0.0, atol=2e-11)
+    bound = len(x) * u * np.linalg.cond(sampled) * float(np.max(np.abs(expected)))
+    np.testing.assert_allclose(streamed_basis[:, rank:], expected, rtol=0.0, atol=bound)
 
 
 def test_factor_smooth_constructor_contract() -> None:
