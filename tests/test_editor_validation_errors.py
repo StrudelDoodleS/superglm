@@ -428,3 +428,34 @@ def test_the_cv_tab_leaves_a_refused_folds_error_score_out():
     refused, scored = result["folds"]
     assert refused["scores"]["deviance"] is None and refused["score_refused"]
     assert result["mean"]["deviance"] == scored["scores"]["deviance"]
+
+
+def test_the_cv_tab_keeps_a_score_its_refused_fold_did_compute():
+    """A supplied result's custom ``gini`` scores the priced rows; the deviance is refused.
+
+    In the refused fold the deviance reads none, with the reason, and the Gini keeps its
+    value, which its mean includes. Mutation: every score of a fold with a refusal was
+    shown as none, so the tab hid a Gini that its mean counted.
+    """
+    from superglm.editor.cv import cv_report_payload
+    from superglm.model_selection import cross_validate
+
+    def gini(model, rows, target, *, sample_weight=None, offset=None):
+        return 0.25 + 0.5 * len(target) / 10.0
+
+    X, y, splitter = cv_frame()
+    model = editor_fit()
+    with pytest.warns(UserWarning, match="scored 1 of 2 folds"):
+        supplied = cross_validate(model, X, y, cv=splitter, scoring=("deviance", gini))
+    assert supplied.refused_scores == ((0, "deviance"),)
+    session = edit(model, cv=supplied, cv_data=(X, y), train_data=(TRAIN, TRAIN_Y))
+    widget = session.widget(mode="server")
+    try:
+        [result] = cv_report_payload(widget)["results"]
+    finally:
+        widget.close()
+    refused, scored = result["folds"]
+    assert refused["scores"]["deviance"] is None and refused["score_refused"]
+    assert refused["scores"]["gini"] == pytest.approx(0.45)
+    assert scored["scores"]["gini"] == pytest.approx(0.4)
+    assert result["mean"]["gini"] == pytest.approx(0.425)

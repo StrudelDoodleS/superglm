@@ -127,8 +127,11 @@ class CrossValidationResult:
         The ``warm_start`` the folds were fitted with.
     fit_kwargs : dict or None
         The ``fit_kwargs`` every fold's fit received, copied.
+    refused_scores : tuple of (int, str) or None
+        The ``(fold, score)`` cells whose score was refused (``"score
+        refused"``), in fold order. A fold's other scores stand.
 
-    ``n_rows`` through ``fit_kwargs`` are ``None`` on a result made before
+    ``n_rows`` through ``refused_scores`` are ``None`` on a result made before
     they were recorded; such a result without ``warm_start`` and
     ``fit_kwargs`` was fitted cold, with no extra fit arguments.
     """
@@ -150,6 +153,7 @@ class CrossValidationResult:
     builtin_scores: tuple[str, ...] | None = None
     warm_start: bool | None = None
     fit_kwargs: dict[str, Any] | None = None
+    refused_scores: tuple[tuple[int, str], ...] | None = None
 
     def plot_terms_by_fold(
         self,
@@ -1298,4 +1302,5 @@ def cross_validate(
             key: dict(value) if isinstance(value, Mapping) else value
             for key, value in fit_kwargs.items()
         },
+        refused_scores=tuple(sorted(refused_cells)),
     )

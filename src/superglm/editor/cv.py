@@ -1084,10 +1084,14 @@ def _result_payload(
     folds = [
         {
             **{column: record.get(column) for column in _FOLD_COLUMNS},
-            # Why a fold has no score where its held-out rows have no quote (``cross_validate``):
-            # its scores are shown as none, whatever ``error_score`` they read.
+            # Why a fold has a score refused where its held-out rows have no quote
+            # (``cross_validate``): a refused score is shown as none, whatever ``error_score``
+            # it reads, and the fold's other scores stand.
             "score_refused": _refusal(record),
-            "scores": {name: None if _refusal(record) else record.get(name) for name in names},
+            "scores": {
+                name: None if _score_refused(result, record, name) else record.get(name)
+                for name in names
+            },
         }
         for record in result.fold_scores.to_dict("records")
     ]
@@ -1110,6 +1114,13 @@ def _refusal(record: dict[str, Any]) -> str | None:
     """Why a fold's scores were refused, from its ``fold_scores`` record; None if they were not."""
     reason = record.get(REFUSED_COLUMN)
     return reason if isinstance(reason, str) else None
+
+
+def _score_refused(result: CrossValidationResult, record: dict[str, Any], name: str) -> bool:
+    """Whether the fold's score ``name`` was refused: by its cell, or its fold without that record."""
+    if result.refused_scores is None:
+        return _refusal(record) is not None
+    return (record.get("fold"), name) in result.refused_scores
 
 
 def _folds_partition_rows(result: CrossValidationResult) -> bool:
@@ -1464,6 +1475,7 @@ def run_cv(plan: CVRunPlan, context) -> CVRun:
             pooled_scores=recorder.pooled_scores(),
             splitter=plan.splitter,
             builtin_scores=plan.scoring,
+            refused_scores=tuple(sorted(recorder.refused_scores)),
         ),
         terms=fold_term_items(
             plan.terms, recorder.curves, held=plan.edited, display=_term_display(plan.model)
@@ -1501,6 +1513,7 @@ class _FoldRecorder:
         self.fold_fits: list[dict[str, Any]] = []
         # By fold: why its scores are missing, where its held-out rows have no quote.
         self.refused: dict[int, str] = {}
+        self.refused_scores: set[tuple[int, str]] = set()
 
     @property
     def fold_number(self) -> int:
@@ -1546,6 +1559,7 @@ class _FoldRecorder:
                 # Held-out rows with no quote take this score, not the fold: its fit, curves
                 # and trace stand, it stays out of the pooled totals, and the page says why.
                 scores[name] = float("nan")
+                self.refused_scores.add((self._fold, name))
                 framed = refusal_in_frame(
                     exc, model, X, offset, sample_weight, test, len(self._y), self._fold
                 )
