@@ -98,6 +98,44 @@ def _dense_constraint_se(model, functionals: np.ndarray) -> np.ndarray:
     return np.sqrt(np.maximum(np.diag(covariance), 0.0) * model.result.phi)
 
 
+U = 2.0**-53  # the unit roundoff
+
+
+def _gamma(k: int) -> float:
+    """``gamma_k = k u / (1 - k u)`` (Higham 2002, sec. 3.1)."""
+    return k * U / (1.0 - k * U)
+
+
+def _footnote(model, term: str):
+    """The record's alias on ``term`` and the summary's footnote line that reports it.
+
+    The line is one of the record's notes, and the printed summary carries it (wrapped).
+    """
+    (alias,) = [a for a in model._fit_inference_info["identifiability"].aliases if a.term == term]
+    summary = model.summary()
+    notes = [" ".join(note.split()) for note in summary._info["identifiability_notes"]]
+    (line,) = [note for note in notes if note.startswith((f"{term} ", f"{term}:"))]
+    assert line in " ".join(str(summary).split())
+    return alias, line
+
+
+def _design_rows(model, X) -> np.ndarray:
+    """``[1, X_D]`` on the rows of ``X``: each coefficient's column, scored as ``predict`` does."""
+    from superglm._frame import as_eager_frame
+    from superglm.model import base
+
+    frame, p = as_eager_frame(X), len(model.result.beta)
+    columns = [np.ones(len(X))]
+    for unit in np.eye(p):
+        columns.append(
+            sum(
+                base._score_prediction_term_exact(term, frame, unit)
+                for term in base._prediction_plan(model)["features"]
+            )
+        )
+    return np.column_stack(columns)
+
+
 rng = np.random.default_rng(7)
 N = 2000
 X_SPREAD = rng.uniform(0, 10, N)
@@ -162,9 +200,11 @@ def test_nested_factors_blank_the_later_factor_alone():
     rows, reference = _rows(model), _rows(alone)
     for level in ("f[A]", "f[C]", "f[D]", "f[E]"):
         assert rows[level] == pytest.approx(reference[level], rel=1e-8)
-    assert "g[P] is aliased with f: each level of g is a union of levels of f." in str(
-        model.summary()
-    )
+    # the footnote names the held level, its partner and the nesting that aliases them
+    alias, note = _footnote(model, "g[P]")
+    assert alias.aliased_with == ("f",) and alias.source == "construction"
+    assert "aliased with f" in note and "each level of g" in note
+    assert "union of levels of f" in note
 
 
 def test_a_duplicated_numeric_blanks_the_duplicate_alone():
@@ -175,7 +215,10 @@ def test_a_duplicated_numeric_blanks_the_duplicate_alone():
     alone = _fit({"x": features["x"], "x1": Numeric()}, X[["x", "x1"]], Y)
     assert _blank(model, X, Y) == {"x2": [0]}
     assert _rows(model)["x1"] == pytest.approx(_rows(alone)["x1"], rel=1e-8)
-    assert "x2 is aliased with x1: no data separates them at float64." in str(model.summary())
+    # the footnote names the held duplicate, the term it keeps and that no row separates them
+    alias, note = _footnote(model, "x2")
+    assert alias.aliased_with == ("x1",) and alias.source == "rank"
+    assert "aliased with x1" in note and "no data separates them" in note
 
 
 @pytest.mark.parametrize("case", ["nested", "duplicate"])
@@ -271,10 +314,11 @@ def test_a_level_at_one_value_holds_its_slope_alone():
     level = next(g for g in model._groups if g.name == "f")
     np.testing.assert_allclose(se["f"], oracle[level.sl], rtol=1e-8)
     np.testing.assert_allclose(se["x:f[E]"], oracle[group.sl], rtol=1e-6)
-    assert (
-        "x:f[E]'s unpenalised part is aliased with f: level E of f has 1 distinct value of x."
-        in (" ".join(str(model.summary()).split()))
-    )
+    # the footnote names the held smooth part, its partner, the level and its one value of x
+    alias, note = _footnote(model, "x:f[E]'s unpenalised part")
+    assert alias.aliased_with == ("f",) and alias.source == "construction"
+    assert "aliased with f" in note and "level E of f" in note
+    assert "1 distinct value of x" in note
 
 
 def _republish(model, decomposition) -> None:
@@ -335,9 +379,11 @@ def test_a_level_at_one_value_of_a_numeric_by_level_takes_one_decision_on_any_ke
         )
         assert model.result.effective_df == pytest.approx(9.0, abs=1e-8)
         assert model.result.beta[-1] == 0.0
-        assert "x:f[E] is aliased with f: level E of f has 1 distinct value of x." in str(
-            model.summary()
-        )
+        # the footnote names the blank coefficient, its partner, the level and its one value
+        alias, note = _footnote(model, "x:f[E]")
+        assert alias.coordinate == model._dm.p - 1 and alias.aliased_with == ("f",)
+        assert "aliased with f" in note and "level E of f" in note
+        assert "1 distinct value of x" in note
 
 
 def test_basis_functions_without_data_or_penalty_are_blank_with_their_count():
@@ -531,6 +577,47 @@ def _redecide(model):
     )
 
 
+def _structured_rows(model, W) -> tuple[np.ndarray, np.ndarray]:
+    """``B = sqrt(W) X_c`` (``X_c`` centred at ``W``) and the penalty ``S``, dense, of a structured fit."""
+    from superglm.model import state_ops
+
+    state = state_ops.retained_linear_state(model)
+    n = model._dm.n
+    X = np.hstack([np.asarray(m.toarray(), float).reshape(n, -1) for m in model._dm.group_matrices])
+    B = np.sqrt(W)[:, None] * (X - (W @ X) / np.sum(W))
+    S = state_ops._structured_penalty_product(state.penalized_operator)(np.eye(X.shape[1]))[0]
+    return B, S
+
+
+def _stand_in_record(model, directions, W, B, S):
+    """The structured fit's record decided at weights ``W`` by a factor that truncated ``directions``.
+
+    The stand-in inverts the dense ``H = B'B + S`` (``_structured_rows``) off ``directions`` and
+    presents them as its only truncated ones, so the owner reads exactly those whatever the
+    fit's own factor truncated.  Its condition estimate (it only enters the accuracy note) is 1.
+    """
+    from types import SimpleNamespace
+
+    from superglm.model import state_ops
+
+    state = state_ops.retained_linear_state(model)
+    H = B.T @ B + S
+    complement = np.linalg.svd(directions, full_matrices=True)[0][:, directions.shape[1] :]
+    inverse = complement @ np.linalg.solve(complement.T @ H @ complement, complement.T)
+    factor = SimpleNamespace(
+        shape=H.shape,
+        rank=H.shape[0] - directions.shape[1],
+        schur_condition_estimate=1.0,
+        null_directions=lambda: directions,
+        solve=lambda vectors: inverse @ vectors,
+        selected_inverse_diagonal=lambda indices: np.diag(inverse)[indices],
+    )
+    forced = dataclasses.replace(state, profiled_factor=factor, identifiability=None)
+    return state_ops._structured_identifiability(
+        model, forced, W, publish=True, residual=state_ops._stepped_residual(model, W)
+    )
+
+
 def test_a_structured_fit_reads_its_truncated_directions_alone(monkeypatch):
     """Five one-row ``sz`` levels among 60: the rows are read on the factor's 4 truncated directions.
 
@@ -600,42 +687,96 @@ def test_a_dense_alias_reads_the_grams_undecided_direction_alone(monkeypatch):
     assert [alias.term for alias in record.aliases] == ["x2"]
 
 
-def test_a_near_alias_is_fitted_from_its_undecided_direction(monkeypatch):
-    """``z = x + 1e-8 h``: the Gram cannot tell its smallest direction from zero; the rows can.
+def _near_alias():
+    """``z = x + 1e-8 h`` on the dense solver, and the least-squares oracle of ``[1, x, z]``.
 
-    The Jacobi-scaled design has singular value ``7e-9`` there, its Gram ``5e-17``, under the
-    Gram's formation bound, so the dense solver truncates it; read from the rows it clears the
-    rounding bound (``7e-13``), so the penalised fit identifies ``z`` and the fit takes the step
-    the rows give along it (``identifiability.WeakDirections``).  Coefficients and SEs are the
-    least-squares fit's, from a QR of ``[1, x, z]`` (``numpy.linalg.lstsq``; ``kappa u`` ~ 1e-8,
-    rtol 1e-6), and one direction is read.  At ``1d18eaf47`` ``z`` was blank as fixed by the
-    solver's rank decision, and ``x`` showed the SE of the fit without ``z``, eight orders too
-    small.  Mutation: skipping the step (``WeakDirections.step`` zero) leaves ``z`` at zero.
+    Returns the fit, its rows, the design, held-out rows with theirs, and the oracle's
+    coefficients (``numpy.linalg.lstsq``) and SEs (from a QR of the design).
     """
     draws = np.random.default_rng(11).standard_normal((8, 3000))
     h, x = draws[4], draws[5]
     frame = pd.DataFrame({"x": x, "z": x + 1e-8 * h})
+    held = pd.DataFrame({"x": draws[1], "z": draws[1] + 1e-8 * draws[0]})
     y = 1.0 + 0.5 * x + 3e-6 * h + 0.5 * draws[7]
     model = SuperGLM(family="gaussian", features={"x": Numeric(), "z": Numeric()})
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         model.fit(frame, y)
-    design = np.column_stack((np.ones_like(x), frame["x"], frame["z"]))
+    design, held_design = (
+        np.column_stack((np.ones(len(rows)), rows["x"], rows["z"])) for rows in (frame, held)
+    )
     coefficients, residual, _, _ = np.linalg.lstsq(design, y, rcond=None)
-    r = np.linalg.qr(design)[1]
-    inverse = np.linalg.inv(r)
+    inverse = np.linalg.inv(np.linalg.qr(design)[1])
     scale = float(residual[0]) / (len(y) - 3)
     se = np.sqrt(scale * np.sum(inverse * inverse, axis=1))
-    beta = np.r_[model.result.intercept, model.result.beta]
-    np.testing.assert_allclose(beta, coefficients, rtol=1e-6)
+    return model, frame, y, design, (held, held_design), coefficients, se
+
+
+def _near_alias_se(model, frame, y) -> np.ndarray:
     metrics = model.metrics(frame, y)
-    ours = np.r_[metrics.intercept_se, metrics.coefficient_se["x"], metrics.coefficient_se["z"]]
-    np.testing.assert_allclose(ours, se, rtol=1e-6)
+    return np.r_[metrics.intercept_se, metrics.coefficient_se["x"], metrics.coefficient_se["z"]]
+
+
+def test_a_near_alias_is_fitted_from_its_undecided_direction():
+    """``z = x + 1e-8 h``: the Gram cannot tell its smallest direction from zero; the rows can.
+
+    The Jacobi-scaled design has singular value ``7e-9`` there, its Gram ``5e-17``, under the
+    Gram's formation bound, so the dense solver truncates it; read from the rows it clears the
+    rounding bound (``7e-13``), so the penalised fit identifies ``z`` and the fit takes the step
+    the rows give along it (``identifiability.WeakDirections``).  The fit is the least-squares
+    fit of ``[1, x, z]``: its fitted values and held-out predictions are the oracle's to about
+    ``kappa u`` of their size (``kappa`` the Jacobi-scaled design's condition, ``2e8``; a
+    least-squares fit's values move by ``O(kappa)`` times a perturbation, Higham 2002, Thm 20.1),
+    its normal equations hold to the rounding of evaluating them (``gamma_(n+4)``, componentwise),
+    and its SEs are the oracle's (``kappa u`` ~ 1e-8, rtol 1e-6).  At ``1d18eaf47`` ``z`` was
+    blank as fixed by the solver's rank decision, and ``x`` showed the SE of the fit without
+    ``z``, eight orders too small.  Mutation: skipping the step (``WeakDirections.step`` zero)
+    leaves ``z`` at zero, which moves the predictions by ``3e-3``.
+    """
+    model, frame, y, design, (held, held_design), coefficients, se = _near_alias()
+    condition = np.linalg.cond(design / np.linalg.norm(design, axis=0))
+    for rows, rows_design in ((frame, design), (held, held_design)):
+        reference = rows_design @ coefficients
+        error = np.max(np.abs(model.predict(rows) - reference))
+        assert error <= 10.0 * condition * U * np.max(np.abs(reference))
+    beta = np.r_[model.result.intercept, model.result.beta]
+    residual = y - design @ beta
+    magnitude = np.abs(design).T @ (np.abs(residual) + np.abs(design) @ np.abs(beta))
+    assert np.max(np.abs(design.T @ residual) / magnitude) <= _gamma(len(y) + 4)
+    np.testing.assert_allclose(_near_alias_se(model, frame, y), se, rtol=1e-6)
     published = model._fit_inference_info["identifiability"]
     assert published.aliases == () and published.weak is not None and published.weak.fitted
+
+
+@pytest.mark.parametrize("kept", [True, False], ids=["kept", "truncated"])
+def test_a_near_alias_reads_one_direction_whether_the_solver_kept_it_or_not(kept, monkeypatch):
+    """``z = x + 1e-8 h`` with the solver's decision forced both ways: one direction is read.
+
+    The fit's formed Gram is decomposed with the near alias kept (a ridge of ``1e-13`` of the
+    diagonal) or truncated (a rank cut of ``1e-8``).  Either way that one direction is all the
+    decomposition leaves undecided (a kept eigenvalue under the formation bound is recomputed as
+    undecided, ``state_ops._dense_base``), so the publication reads one direction from the rows,
+    once, and the SEs are the least-squares oracle's.  At ``633289397`` the owner factored all of
+    ``X_F`` from the rows.
+    """
+    from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_gram
+
+    model, frame, y, design, _, _, se = _near_alias()
+    centred = design[:, 1:] - design[:, 1:].mean(axis=0)
+    hessian = centred.T @ centred  # unpenalised Gaussian: ``H = X_c'X_c``
+    if kept:
+        decomposition = decompose_gram(hessian + 1e-13 * np.diag(np.diag(hessian)))
+        assert decomposition.rank == decomposition.width
+    else:
+        policy = dataclasses.replace(SHARED_RANK_POLICY, gram_rcond=1e-8)
+        decomposition = decompose_gram(hessian, policy=policy)
+        assert decomposition.rank == decomposition.width - 1
     widths = _row_passes(monkeypatch)
-    record = _redecide(model)
+    _republish(model, decomposition)
+    record = model._fit_inference_info["identifiability"]
     assert widths == [1] and record.row_directions == 1
+    assert record.aliases == () and record.weak is not None
+    np.testing.assert_allclose(_near_alias_se(model, frame, y), se, rtol=1e-6)
 
 
 # ------------------------------------------------------------------ one gauge
@@ -646,17 +787,35 @@ def test_fit_at_its_default_lambda_publishes_the_owners_constraint():
     (stage 1, follow-up 3); the record's gauge moves the coefficients along the alias onto the
     later term's constraint (``identifiability.Gauge``), so ``f[E]`` reports its coefficient and
     the SE of the fit with that constraint held, as ``fit_reml`` does, and no fitted value
-    moves.  Mutation: no gauge published blanks ``f[E]`` and reports it at zero.
+    moves.  The published coefficients are ``fl(beta - N s)``, ``s = (G'N)^-1 G' beta``, so
+    ``G'`` of them is zero to the rounding of forming ``s``, ``N s``, the difference and the
+    product itself: within ``3 gamma_(p+2) |G|'(|beta| + |N||s|)``.  Mutation: no gauge published
+    blanks ``f[E]`` and reports it at zero; a gauge not applied leaves ``G' beta`` at ``1e2``.
     """
+    from superglm.solvers.identifiability import Gauge
+
+    moves: list[tuple[np.ndarray, np.ndarray]] = []
+    coefficients = Gauge.coefficients
+
+    def recorded(gauge, beta, intercept):
+        moved = coefficients(gauge, beta, intercept)
+        moves.append((moved[0], moved[2]))
+        return moved
+
     X = pd.DataFrame({"x": np.where(LEVEL == "E", 5.0, X_SPREAD), "f": LEVEL})
-    model = _fit({"x": Spline(n_knots=6), "f": Categorical()}, X, Y, interactions=[("x", "f")])
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Gauge, "coefficients", recorded)
+        model = _fit({"x": Spline(n_knots=6), "f": Categorical()}, X, Y, interactions=[("x", "f")])
     record = model._fit_inference_info["identifiability"]
     assert record.gauge is not None
     assert _blank(model, X, Y) == {}
     level = next(g for g in model._groups if g.name == "f")
     functionals = record.gauge.functionals
-    assert abs(float(functionals[:, 0] @ model.result.beta)) <= 1e-12
-    assert model.result.beta[level.start + 3] != 0.0
+    beta = model.result.beta
+    step = next(step for moved, step in moves if np.array_equal(moved, beta))
+    G, null = np.abs(functionals[:, 0]), np.abs(record.gauge.null)
+    allowance = 3.0 * _gamma(len(beta) + 2) * float(G @ np.abs(beta) + G @ (null @ np.abs(step)))
+    assert abs(float(functionals[:, 0] @ beta)) <= allowance
     np.testing.assert_allclose(
         model.metrics(X, Y).coefficient_se["f"],
         _dense_constraint_se(model, functionals)[level.sl],
@@ -737,10 +896,14 @@ def test_a_near_duplicate_column_is_fitted_as_mgcv_fits_it():
     The fixture is mgcv 1.9-3 run on superglm's own design and penalty at the pinned lambda
     (``paraPen``).  The dense solver truncates the pair's difference (its Gram eigenvalue is
     below the formation bound); the rows identify it, so the fit takes their step along it and
-    reports its variance (``identifiability.WeakDirections``): no blank, the coefficients near
-    ``+-9e5``, every SE^2 / phi mgcv's ``Vp / sig2`` and the EDF and scale mgcv's (rtol 1e-6:
-    the direction's curvature is read from the rows to ``kappa u`` ~ 1e-8).  At ``1d18eaf47``
-    ``x2`` was blank and ``x1`` showed SE 0.0224 against mgcv's 2.2e6.
+    reports its variance (``identifiability.WeakDirections``): no blank, every SE^2 / phi
+    mgcv's ``Vp / sig2`` and the EDF and scale mgcv's (rtol 1e-6: the direction's curvature is
+    read from the rows to ``kappa u`` ~ 1e-8).  The coefficients near ``+-9e5`` cancel in every
+    prediction, so the fit is compared where a user reads it: the link predictions on the
+    training rows and on held-out rows are mgcv's to about ``kappa u`` of their size (``kappa``
+    the Jacobi-scaled design's condition, ``2.5e8``; Higham 2002, Thm 20.1), each engine
+    carrying that much.  At ``1d18eaf47`` ``x2`` was blank and ``x1`` showed SE 0.0224 against
+    mgcv's 2.2e6.  Mutation: no step along the direction moves the predictions by ``3e-2``.
     """
     fixture = json.loads((FIXTURES / "mgcv_near_duplicate_and_aliased_columns.json").read_text())
     oracle = fixture["near_duplicate"]
@@ -765,9 +928,16 @@ def test_a_near_duplicate_column_is_fitted_as_mgcv_fits_it():
     )
     vp = np.diag(np.asarray(oracle["Vp"])) / oracle["sig2"]
     np.testing.assert_allclose(se**2 / model.result.phi, vp, rtol=1e-6)
-    beta = np.r_[model.result.intercept, model.result.beta]
     mgcv = np.asarray(oracle["coef"])
-    assert np.max(np.abs(beta - mgcv)) <= 1e-6 * np.max(np.abs(mgcv))
+    rows = np.random.default_rng(2)
+    z, x1, h = rows.uniform(size=500), rows.normal(size=500), rows.normal(size=500)
+    held = pd.DataFrame({"x1": x1, "x2": x1 + oracle["d"] * h, "z": z})
+    training = np.column_stack((np.ones(len(y)), design))
+    condition = np.linalg.cond(training / np.linalg.norm(training, axis=0))
+    for frame, rows_design in ((X, training), (held, _design_rows(model, held))):
+        reference = rows_design @ mgcv
+        error = np.max(np.abs(model.predict(frame) - reference))
+        assert error <= 10.0 * condition * U * np.max(np.abs(reference))
     assert model.result.phi == pytest.approx(oracle["sig2"], rel=1e-6)
     assert model.result.effective_df == pytest.approx(oracle["edf"], rel=1e-6)
 
@@ -827,16 +997,21 @@ def test_an_exact_three_column_alias_takes_one_constraint_in_any_row_order(d, he
 def test_a_large_sz_fit_reads_only_its_undecided_directions(case, monkeypatch):
     """Zero-claim ``sz`` levels and a near-duplicate beside an ``sz`` term: a few rows read.
 
-    Five Poisson levels with no claims: their working weights vanish where the fit stopped, so
-    the weighted rows tell a direction's curvature from zero or not depending on that stop (a
-    separation, which the exact test of stage 6b decides); the design identifies every one, so
-    none is an alias: each is held as not resolved at float64 or reported with its curvature,
-    never moved along, with no coordinate blank.  ``zz = z + 1e-8 h``:
-    the rows identify the pair and fit it.  Either way the owner reads only the factor's
-    truncated directions (a pass of at most two columns, twice) and forms one small construction
-    map per term they reach.  At ``1d18eaf47`` both fell back to factoring the whole
-    restricted design from the rows (2003 columns at 1000 levels, 1.6 GiB; the zero-claim case
-    then refused the gauge and blanked 2306 coefficients).
+    Five Poisson levels with no claims: their working weights vanish (where the fit stops, a
+    separation, which the exact test of stage 6b decides).  The decision is taken here at those
+    rows' weights set to zero, by a stand-in factor that truncated the directions it cannot
+    certify (``_stand_in_record``): those whose Jacobi-scaled ``[B; S]`` singular value is
+    under ``sqrt(u)``, so their curvature is under the rounding of ``H``.  The ones under
+    ``gamma_n``, which no weighted row reaches, are not resolved at float64: the design at unit
+    weight identifies each, so none is an alias, none is moved along and no coordinate is blank;
+    the rest the rows identify, with their curvature.  ``zz = z + 1e-8 h``: the factor truncates
+    the pair's difference, and the rows identify it and fit it.  Either way the owner reads only
+    the truncated directions (a pass of their width, at most twice) and forms one small
+    construction map per term they reach.  At ``1d18eaf47`` both fell back to factoring the
+    whole restricted design from the rows (2003 columns at 1000 levels, 1.6 GiB; the zero-claim
+    case then refused the gauge and blanked 2306 coefficients).  Mutations: candidates of every
+    coordinate fail the work count; skipping the design's read at unit weight moves the
+    zero-claim directions as aliases.
     """
     from superglm import FactorSmooth, LambdaPolicy
     from superglm.model import state_ops
@@ -889,9 +1064,20 @@ def test_a_large_sz_fit_reads_only_its_undecided_directions(case, monkeypatch):
         warnings.simplefilter("ignore")
         model.fit_reml(frame, y)
     assert not any(np.any(np.isnan(v)) for v in model.metrics(frame, y).coefficient_se.values())
-    published = model._fit_inference_info["identifiability"]
-    truncated = state_ops.retained_linear_state(model).profiled_factor.null_directions().shape[1]
-    assert 0 < truncated <= 5
+    W = np.array(state_ops._solver_space_working_weights(model), dtype=np.float64)
+    if case == "zero_claims":
+        W[g < 5] = 0.0
+        B, S = _structured_rows(model, W)
+        jacobi = np.sqrt(np.diag(B.T @ B + S))
+        _, singular, right = np.linalg.svd(np.vstack((B, S)) / jacobi, full_matrices=False)
+        directions = right[singular <= np.sqrt(U) * singular[0]].T / jacobi[:, None]
+        exact = int(np.count_nonzero(singular <= _gamma(len(y)) * singular[0]))
+    else:
+        assert [group.name for group in model._groups[:2]] == ["z", "zz"]
+        B, S = _structured_rows(model, W)
+        directions = np.zeros((B.shape[1], 1))
+        directions[[0, 1], 0] = np.sqrt(0.5) * np.array([1.0, -1.0])  # ``z - zz``
+    truncated = directions.shape[1]
     formed: list[str] = []
     construction = state_ops._raw_construction
 
@@ -901,14 +1087,20 @@ def test_a_large_sz_fit_reads_only_its_undecided_directions(case, monkeypatch):
 
     monkeypatch.setattr(state_ops, "_raw_construction", counted)
     widths = _row_passes(monkeypatch)
-    record = _redecide(model)
+    record = _stand_in_record(model, directions, W, B, S)
     assert widths and all(width <= truncated for width in widths) and len(widths) <= 2
     assert record.row_directions == truncated
     # one small map per term the directions reach, never one per level
     assert len(formed) == len(set(formed)) <= 3
+    assert record.coefficient_identified().all()
     if case == "zero_claims":
-        assert {a.source for a in published.aliases} <= {"float64"}
-        assert published.weak is None or not published.weak.fitted
-        assert published.gauge is None or not np.any(published.gauge.moved)
+        assert 0 < exact < truncated
+        assert len(record.aliases) == exact
+        assert {a.source for a in record.aliases} == {"float64"}
+        assert record.gauge is not None and not np.any(record.gauge.moved)
+        assert record.weak is not None and record.weak.root.shape[1] == truncated - exact
+        assert not record.weak.fitted  # Poisson: the publication resumes IRLS on them
     else:
-        assert published.aliases == () and published.weak is not None and published.weak.fitted
+        assert record.aliases == () and record.gauge is None
+        assert record.weak is not None and record.weak.fitted
+        assert record.weak.root.shape[1] == 1
