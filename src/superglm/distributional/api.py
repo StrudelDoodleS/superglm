@@ -1532,7 +1532,9 @@ class SuperLSS:
         bin them and each moment gets a bootstrap band, so a band clear of zero
         (mean), of one (standard deviation) or of zero (skewness) marks the
         region where the fit is wrong and in which moment.  ``sample_weight``
-        is the aggregation weight of the residual payload; further keywords
+        is read as :meth:`residual_set` reads it: a prior weight is inside each
+        row's law and the row counts once, a frequency weight replicates the
+        row; further keywords
         (``n_bins``, ``n_boot``) reach the builder.  ``truncation`` and
         ``censored`` are the bounds the model was fitted with, read as in
         :meth:`fit`; pass them for rows recorded under them.
@@ -1654,9 +1656,11 @@ class SuperLSS:
         expected count of exceedances match the realised one at each threshold,
         does each predicted quantile leave the right fraction of rows above it,
         and is the exceedance forecast reliable (the CORP diagram of
-        Dimitriadis, Gneiting and Jordan 2021).  ``sample_weight`` is the
-        aggregation weight; ``levels``, ``thresholds`` and ``quantile_grid``
-        reach the builder.
+        Dimitriadis, Gneiting and Jordan 2021).  ``sample_weight`` is read as
+        :meth:`residual_set` reads it: a prior weight is inside each row's law
+        and the row counts once in every table, a frequency weight replicates
+        the row; ``levels``, ``thresholds`` and ``quantile_grid`` reach the
+        builder.
         """
         require_scalar_response(self.family, "calibration")
         self._warn_bounds_unread("calibration", None, None, takes_bounds=False)
