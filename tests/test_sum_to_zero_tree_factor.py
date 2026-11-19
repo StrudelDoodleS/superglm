@@ -887,25 +887,25 @@ def _negative_level(W, levels):
         "weightless",
     ],
 )
-def test_coefficient_estimability_is_the_data_s(kwargs) -> None:
-    """Estimable when no null vector of ``[1, X]`` over the rows with ``w != 0`` moves it.
+def test_truncated_directions_are_null_vectors_of_the_hessian(kwargs) -> None:
+    """Every direction the tree truncates is a null vector of ``H``, one per rank lost.
 
-    The package's rule (the dense solver and the exact reference read the
-    data alone), on the balance tree of the data: the same leaf triangles
-    (``sqrt|w|`` rows, never the signed middle) without the penalty, its
-    certified nulls confirmed on the rows.  Reference: the
-    column-equilibrated SVD of ``sqrt|w| [1, X]``, null below ``max(n, p)
-    eps`` of the largest singular value (``dgesdd``'s backward error),
-    touching a coordinate above ``sqrt(eps)``.  Mutations: the fit's own
-    (penalized) aliases deciding; the signed rows' system taken as the data
-    tree's (a level of negative curvature has no unpenalized signed factor).
+    ``null_directions`` lifts each border null to the levels by the down-sweep
+    and moves its intercept entry to raw coordinates; ``solvers.identifiability``
+    reads every coordinate they reach as left undetermined by the tree's
+    minimum-norm split.  Reference: the fixture's dense ``H`` (signed rows
+    included), ``||H v|| <= p^2 eps ||H|| ||v||``.  Mutation: the levels left
+    unlifted (the border null alone) leaves ``H v`` at 0.3 to 0.4 of ``||H||``
+    on the one-row and weightless levels, and no direction at all on two thin
+    siblings.
     """
     case = _case(**kwargs)
     factor = SumToZeroTreeFactor(case["system"], case["penalized"])
-    _, X, _ = _dense(case)
-    A = np.sqrt(np.abs(case["W"]))[:, None] * X
-    A = A / np.maximum(np.linalg.norm(A, axis=0), np.finfo(np.float64).tiny)
-    _, singular, rows = np.linalg.svd(A, full_matrices=False)
-    null = rows[singular <= max(A.shape) * EPS * singular[0]]
-    expected = ~np.any(np.abs(null) > np.sqrt(EPS), axis=0)
-    np.testing.assert_array_equal(factor.coefficient_estimable(), expected)
+    H, _, _ = _dense(case)
+    directions = factor.null_directions()
+    p = H.shape[0]
+    assert directions.shape == (p, p - factor.rank)
+    norms = np.linalg.norm(directions, axis=0)
+    assert np.all(norms > 0.0)
+    residual = np.linalg.norm(H @ directions, axis=0)
+    assert np.all(residual <= p * p * EPS * np.linalg.norm(H, 2) * norms)

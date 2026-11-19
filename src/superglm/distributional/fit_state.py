@@ -56,6 +56,7 @@ from superglm.distributional.weights import (
     WeightContract,
     WeightProvenance,
 )
+from superglm.solvers.identifiability import functional_identified
 
 
 def _positive_integer(value: Any, *, name: str) -> int:
@@ -488,24 +489,30 @@ def _compact_null(null: JointNullModel) -> CompactNullModel:
     )
 
 
-def _block_coefficients_estimable(solver_result: DenseSolverResult, block: slice) -> bool:
-    """Whether the fit estimated every coefficient of ``block`` within the face it kept.
+def _block_coefficients_identified(solver_result: DenseSolverResult, block: slice) -> bool:
+    """Whether the fit determined every coefficient of ``block`` within the face it kept.
 
-    A fit whose REML removed a term's penalized range (a random effect, or a
-    smooth's wiggle) through an exact coefficient face holds those directions
-    fixed, and the lifted terminal decomposition puts the face constraints in
-    its null space. A fixed direction is determined, not unidentified, so on a
-    face each coefficient is read as the functional ``null_basis[j] @ z`` of the
-    reduced coordinates ``z``, judged by the reduced decomposition's own
-    estimability decision: a coefficient the face fixes completely is the zero
-    functional and passes, and one it fixes only partly (a smooth's wiggle) is
-    judged by the part left free. No rank is recomputed.
+    Each coefficient is judged by ``solvers.identifiability.functional_identified`` on the
+    terminal decomposition.  A fit whose REML removed a term's penalized range (a random
+    effect, or a smooth's wiggle) through an exact coefficient face holds those directions
+    fixed, and the lifted terminal decomposition puts the face constraints in its null space.
+    A fixed direction is determined, not unidentified, so on a face each coefficient is read
+    as the functional ``null_basis[j] @ z`` of the reduced coordinates ``z``, judged on the
+    reduced decomposition: a coefficient the face fixes completely is the zero functional and
+    passes, and one it fixes only partly (a smooth's wiggle) is judged by the part left free.
+    No rank is recomputed.
     """
     face = solver_result.coefficient_face
     if face is None:
-        return bool(solver_result.terminal_rank.coefficient_estimable()[block].all())
-    reduced = solver_result.terminal_reduced_rank
-    return all(reduced.is_estimable(face.null_basis[j]) for j in range(block.start, block.stop))
+        decomposition, functionals = solver_result.terminal_rank, None
+    else:
+        decomposition, functionals = solver_result.terminal_reduced_rank, face.null_basis
+    width = decomposition.width
+    for j in range(block.start, block.stop):
+        contrast = np.eye(width)[j] if functionals is None else functionals[j]
+        if not functional_identified(decomposition, contrast):
+            return False
+    return True
 
 
 def _limit_row_disclosure(
@@ -519,15 +526,15 @@ def _limit_row_disclosure(
     The family counts the rows its kernel treats as at the limit, where the
     parameter has no expected information, and names the parameter. That count
     alone proves nothing: the other rows may identify every direction. The
-    fit's own terminal rank decision says which coefficients are estimable (see
-    ``_block_coefficients_estimable``: ``solver_result.terminal_rank``, the
+    fit's own terminal rank decision says which coefficients are identified (see
+    ``_block_coefficients_identified``: ``solver_result.terminal_rank``, the
     shared rank policy on the final penalized curvature, or within the retained
     face when REML removed a penalized range, such as a random effect or a
     smooth's wiggle), and a parameter is unidentified when one of its
     coefficients is not: a nonsingular information matrix is
     the condition for local identification (Rothenberg, *Econometrica* 39(3),
     1971). No information is evaluated here, and a coefficient the fit's rank
-    policy treats as estimable is not disclosed, however small its
+    policy treats as identified is not disclosed, however small its
     information. Nor is the null direction attributed to the limit rows: a
     block singular by construction (nested factors, or a level term beside
     its own factor smooth) is disclosed whenever any row is at the limit.
@@ -545,7 +552,7 @@ def _limit_row_disclosure(
     if n_limit == 0:
         return None
     state = next(state for state in layout.predictors if state.parameter_index == index)
-    if _block_coefficients_estimable(solver_result, state.coefficient_slice):
+    if _block_coefficients_identified(solver_result, state.coefficient_slice):
         return None
     if state.intercept_index is None:
         constant_offered = n_limit < len(theta)

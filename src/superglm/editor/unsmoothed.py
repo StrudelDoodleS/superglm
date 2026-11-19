@@ -33,6 +33,7 @@ from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.rebuild import clone_with_replaced_features
 from superglm.features.spline import _SplineBase
 from superglm.model.fit_state import fitted_lambda2
+from superglm.solvers.identifiability import functional_identified
 
 _NOT_SMOOTHED = "Unsmoothed is for a spline term: {term!r} has no smoothing to switch off."
 _ORDERED = (
@@ -174,9 +175,10 @@ def _curve_determined(model, name: str) -> bool:
     """Whether the refit's penalised system determines every coefficient of ``name``.
 
     A coefficient selection set to zero is determined; one the fit kept is
-    when its coordinate is estimable on the fit's penalised Gram, the rank
-    decision the fit itself made. A fit that kept no rank record cannot say,
-    and is taken as determined.
+    when the fit's penalised Gram identifies its coordinate
+    (``solvers.identifiability.functional_identified``), the rank decision the
+    fit itself made. A fit that kept no rank record cannot say, and is taken as
+    determined.
     """
     rank = getattr(model.result, "rank_info", None)
     if rank is None:
@@ -193,7 +195,7 @@ def _curve_determined(model, name: str) -> bool:
                 continue
             contrast = np.zeros(selected.size)
             contrast[position[column]] = 1.0
-            if not rank.augmented.is_estimable(contrast):
+            if not functional_identified(rank.augmented, contrast):
                 return False
     return True
 

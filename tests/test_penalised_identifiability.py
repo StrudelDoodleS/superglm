@@ -156,6 +156,68 @@ def test_a_duplicated_numeric_blanks_the_duplicate_alone():
     assert "x2 is aliased with x1: no data separates them at float64." in str(model.summary())
 
 
+@pytest.mark.parametrize("case", ["nested", "duplicate"])
+def test_superlss_drops_the_coefficient_superglm_blanks(case):
+    """SuperGLM and SuperLSS take one alias decision on nested factors and on ``x2 = 2 x1``.
+
+    SuperGLM's record names the later term's coordinate (``solvers.identifiability``);
+    SuperLSS's terminal rank drops that coordinate, refits without it as a design alias
+    (``solver._drops_design_aliases``) and publishes it at zero.
+    """
+    from superglm import SuperLSS, cat, s, term
+    from superglm.distributional import GaussianLS
+
+    if case == "nested":
+        g = np.where(np.isin(LEVEL, ["A", "B"]), "P", "Q")
+        X = pd.DataFrame({"x": X_SPREAD, "f": LEVEL, "g": g})
+        features = {"x": Spline(n_knots=6), "f": Categorical(), "g": Categorical()}
+        location, expected = (s("x"), cat("f"), cat("g")), {"g"}
+    else:
+        X = pd.DataFrame({"x": X_SPREAD, "x1": X1, "x2": 2.0 * X1})
+        features = {"x": Spline(n_knots=6), "x1": Numeric(), "x2": Numeric()}
+        location, expected = (s("x"), term("x1", Numeric()), term("x2", Numeric())), {"x2"}
+    glm = _fit(features, X, Y)
+    owner = {
+        next(g.name for g in glm._groups if g.start <= alias.coordinate < g.end)
+        for alias in glm._fit_inference_info["identifiability"].aliases
+    }
+    family = GaussianLS(scale_floor=0)
+    lss = SuperLSS(family, family.location(*location), family.scale())
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        lss.fit_reml(X, Y)
+    state = lss._require_fitted().fit_state
+    result = state.solver_result
+    dropped = np.flatnonzero(result.terminal_rank.structural_aliases)
+    terms = {
+        name.split(":", 1)[1]
+        for name, block in state.layout.term_slices.items()
+        if any(block.start <= index < block.stop for index in dropped)
+    }
+    assert owner == terms == expected
+    assert result.converged and np.all(result.coefficients[dropped] == 0.0)
+
+
+def test_a_truncated_direction_on_a_column_of_tiny_curvature_is_read():
+    """Two truncated directions, one on a column whose Jacobi scale is 1e-9 of the other's.
+
+    A structured factor truncates a column carried by rounding-level weights beside an
+    ordinary alias.  Scaled by ``sqrt(diag H)`` and read as one basis, the second direction's
+    singular value falls under the share floor and its column looks determined; each
+    direction is normalised first, so both are read (``fixed_coordinates``).  Mutation:
+    without the normalisation coordinate 1 is reported determined.
+    """
+    from superglm.solvers.identifiability import TruncatedDecomposition, fixed_coordinates
+
+    decomposition = TruncatedDecomposition(
+        null_vectors=np.eye(3)[:, :2],
+        rank=1,
+        column_scale=np.array([1.0, 1e-9, 1.0]),
+        pre_truncation_condition=1.0,
+    )
+    assert fixed_coordinates(decomposition).tolist() == [0, 1]
+
+
 def test_a_level_at_one_value_blanks_its_slope_alone():
     """Level E sits at one ``x``: its slope coordinate is aliased with ``f[E]``, which keeps an SE.
 

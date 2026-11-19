@@ -11,9 +11,6 @@ from superglm.solvers._structured.assembly import (
 from superglm.solvers._structured.balance_tree import (
     SumToZeroLeafSystem,
 )
-from superglm.solvers._structured.geometry import (
-    _orthonormal_column_span,
-)
 from superglm.solvers._structured.operators import (
     SumToZeroBlockOperator,
     compact_operator_diagonal,
@@ -167,22 +164,6 @@ def test_a_non_finite_sz_operator_block_is_refused_as_curvature(bad) -> None:
                 n_levels - 1, block_size
             ),
         )
-
-
-def test_orthonormal_column_span_is_invariant_to_candidate_scale() -> None:
-    candidates = np.array(
-        [
-            [1.0, 0.0],
-            [0.0, 1e-14],
-            [0.0, 0.0],
-            [0.0, 0.0],
-        ]
-    )
-
-    span = _orthonormal_column_span(candidates)
-
-    assert span.shape == (4, 2)
-    np.testing.assert_allclose(span @ span.T, np.diag([1.0, 1.0, 0.0, 0.0]))
 
 
 # ``tilt**2`` sets the lifted null eigenvalue and these two points bracket

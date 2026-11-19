@@ -29,9 +29,6 @@ from superglm.solvers._structured.block_leaves import (
     FactorSmoothPenalizedOperator,
     factor_smooth_prior_statistics,
 )
-from superglm.solvers._structured.geometry import (
-    cancelled_column_row_norms,
-)
 from superglm.solvers._structured.layout import (
     FactorSmoothLeafLayout,
     get_structured_layout,
@@ -453,7 +450,7 @@ class _IRLSDirectStructuredStep(_IRLSDirectStep):
         materialised.  An fREML performance iteration publishes the system its
         last step solved, every other fit the export rows' system.
         """
-        W, dm, p, gms, groups = fit.W, fit.dm, fit.p, fit.gms, fit.groups
+        W, p, gms, groups = fit.W, fit.p, fit.gms, fit.groups
         _return_working_system, cache_out = fit._return_working_system, fit.cache_out
         if _return_working_system:
             structured_final = self._last_system
@@ -499,12 +496,6 @@ class _IRLSDirectStructuredStep(_IRLSDirectStep):
             cache_out["penalized_operator"] = penalized_operator
             cache_out["xtwz_small"] = structured_final.xtwz_small
             cache_out["xtwz_structured"] = structured_final.xtwz_structured
-            if not _return_working_system and isinstance(structured_final, FactorSmoothLeafSystem):
-                # The retained estimability rule reads these (a nested chain
-                # certifies its border on its own leaf-shifted moments).
-                cache_out["structured_row_column_norm"] = cancelled_column_row_norms(
-                    centred_data_operator(structured_final), dm, W
-                )
             cache_out["XtWz"] = XtWz
             cache_out["XtW1"] = XtW1
             cache_out["sum_W"] = sum_W

@@ -48,6 +48,7 @@ from superglm.solvers._structured.operators import (
 )
 from superglm.solvers.hessian_factor import DerivativeCrossTraceFactor, HessianFactor
 from superglm.types import PenaltyComponent
+from tests._identifiability_parity import truncated_reach
 
 EPS = np.finfo(np.float64).eps
 CHAIN = ("make", "model", "variant", "trim")
@@ -844,7 +845,7 @@ def test_pivots_logdet_and_inverse_diagonal(name):
     if name in WELL_CONDITIONED:
         scale = np.sqrt(np.outer(np.diag(exact_block), np.diag(exact_block)))
         assert np.all(np.abs(block - exact_block) <= gamma * scale)
-    assert np.all(factor.coefficient_estimable())
+    assert factor.null_directions().shape == (factor.shape[0], 0)
     # Every rank decision reads Q_s = D_s Q D_s (§3.7) of the intercept-profiled
     # Q, the super-root having eliminated the intercept (one-engine design
     # §3.1).  The PSD sum knows Q to gamma_Q sqrt(Q_ii Q_jj) per entry (§3.4,
@@ -1105,7 +1106,7 @@ def test_profiled_factor_against_the_exact_centred_reference(name):
     exact = refs["trace_O1_c"] + refs["trace_low_c"]
     bound += (4 * gamma_tree + 2 * gamma_border) * math.sqrt(pc * refs["tr11_c"])
     assert abs(value - exact) <= bound
-    assert np.all(profiled.coefficient_estimable())
+    assert profiled.null_directions().shape == (profiled.shape[0], 0)
     assert np.array_equal(profiled.scaled_schur_eigenvalues(), augmented.scaled_schur_eigenvalues())
 
 
@@ -1243,7 +1244,7 @@ def test_chain_only_factor_with_an_intercept_border():
     edf = factor.inverse_operator_diagonal(data)
     S = _floats(_pair(_fraction_penalty(fx, k - 1, 1)))
     assert np.all(np.abs(edf - (1.0 - np.diag(Hinv_f @ S))) <= 2 * gamma_tree)
-    assert np.all(factor.coefficient_estimable())
+    assert factor.null_directions().shape == (factor.shape[0], 0)
     assert factor.scaled_schur_eigenvalues().shape == (0,)
 
 
@@ -1265,7 +1266,7 @@ def test_rank_deficient_border_is_truncated_by_exactly_one_direction(name):
     assert sorted(certificate.directions[0] + 1) == sorted([fx["duplicate"], q - 1])
     estimable = np.ones(p, dtype=bool)
     estimable[pair] = False
-    assert np.array_equal(factor.coefficient_estimable(), estimable)
+    assert np.array_equal(~truncated_reach(factor), estimable)
     # The null vector of H is n = [0; e_i - e_j] (identical columns, so F z = 0
     # and the null is uncoupled).  Rank decisions and the retained inverse are
     # taken in the Jacobi-scaled border coordinates (§3.7), where the null
@@ -1355,7 +1356,7 @@ def test_a_truncated_factor_maps_its_centred_null_to_raw_coordinates():
     fx = _with_border_column(fx, np.where(fx["w"] != 0.0, 0.0, 7.0))
     factor = _factor(fx)
     assert factor.rank == factor.shape[0] - 1
-    estimable = factor.coefficient_estimable()[factor.small_indices]
+    estimable = ~truncated_reach(factor)[factor.small_indices]
     assert np.array_equal(estimable, [True] * 5 + [False])
 
 
@@ -1443,10 +1444,10 @@ def test_a_border_column_carried_by_rounding_weights_is_an_exact_null_direction(
     reference = factors[0]
     exact = reference.selected_inverse_diagonal(np.arange(p))
     assert reference.rank_truncated and reference.rank == p - 1
-    assert not reference.coefficient_estimable()[p - 1]
+    assert truncated_reach(reference)[p - 1]
     for factor in factors[1:]:
         assert factor.rank == p - 1
-        assert np.array_equal(factor.coefficient_estimable(), reference.coefficient_estimable())
+        assert np.array_equal(truncated_reach(factor), truncated_reach(reference))
         assert abs(factor.logdet() - reference.logdet()) <= 8 * EPS * abs(reference.logdet())
         # the two rows moved every other statistic by at most 1e-16 of their weight
         diagonal = factor.selected_inverse_diagonal(np.arange(p))
@@ -1477,7 +1478,7 @@ def test_a_border_column_carried_by_tiny_positive_weights_keeps_its_pivot(ratio)
     eigenvalues = np.linalg.eigvalsh(scale[:, None] * (0.5 * (H + H.T)) * scale[None, :])
     assert np.sum(eigenvalues > 1e-10 * eigenvalues[-1]) == p
     assert factor.rank == p and not factor.rank_truncated
-    assert factor.coefficient_estimable()[p - 1]
+    assert not truncated_reach(factor)[p - 1]
 
 
 def test_refusals_by_the_iterate_are_linalg_errors():

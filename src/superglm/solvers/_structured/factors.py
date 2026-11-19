@@ -169,6 +169,10 @@ class _ProfiledLeafFactor(_ProfiledInterceptFactor):
         self.max_structured_inverse_block = augmented_factor.max_structured_inverse_block
         self.border_certificate = augmented_factor.border_certificate
 
+    def null_directions(self) -> NDArray:
+        """The slopes of the augmented factor's truncated directions (``null_directions``)."""
+        return self.augmented_factor.null_directions()[1:]
+
     def published(self, system: FactorSmoothLeafSystem | SumToZeroLeafSystem | None = None):
         """This factor with its augmented factor on the published ``system`` (its own, published, if ``None``)."""
         augmented = self.augmented_factor

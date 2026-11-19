@@ -1166,8 +1166,16 @@ naming what it is aliased with: a factor nested in another, a duplicated
 column, a level seen at one value of its covariate, a basis function with no
 data and no penalty. The later term absorbs the alias, as in R's `lm`; the
 coefficients beside it keep their standard errors
-(`src/superglm/solvers/identifiability.py`). The dense solver applies this;
-the structured solvers still apply the data rank below.
+(`src/superglm/solvers/identifiability.py`). Every backend reads this one
+decision. A structured fit (`fs`, `sz`, nested random effects) whose factor
+truncated nothing has certified the Hessian nonsingular, so nothing is aliased
+and the small design is never formed. Otherwise the factor publishes the
+directions it truncated, and the small design's Gram is formed through the
+retained moments. Its split along a truncated direction is the
+minimum-norm one rather than a zero on the later term, so where the Hessian is
+singular every coefficient such a direction reaches is shown as missing, where
+the dense solver shows only the one it fixed at zero. Elsewhere the two
+backends print the same standard errors.
 
 The *data rank* asks whether the data alone, ignoring the penalties, pin a
 direction down. It is a diagnostic, computed on request

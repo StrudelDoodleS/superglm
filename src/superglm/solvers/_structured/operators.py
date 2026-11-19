@@ -260,9 +260,6 @@ class CenteredBlockOperator:
     total: float
     center: NDArray
     raw_structured_cross: NDArray | None = None
-    # Centred column norms taken from the rows where the moments cancel below
-    # round-off, NaN elsewhere (geometry.cancelled_column_row_norms).
-    row_column_norm: NDArray | None = None
     shape: tuple[int, int] = field(init=False)
 
     def __post_init__(self):
@@ -275,12 +272,6 @@ class CenteredBlockOperator:
         center.setflags(write=False)
         object.__setattr__(self, "cross", cross)
         object.__setattr__(self, "center", center)
-        if self.row_column_norm is not None:
-            row_column_norm = np.array(self.row_column_norm, dtype=np.float64, copy=True)
-            if row_column_norm.shape != (p,):
-                raise ValueError("row_column_norm must match the coefficient width.")
-            row_column_norm.setflags(write=False)
-            object.__setattr__(self, "row_column_norm", row_column_norm)
         if self.raw_structured_cross is not None:
             raw_structured_cross = np.array(
                 self.raw_structured_cross,

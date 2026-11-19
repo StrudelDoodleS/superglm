@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import dataclasses
 from dataclasses import dataclass
 
 import numpy as np
-from numpy.typing import NDArray
 
 from superglm._reporting_state import (
     FactorSmoothLevelSupport,
@@ -71,26 +69,19 @@ class StructuredLinearSystemState:
         object.__setattr__(self, "support_totals", dict(self.support_totals))
 
 
-def centred_data_operator(
-    system, *, row_column_norm: NDArray | None = None
-) -> CenteredBlockOperator:
+def centred_data_operator(system) -> CenteredBlockOperator:
     """``system``'s data operator centred on its working-weighted mean, ``X~' W X~``.
 
     An ``fs`` or ``sz`` leaf system serves it on its ``c0``-shifted moments
     (``centred_data_operator``), which round at the
     columns' spread; every other system centres its raw moments on ``xtw /
-    sum_w``.  ``row_column_norm`` attaches the rows' norms of the columns whose
-    moments cancel (``geometry.cancelled_column_row_norms``).
+    sum_w``.
     """
     if isinstance(system, FactorSmoothLeafSystem | SumToZeroLeafSystem):
-        operator = system.centred_data_operator
-    else:
-        xtw = np.empty(system.operator.shape[0], dtype=np.float64)
-        xtw[system.operator.small_indices] = system.xtw_small
-        xtw[system.operator.structured_indices] = system.xtw_structured
-        operator = CenteredBlockOperator(
-            raw=system.operator, cross=xtw, total=system.sum_w, center=xtw / system.sum_w
-        )
-    if row_column_norm is not None:
-        operator = dataclasses.replace(operator, row_column_norm=row_column_norm)
-    return operator
+        return system.centred_data_operator
+    xtw = np.empty(system.operator.shape[0], dtype=np.float64)
+    xtw[system.operator.small_indices] = system.xtw_small
+    xtw[system.operator.structured_indices] = system.xtw_structured
+    return CenteredBlockOperator(
+        raw=system.operator, cross=xtw, total=system.sum_w, center=xtw / system.sum_w
+    )

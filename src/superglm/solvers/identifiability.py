@@ -83,7 +83,7 @@ class Identifiability:
     ``aliases`` are the coordinates without a standard error; every other coefficient is
     identified.  ``penalised_condition`` is the published decomposition's condition number, whose
     product with ``u`` is the standard errors' relative accuracy, and ``fixed_effect_condition``
-    that of ``X_F``.
+    that of ``X_F`` (NaN when a certificate left ``X_F`` unformed).
     """
 
     width: int
@@ -139,6 +139,56 @@ class Identifiability:
         return tuple(notes)
 
 
+@dataclass(frozen=True)
+class TruncatedDecomposition:
+    """A published decomposition of ``H`` known by the directions it truncated, rank ``rank``.
+
+    A structured factor inverts ``H`` on the complement of its truncated directions
+    ``null_vectors`` (``width x t``, the Moore-Penrose inverse of its Jacobi-scaled border), so
+    every coordinate they reach is left undetermined, as a spectral decomposition's
+    (``fixed_coordinates``).  ``column_scale`` is ``sqrt(diag H)``, and
+    ``pre_truncation_condition`` the condition number the factor certified.
+    """
+
+    null_vectors: NDArray
+    rank: int
+    column_scale: NDArray
+    pre_truncation_condition: float
+
+    @property
+    def width(self) -> int:
+        return int(self.null_vectors.shape[0])
+
+    @property
+    def active_columns(self) -> NDArray:
+        return np.arange(self.width)
+
+    def null_basis(self) -> NDArray:
+        return self.null_vectors
+
+
+def certified_identifiability(decomposition, width: int) -> Identifiability | None:
+    """The record of a fit whose structured factor certified ``H`` nonsingular; ``None`` otherwise.
+
+    A structured factor keeps full rank only on certified pivots: its border by Rump's verified
+    Cholesky for every matrix within its formation bound (``border.factor_border``), its levels
+    positive definite by construction or kept above ``20 k eps`` of their columns.  ``H`` is then
+    nonsingular, so ``null(H) = N_S null(X_F)`` is zero and every coefficient is identified, with
+    no ``X_F`` Gram formed (``N_S`` holds every ``sz`` level's line).  A dense decomposition's full
+    rank is not such a certificate, so only ``TruncatedDecomposition`` gives one.
+    """
+    if not isinstance(decomposition, TruncatedDecomposition):
+        return None
+    if decomposition.rank != decomposition.width:
+        return None
+    return Identifiability(
+        width=width,
+        aliases=(),
+        penalised_condition=float(decomposition.pre_truncation_condition),
+        fixed_effect_condition=float("nan"),
+    )
+
+
 def fixed_coordinates(decomposition) -> NDArray:
     """The coordinates a published decomposition of ``H`` leaves undetermined, in its own order.
 
@@ -163,6 +213,23 @@ def coordinates_identified(decomposition) -> NDArray:
     identified = np.ones(decomposition.width, dtype=bool)
     identified[fixed_coordinates(decomposition)] = False
     return identified
+
+
+def functional_identified(decomposition, contrast: NDArray) -> bool:
+    """Whether a published decomposition of ``H`` determines the functional ``contrast' beta``.
+
+    Wood, Pya & Saefken's criterion on the decomposition itself: in its Jacobi-scaled dual
+    coordinates the contrast has no share above the floor on its null space, which with every
+    lambda positive is ``null(H)``.  A unit contrast is identified exactly when no null direction
+    reaches its coordinate (``_reached``), whatever the decomposition's representative.
+    """
+    null = _orthonormal(decomposition, decomposition.null_basis())
+    if null.shape[1] == 0:
+        return True
+    scale = np.asarray(decomposition.column_scale, dtype=np.float64)
+    scaled = np.asarray(contrast, dtype=np.float64) / np.where(scale > 0.0, scale, 1.0)
+    norm = float(np.linalg.norm(scaled))
+    return norm == 0.0 or float(np.linalg.norm(null.T @ scaled)) <= _SHARE_FLOOR * norm
 
 
 def penalty_null_space(blocks: Sequence[NDArray], width: int) -> NDArray:
@@ -191,25 +258,33 @@ def decide_identifiability(
     width: int,
     groups: Sequence,
     null_spaces: Sequence[NDArray],
-    data_gram: NDArray,
+    data_gram,
     rows: int,
     design=None,
     specs: Mapping[Any, Any] | None = None,
     W: NDArray | None = None,
+    data_diagonal: NDArray | None = None,
 ) -> Identifiability:
     """The identifiability record of a fit with published decomposition ``decomposition`` of ``H``.
 
     ``columns`` maps the decomposition's coordinates to the ``width`` fitted ones, ``groups``
     are its term blocks (``GroupSlice``, in its coordinates) and ``null_spaces`` their penalty
     null spaces (``penalty_null_space``).  ``data_gram`` is the centred data Gram at the fit's
-    weights, over ``rows`` rows.  ``design`` (their rows, a ``DesignMatrix`` of those groups)
+    weights, over ``rows`` rows: a dense matrix, or a compact operator (``matvec``) with its
+    diagonal ``data_diagonal``, which a structured fit holds in place of the matrix; only its
+    products with ``N_S`` are read.  ``design`` (their rows, a ``DesignMatrix`` of those groups)
     and ``W`` read the directions the Gram cannot resolve from the rows, and ``specs``
     (feature specs by name) name levels; without the rows such a direction counts as aliased.
     """
     columns = np.asarray(columns, dtype=np.intp)
     basis = _null_space_basis(groups, null_spaces, decomposition.width)
+    if isinstance(data_gram, np.ndarray):
+        gram_basis, diagonal = data_gram @ basis, np.diag(data_gram)
+    else:
+        gram_basis = data_gram.matvec(basis) if basis.shape[1] else np.zeros_like(basis)
+        diagonal = np.asarray(data_diagonal, dtype=np.float64)
     owner_null, fixed_effect_condition = _fixed_effect_null(
-        basis, np.asarray(data_gram, dtype=np.float64), rows, groups, design, W
+        basis, basis.T @ gram_basis, diagonal, rows, groups, design, W
     )
     owner = np.empty(decomposition.width, dtype=np.intp)
     for index, group in enumerate(groups):
@@ -282,7 +357,8 @@ def _null_space_basis(groups: Sequence, null_spaces: Sequence[NDArray], width: i
 
 def _fixed_effect_null(
     basis: NDArray,
-    data_gram: NDArray,
+    gram: NDArray,
+    data_diagonal: NDArray,
     rows: int,
     groups: Sequence,
     design,
@@ -290,13 +366,13 @@ def _fixed_effect_null(
 ) -> tuple[NDArray, float]:
     """A basis of ``N_S null(X_F)`` in the decomposition's coordinates, and ``X_F``'s condition.
 
-    A column of ``X_F`` whose Gram diagonal is zero has no data at all.  The rest is decided by
+    ``gram`` is ``X_F``'s Gram ``N_S' D N_S`` and ``data_diagonal`` the diagonal of ``D``.  A
+    column of ``X_F`` whose Gram diagonal is zero has no data at all.  The rest is decided by
     the Gram when every Jacobi-scaled eigenvalue clears its error bound, which then certifies
     full rank (Weyl), and otherwise by the rows (``_factor_singular_values``): an eigenvector
     below the bound is a null vector only to within that bound over the spectral gap, so it is
     not read as one.  The condition is ``X_F``'s, in singular values.
     """
-    gram = basis.T @ data_gram @ basis
     gram = 0.5 * (gram + gram.T)
     diagonal = np.diag(gram)
     active = np.flatnonzero(diagonal > 0.0)
@@ -310,13 +386,15 @@ def _fixed_effect_null(
     # congruence moves entry ``kl`` by at most ``gamma_n r_k r_l``, ``r = |N_S|' s``.
     from superglm.solvers.rank import _eigensolver_relative_bar, _formation_slack
 
-    reach = (np.abs(basis[:, active]).T @ np.sqrt(np.maximum(np.diag(data_gram), 0.0))) ** 2
+    reach = (np.abs(basis[:, active]).T @ np.sqrt(np.maximum(data_diagonal, 0.0))) ** 2
     error = _eigensolver_relative_bar(active.size + 1) * largest + _formation_slack(
         gamma_up(rows + 2) * reach, diagonal[active]
     )
     if values[0] > error:
         return nulls[0], math.sqrt(largest / float(values[0]))
-    singular, right = _factor_singular_values(basis[:, active], scale, groups, design, W, data_gram)
+    singular, right = _factor_singular_values(
+        basis[:, active], scale, groups, design, W, data_diagonal
+    )
     nulls.append((basis[:, active] / scale) @ right[:, ~(singular > 0.0)])
     kept = singular[singular > 0.0]
     condition = float(kept[0] / kept[-1]) if kept.size else 1.0
@@ -329,7 +407,7 @@ def _factor_singular_values(
     groups: Sequence,
     design,
     W: NDArray | None,
-    data_gram: NDArray,
+    data_diagonal: NDArray,
 ) -> tuple[NDArray, NDArray]:
     """``X_F``'s Jacobi-scaled singular values from the rows, zero where rounding explains them.
 
@@ -357,7 +435,7 @@ def _factor_singular_values(
     factor = factor / scale
     _, singular, right_t = np.linalg.svd(factor)
     magnitude = np.maximum(
-        np.sqrt(np.maximum(np.diag(data_gram), 0.0)), np.asarray(inflated, dtype=np.float64)
+        np.sqrt(np.maximum(data_diagonal, 0.0)), np.asarray(inflated, dtype=np.float64)
     )
     formation = gamma_up(columns.shape[0] + len(groups) + 3) * (magnitude @ np.abs(columns)) / scale
     bound = float(np.linalg.norm(formation)) + gamma_up(
@@ -367,9 +445,15 @@ def _factor_singular_values(
 
 
 def _orthonormal(decomposition, vectors: NDArray) -> NDArray:
-    """An orthonormal basis of ``vectors`` in the decomposition's Jacobi-scaled coordinates."""
+    """An orthonormal basis of ``vectors`` in the decomposition's Jacobi-scaled coordinates.
+
+    Each scaled vector is normalised first, so a direction on a column of tiny curvature (a
+    column carried by rounding-level weights) is not cut as dependent on one of ordinary scale.
+    """
     scale = np.asarray(decomposition.column_scale, dtype=np.float64)
     scaled = np.asarray(vectors, dtype=np.float64) * np.where(scale > 0.0, scale, 1.0)[:, None]
+    norms = np.linalg.norm(scaled, axis=0)
+    scaled = scaled[:, norms > 0.0] / norms[norms > 0.0]
     if scaled.shape[1] == 0:
         return scaled
     left, singular, _ = np.linalg.svd(scaled, full_matrices=False)
@@ -529,8 +613,11 @@ def _empty_basis_functions(matrix, positive: NDArray) -> int:
 __all__ = [
     "Alias",
     "Identifiability",
+    "TruncatedDecomposition",
+    "certified_identifiability",
     "coordinates_identified",
     "decide_identifiability",
     "fixed_coordinates",
+    "functional_identified",
     "penalty_null_space",
 ]

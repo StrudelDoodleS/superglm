@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 
 from superglm import FactorSmooth, LambdaPolicy, Spline, SuperGLM
-from superglm.model import state_ops
+from tests._identifiability_parity import assert_same_identifiability, coefficient_ses
 
 
 def _data(
@@ -279,19 +279,17 @@ def test_sz_sparse_levels_keep_other_global_smooth_in_summary_and_reconstruction
     assert np.all(np.isfinite(reconstructed["log_relativity"]))
 
 
-def test_sz_structured_estimability_is_the_data_s():
-    """A two-row level: estimability reads the data alone, as the dense solver's rule.
+def test_sz_two_row_level_standard_errors_are_the_dense_solver_s():
+    """A two-row level: the penalty identifies what its data leave free, on both backends.
 
-    The level's data pin only two of its six coordinates.  The penalty
-    identifies the rest, so the Hessian ``H = X'WX + S`` is nonsingular, but
-    a coefficient is estimable only when no null vector of the data ``[1, X]``
-    moves it, and the sum-to-zero constraint spreads the level's free
-    directions over every level and the main effect.  The structured fit's
-    estimability is that set exactly: the column-equilibrated SVD's null
-    vectors (below ``max(n, p) eps`` of the largest singular value, the
-    ``dgesdd`` backward error) and the dense solver's.  Mutation: the fit's
-    own (penalized) aliases deciding estimability, which reported every
-    coefficient estimable.
+    The level's data pin only two of its six coordinates, and the sum-to-zero
+    constraint spreads its free directions over every level and the main effect, so
+    the data ``[1, X]`` alone have null vectors (the column-equilibrated SVD's, below
+    ``max(n, p) eps`` of the largest singular value, the ``dgesdd`` backward error).
+    The penalty curves every one of them, so ``H = X'WX + S`` is nonsingular and the
+    fit identifies every coefficient (``solvers.identifiability``): the structured
+    backend reports every standard error, the dense backend's values and footnotes.
+    Mutation: stage 1's structured backend blanked the data's null set, 32 coefficients.
     """
     X, y = _data()
     rare = X["segment"] == "omega"
@@ -319,28 +317,15 @@ def test_sz_structured_estimability_is_the_data_s():
     }
     structured = models["structured"]
     assert structured._reml_profile["direct_backend"] == "structured"
-    estimable = structured._fit_inference_info["coefficient_identified"]
     eps = np.finfo(float).eps
     A = np.column_stack((np.ones(structured._dm.n), structured._dm.toarray()))
     A = A / np.linalg.norm(A, axis=0)
     _, singular, rows = np.linalg.svd(A, full_matrices=False)
     null = rows[singular <= max(A.shape) * eps * singular[0]]
-    structural = np.any(np.abs(null[:, 1:]) > np.sqrt(eps), axis=0)
-    assert np.any(structural)
-    np.testing.assert_array_equal(estimable, ~structural)
-    for solve, model in models.items():
-        se = model.metrics(X, y).coefficient_se
-        mask = np.concatenate(
-            [np.isnan(np.atleast_1d(np.asarray(se[g.name], dtype=float))) for g in model._groups]
-        )
-        if solve == "structured":
-            np.testing.assert_array_equal(mask, structural, err_msg=solve)
-            continue
-        # The dense fit blanks only what its penalised Hessian leaves free; its data-only
-        # rule, on request, is the structured backend's (``state_ops.fit_data_rank``).
-        record = state_ops.fit_data_rank(model)
-        np.testing.assert_array_equal(record.data.coefficient_estimable(), ~structural)
-        assert not np.any(mask & ~structural)
+    assert np.any(np.abs(null[:, 1:]) > np.sqrt(eps))
+    metrics = {solve: model.metrics(X, y) for solve, model in models.items()}
+    assert not np.any(np.isnan(coefficient_ses(metrics["structured"])))
+    assert_same_identifiability(metrics["structured"], metrics["gram"], rtol=1e-10)
 
 
 def test_sz_summary_uses_one_structured_group_row():

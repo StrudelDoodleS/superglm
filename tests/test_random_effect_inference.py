@@ -24,6 +24,7 @@ from superglm.links import IdentityLink, LogitLink, LogLink, stabilize_eta
 from superglm.solvers._structured.state import (
     StructuredLinearSystemState,
 )
+from tests._identifiability_parity import assert_same_identifiability
 
 
 def _fit_pair(
@@ -456,14 +457,14 @@ def test_structured_estimability_uses_centered_data_geometry():
         y,
     )
 
-    dense_mask = dense._fit_inference_info["coefficient_identified"]
-    structured_mask = structured._fit_inference_info["coefficient_identified"]
-
     # The penalised fit identifies every level (the ridge holds each one) and not the
-    # constant, which is the intercept's.  The structured backend still flags the data's own
-    # null space until its solvers read ``solvers.identifiability``.
-    np.testing.assert_array_equal(dense_mask, [False] + [True] * n_levels)
-    assert not np.any(structured_mask)
+    # constant, which is the intercept's (``solvers.identifiability``), on both backends,
+    # with the same footnote.  Mutation: stage 1's structured backend flagged the data's own
+    # null space, every coefficient.
+    np.testing.assert_array_equal(
+        structured._fit_inference_info["coefficient_identified"], [False] + [True] * n_levels
+    )
+    assert_same_identifiability(structured.metrics(X, y), dense.metrics(X, y), rtol=1e-10)
 
 
 def test_random_effect_summary_uses_one_structured_group_row():

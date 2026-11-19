@@ -54,6 +54,7 @@ from superglm.solvers._structured.state import (
     StructuredLinearSystemState,
 )
 from superglm.types import GroupSlice, PenaltyComponent
+from tests._identifiability_parity import assert_same_identifiability
 
 
 def _factor_smooth_problem(
@@ -1166,14 +1167,15 @@ def test_factor_smooth_estimability_and_summary_match_dense_centered_geometry():
         y,
     )
 
-    # The structured backend still applies the data-only rule: the dense fit's on request.
-    structured_flags = structured._fit_inference_info["coefficient_identified"]
-    np.testing.assert_array_equal(
-        structured_flags, state_ops.fit_data_rank(dense).data.coefficient_estimable()
-    )
-    assert np.all(dense._fit_inference_info["coefficient_identified"][structured_flags])
+    # The data alone leave some level coordinates free; the fs penalty curves every
+    # direction, its lines included (``null_0``, ``null_1``), so the fit identifies every
+    # coefficient on both backends (``solvers.identifiability``).  Mutation: stage 1's
+    # structured backend blanked the data's null set.
     factor_group = next(group for group in structured._groups if group.name == "x:group:fs")
-    assert np.any(~structured_flags[factor_group.sl])
+    data_only = state_ops.fit_data_rank(dense).data.coefficient_estimable()
+    assert np.any(~data_only[factor_group.sl])
+    assert np.all(structured._fit_inference_info["coefficient_identified"])
+    assert_same_identifiability(structured.metrics(X, y), dense.metrics(X, y), rtol=1e-10)
     row = next(row for row in structured.summary()._coef_rows if row.name == "x:group:fs")
     assert row.coef is None
     assert row.structured_kind == "factor_smooth_fs"

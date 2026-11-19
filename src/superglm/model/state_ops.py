@@ -18,20 +18,19 @@ from superglm.inference.covariance import (
 )
 from superglm.model.fit_state import fitted_lambda2, fitted_penalty
 from superglm.model.retired_state import retained_linear_state
-from superglm.solvers._structured.balance_tree import (
-    ProfiledSumToZeroTreeFactor,
-)
-from superglm.solvers._structured.geometry import (
-    centered_operator_coefficient_estimable,
-)
+from superglm.solvers._structured.balance_tree import SumToZeroPenalizedOperator
+from superglm.solvers._structured.nested import NestedDataOperator, NestedPenalizedOperator
 from superglm.solvers._structured.operators import (
     CenteredBlockOperator,
+    compact_operator_diagonal,
 )
 from superglm.solvers._structured.state import (
     StructuredLinearSystemState,
 )
 from superglm.solvers.identifiability import (
     Identifiability,
+    TruncatedDecomposition,
+    certified_identifiability,
     decide_identifiability,
     penalty_null_space,
 )
@@ -487,12 +486,13 @@ def _penalty_null_spaces(model, active_groups) -> list[NDArray]:
 
 
 def _decided_identifiability(
-    model, decomposition, active_groups, design, W, data_gram, *, penalized=True
+    model, decomposition, active_groups, design, W, data_gram, *, penalized=True, data_diagonal=None
 ) -> Identifiability:
     """The identifiability of a fit whose centred Hessian is ``decomposition``, in fitted coordinates.
 
     ``decomposition`` is in the coordinates of ``active_groups`` (the selected groups), ``design``
-    their rows; ``solvers.identifiability`` decides and explains the record.
+    their rows, and ``data_gram`` their centred data Gram (or a compact operator of it with its
+    diagonal ``data_diagonal``); ``solvers.identifiability`` decides and explains the record.
     """
     original = {group.name: group for group in model._groups}
     columns = np.zeros(0, dtype=np.intp)
@@ -515,6 +515,89 @@ def _decided_identifiability(
         design=design,
         specs={**getattr(model, "_specs", {}), **getattr(model, "_interaction_specs", {})},
         W=W,
+        data_diagonal=data_diagonal,
+    )
+
+
+def _structured_penalty_diagonal(penalized) -> NDArray:
+    """The diagonal of a structured fit's penalty in its slope coordinates, from its parts.
+
+    An ``fs`` or ``sz`` operator keeps its border and level penalties apart; an ``sz`` level's
+    public coordinate also carries the last level's block (``beta_K = -sum_l beta_l``).  A nested
+    chain keeps one lambda per node and its border penalty.
+    """
+    diagonal = np.empty(penalized.shape[0])
+    if isinstance(penalized, NestedPenalizedOperator):
+        diagonal[penalized.small_indices] = np.diag(penalized.border_penalty)
+        diagonal[penalized.structured_indices] = np.concatenate(penalized.node_penalty)
+        return diagonal
+    local = np.diagonal(penalized.penalty_local, axis1=1, axis2=2)
+    if isinstance(penalized, SumToZeroPenalizedOperator):
+        local = local[:-1] + local[-1:]
+    diagonal[penalized.small_indices] = np.diag(penalized.penalty_small)
+    diagonal[penalized.structured_indices] = local
+    return diagonal
+
+
+def _spread_centred_operator(operator: CenteredBlockOperator) -> CenteredBlockOperator:
+    """The centred data operator formed at the columns' spread, as ``X_F``'s Gram bound assumes.
+
+    An ``fs`` or ``sz`` leaf system's already is (its ``c0``-shifted moments).  A nested chain's
+    retained one centres the raw moments, which cancel for a column far from zero; its leaf
+    statistics are taken about the rows' global centre ``c``, so centring them about the weighted
+    mean's offset ``m - c`` rounds at the spread (Chan, Golub & LeVeque 1983).
+    """
+    raw = operator.raw
+    if not isinstance(raw, NestedDataOperator):
+        return operator
+    leaf = dataclasses.replace(raw.leaf, center=np.zeros_like(raw.leaf.center))
+    cross = np.array(operator.cross, dtype=np.float64, copy=True)
+    cross[raw.small_indices] = leaf.cross.sum(axis=0)
+    return CenteredBlockOperator(
+        raw=dataclasses.replace(raw, leaf=leaf),
+        cross=cross,
+        total=operator.total,
+        center=cross / operator.total,
+    )
+
+
+def _structured_identifiability(model, state: StructuredLinearSystemState, W) -> Identifiability:
+    """The identifiability of a structured fit, read from its retained factor and moments.
+
+    The factor inverts ``H`` off the directions it truncated (``null_directions``); a factor that
+    truncated none certified ``H`` nonsingular (``identifiability.certified_identifiability``).
+    Otherwise ``X_F``'s Gram comes through the centred data operator, so no ``p x p`` matrix is
+    formed.  The condition the factor certified is its border's.
+    """
+    factor = state.profiled_factor
+    certified = certified_identifiability(
+        TruncatedDecomposition(
+            null_vectors=np.zeros((factor.shape[0], 0)),
+            rank=int(factor.rank),
+            column_scale=np.ones(factor.shape[0]),
+            pre_truncation_condition=float(factor.schur_condition_estimate),
+        ),
+        len(model._solver_pirls_result().beta),
+    )
+    if certified is not None:
+        return certified
+    operator = _spread_centred_operator(state.centered_data_operator)
+    data_diagonal = compact_operator_diagonal(operator)
+    hessian_diagonal = data_diagonal + _structured_penalty_diagonal(state.penalized_operator)
+    decomposition = TruncatedDecomposition(
+        null_vectors=factor.null_directions(),
+        rank=int(factor.rank),
+        column_scale=np.sqrt(np.maximum(hessian_diagonal, 0.0)),
+        pre_truncation_condition=float(factor.schur_condition_estimate),
+    )
+    return _decided_identifiability(
+        model,
+        decomposition,
+        list(model._groups),
+        model._dm,
+        W,
+        operator,
+        data_diagonal=data_diagonal,
     )
 
 
@@ -803,6 +886,7 @@ def fit_inference_info(model):
             linear_state.centered_data_operator,
         )
         group_edf_map = {group.name: float(np.sum(edf[group.sl])) for group in active_groups}
+        identifiability = _structured_identifiability(model, linear_state, W)
         return {
             "W": W,
             "XtWX_inv": inverse,
@@ -812,14 +896,8 @@ def fit_inference_info(model):
             "edf": edf,
             "edf1": edf1,
             "group_edf_map": group_edf_map,
-            # The structured solvers still flag the data's null space (an sz
-            # factor's on the balance tree, SumToZeroTreeFactor.coefficient_estimable);
-            # their fits move to the penalised rule with their own solvers.
-            "coefficient_identified": (
-                linear_state.profiled_factor.coefficient_estimable()
-                if isinstance(linear_state.profiled_factor, ProfiledSumToZeroTreeFactor)
-                else centered_operator_coefficient_estimable(linear_state.centered_data_operator)
-            ),
+            "identifiability": identifiability,
+            "coefficient_identified": identifiability.coefficient_identified(),
             "structured_covariance": True,
         }
     if solver.rank_info is not None:

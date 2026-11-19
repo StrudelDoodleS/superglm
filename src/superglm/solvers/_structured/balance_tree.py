@@ -56,8 +56,8 @@ Caches:
 
 * ``SumToZeroTreeFactor``'s inference state (``_Q_inverse_centred``,
   ``_level_diagonal_blocks``, ``_last_level_cross``, ``_penalty_total_form``,
-  ``_retained_own``/``_projector_parts``, ``_scaled_eigenvalues_cache``,
-  ``_data_estimable``), formed on first read. Owner and lifetime: the factor;
+  ``_retained_own``/``_projector_parts``, ``_scaled_eigenvalues_cache``),
+  formed on first read. Owner and lifetime: the factor;
   invalidation: none. Pickled as they stand; no rank decision or bound reads
   them.
 * ``balance_tree(K)``: module ``lru_cache(maxsize=16)`` keyed by ``K``, a pure
@@ -100,7 +100,6 @@ from superglm.solvers._structured.operators import (
     SumToZeroBlockOperator,
 )
 from superglm.solvers.hessian_factor import _component_indices, _component_omega
-from superglm.solvers.rank import SHARED_RANK_POLICY
 from superglm.types import PenaltyComponent
 
 if TYPE_CHECKING:
@@ -1944,9 +1943,8 @@ class SumToZeroTreeFactor:
     def published(self, system: SumToZeroLeafSystem) -> SumToZeroTreeFactor:
         """This factor on ``system``, its published copy (``published_leaf_system``).
 
-        Every number is this factor's own; the system it was built on is
-        replaced, which only the data estimability reads, on the published
-        leaf's trailing factor (``FactorSmoothLeafData.stacked_tail_rows``).
+        Every number is this factor's own; only the system it was built on is
+        replaced, which no solve, inverse or trace reads.
         """
         import copy
 
@@ -2166,115 +2164,23 @@ class SumToZeroTreeFactor:
             )
         return diagonal
 
-    def coefficient_estimable(self) -> NDArray:
-        """Per-coefficient data estimability in raw coordinates (the package's rule).
+    def null_directions(self) -> NDArray:
+        """The directions this factor truncated, in raw augmented coordinates ``(p, t)``.
 
-        A coefficient is estimable when no null vector of the data ``[1, X]``
-        over the weighted rows moves it, so a direction only the penalty pins
-        is not estimable. The null space comes from the balance tree on the
-        same ``sqrt|w|`` leaf triangles with no penalty, confirmed on the rows
-        (``_verified_data_estimable``). Owner and lifetime: this factor;
-        nothing invalidates it.
+        Each border null ``x`` (``_null_x``, the intercept first) lifts to the levels by the
+        down-sweep's ``S`` and its intercept entry moves back to raw coordinates by
+        ``R = I - e_0 c'``; the inverse is the Moore-Penrose one off them, so every coordinate
+        they reach is undetermined (``solvers.identifiability``).
         """
-        estimable = self.__dict__.get("_data_estimable")
-        if estimable is None:
-            estimable = self._data_factor()._verified_data_estimable()
-            self._data_estimable = estimable
-        return estimable.copy()
-
-    def _data_factor(self) -> SumToZeroTreeFactor:
-        """The balance tree of the data alone: the leaf triangles, no penalty, Fisher form."""
-        import dataclasses
-
-        from superglm.solvers._structured.block_leaves import (
-            _fisher_moments,
-            _system_from_moments,
-        )
-
-        system, leaf = self.system, self.system.leaf
-        penalized = self.penalized
-        if not (leaf.signed or np.any(penalized.penalty_local) or np.any(penalized.penalty_small)):
-            return self
-        operator = system.operator
-        K, k, q = self.n_levels, self.block_size, len(operator.small_indices)
-        if leaf.signed:
-            # the triangles are of ``sqrt|w|`` rows: their Grams are the data's
-            # under |w|, the intercept column's the total |w|
-            tail_gram = leaf.trailing_gram()
-            if tail_gram is None:
-                raise ValueError("This signed sz leaf keeps no Gram of its trailing rows.")
-            fisher = dataclasses.replace(
-                leaf,
-                signed=False,
-                tail_gram=tail_gram,
-                pseudo_rows=None,
-                signature=None,
-                error_rows=None,
-                error_diagonal=None,
-            )
-            level_rows, border = _fisher_moments(fisher.top, tail_gram, k)
-            total = float(np.sum(fisher.top[:, :, k] ** 2) + np.sum(fisher.tail_norms2[:, 0]))
-            system = _system_from_moments(
-                fisher,
-                level_rows,
-                border,
-                weights=np.array([total]),
-                weighted_rhs=np.zeros(1),
-                small_indices=operator.small_indices,
-                structured_indices=operator.structured_indices,
-                group_index=system.dominant_group_index,
-                group_name=system.dominant_group_name,
-                basis="sz",
-                thin_levels=system.thin_levels,
-                thin_counts=getattr(system, "thin_counts", None),
-            )
-        data = SumToZeroPenalizedOperator.with_penalties(
-            system.operator, np.zeros((q, q)), np.zeros((K, k, k))
-        )
-        return SumToZeroTreeFactor(system, data)
-
-    def _verified_data_estimable(self) -> NDArray:
-        """Data estimability on this (unpenalized) tree: its certified nulls, confirmed on the rows.
-
-        A direction the border certificate cannot place is a candidate, not a
-        null, so each candidate is measured on the data: the per-level residual
-        ``R_l [beta_l; alpha; b]`` on the candidates' span, equilibrated to unit
-        public columns. Singular values at most ``factor_rcond`` give the null
-        directions; a coordinate the null basis touches above ``factor_rcond``
-        is not estimable (``geometry._coefficient_estimable_from_null_basis``).
-        """
-        width = self.shape[0]
-        N_x = self._null_x
-        t = N_x.shape[1]
-        if not t:
-            return np.ones(width, dtype=bool)
-        K, k = self.n_levels, self.block_size
-        q = len(self._border_x)
-        coordinates = self._coordinates(True)
-        beta = np.einsum("lke,et->lkt", self._S[:K], N_x)
-        basis = self._level_to_public(beta, N_x, coordinates)
-        basis[0] -= self._center @ basis[self.small_indices[1:]]
-        diagonal = np.empty(width)
-        level_diagonal = np.diagonal(self.penalized.D, axis1=1, axis2=2)
-        diagonal[self.structured_indices] = level_diagonal[: K - 1] + level_diagonal[K - 1][None]
-        diagonal[self.small_indices[1:]] = np.diag(self.penalized.A)
-        diagonal[0] = self.system.sum_w
-        root = np.sqrt(np.maximum(diagonal, np.finfo(np.float64).tiny))
-        Q, Rq = np.linalg.qr(root[:, None] * basis)
-        leaf = self.system.leaf
-        top = leaf.top
-        # the triangles' leading rows, then their trailing rows (zero on the
-        # level basis) or the trailing rows' triangular factor: an orthogonal
-        # map of the stacked rows, which keeps every singular value
-        rows = np.matmul(top[:, :, :k], beta)
-        rows += top[:, :, k : k + 1] * N_x[0][None, None, :]
-        rows += np.matmul(top[:, :, k + 1 : k + 1 + q], N_x[self._border_x])
-        tail = leaf.stacked_tail_rows() @ np.vstack([N_x[:1], N_x[self._border_x]])
-        stacked = np.concatenate([rows.reshape(-1, t), tail])
-        residual = scipy.linalg.solve_triangular(Rq, stacked.T, trans="T").T
-        singular, right = np.linalg.svd(residual, full_matrices=False)[1:]
-        null = Q @ right[singular <= SHARED_RANK_POLICY.factor_rcond].T
-        return np.linalg.norm(null, axis=1) <= SHARED_RANK_POLICY.factor_rcond
+        x = self._null_x
+        directions = np.zeros((self.shape[0], x.shape[1]))
+        if not x.shape[1]:
+            return directions
+        K = self.n_levels
+        directions[self.structured_indices] = np.einsum("lke,et->lkt", self._S[:K], x)[: K - 1]
+        border = x[self._border_x]
+        directions[self.small_indices] = np.vstack(((x[0] - self._center @ border)[None], border))
+        return directions
 
     def _paths(self) -> tuple[NDArray, NDArray, NDArray, NDArray]:
         """``(leaf_parent, leaf_side, node_parent, node_side)`` of the balance tree."""
@@ -2904,10 +2810,6 @@ class ProfiledSumToZeroTreeFactor(_ProfiledLeafFactor):
         Ux[x_positions, 1] = operator.center[small]
         core = np.array([[0.0, -1.0], [-1.0, total]])
         return _LevelForm(raw.D, Cx, Ax, raw.low + ((Ul, Ux, core),))
-
-    def coefficient_estimable(self) -> NDArray:
-        """The slopes' estimability (``SumToZeroTreeFactor.coefficient_estimable``)."""
-        return self.augmented_factor.coefficient_estimable()[1:]
 
     def raw_level_inverse_block(self, level: int) -> NDArray:
         return self.augmented_factor.raw_level_inverse_block(level)

@@ -40,9 +40,6 @@ from superglm.solvers._structured.assembly import (
     build_augmented_nested_factor,
     build_penalized_nested_operator,
 )
-from superglm.solvers._structured.geometry import (
-    centered_operator_coefficient_estimable,
-)
 from superglm.solvers._structured.layout import (
     build_nested_structured_layout,
     get_structured_layout,
@@ -70,8 +67,9 @@ from superglm.solvers._structured.selection import (
     resolve_structured_backend,
 )
 from superglm.solvers.irls_direct import fit_irls_direct
-from superglm.solvers.rank import decompose_factor, decompose_gram
+from superglm.solvers.rank import decompose_gram
 from superglm.types import GroupSlice, PenaltyComponent
+from tests._identifiability_parity import truncated_reach
 
 EPS = np.finfo(np.float64).eps
 
@@ -1176,7 +1174,7 @@ def test_a_mostly_zero_numeric_column_stays_estimable_about_its_prior_weighted_m
     bound = p * EPS * eigenvalues[-1] / eigenvalues[1]
     expected = [2**-0.5, 2**-0.5, 0.0]
     assert np.all(np.abs(np.abs(null[border[:3], 0]) - expected) <= bound)
-    assert factor.coefficient_estimable()[border][:3].tolist() == [False, False, True]
+    assert truncated_reach(factor)[border][:3].tolist() == [True, True, False]
 
 
 def _coded_border_case(seed: int = 41, n: int = 500):
@@ -1600,40 +1598,6 @@ def test_repeated_resolution_reuses_the_nesting_cache(monkeypatch) -> None:
     assert first.chain_group_indices == second.chain_group_indices == layout.chain_group_indices
 
 
-# ── Estimability ──────────────────────────────────────────────────────────
-
-
-def test_nested_estimability_matches_the_dense_centred_rank() -> None:
-    case = _nested_case(n=300)
-    dense = case.matrices[0].M
-    # Border columns: a normal, 10 + 3N, the leaf and root attributes (in the
-    # tree span) and a duplicate of the normal.  The ones column is left out:
-    # its dense centred copy is rounding noise the dense reference misreads.
-    columns = np.column_stack((dense[:, 1:5], dense[:, 1]))
-    matrices = [DenseGroupMatrix(columns), *case.matrices[1:]]
-    dm = DesignMatrix(matrices, n=case.dm.n, p=case.dm.p)
-    layout = get_structured_layout(
-        dm, case.groups, dominant_group_index=VARIANT, chain_group_indices=CHAIN
-    )
-    system = build_nested_structured_system(
-        matrices, case.groups, case.weights, np.zeros(dm.n), layout=layout
-    )
-    xtw = np.empty(dm.p)
-    xtw[layout.small_indices] = system.xtw_small
-    xtw[layout.structured_indices] = system.xtw_structured
-    operator = CenteredBlockOperator(
-        raw=system.operator, cross=xtw, total=system.sum_w, center=xtw / system.sum_w
-    )
-    design = np.hstack([matrix.toarray() for matrix in matrices])
-    centered = design - (case.weights @ design) / np.sum(case.weights)
-    expected = decompose_factor(np.sqrt(case.weights)[:, None] * centered).coefficient_estimable()
-    result = centered_operator_coefficient_estimable(operator)
-    np.testing.assert_array_equal(result[layout.small_indices], expected[layout.small_indices])
-    assert not np.any(result[layout.structured_indices])
-    assert not np.any(expected[layout.structured_indices])
-    np.testing.assert_array_equal(result[:5], [False, True, False, False, False])
-
-
 def _augmented_factor(
     matrices, groups, weights, lambdas, components, chain, prior_weights=None, error=None
 ):
@@ -1700,9 +1664,7 @@ def test_the_row_pass_floor_nulls_a_column_carried_by_rounding_weights(weight_sc
     assert reference.rank == p - 2
     for factor in factors[1:]:
         assert factor.rank == reference.rank
-        np.testing.assert_array_equal(
-            factor.coefficient_estimable(), reference.coefficient_estimable()
-        )
+        np.testing.assert_array_equal(truncated_reach(factor), truncated_reach(reference))
         assert abs(factor.logdet() - reference.logdet()) <= bound
 
 

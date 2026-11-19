@@ -997,7 +997,7 @@ def test_public_fit_hands_its_layout_to_the_limit_gate(
     import superglm.distributional.fit_state as fit_state_module
 
     monkeypatch.setattr(negative_binomial_family, "poisson_limit_row_count", lambda *a, **k: 3)
-    monkeypatch.setattr(fit_state_module, "_block_coefficients_estimable", lambda *a: False)
+    monkeypatch.setattr(fit_state_module, "_block_coefficients_identified", lambda *a: False)
     offset = np.where(np.arange(240) < 120, 0.0, 0.5) if offset_varies else None
     _, fit_state = _gate_fit((cat("g"),), offset)
     (entry,) = [m for m in fit_state.result.warnings if "rows have a size at the" in m]
@@ -1053,14 +1053,14 @@ def test_size_at_the_poisson_limit_is_disclosed_with_its_row_count() -> None:
     fitted = model._require_fitted().fit_state.solver_result.theta
     reach = np.maximum(fitted[:, 0], np.maximum(response - 1.0, 0.0))
     expected = int(np.count_nonzero(reach < _EPS * fitted[:, 1]))
-    from superglm.distributional.fit_state import _block_coefficients_estimable
+    from superglm.distributional.fit_state import _block_coefficients_identified
 
     solved = model._require_fitted().fit_state.solver_result
     size = _size_state(model._require_fitted().fit_state).coefficient_slice
-    estimable = _block_coefficients_estimable(solved, size)
+    identified = _block_coefficients_identified(solved, size)
     for messages in ([str(w.message) for w in caught], list(model.result_.warnings)):
         entries = [m for m in messages if "rows have a size at the" in m]
-        if expected == 0 or estimable:
+        if expected == 0 or identified:
             assert not entries
             continue
         (entry,) = entries

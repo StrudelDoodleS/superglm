@@ -80,7 +80,6 @@ from superglm import (
     Tweedie,
 )
 from superglm.inference.covariance import StructuredCovarianceAccessor
-from superglm.model import state_ops
 from superglm.model.reml_setup import collect_reml_groups
 from superglm.reml._leverage_rows import reads_row_supports
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
@@ -92,6 +91,11 @@ from superglm.solvers._structured.nested import (
 )
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.mode_score import mode_certification_bar
+from tests._identifiability_parity import (
+    assert_same_identifiability,
+    assert_structured_blanks_its_truncation,
+    penalised_null_reach,
+)
 
 EPS = np.finfo(np.float64).eps
 PIRLS_TOL = 1e-10
@@ -382,18 +386,6 @@ def _assert_nested(model: SuperGLM) -> None:
     assert factor._is_centered_data(*factor._pieces(state.centered_data_operator))
 
 
-def _data_only_identified(model: SuperGLM) -> np.ndarray:
-    """A fit's data-only estimability (``state_ops.fit_data_rank``), which the nested backend reports.
-
-    A dense fit reports more: everything its penalised Hessian identifies
-    (``solvers.identifiability``).
-    """
-    record = state_ops.fit_data_rank(model)
-    identified = np.zeros(len(record.mean_x), dtype=bool)
-    identified[record.selected_columns] = record.data.coefficient_estimable()
-    return identified
-
-
 def _assert_same_fit(nested: SuperGLM, dense: SuperGLM, frame, y, offset, weight, budget) -> None:
     """Every published quantity of two fits at the same smoothing parameters."""
     scale = budget / (1.0 + float(np.max(np.abs(nested._dm.toarray()).sum(axis=1))))
@@ -415,9 +407,7 @@ def _assert_same_fit(nested: SuperGLM, dense: SuperGLM, frame, y, offset, weight
     dense_metrics = dense.metrics(frame, y, sample_weight=weight, offset=offset)
     # the nested fit's inference reads its retained factors, not a dense rebuild
     assert isinstance(nested_metrics._active_info[3], StructuredCovarianceAccessor)
-    nested_identified = nested_metrics._current_coefficient_identified
-    np.testing.assert_array_equal(nested_identified, _data_only_identified(dense))
-    assert np.all(dense_metrics._current_coefficient_identified[nested_identified])
+    assert_same_identifiability(nested_metrics, dense_metrics, rtol=8 * budget)
     for nested_edf, dense_edf in zip(
         nested_metrics._influence_edf, dense_metrics._influence_edf, strict=True
     ):
@@ -835,21 +825,21 @@ def test_a_parent_with_more_levels_than_the_block_cap_reports_standard_errors() 
 
 
 @pytest.mark.parametrize("leaf_constant", [False, True])
-def test_border_estimability_is_invariant_to_a_column_offset(leaf_constant: bool) -> None:
-    """Adding a constant to a numeric column cannot change what the data identify.
+def test_border_identifiability_is_invariant_to_a_column_offset(leaf_constant: bool) -> None:
+    """Adding a constant to a numeric column cannot change what the fit identifies.
 
-    The border's decision is taken on the Schur complement of the leaf block,
-    the within-leaf scatter (Lovell 1963).  The raw moments of
-    ``x = 1e7 + N(0, 1)`` are ``1e14`` times that scatter, beyond what a
-    float64 difference resolves, so the reduction runs on the rows ``x - c``
-    the leaf statistics hold (Chan, Golub & LeVeque 1983, §3); ``1e12`` is an
-    epoch-millisecond column.  A column constant within every leaf lies in the
-    span of the leaf indicators at any offset and stays non-estimable.  The
-    compact reduction is called directly: the public dispatcher's dense
-    fallback for narrow systems would hide a reduction that raises.
+    ``X_F``'s Gram is formed on the rows ``x - c`` the leaf statistics hold
+    (Chan, Golub & LeVeque 1983, §3): the raw moments of ``x = 1e7 + N(0, 1)``
+    are ``1e14`` times the column's scatter, beyond what a float64 difference
+    resolves; ``1e12`` is an epoch-millisecond column.  A column constant
+    within every leaf lies in the span of the leaf indicators, which the data
+    alone leave free; the leaves' ridge identifies it (``solvers.identifiability``),
+    so its standard error is reported, the same at every offset.  Mutations:
+    the retained operator's raw-moment centring, whose cancelled Gram reads ``x``
+    as aliased at ``1e12``; stage 1's data-only rule, which blanks ``x``
+    wherever it is constant within leaves.
     """
     from superglm import Numeric
-    from superglm.solvers._structured.geometry import _nested_centered_estimability
 
     rng = np.random.default_rng(0)
     n, roots, leaves = 900, 10, 30
@@ -868,7 +858,7 @@ def test_border_estimability_is_invariant_to_a_column_offset(leaf_constant: bool
             "leaf": np.array([f"l{code}" for code in leaf], dtype=object),
         }
     )
-    decisions = []
+    errors = []
     for offset in (0.0, 1e7, 1e12):
         data = frame.assign(x=offset + spread)
         model = SuperGLM(
@@ -881,15 +871,12 @@ def test_border_estimability_is_invariant_to_a_column_offset(leaf_constant: bool
         state = model._linear_system_state
         assert model._reml_profile["structured_chain"] == ("root", "leaf")
         assert isinstance(state.augmented_factor, NestedSchurFactor)
-        operator = state.centered_data_operator
-        estimable = _nested_centered_estimability(operator, operator.raw)
-        x = next(group.sl for group in model._groups if group.name == "x")
-        assert bool(estimable[x][0]) is not leaf_constant
-        se = model.metrics(data, y).coefficient_se["x"]
-        assert bool(np.isfinite(se[0])) is not leaf_constant
-        decisions.append(estimable)
-    for decision in decisions[1:]:
-        np.testing.assert_array_equal(decision, decisions[0])
+        errors.append(float(model.metrics(data, y).coefficient_se["x"][0]))
+        assert np.isfinite(errors[-1])
+        assert model._fit_inference_info["identifiability"].aliases == ()
+    # at 1e12 the column's spacing is 2**-12 of its unit spread, and REML stops anywhere
+    # inside its tolerance: the error moves by about 1e-5 there
+    np.testing.assert_allclose(errors, errors[0], rtol=1e-3)
 
 
 # ── A chain of one ────────────────────────────────────────────────────────
@@ -1031,9 +1018,12 @@ def _assert_chain_of_one_is_gram(chain: SuperGLM, gram: SuperGLM, extra, weight)
     assert abs(chain.result.log_det_H - gram.result.log_det_H) <= rank * gamma
     chain_metrics = chain.metrics(frame, y, sample_weight=weight)
     gram_metrics = gram.metrics(frame, y, sample_weight=weight)
-    chain_identified = chain_metrics._current_coefficient_identified
-    np.testing.assert_array_equal(chain_identified, _data_only_identified(gram))
-    assert np.all(gram_metrics._current_coefficient_identified[chain_identified])
+    reach = penalised_null_reach(chain, weight)
+    if np.count_nonzero(reach) > 1:
+        # an alias the chain's minimum-norm split spreads over its columns
+        assert_structured_blanks_its_truncation(chain_metrics, gram_metrics, reach, rtol=budget)
+    else:
+        assert_same_identifiability(chain_metrics, gram_metrics, rtol=budget)
 
 
 def _lone_level_pair(extra, lam, weight_scale=1.0):
@@ -1093,7 +1083,10 @@ def test_a_chain_of_one_certifies_an_observed_mode_beside_a_constant_column() ->
     estimable = chain.metrics(frame, y, sample_weight=weight)._current_coefficient_identified
     const = next(group.sl for group in chain._groups if group.name == "const")
     assert not estimable[const][0]
-    np.testing.assert_array_equal(np.delete(estimable, const), _data_only_identified(gram))
+    np.testing.assert_array_equal(
+        np.delete(estimable, const),
+        gram.metrics(reduced, y, sample_weight=weight)._current_coefficient_identified,
+    )
 
 
 def test_a_chain_of_one_fits_a_column_offset_by_a_million() -> None:

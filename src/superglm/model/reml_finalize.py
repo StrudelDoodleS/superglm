@@ -127,11 +127,9 @@ def _build_structured_linear_system_state(
     if isinstance(system, FactorSmoothLeafSystem | SumToZeroLeafSystem):
         if data_operator is not system.operator:
             raise RuntimeError("terminal structured refit's data operator is not its system's")
-        # on the c0-shifted moments: the estimability, the column scales and
-        # the small data factor read its numbers
-        centered_data_operator = centred_data_operator(
-            system, row_column_norm=cache.get("structured_row_column_norm")
-        )
+        # on the c0-shifted moments: the identifiability record and the small
+        # data factor read its numbers
+        centered_data_operator = centred_data_operator(system)
         # the published state keeps no row-scale leaf arrays: the system and
         # factor are copies keeping only what a published factor reads
         own = factor.augmented_factor.system is system
@@ -146,7 +144,6 @@ def _build_structured_linear_system_state(
             cross=xtw,
             total=system.sum_w,
             center=xtw / system.sum_w,
-            row_column_norm=cache.get("structured_row_column_norm"),
         )
 
     return StructuredLinearSystemState(

@@ -363,8 +363,8 @@ def _close_level(
     it stays exactly symmetric.  A non-empty ``tail_root`` ``(p - k, p - k)``
     becomes ``R`` of ``QR([tail_root; T])`` (a TSQR merge, ``_merge_level``):
     over the pass, in level order, the triangular factor of every level's
-    trailing rows stacked, which an ``sz`` term's thin-level aliases and data
-    estimability read (no level's triangle is kept for it).  Fixed
+    trailing rows stacked, which an ``sz`` term's thin-level aliases read (no
+    level's triangle is kept for it).  Fixed
     order; the merge's LAPACK runs on the pass's own thread.
     """
     p = R.shape[0]
@@ -827,10 +827,9 @@ class FactorSmoothLeafData:
         leaf's; else formed on first read and held, from a caller's triangles
         or by ``trailing_source``'s compact pass.  An ``sz`` term's
         thin-level aliases read it at every factor build
-        (``SumToZeroTreeFactor._penalized_aliases``), its data estimability
-        at publication.  Owner: this leaf; lifetime: the leaf's;
-        invalidation: none (the leaf data are immutable).  ``(q + 1)^2``
-        floats.
+        (``SumToZeroTreeFactor._penalized_aliases``).  Owner: this leaf;
+        lifetime: the leaf's; invalidation: none (the leaf data are
+        immutable).  ``(q + 1)^2`` floats.
         """
         if self.tail_root is not None:
             return self.tail_root
@@ -2395,6 +2394,26 @@ class FactorSmoothLeafFactor:
                 f"FactorSmooth term {self.term_name!r} solve is not representable."
             )
         return solution
+
+    def null_directions(self) -> NDArray:
+        """The directions this factor truncated, in raw augmented coordinates ``(p, t)``.
+
+        Each null ``z`` of the profiled border is ``[-c*' z; z]`` on ``[alpha | border]``, the
+        levels' ``-F_l`` of it, its intercept entry moved back to raw coordinates by
+        ``R = I - e_0 c'``; the inverse is the Moore-Penrose one off them, so every coordinate
+        they reach is undetermined (``solvers.identifiability``).
+        """
+        null = self._border.null
+        directions = np.zeros((self.shape[0], null.shape[1]))
+        if not null.shape[1]:
+            return directions
+        border = np.vstack((-(self._center_star @ null)[None], null))
+        directions[self.structured_indices] = -np.einsum(
+            "kij,jt->kit", self._F_centred, border, optimize=True
+        )
+        border[0] -= self._center @ null
+        directions[self.small_indices] = border
+        return directions
 
     def logdet(self) -> float:
         return self._logdet

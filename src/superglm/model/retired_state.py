@@ -86,9 +86,6 @@ def _rebuild(model):
         FactorSmoothLeafFactor,
         ProfiledFactorSmoothLeafFactor,
     )
-    from superglm.solvers._structured.geometry import (
-        cancelled_column_row_norms,
-    )
     from superglm.solvers._structured.layout import (
         get_structured_layout,
     )
@@ -160,10 +157,6 @@ def _rebuild(model):
     elif isinstance(factor, FactorSmoothLeafFactor):
         profiled = ProfiledFactorSmoothLeafFactor(
             augmented_factor=factor, sum_w=system.sum_w, xtw=xtw
-        )
-        # the retained estimability rule reads them (as the fit that built the state)
-        cache["structured_row_column_norm"] = cancelled_column_row_norms(
-            system.centred_data_operator, dm, weights
         )
     else:  # pragma: no cover - structured dispatch invariant
         raise TypeError(f"Unsupported structured factor {type(factor).__name__}.")

@@ -151,15 +151,16 @@ def test_fs_reml_does_not_move_with_a_large_column_offset(family, link) -> None:
 
 
 @pytest.mark.parametrize("discrete", [False, True])
-def test_fs_standard_errors_are_nan_only_where_the_design_cannot_estimate(discrete) -> None:
+def test_fs_standard_errors_are_reported_wherever_a_penalty_identifies(discrete) -> None:
     """Poisson ``fs`` with a column at ``1e6``, lambda 1e-7 beside weights 1e4.
 
-    Estimability for standard errors was read off the raw moments centred by
-    subtraction, which cancel to noise for the offset column: every one of the
-    190 standard errors came back NaN.  The NaN set must be the design's
-    structural non-estimable set (each level's constant, aliased with the
-    intercept), the same with the column translated back.  Mutation: the
-    retained centred data operator on the raw moments.
+    Read off the raw moments centred by subtraction, which cancel to noise for
+    the offset column, every one of the 190 standard errors once came back NaN.
+    Each level's constant is aliased with the intercept in the data alone (the
+    design's structural set, nonempty here), but the ``fs`` null penalties hold
+    it, so the fit identifies every coefficient (``solvers.identifiability``)
+    and reports every standard error, the same with the column translated back.
+    Mutation: stage 1's data-only rule blanks the 64 level coordinates.
     """
     frame, eta, rng, _ = _frame()
     n = len(frame)
@@ -177,11 +178,9 @@ def test_fs_standard_errors_are_nan_only_where_the_design_cannot_estimate(discre
             weight,
         )
         assert model._reml_profile["direct_backend"] == "structured"
-        mask = _nan_mask(model, data, y, weight)
-        np.testing.assert_array_equal(mask, _structurally_non_estimable(model, weight))
-        masks.append(mask)
-    np.testing.assert_array_equal(masks[0], masks[1])
-    assert 0 < int(masks[0].sum()) < len(masks[0])
+        assert np.any(_structurally_non_estimable(model, weight))
+        masks.append(_nan_mask(model, data, y, weight))
+    assert not np.any(masks[0]) and not np.any(masks[1])
 
 
 # ---------------------------------------------------------------- leverage

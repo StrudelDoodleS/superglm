@@ -696,8 +696,8 @@ class NestedDataOperator:
 
         ``within + sum_l [dev_l m_l' + m_l dev_l' + a_l m_l m_l']`` with the raw
         leaf means ``m = mean + center``: the chain path never forms it from
-        rows (§12, decision 1); only the dense-reference, diagonal and estimability
-        readers ask for it.  Cached for the life of this immutable operator.
+        rows (§12, decision 1); only the dense-reference and diagonal readers ask
+        for it.  Cached for the life of this immutable operator.
         """
         leaf = self.leaf
         mean = leaf.mean + leaf.center
@@ -1603,8 +1603,8 @@ class NestedSchurFactor:
             ([1.0], 1.0 - np.einsum("ij,ij->i", null, border.null_left))
         )
         self._retained_diagonal = self._retained_own
-        # sqrt(diag Q) in the factor's coordinates, the scaling of the
-        # estimability null basis (``coefficient_estimable``)
+        # sqrt(diag Q) in the factor's coordinates: the Jacobi scaling in which
+        # a truncated factor's solve is the minimum-norm one
         self._border_root = np.sqrt(
             np.maximum(
                 np.r_[D0, np.diag(Q_data) + np.diag(S_rest) + D0 * center_star**2],
@@ -2547,28 +2547,23 @@ class NestedSchurFactor:
         ]
         return self._cross_matrix(records) + _low_rank_matrix(self.solve, records)
 
-    def coefficient_estimable(self) -> NDArray:
-        """Return per-coefficient estimability ``(p,)`` after the border truncation.
+    def null_directions(self) -> NDArray:
+        """The directions this factor truncated, in raw augmented coordinates ``(p, t)``.
 
-        All ``True`` without a null direction; otherwise the null basis of ``H``
-        in raw coordinates, ``[-F z; z]`` with the intercept entry mapped by
-        ``R = I - e_0 c'``, its border rows scaled by ``sqrt(diag Q)`` (the
-        Jacobi scaling the rank decisions use, so they carry the scaled null
-        vectors' eps-level noise), passed to
-        ``geometry._coefficient_estimable_from_null_basis``.  A coordinate
-        touches the null space in either scaling.
+        ``[-F z; z]`` for each null ``z`` of the profiled border (``[-c*' z; z]`` with the
+        intercept), its intercept entry moved back to raw coordinates by ``R = I - e_0 c'``; the
+        inverse is the Moore-Penrose one off them, so every coordinate they reach is
+        undetermined (``solvers.identifiability``).
         """
-        from superglm.solvers._structured.geometry import _coefficient_estimable_from_null_basis
-
         null = self._null_border
+        directions = np.zeros((self.shape[0], null.shape[1]))
         if not null.shape[1]:
-            return np.ones(self.shape[0], dtype=bool)
+            return directions
         raw = null.copy()
         raw[0] -= self._center @ null
-        null_basis = np.zeros((self.shape[0], null.shape[1]))
-        null_basis[self.small_indices] = self._border_root[:, None] * raw
-        null_basis[self.structured_indices] = -np.concatenate(self._F) @ null
-        return _coefficient_estimable_from_null_basis(self.shape[0], null_basis)
+        directions[self.small_indices] = raw
+        directions[self.structured_indices] = -np.concatenate(self._F) @ null
+        return directions
 
     def scaled_schur_eigenvalues(self) -> NDArray:
         """Return the ascending eigenvalues of the scaled deflated border matrix, cached.
@@ -2857,9 +2852,9 @@ class ProfiledNestedSchurFactor(_ProfiledInterceptFactor):
         ]
         return self._cross_matrix(records)
 
-    def coefficient_estimable(self) -> NDArray:
-        """Augmented ``coefficient_estimable`` without the intercept entry."""
-        return self.augmented_factor.coefficient_estimable()[1:]
+    def null_directions(self) -> NDArray:
+        """The slopes of the augmented factor's truncated directions (``null_directions``)."""
+        return self.augmented_factor.null_directions()[1:]
 
     def scaled_schur_eigenvalues(self) -> NDArray:
         """Augmented ``scaled_schur_eigenvalues``."""

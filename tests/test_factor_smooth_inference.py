@@ -16,10 +16,10 @@ from superglm import (
     Spline,
     SuperGLM,
 )
-from superglm.model import state_ops
 from superglm.solvers._structured.state import (
     FactorSmoothLevelSupport,
 )
+from tests._identifiability_parity import assert_same_identifiability, coefficient_ses
 
 
 def _data() -> tuple[pd.DataFrame, np.ndarray]:
@@ -543,13 +543,12 @@ def test_factor_smooth_upper_boundary_reports_collapse() -> None:
 
 def test_factor_smooth_standard_errors_survive_a_near_singular_level() -> None:
     """Forty levels of 10-23 rows with k=5: one level's data block is singular
-    to ~1e-13 (equilibrated), yet full rank under the shared rule.  Its formed
-    local inverse used to inflate the reduced Schur complement's a posteriori
-    bound past every eigenvalue, so auto reported NaN for every coefficient,
-    the numeric column ``z`` included; gram reports ``z`` and most of the smooth.
-    The refined local solves keep auto's NaN set inside what the shared rule
-    can resolve: every coefficient gram leaves NaN stays NaN, and ``z`` and all
-    but at most one level's coefficients are reported.
+    to ~1e-13 (equilibrated).  The structured backend once reported NaN for
+    every coefficient here, the numeric column ``z`` included.  The fs penalty
+    curves every direction of a level, its line included, so the fit identifies
+    every coefficient (``solvers.identifiability``): both backends report every
+    standard error, the same values and footnotes.  Mutation: stage 1's
+    structured backend blanked the data's null set.
     """
     rng = np.random.default_rng(5102)
     n, n_levels = 600, 40
@@ -559,7 +558,7 @@ def test_factor_smooth_standard_errors_survive_a_near_singular_level() -> None:
     y = 0.2 * z + 0.4 * np.sin(2 * np.pi * x) + rng.normal(0, 0.3, n_levels)[codes]
     y = y + rng.normal(0, 0.4, n)
     X = pd.DataFrame({"x": x, "z": z, "g": np.array([f"g{c:02d}" for c in codes], dtype=object)})
-    se, models = {}, {}
+    metrics = {}
     for direct_solve in ("gram", "auto"):
         model = SuperGLM(
             family="gaussian",
@@ -569,19 +568,7 @@ def test_factor_smooth_standard_errors_survive_a_near_singular_level() -> None:
             direct_solve=direct_solve,
         )
         model.fit_reml(X, y)
-        models[direct_solve] = model
-        se[direct_solve] = {
-            term: np.asarray(value, dtype=float)
-            for term, value in model.metrics(X, y).coefficient_se.items()
-        }
-    assert np.all(np.isfinite(se["gram"]["z"]))
-    assert np.all(np.isfinite(se["auto"]["z"]))
-    # The structured backend still applies the data-only rule: compare it with the dense
-    # fit's, computed on request; the dense fit's own blanks are a subset of it.
-    record = state_ops.fit_data_rank(models["gram"])
-    group = next(g for g in models["gram"]._groups if g.name == "x:g:fs")
-    gram_nan = ~record.data.coefficient_estimable()[group.sl].reshape(n_levels, 5)
-    assert np.all(gram_nan[np.isnan(se["gram"]["x:g:fs"]).reshape(n_levels, 5)])
-    auto_nan = np.isnan(se["auto"]["x:g:fs"]).reshape(n_levels, 5)
-    assert np.all(auto_nan[gram_nan])
-    assert np.count_nonzero((auto_nan & ~gram_nan).any(axis=1)) <= 1
+        metrics[direct_solve] = model.metrics(X, y)
+    assert metrics["auto"]._model._reml_profile["direct_backend"] == "structured"
+    assert not np.any(np.isnan(coefficient_ses(metrics["auto"])))
+    assert_same_identifiability(metrics["auto"], metrics["gram"], rtol=1e-5)

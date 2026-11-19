@@ -39,12 +39,17 @@ from superglm import (
     Spline,
     SuperGLM,
 )
-from superglm.model import state_ops
 from superglm.reml.penalty_algebra import (
     _penalty_component_omega_ssp,
     build_penalty_matrix,
     penalty_component_matvec,
     penalty_component_quadratic,
+)
+from tests._identifiability_parity import (
+    assert_same_identifiability,
+    assert_structured_blanks_its_truncation,
+    coefficient_ses,
+    penalised_null_reach,
 )
 
 EPS = float(np.finfo(np.float64).eps)
@@ -158,16 +163,10 @@ def _nan_mask(model: SuperGLM, frame, y, weight) -> np.ndarray:
     )
 
 
-def _data_only_mask(model) -> np.ndarray:
-    """The data-only rule's blanks on a fit (``state_ops.fit_data_rank``).
-
-    The structured backend still blanks these; a dense fit blanks only what its penalised
-    Hessian leaves free (``solvers.identifiability``), a subset of them.
-    """
-    record = state_ops.fit_data_rank(model)
-    mask = np.zeros(len(record.mean_x), dtype=bool)
-    mask[record.selected_columns] = ~record.data.coefficient_estimable()
-    return mask
+def _metrics(model: SuperGLM, frame, y, weight):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return model.metrics(frame, y, sample_weight=weight)
 
 
 def _structurally_non_estimable(model: SuperGLM, weight) -> np.ndarray:
@@ -216,13 +215,16 @@ def _assert_fits_as_gram(auto: SuperGLM, gram: SuperGLM) -> None:
 def test_sz_one_row_levels_fit_as_the_dense_solver_does(one_row, discrete) -> None:
     """Four or eight one-row levels (stage-3 verifier, finding 1).
 
-    A one-row level's deviation trades with the main effect: the data leave
-    it free, and the sum-to-zero constraint spreads it over every level, so
-    the standard errors are NaN on the design's structural non-estimable set
-    exactly, as the dense solver's.  Mutations: the balance tree's deferral
-    judged against the stacked matrix's own column norm (``_decide``)
-    instead of the unreduced column; estimability read from the fit's own
-    (penalized) aliases, which leaves the penalized coordinates finite.
+    A one-row level's deviation line trades with the main effect's, and
+    neither line is penalised: an exact null of the penalised Hessian, which
+    the sum-to-zero constraint spreads over every level.  The tree's split is
+    the minimum-norm one, so its standard errors are NaN on every coordinate
+    the null directions reach (a dense SVD's); the dense solver fixes one
+    coordinate per direction at zero and blanks those alone, and every other
+    standard error agrees (``solvers.identifiability``).  Mutations: the
+    balance tree's deferral judged against the stacked matrix's own column
+    norm (``_decide``) instead of the unreduced column; stage 1's data-only
+    blanks, on coefficients the penalty identifies.
     """
     frame, eta, rng, _ = _frame(one_row=one_row)
     y = _response("gaussian", eta, rng)
@@ -231,10 +233,11 @@ def test_sz_one_row_levels_fit_as_the_dense_solver_does(one_row, discrete) -> No
     gram = _fit(_model("gaussian", "gram", discrete=discrete), frame, y, weight)
     _assert_fits_as_gram(auto, gram)
     assert len(auto._reml_profile["structured_thin_levels"]) == one_row
-    nan = _nan_mask(auto, frame, y, weight)
-    np.testing.assert_array_equal(nan, _structurally_non_estimable(auto, weight))
-    np.testing.assert_array_equal(nan, _data_only_mask(gram))
-    assert not np.any(_nan_mask(gram, frame, y, weight) & ~nan)
+    reach = penalised_null_reach(auto, weight)
+    assert np.any(_structurally_non_estimable(auto, weight) & ~reach)
+    assert_structured_blanks_its_truncation(
+        _metrics(auto, frame, y, weight), _metrics(gram, frame, y, weight), reach, rtol=1e-8
+    )
 
 
 @pytest.mark.parametrize("family", ["gaussian", "poisson", "gamma_log"])
@@ -4172,14 +4175,17 @@ def test_sz_leverage_of_a_wide_term_sums_to_edf(lam, scale) -> None:
     "numerics", [("x1", "x10"), ("x1", "x10", "x1dup")], ids=["signed_rows", "duplicated_column"]
 )
 def test_sz_standard_errors_are_nan_only_on_exact_aliases(numerics) -> None:
-    """The NaN set is the design's structural set and the dense solver's (finding 2).
+    """NaN only on an alias of the penalised fit, as the dense solver's (finding 2).
 
     Gaussian with a log link on the block-factor note's fixture: its
     structured standard errors were NaN on 183 of 192 estimable coefficients
     (the range-space estimability solve of the retired sum-to-zero rule, on
-    ill-conditioned level blocks).  A duplicated column is an exact alias:
-    NaN on exactly its two columns.  Demonstration: the stage-4 builder's
-    tree reports 183 and 185 NaN here.
+    ill-conditioned level blocks).  Without an alias both backends report
+    every standard error, the same values and footnotes.  A duplicated
+    column is an exact alias: the tree's minimum-norm split leaves both
+    columns NaN, the dense solver fixes the later at zero and blanks it
+    alone.  Demonstration: the stage-4 builder's tree reports 183 and 185
+    NaN here.
     """
     frame, y = _block_factor_frame(0)
     frame["x1dup"] = frame["x1"].to_numpy().copy()
@@ -4190,24 +4196,26 @@ def test_sz_standard_errors_are_nan_only_on_exact_aliases(numerics) -> None:
     }
     assert models["auto"]._reml_profile["direct_backend"] == "structured"
     assert models["gram"]._reml_profile["direct_backend"] == "gram"
-    mask = _nan_mask(models["auto"], frame, y, weight)
-    np.testing.assert_array_equal(mask, _data_only_mask(models["gram"]))
-    np.testing.assert_array_equal(mask, _structurally_non_estimable(models["auto"], weight))
-    # the dense fit blanks the alias's absorber alone: the later duplicate
-    dense = _nan_mask(models["gram"], frame, y, weight)
-    assert not np.any(dense & ~mask)
+    metrics = {solve: _metrics(model, frame, y, weight) for solve, model in models.items()}
+    if "x1dup" not in numerics:
+        assert_same_identifiability(metrics["auto"], metrics["gram"], rtol=1e-7)
+        return
     columns = {g.name: g.start for g in models["gram"]._groups}
-    if "x1dup" in numerics:
-        assert dense[columns["x1dup"]] and not dense[columns["x1"]]
+    reach = penalised_null_reach(models["auto"], weight)
+    assert np.flatnonzero(reach).tolist() == [columns["x1"], columns["x1dup"]]
+    assert_structured_blanks_its_truncation(metrics["auto"], metrics["gram"], reach, rtol=1e-7)
+    # the dense fit blanks the alias's absorber alone: the later duplicate
+    dense = np.isnan(coefficient_ses(metrics["gram"]))
+    assert dense[columns["x1dup"]] and not dense[columns["x1"]]
 
 
-def test_sz_random_effect_levels_are_non_estimable_as_on_gram() -> None:
+def test_sz_random_effect_levels_report_their_standard_errors_as_on_gram() -> None:
     """A random effect's levels sum to the intercept: the data alone leave that direction free.
 
-    The ridge penalty identifies it, so it is no alias of the fit's Hessian: the dense fit
-    reports every level's standard error (``solvers.identifiability``), while the structured
-    backend still applies the data-only rule, the dense fit's on request.  Mutation: master's
-    dense fit blanked all twelve.
+    The ridge penalty identifies it, so it is no alias of the fit's Hessian: both backends
+    report every level's standard error, the same values and footnotes
+    (``solvers.identifiability``).  Mutation: stage 1's structured backend, and master's dense
+    fit, blanked all twelve.
     """
     frame, eta, rng, _ = _frame()
     frame["h"] = np.array([f"h{v:02d}" for v in rng.integers(0, 12, len(frame))], dtype=object)
@@ -4218,12 +4226,12 @@ def test_sz_random_effect_levels_are_non_estimable_as_on_gram() -> None:
         for solve in ("auto", "gram")
     }
     assert models["auto"]._reml_profile["direct_backend"] == "structured"
-    mask = _nan_mask(models["auto"], frame, y, weight)
     h = next(group for group in models["auto"]._groups if group.name == "h")
-    assert np.all(mask[h.sl]) and h.end - h.start == 12
-    np.testing.assert_array_equal(mask, _data_only_mask(models["gram"]))
-    np.testing.assert_array_equal(mask, _structurally_non_estimable(models["auto"], weight))
-    assert not np.any(_nan_mask(models["gram"], frame, y, weight)[h.sl])
+    assert np.all(_structurally_non_estimable(models["auto"], weight)[h.sl])
+    assert h.end - h.start == 12
+    metrics = {solve: _metrics(model, frame, y, weight) for solve, model in models.items()}
+    assert not np.any(np.isnan(coefficient_ses(metrics["auto"])))
+    assert_same_identifiability(metrics["auto"], metrics["gram"], rtol=1e-7)
 
 
 # ------------------------------------------------------ weak identification
@@ -4235,9 +4243,11 @@ def test_a_tiny_weight_level_is_named_not_the_whole_model() -> None:
     flagged, noise included (71 coefficients under REML, among them
     ``cat``).  The warning names the level's own coordinates and the
     columns that move with it, and never an unrelated column; the fit still
-    converges (the certificate leaves every moved column ungated), and the
-    standard errors follow the data rule as the dense solver's do (the
-    level's weighted columns sit below ``sqrt(eps)`` of the data's scale).
+    converges (the certificate leaves every moved column ungated).  Both
+    solvers truncate the direction, which the rows identify at float64, so
+    each blanks what its own rank decision left undetermined, and says so: the
+    dense solver the coordinate it fixed, the tree every coordinate its
+    minimum-norm split reaches (``solvers.identifiability``).
     Mutations: the disclosure reading every column the direction moves; the
     direction's entries kept within its Davis-Kahan resolution; the levels'
     entries read without removing the shift the constraint gives them all.
@@ -4264,34 +4274,36 @@ def test_a_tiny_weight_level_is_named_not_the_whole_model() -> None:
     assert len(names) == 1 and "x:g:sz[" in names[0]
     gram = _fit(_model("gaussian", "gram", lam=None), frame, y, weight)
     structured_mask = _nan_mask(model, frame, y, weight)
-    np.testing.assert_array_equal(structured_mask, _data_only_mask(gram))
-    assert not np.any(_nan_mask(gram, frame, y, weight) & ~structured_mask)
+    dense_mask = _nan_mask(gram, frame, y, weight)
+    assert np.any(dense_mask) and not np.any(dense_mask & ~structured_mask)
+    for fit, mask in ((model, structured_mask), (gram, dense_mask)):
+        record = fit._fit_inference_info["identifiability"]
+        assert {alias.source for alias in record.aliases} == {"fit"}
+        assert sorted(alias.coordinate for alias in record.aliases) == np.flatnonzero(mask).tolist()
 
 
-@pytest.mark.parametrize("solve", ["structured", "gram"])
-def test_selected_sz_standard_errors_follow_the_data_rule(solve) -> None:
-    """``select=True`` pins each level's line with a penalty: the dense fit reports every SE.
+def test_selected_sz_standard_errors_are_reported_as_on_gram() -> None:
+    """``select=True`` pins each level's line with a penalty: every standard error is reported.
 
     Every level of Sol's all-thin fixture sits at one ``x``: the data alias
     each level's line with the main effect, and the ``null`` penalty alone
-    pins it.  The penalised fit identifies it, so the dense fit's standard
-    errors are all finite (``solvers.identifiability``); the structured
-    backend still applies the data-only rule, missing (NaN) on exactly the
-    coordinates a null vector of ``[1, X]`` touches.  Mutation: master's
-    dense fit read the data-only rule.
+    pins it.  The penalised fit identifies it (``solvers.identifiability``),
+    so both backends report every standard error, the same values and
+    footnotes.  Mutation: stage 1's structured backend, and master's dense
+    fit, blanked the coordinates a null vector of ``[1, X]`` touches.
     """
     frame, y = _all_thin_frame()
     weight = np.ones(len(y))
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        model = _all_thin_model(solve, select=True).fit_reml(frame, y)
-    assert model._reml_profile["direct_backend"] == solve
-    missing = _nan_mask(model, frame, y, weight)
-    if solve == "gram":
-        assert not missing.any()
-        return
-    assert missing.any()
-    assert np.array_equal(missing, _structurally_non_estimable(model, weight))
+    metrics = {}
+    for solve in ("structured", "gram"):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model = _all_thin_model(solve, select=True).fit_reml(frame, y)
+        assert model._reml_profile["direct_backend"] == solve
+        metrics[solve] = _metrics(model, frame, y, weight)
+    assert np.any(_structurally_non_estimable(metrics["structured"]._model, weight))
+    assert not np.any(np.isnan(coefficient_ses(metrics["structured"])))
+    assert_same_identifiability(metrics["structured"], metrics["gram"], rtol=1e-7)
 
 
 def test_holdout_drop_term_deltas_use_the_predict_rule_for_a_redundant_group_term() -> None:

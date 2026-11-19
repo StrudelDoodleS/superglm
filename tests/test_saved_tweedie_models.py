@@ -58,12 +58,13 @@ def _dense_se(model) -> np.ndarray:
     return np.sqrt(np.diag(np.linalg.inv(H))[1:] * model._result.phi)
 
 
-def _assert_se_close(rebuilt: dict, reference: dict, tolerance: float, pattern=True) -> None:
+def _assert_se_close(rebuilt: dict, reference: dict, tolerance: float) -> None:
     for term, expected in reference.items():
         got = np.asarray(rebuilt[term], dtype=float)
-        if pattern:
-            np.testing.assert_array_equal(np.isfinite(got), np.isfinite(expected))
-        finite = np.isfinite(got)
+        # none the reference reports is lost; the penalised fit may report more
+        # (``solvers.identifiability``)
+        assert np.all(np.isfinite(got)[np.isfinite(expected)])
+        finite = np.isfinite(got) & np.isfinite(expected)
         relative = np.abs(got[finite] - expected[finite]) / np.abs(expected[finite])
         assert np.all(relative <= tolerance), (term, float(np.max(relative)), tolerance)
 
@@ -84,7 +85,7 @@ def test_a_tweedie_model_saved_by_v0_35_0_loads_predicts_and_rebuilds(
 
     The rebuilt standard errors are those of the model's own penalized Hessian
     at the saved coefficients, within the variances' ``n u kappa_s``
-    (``_se_tolerance``), with v0.35.0's pattern of reported values.  On the fs
+    (``_se_tolerance``), none of v0.35.0's reported values lost.  On the fs
     discrete fixture v0.35.0's own reported errors sit 3.5e-5 from that
     Hessian (measured on v0.35.0 itself: its factor was built at other working
     weights), so only the exact random-effect fixture is also held to them.
@@ -107,11 +108,7 @@ def test_a_tweedie_model_saved_by_v0_35_0_loads_predicts_and_rebuilds(
     assert dense.size == sum(np.asarray(value).size for value in se.values())
     offsets = np.cumsum([0] + [np.asarray(value).size for value in se.values()])
     reference = {term: dense[offsets[i] : offsets[i + 1]] for i, term in enumerate(se)}
-    # the reported entries (a random-effect level's is NaN by the package's
-    # convention, and its pattern is v0.35.0's)
-    _assert_se_close(se, reference, tolerance, pattern=False)
-    for term, saved in record["se"].items():
-        np.testing.assert_array_equal(np.isfinite(se[term]), np.isfinite(saved))
+    _assert_se_close(se, reference, tolerance)
     if name == "tweedie_re_exact":
         _assert_se_close(se, record["se"], tolerance)
 

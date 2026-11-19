@@ -174,7 +174,9 @@ def test_an_fs_model_saved_by_v0_35_0_loads_predicts_and_rebuilds_its_inference(
     for term, saved in record["se"].items():
         saved = scale * np.asarray(saved, dtype=float)
         rebuilt = np.asarray(se[term], dtype=float)
-        np.testing.assert_array_equal(np.isfinite(rebuilt), np.isfinite(saved))
+        # every error v0.35.0 reported, and the ones its data-only rule blanked that the
+        # penalised fit identifies (``solvers.identifiability``)
+        assert np.all(np.isfinite(rebuilt)[np.isfinite(saved)])
         finite = np.isfinite(saved)
         relative = np.abs(rebuilt[finite] - saved[finite]) / np.abs(saved[finite])
         assert np.all(relative <= tolerance), (term, float(np.max(relative)), tolerance)
