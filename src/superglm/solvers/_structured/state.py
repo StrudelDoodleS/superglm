@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -32,6 +33,9 @@ from superglm.solvers._structured.operators import (
     SumToZeroBlockOperator,
 )
 
+if TYPE_CHECKING:
+    from superglm.solvers.identifiability import Identifiability
+
 
 @dataclass(frozen=True)
 class StructuredLinearSystemState:
@@ -40,7 +44,10 @@ class StructuredLinearSystemState:
     There is no raw-coordinate coefficient factor: the slope covariance is
     ``M_ss``, the slope block of the augmented inverse (``profiled_factor``).
     Older pickles' ``coefficient_factor`` or ``fallback_reason`` entries are
-    restored as unread attributes.
+    restored as unread attributes.  ``identifiability`` is the fit's record
+    (``solvers.identifiability``), decided from this state at the fit's weights
+    when the fit publishes it or on first inference, and kept with it: the
+    state is its owner, and a new fit installs a new state.
     """
 
     profiled_factor: (
@@ -55,6 +62,7 @@ class StructuredLinearSystemState:
         StructuredLevelSupport | FactorSmoothLevelSupport,
     ]
     backend: str = "structured"
+    identifiability: Identifiability | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.profiled_factor.shape != self.system.operator.shape:

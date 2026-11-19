@@ -1307,11 +1307,15 @@ class RankInfo:
         models", Statistical Modelling 26(4), section 5.1, p. 397). The covariance is the
         one the fit would report with no row held; leverage and the degrees of freedom stay
         the face fit's (``augmented_inverse``). A record saved before fits held no row
-        keeps the face fit's (``covariance_policy``).
+        keeps the face fit's (``covariance_policy``). A singular fit published in its
+        identifiability gauge reports the covariance in that gauge (``Gauge.covariance``).
         """
         if self.covariance_policy == "face":
-            return self.augmented_inverse()
-        return self.augmented.pseudo_inverse()
+            inverse = self.augmented_inverse()
+        else:
+            inverse = self.augmented.pseudo_inverse()
+        gauge = None if self.identifiability is None else self.identifiability.gauge
+        return inverse if gauge is None else gauge.covariance(inverse, self.selected_columns)
 
     def coefficient_inverse(self) -> NDArray:
         """The raw slopes' inverse Hessian, on the active face when there is one."""

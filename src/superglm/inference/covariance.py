@@ -104,8 +104,55 @@ class BinaryScaledCovariance(_SelectedBlockAccess):
             return np.ldexp(covariance_selected_diagonal(self.base, indices), self.exponent)
 
 
+class _GaugeCorrection:
+    """``P V P'`` read off an ungauged covariance ``V`` (``solvers.identifiability.Gauge``).
+
+    ``null`` (``n x k``) and ``coordinates`` (``E``, ``k``) are the gauge in the covariance's own
+    coordinates, ``apply`` the ungauged product ``V x``.  With ``L = N (E'N)^-1``, ``P = I - L
+    E'``, so ``P V P'`` at rows ``I`` and columns ``J`` is ``V_IJ - L_I (VE)_J' - (VE)_I L_J' + L_I
+    (E'VE) L_J'``: ``V E`` takes ``k`` solves through the factor, formed once on first read and
+    kept with the accessors that share this correction (its owner; the fit is its lifetime, and it
+    holds nothing a later fit could invalidate).  No ``n x n`` matrix is formed.
+    """
+
+    def __init__(self, null: NDArray, coordinates: NDArray, apply):
+        self.coordinates = np.asarray(coordinates, dtype=np.intp)
+        self.lift = np.linalg.solve(null[self.coordinates].T, np.asarray(null).T).T
+        self._apply = apply
+        self._applied: NDArray | None = None
+
+    @property
+    def applied(self) -> NDArray:
+        """``V E`` (``n x k``), ungauged and unscaled."""
+        if self._applied is None:
+            units = np.zeros((self.lift.shape[0], self.coordinates.size))
+            units[self.coordinates, np.arange(self.coordinates.size)] = 1.0
+            self._applied = np.asarray(self._apply(units), dtype=np.float64)
+        return self._applied
+
+    def block(self, rows: NDArray, columns: NDArray, base: NDArray) -> NDArray:
+        L_r, L_c = self.lift[rows], self.lift[columns]
+        VE_r, VE_c = self.applied[rows], self.applied[columns]
+        EVE = self.applied[self.coordinates]
+        return base - L_r @ VE_c.T - VE_r @ L_c.T + L_r @ EVE @ L_c.T
+
+    def diagonal(self, rows: NDArray, base: NDArray) -> NDArray:
+        L, VE = self.lift[rows], self.applied[rows]
+        EVE = self.applied[self.coordinates]
+        diagonal = base - 2.0 * np.sum(L * VE, axis=1) + np.sum((L @ EVE) * L, axis=1)
+        diagonal[np.isin(rows, self.coordinates)] = 0.0
+        return diagonal
+
+    def solve(self, rhs: NDArray, apply) -> NDArray:
+        """``P V P' rhs`` through the ungauged ``apply``."""
+        values = np.array(rhs, dtype=np.float64, copy=True)
+        values[self.coordinates] -= self.lift.T @ values
+        solved = np.asarray(apply(values), dtype=np.float64)
+        return solved - self.lift @ solved[self.coordinates]
+
+
 class StructuredSlopeCovarianceAccessor(_SelectedBlockAccess):
-    """Selected access to a compact profiled slope covariance."""
+    """Selected access to a compact profiled slope covariance, in its gauge when it has one."""
 
     backend = "structured"
 
@@ -114,25 +161,51 @@ class StructuredSlopeCovarianceAccessor(_SelectedBlockAccess):
         factor: HessianFactor,
         *,
         scale: float = 1.0,
+        gauge: _GaugeCorrection | None = None,
     ):
         self.factor = factor
         self.scale = float(scale)
+        self.gauge = gauge
         self.shape = factor.shape
         self.ndim = 2
 
     def scaled(self, scale: float) -> StructuredSlopeCovarianceAccessor:
-        return StructuredSlopeCovarianceAccessor(self.factor, scale=self.scale * float(scale))
+        return StructuredSlopeCovarianceAccessor(
+            self.factor, scale=self.scale * float(scale), gauge=self.gauge
+        )
 
     def selected_block(self, indices: NDArray) -> NDArray:
         selected = np.asarray(indices, dtype=np.intp)
-        return self.scale * self.factor.selected_inverse_block(selected)
+        block = self.factor.selected_inverse_block(selected)
+        if self.gauge is not None:
+            block = self.gauge.block(selected, selected, block)
+        return self.scale * block
 
     def selected_diagonal(self, indices: NDArray) -> NDArray:
         selected = np.asarray(indices, dtype=np.intp)
-        return self.scale * self.factor.selected_inverse_diagonal(selected)
+        diagonal = self.factor.selected_inverse_diagonal(selected)
+        if self.gauge is not None:
+            diagonal = self.gauge.diagonal(selected, diagonal)
+        return self.scale * diagonal
 
     def solve(self, rhs: NDArray) -> NDArray:
-        return self.scale * self.factor.solve(rhs)
+        if self.gauge is None:
+            return self.scale * self.factor.solve(rhs)
+        return self.scale * self.gauge.solve(rhs, self.factor.solve)
+
+    def raw_level_block(self, level: int) -> NDArray:
+        """One raw level's ``sz`` block (``ProfiledSumToZeroTreeFactor.raw_level_inverse_block``)."""
+        block = self.factor.raw_level_inverse_block(level)
+        if self.gauge is not None:
+            levels = np.asarray(self.factor.structured_indices, dtype=np.intp)
+            if level < levels.shape[0]:
+                L, VE = self.gauge.lift[levels[level]], self.gauge.applied[levels[level]]
+            else:  # the last level is minus the sum of the public ones
+                L = -self.gauge.lift[levels].sum(axis=0)
+                VE = -self.gauge.applied[levels].sum(axis=0)
+            EVE = self.gauge.applied[self.gauge.coordinates]
+            block = block - L @ VE.T - VE @ L.T + L @ EVE @ L.T
+        return self.scale * block
 
     def trace(self) -> float:
         indices = np.arange(self.shape[0], dtype=np.intp)
@@ -144,7 +217,10 @@ class StructuredCovarianceAccessor(_SelectedBlockAccess):
 
     The retained factor lives in solver coordinates. ``intercept_shift`` maps
     its intercept into the canonical public coefficient state without
-    materializing the full augmented inverse.
+    materializing the full augmented inverse.  ``gauge``
+    (``solvers.identifiability.Gauge``, in the factor's slope coordinates)
+    publishes a singular fit's covariance at its blanked coordinates' zeros,
+    ``P V P'``, as its coefficients are published.
     """
 
     backend = "structured"
@@ -157,6 +233,8 @@ class StructuredCovarianceAccessor(_SelectedBlockAccess):
         *,
         intercept_shift: NDArray | None = None,
         scale: float = 1.0,
+        gauge=None,
+        _corrections: tuple[_GaugeCorrection, _GaugeCorrection] | None = None,
     ):
         self.factor = factor
         self.augmented_factor = factor.augmented_factor
@@ -171,13 +249,28 @@ class StructuredCovarianceAccessor(_SelectedBlockAccess):
         self.scale = float(scale)
         self.shape = (p + 1, p + 1)
         self.ndim = 2
-        self.slopes = StructuredSlopeCovarianceAccessor(factor, scale=self.scale)
+        self.gauge = gauge
+        if _corrections is None and gauge is not None:
+            null = np.asarray(gauge.null, dtype=np.float64)
+            # the public intercept is the solver's plus ``shift' beta``
+            public = np.vstack(((gauge.intercept + shift @ null)[None, :], null))
+            _corrections = (
+                _GaugeCorrection(public, gauge.coordinates + 1, self._ungauged_solve),
+                _GaugeCorrection(null, gauge.coordinates, factor.solve),
+            )
+        self._corrections = _corrections
+        self._augmented = None if _corrections is None else _corrections[0]
+        self.slopes = StructuredSlopeCovarianceAccessor(
+            factor, scale=self.scale, gauge=None if _corrections is None else _corrections[1]
+        )
 
     def scaled(self, scale: float) -> StructuredCovarianceAccessor:
         return StructuredCovarianceAccessor(
             self.factor,
             intercept_shift=self.intercept_shift,
             scale=self.scale * float(scale),
+            gauge=self.gauge,
+            _corrections=self._corrections,
         )
 
     def _solver_contrasts(self, public_indices: NDArray) -> NDArray:
@@ -212,8 +305,10 @@ class StructuredCovarianceAccessor(_SelectedBlockAccess):
         selected = np.asarray(indices, dtype=np.intp)
         self._check_block_request(selected)
         contrasts = self._solver_contrasts(selected)
-        solved = self.augmented_factor.solve(contrasts)
-        return self.scale * (contrasts.T @ solved)
+        block = contrasts.T @ self.augmented_factor.solve(contrasts)
+        if self._augmented is not None:
+            block = self._augmented.block(selected, selected, block)
+        return self.scale * block
 
     def selected_diagonal(self, indices: NDArray) -> NDArray:
         selected = np.asarray(indices, dtype=np.intp)
@@ -233,15 +328,32 @@ class StructuredCovarianceAccessor(_SelectedBlockAccess):
 
     def intercept_variance(self) -> float:
         contrast = np.concatenate(([1.0], self.intercept_shift))
-        return float(self.scale * (contrast @ self.augmented_factor.solve(contrast)))
+        variance = float(contrast @ self.augmented_factor.solve(contrast))
+        if self._augmented is not None:
+            variance = float(
+                self._augmented.diagonal(np.zeros(1, np.intp), np.array([variance]))[0]
+            )
+        return self.scale * variance
 
     def intercept_cross(self, slope_indices: NDArray) -> NDArray:
         selected = np.asarray(slope_indices, dtype=np.intp)
         if selected.ndim != 1:
             raise ValueError("slope_indices must be one-dimensional")
         contrast = np.concatenate(([1.0], self.intercept_shift))
-        solved = self.augmented_factor.solve(contrast)
-        return self.scale * solved[selected + 1]
+        cross = self.augmented_factor.solve(contrast)[selected + 1]
+        if self._augmented is not None:
+            cross = self._augmented.block(np.zeros(1, np.intp), selected + 1, cross[None, :])[0]
+        return self.scale * cross
+
+    def _ungauged_solve(self, rhs: NDArray) -> NDArray:
+        """``V rhs`` in public coordinates at unit scale, before any gauge."""
+        values = np.asarray(rhs, dtype=np.float64)
+        solver_rhs = np.array(values, copy=True)
+        solver_rhs[1:] += np.multiply.outer(self.intercept_shift, values[0])
+        solver_solution = self.augmented_factor.solve(solver_rhs)
+        public_solution = np.array(solver_solution, copy=True)
+        public_solution[0] += self.intercept_shift @ solver_solution[1:]
+        return public_solution
 
     def solve(self, rhs: NDArray) -> NDArray:
         values = np.asarray(rhs, dtype=np.float64)
@@ -250,13 +362,16 @@ class StructuredCovarianceAccessor(_SelectedBlockAccess):
             values = values[:, None]
         if values.ndim != 2 or values.shape[0] != self.shape[0]:
             raise ValueError(f"rhs must have shape ({self.shape[0]},) or ({self.shape[0]}, m).")
-        solver_rhs = np.array(values, copy=True)
-        solver_rhs[1:] += self.intercept_shift[:, None] * values[0]
-        solver_solution = self.augmented_factor.solve(solver_rhs)
-        public_solution = np.array(solver_solution, copy=True)
-        public_solution[0] += self.intercept_shift @ solver_solution[1:]
-        public_solution *= self.scale
+        if self._augmented is None:
+            public_solution = self._ungauged_solve(values)
+        else:
+            public_solution = self._augmented.solve(values, self._ungauged_solve)
+        public_solution = self.scale * public_solution
         return public_solution[:, 0] if vector_rhs else public_solution
+
+    def raw_level_block(self, level: int) -> NDArray:
+        """One raw level's ``sz`` slope block, in the published gauge."""
+        return self.slopes.raw_level_block(level)
 
     def quadratic_form(self, contrast: NDArray) -> float:
         values = np.asarray(contrast, dtype=np.float64)
@@ -312,7 +427,7 @@ def covariance_factor_smooth_raw_level_block(
         )
         and (term_name is None or covariance.factor.dominant_group_name == term_name)
     ):
-        return covariance.scale * covariance.factor.raw_level_inverse_block(level)
+        return covariance.raw_level_block(level)
 
     if level < n_levels - 1:
         start = level * block_size

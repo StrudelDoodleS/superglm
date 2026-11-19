@@ -1167,15 +1167,25 @@ column, a level seen at one value of its covariate, a basis function with no
 data and no penalty. The later term absorbs the alias, as in R's `lm`; the
 coefficients beside it keep their standard errors
 (`src/superglm/solvers/identifiability.py`). Every backend reads this one
-decision. A structured fit (`fs`, `sz`, nested random effects) whose factor
+decision. When the small design's Gram cannot tell a direction from zero,
+the rows are read on those directions alone, the way the data rank reads them
+below. A structured fit (`fs`, `sz`, nested random effects) whose factor
 truncated nothing has certified the Hessian nonsingular, so nothing is aliased
 and the small design is never formed. Otherwise the factor publishes the
-directions it truncated, and the small design's Gram is formed through the
-retained moments. Its split along a truncated direction is the
-minimum-norm one rather than a zero on the later term, so where the Hessian is
-singular every coefficient such a direction reaches is shown as missing, where
-the dense solver shows only the one it fixed at zero. Elsewhere the two
-backends print the same standard errors.
+directions it truncated. The rows are read on those directions only, and
+when every one of them is zero to rounding they are the aliases, again
+without forming the small design.
+
+Where the Hessian is singular, the fit publishes one coefficient per alias at
+zero, the one shown as missing, whichever backend ran: the latest coefficient
+the alias reaches, as in R. The dense solver usually fixes that coefficient
+at zero already. A structured factor's own split along an alias is the
+minimum-norm one, so its coefficients are moved along the alias to the same
+zeros. That changes no fitted value, and its standard errors are then the
+dense fit's. An alias that exists only because some rows' working weights
+vanished, such as a level whose mean is far below a log link's range, would
+move those rows' fitted values; such a fit keeps its own split, and every
+coefficient the alias reaches is shown as missing.
 
 The *data rank* asks whether the data alone, ignoring the penalties, pin a
 direction down. It is a diagnostic, computed on request

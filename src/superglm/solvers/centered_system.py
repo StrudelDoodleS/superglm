@@ -884,7 +884,11 @@ def grouped_projected_factor(
     ``A = sqrt(W) ((X - c) - c_lo)`` and ``basis`` is ``p x k``. One pass over
     the rows: each group writes its part of ``X basis`` from its compact form
     (``_design_leaf_parts``), so a support group costs one ``k``-vector add per
-    row (``n T k`` in all, against ``2 n p^2`` for the TSQR of ``A``).
+    row (``n T k`` in all, against ``2 n p^2`` for the TSQR of ``A``).  An
+    ``fs`` or ``sz`` block writes each row's natural basis against its level's
+    rows of ``basis`` (an ``sz`` final level against minus their sum), never its
+    ``K k``-wide rows, and its centre joins after the product, which its column
+    magnitudes carry.
 
     **Error.** Every entry of ``B`` lies within ``gamma_(p + T + 3)`` of
     ``|a_r|' |basis|`` (Higham 2002, secs. 3.1 and 3.5), and the TSQR of ``B``
@@ -892,6 +896,7 @@ def grouped_projected_factor(
     rounding an entry of ``A'B`` carries, so ``gamma`` of it times
     ``|A|' |B|`` bounds its error (``rank.decompose_gram_deflated``).
     """
+    from superglm._group_matrix._group_matrix_core import FactorSmoothGroupMatrix
     from superglm._group_matrix._group_matrix_discretized import (
         DiscretizedSplineCategoricalGroupMatrix,
     )
@@ -939,6 +944,27 @@ def grouped_projected_factor(
             supports[column] = raw
             plans.append((columns, "level", table, np.zeros((raw.shape[0], width)), rows, codes))
             continue
+        if kind == "rows" and type(group) is FactorSmoothGroupMatrix:
+            smooth = cast(FactorSmoothGroupMatrix, group)
+            columns = slice(column, column + int(smooth.shape[1]))
+            centre = _centred_support(np.zeros((1, smooth.shape[1])), center, center_lo, columns)
+            base += (centre @ basis[columns])[0]
+            blocks = basis[columns].reshape(smooth.coefficient_levels, smooth.block_size, width)
+            if smooth.factor_basis == "sz":
+                blocks = np.concatenate((blocks, -blocks.sum(axis=0)[None]))
+            # each row's natural basis, as ``toarray`` places it
+            raw = smooth.B_unique[smooth.bin_idx] if smooth.is_discrete else smooth.B
+            natural = np.ascontiguousarray(raw @ smooth.natural_map, dtype=np.float64)
+            squares = np.zeros((smooth.n_levels, smooth.block_size))
+            np.add.at(squares, smooth.codes, np.asarray(W, dtype=np.float64)[:, None] * natural**2)
+            if smooth.factor_basis == "sz":
+                squares = squares[:-1] + squares[-1:]
+            magnitudes[columns] = np.sqrt(squares).ravel() + np.abs(centre[0]) * math.sqrt(
+                float(np.sum(W))
+            )
+            accumulator = np.zeros((smooth.n_levels, smooth.block_size, width))
+            plans.append((columns, "smooth", blocks, accumulator, natural, smooth.codes))
+            continue
         if kind == "rows":
             columns = slice(column, column + int(first.shape[1]))
             plans.append((columns, "rows", None, None, first, None))
@@ -976,6 +1002,9 @@ def grouped_projected_factor(
             for columns, kind, table, _, first, second in plans:
                 if kind == "full":
                     _gather_table_rows(projected, table, first, start)
+                elif kind == "smooth":
+                    rows = slice(start, stop)
+                    projected += np.einsum("rk,rkw->rw", first[rows], table[second[rows]])
                 elif kind == "level":
                     low, high = np.searchsorted(first, (start, stop))
                     spans.append((int(low), int(high)))
@@ -1003,6 +1032,9 @@ def grouped_projected_factor(
                 local = locals_[id(accumulator)]
                 if kind == "full":
                     _scatter_table_rows(local, weighted, first, start)
+                elif kind == "smooth":
+                    rows = slice(start, stop)
+                    np.add.at(local, second[rows], first[rows][:, :, None] * weighted[:, None, :])
                 else:
                     low, high = next(level)
                     _scatter_table_rows_at(local, weighted, first, second, low, high, start)
@@ -1015,6 +1047,17 @@ def grouped_projected_factor(
         for columns, kind, _, accumulator, _, _ in plans:
             if kind == "full":
                 cross[columns] += supports[columns.start].T @ accumulator
+            elif kind == "smooth":
+                # an ``sz`` final level's rows are minus their natural basis in every block
+                levels = (columns.stop - columns.start) // accumulator.shape[1]
+                public = accumulator[:levels]
+                if len(accumulator) > levels:
+                    public = public - accumulator[levels:]
+                cross[columns] += public.reshape(columns.stop - columns.start, width)
+                centre = _centred_support(
+                    np.zeros((1, columns.stop - columns.start)), center, center_lo, columns
+                )
+                cross[columns] += centre.T @ weighted_total[None, :]
             elif kind == "level":
                 cross[columns] += supports[columns.start].T @ accumulator
                 centre = _centred_support(
@@ -1025,7 +1068,7 @@ def grouped_projected_factor(
     factor = streamed_weighted_factor(blocks(), np.ones(n))
     # Roundings an entry of ``A'B`` carries beyond ``|A|' |B|``: centring and
     # table product, group adds, scalings, span sums and the widest support.
-    widest = max((plan[2].shape[0] for plan in plans if plan[2] is not None), default=0)
+    widest = max((plan[2].shape[0] for plan in plans if plan[1] in ("full", "level")), default=0)
     roundings = (
         (p + 2) + len(plans) + 3 + span_rows + -(-n // span_rows) + -(-n // block_rows) + widest + 1
     )

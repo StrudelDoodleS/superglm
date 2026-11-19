@@ -448,7 +448,38 @@ def test_grey_projection_is_the_rows_product(kind, discrete, blocks, monkeypatch
         family="poisson", features=features, interactions=interactions, discrete=discrete
     )
     model.fit_reml(frame, y)
-    dm = model._dm
+    _assert_rows_product(model._dm, blocks, monkeypatch)
+
+
+@pytest.mark.parametrize("blocks", ["one_block", "many_blocks"])
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
+@pytest.mark.parametrize("basis", ["fs", "sz"])
+def test_factor_smooth_projection_is_the_rows_product(basis, discrete, blocks, monkeypatch):
+    """An ``fs`` or ``sz`` block's compact route is the dense design's product, as above.
+
+    Each row writes its natural basis against its level's rows of ``V`` (an ``sz`` final level
+    against minus their sum) and its centre after the product.  Mutation: dropping the final
+    level's minus sign, or its share of ``A'B``, fails it.
+    """
+    from superglm import FactorSmooth
+
+    rng = np.random.default_rng(3)
+    n, K = 1500, 12
+    g = rng.integers(0, K, n)
+    x = rng.uniform(0.0, 10.0, n)
+    frame = pd.DataFrame({"x": x, "u": rng.normal(size=n), "g": [f"g{v:02d}" for v in g]})
+    y = rng.poisson(np.exp(-1.0 + 0.3 * np.sin(x) + 0.1 * (g % 3))).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        features={"u": Numeric(), "x": Spline(kind="ps", n_knots=6)},
+        interactions=[FactorSmooth("x", group="g", basis=basis, k=5)],
+        discrete=discrete,
+    )
+    model.fit_reml(frame, y)
+    _assert_rows_product(model._dm, blocks, monkeypatch)
+
+
+def _assert_rows_product(dm, blocks, monkeypatch):
     rng = np.random.default_rng(5)
     W = rng.uniform(0.1, 2.0, dm.n)
     X = dm.toarray()

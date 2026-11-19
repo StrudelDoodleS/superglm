@@ -3,10 +3,9 @@
 ``solvers.identifiability`` decides which coefficients a fit identifies; the structured
 backends (``fs``, ``sz``, nested chains) read it from their retained factors and the dense
 backend from its rank record.  On a full-rank penalised Hessian both report every standard
-error, the same footnotes and the same values.  On a singular one the structured factor's
-split is the minimum-norm one, so every coordinate its truncated directions reach is blank,
-while the dense fit fixes the later coordinate of each alias at zero and blanks that alone;
-the two agree everywhere else.
+error, the same footnotes and the same values.  On a singular one both publish one gauge
+(``identifiability.Gauge``): one coordinate per null direction at zero and blank, the rest with
+the same coefficients and standard errors, and no fitted value moved.
 """
 
 from __future__ import annotations
@@ -100,17 +99,44 @@ def truncated_reach(factor) -> np.ndarray:
     return reach
 
 
-def assert_structured_blanks_its_truncation(
-    structured_metrics, dense_metrics, reach: np.ndarray, *, rtol: float
-) -> None:
-    """A singular Hessian: the structured fit blanks every coordinate ``reach`` marks.
+def without_gauge(monkeypatch, fit):
+    """``fit()`` with the identifiability gauge left unpublished: the coefficients ``633289397`` published."""
+    from superglm.model import state_ops
 
-    The dense fit's blanks, its representative zeros, are among them; every other standard
-    error agrees.
+    with monkeypatch.context() as patch:
+        # absent before fits published a gauge (``raising=False``)
+        patch.setattr(state_ops, "publish_identified_gauge", lambda model: None, raising=False)
+        return fit()
+
+
+def assert_one_gauge(structured_metrics, dense_metrics, frame, *, rtol: float, before=None) -> None:
+    """A singular Hessian: both backends publish the same gauge (``identifiability.Gauge``).
+
+    The same blanks, footnotes and standard errors (``assert_same_identifiability``), zero
+    coefficients on the blanks and the same coefficients elsewhere, normwise: in this gauge
+    they reach ``7e3`` beside fitted values of order one, so a solve's error is the vector's,
+    not each entry's.  The structured fit moved its coefficients (its record holds the gauge),
+    and each backend predicts what the same fit without the gauge (``before``, from
+    ``without_gauge``) predicts, to ``1e-12`` of the predictor's own magnitude ``|b_0| + |x|'
+    |beta|`` in either gauge: the size of the rounding any evaluation of it carries.  Without
+    ``before`` the caller checks the predictions.
     """
-    structured_se, dense_se = coefficient_ses(structured_metrics), coefficient_ses(dense_metrics)
-    assert np.any(reach)
-    np.testing.assert_array_equal(np.isnan(structured_se), reach)
-    dense_blank = np.isnan(dense_se)
-    assert np.any(dense_blank) and np.all(reach[dense_blank])
-    np.testing.assert_allclose(structured_se[~reach], dense_se[~reach], rtol=rtol)
+    assert_same_identifiability(structured_metrics, dense_metrics, rtol=rtol)
+    structured, dense = structured_metrics._model, dense_metrics._model
+    blank = ~np.asarray(structured._fit_inference_info["coefficient_identified"])
+    assert np.any(blank)
+    beta, reference = structured.result.beta, dense.result.beta
+    assert np.all(beta[blank] == 0.0) and np.all(reference[blank] == 0.0)
+    assert np.max(np.abs(beta - reference)) <= rtol * np.max(np.abs(reference))
+    assert structured._fit_inference_info["identifiability"].gauge is not None
+    X = np.abs(np.asarray(structured._dm.toarray(), dtype=np.float64))
+    for model, unmoved in zip((structured, dense), before or (), strict=bool(before)):
+        magnitude = np.maximum(
+            abs(float(model.result.intercept)) + X @ np.abs(model.result.beta),
+            abs(float(unmoved.result.intercept)) + X @ np.abs(unmoved.result.beta),
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            mean, reference_mean = model.predict(frame), unmoved.predict(frame)
+        slope = np.abs(model._link.deriv_inverse(model._link.link(reference_mean)))
+        assert np.all(np.abs(mean - reference_mean) <= 1e-12 * slope * magnitude)

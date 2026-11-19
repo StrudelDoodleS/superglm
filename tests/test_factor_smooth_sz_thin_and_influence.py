@@ -46,10 +46,11 @@ from superglm.reml.penalty_algebra import (
     penalty_component_quadratic,
 )
 from tests._identifiability_parity import (
+    assert_one_gauge,
     assert_same_identifiability,
-    assert_structured_blanks_its_truncation,
     coefficient_ses,
     penalised_null_reach,
+    without_gauge,
 )
 
 EPS = float(np.finfo(np.float64).eps)
@@ -212,19 +213,22 @@ def _assert_fits_as_gram(auto: SuperGLM, gram: SuperGLM) -> None:
 # ------------------------------------------------------------ exhausted levels
 @pytest.mark.parametrize("discrete", [False, True])
 @pytest.mark.parametrize("one_row", [4, 8])
-def test_sz_one_row_levels_fit_as_the_dense_solver_does(one_row, discrete) -> None:
+def test_sz_one_row_levels_fit_as_the_dense_solver_does(one_row, discrete, monkeypatch) -> None:
     """Four or eight one-row levels (stage-3 verifier, finding 1).
 
     A one-row level's deviation line trades with the main effect's, and
     neither line is penalised: an exact null of the penalised Hessian, which
-    the sum-to-zero constraint spreads over every level.  The tree's split is
-    the minimum-norm one, so its standard errors are NaN on every coordinate
-    the null directions reach (a dense SVD's); the dense solver fixes one
-    coordinate per direction at zero and blanks those alone, and every other
-    standard error agrees (``solvers.identifiability``).  Mutations: the
-    balance tree's deferral judged against the stacked matrix's own column
-    norm (``_decide``) instead of the unreduced column; stage 1's data-only
-    blanks, on coefficients the penalty identifies.
+    the sum-to-zero constraint spreads over every level.  The tree's own
+    split is the minimum-norm one, and the dense solver fixes a coordinate
+    of each direction it chose for conditioning; both publish the latest
+    coordinate of each at zero instead (``identifiability.Gauge``), so both
+    blank one per direction (3 of 191 with four one-row levels, where the
+    minimum-norm split left 58 undetermined) and agree on every coefficient,
+    standard error and footnote, and neither prediction moves.
+    Mutations: the balance tree's deferral judged against the stacked
+    matrix's own column norm (``_decide``) instead of the unreduced column;
+    stage 1's data-only blanks, on coefficients the penalty identifies; no
+    gauge (``Identifiability.gauge`` unpublished), as at ``633289397``.
     """
     frame, eta, rng, _ = _frame(one_row=one_row)
     y = _response("gaussian", eta, rng)
@@ -235,9 +239,21 @@ def test_sz_one_row_levels_fit_as_the_dense_solver_does(one_row, discrete) -> No
     assert len(auto._reml_profile["structured_thin_levels"]) == one_row
     reach = penalised_null_reach(auto, weight)
     assert np.any(_structurally_non_estimable(auto, weight) & ~reach)
-    assert_structured_blanks_its_truncation(
-        _metrics(auto, frame, y, weight), _metrics(gram, frame, y, weight), reach, rtol=1e-8
-    )
+    before = [
+        without_gauge(
+            monkeypatch,
+            lambda solve=solve: _fit(
+                _model("gaussian", solve, discrete=discrete), frame, y, weight
+            ),
+        )
+        for solve in ("auto", "gram")
+    ]
+    structured, dense = _metrics(auto, frame, y, weight), _metrics(gram, frame, y, weight)
+    assert_one_gauge(structured, dense, frame, before=before, rtol=1e-8)
+    blank = np.isnan(coefficient_ses(structured))
+    # one null direction fewer than the one-row levels
+    assert np.count_nonzero(blank) == one_row - 1
+    assert np.all(reach[blank])
 
 
 @pytest.mark.parametrize("family", ["gaussian", "poisson", "gamma_log"])
@@ -3831,6 +3847,29 @@ def _dense_cross_trace(model: SuperGLM, X, W, rates, rank: int) -> tuple[float, 
     return reference, beta
 
 
+def test_an_alias_of_vanished_working_weights_keeps_its_fitted_values(monkeypatch) -> None:
+    """A one-row level below the log link's range: the published coefficients do not move.
+
+    Its row's Fisher weight is ``3e-70``, so the penalised Hessian is singular along a direction
+    that moves that row's linear predictor (by ``2.6e5`` here, to an overflowing mean).  The
+    gauge is refused where a row's predictor would move beyond ``sqrt(eps)`` of its size, so the
+    record keeps the factor's split and every fitted value stands.  Mutation: publishing the
+    move overflows the row's mean (and the cross-trace test below raises on it).
+    """
+    frame, y, weight = _signed_aliased_frame("one_row")
+
+    def fit():
+        model = _model("gaussian_log", "auto", lam=1.29, main_lam=1e-4, numerics=("x1", "x10"))
+        return _fit(model, frame, y, weight)
+
+    model, before = fit(), without_gauge(monkeypatch, fit)
+    assert model._fit_inference_info["identifiability"].gauge is None
+    np.testing.assert_array_equal(model.result.beta, before.result.beta)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert np.all(np.isfinite(model.predict(frame)))
+
+
 @pytest.mark.parametrize(
     ("variant", "lam_x"), [("same_x", 8e-4), ("same_x", 1e-4), ("one_row", 1e-4)]
 )
@@ -4174,7 +4213,7 @@ def test_sz_leverage_of_a_wide_term_sums_to_edf(lam, scale) -> None:
 @pytest.mark.parametrize(
     "numerics", [("x1", "x10"), ("x1", "x10", "x1dup")], ids=["signed_rows", "duplicated_column"]
 )
-def test_sz_standard_errors_are_nan_only_on_exact_aliases(numerics) -> None:
+def test_sz_standard_errors_are_nan_only_on_exact_aliases(numerics, monkeypatch) -> None:
     """NaN only on an alias of the penalised fit, as the dense solver's (finding 2).
 
     Gaussian with a log link on the block-factor note's fixture: its
@@ -4182,10 +4221,10 @@ def test_sz_standard_errors_are_nan_only_on_exact_aliases(numerics) -> None:
     (the range-space estimability solve of the retired sum-to-zero rule, on
     ill-conditioned level blocks).  Without an alias both backends report
     every standard error, the same values and footnotes.  A duplicated
-    column is an exact alias: the tree's minimum-norm split leaves both
-    columns NaN, the dense solver fixes the later at zero and blanks it
-    alone.  Demonstration: the stage-4 builder's tree reports 183 and 185
-    NaN here.
+    column is an exact alias: both backends fix the later at zero and blank
+    it alone, with the whole effect on the earlier (the tree's minimum-norm
+    split halved it and left both NaN at ``633289397``).  Demonstration: the
+    stage-4 builder's tree reports 183 and 185 NaN here.
     """
     frame, y = _block_factor_frame(0)
     frame["x1dup"] = frame["x1"].to_numpy().copy()
@@ -4203,10 +4242,19 @@ def test_sz_standard_errors_are_nan_only_on_exact_aliases(numerics) -> None:
     columns = {g.name: g.start for g in models["gram"]._groups}
     reach = penalised_null_reach(models["auto"], weight)
     assert np.flatnonzero(reach).tolist() == [columns["x1"], columns["x1dup"]]
-    assert_structured_blanks_its_truncation(metrics["auto"], metrics["gram"], reach, rtol=1e-7)
-    # the dense fit blanks the alias's absorber alone: the later duplicate
-    dense = np.isnan(coefficient_ses(metrics["gram"]))
-    assert dense[columns["x1dup"]] and not dense[columns["x1"]]
+    before = [
+        without_gauge(
+            monkeypatch,
+            lambda solve=solve: _fit(
+                _model("gaussian_log", solve, numerics=numerics), frame, y, weight
+            ),
+        )
+        for solve in ("auto", "gram")
+    ]
+    assert_one_gauge(metrics["auto"], metrics["gram"], frame, before=before, rtol=1e-8)
+    # the alias's absorber alone is blank: the later duplicate
+    blank = np.isnan(coefficient_ses(metrics["auto"]))
+    assert np.flatnonzero(blank).tolist() == [columns["x1dup"]]
 
 
 def test_sz_random_effect_levels_report_their_standard_errors_as_on_gram() -> None:

@@ -9,6 +9,7 @@ from typing import cast
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._roundoff import SQRT_EPS
 from superglm._weight_units import coefficient_covariance, scale_penalties, solver_weights
 from superglm.group_matrix import DesignMatrix
 from superglm.inference._metrics_design import MappedColumnFactor, factor_from_gram
@@ -41,6 +42,7 @@ from superglm.solvers.rank import (
     decompose_gram_if_authoritative,
     diagonal_of_square,
     selected_group_name_set,
+    weights_fingerprint,
 )
 from superglm.solvers.working_rows import fisher_working_weights
 from superglm.types import GroupSlice
@@ -486,13 +488,25 @@ def _penalty_null_spaces(model, active_groups) -> list[NDArray]:
 
 
 def _decided_identifiability(
-    model, decomposition, active_groups, design, W, data_gram, *, penalized=True, data_diagonal=None
+    model,
+    decomposition,
+    active_groups,
+    design,
+    W,
+    data_gram,
+    *,
+    penalized=True,
+    data_diagonal=None,
+    penalty=None,
+    gauge=False,
 ) -> Identifiability:
     """The identifiability of a fit whose centred Hessian is ``decomposition``, in fitted coordinates.
 
     ``decomposition`` is in the coordinates of ``active_groups`` (the selected groups), ``design``
     their rows, and ``data_gram`` their centred data Gram (or a compact operator of it with its
-    diagonal ``data_diagonal``); ``solvers.identifiability`` decides and explains the record.
+    diagonal ``data_diagonal``); ``solvers.identifiability`` decides and explains the record, with
+    the penalty null spaces formed only if it reads them.  ``penalty`` and ``gauge`` are
+    ``decide_identifiability``'s.
     """
     original = {group.name: group for group in model._groups}
     columns = np.zeros(0, dtype=np.intp)
@@ -506,7 +520,7 @@ def _decided_identifiability(
         width=len(model._solver_pirls_result().beta),
         groups=active_groups,
         null_spaces=(
-            _penalty_null_spaces(model, active_groups)
+            (lambda: _penalty_null_spaces(model, active_groups))
             if penalized
             else [np.eye(group.size) for group in active_groups]
         ),
@@ -516,6 +530,8 @@ def _decided_identifiability(
         specs={**getattr(model, "_specs", {}), **getattr(model, "_interaction_specs", {})},
         W=W,
         data_diagonal=data_diagonal,
+        penalty=penalty,
+        gauge=gauge,
     )
 
 
@@ -561,14 +577,70 @@ def _spread_centred_operator(operator: CenteredBlockOperator) -> CenteredBlockOp
     )
 
 
-def _structured_identifiability(model, state: StructuredLinearSystemState, W) -> Identifiability:
+def _structured_penalty_product(penalized):
+    """``T -> (S T, |S| |T|)`` for a structured fit's penalty, from its parts, in slope coordinates.
+
+    An ``fs`` or ``sz`` operator keeps its border block and one block per level; an ``sz``
+    level's public coordinate also carries the last level's (``beta_K = -sum_l beta_l``, so
+    ``(S beta)_l = P_l beta_l - P_K beta_K``).  A nested chain keeps one lambda per node and its
+    border penalty.
+    """
+    small = np.asarray(penalized.small_indices, dtype=np.intp)
+    levels = np.asarray(penalized.structured_indices, dtype=np.intp)
+    if isinstance(penalized, NestedPenalizedOperator):
+        border = np.asarray(penalized.border_penalty, dtype=np.float64)
+        nodes = np.concatenate(penalized.node_penalty)
+        levels = levels.ravel()
+    else:
+        border = np.asarray(penalized.penalty_small, dtype=np.float64)
+        local = np.asarray(penalized.penalty_local, dtype=np.float64)
+
+    def apply(T: NDArray) -> tuple[NDArray, NDArray]:
+        applied, magnitude = np.zeros_like(T), np.zeros_like(T)
+        applied[small] = border @ T[small]
+        magnitude[small] = np.abs(border) @ np.abs(T[small])
+        if isinstance(penalized, NestedPenalizedOperator):
+            applied[levels] = nodes[:, None] * T[levels]
+            magnitude[levels] = np.abs(applied[levels])
+            return applied, magnitude
+        blocks = T[levels]
+        if isinstance(penalized, SumToZeroPenalizedOperator):
+            raw = np.concatenate((blocks, -blocks.sum(axis=0)[None]))
+            own = np.einsum("lij,ljt->lit", local, raw)
+            reach = np.einsum("lij,ljt->lit", np.abs(local[:-1]), np.abs(blocks))
+            applied[levels] = own[:-1] - own[-1:]
+            # ``|beta_K| <= sum_l |beta_l|``
+            magnitude[levels] = reach + (np.abs(local[-1]) @ np.abs(blocks).sum(axis=0))[None]
+        else:
+            applied[levels] = np.einsum("lij,ljt->lit", local, blocks)
+            magnitude[levels] = np.einsum("lij,ljt->lit", np.abs(local), np.abs(blocks))
+        return applied, magnitude
+
+    return apply
+
+
+def _structured_identifiability(
+    model, state: StructuredLinearSystemState, W, *, gauge: bool = False
+) -> Identifiability:
     """The identifiability of a structured fit, read from its retained factor and moments.
 
     The factor inverts ``H`` off the directions it truncated (``null_directions``); a factor that
     truncated none certified ``H`` nonsingular (``identifiability.certified_identifiability``).
-    Otherwise ``X_F``'s Gram comes through the centred data operator, so no ``p x p`` matrix is
-    formed.  The condition the factor certified is its border's.
+    Otherwise the rows are read on its truncated directions (the penalty applied from its parts),
+    and only where they leave one identified is ``X_F``'s Gram formed, through the centred data
+    operator, so no ``p x p`` matrix is formed.  The condition the factor certified is its
+    border's.  The record is kept on ``state``; ``gauge`` is ``decide_identifiability``'s, for the
+    fit that publishes its coefficients.
     """
+    if state.identifiability is not None:
+        return state.identifiability
+    record = _structured_record(model, state, W, gauge=gauge)
+    object.__setattr__(state, "identifiability", record)
+    return record
+
+
+def _structured_record(model, state: StructuredLinearSystemState, W, *, gauge: bool):
+    """``_structured_identifiability``'s decision, before it is kept on ``state``."""
     factor = state.profiled_factor
     certified = certified_identifiability(
         TruncatedDecomposition(
@@ -598,16 +670,19 @@ def _structured_identifiability(model, state: StructuredLinearSystemState, W) ->
         W,
         operator,
         data_diagonal=data_diagonal,
+        penalty=_structured_penalty_product(state.penalized_operator),
+        gauge=gauge,
     )
 
 
 def _record_identifiability(
-    model, rank_info, design, active_groups, W, data_gram
+    model, rank_info, design, active_groups, W, data_gram, *, gauge: bool = False
 ) -> Identifiability | None:
     """The record's identifiability, decided on first inference and kept on the record.
 
-    ``None`` for a record saved before fits recorded it: its standard errors keep their flags
-    (``RankInfo.coefficient_identified``).
+    A singular fit decides it when it publishes its coefficients (``publish_identified_gauge``,
+    with ``gauge``).  ``None`` for a record saved before fits recorded it: its standard errors
+    keep their flags (``RankInfo.coefficient_identified``).
     """
     if rank_info.identifiability_policy != "penalised":
         return None
@@ -621,9 +696,89 @@ def _record_identifiability(
             data_gram,
             # an unpenalized fit's data rank is its Hessian's (``RankInfo.data``)
             penalized=rank_info.data is not rank_info.augmented,
+            gauge=gauge,
         )
         object.__setattr__(rank_info, "identifiability", decided)
     return rank_info.identifiability
+
+
+def publish_identified_gauge(model) -> None:
+    """Publish a singular fit's coefficients in its identifiability gauge (``Gauge``).
+
+    Where the published decomposition of the centred Hessian is singular, the fit's
+    identifiability record is decided now rather than on first inference, and the solver's
+    coefficients move along ``null(H)`` to its blanked coordinates' zeros: the dense solver's own
+    zeros where it fixed them there, a structured factor's minimum-norm split otherwise.  No
+    fitted value moves: the solver intercept takes each direction's intercept component, and a
+    centred state's ``alpha`` its offset from the state's centre.  A direction null only because
+    its rows' working weights vanished (a level below a log link's range) would move those rows'
+    linear predictor; where any row's moves by more than ``sqrt(eps)`` of its size, the move is
+    not published and the record keeps the decomposition's own split, every coordinate it reaches
+    blank.  A full-rank fit, a constrained fit and a record saved before fits recorded
+    identifiability are left alone.
+    """
+    from superglm.solvers.mode_score import linear_predictor
+
+    solver = getattr(model, "_solver_result", None)
+    if solver is None or model._dm is None or getattr(solver, "scop_inference", None) is not None:
+        return
+    state = retained_linear_state(model)
+    if isinstance(state, StructuredLinearSystemState):
+        if state.identifiability is not None:
+            return
+        if int(state.profiled_factor.rank) == state.profiled_factor.shape[0]:
+            return
+        W = _solver_space_working_weights(model)
+        record = _structured_identifiability(model, state, W, gauge=True)
+    else:
+        rank_info = solver.rank_info
+        if (
+            rank_info is None
+            or rank_info.identifiability_policy != "penalised"
+            or rank_info.identifiability is not None
+            or rank_info.face is not None
+            or rank_info.augmented.rank == rank_info.augmented.width
+        ):
+            return
+        W = _solver_space_working_weights(model)
+        design, active_groups = _rank_active_state(model, rank_info)
+        held = rank_info.data_gram
+        data_gram = (
+            held
+            if held is not None and rank_info.data_gram_weights == weights_fingerprint(W)
+            else _rank_centered_data_gram(design, W)
+        )
+        record = _record_identifiability(
+            model, rank_info, design, active_groups, W, data_gram, gauge=True
+        )
+    gauge = None if record is None else record.gauge
+    if gauge is None:
+        return
+    beta, intercept, step = gauge.coefficients(solver.beta, solver.intercept)
+    changes = {"beta": beta, "intercept": intercept}
+    alpha, centre = solver.centred_intercept, solver.state_center
+    if alpha is not None and centre is not None:
+        # ``alpha + (x - c)' beta`` on a fitted row, where ``x' N = -intercept``
+        offset = gauge.intercept + np.asarray(centre, dtype=np.float64) @ gauge.null
+        changes["centred_intercept"] = float(alpha) - float(offset @ step)
+    published = dataclasses.replace(solver, **changes)
+    before = linear_predictor(model._dm, solver, None)
+    after = linear_predictor(model._dm, published, None)
+    size = np.maximum(1.0, np.maximum(np.abs(before), np.abs(after)))
+    if not np.all(np.abs(after - before) <= SQRT_EPS * size):
+        if isinstance(state, StructuredLinearSystemState):
+            object.__setattr__(state, "identifiability", None)
+            _structured_identifiability(model, state, W)
+        else:
+            object.__setattr__(rank_info, "identifiability", None)
+            _record_identifiability(model, rank_info, design, active_groups, W, data_gram)
+        return
+    if model._result is solver:
+        model._result = published
+    reml = getattr(model, "_reml_result", None)
+    if reml is not None and getattr(reml, "pirls_result", None) is solver:
+        reml.pirls_result = published
+    model._solver_result = published
 
 
 def fit_data_rank(model):
@@ -688,16 +843,22 @@ def _structured_covariance_state(
     StructuredCovarianceAccessor,
     list[GroupSlice],
 ]:
-    """Build lazy covariance views over one retained structured fit."""
+    """Build lazy covariance views over one retained structured fit.
+
+    A singular fit published in its identifiability gauge (``publish_identified_gauge``) reads
+    its covariance in that gauge.
+    """
     active_groups = list(model._groups)
     shift = _public_intercept_shift(
         model,
         active_groups,
         state.profiled_factor.shape[0],
     )
+    record = state.identifiability
     augmented = StructuredCovarianceAccessor(
         state.profiled_factor,
         intercept_shift=shift,
+        gauge=None if record is None else record.gauge,
     )
     # The slope covariance M_ss, the slope block of the augmented inverse: no
     # raw-coordinate coefficient factor exists.

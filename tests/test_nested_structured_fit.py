@@ -92,8 +92,8 @@ from superglm.solvers._structured.nested import (
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.mode_score import mode_certification_bar
 from tests._identifiability_parity import (
+    assert_one_gauge,
     assert_same_identifiability,
-    assert_structured_blanks_its_truncation,
     penalised_null_reach,
 )
 
@@ -1018,10 +1018,9 @@ def _assert_chain_of_one_is_gram(chain: SuperGLM, gram: SuperGLM, extra, weight)
     assert abs(chain.result.log_det_H - gram.result.log_det_H) <= rank * gamma
     chain_metrics = chain.metrics(frame, y, sample_weight=weight)
     gram_metrics = gram.metrics(frame, y, sample_weight=weight)
-    reach = penalised_null_reach(chain, weight)
-    if np.count_nonzero(reach) > 1:
-        # an alias the chain's minimum-norm split spreads over its columns
-        assert_structured_blanks_its_truncation(chain_metrics, gram_metrics, reach, rtol=budget)
+    if np.any(penalised_null_reach(chain, weight)):
+        # an alias: the chain's minimum-norm split moves to the dense solver's zeros
+        assert_one_gauge(chain_metrics, gram_metrics, frame, rtol=budget)
     else:
         assert_same_identifiability(chain_metrics, gram_metrics, rtol=budget)
 

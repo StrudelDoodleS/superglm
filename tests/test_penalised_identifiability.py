@@ -388,3 +388,206 @@ def test_a_saved_record_without_the_decision_keeps_its_flags_unless_full_rank():
         full.result.rank_info, identifiability_policy="data", identifiability=None, data=None
     )
     assert old_full.coefficient_identified().all()
+
+
+# ------------------------------------------------------------ what the rows read
+def _row_passes(monkeypatch) -> list[int]:
+    """The width of every row pass the owner makes (``grouped_projected_factor``)."""
+    import superglm.solvers.centered_system as centered_system
+
+    widths: list[int] = []
+    original = centered_system.grouped_projected_factor
+
+    def counted(dm, W, basis, **kwargs):
+        widths.append(int(np.shape(basis)[1]))
+        return original(dm, W, basis, **kwargs)
+
+    monkeypatch.setattr(centered_system, "grouped_projected_factor", counted)
+    return widths
+
+
+def _redecide(model):
+    """The fit's record decided again from its retained state, as the fit decides it."""
+    from superglm.model import state_ops
+
+    W = state_ops._solver_space_working_weights(model)
+    state = state_ops.retained_linear_state(model)
+    if state is not None:
+        object.__setattr__(state, "identifiability", None)
+        return state_ops._structured_identifiability(model, state, W, gauge=True)
+    rank_info = model.result.rank_info
+    object.__setattr__(rank_info, "identifiability", None)
+    design, groups = state_ops._rank_active_state(model, rank_info)
+    gram = state_ops._rank_centered_data_gram(design, W)
+    return state_ops._record_identifiability(model, rank_info, design, groups, W, gram, gauge=True)
+
+
+def test_a_structured_fit_reads_its_truncated_directions_alone(monkeypatch):
+    """Five one-row ``sz`` levels among 60: the rows are read on the factor's 4 truncated directions.
+
+    The factor certified its kept pivots, so its truncated directions are the only undecided
+    ones; the rows put each under its rounding bound, so they are ``null(H)``, read in one pass
+    of 4 columns, and neither ``N_S`` nor ``X_F``'s Gram is formed.  At ``633289397`` the owner
+    formed the Gram of every level's line and factored ``X_F`` whole (120 columns), which took
+    54 s and 1.4 GiB at 1000 levels.
+    """
+    from superglm import FactorSmooth, LambdaPolicy
+    from superglm.model import state_ops
+
+    rows = np.random.default_rng(1)
+    K, n = 60, 2400
+    g = rows.integers(5, K, n)
+    g[:5] = np.arange(5)
+    x = rows.uniform(size=n)
+    frame = pd.DataFrame({"x": x, "z": rows.normal(size=n), "g": [f"g{v:03d}" for v in g]})
+    y = np.sin(3 * x) + 0.3 * np.sin(5 * x + g % 7) + 0.1 * frame["z"] + rows.normal(0, 0.3, n)
+    model = SuperGLM(
+        family="gaussian",
+        features={
+            "z": Numeric(),
+            "x": Spline(kind="ps", n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0)),
+        },
+        interactions=[
+            FactorSmooth(
+                "x", group="g", basis="sz", k=6, lambda_policy={"wiggle": LambdaPolicy.fixed(0.7)}
+            )
+        ],
+        selection_penalty=0,
+        direct_solve="structured",
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y)
+    truncated = state_ops.retained_linear_state(model).profiled_factor.null_directions().shape[1]
+    assert truncated == 4
+
+    def unread(*_args, **_kwargs):
+        raise AssertionError("the penalty null spaces were formed")
+
+    monkeypatch.setattr(state_ops, "_penalty_null_spaces", unread)
+    widths = _row_passes(monkeypatch)
+    record = _redecide(model)
+    assert widths == [truncated] and record.row_directions == truncated
+    assert len(record.aliases) == truncated and record.gauge is not None
+
+
+def test_a_dense_alias_reads_the_grams_undecided_direction_alone(monkeypatch):
+    """``x2 = 2 x1`` on the dense solver: one direction read from the rows, not ``X_F`` whole.
+
+    The Gram certifies every eigenvalue above its error bound; the one below is read from the
+    rows, falls under its rounding bound, and is the alias (Courant-Fischer).  At ``633289397``
+    the owner factored all of ``X_F`` from the rows.
+    """
+    X = pd.DataFrame({"x": X_SPREAD, "x1": X1, "x2": 2.0 * X1})
+    model = _fit({"x": Spline(n_knots=6), "x1": Numeric(), "x2": Numeric()}, X, Y)
+    widths = _row_passes(monkeypatch)
+    record = _redecide(model)
+    assert widths == [1] and record.row_directions == 1
+    assert [alias.term for alias in record.aliases] == ["x2"]
+
+
+def test_a_near_alias_is_identified_from_its_undecided_direction(monkeypatch):
+    """``z = x + 1e-8 h``: the Gram cannot tell its smallest direction from zero; the rows can.
+
+    The Jacobi-scaled ``X_F`` has singular value ``5e-9`` there, its Gram ``2.5e-17``, under the
+    Gram's error bound; read from the rows it clears the rounding bound (``7e-13``) by more than
+    Li & Li's shift, so the penalised fit identifies ``z``.  The dense solver's rank decision
+    fixed ``z`` at zero, so ``z`` is blank for that reason alone and ``x`` keeps its SE.
+    Mutation: reading the Gram's undecided direction as null names ``z`` an alias of ``x``.
+    """
+    draws = np.random.default_rng(11).standard_normal((8, 3000))
+    h, x = draws[4], draws[5]
+    frame = pd.DataFrame({"x": x, "z": x + 1e-8 * h})
+    y = 1.0 + 0.5 * x + 3e-6 * h + 0.5 * draws[7]
+    model = SuperGLM(family="gaussian", features={"x": Numeric(), "z": Numeric()})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(frame, y)
+    widths = _row_passes(monkeypatch)
+    record = _redecide(model)
+    assert widths == [1] and record.row_directions == 1
+    assert all(alias.source == "fit" and not alias.aliased_with for alias in record.aliases)
+    assert record.gauge is None
+    assert np.isfinite(model.metrics(frame, y).coefficient_se["x"]).all()
+
+
+# ------------------------------------------------------------------ one gauge
+def test_fit_at_its_default_lambda_publishes_the_owners_zero():
+    """Level E at one ``x``, ``fit()`` at lambda 0.1: the slope coordinate is published at zero.
+
+    The dense solver's rank decision here fixes ``f[E]`` at zero, not the later term's slope
+    (stage 1, follow-up 3); the record's gauge moves the coefficients along the alias to the
+    later coordinate's zero (``identifiability.Gauge``), so ``f[E]`` reports its coefficient and
+    the SE of the fit without the slope, as ``fit_reml`` does, and no fitted value moves.
+    Mutation: no gauge published blanks ``f[E]`` and reports it at zero.
+    """
+    X = pd.DataFrame({"x": np.where(LEVEL == "E", 5.0, X_SPREAD), "f": LEVEL})
+    model = _fit({"x": Spline(n_knots=6), "f": Categorical()}, X, Y, interactions=[("x", "f")])
+    record = model._fit_inference_info["identifiability"]
+    assert record.gauge is not None
+    blank = _blank(model, X, Y)
+    assert list(blank) == ["x:f[E]"] and len(blank["x:f[E]"]) == 1
+    group = next(g for g in model._groups if g.name == "x:f[E]")
+    fixed = group.start + blank["x:f[E]"][0]
+    level = next(g for g in model._groups if g.name == "f")
+    assert model.result.beta[fixed] == 0.0 and model.result.beta[level.start + 3] != 0.0
+    np.testing.assert_allclose(
+        model.metrics(X, Y).coefficient_se["f"], _dense_face_se(model, [fixed])[level.sl], rtol=1e-8
+    )
+    np.testing.assert_allclose(model.predict(X), model._fit_mu, rtol=1e-12)
+
+
+@pytest.mark.parametrize("basis", ["fs", "sz"])
+def test_a_duplicate_beside_a_factor_smooth_publishes_one_gauge(basis, monkeypatch):
+    """``x2 = x1`` beside an ``fs`` or ``sz`` term: both backends blank ``x2`` alone.
+
+    The structured factor truncates the duplicate's direction and splits the effect evenly;
+    it publishes the dense solver's zero on ``x2`` instead, with the same coefficients, SEs and
+    footnote, and predicts what it predicted before (``assert_one_gauge``).  Mutation: no gauge
+    leaves ``x1`` blank at half the effect.
+    """
+    from superglm import FactorSmooth, LambdaPolicy
+    from tests._identifiability_parity import assert_one_gauge, without_gauge
+
+    rows = np.random.default_rng(4)
+    n, K = 3000, 25
+    g = rows.integers(0, K, n)
+    x, x1 = rows.uniform(size=n), rows.normal(size=n)
+    frame = pd.DataFrame({"x": x, "x1": x1, "x2": x1.copy(), "g": [f"g{v:02d}" for v in g]})
+    y = np.sin(3 * x) + 0.2 * x1 + 0.2 * np.sin(4 * x + g % 5) + rows.normal(0, 0.3, n)
+
+    def fit(solve):
+        model = SuperGLM(
+            family="gaussian",
+            features={
+                "x1": Numeric(),
+                "x2": Numeric(),
+                "x": Spline(kind="ps", n_knots=6, lambda_policy=LambdaPolicy.fixed(1.0)),
+            },
+            interactions=[
+                FactorSmooth(
+                    "x",
+                    group="g",
+                    basis=basis,
+                    k=5,
+                    lambda_policy={"wiggle": LambdaPolicy.fixed(0.7)},
+                )
+            ],
+            selection_penalty=0,
+            direct_solve=solve,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return model.fit_reml(frame, y)
+
+    structured, dense = fit("structured"), fit("gram")
+    assert structured._fit_inference_info.get("structured_covariance")
+    before = [
+        without_gauge(monkeypatch, lambda solve=solve: fit(solve))
+        for solve in ("structured", "gram")
+    ]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        metrics = [model.metrics(frame, y) for model in (structured, dense)]
+    assert_one_gauge(*metrics, frame, before=before, rtol=1e-8)
+    assert _blank(structured, frame, y) == {"x2": [0]}
