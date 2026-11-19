@@ -1,8 +1,9 @@
 """scripts/check_fix_tests.py: which tests it selects, and what it says about each one.
 
 The base run takes ``scripts/`` from the base as well, so a test here fails on base only
-where the pull request changes the script. Each carries ``pins_behaviour``, since most
-pin what the script already did, and a test added here later must say so too.
+where the pull request changes the script. Most carry ``pins_behaviour``, since they pin
+what the script already did, and a test added here later must say so too; a test that fails
+on the script before the change it guards is a regression, and carries none.
 """
 
 from __future__ import annotations
@@ -100,7 +101,6 @@ def test_the_marker_counts_on_a_test_a_class_or_the_module():
     assert not other_mark["test_a"].pinned
 
 
-@pytest.mark.pins_behaviour
 def test_a_control_is_documented_by_whatever_carries_its_mark():
     """The docstring that counts is the marked test's, class's or module's, never an outer one's."""
     on_test = _tests(
@@ -441,7 +441,6 @@ _KEYED_MODULE = (
 )
 
 
-@pytest.mark.pins_behaviour
 def test_a_test_the_base_cannot_judge_fails_the_check(tmp_path):
     """A module that fails to collect on base for a reason other than a missing name leaves its
     tests undecided, and an undecided test fails the check, listed. A test the run does not
@@ -496,7 +495,6 @@ def test_a_test_the_base_cannot_judge_fails_the_check(tmp_path):
         assert "no test was judged on base" in run.stdout and "UNDECIDED" not in run.stdout
 
 
-@pytest.mark.pins_behaviour
 def test_the_base_run_reads_the_bases_project_metadata_and_the_heads_pytest_options(tmp_path):
     """A test of project metadata meets the base's ``pyproject.toml``, while the head's
     ``[tool.pytest.ini_options]`` still reaches the run (here a filter that makes a warning an
