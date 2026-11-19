@@ -1,7 +1,8 @@
 """scripts/check_fix_tests.py: which tests it selects, and what it says about each one.
 
-The script is not under ``src/``, so the base run cannot fail these tests: each carries
-``pins_behaviour`` itself, and a test added here later must say so too.
+The base run takes ``scripts/`` from the base as well, so a test here fails on base only
+where the pull request changes the script. Each carries ``pins_behaviour``, since most
+pin what the script already did, and a test added here later must say so too.
 """
 
 from __future__ import annotations
@@ -104,7 +105,8 @@ def test_a_control_is_documented_by_whatever_carries_its_mark():
     """The docstring that counts is the marked test's, class's or module's, never an outer one's."""
     on_test = _tests(
         '@pytest.mark.pins_behaviour\ndef test_a():\n    """Pins x."""\n'
-        "@pytest.mark.pins_behaviour\ndef test_b(): pass"
+        "@pytest.mark.pins_behaviour\ndef test_b(): pass\n"
+        '@pytest.mark.pins_behaviour\ndef test_c():\n    """ \n    """'
     )
     on_class = _tests(
         '@pytest.mark.pins_behaviour\nclass TestC:\n    """Pins y."""\n    def test_a(self): pass'
@@ -115,7 +117,11 @@ def test_a_control_is_documented_by_whatever_carries_its_mark():
         '        """Says nothing of the class."""'
     )
 
-    assert (on_test["test_a"].documented, on_test["test_b"].documented) == (True, False)
+    assert [on_test[name].documented for name in ("test_a", "test_b", "test_c")] == [
+        True,
+        False,
+        False,  # a blank docstring says nothing
+    ]
     assert on_class["TestC::test_a"].documented and on_module["test_a"].documented
     assert not inner["TestC::test_a"].documented
 
@@ -208,8 +214,18 @@ class TestGroup:
         assert double(1) == 2
 """
 _NEW_MODULE = (
-    "from tiny import triple\n\n\ndef test_import_fails_on_base():\n    assert triple(2) == 6\n"
+    "from tiny import double, triple\n\n\ndef test_import_fails_on_base():\n"
+    "    assert triple(2) == 6\n\n\ndef test_unchanged_beside_it():\n"
+    "    assert double(0) in (0, 1)\n"
 )
+# A tool the pull request adds beside its src/ change, and its test: the tool is absent on base.
+_NEW_TOOL = {
+    "scripts/tool.py": 'ANSWER = "ok"\n',
+    "tests/test_tool.py": (
+        "import runpy\n\n\ndef test_the_new_tool_answers():\n"
+        '    assert runpy.run_path("scripts/tool.py")["ANSWER"] == "ok"\n'
+    ),
+}
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -272,6 +288,7 @@ def test_a_vacuous_test_is_flagged_and_every_other_outcome_is_told_apart(tmp_pat
             "tests/test_new.py": _NEW_TESTS,
             "tests/test_new_module.py": _NEW_MODULE,
             "tests/_helpers.py": "VALUE = 1\n",
+            **_NEW_TOOL,
         },
     )
     report = tmp_path / "out.json"
@@ -294,7 +311,12 @@ def test_a_vacuous_test_is_flagged_and_every_other_outcome_is_told_apart(tmp_pat
     assert status["test_skipped_on_base"] == "skipped"
     assert status["test_needs_a_new_name"] == "fails"
     assert verdicts["tests/test_new.py::test_needs_a_new_name"]["kind"] == "ImportError"
+    # a module that fails to import on base decides none of its tests, the unchanged one included
+    assert status["test_import_fails_on_base"] == status["test_unchanged_beside_it"]
+    assert status["test_unchanged_beside_it"] == "collection_error"
     assert verdicts["tests/test_new_module.py::test_import_fails_on_base"]["kind"] == "ImportError"
+    assert "not decided, its module fails on base (ImportError)" in done.stdout
+    assert status["test_the_new_tool_answers"] == "fails"  # the tool is the base's: absent
     assert status["test_old"] == "fails"  # the changed assertion fails on base's code
     assert "tests/test_new.py::test_vacuous_passes_without_the_fix (added)" in done.stdout
     assert "control (@pytest.mark.pins_behaviour): tests/test_new.py::test_deliberate_pin" in (

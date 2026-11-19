@@ -937,8 +937,10 @@ def test_the_durations_refresh_drops_the_runtime_ci_measures_under_coverage() ->
 
 
 def test_the_never_run_check_reads_every_shard_after_the_matrix() -> None:
-    """The check downloads each shard's junit artifact, whatever the shards' verdict."""
+    """The check downloads each shard's junit artifact, whatever the shards' verdict, and
+    requires a report from every shard of the matrix."""
     jobs = yaml.safe_load((_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"]
+    matrix = jobs["test-compatibility"]["strategy"]["matrix"]
     job, upload = (
         jobs["never-run"],
         next(
@@ -954,14 +956,17 @@ def test_the_never_run_check_reads_every_shard_after_the_matrix() -> None:
         upload["with"]["name"].startswith("pytest-") and download["with"]["pattern"] == "pytest-*"
     )
     assert upload["with"]["name"].endswith("-${{ matrix.group }}")  # the platform is the rest
+    shards = len(matrix["group"]) * len(matrix["runtime"])
     assert any(
-        step.get("run") == f"python3 scripts/check_never_run_tests.py {download['with']['path']}"
+        step.get("run")
+        == f"python3 scripts/check_never_run_tests.py {download['with']['path']} --shards {shards}"
         for step in job["steps"]
     )
 
 
 def _junit(directory: Path, platform: str, cases: dict[tuple[str, str], str]) -> None:
-    """One shard's report: ``{(classname, name): outcome}``, outcome ``passed``, ``xfail`` or a skip message."""
+    """One shard's report: ``{(classname, name): outcome}``, outcome ``passed``, ``xfail``,
+    ``notrun`` (``xfail(run=False)``) or a skip message, in the forms pytest writes."""
     shard = directory / f"pytest-{platform}-1"
     shard.mkdir(parents=True)
     body = []
@@ -969,6 +974,7 @@ def _junit(directory: Path, platform: str, cases: dict[tuple[str, str], str]) ->
         inner = {
             "passed": "",
             "xfail": '<skipped type="pytest.xfail" message="declared" />',
+            "notrun": '<skipped type="pytest.xfail" message="[NOTRUN] disabled until fixed" />',
         }.get(outcome, f'<skipped type="pytest.skip" message="{outcome}" />')
         body.append(
             f'<testcase classname="{classname}" name="{name}" time="0.1">{inner}</testcase>'
@@ -979,47 +985,92 @@ def _junit(directory: Path, platform: str, cases: dict[tuple[str, str], str]) ->
     )
 
 
+def _check_never_run(directory: Path, shards: int = 2) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(_ROOT / "scripts/check_never_run_tests.py"),
+            str(directory),
+            "--shards",
+            str(shards),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+
 def test_the_never_run_check_fails_only_on_a_test_no_platform_ran(tmp_path: Path) -> None:
-    """Skipped on one platform, run on another: fine; skipped on both: named, unless run elsewhere."""
+    """Skipped on one platform, run on another: fine; skipped on both: named, unless run
+    elsewhere, which a skip's message shows only when every skip of the test has it and
+    the workflow it names runs the test's module."""
     gamlss = (
         "tests.test_two_piece_lss_vertical_slice",
         "test_real_line_family_matches_gamlss_sn2_at_a_parametric_specification",
     )
+    book = "[dataset] freMTPL2freq.parquet is not readable"
     cases = {
         ("tests.test_ci_contracts", "test_one_platform"): "requires Windows",
         ("tests.test_ci_contracts", "test_declared_failure"): "xfail",
-        (
-            "tests.test_ci_contracts",
-            "test_on_the_book",
-        ): "[dataset] freMTPL2freq.parquet is not readable",
+        ("tests.test_realdata_parity", "test_on_the_book"): book,
         gamlss: "requires R with mgcv and jsonlite",
         ("", "tests.docs.test_notebooks"): "collection skipped",
+        ("tests.test_check_fix_tests", "test_runs_on_linux"): "passed",
     }
-    on_windows = cases | {("tests.test_ci_contracts", "test_one_platform"): "passed"}
+    on_windows = cases | {
+        ("tests.test_ci_contracts", "test_one_platform"): "passed",
+        ("", "tests.test_check_fix_tests"): "collection skipped",  # its tests ran on Linux
+    }
+    del on_windows[("tests.test_check_fix_tests", "test_runs_on_linux")]
     _junit(tmp_path / "ran", "Linux-X64-py3.12", cases)
     _junit(tmp_path / "ran", "Windows-X64-py3.13", on_windows)
-    never = {("tests.test_ci_contracts", "test_waits_for_an_event"): "the fit did not reach it"}
+    never = {
+        ("tests.test_ci_contracts", "test_waits_for_an_event"): "the fit did not reach it",
+        ("tests.test_ci_contracts", "test_disabled"): "notrun",
+        ("tests.test_ci_contracts", "test_on_a_book_no_workflow_runs"): book,
+        ("tests.test_realdata_parity", "test_skipped_for_two_reasons"): book,
+        ("tests.test_check_fix_tests", "test_skipped_where_its_module_ran"): "requires a GPU",
+    }
     _junit(tmp_path / "never", "Linux-X64-py3.12", cases | never)
-    _junit(tmp_path / "never", "Windows-X64-py3.13", on_windows | never)
+    _junit(
+        tmp_path / "never",
+        "Windows-X64-py3.13",
+        on_windows
+        | never
+        | {("tests.test_realdata_parity", "test_skipped_for_two_reasons"): "requires a GPU"},
+    )
 
-    def check(directory: Path) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [sys.executable, str(_ROOT / "scripts/check_never_run_tests.py"), str(directory)],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-
-    ran, never_ran = check(tmp_path / "ran"), check(tmp_path / "never")
+    ran, never_ran = _check_never_run(tmp_path / "ran"), _check_never_run(tmp_path / "never")
     assert ran.returncode == 0, ran.stdout + ran.stderr
     assert "1 in the Real data workflow" in ran.stdout and "1 in the docs workflow" in ran.stdout
     assert f"tests/test_two_piece_lss_vertical_slice.py::{gamlss[1]}" in ran.stdout
     assert "test_one_platform" not in ran.stdout and "test_declared_failure" not in ran.stdout
+    assert "test_check_fix_tests" not in ran.stdout
     assert never_ran.returncode == 1
+    assert f"{len(never)} run on no platform" in never_ran.stdout
     assert "tests/test_ci_contracts.py::test_waits_for_an_event: the fit did not reach it" in (
         never_ran.stdout
     )
+    for (classname, name), _ in never.items():
+        assert f"{classname.replace('.', '/')}.py::{name}: " in never_ran.stdout, name
+
+
+@pytest.mark.parametrize("report", ["missing", "empty", "no tests"])
+def test_the_never_run_check_fails_unless_every_shard_reported(tmp_path: Path, report) -> None:
+    """A shard whose junit is missing or holds no test hides what it skipped."""
+    _junit(tmp_path, "Linux-X64-py3.12", {("tests.test_ci_contracts", "test_a"): "passed"})
+    if report != "missing":
+        silent = tmp_path / "pytest-Windows-X64-py3.13-1"
+        silent.mkdir()
+        empty = "" if report == "empty" else '<testsuites><testsuite name="pytest" /></testsuites>'
+        (silent / "pytest-results.xml").write_text(empty, encoding="utf-8")
+
+    done = _check_never_run(tmp_path)
+
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "1 of 2 shards reported a test" in done.stdout
+    assert ("pytest-Windows-X64-py3.13-1" in done.stdout) == (report != "missing")
 
 
 # A fit's outcome: what an assertion behind ``if <outcome>:`` or a skip waits on.

@@ -198,7 +198,8 @@ jobs:
   never-run:
     # A test every platform skipped passed in no shard. The shards' junit reports
     # name them; scripts/check_never_run_tests.py fails on one unless it names
-    # the workflow that does run it.
+    # the workflow that does run it, and unless every one of the matrix's 20
+    # shards (groups times runtimes) reported a test.
     name: Every test runs on some platform
     if: ${{ always() }}
     needs: test-compatibility
@@ -214,7 +215,7 @@ jobs:
           path: junit
 
       - name: Fail on a test skipped on every platform
-        run: python3 scripts/check_never_run_tests.py junit
+        run: python3 scripts/check_never_run_tests.py junit --shards 20
 
   polars-floor:
     # The lock holds the newest Polars, so the matrix never runs the declared

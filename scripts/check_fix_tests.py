@@ -5,14 +5,20 @@
 
 This is the fail-to-pass criterion of SWT-Bench (arXiv:2406.12952): a test that pins
 a fix fails on the unfixed code and passes on the fixed code. The script takes the
-head commit's tree with ``src/`` replaced by the merge base's, runs only the tests
-the pull request added or changed, and judges each one. It compares committed
-revisions; uncommitted changes are not seen. Each selected test is judged:
+merge base's tree with the head's ``tests/`` and pytest configuration, so the tests
+meet the code before the change (``src/``, and the scripts, workflows and anything
+else they exercise), runs only the tests the pull request added or changed, and
+judges each one. It compares committed revisions; uncommitted changes are not
+seen. Each selected test is judged:
 
 * fails or errors on base: counts as a pass for this check. The check cannot tell
   the right reason from the wrong one, so the output counts the failures by
   exception type; an ``ImportError`` or ``AttributeError`` says the test fails
   for want of a name, not for the behaviour it asserts.
+* its module fails to import or collect on base: not decided, since every test in
+  it fails whatever it asserts. Reported, never counted either way; import a name
+  the base lacks inside the tests that use it, and the module's other tests are
+  judged.
 * passes on base: the test does not need the change. It is flagged unless it
   is a control: it carries ``@pytest.mark.pins_behaviour`` on the test, its class
   or the module (``pytestmark``), which says "this deliberately pins behaviour
@@ -68,6 +74,7 @@ MARKER = "pins_behaviour"
 ROOT = Path(__file__).resolve().parents[1]
 TEST_FILES = ("test_*.py", "*_test.py")
 PYTEST_ERRORS = {2, 3, 4}  # interrupted, internal error, usage error; 5 is "nothing collected"
+PYTEST_CONFIG = ("pyproject.toml", "pytest.ini", "tox.ini", "setup.cfg", "conftest.py")
 SHOWN = 20
 RUN_TIMEOUT = 1200  # seconds for the run on base; the workflow's `timeout` wrapper is 30 minutes
 COLLECT_TIMEOUT = 300  # seconds for collecting on base
@@ -86,7 +93,7 @@ class RunTimeoutError(CheckError):
 class Test:
     digest: str
     pinned: bool
-    documented: bool = False  # the test, class or module carrying the mark has a docstring
+    documented: bool = False  # what carries the mark has a docstring that is not blank
 
 
 def _names_marker(expression: ast.AST) -> bool:
@@ -128,8 +135,9 @@ def collect_tests(source: str) -> dict[str, Test]:
     found: dict[str, Test] = {}
 
     def mark(node, marked: bool, outer: bool | None) -> bool | None:
-        """``None`` unpinned, else whether the innermost node carrying the mark has a docstring."""
-        return ast.get_docstring(node) is not None if marked else outer
+        """``None`` unpinned, else whether the innermost node carrying the mark has a docstring
+        that is not blank."""
+        return bool((ast.get_docstring(node) or "").strip()) if marked else outer
 
     def visit(body, classes, context, pin):
         for node in body:
@@ -206,10 +214,16 @@ def pinned_pools(base) -> dict[str, str]:
 
 
 def base_tree(root: Path, merge_base: str, head: str, where: Path, package: str) -> dict[str, str]:
-    """A worktree of ``head`` whose ``src/`` is the merge base's, and the environment to run it in."""
-    git(root, "worktree", "add", "--detach", str(where), head)
-    shutil.rmtree(where / "src")
-    archive = git(root, "archive", merge_base, "src", binary=True)
+    """A worktree of the merge base with the head's ``tests/`` and pytest configuration, and the
+    environment to run it in."""
+    git(root, "worktree", "add", "--detach", str(where), merge_base)
+    for path in (where / name for name in ("tests", *PYTEST_CONFIG)):
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink(missing_ok=True)
+    overlay = git(root, "ls-tree", "--name-only", head, "--", "tests", *PYTEST_CONFIG).split()
+    archive = git(root, "archive", head, *overlay, binary=True)
     with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
         tar.extractall(where, filter="data")
     path = os.pathsep.join(filter(None, [str(where / "src"), os.environ.get("PYTHONPATH", "")]))
@@ -429,7 +443,7 @@ def judge(selected, pinned, collected, broken, ran, unfinished=frozenset()):
     for key, how in selected.items():
         path = key[0]
         if path in broken:
-            status, kind = "fails", _kind(broken[path])
+            status, kind = "collection_error", _kind(broken[path])
         elif key not in collected:
             status, kind = "not_collected", ""
         elif key in unfinished:
@@ -463,11 +477,12 @@ def render(verdicts, notes, merge_base, head) -> str:
     for key in by_status.get("fails", []):
         kinds[verdicts[key]["kind"]] = kinds.get(verdicts[key]["kind"], 0) + 1
     lines = [
-        f"fix-test check: head {head[:10]} against src/ of {merge_base[:10]}",
+        f"fix-test check: the tests of head {head[:10]} against {merge_base[:10]}",
         f"{len(verdicts)} tests added or changed",
         f"  fail or error on base ......... {len(by_status.get('fails', []))}",
         f"  pass on base, controls ........ {len(controls)}",
         f"  pass on base, flagged ......... {len(flagged)}",
+        f"  module fails to collect on base {len(by_status.get('collection_error', []))}",
         f"  skipped on base ............... {len(by_status.get('skipped', []))}",
         f"  not run, not collected, timed out {sum(len(by_status.get(s, [])) for s in ('not_run', 'not_collected', 'timed_out'))}",
         *notes,
@@ -494,6 +509,15 @@ def render(verdicts, notes, merge_base, head) -> str:
             lines.append(f"  {title}: {label(key)}")
     for key in by_status.get("not_collected", [])[:SHOWN]:
         lines.append(f"  not collected by pytest: {label(key)}")
+    for key in by_status.get("collection_error", [])[:SHOWN]:
+        lines.append(
+            f"  not decided, its module fails on base ({verdicts[key]['kind']}): {label(key)}"
+        )
+    if "collection_error" in by_status:
+        lines.append(
+            "    import a name the base lacks inside the tests that use it, and the module's "
+            "other tests are judged"
+        )
     lines += [f"  control (@pytest.mark.{MARKER}): {label(key)}" for key in controls]
     if flagged:
         lines.append(
