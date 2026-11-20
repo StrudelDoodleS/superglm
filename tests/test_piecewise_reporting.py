@@ -16,6 +16,7 @@ tighter measured one.
 from __future__ import annotations
 
 import re
+import warnings
 from io import BytesIO
 
 import numpy as np
@@ -28,7 +29,7 @@ from superglm.export.excel import write_rating_table_workbook
 from superglm.export.rating_tables import build_rating_table_payload
 from superglm.export.summary import _adapt_compact_summary, build_summary_export_payload
 from superglm.inference._term_covariance import feature_se_from_cov
-from tests._piecewise_cases import CASE_NAMES, WARNING_CASES, make_case
+from tests._piecewise_cases import CASE_NAMES, WARNING_CASES, heaped_int_draw, make_case
 
 _EPS = float(np.finfo(np.float64).eps)
 
@@ -238,6 +239,44 @@ class TestTermInference:
         )
         assert se.shape == (spec._knots.size,)
         np.testing.assert_array_equal(se, np.zeros(spec._knots.size))
+
+
+def test_a_knot_whose_hat_covers_only_zero_responses_has_no_finite_estimate():
+    """``heaped_int_draw``: knot 5's hat covers only the 9 rows at ``x = 5``, every one at 0.
+
+    The likelihood rises without bound as that coefficient falls, so it has no finite estimate
+    (the fit's existence decision, ``model.separation_ops``): its standard error is NaN and the
+    separation footnote names the rows; every other knot keeps a finite one, from the fit on the
+    rows it keeps; the knot's summary row has no statistic, p-value or interval; and the
+    whole-term chi-square row keeps its EDF but has no p-value, since a term with a coefficient
+    that has no finite estimate has no Wald test (the footnote is the disclosure).  At
+    ``a4a7a64cd`` the summary printed ``-11.22`` with SE 111.4, where the iterations stopped.
+    Mutation: no separation decision (``separation_boundaries`` returning ``()``).
+    """
+    case = heaped_int_draw()
+    x = case.X["x"].to_numpy()
+    assert np.count_nonzero(x == 5.0) == 9 and np.all(case.y[x == 5.0] == 0.0)
+    model = SuperGLM(
+        features={"x": case.spec, "region": Categorical(base="first"), "density": Numeric()}
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(case.X, case.y, sample_weight=case.sample_weight)
+    assert any(type(c.message).__name__ == "SeparationWarning" for c in caught)
+    rows = [row for row in build_summary_export_payload(model).terms if row.group == "x"]
+    coefficients = {row.term: row for row in rows if row.kind == "coefficient"}
+    separated = coefficients.pop("x[5]")
+    assert separated.std_error is None or np.isnan(separated.std_error)
+    assert separated.statistic_type == "" and separated.p_value is None
+    assert separated.ci_lower is None and separated.ci_upper is None
+    for term, row in coefficients.items():
+        assert row.std_error is not None and np.isfinite(row.std_error) and row.std_error > 0, term
+        assert row.statistic_type == "z" and np.isfinite(row.p_value), term
+    (group,) = [row for row in rows if row.kind == "group"]
+    assert group.statistic_type == "chi2" and group.edf == 6.0 and group.p_value is None
+    notes = "\n".join(model._fit_inference_info["identifiability"].notes())
+    assert "has no finite estimate" in notes and "9 rows with responses at 0" in notes
+    assert "rows 556, 558, 576" in notes
 
 
 class TestSummaryRows:

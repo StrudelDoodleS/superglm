@@ -125,12 +125,12 @@ def pinned_narrower() -> PiecewiseCase:
     return PiecewiseCase(X, y, w, Piecewise([40.0, 60.0], base=40.0, lower=20.0, upper=80.0))
 
 
-def heaped_int_x() -> PiecewiseCase:
-    """Integer x heaped on multiples of 5, with int-mode breaks and tied quantiles.
+def heaped_int_draw() -> PiecewiseCase:
+    """``heaped_int_x``'s draw as it falls: knot 5's hat covers only rows with response 0.
 
-    Insurance rating variables are heaped (ages ending 0/5, whole-year
-    tenures), so collapsing quantiles are the norm rather than the exception.
-    ``build()`` warns for this case; that warning is the point of the fixture.
+    The 9 rows at ``x = 5`` are the only rows under that knot's hat and all drew ``y = 0``, so
+    its coefficient has no finite estimate (separated).  ``heaped_int_x`` gives one of them a
+    claim; the separation has its own test.
     """
     rng = np.random.default_rng(23)
     heaped = rng.choice(np.array([10.0, 20.0, 30.0]), 540, p=[0.4, 0.35, 0.25])
@@ -140,6 +140,22 @@ def heaped_int_x() -> PiecewiseCase:
     x[-1] = 40.0
     X, y, w = _frame(x, seed=24, kink=20.0)
     return PiecewiseCase(X, y, w, Piecewise(8, base="most_exposed"))
+
+
+def heaped_int_x() -> PiecewiseCase:
+    """Integer x heaped on multiples of 5, with int-mode breaks and tied quantiles.
+
+    Insurance rating variables are heaped (ages ending 0/5, whole-year
+    tenures), so collapsing quantiles are the norm rather than the exception.
+    ``build()`` warns for this case; that warning is the point of the fixture.
+    One row at ``x = 5`` is given a claim so that no knot's hat covers only
+    zero-response rows: the draw separates knot 5 (``heaped_int_draw``), which
+    this fixture is not about.
+    """
+    case = heaped_int_draw()
+    y = case.y.copy()
+    y[np.flatnonzero(case.X["x"].to_numpy() == 5.0)[0]] = 1.0
+    return PiecewiseCase(case.X, y, case.sample_weight, case.spec)
 
 
 def many_knots() -> PiecewiseCase:
@@ -220,4 +236,4 @@ def make_case(name: str, extrapolation: str | None = None) -> PiecewiseCase:
     return case
 
 
-__all__ = ["CASES", "CASE_NAMES", "WARNING_CASES", "PiecewiseCase", "make_case"]
+__all__ = ["CASES", "CASE_NAMES", "WARNING_CASES", "PiecewiseCase", "heaped_int_draw", "make_case"]
