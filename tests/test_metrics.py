@@ -12,7 +12,7 @@ from scipy.special import gammaln
 from scipy.stats import poisson
 
 from superglm import ConvergenceWarning, ModelMetrics, SuperGLM, generate_tweedie_cpg
-from superglm.distributions import Gamma, NegativeBinomial, Poisson, Tweedie
+from superglm.distributions import Binomial, Gamma, NegativeBinomial, Poisson, Tweedie
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
@@ -1448,6 +1448,55 @@ class TestNullModel:
         (family, link, y, offset), reference, rel = getattr(self, f"_missed_{case}")()
         metrics = self._null_metrics(family, y, offset, link=link)
         assert metrics.null_deviance == pytest.approx(reference, rel=rel, abs=1e-8)
+
+    @pytest.mark.pins_behaviour
+    @pytest.mark.parametrize("family", ["binomial", "nb2", "nb2_wide"])
+    def test_convex_null_model_takes_newton_steps(self, family):
+        """A null deviance convex in the intercept is found in a few Newton steps.
+
+        The binomial/logit and NB2/log null fits under exposure offsets take at
+        most 8 Newton points and evaluate the deviance at most 4 times, only
+        after a step that crossed the root; Brent's method alone evaluates it
+        16 times or more, which doubled the logit null fit's time against
+        master's scoring at 678k rows. Under offsets uniform on -15 to 15 the
+        NB2 step needs the observed information: Fisher scoring there converges
+        linearly and took 126 points. It pins master's cost; mutations: skip
+        the Newton path (all three), Fisher information in the step
+        (``nb2_wide``).
+        """
+        from superglm.links import LogitLink, LogLink
+        from superglm.model.fit_ops import _compute_null_mu
+
+        rng = np.random.default_rng(0)
+        n = 5000
+        offset = np.log(rng.uniform(0.003, 1.0, n))
+        weights = rng.uniform(0.5, 2.0, n)
+        if family == "binomial":
+            distribution, link = Binomial(), LogitLink()
+            y = (rng.random(n) < 0.05 * np.exp(offset)).astype(float)
+        elif family == "nb2_wide":
+            distribution, link = NegativeBinomial(theta=2.0), LogLink()
+            offset = rng.uniform(-15.0, 15.0, n)
+            y = np.tile([2.0, 4.0], n // 2)
+        else:
+            distribution, link = NegativeBinomial(theta=1.5), LogLink()
+            y = rng.poisson(0.04 * np.exp(offset)).astype(float)
+        counts = {"deviance": 0, "points": 0}
+        unit, derivative = distribution.deviance_unit, link.deriv_inverse
+
+        def counted_unit(response, mean):
+            counts["deviance"] += 1
+            return unit(response, mean)
+
+        def counted_derivative(eta):
+            counts["points"] += 1
+            return derivative(eta)
+
+        distribution.deviance_unit = counted_unit
+        link.deriv_inverse = counted_derivative
+        _compute_null_mu(y, weights, offset, distribution, link, weight_semantics="prior")
+        assert counts["points"] <= 8
+        assert counts["deviance"] <= 4
 
     def test_null_model_that_stops_short_says_so(self, monkeypatch):
         """A null fit stopped short warns that the null figures are its last step's.

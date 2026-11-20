@@ -402,6 +402,92 @@ def _log_power_null_intercept(y, weights, offset, distribution, link) -> float |
     return float(root) if np.isfinite(root) else None
 
 
+def _null_curvature_kind(distribution, link) -> str | None:
+    """How the deviance curves in ``eta``: ``"canonical"`` (convex, observed information is
+    Fisher's), ``"convex"`` (the log link of a power-variance or NB2 family), or None."""
+    from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
+    from superglm.links import IdentityLink, InverseLink, LogitLink, LogLink
+
+    canonical = (
+        (Binomial, LogitLink),
+        (Poisson, LogLink),
+        (Gamma, InverseLink),
+        (Gaussian, IdentityLink),
+    )
+    if any(isinstance(distribution, d) and isinstance(link, k) for d, k in canonical):
+        return "canonical"
+    if isinstance(distribution, (Gamma, Tweedie, NegativeBinomial)) and isinstance(link, LogLink):
+        return "convex"
+    return None
+
+
+def _convex_null_intercept(b, y, weights, offset, distribution, link, kind) -> float | None:
+    """The null intercept by safeguarded Newton steps, where the deviance is convex in it.
+
+    The step divides the score by the observed information, which under a
+    canonical link (``kind``) is the Fisher information, so its curvature term
+    is not formed. The score is minus half the deviance's slope, so the points
+    where it has each sign bracket the root, and a step that leaves the bracket
+    is replaced by bisection (Press et al., Numerical Recipes, 2nd ed., section
+    9.4). A step after which the score keeps its sign lowered the deviance, the
+    deviance being convex, so it is evaluated only after a step that crossed
+    the root; one that raised it by more than the relative 1e-8 R's glm.fit
+    calls converged (Marschner, R Journal 3(2), 2011) is bisected back towards
+    the point it left. None when the information is not positive, or after
+    ``_NULL_MAX_ITER`` points: Brent's method takes over.
+    """
+    from superglm.distributions import clip_mu
+
+    def means(b):
+        eta = stabilize_eta(b + offset, link)
+        return eta, clip_mu(link.inverse(eta), distribution)
+
+    def deviance(mu):
+        value = weighted_row_sum(weights, distribution.deviance_unit, y, mu)
+        return value if np.isfinite(value) else np.inf
+
+    below, above = -np.inf, np.inf
+    accepted = accepted_sign = accepted_deviance = None
+    for _ in range(_NULL_MAX_ITER):
+        eta, mu = means(b)
+        dmu = link.deriv_inverse(eta)
+        V = distribution.variance(mu)
+        residual = weights * (y - mu)
+        score = float(np.sum(residual * dmu / V))
+        if score > 0.0:
+            below = b
+        else:
+            above = b
+        candidate_deviance = None
+        if accepted is not None and (score > 0.0) != accepted_sign:
+            if accepted_deviance is None:
+                accepted_deviance = deviance(means(accepted)[1])
+            candidate_deviance = deviance(mu)
+            if not candidate_deviance - accepted_deviance < 1e-8 * (0.1 + abs(candidate_deviance)):
+                b = 0.5 * (accepted + b)
+                continue
+        accepted, accepted_sign, accepted_deviance = b, score > 0.0, candidate_deviance
+        information = float(np.sum(weights * dmu**2 / V))
+        if kind != "canonical":
+            curvature = (
+                link.deriv2_inverse(eta) / V - dmu**2 * distribution.variance_derivative(mu) / V**2
+            )
+            information -= float(np.sum(residual * curvature))
+        if not information > 0.0:
+            return None
+        step = score / information
+        # The step's change in the means, relative to their size: unit-free
+        # under every link.
+        if abs(step) * float(np.sum(weights * np.abs(dmu))) <= 1e-8 * float(
+            np.sum(weights * np.abs(mu))
+        ):
+            return b + step
+        b += step
+        if np.isfinite(below) and np.isfinite(above) and not below < b < above:
+            b = 0.5 * (below + above)
+    return None
+
+
 def _compute_null_mu(
     y: NDArray,
     weights: NDArray,
@@ -423,7 +509,10 @@ def _compute_null_mu(
     all one for a binomial) has its minimum in the limit: below or above the
     predictor bound every row is clipped, and the deviance is flat at its limit.
     Under the log link with variance ``mu**p`` (Poisson, Gamma, Tweedie) the
-    minimum has a closed form, which is used wherever no clip acts on it.
+    minimum has a closed form, which is used wherever no clip acts on it, and
+    where the deviance is convex in the intercept (a canonical link, or the log
+    link of a power-variance or NB2 family) safeguarded Newton steps find it
+    before Brent's method is needed.
     ``weight_semantics`` is accepted for the callers and does not change the fit.
     """
     from scipy.optimize import minimize_scalar
@@ -471,12 +560,15 @@ def _compute_null_mu(
 
     carried = offset[weights > 0.0]
     eta_bar = float(link.link(np.atleast_1d(y_bar))[0])
+    start = eta_bar - float(np.average(offset, weights=weights))
+    kind = _null_curvature_kind(distribution, link)
+    if kind is not None:
+        b = _convex_null_intercept(start, y, weights, offset, distribution, link, kind)
+        if b is not None:
+            return means(b)
     centres = (eta_bar, -eta_bar) if isinstance(link, SqrtLink) else (eta_bar,)
     quantiles = np.quantile(carried, np.linspace(0.0, 1.0, 5))
-    points = np.concatenate(
-        [[eta_bar - float(np.average(offset, weights=weights))]]
-        + [centre - quantiles for centre in centres]
-    )
+    points = np.concatenate([[start]] + [centre - quantiles for centre in centres])
     bracket = _null_bracket(deviance, points[np.isfinite(points)])
     if bracket is not None:
         found = minimize_scalar(
