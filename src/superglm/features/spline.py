@@ -890,7 +890,13 @@ class CubicRegressionSpline(_IntegratedPenaltySpline):
         ``Constraint.fit.concave``, or any of the corresponding
         ``Constraint.postfit.*`` kinds. Fit-time constraints apply on the
         spline term's linear-predictor contribution and use the constrained
-        QP solver path. With ``fit_reml()``, fixed lambdas work directly;
+        QP solver path. An increasing or decreasing rule holds the adjacent
+        B-spline coefficient differences of the natural cubic to one sign.
+        That is sufficient for a monotone curve but not necessary, like the
+        linear conditions of Wood (1994) behind mgcv's ``mono.con``, so the
+        fit is the best curve in a smaller set than all monotone curves;
+        more knots narrow the gap. Convex and concave rules are exact.
+        With ``fit_reml()``, fixed lambdas work directly;
         automatic lambda estimation uses the QP passthrough heuristic
         (unconstrained REML followed by constrained refit), not exact joint
         constrained REML.
