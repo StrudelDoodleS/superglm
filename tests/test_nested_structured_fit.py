@@ -842,7 +842,12 @@ def test_border_estimability_is_invariant_to_a_column_offset(leaf_constant: bool
     ridge determines a column the data alone cannot, and the penalised fit is
     positive definite.  Without the offset it is the dense inverse's of
     ``[1 X]'[1 X] + S`` (rtol 1e-8); the leaf-constant column's was NaN while
-    readers applied the data rule to a penalised fit.
+    readers applied the data rule to a penalised fit.  At an offset it is the
+    same number to the resolution of the stored column: ``fl(offset + x)``
+    holds each row to half a float64 spacing at the offset, and a standard
+    error moves with its centred column at a condition number of order one
+    (at most 0.2 of that perturbation here), so the bar is a whole spacing
+    over the column's spread, about 1.9e-9 at ``1e7`` and 1.2e-4 at ``1e12``.
     """
     from superglm import Numeric
     from superglm.solvers._structured.geometry import _nested_centered_estimability
@@ -882,9 +887,11 @@ def test_border_estimability_is_invariant_to_a_column_offset(leaf_constant: bool
         x = next(group.sl for group in model._groups if group.name == "x")
         assert bool(estimable[x][0]) is not leaf_constant
         se = model.metrics(data, y).coefficient_se_raw["x"]
-        assert np.isfinite(se[0])
         if offset == 0.0:
             assert se[0] == pytest.approx(dense_raw_standard_errors(model, data)[x][0], rel=1e-8)
+            without_offset = se[0]
+        else:
+            assert se[0] == pytest.approx(without_offset, rel=np.spacing(offset) / np.std(spread))
         decisions.append(estimable)
     for decision in decisions[1:]:
         np.testing.assert_array_equal(decision, decisions[0])
@@ -1069,6 +1076,7 @@ def test_a_chain_of_one_drops_a_constant_column_as_gram_does(lam) -> None:
     _assert_chain_of_one_is_gram(chain, gram, "constant", weight)
 
 
+@pytest.mark.pins_behaviour
 def test_a_chain_of_one_certifies_an_observed_mode_beside_a_constant_column() -> None:
     """Binomial/probit, whose observed rows reach the mode score, beside the
     constant column.  The chain's centred operator gives the column an exactly
@@ -1077,7 +1085,12 @@ def test_a_chain_of_one_certifies_an_observed_mode_beside_a_constant_column() ->
     and auto raised ObservedModeNotCertifiedError where gram fits.  Normalised
     at the centring's resolution it certifies, and the fit is gram's on the
     model without the column, whose objective it must meet to
-    ``reml_tol (1 + |V|)``."""
+    ``reml_tol (1 + |V|)``.
+
+    A control: the certification, the objective and the chain's data rule held
+    before readers showed a certified fit's standard errors, and must after.
+    Only where the reduced fit's data rule is read from changed, to its rank
+    record, since its readers now show every standard error."""
     frame, latent, weight = _lone_level_data("constant", seed=4)
     y = (latent > 0.2).astype(float)  # the latent-variable form of a probit response
     reduced = frame.drop(columns="const")
