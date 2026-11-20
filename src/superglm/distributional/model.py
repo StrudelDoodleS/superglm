@@ -88,7 +88,7 @@ from superglm.distributional.smoothing.loop import fit_distributional_efs
 from superglm.distributional.solver.chunks import ChunkSize
 from superglm.distributional.solver.shape import refit_with_shape_rules, shape_rows
 from superglm.distributional.solver.solver import fit_dense_fixed_lambda
-from superglm.distributional.support import disclose, support_labels
+from superglm.distributional.support import disclose, support_rows
 from superglm.distributional.timing import FitPhaseRecorder, measure_phase
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
@@ -771,7 +771,7 @@ class DenseDistributionalModel:
         outside = self.outside_domain(eta)
         theta = self.parameters_from_eta(eta, outside_domain="interior")
         if warn:
-            off = disclose(support_labels(self, X), outside.any(axis=1))
+            off = disclose(support_rows(self, X), outside.any(axis=1))
             on = outside & ~off[:, None]
             if np.any(on):
                 from superglm.model.base import warn_no_value

@@ -213,7 +213,12 @@ def _fit_disclosing(model, sample, response, *, prediction_offsets=None, **optio
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         model.fit_reml(sample, response, **options)
-    assert np.all(np.isfinite(model.covariance_))
+    # finite, except the rows and columns of a coefficient an unfitted direction reaches
+    # (a size at its Poisson limit flattens directions the design identifies)
+    withheld = model._require_fitted().fit_state.unfitted_coordinates
+    covariance = np.asarray(model.covariance_)
+    assert np.all(np.isfinite(covariance[np.ix_(~withheld, ~withheld)]))
+    assert np.isnan(covariance[withheld]).all() and np.isnan(covariance[:, withheld]).all()
     assert np.all(np.isfinite(np.asarray(model.predict(sample, offsets=prediction_offsets))))
     if not model.result_.converged:
         assert any(issubclass(item.category, ConvergenceWarning) for item in caught)

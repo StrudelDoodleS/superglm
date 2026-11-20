@@ -23,11 +23,13 @@ from superglm._fit_gate import fit_record
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm._lambda_box import LAMBDA_CEILING, bound_warning_message
 from superglm._parallel import fit_pool
+from superglm._warn import _PACKAGE_PREFIX
 from superglm.diagnostics.convergence import (
     ConvergenceWarning,
     lss_ill_conditioned_note,
     lss_nonconvergence_message,
 )
+from superglm.diagnostics.estimability import NonEstimablePredictionWarning
 from superglm.diagnostics.fit_report import FitDiagnosticReport
 from superglm.diagnostics.separation import disclosure_scope
 from superglm.distributional._common import json_number, row_index
@@ -93,7 +95,7 @@ from superglm.distributional.revision import (
 )
 from superglm.distributional.separation import validate_separation_policy
 from superglm.distributional.shape_repair import repaired_model
-from superglm.distributional.support import disclose, support_labels
+from superglm.distributional.support import disclose, support_rows
 from superglm.distributional.surfaces import (
     DensityFan,
     Portfolio,
@@ -1144,21 +1146,25 @@ class SuperLSS:
         design, or a direction the data identify but the fit did not fit) is still
         predicted, at the published coefficients, and named in one
         ``NonEstimablePredictionWarning``; its ``se`` is NaN for each parameter whose
-        predictor leans on one, as that standard error does not exist.
+        predictor leans on one, as that standard error does not exist. So is the ``se``
+        of a row whose predictor reaches an unfitted direction at all, however little
+        (``support.SupportRows``): the fit's covariance leaves out that direction's
+        variance; the same warning names those rows.
         """
         model = self._require_fitted()
         # One adapter for every pass, so the columns and the coded levels are read from X once.
         frame = as_eager_frame(X)
-        labels = support_labels(model, frame)
+        support = support_rows(model, frame)
         values = model.predict_eta(frame, offsets=offsets)
-        disclose(labels)
+        withheld = None if support is None else (support.labels != "") | support.unfitted
+        disclose(support, withheld="standard errors" if se_fit else None)
         index = row_index(X, len(values))
         link = pd.DataFrame(values, columns=self.parameter_names_, index=index)
         if not se_fit:
             return link
         standard_errors = link_standard_errors(model, frame, covariance=covariance)
-        if labels is not None:
-            standard_errors[labels != ""] = np.nan
+        if withheld is not None:
+            standard_errors[withheld] = np.nan
         errors = pd.DataFrame(standard_errors, columns=self.parameter_names_, index=index)
         self._warn_if_hand_edited()
         return link, errors
@@ -1938,8 +1944,28 @@ class SuperLSS:
         and carry ``covariance_kind="fixed"``.  After a hand edit the draws are
         centred on the edit and keep the fit's covariance.  One draw set can be
         reused across quantities.
+
+        The draws of a coefficient a direction the data identify but the fit did not
+        fit reaches leave that direction's spread out; a ``NonEstimablePredictionWarning``
+        names them, and every row quantity built from the draws is NaN where it reaches
+        the direction (``posterior_parameters``, ``posterior_bounds``,
+        ``posterior_predictive``).
         """
-        draws = posterior_draws(self._require_fitted(), n_draws, covariance=covariance, seed=seed)
+        fitted = self._require_fitted()
+        draws = posterior_draws(fitted, n_draws, covariance=covariance, seed=seed)
+        reached = fitted.fit_state.unfitted_coordinates
+        if np.any(reached):
+            names = ", ".join(np.asarray(fitted.layout.coefficient_names)[reached])
+            warnings.warn(
+                NonEstimablePredictionWarning(
+                    f"The draws of {names} leave out the spread of a direction the data identify "
+                    "but the fit did not fit; row quantities built from them are NaN where they "
+                    "reach it.",
+                    np.zeros(0, dtype=np.intp),
+                    (),
+                ),
+                skip_file_prefixes=(_PACKAGE_PREFIX,),
+            )
         self._warn_if_hand_edited()
         return draws
 

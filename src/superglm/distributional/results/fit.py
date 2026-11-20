@@ -33,6 +33,20 @@ def _frozen_array_mapping(
     return MappingProxyType(result)
 
 
+def _readonly_covariance(values: NDArray) -> NDArray[np.float64]:
+    """A read-only covariance: finite, except NaN rows and columns on withheld coordinates.
+
+    A coordinate a direction the fit did not fit reaches has no covariance
+    (``DistributionalFitState.unfitted_coordinates``); every other entry is finite.
+    """
+    matrix = np.asarray(values, dtype=np.float64)
+    withheld = np.all(np.isnan(matrix), axis=0) if matrix.ndim == 2 else np.zeros(0, bool)
+    kept = matrix[np.ix_(~withheld, ~withheld)] if matrix.ndim == 2 else matrix
+    if not np.all(np.isfinite(kept)) or not np.all(np.isnan(matrix[withheld])):
+        raise ValueError("covariance must be finite outside the rows and columns it withholds")
+    return np.frombuffer(matrix.tobytes(order="C"), dtype=matrix.dtype).reshape(matrix.shape)
+
+
 @dataclass(frozen=True)
 class DistributionalFitResult:
     """Compact immutable public-scale state for one complete fitted revision."""
@@ -74,7 +88,7 @@ class DistributionalFitResult:
         object.__setattr__(
             self, "coefficients", _readonly_finite(self.coefficients, name="coefficients")
         )
-        object.__setattr__(self, "covariance", _readonly_finite(self.covariance, name="covariance"))
+        object.__setattr__(self, "covariance", _readonly_covariance(self.covariance))
         object.__setattr__(self, "coefficient_names", tuple(self.coefficient_names))
         object.__setattr__(self, "parameter_names", tuple(self.parameter_names))
         object.__setattr__(

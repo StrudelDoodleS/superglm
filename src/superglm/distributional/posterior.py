@@ -50,8 +50,10 @@ from superglm.distributional.prediction_design import map_design_blocks
 from superglm.distributional.response import require_scalar_response
 from superglm.distributional.revision import CORRECTED_COVARIANCE_NEEDS_THE_FIT
 from superglm.distributional.smoothing.derivatives import LamlDerivatives, laml_derivatives
+from superglm.distributional.solver.aliases import withheld_covariance
 from superglm.distributional.solver.assembly import dense_predictor_matrices
 from superglm.distributional.solver.binned_rows import binned_layout
+from superglm.distributional.support import withheld_cells
 from superglm.reml.multi_penalty import (
     _UNIT_ROUNDOFF,
     _gamma,
@@ -566,8 +568,14 @@ def posterior_covariance(fitted: Any, *, kind: CovarianceKind = "fixed") -> NDAr
     accepted a substitute curvature (Fisher or nearest semidefinite) uses it
     throughout (Wood, Pya and Saefken 2016 §3.3.1; Wood and Fasiolo 2017 §3),
     disclosed with a ``ConvergenceWarning``.
+
+    The rows and columns of a coefficient a direction the fit did not fit reaches
+    (``DistributionalFitState.unfitted_coordinates``) are NaN: the covariance there leaves
+    that direction's variance out.  Every other entry is the fit's.
     """
-    return _resolved_posterior_covariance(fitted, kind)[0]
+    matrix = _resolved_posterior_covariance(fitted, kind)[0]
+    reached = getattr(fitted.fit_state, "unfitted_coordinates", None)
+    return matrix if reached is None else withheld_covariance(matrix, reached)
 
 
 def _resolved_posterior_covariance(
@@ -868,12 +876,17 @@ def posterior_parameters(
 
     A draw whose predictor for a parameter leaves its link's declared domain
     (``eta <= 0`` under a negative-power ``PowerLink``) has no value of that
-    parameter: that cell is NaN.
+    parameter: that cell is NaN. So is a cell whose predictor leans on what the fit
+    does not determine or reaches a direction it did not fit (``support.withheld_cells``),
+    whose spread the draws leave out; one ``NonEstimablePredictionWarning`` names those rows.
     """
+    withheld = withheld_cells(fitted, X, "posterior draws")
     for rows, block, outside in _posterior_blocks(
         fitted, X, draws, offsets=offsets, chunk_rows=chunk_rows, name_levels=name_levels
     ):
         block[outside] = np.nan
+        if withheld is not None:
+            block[:, withheld[rows]] = np.nan
         yield rows, block
 
 
@@ -1128,6 +1141,11 @@ def posterior_bounds(
     one, the distribution-function quantities read each row's own
     prior-weighted law (:func:`resolve_quantity`) and are chunked in step with
     the rows they belong to.
+
+    A row whose predictor leans on what the fit does not determine or reaches a
+    direction it did not fit (``support.withheld_cells``) has no posterior summary the
+    draws can give, as they leave that direction's spread out: its ``mean``, ``sd`` and
+    bounds are NaN, its estimate stands, and one ``NonEstimablePredictionWarning`` names it.
     """
     coverage = float(level)
     if not 0.0 < coverage < 1.0:
@@ -1159,6 +1177,7 @@ def posterior_bounds(
         )
     estimate[no_value] = np.nan
     summarized = ~no_value
+    withheld = withheld_cells(fitted, frame, "posterior summaries")
 
     tail = 0.5 * (1.0 - coverage)
     summaries = {
@@ -1217,6 +1236,12 @@ def posterior_bounds(
             draws=True,
         )
 
+    if withheld is not None:
+        unsummarized = withheld.any(axis=1)
+        for summary in summaries.values():
+            summary[unsummarized] = np.nan
+        if quantity_draws is not None:
+            quantity_draws[:, unsummarized] = np.nan
     bounds = pd.DataFrame({"estimate": estimate, **summaries}, index=row_index(X, n_observations))
     if return_draws:
         assert quantity_draws is not None
@@ -1241,7 +1266,7 @@ def link_standard_errors(
     ordinary number) is taken again from its row scaled by a power of two, which is exact:
     ``sqrt(x' V x) = 2^e sqrt(y' V y)`` with ``y = 2^-e x``.
     """
-    matrix = posterior_covariance(fitted, kind=covariance)
+    matrix = _resolved_posterior_covariance(fitted, covariance)[0]
     layout = fitted.layout
     frame = as_eager_frame(X)
     blocks = [
@@ -1361,7 +1386,11 @@ def posterior_predictive(
     A row with no value of a parameter, at the fitted coefficients or at a
     posterior draw (its predictor leaves the link's declared domain), has no
     predictive draws: its column reads NaN, with one warning, and a ``reduce``,
-    which cannot leave it out, refuses it with ``NoPredictedMeanError``.
+    which cannot leave it out, refuses it with ``NoPredictedMeanError``. With
+    ``parameter_uncertainty``, a row whose predictor leans on what the fit does not determine
+    or reaches a direction it did not fit (``support.withheld_cells``) reads NaN too, and a
+    ``reduce`` over it is NaN, as the draws leave that direction's spread out; one
+    ``NonEstimablePredictionWarning`` names those rows.
     """
     require_scalar_response(fitted.family, "posterior_predictive")
     frame = as_eager_frame(X)
@@ -1387,6 +1416,8 @@ def posterior_predictive(
     # reuses the other's stream.
     uniform_rng = np.random.default_rng(np.random.SeedSequence(seed).spawn(2)[1])
 
+    cells = withheld_cells(fitted, frame, "predictive draws") if parameter_uncertainty else None
+    withheld = None if cells is None else cells.any(axis=1)
     pieces: list[NDArray[np.float64]] = []
     no_value = np.zeros(len(frame), dtype=bool)
     lost_parameters = np.zeros(len(fitted.layout.predictors), dtype=bool)
@@ -1424,6 +1455,8 @@ def posterior_predictive(
             raise ValueError("non-finite predictive draws cannot be represented or reduced")
         if combine is None:
             simulated[:, lost] = np.nan
+            if withheld is not None:
+                simulated[:, withheld[rows]] = np.nan
             pieces.append(simulated)
             continue
         with np.errstate(over="ignore", invalid="ignore"):
@@ -1453,13 +1486,21 @@ def posterior_predictive(
             total = np.sum(pieces, axis=0, dtype=np.float64)
         if not np.all(np.isfinite(total)):
             raise ValueError("Predictive reduction produced non-finite values")
-        return total
+        return _withheld_reduction(total, withheld)
     if any(piece.ndim < 2 for piece in pieces):
         raise ValueError(
             "reduce must return a (draws,) summary that is additive across row chunks "
             "or a (draws, columns) block; it returned neither on every chunk"
         )
-    return np.concatenate(pieces, axis=1)
+    joined = np.concatenate(pieces, axis=1)
+    return joined if combine is None else _withheld_reduction(joined, withheld)
+
+
+def _withheld_reduction(reduced: NDArray, withheld: NDArray | None) -> NDArray[np.float64]:
+    """A reduction over the rows, NaN when one of them is withheld (``withheld_cells``)."""
+    if withheld is None or not np.any(withheld):
+        return reduced
+    return np.full(np.shape(reduced), np.nan)
 
 
 def simultaneous_critical_value(

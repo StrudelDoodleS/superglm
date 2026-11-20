@@ -162,7 +162,20 @@ def test_poisson_like_fit_finishes_and_discloses_the_boundary(dropped_rows: int)
     assert any(
         "could not establish a stable finite theta" in message for message in model.result_.warnings
     )
-    assert np.all(np.isfinite(model.covariance_))
+    _assert_finite_but_the_unfitted_size(model._require_fitted())
+
+
+def _assert_finite_but_the_unfitted_size(fitted) -> None:
+    """The published covariance is finite but on the size coefficients an unfitted direction
+    reaches (``unfitted_coordinates``: a size at its Poisson limit flattens a direction the
+    design identifies), whose rows and columns are NaN."""
+    withheld = fitted.fit_state.unfitted_coordinates
+    size = np.zeros_like(withheld)
+    size[_size_state(fitted.fit_state).coefficient_slice] = True
+    covariance = np.asarray(fitted.covariance)
+    assert not np.any(withheld & ~size)
+    assert np.all(np.isfinite(covariance[np.ix_(~withheld, ~withheld)]))
+    assert np.isnan(covariance[withheld]).all() and np.isnan(covariance[:, withheld]).all()
 
 
 def _family_diagnosis(family, response, *, sample_weight, contract):
@@ -461,7 +474,7 @@ def test_size_reaching_its_poisson_limit_under_the_endgame_is_disclosed() -> Non
     assert smoothing.converged or disclosed, smoothing.convergence_reason
     prediction = np.asarray(model.predict(frame, offsets={"mean": log_exposure}))
     assert np.all(np.isfinite(prediction))
-    assert np.all(np.isfinite(fitted.covariance))
+    _assert_finite_but_the_unfitted_size(fitted)
 
 
 def test_fisher_fallback_on_overdispersed_data_is_disclosed(monkeypatch) -> None:

@@ -48,7 +48,7 @@ from superglm.distributional.results.shape import ShapeFit, shape_disclosures
 from superglm.distributional.results.smoothing import DistributionalEFSResult
 from superglm.distributional.results.solver import DenseSolverConfig, DenseSolverResult
 from superglm.distributional.revision import HandEdit, check_hand_edit
-from superglm.distributional.solver.aliases import design_split, reached
+from superglm.distributional.solver.aliases import design_split, reached, withheld_covariance
 from superglm.distributional.solver.chunks import ChunkSize
 from superglm.distributional.telemetry import CurvatureTelemetry
 from superglm.distributional.walls import PRESSED_STEP, outward_step, wall_rows
@@ -447,7 +447,8 @@ class DistributionalFitState:
             raise ValueError("compact and solver exact-face components must agree")
         if not np.array_equal(self.result.coefficients, self.solver_result.coefficients):
             raise ValueError("compact and solver coefficients must agree")
-        if not np.array_equal(self.result.covariance, self.inference.covariance):
+        withheld = withheld_covariance(self.inference.covariance, self.unfitted_coordinates)
+        if not np.array_equal(self.result.covariance, withheld, equal_nan=True):
             raise ValueError("compact and inference covariance must agree")
         if self.result.rank != self.inference.rank:
             raise ValueError("compact and inference rank must agree")
@@ -857,13 +858,19 @@ def prepare_distributional_fit_state(
     )
     face = solver_result.coefficient_face
     exact_face_components = () if face is None else face.component_names
+    design_aliases, unfitted = _dropped_split(layout, solver_result, likelihood_plan)
+    reached_by = (
+        np.zeros(layout.n_coefficients, dtype=bool)
+        if unfitted is None or unfitted.shape[1] == 0
+        else reached(unfitted, solver_result.terminal_rank.column_scale)
+    )
     result = DistributionalFitResult(
         coefficients=solver_result.coefficients,
         coefficient_names=layout.coefficient_names,
         parameter_names=parameter_names,
         predictor_coefficients=predictor_coefficients,
         smoothing_parameters=lambdas,
-        covariance=inference.covariance,
+        covariance=withheld_covariance(inference.covariance, reached_by),
         total_effective_df=inference.total_edf,
         predictor_edf=inference.predictor_edf,
         intercept_edf=inference.intercept_edf,
@@ -916,7 +923,6 @@ def prepare_distributional_fit_state(
             response_spec=response_spec(family),
         )
     bounds = plan_observation(likelihood_plan).bounds
-    design_aliases, unfitted = _dropped_split(layout, solver_result, likelihood_plan)
     return DistributionalFitState(
         revision=revision,
         weight_contract=likelihood_plan.weights.provenance.contract,

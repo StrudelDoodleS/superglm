@@ -374,6 +374,82 @@ def test_superlss_withholds_the_standard_errors_of_a_near_duplicate_it_did_not_f
     assert np.all(np.isfinite(intercepts["se"]))
 
 
+def test_superlss_withholds_every_variance_its_unfitted_direction_reaches():
+    """The near-duplicate: covariance, ``se_fit`` and posterior summaries are NaN where reached.
+
+    The unfitted direction ``x1 - x2`` reaches ``x1`` and ``x2``, and every row with an ``x1``
+    or ``x2`` (``|r'u|`` above the ``gamma_k |r|'|u|`` rounding of forming it, however small
+    against R's ``1e-6``), whose variance along it the fit's covariance leaves out: about
+    ``(r'u)^2`` over the direction's curvature, the order of the reported variance.  Those
+    entries, standard errors and summaries are NaN, named in the one warning; every other
+    entry is the fit's own (``inference.covariance``, ``link_standard_errors``, the draws
+    pushed through the design by hand).  At ``253c6d353`` all were finite (``x1``'s variance
+    the refit's 0.0224^2).  Mutation checks: a covariance, an ``se`` or a summary that is not
+    withheld prints a number; a row read by R's ``1e-6`` alone keeps the training rows' SEs.
+    """
+    from superglm import SuperLSS, s, term
+    from superglm.distributional import GaussianLS
+    from superglm.distributional.posterior import (
+        link_standard_errors,
+        posterior_draws,
+        posterior_parameters,
+    )
+
+    X, y = _near_duplicate_frame(1e-8)
+    family = GaussianLS(scale_floor=0)
+    location = family.location(term("x1", Numeric()), term("x2", Numeric()), s("z", n_knots=8))
+    lss = SuperLSS(family, location, family.scale(), discrete=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        lss.fit_reml(X, y)
+    fitted = lss._require_fitted()
+    names = list(fitted.layout.coefficient_names)
+    reached = np.isin(names, ["location:x1", "location:x2"])
+    covariance = np.asarray(lss.covariance_)
+    assert np.isnan(covariance[reached]).all() and np.isnan(covariance[:, reached]).all()
+    kept = np.ix_(~reached, ~reached)
+    np.testing.assert_array_equal(covariance[kept], fitted.inference.covariance[kept])
+    rows = pd.concat(
+        [X.iloc[:3], pd.DataFrame({"x1": 0.0, "x2": 0.0, "z": [0.1, 0.5, 0.9]})],
+        ignore_index=True,
+    )
+    plain = np.isin(np.arange(6), [3, 4, 5])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _, se = lss.predict_link(rows, se_fit=True)
+        bounds = lss.posterior_bounds(rows, "mean", n_draws=200, seed=0)
+    assert se["location"].isna().to_numpy().tolist() == (~plain).tolist()
+    oracle = link_standard_errors(fitted, rows)
+    np.testing.assert_array_equal(se.to_numpy()[plain], oracle[plain])
+    np.testing.assert_array_equal(se["scale"].to_numpy(), oracle[:, 1])
+    summaries = bounds[["mean", "sd", "lower", "upper"]].to_numpy()
+    assert np.isnan(summaries[~plain]).all() and np.all(np.isfinite(bounds["estimate"]))
+    notes = [str(w.message) for w in caught if w.category.__name__.startswith("NonEstimable")]
+    assert len(notes) == 2 and all("(rows 0, 1, 2)" in note for note in notes)
+    # the plain rows' summaries: the same draws through the location design, formed by hand
+    block = fitted.layout.predictors[0].coefficient_slice
+    unit = np.eye(len(names))[block]
+    design = np.column_stack([fitted.predict_eta_at(e, rows.iloc[3:])[:, 0] for e in unit])
+    draws = posterior_draws(fitted, 200, seed=0).coefficients[:, block] @ design.T
+    magnitude = np.abs(posterior_draws(fitted, 200, seed=0).coefficients[:, block]) @ np.abs(
+        design.T
+    )
+    tolerance = 4 * design.shape[1] * U * float(np.max(magnitude))
+    expected = np.column_stack(
+        (draws.mean(axis=0), draws.std(axis=0, ddof=1), *np.quantile(draws, [0.05, 0.95], axis=0))
+    )
+    np.testing.assert_allclose(summaries[plain], expected, rtol=0.0, atol=tolerance)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ((_, theta),) = posterior_parameters(fitted, rows, posterior_draws(fitted, 200, seed=0))
+        predictive = lss.posterior_predictive(rows, n_draws=50, seed=0)
+        total = lss.posterior_predictive(rows, n_draws=50, seed=0, reduce="sum")
+    assert np.isnan(theta[:, ~plain, 0]).all() and np.all(np.isfinite(theta[:, :, 1]))
+    np.testing.assert_allclose(theta[:, plain, 0], draws, rtol=0.0, atol=tolerance)
+    assert np.isnan(predictive[:, ~plain]).all() and np.all(np.isfinite(predictive[:, plain]))
+    assert np.isnan(total).all()
+
+
 def test_a_truncated_direction_on_a_column_of_tiny_curvature_is_read():
     """Two truncated directions, one on a column whose Jacobi scale is 1e-9 of the other's.
 

@@ -214,4 +214,13 @@ def reached(directions: NDArray, column_scale: NDArray) -> NDArray:
     return np.einsum("ij,ij->i", basis, basis) > _SHARE_FLOOR**2
 
 
-__all__ = ["design_split", "held_coordinates", "reached"]
+def withheld_covariance(covariance: NDArray, coordinates: NDArray) -> NDArray:
+    """``covariance`` with NaN rows and columns on ``coordinates`` (a mask), the rest as it is."""
+    matrix = np.array(covariance, dtype=np.float64, copy=True)
+    mask = np.asarray(coordinates, dtype=bool)
+    matrix[mask, :] = np.nan
+    matrix[:, mask] = np.nan
+    return matrix
+
+
+__all__ = ["design_split", "held_coordinates", "reached", "withheld_covariance"]
