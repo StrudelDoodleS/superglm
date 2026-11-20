@@ -44,7 +44,6 @@ from superglm.reml.penalty_algebra import build_penalty_matrix
 
 from ._traced_memory import own_traced_peak
 from .test_saved_fs_models import assert_predicts_as_saved
-from .test_spline_cat_separation import separated_tail_design
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SAVED = FIXTURES / "saved_master_bce2910e5"
@@ -313,31 +312,9 @@ def _recorded_separation(case: str):
     - ``slope``, ``varying_slope``, ``curve``: a numeric by a factor, one level's slope
       separated: the term's ``_separated_ranges``;
     - ``cell``, ``crossed_cell``, ``base_cell``, ``crossed_cell_fit``: a factor by a factor, one
-      cell without a claim: the crossed scan's cells (``_separated_cells_at_fit``);
-    - ``held_curve``: a spline by a factor, level C without a claim past x = 22, where its
-      curve is held (``_separated_curves``).  The hold takes that range out of the curve, and
-      ``t``, the indicator of those rows, stays in the model and walks: it is unpenalised, and
-      aliases four levels of ``g`` that only those rows have.
+      cell without a claim: the crossed scan's cells (``_separated_cells_at_fit``).
     """
     options: dict = {}
-    if case == "held_curve":
-        frame, y, weight = separated_tail_design(n=3000)
-        tail = ((frame["f"] == "C") & (frame["x"] > 22)).to_numpy()
-        order = [f"b{code}" for code in range(8)]
-        codes = 4 * tail + np.random.default_rng(34).integers(0, 4, len(frame))
-        frame = frame.assign(t=tail.astype(float), g=[order[code] for code in codes])
-        model = SuperGLM(
-            family="poisson",
-            features={
-                "x": Spline(n_knots=12),
-                "f": Categorical(base="C"),
-                "t": Numeric(),
-                "g": OrderedCategorical(order=order, basis=Spline(kind="ps", n_knots=7)),
-            },
-            interactions=[("x", "f")],
-            tol=1e-6,
-        )
-        return frame, y, model, "fit", {"sample_weight": weight}
     if case in ("reference_m20", "reference_m21"):
         rng = np.random.default_rng(124)
         region = np.repeat(["a", "b", "c"], 40)
@@ -620,7 +597,6 @@ _RECORDED_SEPARATION_CASES = (
     "crossed_cell",
     "base_cell",
     "crossed_cell_fit",
-    "held_curve",
 )
 
 
@@ -680,7 +656,7 @@ def test_a_fit_outside_the_rule_keeps_the_data_rule(case):
         assert model.result.converged
         if case.startswith("reference") or case == "base_cell":
             open_to_the_data = ~model.result.rank_info.coefficient_estimable()
-        options = {k: options[k] for k in ("offset", "sample_weight") if k in options}
+        options = {key: value for key, value in options.items() if key == "offset"}
     elif case in _UNPRICED_REGION_CASES:
         frame, y, model, event = _unpriced_region(case)
         assert event in {type(w.message).__name__ for w in _fit(model, frame, y)}

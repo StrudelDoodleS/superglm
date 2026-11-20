@@ -1180,10 +1180,9 @@ a range with no rows.
   smoothing parameters it reached, as its `ConvergenceWarning` says.
 - **So does a fit that names a level or region it cannot price.** That is a
   factor-smooth level the fit reports as thin, without weight or separated; a
-  categorical level, a crossed cell, a level's own slope or a range of a
-  level's curve it reports as separated; a coefficient `fit_reml` reports as
-  weakly identified or a reference level it reports as separated; or a fit
-  that ends with the
+  categorical level, a crossed cell or a level's own slope it reports as
+  separated; a coefficient `fit_reml` reports as weakly identified or a
+  reference level it reports as separated; or a fit that ends with the
   separation warning the solver raises at runtime. Such a fit can stop where
   its penalised Hessian still has full rank, so the rank test would not catch
   it.

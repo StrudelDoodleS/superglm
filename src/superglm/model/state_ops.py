@@ -532,14 +532,13 @@ def _names_an_unpriced_level(model) -> bool:
     penalized Hessian keeps full rank there; these records name it:
 
     - on an interaction: an ``sz`` term's levels left out of its population curve
-      (``_left_out``), a varying coefficient's separated levels, a crossed term's separated
-      cells, and a level's curve held over a separated range (``_separated_curves``);
+      (``_left_out``: thin, separated, or without weight unless ``select=True``), a
+      varying coefficient's separated levels and a crossed term's separated cells;
     - a categorical level the build-time scan found separated;
     - the runtime separation finding (``PIRLSResult.separation_message``);
     - a slope REML reports as weakly identified, or a set it found separated.
     """
-    # a held curve's range is out of its curve; an unpenalized column over those rows still walks
-    records = ("_left_out", "_separated_ranges", "_separated_cells_at_fit", "_separated_curves")
+    records = ("_left_out", "_separated_ranges", "_separated_cells_at_fit")
     for spec in model._interaction_specs.values():
         if any(getattr(spec, record, None) for record in records):
             return True
