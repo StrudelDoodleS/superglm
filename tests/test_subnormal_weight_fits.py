@@ -389,9 +389,21 @@ def test_known_scale_path_tables_use_unit_dispersion():
     y = rng.negative_binomial(2, 2 / (2 + mu)).astype(float)
     model = SuperGLM(family="poisson", features={"x": PSpline(n_knots=8), "z": Categorical()})
     model.fit_path(frame, y, n_lambda=5)
-    # Path results retain Pearson dispersion for quasi-likelihood diagnostics.
-    # A fitted-family coefficient table still uses the known unit dispersion.
-    assert model.result.phi > 1.5
+    assert model.result.phi == 1.0
+    # A path result saved before known-scale paths published 1 holds Pearson's
+    # dispersion; a fitted-family coefficient table still uses the known unit one.
+    from dataclasses import replace
+
+    metrics = model.metrics(frame, y)
+    pearson = metrics.pearson_chi2 / (metrics.n_obs - metrics.effective_df)
+    assert pearson > 1.5
+    shared = model._solver_result is model._result
+    model._result = replace(model._result, phi=float(pearson))
+    model._solver_result = (
+        model._result if shared else replace(model._solver_result, phi=float(pearson))
+    )
+    model._summary_cache = None
+    model._fit_metrics_cache = None
     inference = model._fit_inference_info
     augmented = inference["XtWX_inv_aug"]
     categorical = next(g for g in inference["active_groups"] if g.feature_name == "z")
