@@ -259,6 +259,71 @@ def test_a_spline_curves_points_off_support_have_no_simultaneous_band():
         assert np.all(np.isnan(values[flagged])) and np.all(np.isfinite(values[~flagged])), column
 
 
+@pytest.mark.pins_behaviour
+def test_a_curve_points_off_support_test_reads_its_dual_norm(monkeypatch):
+    """A term curve's point is tested against its dual norm ``||r D^-1||``, ``D`` from the rows.
+
+    Pins the norm the term readers' off-support test divides each point's share by
+    (``explain_ops._curve_labels``): the reader's own standard error at ``diag(D^-2)``, which
+    for a point ``r`` of the curve is ``||r D^-1||`` in the record's Jacobi scale ``D =
+    sqrt(diag(X_c' W X_c + S))``.  The oracle is formed here from the training rows, the
+    fit's working weights and its smoothing parameters' penalty, with each grid point's ``r``
+    the spline's columns as ``predict`` scores them (the curve's log relativity is ``r beta``
+    to rounding, checked); every norm is the oracle's to ``n u``, the rounding of ``D``'s
+    ``n``-row sums.  It held at ``97073c490``.  Mutation (``u3``): the norm at ``diag(D^-1)``
+    moves every point's by a factor up to ``sqrt(44)``, ``D`` from ``2.2`` to ``44`` here; the
+    readers' label tests did not see it (stage 6c-3's mutation run, at this head and its base).
+    """
+    import superglm.diagnostics.estimability as estimability
+    from superglm.model.state_ops import _solver_space_working_weights
+    from superglm.reml.penalty_algebra import build_penalty_matrix
+
+    rows = np.random.default_rng(3)
+    x = rows.uniform(0.0, 10.0, N)
+    frame = pd.DataFrame({"x": x, "xl": x})
+    response = rows.gamma(2.0, np.exp(0.1 * np.sin(x)) / 2.0)
+    model = SuperGLM(
+        family=superglm.families.gamma(),
+        link="log",
+        features={"x": Spline(n_knots=6), "xl": Numeric()},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, response)
+    read = []
+    off_support = estimability.off_support
+
+    def spy(projections, norms, tol=estimability.PREDICTION_TOLERANCE):
+        read.append(np.array(norms, dtype=np.float64))
+        return off_support(projections, norms, tol)
+
+    monkeypatch.setattr(estimability, "off_support", spy)
+    inference, _ = _caught(lambda: model.term_inference("x", with_se=False))
+    (norms,) = read
+    grid = np.asarray(inference.x)
+    columns = np.concatenate(
+        [np.arange(g.start, g.end) for g in model._groups if g.feature_name == "x"]
+    )
+    points = _design(model, pd.DataFrame({"x": grid, "xl": 0.0}))[:, columns]
+    beta = model.result.beta[columns]
+    np.testing.assert_allclose(
+        inference.log_relativity,
+        points @ beta,
+        rtol=0,
+        atol=8 * U * np.max(np.abs(points) @ np.abs(beta)),
+    )
+    dm = model._dm
+    X, W = dm.toarray(), _solver_space_working_weights(model)
+    S = build_penalty_matrix(
+        dm.group_matrices, model._groups, model._reml_lambdas, dm.p, model._reml_penalties
+    )
+    centred = X - (W @ X) / np.sum(W)
+    D = np.sqrt(np.einsum("i,ij,ij->j", W, centred, centred) + np.diag(S))
+    assert np.ptp(D[columns]) > 10.0
+    oracle = np.linalg.norm(points / D[columns], axis=1)
+    np.testing.assert_allclose(norms, oracle, rtol=N * U)
+
+
 def test_a_rating_table_flags_the_levels_the_fit_does_not_determine():
     """The categorical block of ``f`` carries each level's kind; its workbook note names ``E``."""
     from superglm.export.rating_tables import _categorical_block
