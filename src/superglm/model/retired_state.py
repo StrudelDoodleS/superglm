@@ -11,6 +11,7 @@ refit.
 
 from __future__ import annotations
 
+import dataclasses
 import warnings
 
 import numpy as np
@@ -58,6 +59,24 @@ def release_v0_35_nb_summaries(model) -> None:
     cache = model.__dict__.get("_summary_cache")
     infos = [getattr(summary, "_info", {}) for summary in (cache or {}).values()]
     if any("nb_theta" in info and "nb_theta_ci_status" not in info for info in infos):
+        model.__dict__["_summary_cache"] = None
+
+
+def release_saved_mask_summaries(model) -> None:
+    """``SuperGLM.__setstate__``'s part for a model saved before fits recorded which standard errors they show.
+
+    Its record keeps the blanks it was saved with (``RankInfo.standard_error_mask``).  A summary
+    cached beside it is dropped: the next ``summary()`` is formed from the same inference, and
+    says a refit shows the blank ones (``state_ops.saved_standard_error_note``).
+    """
+    record = model.__dict__.get("_linear_system_state")
+    if record is None:
+        # the solver-space result first, as the readers take it (``state_ops._fit_record``)
+        result = model.__dict__.get("_solver_result")
+        if result is None:
+            result = model.__dict__.get("_result")
+        record = getattr(result, "rank_info", None)
+    if getattr(record, "standard_error_mask", None) == "data":
         model.__dict__["_summary_cache"] = None
 
 
@@ -173,4 +192,5 @@ def _rebuild(model):
         factor=profiled, data_operator=system.operator, cache=cache, support_totals=support
     )
     warnings.warn(REBUILT_NOTICE, UserWarning, stacklevel=4)
-    return state
+    # a model saved before fits recorded which standard errors they show keeps the ones it had
+    return None if state is None else dataclasses.replace(state, standard_error_mask="data")

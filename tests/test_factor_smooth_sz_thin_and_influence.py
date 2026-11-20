@@ -46,6 +46,8 @@ from superglm.reml.penalty_algebra import (
     penalty_component_quadratic,
 )
 
+from .test_penalized_standard_errors import dense_raw_standard_errors
+
 EPS = float(np.finfo(np.float64).eps)
 _U = EPS / 2.0
 
@@ -155,6 +157,25 @@ def _nan_mask(model: SuperGLM, frame, y, weight) -> np.ndarray:
     return np.concatenate(
         [np.isnan(np.atleast_1d(np.asarray(se[g.name], dtype=float))) for g in model._groups]
     )
+
+
+def _data_rule_mask(model: SuperGLM) -> np.ndarray:
+    """The slopes the data alone leave open, as the fit's own record of the data reads them.
+
+    Every reader blanked these until standard errors came from a certified penalised fit
+    (``state_ops.standard_error_mask``); a fit without that certificate still does.
+    """
+    state = model._linear_system_state
+    if state is None:
+        return ~model.result.rank_info.coefficient_estimable()
+    return ~state.profiled_factor.coefficient_estimable()
+
+
+def _raw_standard_errors(model: SuperGLM, frame, y, weight) -> np.ndarray:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        se = model.metrics(frame, y, sample_weight=weight).coefficient_se_raw
+    return np.concatenate([np.atleast_1d(np.asarray(se[g.name], float)) for g in model._groups])
 
 
 def _structurally_non_estimable(model: SuperGLM, weight) -> np.ndarray:
@@ -4181,14 +4202,15 @@ def test_sz_standard_errors_are_nan_only_on_exact_aliases(numerics) -> None:
     np.testing.assert_array_equal(mask, _structurally_non_estimable(models["auto"], weight))
 
 
-def test_sz_random_effect_levels_are_non_estimable_as_on_gram() -> None:
-    """A random effect's levels sum to the intercept: NaN on every one, as the dense solver.
+def test_sz_random_effect_levels_show_the_ridges_standard_errors_as_on_gram() -> None:
+    """A random effect's levels sum to the intercept, and its ridge determines every one.
 
-    The ridge penalty identifies that direction, so it is no alias of the
-    fit's Hessian, but estimability reads the data alone (the package's rule,
-    and v0.35.0's on the models saved with this shape).  Mutation:
-    estimability read from the fit's own (penalized) aliases, which reported
-    the twelve levels' standard errors finite.
+    The data alone leave all twelve open: the structured solver's record of the
+    data says so, as the dense solver's and the SVD of ``[1, X]`` do.  The
+    ridge makes the penalised Hessian positive definite, so both solvers show
+    each level's standard error, the dense inverse's of ``[1 X]'[1 X] + S``
+    (rtol 1e-8).  Every one was NaN while readers applied the data rule to a
+    penalised fit.
     """
     frame, eta, rng, _ = _frame()
     frame["h"] = np.array([f"h{v:02d}" for v in rng.integers(0, 12, len(frame))], dtype=object)
@@ -4199,11 +4221,17 @@ def test_sz_random_effect_levels_are_non_estimable_as_on_gram() -> None:
         for solve in ("auto", "gram")
     }
     assert models["auto"]._reml_profile["direct_backend"] == "structured"
-    mask = _nan_mask(models["auto"], frame, y, weight)
+    mask = _data_rule_mask(models["auto"])
     h = next(group for group in models["auto"]._groups if group.name == "h")
     assert np.all(mask[h.sl]) and h.end - h.start == 12
-    np.testing.assert_array_equal(mask, _nan_mask(models["gram"], frame, y, weight))
+    np.testing.assert_array_equal(mask, _data_rule_mask(models["gram"]))
     np.testing.assert_array_equal(mask, _structurally_non_estimable(models["auto"], weight))
+    for model in models.values():
+        np.testing.assert_allclose(
+            _raw_standard_errors(model, frame, y, weight),
+            dense_raw_standard_errors(model, frame),
+            rtol=1e-8,
+        )
 
 
 # ------------------------------------------------------ weak identification
@@ -4249,17 +4277,17 @@ def test_a_tiny_weight_level_is_named_not_the_whole_model() -> None:
 
 
 @pytest.mark.parametrize("solve", ["structured", "gram"])
-def test_selected_sz_standard_errors_follow_the_data_rule(solve) -> None:
-    """``select=True`` adds a penalty, not data, so standard errors keep the data-only estimability rule.
+def test_selected_sz_shows_the_standard_errors_its_penalty_determines(solve) -> None:
+    """``select=True`` penalises every level's line, so the penalised fit determines every coefficient.
 
     Every level of Sol's all-thin fixture sits at one ``x``: the data alias
-    each level's line with the main effect, and the ``null`` penalty alone
-    pins it.  A direction only a penalty pins is not estimable, so its
-    standard errors are missing (NaN), on exactly the coordinates a null
-    vector of ``[1, X]`` touches, as without ``select`` and as a random
-    effect's ridge-identified directions are.  The credibility page says so.
-    Mutation: estimability read from the fit's penalized system, which
-    ``select=True`` makes positive definite, reports every one finite.
+    each level's line with the main effect, on exactly the coordinates a null
+    vector of ``[1, X]`` touches, and the fit's record of the data says so.
+    The ``null`` penalty pins those lines and makes the penalised Hessian
+    positive definite, so each coefficient shows the dense inverse's standard
+    error of ``[1 X]'[1 X] + S`` (rtol 1e-8), as a random effect's
+    ridge-determined levels do.  The credibility page says so.  They were NaN
+    while readers applied the data rule to a penalised fit.
     """
     frame, y = _all_thin_frame()
     weight = np.ones(len(y))
@@ -4267,9 +4295,14 @@ def test_selected_sz_standard_errors_follow_the_data_rule(solve) -> None:
         warnings.simplefilter("ignore")
         model = _all_thin_model(solve, select=True).fit_reml(frame, y)
     assert model._reml_profile["direct_backend"] == solve
-    missing = _nan_mask(model, frame, y, weight)
+    missing = _data_rule_mask(model)
     assert missing.any()
     assert np.array_equal(missing, _structurally_non_estimable(model, weight))
+    np.testing.assert_allclose(
+        _raw_standard_errors(model, frame, y, weight),
+        dense_raw_standard_errors(model, frame),
+        rtol=1e-8,
+    )
 
 
 def test_holdout_drop_term_deltas_use_the_predict_rule_for_a_redundant_group_term() -> None:

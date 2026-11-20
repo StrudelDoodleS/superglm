@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -57,6 +58,12 @@ class StructuredLinearSystemState:
         StructuredLevelSupport | FactorSmoothLevelSupport,
     ]
     backend: str = "structured"
+    # ``RankInfo.standard_error_mask`` for a structured fit: ``"data"`` on a state saved before
+    # fits recorded it, and on one rebuilt for such a model.
+    standard_error_mask: Literal["data", "penalized"] = "penalized"
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update({"standard_error_mask": "data"} | state)
 
     def __post_init__(self) -> None:
         if self.profiled_factor.shape != self.system.operator.shape:

@@ -371,6 +371,11 @@ def summary(
     XtWX_inv = inf["XtWX_inv"]
     XtWX_inv_aug = inf["XtWX_inv_aug"]
     active_groups = inf["active_groups"]
+    from superglm.model.state_ops import saved_standard_error_note
+
+    model_info["standard_error_note"] = saved_standard_error_note(
+        model, inf["coefficient_estimable"]
+    )
     known_scale = getattr(model._distribution, "scale_known", True)
     coef_rows = build_coef_rows(
         groups=model._groups,

@@ -148,6 +148,9 @@ def _fitted_discrete_tensor_state():
         _fit_weights=weights,
         _fit_offset=None,
         _runtime_canonical_state=None,
+        _resolved_penalty=GroupLasso(lambda1=0.0),
+        _specs={},
+        _interaction_specs={},
     )
     model._solver_pirls_result = lambda: result
     return model

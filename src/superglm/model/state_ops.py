@@ -30,11 +30,13 @@ from superglm.solvers._structured.state import (
     StructuredLinearSystemState,
 )
 from superglm.solvers.rank import (
+    RankDecomposition,
     decide_data_rank,
     decompose_factor,
     decompose_gram,
     decompose_gram_if_authoritative,
     diagonal_of_square,
+    penalized_rank_certified,
     selected_group_name_set,
 )
 from superglm.solvers.working_rows import fisher_working_weights
@@ -500,6 +502,147 @@ def fit_active_info(model):
     return X_active, W, inverse, augmented, active_groups
 
 
+def _fit_record(model):
+    """The fit's own record of its rank: a structured fit's retained system, a dense fit's rank record."""
+    state = retained_linear_state(model)
+    return state if state is not None else model._solver_pirls_result().rank_info
+
+
+def _fit_decomposition(record):
+    """What a fit's covariance is inverted from: its structured factor, or its dense record's."""
+    penalized = getattr(record, "profiled_factor", None)
+    return penalized if penalized is not None else getattr(record, "augmented", None)
+
+
+def _positive_definite(penalized) -> bool:
+    """Whether a decomposition of a penalized Hessian certifies it as positive definite.
+
+    A dense one certifies itself by ``rank.penalized_rank_certified``, a structured factor by
+    truncating no direction.
+    """
+    if isinstance(penalized, RankDecomposition):
+        return penalized_rank_certified(penalized)
+    return not penalized.rank_truncated
+
+
+def _names_an_unpriced_level(model) -> bool:
+    """Whether the fit's own records name a level or region the data cannot price.
+
+    Its coefficient walks towards infinity and stops where the data still hold it, so the
+    penalized Hessian keeps full rank there; these records name it:
+
+    - on an interaction: an ``sz`` term's levels left out of its population curve
+      (``_left_out``: thin, separated, or without weight unless ``select=True``), a
+      varying coefficient's separated levels and a crossed term's separated cells;
+    - a categorical level the build-time scan found separated;
+    - the runtime separation finding (``PIRLSResult.separation_message``);
+    - a slope REML reports as weakly identified, or a set it found separated.
+    """
+    records = ("_left_out", "_separated_ranges", "_separated_cells_at_fit")
+    for spec in model._interaction_specs.values():
+        if any(getattr(spec, record, None) for record in records):
+            return True
+    if any(getattr(spec, "_separated_levels_at_fit", ()) for spec in model._specs.values()):
+        return True
+    if getattr(model._solver_pirls_result(), "separation_message", None) is not None:
+        return True
+    profile = getattr(model, "_reml_profile", None) or {}
+    return bool(profile.get("reml_weakly_identified") or profile.get("reml_laplace_separated"))
+
+
+def penalized_fit_certified(model, penalized) -> bool:
+    """Whether every coefficient ``model`` published has a standard error read from ``penalized``.
+
+    ``penalized`` is what the covariance in hand is inverted from: the fit's own
+    decomposition, or the one ``metrics`` re-forms on other rows or weights.  The published
+    coefficients must be the unconstrained optimum of a quadratic penalty, and the penalty
+    must determine what the data leave open:
+
+    - the coefficient solve converged: one that stopped short of its convergence test, or
+      whose coefficients were revised after it (a shape repair, an editor edit), has no
+      optimum for the penalized Hessian to belong to;
+    - no selection penalty and no term under a shape rule: the coefficients would not be the
+      optimum the penalized Hessian belongs to;
+    - no level or region the fit's records name as unpriced (``_names_an_unpriced_level``);
+    - ``penalized`` positive definite (``_positive_definite``);
+    - the fit's own decomposition positive definite too: ``null(D + S)`` is
+      ``null(D)`` meeting ``null(S)``, so that is the penalty holding every direction the
+      fit's data leave open, each on the decomposition's own column scale.  Rows the fit
+      never saw can make a Hessian re-formed on them positive definite, and say nothing
+      about the coefficients it published.
+    """
+    if not getattr(model._solver_pirls_result(), "converged", True):
+        return False
+    lambda1 = getattr(fitted_penalty(model), "lambda1", None)
+    if lambda1 is not None and lambda1 != 0.0:
+        return False
+    if any(g.constraints is not None or g.monotone_engine is not None for g in model._groups):
+        return False
+    if _names_an_unpriced_level(model):
+        return False
+    own = _fit_decomposition(_fit_record(model))
+    return own is not None and _positive_definite(own) and _positive_definite(penalized)
+
+
+def standard_error_mask(model, penalized, data_mask) -> NDArray:
+    """Which coefficients show a standard error, for every reader of ``model``.
+
+    Every coefficient when the penalized fit is certified (``penalized_fit_certified``): the
+    penalty then determines what the data alone leave open, and ``sqrt(phi diag V)`` is each
+    coefficient's posterior standard deviation.  Otherwise those the data alone determine,
+    ``data_mask()``; a record saved before fits recorded this rule keeps that mask whatever its
+    rank (``RankInfo.standard_error_mask``).
+    """
+    record = _fit_record(model)
+    if getattr(record, "standard_error_mask", "data") == "penalized" and penalized_fit_certified(
+        model, penalized
+    ):
+        return np.ones(len(model._solver_pirls_result().beta), dtype=bool)
+    return data_mask()
+
+
+def rank_standard_error_mask(model, rank_info) -> NDArray:
+    """``standard_error_mask`` of a dense fit read from its own rank record."""
+    return standard_error_mask(model, rank_info.augmented, rank_info.coefficient_estimable)
+
+
+def refit_shows_every_standard_error(model, penalized=None) -> bool:
+    """Whether ``model`` was saved before fits recorded the rule, and a fit today would be certified.
+
+    ``penalized`` is the decomposition the mask in hand was decided on, the fit's own when
+    omitted.  Only such a saved record keeps blanks a refit would show, so every other record
+    answers ``False`` without reading a decomposition.
+    """
+    record = _fit_record(model)
+    if getattr(record, "standard_error_mask", "penalized") != "data":
+        return False
+    if penalized is None:
+        penalized = _fit_decomposition(record)
+    return penalized is not None and penalized_fit_certified(model, penalized)
+
+
+def saved_standard_error_note(model, mask: NDArray, refit_shows: bool | None = None) -> str | None:
+    """A summary's line for a saved model whose blank standard errors a refit would show.
+
+    ``refit_shows`` is ``refit_shows_every_standard_error`` on the decomposition ``mask`` was
+    decided on, read here from the fit's own when omitted.
+    """
+    blank = int(np.size(mask) - np.count_nonzero(mask))
+    if not blank:
+        return None
+    if refit_shows is None:
+        refit_shows = refit_shows_every_standard_error(model)
+    if not refit_shows:
+        return None
+    subject, them = (
+        ("1 standard error is", "it") if blank == 1 else (f"{blank} standard errors are", "them")
+    )
+    return (
+        f"{subject} blank because this model was saved by an earlier superglm, which showed only "
+        f"those the data alone determine. Refit the model to show {them}."
+    )
+
+
 def _structured_small_data_factor(operator: CenteredBlockOperator) -> MappedColumnFactor:
     """Store the exact centered dense-small Gram factor on mapped columns."""
     raw = operator.raw
@@ -602,10 +745,16 @@ def fit_inference_info(model):
             "group_edf_map": group_edf_map,
             # an sz factor reads the data's null space on the balance tree of
             # the data (SumToZeroTreeFactor.coefficient_estimable)
-            "coefficient_estimable": (
-                linear_state.profiled_factor.coefficient_estimable()
-                if isinstance(linear_state.profiled_factor, ProfiledSumToZeroTreeFactor)
-                else centered_operator_coefficient_estimable(linear_state.centered_data_operator)
+            "coefficient_estimable": standard_error_mask(
+                model,
+                linear_state.profiled_factor,
+                lambda: (
+                    linear_state.profiled_factor.coefficient_estimable()
+                    if isinstance(linear_state.profiled_factor, ProfiledSumToZeroTreeFactor)
+                    else centered_operator_coefficient_estimable(
+                        linear_state.centered_data_operator
+                    )
+                ),
             ),
             "structured_covariance": True,
         }
@@ -627,7 +776,7 @@ def fit_inference_info(model):
                 "edf": np.array([]),
                 "edf1": np.array([]),
                 "group_edf_map": dict(rank_info.group_edf),
-                "coefficient_estimable": rank_info.coefficient_estimable(),
+                "coefficient_estimable": rank_standard_error_mask(model, rank_info),
             }
         if data_gram is None:
             data_gram = _rank_centered_data_gram(X_active, W)
@@ -643,7 +792,7 @@ def fit_inference_info(model):
             "edf": edf,
             "edf1": edf1,
             "group_edf_map": dict(rank_info.group_edf),
-            "coefficient_estimable": rank_info.coefficient_estimable(),
+            "coefficient_estimable": rank_standard_error_mask(model, rank_info),
         }
 
     X_active, active_groups, inverse, augmented, data_gram, profile_inverse, data_rank = (

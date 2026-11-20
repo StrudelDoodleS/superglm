@@ -42,6 +42,7 @@ from superglm.solvers._structured.block_leaves import (
     FactorSmoothLeafFactor,
     ProfiledFactorSmoothLeafFactor,
 )
+from superglm.solvers._structured.geometry import centered_operator_coefficient_estimable
 from superglm.solvers._structured.operators import (
     BlockSymmetricOperator,
     materialize_compact_operator,
@@ -1165,12 +1166,17 @@ def test_factor_smooth_estimability_and_summary_match_dense_centered_geometry():
         y,
     )
 
-    np.testing.assert_array_equal(
-        structured._fit_inference_info["coefficient_estimable"],
-        dense._fit_inference_info["coefficient_estimable"],
+    # What the data alone determine, on each solver's own record of the data: some ``fs``
+    # coefficient is open on both.  Every ``fs`` coefficient is penalised and neither Hessian
+    # is singular, so both summaries show every standard error.
+    data_estimable = centered_operator_coefficient_estimable(
+        structured._linear_system_state.centered_data_operator
     )
+    np.testing.assert_array_equal(data_estimable, dense.result.rank_info.coefficient_estimable())
     factor_group = next(group for group in structured._groups if group.name == "x:group:fs")
-    assert np.any(~structured._fit_inference_info["coefficient_estimable"][factor_group.sl])
+    assert np.any(~data_estimable[factor_group.sl])
+    for model in (structured, dense):
+        assert np.all(model._fit_inference_info["coefficient_estimable"])
     row = next(row for row in structured.summary()._coef_rows if row.name == "x:group:fs")
     assert row.coef is None
     assert row.structured_kind == "factor_smooth_fs"

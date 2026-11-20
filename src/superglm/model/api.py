@@ -343,7 +343,9 @@ class SuperGLM:
         rebuilds the linear system with the current engine
         (``superglm.model.retired_state``).  A v0.35.0 Tweedie model's REML
         memo is dropped, and so is a summary v0.35.0 cached after
-        ``estimate_theta``.  A kindless spline the saved fit built as a SCOP
+        ``estimate_theta`` or one cached beside a record saved before fits
+        recorded which standard errors they show
+        (``release_saved_mask_summaries``).  A kindless spline the saved fit built as a SCOP
         P-spline is marked to warn at its next build
         (``mark_kindless_saved_on_scop``).
         """
@@ -353,12 +355,14 @@ class SuperGLM:
         from superglm.model.retired_state import (
             mark_retired_linear_state,
             release_retired_tweedie_state,
+            release_saved_mask_summaries,
             release_v0_35_nb_summaries,
         )
 
         mark_retired_linear_state(self)
         release_retired_tweedie_state(self)
         release_v0_35_nb_summaries(self)
+        release_saved_mask_summaries(self)
         from superglm.features._spline_build import mark_kindless_saved_on_scop
 
         mark_kindless_saved_on_scop(self)

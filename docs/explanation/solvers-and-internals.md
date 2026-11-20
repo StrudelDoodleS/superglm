@@ -1154,11 +1154,46 @@ The QR path is basically saying:
 #### 17.3.2 Which coefficients the data can estimate
 
 After the fit, superglm decides which coefficients the data alone can
-identify. This is the *data rank*. A coefficient outside it, such as a spline
-basis function over a corner of a tensor term with no rows, is reported as not
-estimable, and its standard error is shown as missing. Its fitted value and the
-model's predictions do not depend on this decision, which is made after the
-coefficients are solved.
+identify. This is the *data rank*. A penalty can still determine a coefficient
+outside it, such as a level of a random effect or a spline basis function over
+a range with no rows.
+
+- **Every standard error is shown when the penalised fit has full rank.** The
+  test is the fit's own, on the penalised Hessian
+  $\mathbf{X}^\top\mathbf{W}\mathbf{X} + \mathbf{S}$. Its own factorisation
+  decides the rank while the square root of its condition number after scaling
+  to a unit diagonal (the condition of its Cholesky factor) is below
+  $1.19 \times 10^7$. Past that the weighted rows and the penalty's root
+  decide it, without forming the Hessian. A structured fit has full rank when
+  its solver dropped no direction. Each coefficient then has a finite
+  posterior variance.
+- **Full rank means the penalty holds every direction the data leave open.**
+  A direction that neither the data nor the penalty determine leaves the
+  penalised Hessian short of full rank, and keeps the fit on the data rank.
+- **Otherwise the data rank decides.** A coefficient outside it is reported as
+  not estimable, and its standard error is shown as missing.
+- **A fit with a selection penalty, a shape rule or a shape repair always uses
+  the data rank.**
+- **So does a fit whose coefficient solve did not converge.** A `fit_reml`
+  that stops before its smoothing parameters settle is still eligible when
+  its last coefficient solve converged: its standard errors are those of the
+  smoothing parameters it reached, as its `ConvergenceWarning` says.
+- **So does a fit that names a level or region it cannot price.** That is a
+  factor-smooth level the fit reports as thin, without weight or separated; a
+  categorical level, a crossed cell or a level's own slope it reports as
+  separated; a coefficient `fit_reml` reports as weakly identified or a
+  reference level it reports as separated; or a fit that ends with the
+  separation warning the solver raises at runtime. Such a fit can stop where
+  its penalised Hessian still has full rank, so the rank test would not catch
+  it.
+- **`metrics` on other rows or weights reads both fits.** The Hessian formed
+  on those rows must pass the rank test, and so must the training fit's own:
+  rows the fit never saw do not determine the coefficients it published.
+- **A saved model keeps the standard errors it was saved with.** Its summary
+  says when a refit would show more.
+
+Fitted values and predictions do not depend on this decision, which is made
+after the coefficients are solved.
 
 The decision is the numerical rank of the weighted design
 $\mathbf{W}^{1/2}\mathbf{X}$. Columns are scaled to unit length, and a
