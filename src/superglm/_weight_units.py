@@ -10,6 +10,7 @@ square root, when a variance overflows but its standard error is finite.
 from __future__ import annotations
 
 import math
+from typing import cast
 
 import numpy as np
 
@@ -450,7 +451,8 @@ def unit_log_likelihood(family, y, mu, weights, result, *, weight_semantics, rep
             weight_semantics=weight_semantics,
             report_contract=report_contract,
         )
-    phi = result.solver_phi
+    # Set on this path: the early return above covers ``solver_phi is None``.
+    phi = cast(float, result.solver_phi)
     if weight_semantics == "prior":
         density = unit_prior_log_density(family, y, mu, weights, result)
         if density is not None:

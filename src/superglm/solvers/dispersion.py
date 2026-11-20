@@ -249,7 +249,7 @@ def lifted_ml_scale(
 
 
 def _normal(value: float | None) -> bool:
-    return value is not None and math.isfinite(value) and value >= np.finfo(np.float64).tiny
+    return value is not None and math.isfinite(value) and bool(value >= np.finfo(np.float64).tiny)
 
 
 def scale_fields(
@@ -290,16 +290,17 @@ def scale_fields(
     if solver_phi is not None:
         exponent = int(result.weight_exponent)
         solver_value = solver_likelihood_phi
-        if solver_value is None and _normal(value):
+        if solver_value is None and value is not None and _normal(value):
             try:
                 solver_value = math.ldexp(value, exponent)
             except OverflowError:
                 solver_value = None
-        if not _normal(None if solver_value is None else float(solver_value)):
+        if solver_value is None or not _normal(float(solver_value)):
             return pearson_pair
+        lifted = float(solver_value)
         return {
-            "phi_likelihood": math.ldexp(float(solver_value), -exponent),
-            "solver_phi_likelihood": float(solver_value),
+            "phi_likelihood": math.ldexp(lifted, -exponent),
+            "solver_phi_likelihood": lifted,
             "phi_method": PEARSON,
             "phi_likelihood_method": likelihood_method,
         }
