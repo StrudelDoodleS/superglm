@@ -316,6 +316,7 @@ def test_a_fully_penalized_factor_smooth_shows_every_standard_error(basis, selec
         "exact_alias",
         "past_the_bar",
         "separated_level",
+        "runtime_finding",
     ],
 )
 def test_a_fit_outside_the_rule_keeps_the_data_rule(case):
@@ -338,11 +339,18 @@ def test_a_fit_outside_the_rule_keeps_the_data_rule(case):
       effect.  Its coefficient walks towards minus infinity and stops at weights near 1e-16,
       where the penalised Hessian is positive definite and its record's condition is 3: the
       build-time scan that counts the level's claims names it, the factorisation cannot.
+    - ``runtime_finding``: the same rows with a Gaussian response under a log link that is
+      negative in that region, so no finite mean fits it.  A Gaussian response has no
+      boundary for the build-time scan to count; the solver's backstop reports the walk.
     """
-    if case == "separated_level":
+    if case in ("separated_level", "runtime_finding"):
         frame, y = _separated_region()
+        family = {"family": "poisson"}
+        if case == "runtime_finding":
+            y = np.where(frame["region"] == "B", -1.0, 2.0 + 0.1 * y)
+            family = {"family": "gaussian", "link": "log"}
         model = SuperGLM(
-            family="poisson",
+            **family,
             features={"region": Categorical(base="A"), "branch": RandomEffect()},
             selection_penalty=0,
         )
