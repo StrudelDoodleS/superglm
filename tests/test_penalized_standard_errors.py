@@ -815,14 +815,16 @@ def test_other_rows_show_every_level_of_a_fit_whose_penalty_holds_what_its_data_
     np.testing.assert_allclose(se, np.sqrt(np.diag(np.linalg.inv(hessian))[-3:]), rtol=1e-10)
 
 
+@pytest.mark.pins_behaviour
 def test_metrics_on_other_rows_keeps_no_factor_for_the_saved_models_note():
-    """What a ``metrics`` object on other rows still holds once its standard errors are read.
+    """Control: what a ``metrics`` object on other rows holds once its standard errors are read.
 
-    Four hundred unpenalised levels on reordered rows, so the inverse is re-formed at ``p`` of
-    399.  The object keeps three ``p x p`` arrays for its readers (the inverse, the augmented
-    covariance and the centred Gram), 3.05 times ``8 p^2`` bytes with its row vectors.  The
-    decomposition they were formed from decides a saved model's note while it is in hand, and
-    only that answer is kept: holding its Cholesky factor as well is a fourth array, 4.05.
+    It passes on master, and must after it.  Four hundred unpenalised levels on reordered rows,
+    so the inverse is re-formed at ``p`` of 399.  The object keeps three ``p x p`` arrays for
+    its readers (the inverse, the augmented covariance and the centred Gram), 3.05 times
+    ``8 p^2`` bytes with its row vectors, as on master.  The decomposition they were formed
+    from decides a saved model's note while it is in hand, and only that answer is kept:
+    holding its Cholesky factor as well is a fourth array, 4.05.
     """
     levels = 400
     rng = np.random.default_rng(274)
