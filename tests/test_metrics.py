@@ -751,7 +751,8 @@ class TestMetricsCaching:
         rows = {row.name: row for row in metrics._build_coef_rows()}
 
         for name in ("x1", "x2"):
-            assert not rows[name].estimable and np.isnan(rows[name].se)
+            assert not rows[name].estimable
+            assert np.isnan(rows[name].se)
         # the influence diagonal sums to the edf with the intercept: 1 + one slope.
         # The alias is truncated, so the retained slope block is one-dimensional
         # and each row's quadratic form rounds within 8 u of its value; the sum
@@ -777,7 +778,8 @@ class TestMetricsCaching:
 
         # the alias reaches both columns at every scale (Jacobi-scaled, it is ``(1, -1) / sqrt 2``)
         for name in ("x1", "x2"):
-            assert not rows[name].estimable and np.isnan(rows[name].se)
+            assert not rows[name].estimable
+            assert np.isnan(rows[name].se)
         # the influence diagonal sums to the edf with the intercept: 1 + one slope.
         # The alias is truncated, so the retained slope block is one-dimensional
         # and each row's quadratic form rounds within 8 u of its value; the sum

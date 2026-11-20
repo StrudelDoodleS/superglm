@@ -197,14 +197,17 @@ def _readers(model, record, *, metrics_first: bool):
     return summary, metrics
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("variant", VARIANTS)
 @pytest.mark.parametrize("case", CASES)
 def test_both_readers_agree_in_either_order_and_after_a_repickle(case, variant):
     """``summary()`` and ``metrics()`` blank the same coefficients, whichever runs first, and a
     model pickled again after reading them (its tag with it) reads the same numbers; nothing
-    either reads moves a coefficient or a prediction.  At ``253c6d353`` the ``sz`` model's
-    saved covariance accessor raised in both readers (``AttributeError: ... 'gauge'``) on
-    the compact pickles and on the warm one saved after its readers."""
+    either reads moves a coefficient or a prediction.  A control against master, whose own
+    code read its pickles consistently: it pins that this branch's migration keeps that.  At
+    ``253c6d353`` the ``sz`` model's saved covariance accessor raised in both readers
+    (``AttributeError: ... 'gauge'``) on the compact pickles and on the warm one saved after
+    its readers."""
     record = _record(case)
     blob = record["models"][variant]
     first, second = _loads(blob), _loads(blob)
