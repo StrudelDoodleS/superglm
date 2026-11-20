@@ -302,6 +302,27 @@ def test_a_saved_near_duplicate_withholds_what_its_coefficients_never_fitted(var
     assert float(model.result.effective_df) == record["outputs"][variant]["effective_df"]
 
 
+@pytest.mark.pins_behaviour
+def test_a_saved_coefficient_whose_standard_error_alone_is_withheld_keeps_its_value():
+    """Pins that the tables keep a value the record identifies when only its SE is withheld.
+
+    The saved near-duplicate's ``x1`` and ``x2`` (above) are identified by the rows; their
+    SEs are withheld because the saved coefficients were never fitted along the pair's
+    difference (``Identifiability.withheld``).  Unlike an alias's or a separated coefficient,
+    each still prints its saved value beside the blank SE, as at ``c1d39faa8``.  Mutation:
+    values blanked wherever the SE is (``state_ops.inference_estimated`` as the SE mask).
+    """
+    record = _record("near_duplicate")
+    model = _loads(record["models"]["warm_cold"])
+    table = _quiet(model.summary)
+    rows = {row.name: row for row in table._coef_rows if not row.is_spline}
+    for name in ("x1", "x2"):
+        assert np.isnan(rows[name].se)
+        assert rows[name].coef == model.result.beta[_column(model, name) - 1]
+        line = next(line for line in str(table).splitlines() if line.startswith(f"║ {name} "))
+        assert line.split()[2] != "---" and line.split()[3] == "---"
+
+
 @pytest.mark.parametrize("variant", ["warm_cold", "warm_read"])
 def test_a_saved_separated_reference_level_reads_its_kept_rows_at_the_saved_coefficients(variant):
     """C3: reference level E has every response zero.  Existence is decided from the saved

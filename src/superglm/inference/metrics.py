@@ -1559,6 +1559,14 @@ class ModelMetrics:
         return inference_intercept_identified(self._model._fit_inference_info)
 
     @cached_property
+    def _fit_estimated(self) -> tuple[NDArray | None, bool]:
+        """Which coefficients' values, and whether the intercept's, the fit identifies."""
+        from superglm.model.state_ops import inference_estimated, inference_intercept_estimated
+
+        inference = self._model._fit_inference_info
+        return inference_estimated(inference), inference_intercept_estimated(inference)
+
+    @cached_property
     def _coefficient_dispersion(self) -> float:
         """Dispersion used by the explicitly quasi-likelihood SE accessor.
 
@@ -2000,6 +2008,9 @@ class ModelMetrics:
             precomputed_edf1=edf1,
             precomputed_design_moments=precomputed_moments,
             coefficient_identified_override=self._current_coefficient_identified,
+            intercept_identified=self._fit_intercept_identified,
+            estimate_identified_override=self._fit_estimated[0],
+            intercept_estimated=self._fit_estimated[1],
             selected_group_names=selected_names,
             group_matrices=(
                 self._dm.group_matrices if self._uses_fit_design and self._dm is not None else None
@@ -2113,6 +2124,11 @@ class ModelMetrics:
             "converged": self._result.converged,
             "n_iter": self._result.n_iter,
         }
+        from superglm.model.report_ops import identifiability_notes
+
+        notes = identifiability_notes(self._model)
+        if notes:
+            model_info["identifiability_notes"] = notes
 
         # NB theta profile info
         nb_pr = getattr(self._model, "_nb_profile_result", None)

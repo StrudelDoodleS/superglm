@@ -318,6 +318,11 @@ def _format_ascii_number(value: float | None, *, decimals: int, width: int) -> s
     raise ValueError(f"{numeric!r} cannot be represented in an ASCII field of width {width}")
 
 
+def _html_number(value: float | None, decimals: int) -> str:
+    """A table value in fixed notation, ``---`` where it has none (``None`` or not finite)."""
+    return "---" if value is None or not np.isfinite(value) else f"{value:.{decimals}f}"
+
+
 class ModelSummary:
     """Formatted model summary with ASCII and HTML output.
 
@@ -1229,7 +1234,7 @@ class ModelSummary:
                     f"</tr>"
                 )
             else:
-                coef_str = f"{row.coef:.4f}" if row.coef is not None else "---"
+                coef_str = _html_number(row.coef, 4)
                 parts.append(
                     f"<tr>"
                     f'<td style="{cell_l}">{html_escape(row.name)}</td>'

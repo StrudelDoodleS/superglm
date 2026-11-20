@@ -2308,6 +2308,28 @@ def inference_intercept_identified(inference: dict) -> bool:
     return True if record is None else bool(record.intercept_identified())
 
 
+def inference_estimated(inference: dict) -> NDArray | None:
+    """Which coefficients' published values an inference record's tables show as estimates.
+
+    Its identified ones (``inference_identified``) and those whose standard error alone its
+    record withholds (``Identifiability.withheld``); an alias's and separation's show none.
+    """
+    identified = inference_identified(inference)
+    record = inference.get("identifiability")
+    if identified is None or record is None or not record.withheld:
+        return identified
+    estimated = np.array(identified, dtype=bool)
+    withheld = [c for c in record.withheld if c >= 0]
+    estimated[withheld] = record.estimate_identified()[withheld]
+    return estimated
+
+
+def inference_intercept_estimated(inference: dict) -> bool:
+    """Whether an inference record's tables show the intercept's value (``intercept_estimated``)."""
+    record = inference.get("identifiability")
+    return True if record is None else bool(record.intercept_estimated())
+
+
 def fit_inference_info(model):
     """All coefficient-space inference quantities for model.summary().
 

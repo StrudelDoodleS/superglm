@@ -4220,6 +4220,48 @@ def test_the_vanished_row_fit_reports_both_directions_not_resolved_on_either_bac
     assert notes["auto"] == notes["gram"]
 
 
+def test_the_vanished_row_fit_prints_no_value_for_its_unidentified_intercept() -> None:
+    """Both backends print the vanished-row fit's intercept row alike: no estimate, no SE.
+
+    The fit is the ones above.  Both undecided directions move the intercept
+    (``Gauge.intercept_reached``), so its published value is wherever each backend's gauge
+    leaves it, 84.25 structured and 66.19 dense: not an estimate.  The summary's and
+    ``metrics()``'s tables print it as ``---``, as R prints ``NA``, with the footnote saying
+    so; every other row has its value and SE on both, and the published intercepts stay
+    where they were.  At ``c1d39faa8`` both tables printed the two values, and ``metrics()``'s
+    an SE of 0.465 beside them.  Mutation: the intercept row with its value.
+    """
+    frame, y, weight = _signed_aliased_frame("one_row")
+    row = int(np.flatnonzero(frame["g"].to_numpy() == "g000")[0])
+    offset = np.where(np.arange(len(y)) != row, 0.0, -160.0)
+    lines, intercepts = {}, {}
+    for solve in ("auto", "gram"):
+        model = _model("gaussian_log", solve, lam=1.29, main_lam=100.0, numerics=("x1", "x10"))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit_reml(frame, y, sample_weight=weight, offset=offset)
+            tables = (
+                model.summary(),
+                model.metrics(frame, y, sample_weight=weight, offset=offset).summary(),
+            )
+        intercepts[solve] = model.result.intercept
+        for table in tables:
+            rows = [r for r in table._coef_rows if not (r.is_spline or r.structured_kind)]
+            assert rows[0].name == "Intercept"
+            assert np.isnan(rows[0].coef) and np.isnan(rows[0].se)
+            assert all(np.isfinite(r.coef) and np.isfinite(r.se) for r in rows[1:])
+            notes = " ".join(
+                " ".join(note.split()) for note in table._info["identifiability_notes"]
+            )
+            assert "The intercept is not identified (estimate and standard error" in notes
+            lines.setdefault(solve, []).append(
+                next(line for line in str(table).splitlines() if line.startswith("║ Intercept"))
+            )
+    assert abs(intercepts["auto"] - intercepts["gram"]) > 1.0
+    assert lines["auto"] == lines["gram"]
+    assert lines["auto"][0].split()[2:9] == ["---"] * 7
+
+
 @pytest.mark.parametrize(
     ("variant", "lam_x"), [("same_x", 8e-4), ("same_x", 1e-4), ("one_row", 1e-4)]
 )

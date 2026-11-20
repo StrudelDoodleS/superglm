@@ -287,26 +287,39 @@ class Identifiability:
             root = root - null @ np.linalg.solve(functionals.T @ null, functionals.T @ root)
         return root
 
-    def coefficient_identified(self) -> NDArray:
+    def estimate_identified(self) -> NDArray:
+        """Whether each coefficient's published value is an estimate the fit identifies.
+
+        Not an alias's coordinate (the coefficient it holds, at zero or where the fit left it)
+        and not one separation moves: R prints ``NA`` for such a value.  A ``withheld``
+        coefficient is identified; only its standard error is withheld.
+        """
         identified = np.ones(self.width, dtype=bool)
         identified[[alias.coordinate for alias in self.aliases if alias.coordinate is not None]] = (
             False
         )
         if self.separation is not None:
             identified[np.asarray(self.separation.reached, dtype=np.intp)] = False
+        return identified
+
+    def coefficient_identified(self) -> NDArray:
+        identified = self.estimate_identified()
         identified[[c for c in self.withheld if c >= 0]] = False
         return identified
 
-    def intercept_identified(self) -> bool:
-        """Whether the intercept has a finite estimate (false when separation moves it) and an
-        SE (``withheld`` holds ``-1`` when it has none, and a direction of ``null(H)`` whose
-        rows' mean is off zero, ``Gauge.intercept_reached``, moves it as an alias does)."""
-        if -1 in self.withheld:
-            return False
+    def intercept_estimated(self) -> bool:
+        """Whether the intercept's published value is an estimate: false when separation moves
+        it, or a direction of ``null(H)`` whose rows' mean is off zero
+        (``Gauge.intercept_reached``) moves it as an alias does."""
         reached = getattr(self.gauge, "intercept_reached", None)
         if reached is not None and np.any(reached):
             return False
         return self.separation is None or not self.separation.intercept_reached
+
+    def intercept_identified(self) -> bool:
+        """Whether the intercept has an estimate (``intercept_estimated``) and an SE
+        (``withheld`` holds ``-1`` when it has none)."""
+        return -1 not in self.withheld and self.intercept_estimated()
 
     def published_covariance(
         self, covariance: NDArray, columns: NDArray, *, weak: bool = True
@@ -369,7 +382,10 @@ class Identifiability:
         blank = [alias for alias in self.aliases if alias.coordinate is not None]
         held = [alias for alias in self.aliases if alias.coordinate is None]
         for aliases, header in (
-            (blank, "{count} {plural} not identified (standard error shown as ---):"),
+            (
+                blank,
+                "{count} {plural} not identified (estimate and standard error shown as ---):",
+            ),
             (
                 held,
                 "{count} smooth-term {plural} not identified, held at zero (the terms' "
@@ -397,8 +413,9 @@ class Identifiability:
         reached = getattr(self.gauge, "intercept_reached", None)
         if reached is not None and np.any(reached):
             notes.append(
-                "The intercept is not identified (standard error shown as ---): the directions "
-                "above move it with the coefficients they hold, whose level it carries."
+                "The intercept is not identified (estimate and standard error shown as ---): "
+                "the directions above move it with the coefficients they hold, whose level it "
+                "carries."
             )
         if self.weak is not None and not self.weak.fitted:
             count = self.weak.root.shape[1]

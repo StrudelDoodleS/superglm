@@ -443,7 +443,9 @@ def test_structured_summary_blanks_the_later_dense_small_alias():
     alone = next(row for row in single.summary()._coef_rows if row.name == "x")
     assert not rows["duplicate"].estimable and np.isnan(rows["duplicate"].se)
     assert np.isnan(rows["duplicate"].p)
-    assert rows["duplicate"].coef == 0.0
+    # held at zero by the gauge: the constraint, not an estimate, so no value (R's NA)
+    assert np.isnan(rows["duplicate"].coef)
+    assert model.result.beta[next(g for g in model._groups if g.name == "duplicate").start] == 0.0
     assert rows["x"].estimable and np.isfinite(rows["x"].p)
     assert rows["x"].coef == pytest.approx(reference["x"].coef, rel=1e-8)
     assert rows["x"].se == pytest.approx(reference["x"].se, rel=1e-8)

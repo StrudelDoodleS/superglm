@@ -191,6 +191,31 @@ def test_a_row_factors_rank_decision_certifies_no_absence_past_its_own_floor(mon
     assert separation.rows.size == int(np.sum(~kept))
 
 
+def test_a_separated_coefficient_shows_no_estimate_in_either_table():
+    """C3: the summary's and ``metrics()``'s tables print the intercept and f's levels as ``---``.
+
+    Separation moves them to infinity, so their published values are where the walk stopped,
+    not estimates: R prints ``NA``.  ``x``'s term row is unchanged, the footnote says what
+    ``---`` stands for, and the published coefficients stay where the fit left them.  At
+    ``c1d39faa8`` both tables printed the intercept as -29.77 and each level near 28.8, and
+    ``metrics()``'s the intercept's SE as 0.080.  Mutation: the separated rows with their
+    values.
+    """
+    X, y, _ = _reference_level_frame()
+    model = _fit("poisson", {"f": Categorical(), "x": Spline(n_knots=8)}, X, y, method="fit_reml")
+    for table in (model.summary(), model.metrics(X, y).summary()):
+        rows = {row.name: row for row in table._coef_rows}
+        for name in ("Intercept", "f[A]", "f[B]", "f[C]", "f[D]"):
+            assert np.isnan(rows[name].coef) and np.isnan(rows[name].se), name
+        assert rows["x"].is_spline and rows["x"].wald_chi2 is not None
+        shown = [line.split()[2:4] for line in str(table).splitlines() if line.startswith("║ f[")]
+        assert shown and all(cells == ["---", "---"] for cells in shown if cells[1] != "ref")
+    assert "no finite estimate (estimate and standard error shown as ---)" in " ".join(
+        " ".join(note.split()) for note in _notes(model).splitlines()
+    )
+    assert np.isfinite(model.result.intercept) and np.all(np.isfinite(model.result.beta))
+
+
 def test_equal_copies_of_the_separated_rows_read_the_fits_own_record():
     """``metrics`` on equal copies of C3's rows is ``metrics`` on the rows themselves.
 

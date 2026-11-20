@@ -80,8 +80,9 @@ class TestRareLevelWithoutFiniteEstimate:
         decision = m.result.separation_statement.decision
         assert decision.state == "present" and decision.names == ("cat[rare]",)
         notes = " ".join(" ".join(note.split()) for note in s._info["identifiability_notes"])
-        assert "1 coefficient has no finite estimate (standard error shown as ---): cat[rare]." in (
-            notes
+        assert (
+            "1 coefficient has no finite estimate (estimate and standard error shown as ---): "
+            "cat[rare]." in notes
         )
         assert "10 rows with responses at 0 (level rare of cat) are separated" in notes
         kept = fit(~rare)

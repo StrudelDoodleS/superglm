@@ -1359,24 +1359,24 @@ class Separation:
                 else ""
             )
             return (
-                f"{words['count']} {words['has']} no finite estimate (standard error shown as "
-                f"---): {words['listed']}. Every row is separated ({words['rows']} with "
+                f"{words['count']} {words['has']} no finite estimate (estimate and standard "
+                f"error shown as ---): {words['listed']}. Every row is separated ({words['rows']} with "
                 f"responses at {words['edges']}): a direction moving {words['them']} fits every "
                 f"row exactly at the boundary, so no row is kept and the coefficients are where "
                 f"the fit stopped.{penalised} {_SEPARATION_REMEDY}",
             )
         if self.state == "partial":
             return (
-                f"{words['count']} {words['has']} no finite estimate (standard error shown as "
-                f"---): {words['listed']}. At least {words['rows']} with responses at "
+                f"{words['count']} {words['has']} no finite estimate (estimate and standard "
+                f"error shown as ---): {words['listed']}. At least {words['rows']} with responses at "
                 f"{words['edges']} ({words['where']}) {words['are']} separated along a direction moving "
                 f"{words['them']}; the fit on the remaining rows was not shown to separate no "
                 "further, so more rows may be. The coefficients are where the fit stopped, not "
                 f"a fit on the remaining rows. {_SEPARATION_REMEDY}",
             )
         return (
-            f"{words['count']} {words['has']} no finite estimate (standard error shown as ---): "
-            f"{words['listed']}. {words['rows']} with responses at {words['edges']} "
+            f"{words['count']} {words['has']} no finite estimate (estimate and standard error "
+            f"shown as ---): {words['listed']}. {words['rows']} with responses at {words['edges']} "
             f"({words['where']}) {words['are']} separated: a direction moving {words['them']} fits those "
             f"rows exactly at the boundary, so {words['estimate']} infinite. The other "
             "coefficients and their standard errors are the fit on the remaining rows. "

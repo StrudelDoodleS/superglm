@@ -181,6 +181,8 @@ def build_coef_rows(
     precomputed_design_moments: tuple[NDArray, NDArray, NDArray] | None = None,
     coefficient_identified_override: NDArray | None = None,
     intercept_identified: bool = True,
+    estimate_identified_override: NDArray | None = None,
+    intercept_estimated: bool | None = None,
     selected_group_names: set[str] | None = None,
     group_matrices: list | None = None,
     sample_weights: NDArray | None = None,
@@ -206,6 +208,9 @@ def build_coef_rows(
     rules_enforced : False for a model last fitted by ``fit_path``, which fits every
         term without its constraint rows; the rule line of a term the build
         constrained then says its rules were not enforced.
+    estimate_identified_override, intercept_estimated : which values the fit identifies
+        (``Identifiability.estimate_identified``); a row the fit does not identify shows no
+        value, as R prints ``NA``.  The standard-error masks by default.
     """
     from superglm.features.categorical import Categorical
     from superglm.features.factor_smooth import FactorSmooth
@@ -253,6 +258,20 @@ def build_coef_rows(
             else np.ones(len(beta), dtype=bool)
         )
     )
+
+    # an alias's coefficient and a separated one have no value to show, only the fit's stopping
+    # point; a group selection dropped is exactly zero, its estimate
+    estimated = (
+        coefficient_identified
+        if estimate_identified_override is None
+        else np.asarray(estimate_identified_override, dtype=bool)
+    ).copy()
+    for g in groups:
+        if g.name not in selected_names:
+            estimated[g.sl] = True
+    shown = np.where(estimated, beta, np.nan)
+    if intercept_estimated is None:
+        intercept_estimated = intercept_identified
 
     # ── Per-level diagnostics for categorical features ────────────
     # Compute observation count, exposure share and thinness per non-base level.
@@ -352,11 +371,13 @@ def build_coef_rows(
     rows: list[_CoefRow] = []
 
     # Intercept row
-    z, p, ci_lo, ci_hi = _compute_coef_stats(intercept, icpt_se, alpha)
+    z, p, ci_lo, ci_hi = _compute_coef_stats(
+        intercept if intercept_estimated else float("nan"), icpt_se, alpha
+    )
     rows.append(
         _CoefRow(
             name="Intercept",
-            coef=intercept,
+            coef=intercept if intercept_estimated else float("nan"),
             se=icpt_se,
             z=z,
             p=p,
@@ -485,6 +506,7 @@ def build_coef_rows(
         spec = specs.get(g.feature_name) or interaction_specs.get(g.feature_name)
         feature_label = str(g.feature_name)
         b_g = beta[g.sl]
+        shown_g = shown[g.sl]
         se_g = se_dict[g.name]
         active = g.name in selected_names
 
@@ -686,7 +708,7 @@ def build_coef_rows(
                     # Polynomial branch does.
                     powers = spec._basis_spline.powers
                     for i in range(main_group.size):
-                        coef_val = float(b_main[i])
+                        coef_val = float(shown[main_group.sl][i])
                         se_val = float(se_main[i]) if len(se_main) > i else 0.0
                         z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
                         rows.append(
@@ -863,7 +885,7 @@ def build_coef_rows(
             diag = _level_diag.get(g.name, {})
             cat_rules = rules_of(spec).describe() or None
             for i, level in enumerate(spec._non_base):
-                coef_val = float(b_g[i])
+                coef_val = float(shown_g[i])
                 se_val = float(se_g[i])
                 z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
                 n_obs_i, exp_share_i, thin_i = diag.get(i, (None, None, False))
@@ -946,7 +968,7 @@ def build_coef_rows(
             else:
                 poly_group = f"{g.name} P({','.join(str(p) for p in powers)})"
             for i in range(g.size):
-                coef_val = float(b_g[i])
+                coef_val = float(shown_g[i])
                 se_val = float(se_g[i]) if len(se_g) > i else 0.0
                 z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
                 rows.append(
@@ -1006,7 +1028,7 @@ def build_coef_rows(
 
         elif isinstance(spec, CategoricalInteraction):
             for i, (lev1, lev2) in enumerate(spec._pairs):
-                coef_val = float(b_g[i])
+                coef_val = float(shown_g[i])
                 se_val = float(se_g[i])
                 z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
                 rows.append(
@@ -1024,7 +1046,7 @@ def build_coef_rows(
 
         elif isinstance(spec, NumericCategorical):
             for i, level in enumerate(spec._non_base):
-                coef_val = float(b_g[i])
+                coef_val = float(shown_g[i])
                 se_val = float(se_g[i])
                 z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
                 rows.append(
@@ -1043,7 +1065,7 @@ def build_coef_rows(
         elif isinstance(spec, NumericInteraction | PolynomialInteraction):
             if active and g.size <= 4:
                 for i in range(g.size):
-                    coef_val = float(b_g[i])
+                    coef_val = float(shown_g[i])
                     se_val = float(se_g[i])
                     z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
                     rows.append(
@@ -1156,7 +1178,7 @@ def build_coef_rows(
         elif isinstance(spec, Numeric):
             gedf = _get_group_edf_map()
             num_edf = gedf.get(g.name, 0.0) if active else 0.0
-            coef_display = float(b_g[0])
+            coef_display = float(shown_g[0])
             se_display = float(se_g[0])
             z, p, ci_lo, ci_hi = _compute_coef_stats(coef_display, se_display, alpha)
             rows.append(
@@ -1188,7 +1210,7 @@ def build_coef_rows(
             knots = spec._knots
             pw_edf = _get_group_edf_map().get(g.name, 0.0) if active else 0.0
             for i, knot_index in enumerate(spec._non_base_indices):
-                coef_val = float(b_g[i])
+                coef_val = float(shown_g[i])
                 se_val = float(se_g[i]) if len(se_g) > i else 0.0
                 if shrunk:
                     z = p = ci_lo = ci_hi = None
@@ -1244,7 +1266,7 @@ def build_coef_rows(
             )
 
         else:
-            coef_val = float(b_g[0])
+            coef_val = float(shown_g[0])
             se_val = float(se_g[0]) if len(se_g) > 0 else 0.0
             z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
             rows.append(

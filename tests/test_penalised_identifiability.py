@@ -221,6 +221,29 @@ def test_a_duplicated_numeric_blanks_the_duplicate_alone():
     assert "aliased with x1" in note and "no data separates them" in note
 
 
+def test_the_duplicate_the_gauge_holds_at_zero_shows_no_estimate():
+    """``x2 = 2 x1``: the summary's and ``metrics()``'s tables print ``x2`` as ``---``.
+
+    The gauge holds ``x2`` at zero (``Gauge.coordinates``), so its value is the constraint, not
+    an estimate: R prints ``NA``.  ``x1`` keeps its value and SE, the footnote says what
+    ``---`` stands for, and the published coefficient is still zero.  At ``c1d39faa8`` both
+    tables printed ``x2`` as ``0.0000`` beside a blank SE.  Mutation: every slope row with its
+    value.
+    """
+    X = pd.DataFrame({"x": X_SPREAD, "x1": X1, "x2": 2.0 * X1})
+    model = _fit({"x": Spline(n_knots=6), "x1": Numeric(), "x2": Numeric()}, X, Y)
+    for table in (model.summary(), model.metrics(X, Y).summary()):
+        rows = {row.name: row for row in table._coef_rows if not row.is_spline}
+        assert np.isnan(rows["x2"].coef) and np.isnan(rows["x2"].se)
+        assert np.isfinite(rows["x1"].coef) and np.isfinite(rows["x1"].se)
+        line = next(line for line in str(table).splitlines() if line.startswith("║ x2 "))
+        assert line.split()[2:4] == ["---", "---"]
+    notes = " ".join(model._fit_inference_info["identifiability"].notes())
+    assert "1 coefficient not identified (estimate and standard error shown as ---)" in notes
+    x2 = next(group for group in model._groups if group.name == "x2")
+    assert model.result.beta[x2.start] == 0.0
+
+
 @pytest.mark.parametrize("case", ["nested", "duplicate"])
 def test_superlss_drops_the_coefficient_superglm_blanks(case):
     """SuperGLM and SuperLSS take one alias decision on nested factors and on ``x2 = 2 x1``.
