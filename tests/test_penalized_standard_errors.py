@@ -34,6 +34,7 @@ from superglm import (
     FactorSmooth,
     LambdaPolicy,
     Numeric,
+    OrderedCategorical,
     RandomEffect,
     Spline,
     SuperGLM,
@@ -258,6 +259,158 @@ def _unpriced_level(case: str):
     return frame.assign(veh=veh), y.astype(float), model
 
 
+def _branches(seed: int, n: int, count: int):
+    """``n`` rows in ``count`` branches: the generator, codes, names and a spline over their order."""
+    rng = np.random.default_rng(seed)
+    branch = rng.integers(0, count, n)
+    order = [f"br{code:02d}" for code in range(count)]
+    spline = OrderedCategorical(order=order, basis=Spline(kind="ps", n_knots=count - 1))
+    return rng, branch, [order[code] for code in branch], spline
+
+
+def _recorded_separation(case: str):
+    """A separated level, cell or slope beside a penalised term its column aliases.
+
+    Returns rows, response, model, fit method and the fit's keyword arguments.  The alias is
+    exact in the design, so the data rule leaves the coefficient blank, and the penalty breaks
+    it, so the penalised Hessian has full rank; what the walked coefficient then shows is where
+    its walk stopped.  Each fit converges, and one record names it on every machine (two of
+    the ``reference`` fits also end with the runtime finding under one OpenBLAS kernel):
+
+    - ``reference_m20``, ``reference_m21``, ``reference_tol``: binomial under a log link, the
+      reference level without a success: REML's separated set (``reml_laplace_separated``);
+    - ``slope``, ``varying_slope``, ``curve``: a numeric by a factor, one level's slope
+      separated: the term's ``_separated_ranges``;
+    - ``cell``, ``crossed_cell``, ``base_cell``, ``crossed_cell_fit``: a factor by a factor, one
+      cell without a claim: the crossed scan's cells (``_separated_cells_at_fit``).
+    """
+    options: dict = {}
+    if case in ("reference_m20", "reference_m21"):
+        rng = np.random.default_rng(124)
+        region = np.repeat(["a", "b", "c"], 40)
+        frame = pd.DataFrame(
+            {"g": region, "h": np.char.add(region, rng.integers(0, 3, len(region)).astype(str))}
+        )
+        y = np.where(region == "a", 0.0, rng.uniform(size=len(region)) < 0.05).astype(float)
+        options["offset"] = float(case[-2:]) * -1.0 * (region == "a")
+        features = {
+            "g": Categorical(base="a"),
+            "h": RandomEffect(lambda_policy=LambdaPolicy.fixed(7.0)),
+        }
+        model = SuperGLM(
+            family="binomial",
+            link="log",
+            selection_penalty=0,
+            separation="ignore",
+            features=features,
+        )
+        return frame, y, model, "fit_reml", options
+    if case == "reference_tol":
+        rng = np.random.default_rng(101)
+        level = rng.integers(0, 12, 2000)
+        a = np.where(level < 3, "A", np.where(level < 7, "B", "C"))
+        frame = pd.DataFrame({"a": a, "branch": [f"b{v:02d}" for v in rng.integers(0, 12, 2000)]})
+        y = rng.binomial(1, np.clip(np.exp(-1.5 + 0.05 * level), 0.01, 0.8)).astype(float)
+        y[a == "A"] = 0.0
+        model = SuperGLM(
+            family="binomial",
+            link="log",
+            separation="ignore",
+            features={"a": Categorical(base="A"), "branch": RandomEffect()},
+            selection_penalty=0,
+        )
+        return frame, y, model, "fit_reml", {"pirls_tol": 1e-4}
+    if case in ("slope", "cell"):
+        rng = np.random.default_rng(541)
+        g = np.repeat(["a", "b"], 300)
+        x = rng.integers(0, 2, 600).astype(float)
+        y = rng.poisson(1.2, 600).astype(float)
+        y[(g == "b") & (x == 1)] = 0.0
+        z = 2 * (g == "b") + x + 0.05 * rng.integers(0, 2, 600)
+        frame = pd.DataFrame({"x": x, "g": g, "z": z, "a": np.where(x > 0, "y", "n")})
+        term, first = ("x", Numeric()) if case == "slope" else ("a", Categorical(base="n"))
+        model = SuperGLM(
+            family="poisson",
+            features={term: first, "g": Categorical(base="a"), "z": Spline(kind="ps", n_knots=8)},
+            interactions=[(term, "g")],
+            selection_penalty=0,
+            spline_penalty=1,
+        )
+        return frame, y, model, "fit", options
+    if case == "varying_slope":
+        rng = np.random.default_rng(3)
+        c = np.repeat(["A", "B"], 800)
+        x = rng.uniform(size=1600)
+        x[(c == "B") & (x < 0.33)] = 0.0
+        y = rng.poisson(np.exp(0.5 + 0.2 * x)).astype(float)
+        y[(c == "B") & (x > 0.0)] = 0.0
+        frame = pd.DataFrame({"x": x, "c": c, "z": np.where(c == "B", x, 0.0)})
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "x": Numeric(),
+                "c": Categorical(base="A"),
+                "z": Spline(kind="ps", n_knots=6, select=True),
+            },
+            interactions=[("x", "c")],
+            selection_penalty=0,
+            max_iter=200,
+            direct_solve="gram",
+        )
+        return frame, y, model, "fit", options
+    if case == "curve":
+        rng, branch, names, spline = _branches(88, 2400, 12)
+        cat = np.where(branch < 3, "C", np.where(branch < 8, "B", "A"))
+        x = rng.uniform(-2.0, 2.0, len(branch))
+        logit = 0.2 + 0.5 * x + 0.3 * (cat == "B") + 0.05 * branch
+        y = rng.binomial(1, 1.0 / (1.0 + np.exp(-logit))).astype(float)
+        y[cat == "C"] = x[cat == "C"] >= 0
+        frame = pd.DataFrame({"x": x, "cat": cat, "branch": names})
+        model = SuperGLM(
+            family="binomial",
+            features={"x": Numeric(), "cat": Categorical(base="A"), "branch": spline},
+            interactions=[("x", "cat")],
+        )
+        return frame, y, model, "fit", options
+    if case == "crossed_cell":
+        frame, _ = _thin_level()
+        rng = np.random.default_rng(5)
+        y = rng.poisson(np.exp(0.3 + 0.5 * frame["x"].to_numpy() / 80.0)).astype(float)
+        a, b = (rng.choice([f"{name}{i}" for i in range(3)], len(frame)) for name in "ab")
+        y[(a == "a2") & (b == "b2")] = 0.0
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "x": Spline(n_knots=8),
+                "f": Categorical(),
+                "a": Categorical(base="a0"),
+                "b": Categorical(base="b0"),
+            },
+            interactions=[("x", "f"), ("a", "b")],
+        )
+        return frame.assign(a=a, b=b), y, model, "fit", options
+    rng, branch, names, spline = _branches(77, 2700, 18)
+    a = np.array(["A0", "A1", "A2"])[branch // 6]
+    b = np.array(["B0", "B1", "B2"])[(branch // 2) % 3]
+    mean = np.exp(0.5 + 0.2 * (a == "A1") + 0.2 * (b == "B1") + 0.03 * branch)
+    y = rng.poisson(mean).astype(float)
+    empty = ("A0", "B0") if case == "base_cell" else ("A2", "B2")
+    if case == "crossed_cell_fit":
+        y = rng.poisson(mean).astype(float)
+    y[(a == empty[0]) & (b == empty[1])] = 0.0
+    model = SuperGLM(
+        family="poisson",
+        features={
+            "a": Categorical(base="A0"),
+            "b": Categorical(base="B0"),
+            "branch": RandomEffect() if case == "base_cell" else spline,
+        },
+        interactions=[("a", "b")],
+    )
+    method = "fit_reml" if case == "base_cell" else "fit"
+    return pd.DataFrame({"a": a, "b": b, "branch": names}), y, model, method, options
+
+
 # -------------------------------------------------------------------- row A: the mgcv oracle
 def test_a_thin_level_shows_mgcvs_bayesian_standard_errors():
     """A spline by a factor with a thin level: every SE is printed, and is mgcv's ``Vp``.
@@ -336,6 +489,25 @@ def test_a_penalized_factor_shows_a_standard_error_for_every_level():
     assert np.all(np.isfinite(_flat(model, model.metrics(held_out, y_held_out).coefficient_se)))
 
 
+def test_a_reml_stopped_early_shows_the_standard_errors_of_the_penalty_it_reached():
+    """``fit_reml`` out of iterations: its last coefficient solve converged, so the rule applies.
+
+    One outer iteration leaves the smoothing parameters short of their optimum, and the fit
+    says so (``ConvergenceWarning``; ``diagnostics`` reports it as not converged).  The
+    coefficients are still the penalised optimum at the smoothing parameters reached, which is
+    what the rule needs, so every level of the random effect shows the dense inverse's standard
+    error at those parameters (rtol 1e-9); master blanked all seven.  The coefficient solve's
+    own convergence is what gates the rule (``not_converged`` below).
+    """
+    frame, y = _zero_claim_levels(900, levels="ABCDEFZ")
+    model = _random_effect_model()
+    caught = {type(w.message).__name__ for w in _fit(model, frame, y, max_reml_iter=1)}
+    assert "ConvergenceWarning" in caught and model.result.converged
+    assert not model.diagnostics()["_model"]["converged"]
+    raw = _flat(model, model.metrics(frame, y).coefficient_se_raw)
+    np.testing.assert_allclose(raw, dense_raw_standard_errors(model, frame), rtol=1e-9)
+
+
 # -------------------------------------------------------------- row C1: fully penalised smooths
 @pytest.mark.parametrize(
     ("basis", "select", "blank_on_master"),
@@ -380,6 +552,20 @@ _UNPRICED_REGION_CASES = (
 )
 
 
+_RECORDED_SEPARATION_CASES = (
+    "reference_m20",
+    "reference_m21",
+    "reference_tol",
+    "slope",
+    "cell",
+    "varying_slope",
+    "curve",
+    "crossed_cell",
+    "base_cell",
+    "crossed_cell_fit",
+)
+
+
 @pytest.mark.pins_behaviour
 @pytest.mark.parametrize(
     "case",
@@ -397,6 +583,7 @@ _UNPRICED_REGION_CASES = (
         "weak_unscanned_level",
         "weak_gaussian_level",
         "not_converged",
+        *_RECORDED_SEPARATION_CASES,
     ],
 )
 def test_a_fit_outside_the_rule_keeps_the_data_rule(case):
@@ -424,9 +611,23 @@ def test_a_fit_outside_the_rule_keeps_the_data_rule(case):
       infinity and stops where the penalised Hessian is positive definite and well
       conditioned (the region's record has condition 3): no factorisation shows it, and each
       case is named by a different record of the fit.
+    - ``reference_m20`` and the cases after it (``_recorded_separation``): the walked
+      coefficient is one the data rule already left blank, behind an exact alias with a
+      penalised term.  The penalty breaks the alias and holds every data-null direction, so
+      neither the rank certificate nor the penalty's curvature sees the walk.  Where the walk
+      runs to rounding (the ``reference`` cases and ``base_cell``) the rows' weights span
+      thirteen orders, where an SVD and the fit's data rank can cut differently, so the
+      reference is the fit's own record of its data rank, which this rule does not write.
     """
-    open_to_the_data = None
-    if case in _UNPRICED_REGION_CASES:
+    open_to_the_data, options = None, {}
+    if case in _RECORDED_SEPARATION_CASES:
+        frame, y, model, method, options = _recorded_separation(case)
+        _fit(model, frame, y, method=method, **options)
+        assert model.result.converged
+        if case.startswith("reference") or case == "base_cell":
+            open_to_the_data = ~model.result.rank_info.coefficient_estimable()
+        options = {key: value for key, value in options.items() if key == "offset"}
+    elif case in _UNPRICED_REGION_CASES:
         frame, y, model, event = _unpriced_region(case)
         assert event in {type(w.message).__name__ for w in _fit(model, frame, y)}
         assert model.result.converged is (case != "not_converged")
@@ -475,7 +676,7 @@ def test_a_fit_outside_the_rule_keeps_the_data_rule(case):
         open_to_the_data = data_undetermined(model, frame)
     assert open_to_the_data.any()
     for rows in (frame, frame.copy()):
-        se = _flat(model, model.metrics(rows, y).coefficient_se)
+        se = _flat(model, model.metrics(rows, y, **options).coefficient_se)
         np.testing.assert_array_equal(np.isnan(se), open_to_the_data)
 
 

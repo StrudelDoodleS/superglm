@@ -532,19 +532,23 @@ def _names_an_unpriced_level(model) -> bool:
     Its coefficient walks towards infinity and stops where the data still hold it, so no
     data-null direction carries it (``_penalty_holds_data_null``); these records do:
 
-    - an ``sz`` term's levels left out of its population curve (``FactorSmooth._left_out``):
-      thin or separated; a level without weight is thin unless ``select=True`` penalizes it;
+    - on an interaction: an ``sz`` term's levels left out of its population curve
+      (``_left_out``: thin, separated, or without weight unless ``select=True``), a
+      varying coefficient's separated levels and a crossed term's separated cells;
     - a categorical level the build-time scan found separated;
     - the runtime separation finding (``PIRLSResult.separation_message``);
-    - a slope REML's diagnostics report as weakly identified (``reml_weakly_identified``).
+    - a slope REML reports as weakly identified, or a set it found separated.
     """
-    if any(getattr(spec, "_left_out", None) for spec in model._interaction_specs.values()):
-        return True
+    records = ("_left_out", "_separated_ranges", "_separated_cells_at_fit")
+    for spec in model._interaction_specs.values():
+        if any(getattr(spec, record, None) for record in records):
+            return True
     if any(getattr(spec, "_separated_levels_at_fit", ()) for spec in model._specs.values()):
         return True
     if getattr(model._solver_pirls_result(), "separation_message", None) is not None:
         return True
-    return bool((getattr(model, "_reml_profile", None) or {}).get("reml_weakly_identified"))
+    profile = getattr(model, "_reml_profile", None) or {}
+    return bool(profile.get("reml_weakly_identified") or profile.get("reml_laplace_separated"))
 
 
 def _data_null_curvature(model, record: RankInfo) -> tuple[NDArray, float] | None:

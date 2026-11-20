@@ -1151,6 +1151,9 @@ def build_design_matrix(
     for spec in compiled.specs.values():
         if isinstance(spec, Categorical):
             spec._separated_levels_at_fit = ()
+    for spec in compiled.interaction_specs.values():
+        if getattr(spec, "_separated_cells_at_fit", ()):
+            spec._separated_cells_at_fit = ()
     if separation_records:
         from superglm.diagnostics.separation import (
             emit_curve_separation,
@@ -1204,19 +1207,22 @@ def build_design_matrix(
                 )
             else:
                 _, name_i, spec1_i, spec2_i, x1_i, x2_i, p1_i, p2_i = record
-                findings.extend(
-                    scan_interaction_term(
-                        name_i,
-                        spec1_i,
-                        spec2_i,
-                        x1_i,
-                        x2_i,
-                        p1_i,
-                        p2_i,
-                        y,
-                        sample_weight,
-                        separation_boundaries,
-                    )
+                found = scan_interaction_term(
+                    name_i,
+                    spec1_i,
+                    spec2_i,
+                    x1_i,
+                    x2_i,
+                    p1_i,
+                    p2_i,
+                    y,
+                    sample_weight,
+                    separation_boundaries,
+                )
+                findings.extend(found)
+                # the standard-error rule reads these cells (state_ops._names_an_unpriced_level)
+                compiled.interaction_specs[name_i]._separated_cells_at_fit = tuple(
+                    label for finding in found for label in finding.labels
                 )
         compiled.scan_codes.clear()
         emit_separation_findings(findings, separation)
