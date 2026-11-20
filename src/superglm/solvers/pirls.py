@@ -68,7 +68,6 @@ from superglm.solvers.rank import (
     decide_data_rank,
     decompose_factor,
     decompose_gram_if_authoritative,
-    full_centre_pair,
 )
 from superglm.solvers.working_rows import (
     coefficient_initial_intercept,
@@ -2075,7 +2074,6 @@ def _fit_pirls_inner(
         group_edf=group_edf,
         objective_loss=None,
         covariance_policy="rule_free",
-        centre_pair=full_centre_pair(centered, p, selected_columns),
     )
     p_eff = rank_info.total_edf
 

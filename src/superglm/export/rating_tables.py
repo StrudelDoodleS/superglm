@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -25,12 +25,6 @@ from superglm.inference._ordered_reference import ordered_reference_intercept
 from superglm.inference._term_helpers import _VALID_CENTERING
 from superglm.inference._term_types import TermInference
 from superglm.links import LogLink
-from superglm.model.estimability_ops import (
-    data_null_directions,
-    functional_marks,
-    term_rows,
-    term_spec,
-)
 
 if TYPE_CHECKING:
     from superglm.model import SuperGLM
@@ -72,11 +66,6 @@ class RatingTableBlock:
     # ``OrderedCategorical``, a single-valued ``Numeric`` -- which is why the total is summed from the blocks rather
     # than assumed to run over every exported term.
     centering_shift: float = 0.0
-    # Which rows' relativities lean on a direction the training data do not
-    # determine (``estimability_ops.functional_marks``), parallel to ``table``:
-    # the fitted model's value, which rests on how the fit split terms it
-    # cannot tell apart.  ``None`` when the fit's design has full rank.
-    non_estimable: NDArray | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -99,9 +88,6 @@ class InteractionTableBlock:
     name: str
     table: pd.DataFrame
     kind: str = "cells"
-    # ``RatingTableBlock.non_estimable`` per cell: one row per table row, one
-    # column per relativity column (the key column left out).
-    non_estimable: NDArray | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -275,96 +261,7 @@ def _interval_keys(bin_from, bin_to) -> list[str]:
     ]
 
 
-def _centring_points(ti: TermInference, name: str, centering: str) -> dict | None:
-    """The points ``_recenter_term`` averaged the block's log relativities over, or ``None``."""
-    points = ti.levels if ti.levels is not None else ti.x
-    if centering == "native" or points is None or len(points) <= 1:
-        return None
-    return {name: list(points)}
-
-
-def _entry_marks(
-    model,
-    name: str,
-    points: dict | None = None,
-    *,
-    functionals: NDArray | None = None,
-    columns: tuple | None = None,
-    centring: dict | None = None,
-    reference: dict | None = None,
-) -> NDArray | None:
-    """Which entries' log relativities lean on what the fit does not determine, or ``None``.
-
-    An entry reads the term's design row at its ``points`` (raw covariate
-    values, or resolved input ``columns``), or the given ``functionals``; a
-    mean-centred block subtracts the term's mean over ``centring``, a native
-    one its reporting ``reference`` row (the level fixed at one).  ``None``,
-    with nothing formed, when the fit has no tested direction
-    (``estimability_ops.data_null_directions``).
-    """
-    if data_null_directions(model) is None:
-        return None
-    rows = (
-        functionals if functionals is not None else term_rows(model, name, points, columns=columns)
-    )
-    if centring is not None:
-        rows = rows - term_rows(model, name, centring).mean(axis=0)
-    elif reference is not None:
-        rows = rows - term_rows(model, name, reference)
-    return functional_marks(model, name, rows)
-
-
-def _bin_functionals(model, name: str, frame: EagerFrame, sample_weight, table) -> NDArray:
-    """Each bin's entry as ``discretization_impact`` forms it: its rows' weighted mean design row.
-
-    The rows are the training rows in ``[bin_from, bin_to)`` (the last bin
-    closed), weighted by the geometry weight the bin average reads; a bin
-    with no weight reads its midpoint.
-    """
-    from superglm.diagnostics.discretize import _validated_discretization_weights
-
-    _, weight = _validated_discretization_weights(model, sample_weight, len(frame))
-    x = np.asarray(frame.column_array(name), dtype=np.float64)
-    lower = table["bin_from"].to_numpy(dtype=np.float64)
-    upper = table["bin_to"].to_numpy(dtype=np.float64)
-    bins = np.clip(np.searchsorted(lower, x, side="right") - 1, 0, lower.size - 1)
-    design = term_rows(model, name, {name: x})
-    mass = np.bincount(bins, weights=weight, minlength=lower.size)
-    sums = np.vstack(
-        [
-            np.bincount(bins, weights=weight * design[:, j], minlength=lower.size)
-            for j in range(design.shape[1])
-        ]
-    ).T
-    midpoints = term_rows(model, name, {name: _bin_points(lower, upper)})
-    held = mass > 0.0
-    sums[held] /= mass[held, None]
-    sums[~held] = midpoints[~held]
-    return sums
-
-
-def _ordered_reference(model, name: str) -> dict | None:
-    """An ordered factor's reporting reference level, whose relativity is fixed at one."""
-    spec = term_spec(model, name)
-    return {name: [spec._base_level]} if isinstance(spec, OrderedCategorical) else None
-
-
-def _bin_points(lower: NDArray, upper: NDArray) -> NDArray:
-    """A bounded bin's midpoint, an unbounded one's finite end: where its entry is tested."""
-    lower, upper = np.asarray(lower, dtype=np.float64), np.asarray(upper, dtype=np.float64)
-    return np.where(
-        np.isfinite(lower) & np.isfinite(upper),
-        0.5 * lower + 0.5 * upper,
-        np.where(np.isfinite(lower), lower, upper),
-    )
-
-
-def _continuous_block(
-    name: str,
-    table: pd.DataFrame,
-    centering_shift: float,
-    non_estimable: NDArray | None = None,
-) -> RatingTableBlock:
+def _continuous_block(name: str, table: pd.DataFrame, centering_shift: float) -> RatingTableBlock:
     """A binned block, moved by the same constant every other block moves by.
 
     The binned relativities come from ``discretization_impact``, which knows
@@ -400,11 +297,7 @@ def _continuous_block(
         }
     )
     return RatingTableBlock(
-        name=name,
-        kind="continuous",
-        table=out,
-        centering_shift=float(centering_shift),
-        non_estimable=non_estimable,
+        name=name, kind="continuous", table=out, centering_shift=float(centering_shift)
     )
 
 
@@ -585,30 +478,7 @@ def _continuous_ppform_block(
         table=table,
         extrapolation=segments.extrapolation,
         centering_shift=segments.centering_shift,
-        non_estimable=_ppform_marks(model, name, centering, lo, hi),
     )
-
-
-def _ppform_marks(model, name: str, centering: str, lo: NDArray, hi: NDArray) -> NDArray | None:
-    """A piece is marked when any of its exported coefficients leans on what the fit does not determine.
-
-    A piece's coefficients ``a, b, c, d`` are an invertible linear map of its
-    curve at four distinct points of the piece (a cubic is fixed by four
-    values), so the piece is tested at its ends and thirds; a tail row (one
-    constant) at its finite end.
-    """
-    if data_null_directions(model) is None:
-        return None
-    centring = _centring_points(_main_effect_inference(model, name, centering), name, centering)
-    lower = np.where(np.isfinite(lo), lo, hi)
-    upper = np.where(np.isfinite(hi), hi, lo)
-    width = upper - lower
-    marks = np.zeros(lower.size, dtype=bool)
-    for share in (0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0):
-        found = _entry_marks(model, name, {name: lower + share * width}, centring=centring)
-        if found is not None:
-            marks |= found
-    return marks
 
 
 def _export_weights(model: SuperGLM, n_rows: int, sample_weight: NDArray | None) -> NDArray:
@@ -827,13 +697,6 @@ def _categorical_block(
             }
         ),
         centering_shift=float(ti.centering_shift),
-        non_estimable=_entry_marks(
-            model,
-            name,
-            {name: levels},
-            centring=_centring_points(ti, name, centering),
-            reference=_ordered_reference(model, name),
-        ),
     )
 
 
@@ -879,12 +742,6 @@ def _piecewise_block(model: SuperGLM, name: str, centering: str) -> RatingTableB
         ),
         extrapolation=model._specs[name].extrapolation,
         centering_shift=float(ti.centering_shift),
-        non_estimable=_entry_marks(
-            model,
-            name,
-            {name: np.asarray(ti.x, dtype=np.float64)},
-            centring=_centring_points(ti, name, centering),
-        ),
     )
 
 
@@ -906,8 +763,6 @@ def _numeric_block(model: SuperGLM, name: str, centering: str) -> RatingTableBlo
         # agree with what the block's values actually carry, and a lie here
         # moves every prediction in the workbook.
         centering_shift=float(ti.centering_shift),
-        # The per-unit factor reads the coefficient: the change from 0 to 1.
-        non_estimable=_entry_marks(model, name, {name: [1.0]}, reference={name: [0.0]}),
     )
 
 
@@ -1778,7 +1633,6 @@ def _continuous_interaction_block(
     raw: dict,
     parent1: str,
     parent2: str,
-    model: SuperGLM | None = None,
 ) -> InteractionTableBlock:
     from superglm.diagnostics.discretize import _ascending_grid, orient_grid_surface
 
@@ -1795,17 +1649,7 @@ def _continuous_interaction_block(
 
     table = pd.DataFrame(relativity, columns=[_format_axis_value(v) for v in x2])
     table.insert(0, parent1, [_format_axis_value(v) for v in x1])
-    marks = None
-    if model is not None:
-        # The axes are the resolved inputs (an ordinal parent's scores), as the
-        # surface was read on them.
-        marks = _entry_marks(model, name, columns=(np.repeat(x1, x2.size), np.tile(x2, x1.size)))
-    return InteractionTableBlock(
-        name=name,
-        table=table,
-        kind="grid",
-        non_estimable=None if marks is None else marks.reshape(x1.size, x2.size),
-    )
+    return InteractionTableBlock(name=name, table=table, kind="grid")
 
 
 def _spline_categorical_block(
@@ -1844,16 +1688,14 @@ def _spline_categorical_block(
         spline_categorical_bins,
     )
 
-    parent1, parent2 = ispec.parent_names
+    parent1, _ = ispec.parent_names
     if has_ordinal_parent(model, ispec):
         keys, log_deviation = ordinal_parent_cells(model, ispec, _interaction_beta(model, name))
         kind = "cells"
-        points = list(keys)
     elif banded is not None:
         edges, log_deviation = banded_cells(banded, len(ispec._non_base))
         keys = _interval_keys(edges[:-1], edges[1:])
         kind = "spline_cells"
-        points = _bin_points(edges[:-1], edges[1:])
     else:
         if frame is None:
             raise TypeError(
@@ -1872,29 +1714,13 @@ def _spline_categorical_block(
         keys = _interval_keys(bins.edges[:-1], bins.edges[1:])
         log_deviation = bins.log_deviation
         kind = "spline_cells"
-        points = bins.representatives
     factor = dict(zip(map(str, ispec._non_base), np.exp(log_deviation).T, strict=True))
     ones = np.ones(len(keys))
     levels = [str(level) for level in ispec._cat_levels]
     columns = {_row_key_header(parent1, levels): keys}
     for level in levels:
         columns[level] = factor.get(level, ones)
-    # A cell is the level's deviation at the row's point; the base level's
-    # column reads no coefficient.
-    marks = _entry_marks(
-        model,
-        name,
-        {
-            parent1: np.repeat(np.asarray(points, dtype=object), len(ispec._cat_levels)),
-            parent2: list(ispec._cat_levels) * len(keys),
-        },
-    )
-    return InteractionTableBlock(
-        name=name,
-        table=pd.DataFrame(columns),
-        kind=kind,
-        non_estimable=None if marks is None else marks.reshape(len(keys), len(levels)),
-    )
+    return InteractionTableBlock(name=name, table=pd.DataFrame(columns), kind=kind)
 
 
 def _interaction_blocks(
@@ -1953,7 +1779,7 @@ def _interaction_blocks(
                     "or reconstruct the term as a cell table."
                 )
             parent2 = ispec.parent_names[1]
-            blocks.append(_continuous_interaction_block(name, raw, parent1, parent2, model))
+            blocks.append(_continuous_interaction_block(name, raw, parent1, parent2))
             continue
 
         if "pairs" not in raw:
@@ -1971,23 +1797,7 @@ def _interaction_blocks(
         ]
         columns = [_row_key_header(parent1, levels2), *levels2]
         table = pd.DataFrame(rows, columns=columns)
-        levels1 = list(raw["levels1"])
-        marks = _entry_marks(
-            model,
-            name,
-            {
-                parent1: np.repeat(np.asarray(levels1, dtype=object), len(levels2)),
-                ispec.parent_names[1]: list(levels2) * len(levels1),
-            },
-        )
-        blocks.append(
-            InteractionTableBlock(
-                name=name,
-                table=table,
-                kind="cells",
-                non_estimable=None if marks is None else marks.reshape(len(levels1), len(levels2)),
-            )
-        )
+        blocks.append(InteractionTableBlock(name=name, table=table, kind="cells"))
     return blocks
 
 
@@ -2944,23 +2754,8 @@ def build_rating_table_payload(
             # asked for and all of them share one origin.  ``with_se=False``,
             # so this is the point estimate alone -- the band's own centering
             # is ``_recenter_term``'s business and is not routed through here.
-            ti = _main_effect_inference(model, name, centering)
-            table = selected.tables[name]
-            main_effects.append(
-                _continuous_block(
-                    name,
-                    table,
-                    float(ti.centering_shift),
-                    None
-                    if data_null_directions(model) is None
-                    else _entry_marks(
-                        model,
-                        name,
-                        functionals=_bin_functionals(model, name, frame, sample_weight, table),
-                        centring=_centring_points(ti, name, centering),
-                    ),
-                )
-            )
+            centering_shift = float(_main_effect_inference(model, name, centering).centering_shift)
+            main_effects.append(_continuous_block(name, selected.tables[name], centering_shift))
         elif isinstance(spec, Categorical | OrderedCategorical):
             main_effects.append(_categorical_block(model, frame, name, sample_weight, centering))
         elif isinstance(spec, Numeric):

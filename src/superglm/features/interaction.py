@@ -26,7 +26,7 @@ import scipy.sparse as sp
 from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
-from superglm._group_matrix._group_matrix_bins import discretize_positive_support, fit_bin_lookup
+from superglm._group_matrix._group_matrix_bins import discretize_positive_support
 from superglm.features import _basis_kernels
 from superglm.features._spline_config import SplineOptionWarning
 from superglm.features._spline_penalties import _gapped_rank, structural_penalty_ranks
@@ -614,7 +614,6 @@ class SplineCategorical:
             x_spline, int(n_bins), sample_weight, bin_knots(spline_spec, x_spline, sample_weight)
         )
         B_unique = np.asarray(self._raw_rows(support), dtype=np.float64)
-        self._fit_bins = {0: fit_bin_lookup(x_spline, support, bin_idx, sample_weight)}
 
         omega = spline_spec._build_penalty()
         if self._projection is not None:
@@ -2463,10 +2462,6 @@ class TensorInteraction:
                 )
                 counts = np.bincount(idx, weights=geometry_weight, minlength=len(support))
                 bins.append((support, idx))
-                self._fit_bins = {
-                    **(getattr(self, "_fit_bins", None) or {}),
-                    axis: fit_bin_lookup(x, support, idx, geometry_weight),
-                }
             info = self._marginal_ingredients(
                 candidate, x, support=support, counts=counts, geometry_weight=geometry_weight
             )

@@ -1211,19 +1211,6 @@ class RankDecomposition:
         return result
 
 
-def full_centre_pair(centered, width: int, selected_columns: NDArray) -> tuple[NDArray, NDArray]:
-    """A centred system's exact centre pair at full width (``RankInfo.centre_pair``)."""
-    hi, lo = centered.centre_pair()
-    full_hi = np.zeros(width)
-    full_lo = np.zeros(width)
-    full_hi[selected_columns] = hi
-    if lo is not None:
-        full_lo[selected_columns] = lo
-    full_hi.setflags(write=False)
-    full_lo.setflags(write=False)
-    return full_hi, full_lo
-
-
 def face_pseudo_inverse(decomposition: RankDecomposition, face: NDArray | None) -> NDArray:
     """``Z (Z' M Z)^+ Z'`` from the decomposition of ``Z' M Z`` on a face ``Z``; ``M^+`` without one.
 
@@ -1295,12 +1282,6 @@ class RankInfo:
     # before fits did: ``__setstate__`` gives it that value, and every reader keeps the blanks
     # it was saved with until refit.
     standard_error_mask: Literal["data", "penalized"] = field(default="penalized", compare=False)
-    # The centre the data Gram's rows were taken about as an exact pair
-    # ``(hi, lo)`` (``CenteredSystem.centre_pair``), full width like
-    # ``mean_x``, zero ``lo`` where the system kept none: a reader centring a
-    # new row reads ``(x - hi) - lo``, as the record was decided.  ``None``
-    # for a record from before fits kept it.
-    centre_pair: tuple[NDArray, NDArray] | None = field(default=None, repr=False, compare=False)
 
     def __setstate__(self, state: dict) -> None:
         self.__dict__.update({"standard_error_mask": "data"} | state)

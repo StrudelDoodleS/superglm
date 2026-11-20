@@ -14,7 +14,18 @@ Tools for Package Developers*, R Journal 7(1), 2015, whose test this is
 default ``tol``.  A row of the training design reads rounding there.  A row
 the record treats as determined only up to its rank cut (a near alias the
 data rank truncated) can read a share near ``tol`` and warn, as it does in
-``predict.lm``.
+``predict.lm``.  The warning is advisory: the price is unchanged.
+
+**Which fits are tested.**  Only a dense, unbinned ``SuperGLM`` fit that
+carries both rank records below.  Every other fit is silent, as before this
+test existed: a binned fit (``discrete=True``, or a spline with
+``discrete=True``), whose record is its binned design's and not the rows it
+prices; a fit with a ``FactorSmooth`` term (``sz`` or ``fs``), whose held and
+population levels are priced by their own rules; a structured fit, and a
+compact or older saved model, that keeps no dense rank records; and a fit
+whose centred columns sit so far from zero that float64 cannot resolve a row's
+share at the tolerance (``_resolvable``).  ``SuperLSS`` has its own ``predict``
+and is not tested.
 
 **The directions.**  The fit's data rank (``RankInfo.data``, the decomposition
 of the centred data Gram ``X_c' W X_c`` the fit already decided) records the
@@ -27,13 +38,12 @@ scale-aware rank cut), is exactly the part no penalty curves.  Only the
 intersection of the two recorded null spaces is tested: the principal
 directions between them whose squared sine is at most ``FREE_SINE_CUT``.
 Penalty null spaces are structural, so a shared direction's squared sine is
-the bases' rounding and any penalised one's is one.  Both records travel with
-every fit, a compact one too, so nothing here reads the design.
+the bases' rounding and any penalised one's is one.  Nothing here reads the
+design or a training row, and nothing runs at fit time.
 
 The design with its intercept, ``[1, X]``, has null vectors ``[-c' n; n]`` for
-each such ``n`` (``c`` a centre of the training rows), so a scoring row
-``[1, x]`` reads ``(x - c)' n``.  Nothing here forms a decomposition of the
-design or reads a training row: a fit with no such direction is not tested.
+each such ``n`` (``c`` the record's weighted column centre), so a scoring row
+``[1, x]`` reads ``(x - c)' n``.
 
 **The scale.**  The record decided its rank on columns equilibrated by
 ``D = column_scale`` (the norms of the centred weighted columns); the
@@ -41,32 +51,26 @@ intercept's column has norm ``sqrt(sum W)``.  The test is read in that scale,
 where the bases are orthonormal: a row is ``[1 / sqrt(sum W), (x - c) / D]``
 and a direction ``D n``, normalised.  A column the record holds structurally
 null (``D = 0``: constant on the training rows) has unit scale.  Each row is
-scaled by a power of two (exact) before it is projected or its norm taken,
-LAPACK's ``xLASSQ`` scaled sum of squares, so no finite row overflows.
+scaled by a power of two (exact) before it is divided by ``D``, projected or
+its norm taken, LAPACK's ``xLASSQ`` scaled sum of squares, so no finite row
+overflows.
 
 **Coordinates.**  The record is in the solver's columns.  A spline term whose
 public columns lose their training means ``m`` (``runtime_canonicalize``)
 keeps its coefficients, so a direction is the same coefficient vector in the
-public model and its centre is ``c - m`` there.  Every column is read about
-the one centre the record was decided at (its weighted mean ``c``): ``(x -
-c)' n`` is the same constant on every training row only for a centre that is
-one weighted mean of them, so centres are never mixed.  A binned fit (``discrete=True``) is read as it was fitted: each binned
-column's value is replaced by its bin's support point (``_group_matrix_bins.fit_bin_lookup``).
+public model and its centre is ``c - m`` there.
 """
 
 from __future__ import annotations
 
 import contextlib
 import contextvars
-import warnings
-from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._roundoff import SQRT_EPS
+from superglm._roundoff import SQRT_EPS, UNIT_ROUNDOFF
 
 # ``predict.lm``'s ``tol`` (R >= 4.3, ``rankdeficient = "warnif"``), on the
 # share ``||r N|| / ||r||`` of Lenth (2015).  Training rows read rounding,
@@ -93,12 +97,17 @@ class NonEstimablePredictionWarning(UserWarning):
     ``rows`` holds their positions in the order predicted, as R's
     ``"non-estim"`` attribute does.  Their predictions are returned unchanged:
     the published fit's values, which its constraint fixes there rather than
-    the data.
+    the data.  Only dense, unbinned fits are tested
+    (``superglm.model.estimability_ops``).
     """
 
     def __init__(self, message: str, rows: NDArray) -> None:
         super().__init__(message)
         self.rows = np.asarray(rows, dtype=np.intp)
+
+    def __reduce__(self):
+        # pickled with its rows, so a warning raised in a worker process arrives whole
+        return (type(self), (str(self), self.rows))
 
 
 @contextlib.contextmanager
@@ -118,8 +127,7 @@ class DataNullDirections:
     ``dual`` (``p x k``) is orthonormal: ``D n`` on the record's columns, zero
     elsewhere.  ``scale`` is ``D`` (one on a structurally null column, zero on
     a column outside the record, which no direction reaches) and ``centre``
-    the public centre rows are read about, ``(x - centre) - centre_lo``.
-    ``alpha_scale`` is ``sqrt(sum W)``.
+    the public centre rows are read about.  ``alpha_scale`` is ``sqrt(sum W)``.
     ``outside`` holds, for every data-null direction, its squared sine to the
     penalised Hessian's null space, ascending; the kept directions are those
     at or below ``FREE_SINE_CUT`` (the restriction's evidence: its gap).
@@ -128,24 +136,33 @@ class DataNullDirections:
     dual: NDArray
     scale: NDArray
     centre: NDArray
-    centre_lo: NDArray
     alpha_scale: float
     outside: NDArray
 
-    @property
-    def directions(self) -> NDArray:
-        """The raw coefficient vectors ``n = D^-1 (D n)``."""
-        safe = np.where(self.scale > 0.0, self.scale, 1.0)
-        return self.dual / safe[:, None]
+
+def _tested(model) -> bool:
+    """Whether the fit is one the test reads (module docstring): dense, unbinned, no factor smooth."""
+    from superglm.dm_builder import should_discretize
+    from superglm.features.factor_smooth import FactorSmooth
+
+    discrete = bool(getattr(model, "_discrete", False))
+    if discrete:
+        return False
+    if any(should_discretize(spec, discrete) for spec in getattr(model, "_specs", {}).values()):
+        return False
+    interactions = getattr(model, "_interaction_specs", {}) or {}
+    return not any(isinstance(spec, FactorSmooth) for spec in interactions.values())
 
 
-def _record(model):
+def _records(model):
+    """The fit's result and its two dense rank records, or ``None`` when either is missing."""
     result = getattr(model, "_result", None)
     rank_info = getattr(result, "rank_info", None)
-    record = getattr(rank_info, "data", None)
-    if result is None or rank_info is None or record is None:
+    data = getattr(rank_info, "data", None)
+    augmented = getattr(rank_info, "augmented", None)
+    if result is None or data is None or augmented is None:
         return None
-    return result, rank_info, record
+    return result, rank_info, data
 
 
 def _dual_null_basis(record) -> NDArray | None:
@@ -182,13 +199,12 @@ def _penalty_free(rank_info, dual: NDArray, local_scale: NDArray):
     Hessian's recorded null basis, read in the same scale, is orthonormalised;
     the singular values of their overlap are the cosines of the principal
     angles between the two spaces.  A direction is kept when its squared sine
-    is at most ``FREE_SINE_CUT``.  A fit whose penalised Hessian has no record
-    has none kept: its penalty cannot be read.
+    is at most ``FREE_SINE_CUT``.
     """
-    augmented = getattr(rank_info, "augmented", None)
+    augmented = rank_info.augmented
     if augmented is rank_info.data:  # unpenalised: one decomposition
         return dual, np.zeros(dual.shape[1])
-    if augmented is None or augmented.width != dual.shape[0]:
+    if augmented.width != dual.shape[0]:
         return dual[:, :0], np.ones(dual.shape[1])
     held = augmented.null_basis()
     if held.shape[1] == 0:
@@ -203,15 +219,33 @@ def _penalty_free(rank_info, dual: NDArray, local_scale: NDArray):
     return basis @ left[:, sines <= FREE_SINE_CUT], sines
 
 
-def data_null_directions(model) -> DataNullDirections | None:
-    """The published fit's tested directions (module docstring), or ``None`` when it has none.
+def _resolvable(null: DataNullDirections) -> bool:
+    """Whether float64 resolves a row's share at the tolerance, given the stored centre.
 
-    Reads the data rank and the penalised Hessian's rank the fit decided
-    (``RankInfo.data`` and ``RankInfo.augmented``);
-    ``None`` for a fit without that record and for one with no direction the
-    data and the penalty both leave free, so such a fit is never tested.
+    The centre ``c`` is held to rounding, ``u |c_j|`` per column, which moves
+    a row's dual entry by ``u |c_j| / D_j``; over a row of size at least
+    ``1 / sqrt(sum W)`` and the unit directions that bounds the share's error
+    by ``u sqrt(sum W) || (|c| / D)' |N| ||``.  A fit where that reaches a
+    sixteenth of the tolerance (a column offset from zero by many times its
+    spread, 2**40 against a spread of a few units) is not tested.
     """
-    found = _record(model)
+    covered = null.scale > 0.0
+    weight = np.abs(null.centre[covered]) / null.scale[covered]
+    bound = UNIT_ROUNDOFF * null.alpha_scale * np.linalg.norm(weight @ np.abs(null.dual[covered]))
+    return bool(bound < PREDICTION_TOLERANCE / 16.0)
+
+
+def data_null_directions(model) -> DataNullDirections | None:
+    """The tested directions of the published fit (module docstring), or ``None``.
+
+    ``None`` for a fit the test does not read (``_tested``, ``_records``), for
+    one with no direction the data and the penalty both leave free, and for
+    one whose rows the centre cannot resolve (``_resolvable``): such a fit is
+    never tested.
+    """
+    if not _tested(model):
+        return None
+    found = _records(model)
     if found is None:
         return None
     result, rank_info, record = found
@@ -231,22 +265,19 @@ def data_null_directions(model) -> DataNullDirections | None:
     from superglm.model.runtime_canonicalize import _public_column_shifts
 
     terms = (getattr(model, "_runtime_canonical_state", None) or {}).get("terms", {})
-    pair = getattr(rank_info, "centre_pair", None)
-    hi, lo = (mean_x, np.zeros(width)) if pair is None else pair
-    centre = np.asarray(hi, dtype=np.float64) - _public_column_shifts(terms, width)
     scale = np.zeros(width)
     scale[selected] = local_scale
     dual = np.zeros((width, dual_local.shape[1]))
     dual[selected] = dual_local
     sum_w = float(rank_info.sum_w)
-    return DataNullDirections(
+    null = DataNullDirections(
         dual=dual,
         scale=scale,
-        centre=centre,
-        centre_lo=np.asarray(lo, dtype=np.float64),
+        centre=mean_x - _public_column_shifts(terms, width),
         alpha_scale=float(np.sqrt(sum_w)) if sum_w > 0.0 else 1.0,
         outside=outside,
     )
+    return null if _resolvable(null) else None
 
 
 def _dense_rows(rows) -> NDArray:
@@ -268,32 +299,28 @@ class _ScaledRows:
         self.projection = np.zeros((n, k))
         self.square = np.zeros(n)
 
-    def _raise_to(self, rows: slice, largest: NDArray) -> NDArray:
-        """Raise each row's exponent to cover ``largest``; the factor ``2**-e`` its entries take."""
-        _, needed = np.frexp(largest)
+    def add(self, rows: slice, entries: NDArray, null: NDArray, shift: NDArray) -> None:
+        """Add a block of entries ``entries * 2**shift`` (``rows x m``) and their null rows.
+
+        ``shift`` (per row) carries the power of two the caller scaled the
+        entries by before dividing them by the column scale.
+        """
+        _, needed = np.frexp(np.max(np.abs(entries), axis=1, initial=0.0))
+        needed = needed + shift
         current = self.exponent[rows]
         raised = np.flatnonzero(needed > current)
         if raised.size:
             at = np.arange(rows.start, rows.stop)[raised]
-            shift = current[raised] - needed[raised]
-            self.projection[at] = np.ldexp(self.projection[at], shift[:, None])
-            self.square[at] = np.ldexp(self.square[at], 2 * shift)
+            change = current[raised] - needed[raised]
+            self.projection[at] = np.ldexp(self.projection[at], change[:, None])
+            self.square[at] = np.ldexp(self.square[at], 2 * change)
             self.exponent[at] = needed[raised]
         # a power of two, so multiplying by it is exact (``ldexp``)
-        return np.ldexp(1.0, -self.exponent[rows])
-
-    def add(self, rows: slice, entries: NDArray, null: NDArray) -> None:
-        """Add a block of dual entries (``rows x m``) and their null rows (``m x k``)."""
-        factor = self._raise_to(rows, np.max(np.abs(entries), axis=1, initial=0.0))
+        factor = np.ldexp(1.0, shift - self.exponent[rows])
         scaled = entries * factor[:, None]
         if np.any(null):
             self.projection[rows] += scaled @ null
         self.square[rows] += np.einsum("ij,ij->i", scaled, scaled)
-
-    def add_projection(self, rows: slice, values: NDArray) -> None:
-        """Add products ``r q`` a term gave directly (``rows x k``), with no norm entry."""
-        factor = self._raise_to(rows, np.max(np.abs(values), axis=1, initial=0.0))
-        self.projection[rows] += values * factor[:, None]
 
     def shares(self) -> NDArray:
         projected = np.sqrt(np.einsum("ij,ij->i", self.projection, self.projection))
@@ -301,43 +328,24 @@ class _ScaledRows:
         return np.divide(projected, size, out=np.zeros_like(size), where=size > 0.0)
 
 
-def _term_inputs(term: dict[str, Any], frame) -> list[NDArray]:
-    """The term's resolved input columns, each binned column at its bin's support point."""
-    from superglm._group_matrix._group_matrix_bins import binned_values
-    from superglm.model.base import _term_columns
-
-    columns = list(_term_columns(term, frame))
-    bins = getattr(term["spec"], "_fit_bins", None) or {}
-    for axis, lookup in bins.items():
-        columns[axis] = binned_values(lookup, columns[axis])
-    return columns
-
-
-def _held_frame(term: dict[str, Any], frame, rows: slice):
-    """An ``sz`` term's two input columns on ``rows``, the numeric one binned as the fit read it."""
-    import pandas as pd
-
-    from superglm._frame import as_eager_frame
-    from superglm._group_matrix._group_matrix_bins import binned_values
-
-    left, right = term["parent_names"]
-    values = np.asarray(frame.column_array(left), dtype=np.float64)[rows]
-    lookup = (getattr(term["spec"], "_fit_bins", None) or {}).get(0)
-    if lookup is not None:
-        values = binned_values(lookup, values)
-    return as_eager_frame(pd.DataFrame({left: values, right: frame.column_array(right)[rows]}))
-
-
 def _population_skipped(spec, random_effects: str) -> bool:
     """Whether a population prediction leaves the term out (``base._predict_eta``)."""
-    from superglm.features.factor_smooth import FactorSmooth
     from superglm.features.random_effect import RandomEffect
 
-    if random_effects != "population":
-        return False
-    if isinstance(spec, RandomEffect):
-        return True
-    return isinstance(spec, FactorSmooth) and not spec._has_population_offset
+    return random_effects == "population" and isinstance(spec, RandomEffect)
+
+
+def _scaled_entries(rows: NDArray, centre: NDArray, scale: NDArray) -> tuple[NDArray, NDArray]:
+    """``((rows - centre) * 2**-e) / scale`` and its per-row ``e``: the dual entries, unscaled later.
+
+    Each row is scaled by a power of two to magnitude at most one before it is
+    divided by the column scale, so a finite row cannot overflow there.
+    """
+    centred = rows - centre
+    _, shift = np.frexp(np.max(np.abs(centred), axis=1, initial=0.0))
+    centred *= np.ldexp(1.0, -shift)[:, None]
+    centred /= scale
+    return centred, shift
 
 
 def prediction_shares(model, frame, plan, random_effects: str) -> NDArray | None:
@@ -345,73 +353,46 @@ def prediction_shares(model, frame, plan, random_effects: str) -> NDArray | None
 
     ``None``, with no pass over the rows, when the fit has no tested direction
     (``data_null_directions``).  Otherwise one pass forms each term's design
-    rows in blocks and accumulates both the projection and the norm.  A term
-    a population prediction leaves out has a zero row; an ``sz`` term with
-    held levels gives its products as ``predict`` scores it, so a held level
-    priced at the population curve reads what that curve reads.
+    rows in blocks and accumulates both the projection and the norm; a term a
+    population prediction leaves out has a zero row.  The rows' unseen-level
+    notice was ``predict``'s own to give, so the pass gives none
+    (``unseen_routing_quiet``, a context variable: no warning filter moves).
     """
     null = data_null_directions(model)
     if null is None:
         return None
-    from superglm.features.factor_smooth import FactorSmooth
-    from superglm.model.base import _score_unidentified_factor_smooth
+    from superglm.features.categorical import unseen_routing_quiet
+    from superglm.model.base import _term_columns
 
     n = len(frame)
-    accumulated = _ScaledRows(n, null.dual.shape[1])
-    accumulated.add(
-        slice(0, n), np.full((n, 1), 1.0 / null.alpha_scale), np.zeros((1, null.dual.shape[1]))
-    )
-    features = {feature["name"]: feature for feature in plan["features"]}
-    directions = null.directions
-    # ``predict``'s own pass has already said what scoring these rows says.
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    k = null.dual.shape[1]
+    accumulated = _ScaledRows(n, k)
+    intercept = np.full((n, 1), 1.0 / null.alpha_scale)
+    accumulated.add(slice(0, n), intercept, np.zeros((1, k)), np.zeros(n, dtype=np.intc))
+    # A rescaled part may underflow to zero, which the share cannot see; ``errstate``
+    # is NumPy's per-context floating-point mode, not a warning filter.
+    with unseen_routing_quiet(), np.errstate(under="ignore"):
         for term in (*plan["features"], *plan["interactions"]):
             index = np.asarray(term["beta_idx"], dtype=np.intp)
             covered = null.scale[index] > 0.0
             if not np.any(covered):
                 continue
-            every = bool(np.all(covered))
             scale, centre = null.scale[index][covered], null.centre[index][covered]
-            centre_lo = null.centre_lo[index][covered]
             term_null = null.dual[index][covered]
             spec = term["spec"]
             block = max(1, _BLOCK_ENTRIES // max(1, index.size))
-            held = isinstance(spec, FactorSmooth) and spec._has_population_offset
             skipped = _population_skipped(spec, random_effects)
-            inputs = None if skipped else _term_inputs(term, frame)
+            columns = None if skipped else _term_columns(term, frame)
             for start in range(0, n, block):
                 stop = min(n, start + block)
                 rows = slice(start, stop)
-                if inputs is None:
-                    entries = np.broadcast_to(
-                        ((0.0 - centre) - centre_lo) / scale, (stop - start, centre.size)
-                    )
-                    accumulated.add(rows, entries, term_null)
-                    continue
-                design = _dense_rows(spec.transform(*(column[rows] for column in inputs)))
-                entries = (design if every else design[:, covered]) - centre
-                entries -= centre_lo
-                entries /= scale
-                if not held:
-                    accumulated.add(rows, entries, term_null)
-                    continue
-                accumulated.add(rows, entries, np.zeros_like(term_null))
-                sub = _held_frame(term, frame, rows)
-                products = np.column_stack(
-                    [
-                        _score_unidentified_factor_smooth(
-                            term,
-                            sub,
-                            directions[:, j],
-                            population=random_effects == "population",
-                            features=features,
-                        )[0]
-                        - (centre + centre_lo) @ directions[index][covered, j]
-                        for j in range(directions.shape[1])
-                    ]
-                )
-                accumulated.add_projection(rows, products)
+                if columns is None:
+                    design = np.zeros((stop - start, centre.size))
+                else:
+                    design = _dense_rows(spec.transform(*(column[rows] for column in columns)))
+                    design = design if bool(np.all(covered)) else design[:, covered]
+                entries, shift = _scaled_entries(design, centre, scale)
+                accumulated.add(rows, entries, term_null, shift)
     return accumulated.shares()
 
 
@@ -449,63 +430,3 @@ def non_estimable_message(rows: NDArray) -> str:
         "attribute lists them; check those rows' levels and values against the training data, "
         "or merge the terms the fit cannot separate."
     )
-
-
-def term_spec(model, term_name: str):
-    """The term's spec as ``predict`` scores it."""
-    return _term(model, term_name)["spec"]
-
-
-def _term(model, term_name: str) -> dict[str, Any]:
-    from superglm.model.base import _prediction_plan
-
-    plan = _prediction_plan(model)
-    return next(t for t in (*plan["features"], *plan["interactions"]) if t["name"] == term_name)
-
-
-def term_rows(model, term_name: str, points: Mapping[str, Any] | None = None, *, columns=None):
-    """The term's design rows at raw covariate ``points`` (keyed by input column), or at
-    already resolved input ``columns`` (a tuple in the term's parent order)."""
-    import pandas as pd
-
-    from superglm._frame import as_eager_frame
-    from superglm.model.base import _term_columns
-
-    term = _term(model, term_name)
-    if columns is None:
-        frame = as_eager_frame(
-            pd.DataFrame({key: list(values) for key, values in (points or {}).items()})
-        )
-        columns = _term_columns(term, frame)
-    return _dense_rows(term["spec"].transform(*columns))
-
-
-def functional_shares(model, term_name: str, functionals: NDArray) -> NDArray | None:
-    """Each coefficient functional's share along the tested directions, or ``None``.
-
-    ``functionals`` (``entries x p_t``, public coordinates) are rows of the
-    term's coefficients, such as a rating-table entry's log relativity.  An
-    entry carries no intercept, so its share is ``||(f / D) N|| / ||f / D||``
-    on the term's columns (zero for an entry that reads no coefficient, such
-    as a base level), scaled per row as the predicted rows are.  ``None``,
-    with nothing formed, when the fit has no tested direction.
-    """
-    null = data_null_directions(model)
-    if null is None:
-        return None
-    index = np.asarray(_term(model, term_name)["beta_idx"], dtype=np.intp)
-    covered = null.scale[index] > 0.0
-    functionals = np.asarray(functionals, dtype=np.float64)
-    accumulated = _ScaledRows(functionals.shape[0], null.dual.shape[1])
-    accumulated.add(
-        slice(0, functionals.shape[0]),
-        functionals[:, covered] / null.scale[index][covered],
-        null.dual[index][covered],
-    )
-    return accumulated.shares()
-
-
-def functional_marks(model, term_name: str, functionals: NDArray) -> NDArray | None:
-    """Which functionals lean on the tested directions (``functional_shares``), or ``None``."""
-    shares = functional_shares(model, term_name, functionals)
-    return None if shares is None else shares > PREDICTION_TOLERANCE

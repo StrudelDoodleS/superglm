@@ -212,8 +212,20 @@ split the terms rather than on the data. The test is R's `predict.lm` check
 a penalty fixes, such as a random effect's level sum under its zero-mean
 prior, is determined and never warns. As in `predict.lm`, a row the fit's rank
 decision treats as determined only up to its cut, a near alias it truncated,
-can warn too, a training row included. The rating-table export shades the
-entries that lean on such a direction and names them in the block's note.
+can warn too, a training row included.
+
+Only a dense, unbinned fit is tested. These fits are silent, as they were
+before the test existed:
+
+- a binned fit (`discrete=True`, or a `Spline(discrete=True)`);
+- a fit with a `FactorSmooth` term, `basis="sz"` or `"fs"`, whose held and
+  population levels have their own rules (described below);
+- a structured fit, and any model that does not carry the fit's two rank
+  records (one saved by an older superglm, say);
+- a fit whose columns sit so far from zero, against their spread, that float64
+  cannot resolve the test (a column near `2**40` that varies by a few units).
+
+The rating tables carry no mark.
 
 ### SZ levels the data cannot identify
 

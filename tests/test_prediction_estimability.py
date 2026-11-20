@@ -5,21 +5,27 @@ space when ``||r N|| > 1e-6 ||r||`` (Lenth, R Journal 7(1), 2015), with ``N``
 the null space the fit's data rank recorded, restricted to the null space of
 every penalty component, read in the record's equilibrated scale
 (``model.estimability_ops``).  ``predict`` returns master's price and gives one
-``NonEstimablePredictionWarning`` whose ``rows`` names them; the rating-table
-export marks the entries that lean.
+``NonEstimablePredictionWarning`` whose ``rows`` names them.  Only dense,
+unbinned fits are tested; every other fit is silent, as on master, and each
+review reproducer of a crash or a wrong warning there is pinned here as
+silent and priced as master prices it.
 
 Each fixture forces its direction by construction: a level seen at one value of
 its by-level slope, or a column equal to another on every training row.  A test
-of a warning or a mark fails on master, which has neither (the class is matched
-by name, so it fails on the assertion).  A test of silence is a control
-(``pins_behaviour``) and reads only the public API, so it passes on master;
-several pin a defect a review found at ``ce4a5b2f2``.  Every fixture's shares,
+of a warning fails on master, which has none, on its assertion (the class is
+matched by name).  Two tests read the module's own penalty restriction and
+row blocks: they import ``superglm.model.estimability_ops``, so on master they
+fail on that import, not on a behaviour.  A test of silence is
+a control (``pins_behaviour``) and reads only the public API, so it passes on
+master; several pin a defect a review found on this branch.  Every fixture's shares,
 training rows included, are asserted at least three orders of magnitude on the
 right side of the tolerance, so the tolerance does not pick the answer.
 """
 
 from __future__ import annotations
 
+import pickle
+import threading
 import warnings
 
 import numpy as np
@@ -31,8 +37,6 @@ from superglm import (
     Categorical,
     FactorSmooth,
     Numeric,
-    OrderedCategorical,
-    Polynomial,
     RandomEffect,
     Spline,
     SuperGLM,
@@ -339,12 +343,12 @@ def test_a_translated_aliased_column_never_warns_its_training_rows(shift):
 
 
 @pytest.mark.pins_behaviour
-def test_a_binned_fits_training_rows_are_read_as_it_binned_them():
-    """Control (passes on master; at ce4a5b2f2 all 300 rows warned).
+def test_a_binned_fit_is_silent():
+    """Control (passes on master; at ce4a5b2f2 all 300 rows warned, and a compact pickle of it
+    warned again after loading at b839308ef).
 
-    An unpenalised spline on four bins: the binned design has rank 3 of 7, and
-    a training row's exact basis row is off it, but the fit read it at its
-    bin's support point, which is on it.
+    An unpenalised spline on four bins has a rank-deficient binned design, whose
+    record is not the rows ``predict`` prices: a binned fit is not tested.
     """
     X = pd.DataFrame({"x": np.linspace(0.0, 1.0, 300)})
     y = np.random.default_rng(913).poisson(2, len(X)).astype(float)
@@ -357,166 +361,21 @@ def test_a_binned_fits_training_rows_are_read_as_it_binned_them():
         spline_penalty=0.0,
         discrete=True,
         n_bins=4,
+        retain_fit_state=False,
     )
-    for frame in (X, X.copy()):
-        _, found = _disclosures(lambda frame=frame: model.predict(frame))
+    saved = pickle.loads(pickle.dumps(model))
+    for fitted, frame in ((model, X), (model, X.copy()), (saved, X)):
+        _, found = _disclosures(lambda fitted=fitted, frame=frame: fitted.predict(frame))
         assert not found
 
 
-def test_the_rating_table_marks_the_entries_the_data_do_not_determine(tmp_path):
-    """Row J (spline): f's level E and the E column of ``x:f`` are marked; nothing else is.
-
-    Mean-centred, every level of ``f`` reads the block's mean, which E moves,
-    so every level is marked.  In the workbook a mark is a shaded cell and a
-    note.
-    """
-    model = _row_j("spline", "fit")
-    for centering, levels in (("native", [4]), ("mean", [0, 1, 2, 3, 4])):
-        payload = model.rating_table_payload(ROW_J, Y, centering=centering, impact_bins=())
-        blocks = {block.name: block for block in payload.main_effects}
-        assert np.flatnonzero(blocks["f"].non_estimable).tolist() == levels
-        assert not np.any(blocks["x"].non_estimable)
-        (cells,) = payload.interactions
-        columns = list(cells.table.columns[1:])
-        marked = np.flatnonzero(np.any(cells.non_estimable, axis=0)).tolist()
-        assert [columns[j] for j in marked] == ["E"]
-        # every E cell away from x = 5 is marked
-        keys = cells.table.iloc[:, 0].tolist()
-        e = cells.non_estimable[:, columns.index("E")]
-        assert e.sum() >= len(keys) - 1
-
-    import openpyxl
-
-    path = tmp_path / "rating.xlsx"
-    model.export_rating_tables(path, ROW_J, Y, impact_bins=())
-    notes = [
-        cell.value
-        for sheet in openpyxl.load_workbook(path).worksheets
-        for row in sheet.iter_rows()
-        for cell in row
-        if isinstance(cell.value, str) and cell.value.startswith("Not determined")
-    ]
-    assert len(notes) == 2
-
-
-def test_the_aliased_columns_per_unit_blocks_are_marked():
-    """``x1`` and ``x2`` trade one for the other: each per-unit factor leans; ``f`` does not."""
-    X, y, features = _aliased()
-    model = _fit(X, y, features, family=superglm.families.poisson())
-    payload = model.rating_table_payload(X, y, impact_bins=())
-    blocks = {block.name: block for block in payload.main_effects}
-    assert blocks["x1"].non_estimable.tolist() == [True]
-    assert blocks["x2"].non_estimable.tolist() == [True]
-    assert not np.any(blocks["f"].non_estimable)
-
-
-def _poisson(X, features, interactions=(), **kwargs):
-    y = np.random.default_rng(913).poisson(2, len(X)).astype(float)
-    model = _fit(
-        X,
-        y,
-        features,
-        interactions,
-        family=superglm.families.poisson(),
-        selection_penalty=0.0,
-        **kwargs,
-    )
-    return model, y
-
-
-def _ordinal_frame():
-    levels = list("ABCDEFG")
-    code = np.tile(np.arange(7), 60)
-    X = pd.DataFrame(
-        {
-            "band": np.array(levels)[code],
-            "dup": code.astype(float),
-            "x": np.random.default_rng(9).uniform(size=len(code)),
-        }
-    )
-    band = OrderedCategorical(order=levels, base="first", basis=Spline(k=6))
-    return X, band
-
-
-def test_an_ordered_factors_native_table_marks_against_its_reference_level():
-    """The ordered factor's line is aliased with ``dup``: A, the reference at 1.0, is not marked.
-
-    Each other level's relativity is its contrast with A, which the aliased
-    slope moves, so B to G are marked.
-    """
-    X, band = _ordinal_frame()
-    model, y = _poisson(X, {"band": band, "dup": Numeric()})
-    payload = model.rating_table_payload(X, y, impact_bins=(), n_bins=5)
-    block = payload.main_effects[0]
-    assert block.table.iloc[0, 1] == 1.0
-    assert block.non_estimable.tolist() == [False] + [True] * 6
-
-
 @pytest.mark.pins_behaviour
-def test_an_ordered_factor_by_spline_surface_exports():
-    """Control (passes on master; at ce4a5b2f2 the export raised on the grid's scores)."""
-    X, band = _ordinal_frame()
-    model, y = _poisson(X, {"band": band, "dup": Numeric(), "x": Spline(k=5)}, [("band", "x")])
-    payload = model.rating_table_payload(X, y, impact_bins=(), n_bins=5)
-    assert [block.table.shape for block in payload.interactions] == [(5, 6)]
+def test_an_sz_fit_is_silent():
+    """Control (passes on master; the disclosure once crashed on these rows).
 
-
-def test_a_binned_entry_is_tested_as_its_rows_weighted_mean():
-    """A bin of ``x`` values -1, 1, 1: its factor averages the aliased line's rows, so it is marked.
-
-    The polynomial's linear part is aliased with ``dup``; at the bin's
-    midpoint, 0, it vanishes, but its mean over the bin's rows does not.
-    """
-    x = np.tile(np.arange(-2.0, 3.0), 60)
-    model, _ = _poisson(
-        pd.DataFrame({"x": x, "dup": x}), {"x": Polynomial(degree=2), "dup": Numeric()}
-    )
-    quoted = np.array([-1.0, 1.0, 1.0])
-    payload = model.rating_table_payload(
-        pd.DataFrame({"x": quoted, "dup": quoted}), np.ones(3), impact_bins=(), n_bins=1
-    )
-    assert payload.main_effects[0].non_estimable.tolist() == [True]
-
-
-def test_a_healthy_splines_binned_entries_are_not_marked():
-    """A penalised spline on an 8-valued covariate: each bin is a mean of training rows."""
-    local = np.random.default_rng(3)
-    x = local.integers(1, 9, 5000).astype(float)
-    y = local.poisson(np.exp(-1 + 0.1 * x)).astype(float)
-    model = _fit(pd.DataFrame({"x": x}), y, {"x": Spline()}, family=superglm.families.poisson())
-    payload = model.rating_table_payload(pd.DataFrame({"x": x}), y, impact_bins=())
-    block = payload.main_effects[0]
-    assert block.kind == "continuous"
-    assert block.non_estimable is None or not np.any(block.non_estimable)
-
-
-def test_a_polynomial_piece_is_marked_where_its_coefficients_lean():
-    """An unpenalised cubic spline aliased with ``x (x - 1/2)(x + 1/2)``: every piece leans.
-
-    On ``[-0.5, 0.5)`` the aliased cubic vanishes at the ends and the middle
-    but not at the thirds, which the four coefficients read.
-    """
-    x = np.linspace(-1.0, 1.0, 513)
-    X = pd.DataFrame({"x": x, "dup": x * (x - 0.5) * (x + 0.5)})
-    model, y = _poisson(
-        X,
-        {"x": Spline(kind="bs", knots=[-0.5, 0.5], boundary=(-1.0, 1.0)), "dup": Numeric()},
-        spline_penalty=0.0,
-    )
-    payload = model.rating_table_payload(X, y, impact_bins=(), continuous_kind="ppform")
-    block = payload.main_effects[0]
-    middle = block.table.iloc[:, 0].tolist().index("[-0.5, 0.5)")
-    assert block.non_estimable[middle]
-
-
-@pytest.mark.pins_behaviour
-def test_an_sz_levels_held_rows_read_the_population_curve_they_are_priced_at():
-    """Control (passes on master; before the sz rows were read through ``predict``'s own
-    scoring, the disclosure crashed on them).
-
-    Level E sits at x = 5 alone, so its line is free; ``predict`` prices E on the
-    population curve and says so (``SZ_POPULATION_PREDICTION``), so E at other x
-    leans on nothing and is not named again.
+    Level E sits at x = 5 alone; ``predict`` prices E on the population curve
+    and says so (``SZ_POPULATION_PREDICTION``).  A fit with a factor smooth is
+    not tested.
     """
     model = _fit(
         ROW_J,
@@ -536,7 +395,7 @@ def test_an_sz_levels_held_rows_read_the_population_curve_they_are_priced_at():
 
 @pytest.mark.parametrize("x_name", list(X_SPECS))
 def test_a_compact_fits_rows_are_tested_from_its_records(x_name):
-    """``retain_fit_state=False`` keeps no design; the test reads the two rank records only."""
+    """``retain_fit_state=False`` keeps no design but both rank records, saved and loaded too."""
     model = _fit(
         ROW_J,
         Y,
@@ -544,31 +403,27 @@ def test_a_compact_fits_rows_are_tested_from_its_records(x_name):
         [("x", "f")],
         retain_fit_state=False,
     )
-    mu, found = _disclosures(lambda: model.predict(ROW_J_NEW))
-    assert [w.rows.tolist() for w in found] == [[1, 2]]
-    np.testing.assert_allclose(mu, _master((x_name, "fit")), rtol=1e-9)
+    for fitted in (model, pickle.loads(pickle.dumps(model))):
+        mu, found = _disclosures(lambda fitted=fitted: fitted.predict(ROW_J_NEW))
+        assert [w.rows.tolist() for w in found] == [[1, 2]]
+        np.testing.assert_allclose(mu, _master((x_name, "fit")), rtol=1e-9)
 
 
 def test_the_shares_are_the_same_across_row_blocks(monkeypatch):
     """Rows formed in blocks of a few rows read the shares of one block (``prediction_shares``).
 
-    The plain terms and an ``sz`` term's held level, whose products are scored
-    per block, both cross the boundary; the scaling is per row, so the shares
-    agree to rounding and the same rows are named.
+    Spline, categorical, numeric and interaction terms cross the boundary; the
+    scaling is per row, so the shares agree to rounding and the same rows are
+    named.
     """
     from superglm.model import estimability_ops
 
+    X, y, features = _aliased()
     fixtures = [
         (_row_j("spline", "fit"), pd.concat([ROW_J, ROW_J_NEW], ignore_index=True)),
         (
-            _fit(
-                ROW_J,
-                Y,
-                {"x": Spline(n_knots=6)},
-                [FactorSmooth("x", group="f", basis="sz", k=6)],
-                method="fit_reml",
-            ),
-            pd.concat([ROW_J, ROW_J_NEW], ignore_index=True),
+            _fit(X, y, features, family=superglm.families.poisson()),
+            pd.concat([X, ALIASED_NEW], ignore_index=True),
         ),
     ]
     for model, frame in fixtures:
@@ -579,3 +434,251 @@ def test_the_shares_are_the_same_across_row_blocks(monkeypatch):
         # a share is at most one; the training rows read rounding either way
         np.testing.assert_allclose(blocked, whole, rtol=1e-12, atol=16 * 2.0**-53)
         assert np.array_equal(blocked > TOL, whole > TOL)
+
+
+# ------------------------------------------------------------ round-2 review reproducers
+
+
+def _duplicated(scale=1.0):
+    x = np.arange(-2.0, 3.0).repeat(50) * scale
+    return pd.DataFrame({"x": x, "dup": x})
+
+
+@pytest.mark.pins_behaviour
+def test_a_slotted_custom_feature_spec_fits_and_predicts():
+    """Control (passes on master; at b839308ef the fit raised on a slotted spec)."""
+
+    class SlottedNumeric:
+        __slots__ = ()
+        build = Numeric.build
+        transform = Numeric.transform
+        reconstruct = Numeric.reconstruct
+
+    X = pd.DataFrame({"x": np.arange(-2.0, 3.0).repeat(50)})
+    model = _fit(
+        X,
+        np.full(len(X), 2.0),
+        {"x": SlottedNumeric()},
+        family=superglm.families.poisson(),
+        selection_penalty=0.0,
+    )
+    mu, found = _disclosures(lambda: model.predict(X.iloc[:1]))
+    np.testing.assert_allclose(mu, [2.0], rtol=1e-9)
+    assert not found
+
+
+def test_a_row_at_the_float64_limit_is_warned_without_overflow():
+    """``dup = 1e307`` over columns of norm 3.2e-3: priced as master, warned, nothing overflows.
+
+    Each row is scaled by a power of two before its division by the column
+    scale, so neither the default nor ``over="raise"`` sees an overflow.
+    """
+    X = _duplicated(1e-4)
+    model = _fit(
+        X,
+        np.full(len(X), 2.0),
+        {"x": Numeric(), "dup": Numeric()},
+        family=superglm.families.poisson(),
+        selection_penalty=0.0,
+    )
+    new = pd.DataFrame({"x": [0.0], "dup": [1e307]})
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with np.errstate(all="raise"):
+            mu = model.predict(new)
+    np.testing.assert_allclose(mu, [2.0], rtol=1e-9)
+    assert [type(c.message).__name__ for c in caught] == ["NonEstimablePredictionWarning"]
+    assert caught[0].message.rows.tolist() == [0]
+    np.testing.assert_allclose(_shares(model, new), [np.sqrt(0.5)], rtol=1e-6)
+
+
+def test_the_warning_pickles_with_its_rows():
+    """A warning raised in a worker process reaches its parent whole (``__reduce__``)."""
+    X = _duplicated()
+    model = _fit(
+        X,
+        np.full(len(X), 2.0),
+        {"x": Numeric(), "dup": Numeric()},
+        family=superglm.families.poisson(),
+        selection_penalty=0.0,
+    )
+    _, (warning,) = _disclosures(lambda: model.predict(pd.DataFrame({"x": [0.0], "dup": [1.0]})))
+    restored = pickle.loads(pickle.dumps(warning))
+    assert type(restored) is type(warning)
+    assert restored.rows.tolist() == [0] and str(restored) == str(warning)
+
+
+def test_two_concurrent_predictions_each_warn(monkeypatch):
+    """No warning filter moves, so two threads predicting at once each get their warning."""
+    X = _duplicated()
+    model = _fit(
+        X,
+        np.full(len(X), 2.0),
+        {"x": Numeric(), "dup": Numeric()},
+        family=superglm.families.poisson(),
+        selection_penalty=0.0,
+    )
+    new = pd.DataFrame({"x": [0.0], "dup": [1.0]})
+    entered, leave = threading.Event(), threading.Event()
+    original = Numeric.transform
+
+    def transform(self, values):
+        if not entered.is_set():
+            entered.set()
+            assert leave.wait(10.0)
+        return original(self, values)
+
+    monkeypatch.setattr(Numeric, "transform", transform)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        worker = threading.Thread(target=model.predict, args=(new,))
+        worker.start()
+        assert entered.wait(10.0)
+        model.predict(new)
+        leave.set()
+        worker.join(10.0)
+    rows = [c.message.rows.tolist() for c in caught if hasattr(c.message, "rows")]
+    assert rows == [[0], [0]]
+
+
+@pytest.mark.pins_behaviour
+def test_an_sz_population_quote_of_an_unseen_level_is_priced():
+    """Control (passes on master at 0.91635282; at b839308ef ``unseen="error"`` raised)."""
+    model = _fit(
+        ROW_J,
+        Y,
+        {"x": Spline(n_knots=6)},
+        [FactorSmooth("x", group="f", basis="sz", k=6, unseen="error")],
+        method="fit_reml",
+    )
+    new = pd.DataFrame({"x": [4.0], "f": ["unseen"]})
+    mu, found = _disclosures(lambda: model.predict(new, random_effects="population"))
+    np.testing.assert_allclose(mu, [0.91635282], rtol=1e-7)
+    assert not found
+
+
+@pytest.mark.pins_behaviour
+def test_an_fs_fit_with_an_aliased_column_is_silent():
+    """Control (passes on master): a factor smooth's fit is not tested, conditional or population."""
+    local = np.random.default_rng(913)
+    v = local.uniform(0.0, 1.0, 2000)
+    X = pd.DataFrame({"x": v, "u": v, "g": local.choice(list("ABCDE"), len(v))})
+    model = _fit(
+        X,
+        local.poisson(2.0, len(X)).astype(float),
+        {"x": Numeric(), "u": Numeric()},
+        [FactorSmooth("x", group="g", basis="fs", k=5)],
+        method="fit_reml",
+        family=superglm.families.poisson(),
+        selection_penalty=0.0,
+        direct_solve="gram",
+    )
+    new = pd.DataFrame({"x": [0.2, 0.2], "u": [0.2, 0.8], "g": ["unseen", "unseen"]})
+    for mode in ("conditional", "population"):
+        _, found = _disclosures(lambda mode=mode: model.predict(new, random_effects=mode))
+        assert not found
+
+
+@pytest.mark.pins_behaviour
+def test_a_structured_fit_is_silent():
+    """Control (passes on master): a structured fit keeps no dense rank records, so it is silent."""
+    local = np.random.default_rng(952)
+    n = 10000
+    x = local.integers(-4, 5, n).astype(float)
+    g = local.integers(0, 80, n)
+    X = pd.DataFrame({"x": x, "dup": x, "g": g})
+    y = local.poisson(np.exp(0.01 * x + 0.1 * np.sin(g))).astype(float)
+    model = _fit(
+        X,
+        y,
+        {"x": Numeric(), "dup": Numeric(), "g": RandomEffect()},
+        method="fit_reml",
+        family=superglm.families.poisson(),
+        selection_penalty=0.0,
+        direct_solve="auto",
+    )
+    assert model.result.rank_info is None
+    mu, found = _disclosures(
+        lambda: model.predict(pd.DataFrame({"x": [0.0], "dup": [1.0], "g": [0]}))
+    )
+    assert np.all(np.isfinite(mu)) and not found
+
+
+def test_a_binned_spline_on_four_values_is_silent():
+    """An unpenalised spline on four values, quoted between them at 1.5.
+
+    The unbinned fit warns; the same fit on 256 bins is not tested and stays
+    silent, at the unbinned price.
+    """
+    X = pd.DataFrame({"x": np.tile([0.0, 1.0, 2.0, 3.0], 100)})
+    y = np.random.default_rng(913).poisson(2.0, len(X)).astype(float)
+    new = pd.DataFrame({"x": [1.5]})
+    prices = {}
+    for discrete in (False, True):
+        model = _fit(
+            X,
+            y,
+            {"x": Spline(kind="ps", k=8, knot_strategy="uniform")},
+            family=superglm.families.poisson(),
+            selection_penalty=0.0,
+            spline_penalty=0.0,
+            discrete=discrete,
+            n_bins=256,
+        )
+        prices[discrete], found = _disclosures(lambda model=model: model.predict(new))
+        assert bool(found) is (not discrete)
+    np.testing.assert_allclose(prices[True], prices[False], rtol=1e-9)
+
+
+@pytest.mark.pins_behaviour
+def test_the_rating_table_carries_no_marks():
+    """Control (passes on master): exact banding of a spline-by-level term exports, unmarked."""
+    local = np.random.default_rng(913)
+    xv = np.tile(np.arange(4.0).repeat(2), 100)
+    X = pd.DataFrame({"x": xv, "f": np.tile(["A", "B"], len(xv) // 2)})
+    y = local.poisson(2.0, len(X)).astype(float)
+    model = _fit(
+        X,
+        y,
+        {"x": Spline(kind="ps", k=8, knot_strategy="uniform"), "f": Categorical(base="first")},
+        [("x", "f")],
+        family=superglm.families.poisson(),
+        selection_penalty=0.0,
+        spline_penalty=0.0,
+    )
+    take = np.repeat(np.arange(len(X)), 1 + (xv == 0.0).astype(int))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        payload = model.rating_table_payload(
+            X.iloc[take],
+            y[take],
+            n_bins=1,
+            bin_strategy="exact",
+            impact_bins=(),
+            band_max_error=100.0,
+            band_se=100.0,
+        )
+    for block in (*payload.main_effects, *payload.interactions):
+        assert not hasattr(block, "non_estimable")
+
+
+def test_a_huge_row_over_tiny_columns_is_warned_without_overflow():
+    """Columns of scale ``1e-150`` quoted at ``dup = 1e170``: the share is ``sqrt(1/2)``, not NaN.
+
+    The row is scaled by a power of two before it is divided by the column
+    norms, so the warning is given and ``over="raise"`` finds nothing.
+    """
+    X = _duplicated(1e-150)
+    model = _fit(
+        X,
+        np.full(len(X), 2.0),
+        {"x": Numeric(), "dup": Numeric()},
+        family=superglm.families.poisson(),
+        selection_penalty=0.0,
+    )
+    new = pd.DataFrame({"x": [0.0], "dup": [1e170]})
+    with np.errstate(over="raise", invalid="raise", divide="raise"):
+        mu, found = _disclosures(lambda: model.predict(new))
+    assert [w.rows.tolist() for w in found] == [[0]]
+    np.testing.assert_array_equal(mu, base.predict_exact(model, new, warn=False))
+    np.testing.assert_allclose(_shares(model, new), [np.sqrt(0.5)], rtol=1e-6)

@@ -6,7 +6,6 @@ from os import PathLike
 from pathlib import Path
 from typing import BinaryIO
 
-import numpy as np
 import pandas as pd
 
 _TERM_COLUMNS = (
@@ -427,66 +426,6 @@ def _annotate_per_unit_offset_blocks(ws, main_effects) -> None:
         )
 
 
-# The fill of a relativity the training data do not determine (``non_estimable``).
-_NON_ESTIMABLE_FILL = "FFF2CC"
-
-
-def _non_estimable_note(keys) -> str:
-    """The sentence naming a block's entries the training data do not determine."""
-    keys = [str(key) for key in keys]
-    named = ", ".join(keys[:5]) + (", ..." if len(keys) > 5 else "")
-    return (
-        f"Not determined by the training data ({named}; shaded): the value is the fitted "
-        "model's, resting on how the fit split terms it cannot tell apart."
-    )
-
-
-def _shade(cell) -> None:
-    from openpyxl.styles import PatternFill
-
-    cell.fill = PatternFill(
-        start_color=_NON_ESTIMABLE_FILL, end_color=_NON_ESTIMABLE_FILL, fill_type="solid"
-    )
-
-
-def _annotate_non_estimable_blocks(ws, main_effects) -> None:
-    """Shade each main-effect relativity the data do not determine and name it in the note row.
-
-    Runs after the other annotations and appends to a note already there, so a
-    block's own evaluation rule stays first.
-    """
-    starts = _main_effect_start_columns(main_effects)
-    for idx, block in enumerate(main_effects):
-        marks = getattr(block, "non_estimable", None)
-        if marks is None or not np.any(marks):
-            continue
-        rows = np.flatnonzero(marks)
-        for row in rows:
-            _shade(ws.cell(row=_MAIN_EFFECT_HEADER_ROW + 1 + int(row), column=starts[idx] + 1))
-        note = _non_estimable_note(block.table.iloc[rows, 0].tolist())
-        cell = ws.cell(row=_MAIN_EFFECT_NOTE_ROW, column=starts[idx])
-        cell.value = note if cell.value is None else f"{cell.value} {note}"
-
-
-def _annotate_non_estimable_cells(ws, block, title_row: int) -> None:
-    """Shade an interaction block's cells the data do not determine and name them under its title."""
-    marks = getattr(block, "non_estimable", None)
-    if marks is None or not np.any(marks):
-        return
-    rows, columns = np.nonzero(marks)
-    keys = block.table.iloc[:, 0].tolist()
-    headers = list(block.table.columns[1:])
-    for row, column in zip(rows, columns, strict=True):
-        _shade(ws.cell(row=title_row + 3 + int(row), column=2 + int(column)))
-    ws.cell(
-        row=title_row + 1,
-        column=1,
-        value=_non_estimable_note(
-            [f"{keys[r]} / {headers[c]}" for r, c in zip(rows, columns, strict=True)]
-        ),
-    )
-
-
 def _autosize(ws) -> None:
     from openpyxl.utils import get_column_letter
 
@@ -542,7 +481,6 @@ def _write_rating_blocks(ws, main_effects, interactions) -> None:
     _annotate_piecewise_blocks(ws, main_effects)
     _annotate_per_unit_offset_blocks(ws, main_effects)
     _annotate_ppform_blocks(ws, main_effects)
-    _annotate_non_estimable_blocks(ws, main_effects)
 
     interaction_row = max_main_row + 3
     for block in interactions:
@@ -557,7 +495,6 @@ def _write_rating_blocks(ws, main_effects, interactions) -> None:
         ):
             for cell in row:
                 cell.number_format = "0.000000"
-        _annotate_non_estimable_cells(ws, block, interaction_row)
         interaction_row = end_row + 3
 
 
