@@ -551,6 +551,10 @@ def test_a_reml_stopped_early_shows_the_standard_errors_of_the_penalty_it_reache
     what the rule needs, so every level of the random effect shows the dense inverse's standard
     error at those parameters (rtol 1e-9); master blanked all seven.  The coefficient solve's
     own convergence is what gates the rule (``not_converged`` below).
+
+    The test fails on master, so it is not a marked control.  The convergence gate did not
+    make it pass: the rule showed these seven before the gate was written, and the gate, which
+    reads the coefficient solve and not REML's outer loop, only keeps them shown.
     """
     frame, y = _zero_claim_levels(900, levels="ABCDEFZ")
     model = _random_effect_model()
@@ -859,8 +863,13 @@ def test_a_fit_at_the_bar_shows_every_level_whichever_decomposition_it_records(
     its own rows only, by the same certificate.  Each value is the dense inverse's of the
     well-conditioned parametrisation, to the recorded condition squared times ``u`` (1.5e-2
     and 5e-2): what an inverse through a Gram of that condition is bounded by, whichever
-    decomposition a reader inverts.  A reader that takes only the Gram's certificate blanks
-    the levels with one kernel at 1.8e-7 and with every kernel at 1e-7.
+    decomposition a reader inverts.
+
+    A reader that takes only the Gram's certificate blanks the levels with every kernel at
+    1e-7, and at 1.8e-7 with the kernel that records the row factor.  With the kernel that
+    records the Gram, the 1.8e-7 fit kept without its design passes under that reader as
+    well.  Master blanks the levels on every row, so every case fails there and none is a
+    marked control.
     """
     x, z, frame, y, model, reference = _near_copy(perturbation, retain_fit_state=retain_fit_state)
     record = model.result.rank_info.augmented
