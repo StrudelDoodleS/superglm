@@ -142,6 +142,10 @@ def _weighted_residual_square(
         denominator = np.broadcast_to(phi, result.shape)
         for index in np.flatnonzero(unsafe):
             difference = float(residual[index])
+            if np.isnan(difference):
+                # A NaN mean (a null model with no fit) has no density.
+                result[index] = np.nan
+                continue
             if np.isfinite(difference):
                 factors = (float(weights[index]), difference, difference)
             else:

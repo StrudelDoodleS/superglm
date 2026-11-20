@@ -1416,6 +1416,38 @@ class TestNullModel:
         return ("binomial", "cauchit", y, offset), best.fun, 1e-9
 
     @staticmethod
+    def _missed_binomial_cloglog_offsets_40_apart():
+        from scipy.optimize import minimize_scalar
+
+        from superglm.links import _CLOGLOG_LINK_ETA_MAX
+
+        rng = np.random.default_rng(1)
+        offset = np.repeat([-20.0, 20.0], 200)
+        y = (rng.random(400) < np.where(offset > 0, 0.865, 0.0)).astype(float)
+
+        def deviance(b):
+            # The package's clips: eta into [-20, its cap], the probability into 1e-7.
+            eta = np.clip(np.atleast_1d(b)[:, None] + offset, -20.0, _CLOGLOG_LINK_ETA_MAX)
+            mu = np.clip(-np.expm1(-np.exp(eta)), 1e-7, 1.0 - 1e-7)
+            return -2.0 * np.sum(y * np.log(mu) + (1.0 - y) * np.log1p(-mu), axis=1)
+
+        grid = np.linspace(-80.0, 80.0, 160001)
+        start = grid[
+            np.argmin(
+                np.concatenate(
+                    [deviance(g) for g in np.split(grid[:-1], 100)] + [deviance(grid[-1])]
+                )
+            )
+        ]
+        best = minimize_scalar(
+            lambda b: float(deviance(b)[0]),
+            bounds=(start - 1e-3, start + 1e-3),
+            method="bounded",
+            options={"xatol": 1e-12},
+        )
+        return ("binomial", "cloglog", y, offset), best.fun, 1e-9
+
+    @staticmethod
     def _missed_poisson_sqrt():
         # The intercept -3 puts both groups' means on their responses, 9 and 1.
         return ("poisson", "sqrt", np.tile([9.0, 1.0], 50), np.tile([0.0, 2.0], 50)), 0.0, 0.0
@@ -1430,7 +1462,13 @@ class TestNullModel:
 
     @pytest.mark.parametrize(
         "case",
-        ["poisson_offsets_120_apart", "binomial_cauchit", "poisson_sqrt", "nb2_uniform_offsets"],
+        [
+            "poisson_offsets_120_apart",
+            "binomial_cauchit",
+            "binomial_cloglog_offsets_40_apart",
+            "poisson_sqrt",
+            "nb2_uniform_offsets",
+        ],
     )
     def test_null_model_reaches_the_minimum_scoring_missed(self, case):
         """Null fits that Fisher scoring left short, or at the wrong minimum, silently or not.
@@ -1444,6 +1482,10 @@ class TestNullModel:
           rounding there).
         - NB2/log with offsets uniform on -15 to 15 converged linearly from one
           side and warned at its step limit on a correct number.
+        - Binomial/cloglog with offsets 40 apart: Brent's bounded method, given
+          the bracket around the best candidate, settled on another plateau of
+          the clipped deviance, 647.85 against 134.37; it now starts from the
+          best candidate.
         """
         (family, link, y, offset), reference, rel = getattr(self, f"_missed_{case}")()
         metrics = self._null_metrics(family, y, offset, link=link)
@@ -1460,9 +1502,10 @@ class TestNullModel:
         16 times or more, which doubled the logit null fit's time against
         master's scoring at 678k rows. Under offsets uniform on -15 to 15 the
         NB2 step needs the observed information: Fisher scoring there converges
-        linearly and took 126 points. It pins master's cost; mutations: skip
-        the Newton path (all three), Fisher information in the step
-        (``nb2_wide``).
+        linearly and took 126 points. ``binomial`` and ``nb2`` pin master's
+        cost; ``nb2_wide`` is a fix, which master's 25 scoring points failed.
+        Mutations: skip the Newton path (all three), Fisher information in the
+        step (``nb2_wide``).
         """
         from superglm.links import LogitLink, LogLink
         from superglm.model.fit_ops import _compute_null_mu
@@ -1497,6 +1540,27 @@ class TestNullModel:
         _compute_null_mu(y, weights, offset, distribution, link, weight_semantics="prior")
         assert counts["points"] <= 8
         assert counts["deviance"] <= 4
+
+    def test_null_model_with_no_predictor_for_the_mean_is_nan(self):
+        """A null model whose link has no predictor for the mean response is NaN, with a warning.
+
+        A Gaussian log-link holdout with a mean of zero or below has no null
+        intercept: ``metrics()`` raised ``ValueError`` (an argmin of no
+        candidates), as the null statistics of ``fit()`` on such a response
+        did. Master returned NaN for the null figures.
+        """
+        rng = np.random.default_rng(0)
+        n = 200
+        offset = np.log(rng.uniform(0.2, 1.0, n))
+        X = pd.DataFrame({"x": rng.uniform(size=n)})
+        model = SuperGLM(family="gaussian", link="log", features={}, n_jobs=1)
+        model.fit(X, np.exp(0.3 + offset) + rng.normal(0.0, 0.1, n), offset=offset)
+        for holdout in (rng.normal(-0.2, 1.0, n), np.tile([-1.0, 1.0], n // 2)):
+            with pytest.warns(ConvergenceWarning, match="null model .* has no fit") as caught:
+                metrics = model.metrics(X, holdout, offset=offset)
+                assert np.isnan(metrics.null_deviance)
+                assert np.isnan(metrics.null_log_likelihood)
+            assert sum("has no fit" in str(w.message) for w in caught) == 1
 
     def test_null_model_that_stops_short_says_so(self, monkeypatch):
         """A null fit stopped short warns that the null figures are its last step's.

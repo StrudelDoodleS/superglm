@@ -342,12 +342,13 @@ def _random_effect_separation_hazard(model, X, y, sample_weight) -> str | None:
 _NULL_MAX_ITER = 100
 
 
-def _null_bracket(deviance, points: NDArray) -> tuple[float, float] | None:
-    """An interval holding a minimum of ``deviance``, from the best of ``points``.
+def _null_bracket(deviance, points: NDArray) -> tuple[float, float, float] | None:
+    """A bracket ``(lo, best, hi)`` holding a minimum of ``deviance``, from the best of ``points``.
 
-    The interval spans the lowest point's neighbours. A lowest point at an end
-    is walked outward with doubling steps until the deviance stops falling, or
-    is not finite; None after ``_NULL_MAX_ITER`` steps that all fell.
+    ``best`` is the lowest point and ``lo``, ``hi`` its neighbours. A lowest
+    point at an end is walked outward with doubling steps until the deviance
+    stops falling, or is not finite; None after ``_NULL_MAX_ITER`` steps that
+    all fell.
     """
     xs = np.unique(points)
     if xs.size == 1:
@@ -355,20 +356,50 @@ def _null_bracket(deviance, points: NDArray) -> tuple[float, float] | None:
     fs = [deviance(x) for x in xs]
     i = int(np.argmin(fs))
     if 0 < i < xs.size - 1:
-        return float(xs[i - 1]), float(xs[i + 1])
+        return float(xs[i - 1]), float(xs[i]), float(xs[i + 1])
     end, inner = (0, 1) if i == 0 else (-1, -2)
     x, f, step = xs[end], fs[end], 2.0 * (xs[end] - xs[inner])
     for _ in range(_NULL_MAX_ITER):
         trial = x + step
         f_trial = deviance(trial)
         if not f_trial < f:
-            return (
-                (float(trial), float(x - step / 2))
-                if step < 0
-                else (float(x - step / 2), float(trial))
-            )
+            ends = sorted((float(trial), float(x - step / 2)))
+            return ends[0], float(x), ends[1]
         x, f, step = trial, f_trial, 2.0 * step
     return None
+
+
+def _null_brent(deviance, bracket: tuple[float, float, float]):
+    """Brent's method on ``bracket``, started from its best point.
+
+    It runs on ``t = (b - best) / (hi - lo)``, so its absolute floor on the
+    step (SciPy's ``1e-11``) is a share of the bracket, the same in any units.
+    A bracket whose best point ties a neighbour, on a flat stretch of the
+    deviance, is searched by the bounded method instead.
+    """
+    from scipy.optimize import minimize_scalar
+
+    lo, best, hi = bracket
+    width = hi - lo
+
+    def scaled(t: float) -> float:
+        return deviance(best + t * width)
+
+    try:
+        found = minimize_scalar(
+            scaled,
+            bracket=((lo - best) / width, 0.0, (hi - best) / width),
+            method="brent",
+            options={"maxiter": _NULL_MAX_ITER},
+        )
+    except ValueError:
+        found = minimize_scalar(
+            scaled,
+            bounds=((lo - best) / width, (hi - best) / width),
+            method="bounded",
+            options={"xatol": 1e-12, "maxiter": _NULL_MAX_ITER},
+        )
+    return best + float(found.x) * width, bool(found.success)
 
 
 def _log_power_null_intercept(y, weights, offset, distribution, link) -> float | None:
@@ -513,10 +544,14 @@ def _compute_null_mu(
     where the deviance is convex in the intercept (a canonical link, or the log
     link of a power-variance or NB2 family) safeguarded Newton steps find it
     before Brent's method is needed.
+    The result is a minimisation that may stop above the true minimum under
+    extreme offsets (logit beyond about +-24, log beyond about +-71, where rows
+    sit at the predictor bound) or a non-convex link (sqrt, cauchit). Where the
+    link has no linear predictor for the weighted mean response (a Gaussian
+    log-link response with a mean of zero or below) the null means are NaN,
+    with a warning saying why.
     ``weight_semantics`` is accepted for the callers and does not change the fit.
     """
-    from scipy.optimize import minimize_scalar
-
     from superglm.distributions import Binomial, Gaussian, clip_mu
     from superglm.links import SqrtLink
     from superglm.solvers.mode_score import compensated_weighted_mean
@@ -559,7 +594,13 @@ def _compute_null_mu(
         return value if np.isfinite(value) else np.inf
 
     carried = offset[weights > 0.0]
-    eta_bar = float(link.link(np.atleast_1d(y_bar))[0])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        eta_bar = float(link.link(np.atleast_1d(y_bar))[0])
+    if not np.isfinite(eta_bar):
+        from superglm.diagnostics.convergence import warn_null_model_unavailable
+
+        warn_null_model_unavailable(type(link).__name__, y_bar)
+        return np.full(len(y), np.nan)
     start = eta_bar - float(np.average(offset, weights=weights))
     kind = _null_curvature_kind(distribution, link)
     if kind is not None:
@@ -571,16 +612,9 @@ def _compute_null_mu(
     points = np.concatenate([[start]] + [centre - quantiles for centre in centres])
     bracket = _null_bracket(deviance, points[np.isfinite(points)])
     if bracket is not None:
-        found = minimize_scalar(
-            deviance,
-            bounds=bracket,
-            method="bounded",
-            # Relative to the bracket, so the stop is the same in any units.
-            options={"xatol": 1e-12 * (bracket[1] - bracket[0]), "maxiter": _NULL_MAX_ITER},
-        )
-        if found.success:
-            return means(float(found.x))
-        b = float(found.x)
+        b, converged = _null_brent(deviance, bracket)
+        if converged:
+            return means(b)
     else:
         b = float(points[np.argmin([deviance(x) for x in points])])
 
