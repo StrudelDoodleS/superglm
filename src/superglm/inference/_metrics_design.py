@@ -353,13 +353,22 @@ def iter_dense_chunks(design: MetricsDesign) -> Iterator[tuple[int, int, NDArray
 
 
 def quadratic_form_diagonal(
-    design: MetricsDesign, matrix: NDArray, *, center: NDArray | None = None
+    design: MetricsDesign,
+    matrix: NDArray,
+    *,
+    center: NDArray | None = None,
+    root: NDArray | None = None,
 ) -> NDArray:
-    """Return row-wise ``(x - center) @ matrix @ (x - center)`` without retaining a dense design."""
+    """Return row-wise ``r' (matrix + root root') r``, ``r = x - center``, one pass, no dense design.
+
+    ``root`` adds a low-rank term as ``||r' root||^2`` rather than through its entries.
+    """
     result = np.empty(design.shape[0], dtype=np.float64)
     for start, stop, block in iter_dense_chunks(design):
         rows = block if center is None else block - center
         result[start:stop] = np.sum((rows @ matrix) * rows, axis=1)
+        if root is not None:
+            result[start:stop] += np.sum(np.square(rows @ root), axis=1)
     return result
 
 

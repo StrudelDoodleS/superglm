@@ -12,6 +12,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.special import gammaln
 
+from superglm._roundoff import SQRT_EPS
 from superglm._utils import weighted_row_sum
 from superglm._weight_units import (
     dispersion_standard_deviation,
@@ -61,7 +62,6 @@ from superglm.solvers.centered_system import (
     penalty_factor,
     weighted_mean_pair,
 )
-from superglm.solvers.identifiability import coordinates_identified
 from superglm.solvers.mode_score import corrected_two_pass_pair
 from superglm.solvers.rank import (
     RankDecomposition,
@@ -151,7 +151,7 @@ def _profiled_augmented_covariance(
     """Invert after profiling the intercept, then map back to raw coordinates.
 
     ``profiled_inverse`` is the profiled slopes' inverse when the caller has it
-    (``ModelMetrics._covariance_profiled_inverse``); else ``D + S`` is decomposed here.
+    (``ModelMetrics._reformed_inference``); else ``D + S`` is decomposed here.
     """
     if profiled_inverse is None:
         profiled_inverse = decompose_gram(data_gram + penalty).pseudo_inverse()
@@ -297,19 +297,50 @@ def _face_ranks(design: MetricsDesign, W: NDArray, root: NDArray, face: NDArray)
     return rows, data_gram, coefficient, profile
 
 
-def _coefficient_identified(
-    decomposition: RankDecomposition,
-    groups: list[GroupSlice],
-    active_groups: list[GroupSlice],
-    width: int,
-) -> NDArray:
-    """Which fitted coefficients a re-formed centred Hessian identifies (``solvers.identifiability``)."""
-    identified = np.zeros(width, dtype=bool)
-    original_by_name = {group.name: group for group in groups}
-    active_identified = coordinates_identified(decomposition)
-    for active_group in active_groups:
-        identified[original_by_name[active_group.name].sl] = active_identified[active_group.sl]
-    return identified
+def _free_basis(face: NDArray | None, functionals: NDArray | None) -> NDArray | None:
+    """An orthonormal basis of the coefficients ``G' beta = 0`` leaves free, on ``face`` if any.
+
+    ``functionals`` ``G`` (active coordinates, a column per constraint) are the fit's gauge,
+    ``face`` ``Z`` (orthonormal) a constrained fit's active face.  Both leave free ``Z c`` with
+    ``G' Z c = 0``: the right singular vectors of ``G_1' Z`` past its rank, ``G_1`` the
+    unit-normed constraints, whose singular values are the cosines of the angles between the
+    face and the constraints; one under ``sqrt(eps)`` of the largest is a direction both leave
+    free.  ``None`` when neither restricts.
+    """
+    if functionals is None or functionals.shape[1] == 0:
+        return face
+    basis = np.eye(functionals.shape[0]) if face is None else np.asarray(face, dtype=np.float64)
+    unit = functionals / np.linalg.norm(functionals, axis=0)
+    _, singular, right = np.linalg.svd(unit.T @ basis)
+    rank = int(np.count_nonzero(singular > SQRT_EPS * singular[0])) if singular.size else 0
+    return basis @ right[rank:].T
+
+
+def _fitted_columns(groups: list[GroupSlice], active_groups: list[GroupSlice]) -> NDArray:
+    """The fitted coordinates of the compact active groups' columns, in their order."""
+    original = {group.name: group for group in groups}
+    if not active_groups:
+        return np.zeros(0, dtype=np.intp)
+    return np.concatenate(
+        [np.arange(original[g.name].start, original[g.name].end) for g in active_groups]
+    ).astype(np.intp)
+
+
+def _design_rows(design: MetricsDesign, active_groups: list[GroupSlice]) -> DesignMatrix:
+    """``design`` as a grouped design, one dense block per term, for the owner's row passes.
+
+    A grouped design is passed as it is; an evaluated one's rows are formed once.
+    """
+    if isinstance(design, DesignMatrix):
+        return design
+    from superglm._group_matrix._group_matrix_core import DenseGroupMatrix
+
+    rows = np.asarray(design.toarray() if hasattr(design, "toarray") else design, dtype=np.float64)
+    return DesignMatrix(
+        [DenseGroupMatrix(rows[:, group.sl]) for group in active_groups],
+        n=rows.shape[0],
+        p=rows.shape[1],
+    )
 
 
 def _requires_wood_inference(model, active_groups: list[GroupSlice]) -> bool:
@@ -335,22 +366,6 @@ def _requires_wood_inference(model, active_groups: list[GroupSlice]) -> bool:
         if isinstance(spec, SplineCategorical | TensorInteraction):
             return True
     return False
-
-
-def _keeps_constrained_covariance(result) -> bool:
-    """Whether a fit's leverage and degrees of freedom are its shape constraints' active face's.
-
-    A QP fit whose shape rows bind records its active face on its rank record
-    (``RankInfo.face``, from the rows ``irls_direct._binding_rows`` reads as
-    binding at the fit).  Its leverage and degrees of freedom are the
-    equality-constrained fit's on that face, so the training rows, recognised
-    by content, read the fit's own record, and other rows re-form them on that
-    face.  Its covariance holds no row (``RankInfo.covariance_inverse``).
-    """
-    if getattr(result, "scop_inference", None) is not None:
-        return True
-    rank_info = getattr(result, "rank_info", None)
-    return rank_info is not None and getattr(rank_info, "face", None) is not None
 
 
 class ModelMetrics:
@@ -379,20 +394,30 @@ class ModelMetrics:
     design, which ``predict`` does not reproduce.  ``SuperGLM.summary``
     reports the fit's own statistics instead.
 
-    On the frame a model was fitted on, leverage and effective degrees of
-    freedom come from the fit itself, and so do the standardized residuals
-    and Cook's distance built on that leverage.  Equal copies of that frame,
-    or a pickled model, are recognised as the training rows only when the
-    model keeps a structured or shape-constrained covariance.  Otherwise
-    leverage is re-formed on the rows passed, which for a discrete fit can
-    differ slightly from its binned fit.  For a fit whose shape constraints
-    bind, the inverse re-formed for leverage and the degrees of freedom is
-    restricted to the fit's active face: with ``Z`` a basis of the
-    coefficients the binding rows leave free, it is
-    ``Z (Z' (X' W X + S) Z)^+ Z'`` on the rows passed, and with no row
-    binding ``Z = I``, the unconstrained fit's.  The covariance behind
-    standard errors and intervals holds no row: which rows bind is itself
-    estimated.
+    On the rows a model was fitted on, the object it was given or equal
+    copies of it (X, y, weights and offset by content), every standard error,
+    blank, effective degree of freedom and leverage is the fit's own: its
+    working weights, with the rows a separation withholds at zero, and its
+    published covariance, with the weak directions' term added to leverage
+    in low-rank form (``Identifiability.weak_root``).  A model released with
+    ``retain_fit_state=False`` keeps no working weights: on its own rows its
+    leverage is formed from the rows passed only when they reproduce them (a
+    fit with no binned term), and is otherwise refused.
+
+    On other rows the coefficients are the fit's, and so is whether each
+    estimate is finite.  The covariance is re-formed in the fit's gauge: with
+    ``B`` a basis of the coefficients its constraints ``G' beta = 0`` leave
+    free, ``B (B' H B)^+ B'`` for the penalised Hessian ``H`` of the rows
+    passed, at their own working weights.  A coefficient is blank when the
+    fit blanks it or when the null space of ``B' H B``, decided on those rows
+    as the fit's own record is (``solvers.identifiability``), reaches it.
+    For a fit whose shape constraints bind, the inverse re-formed for
+    leverage and the degrees of freedom is also restricted to the fit's
+    active face: with ``Z`` a basis of the coefficients the binding rows
+    leave free, it is ``Z (Z' (X' W X + S) Z)^+ Z'`` on the rows passed, and
+    with no row binding ``Z = I``, the unconstrained fit's.  The covariance
+    behind standard errors and intervals holds no row: which rows bind is
+    itself estimated.
     """
 
     def __init__(
@@ -463,20 +488,17 @@ class ModelMetrics:
                 own_frame=self._X is fit_X,
             )
         else:
-            # Equal copies of the training rows (after a pickle round trip) are recognised by a
-            # content fingerprint of X, y, weights and offset. Only a fit whose metrics always read
-            # its retained covariance (structured or shape-constrained) then reads the fit design;
-            # a dense fit re-forms everything on the supplied rows.
-            keeps_fit_covariance = retained_linear_state(
-                model
-            ) is not None or _keeps_constrained_covariance(self._result)
+            # The training rows, by identity or as equal copies (after a pickle round trip, say),
+            # recognised by a content fingerprint of X, y, weights and offset: either way they
+            # read the fit's own record. The fingerprint reads X once, as the identity check does,
+            # and only after the weights' and offset's digests match.
             self._fit_geometry_matches = bool(
                 self._uses_fit_design
                 and fit_weights is not None
                 and np.shape(fit_weights) == np.shape(self._weights)
                 and np.array_equal(np.asarray(fit_weights), self._weights)
             ) or bool(
-                keeps_fit_covariance
+                not self._uses_fit_design
                 and geometry_guard is not None
                 and geometry_guard.matches_training(
                     self._X, self._y, self._weights, self._offset, own_frame=self._X is fit_X
@@ -1043,20 +1065,21 @@ class ModelMetrics:
             W = self._fit_working_weights
         else:
             eta, mu = self._working_eta_mu
+            prior = self._geometry_prior_weights
+            if self._fit_geometry_matches:
+                # a released fit's own rows: the rows its separation withholds carry no weight
+                from superglm.model.separation_ops import withheld_weights
+
+                prior = withheld_weights(self._model, prior)
             W = fisher_working_weights(
                 distribution=self._family,
                 link=self._link,
                 mu=mu,
                 eta=eta,
-                sample_weight=self._geometry_prior_weights,
+                sample_weight=prior,
             )
 
         uses_fitted_rank = self._working_weights_match_fit(W)
-        # The training rows of a constrained fit, by identity or by content,
-        # read its face through its rank record below, as the fit itself does.
-        constrained_training_rows = (
-            _keeps_constrained_covariance(self._result) and self._fit_geometry_matches
-        )
         if self._reads_retained_covariance:
             fit_inference = self._model._fit_inference_info
             inverse = fit_inference["XtWX_inv"]
@@ -1092,23 +1115,8 @@ class ModelMetrics:
             self.__dict__["_coefficient_identified"] = inference_identified(fit_inference)
             return X_a, W, inverse, augmented, active_groups
 
-        # Re-formed on other rows or weights, a constrained fit's inverse is
-        # restricted to the face its binding rows leave free; ``None``
-        # (nothing binds, or no shape rows) is the unconstrained inverse.
-        face = getattr(rank_info, "face", None)
-        if not (self._uses_fit_design or constrained_training_rows):
-            selected_columns, active_groups = _selected_group_state(
-                self._result,
-                self._groups,
-                penalty=fitted_penalty(self._model),
-            )
-            X_a = EvaluationDesign(self._model, self._X, selected_columns)
-            inverse, augmented = self._reformed_inference(
-                X_a, active_groups, self._model._dm.group_matrices, W, face
-            )
-            return X_a, W, inverse, augmented, active_groups
-
         if uses_fitted_rank:
+            # the training rows, by identity or by content: the fit's record, its face included
             X_a, active_groups = _rank_active_state(self._model, rank_info)
             inverse = rank_info.coefficient_inverse()
             augmented = _rank_augmented_covariance(self._model, rank_info, active_groups)
@@ -1118,11 +1126,23 @@ class ModelMetrics:
             )
             return X_a, W, inverse, augmented, active_groups
 
-        _, active_groups = _selected_group_state(
+        # Re-formed on other rows or weights, a constrained fit's inverse is
+        # restricted to the face its binding rows leave free; ``None``
+        # (nothing binds, or no shape rows) is the unconstrained inverse.
+        face = getattr(rank_info, "face", None)
+        selected_columns, active_groups = _selected_group_state(
             self._result,
             self._groups,
             penalty=fitted_penalty(self._model),
         )
+        if not (self._uses_fit_design or self._fit_geometry_matches):
+            X_a = EvaluationDesign(self._model, self._X, selected_columns)
+            inverse, augmented = self._reformed_inference(
+                X_a, active_groups, self._model._dm.group_matrices, W, face
+            )
+            return X_a, W, inverse, augmented, active_groups
+
+        # the fit's own frame at other weights, or a fit without a rank record on its own rows
         X_a = _grouped_active_design(self._model, active_groups)
         inverse, augmented = self._reformed_inference(
             X_a, active_groups, self._dm.group_matrices, W, face
@@ -1133,9 +1153,10 @@ class ModelMetrics:
     def _reformed_inference(self, X_a, active_groups, group_matrices, W, face):
         """The coefficient inverse and profiled covariance re-formed on ``X_a`` at ``W``.
 
-        Which coefficients the re-formed centred Hessian ``D + S`` identifies is read off its
-        decomposition (``solvers.identifiability``); on a face that is the unconstrained one,
-        which a fit whose covariance holds no shape row also inverts.
+        Both are taken in the fit's gauge: on the coefficients its constraints ``G' beta = 0``
+        leave free (``_free_basis``), and on a constrained fit's face as well where its policy
+        holds it.  Which coefficients these rows identify is decided by the owner
+        (``_evaluation_identified``); the decomposition the covariance reads decides nothing.
         """
         lam2 = scale_penalties(fitted_lambda2(self._model), self._geometry_weight_exponent)
         penalty_terms = (group_matrices, self._groups, active_groups, lam2)
@@ -1146,45 +1167,131 @@ class ModelMetrics:
         data_rank = None if np.any(S_active) else _certified_data_rank(X_a, W, centered_data_gram)
         # one stacked root for the face's decompositions and the covariance's
         root = cache(partial(_active_penalty_root, *penalty_terms, reml_penalties=reml_penalties))
+        columns = _fitted_columns(self._groups, active_groups)
+        functionals = self._gauge_functionals(columns)
+        free = _free_basis(face, functionals)
         inverse, profile_rank = self._reformed_ranks(
-            X_a, W, XtWX, XtW1, centered_data_gram, S_active, data_rank, face, root
+            X_a, W, XtWX, XtW1, centered_data_gram, S_active, data_rank, free, root
         )
         # A root of the summed ``S`` cuts a term below ``u`` times another, which can be all
         # the curvature some direction has; each term's own root keeps it.
         unconstrained = (
             profile_rank
-            if face is None
+            if free is None
             else _certified_profile_rank(
                 X_a, W, centered_data_gram, XtW1, S_active, data_rank, root=root()
             )
         )
-        self.__dict__["_coefficient_identified"] = _coefficient_identified(
-            unconstrained, self._groups, active_groups, len(self._result.beta)
+        moments = (centered_data_gram, XtW1, S_active, data_rank, root)
+        self.__dict__["_coefficient_identified"] = self._evaluation_identified(
+            X_a, W, moments, unconstrained, functionals, active_groups, columns
         )
+        if face is None or getattr(self._result.rank_info, "covariance_policy", "face") == "face":
+            covariance = face_pseudo_inverse(profile_rank, free)
+        else:
+            # a fit whose covariance holds no shape row: its gauge alone restricts it
+            gauge = _free_basis(None, functionals)
+            covariance = (
+                unconstrained.pseudo_inverse()
+                if gauge is None
+                else face_pseudo_inverse(_face_ranks(X_a, W, root(), gauge)[3], gauge)
+            )
         augmented = _profiled_augmented_covariance(
-            centered_data_gram,
-            S_active,
-            XtW1,
-            float(np.sum(W)),
-            profiled_inverse=self._covariance_profiled_inverse(profile_rank, unconstrained, face),
+            centered_data_gram, S_active, XtW1, float(np.sum(W)), profiled_inverse=covariance
         )
         return inverse, augmented
 
-    def _covariance_profiled_inverse(self, profile_rank, unconstrained, face):
-        """The profiled slopes' inverse a re-formed covariance reads, by the fit's policy.
+    def _gauge_functionals(self, columns: NDArray) -> NDArray | None:
+        """The fit's constraints ``G' beta = 0`` on its active ``columns``, a column each.
 
-        ``profile_rank`` decomposes ``D + S`` off a face and ``Z'(D + S)Z`` on one, which
-        leverage and the degrees of freedom read. A fit whose covariance holds no shape row
-        (``RankInfo.covariance_inverse``) inverts ``D + S`` itself, ``unconstrained``, factored
-        from the stacked penalty root as the face's is (``_face_ranks``); a record saved before
-        keeps the face's, ``Z (Z'(D + S)Z)^+ Z'``.
+        A published gauge's functionals (``identifiability.Gauge``); without one, the
+        coordinates the fit holds at zero: its record's aliases, or a record saved before the
+        explained decision's blanks.  A coordinate a separation reaches is not held (the fit
+        walked it) and stays blank.  ``None`` when the fit holds nothing.
         """
-        if face is None:
-            return profile_rank.pseudo_inverse()
-        rank_info = getattr(self._result, "rank_info", None)
-        if getattr(rank_info, "covariance_policy", "face") == "face":
-            return face_pseudo_inverse(profile_rank, face)
-        return unconstrained.pseudo_inverse()
+        inference = self._model._fit_inference_info
+        record = inference.get("identifiability")
+        if record is not None and record.gauge is not None:
+            functionals = np.asarray(record.gauge.functionals, dtype=np.float64)[columns]
+            functionals = functionals[:, np.any(functionals != 0.0, axis=0)]
+            return functionals if functionals.shape[1] else None
+        if record is not None:
+            held = np.asarray(
+                [alias.coordinate for alias in record.aliases if alias.coordinate is not None],
+                dtype=np.intp,
+            )
+        else:
+            flags = inference_identified(inference)
+            held = np.zeros(0, np.intp) if flags is None else np.flatnonzero(~np.asarray(flags))
+        positions = np.flatnonzero(np.isin(columns, held))
+        if not positions.size:
+            return None
+        functionals = np.zeros((len(columns), positions.size))
+        functionals[positions, np.arange(positions.size)] = 1.0
+        return functionals
+
+    def _evaluation_identified(
+        self, X_a, W, moments, unconstrained, functionals, active_groups, columns
+    ) -> NDArray:
+        """The fit's blanks, and every coordinate these rows leave undetermined in its gauge.
+
+        The coefficients are the fit's and so is whether each estimate exists, so its blanks
+        stay.  The rows leave undetermined the null space of the Hessian restricted to the
+        gauge, ``null(B' H B) = null(H) cap null(G')`` mapped by ``B``, which is the null space
+        of ``H + G_1 G_1'``, ``G_1`` the constraints scaled to unit curvature in the Jacobi
+        coordinates of ``D + S``.  Its decomposition, certified by the rows where its Gram
+        cannot be (``_certified_profile_rank``), leaves undecided directions only where it is
+        near singular (``state_ops._dense_base``); the owner decides them from the rows, at
+        these working weights and then at unit weight on the positive-weight rows
+        (``solvers.identifiability.decide_identifiability``).  The coefficients do not move,
+        so every coordinate a null direction reaches is blank.
+        """
+        from superglm.model.state_ops import _dense_base
+        from superglm.solvers.identifiability import TruncatedDecomposition, decide_identifiability
+
+        fit = inference_identified(self._model._fit_inference_info)
+        identified = (
+            np.ones(len(self._result.beta), dtype=bool)
+            if fit is None
+            else np.array(fit, dtype=bool, copy=True)
+        )
+        data_gram, xtw1, penalty, data_rank, root = moments
+        decomposition = unconstrained
+        if functionals is not None:
+            scale = np.sqrt(np.maximum(np.diag(data_gram + penalty), 0.0))
+            safe = np.where(scale > 0.0, scale, 1.0)
+            constraints = functionals / np.linalg.norm(functionals / safe[:, None], axis=0)
+            penalty = penalty + constraints @ constraints.T
+            decomposition = _certified_profile_rank(
+                X_a, W, data_gram, xtw1, penalty, data_rank, root=np.vstack((root(), constraints.T))
+            )
+        width = data_gram.shape[0]
+        base = _dense_base(
+            decomposition, np.diag(data_gram), X_a.shape[0], lambda: data_gram + penalty
+        )
+        if base.null_vectors.shape[1] == 0:
+            return identified
+        record = decide_identifiability(
+            base,
+            columns=columns,
+            width=len(identified),
+            groups=active_groups,
+            design=_design_rows(X_a, active_groups),
+            W=W,
+            data_diagonal=np.diag(data_gram),
+            data_apply=lambda vectors: data_gram @ vectors,
+            penalty=lambda vectors: (penalty @ vectors, np.abs(penalty) @ np.abs(vectors)),
+            specs={**self._model._specs, **self._model._interaction_specs},
+            # held at no coordinate: every coordinate a null direction reaches is blank
+            published=TruncatedDecomposition(
+                null_vectors=np.zeros((width, 0)),
+                rank=width,
+                column_scale=np.ones(width),
+                pre_truncation_condition=1.0,
+            ),
+            support=(self._weights > 0.0).astype(np.float64),
+        )
+        return identified & record.coefficient_identified()
 
     def _reformed_ranks(
         self, X_a, W, XtWX, XtW1, centered_data_gram, S_active, data_rank, face, penalty_root
@@ -1305,6 +1412,13 @@ class ModelMetrics:
         constrained fit's active face evaluates them on the rows projected on it
         (``_face_projection``).
         """
+        if self._dm is None and getattr(self._model, "_discrete", False):
+            raise RuntimeError(
+                "retain_fit_state=False released the working weights of a fit on binned rows, "
+                "which its leverage reads and the exact rows passed do not reproduce; refit "
+                "with retain_fit_state=True for leverage, standardized residuals and Cook's "
+                "distance"
+            )
         X_a, W, _, augmented, _ = self._active_info
         W = np.asarray(W, dtype=np.float64)
         sum_w = float(np.sum(W))
@@ -1330,20 +1444,18 @@ class ModelMetrics:
                 # covariance, which holds no shape row.
                 slopes = rank_info.augmented_inverse()
             root = None
-            if rank_info is not None and rank_info.face is None and self._reads_retained_covariance:
+            reads_record = self._reads_retained_covariance or self._working_weights_match_fit(W)
+            if rank_info is not None and rank_info.face is None and reads_record:
                 record = getattr(rank_info, "identifiability", None)
                 root = None if record is None else record.weak_root(rank_info.selected_columns)
             if root is not None:
                 # the weak directions' term as ``(x' P U)^2``, never through their ``1 / C``
-                # entries (``Identifiability.weak_root``)
+                # entries (``Identifiability.weak_root``), in the same pass
                 slopes = cast("RankInfo", rank_info).covariance_inverse(weak=False)
             center = weighted_center(X_a, W)
-            h = W / sum_w + W * quadratic_form_diagonal(X_a, slopes, center=center)
-            if root is not None:
-                for start, stop, block in iter_dense_chunks(X_a):
-                    h[start:stop] += W[start:stop] * np.sum(
-                        np.square((block - center) @ root[1:]), axis=1
-                    )
+            h = W / sum_w + W * quadratic_form_diagonal(
+                X_a, slopes, center=center, root=None if root is None else root[1:]
+            )
         return np.clip(h, 0.0, 1.0)
 
     @property

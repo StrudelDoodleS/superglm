@@ -1267,9 +1267,11 @@ class SuperGLM:
         computed from the model's predictions on ``X``, the values ``predict``
         returns.  They do not depend on object identity: equal copies of the
         training data and a saved and reloaded model give the same values as
-        the objects the model was fitted on.  Leverage-based diagnostics do
-        depend on it.  On the fit's own objects, ``leverage``, the standardized
-        residuals and Cook's distance read the fit's own geometry; see the
+        the objects the model was fitted on.  So do the standard errors and
+        leverage-based diagnostics: on the training rows, the fit's own objects
+        or equal copies of them, ``leverage``, the standardized residuals,
+        Cook's distance and the standard errors read the fit's own geometry; on
+        other rows they are re-formed in the fit's gauge; see the
         :class:`ModelMetrics` notes.
 
         :meth:`summary` instead reports the fit's own statistics from its

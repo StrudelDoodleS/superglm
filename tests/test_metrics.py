@@ -728,11 +728,12 @@ class TestMetricsCaching:
         np.testing.assert_allclose(metrics._mu, model.predict(X), rtol=0.0, atol=0.0)
 
     def test_evaluation_aliases_override_fit_time_estimability(self):
-        """Rank loss on evaluation rows blanks the alias; the column it duplicates keeps its SE.
+        """Rank loss on evaluation rows blanks every coordinate the alias reaches.
 
-        ``x2`` absorbs the alias (the later column); ``x1``'s standard error is the
-        evaluation rows' fit without ``x2``, ``sqrt(phi / sum (x1 - mean)^2)``.  Mutation:
-        master blanked both.
+        The coefficients are the fit's, which holds neither column at zero, and these rows
+        determine only ``beta1 + beta2``: ``x1`` and ``x2`` are both blank (the owner's reach
+        test on the rows' null space, ``solvers.identifiability``).  The hat matrix is the
+        rows' own, of rank 1 + one slope.
         """
         rng = np.random.default_rng(20260716)
         x1 = rng.normal(size=240)
@@ -749,9 +750,8 @@ class TestMetricsCaching:
         metrics = model.metrics(X_eval, 0.5 + 0.5 * x1)
         rows = {row.name: row for row in metrics._build_coef_rows()}
 
-        assert not rows["x2"].estimable and np.isnan(rows["x2"].se)
-        alone = np.sqrt(model.result.phi / np.sum((x1 - x1.mean()) ** 2))
-        assert rows["x1"].estimable and rows["x1"].se == pytest.approx(alone, rel=1e-8)
+        for name in ("x1", "x2"):
+            assert not rows[name].estimable and np.isnan(rows[name].se)
         # the influence diagonal sums to the edf with the intercept: 1 + one slope.
         # The alias is truncated, so the retained slope block is one-dimensional
         # and each row's quadratic form rounds within 8 u of its value; the sum
@@ -775,10 +775,9 @@ class TestMetricsCaching:
         metrics = model.metrics(X_eval, 1.0 + 2.0 * x)
         rows = {row.name: row for row in metrics._build_coef_rows()}
 
-        # ``x2`` absorbs the alias at every scale; ``x1`` is the fit without it
-        assert not rows["x2"].estimable and np.isnan(rows["x2"].se)
-        alone = np.sqrt(model.result.phi / np.sum((x - x.mean()) ** 2))
-        assert rows["x1"].estimable and rows["x1"].se == pytest.approx(alone, rel=1e-8)
+        # the alias reaches both columns at every scale (Jacobi-scaled, it is ``(1, -1) / sqrt 2``)
+        for name in ("x1", "x2"):
+            assert not rows[name].estimable and np.isnan(rows[name].se)
         # the influence diagonal sums to the edf with the intercept: 1 + one slope.
         # The alias is truncated, so the retained slope block is one-dimensional
         # and each row's quadratic form rounds within 8 u of its value; the sum
@@ -3526,12 +3525,12 @@ def _hat_and_edf(design, W, penalty):
     return hat, edf, hat_gap, edf_gap
 
 
-def test_equal_copy_of_dense_discrete_rows_uses_one_exact_geometry():
-    """A dense fit keeps no covariance for rows it did not fit, and an equal copy of
-    the training rows is such a frame: leverage and edf come together from the exact
-    public design, the Fisher weights of its exact means and the fitted penalty,
-    never with the binned fit's working weights or edf.  The live frame keeps the fit
-    geometry: the binned design, its working weights and its retained edf."""
+def test_equal_copy_of_dense_discrete_rows_reads_the_binned_fit_geometry():
+    """An equal copy of a binned dense fit's training rows is its training rows: leverage
+    and edf are the fit's, from the binned design, its working weights and its retained
+    edf, as on the live frame, while the means behind the deviance stay the exact
+    predictions.  The exact public design's leverage and edf, which a copy read at
+    ``253c6d353``, differ from the fit's far beyond either evaluation's gap."""
     from superglm.inference.covariance import _active_penalty_matrix
     from superglm.model.fit_state import fitted_lambda2
 
@@ -3562,16 +3561,15 @@ def test_equal_copy_of_dense_discrete_rows_uses_one_exact_geometry():
         exact, model.predict(X), penalty
     )
     copy = model.metrics(X.copy(), y.copy())
-    np.testing.assert_array_less(np.abs(copy.leverage - exact_hat), exact_hat_gap + tiny)
-    assert abs(np.sum(copy._influence_edf[0]) - exact_edf) <= exact_edf_gap
-
     live = model.metrics(X, y)
     fit_hat, fit_edf, fit_hat_gap, fit_edf_gap = _hat_and_edf(
         model._dm.toarray(), live._active_info[1], penalty
     )
-    np.testing.assert_array_less(np.abs(live.leverage - fit_hat), fit_hat_gap + tiny)
-    assert abs(np.sum(live._influence_edf[0]) - fit_edf) <= fit_edf_gap
-    np.testing.assert_array_equal(live._influence_edf[0], model._fit_inference_info["edf"])
+    for metrics in (live, copy):
+        np.testing.assert_array_less(np.abs(metrics.leverage - fit_hat), fit_hat_gap + tiny)
+        assert abs(np.sum(metrics._influence_edf[0]) - fit_edf) <= fit_edf_gap
+        np.testing.assert_array_equal(metrics._influence_edf[0], model._fit_inference_info["edf"])
+    np.testing.assert_array_equal(copy._mu, model.predict(X))
 
     # The binned and exact geometries differ far beyond either evaluation's gap.
     assert np.any(np.abs(exact_hat - fit_hat) > exact_hat_gap + fit_hat_gap)

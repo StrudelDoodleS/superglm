@@ -123,6 +123,27 @@ def test_ordinary_metrics_use_compact_inference_after_fit_state_release():
     np.testing.assert_allclose(released_metrics._influence_edf[1], compact["edf1"])
 
 
+def test_a_released_binned_fit_refuses_leverage_its_exact_rows_cannot_reproduce():
+    """A binned fit released with ``retain_fit_state=False`` keeps no working weights, and its
+    exact rows do not reproduce the binned ones its leverage reads: leverage, and Cook's
+    distance built on it, say so, while the standard errors stay the fit's.  At
+    ``253c6d353`` leverage was formed at the exact rows' weights against the binned fit's
+    covariance and returned.  Mutation: the released fit's leverage on any rows it matches.
+    """
+    X, y, sample_weight = _sample_data(n=400)
+    features = {"age": Spline(n_knots=8), "density": Numeric()}
+    kwargs = dict(family="poisson", selection_penalty=0.0, discrete=True, features=features)
+    retained = SuperGLM(**kwargs).fit(X, y, sample_weight=sample_weight)
+    released = SuperGLM(**kwargs, retain_fit_state=False).fit(X, y, sample_weight=sample_weight)
+    metrics = released.metrics(X, y, sample_weight=sample_weight)
+    for name in ("leverage", "cooks_distance"):
+        with pytest.raises(RuntimeError, match="binned rows"):
+            getattr(metrics, name)
+    expected = retained.metrics(X, y, sample_weight=sample_weight).coefficient_se_raw
+    for name, values in metrics.coefficient_se_raw.items():
+        np.testing.assert_array_equal(values, expected[name])
+
+
 def test_released_metrics_reuse_compact_inference_for_equal_fit_geometry():
     X, y, sample_weight = _sample_data(n=240)
     model = _model(retain_fit_state=False).fit(X, y, sample_weight=sample_weight)

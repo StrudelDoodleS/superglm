@@ -959,6 +959,138 @@ def test_a_near_duplicate_column_is_fitted_as_mgcv_fits_it():
     assert model.result.effective_df == pytest.approx(oracle["edf"], rel=1e-6)
 
 
+def test_a_near_duplicates_leverage_is_the_published_fits_on_its_rows_and_their_copies():
+    """The rows and equal copies of them give one leverage, which sums to mgcv's EDF.
+
+    Leverage is the hat diagonal of the published fit, the weak direction included, so its
+    sum is the fit's EDF: mgcv's 11.3156 to the ``1e-6`` the direction's curvature is read to
+    (``test_a_near_duplicate_column_is_fitted_as_mgcv_fits_it``).  The weak direction's term is
+    read as ``(r' P U)^2``; through the dense covariance's ``1 / C`` entries (``C`` about
+    ``2e-13``) it carries their rounding, so at ``253c6d353`` the rows' own leverage summed to
+    12.23, and an equal copy, re-formed on the solver's truncated inverse, to 10.32.
+    Mutations: the weak root read only for a released fit; copies recognised only for
+    structured fits.
+    """
+    fixture = json.loads((FIXTURES / "mgcv_near_duplicate_and_aliased_columns.json").read_text())
+    oracle = fixture["near_duplicate"]
+    X, y = _near_duplicate_frame(oracle["d"])
+    model = SuperGLM(
+        family="gaussian", features={"x1": Numeric(), "x2": Numeric(), "z": Spline(n_knots=8)}
+    )
+    model.lambda2 = oracle["lambda"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y, tol=1e-12, max_iter=500)
+    own, copy = model.metrics(X, y), model.metrics(X.copy(), y.copy())
+    np.testing.assert_array_equal(copy.leverage, own.leverage)
+    assert float(np.sum(own.leverage)) == pytest.approx(oracle["edf"], rel=1e-6)
+    np.testing.assert_array_equal(copy.coefficient_se["x1"], own.coefficient_se["x1"])
+
+
+# --------------------------------------------- rows other than the fit's, in its gauge
+def _gauge_fit(columns: dict[str, np.ndarray]):
+    """A Gaussian fit of unpenalised numeric columns (``x2 = x1`` is held by the gauge)."""
+    rng = np.random.default_rng(3)
+    y = 1.0 + columns["x1"] + rng.normal(size=len(columns["x1"]))
+    model = SuperGLM(
+        family="gaussian", selection_penalty=0.0, features={name: Numeric() for name in columns}
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(pd.DataFrame(columns), y)
+    return model
+
+
+def _gauge_oracle(model, frame) -> tuple[np.ndarray, float]:
+    """``B (B'HB)^+ B'``'s diagonal on ``frame`` and the condition of ``B'HB`` on its range.
+
+    ``H = A'A`` (a Gaussian identity fit's Fisher weights are one, the columns unpenalised),
+    ``A = [1, X]`` scored as ``predict`` does, and ``B`` spans the coefficients the fit's gauge
+    leaves free: every coordinate but the ones it holds at zero.  An eigenvalue of ``B'HB``
+    under ``n u`` of the largest is its null space, whose coordinates are blank; the others'
+    variances are those of every generalised inverse.
+    """
+    A = _design_rows(model, frame)
+    held = 1 + np.flatnonzero(~np.asarray(model._fit_inference_info["coefficient_identified"]))
+    B = np.eye(A.shape[1])[:, np.setdiff1d(np.arange(A.shape[1]), held)]
+    values, vectors = np.linalg.eigh(B.T @ (A.T @ A) @ B)
+    kept = values > len(A) * U * values[-1]
+    inverse = (vectors[:, kept] / values[kept]) @ vectors[:, kept].T
+    return np.diag(B @ inverse @ B.T), float(values[-1] / values[kept][0])
+
+
+def _raw_se(model, frame) -> np.ndarray:
+    metrics = model.metrics(frame, np.zeros(len(frame)))
+    return np.r_[
+        metrics.intercept_se_raw,
+        [metrics.coefficient_se_raw[name][0] for name in frame.columns],
+    ]
+
+
+@pytest.mark.parametrize("correlation", [0.0, 0.5], ids=["identity", "correlated"])
+def test_rows_that_resolve_a_training_alias_read_the_covariance_in_the_fits_gauge(correlation):
+    """Training ``x2 = x1``, held by the gauge at ``beta2 = 0``; rows that separate the two.
+
+    The coefficients are the fit's, so ``x2`` stays blank, and the covariance is the fixed
+    gauge's, ``B (B'HB)^+ B'`` (w5m2's counterexample: with the slopes' Hessian ``I`` the fixed
+    gauge's ``var(beta1)`` is 1 where the oblique ``P H^+ P'`` gives 2; correlated at 0.5 it is
+    1 where ``H^+`` gives 4/3), to ``10 kappa n u`` of the oracle's variance.  At
+    ``253c6d353`` these rows printed x2's SE and, correlated, ``H^+``'s x1.  Mutations: no
+    gauge restriction; the fit's blanks dropped.
+    """
+    rng = np.random.default_rng(1)
+    x1 = rng.normal(size=200)
+    model = _gauge_fit({"x1": x1, "x2": x1.copy()})
+    assert model._fit_inference_info["coefficient_identified"].tolist() == [True, False]
+    # rows whose centred slopes have the Gram ``[[1, c], [c, 1]]``
+    a, b = np.array([1.0, -1.0, 1.0, -1.0]) / 2.0, np.array([1.0, 1.0, -1.0, -1.0]) / 2.0
+    frame = pd.DataFrame({"x1": a, "x2": correlation * a + np.sqrt(1.0 - correlation**2) * b})
+    variance, condition = _gauge_oracle(model, frame)
+    se = _raw_se(model, frame)
+    assert np.isnan(se[2]) and np.all(np.isfinite(se[:2]))
+    np.testing.assert_allclose(se[:2] ** 2, variance[:2], rtol=10 * condition * len(frame) * U)
+
+
+@pytest.mark.parametrize(
+    ("training", "evaluation", "blank"),
+    [
+        ("aliased", {"x3": "x1"}, [1, 2, 3]),
+        ("aliased", {"x3": "x2"}, [2]),
+        ("full", {"x3": "x1"}, [1, 3]),
+    ],
+    ids=["new-alias-in-the-gauge", "alias-the-gauge-holds", "new-alias"],
+)
+def test_rows_that_introduce_an_alias_blank_what_it_reaches_in_the_fits_gauge(
+    training, evaluation, blank
+):
+    """Rows on which one column copies another: blank where ``null(B'HB)`` reaches.
+
+    The rows leave undetermined ``null(H) cap null(G')``, not the difference of the two null
+    spaces (w5m2): beside a training gauge holding ``beta2 = 0``, ``x3 = x1`` blanks x1 and x3,
+    and ``x3 = x2`` blanks nothing new, since the gauge already holds that direction, so x3
+    keeps the gauge's SE.  A full-rank fit's ``x3 = x1`` blanks both, since the coefficients
+    do not move to hold either at zero.  Every other SE is the oracle's ``B (B'HB)^+ B'``.  At
+    ``253c6d353`` the rows' own decomposition blanked one pivot of each new alias and none of
+    the fit's, and blanked x3 beside the gauge.  Mutations: the restricted null space read
+    off ``H`` alone; the owner's decision skipped.
+    """
+    rng = np.random.default_rng(1)
+    x1, other, x3 = rng.normal(size=(3, 200))
+    model = _gauge_fit({"x1": x1, "x2": x1.copy() if training == "aliased" else other, "x3": x3})
+    e = rng.normal(size=(3, 400))
+    columns = {"x1": e[0], "x2": e[1], "x3": e[2]}
+    for name, source in evaluation.items():
+        columns[name] = columns[source]
+    frame = pd.DataFrame(columns)
+    se = _raw_se(model, frame)
+    assert np.flatnonzero(np.isnan(se)).tolist() == blank
+    variance, condition = _gauge_oracle(model, frame)
+    shown = np.setdiff1d(np.arange(4), blank)
+    np.testing.assert_allclose(
+        se[shown] ** 2, variance[shown], rtol=10 * condition * len(frame) * U
+    )
+
+
 def _three_column_frame(d: float):
     """Sol's review case: ``b = a + d u`` on integer columns, an exact alias at float64."""
     rng = np.random.default_rng(42)

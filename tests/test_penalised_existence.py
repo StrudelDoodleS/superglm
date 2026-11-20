@@ -162,6 +162,50 @@ def test_a_reference_level_with_every_response_zero_has_no_standard_error_but_a_
     np.testing.assert_allclose(published, oracle, rtol=1e-10)
 
 
+def test_equal_copies_of_the_separated_rows_read_the_fits_own_record():
+    """``metrics`` on equal copies of C3's rows is ``metrics`` on the rows themselves.
+
+    The copies are the training rows by content, so they read the fit's record: f and the
+    intercept, which the separation moves, have no standard error, every other number is the
+    one the rows' own object gives, and E's withheld rows have zero leverage.  At
+    ``253c6d353`` a dense fit re-formed everything on a copy and printed f's SE (1.08e5) from
+    the walked fit.  Mutation: recognising copies only for structured fits.
+    """
+    X, y, kept = _reference_level_frame()
+    model = _fit("poisson", {"f": Categorical(), "x": Spline(n_knots=8)}, X, y, method="fit_reml")
+    own, copy = model.metrics(X, y), model.metrics(X.copy(), y.copy())
+    assert np.all(np.isnan(copy.coefficient_se["f"])) and np.isnan(copy.intercept_se)
+    np.testing.assert_array_equal(copy.coefficient_se["x"], own.coefficient_se["x"])
+    np.testing.assert_array_equal(copy.leverage, own.leverage)
+    np.testing.assert_array_equal(copy._influence_edf[0], own._influence_edf[0])
+    assert np.all(copy.leverage[~kept] == 0.0)
+
+
+def test_a_released_separated_fit_gives_its_withheld_rows_no_leverage():
+    """``retain_fit_state=False`` keeps no working weights: on its own rows leverage is formed
+    from the rows passed, with the rows the separation withholds at zero weight, as the
+    retained fit's are.  The other rows' leverage is the retained fit's to the rounding of
+    predicting the linear predictor again (``n u`` of the predictor, times the largest
+    leverage).  At ``253c6d353`` E's rows read their walked working weights: leverage about
+    1e-15, 1e-13 of a kept row's.  Mutation: the released fit's own rows without the mask.
+    """
+    X, y, kept = _reference_level_frame()
+    features = {"f": Categorical(), "x": Spline(n_knots=8)}
+    retained = _fit("poisson", features, X, y, method="fit_reml")
+    released = SuperGLM(
+        family="poisson", features=features, selection_penalty=0.0, retain_fit_state=False
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        released.fit_reml(X, y)
+    leverage = released.metrics(X, y).leverage
+    assert np.all(leverage[~kept] == 0.0)
+    reference = retained.metrics(X, y).leverage
+    eta = np.log(retained.predict(X))
+    tolerance = len(y) * U * float(np.max(np.abs(eta[kept]))) * float(np.max(reference))
+    np.testing.assert_allclose(leverage[kept], reference[kept], rtol=0.0, atol=tolerance)
+
+
 def _walked_to(monkeypatch, kept, depth: float) -> None:
     """Publish the fit with its walk stopped where E's rows' largest linear predictor is ``-depth``.
 
