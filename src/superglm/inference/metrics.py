@@ -1891,34 +1891,29 @@ class ModelMetrics:
     def _disclosed_feature(self, name, values, indices, read, *, diagonal):
         """``values`` with NaN standard errors at the points off the fit's support, and one warning.
 
-        The test is the term readers' (``explain_ops._curve_labels``) on the functional this
-        reader reports: ``read`` at the block ``Q Q'`` of each kind's directions gives a point's
-        share along it, and at ``diag(D^-2)`` its dual norm, on the feature's active
-        ``indices``.  Nothing is read for a fit with no such direction.
+        The test is ``estimability_ops.reader_labels`` on the functional this reader reports:
+        ``read`` at the block ``Q Q'`` of each kind's directions gives a point's share along it,
+        and at ``diag(D^-2)`` its dual norm, on the feature's active ``indices``.  Nothing is read
+        for a fit with no such direction.
         """
-        from superglm.diagnostics.estimability import off_support
-        from superglm.model.estimability_ops import published_directions
+        from superglm.model.estimability_ops import reader_labels
         from superglm.model.explain_ops import _active_layout, _curve_warning
 
-        directions = published_directions(self._model)
-        if directions is None:
-            return values
-        _, columns = _active_layout(self._model)
-        fitted = columns[indices]
         key = next(key for key in values if key.startswith("se"))
 
-        def probe(block):
-            return np.atleast_1d(np.asarray(read(block)[key], dtype=np.float64))
+        def probe(scale, roots):
+            if roots is None:
+                inverse = 1.0 / scale**2
+                block = inverse if diagonal else np.diag(inverse)
+            else:
+                block = np.einsum("ij,ij->i", roots, roots) if diagonal else roots @ roots.T
+            return {key: np.atleast_1d(np.asarray(read(block)[key], dtype=np.float64))}
 
-        inverse = 1.0 / directions.scale[fitted] ** 2
-        norms = probe(inverse if diagonal else np.diag(inverse))
-        shares = {
-            kind: probe(np.einsum("ij,ij->i", root, root) if diagonal else root @ root.T)
-            for kind, root in ((kind, slopes[fitted]) for kind, slopes in directions.slopes.items())
-        }
-        labels = off_support(shares, norms)
-        if not np.any(labels != ""):
+        _, columns = _active_layout(self._model)
+        labels = reader_labels(self._model, columns[indices], probe)
+        if labels is None or not np.any(labels[key] != ""):
             return values
+        labels = labels[key]
         se = np.atleast_1d(np.array(values[key], dtype=np.float64, copy=True))
         se[labels != ""] = np.nan
         _curve_warning({name: labels})

@@ -207,42 +207,70 @@ def term_coordinates(model, name) -> NDArray:
     return np.concatenate(blocks) if blocks else np.zeros(0, dtype=np.intp)
 
 
-def point_labels(model, name, values) -> NDArray | None:
-    """Each point a term reader reports, labelled by ``diagnostics.estimability.off_support``.
+def reader_labels(model, coordinates, read, *, reached_only: bool = False) -> dict | None:
+    """Each point a reader reports, labelled by ``diagnostics.estimability.off_support``.
 
-    ``values(beta_t)`` is the reader at the term's coefficients ``beta_t`` (``term_coordinates``):
-    an array of the log values it reports, linear in ``beta_t`` (a curve, a level table, a cell
-    table, a bin's weighted mean of the term).  Its point ``r`` is a functional of the term's
-    coordinates alone, so its share along a kind is ``||r Q||``, read as ``values`` at each
-    direction ``q_t`` (one call per direction), and its dual norm ``||r D^-1||``, read from
-    ``values`` at the term's unit vectors.  ``None`` when the fit has no direction to disclose,
-    and when none reaches the term enough to move a label: ``||r Q|| <= ||r D^-1|| ||D q_t||``
-    (Cauchy-Schwarz), so a term with ``||D q_t|| <= 1e-6`` over every direction has no point off
-    support, and nothing is read.
+    The one off-support test of every reader of a published fit's terms: a point is a functional
+    ``r`` of the coefficients on ``coordinates`` (positions in the record's coordinates), and
+    ``read(scale, roots)`` evaluates the reader's own functional, returning its points by name.
+    With ``roots`` ``None`` that is each point's dual norm ``||r D^-1||`` (``scale`` is ``D`` on the
+    coordinates); otherwise its share along one kind, ``||r Q||`` or the row ``r Q``, with ``roots``
+    the kind's raw vectors ``q = M^-1 Q`` on the coordinates, one column each (module docstring).
+    Returns each name's labels, shaped as its norms.  ``None`` when the fit has no direction to
+    disclose, and nothing is read.  With ``reached_only`` a kind is read only where it can move a
+    label, ``||r Q|| <= ||r D^-1|| ||D q||`` (Cauchy-Schwarz) exceeding ``1e-6 ||r D^-1||``: a
+    coordinate set no kind reaches by more than that has no point off support, and gives ``None``.
     """
     from superglm.diagnostics.estimability import PREDICTION_TOLERANCE, off_support
 
     directions = published_directions(model)
     if directions is None:
         return None
-    index = term_coordinates(model, name)
-    scale = directions.scale[index]
-    reached = {
-        kind: slopes[index]
-        for kind, slopes in directions.slopes.items()
-        if np.linalg.norm(scale[:, None] * slopes[index]) > PREDICTION_TOLERANCE
-    }
-    if not reached or index.size == 0:
-        return None
+    coordinates = np.asarray(coordinates, dtype=np.intp)
+    scale = directions.scale[coordinates]
+    roots = {kind: slopes[coordinates] for kind, slopes in directions.slopes.items()}
+    if reached_only:
+        roots = {
+            kind: root
+            for kind, root in roots.items()
+            if np.linalg.norm(scale[:, None] * root) > PREDICTION_TOLERANCE
+        }
+        if not roots or coordinates.size == 0:
+            return None
+    norms = read(scale, None)
+    shares = {kind: read(scale, root) for kind, root in roots.items()}
+    labels = {}
+    for name, norm in norms.items():
+        norm = np.asarray(norm, dtype=np.float64)
+        projections = {
+            kind: np.asarray(values[name], dtype=np.float64) for kind, values in shares.items()
+        }
+        labels[name] = off_support(projections, norm.ravel()).reshape(norm.shape)
+    return labels
 
-    def read(beta: NDArray) -> NDArray:
+
+def point_labels(model, name, values) -> NDArray | None:
+    """Each point a linear term reader reports, labelled by ``reader_labels``.
+
+    ``values(beta_t)`` is the reader at the term's coefficients ``beta_t`` (``term_coordinates``):
+    an array of the log values it reports, linear in ``beta_t`` (a curve, a level table, a cell
+    table, a bin's weighted mean of the term).  Its point ``r`` is a functional of the term's
+    coordinates alone, so its share along a kind is ``r Q``, read as ``values`` at each
+    direction ``q_t`` (one call per direction), and its dual norm ``||r D^-1||``, read from
+    ``values`` at the term's unit vectors.  ``None`` when the fit has no direction to disclose,
+    and when none reaches the term enough to move a label (``reached_only``).
+    """
+
+    def evaluate(beta: NDArray) -> NDArray:
         return np.asarray(values(np.asarray(beta, dtype=np.float64)), dtype=np.float64)
 
-    units = np.eye(index.size)
-    squares = sum((read(units[j]) / scale[j]) ** 2 for j in range(index.size))
-    shares = {
-        kind: np.stack([read(slopes[:, j]).ravel() for j in range(slopes.shape[1])], axis=1)
-        for kind, slopes in reached.items()
-    }
-    norms = np.sqrt(np.asarray(squares, dtype=np.float64))
-    return off_support(shares, norms.ravel()).reshape(norms.shape)
+    def read(scale: NDArray, roots: NDArray | None) -> dict:
+        if roots is None:
+            units = np.eye(scale.size)
+            squares = sum((evaluate(units[j]) / scale[j]) ** 2 for j in range(scale.size))
+            return {"points": np.sqrt(np.asarray(squares, dtype=np.float64))}
+        columns = [evaluate(roots[:, j]).ravel() for j in range(roots.shape[1])]
+        return {"points": np.stack(columns, axis=1)}
+
+    labels = reader_labels(model, term_coordinates(model, name), read, reached_only=True)
+    return None if labels is None else labels["points"]

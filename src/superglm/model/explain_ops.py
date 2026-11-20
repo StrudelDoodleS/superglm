@@ -135,29 +135,20 @@ def _curve_labels(model, read):
     """Per kind, ``read(covariance_fn)``'s standard errors at the probes, as off-support labels.
 
     ``read`` takes a ``covariance_fn`` and returns a mapping of point arrays (a term's points,
-    or each term's), the readers' standard errors at that covariance.  ``None`` when the fit
-    has no direction to disclose (``estimability_ops.published_directions``): then nothing is
-    read.  One read per kind and one for the norms, all in coefficient space.
+    or each term's), the readers' standard errors at that covariance, on the active layout
+    (``_active_layout``): ``estimability_ops.reader_labels``, with a point's dual norm its
+    standard error at ``diag(D^-2)`` and its share along a kind that at ``Q Q'``.  ``None`` when
+    the fit has no direction to disclose: then nothing is read.
     """
-    from superglm.diagnostics.estimability import off_support
-    from superglm.model.estimability_ops import published_directions
+    from superglm.model.estimability_ops import reader_labels
 
-    directions = published_directions(model)
-    if directions is None:
-        return None
     groups, columns = _active_layout(model)
-    norms = read(lambda: (_DiagonalCovariance(1.0 / directions.scale[columns] ** 2), groups))
-    shares = {
-        kind: read(lambda slopes=slopes: (_RootCovariance(slopes[columns]), groups))
-        for kind, slopes in directions.slopes.items()
-    }
-    return {
-        name: off_support(
-            {kind: np.asarray(values[name], dtype=np.float64) for kind, values in shares.items()},
-            np.asarray(norm, dtype=np.float64),
-        )
-        for name, norm in norms.items()
-    }
+
+    def covariance(scale, roots):
+        held = _DiagonalCovariance(1.0 / scale**2) if roots is None else _RootCovariance(roots)
+        return read(lambda: (held, groups))
+
+    return reader_labels(model, columns, covariance)
 
 
 # Set while a reader that shows each point's ``non_estimable`` kind itself (the editor's curves)
