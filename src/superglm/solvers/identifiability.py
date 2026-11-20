@@ -253,7 +253,9 @@ class Identifiability:
     at coefficients it cannot move (``model.saved_record``).  A fit's own record has neither.
     ``intercept_aliased`` is a saved record's: the directions whose split its coefficients do
     not show (``Alias``es on every coordinate they reach) reach the intercept too, so its saved
-    value is not an estimate either.
+    value is not an estimate either.  ``unresolved`` (fitted coordinates) are those a direction
+    not resolved at float64 reaches (``Gauge.moved`` false): the fit never moves along one, so
+    their published values are where its solver stopped, which no other solve repeats.
     """
 
     width: int
@@ -272,6 +274,7 @@ class Identifiability:
     withheld: tuple[int, ...] = ()  # ``-1`` is the intercept
     provenance: tuple[str, ...] = ()
     intercept_aliased: bool = False
+    unresolved: tuple[int, ...] = ()
 
     def weak_root(self, columns: NDArray) -> NDArray | None:
         """``[-c'PU; PU]`` on ``columns``, the weak directions' published root with its intercept.
@@ -294,14 +297,16 @@ class Identifiability:
     def estimate_identified(self) -> NDArray:
         """Whether each coefficient's published value is an estimate the fit identifies.
 
-        Not an alias's coordinate (the coefficient it holds, at zero or where the fit left it)
-        and not one separation moves: R prints ``NA`` for such a value.  A ``withheld``
-        coefficient is identified; only its standard error is withheld.
+        Not an alias's coordinate (the coefficient it holds, at zero or where the fit left it),
+        not one a direction not resolved at float64 reaches (``unresolved``) and not one
+        separation moves: R prints ``NA`` for such a value.  A ``withheld`` coefficient is
+        identified; only its standard error is withheld.
         """
         identified = np.ones(self.width, dtype=bool)
         identified[[alias.coordinate for alias in self.aliases if alias.coordinate is not None]] = (
             False
         )
+        identified[list(self.unresolved)] = False
         if self.separation is not None:
             identified[np.asarray(self.separation.reached, dtype=np.intp)] = False
         return identified
@@ -733,6 +738,7 @@ def decide_identifiability(
         owner[group.sl] = index
     facts = _RowFacts(design, W)
     weak = None
+    reach: tuple[int, ...] = ()
     if construction is None:
         both = np.hstack((null, floating))
         unresolved = np.r_[np.zeros(null.shape[1], bool), np.ones(floating.shape[1], bool)]
@@ -761,6 +767,8 @@ def decide_identifiability(
         if quiet:
             # the held separated directions follow the aliases; the separation record names them
             aliases = aliases[: _orthonormal(decomposition, null).shape[1]]
+        elif gauge is not None:
+            reach = _unresolved_reach(gauge, decomposition, columns)
         if split is not None and weak_mask is not None and np.any(weak_mask):
             weak = _weak_directions(
                 split,
@@ -790,7 +798,35 @@ def decide_identifiability(
             else int(decomposition.rank) + (0 if weak is None else weak.root.shape[1])
         ),
         curvature_floor=floor,
+        unresolved=reach,
     )
+
+
+def _unresolved_reach(gauge: Gauge, decomposition, columns: NDArray) -> tuple[int, ...]:
+    """The fitted coordinates whose published values the unresolved directions leave unmoved.
+
+    The published coefficients are ``P beta``, ``P = I - N_m (G_m'N_m)^-1 G_m'`` on the moved
+    directions (``Gauge.coefficients``), so where the solver stopped along a held direction
+    ``u`` they keep ``P u``'s share of it.  A coordinate's value is a functional ``e_j``, off
+    support when its share of ``P u``'s Jacobi-orthonormal span exceeds the term readers'
+    ``1e-6`` (``diagnostics.estimability.off_support``, predict.lm's tol); a share under it is
+    the computed direction's own error, not a value the walk moved.
+    """
+    from superglm.diagnostics.estimability import PREDICTION_TOLERANCE
+
+    moved = gauge._moved()
+    if np.all(moved):
+        return ()
+    null, functionals = gauge.null[columns], gauge.functionals[columns]
+    held = null[:, ~moved]
+    if np.any(moved):
+        constraint = functionals[:, moved]
+        held = held - null[:, moved] @ np.linalg.solve(
+            constraint.T @ null[:, moved], constraint.T @ held
+        )
+    basis = _orthonormal(decomposition, held)
+    share = np.einsum("ij,ij->i", basis, basis)
+    return tuple(int(c) for c in columns[share > PREDICTION_TOLERANCE**2])
 
 
 def _curvature_floor(

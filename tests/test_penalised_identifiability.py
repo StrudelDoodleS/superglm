@@ -1404,8 +1404,9 @@ def test_a_large_sz_fit_reads_only_its_undecided_directions(case, monkeypatch):
     certify (``_stand_in_record``): those whose Jacobi-scaled ``[B; S]`` singular value is
     under ``sqrt(u)``, so their curvature is under the rounding of ``H``.  The ones under
     ``gamma_n``, which no weighted row reaches, are not resolved at float64: the design at unit
-    weight identifies each, so none is an alias, none is moved along and no coordinate is blank;
-    the rest the rows identify, with their curvature.  ``zz = z + 1e-8 h``: the factor truncates
+    weight identifies each, so none is an alias and none is moved along, and the coordinates
+    they reach have no standard error (their values are where the solver stopped), and no other
+    is blank; the rest the rows identify, with their curvature.  ``zz = z + 1e-8 h``: the factor truncates
     the pair's difference, and the rows identify it and fit it.  Either way the owner reads only
     the truncated directions (a pass of their width, at most twice) and forms one small
     construction map per term they reach.  At ``1d18eaf47`` both fell back to factoring the
@@ -1464,7 +1465,11 @@ def test_a_large_sz_fit_reads_only_its_undecided_directions(case, monkeypatch):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         model.fit_reml(frame, y)
-    assert not any(np.any(np.isnan(v)) for v in model.metrics(frame, y).coefficient_se.values())
+    se = model.metrics(frame, y).coefficient_se
+    blank = np.flatnonzero(
+        np.isnan(np.concatenate([np.atleast_1d(se[g.name]) for g in model._groups]))
+    )
+    np.testing.assert_array_equal(blank, model._fit_inference_info["identifiability"].unresolved)
     W = np.array(state_ops._solver_space_working_weights(model), dtype=np.float64)
     if case == "zero_claims":
         W[g < 5] = 0.0
@@ -1493,8 +1498,11 @@ def test_a_large_sz_fit_reads_only_its_undecided_directions(case, monkeypatch):
     assert record.row_directions == truncated
     # one small map per term the directions reach, never one per level
     assert len(formed) == len(set(formed)) <= 3
-    assert record.coefficient_identified().all()
+    np.testing.assert_array_equal(
+        np.flatnonzero(~record.coefficient_identified()), record.unresolved
+    )
     if case == "zero_claims":
+        assert record.unresolved
         assert 0 < exact < truncated
         assert len(record.aliases) == exact
         assert {a.source for a in record.aliases} == {"float64"}

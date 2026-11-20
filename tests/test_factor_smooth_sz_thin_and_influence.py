@@ -3982,7 +3982,10 @@ def test_an_alias_of_vanished_working_weights_keeps_its_fitted_values(monkeypatc
     direction is an exact null of the rows: the row's information (``3e-70``) and score
     (``mu (y - mu)``, ``1e-35``) are far below the fit's tolerance, so every other row's fitted
     mean is that fit's, the same aliased terms are reported (both ``"float64"`` where the
-    weightless fit's are ``"rank"``), and the same coordinates keep a standard error.
+    weightless fit's are ``"rank"``), and the same coordinates keep a standard error, but for
+    those the two undecided directions reach (``Identifiability.unresolved``): the weightless fit
+    moves along its aliases and publishes their SEs in its gauge, the vanished one moves along
+    neither, so those coordinates' values are where its solver stopped and have none.
     The row itself predicts the link's floor.  Mutation: treating every direction the weighted
     rows put under their bound as an alias (``_design_null`` returning them all), or gauging it,
     reports it as ``"rank"`` and moves that row's mean from the floor to the ceiling,
@@ -4021,8 +4024,12 @@ def test_an_alias_of_vanished_working_weights_keeps_its_fitted_values(monkeypatc
     np.testing.assert_allclose(mean[others], weightless_mean[others], rtol=1e-9)
     # the floor, to the few ulp a SIMD ``exp`` may differ by
     assert abs(mean[row] - math.exp(-80.0)) <= 8.0 * _U * math.exp(-80.0)
-    for term, values in reference_se.items():
-        assert np.array_equal(np.isfinite(se[term]), np.isfinite(values)), term
+    unresolved = np.zeros(len(model.result.beta), dtype=bool)
+    unresolved[list(record.unresolved)] = True
+    assert np.any(unresolved)
+    for group in model._groups:
+        kept = np.isfinite(reference_se[group.name]) & ~unresolved[group.sl]
+        assert np.array_equal(np.isfinite(se[group.name]), kept), group.name
 
 
 def _contrast_rows(model: SuperGLM, frame) -> np.ndarray:
@@ -4128,6 +4135,24 @@ def test_a_vanished_working_weight_publishes_the_gauge_of_a_zero_prior_weight() 
     assert abs(factor / scale - 1.0) <= reference._tol
 
 
+def _jacobi_condition(model: SuperGLM) -> float:
+    """The Jacobi-scaled solver Hessian's condition on the complement of its null space, dense."""
+    from superglm.model import state_ops
+
+    W = np.asarray(state_ops._solver_space_working_weights(model), dtype=np.float64)
+    n = model._dm.n
+    X = np.hstack([np.asarray(m.toarray(), float).reshape(n, -1) for m in model._dm.group_matrices])
+    state = state_ops.retained_linear_state(model)
+    S = state_ops._structured_penalty_product(state.penalized_operator)(np.eye(X.shape[1]))[0]
+    B = np.sqrt(W)[:, None] * (X - (W @ X) / np.sum(W))
+    H = B.T @ B + S
+    jacobi = np.sqrt(np.diag(H))
+    values = np.linalg.eigvalsh(H / np.outer(jacobi, jacobi))
+    return float(
+        values[-1] / values[model._fit_inference_info["identifiability"].gauge.null.shape[1]]
+    )
+
+
 @pytest.mark.pins_behaviour
 def test_the_dense_path_holds_every_gauge_direction_in_its_standard_errors() -> None:
     """The vanished-row fit's coefficient SEs on the dense (gram) path are the structured path's.
@@ -4136,14 +4161,14 @@ def test_the_dense_path_holds_every_gauge_direction_in_its_standard_errors() -> 
     every direction the published constraint holds, moved or not (``P V P'``, the unresolved
     directions held where the fit left them), as the structured path's own correction does.
     The fit is the one above's, offset ``-160`` on one row, whose gauge holds an unresolved
-    direction.  The two backends give every coefficient one SE to ``4 kappa u``, ``kappa`` the
-    Jacobi-scaled Hessian's condition on the complement of its null space (measured ``5e-11``,
-    ``6e-11`` under Haswell, against ``1.6e-5``).  Mutation (``m1``): a covariance projected along the moved directions
-    only moves the dense path's SEs by up to 100% and leaves the structured path's; the test
-    above, on the structured path, does not see it.
+    direction.  The two backends withhold the SEs of the coordinates those directions reach
+    (``Identifiability.unresolved``: their values are where each solver stopped) and give every
+    other coefficient one SE to ``4 kappa u``, ``kappa`` the Jacobi-scaled Hessian's condition on
+    the complement of its null space (measured ``5e-11``, ``6e-11`` under Haswell, against
+    ``1.6e-5``).  Mutation (``m1``): a covariance projected along the moved directions only
+    moves the dense path's SEs by up to 100% and leaves the structured path's; the test above,
+    on the structured path, does not see it.
     """
-    from superglm.model import state_ops
-
     frame, y, weight = _signed_aliased_frame("one_row")
     row = int(np.flatnonzero(frame["g"].to_numpy() == "g000")[0])
     offset = np.where(np.arange(len(y)) != row, 0.0, -160.0)
@@ -4161,22 +4186,11 @@ def test_the_dense_path_holds_every_gauge_direction_in_its_standard_errors() -> 
         assert bool(model._fit_inference_info.get("structured_covariance")) == (solve == "auto")
         if solve == "auto":
             structured = model
-    # the Jacobi-scaled solver Hessian of the structured fit, dense
-    W = np.asarray(state_ops._solver_space_working_weights(structured), dtype=np.float64)
-    n = structured._dm.n
-    X = np.hstack(
-        [np.asarray(m.toarray(), float).reshape(n, -1) for m in structured._dm.group_matrices]
-    )
-    state = state_ops.retained_linear_state(structured)
-    S = state_ops._structured_penalty_product(state.penalized_operator)(np.eye(X.shape[1]))[0]
-    B = np.sqrt(W)[:, None] * (X - (W @ X) / np.sum(W))
-    H = B.T @ B + S
-    jacobi = np.sqrt(np.diag(H))
-    values = np.linalg.eigvalsh(H / np.outer(jacobi, jacobi))
-    kappa = values[-1] / values[records["auto"].gauge.null.shape[1]]
+    kappa = _jacobi_condition(structured)
     np.testing.assert_array_equal(np.isnan(se["gram"]), np.isnan(se["auto"]))
     shown = ~np.isnan(se["auto"])
-    assert not np.any(np.isnan(se["auto"]))
+    assert records["auto"].unresolved == records["gram"].unresolved
+    np.testing.assert_array_equal(np.flatnonzero(~shown), records["auto"].unresolved)
     np.testing.assert_allclose(se["gram"][shown], se["auto"][shown], rtol=4.0 * kappa * _U)
 
 
@@ -4902,9 +4916,11 @@ def test_reports_read_a_held_level_of_the_group_term_as_predict_prices(trade) ->
     term moves (g000's special by 5, or a random polynomial pattern) and the
     sz constants and intercept take it back.  Each report's g000 then equals
     ``rel(ref) + eta(g000, x) - eta(ref, x) + dev(ref, x) - dev(g000, x)`` at
-    every ``x``, ``dev`` the ``factor_smooth()`` curves, within ``8
-    gamma_count`` of the magnitudes ``predict`` touches (Higham 2002, sections
-    3.1 and 3.5).  Fails on 4a2ed996: the reports read 5.0 (special) and
+    every ``x``, ``dev`` each level's deviation from the population curve at the
+    published coefficients (the arithmetic of the ``factor_smooth()`` curves, which
+    show no value at the identified levels here: the fit's directions not resolved at
+    float64 lean on them), within ``8 gamma_count`` of the magnitudes ``predict``
+    touches (Higham 2002, sections 3.1 and 3.5).  Fails on 4a2ed996: the reports read 5.0 (special) and
     -17.99 (polynomial) where ``predict`` prices 0.0 and -2.88.  With
     ``integers`` the group column holds the integers ``0 .. 11`` beside an
     ``OrderedCategorical(order=["0", ..., "11"])``, which the model accepts
@@ -4941,7 +4957,6 @@ def test_reports_read_a_held_level_of_the_group_term_as_predict_prices(trade) ->
             stabilize=False,
             warn=False,
         ).reshape(2, -1)
-        curves = model.factor_smooth("x:g:sz", grid=steps).curves.set_index("level")["effect"]
         reported = {
             "relativities": model.relativities()["g"].set_index("level")["log_relativity"],
             "term_inference": pd.Series(
@@ -4960,7 +4975,16 @@ def test_reports_read_a_held_level_of_the_group_term_as_predict_prices(trade) ->
                 model.reconstruct_feature("g")["level_log_relativities"]
             ),
         }
-    dev = {level: curves.loc[level].to_numpy() for level in (held, other)}
+    from superglm.inference.factor_smooths import _reported
+
+    spec = model._interaction_specs["x:g:sz"]
+    term = next(g for g in model._groups if g.name == "x:g:sz")
+    deviations = _reported(spec)(np.asarray(model.result.beta[term.sl], dtype=np.float64))
+    labels = [str(level) for level in spec._levels]
+    dev = {
+        level: spec.marginal_basis(steps) @ deviations[labels.index(str(level))]
+        for level in (held, other)
+    }
     count = len(model.result.beta) + 12 * 5 + 4 * 5 + 2
     magnitude = float(np.max(_eta_magnitude(model, grid))) + 4.0 * reach
     bound = 8.0 * _gamma(count) * (magnitude + max(np.abs(d).max() for d in dev.values()))
@@ -4983,7 +5007,10 @@ def test_importance_and_holdout_read_a_held_level_of_the_group_term_as_predict_p
     term or the main effect changes, within
     the roundings of ``8 gamma_count`` of what ``predict`` touches.  Fails on
     4a2ed996: the sz term's variance 25.1 became 439, and the group term's
-    holdout delta moved from 0 to -13.5.
+    holdout delta moved from 0 to -13.5.  The fit's three directions not resolved
+    at float64 reach ``x``, ``g`` and the sz term, whose shares on the rows they
+    move (``Identifiability.unresolved``), so those terms have no variance on
+    either side of the trade; the special's is compared.
     """
     order = [f"g{i:03d}" for i in range(12)]
     model, frame, y = _folded_group_term_model(
@@ -5008,7 +5035,11 @@ def test_importance_and_holdout_read_a_held_level_of_the_group_term_as_predict_p
             )
     # sd moves by at most the rms of the per-row rounding, 2 max(delta)
     sd_before, sd_after = reports["before"][0], reports["after"][0]
-    assert np.all(np.abs(sd_after - sd_before) <= 2.0 * float(np.max(delta)))
+    withheld = ["x", "g", "x:g:sz"]
+    assert sd_before[withheld].isna().all() and sd_after[withheld].isna().all()
+    shown = sd_before.drop(index=withheld)
+    assert shown.notna().all()
+    assert np.all(np.abs(sd_after[shown.index] - shown) <= 2.0 * float(np.max(delta)))
     slope = 2.0 * (np.maximum(reports["before"][2], reports["after"][2]) + y)
     # the sz term's constants sum to zero, so the trade moves the intercept by
     # the special's mean, which dropping the sz term exposes: only x and g

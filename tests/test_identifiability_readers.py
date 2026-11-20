@@ -27,11 +27,14 @@ the walk's values again.  The third case forces the Wald solve that a held row t
 ``LinAlgError`` to return ``b' V^+ b``, as a route whose held rows are not exactly zero does:
 the joint test must be withheld because the record says so, not because the solve failed.
 The vanished-weight fit (an sz factor smooth whose one-row level ``g000`` sits at offset
-``-160``, on both backends) holds two directions not resolved at float64; at ``b175d49f2``
-``factor_smooth()`` printed ``g000``'s coefficient norm where they left it (11.80 on auto,
-2209.50 on gram).  The tiered fit adds a 3-level ordered polynomial whose base carries only zero
-responses, whose separation is verified on its levels: walked decided, and forced to a proven
-lower bound (``"partial"``).
+``-160``, on both backends) holds two directions not resolved at float64, which reach every
+level's two unpenalised parts: their values are where the solver stopped, not estimates.  At
+``b175d49f2`` ``factor_smooth()`` printed ``g000``'s coefficient norm where they left it (11.80
+on auto, 2209.50 on gram); at ``d90533200`` ``diagnostics()`` printed the sz term's norm (2784
+against 3399), ``term_importance`` its variance (9795 against 10858) and ``factor_smooth()``
+``g000``'s curve 2197.7 apart.  The tiered fit adds a 3-level ordered polynomial whose base
+carries only zero responses, whose separation is verified on its levels: walked decided, and
+forced to a proven lower bound (``"partial"``).
 """
 
 from __future__ import annotations
@@ -73,8 +76,9 @@ class _Case:
     functional readers that lean on what the fit does not determine; ``rows`` are the rows
     ``predict`` names.  ``basis`` names a spline and its basis functions without a value;
     ``edit`` a term an editor edit shifts.  ``smooth_levels`` maps a factor smooth to the levels
-    whose ``factor_smooth()`` coefficient norm has no value, and ``skip`` names the readers the
-    case does not walk.
+    whose ``factor_smooth()`` coefficient norm has no value and ``smooth_curves`` those whose
+    curve has none, ``skip`` names the readers the case does not walk, and ``offset`` is the
+    fit's.
     """
 
     model: SuperGLM
@@ -94,7 +98,9 @@ class _Case:
     basis: tuple[str, tuple[int, ...]] | None
     edit: tuple[str, float, float]
     smooth_levels: dict[str, tuple[str, ...]] = dataclasses.field(default_factory=dict)
+    smooth_curves: dict[str, tuple[str, ...]] = dataclasses.field(default_factory=dict)
     skip: tuple[str, ...] = ()
+    offset: np.ndarray | None = None
 
 
 def _quiet(call, *args, **kwargs):
@@ -278,20 +284,21 @@ def _vanished(direct_solve: str) -> _Case:
         shown=("x1", "x10", "cat[c00]"),
         untested=(),
         tested=("x",),
-        unidentified={},
-        # the record counts the held unresolved directions' values as estimates, so the sz
-        # group's own norm and importance are not walked
-        unnormed=(),
+        # the unresolved directions reach each level's two unpenalised parts
+        unidentified={"x:g:sz": [6 * level + part for level in range(29) for part in (4, 5)]},
+        unnormed=("x:g:sz",),
         normed=("x1", "x10", "cat", "x"),
-        unimportant=(),
+        unimportant=("x:g:sz",),
         important=("x1", "x10", "cat", "x"),
         off_support={"x1": none, "x10": none, "cat": none, "x": none},
         rows=np.array([row]),
         basis=("x", ()),
         edit=("x", 0.2, 0.6),
         smooth_levels={"x:g:sz": ("g000",)},
+        smooth_curves={"x:g:sz": ("g000",)},
         # the rating tables refuse an sz term; an edited model's record is not held on this route
         skip=("rating tables", "edited model's table"),
+        offset=offset,
     )
 
 
@@ -649,19 +656,26 @@ def _predict(case):
 
 
 def _factor_smooth(case):
-    """``factor_smooth()``'s level table: a level's coefficient norm reads only what is determined."""
+    """``factor_smooth()``: a level's coefficient norm reads only what is determined, and a curve
+    point not resolved at float64 has no value, SE or interval."""
     from superglm.features.factor_smooth import FactorSmooth
 
     problems = []
     for name, spec in case.model._interaction_specs.items():
         if not isinstance(spec, FactorSmooth):
             continue
-        table = _quiet(case.model.factor_smooth, name).table
+        result = _quiet(case.model.factor_smooth, name)
+        table, curves = result.table, result.curves
         norms = table["coefficient_norm"].to_numpy(dtype=np.float64)
         blank = tuple(table.loc[np.isnan(norms), "level"])
         if blank != case.smooth_levels.get(name, ()):
             problems.append(f"factor_smooth: {name} norm NaN at {blank}")
         problems += [f"factor_smooth: {name} norm {norms}"] if np.any(np.isinf(norms)) else []
+        expected = curves["level"].isin(case.smooth_curves.get(name, ())).to_numpy()
+        for column in ("effect", "posterior_se", "lower", "upper"):
+            if not np.array_equal(curves[column].isna().to_numpy(), expected):
+                missing = sorted(set(curves.loc[curves[column].isna(), "level"]))
+                problems.append(f"factor_smooth: {name} curve {column} NaN at {missing}")
     return problems
 
 
@@ -740,6 +754,88 @@ def test_no_reader_shows_a_number_the_fit_does_not_identify(build, forced, monke
 
         monkeypatch.setattr(coef_tables, "covariance_wald_statistic", _least_squares_wald)
     assert _walk(case) == []
+
+
+def _printed(case: _Case) -> dict[tuple, np.ndarray]:
+    """What the summary, ``diagnostics()``, ``term_importance``, ``factor_smooth()``, the term
+    readers and ``predict`` print on the case, one array per printed quantity."""
+    model, X = case.model, case.X
+    printed: dict[tuple, np.ndarray] = {}
+    rows = model.summary()._coef_rows
+    for field in ("coef", "se", "ci_low", "ci_high", "wald_chi2", "ref_df"):
+        values = [getattr(row, field) for row in rows]
+        printed["summary", field] = np.array([np.nan if v is None else v for v in values], float)
+    # a p-value is read on its own scale, one
+    printed["summary p", "p"] = np.array(
+        [np.nan if row.p is None else row.p for row in rows]
+        + [np.nan if row.wald_p is None else row.wald_p for row in rows],
+        dtype=float,
+    )
+    diagnostics = model.diagnostics()
+    printed["diagnostics", "group_norm"] = np.array(
+        [diagnostics[group.name]["group_norm"] for group in model._groups], dtype=float
+    )
+    importance = _quiet(model.term_importance, X)
+    for column in ("group_norm", "variance_eta", "sd_eta", "edf"):
+        printed["term_importance", column] = importance[column].to_numpy(dtype=np.float64)
+    smooth = _quiet(model.factor_smooth, "x:g:sz")
+    printed["factor_smooth", "coefficient_norm"] = smooth.table["coefficient_norm"].to_numpy(
+        dtype=np.float64
+    )
+    for column in ("effect", "posterior_se", "lower", "upper"):
+        printed["factor_smooth", column] = smooth.curves[column].to_numpy(dtype=np.float64)
+    for term, frame in _quiet(model.relativities, with_se=True).items():
+        for column in ("log_relativity", "se_log_relativity"):
+            printed["relativities", term, column] = frame[column].to_numpy(dtype=np.float64)
+    inference = _quiet(model.term_inference, "x")
+    for field in ("log_relativity", "se_log_relativity", "ci_lower", "ci_upper"):
+        printed["term_inference", field] = np.asarray(getattr(inference, field), dtype=float)
+    printed["predict", "mean"] = _quiet(model.predict, X, offset=case.offset)
+    return printed
+
+
+def test_the_vanished_weight_fit_prints_the_same_numbers_on_either_backend():
+    """The vanished-weight fit's readers print one thing, structured or dense.
+
+    Its two directions not resolved at float64 leave the published coefficients along them
+    where each backend's solver stopped, so a number leaning on them is not an estimate: the
+    summary's intercept is ``---``, the sz term's norm and importance NaN, and ``g000``'s
+    ``factor_smooth()`` norm and curve have no value.  Everything else the summary,
+    ``diagnostics()``, ``term_importance``, ``factor_smooth()``, the term readers and
+    ``predict`` print on the fitted rows agrees to ``4 kappa u`` of each quantity's scale
+    (``kappa`` the Jacobi-scaled Hessian's condition on the complement of its null space,
+    3.5e10; a p-value on its own scale), and is NaN on both or neither.  Measured, the worst is
+    ``3.1e-7``.  At ``d90533200`` ``diagnostics()`` printed the sz term's norm 2784.04 against
+    3398.78, ``term_importance`` its variance 9794.6 against 10857.7, and ``g000``'s curve
+    differed by 2197.7.
+    """
+    from tests.test_factor_smooth_sz_thin_and_influence import _jacobi_condition
+
+    cases = {solve: _vanished(solve) for solve in ("auto", "gram")}
+    tolerance = 4.0 * _jacobi_condition(cases["auto"].model) * 2.0**-53
+    printed = {solve: _printed(case) for solve, case in cases.items()}
+    problems = []
+    for key, auto in printed["auto"].items():
+        gram = printed["gram"][key]
+        if not np.array_equal(np.isnan(auto), np.isnan(gram)):
+            blank = (np.flatnonzero(np.isnan(values)) for values in (auto, gram))
+            problems.append(f"{key}: NaN at {' and '.join(map(str, blank))}")
+            continue
+        shown = ~np.isnan(auto)
+        scale = 1.0 if key[0] == "summary p" else float(np.max(np.abs(auto[shown]), initial=0.0))
+        worst = float(np.max(np.abs(auto[shown] - gram[shown]), initial=0.0))
+        if worst > tolerance * scale:
+            problems.append(f"{key}: differ by {worst:.3g} at scale {scale:.3g}")
+    assert problems == []
+    auto, model = printed["auto"], cases["auto"].model
+    names = [row.name for row in model.summary()._coef_rows]
+    assert np.isnan(auto["summary", "coef"][names.index("Intercept")])
+    sz = [group.name for group in model._groups].index("x:g:sz")
+    assert np.flatnonzero(np.isnan(auto["diagnostics", "group_norm"])).tolist() == [sz]
+    assert np.flatnonzero(np.isnan(auto["term_importance", "variance_eta"])).tolist() == [sz]
+    assert np.isnan(auto["factor_smooth", "coefficient_norm"]).tolist() == [
+        level == "g000" for level in model._interaction_specs["x:g:sz"]._levels
+    ]
 
 
 @pytest.mark.parametrize("forced", [False, True], ids=["present", "partial"])

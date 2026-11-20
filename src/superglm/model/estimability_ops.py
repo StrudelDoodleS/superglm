@@ -227,7 +227,9 @@ def term_coordinates(model, name) -> NDArray:
     return np.concatenate(blocks) if blocks else np.zeros(0, dtype=np.intp)
 
 
-def reader_labels(model, coordinates, read, *, reached_only: bool = False) -> dict | None:
+def reader_labels(
+    model, coordinates, read, *, reached_only: bool = False, kinds: tuple[str, ...] | None = None
+) -> dict | None:
     """Each point a reader reports, labelled by ``diagnostics.estimability.off_support``.
 
     The one off-support test of every reader of a published fit's terms: a point is a functional
@@ -240,6 +242,7 @@ def reader_labels(model, coordinates, read, *, reached_only: bool = False) -> di
     disclose, and nothing is read.  With ``reached_only`` a kind is read only where it can move a
     label, ``||r Q|| <= ||r D^-1|| ||D q||`` (Cauchy-Schwarz) exceeding ``1e-6 ||r D^-1||``: a
     coordinate set no kind reaches by more than that has no point off support, and gives ``None``.
+    ``kinds`` reads only those kinds.
     """
     from superglm.diagnostics.estimability import PREDICTION_TOLERANCE, off_support
 
@@ -248,7 +251,11 @@ def reader_labels(model, coordinates, read, *, reached_only: bool = False) -> di
         return None
     coordinates = np.asarray(coordinates, dtype=np.intp)
     scale = directions.scale[coordinates]
-    roots = {kind: slopes[coordinates] for kind, slopes in directions.slopes.items()}
+    roots = {
+        kind: slopes[coordinates]
+        for kind, slopes in directions.slopes.items()
+        if kinds is None or kind in kinds
+    }
     if reached_only:
         roots = {
             kind: root
@@ -269,7 +276,7 @@ def reader_labels(model, coordinates, read, *, reached_only: bool = False) -> di
     return labels
 
 
-def point_labels(model, name, values) -> NDArray | None:
+def point_labels(model, name, values, kinds: tuple[str, ...] | None = None) -> NDArray | None:
     """Each point a linear term reader reports, labelled by ``reader_labels``.
 
     ``values(beta_t)`` is the reader at the term's coefficients ``beta_t`` (``term_coordinates``):
@@ -278,7 +285,8 @@ def point_labels(model, name, values) -> NDArray | None:
     coordinates alone, so its share along a kind is ``r Q``, read as ``values`` at each
     direction ``q_t`` (one call per direction), and its dual norm ``||r D^-1||``, read from
     ``values`` at the term's unit vectors.  ``None`` when the fit has no direction to disclose,
-    and when none reaches the term enough to move a label (``reached_only``).
+    and when none reaches the term enough to move a label (``reached_only``); ``kinds`` as
+    ``reader_labels``.
     """
 
     def evaluate(beta: NDArray) -> NDArray:
@@ -292,5 +300,7 @@ def point_labels(model, name, values) -> NDArray | None:
         columns = [evaluate(roots[:, j]).ravel() for j in range(roots.shape[1])]
         return {"points": np.stack(columns, axis=1)}
 
-    labels = reader_labels(model, term_coordinates(model, name), read, reached_only=True)
+    labels = reader_labels(
+        model, term_coordinates(model, name), read, reached_only=True, kinds=kinds
+    )
     return None if labels is None else labels["points"]

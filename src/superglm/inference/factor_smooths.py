@@ -203,16 +203,9 @@ def _population_deviations(
     return deviations, 0.5 * (covariances + np.transpose(covariances, (0, 2, 1)))
 
 
-def _level_norms(model, group: GroupSlice, spec: FactorSmooth, values: NDArray) -> NDArray:
-    """Each level's coefficient norm, NaN where it reads a direction the fit does not determine.
-
-    ``values`` are the levels' reported coefficients (``n_levels x k``: an ``fs`` level's block,
-    an ``sz`` level's deviation from the population curve), linear in the term's coefficients.
-    The norm is a table's value (``coef_tables``): it is not an estimate where one of its entries
-    leans on a direction the record does not determine (an alias, a separation, or one not
-    resolved at float64), by the term readers' one test (``estimability_ops.point_labels``).
-    """
-    from superglm.model.estimability_ops import point_labels
+def _reported(spec: FactorSmooth):
+    """The levels' reported coefficients (``n_levels x k``) at the term's coefficients: an ``fs``
+    level's block, an ``sz`` level's deviation from the population curve."""
 
     def reported(beta: NDArray) -> NDArray:
         blocks = spec._level_blocks(beta)
@@ -221,11 +214,43 @@ def _level_norms(model, group: GroupSlice, spec: FactorSmooth, values: NDArray) 
         identified, offset = spec._identified_blocks(blocks)
         return identified - offset[None, :]
 
+    return reported
+
+
+def _level_norms(model, group: GroupSlice, spec: FactorSmooth, values: NDArray) -> NDArray:
+    """Each level's coefficient norm, NaN where it reads a direction the fit does not determine.
+
+    ``values`` are the levels' reported coefficients (``_reported``), linear in the term's
+    coefficients.  The norm is a table's value (``coef_tables``): it is not an estimate where
+    one of its entries leans on a direction the record does not determine (an alias, a
+    separation, or one not resolved at float64), by the term readers' one test
+    (``estimability_ops.point_labels``).
+    """
+    from superglm.model.estimability_ops import point_labels
+
     norms = np.linalg.norm(values, axis=1)
-    labels = point_labels(model, group.feature_name, reported)
+    labels = point_labels(model, group.feature_name, _reported(spec))
     if labels is None:
         return norms
     return np.where(np.any(labels != "", axis=1), np.nan, norms)
+
+
+def _curve_blanks(
+    model, group: GroupSlice, spec: FactorSmooth, basis: NDArray, levels: NDArray
+) -> NDArray | None:
+    """Which curve points (level by level, then grid) lean on a direction not resolved at
+    float64, whose value is not an estimate, by the norms' test (``_level_norms``); ``None``
+    when none can.  An alias's or a separation's points keep the published fit's values."""
+    from superglm.model.estimability_ops import point_labels
+
+    reported = _reported(spec)
+    labels = point_labels(
+        model,
+        group.feature_name,
+        lambda beta: reported(beta)[levels] @ basis.T,
+        kinds=("unresolved",),
+    )
+    return None if labels is None else (labels != "").ravel()
 
 
 def _grid_values(spec: FactorSmooth, grid: int | NDArray | None) -> NDArray:
@@ -588,6 +613,13 @@ def factor_smooth_result(
             diagnostics["held_levels"] = [
                 spec._levels[code] for code in spec._levels_at_population()
             ]
+
+    blank = (
+        None if curves.empty else _curve_blanks(model, group, spec, basis, selected_level_indices)
+    )
+    if blank is not None:
+        # a curve point not resolved at float64 shows no value, as its level's norm
+        curves.loc[blank, ["effect", "posterior_se", "lower", "upper"]] = np.nan
 
     return FactorSmoothResult(
         name=group.name,

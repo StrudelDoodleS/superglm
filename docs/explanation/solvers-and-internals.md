@@ -1177,7 +1177,12 @@ identified. The rounding grows with the rows read together: a column a
 relative $d$ from another is aliased when $d$ is below about $p^{3/2}u$ read
 alone, or about $nku$ for $n$ rows and $k$ directions read beside a strongly
 identified one ($u = 2^{-53}$). A direction inside the uncertainty is reported
-as not resolved at float64. A direction the weighted rows cannot tell from
+as not resolved at float64. The fit never moves along such a direction, so the
+coefficients it reaches are where the solver stopped, which another backend
+need not repeat: they are not estimates, and print with no value and no
+standard error, as an alias's held coordinate does, while a relativity,
+curve or prediction leaning on the direction is flagged or shown blank. A
+direction the weighted rows cannot tell from
 zero is an alias only if the unweighted design on the rows with positive
 weight cannot either, since a working weight that vanishes (a level whose mean
 is far below a log link's range) carries no information about which
