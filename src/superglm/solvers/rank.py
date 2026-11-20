@@ -843,7 +843,8 @@ def penalized_rank_certified(
     """Whether a penalized Hessian's own Gram decomposition certifies it as positive definite.
 
     Full rank, from the Gram itself, outside the band that sends a Gram to its observation
-    factor (``needs_factor_certification``): a Jacobi-scaled condition under
+    factor (``needs_factor_certification``): ``pre_truncation_condition``, the square root of
+    the Jacobi-scaled Gram's condition (its Cholesky factor's condition), under
     ``warning_condition / sqrt(certification_band)``.  A decomposition of the row factor is
     what a fit holds when its Gram could not certify itself, so it does not qualify.  Every
     coefficient then has a finite posterior variance ``phi (X'WX + S)^-1`` (Wood, Pya and

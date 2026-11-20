@@ -1160,9 +1160,11 @@ a range with no rows.
 
 - **Every standard error is shown when the penalised fit has full rank.** The
   test is the fit's own: the penalised Hessian
-  $\mathbf{X}^\top\mathbf{W}\mathbf{X} + \mathbf{S}$ has full rank with a
-  scaled condition number below $1.19 \times 10^7$, or the structured solver
-  dropped no direction. Each coefficient then has a finite posterior variance.
+  $\mathbf{X}^\top\mathbf{W}\mathbf{X} + \mathbf{S}$ has full rank, and the
+  square root of its condition number after scaling to a unit diagonal (the
+  condition of its Cholesky factor) is below $1.19 \times 10^7$; or the
+  structured solver dropped no direction. Each coefficient then has a finite
+  posterior variance.
 - **Otherwise the data rank decides.** A coefficient outside it is reported as
   not estimable, and its standard error is shown as missing.
 - **A fit with a selection penalty, a shape rule or a shape repair always uses

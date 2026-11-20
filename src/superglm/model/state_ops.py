@@ -562,7 +562,8 @@ def penalized_fit_certified(model, penalized) -> bool:
     """
     from superglm.model.report_ops import shape_repaired_feature_names
 
-    if (fitted_penalty(model).lambda1 or 0.0) > 0.0:
+    lambda1 = getattr(fitted_penalty(model), "lambda1", None)
+    if lambda1 is not None and lambda1 != 0.0:
         return False
     if any(g.constraints is not None or g.monotone_engine is not None for g in model._groups):
         return False

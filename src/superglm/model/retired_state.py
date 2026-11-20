@@ -71,7 +71,11 @@ def release_saved_mask_summaries(model) -> None:
     """
     record = model.__dict__.get("_linear_system_state")
     if record is None:
-        record = getattr(model.__dict__.get("_result"), "rank_info", None)
+        # the solver-space result first, as the readers take it (``state_ops._fit_record``)
+        result = model.__dict__.get("_solver_result")
+        if result is None:
+            result = model.__dict__.get("_result")
+        record = getattr(result, "rank_info", None)
     if getattr(record, "standard_error_mask", None) == "data":
         model.__dict__["_summary_cache"] = None
 
