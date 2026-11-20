@@ -662,11 +662,16 @@ class TestSteepestDescentFallback:
 # ── F6: Quasi-separated CI integration test ─────────────────────
 
 
-class TestQuasiSeparatedCIFinite:
-    """CI values are finite even for quasi-separated categorical levels."""
+class TestQuasiSeparatedCI:
+    """A separated level's interval is withheld, never inf; every other level's is finite."""
 
-    def test_quasi_separated_ci_finite(self):
-        """Quasi-separated level produces finite (clamped) CIs, not inf/nan."""
+    def test_a_separated_levels_interval_is_withheld_and_the_others_are_finite(self):
+        """Every response at the rare level is 0 under a log link, so its effect has no finite estimate.
+
+        The existence decision certifies it (``tests/test_quasi_separation.py`` has the certificate): the
+        rare level's interval and SE are withheld (NaN, with the separation footnote) where master clamped
+        them to a finite number, and the other levels keep finite intervals and SEs.
+        """
         rng = np.random.default_rng(42)
         n = 5000
         n_rare = 5
@@ -694,17 +699,19 @@ class TestQuasiSeparatedCIFinite:
         )
         m.fit(df, y, sample_weight=exposure, offset=np.log(exposure))
 
-        # term_inference should produce finite CIs for all levels
         ti = m.term_inference("cat")
-        if ti.ci_lower is not None:
-            assert np.all(np.isfinite(ti.ci_lower)), "CI lower contains inf/nan"
-            assert np.all(np.isfinite(ti.ci_upper)), "CI upper contains inf/nan"
+        rare = np.asarray(ti.levels) == "rare"
+        assert rare.sum() == 1
+        for bound in (ti.ci_lower, ti.ci_upper):
+            assert np.all(np.isnan(np.asarray(bound)[rare]))
+            assert np.all(np.isfinite(np.asarray(bound)[~rare]))
+        assert not np.any(np.isinf(np.asarray(ti.ci_lower)))
 
-        # summary should also produce finite output
         s = m.summary()
-        for row in s._coef_rows:
-            if row.se is not None:
-                assert np.isfinite(row.se), f"{row.name} SE is not finite"
+        rows = {row.name: row for row in s._coef_rows}
+        assert np.isnan(rows["cat[rare]"].se)
+        assert all(np.isfinite(row.se) for name, row in rows.items() if name != "cat[rare]")
+        assert "no finite estimate" in str(s)
 
 
 # ── F1 test gap: reml_tol parameter effectiveness ───────────────

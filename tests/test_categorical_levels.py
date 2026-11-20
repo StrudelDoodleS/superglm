@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperGLM
+from superglm import NonEstimablePredictionWarning, SuperGLM
 from superglm.features.categorical import Categorical
 from superglm.features.grouping import collapse_levels
 
@@ -121,7 +121,7 @@ def test_a_rejected_bool_lookalike_does_not_warn_about_a_separated_level():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         model.fit(pd.DataFrame({"g": labels}), y)
-    with pytest.warns(UserWarning, match="response boundary"):
+    with pytest.warns(NonEstimablePredictionWarning, match="no finite estimate"):
         model.predict(pd.DataFrame({"g": [True]}))
     expected = model.predict(pd.DataFrame({"g": [False]}))
     with warnings.catch_warnings(record=True) as caught:
@@ -130,7 +130,8 @@ def test_a_rejected_bool_lookalike_does_not_warn_about_a_separated_level():
     np.testing.assert_array_equal(actual, expected)
     messages = [str(item.message) for item in caught]
     assert any("unseen at fit" in message for message in messages)
-    assert not any("response boundary" in message for message in messages)
+    assert not any("no finite estimate" in message for message in messages)
+    assert not any(issubclass(item.category, NonEstimablePredictionWarning) for item in caught)
 
 
 class TestDeclaredUniverse:
