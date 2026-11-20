@@ -101,17 +101,14 @@ def _ordered_piecewise_structural_rows(
 ) -> list[_CoefRow]:
     """Structural contrast rows for an OrderedCategorical Piecewise basis.
 
-    One slope-change Wald row per stated break and one curvature row per
-    segment of degree >= 2 (a single z row for one curvature freedom, a joint
-    chi-square family row for more). These are ordinary linear-model tests of
-    a fixed-knot design -- Smith (1979), Am. Statist. 33(2):57-62 -- and the
-    honest vocabulary under C0 seams, where per-segment orthogonal per-power
-    z-statistics do not exist (the segments share their joint values, so
-    within-segment components are not free parameters).
+    One slope-change Wald row per stated break and one curvature row per segment of degree >= 2 (a z
+    row for one curvature freedom, a joint chi-square row for more): ordinary linear-model tests of
+    a fixed-knot design (Smith 1979, Am. Statist. 33(2):57-62), the honest vocabulary under C0
+    seams, where the segments share their joint values and per-power z-statistics do not exist.
 
-    A row that reads a coefficient the fit does not identify follows that coefficient's row:
-    no estimate where ``estimated_main`` is False, no standard error or test where
-    ``identified_main`` is False.
+    A row that reads a coefficient the fit does not identify follows that coefficient's row: no
+    estimate where ``estimated_main`` is False, no standard error or test where ``identified_main``
+    is False.
     """
     from scipy.stats import chi2 as chi2_dist
 

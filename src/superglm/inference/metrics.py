@@ -1237,16 +1237,15 @@ class ModelMetrics:
     ) -> NDArray:
         """The fit's blanks, and every coordinate these rows leave undetermined in its gauge.
 
-        The coefficients are the fit's and so is whether each estimate exists, so its blanks
-        stay.  The rows leave undetermined the null space of the Hessian restricted to the
-        gauge, ``null(B' H B) = null(H) cap null(G')`` mapped by ``B``, which is the null space
-        of ``H + G_1 G_1'``, ``G_1`` the constraints scaled to unit curvature in the Jacobi
-        coordinates of ``D + S``.  Its decomposition, certified by the rows where its Gram
-        cannot be (``_certified_profile_rank``), leaves undecided directions only where it is
-        near singular (``state_ops._dense_base``); the owner decides them from the rows, at
-        these working weights and then at unit weight on the positive-weight rows
-        (``solvers.identifiability.decide_identifiability``).  The coefficients do not move,
-        so every coordinate a null direction reaches is blank.
+        The coefficients are the fit's and so is whether each estimate exists, so its blanks stay.
+        The rows leave undetermined ``null(B' H B) = null(H) cap null(G')`` mapped by ``B``: the
+        null space of ``H + G_1 G_1'``, ``G_1`` the constraints scaled to unit curvature in the
+        Jacobi coordinates of ``D + S``.  Its decomposition, certified by the rows where its Gram
+        cannot be (``_certified_profile_rank``), leaves undecided directions only where it is near
+        singular (``state_ops._dense_base``); the owner decides them from the rows, at these working
+        weights and then at unit weight on the positive-weight rows
+        (``solvers.identifiability.decide_identifiability``).  The coefficients do not move, so
+        every coordinate a null direction reaches is blank.
         """
         from superglm.model.state_ops import _dense_base
         from superglm.solvers.identifiability import TruncatedDecomposition, decide_identifiability

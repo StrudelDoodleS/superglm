@@ -570,17 +570,15 @@ def _dense_base(
 ) -> TruncatedDecomposition:
     """The part of a dense decomposition of the centred Hessian it certified, and the rest.
 
-    The decomposition is of the Hessian as formed (``hessian()``), within ``gamma_(n+2)
-    sqrt(D_ii D_jj)`` entrywise of the exact one (``D`` the data Gram, ``n`` its rows; Higham
-    2002, sec. 3.5): a Jacobi-scaled bound ``e`` (``rank._formation_slack``).  Its kept part is
-    certified when the smallest equilibrated eigenvalue it holds exceeds ``e`` (Weyl): the
-    retained spectrum less the eigensolver's bar, or a Cholesky factor's ``1 /
-    ||L^-1||_F^2`` less its backward error.  Then it inverts ``H`` there and its truncated
-    directions are the undecided ones.  A rank decision that kept an eigenvalue it cannot tell
-    from zero is replaced: the equilibrated spectrum is recomputed, the eigenvalues past the
-    bound are the certified part, and the rest are undecided, read from the rows like any
-    truncated direction.  A factor of the rows decided its own rank, and states its own floor
-    (``_factor_floor``); with no certified part the floor is vacuous, infinite.
+    The Hessian as formed (``hessian()``) is within ``gamma_(n+2) sqrt(D_ii D_jj)`` entrywise of the
+    exact one (``D`` the data Gram, ``n`` its rows; Higham 2002, sec. 3.5): a Jacobi-scaled bound
+    ``e`` (``rank._formation_slack``).  The kept part is certified when its smallest equilibrated
+    eigenvalue (the retained spectrum less the eigensolver's bar, or a Cholesky factor's ``1 /
+    ||L^-1||_F^2`` less its backward error) exceeds ``e`` (Weyl); it inverts ``H`` there, and its
+    truncated directions are undecided.  A rank decision that kept an eigenvalue it cannot tell from
+    zero is replaced by the recomputed equilibrated spectrum: the eigenvalues past the bound are
+    certified, the rest read from the rows.  A factor of the rows states its own floor
+    (``_factor_floor``); with no certified part it is vacuous, infinite.
     """
     import scipy.linalg
 
@@ -1254,14 +1252,13 @@ def _publish_existence(
     """Decide whether the fit's estimate exists, and publish the fit that decision gives.
 
     The fit's score proves existence where it can (``separation_ops.existence_certified``);
-    otherwise the rows decide (``separation_ops.decide_separation``).  A separating direction
-    verified exactly is published as the fit on the rows it keeps (``_withheld_publication``)
-    once that fit's own score proves those rows separate no further; short of that it is a
-    proven lower bound (``"partial"``), and the walked fit is published with the decision on
-    its record.  A fit refused under ``"error"`` (``refuses_on_publication``) stops at the
-    verified direction: it publishes nothing, so no withheld fit is run.  The decision is kept
-    on the record whatever it is, ``"absent"`` included, so its readers can tell a decided
-    absence from a decision never built.  ``refit`` forms the fit on the kept rows
+    otherwise the rows decide (``separation_ops.decide_separation``).  A direction verified exactly
+    is published as the fit on the rows it keeps (``_withheld_publication``) once that fit's own
+    score proves those rows separate no further; short of that it is a proven lower bound
+    (``"partial"``), and the walked fit is published with the decision on its record.  A fit refused
+    under ``"error"`` (``refuses_on_publication``) publishes nothing, so no withheld fit is run.
+    The decision is kept on the record whatever it is, ``"absent"`` included, so a reader tells a
+    decided absence from one never built.  ``refit`` forms the fit on the kept rows
     (``separation_ops.withheld_refit`` by default).
     """
     from superglm.diagnostics.separation import refuses_on_publication, response_sides
@@ -1524,20 +1521,15 @@ _RESUME_TOLERANCE = 1e-13
 def _resumed_weak_fit(model, context: _PublicationContext) -> _PublicationContext | None:
     """D6 under any family: penalised IRLS resumed on the identified subspace, at the fit's lambda.
 
-    The solver truncated directions ``T`` the rows identify (``WeakDirections``), so its
-    coefficients are not the penalised optimum along them, and one Newton step from a mode
-    whose weights move with the mean is not it either.  Each iteration rebuilds the centred
-    system at the current Fisher weights (``build_centered_system``, the fit's penalty), its
-    decomposition and the owner's row read, and takes the joint Newton step on the identified
-    subspace: ``V g`` on the certified part and ``U C^-1 U'g`` on the weak directions (their
-    covariance root, ``WeakDirections.root``; ``U = T - V H T``, so ``U'g = T'g - (H T)'V g``
-    carries the coupling the old one-step form assumed away), with the intercept's own.  A step
-    is halved until the penalised deviance ``D + beta'S beta`` does not rise, at most
-    ``_RESUME_HALVINGS`` times, and the resumption stops when the Newton decrement
-    ``g' H^+ g`` falls under the fit's tolerance (stationarity), or after
-    ``_RESUME_ITERATIONS``.  The last accepted state's record, covariance and EDF are published,
-    with the rank record rebuilt at its weights.  ``None`` (6a's coefficients kept, the summary
-    saying so) when a step cannot be accepted or stationarity is not reached.  Dense fits only.
+    The solver truncated directions ``T`` the rows identify (``WeakDirections``).  Each iteration
+    rebuilds the centred system, its decomposition and the owner's row read at the current Fisher
+    weights, and takes the joint Newton step: ``V g`` on the certified part, ``U C^-1 U'g`` on the
+    weak directions (``U = T - V H T`` carries their coupling), and the intercept's own.  A step is
+    halved until ``D + beta'S beta`` does not rise, at most ``_RESUME_HALVINGS`` times; it stops at
+    stationarity (``g' H^+ g`` under the fit's tolerance) or after ``_RESUME_ITERATIONS``.  The last
+    accepted state's record, covariance and EDF are published, the rank record rebuilt at its
+    weights; ``None`` (6a's coefficients kept, the summary saying so) when no step is accepted or
+    stationarity is not reached.  Dense fits only.
     """
     from superglm.model.separation_ops import fisher_rows, withheld_weights
     from superglm.solvers.centered_system import build_centered_system
@@ -1729,17 +1721,14 @@ def _restore_separated(
 ) -> tuple[NDArray, float]:
     """The withheld fit's coefficients moved along the separated span to the walk's predictor.
 
-    The span is exactly null on the kept rows, so no kept fitted value moves; on the separated
-    rows the move is the least-squares match of the walked fit's predictor (the walk stopped
-    near the boundary, where the estimate's limit puts those rows).
-
-    Each separated row's residual is read relative to its own target, floored at the fit's
-    predictor scale, so every row's right-hand side is at most two: unweighted, a row the walk
-    drove to ``-1e27`` sets a normwise solver's error to ``u 1e27`` on every component, the
-    shared one a kept row reads too.  Columns are then equilibrated (van der Sluis, Numer.
-    Math. 14, 1969), so the scaled solve's normwise error is each component's error relative
-    to its own column's scale.  When every target is within the floor the weights are equal
-    and the solution is the unweighted one.
+    The span is exactly null on the kept rows, so no kept fitted value moves; on the separated rows
+    the move is the least-squares match of the walked fit's predictor (the walk stopped near the
+    boundary, where the estimate's limit puts those rows).  Each separated row's residual is read
+    relative to its own target, floored at the fit's predictor scale, so no right-hand side exceeds
+    two: unweighted, a row the walk drove to ``-1e27`` sets a normwise solver's error to ``u 1e27``
+    on every component, the shared one a kept row reads too.  Columns are then equilibrated (van der
+    Sluis, Numer. Math. 14, 1969), so each component's error is relative to its own column's scale;
+    with every target within the floor the solution is the unweighted one.
     """
     from superglm.solvers.mode_score import linear_predictor
 

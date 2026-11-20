@@ -416,17 +416,14 @@ def _disclose_weak_identification(
 ) -> None:
     """Publish every weakly identified slope of a finished REML fit.
 
-    Once per fit, for every family and backend: the final-mode test from its
-    Fisher rows (``reml.identified.final_mode_weak_slopes``; ``at_mode``, not
-    for a QP-certified refit), the slopes the Laplace approximation left out,
-    and the directions the border factor or the observed certificate flagged.
-    The fit keeps them all; ``profile["reml_weakly_identified"]`` holds the
-    slope indices, ``model.diagnostics()`` their names, and one
-    ``WeakIdentificationWarning`` names them.  The warning is held
-    (``model._held_fit_notices``) until the fit is published
-    (``fit_ops._publish_fit_notices``): a fit refused under
-    ``separation="error"`` there says nothing else about itself, and a refit an
-    NB2 theta alternation supersedes says nothing.
+    Once per fit, for every family and backend: the final-mode test from its Fisher rows
+    (``reml.identified.final_mode_weak_slopes``; ``at_mode``, not for a QP-certified refit), the
+    slopes the Laplace approximation left out, and the directions the border factor or the observed
+    certificate flagged.  The fit keeps them all: ``profile["reml_weakly_identified"]`` holds the
+    slope indices, ``model.diagnostics()`` their names, and one ``WeakIdentificationWarning`` names
+    them, held (``model._held_fit_notices``) until the fit is published
+    (``fit_ops._publish_fit_notices``): a fit refused under ``separation="error"`` there says
+    nothing else about itself, and a refit an NB2 theta alternation supersedes says nothing.
     """
     flagged: set[int] = set()
     if at_mode:

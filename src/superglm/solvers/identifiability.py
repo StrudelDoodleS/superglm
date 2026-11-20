@@ -841,27 +841,15 @@ def _read_rows(
 ) -> _Split:
     """The decision on the undecided directions ``T``, from one pass over the rows.
 
-    In the basis ``[K, T]``, ``K`` the part the decomposition certified positive definite, ``H``
-    is singular exactly where the Schur complement ``C = T'HT - T'HK (K'HK)^-1 K'HT`` is (a
-    positive definite block's Schur complement carries the nullity).  The rows give ``T'HT =
-    B'B + T'ST``, ``B = sqrt(W) X_c T``, and ``HT = D T + S T`` with ``D T = A'B`` from the same
-    pass (``grouped_projected_factor``); the decomposition's inverse on ``K`` gives ``V H T``, so
-    ``C = T'HT - (HT)' V (HT)`` and ``T - V H T`` are the directions it is the curvature of.
-    The decomposition left ``K'HT`` at its rounding (its own ``HT`` vanishes on ``K``), so the
-    correction is that rounding's square over ``K``'s curvature, and its own error is bounded
-    by ``||HT|| ||V HT||`` (taken as the shift).  An eigenvalue of ``C`` whose root is within
-    the rounding bound of ``B``'s singular values (``_row_bound``) and of ``T'ST`` cannot be told
-    from zero in float64: a direction of ``null(H)``.  One whose root clears it after the shift
-    is identified (Weyl); any other is not resolved at float64.  The bound grows with the rows
-    (``gamma_(n k) ||B||``, Higham 2002, Thm 19.4), so a near-duplicate column separated by
-    about ``n u`` of its norm is aliased on a large book and identified on a small sample.
-
-    The eigenvectors of the directions it does not identify are within ``sin theta <= e / gap``
-    of ``C``'s invariant subspace (Davis and Kahan 1970, the sin theta theorem; LAPACK Users'
-    Guide sec. 4.7.1 states the same ``|E| / gap`` bound for a cluster): ``e`` bounds ``|fl(C) -
-    C|``, ``B'B``'s ``(2 |R| + 3 b) b`` from the singular value bound ``b``, ``T'ST``'s rounding,
-    the coupling's shift and the eigensolver's ``gamma_(k^2) |C|``, and ``gap`` is the least
-    identified eigenvalue, less ``e`` (Weyl), over the largest other one.  No gap leaves no bound.
+    With ``K`` the part the decomposition certified, ``H`` is singular exactly where the Schur
+    complement ``C = T'HT - (HT)' V (HT)`` is, the curvature of ``T - V H T``: one pass gives ``T'HT
+    = B'B + T'ST`` and ``HT`` (``grouped_projected_factor``), the correction's error bounded by
+    ``||HT|| ||V HT||`` (the shift).  An eigenvalue of ``C`` whose root is within the rounding bound
+    of ``B``'s singular values (``_row_bound``, ``gamma_(n k) ||B||``: Higham 2002, Thm 19.4,
+    growing with the rows) and of ``T'ST`` is a direction of ``null(H)``; one that clears it after
+    the shift is identified (Weyl); any other is not resolved at float64.  The eigenvectors are
+    within ``sin theta <= e / gap`` of ``C``'s invariant subspace (Davis and Kahan 1970), ``e``
+    bounding ``|fl(C) - C|``; no gap leaves no bound.
     """
     from superglm.solvers.centered_system import grouped_projected_factor, weighted_mean_pair
 
@@ -992,36 +980,15 @@ def _design_null(
 ) -> tuple[NDArray, NDArray]:
     """Of the directions the weighted rows cannot tell from zero, those the design cannot either.
 
-    With every lambda positive ``null(H) = N_S null(X N_S)`` on the rows with positive prior
-    weight: a working weight carries no information about identifiability, only about its
-    precision.  So the directions are read once more at unit weight on those rows
-    (``grouped_projected_factor``): the curvature ``B_1'B_1 + T'ST`` of the Hessian at unit
-    weight, and an eigenvalue whose root is within the rounding bound of ``B_1``'s singular
-    values (``_row_bound``, the pass's own column norms) and of ``T'ST`` is an alias of the
-    design, as in ``_read_rows``.  The rest are identified by the design and carry no weighted
-    curvature the fit can resolve: they move fitted values, so they are never a gauge, and their
-    coordinates' standard errors are not resolved at float64.  Returns the aliases and the rest,
-    in decomposition coordinates; ``centred=False`` reads the rows uncentred (an intercept column).
-
-    ``directions`` are ``N = R Q^`` for the first pass's refined directions ``R`` and
-    eigenvectors ``Q^``, within ``angle`` of the invariant subspace ``Q`` (``_read_rows``): ``Q^
-    = Q X + Q_1 Y``, ``|Y| <= angle``, so the basis read here, ``N G`` (``|G| = 1 /
-    sigma_min(J N)`` in Jacobi coordinates ``J``), is that subspace's to within ``angle |G|
-    |M R Q_1|`` with ``M = [A_1; L']`` the rows and penalty.  ``Q_1`` is within ``angle`` of the
-    computed ``Q^_1`` too, so ``|M R Q_1| <= |M P| + angle sigma_max(J N) |M N G|`` with ``P = R
-    Q^_1`` the identified directions (``complement``, read in the same pass) and ``|M N G|`` the
-    largest root here.  Each root moves by at most that (Weyl), so a direction is an alias only
-    when its root clears the rounding bound with it added; otherwise the design may identify it,
-    and it is not resolved.
-
-    The first pass certified ``N`` only at the weighted curvature: ``N`` is within ``residual``
-    (``_refinement_residual``, Frobenius, Jacobi) of ``H``'s low eigenvectors, and that residual
-    carries no more weighted curvature than ``N`` does.  Where the design tells a direction of
-    ``N`` from zero, the weights have vanished on rows the design reads, and the residual is read
-    at the design's curvature instead: each root moves by at most ``||M~||_F residual /
-    sigma_min(J N)``, ``||M~||_F^2 <= sum_j m_j^2 / D_j^2 + p`` (``m`` the pass's column
-    magnitudes, ``D`` the Jacobi scale, the penalty's diagonal at most ``D_j^2``), which a
-    direction clears to be an alias.
+    With every lambda positive ``null(H) = N_S null(X N_S)`` on the rows with positive prior weight
+    (a working weight carries no information about identifiability), so they are read again at unit
+    weight there: a root of ``B_1'B_1 + T'ST`` within ``_row_bound`` and ``T'ST``'s rounding is an
+    alias of the design; the rest move fitted values, are never a gauge, and their SEs are not
+    resolved at float64.  Returns both in decomposition coordinates (``centred=False``: rows
+    uncentred).  Each root moves by at most ``angle |G| |M R Q_1|`` (against ``_read_rows``'s
+    subspace, through ``complement``) and, where the design tells a direction from zero, by
+    ``||M~||_F residual / sigma_min(J N)`` (``_refinement_residual`` at the design's curvature;
+    Weyl): a direction is an alias only when its root clears the rounding bound with them added.
     """
     from superglm.solvers.centered_system import grouped_projected_factor, weighted_mean_pair
 
@@ -1154,17 +1121,14 @@ def _construction_gauge(
     """The published constraints on ``null(H)``: the latest construction columns, in term order.
 
     Each null direction is written on the terms' construction columns of ``X_F``
-    (``ConstructionColumns``), unit-normed by the centred data Gram's diagonal (a column's norm
-    for an unpenalised term, its block's diagonal for a smooth's, the scale the conditioning
-    check reads), and one column per
+    (``ConstructionColumns``), unit-normed by the centred data Gram's diagonal, and one column per
     direction is held at zero: the latest each still reaches in term order
-    (``rank._earliest_representatives``, so the first-defined term keeps its coefficients), a
-    choice of the construction alone.  It is kept unless it amplifies the retained columns'
-    conditioning by more than ``_AMPLIFICATION_LIMIT`` (``rank._selection_amplification``); then
-    the conditioning-first choice (``rank._leverage_pivot_representatives``) takes its place.
-    Directions the construction columns cannot represent (an unresolved direction off the
-    penalty null space) are held on the fitted coordinates instead.  The ``unresolved``
-    directions (after the aliases) are held with them but never moved along (``Gauge.moved``).
+    (``rank._earliest_representatives``, so the first-defined term keeps its coefficients), a choice
+    of the construction alone.  It is kept unless it amplifies the retained columns' conditioning by
+    more than ``_AMPLIFICATION_LIMIT`` (``rank._selection_amplification``); then
+    ``rank._leverage_pivot_representatives`` chooses.  Directions the construction columns cannot
+    represent are held on the fitted coordinates; the ``unresolved`` ones (after the aliases) are
+    held with them but never moved along (``Gauge.moved``).
     """
     from superglm.solvers.rank import (
         _earliest_representatives,
