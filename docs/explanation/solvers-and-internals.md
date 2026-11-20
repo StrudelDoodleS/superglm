@@ -1208,6 +1208,18 @@ then. A held factor level or numeric column is shown as missing; a held part
 of a smooth blanks no coefficient, and the smooth's coefficients have the
 standard errors of the fit with that part at zero. No fitted value moves.
 
+The tables and the term readers apply two rules to the same alias, the two R
+applies. A table (the summary, `metrics()`, the exports) shows each kept
+coefficient as fitted in the reduced model, as `summary.lm` does: with
+`x2 = 2 x1`, `x2` is shown as missing and `x1` keeps its value and standard
+error, which then describe `x1` and `x2` together. A term reader
+(`relativities`, `term_inference`, the rating tables, `predict`) evaluates a
+point of the published fit and flags it when it moves the fit along a direction
+the rows do not determine, as `predict.lm` does with `rankdeficient = "warnif"`:
+`x1`'s relativity per unit moves `x1` without `x2`, which no training row does,
+so it is flagged `alias` and has no standard error. Both follow the same record,
+and the summary's footnote says which coefficients this applies to.
+
 The *data rank* asks whether the data alone, ignoring the penalties, pin a
 direction down. It is a diagnostic, computed on request
 (`state_ops.fit_data_rank`): the editor's free levels read it, and no standard

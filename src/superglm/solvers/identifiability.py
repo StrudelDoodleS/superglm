@@ -417,6 +417,13 @@ class Identifiability:
                 label = term if size == 1 else f"{term} ({size} {unit})"
                 link = f" is aliased with {', '.join(others)}" if others else ""
                 notes.append(f"  {label}{link}: {reason}.")
+        if any(alias.aliased_with for alias in blank):
+            # a table shows the reduced model's coefficient; a term reader flags a move off the rows
+            notes.append(
+                'The coefficients named after "is aliased with" are shown as fitted with the ones '
+                "above held at zero (R's summary.lm); a relativity or prediction that moves one of "
+                "them alone leaves the rows' span, and is flagged as an alias (R's predict.lm)."
+            )
         reached = getattr(self.gauge, "intercept_reached", None)
         if reached is not None and np.any(reached):
             notes.append(

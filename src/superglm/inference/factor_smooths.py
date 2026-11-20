@@ -203,6 +203,31 @@ def _population_deviations(
     return deviations, 0.5 * (covariances + np.transpose(covariances, (0, 2, 1)))
 
 
+def _level_norms(model, group: GroupSlice, spec: FactorSmooth, values: NDArray) -> NDArray:
+    """Each level's coefficient norm, NaN where it reads a direction the fit does not determine.
+
+    ``values`` are the levels' reported coefficients (``n_levels x k``: an ``fs`` level's block,
+    an ``sz`` level's deviation from the population curve), linear in the term's coefficients.
+    The norm is a table's value (``coef_tables``): it is not an estimate where one of its entries
+    leans on a direction the record does not determine (an alias, a separation, or one not
+    resolved at float64), by the term readers' one test (``estimability_ops.point_labels``).
+    """
+    from superglm.model.estimability_ops import point_labels
+
+    def reported(beta: NDArray) -> NDArray:
+        blocks = spec._level_blocks(beta)
+        if spec.basis == "fs" or not spec._has_population_offset:
+            return blocks
+        identified, offset = spec._identified_blocks(blocks)
+        return identified - offset[None, :]
+
+    norms = np.linalg.norm(values, axis=1)
+    labels = point_labels(model, group.feature_name, reported)
+    if labels is None:
+        return norms
+    return np.where(np.any(labels != "", axis=1), np.nan, norms)
+
+
 def _grid_values(spec: FactorSmooth, grid: int | NDArray | None) -> NDArray:
     if spec._spline is None:
         raise RuntimeError("FactorSmooth marginal state is unavailable.")
@@ -394,7 +419,7 @@ def factor_smooth_result(
                 "effective_df": level_edf,
                 "credibility": local_credibility,
                 "shrinkage": 1.0 - local_credibility,
-                "coefficient_norm": np.linalg.norm(coefficients, axis=1),
+                "coefficient_norm": _level_norms(model, group, spec, coefficients),
                 "has_information": has_information,
                 "sufficient_support": sufficient_support,
                 "collapsed": np.full(n_levels, collapsed, dtype=bool),
@@ -509,7 +534,7 @@ def factor_smooth_result(
                 "information_trace": information_trace,
                 "information_rank": information_rank,
                 "effective_df": level_edf,
-                "coefficient_norm": np.linalg.norm(deviations, axis=1),
+                "coefficient_norm": _level_norms(model, group, spec, deviations),
                 "has_information": has_information,
                 "sufficient_support": sufficient_support,
             }

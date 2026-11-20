@@ -26,11 +26,16 @@ a separated reference level, the aliased fit a Wood test on the spline it does n
 the walk's values again.  The third case forces the Wald solve that a held row turns into a
 ``LinAlgError`` to return ``b' V^+ b``, as a route whose held rows are not exactly zero does:
 the joint test must be withheld because the record says so, not because the solve failed.
+The vanished-weight fit (an sz factor smooth whose one-row level ``g000`` sits at offset
+``-160``, on both backends) holds two directions not resolved at float64; at ``b175d49f2``
+``factor_smooth()`` printed ``g000``'s coefficient norm where they left it (11.80 on auto,
+2209.50 on gram).  A ``"partial"`` decision, a proven lower bound, is walked as a control.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import functools
 import warnings
 from collections.abc import Callable
 
@@ -65,7 +70,9 @@ class _Case:
     value that is not an estimate; ``important`` ones keep it).  ``off_support`` maps a term to the points of its
     functional readers that lean on what the fit does not determine; ``rows`` are the rows
     ``predict`` names.  ``basis`` names a spline and its basis functions without a value;
-    ``edit`` a term an editor edit shifts.
+    ``edit`` a term an editor edit shifts.  ``smooth_levels`` maps a factor smooth to the levels
+    whose ``factor_smooth()`` coefficient norm has no value, and ``skip`` names the readers the
+    case does not walk.
     """
 
     model: SuperGLM
@@ -84,6 +91,8 @@ class _Case:
     rows: np.ndarray
     basis: tuple[str, tuple[int, ...]] | None
     edit: tuple[str, float, float]
+    smooth_levels: dict[str, tuple[str, ...]] = dataclasses.field(default_factory=dict)
+    skip: tuple[str, ...] = ()
 
 
 def _quiet(call, *args, **kwargs):
@@ -242,6 +251,107 @@ def _aliased() -> _Case:
         rows=np.zeros(0, dtype=np.intp),
         basis=("g", (12, 13, 14)),
         edit=("g", 1.0, 2.0),
+    )
+
+
+def _vanished(direct_solve: str) -> _Case:
+    """The sz fit whose one-row level ``g000`` sits at offset ``-160``: its weight vanished."""
+    from tests.test_factor_smooth_sz_thin_and_influence import _model, _signed_aliased_frame
+
+    frame, y, weight = _signed_aliased_frame("one_row")
+    row = int(np.flatnonzero(frame["g"].to_numpy() == "g000")[0])
+    offset = np.where(np.arange(len(y)) != row, 0.0, -160.0)
+    model = _model("gaussian_log", direct_solve, lam=1.29, main_lam=100.0, numerics=("x1", "x10"))
+    _quiet(model.fit_reml, frame, y, sample_weight=weight, offset=offset)
+
+    def none(frame):
+        return np.zeros(len(frame), dtype=bool)
+
+    return _Case(
+        model=model,
+        X=frame,
+        y=y,
+        # the level lines its weight no longer reads are not resolved, and move the intercept
+        blank=("Intercept",),
+        shown=("x1", "x10", "cat[c00]"),
+        untested=(),
+        tested=("x",),
+        unidentified={},
+        # the record counts the held unresolved directions' values as estimates, so the sz
+        # group's own norm and importance are not walked
+        unnormed=(),
+        normed=("x1", "x10", "cat", "x"),
+        unimportant=(),
+        important=("x1", "x10", "cat", "x"),
+        off_support={"x1": none, "x10": none, "cat": none, "x": none},
+        rows=np.array([row]),
+        basis=("x", ()),
+        edit=("x", 0.2, 0.6),
+        smooth_levels={"x:g:sz": ("g000",)},
+        # the rating tables refuse an sz term; an edited model's record is not held on this route
+        skip=("rating tables", "edited model's table"),
+    )
+
+
+def _partial() -> _Case:
+    """The separated fixture's zero sets beside a 3-level ordered polynomial whose base is zero."""
+    rng = np.random.default_rng(42)
+    n = 4000
+    X = pd.DataFrame(
+        {
+            "band": rng.choice(LEVELS, n),
+            "x": rng.uniform(0, 10, n),
+            "s": rng.uniform(0, 1, n),
+            "c": rng.choice(list("ABC"), n),
+            "tier": rng.choice(["T0", "T1", "T2"], n, p=[0.45, 0.45, 0.1]),
+        }
+    )
+    position = np.array([LEVELS.index(band) for band in X["band"]])
+    y = rng.poisson(np.exp(-1.0 + 0.05 * position + 0.2 * np.sin(6 * X["s"]))).astype(float)
+    verified = (position >= 8) | (X["x"].to_numpy() > 8.0)
+    y[verified | (X["tier"] == "T2").to_numpy()] = 0.0
+    features = {
+        "band": OrderedCategorical(order=LEVELS, basis=Piecewise(breaks=["Mi007"], degrees=[1, 2])),
+        "x": Piecewise(breaks=[4.0, 8.0]),
+        "s": Spline(n_knots=6),
+        "c": Categorical(),
+        "tier": OrderedCategorical(order=["T0", "T1", "T2"], base="T2", basis=Polynomial(degree=2)),
+    }
+    model = SuperGLM(family="poisson", selection_penalty=0.0, features=features)
+    _quiet(model.fit, X, y)
+    top = f"x[{float(X['x'].max()):.10g}]"
+
+    def none(frame):
+        return np.zeros(len(frame), dtype=bool)
+
+    return _Case(
+        model=model,
+        X=X,
+        y=y,
+        blank=(
+            "band[Mi008]",
+            "band[Mi009]",
+            "band[slope-change @ Mi007]",
+            "band[curvature Mi007..Mi009]",
+            top,
+        ),
+        shown=("band[Mi000]", "band[Mi007]", "x[8]", "c[A]"),
+        untested=("band", "x"),
+        tested=("s",),
+        unidentified={"band": [1, 2], "x": [2]},
+        unnormed=("band", "x"),
+        normed=("s", "c"),
+        unimportant=("band", "x"),
+        important=("s", "c"),
+        off_support={
+            "band": lambda frame: frame["level"].isin(["Mi008", "Mi009"]).to_numpy(),
+            "x": lambda frame: frame["x"].to_numpy() > 8.0,
+            "c": none,
+            "s": none,
+        },
+        rows=np.flatnonzero(verified),
+        basis=None,
+        edit=("s", 0.2, 0.6),
     )
 
 
@@ -525,6 +635,23 @@ def _predict(case):
     return problems + ([] if np.all(np.isfinite(mean)) else ["predict dropped a value"])
 
 
+def _factor_smooth(case):
+    """``factor_smooth()``'s level table: a level's coefficient norm reads only what is determined."""
+    from superglm.features.factor_smooth import FactorSmooth
+
+    problems = []
+    for name, spec in case.model._interaction_specs.items():
+        if not isinstance(spec, FactorSmooth):
+            continue
+        table = _quiet(case.model.factor_smooth, name).table
+        norms = table["coefficient_norm"].to_numpy(dtype=np.float64)
+        blank = tuple(table.loc[np.isnan(norms), "level"])
+        if blank != case.smooth_levels.get(name, ()):
+            problems.append(f"factor_smooth: {name} norm NaN at {blank}")
+        problems += [f"factor_smooth: {name} norm {norms}"] if np.any(np.isinf(norms)) else []
+    return problems
+
+
 # The reader table: every reader of a published SuperGLM fit a user calls, by its rule.
 READERS: dict[str, Callable[[_Case], list[str]]] = {
     # tables
@@ -547,6 +674,7 @@ READERS: dict[str, Callable[[_Case], list[str]]] = {
     "simultaneous_bands": _bands,
     "rating tables": _rating_tables,
     "predict": _predict,
+    "factor_smooth": _factor_smooth,
 }
 
 
@@ -561,14 +689,8 @@ def _least_squares_wald(beta, covariance):
     return float(beta @ np.linalg.lstsq(matrix, beta, rcond=None)[0])
 
 
-@pytest.mark.parametrize(
-    ("build", "forced"),
-    [(_separated, False), (_aliased, False), (_separated, True)],
-    ids=["separated", "aliased", "separated, Wald by least squares"],
-)
-def test_no_reader_shows_a_number_the_fit_does_not_identify(build, forced, monkeypatch):
-    """Every reader in ``READERS`` on the case: tables blank, functionals flag and withhold."""
-    case = build()
+def _walk(case: _Case) -> list[str]:
+    """Every reader in ``READERS`` the case walks, once the record decides its construction."""
     record = case.model._fit_inference_info["identifiability"]
     decided = {
         group.name: np.flatnonzero(~record.coefficient_identified()[group.sl]).tolist()
@@ -576,9 +698,82 @@ def test_no_reader_shows_a_number_the_fit_does_not_identify(build, forced, monke
     }
     # the fixture's construction is what the record decides; the walk tests the readers
     assert {name: blank for name, blank in decided.items() if blank} == case.unidentified
+    walked = (reader for name, reader in READERS.items() if name not in case.skip)
+    return [problem for reader in walked for problem in reader(case)]
+
+
+@pytest.mark.parametrize(
+    ("build", "forced"),
+    [
+        (_separated, False),
+        (_aliased, False),
+        (_separated, True),
+        (functools.partial(_vanished, "auto"), False),
+        (functools.partial(_vanished, "gram"), False),
+    ],
+    ids=[
+        "separated",
+        "aliased",
+        "separated, Wald by least squares",
+        "vanished weight, auto",
+        "vanished weight, gram",
+    ],
+)
+def test_no_reader_shows_a_number_the_fit_does_not_identify(build, forced, monkeypatch):
+    """Every reader in ``READERS`` on the case: tables blank, functionals flag and withhold."""
+    case = build()
     if forced:
         import superglm.inference.coef_tables as coef_tables
 
         monkeypatch.setattr(coef_tables, "covariance_wald_statistic", _least_squares_wald)
-    problems = [problem for reader in READERS.values() for problem in reader(case)]
-    assert problems == []
+    assert _walk(case) == []
+
+
+@pytest.mark.pins_behaviour
+def test_a_partial_separation_withholds_what_its_verified_span_reaches():
+    """A ``"partial"`` decision: every reader withholds what its verified span reaches.
+
+    Pins that the readers take a proven lower bound as they take a ``"present"`` decision: the
+    coefficients its span moves (``band`` above its break, ``x`` above 8) show no value, SE,
+    interval or test, and their points are flagged.  It held at ``b175d49f2``: the record reads
+    ``Separation.reached`` whatever the state.  The fixture's third zero set, the base ``T2``
+    of a 3-level ordered polynomial, separates too, along a direction moving the intercept and
+    ``tier``, but no float64 direction is exactly zero on ``T0``'s and ``T1``'s rows (the
+    polynomial's level values are not dyadic), so none verifies: those coefficients keep the
+    walk's values and SEs (``tier[P1]`` 2752, the intercept 13,540) beside the footnote's "more
+    rows may be", and this test asserts nothing about them.
+    """
+    case = _partial()
+    assert case.model._fit_inference_info["identifiability"].separation.state == "partial"
+    assert _walk(case) == []
+
+
+def test_the_footnote_says_which_rule_an_aliased_partner_follows():
+    """``x2 = 2 x1``: the table shows ``x1`` in the reduced model, a relativity flags it.
+
+    ``summary.lm`` prints the kept coefficient of an exact duplicate with its value and SE;
+    ``predict.lm`` flags a row that moves it alone, as ``x1``'s relativity per unit does.  The
+    footnote says so beside the alias, so a reader of both is told why they differ.  At
+    ``b175d49f2`` it named the alias only.
+    """
+    rng = np.random.default_rng(11)
+    x1 = rng.normal(size=500)
+    X = pd.DataFrame({"x1": x1, "x2": 2.0 * x1, "c": rng.choice(list("AB"), 500)})
+    y = rng.poisson(np.exp(0.2 + 0.3 * x1)).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"x1": Numeric(), "x2": Numeric(), "c": Categorical()},
+    )
+    _quiet(model.fit, X, y)
+    rows = {row.name: row for row in model.summary()._coef_rows}
+    assert _missing(rows["x2"].coef) and _present(rows["x1"].coef) and _present(rows["x1"].se)
+    relativity = _quiet(model.relativities, with_se=True)["x1"]
+    assert np.isnan(relativity["se_log_relativity"].to_numpy(dtype=np.float64)).all()
+    text = " ".join(str(model.summary()).split())
+    assert "x2 is aliased with x1" in text
+    assert (
+        'The coefficients named after "is aliased with" are shown as fitted with the ones above '
+        "held at zero (R's summary.lm); a relativity or prediction that moves one of them alone "
+        "leaves the rows' span, and is flagged as an alias (R's predict.lm)."
+    ) in text
