@@ -225,6 +225,40 @@ def test_a_levels_alias_gives_its_feature_se_no_value():
     np.testing.assert_allclose(np.delete(se, e), np.delete(expected, e), rtol=16 * U)
 
 
+def test_a_spline_curves_points_off_support_have_no_simultaneous_band():
+    """A spline beside its own linear column: its curve leans on the alias the gauge holds.
+
+    ``xl = x`` duplicates the spline's unpenalised linear direction, so ``null(H)`` moves the
+    spline's curve by a line and ``xl`` against it; the published constraint holds ``xl`` at
+    zero (D8: the later term), and every point of the spline's curve but those where that line
+    vanishes leans on it.  ``simultaneous_bands`` gives those points no standard error and no
+    band, with one warning, as ``term_inference`` labels them; a point the fit determines keeps
+    its band.  At ``253c6d353`` the bands were the constraint's.  Mutation: the bands read
+    without the off-support test.
+    """
+    rows = np.random.default_rng(3)
+    x = rows.uniform(0.0, 10.0, N)
+    frame = pd.DataFrame({"x": x, "xl": x})
+    response = rows.gamma(2.0, np.exp(0.1 * np.sin(x)) / 2.0)
+    model = SuperGLM(
+        family=superglm.families.gamma(),
+        link="log",
+        features={"x": Spline(n_knots=6), "xl": Numeric()},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, response)
+    inference, _ = _caught(lambda: model.term_inference("x", with_se=False))
+    flagged = np.asarray(inference.non_estimable) != ""
+    assert np.count_nonzero(flagged) > len(flagged) // 2
+    bands, caught = _caught(lambda: model.simultaneous_bands("x", n_sim=500))
+    assert len(_disclosures(caught)) == 1
+    np.testing.assert_array_equal(bands["x"].to_numpy(), np.asarray(inference.x))
+    for column in ("se", "ci_lower_simultaneous", "ci_upper_pointwise"):
+        values = bands[column].to_numpy()
+        assert np.all(np.isnan(values[flagged])) and np.all(np.isfinite(values[~flagged])), column
+
+
 def test_a_rating_table_flags_the_levels_the_fit_does_not_determine():
     """The categorical block of ``f`` carries each level's kind; its workbook note names ``E``."""
     from superglm.export.rating_tables import _categorical_block

@@ -4909,9 +4909,9 @@ def test_a_held_level_of_the_group_term_reports_the_error_of_the_identified_mean
     the error of g000's own value.  With ``integers`` the group column holds
     ``0 .. 11`` beside ``order=["0", ..., "11"]`` and the held level is
     ``"0"`` in the term's table (PR 508 round 7); fails on 8f4d0d7c.  That mean leans on the two
-    directions the rows cannot resolve at float64 (``c'N`` at 0.023 and 0.085 of ``|c| |N|``),
-    where its variance ``c' V c``, ``1.5e12``, is the published constraint's: so the held level
-    has no standard error in either reader, each saying so once.  At ``253c6d353`` both printed
+    directions the published constraint holds (``c'N`` at 0.023 and 0.085 of ``|c| |N|``),
+    where its variance ``c' V c``, ``1.5e12``, is the constraint's: so the held level has no
+    standard error in either reader, each saying so once.  At ``253c6d353`` both printed
     ``sqrt(c' V c)``.
     """
     order = [str(i) for i in range(12)] if integers else [f"g{i:03d}" for i in range(12)]
@@ -4929,7 +4929,7 @@ def test_a_held_level_of_the_group_term_reports_the_error_of_the_identified_mean
     V = np.asarray(covariance)[group.start : group.end, group.start : group.end]
     assert float(c @ V @ c) > 1e10
     record = model._fit_inference_info["identifiability"]
-    assert {alias.source for alias in record.aliases} == {"float64"}
+    assert record.aliases and {alias.source for alias in record.aliases} <= {"float64", "rank"}
     null = np.asarray(record.gauge.null)
     a = np.zeros(null.shape[0])
     a[next(g for g in model._groups if g.feature_name == "g").sl] = c
