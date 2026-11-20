@@ -20,7 +20,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame
-from superglm._group_matrix._group_matrix_bins import discretize_positive_support
+from superglm._group_matrix._group_matrix_bins import discretize_positive_support, fit_bin_lookup
 from superglm._parallel import pooled_map
 from superglm._warn import warn_caller
 from superglm.features._spline_build import finish_penalties, qp_geometry, shape_engine
@@ -330,6 +330,9 @@ def compile_predictor_design(
 
         # Check if this feature should use fit-time discretization
         use_discrete = _bins_as_built_in(name, spec, spline_bins(spec, model_discrete))
+        # The bins this fit reads the column in, for the prediction disclosure
+        # (``estimability_ops``); none on an exact build.
+        cast(Any, spec)._fit_bins = None
         B_unique = None
         bin_idx = None
         exposure_agg = None
@@ -357,6 +360,9 @@ def compile_predictor_design(
             # (should_discretize).
             B_unique = cast(_SplineBase, spec)._basis_matrix(bin_centers).toarray()
             exposure_agg = np.bincount(bin_idx, weights=sample_weight, minlength=len(bin_centers))
+            cast(Any, spec)._fit_bins = {
+                0: fit_bin_lookup(x_col, bin_centers, bin_idx, feature_build_weight)
+            }
 
             if getattr(spec, "select", False):
                 n_null = 1
@@ -625,6 +631,8 @@ def compile_predictor_design(
         use_discrete_tensor, use_discrete_spline_cat, use_discrete_factor_smooth = binned_routes[
             iname
         ]
+        # Set by a binned build (``fit_bin_lookup``); none on an exact one.
+        ispec._fit_bins = None
         B_unique_inter = None
         bin_idx_inter = None
         exposure_agg_inter = None

@@ -325,4 +325,40 @@ def _adaptive_bins(
     return support, cell_of_value
 
 
-__all__ = ["discretize_column", "discretize_positive_support"]
+def fit_bin_lookup(x: NDArray, support: NDArray, index: NDArray, weights: NDArray | None):
+    """The value range of each bin's positive-weight rows, beside its support point.
+
+    ``(support, lower, upper)`` over the bins holding such rows, sorted: a
+    training row's value lies in its own bin's range, so ``binned_values``
+    returns the point the fit read it at.
+    """
+    x = np.asarray(x, dtype=np.float64).ravel()
+    index = np.asarray(index, dtype=np.intp).ravel()
+    active = np.ones(x.size, dtype=bool) if weights is None else np.asarray(weights) > 0.0
+    n_bins = len(support)
+    lower = np.full(n_bins, np.inf)
+    upper = np.full(n_bins, -np.inf)
+    np.minimum.at(lower, index[active], x[active])
+    np.maximum.at(upper, index[active], x[active])
+    held = np.isfinite(lower)
+    order = np.argsort(lower[held], kind="stable")
+    return (
+        np.asarray(support, dtype=np.float64)[held][order],
+        lower[held][order],
+        upper[held][order],
+    )
+
+
+def binned_values(lookup, values: NDArray) -> NDArray:
+    """Each value's bin support point: the bin whose range holds it, else the nearer neighbour."""
+    support, lower, upper = lookup
+    values = np.asarray(values, dtype=np.float64)
+    last = support.size - 1
+    left = np.clip(np.searchsorted(lower, values, side="right") - 1, 0, last)
+    right = np.minimum(left + 1, last)
+    outside = values > upper[left]
+    nearer_right = outside & (np.abs(values - support[right]) < np.abs(values - support[left]))
+    return support[np.where(nearer_right, right, left)]
+
+
+__all__ = ["binned_values", "discretize_column", "discretize_positive_support", "fit_bin_lookup"]

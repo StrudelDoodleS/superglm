@@ -39,6 +39,7 @@ from superglm.solvers.rank import (
     decompose_gram_if_authoritative,
     diagonal_of_square,
     face_pseudo_inverse,
+    full_centre_pair,
     weights_fingerprint,
 )
 
@@ -328,6 +329,7 @@ def _retained_rank_info(
         objective_loss=None,
         data_gram=centered_final.data_gram,
         data_gram_weights=weights_fingerprint(W),
+        centre_pair=full_centre_pair(centered_final, p, selected_columns),
         face=face,
         face_rows=face_rows,
         face_augmented=face_rank,

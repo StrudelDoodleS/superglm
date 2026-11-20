@@ -901,7 +901,10 @@ class FactorSmooth:
     ) -> GroupInfo:
         """Build compact support-space geometry with a fixed natural basis."""
         del specs
-        from superglm._group_matrix._group_matrix_bins import discretize_positive_support
+        from superglm._group_matrix._group_matrix_bins import (
+            discretize_positive_support,
+            fit_bin_lookup,
+        )
         from superglm.features._spline_runtime import bin_knots
 
         numeric = self._validate_numeric(x)
@@ -922,6 +925,7 @@ class FactorSmooth:
             numeric, n_bins, sample_weight, bin_knots(spline, numeric, sample_weight)
         )
         basis_unique = spline._raw_basis_matrix(support)
+        self._fit_bins = {0: fit_bin_lookup(numeric, support, bin_idx, sample_weight)}
         return self._group_info(
             codes=codes,
             basis_unique=np.asarray(basis_unique, dtype=np.float64),

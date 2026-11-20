@@ -201,6 +201,20 @@ contributions while retaining fixed effects and the global spline. For SZ,
 that is the global curve, adjusted as described next when the training data
 cannot identify some levels.
 
+### Rows the training data do not determine
+
+When neither the training data nor a penalty separate two terms, as with a
+level whose rows all sit at one value of its own slope, `predict` still prices
+every row, and gives one `NonEstimablePredictionWarning` naming the rows that
+tell those terms apart (its `rows` attribute). Their price rests on how the fit
+split the terms rather than on the data. The test is R's `predict.lm` check
+(`rankdeficient = "warnif"`, tolerance `1e-6` of the row's size). A direction
+a penalty fixes, such as a random effect's level sum under its zero-mean
+prior, is determined and never warns. As in `predict.lm`, a row the fit's rank
+decision treats as determined only up to its cut, a near alias it truncated,
+can warn too, a training row included. The rating-table export shades the
+entries that lean on such a direction and names them in the block's note.
+
 ### SZ levels the data cannot identify
 
 Some SZ levels do not carry enough information for their whole curve:

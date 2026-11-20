@@ -25,7 +25,12 @@ from superglm.inference._ordered_reference import ordered_reference_intercept
 from superglm.inference._term_helpers import _VALID_CENTERING
 from superglm.inference._term_types import TermInference
 from superglm.links import LogLink
-from superglm.model.estimability_ops import data_null_directions, entry_marks
+from superglm.model.estimability_ops import (
+    data_null_directions,
+    functional_marks,
+    term_rows,
+    term_spec,
+)
 
 if TYPE_CHECKING:
     from superglm.model import SuperGLM
@@ -68,7 +73,7 @@ class RatingTableBlock:
     # than assumed to run over every exported term.
     centering_shift: float = 0.0
     # Which rows' relativities lean on a direction the training data do not
-    # determine (``estimability_ops.entry_marks``), parallel to ``table``:
+    # determine (``estimability_ops.functional_marks``), parallel to ``table``:
     # the fitted model's value, which rests on how the fit split terms it
     # cannot tell apart.  ``None`` when the fit's design has full rank.
     non_estimable: NDArray | None = field(default=None, compare=False)
@@ -276,6 +281,72 @@ def _centring_points(ti: TermInference, name: str, centering: str) -> dict | Non
     if centering == "native" or points is None or len(points) <= 1:
         return None
     return {name: list(points)}
+
+
+def _entry_marks(
+    model,
+    name: str,
+    points: dict | None = None,
+    *,
+    functionals: NDArray | None = None,
+    columns: tuple | None = None,
+    centring: dict | None = None,
+    reference: dict | None = None,
+) -> NDArray | None:
+    """Which entries' log relativities lean on what the fit does not determine, or ``None``.
+
+    An entry reads the term's design row at its ``points`` (raw covariate
+    values, or resolved input ``columns``), or the given ``functionals``; a
+    mean-centred block subtracts the term's mean over ``centring``, a native
+    one its reporting ``reference`` row (the level fixed at one).  ``None``,
+    with nothing formed, when the fit has no tested direction
+    (``estimability_ops.data_null_directions``).
+    """
+    if data_null_directions(model) is None:
+        return None
+    rows = (
+        functionals if functionals is not None else term_rows(model, name, points, columns=columns)
+    )
+    if centring is not None:
+        rows = rows - term_rows(model, name, centring).mean(axis=0)
+    elif reference is not None:
+        rows = rows - term_rows(model, name, reference)
+    return functional_marks(model, name, rows)
+
+
+def _bin_functionals(model, name: str, frame: EagerFrame, sample_weight, table) -> NDArray:
+    """Each bin's entry as ``discretization_impact`` forms it: its rows' weighted mean design row.
+
+    The rows are the training rows in ``[bin_from, bin_to)`` (the last bin
+    closed), weighted by the geometry weight the bin average reads; a bin
+    with no weight reads its midpoint.
+    """
+    from superglm.diagnostics.discretize import _validated_discretization_weights
+
+    _, weight = _validated_discretization_weights(model, sample_weight, len(frame))
+    x = np.asarray(frame.column_array(name), dtype=np.float64)
+    lower = table["bin_from"].to_numpy(dtype=np.float64)
+    upper = table["bin_to"].to_numpy(dtype=np.float64)
+    bins = np.clip(np.searchsorted(lower, x, side="right") - 1, 0, lower.size - 1)
+    design = term_rows(model, name, {name: x})
+    mass = np.bincount(bins, weights=weight, minlength=lower.size)
+    sums = np.vstack(
+        [
+            np.bincount(bins, weights=weight * design[:, j], minlength=lower.size)
+            for j in range(design.shape[1])
+        ]
+    ).T
+    midpoints = term_rows(model, name, {name: _bin_points(lower, upper)})
+    held = mass > 0.0
+    sums[held] /= mass[held, None]
+    sums[~held] = midpoints[~held]
+    return sums
+
+
+def _ordered_reference(model, name: str) -> dict | None:
+    """An ordered factor's reporting reference level, whose relativity is fixed at one."""
+    spec = term_spec(model, name)
+    return {name: [spec._base_level]} if isinstance(spec, OrderedCategorical) else None
 
 
 def _bin_points(lower: NDArray, upper: NDArray) -> NDArray:
@@ -519,17 +590,25 @@ def _continuous_ppform_block(
 
 
 def _ppform_marks(model, name: str, centering: str, lo: NDArray, hi: NDArray) -> NDArray | None:
-    """A piece is marked when its curve leans on the data-null space at either end or its middle."""
+    """A piece is marked when any of its exported coefficients leans on what the fit does not determine.
+
+    A piece's coefficients ``a, b, c, d`` are an invertible linear map of its
+    curve at four distinct points of the piece (a cubic is fixed by four
+    values), so the piece is tested at its ends and thirds; a tail row (one
+    constant) at its finite end.
+    """
     if data_null_directions(model) is None:
         return None
     centring = _centring_points(_main_effect_inference(model, name, centering), name, centering)
     lower = np.where(np.isfinite(lo), lo, hi)
     upper = np.where(np.isfinite(hi), hi, lo)
-    marks = [
-        entry_marks(model, name, {name: points}, centring)
-        for points in (lower, _bin_points(lower, upper), upper)
-    ]
-    return np.logical_or.reduce(marks)
+    width = upper - lower
+    marks = np.zeros(lower.size, dtype=bool)
+    for share in (0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0):
+        found = _entry_marks(model, name, {name: lower + share * width}, centring=centring)
+        if found is not None:
+            marks |= found
+    return marks
 
 
 def _export_weights(model: SuperGLM, n_rows: int, sample_weight: NDArray | None) -> NDArray:
@@ -748,8 +827,12 @@ def _categorical_block(
             }
         ),
         centering_shift=float(ti.centering_shift),
-        non_estimable=entry_marks(
-            model, name, {name: levels}, _centring_points(ti, name, centering)
+        non_estimable=_entry_marks(
+            model,
+            name,
+            {name: levels},
+            centring=_centring_points(ti, name, centering),
+            reference=_ordered_reference(model, name),
         ),
     )
 
@@ -796,11 +879,11 @@ def _piecewise_block(model: SuperGLM, name: str, centering: str) -> RatingTableB
         ),
         extrapolation=model._specs[name].extrapolation,
         centering_shift=float(ti.centering_shift),
-        non_estimable=entry_marks(
+        non_estimable=_entry_marks(
             model,
             name,
             {name: np.asarray(ti.x, dtype=np.float64)},
-            _centring_points(ti, name, centering),
+            centring=_centring_points(ti, name, centering),
         ),
     )
 
@@ -824,7 +907,7 @@ def _numeric_block(model: SuperGLM, name: str, centering: str) -> RatingTableBlo
         # moves every prediction in the workbook.
         centering_shift=float(ti.centering_shift),
         # The per-unit factor reads the coefficient: the change from 0 to 1.
-        non_estimable=entry_marks(model, name, {name: [1.0]}, {name: [0.0]}),
+        non_estimable=_entry_marks(model, name, {name: [1.0]}, reference={name: [0.0]}),
     )
 
 
@@ -1714,9 +1797,9 @@ def _continuous_interaction_block(
     table.insert(0, parent1, [_format_axis_value(v) for v in x1])
     marks = None
     if model is not None:
-        marks = entry_marks(
-            model, name, {parent1: np.repeat(x1, x2.size), parent2: np.tile(x2, x1.size)}
-        )
+        # The axes are the resolved inputs (an ordinal parent's scores), as the
+        # surface was read on them.
+        marks = _entry_marks(model, name, columns=(np.repeat(x1, x2.size), np.tile(x2, x1.size)))
     return InteractionTableBlock(
         name=name,
         table=table,
@@ -1798,7 +1881,7 @@ def _spline_categorical_block(
         columns[level] = factor.get(level, ones)
     # A cell is the level's deviation at the row's point; the base level's
     # column reads no coefficient.
-    marks = entry_marks(
+    marks = _entry_marks(
         model,
         name,
         {
@@ -1889,7 +1972,7 @@ def _interaction_blocks(
         columns = [_row_key_header(parent1, levels2), *levels2]
         table = pd.DataFrame(rows, columns=columns)
         levels1 = list(raw["levels1"])
-        marks = entry_marks(
+        marks = _entry_marks(
             model,
             name,
             {
@@ -2868,11 +2951,13 @@ def build_rating_table_payload(
                     name,
                     table,
                     float(ti.centering_shift),
-                    entry_marks(
+                    None
+                    if data_null_directions(model) is None
+                    else _entry_marks(
                         model,
                         name,
-                        {name: _bin_points(table["bin_from"], table["bin_to"])},
-                        _centring_points(ti, name, centering),
+                        functionals=_bin_functionals(model, name, frame, sample_weight, table),
+                        centring=_centring_points(ti, name, centering),
                     ),
                 )
             )
