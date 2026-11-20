@@ -63,6 +63,8 @@ def _ordered_piecewise_structural_rows(
     b_main: NDArray,
     V_b_main: NDArray,
     alpha: float,
+    estimated_main: NDArray,
+    identified_main: NDArray,
 ) -> list[_CoefRow]:
     """Structural contrast rows for an OrderedCategorical Piecewise basis.
 
@@ -73,6 +75,10 @@ def _ordered_piecewise_structural_rows(
     honest vocabulary under C0 seams, where per-segment orthogonal per-power
     z-statistics do not exist (the segments share their joint values, so
     within-segment components are not free parameters).
+
+    A row that reads a coefficient the fit does not identify follows that coefficient's row:
+    no estimate where ``estimated_main`` is False, no standard error or test where
+    ``identified_main`` is False.
     """
     from scipy.stats import chi2 as chi2_dist
 
@@ -87,8 +93,13 @@ def _ordered_piecewise_structural_rows(
     for structural in inner.ordered_structural_rows():
         if structural.kind == "slope_change":
             contrast = structural.contrast
-            estimate = float(contrast @ b_main)
-            se_val = covariance_contrast_se(V_b_main, contrast)
+            reads = contrast != 0.0
+            estimate = float(contrast @ b_main) if np.all(estimated_main[reads]) else float("nan")
+            se_val = (
+                covariance_contrast_se(V_b_main, contrast)
+                if np.all(identified_main[reads])
+                else float("nan")
+            )
             z, p, ci_lo, ci_hi = _compute_coef_stats(estimate, se_val, alpha)
             rows.append(
                 _CoefRow(
@@ -107,10 +118,14 @@ def _ordered_piecewise_structural_rows(
         segment_label = f"{_level_at(segment)}..{_level_at(segment + 1)}"
         indices = np.asarray(structural.column_indices, dtype=np.intp)
         if indices.size == 1:
-            coef_val = float(b_main[indices[0]])
+            coef_val = float(b_main[indices[0]]) if estimated_main[indices[0]] else float("nan")
             contrast = np.zeros(len(b_main))
             contrast[indices[0]] = 1.0
-            se_val = covariance_contrast_se(V_b_main, contrast)
+            se_val = (
+                covariance_contrast_se(V_b_main, contrast)
+                if identified_main[indices[0]]
+                else float("nan")
+            )
             z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
             rows.append(
                 _CoefRow(
@@ -134,11 +149,12 @@ def _ordered_piecewise_structural_rows(
             V_family = V_b_main[np.ix_(indices, indices)]
         stat = float("nan")
         p_val = float("nan")
-        try:
-            stat = covariance_wald_statistic(b_family, V_family)
-            p_val = 1.0 - chi2_dist.cdf(stat, float(indices.size))
-        except np.linalg.LinAlgError:
-            pass
+        if np.all(identified_main[indices]):
+            try:
+                stat = covariance_wald_statistic(b_family, V_family)
+                p_val = 1.0 - chi2_dist.cdf(stat, float(indices.size))
+            except np.linalg.LinAlgError:
+                pass
         rows.append(
             _CoefRow(
                 name=f"{feature_name}[curvature {segment_label}]",
@@ -737,6 +753,8 @@ def build_coef_rows(
                             b_main,
                             V_b_main,
                             alpha,
+                            estimated[main_group.sl],
+                            coefficient_identified[main_group.sl],
                         )
                     )
 

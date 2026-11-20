@@ -14,6 +14,9 @@ inner basis, exact against the fitted model.
 
 from __future__ import annotations
 
+import re
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -108,6 +111,44 @@ def test_segmented_slope_change_rows_are_real_wald_rows(segmented_model) -> None
             assert line.count("---") == 1  # the QS column only
             return
     raise AssertionError("slope-change row missing")
+
+
+def test_a_structural_row_reading_a_separated_coefficient_shows_no_value() -> None:
+    """The bands above the break carry no claims: both rows that read them print ``---``.
+
+    The top segment's value and curvature coefficients have no finite estimate, and the
+    coefficient tables' footnote says their estimate and SE are shown as ``---``; the
+    slope-change and curvature rows are contrasts of those coefficients.  At ``995a0ef03``
+    they printed the walk's stopping point (-20.2 with SE 0.0121, and 26.9), so the table
+    contradicted its own footnote, as master ``a4a7a64cd`` did.
+    ``test_segmented_slope_change_rows_are_real_wald_rows`` is the control on a fit that
+    identifies them.  Mutations: either row's value from ``beta`` unmasked; the slope-change
+    SE unmasked; the call site passing all-True masks.
+    """
+    rng = np.random.default_rng(42)
+    X = pd.DataFrame({"band": rng.choice(LEVELS, 4000)})
+    position = np.array([LEVELS.index(band) for band in X["band"]])
+    y = rng.poisson(np.exp(-1.0 + 0.05 * position)).astype(float)
+    y[position >= 8] = 0.0
+    spec = OrderedCategorical(order=LEVELS, basis=Piecewise(breaks=["Mi007"], degrees=[1, 2]))
+    model = SuperGLM(family="poisson", selection_penalty=0.0, features={"band": spec})
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(X, y)
+    names = ("band[slope-change @ Mi007]", "band[curvature Mi007..Mi009]")
+    for table in (model.summary(), model.metrics(X, y).summary()):
+        text = str(table)
+        for name in names:
+            (line,) = [line for line in text.splitlines() if name in line]
+            assert line.split(name)[1].split()[:6] == ["---"] * 6
+        assert "no finite estimate (estimate and standard error shown as ---)" in text
+        html = table._repr_html_()
+        for name in names:
+            row = re.search(rf"<tr[^>]*>(?:(?!</tr>).)*{re.escape(name)}.*?</tr>", html, re.S)
+            assert row is not None
+            assert re.findall(r"<td[^>]*>([^<]*)</td>", row.group(0))[1:7] == ["---"] * 6
+    assert any(str(w.message).startswith("Separation") for w in caught)
+    assert model.result.rank_info.coefficient_identified().tolist() == [True, False, False]
 
 
 def test_segmented_df_lands_in_the_parametric_bucket(segmented_model) -> None:
