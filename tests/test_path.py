@@ -131,19 +131,38 @@ class TestPathResult:
         assert m.result.intercept == result.intercept_path[-1]
 
     @pytest.mark.pins_behaviour
-    def test_the_final_point_is_the_published_fit(self, poisson_data):
+    def test_the_final_point_is_the_published_fit(self, poisson_data, monkeypatch):
         """Every field of the path's last point is the published result's.
 
         Pins the rule that the final point is read from the fit published, not from the path's
         last solve: its coefficients, intercept, deviance, EDF, iteration count, convergence and
         separation statement.  It already held on these fits, whose selection penalty publishes
         its solve as it stopped; it now holds by construction, wherever publication moves the
-        result.  Mutation: the deviance read from the solve while publication moves it by one
-        ulp fails here.
+        result.  Publication is made to move it here (``state_ops.publish_identified_fit``
+        followed by a deviance one ulp up and one more iteration), so the path's last solve and
+        the published fit differ.  Mutation: the deviance or the iteration count read from the
+        solve fails here, on this test's own assertion.
         """
+        import dataclasses
+
+        from superglm.model import state_ops
+
+        publish = state_ops.publish_identified_fit
+
+        def moved(model):
+            publish(model)
+            result = model._result
+            model._result = model._solver_result = dataclasses.replace(
+                result,
+                deviance=float(np.nextafter(result.deviance, np.inf)),
+                n_iter=result.n_iter + 1,
+            )
+
         df, y, w = poisson_data
         m = _make_model()
+        monkeypatch.setattr(state_ops, "publish_identified_fit", moved)
         result = m.fit_path(df, y, sample_weight=w, n_lambda=10, lambda_ratio=1e-2)
+        monkeypatch.undo()
         published = m.result
         np.testing.assert_array_equal(result.coef_path[-1], published.beta)
         assert result.intercept_path[-1] == published.intercept
