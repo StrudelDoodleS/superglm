@@ -1722,8 +1722,9 @@ def run_final_fit(plan: FinalFitPlan, context) -> FinalFit:
         context.check()
         # The refit's separation statement moved with the carried edits
         # (``separation_ops.revised_statement``): Final fit warns, once the refit would have,
-        # with what the model it returns still says.
-        returned = disclosed_text(model.result)
+        # with what the model it returns still says.  A SuperLSS refit holds no warning back
+        # (``held`` above) and publishes no statement.
+        returned = None if lss else disclosed_text(model.result)
         if runtime_warnings and returned is not None:
             warn_caller(returned, SeparationWarning)
     return FinalFit(
