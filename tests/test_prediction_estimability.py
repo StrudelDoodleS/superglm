@@ -152,14 +152,15 @@ def test_a_levels_alias_gives_its_relativity_and_curve_no_standard_error():
 
     ``relativities(with_se=True)`` and ``term_inference`` test each level's functional (its
     coordinate alone) as ``predict`` tests a row; ``E`` leans on the alias and has a NaN
-    standard error and interval, with one warning naming ``'f'``.  The other levels keep the
-    standard errors ``term_inference`` printed before, and the relativity values do not move.
+    standard error and interval, with one warning naming ``'f'`` and the interaction ``'x:f'``,
+    whose level ``E`` leans on it too.  The other levels keep the standard errors
+    ``term_inference`` printed before, and the relativity values do not move.
     ``non_estimable`` names each level's kind, which the rating table and the editor read.
     """
     model = _fit(ALIASED)
     frames, caught = _caught(lambda: model.relativities(with_se=True))
     (warning,) = _disclosures(caught)
-    assert list(warning.points) == ["f"]
+    assert list(warning.points) == ["f", "x:f"]
     frame = frames["f"]
     levels = frame["level"].tolist()
     e = levels.index("E")
@@ -390,3 +391,193 @@ def test_a_separated_level_is_named_once_by_the_decision():
     levels = frames["c"]["level"].tolist()
     assert np.isnan(frames["c"]["se_log_relativity"].iloc[levels.index("c6")])
     assert len(_disclosures(caught)) == 1
+
+
+@pytest.mark.parametrize("x_spec", [Numeric, lambda: Spline(n_knots=6)], ids=["numeric", "spline"])
+def test_an_interactions_points_off_the_alias_are_flagged_by_the_same_test(x_spec):
+    """``x:f[E]``'s slope (numeric) or curve (spline) leans on the alias; the other levels' do not.
+
+    ``term_inference`` on the interaction flags its points (``non_estimable``, keyed as the
+    inference keys them) and, with standard errors asked for, warns once;
+    ``relativities(with_se=True)`` names the interaction's frames in its warning.  Without
+    standard errors nothing is said.
+    """
+    model = _fit(ALIASED, x_spec=x_spec())
+    inference, caught = _caught(lambda: model.term_inference("x:f"))
+    flagged = getattr(inference, "non_estimable", None)
+    assert flagged
+    if inference.kind == "numeric_categorical":
+        assert flagged == {"E": "alias"}
+    else:
+        assert {level for level, _ in flagged} == {"E"}
+        assert set(flagged.values()) == {"alias"}
+        assert len(flagged) >= len(inference.x) - 1
+    assert len(_disclosures(caught)) == 1
+    _, caught = _caught(lambda: model.term_inference("x:f", with_se=False))
+    assert not _disclosures(caught)
+    _, caught = _caught(lambda: model.relativities(with_se=True))
+    (warning,) = _disclosures(caught)
+    assert any(str(name).startswith("x:f") for name in warning.points)
+
+
+def test_a_spline_by_level_rating_block_flags_the_levels_cells():
+    """The ``x:f`` cell block flags level ``E``'s cells alone; the workbook note names them."""
+    from superglm.export.rating_tables import build_rating_table_payload
+
+    model = _fit(ALIASED, x_spec=Spline(n_knots=6))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        payload = build_rating_table_payload(model, ALIASED, Y, n_bins=10, impact_bins=(10,))
+    (block,) = [b for b in payload.interactions if b.name == "x:f"]
+    flags = getattr(block, "non_estimable", None)
+    assert flags is not None
+    columns = list(block.table.columns[1:])
+    flagged_columns = {columns[j] for j in np.nonzero(flags != "")[1]}
+    assert flagged_columns == {"E"}
+    assert np.count_nonzero(flags[:, columns.index("E")] == "alias") >= len(block.table) - 1
+    from superglm.export.excel import _non_estimable_cells_note
+
+    assert _non_estimable_cells_note(block).startswith("Cells (")
+
+
+def _shifted_alias_fit():
+    """Two splines on ``z = 2 x + 1``: their linear parts are one alias the gauge holds.
+
+    The rows of weight zero sit off the line, so the public columns' training means ``m`` (all
+    rows) differ from the fit's weighted centre ``c`` and the alias's public intercept carries
+    ``m'q`` (``estimability_ops``, "Coordinates").
+    """
+    gen = np.random.default_rng(3)
+    n, k = 1500, 300
+    x = gen.uniform(0, 10, n)
+    z = 2.0 * x + 1.0
+    w = np.ones(n)
+    x[:k], z[:k], w[:k] = gen.uniform(8, 10, k), gen.uniform(0, 5, k), 0.0
+    y = gen.gamma(2.0, np.exp(0.1 * np.sin(x)) / 2.0)
+    frame = pd.DataFrame({"x": x, "z": z})
+    model = SuperGLM(
+        family=superglm.families.gamma(),
+        link="log",
+        features={"x": Spline(n_knots=6), "z": Spline(n_knots=6)},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y, sample_weight=w)
+    return model, frame, y, w
+
+
+def test_rows_on_an_alias_of_two_centred_splines_are_on_support():
+    """The fit's own weighted rows lie on the alias; its weightless rows, off the line, do not.
+
+    The public intercept of the alias carries the materialised spline columns' shift; without
+    it every row on the line would lean on the alias by ``|m'q|``.
+    """
+    model, frame, _, w = _shifted_alias_fit()
+    _, caught = _caught(lambda: model.predict(frame[w > 0]))
+    assert not _disclosures(caught)
+    _, caught = _caught(lambda: model.predict(frame[w == 0]))
+    (warning,) = _disclosures(caught)
+    assert warning.rows.size == int(np.count_nonzero(w == 0))
+    assert set(warning.kinds) == {"alias"}
+
+
+def test_a_binned_spline_block_flags_its_bins_on_the_alias():
+    """The binned blocks of ``x`` and ``z``: a bin's value is the term's mean over its rows.
+
+    Both terms carry the alias's linear part, so their bins lean on it and are flagged.
+    """
+    from superglm.export.rating_tables import build_rating_table_payload
+
+    model, frame, y, w = _shifted_alias_fit()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        payload = build_rating_table_payload(
+            model, frame, y, sample_weight=w, n_bins=8, impact_bins=(8,)
+        )
+    for block in payload.main_effects:
+        flags = getattr(block, "non_estimable", None)
+        assert block.kind == "continuous" and flags is not None
+        assert np.count_nonzero(flags == "alias") >= len(block.table) - 1
+
+
+def test_the_editor_keeps_the_band_of_every_level_the_fit_determines():
+    """Only ``E`` loses its band in the editor's payload; the other levels keep theirs.
+
+    A band whose end is not finite on a determined level still has no band at all (the rule
+    for any other non-finite end).
+    """
+    from superglm.editor import EditorSession
+    from superglm.editor.display import display_for
+    from superglm.editor.payloads import _ci_payload, session_payload
+
+    model = _fit(ALIASED)
+    session = EditorSession.from_model(model, terms=["f"], train_data=(ALIASED, Y))
+    term = session_payload(session)["f"]
+    levels = [str(level) for level in term["levels"]]
+    e = levels.index("E")
+    assert term["ci_lower_y"][e] is None and term["ci_upper_y"][e] is None
+    kept = [i for i in range(len(levels)) if i != e]
+    assert all(isinstance(term["ci_lower_y"][i], float) for i in kept)
+    assert all(term["ci_lower_y"][i] <= term["ci_upper_y"][i] for i in kept)
+    assert term["non_estimable"][e] == "alias"
+
+    editable = session.terms["f"]
+    editable.ci_lower_log_effect = editable.ci_lower_log_effect.copy()
+    editable.ci_lower_log_effect[kept[0]] = np.nan
+    delta = np.zeros(editable.size)
+    assert _ci_payload(editable, delta, display_for(model, "f")) == (None, None)
+
+
+def test_an_sz_terms_row_norm_is_the_functional_predict_scores(monkeypatch):
+    """A saved ``sz`` model whose levels its data identify only in part: rows read as predicted.
+
+    Its term predicts a level left out of the population at the population curve, a row that
+    is not the term's design row.  With a direction forced along one of the term's coordinates
+    (``published_directions``), ``predict`` names the rows that reach it, and each row's norm in
+    the dual scale equals the norm of the predictor's own row: the predictor at each unit
+    coordinate (``_score_terms``), centred and scaled, to ``kappa u``.
+    """
+    import importlib
+    import importlib.util
+    import pickle
+    from pathlib import Path
+
+    path = Path(__file__).parent / "fixtures" / "saved_v0_36_0" / "sz_gaussian_one_row.pkl"
+    with open(path, "rb") as handle:
+        record = pickle.load(handle)
+    model, grid = record["model"], record["grid"]
+    spec = model._interaction_specs["x:g:sz"]
+    assert spec._has_population_offset
+    plan = base._prediction_plan(model)
+    p = len(model.result.beta)
+    gen = np.random.default_rng(11)
+    scale, centre = gen.uniform(0.5, 2.0, p), gen.normal(size=p)
+    (term,) = [t for t in plan["interactions"] if t["name"] == "x:g:sz"]
+    direction = np.zeros((p, 1))
+    direction[term["beta_idx"][0], 0] = 1.0 / scale[term["beta_idx"][0]]
+    forced = None
+    if importlib.util.find_spec("superglm.model.estimability_ops") is not None:
+        estimability_ops = importlib.import_module("superglm.model.estimability_ops")
+        forced = estimability_ops.PublishedDirections(
+            {"unresolved": direction}, {"unresolved": np.zeros(1)}, scale, centre, 3.0
+        )
+        monkeypatch.setattr(estimability_ops, "published_directions", lambda model: forced)
+    _, caught = _caught(lambda: model.predict(grid))
+    (warning,) = _disclosures(caught)
+    assert set(warning.kinds) == {"unresolved"} and warning.rows.size
+
+    frame = as_eager_frame(grid)
+
+    def predictor(beta):
+        eta = base.EtaSum(len(frame), 0.0, None)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            base._score_terms(
+                model, frame, plan, beta, eta, None, random_effects="conditional", fitted=False
+            )
+        return eta.finish()
+
+    rows = np.column_stack([predictor(unit) for unit in np.eye(p)])
+    oracle = np.sqrt(1.0 / 9.0 + np.sum(((rows - centre) / scale) ** 2, axis=1))
+    norms = base._row_norms(model, frame, plan, forced, "conditional")
+    np.testing.assert_allclose(norms, oracle, rtol=1e3 * p * U)

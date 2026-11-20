@@ -194,7 +194,7 @@ def _curve_warning(flagged) -> None:
     warn_caller(
         NonEstimablePredictionWarning(
             "Term values that lean on what the fit does not determine are returned at the "
-            "published fit's values, with their standard errors NaN: "
+            "published fit's values, and where a standard error is reported it is NaN: "
             + "; ".join(parts)
             + ". The warning's `points` name them by term.",
             rows,
@@ -338,6 +338,67 @@ def relativities(model, with_se=False, centering="native"):
     return frames
 
 
+def _interaction_points(raw):
+    """An interaction reconstruction's reported log values, flat, and the keys that name them.
+
+    The keys follow ``InteractionInference``: ``(level, i)`` for point ``i`` of a per-level
+    curve, the ``(level1, level2)`` pair of a cell, the level of a per-unit slope, ``"coef"``
+    for a product coefficient.  ``None`` for a surface, which reports no value here.
+    """
+    from superglm.features.interaction import interaction_cells
+
+    if "per_level" in raw and "x" in raw:
+        keys = [(level, i) for level in raw["levels"] for i in range(len(raw["x"]))]
+        values = [np.asarray(raw["per_level"][level]["log_relativity"]) for level in raw["levels"]]
+        return keys, np.concatenate(values) if values else np.zeros(0)
+    if "pairs" in raw:
+        cells = interaction_cells(raw, "log_relativities")
+        return list(cells), np.fromiter(cells.values(), dtype=np.float64, count=len(cells))
+    if "relativities_per_unit" in raw:
+        slopes = raw["log_relativities_per_unit"]
+        levels = list(raw["levels"])
+        return levels, np.array([slopes[level] for level in levels], dtype=np.float64)
+    if "relativity_per_unit_unit" in raw:
+        return ["coef"], np.array([raw["coef"]], dtype=np.float64)
+    return None
+
+
+def _interaction_labels(model, name):
+    """``{key: kind}`` for an interaction's reported points (``_interaction_points``), or ``None``.
+
+    The same test as every term's (``estimability_ops.point_labels``), on the reconstruction's
+    log values at the term's coefficients; ``None`` when no point is flagged.
+    """
+    from superglm.model.estimability_ops import point_labels, term_coordinates
+
+    ispec = model._interaction_specs[name]
+    beta = np.asarray(model.result.beta)[term_coordinates(model, name)]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fitted = _interaction_points(ispec.reconstruct(beta))
+        if fitted is None:
+            return None
+        keys, _ = fitted
+        labels = point_labels(model, name, lambda b: _interaction_points(ispec.reconstruct(b))[1])
+    if labels is None or not np.any(labels != ""):
+        return None
+    return dict(zip(keys, (str(kind) for kind in labels), strict=True))
+
+
+def _relativity_frame_labels(model, name, labels):
+    """An interaction's labels (``_interaction_labels``) by the relativity frames that hold them."""
+    first = next(iter(labels))
+    if isinstance(first, tuple) and isinstance(first[1], int):
+        levels = dict.fromkeys(key[0] for key in labels)
+        return {
+            f"{name}[{level}]": np.array(
+                [kind for (lv, _), kind in labels.items() if lv == level], dtype=object
+            )
+            for level in levels
+        }
+    return {name: np.array(list(labels.values()), dtype=object)}
+
+
 def _disclosed_relativities(model, frames, centering):
     """``frames`` with NaN standard errors on the points off the fit's support, and one warning.
 
@@ -367,7 +428,15 @@ def _disclosed_relativities(model, frames, centering):
     if labels is None:
         return frames
     flagged = {name: values for name, values in labels.items() if np.any(values != "")}
+    for name in model._interaction_order:
+        cells = _interaction_labels(model, name)
+        if cells is not None:
+            # an interaction's frames carry no standard error: the warning names its points
+            by_frame = _relativity_frame_labels(model, name, cells)
+            flagged.update({key: kinds for key, kinds in by_frame.items() if np.any(kinds != "")})
     for name, values in flagged.items():
+        if "se_log_relativity" not in frames[name].columns:
+            continue
         frame = frames[name].copy()
         se = frame["se_log_relativity"].to_numpy(dtype=np.float64, copy=True)
         se[values != ""] = np.nan
@@ -384,10 +453,19 @@ def _disclosed_term(model, inference, read_kwargs):
     ``non_estimable`` holds each point's kind (``""`` where the fit determines it); with
     standard errors, a flagged point's error, intervals and bands are NaN, with one warning.
     """
-    from superglm.inference._term_types import TermInference
+    from superglm.inference._term_types import InteractionInference, TermInference
 
+    if isinstance(inference, InteractionInference) and inference.active:
+        cells = _interaction_labels(model, inference.name)
+        if cells is None:
+            return inference
+        if read_kwargs.get("with_se"):
+            _curve_warning({inference.name: np.array(list(cells.values()), dtype=object)})
+        flagged = {key: kind for key, kind in cells.items() if kind}
+        return dataclasses.replace(inference, non_estimable=flagged)
     if not isinstance(inference, TermInference) or not inference.active:
         return inference
+    read_kwargs = {key: value for key, value in read_kwargs.items() if key != "with_se"}
     name = inference.name
 
     def read(covariance_fn):
@@ -535,7 +613,9 @@ def term_inference(
         centering=centering,
     )
     inference = _disclosed_term(
-        model, inference, {"n_points": n_points, "alpha": alpha, "centering": centering}
+        model,
+        inference,
+        {"n_points": n_points, "alpha": alpha, "centering": centering, "with_se": with_se},
     )
     # `_term_ops` has no model handle, so it hard-codes `monotone_repaired=False`
     # with a comment inviting the caller to override. This is that caller: a

@@ -566,11 +566,21 @@ def _row_norms(model, frame: EagerFrame, plan, directions, random_effects: str) 
     ``r`` in the centred coordinates is ``[1, x - c]`` (``estimability_ops``), so its square is
     ``1 / sum W`` plus, per term, ``||(x_t - c_t) / D_t||^2`` over the term's design row ``x_t``
     (zero for a term the prediction leaves out).  One pass over the rows: an indicator term
-    reads its lookup through its scorer, any other its design rows in blocks.
+    reads its lookup through its scorer, any other its design rows in blocks.  An ``sz`` term
+    with levels left out of its population is not scored by its design row: its row, and that
+    of the group term it folds, are read as ``predict`` scores them (``_folded_terms``).
     """
     n = len(frame)
     squares = np.full(n, 1.0 / directions.alpha_scale**2)
+    folded = _folded_terms(model, frame, plan, random_effects)
+    for coordinates, scored in folded:
+        for coordinate in coordinates:
+            values = scored(coordinate) - directions.centre[coordinate]
+            squares += (values / directions.scale[coordinate]) ** 2
+    read = {name for coordinates, scored in folded for name in scored.names}
     for term in (*plan["features"], *plan["interactions"]):
+        if term["name"] in read:
+            continue
         index = term["beta_idx"]
         scale, centre = directions.scale[index], directions.centre[index]
         constant = float(np.sum((centre / scale) ** 2))
@@ -589,6 +599,50 @@ def _row_norms(model, frame: EagerFrame, plan, directions, random_effects: str) 
             scaled = (np.asarray(rows, dtype=np.float64) - centre) / scale
             squares[start : start + block] += np.einsum("ij,ij->i", scaled, scaled)
     return np.sqrt(squares)
+
+
+class _FoldedScore:
+    """``predict``'s row values at one coordinate of an ``sz`` term and the group term it folds."""
+
+    def __init__(self, model, frame, term, group, features, population: bool) -> None:
+        self.model, self.frame, self.term, self.group = model, frame, term, group
+        self.features, self.population = features, population
+        self.names = {term["name"]} | ({group["name"]} if group is not None else set())
+
+    def __call__(self, coordinate: int) -> NDArray:
+        unit = np.zeros(np.asarray(self.model.result.beta).size)
+        unit[coordinate] = 1.0
+        values, _ = _score_unidentified_factor_smooth(
+            self.term, self.frame, unit, population=self.population, features=self.features
+        )
+        values = np.asarray(values, dtype=np.float64)
+        if self.group is not None:
+            values = values + _score_prediction_term_exact(self.group, self.frame, unit)
+        return values
+
+
+def _folded_terms(model, frame, plan, random_effects: str) -> list[tuple[NDArray, _FoldedScore]]:
+    """The terms ``predict`` scores off their design rows: each ``sz`` term with population offsets.
+
+    Such a term reads its group term's coefficients too (``_score_unidentified_factor_smooth``:
+    the folded main effect's level values), so its row and the group term's are one functional
+    on the union of their coordinates, read one unit coordinate at a time.
+    """
+    from superglm.features.factor_smooth import FactorSmooth
+
+    features = {term["name"]: term for term in plan["features"]}
+    folded = []
+    for term in plan["interactions"]:
+        spec = term["spec"]
+        if not (isinstance(spec, FactorSmooth) and spec._has_population_offset):
+            continue
+        group = features.get(spec.group) if spec._folds_group_term else None
+        coordinates = np.asarray(term["beta_idx"], dtype=np.intp)
+        if group is not None:
+            coordinates = np.concatenate((coordinates, np.asarray(group["beta_idx"], np.intp)))
+        scored = _FoldedScore(model, frame, term, group, features, random_effects == "population")
+        folded.append((coordinates, scored))
+    return folded
 
 
 def off_support_rows(model, frame: EagerFrame, plan, random_effects: str) -> NDArray | None:

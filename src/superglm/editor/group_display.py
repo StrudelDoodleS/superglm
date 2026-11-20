@@ -62,8 +62,8 @@ def build_group_display(term_payload: dict[str, Any]) -> dict[str, Any]:
             collapsed["previous_y"].append(_weighted_average(previous_y[indices], group_weight))
 
         if ci_lower is not None and ci_upper is not None:
-            collapsed["ci_lower_y"].append(_weighted_average(ci_lower[indices], group_weight))
-            collapsed["ci_upper_y"].append(_weighted_average(ci_upper[indices], group_weight))
+            collapsed["ci_lower_y"].append(_band_end(ci_lower[indices], group_weight))
+            collapsed["ci_upper_y"].append(_band_end(ci_upper[indices], group_weight))
 
     collapsed["exposure"] = {
         "kind": "bars",
@@ -108,10 +108,17 @@ def _weighted_average(values: np.ndarray, weights: np.ndarray) -> float:
     return float(np.mean(values))
 
 
+def _band_end(values: np.ndarray, weights: np.ndarray) -> float | None:
+    """A group's band end; ``None`` when a member has none (a point the fit does not determine)."""
+    if np.any(np.isnan(values)):
+        return None
+    return _weighted_average(values, weights)
+
+
 def _optional_array(values: Any) -> np.ndarray | None:
     if values is None:
         return None
-    return np.asarray(values, dtype=np.float64)
+    return np.asarray([np.nan if v is None else v for v in values], dtype=np.float64)
 
 
 def _default_mode(term_payload: dict[str, Any]) -> str:

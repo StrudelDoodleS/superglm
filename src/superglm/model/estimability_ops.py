@@ -195,3 +195,54 @@ def published_directions(model) -> PublishedDirections | None:
     if not slopes:
         return None
     return PublishedDirections(slopes, intercepts, scale, centre - shifts, alpha_scale)
+
+
+def term_coordinates(model, name) -> NDArray:
+    """A term's coefficient positions, in the order its blocks concatenate them."""
+    blocks = [
+        np.arange(group.start, group.end, dtype=np.intp)
+        for group in model._groups
+        if group.feature_name == name
+    ]
+    return np.concatenate(blocks) if blocks else np.zeros(0, dtype=np.intp)
+
+
+def point_labels(model, name, values) -> NDArray | None:
+    """Each point a term reader reports, labelled by ``diagnostics.estimability.off_support``.
+
+    ``values(beta_t)`` is the reader at the term's coefficients ``beta_t`` (``term_coordinates``):
+    an array of the log values it reports, linear in ``beta_t`` (a curve, a level table, a cell
+    table, a bin's weighted mean of the term).  Its point ``r`` is a functional of the term's
+    coordinates alone, so its share along a kind is ``||r Q||``, read as ``values`` at each
+    direction ``q_t`` (one call per direction), and its dual norm ``||r D^-1||``, read from
+    ``values`` at the term's unit vectors.  ``None`` when the fit has no direction to disclose,
+    and when none reaches the term enough to move a label: ``||r Q|| <= ||r D^-1|| ||D q_t||``
+    (Cauchy-Schwarz), so a term with ``||D q_t|| <= 1e-6`` over every direction has no point off
+    support, and nothing is read.
+    """
+    from superglm.diagnostics.estimability import PREDICTION_TOLERANCE, off_support
+
+    directions = published_directions(model)
+    if directions is None:
+        return None
+    index = term_coordinates(model, name)
+    scale = directions.scale[index]
+    reached = {
+        kind: slopes[index]
+        for kind, slopes in directions.slopes.items()
+        if np.linalg.norm(scale[:, None] * slopes[index]) > PREDICTION_TOLERANCE
+    }
+    if not reached or index.size == 0:
+        return None
+
+    def read(beta: NDArray) -> NDArray:
+        return np.asarray(values(np.asarray(beta, dtype=np.float64)), dtype=np.float64)
+
+    units = np.eye(index.size)
+    squares = sum((read(units[j]) / scale[j]) ** 2 for j in range(index.size))
+    shares = {
+        kind: np.stack([read(slopes[:, j]).ravel() for j in range(slopes.shape[1])], axis=1)
+        for kind, slopes in reached.items()
+    }
+    norms = np.sqrt(np.asarray(squares, dtype=np.float64))
+    return off_support(shares, norms.ravel()).reshape(norms.shape)

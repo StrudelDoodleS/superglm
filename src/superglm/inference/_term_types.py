@@ -240,6 +240,13 @@ class InteractionInference:
     relativity_per_unit_unit: float | None = None
     coef: float | None = None
 
+    # The points the fit does not determine, by key, each with its kind of direction
+    # (``diagnostics.estimability``: ``"alias"``, ``"separated"``, ...): ``(level, i)`` for point
+    # ``i`` of a level's curve over ``x``, the ``(level1, level2)`` pair of a cell, the level of
+    # a per-unit slope, ``"coef"`` for the product coefficient.  A key absent is determined;
+    # ``None`` when every point is.  A flagged value is the published fit's.
+    non_estimable: dict | None = None
+
 
 __all__ = [
     "_MAX_LOG_REL",

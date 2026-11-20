@@ -93,6 +93,10 @@ class InteractionTableBlock:
     name: str
     table: pd.DataFrame
     kind: str = "cells"
+    # Each value cell's kind of direction the fit does not determine (``""`` where it
+    # determines it), ``(rows, value columns)`` beside the key column; ``None`` when every cell
+    # is determined.  The workbook notes the flagged cells.
+    non_estimable: NDArray | None = None
 
 
 @dataclass(frozen=True)
@@ -266,7 +270,60 @@ def _interval_keys(bin_from, bin_to) -> list[str]:
     ]
 
 
-def _continuous_block(name: str, table: pd.DataFrame, centering_shift: float) -> RatingTableBlock:
+def _bin_rows(x: NDArray, edges: NDArray) -> NDArray:
+    """Each row's bin among ``edges``, as ``discretization_impact`` assigns it."""
+    n_bins = len(edges) - 1
+    return np.clip(np.digitize(x, edges, right=False), 1, n_bins) - 1
+
+
+def _band_means(index: NDArray, mass: NDArray, values: NDArray, n_bins: int) -> NDArray:
+    """Per bin, the geometry-mass weighted mean of ``values`` (rows, or rows by columns)."""
+    totals = np.bincount(index, weights=mass, minlength=n_bins)
+    columns = values.reshape(len(index), -1)
+    means = np.stack(
+        [np.bincount(index, weights=mass * column, minlength=n_bins) for column in columns.T],
+        axis=1,
+    )
+    with np.errstate(invalid="ignore", divide="ignore"):
+        means = np.where(totals[:, None] > 0.0, means / totals[:, None], 0.0)
+    return means if values.ndim > 1 else means[:, 0]
+
+
+def _binned_labels(
+    model, name: str, frame: EagerFrame, sample_weight, edges: NDArray
+) -> NDArray | None:
+    """Each bin's kind of direction the fit does not determine (``estimability_ops.point_labels``).
+
+    A bin's relativity is the geometry-weighted mean of the term over the rows it holds
+    (``discretization_impact``; an exact band's certified factor is that mean too), so its
+    functional is that mean of the rows' design rows.
+    """
+    from superglm.diagnostics.discretize import _validated_discretization_weights
+    from superglm.model import base
+    from superglm.model.estimability_ops import point_labels
+
+    term = next(t for t in base._prediction_plan(model)["features"] if t["name"] == name)
+    x = frame.column_array(name, dtype=np.float64)
+    _, mass = _validated_discretization_weights(model, sample_weight, len(x))
+    index = _bin_rows(x, edges)
+    return point_labels(
+        model,
+        name,
+        lambda beta: _band_means(
+            index,
+            mass,
+            np.asarray(base._score_prediction_term_local_exact(term, frame, beta), np.float64),
+            len(edges) - 1,
+        ),
+    )
+
+
+def _continuous_block(
+    name: str,
+    table: pd.DataFrame,
+    centering_shift: float,
+    non_estimable: NDArray | None = None,
+) -> RatingTableBlock:
     """A binned block, moved by the same constant every other block moves by.
 
     The binned relativities come from ``discretization_impact``, which knows
@@ -302,7 +359,11 @@ def _continuous_block(name: str, table: pd.DataFrame, centering_shift: float) ->
         }
     )
     return RatingTableBlock(
-        name=name, kind="continuous", table=out, centering_shift=float(centering_shift)
+        name=name,
+        kind="continuous",
+        table=out,
+        centering_shift=float(centering_shift),
+        non_estimable=non_estimable,
     )
 
 
@@ -1641,6 +1702,7 @@ def _continuous_interaction_block(
     raw: dict,
     parent1: str,
     parent2: str,
+    non_estimable: NDArray | None = None,
 ) -> InteractionTableBlock:
     from superglm.diagnostics.discretize import _ascending_grid, orient_grid_surface
 
@@ -1657,7 +1719,7 @@ def _continuous_interaction_block(
 
     table = pd.DataFrame(relativity, columns=[_format_axis_value(v) for v in x2])
     table.insert(0, parent1, [_format_axis_value(v) for v in x1])
-    return InteractionTableBlock(name=name, table=table, kind="grid")
+    return InteractionTableBlock(name=name, table=table, kind="grid", non_estimable=non_estimable)
 
 
 def _spline_categorical_block(
@@ -1697,13 +1759,34 @@ def _spline_categorical_block(
     )
 
     parent1, _ = ispec.parent_names
+    # ``cells(beta)``: the block's log cells at the term's coefficients, the functional
+    # each cell reports (``estimability_ops.point_labels``)
     if has_ordinal_parent(model, ispec):
         keys, log_deviation = ordinal_parent_cells(model, ispec, _interaction_beta(model, name))
         kind = "cells"
+
+        from superglm.features.ordered_categorical import resolve_interaction_parent
+
+        _, scores = resolve_interaction_parent(
+            model._specs[parent1], np.asarray(keys, dtype=object)
+        )
+
+        def cells(beta):
+            return ispec.level_log_deviations(scores, beta)
     elif banded is not None:
         edges, log_deviation = banded_cells(banded, len(ispec._non_base))
         keys = _interval_keys(edges[:-1], edges[1:])
         kind = "spline_cells"
+        cells = None
+        if frame is not None:
+            # a band's cell is its weighted mean of the level's deviation over the band's rows
+            covariate = frame.column_array(parent1, dtype=np.float64)
+            _, mass = _validated_discretization_weights(model, sample_weight, len(covariate))
+            index = _bin_rows(covariate, edges)
+
+            def cells(beta):
+                deviation = ispec.level_log_deviations(covariate, beta)
+                return _band_means(index, mass, deviation, len(edges) - 1)
     else:
         if frame is None:
             raise TypeError(
@@ -1722,13 +1805,31 @@ def _spline_categorical_block(
         keys = _interval_keys(bins.edges[:-1], bins.edges[1:])
         log_deviation = bins.log_deviation
         kind = "spline_cells"
+        covariate = frame.column_array(parent1, dtype=np.float64)
+
+        def cells(beta):
+            return spline_categorical_bins(
+                ispec, beta, covariate, geometry_weight, n_bins, bin_strategy
+            ).log_deviation
+
     factor = dict(zip(map(str, ispec._non_base), np.exp(log_deviation).T, strict=True))
     ones = np.ones(len(keys))
     levels = [str(level) for level in ispec._cat_levels]
     columns = {_row_key_header(parent1, levels): keys}
     for level in levels:
         columns[level] = factor.get(level, ones)
-    return InteractionTableBlock(name=name, table=pd.DataFrame(columns), kind=kind)
+    non_estimable = None
+    if cells is not None:
+        from superglm.model.estimability_ops import point_labels
+
+        labels = point_labels(model, name, cells)
+        if labels is not None and np.any(labels != ""):
+            by_level = dict(zip(map(str, ispec._non_base), labels.T, strict=True))
+            blank = np.full(len(keys), "", dtype=object)
+            non_estimable = np.stack([by_level.get(level, blank) for level in levels], axis=1)
+    return InteractionTableBlock(
+        name=name, table=pd.DataFrame(columns), kind=kind, non_estimable=non_estimable
+    )
 
 
 def _interaction_blocks(
@@ -1787,7 +1888,11 @@ def _interaction_blocks(
                     "or reconstruct the term as a cell table."
                 )
             parent2 = ispec.parent_names[1]
-            blocks.append(_continuous_interaction_block(name, raw, parent1, parent2))
+            blocks.append(
+                _continuous_interaction_block(
+                    name, raw, parent1, parent2, _grid_labels(model, name, ispec, n_bins)
+                )
+            )
             continue
 
         if "pairs" not in raw:
@@ -1805,8 +1910,53 @@ def _interaction_blocks(
         ]
         columns = [_row_key_header(parent1, levels2), *levels2]
         table = pd.DataFrame(rows, columns=columns)
-        blocks.append(InteractionTableBlock(name=name, table=table, kind="cells"))
+        blocks.append(
+            InteractionTableBlock(
+                name=name,
+                table=table,
+                kind="cells",
+                non_estimable=_cell_labels(model, name, ispec, raw, n_bins),
+            )
+        )
     return blocks
+
+
+def _grid_labels(model, name: str, ispec, n_bins: int) -> NDArray | None:
+    """A sampled surface's cells by kind (``point_labels``), in the block's sorted orientation."""
+    from superglm.diagnostics.discretize import (
+        _ascending_grid,
+        orient_grid_surface,
+        reconstruct_interaction,
+    )
+    from superglm.model.estimability_ops import point_labels
+
+    def surface(beta):
+        raw = reconstruct_interaction(ispec, beta, n_bins)
+        x1 = np.asarray(raw["x1"], dtype=np.float64)
+        x2 = np.asarray(raw["x2"], dtype=np.float64)
+        log_surface = np.log(orient_grid_surface(name, x1, x2, raw["relativity"]))
+        return _ascending_grid(x1, x2, log_surface)[2]
+
+    labels = point_labels(model, name, surface)
+    return labels if labels is not None and np.any(labels != "") else None
+
+
+def _cell_labels(model, name: str, ispec, raw: dict, n_bins: int) -> NDArray | None:
+    """A categorical cell table's cells by kind (``point_labels``); a base cell is determined."""
+    from superglm.diagnostics.discretize import reconstruct_interaction
+    from superglm.features.interaction import interaction_cells
+    from superglm.model.estimability_ops import point_labels
+
+    levels1, levels2 = raw["levels1"], raw["levels2"]
+
+    def table(beta):
+        cells = interaction_cells(reconstruct_interaction(ispec, beta, n_bins), "log_relativities")
+        return np.array([[cells.get((a, b), 0.0) for b in levels2] for a in levels1])
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        labels = point_labels(model, name, table)
+    return labels if labels is not None and np.any(labels != "") else None
 
 
 def _row_key_header(parent: str, levels) -> str:
@@ -2763,7 +2913,16 @@ def build_rating_table_payload(
             # so this is the point estimate alone -- the band's own centering
             # is ``_recenter_term``'s business and is not routed through here.
             centering_shift = float(_main_effect_inference(model, name, centering).centering_shift)
-            main_effects.append(_continuous_block(name, selected.tables[name], centering_shift))
+            table = selected.tables[name]
+            edges = np.append(table["bin_from"].to_numpy(np.float64), table["bin_to"].iloc[-1])
+            main_effects.append(
+                _continuous_block(
+                    name,
+                    table,
+                    centering_shift,
+                    _binned_labels(model, name, frame, sample_weight, edges),
+                )
+            )
         elif isinstance(spec, Categorical | OrderedCategorical):
             main_effects.append(_categorical_block(model, frame, name, sample_weight, centering))
         elif isinstance(spec, Numeric):

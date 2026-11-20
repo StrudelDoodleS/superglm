@@ -421,6 +421,26 @@ def _non_estimable_note(block) -> str | None:
     )
 
 
+def _non_estimable_cells_note(block) -> str | None:
+    """The sentence naming an interaction block's cells the fit does not determine, or ``None``."""
+    from superglm.diagnostics.estimability import reasons
+
+    labels = getattr(block, "non_estimable", None)
+    if labels is None:
+        return None
+    labels = np.asarray(labels, dtype=object)
+    rows, columns = np.nonzero(labels != "")
+    if rows.size == 0:
+        return None
+    keys = block.table.iloc[:, 0].to_numpy()
+    names = block.table.columns[1:]
+    cells = ", ".join(f"({keys[i]}, {names[j]})" for i, j in zip(rows, columns, strict=True))
+    return (
+        f"Cells {cells}: the fit does not determine their relativity ({reasons(labels.ravel())}); "
+        "the value shown is the published fit's."
+    )
+
+
 def _annotate_non_estimable_blocks(ws, main_effects) -> None:
     """Add each block's non-estimable rows to its note row (``RatingTableBlock.non_estimable``).
 
@@ -518,6 +538,10 @@ def _write_rating_blocks(ws, main_effects, interactions) -> None:
         title_cell = ws.cell(row=interaction_row, column=1, value=block.name)
         title_cell.font = Font(bold=True)
         end_row, _ = _write_dataframe(ws, block.table, interaction_row + 2, 1)
+        note = _non_estimable_cells_note(block)
+        if note is not None:
+            # the row between the title and the header is otherwise unused
+            ws.cell(row=interaction_row + 1, column=1, value=note)
         for row in ws.iter_rows(
             min_row=interaction_row + 3,
             max_row=end_row,
