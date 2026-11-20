@@ -1171,8 +1171,12 @@ def test_metrics_known_scale_dispatch_matches_distribution_contract(family, expe
 
 
 class TestNullModel:
+    @pytest.mark.pins_behaviour
     def test_a_log_link_subclass_with_its_own_mapping_takes_the_general_path(self):
         """A ``LogLink`` subclass that changes its mapping is not the built-in log link.
+
+        A control against master, whose scoring evaluated the subclass's own mapping; it
+        guards this change's closed-form shortcut, which first admitted any subclass.
 
         With ``link(mu) = log(mu)/2`` the null fit must minimise the deviance of that
         mapping, so its null deviance equals the deviance of the intercept-only fit
