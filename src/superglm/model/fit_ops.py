@@ -455,17 +455,13 @@ def _null_curvature_kind(distribution, link) -> str | None:
 def _convex_null_intercept(b, y, weights, offset, distribution, link, kind) -> float | None:
     """The null intercept by safeguarded Newton steps, where the deviance is convex in it.
 
-    The step divides the score by the observed information, which under a
-    canonical link (``kind``) is the Fisher information, so its curvature term
-    is not formed. The score is minus half the deviance's slope, so the points
-    where it has each sign bracket the root, and a step that leaves the bracket
-    is replaced by bisection (Press et al., Numerical Recipes, 2nd ed., section
-    9.4). A step after which the score keeps its sign lowered the deviance, the
-    deviance being convex, so it is evaluated only after a step that crossed
-    the root; one that raised it by more than the relative 1e-8 R's glm.fit
-    calls converged (Marschner, R Journal 3(2), 2011) is bisected back towards
-    the point it left. None when the information is not positive, or after
-    ``_NULL_MAX_ITER`` points: Brent's method takes over.
+    Each step divides the score by the observed information (the Fisher information
+    under a canonical link). The score's signs bracket the root, and a step leaving the
+    bracket is bisected (Numerical Recipes, 2nd ed., 9.4). Convexity means a step that
+    keeps the score's sign lowered the deviance, so the deviance is evaluated only after
+    a step that crossed the root, and bisected back if it rose by more than glm.fit's
+    relative 1e-8. None when the information is not positive, or after
+    ``_NULL_MAX_ITER`` points: Brent's method then takes over.
     """
     from superglm.distributions import clip_mu
 
@@ -530,27 +526,14 @@ def _compute_null_mu(
 ) -> NDArray:
     """Null model prediction: intercept-only MLE, offset-aware.
 
-    With an offset the null model has one parameter, the intercept ``b``, and is
-    fitted by minimising the weighted deviance in ``b`` with Brent's method on a
-    bracket (Brent, *Algorithms for Minimization without Derivatives*, 1973,
-    ch. 5). The bracket starts from the best of the intercepts that put an
-    offset quantile's mean at the weighted mean response, on both branches of
-    the sqrt link, so a deviance with several minima (cauchit, sqrt) is searched
-    across its range. A response at the edge of the family's means (all zero, or
-    all one for a binomial) has its minimum in the limit: below or above the
-    predictor bound every row is clipped, and the deviance is flat at its limit.
-    Under the log link with variance ``mu**p`` (Poisson, Gamma, Tweedie) the
-    minimum has a closed form, which is used wherever no clip acts on it, and
-    where the deviance is convex in the intercept (a canonical link, or the log
-    link of a power-variance or NB2 family) safeguarded Newton steps find it
-    before Brent's method is needed.
-    The result is a minimisation that may stop above the true minimum under
-    extreme offsets (logit beyond about +-24, log beyond about +-71, where rows
-    sit at the predictor bound) or a non-convex link (sqrt, cauchit). Where the
-    link has no linear predictor for the weighted mean response (a Gaussian
-    log-link response with a mean of zero or below) the null means are NaN,
-    with a warning saying why.
-    ``weight_semantics`` is accepted for the callers and does not change the fit.
+    The intercept minimises the weighted deviance: in closed form under a log link with
+    variance ``mu**p`` where no clip acts, by safeguarded Newton steps where the deviance
+    is convex in it, and otherwise by Brent's method (1973, ch. 5) on a bracket grown
+    from the best offset-quantile start. A response on the family's edge takes its
+    limit. Under extreme offsets (logit beyond about +-24, log beyond about +-71) or a
+    non-convex link (sqrt, cauchit) the minimisation may stop above the true minimum.
+    Where the link has no predictor for the mean response (Gaussian log link, mean at or
+    below 0) the null means are NaN, with a warning. ``weight_semantics`` is unused.
     """
     from superglm.distributions import Binomial, Gaussian, clip_mu
     from superglm.links import SqrtLink
