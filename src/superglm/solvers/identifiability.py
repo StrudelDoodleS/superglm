@@ -26,7 +26,11 @@ coupling to ``K`` the same pass reads.  An eigenvalue whose root is within the r
 tell from zero is an alias only if the design cannot either, read once more at unit weight on the
 rows with positive prior weight (``_design_null``): a vanished working weight carries no
 information about identifiability, so such a direction is never moved along, and its
-coordinates' standard errors are not resolved at float64.  Counting (a level's rows, its distinct
+coordinates' standard errors are not resolved at float64.  That read takes the first pass's
+eigenvectors, which are only as accurate as their eigenvalues are separated from the identified
+ones (Davis and Kahan 1970): a direction is an alias of the design only when its root clears the
+rounding bound with that error added, so a near-degenerate pair is not resolved on every BLAS
+kernel rather than an alias on one.  Counting (a level's rows, its distinct
 covariate values) only names the reason for an alias; it decides nothing.
 
 **The margin grows with the rows.** In Jacobi-scaled coordinates (unit diagonal of ``H``) the
@@ -580,6 +584,8 @@ class _Split:
     in the eigenvectors ``vectors``: ``null`` under the rounding bound, ``identified`` above it
     by more than the coupling's uncertainty, the rest not resolved at float64.  ``score`` is the
     penalised score along ``T``, ``data`` the data Gram's product ``D T`` read from the rows.
+    ``angle`` bounds the sine of the angle between the computed eigenvectors of the directions
+    it does not identify and ``C``'s invariant subspace there (``_read_rows``).
     """
 
     refined: NDArray
@@ -593,6 +599,7 @@ class _Split:
     candidates: NDArray
     penalised: NDArray
     shift: float = 0.0
+    angle: float = 0.0
 
     def directions(self, mask: NDArray) -> NDArray:
         return self.refined @ self.vectors[:, mask]
@@ -670,7 +677,14 @@ def decide_identifiability(
         )
         if support is not None and null.shape[1]:
             null, floating = _design_null(
-                decomposition, null, groups, design, support, cast(Callable, penalty)
+                decomposition,
+                null,
+                groups,
+                design,
+                support,
+                cast(Callable, penalty),
+                angle=split.angle,
+                complement=split.directions(split.identified),
             )
     floor = _curvature_floor(decomposition, split, scale, floating.shape[1])
     quiet = 0
@@ -811,6 +825,13 @@ def _read_rows(
     is identified (Weyl); any other is not resolved at float64.  The bound grows with the rows
     (``gamma_(n k) ||B||``, Higham 2002, Thm 19.4), so a near-duplicate column separated by
     about ``n u`` of its norm is aliased on a large book and identified on a small sample.
+
+    The eigenvectors of the directions it does not identify are within ``sin theta <= e / gap``
+    of ``C``'s invariant subspace (Davis and Kahan 1970, the sin theta theorem; LAPACK Users'
+    Guide sec. 4.7.1 states the same ``|E| / gap`` bound for a cluster): ``e`` bounds ``|fl(C) -
+    C|``, ``B'B``'s ``(2 |R| + 3 b) b`` from the singular value bound ``b``, ``T'ST``'s rounding,
+    the coupling's shift and the eigensolver's ``gamma_(k^2) |C|``, and ``gap`` is the least
+    identified eigenvalue, less ``e`` (Weyl), over the largest other one.  No gap leaves no bound.
     """
     from superglm.solvers.centered_system import grouped_projected_factor, weighted_mean_pair
 
@@ -849,19 +870,30 @@ def _read_rows(
     shift = float(np.linalg.norm(hessian, 2)) * float(np.linalg.norm(corrected, 2))
     values, vectors = np.linalg.eigh(schur)
     null = np.sqrt(np.maximum(values, 0.0)) <= limit
-    identified = np.sqrt(np.maximum(values - shift, 0.0)) > limit
+    identified = (np.sqrt(np.maximum(values - shift, 0.0)) > limit) & ~null
+    error = (
+        (2.0 * float(np.linalg.norm(factor, 2)) + 3.0 * bound) * bound
+        + rounding
+        + shift
+        + gamma_up(count * count) * float(np.linalg.norm(schur, 2))
+    )
+    angle = 0.0
+    if np.any(identified) and not np.all(identified):
+        gap = float(np.min(values[identified])) - error - float(np.max(values[~identified]))
+        angle = min(1.0, error / gap) if gap > 0.0 else 1.0
     return _Split(
         refined=candidates - corrected,
         values=values,
         vectors=vectors,
         null=null,
-        identified=identified & ~null,
+        identified=identified,
         limit=limit,
         score=score,
         data=np.asarray(cross, dtype=np.float64),
         candidates=candidates,
         penalised=applied,
         shift=shift,
+        angle=angle,
     )
 
 
@@ -900,6 +932,9 @@ def _design_null(
     support: NDArray,
     penalty: Callable[[NDArray], tuple[NDArray, NDArray]],
     centred: bool = True,
+    *,
+    angle: float = 0.0,
+    complement: NDArray | None = None,
 ) -> tuple[NDArray, NDArray]:
     """Of the directions the weighted rows cannot tell from zero, those the design cannot either.
 
@@ -913,9 +948,21 @@ def _design_null(
     curvature the fit can resolve: they move fitted values, so they are never a gauge, and their
     coordinates' standard errors are not resolved at float64.  Returns the aliases and the rest,
     in decomposition coordinates; ``centred=False`` reads the rows uncentred (an intercept column).
+
+    ``directions`` are ``N = R Q^`` for the first pass's refined directions ``R`` and
+    eigenvectors ``Q^``, within ``angle`` of the invariant subspace ``Q`` (``_read_rows``): ``Q^
+    = Q X + Q_1 Y``, ``|Y| <= angle``, so the basis read here, ``N G`` (``|G| = 1 /
+    sigma_min(J N)`` in Jacobi coordinates ``J``), is that subspace's to within ``angle |G|
+    |M R Q_1|`` with ``M = [A_1; L']`` the rows and penalty.  ``Q_1`` is within ``angle`` of the
+    computed ``Q^_1`` too, so ``|M R Q_1| <= |M P| + angle sigma_max(J N) |M N G|`` with ``P = R
+    Q^_1`` the identified directions (``complement``, read in the same pass) and ``|M N G|`` the
+    largest root here.  Each root moves by at most that (Weyl), so a direction is an alias only
+    when its root clears the rounding bound with it added; otherwise the design may identify it,
+    and it is not resolved.
     """
     from superglm.solvers.centered_system import grouped_projected_factor, weighted_mean_pair
 
+    first = np.asarray(directions, dtype=np.float64)
     oriented = _orthonormal(decomposition, directions)
     scale = np.asarray(decomposition.column_scale, dtype=np.float64)
     directions = oriented / np.where(scale > 0.0, scale, 1.0)[:, None]
@@ -926,12 +973,16 @@ def _design_null(
     centre = centre_lo = None
     if centred:
         _, centre, centre_lo = weighted_mean_pair(design, weights, float(np.sum(weights)))
+    tilted = complement is not None and complement.shape[1] > 0 and angle > 0.0
+    read = np.hstack((directions, cast(NDArray, complement))) if tilted else directions
     factor, _, _, magnitudes = grouped_projected_factor(
-        design, weights, directions, center=centre, center_lo=centre_lo
+        design, weights, read, center=centre, center_lo=centre_lo
     )
     factor = np.asarray(factor)
-    if factor.shape[0] < count:
-        factor = np.vstack((factor, np.zeros((count - factor.shape[0], count))))
+    if factor.shape[0] < read.shape[1]:
+        factor = np.vstack((factor, np.zeros((read.shape[1] - factor.shape[0], read.shape[1]))))
+    # ``R`` of ``[B_1, A_1 P]``: its leading block is ``B_1``'s
+    reach_rows, factor = factor[:, count:], factor[:count, :count]
     bound = _row_bound(
         directions, groups, design, factor, np.zeros(directions.shape[0]), magnitudes
     )
@@ -942,7 +993,20 @@ def _design_null(
     )
     values, vectors = np.linalg.eigh(factor.T @ factor + 0.5 * (curvature + curvature.T))
     rotated = directions @ vectors
-    null = np.sqrt(np.maximum(values, 0.0)) <= bound + math.sqrt(rounding)
+    reach = 0.0
+    if tilted:
+        complement = cast(NDArray, complement)
+        singular = np.linalg.svd(
+            first * np.where(scale > 0.0, scale, 1.0)[:, None], compute_uv=False
+        )
+        penalised, _ = penalty(complement)
+        identified = math.sqrt(
+            float(np.linalg.norm(reach_rows, 2)) ** 2
+            + abs(float(np.linalg.norm(complement.T @ penalised, 2)))
+        )
+        own = math.sqrt(max(float(np.max(values)), 0.0))
+        reach = angle / float(singular[-1]) * (identified + angle * float(singular[0]) * own)
+    null = np.sqrt(np.maximum(values, 0.0)) + reach <= bound + math.sqrt(rounding)
     return rotated[:, null], rotated[:, ~null]
 
 
