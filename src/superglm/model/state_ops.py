@@ -534,12 +534,14 @@ def _names_an_unpriced_level(model) -> bool:
 
     - on an interaction: an ``sz`` term's levels left out of its population curve
       (``_left_out``: thin, separated, or without weight unless ``select=True``), a
-      varying coefficient's separated levels and a crossed term's separated cells;
+      varying coefficient's separated levels, a crossed term's separated cells, and a level
+      whose curve is held over a separated range (``_separated_curves``): the hold takes
+      the range out of the curve, and an unpenalized column over the same rows still walks;
     - a categorical level the build-time scan found separated;
     - the runtime separation finding (``PIRLSResult.separation_message``);
     - a slope REML reports as weakly identified, or a set it found separated.
     """
-    records = ("_left_out", "_separated_ranges", "_separated_cells_at_fit")
+    records = ("_left_out", "_separated_ranges", "_separated_cells_at_fit", "_separated_curves")
     for spec in model._interaction_specs.values():
         if any(getattr(spec, record, None) for record in records):
             return True
