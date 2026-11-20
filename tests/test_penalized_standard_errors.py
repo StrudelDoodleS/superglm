@@ -193,6 +193,62 @@ def _separated_region():
     return frame, y
 
 
+def _unpriced_region(case: str):
+    """The separated region in a ``fit_reml`` that cannot price it: rows, response, model, event.
+
+    Region B's coefficient has no finite estimate in any of them, and the event is the warning
+    by which the fit says so.  What differs is which of the fit's own records holds it:
+
+    - ``separated_level``: Poisson, the region a factor: the build-time scan counts its claims;
+    - ``weak_numeric_level``: Poisson, the region a 0/1 column, which the scan does not read;
+    - ``weak_unscanned_level``: Poisson, the region a factor, the scan turned off;
+    - ``weak_gaussian_level``: Gaussian under a log link, the region's response zero: no
+      boundary for the scan to count.  In these three REML's diagnostics name the slope as
+      weakly identified, and nothing else does.
+    """
+    frame, y = _separated_region()
+    in_b = (frame["region"] == "B").to_numpy()
+    options, region, event = {"family": "poisson"}, Categorical(base="A"), "SeparationWarning"
+    if case == "weak_gaussian_level":
+        y, options = np.where(in_b, 0.0, 2.0 + 0.1 * y), {"family": "gaussian", "link": "log"}
+    if case == "weak_numeric_level":
+        frame, region = frame.assign(region=in_b.astype(float)), Numeric()
+    if case == "weak_unscanned_level":
+        options["separation"] = "ignore"
+    if case.startswith("weak"):
+        event = "WeakIdentificationWarning"
+    model = SuperGLM(
+        **options, features={"region": region, "branch": RandomEffect()}, selection_penalty=0
+    )
+    return frame, y, model, event
+
+
+def _unpriced_level(case: str):
+    """The thin-level rows beside a factor whose level R a plain ``fit`` cannot price.
+
+    ``fit`` keeps no REML diagnostics and both fits converge, so each has one record of it:
+
+    - ``scanned_level``: Poisson, R without a claim: the build-time scan names it;
+    - ``runtime_finding``: Gaussian under a log link, R's response negative: no boundary for
+      the scan to count, and the solver's backstop reports the walk.
+    """
+    frame, _ = _thin_level()
+    rng = np.random.default_rng(5)
+    veh = rng.choice(list("PQR"), len(frame), p=[0.5, 0.45, 0.05])
+    mean = np.exp(0.3 + 0.5 * frame["x"].to_numpy() / 80.0)
+    if case == "scanned_level":
+        y, options = np.where(veh == "R", 0.0, rng.poisson(mean)), {"family": "poisson"}
+    else:
+        y = np.where(veh == "R", -1.0, mean + rng.normal(scale=0.2, size=len(frame)))
+        options = {"family": "gaussian", "link": "log"}
+    model = SuperGLM(
+        **options,
+        features={"x": Spline(n_knots=8), "f": Categorical(), "veh": Categorical(base="P")},
+        interactions=[("x", "f")],
+    )
+    return frame.assign(veh=veh), y.astype(float), model
+
+
 # -------------------------------------------------------------------- row A: the mgcv oracle
 def test_a_thin_level_shows_mgcvs_bayesian_standard_errors():
     """A spline by a factor with a thin level: every SE is printed, and is mgcv's ``Vp``.
@@ -306,6 +362,14 @@ def test_a_fully_penalized_factor_smooth_shows_every_standard_error(basis, selec
 
 
 # ------------------------------------------------------- row K: fits the rule does not reach
+_UNPRICED_REGION_CASES = (
+    "separated_level",
+    "weak_numeric_level",
+    "weak_unscanned_level",
+    "weak_gaussian_level",
+)
+
+
 @pytest.mark.pins_behaviour
 @pytest.mark.parametrize(
     "case",
@@ -317,7 +381,11 @@ def test_a_fully_penalized_factor_smooth_shows_every_standard_error(basis, selec
         "exact_alias",
         "past_the_bar",
         "separated_level",
+        "scanned_level",
         "runtime_finding",
+        "weak_numeric_level",
+        "weak_unscanned_level",
+        "weak_gaussian_level",
     ],
 )
 def test_a_fit_outside_the_rule_keeps_the_data_rule(case):
@@ -340,26 +408,24 @@ def test_a_fit_outside_the_rule_keeps_the_data_rule(case):
     - ``past_the_bar``: a column within 1e-7 of another leaves it full rank at a scaled
       condition of 2e7, past the 1.19e7 a Gram is trusted to, so the fit's record is the row
       factor's and is not a certificate.
-    - ``separated_level``: a region with exposure and no claim, whose branches are a random
-      effect.  Its coefficient walks towards minus infinity and stops at weights near 1e-16,
-      where the penalised Hessian is positive definite and its record's condition is 3: the
-      build-time scan that counts the level's claims names it, the factorisation cannot.
-    - ``runtime_finding``: the same rows with a Gaussian response under a log link that is
-      negative in that region, so no finite mean fits it.  A Gaussian response has no
-      boundary for the build-time scan to count; the solver's backstop reports the walk.
+    - ``separated_level`` and the cases after it: a level or region with rows and no finite
+      estimate (``_unpriced_region``, ``_unpriced_level``).  Its coefficient walks towards
+      infinity and stops where the penalised Hessian is positive definite and well
+      conditioned (the region's record has condition 3): no factorisation shows it, and each
+      case is named by a different record of the fit.
     """
-    if case in ("separated_level", "runtime_finding"):
-        frame, y = _separated_region()
-        family = {"family": "poisson"}
-        if case == "runtime_finding":
-            y = np.where(frame["region"] == "B", -1.0, 2.0 + 0.1 * y)
-            family = {"family": "gaussian", "link": "log"}
-        model = SuperGLM(
-            **family,
-            features={"region": Categorical(base="A"), "branch": RandomEffect()},
-            selection_penalty=0,
-        )
-        assert "SeparationWarning" in {type(w.message).__name__ for w in _fit(model, frame, y)}
+    open_to_the_data = None
+    if case in _UNPRICED_REGION_CASES:
+        frame, y, model, event = _unpriced_region(case)
+        assert event in {type(w.message).__name__ for w in _fit(model, frame, y)}
+    elif case in ("scanned_level", "runtime_finding"):
+        frame, y, model = _unpriced_level(case)
+        caught = {type(w.message).__name__ for w in _fit(model, frame, y, method="fit")}
+        assert "SeparationWarning" in caught and model.result.converged
+        # Every row has a positive weight, so the rows leave open what their design does at
+        # unit weights; the walked level's fitted weights underflow to zero, which would add
+        # its own column.
+        open_to_the_data = undetermined_slopes(_design(model))
     elif case == "shape_repair":
         frame, _ = _thin_level()
         u = frame["x"].to_numpy() / 80.0
@@ -393,7 +459,8 @@ def test_a_fit_outside_the_rule_keeps_the_data_rule(case):
             else _thin_level_model(monotone)
         )
         _fit(model, frame, y, method="fit_reml" if case == "monotone_reml" else "fit")
-    open_to_the_data = data_undetermined(model, frame)
+    if open_to_the_data is None:
+        open_to_the_data = data_undetermined(model, frame)
     assert open_to_the_data.any()
     for rows in (frame, frame.copy()):
         se = _flat(model, model.metrics(rows, y).coefficient_se)

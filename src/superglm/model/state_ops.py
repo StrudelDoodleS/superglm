@@ -530,19 +530,23 @@ def _names_an_unpriced_level(model) -> bool:
 
     Such a fit stops where its penalized Hessian is numerically positive definite, so no
     factorization shows it; these records are counted when the design is built, or kept by
-    the solver for the state it publishes:
+    the solver and by REML for the state they publish:
 
     - an ``sz`` term's levels left out of its population curve: thin, separated, or so in
       another term on its group (``FactorSmooth._left_out``).  A level without weight is thin
       where the lines are unpenalized, and not where ``select=True`` penalizes them;
     - a categorical level the build-time scan found separated;
-    - the runtime separation finding (``PIRLSResult.separation_message``).
+    - the runtime separation finding (``PIRLSResult.separation_message``);
+    - a slope REML's diagnostics report as weakly identified (``reml_weakly_identified``):
+      the data hold it no better than rounding does, on a column the scans do not read.
     """
     if any(getattr(spec, "_left_out", None) for spec in model._interaction_specs.values()):
         return True
     if any(getattr(spec, "_separated_levels_at_fit", ()) for spec in model._specs.values()):
         return True
-    return getattr(model._solver_pirls_result(), "separation_message", None) is not None
+    if getattr(model._solver_pirls_result(), "separation_message", None) is not None:
+        return True
+    return bool((getattr(model, "_reml_profile", None) or {}).get("reml_weakly_identified"))
 
 
 def penalized_fit_certified(model, penalized) -> bool:

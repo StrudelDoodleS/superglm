@@ -1171,10 +1171,10 @@ a range with no rows.
   the data rank.**
 - **So does a fit that names a level or region it cannot price.** That is a
   factor-smooth level the fit reports as thin, without weight or separated, a
-  categorical level it reports as separated, or a fit that ends with the
-  separation warning the solver raises at runtime. Such a fit can stop where
-  its penalised Hessian still has full rank, so the rank test alone would not
-  catch it.
+  categorical level it reports as separated, a coefficient `fit_reml` reports
+  as weakly identified, or a fit that ends with the separation warning the
+  solver raises at runtime. Such a fit can stop where its penalised Hessian
+  still has full rank, so the rank test alone would not catch it.
 - **`metrics` on other rows or weights needs both to pass.** The training
   fit must pass the test, and so must the Hessian formed on those rows.
 - **A saved model keeps the standard errors it was saved with.** Its summary
