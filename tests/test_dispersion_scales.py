@@ -26,6 +26,7 @@ from scipy import optimize, special, stats
 from superglm import (
     Categorical,
     Constraint,
+    FactorSmooth,
     LambdaPolicy,
     Numeric,
     PSpline,
@@ -101,6 +102,8 @@ def _features(route: str) -> dict:
     if route == "fit_reml_shape_repair":
         shape = PSpline(n_knots=6, constraint=Constraint.postfit.increasing)
         return {"x": shape, "c": Categorical(), "z": Numeric()}
+    if route == "fit_reml_factor_smooth":
+        return {"x": Spline(n_knots=6), "z": Numeric()}  # the smooth reads its group itself
     if route.endswith("_random_effect"):
         return {"x": Spline(n_knots=6), "c": RandomEffect(), "z": Numeric()}
     return {"x": Spline(n_knots=6), "c": Categorical(), "z": Numeric()}
@@ -134,6 +137,8 @@ def _fitted(family: str, route: str) -> SuperGLM:
         kwargs["selection_penalty"] = 0.0
     if route == "fit_reml_binned":
         kwargs["discrete"] = True
+    if route == "fit_reml_factor_smooth":
+        kwargs["interactions"] = [FactorSmooth("x", group="c", basis="sz", k=5)]
     model = SuperGLM(**kwargs)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -230,7 +235,13 @@ def test_standard_errors_read_pearson(family, route):
 )
 def test_likelihood_scale_is_ml_at_the_fitted_mean(family, route):
     model = _fitted(family, route)
-    assert model.result.phi_likelihood == pytest.approx(_ml_scale(family, model), rel=ML_RTOL)
+    X, _, _ = _frame()
+    y, _ = _response(family)
+    ml = _ml_scale(family, model)
+    fit_mu = np.asarray(model._fit_mu, dtype=np.float64)
+    expected = float(np.sum(_log_density(family, y, fit_mu, ml)))
+    assert model.summary()._info["log_likelihood"] == pytest.approx(expected, rel=RTOL)
+    assert model.result.phi_likelihood == pytest.approx(ml, rel=ML_RTOL)
     assert model.result.phi_likelihood_method == "ml"
 
 
@@ -242,6 +253,7 @@ def test_densities_read_the_likelihood_scale(family, route):
     model = _fitted(family, route)
     X, _, _ = _frame()
     y, _ = _response(family)
+    assert model.result.phi == pytest.approx(_pearson(family, model), rel=RTOL)
     phi_likelihood = _likelihood_reference(family, route, model)
     if family == "gamma":
         # The two scales are far apart, so a density on the SE scale cannot pass.
@@ -270,13 +282,16 @@ def test_tweedie_densities_read_the_likelihood_scale(route):
     model = _fitted("tweedie", route)
     X, _, _ = _frame()
     y, w = _response("tweedie")
-    likelihood, se_scale = model.result.phi_likelihood, model.result.phi
-    assert se_scale > 1.2 * likelihood
     mu = np.asarray(model.predict(X), dtype=np.float64)
     dist = model._distribution
-    expected = weighted_log_likelihood(dist, y, mu, w, likelihood, weight_semantics="prior")
-    wrong = weighted_log_likelihood(dist, y, mu, w, se_scale, weight_semantics="prior")
     observed = model.metrics(X, y, sample_weight=w).log_likelihood
+    se_scale = _pearson("tweedie", model)
+    assert model.result.phi == pytest.approx(se_scale, rel=RTOL)
+    wrong = weighted_log_likelihood(dist, y, mu, w, se_scale, weight_semantics="prior")
+    assert abs(observed - wrong) > 1.0
+    likelihood = model.result.phi_likelihood
+    assert se_scale > 1.2 * likelihood
+    expected = weighted_log_likelihood(dist, y, mu, w, likelihood, weight_semantics="prior")
     assert observed == pytest.approx(expected, rel=RTOL)
     assert abs(observed - wrong) > 1e3 * abs(observed - expected) + 1.0
 
@@ -298,26 +313,52 @@ def test_variance_components_pair_lambda_with_the_likelihood_scale(family):
     """tau^2 = phi_likelihood / lambda, as mgcv's ``gam.vcomp`` pairs sp with ``reml.scale``."""
     model = _fitted(family, "fit_reml_random_effect")
     component = model.random_effects("c")
+    se_scale = _pearson(family, model)
+    assert model.result.phi == pytest.approx(se_scale, rel=RTOL)
+    assert component.phi < se_scale / 1.2
     phi_likelihood = model.result.phi_likelihood
-    assert model.result.phi > 1.2 * phi_likelihood
     assert component.phi == pytest.approx(phi_likelihood, rel=ML_RTOL)
     assert component.tau_squared == pytest.approx(
         phi_likelihood / component.lambda_value, rel=ML_RTOL
     )
 
+    smooth = _fitted(family, "fit_reml_factor_smooth").factor_smooth("x:c:sz", grid=5)
+    likelihood = _fitted(family, "fit_reml_factor_smooth").result.phi_likelihood
+    assert smooth.phi == pytest.approx(likelihood, rel=ML_RTOL)
+    for name, variance in smooth.variance_components.items():
+        assert variance == pytest.approx(likelihood / smooth.lambdas[name], rel=ML_RTOL)
+
+
+def _overview(model: SuperGLM) -> dict:
+    from superglm.export.summary import build_summary_export_payload
+
+    return {row.metric: row.value for row in build_summary_export_payload(model).overview}
+
 
 def test_a_result_saved_before_the_split_keeps_its_one_scale():
     """An old pickle has one ``phi``; it keeps it for both readers and says so."""
-    model = _fitted("gamma", "fit_reml")
-    state = dict(model.result.__getstate__())
-    for name in ("phi_likelihood", "solver_phi_likelihood", "phi_method", "phi_likelihood_method"):
-        state.pop(name)
-    saved = PIRLSResult.__new__(PIRLSResult)
-    saved.__setstate__(pickle.loads(pickle.dumps(state)))
-    from superglm._weight_units import likelihood_scale
-    from superglm.solvers.dispersion import likelihood_scale_method, scale_method
+    fresh = _fitted("gamma", "fit_reml")
+    overview = _overview(fresh)
+    assert overview.get("Scale estimator") == "pearson"
+    assert overview.get("Likelihood phi estimator") == "reml_profile"
+    assert overview.get("Likelihood phi") == pytest.approx(fresh.result.phi_likelihood)
 
-    assert likelihood_scale(saved).phi == saved.phi == model.result.phi
-    assert scale_method(saved) == likelihood_scale_method(saved) == "legacy"
-    assert model.result.phi_method == "pearson"
-    assert model.result.phi_likelihood_method == "reml_profile"
+    saved = pickle.loads(pickle.dumps(fresh))
+    for name in ("_result", "_solver_result"):
+        state = dict(getattr(saved, name).__getstate__())
+        for field in ("phi_likelihood", "solver_phi_likelihood", "phi_method"):
+            state.pop(field, None)
+        state.pop("phi_likelihood_method", None)
+        old = PIRLSResult.__new__(PIRLSResult)
+        old.__setstate__(state)
+        saved.__dict__[name] = old
+    saved._summary_cache = None
+    saved._fit_metrics_cache = None
+    overview = _overview(saved)
+    assert overview.get("Scale estimator") == "legacy"
+    assert "Likelihood phi" not in overview
+    X, _, _ = _frame()
+    y, _ = _response("gamma")
+    mu = np.asarray(saved.predict(X), dtype=np.float64)
+    expected = float(np.sum(_log_density("gamma", y, mu, saved.result.phi)))
+    assert saved.metrics(X, y).log_likelihood == pytest.approx(expected, rel=RTOL)

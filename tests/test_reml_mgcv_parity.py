@@ -153,8 +153,13 @@ class TestMgcvParity:
         Both maximise the REML criterion over the scale (mgcv's ``reml.scale``). A null
         space miscounted by one moves it by 1.2e-3.
         """
+        from superglm.export.summary import build_summary_export_payload
+
         m = _fit("gamma")
-        phi = m.result.phi_likelihood
+        overview = {r.metric: r.value for r in build_summary_export_payload(m).overview}
+        phi = overview.get("Likelihood phi")
+        assert phi is not None, "the summary publishes the likelihood scale"
+        assert phi == m.result.phi_likelihood
         rel = abs(phi - MGCV_GAMMA["reml_scale"]) / MGCV_GAMMA["reml_scale"]
         assert rel < PHI_BAR, f"phi_likelihood {phi:.9f}, mgcv {MGCV_GAMMA['reml_scale']}"
 
