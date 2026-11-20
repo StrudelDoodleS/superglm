@@ -3544,6 +3544,70 @@ def test_reml_at_a_separated_level_does_not_move_with_a_constant_offset(
     assert float(np.ptp(rho)) <= 2.0 * math.sqrt(2.0 * epsilon / curvature)
 
 
+def test_a_separated_fit_publishes_each_separated_row_at_the_walks_predictor(monkeypatch) -> None:
+    """Separated rows whose walk targets span 27 orders keep the walk's predictor; kept rows the refit's.
+
+    The base region and two others have no events, so a certified separation withholds their
+    288 rows, refits the rest, and moves the refit along the separated span to the walk's
+    predictor on those rows (``state_ops._restore_separated``): ``-19.18`` on the base region,
+    ``-5.5e27`` on the other two.  Each row is matched relative to its own target and the
+    span's columns are equilibrated, so every separated row's predictor is the walk's to a few
+    ``u`` of its size (the equilibrated three-column problem is well conditioned), its mean is
+    at the link's floor, the published intercept is the base region's walked predictor (the
+    reference level is withheld, so the refit holds its intercept where it stopped), and each
+    kept row's predictor is the refit's to the rounding of the span's cancelling sum,
+    ``4 gamma_(p + 2)`` of ``|b_0| + |x|'|beta|`` at the refit's coefficients.  At
+    ``26d9fe059`` an unweighted least-squares match put its error, ``u 5.5e27 = 2^41``, on the
+    shared direction: the intercept was ``+2.2e12``, the base region's mean ``0.9999999`` and
+    the kept rows off by ``3.9e-4``.  Mutations: rows unweighted; columns unscaled.
+    """
+    from superglm.model import state_ops
+
+    captured = {}
+    real = state_ops._restore_separated
+
+    def restore(model, solver, beta, intercept, context):
+        from superglm.solvers.mode_score import linear_predictor
+
+        walk = linear_predictor(model._dm, context.walk, model._fit_offset)
+        captured.update(walk=np.asarray(walk), refit=(np.array(beta), float(intercept)))
+        captured["rows"] = np.asarray(context.withheld.rows)
+        return real(model, solver, beta, intercept, context)
+
+    monkeypatch.setattr(state_ops, "_restore_separated", restore)
+    frame, y = _separated_region_districts()
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        features={
+            "c": Categorical(base="first"),
+            "g": RandomEffect(lambda_policy=LambdaPolicy.fixed(5.0)),
+        },
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y)
+        mean = model.predict(frame)
+    region = frame["c"].to_numpy()
+    separated = np.isin(region, ["r00", "r01", "r02"])
+    np.testing.assert_array_equal(np.sort(captured["rows"]), np.flatnonzero(separated))
+    X = np.asarray(model._dm.toarray(), dtype=np.float64)
+    beta, b0 = np.asarray(model.result.beta, dtype=np.float64), float(model.result.intercept)
+    eta, walk = b0 + X @ beta, captured["walk"]
+    assert float(np.min(np.abs(walk[separated]))) < 20.0 < 1e27 < float(np.max(np.abs(walk)))
+    assert np.all(np.abs(eta - walk)[separated] <= 64.0 * _U * np.abs(walk[separated]))
+    assert float(np.max(mean[separated])) <= 1e-6
+    base = region == "r00"
+    assert abs(b0 - float(walk[base][0])) <= 64.0 * _U * abs(float(walk[base][0]))
+    refit_beta, refit_b0 = captured["refit"]
+    kept = ~separated
+    reference = refit_b0 + X[kept] @ refit_beta
+    magnitude = abs(refit_b0) + np.abs(X[kept]) @ np.abs(refit_beta)
+    gamma = (X.shape[1] + 2) * _U / (1.0 - (X.shape[1] + 2) * _U)
+    assert np.all(np.abs(eta[kept] - reference) <= 4.0 * gamma * magnitude)
+
+
 @pytest.mark.parametrize("lam", [2.0, 8.0])
 def test_a_warm_structured_newton_solve_keeps_a_truncated_direction_where_it_is(lam: float) -> None:
     """A structured solve warm-started with two regions without events drifted to -1e8.
