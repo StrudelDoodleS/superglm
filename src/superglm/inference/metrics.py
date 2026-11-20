@@ -50,6 +50,7 @@ from superglm.model.state_ops import (
     _rank_augmented_covariance,
     _solver_space_working_weights,
     rank_standard_error_mask,
+    refit_shows_every_standard_error,
     saved_standard_error_note,
     standard_error_mask,
 )
@@ -1281,13 +1282,26 @@ class ModelMetrics:
         """Decide which coefficients show a standard error on a re-formed inverse.
 
         ``state_ops.standard_error_mask`` on ``profile_rank``, the decomposition the re-formed
-        covariance is inverted from, which is kept beside the mask: a saved model's note is
-        decided on the same pair (``summary``).
+        covariance is inverted from.  A saved model's note is decided on the same pair, here,
+        while the decomposition is in hand: only its answer is kept (``summary``).
         """
         self.__dict__["_coefficient_estimable"] = standard_error_mask(
             self._model, profile_rank, data_mask
         )
-        self.__dict__["_reformed_profile_rank"] = profile_rank
+        self.__dict__["_refit_shows_every_standard_error"] = refit_shows_every_standard_error(
+            self._model, profile_rank
+        )
+
+    def _standard_error_note(self) -> str | None:
+        """``state_ops.saved_standard_error_note`` for the mask this reader shows.
+
+        The mask is read first: forming it is what decides the note of a re-formed inverse
+        (``_decide_standard_errors``).
+        """
+        mask = self._current_coefficient_estimable
+        return saved_standard_error_note(
+            self._model, mask, self.__dict__.get("_refit_shows_every_standard_error")
+        )
 
     def _reformed_ranks(
         self, X_a, W, XtWX, XtW1, centered_data_gram, S_active, data_rank, face, penalty_root
@@ -2023,12 +2037,7 @@ class ModelMetrics:
             "ebic": self.ebic(),
             "converged": self._result.converged,
             "n_iter": self._result.n_iter,
-            # beside the decomposition its mask was decided on, when the inverse was re-formed
-            "standard_error_note": saved_standard_error_note(
-                self._model,
-                self._current_coefficient_estimable,
-                self.__dict__.get("_reformed_profile_rank"),
-            ),
+            "standard_error_note": self._standard_error_note(),
         }
 
         # NB theta profile info

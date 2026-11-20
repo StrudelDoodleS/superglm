@@ -14,6 +14,7 @@ from superglm.inference._metrics_design import MappedColumnFactor, factor_from_g
 from superglm.inference.covariance import (
     StructuredCovarianceAccessor,
     StructuredSlopeCovarianceAccessor,
+    _active_penalty_matrix,
 )
 from superglm.model.fit_state import fitted_lambda2, fitted_penalty
 from superglm.model.retired_state import retained_linear_state
@@ -31,6 +32,7 @@ from superglm.solvers._structured.state import (
 )
 from superglm.solvers.rank import (
     RankDecomposition,
+    RankInfo,
     decide_data_rank,
     decompose_factor,
     decompose_gram,
@@ -147,7 +149,6 @@ def _legacy_rank_state(model, solver, W: NDArray):
     Gram's decompositions, decided as the fit decides them, and ``None`` for
     the last four when no column is selected.
     """
-    from superglm.inference.covariance import _active_penalty_matrix
     from superglm.solvers.centered_system import (
         build_centered_system,
         grouped_augmented_factor,
@@ -528,17 +529,14 @@ def _positive_definite(penalized) -> bool:
 def _names_an_unpriced_level(model) -> bool:
     """Whether the fit's own records name a level or region the data cannot price.
 
-    Such a fit stops where its penalized Hessian is numerically positive definite, so no
-    factorization shows it; these records are counted when the design is built, or kept by
-    the solver and by REML for the state they publish:
+    Its coefficient walks towards infinity and stops where the data still hold it, so no
+    data-null direction carries it (``_penalty_holds_data_null``); these records do:
 
-    - an ``sz`` term's levels left out of its population curve: thin, separated, or so in
-      another term on its group (``FactorSmooth._left_out``).  A level without weight is thin
-      where the lines are unpenalized, and not where ``select=True`` penalizes them;
+    - an ``sz`` term's levels left out of its population curve (``FactorSmooth._left_out``):
+      thin or separated; a level without weight is thin unless ``select=True`` penalizes it;
     - a categorical level the build-time scan found separated;
     - the runtime separation finding (``PIRLSResult.separation_message``);
-    - a slope REML's diagnostics report as weakly identified (``reml_weakly_identified``):
-      the data hold it no better than rounding does, on a column the scans do not read.
+    - a slope REML's diagnostics report as weakly identified (``reml_weakly_identified``).
     """
     if any(getattr(spec, "_left_out", None) for spec in model._interaction_specs.values()):
         return True
@@ -549,25 +547,80 @@ def _names_an_unpriced_level(model) -> bool:
     return bool((getattr(model, "_reml_profile", None) or {}).get("reml_weakly_identified"))
 
 
+def _data_null_curvature(model, record: RankInfo) -> tuple[NDArray, float] | None:
+    """The penalty's curvature on the fit's data-null directions, ascending, and its zero bound.
+
+    The eigenvalues of ``N' S N`` for the null basis ``N`` of the fit's data rank
+    (``RankInfo.data``) and its penalty ``S``, both in the penalized Hessian's Jacobi
+    coordinates ``n -> diag(D + S)^(1/2) n``: ``S`` has entries of at most one there, and
+    ``N`` is orthonormalized, so its conditioning does not enter.  A penalty's null space is
+    structural, so on a direction it does not reach the curvature is zero to the rounding of
+    forming it: at most ``p eps ||S||_1``, which is ``gamma_p`` on each side of the product
+    (``u = eps / 2``).  ``None`` where a column has no Jacobi coordinate, neither the data nor
+    the penalty reaching it, or the null basis is kept in equilibrated form only.
+    """
+    data = record.data
+    if data.equilibrated_null_basis is not None:
+        return None
+    _, active_groups = _rank_active_state(model, record)
+    exponent = getattr(model._solver_pirls_result(), "weight_exponent", 0)
+    penalty = _active_penalty_matrix(
+        model._dm.group_matrices,
+        model._groups,
+        active_groups,
+        scale_penalties(fitted_lambda2(model), exponent),
+        reml_penalties=getattr(model, "_reml_penalties", None),
+    )
+    scale = np.sqrt(data.column_scale**2 + np.diag(penalty))
+    with np.errstate(over="ignore", invalid="ignore"):
+        directions = scale[:, None] * data.null_basis()
+    if not (np.all(scale > 0.0) and np.all(np.isfinite(directions))):
+        return None
+    basis, _ = np.linalg.qr(directions)
+    scaled = penalty / np.outer(scale, scale)
+    curvature = basis.T @ scaled @ basis
+    bound = len(scale) * np.finfo(np.float64).eps * np.linalg.norm(scaled, 1)
+    return np.linalg.eigvalsh(0.5 * (curvature + curvature.T)), float(bound)
+
+
+def _penalty_holds_data_null(model, record) -> bool:
+    """Whether the penalty has curvature on every direction the fit's data leave undetermined.
+
+    ``N' S N`` positive definite: its least eigenvalue above the bound that reads a curvature
+    as zero (``_data_null_curvature``).  A direction the penalty does not reach is one neither
+    the data nor the penalty determine, whatever rows a Hessian is re-formed on.  A structured
+    record holds no null basis, and its factor truncating no direction is the same statement;
+    so is its own certificate for a fit kept without the design its penalty is formed from.
+    """
+    if not isinstance(record, RankInfo):
+        return not record.profiled_factor.rank_truncated
+    if not record.data.null_basis().shape[1] and record.data.equilibrated_null_basis is None:
+        return True
+    if model._dm is None:
+        return _positive_definite(record.augmented)
+    measured = _data_null_curvature(model, record)
+    return measured is not None and bool(measured[0][0] > measured[1])
+
+
 def penalized_fit_certified(model, penalized) -> bool:
     """Whether every coefficient ``model`` published has a standard error read from ``penalized``.
 
     ``penalized`` is what the covariance in hand is inverted from: the fit's own
     decomposition, or the one ``metrics`` re-forms on other rows or weights.  The published
-    coefficients must be the unconstrained optimum of a quadratic penalty, every level
-    priced, and determined by the fit itself:
+    coefficients must be the unconstrained optimum of a quadratic penalty, and the penalty
+    must determine what the data leave open:
 
-    - the fit converged: one that stopped short of its convergence test has no optimum for
-      the penalized Hessian to belong to;
-    - no selection penalty, no term under a shape rule and no shape repair after the fit: the
-      coefficients would not be the optimum the penalized Hessian belongs to;
+    - the coefficient solve converged: one that stopped short of its convergence test, or
+      whose coefficients were revised after it (a shape repair, an editor edit), has no
+      optimum for the penalized Hessian to belong to;
+    - no selection penalty and no term under a shape rule: the coefficients would not be the
+      optimum the penalized Hessian belongs to;
     - no level or region the fit's records name as unpriced (``_names_an_unpriced_level``);
-    - the fit's own decomposition positive definite (``_positive_definite``), as well as
-      ``penalized``: rows the fit never saw can make a Hessian re-formed on them positive
-      definite, and say nothing about the coefficients it published.
+    - ``penalized`` positive definite (``_positive_definite``);
+    - the penalty holds every data-null direction of the fit itself
+      (``_penalty_holds_data_null``): rows the fit never saw can make a Hessian re-formed on
+      them positive definite, and say nothing about the coefficients it published.
     """
-    from superglm.model.report_ops import shape_repaired_feature_names
-
     if not getattr(model._solver_pirls_result(), "converged", True):
         return False
     lambda1 = getattr(fitted_penalty(model), "lambda1", None)
@@ -575,13 +628,13 @@ def penalized_fit_certified(model, penalized) -> bool:
         return False
     if any(g.constraints is not None or g.monotone_engine is not None for g in model._groups):
         return False
-    if shape_repaired_feature_names(model) or _names_an_unpriced_level(model):
+    if _names_an_unpriced_level(model):
         return False
-    fit = _fit_decomposition(_fit_record(model))
+    record = _fit_record(model)
     return (
-        fit is not None
-        and _positive_definite(fit)
-        and (penalized is fit or _positive_definite(penalized))
+        _fit_decomposition(record) is not None
+        and _positive_definite(penalized)
+        and _penalty_holds_data_null(model, record)
     )
 
 
@@ -607,20 +660,33 @@ def rank_standard_error_mask(model, rank_info) -> NDArray:
     return standard_error_mask(model, rank_info.augmented, rank_info.coefficient_estimable)
 
 
-def saved_standard_error_note(model, mask: NDArray, penalized=None) -> str | None:
-    """A summary's line for a saved model whose blank standard errors a refit would show.
+def refit_shows_every_standard_error(model, penalized=None) -> bool:
+    """Whether ``model`` was saved before fits recorded the rule, and a fit today would be certified.
 
-    ``mask`` and ``penalized`` are the pair ``standard_error_mask`` decided on: the fit's own
-    decomposition when ``penalized`` is omitted.  The line is given only where a fit today
-    would show every one of them (``penalized_fit_certified``).
+    ``penalized`` is the decomposition the mask in hand was decided on, the fit's own when
+    omitted.  Only such a saved record keeps blanks a refit would show, so every other record
+    answers ``False`` without reading a decomposition.
     """
     record = _fit_record(model)
-    blank = int(np.size(mask) - np.count_nonzero(mask))
-    if not blank or getattr(record, "standard_error_mask", "penalized") != "data":
-        return None
+    if getattr(record, "standard_error_mask", "penalized") != "data":
+        return False
     if penalized is None:
         penalized = _fit_decomposition(record)
-    if penalized is None or not penalized_fit_certified(model, penalized):
+    return penalized is not None and penalized_fit_certified(model, penalized)
+
+
+def saved_standard_error_note(model, mask: NDArray, refit_shows: bool | None = None) -> str | None:
+    """A summary's line for a saved model whose blank standard errors a refit would show.
+
+    ``refit_shows`` is ``refit_shows_every_standard_error`` on the decomposition ``mask`` was
+    decided on, read here from the fit's own when omitted.
+    """
+    blank = int(np.size(mask) - np.count_nonzero(mask))
+    if not blank:
+        return None
+    if refit_shows is None:
+        refit_shows = refit_shows_every_standard_error(model)
+    if not refit_shows:
         return None
     subject, them = (
         ("1 standard error is", "it") if blank == 1 else (f"{blank} standard errors are", "them")

@@ -15,9 +15,11 @@ says why it must not move.
 
 from __future__ import annotations
 
+import gc
 import json
 import lzma
 import pickle
+import tracemalloc
 import warnings
 from pathlib import Path
 
@@ -30,6 +32,7 @@ from superglm import (
     Categorical,
     Constraint,
     FactorSmooth,
+    LambdaPolicy,
     Numeric,
     RandomEffect,
     Spline,
@@ -38,6 +41,7 @@ from superglm import (
 from superglm.model.fit_state import fitted_lambda2
 from superglm.reml.penalty_algebra import build_penalty_matrix
 
+from ._traced_memory import own_traced_peak
 from .test_saved_fs_models import assert_predicts_as_saved
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -572,6 +576,70 @@ def test_other_rows_do_not_certify_a_fit_its_own_rows_leave_undetermined(rows):
     assert open_to_the_rows.sum() == {"new_rows": 5, "other_weights": 3}[rows]
     se = _flat(model, model.metrics(other, y, sample_weight=other_weight).coefficient_se)
     np.testing.assert_array_equal(np.isnan(se), open_to_the_rows)
+
+
+@pytest.mark.parametrize("perturbation", [1.8e-7, 1e-7])
+def test_other_rows_show_every_level_of_a_fit_whose_penalty_holds_what_its_data_leave(perturbation):
+    """``metrics`` on rows that tell two training columns apart shows every level's standard error.
+
+    ``dup`` is ``x + perturbation z`` on the training rows, which puts the fit's penalised Gram
+    at the bar a Gram is trusted to: at 1.8e-7 one OpenBLAS kernel records the Gram (condition
+    1.18e7) and another the row factor, and at 1e-7 every kernel records the row factor.  The
+    training rows leave one direction open, the three levels against the intercept, and the
+    ridge holds it, so the coefficients the fit published are determined whichever
+    decomposition recorded them.  On rows where ``dup`` is a column of its own the re-formed
+    Hessian is well conditioned, and each level's raw standard error is the dense inverse's of
+    ``[1 X]'[1 X] + S`` at the unit ridge (rtol 1e-10).  A reader that asks the training fit
+    for its Gram's certificate shows them with one kernel and blanks them with the other.
+    """
+    rng = np.random.default_rng(32)
+    n = 420
+    x, z = rng.normal(size=n), rng.normal(size=n)
+    g = rng.choice(list("ABC"), n)
+    y = x + 0.37 * z + rng.normal(size=n)
+    model = SuperGLM(
+        family="gaussian",
+        features={
+            "x": Numeric(),
+            "dup": Numeric(),
+            "g": RandomEffect(lambda_policy=LambdaPolicy.fixed(1.0)),
+        },
+    )
+    _fit(model, pd.DataFrame({"x": x, "dup": x + perturbation * z, "g": g}), y)
+    se = model.metrics(pd.DataFrame({"x": x, "dup": z, "g": g}), y).coefficient_se_raw["g"]
+
+    design = np.column_stack((np.ones(n), x, z, *(g == level for level in "ABC")))
+    hessian = design.T @ design
+    hessian[-3:, -3:] += np.eye(3)
+    np.testing.assert_allclose(se, np.sqrt(np.diag(np.linalg.inv(hessian))[-3:]), rtol=1e-10)
+
+
+def test_metrics_on_other_rows_keeps_no_factor_for_the_saved_models_note():
+    """What a ``metrics`` object on other rows still holds once its standard errors are read.
+
+    Four hundred unpenalised levels on reordered rows, so the inverse is re-formed at ``p`` of
+    399.  The object keeps three ``p x p`` arrays for its readers (the inverse, the augmented
+    covariance and the centred Gram), 3.05 times ``8 p^2`` bytes with its row vectors.  The
+    decomposition they were formed from decides a saved model's note while it is in hand, and
+    only that answer is kept: holding its Cholesky factor as well is a fourth array, 4.05.
+    """
+    levels = 400
+    rng = np.random.default_rng(274)
+    frame = pd.DataFrame({"g": np.tile(np.arange(levels).astype(str), 5)})
+    y = rng.normal(size=len(frame))
+    model = SuperGLM(family="gaussian", features={"g": Categorical(base="0")}, selection_penalty=0)
+    model.fit(frame, y)
+    other, y_other = frame.iloc[::-1].reset_index(drop=True), y[::-1].copy()
+
+    def held_after_reading() -> tuple[int, int]:
+        metrics = model.metrics(other, y_other)
+        shown = int(np.isfinite(metrics.coefficient_se["g"]).sum())
+        gc.collect()
+        return tracemalloc.get_traced_memory()[0], shown
+
+    _, (held, shown) = own_traced_peak(held_after_reading)
+    assert shown == levels - 1
+    assert held < 3.5 * 8 * (levels - 1) ** 2, f"{held / (8 * (levels - 1) ** 2):.2f} arrays held"
 
 
 # ------------------------------------------------------------ row F: models saved by master

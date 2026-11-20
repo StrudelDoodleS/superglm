@@ -1165,19 +1165,27 @@ a range with no rows.
   condition of its Cholesky factor) is below $1.19 \times 10^7$; or the
   structured solver dropped no direction. Each coefficient then has a finite
   posterior variance.
+- **The penalty must hold every direction the data leave open.** On each
+  direction outside the data rank the penalty has curvature above rounding.
+  A direction neither the data nor the penalty determine keeps the fit on the
+  data rank.
 - **Otherwise the data rank decides.** A coefficient outside it is reported as
   not estimable, and its standard error is shown as missing.
 - **A fit with a selection penalty, a shape rule or a shape repair always uses
   the data rank.**
-- **So does a fit that did not converge.**
+- **So does a fit whose coefficient solve did not converge.** A `fit_reml`
+  that stops before its smoothing parameters settle is still eligible when
+  its last coefficient solve converged: its standard errors are those of the
+  smoothing parameters it reached, as its `ConvergenceWarning` says.
 - **So does a fit that names a level or region it cannot price.** That is a
   factor-smooth level the fit reports as thin, without weight or separated, a
   categorical level it reports as separated, a coefficient `fit_reml` reports
   as weakly identified, or a fit that ends with the separation warning the
   solver raises at runtime. Such a fit can stop where its penalised Hessian
   still has full rank, so the rank test alone would not catch it.
-- **`metrics` on other rows or weights needs both to pass.** The training
-  fit must pass the test, and so must the Hessian formed on those rows.
+- **`metrics` on other rows or weights reads both fits.** The Hessian formed
+  on those rows must pass the rank test, and the training fit's penalty must
+  hold every direction its own data left open.
 - **A saved model keeps the standard errors it was saved with.** Its summary
   says when a refit would show more.
 
