@@ -14,7 +14,6 @@ from superglm.inference._metrics_design import MappedColumnFactor, factor_from_g
 from superglm.inference.covariance import (
     StructuredCovarianceAccessor,
     StructuredSlopeCovarianceAccessor,
-    _active_penalty_matrix,
 )
 from superglm.model.fit_state import fitted_lambda2, fitted_penalty
 from superglm.model.retired_state import retained_linear_state
@@ -32,7 +31,6 @@ from superglm.solvers._structured.state import (
 )
 from superglm.solvers.rank import (
     RankDecomposition,
-    RankInfo,
     decide_data_rank,
     decompose_factor,
     decompose_gram,
@@ -149,6 +147,7 @@ def _legacy_rank_state(model, solver, W: NDArray):
     Gram's decompositions, decided as the fit decides them, and ``None`` for
     the last four when no column is selected.
     """
+    from superglm.inference.covariance import _active_penalty_matrix
     from superglm.solvers.centered_system import (
         build_centered_system,
         grouped_augmented_factor,
@@ -529,8 +528,8 @@ def _positive_definite(penalized) -> bool:
 def _names_an_unpriced_level(model) -> bool:
     """Whether the fit's own records name a level or region the data cannot price.
 
-    Its coefficient walks towards infinity and stops where the data still hold it, so no
-    data-null direction carries it (``_penalty_holds_data_null``); these records do:
+    Its coefficient walks towards infinity and stops where the data still hold it, so the
+    penalized Hessian keeps full rank there; these records name it:
 
     - on an interaction: an ``sz`` term's levels left out of its population curve
       (``_left_out``: thin, separated, or without weight unless ``select=True``), a
@@ -553,61 +552,6 @@ def _names_an_unpriced_level(model) -> bool:
     return bool(profile.get("reml_weakly_identified") or profile.get("reml_laplace_separated"))
 
 
-def _data_null_curvature(model, record: RankInfo) -> tuple[NDArray, float] | None:
-    """The penalty's curvature on the fit's data-null directions, ascending, and its zero bound.
-
-    The eigenvalues of ``N' S N`` for the null basis ``N`` of the fit's data rank
-    (``RankInfo.data``) and its penalty ``S``, both in the penalized Hessian's Jacobi
-    coordinates ``n -> diag(D + S)^(1/2) n``: ``S`` has entries of at most one there, and
-    ``N`` is orthonormalized, so its conditioning does not enter.  A penalty's null space is
-    structural, so on a direction it does not reach the curvature is zero to the rounding of
-    forming it: at most ``p eps ||S||_1``, which is ``gamma_p`` on each side of the product
-    (``u = eps / 2``).  ``None`` where a column has no Jacobi coordinate, neither the data nor
-    the penalty reaching it, or the null basis is kept in equilibrated form only.
-    """
-    data = record.data
-    if data.equilibrated_null_basis is not None:
-        return None
-    _, active_groups = _rank_active_state(model, record)
-    exponent = getattr(model._solver_pirls_result(), "weight_exponent", 0)
-    penalty = _active_penalty_matrix(
-        model._dm.group_matrices,
-        model._groups,
-        active_groups,
-        scale_penalties(fitted_lambda2(model), exponent),
-        reml_penalties=getattr(model, "_reml_penalties", None),
-    )
-    scale = np.sqrt(data.column_scale**2 + np.diag(penalty))
-    with np.errstate(over="ignore", invalid="ignore"):
-        directions = scale[:, None] * data.null_basis()
-    if not (np.all(scale > 0.0) and np.all(np.isfinite(directions))):
-        return None
-    basis, _ = np.linalg.qr(directions)
-    scaled = penalty / np.outer(scale, scale)
-    curvature = basis.T @ scaled @ basis
-    bound = len(scale) * np.finfo(np.float64).eps * np.linalg.norm(scaled, 1)
-    return np.linalg.eigvalsh(0.5 * (curvature + curvature.T)), float(bound)
-
-
-def _penalty_holds_data_null(model, record) -> bool:
-    """Whether the penalty has curvature on every direction the fit's data leave undetermined.
-
-    ``N' S N`` positive definite: its least eigenvalue above the bound that reads a curvature
-    as zero (``_data_null_curvature``).  A direction the penalty does not reach is one neither
-    the data nor the penalty determine, whatever rows a Hessian is re-formed on.  A structured
-    record holds no null basis, and its factor truncating no direction is the same statement;
-    so is its own certificate for a fit kept without the design its penalty is formed from.
-    """
-    if not isinstance(record, RankInfo):
-        return not record.profiled_factor.rank_truncated
-    if not record.data.null_basis().shape[1] and record.data.equilibrated_null_basis is None:
-        return True
-    if model._dm is None:
-        return _positive_definite(record.augmented)
-    measured = _data_null_curvature(model, record)
-    return measured is not None and bool(measured[0][0] > measured[1])
-
-
 def penalized_fit_certified(model, penalized) -> bool:
     """Whether every coefficient ``model`` published has a standard error read from ``penalized``.
 
@@ -623,9 +567,11 @@ def penalized_fit_certified(model, penalized) -> bool:
       optimum the penalized Hessian belongs to;
     - no level or region the fit's records name as unpriced (``_names_an_unpriced_level``);
     - ``penalized`` positive definite (``_positive_definite``);
-    - the penalty holds every data-null direction of the fit itself
-      (``_penalty_holds_data_null``): rows the fit never saw can make a Hessian re-formed on
-      them positive definite, and say nothing about the coefficients it published.
+    - the fit's own decomposition positive definite too: ``null(D + S)`` is
+      ``null(D)`` meeting ``null(S)``, so that is the penalty holding every direction the
+      fit's data leave open, each on the decomposition's own column scale.  Rows the fit
+      never saw can make a Hessian re-formed on them positive definite, and say nothing
+      about the coefficients it published.
     """
     if not getattr(model._solver_pirls_result(), "converged", True):
         return False
@@ -636,12 +582,8 @@ def penalized_fit_certified(model, penalized) -> bool:
         return False
     if _names_an_unpriced_level(model):
         return False
-    record = _fit_record(model)
-    return (
-        _fit_decomposition(record) is not None
-        and _positive_definite(penalized)
-        and _penalty_holds_data_null(model, record)
-    )
+    own = _fit_decomposition(_fit_record(model))
+    return own is not None and _positive_definite(own) and _positive_definite(penalized)
 
 
 def standard_error_mask(model, penalized, data_mask) -> NDArray:

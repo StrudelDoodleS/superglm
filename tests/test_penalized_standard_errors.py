@@ -664,10 +664,10 @@ def test_a_fit_outside_the_rule_keeps_the_data_rule(case):
     - ``reference_m20`` and the cases after it (``_recorded_separation``): the walked
       coefficient is one the data rule already left blank, behind an exact alias with a
       penalised term.  The penalty breaks the alias and holds every data-null direction, so
-      neither the rank certificate nor the penalty's curvature sees the walk.  Where the walk
-      runs to rounding (the ``reference`` cases and ``base_cell``) the rows' weights span
-      thirteen orders, where an SVD and the fit's data rank can cut differently, so the
-      reference is the fit's own record of its data rank, which this rule does not write.
+      the rank certificate does not see the walk.  Where the walk runs to rounding (the
+      ``reference`` cases and ``base_cell``) the rows' weights span thirteen orders, where
+      an SVD and the fit's data rank can cut differently, so the reference is the fit's own
+      record of its data rank, which this rule does not write.
     """
     open_to_the_data, options = None, {}
     if case in _RECORDED_SEPARATION_CASES:
@@ -873,6 +873,50 @@ def test_a_fit_at_the_bar_shows_every_level_whichever_decomposition_it_records(
         se = model.metrics(rows, y).coefficient_se_raw["g"]
         assert np.all(np.isfinite(se)), f"{name}: {se}"
         np.testing.assert_allclose(se, reference, rtol=rtol, err_msg=name)
+
+
+def test_other_weights_show_every_level_when_one_ridge_is_far_weaker_than_another():
+    """Two crossed random effects with ridges thirteen orders apart, read at other weights.
+
+    ``a`` has 4 levels and a ridge of 1e-11, ``b`` 192 levels and a ridge of 100; ``b``'s last
+    level has no claim.  The training rows leave two directions open, each factor's levels
+    against the intercept, and each ridge holds its own: in the Hessian's unit-diagonal
+    coordinates ``a``'s curvature there is 2.3e-14 and ``b``'s 0.89.  Both are positive, so
+    the fit's own decomposition has full rank, and ``metrics`` at a fiftieth of the weights
+    shows every level.  A cutoff taken from the whole penalty's norm (3.9e-14, set by ``b``'s
+    ridge) reads ``a``'s curvature as zero and blanks all 196.
+
+    The reference for ``b`` is the dense inverse of ``[1 B]' W [1 B] + 100 I`` at those
+    weights, without ``a``: every level of ``a`` meets every level of ``b`` equally often and
+    the fit gives them one value, so ``a``'s contrasts are orthogonal to ``b``'s columns and
+    its mean is the intercept's column, held by 1e-11 against a weight of 46.  That Hessian's
+    scaled condition is under 2 (rtol 1e-9).
+    """
+    levels = 192
+    n = 8 * levels
+    b = np.repeat(np.arange(levels), 8)
+    frame = pd.DataFrame(
+        {"a": np.char.mod("a%02d", np.tile(np.arange(4), 2 * levels)), "b": np.char.mod("b%03d", b)}
+    )
+    y = ((1 + np.arange(n) // 4 % 2) * (b != levels - 1)).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        features={
+            "a": RandomEffect(lambda_policy=LambdaPolicy.fixed(1e-11)),
+            "b": RandomEffect(lambda_policy=LambdaPolicy.fixed(100.0)),
+        },
+        selection_penalty=0,
+        direct_solve="gram",
+    )
+    assert _fit(model, frame, y) == []
+    weight = np.full(n, 0.02)
+    raw = model.metrics(frame.copy(), y, sample_weight=weight).coefficient_se_raw
+    assert np.all(np.isfinite(raw["a"])) and np.all(np.isfinite(raw["b"]))
+
+    design = np.column_stack((np.ones(n), b[:, None] == np.arange(levels)))
+    hessian = design.T @ ((weight * model.predict(frame))[:, None] * design)
+    hessian[1:, 1:] += 100.0 * np.eye(levels)
+    np.testing.assert_allclose(raw["b"], np.sqrt(np.diag(np.linalg.inv(hessian))[1:]), rtol=1e-9)
 
 
 @pytest.mark.pins_behaviour

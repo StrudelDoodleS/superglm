@@ -1167,10 +1167,9 @@ a range with no rows.
   decide it, without forming the Hessian. A structured fit has full rank when
   its solver dropped no direction. Each coefficient then has a finite
   posterior variance.
-- **The penalty must hold every direction the data leave open.** On each
-  direction outside the data rank the penalty has curvature above rounding.
-  A direction neither the data nor the penalty determine keeps the fit on the
-  data rank.
+- **Full rank means the penalty holds every direction the data leave open.**
+  A direction that neither the data nor the penalty determine leaves the
+  penalised Hessian short of full rank, and keeps the fit on the data rank.
 - **Otherwise the data rank decides.** A coefficient outside it is reported as
   not estimable, and its standard error is shown as missing.
 - **A fit with a selection penalty, a shape rule or a shape repair always uses
@@ -1186,11 +1185,11 @@ a range with no rows.
   weakly identified or a reference level it reports as separated; or a fit
   that ends with the
   separation warning the solver raises at runtime. Such a fit can stop where
-  its penalised Hessian still has full rank and the penalty holds every
-  direction the data leave open, so neither test would catch it.
+  its penalised Hessian still has full rank, so the rank test would not catch
+  it.
 - **`metrics` on other rows or weights reads both fits.** The Hessian formed
-  on those rows must pass the rank test, and the training fit's penalty must
-  hold every direction its own data left open.
+  on those rows must pass the rank test, and so must the training fit's own:
+  rows the fit never saw do not determine the coefficients it published.
 - **A saved model keeps the standard errors it was saved with.** Its summary
   says when a refit would show more.
 
