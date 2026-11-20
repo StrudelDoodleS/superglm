@@ -4188,10 +4188,10 @@ def test_the_vanished_row_fit_reports_both_directions_not_resolved_on_either_bac
     vanished row's, so the weights have vanished on rows it reads, and the first pass's
     directions are certified only to their residual off ``H``'s low eigenvectors, ``(root +
     limit) / sqrt(floor)`` (``identifiability._refinement_residual``), read at the design's
-    curvature.  Neither backend states a floor here (the structured factor's trace bound
-    ``1 / (2 tr(H~^+))`` needs ``8 p gamma_(16 p) tr < 1`` and has ``1.16``; the row factor
-    records its own decision, an infinity), so the residual is unbounded and the design's own
-    alias is not resolved either.
+    curvature.  The structured factor states no floor (its trace bound ``1 / (2 tr(H~^+))``
+    needs ``8 p gamma_(16 p) tr < 1`` and has ``1.16``), so its residual is unbounded; the row
+    factor states ``8.0e-10`` (``state_ops._factor_floor``), a residual of ``3.7e-9`` per
+    direction, which the design's own alias does not clear either.
     Natively the dense path's first pass leaves that alias ``2.3e-10`` from zero at unit weight
     against a bound of ``1.4e-13``, and under Haswell ``0``: the residual is what separated
     them.  So both backends, on every kernel, name both parts "not resolved at float64" in the

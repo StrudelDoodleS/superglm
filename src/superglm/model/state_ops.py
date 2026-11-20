@@ -575,11 +575,12 @@ def _dense_base(
     2002, sec. 3.5): a Jacobi-scaled bound ``e`` (``rank._formation_slack``).  Its kept part is
     certified when the smallest equilibrated eigenvalue it holds exceeds ``e`` (Weyl): the
     retained spectrum less the eigensolver's bar, or a Cholesky factor's ``1 /
-    ||L^-1||_F^2`` less its backward error; a factor of the rows decided its own.  Then it
-    inverts ``H`` there and its truncated directions are the undecided ones.  A rank decision
-    that kept an eigenvalue it cannot tell from zero is replaced: the equilibrated spectrum is
-    recomputed, the eigenvalues past the bound are the certified part, and the rest are
-    undecided, read from the rows like any truncated direction.
+    ||L^-1||_F^2`` less its backward error.  Then it inverts ``H`` there and its truncated
+    directions are the undecided ones.  A rank decision that kept an eigenvalue it cannot tell
+    from zero is replaced: the equilibrated spectrum is recomputed, the eigenvalues past the
+    bound are the certified part, and the rest are undecided, read from the rows like any
+    truncated direction.  A factor of the rows decided its own rank, and states its own floor
+    (``_factor_floor``); with no certified part the floor is vacuous, infinite.
     """
     import scipy.linalg
 
@@ -588,6 +589,25 @@ def _dense_base(
     scale = np.asarray(decomposition.column_scale, dtype=np.float64)
     active = np.flatnonzero(scale > 0.0)
     width = scale.size
+    values = decomposition.retained_values
+    kept = int(decomposition.rank)
+
+    def certified(floor: float) -> TruncatedDecomposition:
+        pseudo = decomposition.pseudo_inverse()
+        return TruncatedDecomposition(
+            null_vectors=decomposition.null_basis(),
+            rank=kept,
+            column_scale=scale,
+            pre_truncation_condition=float(decomposition.pre_truncation_condition),
+            solve=lambda vectors: pseudo @ vectors,
+            floor=floor,
+        )
+
+    if kept == 0:
+        return certified(float("inf"))
+    if decomposition.method == "qr_svd":
+        # a factor decomposition always records the values it kept
+        return certified(_factor_floor(cast(NDArray, values), active.size, rows))
     slack = (
         _formation_slack(
             gamma_up(rows + 2) * np.maximum(np.asarray(data_diagonal)[active], 0.0),
@@ -596,11 +616,7 @@ def _dense_base(
         if active.size
         else 0.0
     )
-    values = decomposition.retained_values
-    kept = int(decomposition.rank)
-    if kept == 0 or decomposition.method == "qr_svd":
-        floor = float("inf")
-    elif kept < len(decomposition.active_columns) or decomposition.cholesky_factor is None:
+    if kept < len(decomposition.active_columns) or decomposition.cholesky_factor is None:
         largest = float(np.max(values)) if values is not None and len(values) else active.size
         floor = (
             float(np.min(values)) - _eigensolver_relative_bar(active.size + 1) * largest
@@ -617,15 +633,7 @@ def _dense_base(
             else -float("inf")
         )
     if floor > slack:
-        pseudo = decomposition.pseudo_inverse()
-        return TruncatedDecomposition(
-            null_vectors=decomposition.null_basis(),
-            rank=kept,
-            column_scale=scale,
-            pre_truncation_condition=float(decomposition.pre_truncation_condition),
-            solve=lambda vectors: pseudo @ vectors,
-            floor=float(floor - slack),
-        )
+        return certified(float(floor - slack))
     formed = hessian()
     equilibrated = formed[np.ix_(active, active)] / np.outer(scale[active], scale[active])
     equilibrated = 0.5 * (equilibrated + equilibrated.T)
@@ -654,6 +662,22 @@ def _dense_base(
         covariance=covariance,
         floor=float(spectrum[trusted][0] - bound) if np.any(trusted) else 0.0,
     )
+
+
+def _factor_floor(values: NDArray, width: int, rows: int) -> float:
+    """A certified lower bound on a row factor's Jacobi-scaled eigenvalues on its kept part.
+
+    ``values`` are the squared singular values the factor kept (``rank.decompose_factor``), of
+    the factor with unit columns: the rows' TSQR triangle and the penalty's root, ``k`` columns
+    of ``n`` rows.  Forming the rows, their triangle and its SVD are backward stable columnwise,
+    within ``gamma_(n k + k^2 + 3)`` of each unit column (Higham 2002, Thm 19.4;
+    ``identifiability._row_bound``), so within that times ``sqrt(k)`` in Frobenius norm, and the
+    exact rows' singular values are within it of the computed ones (Weyl).  The floor is the
+    smallest kept value's root less that bound, squared; zero when nothing is left.
+    """
+    bound = gamma_up(rows * width + width * width + 3) * math.sqrt(width)
+    smallest = math.sqrt(float(np.min(values)))
+    return (smallest - bound) ** 2 if smallest > bound else 0.0
 
 
 def _stepped_residual(model, W: NDArray, rows: Any = None) -> NDArray | None:

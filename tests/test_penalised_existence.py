@@ -162,6 +162,35 @@ def test_a_reference_level_with_every_response_zero_has_no_standard_error_but_a_
     np.testing.assert_allclose(published, oracle, rtol=1e-10)
 
 
+@pytest.mark.parametrize("tol", [1e-6, 1e-8])
+def test_a_row_factors_rank_decision_certifies_no_absence_past_its_own_floor(monkeypatch, tol):
+    """C3 with every rank decision the rows' factor's: E's direction is still found infinite.
+
+    Forced: the dense fit decides its rank from the rows' factor (``rank.decompose_factor``) at
+    every step, as a walked fit whose Gram is too ill-conditioned to certify itself does; an
+    unforced fit reaches it at ``tol=1e-14``, natively and under Haswell.  The factor keeps
+    every direction, E's among them at a Jacobi-scaled curvature of about 3e-7 (6e-9 at
+    ``tol=1e-8``), and states that floor (its smallest kept singular value less its rounding,
+    squared), so the score's margin cannot prove existence and the rows decide it: the
+    intercept and f's levels have no standard error, the footnote names E, and the fit on the
+    rows kept proves on the same route that they separate no further.  At ``c1d39faa8`` the
+    factor's decision recorded an infinite floor, which the absence test read as one:
+    existence was certified, and the summary printed the intercept's SE as 68.4 (505.6).
+    """
+    import superglm.solvers.irls_direct._fit as dense
+
+    monkeypatch.setattr(dense, "_authoritative_gram_rank", lambda memo, matrix: None)
+    X, y, kept = _reference_level_frame()
+    model = _fit("poisson", {"f": Categorical(), "x": Spline(n_knots=8)}, X, y, tol=tol)
+    se = _summary_se(model)
+    for name in ("Intercept", "f[A]", "f[B]", "f[C]", "f[D]"):
+        assert np.isnan(se[name]), name
+    assert "level E of f" in _notes(model)
+    separation = published_separation(model)
+    assert separation.state == "present"
+    assert separation.rows.size == int(np.sum(~kept))
+
+
 def test_equal_copies_of_the_separated_rows_read_the_fits_own_record():
     """``metrics`` on equal copies of C3's rows is ``metrics`` on the rows themselves.
 

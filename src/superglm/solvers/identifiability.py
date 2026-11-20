@@ -941,8 +941,7 @@ def _refinement_residual(decomposition: TruncatedDecomposition, split: _Split) -
     curvature is its root within the rows' rounding and the coupling's shift, ``sqrt(mu +
     shift) + limit`` (``_read_rows``); summed in squares over the directions, the result bounds
     their residual off ``L`` in Frobenius norm.  Zero with no certified part (``L`` is every
-    direction); infinite where the decomposition states no floor (zero, or the infinity a row
-    factor's own decision records, ``state_ops._dense_base``).
+    direction); infinite where the decomposition states no floor (zero).
     """
     if int(decomposition.rank) == 0:
         return 0.0
