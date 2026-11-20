@@ -907,8 +907,10 @@ def grouped_projected_factor(
         DiscretizedSplineCategoricalGroupMatrix,
     )
     from superglm._group_matrix._group_matrix_kernels import (
+        _gather_level_rows,
         _gather_table_rows,
         _gather_table_rows_at,
+        _scatter_level_rows,
         _scatter_table_rows,
         _scatter_table_rows_at,
     )
@@ -965,15 +967,23 @@ def grouped_projected_factor(
                 else cast(scipy.sparse.csr_matrix, smooth.B)
             )
             natural = np.ascontiguousarray(raw @ smooth.natural_map, dtype=np.float64)
-            squares = np.zeros((smooth.n_levels, smooth.block_size))
-            np.add.at(squares, smooth.codes, np.asarray(W, dtype=np.float64)[:, None] * natural**2)
+            codes = np.ascontiguousarray(smooth.codes, dtype=np.intp)
+            weighted_squares = np.asarray(W, dtype=np.float64)[:, None] * natural**2
+            # per level, summed in row order
+            squares = np.column_stack(
+                [
+                    np.bincount(codes, weights=column_squares, minlength=smooth.n_levels)
+                    for column_squares in weighted_squares.T
+                ]
+            )
             if smooth.factor_basis == "sz":
                 squares = squares[:-1] + squares[-1:]
             magnitudes[columns] = np.sqrt(squares).ravel() + np.abs(centre[0]) * math.sqrt(
                 float(np.sum(W))
             )
             accumulator = np.zeros((smooth.n_levels, smooth.block_size, width))
-            plans.append((columns, "smooth", blocks, accumulator, natural, smooth.codes))
+            table = np.ascontiguousarray(blocks)
+            plans.append((columns, "smooth", table, accumulator, natural, codes))
             continue
         if kind == "rows":
             columns = slice(column, column + int(first.shape[1]))
@@ -1021,8 +1031,7 @@ def grouped_projected_factor(
                 if kind == "full":
                     _gather_table_rows(projected, table, first, start)
                 elif kind == "smooth":
-                    rows = slice(start, stop)
-                    projected += np.einsum("rk,rkw->rw", first[rows], table[second[rows]])
+                    _gather_level_rows(projected, first, table, second, start)
                 elif kind == "level":
                     low, high = np.searchsorted(first, (start, stop))
                     spans.append((int(low), int(high)))
@@ -1053,8 +1062,7 @@ def grouped_projected_factor(
                 if kind == "full":
                     _scatter_table_rows(local, weighted, first, start)
                 elif kind == "smooth":
-                    rows = slice(start, stop)
-                    np.add.at(local, second[rows], first[rows][:, :, None] * weighted[:, None, :])
+                    _scatter_level_rows(local, first, weighted, second, start)
                 else:
                     low, high = next(level)
                     _scatter_table_rows_at(local, weighted, first, second, low, high, start)

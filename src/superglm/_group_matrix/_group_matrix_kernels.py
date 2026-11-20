@@ -1322,6 +1322,30 @@ def _scatter_table_rows_at(accumulator, block, rows, codes, first, last, offset)
             target[j] += source[j]
 
 
+@njit(cache=True)
+def _gather_level_rows(out, natural, table, codes, first):
+    """``out[i, :] += natural[first + i] @ table[codes[first + i]]``: a factor smooth's rows into a block."""
+    for i in range(out.shape[0]):
+        row = natural[first + i]
+        source = table[codes[first + i]]
+        for j in range(out.shape[1]):
+            total = 0.0
+            for k in range(row.shape[0]):
+                total += row[k] * source[k, j]
+            out[i, j] += total
+
+
+@njit(cache=True)
+def _scatter_level_rows(accumulator, natural, block, codes, first):
+    """``accumulator[codes[first + i]] += outer(natural[first + i], block[i])``, row by row."""
+    for i in range(block.shape[0]):
+        row = natural[first + i]
+        target = accumulator[codes[first + i]]
+        for k in range(row.shape[0]):
+            for j in range(block.shape[1]):
+                target[k, j] += row[k] * block[i, j]
+
+
 _POOLED_LEAF_KERNELS = (_weighted_centred_rows, _weighted_centred_one_hot)
 """The kernels a TSQR leaf (``rank._tsqr_leaf``) runs on its pool worker: ``nogil`` too."""
 
@@ -1394,6 +1418,10 @@ def _warmup_group_matrix_kernels() -> None:
     _scatter_table_rows(projected, matrix, codes, 0)
     _gather_table_rows_at(projected, matrix, codes, codes, 0, 2, 0)
     _scatter_table_rows_at(projected, matrix, codes, codes, 0, 2, 0)
+    # A factor smooth's rows against its levels' rows of the directions.
+    levels = np.zeros((2, 2, 2))
+    _gather_level_rows(projected, matrix, levels, codes, 0)
+    _scatter_level_rows(levels, matrix, projected, codes, 0)
     row_patterns = np.array([0, 1], dtype=np.int32)
     unique_codes = np.array([[0, 0], [1, 1]], dtype=np.int32)
     marginal_offsets = np.array([0, 2, 4], dtype=np.intp)

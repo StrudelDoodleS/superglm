@@ -490,8 +490,16 @@ def _assert_rows_product(dm, blocks, monkeypatch):
     if blocks == "many_blocks":
         monkeypatch.setattr(centered_system, "_GREY_LEAF_ROWS", 64)
         monkeypatch.setattr(centered_system, "_GREY_SPAN_ROWS", 256)
-    factor, cross, roundings, _ = centered_system.grouped_projected_factor(
+    factor, cross, roundings, magnitudes = centered_system.grouped_projected_factor(
         dm, W, basis, center=centre
+    )
+    # A column's magnitude is its weighted norm, centred, or uncentred plus |c| sqrt(sum W)
+    # where its centre joins after the product (spline-by-level and factor-smooth blocks).
+    centred = np.sqrt(W @ (X - centre) ** 2)
+    inflated = np.sqrt(W @ X**2) + np.abs(centre) * np.sqrt(W.sum())
+    close = 4.0 * dm.n * np.finfo(float).eps * inflated
+    assert np.all(
+        (np.abs(magnitudes - centred) <= close) | (np.abs(magnitudes - inflated) <= close)
     )
     A = np.sqrt(W)[:, None] * (X - centre)
     product = A @ basis
