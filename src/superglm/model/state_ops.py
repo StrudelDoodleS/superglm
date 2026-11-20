@@ -508,22 +508,47 @@ def _fit_record(model):
     return state if state is not None else model._solver_pirls_result().rank_info
 
 
-def penalized_fit_certified(model, penalized) -> bool:
-    """Whether ``penalized`` certifies the quadratic-penalty fit ``model`` published as determined.
+def _fit_decomposition(record):
+    """What a fit's covariance is inverted from: its structured factor, or its dense record's."""
+    penalized = getattr(record, "profiled_factor", None)
+    return penalized if penalized is not None else getattr(record, "augmented", None)
 
-    ``penalized`` is what the covariance is inverted from: a dense decomposition of the
-    penalized Hessian, which certifies itself by ``rank.penalized_rank_certified``, or a
-    structured factor, which does by truncating no direction.  Never for a fit with a
-    selection penalty or a term under a shape rule: its coefficients are not the
-    unconstrained optimum of the quadratic penalty that Hessian belongs to.
+
+def _positive_definite(penalized) -> bool:
+    """Whether a decomposition of a penalized Hessian certifies it as positive definite.
+
+    A dense one certifies itself by ``rank.penalized_rank_certified``, a structured factor by
+    truncating no direction.
+    """
+    if isinstance(penalized, RankDecomposition):
+        return penalized_rank_certified(penalized)
+    return not penalized.rank_truncated
+
+
+def penalized_fit_certified(model, penalized) -> bool:
+    """Whether every coefficient ``model`` published has a standard error read from ``penalized``.
+
+    ``penalized`` is what the covariance in hand is inverted from: the fit's own
+    decomposition, or the one ``metrics`` re-forms on other rows or weights.  The published
+    coefficients must be the unconstrained optimum of a quadratic penalty, and determined by
+    the fit itself:
+
+    - no selection penalty and no term under a shape rule: the coefficients would not be the
+      optimum the penalized Hessian belongs to;
+    - the fit's own decomposition positive definite (``_positive_definite``), as well as
+      ``penalized``: rows the fit never saw can make a Hessian re-formed on them positive
+      definite, and say nothing about the coefficients it published.
     """
     if (fitted_penalty(model).lambda1 or 0.0) > 0.0:
         return False
     if any(g.constraints is not None or g.monotone_engine is not None for g in model._groups):
         return False
-    if isinstance(penalized, RankDecomposition):
-        return penalized_rank_certified(penalized)
-    return not penalized.rank_truncated
+    fit = _fit_decomposition(_fit_record(model))
+    return (
+        fit is not None
+        and _positive_definite(fit)
+        and (penalized is fit or _positive_definite(penalized))
+    )
 
 
 def standard_error_mask(model, penalized, data_mask) -> NDArray:

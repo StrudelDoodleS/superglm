@@ -1167,6 +1167,8 @@ a range with no rows.
   not estimable, and its standard error is shown as missing.
 - **A fit with a selection penalty or a shape rule always uses the data
   rank.**
+- **`metrics` on other rows or weights needs both to pass.** The training
+  fit must pass the test, and so must the Hessian formed on those rows.
 - **A saved model keeps the standard errors it was saved with.** Its summary
   says when a refit would show more.
 

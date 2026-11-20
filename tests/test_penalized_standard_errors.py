@@ -82,8 +82,8 @@ def dense_raw_standard_errors(model, frame) -> np.ndarray:
     return np.sqrt(np.diag(np.linalg.inv(H))[1:])
 
 
-def data_undetermined(model, frame) -> np.ndarray:
-    """The slopes a null vector of the data ``sqrt(W) [1, X]`` moves: what the data alone leave open.
+def undetermined_slopes(A: np.ndarray) -> np.ndarray:
+    """The slopes a null vector of ``A = sqrt(W) [1, X]`` moves: what those rows alone leave open.
 
     A dense SVD of the column-equilibrated weighted design.  A singular value at or below
     ``max(n, p) eps`` of the largest is null (``dgesdd``'s backward error); a slope a null
@@ -91,11 +91,15 @@ def data_undetermined(model, frame) -> np.ndarray:
     by construction (a level's indicator against the intercept, a copied column, basis
     functions with no row), so every other singular value is orders of magnitude clear.
     """
-    A = np.sqrt(_working_weights(model, frame))[:, None] * _design(model)
     A = A / np.maximum(np.linalg.norm(A, axis=0), np.finfo(float).tiny)
     _, singular, right = np.linalg.svd(A, full_matrices=False)
     null = right[singular <= max(A.shape) * EPS * singular[0]]
     return np.any(np.abs(null[:, 1:]) > np.sqrt(EPS), axis=0)
+
+
+def data_undetermined(model, frame) -> np.ndarray:
+    """``undetermined_slopes`` of the fit's own rows at its fitted weights."""
+    return undetermined_slopes(np.sqrt(_working_weights(model, frame))[:, None] * _design(model))
 
 
 def _flat(model, se: dict) -> np.ndarray:
@@ -330,6 +334,52 @@ def test_a_fit_outside_the_rule_keeps_the_data_rule(case):
     for rows in (frame, frame.copy()):
         se = _flat(model, model.metrics(rows, y).coefficient_se)
         np.testing.assert_array_equal(np.isnan(se), open_to_the_data)
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("rows", ["new_rows", "other_weights"])
+def test_other_rows_do_not_certify_a_fit_its_own_rows_leave_undetermined(rows):
+    """Controls: ``metrics`` on rows or weights that break an alias the training fit holds.
+
+    They pass on master, and must after it.  ``dup`` is ``2 x`` on every training row that
+    carries weight, so the fit cannot tell the two slopes apart and its penalised Hessian has
+    rank 4 of 5.  The Hessian re-formed where the alias breaks is positive definite: on new
+    rows where ``dup`` moves with a level of the random effect, and on the training rows at
+    weights that reach the rows where ``dup`` differs, which the fit gave none.  That says
+    nothing about the coefficients the fit published, so each reader keeps the data rule on
+    its own rows.  The reference is the null space of those rows from a dense SVD.
+    """
+    rng = np.random.default_rng(912)
+    n = 900
+    g = rng.choice(list("ABC"), n)
+    x = rng.normal(size=n)
+    y = 1.0 + 0.4 * x + np.select([g == "B", g == "C"], [0.4, -0.4])
+    y = y + rng.normal(scale=0.3, size=n)
+    apart = rng.uniform(size=n) < 0.2
+    if rows == "new_rows":
+        frame = pd.DataFrame({"x": x, "dup": 2.0 * x, "g": g})
+        weight = other_weight = None
+        other = frame.assign(dup=2.0 * x + (g == "B"))
+    else:
+        frame = pd.DataFrame({"x": x, "dup": np.where(apart, rng.normal(size=n), 2.0 * x), "g": g})
+        weight, other_weight = np.where(apart, 0.0, 1.0), np.where(apart, 2.0, 1.0)
+        other = frame
+    model = SuperGLM(
+        family="gaussian",
+        features={"x": Numeric(), "dup": Numeric(), "g": RandomEffect()},
+    )
+    _fit(model, frame, y, sample_weight=weight)
+    own = model.metrics(frame, y, sample_weight=weight).coefficient_se
+    assert np.isnan(own["x"]).all() and np.isnan(own["dup"]).all()
+
+    columns = [np.ones(n), other["x"], other["dup"], *(g == level for level in "ABC")]
+    root = np.ones(n) if other_weight is None else np.sqrt(other_weight)
+    open_to_the_rows = undetermined_slopes(
+        root[:, None] * np.column_stack(columns).astype(np.float64)
+    )
+    assert open_to_the_rows.sum() == {"new_rows": 5, "other_weights": 3}[rows]
+    se = _flat(model, model.metrics(other, y, sample_weight=other_weight).coefficient_se)
+    np.testing.assert_array_equal(np.isnan(se), open_to_the_rows)
 
 
 # ------------------------------------------------------------ row F: models saved by master
