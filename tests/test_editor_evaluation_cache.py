@@ -167,11 +167,14 @@ def test_model_metric_signature_tracks_metric_affecting_model_state():
     model = SimpleNamespace(
         _distribution=Family(),
         _link=Link(),
-        result=SimpleNamespace(phi=np.float64(0.8), effective_df=np.float64(4.25)),
+        result=SimpleNamespace(
+            phi=np.float64(0.8), phi_likelihood=np.float64(0.5), effective_df=np.float64(4.25)
+        ),
     )
 
     signature = model_metric_signature(model)
 
+    # The likelihood scale, which every cached scalar reads, not the standard errors' phi.
     assert signature == (
         Family.__module__,
         Family.__qualname__,
@@ -179,8 +182,46 @@ def test_model_metric_signature_tracks_metric_affecting_model_state():
         2.75,
         Link.__module__,
         Link.__qualname__,
-        0.8,
+        0.5,
         4.25,
+    )
+
+
+def test_a_changed_likelihood_scale_misses_the_cache():
+    """o2h8's reproducer: equal ``phi`` and EDF, different ``phi_likelihood``, so a cached
+    log-likelihood and AIC of the first model must not serve the second."""
+    import pickle
+    from dataclasses import replace
+
+    from superglm import Spline
+    from superglm.distributions import Gamma
+
+    rng = np.random.default_rng(42)
+    n = 400
+    X = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n), "z": rng.normal(size=n)})
+    eta = 0.4 + np.sin(3.0 * X["x"].to_numpy()) + 0.25 * X["z"].to_numpy()
+    y = np.exp(eta) * rng.lognormal(-0.75, np.sqrt(1.5), n)
+    first = SuperGLM(
+        family=Gamma(), selection_penalty=0.0, features={"x": Spline(n_knots=6), "z": Numeric()}
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        first.fit_reml(X, y)
+    second = pickle.loads(pickle.dumps(first))
+    second._result = replace(
+        second._result, phi_likelihood=second._result.phi, phi_likelihood_method="pearson"
+    )
+    dataset = EvaluationDataset("train", "Train", X, y)
+    cache = EvaluationCache()
+    cache.advance_current_revision(1)
+    key_first = EvaluationKey("current", 1, 0, "train", model_metric_signature(first))
+    key_second = EvaluationKey("current", 1, 0, "train", model_metric_signature(second))
+    cache.put(key_first, compute_dataset_metrics(first, dataset))
+
+    assert cache.get(key_second) is None
+    actual = compute_dataset_metrics(second, dataset)
+    assert actual["log_likelihood"] != pytest.approx(
+        cache.get(key_first)["log_likelihood"], rel=1e-3
     )
 
 
@@ -443,7 +484,7 @@ def test_validation_and_test_datasets_use_exact_prediction_fallback(
             y_eval,
             mu,
             weight_eval,
-            float(model.result.phi),
+            float(model.result.phi_likelihood),
         )
     )
     null_mu = _compute_null_mu(

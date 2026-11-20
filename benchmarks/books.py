@@ -317,6 +317,7 @@ _SEMANTICS = (
     "_gini",
     "_ae",
     "_nb2_deviance",
+    "_likelihood_phi",
     "glm_results",
     "lss_results",
     "_sample_rows",
@@ -830,6 +831,12 @@ def _ae(actual, expected, bins):
     ]
 
 
+def _likelihood_phi(result) -> float:
+    """The scale a density reads: ``phi_likelihood``, or ``phi`` on a tree that has one scale."""
+    value = getattr(result, "phi_likelihood", None)
+    return float(result.phi if value is None else value)
+
+
 def glm_results(spec, model, test) -> dict:
     import numpy as np
     from scipy.special import gammaln
@@ -849,7 +856,7 @@ def glm_results(spec, model, test) -> dict:
     else:
         semantics = spec["model_options"].get("weight_semantics", "prior")
         try:
-            phi = float(model.result.phi)
+            phi = _likelihood_phi(model.result)
             out["test_nll"] = -float(
                 weighted_log_likelihood(dist, y, mu, w, phi, weight_semantics=semantics)
             )
@@ -961,7 +968,7 @@ def glm_outputs(spec, model, test, train=None) -> dict:
     mu = model.predict(X) if off is None else model.predict(X, offset=off)
     diag = model.reml_diagnostics()
     result, dist = model.result, model._distribution
-    family = {"phi": float(result.phi)}
+    family = {"phi": float(result.phi), "phi_likelihood": _likelihood_phi(result)}
     for name in ("theta", "p"):  # a negative binomial theta, a Tweedie power
         value = getattr(dist, name, None)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -1066,6 +1073,7 @@ def glm_state(model, calls) -> dict:
             "theta": getattr(dist, "theta", None),
             "power": getattr(dist, "p", None),
             "phi": float(model.result.phi),
+            "phi_likelihood": _likelihood_phi(model.result),
         },
     }
 

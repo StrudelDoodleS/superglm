@@ -243,16 +243,23 @@ def factor_smooth_result(
         _component_suffix(group.name, component.name): float(fitted_lambdas[component.name])
         for component in penalties
     }
-    from superglm._weight_units import physical_variance, scale_penalties, standard_errors
+    from superglm._weight_units import (
+        physical_variance,
+        scale_penalties,
+        standard_errors,
+    )
+    from superglm.model.reml_finalize import variance_component_scale
 
     solver = model._solver_pirls_result()
-    phi = float(model.result.phi)
+    # A variance component pairs lambda with the scale REML profiled it against.
+    scale = variance_component_scale(model)
+    phi = float(scale.phi)
     solver_lambdas = scale_penalties(fitted_lambdas, solver.weight_exponent)
     variance_components = {
         component: float(
             np.inf
             if value == 0.0
-            else physical_variance(1.0 / scale_penalties(value, solver.weight_exponent), solver)
+            else physical_variance(1.0 / scale_penalties(value, solver.weight_exponent), scale)
             if solver.weight_exponent
             else phi / value
         )

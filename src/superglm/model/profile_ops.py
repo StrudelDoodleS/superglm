@@ -417,11 +417,17 @@ def _replace_dataclass_preserving_dynamic_attributes(instance, **changes):
     return replacement
 
 
-def _replace_pirls_phi(result, phi):
-    """Return a phi-adjusted PIRLS result with all runtime metadata intact."""
-    changes = {"phi": float(phi)}
-    if result.weight_exponent:
-        changes["solver_phi"] = float(np.ldexp(phi, result.weight_exponent))
+def _replace_pirls_phi(result, phi, distribution):
+    """Return the result with ``phi`` as its likelihood scale, runtime metadata intact.
+
+    The profiled ML is what the density and its interval read; ``phi`` stays the
+    published refit's Pearson estimate, which standard errors read.
+    """
+    from superglm.solvers.dispersion import ML_AT_MEAN, scale_fields
+
+    changes = scale_fields(
+        result, distribution=distribution, likelihood_phi=phi, likelihood_method=ML_AT_MEAN
+    )
     return _replace_dataclass_preserving_dynamic_attributes(result, **changes)
 
 
@@ -439,6 +445,7 @@ def _reprofile_published_dispersion(result, y_arr, weights, mu) -> None:
 def _synchronize_tweedie_profile_refit(model, y, public_mu, profile_result) -> None:
     """Atomically synchronize a retained final refit to the profiled dispersion."""
     from superglm.model.fit_ops import _compute_fit_stats, _compute_null_mu
+    from superglm.solvers.dispersion import REML_PROFILE
 
     distribution = model._distribution
     weights = model._fit_weights
@@ -452,8 +459,14 @@ def _synchronize_tweedie_profile_refit(model, y, public_mu, profile_result) -> N
         model._link,
         weight_semantics=model_weight_semantics(model),
     )
+    replacement_public = _replace_pirls_phi(model.result, profile_result.phi_hat, distribution)
+    replacement_solver = _replace_pirls_phi(
+        model._solver_pirls_result(), profile_result.phi_hat, distribution
+    )
     # The summary statistics describe the mean the published dispersion was
-    # profiled at.
+    # profiled at, in the unit every other density reader takes it in.
+    from superglm._weight_units import likelihood_scale
+
     fit_stats = _compute_fit_stats(
         y,
         public_mu,
@@ -461,19 +474,23 @@ def _synchronize_tweedie_profile_refit(model, y, public_mu, profile_result) -> N
         offset_arr,
         distribution,
         model._link,
-        profile_result.phi_hat,
+        likelihood_scale(replacement_solver).phi,
         null_mu=null_mu,
         weight_semantics=model_weight_semantics(model),
+        solver_result=replacement_solver,
     )
-
-    replacement_public = _replace_pirls_phi(model.result, profile_result.phi_hat)
-    replacement_solver = _replace_pirls_phi(model._solver_pirls_result(), profile_result.phi_hat)
     reml_result = getattr(model, "_reml_result", None)
+    # A REML publication refit's own profile, which its lambda was selected against.
+    reml_profile = (
+        model.result.phi_likelihood
+        if getattr(model.result, "phi_likelihood_method", None) == REML_PROFILE
+        else None
+    )
     replacement_reml = (
         None
         if reml_result is None
         else _replace_dataclass_preserving_dynamic_attributes(
-            reml_result, pirls_result=replacement_solver
+            reml_result, pirls_result=replacement_solver, variance_component_phi=reml_profile
         )
     )
 

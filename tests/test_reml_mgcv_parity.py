@@ -45,6 +45,7 @@ MGCV_GAMMA = {
     "sum_edf": 8.599088,
     "deviance": 157.6276400,
     "reml_scale": 0.192928517,
+    "scale": 0.192102876,
     "step": (2.0e-05, -1.0),  # x2 is flat: a unit step leaves its EDF where it is
 }
 
@@ -56,9 +57,12 @@ EDF_BAR = 2e-3
 # largest gap measured, the 1.37e-3 step mgcv leaves on the Poisson ``x2``.
 LOG_LAMBDA_BAR = 3e-3
 # Deviance within 1e-5 relative, measured 1.4e-6 (Poisson, from its ``x2``
-# step) and 2.6e-8 (Gamma); phi within 1e-6 of mgcv's REML scale, measured 9e-9.
+# step) and 2.6e-8 (Gamma); phi_likelihood within 1e-6 of mgcv's REML scale, measured
+# 9e-9. phi within 3e-6 of mgcv's scale, measured 9.7e-7: about three times the gap, which
+# the two engines' EDF and coefficient gaps set through Pearson's residual d.f.
 DEVIANCE_BAR = 1e-5
 PHI_BAR = 1e-6
+PEARSON_BAR = 3e-6
 
 
 def _superglm_knots(x: np.ndarray) -> np.ndarray:
@@ -144,15 +148,31 @@ class TestMgcvParity:
         assert abs(m.result.effective_df - MGCV_GAMMA["sum_edf"]) < 2 * EDF_BAR
 
     def test_gamma_scale(self):
-        """Profiled phi within ``PHI_BAR`` of mgcv's REML scale, relative; measured 9e-9.
+        """The likelihood scale within ``PHI_BAR`` of mgcv's REML scale, relative; measured 9e-9.
 
-        Both maximise the REML criterion over the scale (mgcv's ``reml.scale``;
-        its ``scale``, the Pearson estimate, is 0.43% lower here). A null space
-        miscounted by one moves phi by 1.2e-3.
+        Both maximise the REML criterion over the scale (mgcv's ``reml.scale``). A null
+        space miscounted by one moves it by 1.2e-3.
+        """
+        from superglm.export.summary import build_summary_export_payload
+
+        m = _fit("gamma")
+        overview = {r.metric: r.value for r in build_summary_export_payload(m).overview}
+        phi = overview.get("Likelihood phi")
+        assert phi is not None, "the summary publishes the likelihood scale"
+        assert phi == m.result.phi_likelihood
+        rel = abs(phi - MGCV_GAMMA["reml_scale"]) / MGCV_GAMMA["reml_scale"]
+        assert rel < PHI_BAR, f"phi_likelihood {phi:.9f}, mgcv {MGCV_GAMMA['reml_scale']}"
+
+    def test_gamma_standard_error_scale(self):
+        """``phi``, the scale SEs read, within ``PEARSON_BAR`` of mgcv's ``scale``; measured 9.7e-7.
+
+        mgcv's ``Vp`` carries ``scale`` (``sig2``), its Fletcher (2012) estimate, which a
+        log-link Gamma fit with an intercept makes Pearson's; it is 0.43% below the REML
+        scale here.
         """
         m = _fit("gamma")
-        rel = abs(m.result.phi - MGCV_GAMMA["reml_scale"]) / MGCV_GAMMA["reml_scale"]
-        assert rel < PHI_BAR, f"phi {m.result.phi:.9f}, mgcv {MGCV_GAMMA['reml_scale']}"
+        rel = abs(m.result.phi - MGCV_GAMMA["scale"]) / MGCV_GAMMA["scale"]
+        assert rel < PEARSON_BAR, f"phi {m.result.phi:.9f}, mgcv {MGCV_GAMMA['scale']}"
 
     def test_gamma_lambda(self):
         """The resolved smoothing parameter within ``LOG_LAMBDA_BAR`` of mgcv's; measured 2.0e-5."""

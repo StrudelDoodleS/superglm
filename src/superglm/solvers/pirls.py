@@ -350,6 +350,17 @@ class PIRLSResult:
     # Class defaults also restore results saved before these fields existed.
     weight_exponent: int = 0
     solver_phi: float | None = None
+    # ``phi`` is the scale standard errors, intervals and Wald tests read (Pearson's
+    # estimate, or 1 for a known scale). ``phi_likelihood`` is the scale densities read and
+    # variance components pair with lambda (the REML profile, or ML at the fitted mean);
+    # ``solver_phi_likelihood`` is it in the solver unit, as ``solver_phi`` is for ``phi``.
+    # The methods name both estimators. ``superglm.solvers.dispersion.publish_scales`` is
+    # their one writer. A result saved before the split has no methods (``legacy``); its
+    # restore fills ``phi_likelihood`` with its one ``phi``, which serves both.
+    phi_likelihood: float | None = None
+    solver_phi_likelihood: float | None = None
+    phi_method: str | None = None
+    phi_likelihood_method: str | None = None
     # The runtime separation backstop's statement about this returned state
     # (``separation.runtime_finding``), or None.  Recorded by every solve not run
     # under separation="ignore"; of a model's solves, only the published fit's is
@@ -416,6 +427,10 @@ class PIRLSResult:
         for name, value in state.items():
             if name != "_publication_locked":
                 object.__setattr__(self, name, value)
+        if "phi_likelihood" not in state and "phi" in state:
+            # Saved before the split: its one ``phi`` serves both readers (methods ``legacy``).
+            object.__setattr__(self, "phi_likelihood", state["phi"])
+            object.__setattr__(self, "solver_phi_likelihood", state.get("solver_phi"))
         if published:
             self._publish()
 
@@ -2062,16 +2077,20 @@ def _fit_pirls_inner(
     )
     p_eff = rank_info.total_edf
 
-    # The Pearson numerator has the same form under either weight contract --
-    # both scale a row's squared residual by its weight -- so only the
-    # denominator's likelihood size distinguishes them.
-    pearson_sum = pearson_chi2(distribution=family, y=y, mu=mu_new, sample_weight=weights)
-    df_resid = pearson_residual_degrees_of_freedom(
-        weights,
-        p_eff,
-        weight_semantics=weight_semantics,
-    )
-    phi = pearson_sum / df_resid
+    # Standard errors read ``phi``: 1 for a family whose scale it fixes (Poisson,
+    # binomial), as the direct solver publishes it. The Pearson numerator has the same
+    # form under either weight contract -- both scale a row's squared residual by its
+    # weight -- so only the denominator's likelihood size distinguishes them.
+    if getattr(family, "scale_known", True):
+        phi = 1.0
+    else:
+        pearson_sum = pearson_chi2(distribution=family, y=y, mu=mu_new, sample_weight=weights)
+        df_resid = pearson_residual_degrees_of_freedom(
+            weights,
+            p_eff,
+            weight_semantics=weight_semantics,
+        )
+        phi = pearson_sum / df_resid
 
     # The retained centred intercept and its centre, which prediction reads;
     # the raw ``intercept = alpha - c' beta`` cancels at a column's offset

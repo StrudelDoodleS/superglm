@@ -73,6 +73,10 @@ class REMLResult:
     # ``(component, "floor" | "ceiling")`` for each component that box held
     # back at the returned smoothing parameters (``_lambda_box.bound_pressure``).
     bound_pressure: tuple = ()
+    # The REML profile of phi at the published mode where ``pirls_result.phi_likelihood``
+    # holds another estimate (``estimate_p(fit_mode="reml")`` publishes the ML ``phi_hat``
+    # for its densities); variance components pair lambda with it. None elsewhere.
+    variance_component_phi: float | None = None
 
 
 def _map_beta_between_bases(

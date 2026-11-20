@@ -13,9 +13,10 @@
 # parameter of the penalty as built is sp / S.scale. The Newton step left at
 # mgcv's stop, H^-1 g in log sp from its outer gradient and Hessian, is how far
 # its REML search stopped from the optimum. reml.scale is the scale that
-# maximises the REML criterion, the estimator SuperGLM's phi is (mgcv's scale
-# is the Pearson estimate). mgcv is GPL: this runs it as a black box and prints
-# only what the fitted object reports.
+# maximises the REML criterion, SuperGLM's phi_likelihood; scale (sig2) is the
+# one mgcv's Vp carries, its Fletcher (2012) estimate, which for a log-link Gamma
+# fit with an intercept equals Pearson's, SuperGLM's phi. mgcv is GPL: this runs
+# it as a black box and prints only what the fitted object reports.
 #
 #   Rscript tests/oracles/reml_parity_reference.R
 suppressMessages(library(mgcv))
@@ -35,8 +36,8 @@ for (fam in c("poisson", "gamma")) {
   step <- solve(g$outer.info$hess, g$outer.info$grad)
   edf <- sapply(g$smooth, function(s) sum(g$edf[s$first.para:s$last.para]))
   cat(sprintf(
-    "%s: lambda %.7g %.7g | edf %.6f %.6f total %.6f | deviance %.7f | reml.scale %.9g | step %s\n",
-    fam, lambda[1], lambda[2], edf[1], edf[2], sum(g$edf), g$deviance, g$reml.scale,
+    "%s: lambda %.7g %.7g | edf %.6f %.6f total %.6f | deviance %.7f | reml.scale %.9g | scale %.9g | step %s\n",
+    fam, lambda[1], lambda[2], edf[1], edf[2], sum(g$edf), g$deviance, g$reml.scale, g$sig2,
     paste(signif(step, 3), collapse = ", ")
   ))
 }

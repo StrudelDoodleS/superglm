@@ -151,6 +151,8 @@ def _overview_rows(source: _CompactSummarySource) -> tuple[SummaryOverviewRow, .
             _finite_float(info.get("effective_df", fit.get("effective_df"))),
         ),
         SummaryOverviewRow("Fit", "Scale (phi)", _finite_float(info.get("phi", fit.get("phi")))),
+        # A summary cached before the split names no estimator: its one scale is legacy.
+        SummaryOverviewRow("Fit", "Scale estimator", str(info.get("phi_method") or "legacy")),
         SummaryOverviewRow(
             "Fit", "Deviance", _finite_float(info.get("deviance", deviance.get("deviance")))
         ),
@@ -182,6 +184,15 @@ def _overview_rows(source: _CompactSummarySource) -> tuple[SummaryOverviewRow, .
             _finite_float(info.get("ebic", criteria.get("ebic"))),
         ),
     ]
+
+    likelihood_method = info.get("phi_likelihood_method")
+    if likelihood_method not in (None, "", "known", "legacy"):
+        # A separate likelihood scale: the one the log-likelihood and AIC below read.
+        at = next(i for i, row in enumerate(rows) if row.metric == "Scale estimator") + 1
+        rows[at:at] = [
+            SummaryOverviewRow("Fit", "Likelihood phi", _finite_float(info.get("phi_likelihood"))),
+            SummaryOverviewRow("Fit", "Likelihood phi estimator", str(likelihood_method)),
+        ]
 
     if "nb_theta" in info:
         ci_lower, ci_upper = _profile_ci(info, "nb_theta_ci")

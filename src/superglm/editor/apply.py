@@ -10,6 +10,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._utils import weighted_row_sum
+from superglm._weight_units import likelihood_scale
 from superglm.editor.display import display_for, is_edited, transform_for_link, unit_tolerance
 from superglm.editor.errors import EditorValueError
 from superglm.editor.lss.view import is_lss
@@ -782,7 +783,7 @@ def _refresh_fit_statistics(
             offset_arr,
             model._distribution,
             model._link,
-            model.result.phi,
+            likelihood_scale(model.result).phi,
             null_mu=null_mu,
             weight_semantics=model_weight_semantics(model),
             solver_result=model.result,

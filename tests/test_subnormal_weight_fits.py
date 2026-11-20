@@ -155,16 +155,47 @@ def test_subnormal_fit_statistics_and_diagnostics_keep_the_weight_contract(famil
     assert np.all(np.isfinite(metrics.residuals("quantile")))
 
     if semantics == "prior":
+        # Densities read the likelihood's ML scale (Pearson's ``phi`` is the SEs'): scipy's
+        # maximiser in the lifted unit, where the log-likelihood is stationary, so its
+        # location error does not reach the value.
+        from scipy import optimize, special
+
+        def float64_ll(log_scale):
+            row = np.exp(log_scale) / lifted
+            if family == "gaussian":
+                return np.sum(stats.norm.logpdf(y, loc=mu, scale=np.sqrt(row)))
+            if family == "gamma":
+                return np.sum(stats.gamma.logpdf(y, a=1.0 / row, scale=mu * row))
+            z = 4 * np.sqrt(y) / row
+            return np.sum(
+                np.log(2 / (row * np.sqrt(y)))
+                - 2 * (np.sqrt(mu) + y / np.sqrt(mu)) / row
+                + np.log(special.ive(1, z))
+                + z
+            )
+
+        centre = np.log(phi)
+        ml_phi = np.exp(
+            optimize.minimize_scalar(
+                lambda t: -float64_ll(t),
+                bounds=(centre - 5.0, centre + 5.0),
+                method="bounded",
+                options={"xatol": 1e-10},
+            ).x
+        )
+        assert ml_phi < 0.99 * phi
         if family == "gaussian":
-            expected_ll = np.sum(stats.norm.logpdf(y, loc=mu, scale=np.sqrt(phi / lifted)))
+            expected_ll = np.sum(stats.norm.logpdf(y, loc=mu, scale=np.sqrt(ml_phi / lifted)))
         elif family == "gamma":
-            expected_ll = np.sum(stats.gamma.logpdf(y, a=lifted / phi, scale=mu * phi / lifted))
+            expected_ll = np.sum(
+                stats.gamma.logpdf(y, a=lifted / ml_phi, scale=mu * ml_phi / lifted)
+            )
         else:
             with mp.workdps(70):
                 terms = []
                 for value, mean, weight in zip(y, mu, lifted, strict=True):
                     observed, location = mp.mpf(float(value)), mp.mpf(float(mean))
-                    scale = mp.mpf(float(phi)) / mp.mpf(float(weight))
+                    scale = mp.mpf(float(ml_phi)) / mp.mpf(float(weight))
                     terms.append(
                         mp.log(2 / (scale * mp.sqrt(observed)))
                         - 2 * (mp.sqrt(location) + observed / mp.sqrt(location)) / scale
@@ -339,9 +370,11 @@ def test_evaluation_weights_can_use_a_different_unit_from_the_fitted_geometry():
     np.testing.assert_allclose(metrics.feature_se("x")["se_coef"], expected[1], rtol=2e-12, atol=0)
 
     # An exactly predicted evaluation row has a finite log density even when
-    # the physical variance rounds to zero. No infinite prior weight is formed.
+    # the physical variance rounds to zero. No infinite prior weight is formed. The
+    # density reads the ML scale, the residual sum over n.
     perfect = model.metrics(frame, model.predict(frame))
-    expected_ll = -0.5 * len(x) * (np.log(2 * np.pi * phi) - 1064 * np.log(2.0))
+    ml_phi = np.sum(lifted * (y - model.predict(frame)) ** 2) / len(x)
+    expected_ll = -0.5 * len(x) * (np.log(2 * np.pi * ml_phi) - 1064 * np.log(2.0))
     assert perfect.log_likelihood == pytest.approx(expected_ll, rel=2e-12)
 
 
@@ -356,9 +389,21 @@ def test_known_scale_path_tables_use_unit_dispersion():
     y = rng.negative_binomial(2, 2 / (2 + mu)).astype(float)
     model = SuperGLM(family="poisson", features={"x": PSpline(n_knots=8), "z": Categorical()})
     model.fit_path(frame, y, n_lambda=5)
-    # Path results retain Pearson dispersion for quasi-likelihood diagnostics.
-    # A fitted-family coefficient table still uses the known unit dispersion.
-    assert model.result.phi > 1.5
+    assert model.result.phi == 1.0
+    # A path result saved before known-scale paths published 1 holds Pearson's
+    # dispersion; a fitted-family coefficient table still uses the known unit one.
+    from dataclasses import replace
+
+    metrics = model.metrics(frame, y)
+    pearson = metrics.pearson_chi2 / (metrics.n_obs - metrics.effective_df)
+    assert pearson > 1.5
+    shared = model._solver_result is model._result
+    model._result = replace(model._result, phi=float(pearson))
+    model._solver_result = (
+        model._result if shared else replace(model._solver_result, phi=float(pearson))
+    )
+    model._summary_cache = None
+    model._fit_metrics_cache = None
     inference = model._fit_inference_info
     augmented = inference["XtWX_inv_aug"]
     categorical = next(g for g in inference["active_groups"] if g.feature_name == "z")
@@ -486,8 +531,11 @@ def test_editor_export_refreshes_statistics_in_the_evaluation_weight_unit(unit, 
     assert edited._fit_stats.pearson_chi2 == pytest.approx(deviance, rel=2e-12, abs=1e-28)
     assert edited._fit_stats.explained_deviance == pytest.approx(1 - deviance / null_deviance)
     if at_mean:
-        result = model.result
-        log_phi = np.log(result.solver_phi) - result.weight_exponent * np.log(2.0)
+        # The density reads the fit's ML scale, its residual sum over n in the lifted unit.
+        exponent = model.result.weight_exponent
+        lifted = np.ldexp(np.full(len(x), unit), exponent)
+        ml_phi = np.sum(lifted * (y - model.predict(frame)) ** 2) / len(x)
+        log_phi = np.log(ml_phi) - exponent * np.log(2.0)
         expected_ll = -0.5 * len(x) * (np.log(2 * np.pi) + log_phi)
         assert edited._fit_stats.log_likelihood == pytest.approx(expected_ll, rel=2e-12)
 

@@ -24,6 +24,7 @@ the rows with positive weight, as R's ``df.residual`` does. Tweedie forbids
 from __future__ import annotations
 
 import functools
+import math
 from collections.abc import Callable
 
 import numpy as np
@@ -140,3 +141,207 @@ def pearson_residual_degrees_of_freedom(
         weight_semantics=weight_semantics,
     )
     return max(likelihood_size - float(effective_df), 1.0)
+
+
+# The two published scales (Wedderburn 1974; McCullagh & Nelder 1989, Sec. 8.3.6).
+# ``phi`` is what standard errors, intervals and Wald tests read: Pearson's moment
+# estimate, which needs only the mean-variance relation. ``phi_likelihood`` is what a
+# density reads and what a variance component pairs with lambda: Wood's (2011) profile of
+# the family's exact likelihood, the REML profile on the REML routes and ML at the fitted
+# mean (zero nullity) elsewhere. mgcv publishes the same pair as ``sig2`` and ``reml.scale``.
+PEARSON = "pearson"
+KNOWN = "known"
+LEGACY = "legacy"
+REML_PROFILE = "reml_profile"
+ML_AT_MEAN = "ml"
+DEVIANCE_FORM = "deviance"
+SCALE_METHOD_LABELS = {
+    PEARSON: "Pearson",
+    KNOWN: "known",
+    LEGACY: "as saved",
+    REML_PROFILE: "REML profile",
+    ML_AT_MEAN: "ML",
+    DEVIANCE_FORM: "deviance",
+}
+
+
+def profile_likelihood_scale(
+    distribution: Distribution,
+    y: NDArray,
+    sample_weight: NDArray,
+    *,
+    weight_semantics: str,
+    deviance: float,
+    nullity: float = 0.0,
+) -> float | None:
+    """Wood's profile of the exact likelihood's phi; ML at the fitted mean at zero nullity.
+
+    ``deviance`` is the (penalized) deviance at the fitted mean. None where the family has
+    no profile or the profile has no interior optimum (a zero deviance, no residual size).
+    """
+    from superglm.distributions import Gamma, Gaussian
+    from superglm.reml.scale import (
+        gaussian_reml_scale_phi,
+        prepare_gamma_reml_scale_data,
+        prepare_tweedie_reml_scale_data,
+        profile_gamma_reml_scale,
+        profile_tweedie_reml_scale,
+    )
+
+    deviance, nullity = float(deviance), float(nullity)
+    if not (math.isfinite(deviance) and deviance > 0.0):
+        return None
+    try:
+        if isinstance(distribution, Gaussian):
+            size = dispersion_likelihood_size(sample_weight, weight_semantics=weight_semantics)
+            if size - nullity <= 0.0:
+                return None
+            return gaussian_reml_scale_phi(deviance, size, nullity)
+        if isinstance(distribution, Gamma):
+            data = prepare_gamma_reml_scale_data(
+                y, sample_weight, weight_semantics=weight_semantics
+            )
+            if 2.0 * data.sum_weight <= nullity:
+                return None
+            return profile_gamma_reml_scale(data, deviance, nullity).phi
+        if isinstance(distribution, Tweedie):
+            data = prepare_tweedie_reml_scale_data(
+                y, sample_weight, distribution.p, weight_semantics=weight_semantics
+            )
+            return profile_tweedie_reml_scale(data, deviance, nullity).phi
+    except (ValueError, FloatingPointError, OverflowError):
+        # Rows the exact likelihood cannot profile (no positive response, a weight the
+        # contract forbids): the caller publishes its Pearson pair and says so.
+        return None
+    return None
+
+
+def lifted_ml_scale(
+    distribution: Distribution,
+    y: NDArray,
+    sample_weight: NDArray,
+    mu: NDArray,
+    *,
+    weight_semantics: str,
+    exponent: int,
+) -> float | None:
+    """ML at the fitted mean of a fit in a lifted weight unit, in that solver unit.
+
+    The profile runs on the weights times ``2**exponent`` (exact), so a deviance or a
+    scale that underflows in the caller's unit keeps its digits. A prior weight enters
+    the density only through ``phi / w``, so that profile is the solver-unit scale; a
+    replication count's ML does not depend on the weights' unit, so it is lifted after.
+    """
+    from superglm._utils import weighted_row_sum
+
+    weights = np.ldexp(np.asarray(sample_weight, dtype=np.float64), exponent)
+    phi = profile_likelihood_scale(
+        distribution,
+        y,
+        weights,
+        weight_semantics=weight_semantics,
+        deviance=weighted_row_sum(weights, distribution.deviance_unit, y, mu),
+    )
+    if phi is None or validate_weight_semantics(weight_semantics) == PRIOR_WEIGHTS:
+        return phi
+    with np.errstate(over="ignore"):
+        return float(np.ldexp(phi, exponent))
+
+
+def _normal(value: float | None) -> bool:
+    return value is not None and math.isfinite(value) and bool(value >= np.finfo(np.float64).tiny)
+
+
+def scale_fields(
+    result,
+    *,
+    distribution: Distribution,
+    likelihood_phi: float | None,
+    likelihood_method: str,
+    solver_likelihood_phi: float | None = None,
+) -> dict:
+    """The field values that publish both scales on ``result``.
+
+    ``result.phi`` (and ``solver_phi``) already hold Pearson's estimate at the fitting
+    design's mean, as every solver publishes it, or 1 for a known scale. The likelihood
+    scale is ``likelihood_phi`` from ``likelihood_method``, a physical value. On a fit in a
+    lifted weight unit (``solver_phi`` set: weights below ``2**-512``) it is also carried
+    in the solver unit, ``ldexp(likelihood_phi, weight_exponent)`` exactly, unless the
+    caller profiled it there (``solver_likelihood_phi``) because the physical value
+    underflows. The Pearson pair stands in, and the method says so, where neither is a
+    normal positive float.
+    """
+    if getattr(distribution, "scale_known", True):
+        # Standard errors of a known-scale family read 1 whatever ``phi`` holds.
+        return {
+            "phi_likelihood": 1.0,
+            "solver_phi_likelihood": None,
+            "phi_method": KNOWN,
+            "phi_likelihood_method": KNOWN,
+        }
+    solver_phi = getattr(result, "solver_phi", None)
+    value = None if likelihood_phi is None else float(likelihood_phi)
+    pearson_pair = {
+        "phi_likelihood": float(result.phi),
+        "solver_phi_likelihood": solver_phi,
+        "phi_method": PEARSON,
+        "phi_likelihood_method": PEARSON,
+    }
+    if solver_phi is not None:
+        exponent = int(result.weight_exponent)
+        solver_value = solver_likelihood_phi
+        if solver_value is None and value is not None and _normal(value):
+            try:
+                solver_value = math.ldexp(value, exponent)
+            except OverflowError:
+                solver_value = None
+        if solver_value is None or not _normal(float(solver_value)):
+            return pearson_pair
+        lifted = float(solver_value)
+        return {
+            "phi_likelihood": math.ldexp(lifted, -exponent),
+            "solver_phi_likelihood": lifted,
+            "phi_method": PEARSON,
+            "phi_likelihood_method": likelihood_method,
+        }
+    if not _normal(value):
+        return pearson_pair
+    return {
+        "phi_likelihood": value,
+        "solver_phi_likelihood": None,
+        "phi_method": PEARSON,
+        "phi_likelihood_method": likelihood_method,
+    }
+
+
+def publish_scales(
+    result,
+    *,
+    distribution: Distribution,
+    likelihood_phi: float | None,
+    likelihood_method: str,
+    solver_likelihood_phi: float | None = None,
+):
+    """Return ``result`` with both published scales set (``scale_fields``)."""
+    from dataclasses import replace
+
+    return replace(
+        result,
+        **scale_fields(
+            result,
+            distribution=distribution,
+            likelihood_phi=likelihood_phi,
+            likelihood_method=likelihood_method,
+            solver_likelihood_phi=solver_likelihood_phi,
+        ),
+    )
+
+
+def scale_method(result) -> str:
+    """The estimator behind ``result.phi``; ``"legacy"`` for a result saved before the split."""
+    return getattr(result, "phi_method", None) or LEGACY
+
+
+def likelihood_scale_method(result) -> str:
+    """The estimator behind the likelihood scale; ``"legacy"`` before the split."""
+    return getattr(result, "phi_likelihood_method", None) or LEGACY

@@ -2317,7 +2317,8 @@ def test_fit_reml_terminal_observed_state_owns_objective_rank_and_scale() -> Non
     assert result.log_det_H == geometry.log_det_H
     assert model._reml_result.objective == evaluation.value
     assert evaluation.profiled_scale is not None
-    assert result.phi == evaluation.profiled_scale.phi
+    # The criterion's profile is the likelihood scale; ``phi`` is Pearson's, for SEs.
+    assert result.phi_likelihood == evaluation.profiled_scale.phi
 
 
 @pytest.mark.parametrize("discrete", [False, True])
@@ -2485,7 +2486,7 @@ def test_qp_passthrough_terminal_state_owns_fisher_objective_and_scale() -> None
     assert model._reml_result.curvature_source == "fisher"
     assert model._reml_result.objective == pytest.approx(evaluation.value, rel=2e-12)
     assert evaluation.profiled_scale is not None
-    assert result.phi == pytest.approx(evaluation.profiled_scale.phi, rel=2e-12)
+    assert result.phi_likelihood == pytest.approx(evaluation.profiled_scale.phi, rel=2e-12)
 
 
 def test_qp_passthrough_tweedie_scale_uses_terminal_penalty_nullity() -> None:
@@ -2549,17 +2550,16 @@ def test_qp_passthrough_tweedie_scale_uses_terminal_penalty_nullity() -> None:
         weight_semantics="prior",
     )
     assert isinstance(evaluation, REMLObjectiveEvaluation)
-    # The evaluation itself now carries the exact Tweedie scale profile
-    # (0.29.0, audit finding A); the *published* passthrough dispersion
-    # stays the deviance form with the terminal identified nullity.
+    # The evaluation carries the exact Tweedie scale profile (0.29.0, audit finding A)
+    # at the terminal identified nullity; the passthrough publishes it as the
+    # likelihood scale, as the unconstrained route does.
     assert evaluation.profiled_scale is not None
     assert evaluation.penalty_nullity is not None
-    expected_phi = evaluation.penalized_deviance / (n - evaluation.penalty_nullity)
 
     assert model._last_fit_meta["lambda_strategy"] == "qp_passthrough"
     assert model._reml_result.curvature_source == "fisher"
     assert model._reml_result.objective == pytest.approx(evaluation.value, rel=2e-12)
-    assert result.phi == pytest.approx(expected_phi, rel=2e-12)
+    assert result.phi_likelihood == pytest.approx(evaluation.profiled_scale.phi, rel=2e-12)
 
 
 def test_qp_passthrough_poisson_fast_objective_keeps_deviance_scale() -> None:

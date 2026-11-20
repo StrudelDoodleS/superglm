@@ -1261,7 +1261,48 @@ def _publish_fit_statistics(
     """Publish the fit statistics of ``model._result`` and prime the fit-data caches."""
     eta = stabilize_eta(linear_predictor(model._dm, model._result, offset), model._link)
     mu = clip_mu(model._link.inverse(eta), model._distribution)
-    from superglm._weight_units import solver_weights
+    from superglm._weight_units import likelihood_scale, solver_weights
+    from superglm.solvers.dispersion import (
+        ML_AT_MEAN,
+        lifted_ml_scale,
+        profile_likelihood_scale,
+        publish_scales,
+    )
+
+    if getattr(model._result, "phi_likelihood", None) is None:
+        # fit(), fit_path() and a REML fit with nothing to smooth: no REML profile, so
+        # the likelihood scale is the exact likelihood's ML at the fitted mean.
+        distribution = model._distribution
+        likelihood_phi = solver_likelihood_phi = None
+        y_arr = np.asarray(y, dtype=np.float64)
+        w_arr = np.asarray(sample_weight, dtype=np.float64)
+        if getattr(distribution, "scale_known", True):
+            pass
+        elif getattr(model._result, "solver_phi", None) is not None:
+            # A lifted weight unit profiles in that unit, where its deviance is normal.
+            solver_likelihood_phi = lifted_ml_scale(
+                distribution,
+                y_arr,
+                w_arr,
+                mu,
+                weight_semantics=model_weight_semantics(model),
+                exponent=model._result.weight_exponent,
+            )
+        else:
+            likelihood_phi = profile_likelihood_scale(
+                distribution,
+                y_arr,
+                w_arr,
+                weight_semantics=model_weight_semantics(model),
+                deviance=model._result.deviance,
+            )
+        model._result = publish_scales(
+            model._result,
+            distribution=distribution,
+            likelihood_phi=likelihood_phi,
+            likelihood_method=ML_AT_MEAN,
+            solver_likelihood_phi=solver_likelihood_phi,
+        )
 
     null_mu = _compute_null_mu(
         y,
@@ -1278,7 +1319,7 @@ def _publish_fit_statistics(
         offset,
         model._distribution,
         model._link,
-        model._result.phi,
+        likelihood_scale(model._result).phi,
         null_mu=null_mu,
         weight_semantics=model_weight_semantics(model),
         solver_result=model._result,

@@ -180,6 +180,18 @@ class TestDrop1FTest:
         assert result.iloc[0]["p_value"] < 0.05
 
 
+def _hold_saved_phi(model, phi):
+    """Give ``model`` the Pearson ``phi`` a known-scale fit_path result saved before
+    paths published 1 still carries."""
+    from dataclasses import replace
+
+    shared = model._solver_result is model._result
+    model._result = replace(model._result, phi=float(phi))
+    model._solver_result = model._result if shared else replace(model._solver_result, phi=phi)
+    model._summary_cache = None
+    model._fit_metrics_cache = None
+
+
 class TestDrop1DispersionScaling:
     @pytest.mark.parametrize("test", ["Chisq", "F"])
     def test_zero_dispersion_and_zero_deviance_change_is_null_result(self, test):
@@ -241,14 +253,12 @@ class TestDrop1DispersionScaling:
         [("under", 1), ("over", 7)],
     )
     def test_known_scale_chisq_ignores_path_fitted_pearson_dispersion(self, dispersion_shape, seed):
-        """fit_path() leaves phi at Pearson; the known-scale LRT must still use 1.0.
+        """A saved fit_path() result holding Pearson's phi; the known-scale LRT uses 1.0.
 
-        ``fit()`` pins ``phi = 1.0`` for Poisson, so a fitted-phi divisor is
-        invisible there. ``fit_path()`` publishes the path solution untouched,
-        so its ``phi`` is the Pearson dispersion of a mis-specified count fit —
-        below 1 for under-dispersed counts and above 1 for over-dispersed ones.
-        Dividing the deviance change by it moves term ``z`` across the 5% line
-        in both directions.
+        Every fit now publishes ``phi = 1.0`` for Poisson, but a fit_path() model saved
+        before that carries the Pearson dispersion of a mis-specified count fit — below
+        1 for under-dispersed counts and above 1 for over-dispersed ones. Dividing the
+        deviance change by it moves term ``z`` across the 5% line in both directions.
         """
         rng = np.random.default_rng(seed)
         n = 400
@@ -270,9 +280,12 @@ class TestDrop1DispersionScaling:
             features={"x": Numeric(), "z": Numeric()},
         )
         model.fit_path(X, y, n_lambda=5)
-        phi = model.result.phi
+        assert model.result.phi == 1.0
+        metrics = model.metrics(X, y)
+        phi = metrics.pearson_chi2 / (metrics.n_obs - metrics.effective_df)
+        _hold_saved_phi(model, phi)
 
-        # The fixture is only meaningful while fit_path leaves phi off 1.0.
+        # The fixture is only meaningful while the saved phi is off 1.0.
         assert phi != 1.0
         if dispersion_shape == "under":
             assert phi < 0.6

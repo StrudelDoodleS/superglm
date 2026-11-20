@@ -341,7 +341,7 @@ def test_published_phi_is_profiled_at_the_published_mean(characterisation_case):
     result = model.estimate_p(X, y, fit_mode="reml")
     expected = profile_phi_at(np.asarray(y, float), model.predict(X), np.ones(len(y)), result.p_hat)
     assert result.phi_hat == pytest.approx(expected.phi, rel=1e-12)
-    assert model.result.phi == result.phi_hat
+    assert model.result.phi_likelihood == result.phi_hat
     assert result.nll == pytest.approx(expected.criterion / len(y), rel=1e-12)
 
 

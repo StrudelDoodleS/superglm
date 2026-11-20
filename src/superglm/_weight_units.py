@@ -10,6 +10,7 @@ square root, when a variance overflows but its standard error is finite.
 from __future__ import annotations
 
 import math
+from typing import cast
 
 import numpy as np
 
@@ -247,6 +248,35 @@ def solver_dispersion(result):
     return result.phi if phi is None else phi
 
 
+class LikelihoodScale:
+    """A result's likelihood scale under the attribute names its SE scale uses.
+
+    Densities (log-likelihood, NLL, quantile residuals, simulated envelopes) and
+    variance components read ``phi_likelihood``; standard errors read ``phi``. This view
+    lets the unit-carrying density helpers read the first through the same names, so
+    the two never share a field. A result saved before the split has one ``phi``,
+    which serves both.
+    """
+
+    __slots__ = ("phi", "solver_phi", "weight_exponent")
+
+    def __init__(self, result) -> None:
+        exponent = getattr(result, "weight_exponent", 0)
+        value = getattr(result, "phi_likelihood", None)
+        if value is None:
+            self.phi = result.phi
+            self.solver_phi = getattr(result, "solver_phi", None)
+        else:
+            self.phi = value
+            self.solver_phi = getattr(result, "solver_phi_likelihood", None)
+        self.weight_exponent = exponent
+
+
+def likelihood_scale(result) -> LikelihoodScale:
+    """The likelihood-scale view of ``result`` (idempotent)."""
+    return result if isinstance(result, LikelihoodScale) else LikelihoodScale(result)
+
+
 def covariance_exponent(result):
     """An estimated dispersion cancels the unit; a known dispersion does not."""
     exponent = getattr(result, "weight_exponent", 0)
@@ -256,8 +286,8 @@ def covariance_exponent(result):
 
 def coefficient_covariance(inverse, result, *, known_scale=False):
     """Pair the inverse and dispersion before changing their common unit."""
-    # Legacy fit_path results carry Pearson phi even for a known-scale family;
-    # its fitted-family tables explicitly choose the known dispersion instead.
+    # A fit_path result saved before known-scale paths published phi = 1 carries
+    # Pearson's statistic; fitted-family tables choose the known dispersion instead.
     scale = 1.0 if known_scale else solver_dispersion(result)
     exponent = (
         getattr(result, "_geometry_weight_exponent", getattr(result, "weight_exponent", 0))
@@ -342,6 +372,7 @@ def unit_prior_log_density(family, y, mu, weights, result):
     """The row's density, retaining dispersion digits after scalar underflow."""
     from superglm.distributions import Gamma, Gaussian, Tweedie, prior_weight_log_density
 
+    result = likelihood_scale(result)
     phi = solver_dispersion(result)
     exponent = (
         getattr(result, "weight_exponent", 0)
@@ -409,6 +440,7 @@ def unit_log_likelihood(family, y, mu, weights, result, *, weight_semantics, rep
     """
     from superglm.distributions import Gamma, Gaussian, Tweedie, weighted_log_likelihood
 
+    result = likelihood_scale(result)
     if not getattr(result, "weight_exponent", 0) or getattr(result, "solver_phi", None) is None:
         return weighted_log_likelihood(
             family,
@@ -419,7 +451,8 @@ def unit_log_likelihood(family, y, mu, weights, result, *, weight_semantics, rep
             weight_semantics=weight_semantics,
             report_contract=report_contract,
         )
-    phi = result.solver_phi
+    # Set on this path: the early return above covers ``solver_phi is None``.
+    phi = cast(float, result.solver_phi)
     if weight_semantics == "prior":
         density = unit_prior_log_density(family, y, mu, weights, result)
         if density is not None:

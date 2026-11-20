@@ -15,6 +15,7 @@ from scipy.special import gammaln
 from superglm._utils import weighted_row_sum
 from superglm._weight_units import (
     dispersion_standard_deviation,
+    likelihood_scale,
     scale_penalties,
     scaled_standard_errors,
     solver_dispersion,
@@ -67,6 +68,7 @@ from superglm.solvers.centered_system import (
     penalty_factor,
     weighted_mean_pair,
 )
+from superglm.solvers.dispersion import likelihood_scale_method, scale_method
 from superglm.solvers.mode_score import corrected_two_pass_pair
 from superglm.solvers.rank import (
     RankDecomposition,
@@ -626,7 +628,13 @@ class ModelMetrics:
 
     @property
     def phi(self) -> float:
+        """The scale standard errors, intervals and Wald tests read."""
         return self._result.phi
+
+    @property
+    def phi_likelihood(self) -> float:
+        """The scale densities read: the log-likelihood, AIC/BIC and quantile residuals."""
+        return likelihood_scale(self._result).phi
 
     @cached_property
     def _geometry_weight_exponent(self) -> int:
@@ -910,8 +918,9 @@ class ModelMetrics:
         # marginal. A replicated row has the unit-weight marginal (CDFs below use w = 1); a prior
         # weight is part of the distribution (Gaussian variance, Gamma shape, count lattice).
         prior = self._weight_semantics == "prior"
-        phi = self.phi
-        unit_phi = self._result.solver_phi
+        density_scale = likelihood_scale(self._result)  # a PIT reads the density's scale
+        phi = density_scale.phi
+        unit_phi = density_scale.solver_phi
 
         def normal_cdf(residual, root):
             with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
@@ -946,7 +955,7 @@ class ModelMetrics:
             u = rng.uniform(a, b)
         elif isinstance(self._family, Gamma):
             if unit_phi is not None:
-                root = dispersion_standard_deviation(w if prior else np.ones_like(w), self._result)
+                root = dispersion_standard_deviation(w if prior else np.ones_like(w), density_scale)
                 normal = root < 2.0**-256
                 u = np.empty_like(y)
                 # At shape > 2**512 the normal-limit CDF's O(sqrt(phi))
@@ -962,7 +971,9 @@ class ModelMetrics:
                 u = gamma_dist.cdf(y, a=shape, scale=scale)
         elif isinstance(self._family, Gaussian):
             if unit_phi is not None:
-                sigma = dispersion_standard_deviation(w if prior else np.ones_like(w), self._result)
+                sigma = dispersion_standard_deviation(
+                    w if prior else np.ones_like(w), density_scale
+                )
                 u = normal_cdf(y - mu, sigma)
             else:
                 variance = phi / w if prior else np.full_like(y, phi)
@@ -979,12 +990,12 @@ class ModelMetrics:
                 with np.errstate(divide="ignore"):
                     log_row_phi = (
                         np.log(unit_phi)
-                        - self._result.weight_exponent * np.log(2.0)
+                        - density_scale.weight_exponent * np.log(2.0)
                         - np.log(w_eff)
                     )
                 log_relative_variance = log_row_phi + (p_tw - 2.0) * np.log(mu)
                 normal_rows = log_relative_variance < -512 * np.log(2.0)
-                root = dispersion_standard_deviation(w_eff, self._result)
+                root = dispersion_standard_deviation(w_eff, density_scale)
                 u[normal_rows] = normal_cdf(
                     y[normal_rows] - mu[normal_rows],
                     root[normal_rows] * np.power(mu[normal_rows], p_tw / 2.0),
@@ -1996,6 +2007,7 @@ class ModelMetrics:
             },
             "fit": {
                 "phi": self.phi,
+                "phi_likelihood": self.phi_likelihood,
                 "effective_df": self.effective_df,
                 "pearson_chi2": self.pearson_chi2,
                 "n_obs": self.n_obs,
@@ -2029,6 +2041,9 @@ class ModelMetrics:
             "effective_df": self.effective_df,
             "lambda1": penalty.lambda1,
             "phi": self.phi,
+            "phi_method": scale_method(self._result),
+            "phi_likelihood": self.phi_likelihood,
+            "phi_likelihood_method": likelihood_scale_method(self._result),
             "deviance": self.deviance,
             "log_likelihood": self.log_likelihood,
             "aic": self.aic,

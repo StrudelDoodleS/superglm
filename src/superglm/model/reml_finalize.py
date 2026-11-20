@@ -15,6 +15,7 @@ from superglm._reporting_state import (
     StructuredLevelSupport,
     build_reporting_support_state,
 )
+from superglm._weight_units import likelihood_scale
 from superglm.diagnostics.separation import refuse_published_separation
 from superglm.distributions import Gamma, Gaussian, Tweedie, clip_mu
 from superglm.links import stabilize_eta
@@ -81,7 +82,13 @@ from superglm.solvers._structured.state import (
     StructuredLinearSystemState,
     centred_data_operator,
 )
-from superglm.solvers.dispersion import dispersion_likelihood_size, model_weight_semantics
+from superglm.solvers.dispersion import (
+    DEVIANCE_FORM,
+    REML_PROFILE,
+    dispersion_likelihood_size,
+    model_weight_semantics,
+    publish_scales,
+)
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.mode_score import (
     centred_warm_start,
@@ -244,6 +251,7 @@ def compute_profiled_phi(
     likelihood_size: float | None = None,
     gamma_scale_data: GammaScaleProfileData | None = None,
     boundary_phi: float | None = None,
+    hessian_rank: int | None = None,
 ) -> float:
     """Return REML-profiled phi for estimated-scale families.
 
@@ -267,8 +275,11 @@ def compute_profiled_phi(
     penalized_deviance = float(pirls_result.deviance + pq_final)
 
     distribution = model._distribution
-    if isinstance(distribution, Gaussian | Gamma):
+    if hessian_rank is None:
+        # A caller's rank (``profiled_likelihood_scale``) stands for a result that has lost
+        # its own; the coefficient width counts every alias, so it is the last resort.
         hessian_rank = pirls_result.reml_hessian_rank
+    if isinstance(distribution, Gaussian | Gamma):
         if hessian_rank is None:
             hessian_rank = 1 + p_dim
         M_p = compute_penalty_nullity(
@@ -310,7 +321,6 @@ def compute_profiled_phi(
     # Reduced profile for estimated-scale families without a Wood Eq. (4)
     # profiler (Tweedie): the residual likelihood dimension is the penalty
     # nullity on the identified coefficient range, not the penalty rank.
-    hessian_rank = pirls_result.reml_hessian_rank
     if hessian_rank is None:
         hessian_rank = 1 + p_dim
     M_p = compute_penalty_nullity(
@@ -331,6 +341,95 @@ def compute_profiled_phi(
         )
     )
     return float(max(penalized_deviance / max(size - M_p, 1.0), 1e-10))
+
+
+def profiled_likelihood_scale(
+    model,
+    *,
+    y,
+    sample_weight,
+    lambdas,
+    reml_penalties,
+    pirls_result,
+    hessian_rank: int | None = None,
+) -> tuple[float | None, str]:
+    """The likelihood scale a REML route publishes beside Pearson's, and its method.
+
+    Gaussian and Gamma: their Wood (2011) Eq. 4 profile (``compute_profiled_phi``).
+    Tweedie: the same profile of its exact likelihood at the penalized deviance and
+    penalty nullity. Other estimated-scale families: the deviance form. None where the
+    profile has no interior optimum; ``publish_scales`` then stands Pearson in and says so.
+    ``hessian_rank`` overrides ``pirls_result``'s certified rank, for a result that no
+    longer carries one (a coefficient revision clears it).
+    """
+    from superglm.solvers.dispersion import KNOWN, profile_likelihood_scale
+
+    distribution = model._distribution
+    if getattr(distribution, "scale_known", True):
+        return 1.0, KNOWN
+    if isinstance(distribution, Tweedie):
+        p_dim = model._dm.p
+        penalized_deviance = float(
+            pirls_result.deviance
+            + total_penalty_quadratic(
+                pirls_result.beta, lambdas, reml_penalties, list(model._dm.group_matrices)
+            )
+        )
+        if hessian_rank is None:
+            hessian_rank = pirls_result.reml_hessian_rank
+        nullity = compute_penalty_nullity(
+            None,
+            hessian_rank=1 + p_dim if hessian_rank is None else hessian_rank,
+            penalties=reml_penalties,
+            lambdas=lambdas,
+            coefficient_width=p_dim,
+        )
+        phi = profile_likelihood_scale(
+            distribution,
+            y,
+            sample_weight,
+            weight_semantics=model_weight_semantics(model),
+            deviance=penalized_deviance,
+            nullity=nullity,
+        )
+        return phi, REML_PROFILE
+    try:
+        phi = compute_profiled_phi(
+            model,
+            y=y,
+            sample_weight=sample_weight,
+            lambdas=lambdas,
+            reml_penalties=reml_penalties,
+            pirls_result=pirls_result,
+            hessian_rank=hessian_rank,
+        )
+    except ValueError:
+        return None, REML_PROFILE
+    return phi, REML_PROFILE if isinstance(distribution, Gaussian | Gamma) else DEVIANCE_FORM
+
+
+def variance_component_scale(model):
+    """The scale a variance component pairs with lambda, as a ``likelihood_scale`` view.
+
+    It is the REML profile lambda was selected against (mgcv's ``gam.vcomp`` pairs
+    ``sp`` with ``reml.scale``), which every REML route publishes as ``phi_likelihood``.
+    ``estimate_p(fit_mode="reml")`` publishes the ML ``phi_hat`` there for its densities
+    and keeps its REML profile as ``variance_component_phi``.
+    """
+    from types import SimpleNamespace
+
+    from superglm.solvers.dispersion import REML_PROFILE, scale_fields
+
+    solver = model._solver_pirls_result()
+    phi = getattr(getattr(model, "_reml_result", None), "variance_component_phi", None)
+    if phi is None:
+        return likelihood_scale(solver)
+    fields = scale_fields(
+        solver, distribution=model._distribution, likelihood_phi=phi, likelihood_method=REML_PROFILE
+    )
+    return likelihood_scale(
+        SimpleNamespace(phi=solver.phi, weight_exponent=solver.weight_exponent, **fields)
+    )
 
 
 def maybe_qp_passthrough_refit(
@@ -932,33 +1031,26 @@ def finalize_reml_fit(
         sample_weight,
         weight_semantics=model_weight_semantics(model),
     )
-    if isinstance(model._distribution, Tweedie) and not qp_passthrough:
-        phi_fixed = float(final_pirls.phi)
-    elif isinstance(model._distribution, Tweedie) and terminal_evaluation is not None:
-        # QP passthrough publishes the deviance-form dispersion with the
-        # terminal evaluation's identified nullity; see the families guide's
-        # dispersion inventory.
-        penalty_nullity = float(terminal_evaluation.penalty_nullity or 0.0)
-        phi_fixed = max(
-            float(terminal_evaluation.penalized_deviance)
-            / max(published_likelihood_size - penalty_nullity, 1.0),
-            1.0e-10,
-        )
-    elif terminal_evaluation is not None and terminal_evaluation.profiled_scale is not None:
-        phi_fixed = terminal_evaluation.profiled_scale.phi
-    elif terminal_evaluation is not None and not getattr(
-        model._distribution,
-        "scale_known",
-        True,
+    # ``phi`` stays the final solve's Pearson estimate on the fitting design, which standard
+    # errors read; the REML criterion's own profile is the likelihood scale densities and
+    # variance components read (``publish_scales``).
+    if terminal_evaluation is not None and terminal_evaluation.profiled_scale is not None:
+        likelihood_phi = terminal_evaluation.profiled_scale.phi
+        likelihood_method = REML_PROFILE
+    elif (
+        terminal_evaluation is not None
+        and not isinstance(model._distribution, Tweedie)
+        and not getattr(model._distribution, "scale_known", True)
     ):
         penalty_nullity = float(terminal_evaluation.penalty_nullity or 0.0)
-        phi_fixed = max(
+        likelihood_phi = max(
             float(terminal_evaluation.penalized_deviance)
             / max(published_likelihood_size - penalty_nullity, 1.0),
             1.0e-10,
         )
+        likelihood_method = DEVIANCE_FORM
     else:
-        phi_fixed = compute_profiled_phi(
+        likelihood_phi, likelihood_method = profiled_likelihood_scale(
             model,
             y=y,
             sample_weight=sample_weight,
@@ -967,7 +1059,12 @@ def finalize_reml_fit(
             pirls_result=final_pirls,
         )
 
-    corrected = replace(final_pirls, phi=phi_fixed)
+    corrected = publish_scales(
+        final_pirls,
+        distribution=model._distribution,
+        likelihood_phi=likelihood_phi,
+        likelihood_method=likelihood_method,
+    )
     model._result = corrected
     model._reml_result.pirls_result = corrected
     # Under "error" a separated fit is refused before anything describes it.
@@ -1021,7 +1118,7 @@ def finalize_reml_fit(
         offset,
         model._distribution,
         model._link,
-        model._result.phi,
+        likelihood_scale(model._result).phi,
         weight_semantics=model_weight_semantics(model),
     )
     model._solver_result = corrected
