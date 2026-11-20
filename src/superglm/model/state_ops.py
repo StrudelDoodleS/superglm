@@ -1272,14 +1272,14 @@ def _publish_existence(
     weights = np.asarray(model._fit_weights, dtype=np.float64)
     sides = response_sides(model._fit_y_ref, weights, boundaries)
     certified = _certified(model, context, sides, weights)
-    decision, strict, explicit, coordinates = decide_separation(
+    decision, strict, design = decide_separation(
         model, sides=sides, boundaries=boundaries, certified=certified
     )
     if strict is not None and strict.size == np.count_nonzero(sides != 2):
         # complete separation: every row is separated and none is kept, so no data bound any
         # coefficient the penalty leaves free; the walked fit is published as it stopped
         span = _complete_span(model, context, len(model._solver_pirls_result().beta))
-        labels, labelled = separated_labels(model, strict, sides, coordinates)
+        labels, labelled = separated_labels(model, strict, sides, design.coordinates)
         decision = dataclasses.replace(
             decision,
             state="present",
@@ -1292,7 +1292,7 @@ def _publish_existence(
         )
     elif strict is not None and not refuses_on_publication(model):
         published = _withheld_publication(
-            model, context, decision, strict, explicit, coordinates, sides, boundaries, refit
+            model, context, decision, strict, design, sides, boundaries, refit
         )
         if published is not None:
             return published
@@ -1378,8 +1378,7 @@ def _withheld_publication(
     context: _PublicationContext,
     decision,
     strict: NDArray,
-    explicit,
-    coordinates: NDArray,
+    design,
     sides: NDArray,
     boundaries: tuple[str, ...],
     refit: Callable[[Any, NDArray], WithheldFit] | None = None,
@@ -1397,7 +1396,6 @@ def _withheld_publication(
     from superglm.model.separation_ops import (
         coefficient_names,
         existence_certified,
-        lift_span,
         separated_labels,
         separated_span,
         withheld_refit,
@@ -1451,11 +1449,11 @@ def _withheld_publication(
         restore()
         return None
     null = np.vstack((np.asarray(gauge.intercept)[None, :], np.asarray(gauge.null)))
-    spans = separated_span(explicit, coordinates, null, strict, kept)
+    spans = separated_span(design, null, strict, kept)
     if spans is None or spans[1].shape[1] == 0:
         restore()
         return None
-    separated = lift_span(spans[1], coordinates, width)
+    separated = design.lift(spans[1], width)
     # the record again, with the separated span held where the walk left it
     if first.state is not None:
         object.__setattr__(first.state, "identifiability", None)
@@ -1489,7 +1487,7 @@ def _withheld_publication(
     ):
         restore()
         return None
-    labels, labelled = separated_labels(model, strict, sides, coordinates)
+    labels, labelled = separated_labels(model, strict, sides, design.coordinates)
     separation = Separation(
         "present",
         "linear program",
@@ -1506,7 +1504,7 @@ def _withheld_publication(
     context_r.withheld = fit
     context_r.separated = separated
     context_r.walk = walk
-    context_r.explicit = explicit[strict]
+    context_r.explicit = design.matrix[strict]
     context_r.separated_explicit = spans[1]
     return context_r
 

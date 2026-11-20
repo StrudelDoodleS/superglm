@@ -29,7 +29,9 @@ the joint test must be withheld because the record says so, not because the solv
 The vanished-weight fit (an sz factor smooth whose one-row level ``g000`` sits at offset
 ``-160``, on both backends) holds two directions not resolved at float64; at ``b175d49f2``
 ``factor_smooth()`` printed ``g000``'s coefficient norm where they left it (11.80 on auto,
-2209.50 on gram).  A ``"partial"`` decision, a proven lower bound, is walked as a control.
+2209.50 on gram).  The tiered fit adds a 3-level ordered polynomial whose base carries only zero
+responses, whose separation is verified on its levels: walked decided, and forced to a proven
+lower bound (``"partial"``).
 """
 
 from __future__ import annotations
@@ -293,8 +295,13 @@ def _vanished(direct_solve: str) -> _Case:
     )
 
 
-def _partial() -> _Case:
-    """The separated fixture's zero sets beside a 3-level ordered polynomial whose base is zero."""
+def _tiered() -> _Case:
+    """The separated fixture's zero sets beside a 3-level ordered polynomial whose base is zero.
+
+    The polynomial's level values are not dyadic, so no float64 direction on its columns is zero
+    on ``T0``'s and ``T1``'s rows exactly; on its levels' indicators one is, and ``[1, P]`` maps
+    it to the intercept and both powers, which separation then moves.
+    """
     rng = np.random.default_rng(42)
     n = 4000
     X = pd.DataFrame(
@@ -334,22 +341,28 @@ def _partial() -> _Case:
             "band[slope-change @ Mi007]",
             "band[curvature Mi007..Mi009]",
             top,
+            "Intercept",
+            "tier[P1]",
+            "tier[P2]",
+            "tier[T0]",
+            "tier[T1]",
         ),
         shown=("band[Mi000]", "band[Mi007]", "x[8]", "c[A]"),
-        untested=("band", "x"),
+        untested=("band", "x", "tier"),
         tested=("s",),
-        unidentified={"band": [1, 2], "x": [2]},
-        unnormed=("band", "x"),
+        unidentified={"band": [1, 2], "x": [2], "tier": [0, 1]},
+        unnormed=("band", "x", "tier"),
         normed=("s", "c"),
-        unimportant=("band", "x"),
+        unimportant=("band", "x", "tier"),
         important=("s", "c"),
         off_support={
             "band": lambda frame: frame["level"].isin(["Mi008", "Mi009"]).to_numpy(),
             "x": lambda frame: frame["x"].to_numpy() > 8.0,
+            "tier": lambda frame: (frame["level"] != "T2").to_numpy(),
             "c": none,
             "s": none,
         },
-        rows=np.flatnonzero(verified),
+        rows=np.flatnonzero(verified | (X["tier"] == "T2").to_numpy()),
         basis=None,
         edit=("s", 0.2, 0.6),
     )
@@ -729,22 +742,26 @@ def test_no_reader_shows_a_number_the_fit_does_not_identify(build, forced, monke
     assert _walk(case) == []
 
 
-@pytest.mark.pins_behaviour
-def test_a_partial_separation_withholds_what_its_verified_span_reaches():
-    """A ``"partial"`` decision: every reader withholds what its verified span reaches.
+@pytest.mark.parametrize("forced", [False, True], ids=["present", "partial"])
+def test_a_separation_along_an_ordered_polynomial_withholds_what_it_reaches(forced, monkeypatch):
+    """The tiered fit: its base level's separation is verified on the levels, and withheld.
 
-    Pins that the readers take a proven lower bound as they take a ``"present"`` decision: the
-    coefficients its span moves (``band`` above its break, ``x`` above 8) show no value, SE,
-    interval or test, and their points are flagged.  It held at ``b175d49f2``: the record reads
-    ``Separation.reached`` whatever the state.  The fixture's third zero set, the base ``T2``
-    of a 3-level ordered polynomial, separates too, along a direction moving the intercept and
-    ``tier``, but no float64 direction is exactly zero on ``T0``'s and ``T1``'s rows (the
-    polynomial's level values are not dyadic), so none verifies: those coefficients keep the
-    walk's values and SEs (``tier[P1]`` 2752, the intercept 13,540) beside the footnote's "more
-    rows may be", and this test asserts nothing about them.
+    Decided, the fit on the other rows proves them every separated row (``"present"``); forced
+    (the withheld fit's score kept from proving it), the verified direction is a proven lower
+    bound (``"partial"``).  Either way every reader withholds what the span reaches: the
+    intercept, both powers and the levels reading them, as ``band`` above its break and ``x``
+    above 8.  At ``d90533200`` no direction verified on the polynomial's columns, so the
+    decision was ``"partial"`` without it and the tables printed the walk's stopping point:
+    ``tier[P1]`` -4.84 with SE 2752, the intercept -24.64 with SE 13,540.
     """
-    case = _partial()
-    assert case.model._fit_inference_info["identifiability"].separation.state == "partial"
+    import superglm.model.separation_ops as separation_ops
+
+    if forced:
+        monkeypatch.setattr(separation_ops, "existence_certified", lambda *a, **k: False)
+    case = _tiered()
+    monkeypatch.undo()
+    separation = case.model._fit_inference_info["identifiability"].separation
+    assert separation.state == ("partial" if forced else "present")
     assert _walk(case) == []
 
 

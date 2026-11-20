@@ -178,7 +178,9 @@ def published_directions(model) -> PublishedDirections | None:
     decided = getattr(decision, "span", None)
     if "unresolved" in bases and decided is not None and np.shape(decided)[1]:
         held, span = bases["unresolved"], _orthonormal(jacobi(np.asarray(decided, np.float64)))
-        bases["unresolved"] = _orthonormal(held - span @ (span.T @ held))
+        # ``held`` is orthonormal: a direction the span holds leaves only its rounding behind
+        left, singular, _ = np.linalg.svd(held - span @ (span.T @ held), full_matrices=False)
+        bases["unresolved"] = left[:, singular > SQRT_EPS]
     terms = getattr(model, "_runtime_canonical_state", None) or {}
     from superglm.model.runtime_canonicalize import _public_column_shifts
 

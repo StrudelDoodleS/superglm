@@ -1315,7 +1315,12 @@ is on the mean space's edge, not at infinity.
   Zylkin (appendix A.2, after Konis 2007) finds a direction that separates
   every row that can be separated, and the direction is then checked on the
   rows in exact arithmetic (error-free products and an exactly rounded sum),
-  so a row one unit in the last place on the wrong side is caught. The fit is
+  so a row one unit in the last place on the wrong side is caught. A term whose
+  rows take one value per level, such as an ordered term's polynomial coding,
+  is checked on its levels' indicators: its values are not dyadic, so no
+  float64 direction on its columns is exactly zero on a level, while with the
+  intercept its columns span what the indicators span whenever its coding
+  matrix $[1, P]$ is square and nonsingular, which is decided exactly. The fit is
   then refitted on the rows it keeps, at its smoothing parameters, and that
   fit's own score must prove those rows separate no further. If the interior
   rows alone identify every coefficient, the estimate exists (Santos Silva and

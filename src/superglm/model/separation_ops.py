@@ -225,15 +225,145 @@ def structured_floor(factor, hessian_diagonal: NDArray) -> float:
     return 0.5 / trace
 
 
-def explicit_design(model) -> tuple[Any, NDArray]:
+#: The widest block the exact test reads on its levels: ``[1, P]`` is inverted exactly.
+_LEVEL_WIDTH = 16
+
+
+def _exact_inverse(matrix: NDArray) -> NDArray | None:
+    """``matrix^-1`` in exact rationals (Gauss-Jordan), or ``None`` when it is singular."""
+    from fractions import Fraction
+
+    size = matrix.shape[0]
+    work = [
+        [Fraction(float(value)) for value in row] + [Fraction(int(i == j)) for j in range(size)]
+        for i, row in enumerate(matrix)
+    ]
+    for column in range(size):
+        pivot = next((row for row in range(column, size) if work[row][column] != 0), None)
+        if pivot is None:
+            return None
+        work[column], work[pivot] = work[pivot], work[column]
+        head = work[column][column]
+        work[column] = [value / head for value in work[column]]
+        for row in range(size):
+            factor = work[row][column]
+            if row != column and factor != 0:
+                work[row] = [a - factor * b for a, b in zip(work[row], work[column], strict=True)]
+    return np.array([row[size:] for row in work], dtype=object)
+
+
+def _level_values(block: NDArray) -> tuple[NDArray, NDArray, NDArray] | None:
+    """``(P, codes, [1, P]^-1)`` when the ``d`` columns' rows take ``d + 1`` values ``P``.
+
+    Then ``block = L P`` for the indicators ``L`` of its distinct rows (``codes``), and ``[1, P]``
+    nonsingular (decided exactly) makes ``span(1, block) = span(1, L)``.  ``None`` otherwise.
+    """
+    n, d = block.shape
+    if not (0 < d < _LEVEL_WIDTH and n) or np.unique(block[:, 0]).size > d + 1:
+        return None
+    values, codes = np.unique(block, axis=0, return_inverse=True)
+    if values.shape[0] != d + 1:
+        return None
+    inverse = _exact_inverse(np.column_stack((np.ones(d + 1), values)))
+    return None if inverse is None else (values, np.asarray(codes).reshape(-1), inverse)
+
+
+@dataclasses.dataclass(frozen=True)
+class LevelBlock:
+    """A group the exact test reads on its levels' indicators (``_level_values``).
+
+    ``columns`` are the indicators of its levels after the first (the intercept carries the
+    first), ``coordinates`` its fitted slope coordinates, ``values`` its level values ``P`` and
+    ``inverse`` ``[1, P]^-1`` in exact rationals.
+    """
+
+    columns: NDArray
+    coordinates: NDArray
+    values: NDArray
+    inverse: NDArray
+
+
+@dataclasses.dataclass(frozen=True)
+class ExplicitDesign:
+    """The rows' columns the exact test reads, and their map to the fitted coordinates.
+
+    ``matrix`` (CSR, the intercept first) holds them; ``coordinates`` gives each column's fitted
+    coordinate (``-1`` the intercept, ``-2`` a level's indicator) and ``levels`` the groups read
+    on their levels (``LevelBlock``).  A direction ``[a; w]`` here moves the rows as the fitted
+    direction ``lift`` gives, exactly; ``reduce`` writes a fitted direction here.
+    """
+
+    matrix: Any
+    coordinates: NDArray
+    levels: tuple[LevelBlock, ...] = ()
+
+    def covered(self, width: int) -> NDArray:
+        """Which rows of ``[intercept; slopes]`` (``1 + width``) its columns represent."""
+        covered = np.zeros(width + 1, dtype=bool)
+        plain = self.coordinates[self.coordinates != -2]
+        covered[np.where(plain < 0, 0, plain + 1)] = True
+        for block in self.levels:
+            covered[1 + block.coordinates] = True
+        return covered
+
+    def reduce(self, directions: NDArray) -> NDArray:
+        """Fitted ``[intercept; slopes]`` directions in its columns (rounded as computed).
+
+        A level group's part is its level values ``v = P b``: ``v`` less its first entry on the
+        indicators, which the intercept carries.
+        """
+        plain = self.coordinates != -2
+        reduced = np.zeros((self.coordinates.size, directions.shape[1]))
+        rows = self.coordinates[plain]
+        reduced[plain] = directions[np.where(rows < 0, 0, rows + 1)]
+        for block in self.levels:
+            values = block.values @ directions[1 + block.coordinates]
+            reduced[block.columns] = values[1:] - values[0]
+            reduced[0] += values[0]
+        return reduced
+
+    def lift(self, span: NDArray, width: int) -> NDArray:
+        """Its directions as ``[intercept; slopes]`` in fitted coordinates (``1 + width``).
+
+        A level group's part ``[c; b] = [1, P]^-1 [0; w]`` and the intercept's ``a + sum c`` are
+        exact, each rounded once, so an entry is zero exactly where the direction leaves its
+        coordinate.
+        """
+        from fractions import Fraction
+
+        lifted = np.zeros((width + 1, span.shape[1]))
+        plain = self.coordinates != -2
+        rows = self.coordinates[plain]
+        lifted[np.where(rows < 0, 0, rows + 1)] = span[plain]
+        if not self.levels:
+            return lifted
+        for j in range(span.shape[1]):
+            intercept = Fraction(float(span[0, j]))
+            for block in self.levels:
+                target = np.array(
+                    [Fraction(0)] + [Fraction(float(v)) for v in span[block.columns, j]],
+                    dtype=object,
+                )
+                solution = block.inverse @ target
+                intercept += solution[0]
+                lifted[1 + block.coordinates, j] = [float(value) for value in solution[1:]]
+            lifted[0, j] = float(intercept)
+        return lifted
+
+
+def explicit_design(model) -> ExplicitDesign:
     """The rows' columns the exact test reads: the intercept and the unpenalised stored groups.
 
     A group enters when its construction is its own coordinates (``ConstructionColumns.unit``,
     no penalty reaches it) and its matrix holds its entries (one-hot codes, dense or sparse
     columns): every product with a direction is then exact to evaluate (``exact_row_signs``).
-    Returns the CSR matrix (intercept first) and each column's fitted coordinate (``-1`` the
-    intercept).  A smooth's penalty null space is not stored by its entries, so a separation
-    along it cannot be verified exactly and is unresolved.
+    A dense group whose rows take one value per level, ``d + 1`` values for ``d`` columns with
+    ``[1, P]`` nonsingular (an ordered term's level coding, any basis), enters as its levels'
+    indicators (``LevelBlock``): its values ``P`` (a polynomial's, say) are not dyadic, so no
+    float64 direction on its columns is zero on a level exactly, where one on the indicators
+    is, and ``[1, P]`` maps one to the other exactly.  A smooth's penalty null space is not
+    stored by its entries, so a separation along it cannot be verified exactly and is
+    unresolved.
     """
     from scipy import sparse
 
@@ -248,6 +378,7 @@ def explicit_design(model) -> tuple[Any, NDArray]:
     construction = _construction_columns(model, list(model._groups))
     blocks = [sparse.csr_matrix(np.ones((n, 1)))]
     coordinates = [-1]
+    levels = []
     for index, (group, matrix) in enumerate(
         zip(model._groups, model._dm.group_matrices, strict=True)
     ):
@@ -261,14 +392,37 @@ def explicit_design(model) -> tuple[Any, NDArray]:
                 shape=(n, matrix.n_levels),
             )
         elif isinstance(matrix, DenseGroupMatrix):
-            block = sparse.csr_matrix(np.asarray(matrix.M, dtype=np.float64))
+            dense = np.asarray(matrix.M, dtype=np.float64)
+            level = _level_values(dense)
+            if level is not None:
+                values, codes, inverse = level
+                rows = np.flatnonzero(codes > 0)
+                start = len(coordinates)
+                blocks.append(
+                    sparse.csr_matrix(
+                        (np.ones(rows.size), (rows, codes[rows] - 1)), shape=(n, values.shape[1])
+                    )
+                )
+                coordinates.extend([-2] * values.shape[1])
+                levels.append(
+                    LevelBlock(
+                        columns=np.arange(start, len(coordinates)),
+                        coordinates=np.arange(group.start, group.end),
+                        values=values,
+                        inverse=inverse,
+                    )
+                )
+                continue
+            block = sparse.csr_matrix(dense)
         elif type(matrix) is SparseGroupMatrix:
             block = sparse.csr_matrix(matrix.M, dtype=np.float64)
         else:
             continue
         blocks.append(block)
         coordinates.extend(range(group.start, group.end))
-    return sparse.hstack(blocks, format="csr"), np.asarray(coordinates, dtype=np.intp)
+    return ExplicitDesign(
+        sparse.hstack(blocks, format="csr"), np.asarray(coordinates, dtype=np.intp), tuple(levels)
+    )
 
 
 @dataclasses.dataclass
@@ -343,22 +497,20 @@ def aliases_exact(model, gauge, sides: NDArray) -> bool:
     float64, whose rows cannot be evaluated exactly; the existence question along it is the
     alias's.
     """
-    explicit, coordinates = explicit_design(model)
+    design = explicit_design(model)
     null = np.vstack((np.asarray(gauge.intercept)[None, :], np.asarray(gauge.null)))
     if not null.shape[1]:
         return True
-    rows = np.where(coordinates < 0, 0, coordinates + 1)
-    off = np.ones(null.shape[0], dtype=bool)
-    off[rows] = False
+    off = ~design.covered(null.shape[0] - 1)
     largest = np.max(np.abs(null), axis=0)
     on_explicit = ~np.any(np.abs(null[off]) > SQRT_EPS * largest, axis=0)
     if not np.any(on_explicit):
         return True
     live = np.flatnonzero(sides != 2)
-    return exact_null_basis(explicit, null[np.ix_(rows, on_explicit)], live) is not None
+    return exact_null_basis(design.matrix, design.reduce(null[:, on_explicit]), live) is not None
 
 
-def separated_span(explicit, coordinates: NDArray, null: NDArray, rows: NDArray, kept: NDArray):
+def separated_span(design: ExplicitDesign, null: NDArray, rows: NDArray, kept: NDArray):
     """The exact span the withheld fit leaves null, in explicit columns, and its separated part.
 
     ``null`` (``(1 + width) x k``, ``[intercept; slopes]``) spans the withheld fit's null
@@ -367,27 +519,15 @@ def separated_span(explicit, coordinates: NDArray, null: NDArray, rows: NDArray,
     (``separation.exact_null_basis``).  Returns ``(basis, separated)``: the exact basis in
     explicit columns, and the columns of it that are nonzero on a separated row exactly.
     """
-    width = null.shape[0]
-    explicit_rows = np.where(coordinates < 0, 0, coordinates + 1)
-    off = np.ones(width, dtype=bool)
-    off[explicit_rows] = False
     largest = np.max(np.abs(null), axis=0) if null.size else np.zeros(0)
-    if np.any(np.abs(null[off]) > SQRT_EPS * largest):
+    if np.any(np.abs(null[~design.covered(null.shape[0] - 1)]) > SQRT_EPS * largest):
         return None
-    basis = exact_null_basis(explicit, null[explicit_rows], kept)
+    basis = exact_null_basis(design.matrix, design.reduce(null), kept)
     if basis is None:
         return None
-    moved = [
-        j for j in range(basis.shape[1]) if np.any(exact_row_signs(explicit[rows], basis[:, j]))
-    ]
+    separated = design.matrix[rows]
+    moved = [j for j in range(basis.shape[1]) if np.any(exact_row_signs(separated, basis[:, j]))]
     return basis, basis[:, moved]
-
-
-def lift_span(span: NDArray, coordinates: NDArray, width: int) -> NDArray:
-    """Explicit-column directions as ``[intercept; slopes]`` in fitted coordinates."""
-    lifted = np.zeros((width + 1, span.shape[1]))
-    lifted[np.where(coordinates < 0, 0, coordinates + 1)] = span
-    return lifted
 
 
 def separated_labels(
@@ -439,11 +579,11 @@ def coefficient_names(model, span: NDArray) -> tuple[str, ...]:
     return tuple(names)
 
 
-def proposal_span(direction: NDArray | None, coordinates: NDArray, width: int) -> NDArray:
+def proposal_span(direction: NDArray | None, design: ExplicitDesign, width: int) -> NDArray:
     """An unverified proposal as a span whose entries below the square root of eps are cut."""
     if direction is None:
         return np.zeros((width + 1, 0))
-    lifted = lift_span(direction[:, None], coordinates, width)
+    lifted = design.lift(direction[:, None], width)
     largest = float(np.max(np.abs(lifted), initial=0.0))
     lifted[np.abs(lifted) <= SQRT_EPS * largest] = 0.0
     return lifted
@@ -451,13 +591,13 @@ def proposal_span(direction: NDArray | None, coordinates: NDArray, width: int) -
 
 def decide_separation(
     model, *, sides: NDArray, boundaries: tuple[str, ...], certified: bool
-) -> tuple[Separation, NDArray | None, Any, NDArray]:
+) -> tuple[Separation, NDArray | None, ExplicitDesign | None]:
     """The decision before any refit: absent when ``certified``, else the rows' answer.
 
     Returns the decision (``"absent"``; ``"partial"`` for a verified direction, pending the
     withheld fit that would show it maximal; ``"unresolved"`` when none verifies or the rows'
     program exceeds its cap), the verified direction's strict rows (``None`` when none
-    verified), the explicit design and its columns' fitted coordinates.
+    verified) and the explicit design (``None`` when ``certified``).
     """
     from superglm.links import CauchitLink
 
@@ -467,16 +607,15 @@ def decide_separation(
             Separation("absent", "certificate", boundaries=boundaries, unique=unique),
             None,
             None,
-            np.zeros(0, dtype=np.intp),
         )
-    explicit, coordinates = explicit_design(model)
+    design = explicit_design(model)
 
     def priority() -> NDArray | None:
         # past its cap the program reads the rows the walk drove nearest their boundary first
         eta = _linear_predictor(model)
         return None if eta is None else sides * np.where(np.isfinite(eta), eta, 0.0)
 
-    direction, strict, work = separating_direction(explicit, sides, priority)
+    direction, strict, work = separating_direction(design.matrix, sides, priority)
     width = len(model._solver_pirls_result().beta)
     if direction is None:
         return (
@@ -490,11 +629,10 @@ def decide_separation(
                 work=work,
             ),
             None,
-            explicit,
-            coordinates,
+            design,
         )
-    span = proposal_span(direction, coordinates, width)
-    labels, labelled = separated_labels(model, strict, sides, coordinates)
+    span = proposal_span(direction, design, width)
+    labels, labelled = separated_labels(model, strict, sides, design.coordinates)
     return (
         Separation(
             "partial",
@@ -509,8 +647,7 @@ def decide_separation(
             work=work,
         ),
         strict,
-        explicit,
-        coordinates,
+        design,
     )
 
 
