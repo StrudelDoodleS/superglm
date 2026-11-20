@@ -32,9 +32,10 @@ level's two unpenalised parts: their values are where the solver stopped, not es
 ``b175d49f2`` ``factor_smooth()`` printed ``g000``'s coefficient norm where they left it (11.80
 on auto, 2209.50 on gram); at ``d90533200`` ``diagnostics()`` printed the sz term's norm (2784
 against 3399), ``term_importance`` its variance (9795 against 10858) and ``factor_smooth()``
-``g000``'s curve 2197.7 apart.  The tiered fit adds a 3-level ordered polynomial whose base
-carries only zero responses, whose separation is verified on its levels: walked decided, and
-forced to a proven lower bound (``"partial"``).
+``g000``'s curve 2197.7 apart, and an edited structured model's table its intercept (84.27).
+The tiered fit adds a 3-level ordered polynomial whose base carries only zero responses, whose
+separation is verified on its levels: walked decided, and forced to a proven lower bound
+(``"partial"``).
 """
 
 from __future__ import annotations
@@ -296,8 +297,8 @@ def _vanished(direct_solve: str) -> _Case:
         edit=("x", 0.2, 0.6),
         smooth_levels={"x:g:sz": ("g000",)},
         smooth_curves={"x:g:sz": ("g000",)},
-        # the rating tables refuse an sz term; an edited model's record is not held on this route
-        skip=("rating tables", "edited model's table"),
+        # the rating tables refuse an sz term
+        skip=("rating tables",),
         offset=offset,
     )
 
@@ -836,6 +837,31 @@ def test_the_vanished_weight_fit_prints_the_same_numbers_on_either_backend():
     assert np.isnan(auto["factor_smooth", "coefficient_norm"]).tolist() == [
         level == "g000" for level in model._interaction_specs["x:g:sz"]._levels
     ]
+
+
+def test_an_edited_structured_model_prints_no_value_for_an_intercept_it_does_not_identify():
+    """The vanished-weight fit on the structured backend, edited: its intercept prints ``---``.
+
+    Its two directions not resolved at float64 move the intercept (``Gauge.intercept_reached``),
+    so the fit's own table prints none.  An edit keeps that intercept and drops the structured
+    state the published record lives on, so the edited table reads the record inference read
+    (``_fit_inference_info``), as ``estimability_ops.published_estimates`` does.  At
+    ``d90533200`` it read no record and printed 84.27.
+    """
+    from superglm.editor import EditorSession
+
+    case = _vanished("auto")
+    session = _quiet(EditorSession.from_model, case.model, terms=["x"])
+    session.select_x("x", 0.2, 0.6)
+    session.shift("x", 0.05)
+    edited = _quiet(session.to_model)
+    rows = {row.name: row for row in edited.summary()._coef_rows}
+    assert _missing(rows["Intercept"].coef)
+    assert _present(rows["x1"].coef) and _present(rows["cat[c00]"].coef)
+    (line,) = [
+        line for line in str(edited.summary()).splitlines() if line.startswith("║ Intercept ")
+    ]
+    assert line.split("Intercept", 1)[1].split()[0] == "---"
 
 
 @pytest.mark.parametrize("forced", [False, True], ids=["present", "partial"])

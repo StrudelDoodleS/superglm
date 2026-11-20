@@ -521,9 +521,11 @@ def _stale_unestimated(model) -> tuple[np.ndarray, bool]:
     """Which of an edited model's values, and whether its intercept, are not estimates.
 
     Those still holding the separated fit's values (the revised statement's ``reached`` and
-    ``intercept``, ``separation_ops.revised_statement``), an alias's coordinate on a term no
-    edit set, and an intercept an alias moves (``Identifiability.intercept_estimated``'s
-    other conditions); an edited term's coefficients are the edit's.
+    ``intercept``, ``separation_ops.revised_statement``), an alias's coordinate or one a direction
+    not resolved at float64 reaches (``Identifiability.unresolved``) on a term no edit set, and
+    an intercept an alias moves (``Identifiability.intercept_estimated``'s other conditions);
+    an edited term's coefficients are the edit's.  The record is the published one, or the one
+    inference read (``estimability_ops.published_estimates``).
     """
     from superglm.model.estimability_ops import published_record
 
@@ -534,6 +536,9 @@ def _stale_unestimated(model) -> tuple[np.ndarray, bool]:
         blank[np.asarray(statement.reached, dtype=np.intp)] = True
         intercept = bool(statement.intercept)
     record = published_record(model)
+    if record is None:
+        inference = model.__dict__.get("_fit_inference_info")
+        record = None if inference is None else inference.get("identifiability")
     if record is not None:
         edited = {
             str(term) for term in (getattr(model, "_editor_edits", None) or {}).get("terms", ())
@@ -543,9 +548,10 @@ def _stale_unestimated(model) -> tuple[np.ndarray, bool]:
             for group in model._groups
             for coordinate in range(group.start, group.end)
         }
-        for alias in record.aliases:
-            if alias.coordinate is not None and owner.get(alias.coordinate) not in edited:
-                blank[alias.coordinate] = True
+        held = [alias.coordinate for alias in record.aliases if alias.coordinate is not None]
+        for coordinate in (*held, *record.unresolved):
+            if owner.get(coordinate) not in edited:
+                blank[coordinate] = True
         reached = getattr(record.gauge, "intercept_reached", None)
         intercept = intercept or record.intercept_aliased or bool(np.any(reached))
     return blank, intercept
