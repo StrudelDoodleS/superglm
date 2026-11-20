@@ -840,19 +840,19 @@ def penalized_rank_certified(
     *,
     policy: RankPolicy = SHARED_RANK_POLICY,
 ) -> bool:
-    """Whether a penalized Hessian's own Gram decomposition certifies it as positive definite.
+    """Whether a decomposition of a penalized Hessian certifies it as positive definite.
 
-    Full rank, from the Gram itself, outside the band that sends a Gram to its observation
+    Full rank, decided by the Gram outside the band that sends a Gram to its observation
     factor (``needs_factor_certification``): ``pre_truncation_condition``, the square root of
     the Jacobi-scaled Gram's condition (its Cholesky factor's condition), under
-    ``warning_condition / sqrt(certification_band)``.  A decomposition of the row factor is
-    what a fit holds when its Gram could not certify itself, so it does not qualify.  Every
-    coefficient then has a finite posterior variance ``phi (X'WX + S)^-1`` (Wood, Pya and
-    Säfken 2016, JASA 111, sections 2 and 3.1.2), whether or not the data alone determine it.
+    ``warning_condition / sqrt(certification_band)``.  Or decided by that row factor, the
+    authority a Gram inside the band defers to.  Which of the two a fit near the band records
+    varies with the BLAS kernel, and the answer must not.  Every coefficient then has a
+    finite posterior variance ``phi (X'WX + S)^-1`` (Wood, Pya and Säfken 2016, JASA 111,
+    sections 2 and 3.1.2), whether or not the data alone determine it.
     """
     return bool(
-        decomposition.method != "qr_svd"
-        and decomposition.rank == decomposition.width
+        decomposition.rank == decomposition.width
         and not needs_factor_certification(decomposition, policy=policy)
     )
 

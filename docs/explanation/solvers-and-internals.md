@@ -1159,11 +1159,13 @@ outside it, such as a level of a random effect or a spline basis function over
 a range with no rows.
 
 - **Every standard error is shown when the penalised fit has full rank.** The
-  test is the fit's own: the penalised Hessian
-  $\mathbf{X}^\top\mathbf{W}\mathbf{X} + \mathbf{S}$ has full rank, and the
-  square root of its condition number after scaling to a unit diagonal (the
-  condition of its Cholesky factor) is below $1.19 \times 10^7$; or the
-  structured solver dropped no direction. Each coefficient then has a finite
+  test is the fit's own, on the penalised Hessian
+  $\mathbf{X}^\top\mathbf{W}\mathbf{X} + \mathbf{S}$. Its own factorisation
+  decides the rank while the square root of its condition number after scaling
+  to a unit diagonal (the condition of its Cholesky factor) is below
+  $1.19 \times 10^7$. Past that the weighted rows and the penalty's root
+  decide it, without forming the Hessian. A structured fit has full rank when
+  its solver dropped no direction. Each coefficient then has a finite
   posterior variance.
 - **The penalty must hold every direction the data leave open.** On each
   direction outside the data rank the penalty has curvature above rounding.

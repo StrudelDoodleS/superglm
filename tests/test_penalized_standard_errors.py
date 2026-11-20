@@ -260,6 +260,36 @@ def _unpriced_level(case: str):
     return frame.assign(veh=veh), y.astype(float), model
 
 
+def _near_copy(perturbation: float, **options):
+    """Gaussian rows whose ``dup`` is ``x + perturbation z``, fitted beside a unit-ridge factor.
+
+    Returns ``x``, ``z``, the rows, the response, the fitted model and each level's raw
+    standard error from the dense inverse of ``[1 x z G]'[1 x z G] + S``.  ``x`` and ``dup``
+    span what ``x`` and ``z`` do, so the levels' variances are those of that design, which is
+    well conditioned whatever the perturbation.
+    """
+    rng = np.random.default_rng(32)
+    n = 420
+    x, z = rng.normal(size=n), rng.normal(size=n)
+    g = rng.choice(list("ABC"), n)
+    y = x + 0.37 * z + rng.normal(size=n)
+    model = SuperGLM(
+        family="gaussian",
+        features={
+            "x": Numeric(),
+            "dup": Numeric(),
+            "g": RandomEffect(lambda_policy=LambdaPolicy.fixed(1.0)),
+        },
+        **options,
+    )
+    frame = pd.DataFrame({"x": x, "dup": x + perturbation * z, "g": g})
+    _fit(model, frame, y)
+    design = np.column_stack((np.ones(n), x, z, *(g == level for level in "ABC")))
+    hessian = design.T @ design
+    hessian[-3:, -3:] += np.eye(3)
+    return x, z, frame, y, model, np.sqrt(np.diag(np.linalg.inv(hessian))[-3:])
+
+
 def _branches(seed: int, n: int, count: int):
     """``n`` rows in ``count`` branches: the generator, codes, names and a spline over their order."""
     rng = np.random.default_rng(seed)
@@ -599,7 +629,6 @@ _RECORDED_SEPARATION_CASES = (
         "shape_repair",
         "selection_penalty",
         "exact_alias",
-        "past_the_bar",
         "separated_level",
         "scanned_level",
         "runtime_finding",
@@ -627,9 +656,6 @@ def test_a_fit_outside_the_rule_keeps_the_data_rule(case):
     - ``selection_penalty``: the recorded Hessian carries the selection penalty's local
       curvature, which is not a quadratic penalty's.
     - ``exact_alias``: a copied column leaves the penalised Hessian singular.
-    - ``past_the_bar``: a column within 1e-7 of another leaves it full rank at a scaled
-      condition of 2e7, past the 1.19e7 a Gram is trusted to, so the fit's record is the row
-      factor's and is not a certificate.
     - ``separated_level`` and the cases after it: a level or region with rows and no finite
       estimate (``_unpriced_region``, ``_unpriced_level``).  Its coefficient walks towards
       infinity and stops where the penalised Hessian is positive definite and well
@@ -675,18 +701,13 @@ def test_a_fit_outside_the_rule_keeps_the_data_rule(case):
         unconstrained = np.asarray(model.predict(frame), dtype=np.float64)
         model.apply_shape_postfit(frame)
         assert not np.allclose(model.predict(frame), unconstrained, rtol=0.1)
-    elif case in ("exact_alias", "past_the_bar"):
+    elif case == "exact_alias":
         frame, y = _zero_claim_levels()
-        noise = np.random.default_rng(5).normal(size=len(frame))
-        near = 2.0 * frame["dens"] if case == "exact_alias" else frame["dens"] + 1e-7 * noise
-        frame = frame.assign(near=near)
+        frame = frame.assign(near=2.0 * frame["dens"])
         model = _random_effect_model(near=Numeric())
         _fit(model, frame, y)
         decomposition = model.result.rank_info.augmented
-        assert (decomposition.method, decomposition.rank < decomposition.width) == (
-            "qr_svd",
-            case == "exact_alias",
-        )
+        assert decomposition.rank < decomposition.width
     else:
         frame, y = _thin_level()
         monotone = Spline(kind="ps", n_knots=8, constraint=Constraint.fit.increasing)
@@ -817,26 +838,41 @@ def test_other_rows_show_every_level_of_a_fit_whose_penalty_holds_what_its_data_
     ``[1 X]'[1 X] + S`` at the unit ridge (rtol 1e-10).  A reader that asks the training fit
     for its Gram's certificate shows them with one kernel and blanks them with the other.
     """
-    rng = np.random.default_rng(32)
-    n = 420
-    x, z = rng.normal(size=n), rng.normal(size=n)
-    g = rng.choice(list("ABC"), n)
-    y = x + 0.37 * z + rng.normal(size=n)
-    model = SuperGLM(
-        family="gaussian",
-        features={
-            "x": Numeric(),
-            "dup": Numeric(),
-            "g": RandomEffect(lambda_policy=LambdaPolicy.fixed(1.0)),
-        },
-    )
-    _fit(model, pd.DataFrame({"x": x, "dup": x + perturbation * z, "g": g}), y)
-    se = model.metrics(pd.DataFrame({"x": x, "dup": z, "g": g}), y).coefficient_se_raw["g"]
+    _, z, frame, y, model, reference = _near_copy(perturbation)
+    se = model.metrics(frame.assign(dup=z), y).coefficient_se_raw["g"]
+    np.testing.assert_allclose(se, reference, rtol=1e-10)
 
-    design = np.column_stack((np.ones(n), x, z, *(g == level for level in "ABC")))
-    hessian = design.T @ design
-    hessian[-3:, -3:] += np.eye(3)
-    np.testing.assert_allclose(se, np.sqrt(np.diag(np.linalg.inv(hessian))[-3:]), rtol=1e-10)
+
+@pytest.mark.parametrize("retain_fit_state", [True, False])
+@pytest.mark.parametrize("perturbation", [1.8e-7, 1e-7])
+def test_a_fit_at_the_bar_shows_every_level_whichever_decomposition_it_records(
+    perturbation, retain_fit_state
+):
+    """Every reader of a fit at the bar shows each level's standard error, on every kernel.
+
+    The fixture of the test above.  Its penalised Hessian has full rank, which the Gram
+    certifies under the bar and the row factor past it: at 1.8e-7 the kernel decides which
+    of the two the fit records, at 1e-7 it is the row factor on every kernel.  Either is a
+    certificate, so the fit's own rows, a copy of them and rows whose ``dup`` sits at the other
+    perturbation (a Hessian re-formed at the bar) all show the three levels, as rows that
+    tell ``dup`` apart do.  A fit kept without its design (``retain_fit_state=False``) reads
+    its own rows only, by the same certificate.  Each value is the dense inverse's of the
+    well-conditioned parametrisation, to the recorded condition squared times ``u`` (1.5e-2
+    and 5e-2): what an inverse through a Gram of that condition is bounded by, whichever
+    decomposition a reader inverts.  A reader that takes only the Gram's certificate blanks
+    the levels with one kernel at 1.8e-7 and with every kernel at 1e-7.
+    """
+    x, z, frame, y, model, reference = _near_copy(perturbation, retain_fit_state=retain_fit_state)
+    record = model.result.rank_info.augmented
+    assert record.rank == record.width
+    rtol = record.pre_truncation_condition**2 * EPS / 2
+    readers = {"own rows": frame, "a copy": frame.copy()}
+    if retain_fit_state:
+        readers["rows at the bar"] = frame.assign(dup=x + (2.8e-7 - perturbation) * z)
+    for name, rows in readers.items():
+        se = model.metrics(rows, y).coefficient_se_raw["g"]
+        assert np.all(np.isfinite(se)), f"{name}: {se}"
+        np.testing.assert_allclose(se, reference, rtol=rtol, err_msg=name)
 
 
 @pytest.mark.pins_behaviour
