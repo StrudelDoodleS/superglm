@@ -451,9 +451,11 @@ estimators, and the summary prints both. On data heavier-tailed than the
 family's density, as claim severities usually are, the two differ widely: on
 the freMTPL2 severity book Pearson's scale is 9.64 and the REML profile 1.18,
 so standard errors are 2.85 times wider than the likelihood scale alone would
-make them. A bootstrap of that book finds the likelihood-scale SEs too narrow
-for every coefficient. Pearson's estimate is itself dominated by the largest
-claims, so it is the scale of the data's variance, not a stable one.
+make them. A bootstrap of a main-effects Gamma model of the same claims finds
+the likelihood-scale SEs too narrow for every coefficient (by 2.8 times at the
+median) and the Pearson-scale ones on the wide side. Pearson's estimate is
+itself dominated by the largest claims: it is the scale of the data's
+variance, not a stable one.
 
 mgcv's `gam` publishes Fletcher's (2012) refinement of Pearson for
 conventional families. It equals Pearson for Gaussian and log-link Gamma fits
