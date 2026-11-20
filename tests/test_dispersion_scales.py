@@ -437,6 +437,29 @@ def test_variance_components_pair_lambda_with_the_reml_profile(family):
         assert variance == pytest.approx(likelihood / smooth.lambdas[name], rel=RTOL)
 
 
+def test_a_lifted_random_effect_standard_deviation_reads_its_variance_scale():
+    """o2h8's reproducer: in a lifted weight unit the standard deviation is still the root
+    of tau^2, not of Pearson's phi over lambda."""
+    import math
+    from dataclasses import replace
+
+    model = pickle.loads(pickle.dumps(_fitted("gamma", "fit_reml_random_effect")))
+    solver = model._solver_result
+    exponent = 200
+    lifted = replace(
+        solver,
+        weight_exponent=exponent,
+        solver_phi=math.ldexp(solver.phi, exponent),
+        solver_phi_likelihood=math.ldexp(solver.phi_likelihood, exponent),
+    )
+    model._solver_result = model._result = lifted
+    component = model.random_effects("c")
+    assert component.tau_squared == pytest.approx(
+        solver.phi_likelihood / component.lambda_value, rel=RTOL
+    )
+    assert component.standard_deviation == pytest.approx(np.sqrt(component.tau_squared), rel=RTOL)
+
+
 def test_estimate_p_reml_variance_component_reads_the_reml_profile():
     """``estimate_p(fit_mode="reml")`` keeps the ML ``phi_hat`` for its densities, but its
     lambda was selected by REML, so tau^2 pairs it with the REML profile: the value
