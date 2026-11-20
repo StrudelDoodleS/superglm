@@ -545,15 +545,15 @@ def test_a_summary_cached_before_the_split_exports_a_legacy_estimator():
 
 
 def test_a_known_scale_path_summary_shows_the_scale_its_errors_read():
-    """A Poisson ``fit_path`` result holds Pearson's statistic in ``phi``; its standard
-    errors read 1, so the summary shows 1 and names no estimator (a5m3's review)."""
+    """A Poisson ``fit_path`` summary shows the 1 its standard errors read and names no
+    estimator (a5m3's review)."""
     X, eta, _ = _frame()
     y = np.random.default_rng(3).poisson(np.exp(eta)).astype(np.float64)
     model = SuperGLM(family="poisson", features=_features("fit"))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         model.fit_path(X, y, n_lambda=4)
-    assert model.result.phi != pytest.approx(1.0, rel=1e-3)
+    assert model.result.phi == 1.0
     assert model.result.phi_method == "known"
     summary = model.summary()
     row = next(r for r in summary._coef_rows if r.name == "z")
@@ -565,6 +565,40 @@ def test_a_known_scale_path_summary_shows_the_scale_its_errors_read():
     overview = _overview(model)
     assert overview.get("Scale (phi)") == 1.0
     assert overview.get("Scale estimator") == "known"
+
+
+@pytest.mark.parametrize("family", ["poisson", "binomial"])
+def test_known_scale_path_standard_errors_read_unit_dispersion(family):
+    """Every ``fit_path`` point of a known-scale family publishes ``phi = 1``, so its
+    fitted-family SEs are the dense inverse of the information at the fitted mean, unscaled
+    (a Pearson factor of 1.25 here moved them)."""
+    X, eta, _ = _frame()
+    rng = np.random.default_rng(3)
+    if family == "poisson":
+        y = rng.poisson(np.exp(eta)).astype(np.float64)
+    else:
+        y = rng.binomial(1, 1.0 / (1.0 + np.exp(-(eta - 0.6)))).astype(np.float64)
+    model = SuperGLM(family=family, features={"c": Categorical(), "z": Numeric()})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        # The last point's penalty is small enough that its curvature is below the tolerance.
+        model.fit_path(X, y, n_lambda=4, lambda_ratio=1e-8)
+    mu = np.asarray(model._fit_mu, dtype=np.float64)
+    information = mu if family == "poisson" else mu * (1.0 - mu)
+    levels = sorted(X["c"].unique())
+    design = np.column_stack(
+        [np.ones(N)] + [(X["c"] == level).to_numpy(float) for level in levels[1:]] + [X["z"]]
+    )
+    inverse = np.linalg.inv(design.T @ (information[:, None] * design))
+    expected = float(np.sqrt(inverse[-1, -1]))
+    assert model.term_inference("z").se_log_relativity[0] == pytest.approx(expected, rel=1e-6)
+    summary = model.summary()
+    assert float(summary._data["standard_errors"]["coefficient_se"]["z"][0]) == pytest.approx(
+        expected, rel=1e-6
+    )
+    row = next(r for r in summary._coef_rows if r.name == "z")
+    assert row.se == pytest.approx(expected, rel=1e-6)
+    assert model.result.phi == 1.0
 
 
 # --- weights below 2**-512: the fit runs in a lifted weight unit -------------------------

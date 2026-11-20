@@ -2077,16 +2077,20 @@ def _fit_pirls_inner(
     )
     p_eff = rank_info.total_edf
 
-    # The Pearson numerator has the same form under either weight contract --
-    # both scale a row's squared residual by its weight -- so only the
-    # denominator's likelihood size distinguishes them.
-    pearson_sum = pearson_chi2(distribution=family, y=y, mu=mu_new, sample_weight=weights)
-    df_resid = pearson_residual_degrees_of_freedom(
-        weights,
-        p_eff,
-        weight_semantics=weight_semantics,
-    )
-    phi = pearson_sum / df_resid
+    # Standard errors read ``phi``: 1 for a family whose scale it fixes (Poisson,
+    # binomial), as the direct solver publishes it. The Pearson numerator has the same
+    # form under either weight contract -- both scale a row's squared residual by its
+    # weight -- so only the denominator's likelihood size distinguishes them.
+    if getattr(family, "scale_known", True):
+        phi = 1.0
+    else:
+        pearson_sum = pearson_chi2(distribution=family, y=y, mu=mu_new, sample_weight=weights)
+        df_resid = pearson_residual_degrees_of_freedom(
+            weights,
+            p_eff,
+            weight_semantics=weight_semantics,
+        )
+        phi = pearson_sum / df_resid
 
     # The retained centred intercept and its centre, which prediction reads;
     # the raw ``intercept = alpha - c' beta`` cancels at a column's offset

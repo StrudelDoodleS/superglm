@@ -285,8 +285,8 @@ def covariance_exponent(result):
 
 def coefficient_covariance(inverse, result, *, known_scale=False):
     """Pair the inverse and dispersion before changing their common unit."""
-    # Legacy fit_path results carry Pearson phi even for a known-scale family;
-    # its fitted-family tables explicitly choose the known dispersion instead.
+    # A fit_path result saved before known-scale paths published phi = 1 carries
+    # Pearson's statistic; fitted-family tables choose the known dispersion instead.
     scale = 1.0 if known_scale else solver_dispersion(result)
     exponent = (
         getattr(result, "_geometry_weight_exponent", getattr(result, "weight_exponent", 0))
