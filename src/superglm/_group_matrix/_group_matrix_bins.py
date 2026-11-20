@@ -169,14 +169,21 @@ def _value_mass(inverse: NDArray, n_values: int, weights: NDArray | None, n_rows
     """Each distinct value's mass: its row count, or the sum of its rows' weights.
 
     Formed per distinct value, so a weighted column and its replicated twin
-    carry the same float for every value and every later step agrees.
+    carry the same float for every value and every later step agrees. Each
+    value's weights are summed in increasing order, so its mass, and every
+    edge and support point formed from it, is the same for every order of the
+    rows; integer weights sum exactly in any order and keep the row order.
     """
     if weights is None:
         return np.bincount(inverse, minlength=n_values).astype(np.float64)
     w = np.asarray(weights, dtype=np.float64).ravel()
     if w.shape != (n_rows,):
         raise ValueError(f"weights must have length {n_rows}, got {w.size}")
-    return np.bincount(inverse, weights=w, minlength=n_values)
+    if np.sum(w) < 2.0**53 and np.all(w == np.floor(w)):
+        return np.bincount(inverse, weights=w, minlength=n_values)
+    # Rows of equal weight are interchangeable, so the sort need not be stable.
+    order = np.argsort(w)
+    return np.bincount(inverse[order], weights=w[order], minlength=n_values)
 
 
 def _lower_quantile_values(mass: NDArray, total: float, unique_vals: NDArray, n_q: int) -> NDArray:
@@ -189,7 +196,8 @@ def _lower_quantile_values(mass: NDArray, total: float, unique_vals: NDArray, n_
     ``j * q + ceil(j * r / n_q)`` with ``total = q * n_q + r`` so nothing
     overflows. Replicated rows then pick the same values as their weights.
     Fractional masses compare in float64; a target within rounding of a
-    partial sum may land on either neighbour, which only moves one edge.
+    partial sum may land on either neighbour, which only moves one edge, and
+    lands on the same one for every order of the rows (``_value_mass``).
     """
     j = np.arange(1, n_q, dtype=np.int64)
     integral = total < 2.0**53 and bool(np.all(mass == np.floor(mass)))

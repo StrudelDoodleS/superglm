@@ -1,6 +1,7 @@
 """Tests for fit-time discretization (BAM-style binning)."""
 
 import warnings
+from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -3419,3 +3420,67 @@ def test_fractional_weights_read_each_cell_at_its_weighted_mean():
     for cell in np.unique(index):
         rows = x[index == cell]
         assert rows.min() <= support[cell] <= rows.max()
+
+
+def _tied_median_column():
+    """Two halves of a column with the same fractional weights, apart at 30 and 40.
+
+    The lower half ends at 30, so 30 is the exact weighted median and the cut
+    at 4/8 of the mass ties there. Rounding the halves' sums in another order
+    can put the cut on 40.
+    """
+    rng = np.random.default_rng(27)
+    lower = np.r_[rng.integers(1, 30, 59), 30].astype(np.float64)
+    lower[:3] = [10.1, 10.2, 10.3]
+    upper = rng.integers(40, 71, 60).astype(np.float64)
+    weights = np.round(rng.uniform(0.05, 1.0, 60), 2)
+    x = np.r_[lower, upper]
+    w = np.r_[weights, rng.permutation(weights)]
+    knots = np.array([0.0, 10.0, 10.5, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0])
+    exact = [Fraction(float(v)) for v in w]
+    assert 2 * sum(exact[:60]) == sum(exact)
+    return x, w, knots
+
+
+def test_fractional_weights_bin_alike_in_every_row_order():
+    """The bins are a function of the rows, not of their order.
+
+    Three of twelve orders put the tied median cut on 40 instead of 30 and
+    moved rows to other cells; now every order gives the same support and
+    cells, bit for bit.
+    """
+    x, w, knots = _tied_median_column()
+    grids = set()
+    for seed in range(12):
+        order = np.random.default_rng(1000 + seed).permutation(x.size)
+        support, index = discretize_column(x[order], 16, knots, w[order])
+        grids.add((support.tobytes(), index[np.argsort(order)].tobytes()))
+    assert len(grids) == 1
+
+
+def test_a_binned_fit_predicts_alike_in_every_row_order():
+    """A binned fit with fractional frequency weights predicts the same in every row order.
+
+    The tied median cut moved the predictions of an order by up to 24%; the
+    orders now differ only by the solve's rounding, which 1e-10 bounds.
+    """
+    x, w, knots = _tied_median_column()
+    y = np.random.default_rng(5).poisson(w * np.exp(-1.0 + 0.03 * x)).astype(np.float64)
+    grid = pd.DataFrame({"x": np.unique(x)})
+    predictions = []
+    for seed in (0, 3, 7):
+        order = np.random.default_rng(1000 + seed).permutation(x.size)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0,
+            spline_penalty=1.0,
+            weight_semantics="frequency",
+            discrete=True,
+            features={"x": Spline(kind="ps", knots=knots[1:-1], boundary=(0.0, 70.0), n_bins=16)},
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            model.fit(pd.DataFrame({"x": x[order]}), y[order], sample_weight=w[order])
+        predictions.append(model.predict(grid))
+    for prediction in predictions[1:]:
+        np.testing.assert_allclose(prediction, predictions[0], rtol=1e-10, atol=0.0)
