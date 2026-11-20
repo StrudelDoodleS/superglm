@@ -30,7 +30,12 @@ coordinates' standard errors are not resolved at float64.  That read takes the f
 eigenvectors, which are only as accurate as their eigenvalues are separated from the identified
 ones (Davis and Kahan 1970): a direction is an alias of the design only when its root clears the
 rounding bound with that error added, so a near-degenerate pair is not resolved on every BLAS
-kernel rather than an alias on one.  Counting (a level's rows, its distinct
+kernel rather than an alias on one.  Where the design tells one of those directions from zero,
+the weighted rows certified the directions only at their own curvature, so their residual off
+``H``'s low eigenvectors, at most ``(root + limit) / sqrt(floor)`` (the Rayleigh-quotient
+bound), is read at the design's, and none of them is an alias unless it clears the bound with
+that added; the certified part states the floor, and none stated leaves the residual unbounded.
+Counting (a level's rows, its distinct
 covariate values) only names the reason for an alias; it decides nothing.
 
 **The margin grows with the rows.** In Jacobi-scaled coordinates (unit diagonal of ``H``) the
@@ -685,6 +690,7 @@ def decide_identifiability(
                 cast(Callable, penalty),
                 angle=split.angle,
                 complement=split.directions(split.identified),
+                residual=_refinement_residual(decomposition, split),
             )
     floor = _curvature_floor(decomposition, split, scale, floating.shape[1])
     quiet = 0
@@ -924,6 +930,30 @@ def _row_bound(
     ) * float(np.linalg.norm(factor))
 
 
+def _refinement_residual(decomposition: TruncatedDecomposition, split: _Split) -> float:
+    """How far, in Jacobi norm, the first pass's undecided directions may lie off ``H``'s low ones.
+
+    The certified part has dimension ``p - t`` and Jacobi-scaled curvature at least ``floor``
+    there, so ``H~`` has at least ``p - t`` eigenvalues at or above ``floor`` (Courant-Fischer,
+    Golub & Van Loan 2013, sec. 8.1), and a vector ``y`` keeps at most ``sqrt(y'H~y / floor)``
+    off the span ``L`` of the ``t`` below them: the Rayleigh-quotient bound on the angle to an
+    invariant subspace (Parlett, *The Symmetric Eigenvalue Problem*, SIAM 1998).  A direction's
+    curvature is its root within the rows' rounding and the coupling's shift, ``sqrt(mu +
+    shift) + limit`` (``_read_rows``); summed in squares over the directions, the result bounds
+    their residual off ``L`` in Frobenius norm.  Zero with no certified part (``L`` is every
+    direction); infinite where the decomposition states no floor (zero, or the infinity a row
+    factor's own decision records, ``state_ops._dense_base``).
+    """
+    if int(decomposition.rank) == 0:
+        return 0.0
+    floor = float(decomposition.floor)
+    if not 0.0 < floor < math.inf:
+        return math.inf
+    values = split.values[~split.identified]
+    roots = np.sqrt(np.maximum(values, 0.0) + split.shift) + split.limit
+    return float(np.linalg.norm(roots)) / math.sqrt(floor)
+
+
 def _design_null(
     decomposition: TruncatedDecomposition,
     directions: NDArray,
@@ -935,6 +965,7 @@ def _design_null(
     *,
     angle: float = 0.0,
     complement: NDArray | None = None,
+    residual: float = 0.0,
 ) -> tuple[NDArray, NDArray]:
     """Of the directions the weighted rows cannot tell from zero, those the design cannot either.
 
@@ -959,6 +990,15 @@ def _design_null(
     largest root here.  Each root moves by at most that (Weyl), so a direction is an alias only
     when its root clears the rounding bound with it added; otherwise the design may identify it,
     and it is not resolved.
+
+    The first pass certified ``N`` only at the weighted curvature: ``N`` is within ``residual``
+    (``_refinement_residual``, Frobenius, Jacobi) of ``H``'s low eigenvectors, and that residual
+    carries no more weighted curvature than ``N`` does.  Where the design tells a direction of
+    ``N`` from zero, the weights have vanished on rows the design reads, and the residual is read
+    at the design's curvature instead: each root moves by at most ``||M~||_F residual /
+    sigma_min(J N)``, ``||M~||_F^2 <= sum_j m_j^2 / D_j^2 + p`` (``m`` the pass's column
+    magnitudes, ``D`` the Jacobi scale, the penalty's diagonal at most ``D_j^2``), which a
+    direction clears to be an alias.
     """
     from superglm.solvers.centered_system import grouped_projected_factor, weighted_mean_pair
 
@@ -993,12 +1033,16 @@ def _design_null(
     )
     values, vectors = np.linalg.eigh(factor.T @ factor + 0.5 * (curvature + curvature.T))
     rotated = directions @ vectors
+    roots = np.sqrt(np.maximum(values, 0.0))
+    limit = bound + math.sqrt(rounding)
+    jacobi = np.where(scale > 0.0, scale, 1.0)
+    vanished = residual > 0.0 and bool(np.any(roots > limit))
+    singular = (
+        np.linalg.svd(first * jacobi[:, None], compute_uv=False) if tilted or vanished else None
+    )
     reach = 0.0
     if tilted:
-        complement = cast(NDArray, complement)
-        singular = np.linalg.svd(
-            first * np.where(scale > 0.0, scale, 1.0)[:, None], compute_uv=False
-        )
+        complement, singular = cast(NDArray, complement), cast(NDArray, singular)
         penalised, _ = penalty(complement)
         identified = math.sqrt(
             float(np.linalg.norm(reach_rows, 2)) ** 2
@@ -1006,7 +1050,13 @@ def _design_null(
         )
         own = math.sqrt(max(float(np.max(values)), 0.0))
         reach = angle / float(singular[-1]) * (identified + angle * float(singular[0]) * own)
-    null = np.sqrt(np.maximum(values, 0.0)) + reach <= bound + math.sqrt(rounding)
+    if vanished:
+        spread = math.sqrt(
+            float(np.sum((np.asarray(magnitudes, dtype=np.float64) / jacobi) ** 2))
+            + float(np.count_nonzero(scale > 0.0))
+        )
+        reach += spread * residual / float(cast(NDArray, singular)[-1])
+    null = roots + reach <= limit
     return rotated[:, null], rotated[:, ~null]
 
 

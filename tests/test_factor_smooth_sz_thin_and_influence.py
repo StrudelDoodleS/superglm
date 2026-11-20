@@ -3973,14 +3973,16 @@ def test_an_alias_of_vanished_working_weights_keeps_its_fitted_values(monkeypatc
     stays one.  The weighted rows cannot tell a direction that moves that row's linear
     predictor from zero, while the design on the rows with positive prior weight identifies it
     (``identifiability._design_null``): it is no alias, so it is never moved along, and its
-    coordinates' standard errors are not resolved at float64.  The design's own alias is
-    gauged, which moves no fitted value.
+    coordinates' standard errors are not resolved at float64.  The design's own alias, read
+    beside it, is not resolved either: the weighted rows certified both directions at their own
+    curvature only, and their residual read at the design's clears no rounding bound
+    (``identifiability._refinement_residual``), so neither is moved along.
 
     The independent expectation is the same model with the row's prior weight zero, where that
     direction is an exact null of the rows: the row's information (``3e-70``) and score
     (``mu (y - mu)``, ``1e-35``) are far below the fit's tolerance, so every other row's fitted
-    mean is that fit's, the same aliased terms are reported (the vanished one ``"float64"``
-    where the weightless fit's is ``"rank"``), and the same coordinates keep a standard error.
+    mean is that fit's, the same aliased terms are reported (both ``"float64"`` where the
+    weightless fit's are ``"rank"``), and the same coordinates keep a standard error.
     The row itself predicts the link's floor.  Mutation: treating every direction the weighted
     rows put under their bound as an alias (``_design_null`` returning them all), or gauging it,
     reports it as ``"rank"`` and moves that row's mean from the floor to the ceiling,
@@ -4005,7 +4007,7 @@ def test_an_alias_of_vanished_working_weights_keeps_its_fitted_values(monkeypatc
     sources = {alias.term: alias.source for alias in record.aliases}
     assert sources.keys() == {alias.term for alias in expected.aliases}
     vanished = {term for term, source in sources.items() if source == "float64"}
-    assert len(vanished) == 1
+    assert vanished == sources.keys() and len(vanished) == 2
     assert {alias.source for alias in expected.aliases if alias.term in vanished} == {"rank"}
     assert record.weak is None
     with warnings.catch_warnings():
@@ -4046,7 +4048,9 @@ def test_a_vanished_working_weight_publishes_the_gauge_of_a_zero_prior_weight() 
 
     Pins the canonical gauge: a row that adds nothing to the information leaves the published
     constraint where a weightless row puts it.  The fits are the one above's (offset ``-160``,
-    the row's Fisher weight ``3e-70``) and the same with that row's prior weight zero.  Their
+    the row's Fisher weight ``3e-70``) and the same with that row's prior weight zero; the
+    vanished fit's two directions are both not resolved and held where it left them, the
+    weightless fit's two are aliases it moves, on the same construction columns.  Their
     coefficients are not comparable entry by entry: ``sz`` builds its basis from the prior
     weights (the marginal's weighted QR, and a weightless level is held at the population curve
     where a thin one is not), so the two designs differ in every spline and ``sz`` column, and
@@ -4083,10 +4087,8 @@ def test_a_vanished_working_weight_publishes_the_gauge_of_a_zero_prior_weight() 
             return model.fit_reml(frame, y, sample_weight=prior, offset=shift)
 
     vanished, reference = fit(weight, offset), fit(weightless, None)
-    assert {a.source for a in vanished._fit_inference_info["identifiability"].aliases} == {
-        "rank",
-        "float64",
-    }
+    sources = [a.source for a in vanished._fit_inference_info["identifiability"].aliases]
+    assert sources == ["float64", "float64"]
     assert {a.source for a in reference._fit_inference_info["identifiability"].aliases} == {"rank"}
     levels = sorted(frame["g"].unique())
     new = pd.DataFrame(
@@ -4176,6 +4178,46 @@ def test_the_dense_path_holds_every_gauge_direction_in_its_standard_errors() -> 
     shown = ~np.isnan(se["auto"])
     assert not np.any(np.isnan(se["auto"]))
     np.testing.assert_allclose(se["gram"][shown], se["auto"][shown], rtol=4.0 * kappa * _U)
+
+
+def test_the_vanished_row_fit_reports_both_directions_not_resolved_on_either_backend() -> None:
+    """The vanished-row fit's two undecided directions are not resolved, structured or dense.
+
+    The fit is the ones above (offset ``-160`` on one row of ``g000``, ``lambda_x = 100``).
+    The weighted rows cannot tell either direction from zero; the design identifies one, the
+    vanished row's, so the weights have vanished on rows it reads, and the first pass's
+    directions are certified only to their residual off ``H``'s low eigenvectors, ``(root +
+    limit) / sqrt(floor)`` (``identifiability._refinement_residual``), read at the design's
+    curvature.  Neither backend states a floor here (the structured factor's trace bound
+    ``1 / (2 tr(H~^+))`` needs ``8 p gamma_(16 p) tr < 1`` and has ``1.16``; the row factor
+    records its own decision, an infinity), so the residual is unbounded and the design's own
+    alias is not resolved either.
+    Natively the dense path's first pass leaves that alias ``2.3e-10`` from zero at unit weight
+    against a bound of ``1.4e-13``, and under Haswell ``0``: the residual is what separated
+    them.  So both backends, on every kernel, name both parts "not resolved at float64" in the
+    summary and move neither.  At ``97073c490`` the structured path called the first an alias
+    (``"no data separates them"``) on both kernels, and the dense path did under Haswell only.
+    Mutation: ``_design_null`` without the residual restores those.
+    """
+    frame, y, weight = _signed_aliased_frame("one_row")
+    row = int(np.flatnonzero(frame["g"].to_numpy() == "g000")[0])
+    offset = np.where(np.arange(len(y)) != row, 0.0, -160.0)
+    notes = {}
+    for solve in ("auto", "gram"):
+        model = _model("gaussian_log", solve, lam=1.29, main_lam=100.0, numerics=("x1", "x10"))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit_reml(frame, y, sample_weight=weight, offset=offset)
+            summary = model.summary()
+        record = model._fit_inference_info["identifiability"]
+        assert bool(model._fit_inference_info.get("structured_covariance")) == (solve == "auto")
+        assert [alias.source for alias in record.aliases] == ["float64", "float64"]
+        assert not np.any(record.gauge._moved())
+        notes[solve] = [" ".join(note.split()) for note in summary._info["identifiability_notes"]]
+        unresolved = [note for note in notes[solve] if "not resolved at float64" in note]
+        assert len(unresolved) == 2, notes[solve]
+        assert not any("no data separates" in note for note in notes[solve])
+    assert notes["auto"] == notes["gram"]
 
 
 @pytest.mark.parametrize(
