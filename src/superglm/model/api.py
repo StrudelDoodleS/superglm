@@ -1992,8 +1992,20 @@ class SuperGLM:
             but a new combination of covariate values or offsets can cross, and
             so can the exact design on the training rows of a coarsely binned
             fit.
+        NonEstimablePredictionWarning
+            When a row combines covariate values the training data do not
+            determine: its design row leans on a direction of the training
+            design's null space, past R's ``predict.lm`` tolerance (``1e-6``
+            of the row's size; ``model.estimability_ops``). The prediction is
+            returned unchanged; the warning's ``rows`` names those rows. A fit
+            whose training design has full rank never gives it.
         """
-        return self._predict_exact(X, offset, random_effects=random_effects)
+        frame = as_eager_frame(X)
+        mu = self._predict_exact(frame, offset, random_effects=random_effects)
+        from superglm.model.estimability_ops import disclose_non_estimable
+
+        disclose_non_estimable(self, frame, random_effects)
+        return mu
 
     # ── Monotone repair ─────────────────────────────────────────
 

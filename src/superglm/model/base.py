@@ -427,6 +427,91 @@ def _add_centred_term(
     )
 
 
+def _score_terms(
+    model,
+    frame: EagerFrame,
+    plan: dict[str, list[dict[str, Any]]],
+    beta_all: NDArray,
+    eta: EtaSum,
+    centre: NDArray | None,
+    *,
+    random_effects: str,
+    fitted: bool,
+    warn: bool,
+    validate: bool = True,
+) -> tuple[list[str], list[str]]:
+    """Add every term's contribution at the coefficients ``beta_all`` to ``eta``.
+
+    The public predictor's terms as ``_predict_eta`` reads them, linear in
+    ``beta_all``: a column carrying the fit's centre is scored about it, a
+    population prediction leaves out what it zeroes (``validate`` checks those
+    terms' values), and unless ``fitted`` an ``sz`` term with levels left out
+    of its population is scored as ``predict`` scores it.  Returns the
+    separated levels met (when ``warn``) and the partly identified ``sz``
+    levels met, for ``_predict_eta``'s warnings.
+    """
+    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.random_effect import RandomEffect
+
+    def score(term: dict[str, Any]) -> None:
+        if centre is not None:
+            block = centre[term["beta_idx"]]
+            if np.any(block != 0.0):
+                if eta.compensated:
+                    _add_centred_term(eta, term, frame, beta_all, block)
+                else:
+                    eta.add(_centred_term_contribution(term, frame, beta_all, block))
+                return
+        # A callable, so a compensated sum need not hold the term's rows.
+        eta.add(lambda: _score_prediction_term_exact(term, frame, beta_all))
+
+    separated_levels: list[str] = []
+    for term in plan["features"]:
+        if random_effects == "population" and isinstance(term["spec"], RandomEffect):
+            if validate:
+                term["spec"].validate_prediction_values(frame.column_array(term["name"]))
+            continue
+        score(term)
+        held = getattr(term["spec"], "_separated_levels_at_fit", ())
+        if held and not fitted and warn:
+            # the level each row is scored at: raw values go through the spec's
+            # grouping and unseen policy, as ``score`` reads them
+            met = term["spec"]._predicted_levels(frame.column_array(term["name"]))
+            named = [label for label in held if label in met]
+            if named:
+                separated_levels.append(f"{term['name']!r} levels {', '.join(map(str, named))}")
+    if not fitted:
+        from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
+
+        _ensure_factor_smooth_levels_recorded(model)
+    unidentified: list[str] = []
+    features = {feature["name"]: feature for feature in plan["features"]}
+    for term in plan["interactions"]:
+        spec = term["spec"]
+        if not fitted and isinstance(spec, FactorSmooth) and spec._has_population_offset:
+            contribution, named = _score_unidentified_factor_smooth(
+                term,
+                frame,
+                beta_all,
+                population=random_effects == "population",
+                features=features,
+            )
+            eta += contribution
+            if named:
+                unidentified.append(f"term {term['name']!r} levels {', '.join(map(str, named))}")
+            continue
+        if random_effects == "population" and isinstance(spec, FactorSmooth):
+            if validate:
+                left_name, right_name = term["parent_names"]
+                spec.validate_population_prediction_values(
+                    frame.column_array(left_name),
+                    frame.column_array(right_name),
+                )
+            continue
+        score(term)
+    return separated_levels, unidentified
+
+
 def _predict_eta(
     model,
     X,
@@ -448,9 +533,6 @@ def _predict_eta(
         raise ValueError(
             f"random_effects must be 'conditional' or 'population', got {random_effects!r}"
         )
-
-    from superglm.features.factor_smooth import SZ_POPULATION_PREDICTION, FactorSmooth
-    from superglm.features.random_effect import RandomEffect
 
     frame = as_eager_frame(X)
     plan = _prediction_plan(model)
@@ -476,32 +558,17 @@ def _predict_eta(
         and bool(getattr(model.result, "centred_sum_compensated", False)),
     )
 
-    def score(term: dict[str, Any]) -> None:
-        if centre is not None:
-            block = centre[term["beta_idx"]]
-            if np.any(block != 0.0):
-                if eta.compensated:
-                    _add_centred_term(eta, term, frame, beta_all, block)
-                else:
-                    eta.add(_centred_term_contribution(term, frame, beta_all, block))
-                return
-        # A callable, so a compensated sum need not hold the term's rows.
-        eta.add(lambda: _score_prediction_term_exact(term, frame, beta_all))
-
-    separated_levels: list[str] = []
-    for term in plan["features"]:
-        if random_effects == "population" and isinstance(term["spec"], RandomEffect):
-            term["spec"].validate_prediction_values(frame.column_array(term["name"]))
-            continue
-        score(term)
-        held = getattr(term["spec"], "_separated_levels_at_fit", ())
-        if held and not fitted and warn:
-            # the level each row is scored at: raw values go through the spec's
-            # grouping and unseen policy, as ``score`` reads them
-            met = term["spec"]._predicted_levels(frame.column_array(term["name"]))
-            named = [label for label in held if label in met]
-            if named:
-                separated_levels.append(f"{term['name']!r} levels {', '.join(map(str, named))}")
+    separated_levels, unidentified = _score_terms(
+        model,
+        frame,
+        plan,
+        beta_all,
+        eta,
+        centre,
+        random_effects=random_effects,
+        fitted=fitted,
+        warn=warn,
+    )
     # A prediction warning names the caller of ``predict``, however deep the call.
     if separated_levels:
         warn_caller(
@@ -510,36 +577,9 @@ def _predict_eta(
             "predictions sit near the response boundary: " + "; ".join(separated_levels) + ". "
             "Merge them into similar levels (Categorical(grouping=...)) or use re() on the term."
         )
-
-    if not fitted:
-        from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
-
-        _ensure_factor_smooth_levels_recorded(model)
-    unidentified: list[str] = []
-    features = {feature["name"]: feature for feature in plan["features"]}
-    for term in plan["interactions"]:
-        spec = term["spec"]
-        if not fitted and isinstance(spec, FactorSmooth) and spec._has_population_offset:
-            contribution, named = _score_unidentified_factor_smooth(
-                term,
-                frame,
-                beta_all,
-                population=random_effects == "population",
-                features=features,
-            )
-            eta += contribution
-            if named:
-                unidentified.append(f"term {term['name']!r} levels {', '.join(map(str, named))}")
-            continue
-        if random_effects == "population" and isinstance(spec, FactorSmooth):
-            left_name, right_name = term["parent_names"]
-            spec.validate_population_prediction_values(
-                frame.column_array(left_name),
-                frame.column_array(right_name),
-            )
-            continue
-        score(term)
     if unidentified and warn:
+        from superglm.features.factor_smooth import SZ_POPULATION_PREDICTION
+
         warn_caller(SZ_POPULATION_PREDICTION + "; ".join(unidentified) + ".")
 
     total = eta.finish(consume=True)
@@ -936,9 +976,13 @@ def predict_priced(
     With ``what`` the rows are checked (``require_priced_rows``): a weighted
     one raises the named error, and a zero-weight one is left out of the
     score.  Without it the reader handles them itself (``unpriced_rows``).
-    ``predict``'s other disclosures, about partly identified levels, stand.
+    ``predict``'s disclosures about partly identified levels stand; its test of
+    rows the training data do not determine (``estimability_ops``) is
+    ``predict``'s alone and is not run.
     """
-    with no_mean_warning_quiet():
+    from superglm.model.estimability_ops import non_estimable_warning_quiet
+
+    with no_mean_warning_quiet(), non_estimable_warning_quiet():
         mu = model.predict(X, offset=offset)
     if what is not None:
         require_priced_rows(model, mu, weights, what)
