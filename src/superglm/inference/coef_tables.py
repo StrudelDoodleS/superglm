@@ -1335,11 +1335,13 @@ def build_basis_detail(
     alpha=0.05,
     coefficient_identified_override=None,
     selected_group_names=None,
+    estimate_identified_override=None,
 ):
     """Build per-coefficient detail for active 1-D spline groups.
 
     Uses the same known_scale-aware covariance path as ``build_coef_rows``
-    so that SE/z/p/CI values are consistent with the main summary.
+    so that SE/z/p/CI values are consistent with the main summary, and shows
+    no value for a coefficient the fit does not identify, as that does.
     """
     from superglm.features.spline import _SplineBase
 
@@ -1359,6 +1361,13 @@ def build_basis_detail(
             else np.ones(len(beta), dtype=bool)
         )
     )
+    shown = np.where(
+        coefficient_identified
+        if estimate_identified_override is None
+        else np.asarray(estimate_identified_override, dtype=bool),
+        beta,
+        np.nan,
+    )
     detail: dict[str, list] = {}
 
     for g in groups:
@@ -1368,7 +1377,7 @@ def build_basis_detail(
         spec = specs.get(g.feature_name)
         if not isinstance(spec, _SplineBase):
             continue
-        b_g = beta[g.sl]
+        b_g = shown[g.sl]
         if g.name not in selected_names:
             continue
 

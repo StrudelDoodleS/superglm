@@ -459,6 +459,7 @@ def summary(
         alpha=alpha,
         coefficient_identified_override=inference_identified(inf),
         selected_group_names=selected_names,
+        estimate_identified_override=inference_estimated(inf),
     )
     _drop_repaired_basis_detail(basis_detail, model._groups, shape_repaired_feature_names(model))
 

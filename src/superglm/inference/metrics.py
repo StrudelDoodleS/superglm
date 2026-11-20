@@ -2169,6 +2169,7 @@ class ModelMetrics:
             alpha=alpha,
             coefficient_identified_override=self._current_coefficient_identified,
             selected_group_names={group.name for group in active_groups},
+            estimate_identified_override=self._fit_estimated[0],
         )
         # `build_basis_detail` is an independent pass, so without this `summary()` would print
         # per-coefficient detail for exactly the quantities a term row withholds.

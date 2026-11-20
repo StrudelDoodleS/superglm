@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import warnings
 from pathlib import Path
 
@@ -607,6 +608,43 @@ def test_basis_functions_without_data_or_penalty_are_blank_with_their_count():
     model = _fit({"x": spline}, X, Y, spline_penalty=0.0)
     assert _blank(model, X, Y) == {"x": [8, 9, 10]}
     assert "x (3 coefficients): 3 of its basis functions have no data" in str(model.summary())
+
+
+def test_the_full_summarys_basis_rows_show_no_value_the_fit_does_not_identify():
+    """The gap's three basis coefficients print ``---`` for estimate and SE in the detail rows.
+
+    ``summary(detail="full")`` and ``metrics().summary(detail="full")``, as text and as HTML:
+    the gauge holds coordinates 8-10 at zero, so their value is the constraint, not an
+    estimate, and the coefficient tables already show it as ``---`` with the footnote.  At
+    ``bea6a1117`` the text printed ``0.0000`` beside ``---`` and the HTML printed ``0.0000``
+    beside ``nan``.  Mutations: the detail rows' values from ``result.beta``; the HTML cells
+    formatted with ``:.4f``.
+    """
+    gap = np.where((X_SPREAD > 3) & (X_SPREAD < 7), X_SPREAD - 3.0, X_SPREAD)
+    X = pd.DataFrame({"x": gap})
+    spline = Spline(knots=np.linspace(0.5, 9.5, 19), penalty="none")
+    model = _fit({"x": spline}, X, Y, spline_penalty=0.0)
+    blank = {9, 10, 11}  # the detail rows' 1-based labels of coordinates 8-10
+    for table in (model.summary(detail="full"), model.metrics(X, Y).summary(detail="full")):
+        text = {
+            int(line.split()[2]): line.split()[3:5]
+            for line in str(table).splitlines()
+            if line.startswith("║   Coef ")
+        }
+        html = table._repr_html_()
+        cell = "<td style='padding:1px 6px;'>([^<]*)</td>"
+        cells = {int(i): [coef, se] for i, coef, se in re.findall(f"<tr>{cell * 3}", html)}
+        assert sorted(text) == sorted(cells) == list(range(1, 21))
+        for shown in (text, cells):
+            for index, (coef, se) in shown.items():
+                if index in blank:
+                    assert [coef, se] == ["---", "---"]
+                else:
+                    assert np.isfinite(float(coef)) and np.isfinite(float(se))
+        assert "nan" not in html
+        header = "3 coefficients not identified (estimate and standard error shown as ---)"
+        assert header in str(table) and header in html
+    assert np.all(model.result.beta[8:11] == 0.0)
 
 
 def test_a_penalised_factors_empty_level_reports_its_prior_sd():
