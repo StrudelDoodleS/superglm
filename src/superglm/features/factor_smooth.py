@@ -567,6 +567,9 @@ class FactorSmooth:
         self._level_to_code: dict[Any, int] = {}
         self._spline: PSpline | None = None
         self._natural_map = None
+        # The natural marginal basis's prior-weighted mean over the fitted rows: the population
+        # curve is reported less it (``population_basis``).  ``None`` on a model saved before.
+        self._marginal_mean: NDArray | None = None
         self._base_penalty_components: tuple[tuple[str, Any], ...] = ()
         # What the fit's data identify of each sz level (``_record_unidentified_levels``;
         # ``_free_directions`` None until a fit records it): thin levels, the null-space
@@ -780,6 +783,7 @@ class FactorSmooth:
         spline, penalty = self._initialize_marginal_spline(x, weights)
         qr_r: NDArray | None = None
         chunks: list[sp.csr_matrix] | None = [] if retain_basis else None
+        column_sums = np.zeros(self.k)
         for start in range(0, len(x), _MARGINAL_QR_CHUNK_ROWS):
             basis_chunk = sp.csr_matrix(
                 spline._basis_matrix(x[start : start + _MARGINAL_QR_CHUNK_ROWS]),
@@ -787,9 +791,11 @@ class FactorSmooth:
             )
             if weights is None:
                 qr_basis = basis_chunk
+                column_sums += np.asarray(basis_chunk.sum(axis=0)).ravel()
             else:
-                row_scale = np.sqrt(weights[start : start + _MARGINAL_QR_CHUNK_ROWS])
-                qr_basis = basis_chunk.multiply(row_scale[:, None]).tocsr()
+                chunk_weights = weights[start : start + _MARGINAL_QR_CHUNK_ROWS]
+                qr_basis = basis_chunk.multiply(np.sqrt(chunk_weights)[:, None]).tocsr()
+                column_sums += np.asarray(basis_chunk.T @ chunk_weights).ravel()
             qr_r = _combine_qr_r(qr_r, qr_basis)
             if chunks is not None:
                 chunks.append(basis_chunk)
@@ -835,6 +841,7 @@ class FactorSmooth:
                 components += (("null", np.sum(lines, axis=0)),)
         self._spline = spline
         self._natural_map = natural_map
+        self._marginal_mean = (column_sums / normalization_mass) @ np.asarray(natural_map)
         self._base_penalty_components = components
         return exact_basis
 
@@ -971,6 +978,19 @@ class FactorSmooth:
             raise RuntimeError("FactorSmooth has not been fitted.")
         raw = np.asarray(self._spline._raw_basis_matrix(numeric), dtype=np.float64)
         return np.asarray(raw @ self._natural_map, dtype=np.float64)
+
+    def population_basis(self, x: NDArray) -> NDArray[np.float64]:
+        """The marginal basis less its prior-weighted mean over the fitted rows (``_marginal_mean``).
+
+        The population curve's shift ``b(x)' c`` is reported centred as the main effect is, over
+        the fitted rows at their prior weights (Wood 2017, sec. 5.4.1): along a direction the
+        levels left out of the population leave free, ``c`` moves the curve by a constant the
+        intercept takes, so the centred curve is what the fit determines.  A model saved before
+        keeps its uncentred shift.
+        """
+        basis = self.marginal_basis(x)
+        mean = getattr(self, "_marginal_mean", None)
+        return basis if mean is None else basis - np.asarray(mean, dtype=np.float64)
 
     def score(
         self,
@@ -1613,7 +1633,11 @@ def with_held_group_levels(
 def population_curve_shift(
     name: Any, x: NDArray, interaction_specs: Any, groups: Any, beta: NDArray
 ) -> NDArray[np.float64] | None:
-    """``sum_terms b(x)' c`` on ``x`` for feature ``name`` (``population_curve_terms``), or None."""
+    """``sum_terms (b(x) - b_bar)' c`` on ``x`` for feature ``name``, or None.
+
+    ``b_bar`` is each term's marginal mean over the fitted rows (``FactorSmooth.population_basis``),
+    so the shift is centred as the main effect is (``population_curve_terms``).
+    """
     terms = population_curve_terms(name, interaction_specs)
     if not terms:
         return None
@@ -1621,7 +1645,7 @@ def population_curve_shift(
     for key, spec in terms:
         coefficients = np.concatenate([beta[g.sl] for g in groups if g.feature_name == key])
         offset = spec._population_offset(spec._level_blocks(coefficients))
-        shift += spec.marginal_basis(np.asarray(x, dtype=np.float64)) @ offset
+        shift += spec.population_basis(np.asarray(x, dtype=np.float64)) @ offset
     return shift
 
 

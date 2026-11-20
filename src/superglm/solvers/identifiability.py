@@ -123,6 +123,10 @@ class Gauge:
     functionals: NDArray
     intercept: NDArray
     moved: NDArray | None = None
+    # Whether each direction moves the raw intercept: ``c'N`` off zero beyond the cancellation
+    # of forming it (``|c'n| > sqrt(eps) |c|'|n|``), so the intercept is not identified either.
+    # ``None`` on a record saved before.
+    intercept_reached: NDArray | None = None
 
     def _moved(self) -> NDArray:
         count = self.null.shape[1]
@@ -286,8 +290,12 @@ class Identifiability:
 
     def intercept_identified(self) -> bool:
         """Whether the intercept has a finite estimate (false when separation moves it) and an
-        SE (``withheld`` holds ``-1`` when it has none)."""
+        SE (``withheld`` holds ``-1`` when it has none, and a direction of ``null(H)`` whose
+        rows' mean is off zero, ``Gauge.intercept_reached``, moves it as an alias does)."""
         if -1 in self.withheld:
+            return False
+        reached = getattr(self.gauge, "intercept_reached", None)
+        if reached is not None and np.any(reached):
             return False
         return self.separation is None or not self.separation.intercept_reached
 
@@ -377,6 +385,12 @@ class Identifiability:
                 label = term if size == 1 else f"{term} ({size} {unit})"
                 link = f" is aliased with {', '.join(others)}" if others else ""
                 notes.append(f"  {label}{link}: {reason}.")
+        reached = getattr(self.gauge, "intercept_reached", None)
+        if reached is not None and np.any(reached):
+            notes.append(
+                "The intercept is not identified (standard error shown as ---): the directions "
+                "above move it with the coefficients they hold, whose level it carries."
+            )
         if self.weak is not None and not self.weak.fitted:
             count = self.weak.root.shape[1]
             plural = "direction" if count == 1 else "directions"
@@ -1095,10 +1109,13 @@ def _construction_gauge(
     from superglm.solvers.centered_system import weighted_mean_pair
 
     intercept = np.zeros(k)
+    intercept_reached = np.zeros(k, dtype=bool)
     if design is not None and W is not None:
         weights = np.asarray(W, dtype=np.float64)
         mean, _, _ = weighted_mean_pair(design, weights, float(np.sum(weights)))
-        intercept = -(np.asarray(mean, dtype=np.float64) @ null)
+        mean = np.asarray(mean, dtype=np.float64)
+        intercept = -(mean @ null)
+        intercept_reached = np.abs(intercept) > _SHARE_FLOOR * (np.abs(mean) @ np.abs(null))
     fitted_null, fitted_functionals = np.zeros((width, k)), np.zeros((width, k))
     fitted_null[columns], fitted_functionals[columns] = null, functionals
     gauge = Gauge(
@@ -1106,6 +1123,7 @@ def _construction_gauge(
         functionals=fitted_functionals,
         intercept=intercept,
         moved=None if not np.any(unresolved) else ~unresolved,
+        intercept_reached=intercept_reached,
     )
     aliases = []
     dual_lift = np.linalg.inv(functionals.T @ null)

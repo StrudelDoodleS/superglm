@@ -3476,27 +3476,28 @@ def test_term_inference_and_bands_report_the_population_curve() -> None:
     main-effect curve with the shifted curve's errors, and the simultaneous
     bands drew the unshifted curve.  Every surface now takes the curve from
     ``with_population_curve`` and its errors from ``_population_curve_map``:
-    ``term_inference`` equals ``relativities`` bit for bit, and the bands' values are the same
-    curve to the rounding of their own products, ``gamma_(p + k)`` of ``|M||gamma| + |b||c|``.
-    The population curve's level depends on the published constraint: along each alias of the
-    weightless levels' lines the curve moves by one constant (its share there is 0.25 to 0.81
-    of its dual norm, while its contrasts' is 2e-14), so every point has no standard error, in
-    all three readers alike, and each says so once (``NonEstimablePredictionWarning``).  At
-    ``253c6d353`` all three printed the constraint's errors.  Mutation: ``term_inference``
-    unshifted.
+    ``term_inference`` equals ``relativities`` bit for bit, values and errors,
+    and the bands' values and errors are the same curve to the rounding of
+    their own products, ``gamma_(p + k)`` of ``|M||gamma| + |b||c|`` and
+    ``gamma_(2p + 4k)`` of ``|g|'|V||g|`` on a gram fit's dense covariance.
+    The population shift is centred over the fitted rows (``FactorSmooth.population_basis``),
+    so ``g`` is the centred contrast, which the fit determines (``g'N`` is ``2e-14`` of
+    ``|g| |N|``, where the uncentred one's was 0.69): no reader discloses it.  At
+    ``253c6d353`` the shift was uncentred and its errors were the published constraint's.
+    Mutation: ``term_inference`` unshifted; the shift uncentred.
     """
     frame, y, weight = _signed_aliased_frame("weightless", response="fisher")
     model = _fit(_model("gaussian", "gram", lam=None, numerics=("x1", "x10")), frame, y, weight)
     spec = model._interaction_specs["x:g:sz"]
-    with pytest.warns(NonEstimablePredictionWarning):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", NonEstimablePredictionWarning)
         relativity = model.relativities(with_se=True)["x"]
-    with pytest.warns(NonEstimablePredictionWarning):
         inference = model.term_inference("x", with_se=True)
     assert np.array_equal(inference.log_relativity, relativity["log_relativity"].to_numpy())
-    assert np.all(np.isnan(relativity["se_log_relativity"].to_numpy()))
-    assert np.all(np.isnan(inference.se_log_relativity))
+    assert np.array_equal(inference.se_log_relativity, relativity["se_log_relativity"].to_numpy())
 
-    with pytest.warns(NonEstimablePredictionWarning):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", NonEstimablePredictionWarning)
         bands = model.simultaneous_bands("x", n_sim=2_000)
     grid = bands["x"].to_numpy()
     main = model._specs["x"]
@@ -3505,15 +3506,126 @@ def test_term_inference_and_bands_report_the_population_curve() -> None:
     gamma = np.asarray(model.result.beta[group.sl])
     blocks = spec._level_blocks(np.asarray(model.result.beta[term.sl]))
     offset = spec._population_offset(blocks)
-    M, B = main.transform(grid), spec.marginal_basis(grid)
+    M, B = main.transform(grid), spec.population_basis(grid)
     size = np.abs(M) @ np.abs(gamma) + np.abs(B) @ np.abs(offset)
     count = len(gamma) + spec.k
     assert np.all(
         np.abs(bands["log_relativity"].to_numpy() - relativity["log_relativity"].to_numpy())
         <= 2.0 * _gamma(count) * size
     )
-    for column in ("se", "ci_lower_pointwise", "ci_upper_simultaneous"):
-        assert np.all(np.isnan(bands[column].to_numpy())), column
+    covariance, active = model._coef_covariance
+    V = np.asarray(covariance, dtype=np.float64)
+    main_active = next(g for g in active if g.feature_name == "x")
+    term_active = next(g for g in active if g.feature_name == "x:g:sz")
+    G = np.zeros((len(grid), len(V)))
+    G[:, main_active.start : main_active.end] = M
+    G[:, term_active.start : term_active.end] = B @ spec._population_contrast()
+    reach = np.einsum("ij,jk,ik->i", np.abs(G), np.abs(V), np.abs(G))
+    se = bands["se"].to_numpy()
+    reference = relativity["se_log_relativity"].to_numpy()
+    assert np.all(
+        np.abs(se * se - reference * reference) <= 4.0 * _gamma(2 * len(V) + 4 * spec.k) * reach
+    )
+
+
+@pytest.mark.parametrize("variant", ["weightless", "one_row"])
+def test_the_population_curve_does_not_move_with_the_published_constraint(
+    monkeypatch, variant
+) -> None:
+    """Moving the coefficients along ``null(H)`` leaves the reported population curve where it is.
+
+    Along a direction the levels left out of the population leave free, the shift ``b(x)' c``
+    moves the curve by one constant, which the intercept takes; centred over the fitted rows
+    as the main effect is (``FactorSmooth.population_basis``; Wood 2017, sec. 5.4.1), the
+    curve moves by the rounding of evaluating it twice, ``gamma_(p + k)`` of
+    ``|M||gamma| + |b||c|``.  The half-unit shift along each direction (max-normalised, with
+    its intercept component) leaves the fitted rows' dense predictor where it was, to the
+    rounding of the two evaluations, and the centring moves no prediction: ``predict`` is the
+    same with the shift uncentred, where the curve sits one constant away.
+    At ``253c6d353`` the shift was uncentred and the curve moved by ``0.0263`` per unit of
+    the direction on the weightless fixture and ``0.0135`` on the thin one.  Mutation:
+    ``population_basis`` uncentred.
+    """
+    frame, y, weight = _signed_aliased_frame(variant, response="fisher")
+    model = _fit(_model("gaussian", "gram", lam=None, numerics=("x1", "x10")), frame, y, weight)
+    gauge = model._fit_inference_info["identifiability"].gauge
+    main, spec = model._specs["x"], model._interaction_specs["x:g:sz"]
+    group = next(g for g in model._groups if g.name == "x")
+    term = next(g for g in model._groups if g.name == "x:g:sz")
+    X = np.asarray(model._dm.toarray(), dtype=np.float64)
+    positive = weight > 0
+
+    def read(result):
+        saved = model._result
+        model._result = result
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                curve = model.relativities()["x"]
+                mean = model.predict(frame)
+        finally:
+            model._result = saved
+        beta = np.asarray(result.beta)
+        grid = curve["x"].to_numpy()
+        offset = spec._population_offset(spec._level_blocks(beta[term.sl]))
+        size = np.abs(main.transform(grid)) @ np.abs(beta[group.sl]) + np.abs(
+            spec.population_basis(grid)
+        ) @ np.abs(offset)
+        dense = result.intercept + X @ beta
+        return curve["log_relativity"].to_numpy(), size, mean, dense, np.abs(X) @ np.abs(beta)
+
+    published = read(model.result)
+    eta = published[3]
+    with monkeypatch.context() as patch:
+        patch.setattr(type(spec), "population_basis", type(spec).marginal_basis)
+        uncentred = read(model.result)
+    np.testing.assert_array_equal(uncentred[2], published[2])
+    level = uncentred[0] - published[0]
+    assert np.ptp(level) <= 2.0 * _gamma(len(model.result.beta) + spec.k) * np.max(published[1])
+    for j in range(gauge.null.shape[1]):
+        unit = float(np.max(np.abs(gauge.null[:, j])))
+        shifted = dataclasses.replace(
+            model.result,
+            beta=np.asarray(model.result.beta) + 0.5 * gauge.null[:, j] / unit,
+            intercept=model.result.intercept + 0.5 * float(gauge.intercept[j]) / unit,
+        )
+        after = read(shifted)
+        bound = 2.0 * _gamma(len(model.result.beta) + spec.k) * np.maximum(published[1], after[1])
+        assert np.all(np.abs(after[0] - published[0]) <= bound), j
+        magnitude = abs(shifted.intercept) + after[4] + abs(model.result.intercept) + published[4]
+        assert np.all(
+            np.abs(after[3] - eta)[positive] <= 4.0 * _gamma(X.shape[1] + 2) * magnitude[positive]
+        ), j
+
+
+@pytest.mark.parametrize("variant", ["weightless", "one_row"])
+def test_an_intercept_the_aliases_move_has_no_standard_error(variant) -> None:
+    """The levels left out of the population leave directions of ``null(H)`` whose rows' mean is
+    off zero: the raw intercept moves with them, so it has no standard error either.
+
+    Each direction ``n`` is constant on the weighted rows, at ``c'n`` with ``c`` the rows'
+    weighted mean, and the intercept takes ``-c'n`` (``identifiability.Gauge``): here ``c'n``
+    clears the cancellation of forming it, ``sqrt(eps) |c|'|n|``, by orders of magnitude.  The
+    summary and ``metrics()`` show the intercept as blank, and the footnote says why.  At
+    ``253c6d353`` both printed 0.215 (weightless) and 0.214 (thin).  Mutation: the intercept's
+    reach ignored.
+    """
+    frame, y, weight = _signed_aliased_frame(variant, response="fisher")
+    model = _fit(_model("gaussian", "gram", lam=None, numerics=("x1", "x10")), frame, y, weight)
+    null = np.asarray(model._fit_inference_info["identifiability"].gauge.null)
+    X = np.asarray(model._dm.toarray(), dtype=np.float64)
+    centre = (weight @ X) / np.sum(weight)
+    assert np.max(np.abs(centre @ null) / (np.abs(centre) @ np.abs(null))) > 1e3 * math.sqrt(EPS)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        metrics = model.metrics(frame, y, sample_weight=weight)
+        summary = model.summary()
+    assert np.isnan(metrics.intercept_se)
+    (row,) = [row for row in summary._coef_rows if row.name == "Intercept"]
+    assert np.isnan(row.se)
+    assert any(
+        "The intercept is not identified" in note for note in summary._info["identifiability_notes"]
+    )
 
 
 def test_an_editor_edit_of_the_main_spline_moves_predictions_by_the_edit() -> None:
@@ -3570,10 +3682,9 @@ def test_the_reported_curves_errors_are_those_of_their_contrasts() -> None:
     error is ``sqrt(g' V g)`` for its contrast ``g``.  On a gram fit the
     covariance is dense, and both routes are sums of products of its entries:
     each within ``gamma_(2 p + 4 k)`` of ``|g|' |V| |g|`` (Higham 2002,
-    section 3.5).  A weightless level's curve has no error.  The global curve's contrast ``g``
-    leans on ``null(H)`` (``g'N`` is one constant over the grid, the curve's level, at up to
-    0.69 of ``|g| |N|``), so it has no standard error there; its differences between points
-    do not (``2e-14``).  Mutation: the unshifted curves' errors.
+    section 3.5).  A weightless level's curve has no error.  The global curve's shift is
+    centred over the fitted rows (``FactorSmooth.population_basis``), so its contrast is the
+    centred one, which the fit determines.  Mutation: the unshifted curves' errors.
     """
     frame, y, weight = _signed_aliased_frame("weightless", response="fisher")
     model = _fit(_model("gaussian", "gram", lam=None, numerics=("x1", "x10")), frame, y, weight)
@@ -3594,15 +3705,9 @@ def test_the_reported_curves_errors_are_those_of_their_contrasts() -> None:
     grid = relativity["x"].to_numpy()
     G = np.zeros((len(grid), len(V)))
     G[:, main.start : main.end] = model._specs["x"].transform(grid)
-    G[:, term.start : term.end] = spec.marginal_basis(grid) @ contrast
-    null = np.asarray(model._fit_inference_info["identifiability"].gauge.null)
-    norms = np.linalg.norm(null, axis=0)[None, :]
-    share = np.abs(G @ null) / (np.linalg.norm(G, axis=1)[:, None] * norms)
-    assert np.all(np.max(share, axis=1) > 1e-6)
-    assert np.all(np.isnan(relativity["se_log_relativity"].to_numpy()))
-    differences = G[1:] - G[0]
-    spread = np.abs(differences @ null) / (np.linalg.norm(differences, axis=1)[:, None] * norms)
-    assert np.max(spread) <= np.sqrt(_U)
+    G[:, term.start : term.end] = spec.population_basis(grid) @ contrast
+    assert np.all(np.isfinite(relativity["se_log_relativity"].to_numpy()))
+    check(G, V, relativity["se_log_relativity"].to_numpy())
 
     inference = model._fit_inference_info
     augmented = float(model.result.phi) * np.asarray(inference["XtWX_inv_aug"], dtype=np.float64)

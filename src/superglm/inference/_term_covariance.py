@@ -85,7 +85,8 @@ def _population_curve_map(
 ) -> tuple[NDArray, NDArray] | None:
     """``(M, V_f)``: a main-effect curve's map and covariance on its ``sz`` population curve (#432).
 
-    The reported curve is ``f(x) = M(x) gamma + sum_terms b(x)' C theta``
+    The reported curve is ``f(x) = M(x) gamma + sum_terms (b(x) - b_bar)' C theta``
+    (``FactorSmooth.population_basis``: centred over the fitted rows)
     (``factor_smooth.with_population_curve``; ``C`` each term's
     ``FactorSmooth._population_contrast`` on its coefficients ``theta``), so
     ``V_f = M V_mm M' + M V_m. L B' + B L' V_.m M' + B L' V L B'`` with ``L``
@@ -115,7 +116,7 @@ def _population_curve_map(
     for group, term in term_groups:
         contrast = np.asarray(term._population_contrast(), dtype=np.float64)
         lifted[group.start : group.end, column : column + term.k] = contrast.T
-        bases.append(term.marginal_basis(x_grid))
+        bases.append(term.population_basis(x_grid))
         column += term.k
     B = np.concatenate(bases, axis=1)
     if center:
