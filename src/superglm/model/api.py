@@ -13,7 +13,7 @@ from numpy.typing import NDArray
 
 from superglm._blas_threads import solver_blas_threads
 from superglm._fit_gate import fit_record
-from superglm._frame import FrameLike, as_eager_frame
+from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.distributions import Distribution
 from superglm.links import Link
 from superglm.penalties.base import Penalty
@@ -1937,7 +1937,7 @@ class SuperGLM:
 
     def _predict_exact(
         self,
-        X: FrameLike,
+        X: EagerFrame | FrameLike,
         offset: NDArray | None = None,
         *,
         random_effects: str = "conditional",
@@ -2003,10 +2003,12 @@ class SuperGLM:
             fit's rank decision treats as determined only up to its cut (a
             near alias) can warn, a training row included.
         """
-        mu = self._predict_exact(X, offset, random_effects=random_effects)
+        # One frame for both, so each column is read from the caller's frame once.
+        frame = as_eager_frame(X)
+        mu = self._predict_exact(frame, offset, random_effects=random_effects)
         from superglm.model.estimability_ops import disclose_non_estimable
 
-        disclose_non_estimable(self, as_eager_frame(X), random_effects)
+        disclose_non_estimable(self, frame, random_effects)
         return mu
 
     # ── Monotone repair ─────────────────────────────────────────

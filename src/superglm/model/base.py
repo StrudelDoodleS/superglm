@@ -951,7 +951,7 @@ def predict_priced(
 
 def predict_exact(
     model,
-    X: FrameLike,
+    X: EagerFrame | FrameLike,
     offset: NDArray | None = None,
     *,
     random_effects: str = "conditional",

@@ -18,6 +18,7 @@ silence. Each docstring says when it fires and what to do about it.
    superglm.SeparationWarning
    superglm.SlowFitWarning
    superglm.WeakIdentificationWarning
+   superglm.NonEstimablePredictionWarning
    superglm.StructuredSolverError
    superglm.ObservedModeNotCertifiedError
    superglm.ObservedModeNotConvergedError

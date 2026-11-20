@@ -20,13 +20,15 @@ data rank truncated) can read a share near ``tol`` and warn, as it does in
 of the centred data Gram ``X_c' W X_c`` the fit already decided) records the
 null space of the centred design.  A penalised fit determines a direction of
 that space wherever its penalty ``S`` has curvature there (a random effect's
-level sum under its zero-mean prior, a spline's wiggle), so only the part of
-it in the null space of every penalty component is tested: the eigenvectors
-of ``N' S_hat N`` below ``PENALTY_RANK_CUT``, with ``S_hat`` each component
-read in the record's scale and divided by its own largest eigenvalue, so no
-smoothing parameter and no column scale moves the decision.  Penalty null
-spaces are structural: their curvature there is rounding, many orders below
-the cut, and any penalised direction reads a fraction of order one.
+level sum under its zero-mean prior, a spline's wiggle): along a data-null
+``n``, ``n' (X_c' W X_c + S) n = n' S n``, so the null space of the penalised
+Hessian, which the fit also decided (``RankInfo.augmented``, at its own
+scale-aware rank cut), is exactly the part no penalty curves.  Only the
+intersection of the two recorded null spaces is tested: the principal
+directions between them whose squared sine is at most ``FREE_SINE_CUT``.
+Penalty null spaces are structural, so a shared direction's squared sine is
+the bases' rounding and any penalised one's is one.  Both records travel with
+every fit, a compact one too, so nothing here reads the design.
 
 The design with its intercept, ``[1, X]``, has null vectors ``[-c' n; n]`` for
 each such ``n`` (``c`` a centre of the training rows), so a scoring row
@@ -64,13 +66,18 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._roundoff import PENALTY_RANK_CUT
+from superglm._roundoff import SQRT_EPS
 
 # ``predict.lm``'s ``tol`` (R >= 4.3, ``rankdeficient = "warnif"``), on the
 # share ``||r N|| / ||r||`` of Lenth (2015).  Training rows read rounding,
 # about ``u`` times the record's null-space error; a constructed row off the
 # span reads order one.  The gap between the two is reported by the tests.
 PREDICTION_TOLERANCE = 1e-6
+
+# A data-null direction is free when its squared sine to the penalised Hessian's
+# null space is at most this: a shared direction reads the two recorded bases'
+# rounding (below 1e-15 on every sweep fixture), a penalised one reads one.
+FREE_SINE_CUT = SQRT_EPS
 
 # Rows per block when a term's design rows are formed: about 2**20 entries.
 _BLOCK_ENTRIES = 2**20
@@ -113,9 +120,9 @@ class DataNullDirections:
     a column outside the record, which no direction reaches) and ``centre``
     the public centre rows are read about, ``(x - centre) - centre_lo``.
     ``alpha_scale`` is ``sqrt(sum W)``.
-    ``curvature`` holds every eigenvalue of ``N' S_hat N`` over the data-null
-    space, ascending; the kept directions are those at or below
-    ``PENALTY_RANK_CUT`` (the restriction's evidence: its gap).
+    ``outside`` holds, for every data-null direction, its squared sine to the
+    penalised Hessian's null space, ascending; the kept directions are those
+    at or below ``FREE_SINE_CUT`` (the restriction's evidence: its gap).
     """
 
     dual: NDArray
@@ -123,7 +130,7 @@ class DataNullDirections:
     centre: NDArray
     centre_lo: NDArray
     alpha_scale: float
-    curvature: NDArray
+    outside: NDArray
 
     @property
     def directions(self) -> NDArray:
@@ -160,45 +167,47 @@ def _dual_null_basis(record) -> NDArray | None:
     return dual[:, kept] / norms[kept]
 
 
-def _penalty_free(model, rank_info, dual: NDArray, local_scale: NDArray):
-    """The part of ``span(dual)`` no penalty component curves, and every curvature.
+def _orthonormal(basis: NDArray) -> NDArray:
+    """An orthonormal basis of ``basis``'s columns (a thin QR of a few columns)."""
+    if basis.shape[1] == 0:
+        return basis
+    q, _ = np.linalg.qr(basis)
+    return q
 
-    ``N' S_hat N`` summed over the fit's penalty components, each read in the
-    record's scale (``D^-1 S_k D^-1``) and divided by its largest eigenvalue;
-    its eigenvectors at or below ``PENALTY_RANK_CUT`` are kept.
+
+def _penalty_free(rank_info, dual: NDArray, local_scale: NDArray):
+    """The part of ``span(dual)`` the penalised Hessian leaves null, and every squared sine.
+
+    ``dual`` is the data-null basis in the record's scale.  The penalised
+    Hessian's recorded null basis, read in the same scale, is orthonormalised;
+    the singular values of their overlap are the cosines of the principal
+    angles between the two spaces.  A direction is kept when its squared sine
+    is at most ``FREE_SINE_CUT``.  A fit whose penalised Hessian has no record
+    has none kept: its penalty cannot be read.
     """
-    from superglm.inference.covariance import _active_penalty_components
-    from superglm.model.fit_state import fitted_lambda2
-    from superglm.model.state_ops import _rank_active_state
-
-    _, active_groups = _rank_active_state(model, rank_info)
-    k = dual.shape[1]
-    curvature = np.zeros((k, k))
-    for columns, _, omega in _active_penalty_components(
-        model._dm.group_matrices,
-        model._groups,
-        active_groups,
-        fitted_lambda2(model),
-        reml_penalties=getattr(model, "_reml_penalties", None),
-    ):
-        reciprocal = 1.0 / local_scale[columns]
-        block = dual[columns]
-        if omega is None:
-            hat = np.diag(reciprocal**2)
-        else:
-            hat = np.asarray(omega, dtype=np.float64) * np.outer(reciprocal, reciprocal)
-        largest = float(np.linalg.eigvalsh(hat)[-1]) if hat.size else 0.0
-        if largest > 0.0:
-            curvature += block.T @ hat @ block / largest
-    values, vectors = np.linalg.eigh(curvature)
-    free = values <= PENALTY_RANK_CUT
-    return dual @ vectors[:, free], values
+    augmented = getattr(rank_info, "augmented", None)
+    if augmented is rank_info.data:  # unpenalised: one decomposition
+        return dual, np.zeros(dual.shape[1])
+    if augmented is None or augmented.width != dual.shape[0]:
+        return dual[:, :0], np.ones(dual.shape[1])
+    held = augmented.null_basis()
+    if held.shape[1] == 0:
+        return dual[:, :0], np.ones(dual.shape[1])
+    held = _orthonormal(held * local_scale[:, None])
+    basis = _orthonormal(dual)
+    left, cosines, _ = np.linalg.svd(basis.T @ held, full_matrices=True)
+    sines = np.ones(dual.shape[1])
+    sines[: cosines.size] = np.maximum(0.0, 1.0 - cosines**2)
+    order = np.argsort(sines, kind="stable")
+    sines, left = sines[order], left[:, order]
+    return basis @ left[:, sines <= FREE_SINE_CUT], sines
 
 
 def data_null_directions(model) -> DataNullDirections | None:
     """The published fit's tested directions (module docstring), or ``None`` when it has none.
 
-    Reads the data rank the fit decided (``RankInfo.data``) and its penalty;
+    Reads the data rank and the penalised Hessian's rank the fit decided
+    (``RankInfo.data`` and ``RankInfo.augmented``);
     ``None`` for a fit without that record and for one with no direction the
     data and the penalty both leave free, so such a fit is never tested.
     """
@@ -216,7 +225,7 @@ def data_null_directions(model) -> DataNullDirections | None:
         return None
     column_scale = np.asarray(record.column_scale, dtype=np.float64)
     local_scale = np.where(column_scale > 0.0, column_scale, 1.0)
-    dual_local, curvature = _penalty_free(model, rank_info, dual_local, local_scale)
+    dual_local, outside = _penalty_free(rank_info, dual_local, local_scale)
     if dual_local.shape[1] == 0:
         return None
     from superglm.model.runtime_canonicalize import _public_column_shifts
@@ -236,7 +245,7 @@ def data_null_directions(model) -> DataNullDirections | None:
         centre=centre,
         centre_lo=np.asarray(lo, dtype=np.float64),
         alpha_scale=float(np.sqrt(sum_w)) if sum_w > 0.0 else 1.0,
-        curvature=curvature,
+        outside=outside,
     )
 
 

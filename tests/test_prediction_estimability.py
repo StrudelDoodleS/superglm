@@ -260,23 +260,28 @@ def test_a_healthy_random_effect_fit_is_never_warned():
 def test_the_penalty_fixes_a_random_effects_level_sum_and_no_row_is_read(monkeypatch):
     """The data leave the level sum free; the ridge prior curves it; ``predict`` does no extra pass.
 
-    The record's data null space has one direction, whose curvature under the
-    normalised prior is of order one, far above ``PENALTY_RANK_CUT``; Row J's
-    alias reads rounding there.  No tested direction means no design pass.
+    The record's data null space has one direction, and the penalised Hessian's
+    has none, so its squared sine to that space is one, far above
+    ``FREE_SINE_CUT``.  Row J's penalised spline alias, which no penalty
+    curves, is shared by both records: its squared sine is rounding.  No
+    tested direction means no design pass.
     """
-    from superglm._roundoff import PENALTY_RANK_CUT
     from superglm.model import estimability_ops
 
+    cut = estimability_ops.FREE_SINE_CUT
     model, X = _random_effect_fit()
     record = model.result.rank_info.data
     assert record.width - record.rank == 1
     assert estimability_ops.data_null_directions(model) is None
     dual = estimability_ops._dual_null_basis(record)
     scale = np.where(record.column_scale > 0.0, record.column_scale, 1.0)
-    _, curvature = estimability_ops._penalty_free(model, model.result.rank_info, dual, scale)
-    assert np.min(curvature) > PENALTY_RANK_CUT * MARGIN
-    row_j = estimability_ops.data_null_directions(_row_j("numeric", "fit"))
-    assert np.max(np.abs(row_j.curvature)) < PENALTY_RANK_CUT / MARGIN
+    _, outside = estimability_ops._penalty_free(model.result.rank_info, dual, scale)
+    assert np.min(outside) > cut * MARGIN
+    row_j = estimability_ops.data_null_directions(_row_j("spline", "fit_reml"))
+    shared = row_j.outside[row_j.outside <= cut]
+    assert shared.size == row_j.dual.shape[1] >= 1
+    assert np.max(shared) < cut / MARGIN
+    assert np.min(row_j.outside[row_j.outside > cut], initial=1.0) > cut * MARGIN
 
     def no_pass(*args, **kwargs):
         raise AssertionError("a design pass on a fit with no tested direction")
@@ -527,3 +532,50 @@ def test_an_sz_levels_held_rows_read_the_population_curve_they_are_priced_at():
     assert not [c for c in caught if type(c.message).__name__ == "NonEstimablePredictionWarning"]
     _, found = _disclosures(lambda: model.predict(ROW_J))
     assert not found
+
+
+@pytest.mark.parametrize("x_name", list(X_SPECS))
+def test_a_compact_fits_rows_are_tested_from_its_records(x_name):
+    """``retain_fit_state=False`` keeps no design; the test reads the two rank records only."""
+    model = _fit(
+        ROW_J,
+        Y,
+        {"x": X_SPECS[x_name](), "f": Categorical()},
+        [("x", "f")],
+        retain_fit_state=False,
+    )
+    mu, found = _disclosures(lambda: model.predict(ROW_J_NEW))
+    assert [w.rows.tolist() for w in found] == [[1, 2]]
+    np.testing.assert_allclose(mu, _master((x_name, "fit")), rtol=1e-9)
+
+
+def test_the_shares_are_the_same_across_row_blocks(monkeypatch):
+    """Rows formed in blocks of a few rows read the shares of one block (``prediction_shares``).
+
+    The plain terms and an ``sz`` term's held level, whose products are scored
+    per block, both cross the boundary; the scaling is per row, so the shares
+    agree to rounding and the same rows are named.
+    """
+    from superglm.model import estimability_ops
+
+    fixtures = [
+        (_row_j("spline", "fit"), pd.concat([ROW_J, ROW_J_NEW], ignore_index=True)),
+        (
+            _fit(
+                ROW_J,
+                Y,
+                {"x": Spline(n_knots=6)},
+                [FactorSmooth("x", group="f", basis="sz", k=6)],
+                method="fit_reml",
+            ),
+            pd.concat([ROW_J, ROW_J_NEW], ignore_index=True),
+        ),
+    ]
+    for model, frame in fixtures:
+        whole = _shares(model, frame)
+        monkeypatch.setattr(estimability_ops, "_BLOCK_ENTRIES", 61 * 8)
+        blocked = _shares(model, frame)
+        monkeypatch.undo()
+        # a share is at most one; the training rows read rounding either way
+        np.testing.assert_allclose(blocked, whole, rtol=1e-12, atol=16 * 2.0**-53)
+        assert np.array_equal(blocked > TOL, whole > TOL)
