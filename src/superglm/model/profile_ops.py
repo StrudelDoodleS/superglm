@@ -417,11 +417,17 @@ def _replace_dataclass_preserving_dynamic_attributes(instance, **changes):
     return replacement
 
 
-def _replace_pirls_phi(result, phi):
-    """Return a phi-adjusted PIRLS result with all runtime metadata intact."""
-    changes = {"phi": float(phi)}
-    if result.weight_exponent:
-        changes["solver_phi"] = float(np.ldexp(phi, result.weight_exponent))
+def _replace_pirls_phi(result, phi, distribution):
+    """Return the result with ``phi`` as its likelihood scale, runtime metadata intact.
+
+    The profiled ML is what the density and its interval read; ``phi`` stays the
+    published refit's Pearson estimate, which standard errors read.
+    """
+    from superglm.solvers.dispersion import ML_AT_MEAN, scale_fields
+
+    changes = scale_fields(
+        result, distribution=distribution, likelihood_phi=phi, likelihood_method=ML_AT_MEAN
+    )
     return _replace_dataclass_preserving_dynamic_attributes(result, **changes)
 
 
@@ -466,8 +472,10 @@ def _synchronize_tweedie_profile_refit(model, y, public_mu, profile_result) -> N
         weight_semantics=model_weight_semantics(model),
     )
 
-    replacement_public = _replace_pirls_phi(model.result, profile_result.phi_hat)
-    replacement_solver = _replace_pirls_phi(model._solver_pirls_result(), profile_result.phi_hat)
+    replacement_public = _replace_pirls_phi(model.result, profile_result.phi_hat, distribution)
+    replacement_solver = _replace_pirls_phi(
+        model._solver_pirls_result(), profile_result.phi_hat, distribution
+    )
     reml_result = getattr(model, "_reml_result", None)
     replacement_reml = (
         None

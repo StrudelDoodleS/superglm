@@ -31,6 +31,18 @@ from superglm.terms import TermResults
 from superglm.types import GroupSlice
 
 
+def _scale_info(res) -> dict:
+    """The two published scales and their estimators, for the summary."""
+    from superglm._weight_units import likelihood_scale
+    from superglm.solvers.dispersion import likelihood_scale_method, scale_method
+
+    return {
+        "phi_method": scale_method(res),
+        "phi_likelihood": likelihood_scale(res).phi,
+        "phi_likelihood_method": likelihood_scale_method(res),
+    }
+
+
 def _terminal_stop(model, res) -> tuple[str | None, str | None]:
     """The last fitting stage's stop and its non-convergence note: REML's when
     smoothing was selected, otherwise the coefficient fit's."""
@@ -74,6 +86,7 @@ def diagnostics(model) -> dict[str, Any]:
         "intercept": res.intercept,
         "deviance": res.deviance,
         "phi": res.phi,
+        "phi_likelihood": _scale_info(res)["phi_likelihood"],
         "effective_df": res.effective_df,
         "n_iter": (
             model._reml_result.n_reml_iter
@@ -215,6 +228,7 @@ def summary(
         },
         "fit": {
             "phi": res.phi,
+            "phi_likelihood": _scale_info(res)["phi_likelihood"],
             "effective_df": edf,
             "pearson_chi2": fs.pearson_chi2,
             "n_obs": n,
@@ -278,6 +292,7 @@ def summary(
         ),
         "lambda1": lam1,
         "phi": res.phi,
+        **_scale_info(res),
         "pearson_chi2": fs.pearson_chi2,
         "deviance": res.deviance,
         "log_likelihood": ll,

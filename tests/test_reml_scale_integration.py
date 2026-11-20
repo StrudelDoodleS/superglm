@@ -285,7 +285,7 @@ def test_finalize_profiles_phi_from_post_qp_state(monkeypatch: pytest.MonkeyPatc
     assert evaluation.profiled_scale is not None
     assert best.curvature_source == "fisher"
     assert best.objective == pytest.approx(evaluation.value)
-    assert model._result.phi == pytest.approx(evaluation.profiled_scale.phi)
+    assert model._result.phi_likelihood == pytest.approx(evaluation.profiled_scale.phi)
 
 
 def test_reduced_tweedie_phi_uses_penalty_nullity_not_penalty_rank(

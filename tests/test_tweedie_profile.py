@@ -1714,8 +1714,10 @@ class TestEstimatePFitMode:
         assert model.family.p == pytest.approx(result.p_hat)
         assert model.distribution_.p == pytest.approx(result.p_hat)
         assert model._fit_state.distribution is model._distribution
-        assert model.result.phi == pytest.approx(result.phi_hat)
-        assert model._solver_pirls_result().phi == pytest.approx(result.phi_hat)
+        # The profiled ML is the likelihood scale; phi stays the refit's Pearson scale.
+        assert model.result.phi_likelihood == pytest.approx(result.phi_hat)
+        assert model._solver_pirls_result().phi_likelihood == pytest.approx(result.phi_hat)
+        assert model.result.phi == captured["public_result"].phi
         assert model.result is not captured["public_result"]
         assert model._solver_pirls_result() is not captured["solver_result"]
         np.testing.assert_array_equal(model.result.beta, captured["public_result"].beta)
@@ -1740,7 +1742,7 @@ class TestEstimatePFitMode:
         if fit_mode == "reml":
             assert model._reml_result is not captured["reml_result"]
             assert model._reml_result.pirls_result is model._solver_pirls_result()
-            assert model._reml_result.pirls_result.phi == pytest.approx(result.phi_hat)
+            assert model._reml_result.pirls_result.phi_likelihood == pytest.approx(result.phi_hat)
             assert model._reml_result.lambdas == captured["reml_result"].lambdas
             assert model._reml_result.lambda_history is captured["reml_result"].lambda_history
             assert model._reml_lambdas is captured["reml_lambdas"]
@@ -1785,9 +1787,8 @@ class TestEstimatePFitMode:
                 "_group_edf",
             ):
                 assert cache_name not in model.__dict__
-            expected_covariance = (
-                result.phi_hat / captured["solver_result"].phi * captured["old_covariance"][0]
-            )
+            # Standard errors keep the refit's Pearson scale; only densities move to the ML.
+            expected_covariance = captured["old_covariance"][0]
             np.testing.assert_allclose(model._coef_covariance[0], expected_covariance)
         else:
             np.testing.assert_allclose(
@@ -1818,7 +1819,8 @@ class TestEstimatePFitMode:
                 assert getattr(model, released_name) is None
             assert model.__dict__["_fit_inference_info"] is not captured["old_inference_info"]
             expected_covariance = (
-                result.phi_hat * captured["old_inference_info"]["XtWX_inv_aug"][1:, 1:]
+                captured["solver_result"].phi
+                * captured["old_inference_info"]["XtWX_inv_aug"][1:, 1:]
             )
             np.testing.assert_allclose(model._coef_covariance[0], expected_covariance)
 
@@ -1914,11 +1916,16 @@ class TestEstimatePFitMode:
         original.scop_states = {"smooth": np.array([1.0, 2.0])}
         original.future_metadata = np.array([3.0, 4.0])
 
-        replacement = profile_ops_module._replace_pirls_phi(original, 7.25)
+        replacement = profile_ops_module._replace_pirls_phi(
+            original, 7.25, TweedieDistribution(p=1.5)
+        )
 
         assert replacement is not original
-        assert replacement.phi == pytest.approx(7.25)
+        # The profiled ML becomes the likelihood scale; phi stays the SE scale.
+        assert replacement.phi_likelihood == pytest.approx(7.25)
+        assert replacement.phi == pytest.approx(0.75)
         assert original.phi == pytest.approx(0.75)
+        assert original.phi_likelihood is None
         assert replacement.beta is beta
         assert replacement.iteration_log is original.iteration_log
         assert replacement.scop_states is original.scop_states
@@ -2292,7 +2299,7 @@ class TestEstimatePFitMode:
         assert result.converged
         winning_row = result.evaluations.iloc[result.evaluations["nll"].to_numpy().argmin()]
         assert winning_row["p"] == pytest.approx(result.p_hat)
-        assert model.result.phi == pytest.approx(result.phi_hat, rel=1e-12, abs=1e-12)
+        assert model.result.phi_likelihood == pytest.approx(result.phi_hat, rel=1e-12, abs=1e-12)
         assert model._last_fit_meta["method"] == "fit_reml"
 
     @pytest.mark.slow
@@ -2478,7 +2485,7 @@ class TestDecoupledSearchFitMode:
             search_fit_mode="fit",
         )
 
-        assert model.result.phi == pytest.approx(result.phi_hat)
+        assert model.result.phi_likelihood == pytest.approx(result.phi_hat)
         assert model.family.p == pytest.approx(result.p_hat)
 
     def test_decoupled_dispersion_is_reprofiled_off_the_published_fit(self):

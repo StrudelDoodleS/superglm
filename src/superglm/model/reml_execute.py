@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import replace
 from typing import Any
 
-from superglm.distributions import Tweedie, clip_mu
+from superglm._weight_units import likelihood_scale
+from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
-from superglm.model.reml_finalize import compute_profiled_phi
+from superglm.model.reml_finalize import profiled_likelihood_scale
 from superglm.reml.observed_geometry import ObservedModeNotConvergedError
-from superglm.solvers.dispersion import model_weight_semantics
+from superglm.solvers.dispersion import model_weight_semantics, publish_scales
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.mode_score import linear_predictor
 
@@ -159,27 +159,24 @@ def run_fixed_monotone_reml(
             "fixed-lambda constrained REML fit ended without a complete inner-QP KKT certificate"
         )
 
-    # Publish the scale the unconstrained fixed-lambda REML route publishes
-    # (``finalize_reml_fit``): the REML profile of phi at the penalized mode
-    # (Wood 2011, JRSS-B 73(1); Wood 2017, GAMs 2nd ed., section 6.2) for
-    # Gaussian and Gamma, the deviance form over the penalty nullity for the
-    # other estimated-scale families, and the solver's Pearson value for
-    # Tweedie, as that route keeps it.  Where the profile has no interior
-    # optimum (zero penalized deviance) that route refuses the fit, and this
-    # one publishes the solver's Pearson value.
-    if not isinstance(model._distribution, Tweedie):
-        result = replace(
-            result,
-            phi=compute_profiled_phi(
-                model,
-                y=y,
-                sample_weight=sample_weight,
-                lambdas=lambdas,
-                reml_penalties=reml_penalties,
-                pirls_result=result,
-                boundary_phi=result.phi,
-            ),
-        )
+    # Publish the scales the unconstrained REML route publishes (``finalize_reml_fit``):
+    # the solver's Pearson estimate for standard errors, and the REML profile of the
+    # exact likelihood at the penalized mode (Wood 2011, JRSS-B 73(1)) for densities and
+    # variance components.
+    likelihood_phi, likelihood_method = profiled_likelihood_scale(
+        model,
+        y=y,
+        sample_weight=sample_weight,
+        lambdas=lambdas,
+        reml_penalties=reml_penalties,
+        pirls_result=result,
+    )
+    result = publish_scales(
+        result,
+        distribution=model._distribution,
+        likelihood_phi=likelihood_phi,
+        likelihood_method=likelihood_method,
+    )
 
     model._result = result
     model._reml_lambdas = lambdas
@@ -195,7 +192,7 @@ def run_fixed_monotone_reml(
         offset,
         model._distribution,
         model._link,
-        result.phi,
+        likelihood_scale(result).phi,
         weight_semantics=model_weight_semantics(model),
     )
     model._solver_result = result

@@ -13,6 +13,27 @@ if TYPE_CHECKING:
     from superglm.inference.summary_levels import SummaryLevelDisplay
 
 
+def _scale_cell(info, fmt) -> str:
+    """``phi`` with the estimator standard errors read it from."""
+    from superglm.solvers.dispersion import KNOWN, SCALE_METHOD_LABELS
+
+    method = info.get("phi_method")
+    if method is None or method == KNOWN:
+        return fmt(info["phi"])
+    return f"{fmt(info['phi'])} ({SCALE_METHOD_LABELS.get(method, method)})"
+
+
+def _likelihood_scale_rows(info, fmt) -> list[tuple[str, str, str, str]]:
+    """The scale the log-likelihood and AIC read, where it is a separate estimate."""
+    from superglm.solvers.dispersion import KNOWN, SCALE_METHOD_LABELS
+
+    method = info.get("phi_likelihood_method")
+    if method is None or method == KNOWN:
+        return []
+    label = SCALE_METHOD_LABELS.get(method, method)
+    return [("Likelihood phi", f"{fmt(info['phi_likelihood'])} ({label})", "", "")]
+
+
 @dataclass
 class _CoefRow:
     """One row of the coefficient table."""
@@ -426,7 +447,12 @@ class ModelSummary:
             ("Family", info["family"], "No. Observations", str(info["n_obs"])),
             ("Link", info["link"], "Df (effective)", edf_str),
             ("Method", _display_method(info.get("method", "ML")), "Penalty", info["penalty"]),
-            ("Scale (phi)", _fmt(info["phi"]), "Pearson chi2", _fmt(info.get("pearson_chi2", ""))),
+            (
+                "Scale (phi)",
+                _scale_cell(info, _fmt),
+                "Pearson chi2",
+                _fmt(info.get("pearson_chi2", "")),
+            ),
             ("Log-Likelihood", _fmt(info["log_likelihood"]), "AIC", _fmt(info["aic"])),
             ("AICc", _fmt(info["aicc"]), "BIC", _fmt(info["bic"])),
             ("EBIC", _fmt(info["ebic"]), "Converged", conv_str),
@@ -434,6 +460,7 @@ class ModelSummary:
         ]
         if info.get("weight_semantics"):
             rows.append(("Weights", f"{info['weight_semantics']} weights", "", ""))
+        rows.extend(_likelihood_scale_rows(info, _fmt))
 
         # NB theta profile row
         if "nb_theta" in info:
@@ -935,7 +962,12 @@ class ModelSummary:
             ("Family", info["family"], "No. Observations", str(info["n_obs"])),
             ("Link", info["link"], "Df (effective)", edf_str_html),
             ("Method", _display_method(info.get("method", "ML")), "Penalty", info["penalty"]),
-            ("Scale (phi)", _fmt(info["phi"]), "Pearson chi2", _fmt(info.get("pearson_chi2", ""))),
+            (
+                "Scale (phi)",
+                _scale_cell(info, _fmt),
+                "Pearson chi2",
+                _fmt(info.get("pearson_chi2", "")),
+            ),
             ("Log-Likelihood", _fmt(info["log_likelihood"]), "AIC", _fmt(info["aic"])),
             ("AICc", _fmt(info["aicc"]), "BIC", _fmt(info["bic"])),
             ("EBIC", _fmt(info["ebic"]), "Converged", conv_str),
@@ -943,6 +975,7 @@ class ModelSummary:
         ]
         if info.get("weight_semantics"):
             header_rows.append(("Weights", f"{info['weight_semantics']} weights", "", ""))
+        header_rows.extend(_likelihood_scale_rows(info, _fmt))
 
         # NB theta profile row
         if "nb_theta" in info:

@@ -424,27 +424,43 @@ A custom, user-supplied distribution with `scale_known=False` has no exact
 profiler; `fit_reml` falls back to the Gaussian-shaped substitution and warns
 that smoothing selection is approximate for such a family.
 
-## Which dispersion a Tweedie fit publishes
+## Which dispersion a fit publishes
 
-Three entry points publish three different (individually standard) Tweedie
-dispersion estimators. They agree to a few percent on well-behaved data but
-are **not** interchangeable:
+Every fit of an estimated-scale family (Gaussian, Gamma, Tweedie) publishes two
+scales, on every route (`fit`, `fit_path`, `fit_reml`, binned fits, constrained
+fits, shape repair and `estimate_p`):
 
-- **`fit_reml`** publishes the Pearson estimator
-  `phi = sum(w·(y−mu)²/V(mu)) / (n − edf)` in `result.phi`. The REML
-  criterion internally uses the exact profile MLE to choose the smoothing;
-  the published value remains Pearson.
-- **`estimate_p`** publishes the profile **MLE** of phi, re-profiled at the
-  published fit's mean (`result.phi_hat`).
-- The **QP monotone passthrough** path publishes the deviance-based
-  `Dp / (n − Mp)`.
+- **`result.phi`** is the Pearson estimator
+  `phi = sum(w·(y−mu)²/V(mu)) / (n − edf)`, at the fitted mean of the design
+  the fit solved on. Standard errors, confidence intervals, Wald and drop-in
+  tests, standardised residuals and Cook's distance read it. It needs only the
+  mean–variance relation, which is why McCullagh and Nelder (1989, §8.3.6)
+  recommend it for Wald inference, and it is what R's `glm`, statsmodels, H2O
+  and mgcv's `bam` report.
+- **`result.phi_likelihood`** is the profile of the family's exact likelihood:
+  the REML profile on the REML routes, and the maximum-likelihood scale at the
+  fitted mean on `fit` and `fit_path` (`estimate_p` reports it as
+  `result.phi_hat`). The log-likelihood, AIC and BIC, held-out NLL, quantile
+  residuals, the diagnostic Q-Q envelope, the Vuong test and variance
+  components (`RandomEffect`, factor smooths: `tau² = phi_likelihood / lambda`)
+  read it. mgcv makes the same split: its covariance carries `scale` and its
+  log-likelihood and `gam.vcomp` carry `reml.scale`.
 
-This inventory is deliberate documentation of the current state, not an
-endorsement: a future release may unify them (the exact MLE is already
-computed internally). Until then, compare dispersions across entry points
-only with this table in hand. For reference, mgcv's default reported scale
-is a Fletcher-(2012)-improved Pearson estimator, which is a fourth
-convention again.
+`result.phi_method` and `result.phi_likelihood_method` name the two
+estimators, and the summary prints both. On data heavier-tailed than the
+family's density, as claim severities usually are, the two differ widely: on
+the freMTPL2 severity book Pearson's scale is 9.64 and the REML profile 1.18,
+so standard errors are 2.85 times wider than the likelihood scale alone would
+make them. A bootstrap of that book finds the likelihood-scale SEs too narrow
+for every coefficient. Pearson's estimate is itself dominated by the largest
+claims, so it is the scale of the data's variance, not a stable one.
+
+mgcv's `gam` publishes Fletcher's (2012) refinement of Pearson for
+conventional families. It equals Pearson for Gaussian and log-link Gamma fits
+with an intercept; for Tweedie it differs, and SuperGLM keeps Pearson there.
+A model saved before the split has one `phi`, which it keeps for both readers
+(`phi_method == "legacy"`). SuperLSS is separate: its standard errors come from
+the joint likelihood's Hessian.
 
 ## What AIC/BIC count — and what they do not
 

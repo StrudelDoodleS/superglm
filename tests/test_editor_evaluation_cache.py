@@ -443,7 +443,7 @@ def test_validation_and_test_datasets_use_exact_prediction_fallback(
             y_eval,
             mu,
             weight_eval,
-            float(model.result.phi),
+            float(model.result.phi_likelihood),
         )
     )
     null_mu = _compute_null_mu(

@@ -190,12 +190,16 @@ def test_gaussian_shape_repair_refreshes_dispersion_after_final_edf() -> None:
     assert model.result.phi == pytest.approx(expected_phi, rel=2e-13, abs=2e-13)
     assert model._solver_result.phi == pytest.approx(expected_phi, rel=2e-13, abs=2e-13)
     assert model.result.phi != pytest.approx(old_phi)
+    # The likelihood reads its own scale: Gaussian ML at the repaired mean, RSS / n.
+    residual_sum = float(np.sum(model._fit_weights * (y - model._fit_mu) ** 2))
+    expected_likelihood_phi = residual_sum / float(x.size)
+    assert model.result.phi_likelihood == pytest.approx(expected_likelihood_phi, rel=2e-13)
     assert model._fit_stats.log_likelihood == pytest.approx(
         model._distribution.log_likelihood(
             y,
             model._fit_mu,
             model._fit_weights,
-            phi=expected_phi,
+            phi=expected_likelihood_phi,
         )
     )
 

@@ -247,6 +247,35 @@ def solver_dispersion(result):
     return result.phi if phi is None else phi
 
 
+class LikelihoodScale:
+    """A result's likelihood scale under the attribute names its SE scale uses.
+
+    Densities (log-likelihood, NLL, quantile residuals, simulated envelopes) and
+    variance components read ``phi_likelihood``; standard errors read ``phi``. This view
+    lets the unit-carrying density helpers read the first through the same names, so
+    the two never share a field. A result saved before the split has one ``phi``,
+    which serves both.
+    """
+
+    __slots__ = ("phi", "solver_phi", "weight_exponent")
+
+    def __init__(self, result) -> None:
+        exponent = getattr(result, "weight_exponent", 0)
+        value = getattr(result, "phi_likelihood", None)
+        if value is None:
+            self.phi = result.phi
+            self.solver_phi = getattr(result, "solver_phi", None)
+        else:
+            self.phi = value
+            self.solver_phi = getattr(result, "solver_phi_likelihood", None)
+        self.weight_exponent = exponent
+
+
+def likelihood_scale(result) -> LikelihoodScale:
+    """The likelihood-scale view of ``result`` (idempotent)."""
+    return result if isinstance(result, LikelihoodScale) else LikelihoodScale(result)
+
+
 def covariance_exponent(result):
     """An estimated dispersion cancels the unit; a known dispersion does not."""
     exponent = getattr(result, "weight_exponent", 0)
@@ -342,6 +371,7 @@ def unit_prior_log_density(family, y, mu, weights, result):
     """The row's density, retaining dispersion digits after scalar underflow."""
     from superglm.distributions import Gamma, Gaussian, Tweedie, prior_weight_log_density
 
+    result = likelihood_scale(result)
     phi = solver_dispersion(result)
     exponent = (
         getattr(result, "weight_exponent", 0)
@@ -409,6 +439,7 @@ def unit_log_likelihood(family, y, mu, weights, result, *, weight_semantics, rep
     """
     from superglm.distributions import Gamma, Gaussian, Tweedie, weighted_log_likelihood
 
+    result = likelihood_scale(result)
     if not getattr(result, "weight_exponent", 0) or getattr(result, "solver_phi", None) is None:
         return weighted_log_likelihood(
             family,

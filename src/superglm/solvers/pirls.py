@@ -350,6 +350,17 @@ class PIRLSResult:
     # Class defaults also restore results saved before these fields existed.
     weight_exponent: int = 0
     solver_phi: float | None = None
+    # ``phi`` is the scale standard errors, intervals and Wald tests read (Pearson's
+    # estimate, or 1 for a known scale). ``phi_likelihood`` is the scale densities read and
+    # variance components pair with lambda (the REML profile, or ML at the fitted mean);
+    # ``solver_phi_likelihood`` is it in the solver unit, as ``solver_phi`` is for ``phi``.
+    # The methods name both estimators. ``superglm.solvers.dispersion.publish_scales`` is
+    # their one writer; None everywhere is a result saved before the split, whose one
+    # ``phi`` serves both.
+    phi_likelihood: float | None = None
+    solver_phi_likelihood: float | None = None
+    phi_method: str | None = None
+    phi_likelihood_method: str | None = None
     # The runtime separation backstop's statement about this returned state
     # (``separation.runtime_finding``), or None.  Recorded by every solve not run
     # under separation="ignore"; of a model's solves, only the published fit's is

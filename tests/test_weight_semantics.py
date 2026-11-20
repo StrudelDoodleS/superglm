@@ -149,7 +149,7 @@ class TestPriorIsTheEDMLikelihood:
         model = _fit(Gamma(), frame, y, weights, "prior")
         metrics = model.metrics(frame, y, sample_weight=weights)
         mu = np.asarray(model.predict(frame), dtype=np.float64)
-        phi = float(model.result.phi)
+        phi = float(model.result.phi_likelihood)  # the scale densities read
 
         analytic = float(stats.gamma.logpdf(y, a=weights / phi, scale=mu * phi / weights).sum())
         assert metrics.log_likelihood == pytest.approx(analytic, rel=1e-10)
@@ -162,7 +162,7 @@ class TestPriorIsTheEDMLikelihood:
         model = _fit(Gaussian(), frame, y, weights, "prior")
         metrics = model.metrics(frame, y, sample_weight=weights)
         mu = np.asarray(model.predict(frame), dtype=np.float64)
-        phi = float(model.result.phi)
+        phi = float(model.result.phi_likelihood)  # the scale densities read
 
         analytic = float(stats.norm.logpdf(y, loc=mu, scale=np.sqrt(phi / weights)).sum())
         assert metrics.log_likelihood == pytest.approx(analytic, rel=1e-10)

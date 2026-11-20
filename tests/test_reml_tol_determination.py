@@ -356,11 +356,11 @@ class TestPublicationDispersion:
         assert result.converged is True
 
     def test_coupled_publication_profiles_phi_against_the_published_fit(self):
-        """The published phi must describe the published fit, not the candidate.
+        """The published likelihood scale must describe the published fit, not the candidate.
 
         Candidates run at the search tolerance; the publication refit runs
-        tight. Carrying the candidate's phi onto the tight refit scales every
-        published SE by sqrt(phi) of the wrong fit: a relative phi gap of
+        tight. Carrying the candidate's phi onto the tight refit puts every
+        published density at the wrong fit's scale: a relative phi gap of
         2.1e-6 on this fixture, 200x what the assertion resolves (measured
         2026-09-23). Weights and an offset keep the re-profile's weighted,
         offset mean in play.
@@ -384,7 +384,7 @@ class TestPublicationDispersion:
         # and the published nll refers to the published dispersion.
         assert np.isfinite(result.search_nll)
         assert result.nll == pytest.approx(oracle.criterion / len(y), rel=1e-12)
-        assert model.result.phi == pytest.approx(float(result.phi_hat), rel=1e-12)
+        assert model.result.phi_likelihood == pytest.approx(float(result.phi_hat), rel=1e-12)
 
 
 class TestSearchPublishSplit:

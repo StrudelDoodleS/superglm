@@ -210,6 +210,7 @@ def _per_obs_log_likelihood(
 
 def _row_log_densities(model: SuperGLM, y: NDArray, mu: NDArray, sample_weight) -> NDArray:
     """``_per_obs_log_likelihood``'s per-row log densities of ``y`` at the means ``mu``."""
+    from superglm._weight_units import likelihood_scale
     from superglm.distributions import (
         Binomial,
         Gamma,
@@ -221,7 +222,8 @@ def _row_log_densities(model: SuperGLM, y: NDArray, mu: NDArray, sample_weight) 
     )
 
     family = getattr(model, "_distribution")
-    result = model.result
+    # Per-row log-likelihoods are densities: they read the likelihood scale.
+    result = likelihood_scale(model.result)
     if getattr(result, "weight_exponent", 0) and getattr(result, "solver_phi", None) is not None:
         from superglm._weight_units import unit_prior_log_density
 

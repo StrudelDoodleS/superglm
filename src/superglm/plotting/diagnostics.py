@@ -623,7 +623,7 @@ def plot_diagnostics(
     # Annotate with phi and Pearson chi2/df
     from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
 
-    phi = m.phi
+    phi = m.phi_likelihood  # the scale the quantile residuals above were drawn at
     resid_df = pearson_residual_degrees_of_freedom(
         original_weights,
         m.effective_df,
@@ -646,7 +646,7 @@ def _panel_qq_envelope(
 ):
     """Panel 1: Q-Q plot with simulation envelope."""
     family = model._distribution
-    phi = m.phi
+    phi = m.phi_likelihood  # the envelope simulates the fitted density
 
     # Determine sample/grid sizes for large n
     effective_n = n
