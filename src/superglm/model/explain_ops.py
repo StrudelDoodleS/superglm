@@ -553,19 +553,30 @@ def simultaneous_bands(model, feature, *, alpha=0.05, n_sim=10_000, n_points=200
     from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
 
     _ensure_factor_smooth_levels_recorded(model)
-    bands, _ = simultaneous_band_and_critical_value(
-        feature,
-        result=model.result,
-        groups=model._groups,
-        specs=model._specs,
-        interaction_specs=model._interaction_specs,
-        covariance_fn=lambda: model._coef_covariance,
-        alpha=alpha,
-        n_sim=n_sim,
-        n_points=n_points,
-        seed=seed,
-    )
-    return bands
+
+    def band(covariance_fn, sims, determined=None):
+        return simultaneous_band_and_critical_value(
+            feature,
+            result=model.result,
+            groups=model._groups,
+            specs=model._specs,
+            interaction_specs=model._interaction_specs,
+            covariance_fn=covariance_fn,
+            alpha=alpha,
+            n_sim=sims,
+            n_points=n_points,
+            seed=seed,
+            determined=determined,
+        )[0]
+
+    # a grid point off the fit's support has no band (``_curve_labels``, on the band's own
+    # standard error); the critical value is the determined points'
+    labels = _curve_labels(model, lambda covariance_fn: {"points": band(covariance_fn, 2)["se"]})
+    points = None if labels is None else labels["points"]
+    if points is None or not np.any(points != ""):
+        return band(lambda: model._coef_covariance, n_sim)
+    _curve_warning({feature: points})
+    return band(lambda: model._coef_covariance, n_sim, determined=points == "")
 
 
 def term_inference(

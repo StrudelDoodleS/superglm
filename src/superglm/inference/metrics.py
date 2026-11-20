@@ -335,7 +335,8 @@ def _design_rows(design: MetricsDesign, active_groups: list[GroupSlice]) -> Desi
         return design
     from superglm._group_matrix._group_matrix_core import DenseGroupMatrix
 
-    rows = np.asarray(design.toarray() if hasattr(design, "toarray") else design, dtype=np.float64)
+    toarray = getattr(design, "toarray", None)
+    rows = np.asarray(design if toarray is None else toarray(), dtype=np.float64)
     return DesignMatrix(
         [DenseGroupMatrix(rows[:, group.sl]) for group in active_groups],
         n=rows.shape[0],
@@ -559,7 +560,8 @@ class ModelMetrics:
         return bool(
             rank_info is not None
             and self._fit_geometry_matches
-            and np.shape(getattr(self._model, "_fit_weights", None)) == np.shape(working_weights)
+            and np.shape(np.asarray(getattr(self._model, "_fit_weights", ())))
+            == np.shape(working_weights)
         )
 
     @cached_property
@@ -1905,15 +1907,15 @@ class ModelMetrics:
         fitted = columns[indices]
         key = next(key for key in values if key.startswith("se"))
 
-        def probe(root=None, inverse=None):
-            if diagonal:
-                block = np.einsum("ij,ij->i", root, root) if root is not None else inverse
-            else:
-                block = root @ root.T if root is not None else np.diag(inverse)
+        def probe(block):
             return np.atleast_1d(np.asarray(read(block)[key], dtype=np.float64))
 
-        norms = probe(inverse=1.0 / directions.scale[fitted] ** 2)
-        shares = {kind: probe(root=slopes[fitted]) for kind, slopes in directions.slopes.items()}
+        inverse = 1.0 / directions.scale[fitted] ** 2
+        norms = probe(inverse if diagonal else np.diag(inverse))
+        shares = {
+            kind: probe(np.einsum("ij,ij->i", root, root) if diagonal else root @ root.T)
+            for kind, root in ((kind, slopes[fitted]) for kind, slopes in directions.slopes.items())
+        }
         labels = off_support(shares, norms)
         if not np.any(labels != ""):
             return values

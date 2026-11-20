@@ -97,7 +97,7 @@ def _metric(model, record, width: int) -> tuple[NDArray, NDArray, float] | None:
     """``(D, c, sum W)`` in solver coordinates: the Jacobi scale the record was decided in."""
     rank_info = getattr(model._result, "rank_info", None)
     decomposition = getattr(rank_info, "augmented", None)
-    if decomposition is not None:
+    if rank_info is not None and decomposition is not None:
         selected = np.asarray(rank_info.selected_columns, dtype=np.intp)
         column_scale = np.asarray(decomposition.column_scale, dtype=np.float64)
         centre = np.asarray(rank_info.mean_x, dtype=np.float64)

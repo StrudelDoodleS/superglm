@@ -474,8 +474,13 @@ def simultaneous_band_and_critical_value(
     seed: int = 42,
     center: bool = False,
     interaction_specs: Mapping[Any, Any] | None = None,
+    determined: NDArray | None = None,
 ) -> tuple[pd.DataFrame, float]:
     """Simultaneous confidence bands for a spline feature, and their critical value.
+
+    ``determined`` marks the grid points the fit determines (``explain_ops`` reads it from the
+    off-support test): the others have no standard error and no band, and the critical value is
+    the quantile of the maximum over the determined points alone.
 
     The critical value is the simulated quantile itself, since backing it out
     of exponentiated endpoints loses it below their rounding. ``center=True``
@@ -556,9 +561,18 @@ def simultaneous_band_and_critical_value(
 
     # A standard error below the rounding of the largest one carries no
     # information; the floor is relative, so rescaling the response moves it too.
-    se_safe = np.maximum(se, max(SQRT_EPS * float(np.max(se)), TINY))
-    T_sim = np.max(np.abs(f_sim) / se_safe[np.newaxis, :], axis=1)
-    c_sim = float(np.quantile(T_sim, 1.0 - alpha))
+    if determined is not None:
+        determined = np.asarray(determined, dtype=bool)
+        se = np.where(determined, se, np.nan)
+        f_sim, kept = f_sim[:, determined], se[determined]
+    else:
+        kept = se
+    if kept.size:
+        se_safe = np.maximum(kept, max(SQRT_EPS * float(np.max(kept)), TINY))
+        T_sim = np.max(np.abs(f_sim) / se_safe[np.newaxis, :], axis=1)
+        c_sim = float(np.quantile(T_sim, 1.0 - alpha))
+    else:
+        c_sim = float("nan")
 
     z = norm.ppf(1.0 - alpha / 2.0)
 

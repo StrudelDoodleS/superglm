@@ -39,6 +39,7 @@ from superglm import (
     Spline,
     SuperGLM,
 )
+from superglm.diagnostics.estimability import NonEstimablePredictionWarning
 from superglm.reml.penalty_algebra import (
     _penalty_component_omega_ssp,
     build_penalty_matrix,
@@ -3475,21 +3476,28 @@ def test_term_inference_and_bands_report_the_population_curve() -> None:
     main-effect curve with the shifted curve's errors, and the simultaneous
     bands drew the unshifted curve.  Every surface now takes the curve from
     ``with_population_curve`` and its errors from ``_population_curve_map``:
-    ``term_inference`` equals ``relativities`` bit for bit, values and errors,
-    and the bands' values and errors are the same curve to the rounding of
-    their own products, ``gamma_(p + k)`` of ``|M||gamma| + |b||c|`` and
-    ``gamma_(2p + 4k)`` of ``|g|'|V||g|`` on a gram fit's dense covariance.
-    Mutation: ``term_inference`` unshifted.
+    ``term_inference`` equals ``relativities`` bit for bit, and the bands' values are the same
+    curve to the rounding of their own products, ``gamma_(p + k)`` of ``|M||gamma| + |b||c|``.
+    The population curve's level depends on the published constraint: along each alias of the
+    weightless levels' lines the curve moves by one constant (its share there is 0.25 to 0.81
+    of its dual norm, while its contrasts' is 2e-14), so every point has no standard error, in
+    all three readers alike, and each says so once (``NonEstimablePredictionWarning``).  At
+    ``253c6d353`` all three printed the constraint's errors.  Mutation: ``term_inference``
+    unshifted.
     """
     frame, y, weight = _signed_aliased_frame("weightless", response="fisher")
     model = _fit(_model("gaussian", "gram", lam=None, numerics=("x1", "x10")), frame, y, weight)
     spec = model._interaction_specs["x:g:sz"]
-    relativity = model.relativities(with_se=True)["x"]
-    inference = model.term_inference("x", with_se=True)
+    with pytest.warns(NonEstimablePredictionWarning):
+        relativity = model.relativities(with_se=True)["x"]
+    with pytest.warns(NonEstimablePredictionWarning):
+        inference = model.term_inference("x", with_se=True)
     assert np.array_equal(inference.log_relativity, relativity["log_relativity"].to_numpy())
-    assert np.array_equal(inference.se_log_relativity, relativity["se_log_relativity"].to_numpy())
+    assert np.all(np.isnan(relativity["se_log_relativity"].to_numpy()))
+    assert np.all(np.isnan(inference.se_log_relativity))
 
-    bands = model.simultaneous_bands("x", n_sim=2_000)
+    with pytest.warns(NonEstimablePredictionWarning):
+        bands = model.simultaneous_bands("x", n_sim=2_000)
     grid = bands["x"].to_numpy()
     main = model._specs["x"]
     group = next(g for g in model._groups if g.name == "x")
@@ -3504,19 +3512,8 @@ def test_term_inference_and_bands_report_the_population_curve() -> None:
         np.abs(bands["log_relativity"].to_numpy() - relativity["log_relativity"].to_numpy())
         <= 2.0 * _gamma(count) * size
     )
-    covariance, active = model._coef_covariance
-    V = np.asarray(covariance, dtype=np.float64)
-    main_active = next(g for g in active if g.feature_name == "x")
-    term_active = next(g for g in active if g.feature_name == "x:g:sz")
-    G = np.zeros((len(grid), len(V)))
-    G[:, main_active.start : main_active.end] = M
-    G[:, term_active.start : term_active.end] = B @ spec._population_contrast()
-    reach = np.einsum("ij,jk,ik->i", np.abs(G), np.abs(V), np.abs(G))
-    se = bands["se"].to_numpy()
-    reference = relativity["se_log_relativity"].to_numpy()
-    assert np.all(
-        np.abs(se * se - reference * reference) <= 4.0 * _gamma(2 * len(V) + 4 * spec.k) * reach
-    )
+    for column in ("se", "ci_lower_pointwise", "ci_upper_simultaneous"):
+        assert np.all(np.isnan(bands[column].to_numpy())), column
 
 
 def test_an_editor_edit_of_the_main_spline_moves_predictions_by_the_edit() -> None:
@@ -3573,8 +3570,10 @@ def test_the_reported_curves_errors_are_those_of_their_contrasts() -> None:
     error is ``sqrt(g' V g)`` for its contrast ``g``.  On a gram fit the
     covariance is dense, and both routes are sums of products of its entries:
     each within ``gamma_(2 p + 4 k)`` of ``|g|' |V| |g|`` (Higham 2002,
-    section 3.5).  A weightless level's curve has no error.  Mutation: the
-    unshifted curves' errors.
+    section 3.5).  A weightless level's curve has no error.  The global curve's contrast ``g``
+    leans on ``null(H)`` (``g'N`` is one constant over the grid, the curve's level, at up to
+    0.69 of ``|g| |N|``), so it has no standard error there; its differences between points
+    do not (``2e-14``).  Mutation: the unshifted curves' errors.
     """
     frame, y, weight = _signed_aliased_frame("weightless", response="fisher")
     model = _fit(_model("gaussian", "gram", lam=None, numerics=("x1", "x10")), frame, y, weight)
@@ -3596,7 +3595,14 @@ def test_the_reported_curves_errors_are_those_of_their_contrasts() -> None:
     G = np.zeros((len(grid), len(V)))
     G[:, main.start : main.end] = model._specs["x"].transform(grid)
     G[:, term.start : term.end] = spec.marginal_basis(grid) @ contrast
-    check(G, V, relativity["se_log_relativity"].to_numpy())
+    null = np.asarray(model._fit_inference_info["identifiability"].gauge.null)
+    norms = np.linalg.norm(null, axis=0)[None, :]
+    share = np.abs(G @ null) / (np.linalg.norm(G, axis=1)[:, None] * norms)
+    assert np.all(np.max(share, axis=1) > 1e-6)
+    assert np.all(np.isnan(relativity["se_log_relativity"].to_numpy()))
+    differences = G[1:] - G[0]
+    spread = np.abs(differences @ null) / (np.linalg.norm(differences, axis=1)[:, None] * norms)
+    assert np.max(spread) <= np.sqrt(_U)
 
     inference = model._fit_inference_info
     augmented = float(model.result.phi) * np.asarray(inference["XtWX_inv_aug"], dtype=np.float64)
@@ -4797,7 +4803,11 @@ def test_a_held_level_of_the_group_term_reports_the_error_of_the_identified_mean
     ``4 gamma_(2p)`` of ``|c|' |V| |c|``.  Fails on 4a2ed996, which reported
     the error of g000's own value.  With ``integers`` the group column holds
     ``0 .. 11`` beside ``order=["0", ..., "11"]`` and the held level is
-    ``"0"`` in the term's table (PR 508 round 7); fails on 8f4d0d7c.
+    ``"0"`` in the term's table (PR 508 round 7); fails on 8f4d0d7c.  That mean leans on the two
+    directions the rows cannot resolve at float64 (``c'N`` at 0.023 and 0.085 of ``|c| |N|``),
+    where its variance ``c' V c``, ``1.5e12``, is the published constraint's: so the held level
+    has no standard error in either reader, each saying so once.  At ``253c6d353`` both printed
+    ``sqrt(c' V c)``.
     """
     order = [str(i) for i in range(12)] if integers else [f"g{i:03d}" for i in range(12)]
     model, _, _ = _folded_group_term_model(
@@ -4812,16 +4822,21 @@ def test_a_held_level_of_the_group_term_reports_the_error_of_the_identified_mean
     covariance, active = model._coef_covariance
     group = next(ag for ag in active if ag.feature_name == "g")
     V = np.asarray(covariance)[group.start : group.end, group.start : group.end]
-    expected = float(c @ V @ c)
-    bound = 4.0 * _gamma(2 * len(c)) * float(np.abs(c) @ np.abs(V) @ np.abs(c))
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    assert float(c @ V @ c) > 1e10
+    record = model._fit_inference_info["identifiability"]
+    assert {alias.source for alias in record.aliases} == {"float64"}
+    null = np.asarray(record.gauge.null)
+    a = np.zeros(null.shape[0])
+    a[next(g for g in model._groups if g.feature_name == "g").sl] = c
+    assert np.max(np.abs(a @ null) / (np.linalg.norm(a) * np.linalg.norm(null, axis=0))) > 1e-6
+    with pytest.warns(NonEstimablePredictionWarning):
         frame_se = model.relativities(with_se=True)["g"].set_index("level")["se_log_relativity"]
+    with pytest.warns(NonEstimablePredictionWarning):
         inference = model.term_inference("g")
     inferred = dict(zip(inference.levels, inference.se_log_relativity, strict=True))
     held = order[0]
     for se in (frame_se[held], inferred[held]):
-        assert abs(float(se) ** 2 - expected) <= bound
+        assert np.isnan(float(se))
 
 
 def test_reports_fold_a_held_level_beside_a_declared_level_the_group_term_lacks() -> None:
