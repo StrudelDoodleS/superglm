@@ -4126,6 +4126,58 @@ def test_a_vanished_working_weight_publishes_the_gauge_of_a_zero_prior_weight() 
     assert abs(factor / scale - 1.0) <= reference._tol
 
 
+@pytest.mark.pins_behaviour
+def test_the_dense_path_holds_every_gauge_direction_in_its_standard_errors() -> None:
+    """The vanished-row fit's coefficient SEs on the dense (gram) path are the structured path's.
+
+    Pins the dense covariance's gauge: ``Gauge.covariance`` projects the solver's inverse along
+    every direction the published constraint holds, moved or not (``P V P'``, the unresolved
+    directions held where the fit left them), as the structured path's own correction does.
+    The fit is the one above's, offset ``-160`` on one row, whose gauge holds an unresolved
+    direction.  The two backends give every coefficient one SE to ``4 kappa u``, ``kappa`` the
+    Jacobi-scaled Hessian's condition on the complement of its null space (measured ``5e-11``,
+    ``6e-11`` under Haswell, against ``1.6e-5``).  Mutation (``m1``): a covariance projected along the moved directions
+    only moves the dense path's SEs by up to 100% and leaves the structured path's; the test
+    above, on the structured path, does not see it.
+    """
+    from superglm.model import state_ops
+
+    frame, y, weight = _signed_aliased_frame("one_row")
+    row = int(np.flatnonzero(frame["g"].to_numpy() == "g000")[0])
+    offset = np.where(np.arange(len(y)) != row, 0.0, -160.0)
+    se, records = {}, {}
+    for solve in ("auto", "gram"):
+        model = _model("gaussian_log", solve, lam=1.29, main_lam=100.0, numerics=("x1", "x10"))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit_reml(frame, y, sample_weight=weight, offset=offset)
+            se[solve] = coefficient_ses(
+                model.metrics(frame, y, sample_weight=weight, offset=offset)
+            )
+        records[solve] = record = model._fit_inference_info["identifiability"]
+        assert record.gauge is not None and not np.all(record.gauge._moved())
+        assert bool(model._fit_inference_info.get("structured_covariance")) == (solve == "auto")
+        if solve == "auto":
+            structured = model
+    # the Jacobi-scaled solver Hessian of the structured fit, dense
+    W = np.asarray(state_ops._solver_space_working_weights(structured), dtype=np.float64)
+    n = structured._dm.n
+    X = np.hstack(
+        [np.asarray(m.toarray(), float).reshape(n, -1) for m in structured._dm.group_matrices]
+    )
+    state = state_ops.retained_linear_state(structured)
+    S = state_ops._structured_penalty_product(state.penalized_operator)(np.eye(X.shape[1]))[0]
+    B = np.sqrt(W)[:, None] * (X - (W @ X) / np.sum(W))
+    H = B.T @ B + S
+    jacobi = np.sqrt(np.diag(H))
+    values = np.linalg.eigvalsh(H / np.outer(jacobi, jacobi))
+    kappa = values[-1] / values[records["auto"].gauge.null.shape[1]]
+    np.testing.assert_array_equal(np.isnan(se["gram"]), np.isnan(se["auto"]))
+    shown = ~np.isnan(se["auto"])
+    assert not np.any(np.isnan(se["auto"]))
+    np.testing.assert_allclose(se["gram"][shown], se["auto"][shown], rtol=4.0 * kappa * _U)
+
+
 @pytest.mark.parametrize(
     ("variant", "lam_x"), [("same_x", 8e-4), ("same_x", 1e-4), ("one_row", 1e-4)]
 )
@@ -4909,10 +4961,13 @@ def test_a_held_level_of_the_group_term_reports_the_error_of_the_identified_mean
     the error of g000's own value.  With ``integers`` the group column holds
     ``0 .. 11`` beside ``order=["0", ..., "11"]`` and the held level is
     ``"0"`` in the term's table (PR 508 round 7); fails on 8f4d0d7c.  That mean leans on the two
-    directions the published constraint holds (``c'N`` at 0.023 and 0.085 of ``|c| |N|``),
-    where its variance ``c' V c``, ``1.5e12``, is the constraint's: so the held level has no
-    standard error in either reader, each saying so once.  At ``253c6d353`` both printed
-    ``sqrt(c' V c)``.
+    directions the rows cannot resolve at float64 (``c'N`` at 0.023 and 0.085 of ``|c| |N|``),
+    where its variance ``c' V c``, ``1.5e12``, is the published constraint's: so the held level
+    has no standard error in either reader, each saying so once.  At ``253c6d353`` both printed
+    ``sqrt(c' V c)``.  Both directions are not resolved on every BLAS kernel: the first pass's
+    eigenvectors are within its Davis-Kahan angle of the subspace and no closer, so neither is an
+    alias of the design (``identifiability._design_null``).  At ``8cf0bca5d`` the Haswell kernel
+    called one an alias.
     """
     order = [str(i) for i in range(12)] if integers else [f"g{i:03d}" for i in range(12)]
     model, _, _ = _folded_group_term_model(
@@ -4929,7 +4984,7 @@ def test_a_held_level_of_the_group_term_reports_the_error_of_the_identified_mean
     V = np.asarray(covariance)[group.start : group.end, group.start : group.end]
     assert float(c @ V @ c) > 1e10
     record = model._fit_inference_info["identifiability"]
-    assert record.aliases and {alias.source for alias in record.aliases} <= {"float64", "rank"}
+    assert [alias.source for alias in record.aliases] == ["float64", "float64"]
     null = np.asarray(record.gauge.null)
     a = np.zeros(null.shape[0])
     a[next(g for g in model._groups if g.feature_name == "g").sl] = c
@@ -4942,6 +4997,92 @@ def test_a_held_level_of_the_group_term_reports_the_error_of_the_identified_mean
     held = order[0]
     for se in (frame_se[held], inferred[held]):
         assert np.isnan(float(se))
+
+
+def _cleaned_design_null(monkeypatch):
+    """Hand the design's read the first pass's subspace with its exact design null swapped in.
+
+    ``_read_rows``'s refined directions ``R`` are kept; the directions ``N`` handed to
+    ``_design_null`` are replaced by ``[d, n]``: ``d`` the vector of ``span(R)`` the unit-weight
+    rows and the penalty curve least (in the Jacobi metric, read from the dense rows), and ``n``
+    the part of ``N`` off ``d``.  That is another eigensolver's answer within the first pass's
+    angle, the basis a kernel whose rounding leaves the null cluster clean returns.
+    """
+    from superglm.solvers import identifiability
+
+    read_rows, design_null = identifiability._read_rows, identifiability._design_null
+    held: dict = {}
+
+    def kept(*args, **kwargs):
+        held["split"] = split = read_rows(*args, **kwargs)
+        return split
+
+    def cleaned(decomposition, directions, groups, design, support, penalty, *args, **kwargs):
+        refined = np.asarray(held["split"].refined)
+        scale = np.asarray(decomposition.column_scale, dtype=np.float64)
+        jacobi = np.where(scale > 0.0, scale, 1.0)[:, None]
+        X = np.asarray(design.toarray(), dtype=np.float64)
+        weights = np.asarray(support, dtype=np.float64)
+        rows = np.sqrt(weights)[:, None] * (X - (weights @ X) / weights.sum()) @ refined
+        curvature = rows.T @ rows + refined.T @ penalty(refined)[0]
+        metric = (jacobi * refined).T @ (jacobi * refined)
+        root = np.linalg.cholesky(metric)
+        inverse = np.linalg.inv(root)
+        values, vectors = np.linalg.eigh(inverse @ (0.5 * (curvature + curvature.T)) @ inverse.T)
+        least = refined @ (inverse.T @ vectors[:, 0])
+        unit = jacobi[:, 0] * least / np.linalg.norm(jacobi[:, 0] * least)
+        scaled = jacobi * np.asarray(directions, dtype=np.float64)
+        rest = scaled - unit[:, None] * (unit @ scaled)
+        other = np.linalg.svd(rest, full_matrices=False)[0][:, :1]
+        swapped = np.hstack((unit[:, None], other)) / jacobi
+        return design_null(
+            decomposition, swapped, groups, design, support, penalty, *args, **kwargs
+        )
+
+    monkeypatch.setattr(identifiability, "_read_rows", kept)
+    monkeypatch.setattr(identifiability, "_design_null", cleaned)
+
+
+def test_a_held_level_reads_the_same_whichever_basis_the_first_pass_returns(monkeypatch) -> None:
+    """The folded group term's fit publishes the same whichever basis of its null cluster it reads.
+
+    The first pass's two null directions sit within ``3e-2`` (natively) of the subspace
+    (Davis-Kahan: ``|fl(C) - C| / gap``, the identified third eigenvalue only ``1e-17`` away),
+    so a kernel may hand the design's read a basis with the exact design null in it, or one
+    tilted ``1e-5`` toward the identified direction, whose unit-weight root is then ``1e-6``.
+    Forced here (``_cleaned_design_null``), the published aliases, coefficients, intercept and
+    the held level's standard errors are the plain fit's.  At ``8cf0bca5d`` the swapped basis
+    made one direction an alias of the design, which moved the intercept from -27.10 to -21.49
+    (the Haswell kernel, on its own, made the same alias and published -20.85).
+    """
+    order = [f"g{i:03d}" for i in range(12)]
+
+    def published(model):
+        record = model._fit_inference_info["identifiability"]
+        frame = model.relativities(with_se=True)["g"]
+        return (
+            [(alias.source, alias.term, alias.reason) for alias in record.aliases],
+            float(model.result.intercept),
+            np.asarray(model.result.beta, dtype=np.float64),
+            frame["se_log_relativity"].to_numpy(dtype=np.float64),
+        )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", NonEstimablePredictionWarning)
+        plain = published(
+            _folded_group_term_model(OrderedCategorical(order=order, basis=Spline(n_knots=4)))[0]
+        )
+        with monkeypatch.context() as patch:
+            _cleaned_design_null(patch)
+            swapped = published(
+                _folded_group_term_model(OrderedCategorical(order=order, basis=Spline(n_knots=4)))[
+                    0
+                ]
+            )
+    assert swapped[0] == plain[0]
+    assert swapped[1] == plain[1]
+    np.testing.assert_array_equal(swapped[2], plain[2])
+    np.testing.assert_array_equal(swapped[3], plain[3])
 
 
 def test_reports_fold_a_held_level_beside_a_declared_level_the_group_term_lacks() -> None:
