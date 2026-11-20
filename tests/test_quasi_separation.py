@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperGLM
+from superglm import SeparationWarning, SuperGLM
 from superglm.distributions import Tweedie
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
@@ -42,26 +42,53 @@ def _make_sparse_tweedie_data(n=10_000, n_rare=10, seed=42):
     return df, y, exposure
 
 
-class TestSEFiniteForRareLevel:
-    """SE must be large but finite (not 0, not inf) for separated levels."""
+class TestRareLevelWithoutFiniteEstimate:
+    """A level whose every row is at the response boundary has no finite estimate and no SE."""
 
-    def test_se_finite_for_rare_level(self):
+    def test_rare_level_has_no_standard_error_and_the_separation_footnote(self):
+        """``rare``'s ten rows are all at ``y = 0``: its coefficient has no finite estimate.
+
+        Zero is Tweedie's response boundary, which the log link reaches only at ``eta = -inf``.
+        The certificate, from the rows: along ``-e_rare`` every rare row's linear predictor
+        falls and no other row's moves, so the likelihood rises without bound and
+        ``cat[rare]`` has no maximum (the fit's existence decision is ``"present"``, its
+        verified span ``e_rare``).  The summary shows no standard error for it, with the
+        separation footnote, and every other coefficient and standard error is the fit without
+        those rows, to the fits' convergence ``tol``.  At ``a4a7a64cd`` the summary printed
+        ``-22.3`` with a standard error of ``36.1`` (``z = -0.62``): where the solver stopped,
+        and an error no finite estimate has.
+        """
         df, y, exposure = _make_sparse_tweedie_data()
-        m = SuperGLM(
-            family=Tweedie(p=1.5),
-            selection_penalty=0.0,
-            features={"cat": Categorical(base="first")},
-        )
-        m.fit(df, y, sample_weight=exposure, offset=np.log(exposure))
-        s = m.summary()
+        rare = df["cat"].to_numpy() == "rare"
+        assert np.count_nonzero(rare) == 10 and np.all(y[rare] == 0.0)
 
-        rare_row = next(r for r in s._coef_rows if "rare" in r.name)
-        assert rare_row.se is not None
-        assert rare_row.se > 0, "SE should not be zero for separated level"
-        assert np.isfinite(rare_row.se), "SE should be finite"
-        assert np.isfinite(rare_row.z), "z-score should be finite"
-        # SE should be large (indicating undetermined)
-        assert rare_row.se > 1.0, "SE should be large for near-separated level"
+        def fit(keep):
+            model = SuperGLM(
+                family=Tweedie(p=1.5),
+                selection_penalty=0.0,
+                features={"cat": Categorical(base="first")},
+            )
+            frame = df[keep].reset_index(drop=True)
+            model.fit(frame, y[keep], sample_weight=exposure[keep], offset=np.log(exposure[keep]))
+            return model
+
+        with pytest.warns(SeparationWarning):
+            m = fit(np.ones(len(y), dtype=bool))
+        s = m.summary()
+        rows = {r.name: r for r in s._coef_rows}
+        assert np.isnan(rows["cat[rare]"].se) and np.isnan(rows["cat[rare]"].z)
+        decision = m.result.separation_statement.decision
+        assert decision.state == "present" and decision.names == ("cat[rare]",)
+        notes = " ".join(" ".join(note.split()) for note in s._info["identifiability_notes"])
+        assert "1 coefficient has no finite estimate (standard error shown as ---): cat[rare]." in (
+            notes
+        )
+        assert "10 rows with responses at 0 (level rare of cat) are separated" in notes
+        kept = fit(~rare)
+        for row in kept.summary()._coef_rows:
+            assert np.isfinite(rows[row.name].se), row.name
+            np.testing.assert_allclose(rows[row.name].se, row.se, rtol=m._tol)
+            np.testing.assert_allclose(rows[row.name].coef, row.coef, rtol=m._tol)
 
 
 class TestSeparatedTailDiagnostics:
