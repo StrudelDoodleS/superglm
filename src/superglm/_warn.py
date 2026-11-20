@@ -10,6 +10,6 @@ import warnings
 _PACKAGE_PREFIX = os.path.dirname(os.path.abspath(__file__)) + os.sep
 
 
-def warn_caller(message: str, category: type[Warning] = UserWarning) -> None:
-    """Warn at the first frame outside superglm."""
+def warn_caller(message: str | Warning, category: type[Warning] = UserWarning) -> None:
+    """Warn at the first frame outside superglm (a ``Warning`` instance keeps its own class)."""
     warnings.warn(message, category, skip_file_prefixes=(_PACKAGE_PREFIX,))

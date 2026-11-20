@@ -693,6 +693,8 @@ class EditorSession:
             return lss_editable_terms(
                 model, names, n_points=n_points, with_se=with_se, train=train_data
             )
+        from superglm.model.explain_ops import curve_disclosure_quiet
+
         editable: dict[str, EditableTerm] = {}
         # The rows a shape refit reads (_resolve_refit_data).
         refit_data = (
@@ -708,12 +710,14 @@ class EditorSession:
                 raise EditorValueError(f"Interactions are not editable in v1: {name!r}")
             if name not in model._specs:
                 raise EditorKeyError(f"Term not found: {name!r}")
-            ti = model.term_inference(
-                name,
-                with_se=with_se,
-                n_points=n_points,
-                centering=centering,
-            )
+            # the curve shows each point's ``non_estimable`` kind, so the warning is not given
+            with curve_disclosure_quiet():
+                ti = model.term_inference(
+                    name,
+                    with_se=with_se,
+                    n_points=n_points,
+                    centering=centering,
+                )
             term = term_from_inference(ti)
             if centering != "native":
                 native_ti = model.term_inference(

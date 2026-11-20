@@ -151,8 +151,43 @@ def test_main_effect_level_detected():
     assert "'c6'" in message
 
 
+def _separated_level_fit():
+    rng = np.random.default_rng(5)
+    n = 2500
+    c = rng.choice([f"c{i}" for i in range(8)], size=n)
+    w = np.ones(n)
+    y = _tweedie_response(rng, n)
+    y = np.where(c == "c6", 0.0, np.where(y == 0.0, 0.4, y))
+    model = SuperGLM(family=Tweedie(p=1.5), features={"c": Categorical()}, max_iter=60)
+    fit_catching(model, pd.DataFrame({"c": c}), y, w)
+    return model
+
+
+def test_predict_names_the_rows_of_a_decided_separated_level_once():
+    """A decided separation names a separated level's rows once, by the decision's span.
+
+    The level's coordinate is the span (``"present"``), so ``predict``'s off-support
+    disclosure names its rows, kind ``"separated"``, at the caller's line; the build scan's
+    per-level warning is not repeated for rows the disclosure names, and rows of other levels
+    are silent.  At ``253c6d353`` the per-level warning was the only one.
+    """
+    model = _separated_level_fit()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.predict(pd.DataFrame({"c": ["c6", "c1"]}))
+    named = [x for x in caught if type(x.message).__name__ == "NonEstimablePredictionWarning"]
+    assert len(named) == 1 and named[0].message.rows.tolist() == [0]
+    assert named[0].message.kinds == ("separated",)
+    assert named[0].filename == __file__
+    assert not [x for x in caught if "only boundary responses at fit" in str(x.message)]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.predict(pd.DataFrame({"c": ["c1", "c2"]}))
+    assert not caught
+
+
 @pytest.mark.pins_behaviour
-def test_predict_names_a_separated_categorical_level_it_meets():
+def test_predict_names_a_separated_categorical_level_it_meets(monkeypatch):
     """``predict`` names a main-effect level that had only zero responses at fit (sz_explosion round 2).
 
     The fit warns at build; the level has no finite effect, and its
@@ -162,16 +197,12 @@ def test_predict_names_a_separated_categorical_level_it_meets():
     control: master's fixed stack level already found it, and it pins that for
     the deeper prediction path that reads the raw predictor (``warn_caller``).
     Mutation: no record of the level; then the fixed stack level, one frame
-    too deep on that path.
+    too deep on that path.  On the route where no existence decision is built, which keeps
+    this warning (a decided fit names the rows instead:
+    ``test_predict_names_the_rows_of_a_decided_separated_level_once``).
     """
-    rng = np.random.default_rng(5)
-    n = 2500
-    c = rng.choice([f"c{i}" for i in range(8)], size=n)
-    w = np.ones(n)
-    y = _tweedie_response(rng, n)
-    y = np.where(c == "c6", 0.0, np.where(y == 0.0, 0.4, y))
-    model = SuperGLM(family=Tweedie(p=1.5), features={"c": Categorical()}, max_iter=60)
-    fit_catching(model, pd.DataFrame({"c": c}), y, w)
+    force_decision_not_built(monkeypatch)
+    model = _separated_level_fit()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         model.predict(pd.DataFrame({"c": ["c6", "c1"]}))
@@ -184,7 +215,8 @@ def test_predict_names_a_separated_categorical_level_it_meets():
     assert not [x for x in caught if "only boundary responses at fit" in str(x.message)]
 
 
-def test_predict_names_a_separated_grouped_level_by_its_members():
+@pytest.mark.parametrize("decided", [False, True], ids=["scan", "decision"])
+def test_predict_names_a_separated_grouped_level_by_its_members(monkeypatch, decided):
     """``predict`` names a collapsed level that separates when a member's raw value meets it (PR 508 round 1).
 
     ``Categorical(grouping=...)`` is the remedy the guide recommends for
@@ -192,9 +224,14 @@ def test_predict_names_a_separated_grouped_level_by_its_members():
     ("c67"), while ``predict`` reads the frame's raw values ("c6", "c7").  The
     check compared the two directly, so no row ever matched a group.  It now
     resolves the column as ``score`` does: raw to collapsed to fitted.
-    Mutation: the raw values matched against the recorded labels.
+    Mutation: the raw values matched against the recorded labels.  Where the existence
+    decision is built (``decision``) the member's row is named by the off-support disclosure
+    instead, once, and the scan's per-level warning is not repeated.
     """
     from superglm import collapse_levels
+
+    if not decided:
+        force_decision_not_built(monkeypatch)
 
     rng = np.random.default_rng(5)
     n = 2500
@@ -212,6 +249,14 @@ def test_predict_names_a_separated_grouped_level_by_its_members():
             warnings.simplefilter("always")
             model.predict(pd.DataFrame({"c": [member, "c1"]}))
         named = [x for x in caught if "only boundary responses at fit" in str(x.message)]
+        disclosed = [
+            x.message for x in caught if type(x.message).__name__ == "NonEstimablePredictionWarning"
+        ]
+        if decided:
+            assert not named and len(disclosed) == 1
+            assert disclosed[0].rows.tolist() == [0] and disclosed[0].kinds == ("separated",)
+            continue
+        assert not disclosed
         assert len(named) == 1 and "'c' levels c67" in str(named[0].message)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")

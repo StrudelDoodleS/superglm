@@ -73,6 +73,9 @@ def session_payload(
             "spline_view": spline_view,
             "ci_lower_y": ci_lower,
             "ci_upper_y": ci_upper,
+            # parallel to "y": the kind of direction the fit does not determine at each point
+            # (``TermInference.non_estimable``), "" where it does; None when it determines all
+            "non_estimable": term.metadata.get("non_estimable"),
             "weights": weights,
             "exposure": _exposure_payload(term, x_values, weights),
             "handle_indices": _handle_indices(term).astype(int).tolist(),

@@ -147,6 +147,12 @@ class TermInference:
     # into ``base_relativity`` so the workbook multiplies out to ``model.predict``.
     centering_shift: float = 0.0
 
+    # Each point's kind of direction the fit does not determine (``diagnostics.estimability``:
+    # ``"alias"``, ``"separated"``, ``"unresolved"``, ``"unfitted"``), ``""`` where it determines
+    # the point; parallel to ``levels`` or ``x``.  ``None`` when every point is determined.  A
+    # flagged point's value is the published fit's, and its standard error is NaN.
+    non_estimable: NDArray | None = None
+
     def to_dataframe(self) -> pd.DataFrame:
         """Convert to a tidy DataFrame for plotting or export."""
         # "piecewise" belongs with the x-bearing kinds, not with the numeric

@@ -427,7 +427,247 @@ def _add_centred_term(
     )
 
 
-def _predict_eta(
+def _score_terms(
+    model,
+    frame: EagerFrame,
+    plan: dict[str, list[dict[str, Any]]],
+    beta_all: NDArray,
+    eta: EtaSum,
+    centre: NDArray | None,
+    *,
+    random_effects: str,
+    fitted: bool,
+    validate: bool = True,
+) -> list[str]:
+    """Add every term's contribution at the coefficients ``beta_all`` to ``eta``.
+
+    The public predictor's terms as ``_predict_eta`` reads them: a column carrying the fit's
+    centre (``centre``, public coordinates) is scored about it, a population prediction leaves
+    out the random effects and factor smooths it zeroes (``validate`` checks their values), and
+    unless ``fitted`` an ``sz`` term with levels left out of its population is scored as
+    ``predict`` scores it.  It is linear in ``beta_all`` (and in ``eta``'s intercept), so at a
+    direction's coefficients it gives each row's product with it.  Returns the ``sz`` terms'
+    partly identified levels met, for ``predict``'s warning.
+    """
+    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.random_effect import RandomEffect
+
+    def score(term: dict[str, Any]) -> None:
+        if centre is not None:
+            block = centre[term["beta_idx"]]
+            if np.any(block != 0.0):
+                if eta.compensated:
+                    _add_centred_term(eta, term, frame, beta_all, block)
+                else:
+                    eta.add(_centred_term_contribution(term, frame, beta_all, block))
+                return
+        # A callable, so a compensated sum need not hold the term's rows.
+        eta.add(lambda: _score_prediction_term_exact(term, frame, beta_all))
+
+    for term in plan["features"]:
+        if random_effects == "population" and isinstance(term["spec"], RandomEffect):
+            if validate:
+                term["spec"].validate_prediction_values(frame.column_array(term["name"]))
+            continue
+        score(term)
+
+    if not fitted:
+        from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
+
+        _ensure_factor_smooth_levels_recorded(model)
+    unidentified: list[str] = []
+    features = {feature["name"]: feature for feature in plan["features"]}
+    for term in plan["interactions"]:
+        spec = term["spec"]
+        if not fitted and isinstance(spec, FactorSmooth) and spec._has_population_offset:
+            contribution, named = _score_unidentified_factor_smooth(
+                term,
+                frame,
+                beta_all,
+                population=random_effects == "population",
+                features=features,
+            )
+            eta += contribution
+            if named:
+                unidentified.append(f"term {term['name']!r} levels {', '.join(map(str, named))}")
+            continue
+        if random_effects == "population" and isinstance(spec, FactorSmooth):
+            if validate:
+                left_name, right_name = term["parent_names"]
+                spec.validate_population_prediction_values(
+                    frame.column_array(left_name),
+                    frame.column_array(right_name),
+                )
+            continue
+        score(term)
+    return unidentified
+
+
+def _population_skipped(spec, random_effects: str) -> bool:
+    """Whether a population prediction leaves the term out (``_score_terms``)."""
+    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.random_effect import RandomEffect
+
+    if random_effects != "population":
+        return False
+    if isinstance(spec, RandomEffect):
+        return True
+    return isinstance(spec, FactorSmooth) and not spec._has_population_offset
+
+
+def _direction_products(
+    model, frame: EagerFrame, plan, slopes: NDArray, intercepts: NDArray, random_effects: str
+) -> NDArray:
+    """``r q`` for each row ``r`` and each direction ``q``: the predictor at ``q``, no offset.
+
+    One coefficient pass per direction through the predictor's own terms (``_score_terms``), at
+    the fit's centred state, so a row the direction leaves alone reads zero to rounding at the
+    spread of its columns rather than at their offset.
+    """
+    _, centre, _ = prediction_centred_state(model.result)
+    n = len(frame)
+    products = np.empty((n, slopes.shape[1]))
+    for j in range(slopes.shape[1]):
+        direction = np.asarray(slopes[:, j], dtype=np.float64)
+        alpha = float(intercepts[j]) + (0.0 if centre is None else float(centre @ direction))
+        eta = EtaSum(n, alpha, None)
+        _score_terms(
+            model,
+            frame,
+            plan,
+            direction,
+            eta,
+            centre,
+            random_effects=random_effects,
+            fitted=False,
+            validate=False,
+        )
+        products[:, j] = eta.finish(consume=True)
+    return products
+
+
+# A term whose design row is one indicator (or none, at its base level): its dual norm is a
+# lookup, ``||(e_k - c) / D||^2 = sum(c^2 / D^2) + (1 - 2 c_k) / D_k^2``, read by its scorer.
+def _indicator_term(spec) -> bool:
+    from superglm.features.categorical import Categorical
+    from superglm.features.interaction import CategoricalInteraction
+    from superglm.features.random_effect import RandomEffect
+
+    return isinstance(spec, Categorical | RandomEffect | CategoricalInteraction)
+
+
+# Rows per block when a term's design rows are formed for their norm: about 2**20 entries.
+_NORM_BLOCK_ENTRIES = 2**20
+
+
+def _row_norms(model, frame: EagerFrame, plan, directions, random_effects: str) -> NDArray:
+    """``||r M^-1||``: each predicted row's norm in the record's dual Jacobi scale.
+
+    ``r`` in the centred coordinates is ``[1, x - c]`` (``estimability_ops``), so its square is
+    ``1 / sum W`` plus, per term, ``||(x_t - c_t) / D_t||^2`` over the term's design row ``x_t``
+    (zero for a term the prediction leaves out).  One pass over the rows: an indicator term
+    reads its lookup through its scorer, any other its design rows in blocks.
+    """
+    n = len(frame)
+    squares = np.full(n, 1.0 / directions.alpha_scale**2)
+    for term in (*plan["features"], *plan["interactions"]):
+        index = term["beta_idx"]
+        scale, centre = directions.scale[index], directions.centre[index]
+        constant = float(np.sum((centre / scale) ** 2))
+        spec = term["spec"]
+        if _population_skipped(spec, random_effects):
+            squares += constant
+            continue
+        if _indicator_term(spec):
+            lookup = (1.0 - 2.0 * centre) / scale**2
+            squares += constant + _score_prediction_term_local_exact(term, frame, lookup)
+            continue
+        columns = _term_columns(term, frame)
+        block = max(1, _NORM_BLOCK_ENTRIES // max(1, index.size))
+        for start in range(0, n, block):
+            rows = spec.transform(*(column[start : start + block] for column in columns))
+            scaled = (np.asarray(rows, dtype=np.float64) - centre) / scale
+            squares[start : start + block] += np.einsum("ij,ij->i", scaled, scaled)
+    return np.sqrt(squares)
+
+
+def off_support_rows(model, frame: EagerFrame, plan, random_effects: str) -> NDArray | None:
+    """Each predicted row's kind of direction the fit does not determine, or ``None``.
+
+    ``None``, with no pass over the rows, when the published fit has no such direction
+    (``estimability_ops.published_directions``); otherwise ``k`` coefficient passes for its
+    ``k`` directions and one norm pass, and ``diagnostics.estimability.off_support``'s labels.
+    The functional is the one ``predict`` evaluates: the exact design at the rows' values on any
+    fit (a binned fit's own rows can lean off its binned support), the intercept included, a
+    population prediction's random effects at zero.
+    """
+    from superglm.diagnostics.estimability import off_support
+    from superglm.model.estimability_ops import published_directions
+
+    directions = published_directions(model)
+    if directions is None:
+        return None
+    # the predictor's own pass has said what scoring these rows says (unseen levels)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        projections = {
+            kind: _direction_products(
+                model, frame, plan, slopes, directions.intercepts[kind], random_effects
+            )
+            for kind, slopes in directions.slopes.items()
+        }
+        norms = _row_norms(model, frame, plan, directions, random_effects)
+    return off_support(projections, norms)
+
+
+def _separated_level_message(
+    plan, frame: EagerFrame, labels: NDArray | None, random_effects: str
+) -> str | None:
+    """The warning for rows at levels the build scan found separated, or ``None``.
+
+    A row the off-support disclosure already names (``labels``) is not named again here: a
+    level is listed while one of its predicted rows is not labelled.
+    """
+    from superglm.features.random_effect import RandomEffect
+
+    separated_levels: list[str] = []
+    for term in plan["features"]:
+        spec = term["spec"]
+        if random_effects == "population" and isinstance(spec, RandomEffect):
+            continue
+        held = getattr(spec, "_separated_levels_at_fit", ())
+        if not held:
+            continue
+        values = frame.column_array(term["name"])
+        if labels is None or not np.any(labels != ""):
+            # the level each row is scored at: raw values go through the spec's
+            # grouping and unseen policy, as ``score`` reads them
+            met = spec._predicted_levels(values)
+            named = [label for label in held if label in met]
+        else:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                codes = spec._predict_codes(spec._resolve_predict_labels(values))
+            free = labels == ""
+            levels = list(spec._levels)
+            named = [
+                label
+                for label in held
+                if label in levels and np.any(free & (codes == levels.index(label)))
+            ]
+        if named:
+            separated_levels.append(f"{term['name']!r} levels {', '.join(map(str, named))}")
+    if not separated_levels:
+        return None
+    return (
+        "Categorical levels that had exposure but only boundary responses at fit have no "
+        "finite effect; the fit's value for them is where its walk stopped, so their "
+        "predictions sit near the response boundary: " + "; ".join(separated_levels) + ". "
+        "Merge them into similar levels (Categorical(grouping=...)) or use re() on the term."
+    )
+
+
+def _disclosed_eta(
     model,
     X,
     offset: NDArray | None,
@@ -436,21 +676,18 @@ def _predict_eta(
     stabilize: bool = True,
     fitted: bool = False,
     warn: bool = True,
-) -> NDArray[np.floating]:
-    """Predict the raw or stabilized linear predictor on canonical blocks.
+) -> tuple[NDArray[np.floating], NDArray | None]:
+    """``_predict_eta``'s predictor and its rows' off-support labels (``off_support_rows``).
 
-    ``fitted`` scores every term at the fit's own coefficients (screening's working
-    score, random-effect reporting, discretization deltas); ``predict`` instead
-    treats ``sz`` levels the data identify only in part (#432,
-    ``FactorSmooth._identified_blocks``) and warns of them unless ``warn`` is false.
+    The labels are ``None`` unless ``warn`` and not ``fitted``, or where the fit has no
+    direction to disclose; the caller gives their one warning (``disclosure``).
     """
     if random_effects not in ("conditional", "population"):
         raise ValueError(
             f"random_effects must be 'conditional' or 'population', got {random_effects!r}"
         )
 
-    from superglm.features.factor_smooth import SZ_POPULATION_PREDICTION, FactorSmooth
-    from superglm.features.random_effect import RandomEffect
+    from superglm.features.factor_smooth import SZ_POPULATION_PREDICTION
 
     frame = as_eager_frame(X)
     plan = _prediction_plan(model)
@@ -475,77 +712,63 @@ def _predict_eta(
         compensated=centre is not None
         and bool(getattr(model.result, "centred_sum_compensated", False)),
     )
-
-    def score(term: dict[str, Any]) -> None:
-        if centre is not None:
-            block = centre[term["beta_idx"]]
-            if np.any(block != 0.0):
-                if eta.compensated:
-                    _add_centred_term(eta, term, frame, beta_all, block)
-                else:
-                    eta.add(_centred_term_contribution(term, frame, beta_all, block))
-                return
-        # A callable, so a compensated sum need not hold the term's rows.
-        eta.add(lambda: _score_prediction_term_exact(term, frame, beta_all))
-
-    separated_levels: list[str] = []
-    for term in plan["features"]:
-        if random_effects == "population" and isinstance(term["spec"], RandomEffect):
-            term["spec"].validate_prediction_values(frame.column_array(term["name"]))
-            continue
-        score(term)
-        held = getattr(term["spec"], "_separated_levels_at_fit", ())
-        if held and not fitted and warn:
-            # the level each row is scored at: raw values go through the spec's
-            # grouping and unseen policy, as ``score`` reads them
-            met = term["spec"]._predicted_levels(frame.column_array(term["name"]))
-            named = [label for label in held if label in met]
-            if named:
-                separated_levels.append(f"{term['name']!r} levels {', '.join(map(str, named))}")
-    # A prediction warning names the caller of ``predict``, however deep the call.
-    if separated_levels:
-        warn_caller(
-            "Categorical levels that had exposure but only boundary responses at fit have no "
-            "finite effect; the fit's value for them is where its walk stopped, so their "
-            "predictions sit near the response boundary: " + "; ".join(separated_levels) + ". "
-            "Merge them into similar levels (Categorical(grouping=...)) or use re() on the term."
-        )
-
-    if not fitted:
-        from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
-
-        _ensure_factor_smooth_levels_recorded(model)
-    unidentified: list[str] = []
-    features = {feature["name"]: feature for feature in plan["features"]}
-    for term in plan["interactions"]:
-        spec = term["spec"]
-        if not fitted and isinstance(spec, FactorSmooth) and spec._has_population_offset:
-            contribution, named = _score_unidentified_factor_smooth(
-                term,
-                frame,
-                beta_all,
-                population=random_effects == "population",
-                features=features,
-            )
-            eta += contribution
-            if named:
-                unidentified.append(f"term {term['name']!r} levels {', '.join(map(str, named))}")
-            continue
-        if random_effects == "population" and isinstance(spec, FactorSmooth):
-            left_name, right_name = term["parent_names"]
-            spec.validate_population_prediction_values(
-                frame.column_array(left_name),
-                frame.column_array(right_name),
-            )
-            continue
-        score(term)
+    unidentified = _score_terms(
+        model, frame, plan, beta_all, eta, centre, random_effects=random_effects, fitted=fitted
+    )
+    total = eta.finish(consume=True)
+    labels = None
+    if warn and not fitted:
+        labels = off_support_rows(model, frame, plan, random_effects)
+        # A prediction warning names the caller of ``predict``, however deep the call.
+        message = _separated_level_message(plan, frame, labels, random_effects)
+        if message is not None:
+            warn_caller(message)
     if unidentified and warn:
         warn_caller(SZ_POPULATION_PREDICTION + "; ".join(unidentified) + ".")
-
-    total = eta.finish(consume=True)
     if offset is not None:
         total = total + offset
-    return stabilize_eta(total, model._link) if stabilize else total
+    return (stabilize_eta(total, model._link) if stabilize else total), labels
+
+
+def _warn_off_support(labels: NDArray | None, no_mean: NDArray | None = None) -> None:
+    """Give the one off-support warning for ``labels`` when a row is labelled."""
+    if labels is None or not np.any(labels != ""):
+        return
+    from superglm.diagnostics.estimability import disclosure
+
+    warn_caller(disclosure(labels, no_mean))
+
+
+def _predict_eta(
+    model,
+    X,
+    offset: NDArray | None,
+    *,
+    random_effects: str,
+    stabilize: bool = True,
+    fitted: bool = False,
+    warn: bool = True,
+) -> NDArray[np.floating]:
+    """Predict the raw or stabilized linear predictor on canonical blocks.
+
+    ``fitted`` scores every term at the fit's own coefficients (screening's working
+    score, random-effect reporting, discretization deltas); ``predict`` instead
+    treats ``sz`` levels the data identify only in part (#432,
+    ``FactorSmooth._identified_blocks``) and warns of them unless ``warn`` is false.
+    With ``warn`` it also warns once of the rows that lean on a direction the fit does not
+    determine (``off_support_rows``).
+    """
+    eta, labels = _disclosed_eta(
+        model,
+        X,
+        offset,
+        random_effects=random_effects,
+        stabilize=stabilize,
+        fitted=fitted,
+        warn=warn,
+    )
+    _warn_off_support(labels)
+    return eta
 
 
 def predict_eta_exact(
@@ -586,13 +809,22 @@ def predict_eta_raw_exact(
     its readers disclose by name: NumPy's floating-point warning would repeat
     it, or under ``-W error`` be raised in its place.
     """
+    eta, labels = _raw_eta_and_labels(model, X, offset, random_effects=random_effects, warn=warn)
+    _warn_off_support(labels)
+    return eta
+
+
+def _raw_eta_and_labels(
+    model, X, offset: NDArray | None, *, random_effects: str, warn: bool
+) -> tuple[NDArray[np.floating], NDArray | None]:
+    """``predict_eta_raw_exact``'s predictor and its off-support labels (``_disclosed_eta``)."""
     quiet = (
         np.errstate(over="ignore", invalid="ignore")
         if link_domain_rows(model._link) is not None
         else contextlib.nullcontext()
     )
     with quiet:
-        return _predict_eta(
+        return _disclosed_eta(
             model,
             X,
             offset,
@@ -957,11 +1189,21 @@ def predict_exact(
 
     A row with no mean (``_no_mean_rows``, read on the raw linear predictor
     before the fit's stabilizer can move it) predicts NaN, with one warning
-    unless ``warn`` is false; every other row is unchanged.
+    unless ``warn`` is false; every other row is unchanged.  Each row is named in
+    one warning: a row that also leans on a direction the fit does not determine
+    is counted in that disclosure (``off_support_rows``), and the no-mean warning
+    names the others.  Where a reader checks its rows itself
+    (``no_mean_warning_quiet``) neither counts them.
     """
-    eta = predict_eta_raw_exact(model, X, offset, random_effects=random_effects, warn=warn)
+    eta, labels = _raw_eta_and_labels(model, X, offset, random_effects=random_effects, warn=warn)
     mu, missing = _response_mean_and_missing(model, eta)
-    if warn and np.any(missing) and not _NO_MEAN_WARNING_QUIET.get():
+    if not warn:
+        return mu
+    quiet = _NO_MEAN_WARNING_QUIET.get()
+    _warn_off_support(labels, None if quiet else missing)
+    if labels is not None:
+        missing = missing & (labels == "")
+    if np.any(missing) and not quiet:
         warn_caller(_no_mean_warning(model, eta, missing))
     return mu
 

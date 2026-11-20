@@ -49,14 +49,24 @@ class NonEstimablePredictionWarning(UserWarning):
 
     ``rows`` are the row positions (in the order predicted) and ``kinds`` each row's kind
     (``KINDS``), as R's ``"non-estim"`` attribute.  ``no_mean`` counts those rows that have no
-    mean at the returned predictor (predicted NaN).
+    mean at the returned predictor (predicted NaN).  A term reader (a relativity or term curve)
+    names its points by term in ``points`` (term -> each point's kind, ``""`` where the fit
+    determines it), empty for a prediction.
     """
 
-    def __init__(self, message: str, rows: NDArray, kinds: Sequence[str], no_mean: int = 0) -> None:
+    def __init__(
+        self,
+        message: str,
+        rows: NDArray,
+        kinds: Sequence[str],
+        no_mean: int = 0,
+        points: Mapping[object, NDArray] | None = None,
+    ) -> None:
         super().__init__(message)
         self.rows = np.asarray(rows, dtype=np.intp)
         self.kinds = tuple(kinds)
         self.no_mean = int(no_mean)
+        self.points = dict(points or {})
 
 
 def off_support(
@@ -82,6 +92,12 @@ def off_support(
     return labels
 
 
+def reasons(labels: NDArray) -> str:
+    """How many labelled rows lean on each kind, in words (``"2 on a direction ..."``)."""
+    kinds = [str(kind) for kind in np.asarray(labels, dtype=object) if kind != ""]
+    return "; ".join(f"{kinds.count(kind)} on {_REASONS[kind]}" for kind in KINDS if kind in kinds)
+
+
 def disclosure(labels: NDArray, no_mean: NDArray | None = None) -> NonEstimablePredictionWarning:
     """The one warning a prediction call gives for its off-support rows (``off_support``).
 
@@ -92,8 +108,7 @@ def disclosure(labels: NDArray, no_mean: NDArray | None = None) -> NonEstimableP
     rows = np.flatnonzero(labels != "")
     kinds = [str(kind) for kind in labels[rows]]
     count = rows.size
-    present = [kind for kind in KINDS if kind in kinds]
-    parts = "; ".join(f"{kinds.count(kind)} on {_REASONS[kind]}" for kind in present)
+    parts = reasons(labels)
     first = ", ".join(str(int(row)) for row in rows[:5]) + (", ..." if count > 5 else "")
     plural = "row leans" if count == 1 else "rows lean"
     message = (

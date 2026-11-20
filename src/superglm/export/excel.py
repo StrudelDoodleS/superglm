@@ -6,6 +6,7 @@ from os import PathLike
 from pathlib import Path
 from typing import BinaryIO
 
+import numpy as np
 import pandas as pd
 
 _TERM_COLUMNS = (
@@ -406,6 +407,35 @@ def _annotate_ppform_blocks(ws, main_effects) -> None:
         )
 
 
+def _non_estimable_note(block) -> str | None:
+    """The sentence naming a block's rows the fit does not determine, or ``None``."""
+    from superglm.diagnostics.estimability import reasons
+
+    labels = block.non_estimable
+    if labels is None or not np.any(np.asarray(labels, dtype=object) != ""):
+        return None
+    keys = block.table.iloc[:, 0].to_numpy()[np.asarray(labels, dtype=object) != ""]
+    return (
+        f"Rows {', '.join(map(str, keys))}: the fit does not determine their relativity "
+        f"({reasons(labels)}); the value shown is the published fit's."
+    )
+
+
+def _annotate_non_estimable_blocks(ws, main_effects) -> None:
+    """Add each block's non-estimable rows to its note row (``RatingTableBlock.non_estimable``).
+
+    Runs after the other annotations, appending to a note already there, so the block's own
+    rule stays first.
+    """
+    starts = _main_effect_start_columns(main_effects)
+    for idx, block in enumerate(main_effects):
+        note = _non_estimable_note(block)
+        if note is None:
+            continue
+        cell = ws.cell(row=_MAIN_EFFECT_NOTE_ROW, column=starts[idx])
+        cell.value = note if cell.value is None else f"{cell.value} {note}"
+
+
 def _annotate_per_unit_offset_blocks(ws, main_effects) -> None:
     """Write each per-unit offset block's multiply rule into its note row.
 
@@ -481,6 +511,7 @@ def _write_rating_blocks(ws, main_effects, interactions) -> None:
     _annotate_piecewise_blocks(ws, main_effects)
     _annotate_per_unit_offset_blocks(ws, main_effects)
     _annotate_ppform_blocks(ws, main_effects)
+    _annotate_non_estimable_blocks(ws, main_effects)
 
     interaction_row = max_main_row + 3
     for block in interactions:

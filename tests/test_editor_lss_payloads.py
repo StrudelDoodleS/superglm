@@ -43,7 +43,7 @@ TOLERANCE = 64 * EPS
 # Every key of a SuperGLM term's payload; a SuperLSS key on it would change a SuperGLM page.
 GLM_TERM_KEYS = {
     "kind", "term_type", "x", "x_domain", "y", "original_y", "previous_y", "controls",
-    "spline_view", "ci_lower_y", "ci_upper_y", "weights", "exposure", "handle_indices", "impact",
+    "spline_view", "ci_lower_y", "ci_upper_y", "non_estimable", "weights", "exposure", "handle_indices", "impact",
     "n_points", "levels", "level_groups", "level_order_changed", "reference", "shape", "rules", "knots",
     "pending", "unseen", "unsmoothed", "effective_df", "edited", "x_label", "y_label", "title",
     "group_display",

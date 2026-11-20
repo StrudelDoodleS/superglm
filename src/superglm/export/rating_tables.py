@@ -66,6 +66,11 @@ class RatingTableBlock:
     # ``OrderedCategorical``, a single-valued ``Numeric`` -- which is why the total is summed from the blocks rather
     # than assumed to run over every exported term.
     centering_shift: float = 0.0
+    # Each table row's kind of direction the fit does not determine (``TermInference.
+    # non_estimable``: ``"alias"``, ``"separated"``, ...; ``""`` where it determines the row),
+    # parallel to ``table``; ``None`` when every row is determined.  A flagged row's relativity
+    # is the published fit's value, which no data pins down; the workbook notes it.
+    non_estimable: NDArray | None = None
 
 
 @dataclass(frozen=True)
@@ -697,6 +702,7 @@ def _categorical_block(
             }
         ),
         centering_shift=float(ti.centering_shift),
+        non_estimable=ti.non_estimable,
     )
 
 
@@ -742,6 +748,7 @@ def _piecewise_block(model: SuperGLM, name: str, centering: str) -> RatingTableB
         ),
         extrapolation=model._specs[name].extrapolation,
         centering_shift=float(ti.centering_shift),
+        non_estimable=ti.non_estimable,
     )
 
 
@@ -763,6 +770,7 @@ def _numeric_block(model: SuperGLM, name: str, centering: str) -> RatingTableBlo
         # agree with what the block's values actually carry, and a lie here
         # moves every prediction in the workbook.
         centering_shift=float(ti.centering_shift),
+        non_estimable=ti.non_estimable,
     )
 
 

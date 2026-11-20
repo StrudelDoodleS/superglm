@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import dataclasses
 import warnings
+
+import numpy as np
 
 from superglm.inference._term_covariance import simultaneous_band_and_critical_value
 from superglm.inference._term_model_ops import (
@@ -18,6 +22,7 @@ from superglm.inference._term_model_ops import (
 from superglm.inference._term_ops import (
     term_inference as _term_inference,
 )
+from superglm.inference.covariance import _SelectedBlockAccess
 from superglm.model.fit_state import fitted_lambda2
 
 _EDITOR_STALE_INFERENCE_MESSAGE = (
@@ -64,6 +69,139 @@ _SHAPE_REPAIRED_INFERENCE_MESSAGE = (
     "unconstrained fit rather than the published one; returning term inference "
     "without SE/CI. Fit the constraint (Constraint.fit.*) if you need a band."
 )
+
+
+class _RootCovariance(_SelectedBlockAccess):
+    """``R R'`` read as a covariance: a kind's directions ``q q'`` (``_curve_labels``).
+
+    The term readers' standard error of a point is ``sqrt(r V r')``, so at ``V = Q Q'`` it is
+    ``||r Q||``, the point's share along the kind, and at ``V = diag(D^-2)`` it is ``||r D^-1||``,
+    its dual norm: the readers evaluate the off-support test on the very functional they report.
+    """
+
+    def __init__(self, root):
+        self.root = np.asarray(root, dtype=np.float64)
+        self.shape = (self.root.shape[0], self.root.shape[0])
+
+    def selected_block(self, indices):
+        rows = self.root[indices]
+        return rows @ rows.T
+
+    def selected_diagonal(self, indices):
+        rows = self.root[indices]
+        return np.einsum("ij,ij->i", rows, rows)
+
+    def solve(self, vector):
+        return self.root @ (self.root.T @ vector)
+
+
+class _DiagonalCovariance(_SelectedBlockAccess):
+    """``diag(d)`` read as a covariance (``_RootCovariance``)."""
+
+    def __init__(self, diagonal):
+        self.diagonal = np.asarray(diagonal, dtype=np.float64)
+        self.shape = (self.diagonal.size, self.diagonal.size)
+
+    def selected_block(self, indices):
+        return np.diag(self.diagonal[indices])
+
+    def selected_diagonal(self, indices):
+        return self.diagonal[indices]
+
+    def solve(self, vector):
+        return self.diagonal * vector
+
+
+def _active_layout(model):
+    """The selected groups re-indexed to the active columns, and those columns' coordinates.
+
+    The layout of the coefficient covariance the term readers take (``_coef_covariance``).
+    """
+    from superglm.solvers.rank import selected_group_name_set
+
+    selected = selected_group_name_set(model.result, model._groups)
+    groups, columns, start = [], [], 0
+    for group in model._groups:
+        if group.name in selected:
+            width = group.end - group.start
+            groups.append(dataclasses.replace(group, start=start, end=start + width))
+            columns.append(np.arange(group.start, group.end, dtype=np.intp))
+            start += width
+    return groups, (np.concatenate(columns) if columns else np.zeros(0, dtype=np.intp))
+
+
+def _curve_labels(model, read):
+    """Per kind, ``read(covariance_fn)``'s standard errors at the probes, as off-support labels.
+
+    ``read`` takes a ``covariance_fn`` and returns a mapping of point arrays (a term's points,
+    or each term's), the readers' standard errors at that covariance.  ``None`` when the fit
+    has no direction to disclose (``estimability_ops.published_directions``): then nothing is
+    read.  One read per kind and one for the norms, all in coefficient space.
+    """
+    from superglm.diagnostics.estimability import off_support
+    from superglm.model.estimability_ops import published_directions
+
+    directions = published_directions(model)
+    if directions is None:
+        return None
+    groups, columns = _active_layout(model)
+    norms = read(lambda: (_DiagonalCovariance(1.0 / directions.scale[columns] ** 2), groups))
+    shares = {
+        kind: read(lambda slopes=slopes: (_RootCovariance(slopes[columns]), groups))
+        for kind, slopes in directions.slopes.items()
+    }
+    return {
+        name: off_support(
+            {kind: np.asarray(values[name], dtype=np.float64) for kind, values in shares.items()},
+            np.asarray(norm, dtype=np.float64),
+        )
+        for name, norm in norms.items()
+    }
+
+
+# Set while a reader that shows each point's ``non_estimable`` kind itself (the editor's curves)
+# reads term inference: the warning would repeat what it shows.  A context variable, so one
+# thread's reader does not silence another's call.
+_CURVE_DISCLOSURE_QUIET: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "superglm_curve_disclosure_quiet", default=False
+)
+
+
+@contextlib.contextmanager
+def curve_disclosure_quiet():
+    """Within the block, term values off the fit's support are flagged without the warning."""
+    token = _CURVE_DISCLOSURE_QUIET.set(True)
+    try:
+        yield
+    finally:
+        _CURVE_DISCLOSURE_QUIET.reset(token)
+
+
+def _curve_warning(flagged) -> None:
+    """One warning for the term points ``flagged`` (name -> labels) whose standard error is NaN.
+
+    Its ``points`` map each term to its labels; ``rows`` and ``kinds`` are the points of a single
+    term, empty when several are named.  Silent under ``curve_disclosure_quiet``.
+    """
+    if _CURVE_DISCLOSURE_QUIET.get():
+        return
+    from superglm._warn import warn_caller
+    from superglm.diagnostics.estimability import NonEstimablePredictionWarning, reasons
+
+    parts = [f"{name!r} ({reasons(labels)})" for name, labels in flagged.items()]
+    single = next(iter(flagged.values())) if len(flagged) == 1 else np.zeros(0, dtype=object)
+    rows = np.flatnonzero(single != "")
+    warn_caller(
+        NonEstimablePredictionWarning(
+            "Term values that lean on what the fit does not determine are returned at the "
+            "published fit's values, with their standard errors NaN: "
+            + "; ".join(parts)
+            + ". The warning's `points` name them by term.",
+            rows,
+            [str(kind) for kind in single[rows]],
+            points=dict(flagged),
+        )
+    )
 
 
 def metrics(model, X, y, sample_weight=None, offset=None):
@@ -177,6 +315,8 @@ def relativities(model, with_se=False, centering="native"):
         covariance_fn=(lambda: model._coef_covariance) if with_se else None,
         centering=centering,
     )
+    if with_se:
+        frames = _disclosed_relativities(model, frames, centering)
     # Per FEATURE, not for the whole call: this returns every term at once, and
     # dropping the band on unrepaired terms because one term was projected
     # would be the over-reach the repair record already avoids. Only the
@@ -196,6 +336,125 @@ def relativities(model, with_se=False, centering="native"):
                 warnings.warn(_SHAPE_REPAIRED_INFERENCE_MESSAGE, UserWarning, stacklevel=2)
                 frames[name] = frame.drop(columns=["se_log_relativity"])
     return frames
+
+
+def _disclosed_relativities(model, frames, centering):
+    """``frames`` with NaN standard errors on the points off the fit's support, and one warning.
+
+    A relativity is a term functional (its coordinates alone, no intercept), tested as
+    ``predict``'s rows are (``_curve_labels``) on the functional its standard error reports.
+    """
+
+    def read(covariance_fn):
+        probed = _relativities(
+            model._feature_order,
+            model._interaction_order,
+            model._specs,
+            model._interaction_specs,
+            model._groups,
+            model.result,
+            with_se=True,
+            covariance_fn=covariance_fn,
+            centering=centering,
+        )
+        return {
+            name: frame["se_log_relativity"].to_numpy()
+            for name, frame in probed.items()
+            if "se_log_relativity" in frame.columns
+        }
+
+    labels = _curve_labels(model, read)
+    if labels is None:
+        return frames
+    flagged = {name: values for name, values in labels.items() if np.any(values != "")}
+    for name, values in flagged.items():
+        frame = frames[name].copy()
+        se = frame["se_log_relativity"].to_numpy(dtype=np.float64, copy=True)
+        se[values != ""] = np.nan
+        frame["se_log_relativity"] = se
+        frames[name] = frame
+    if flagged:
+        _curve_warning(flagged)
+    return frames
+
+
+def _disclosed_term(model, inference, read_kwargs):
+    """``term_inference``'s result with its off-support points flagged (``_curve_labels``).
+
+    ``non_estimable`` holds each point's kind (``""`` where the fit determines it); with
+    standard errors, a flagged point's error, intervals and bands are NaN, with one warning.
+    """
+    from superglm.inference._term_types import TermInference
+
+    if not isinstance(inference, TermInference) or not inference.active:
+        return inference
+    name = inference.name
+
+    def read(covariance_fn):
+        probed = _term_inference(
+            name,
+            result=model.result,
+            groups=model._groups,
+            specs=model._specs,
+            interaction_specs=model._interaction_specs,
+            covariance_fn=covariance_fn,
+            reml_lambdas=getattr(model, "_reml_lambdas", None),
+            lambda2=fitted_lambda2(model),
+            group_edf=model._group_edf,
+            with_se=True,
+            simultaneous=False,
+            **read_kwargs,
+        )
+        values = {"points": probed.se_log_relativity}
+        curve = getattr(probed, "smooth_curve", None)
+        if curve is not None and curve.se_log_relativity is not None:
+            values["curve"] = curve.se_log_relativity
+        return values if values["points"] is not None else {}
+
+    labels = _curve_labels(model, read)
+    points = None if labels is None else labels.get("points")
+    if points is None or not np.any(points != ""):
+        return inference
+    flagged = points != ""
+
+    def blank(values):
+        if values is None:
+            return None
+        values = np.array(values, dtype=np.float64, copy=True)
+        values[flagged] = np.nan
+        return values
+
+    changes = {"non_estimable": points}
+    if inference.se_log_relativity is not None:
+        for field in (
+            "se_log_relativity",
+            "ci_lower",
+            "ci_upper",
+            "ci_lower_simultaneous",
+            "ci_upper_simultaneous",
+        ):
+            changes[field] = blank(getattr(inference, field))
+        if inference.knot_covariance is not None and inference.knot_covariance.shape[0] == (
+            flagged.size
+        ):
+            covariance = np.array(inference.knot_covariance, dtype=np.float64, copy=True)
+            covariance[flagged, :] = np.nan
+            covariance[:, flagged] = np.nan
+            changes["knot_covariance"] = covariance
+        curve_labels = labels.get("curve")
+        curve = inference.smooth_curve
+        if curve is not None and curve_labels is not None and np.any(curve_labels != ""):
+            on_curve = curve_labels != ""
+            changes["smooth_curve"] = dataclasses.replace(
+                curve,
+                **{
+                    field: np.where(on_curve, np.nan, getattr(curve, field))
+                    for field in ("se_log_relativity", "ci_lower", "ci_upper")
+                    if getattr(curve, field) is not None
+                },
+            )
+        _curve_warning({name: points})
+    return dataclasses.replace(inference, **changes)
 
 
 def simultaneous_bands(model, feature, *, alpha=0.05, n_sim=10_000, n_points=200, seed=42):
@@ -274,6 +533,9 @@ def term_inference(
         n_sim=n_sim,
         seed=seed,
         centering=centering,
+    )
+    inference = _disclosed_term(
+        model, inference, {"n_points": n_points, "alpha": alpha, "centering": centering}
     )
     # `_term_ops` has no model handle, so it hard-codes `monotone_repaired=False`
     # with a comment inviting the caller to override. This is that caller: a

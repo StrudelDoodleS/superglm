@@ -29,6 +29,10 @@ def term_from_inference(ti) -> EditableTerm:
     }
     if ti.levels is not None:
         metadata["native_levels"] = list(ti.levels)
+    non_estimable = getattr(ti, "non_estimable", None)
+    if non_estimable is not None:
+        # each point's kind of direction the fit does not determine, "" where it does
+        metadata["non_estimable"] = [str(kind) for kind in non_estimable]
     if ti.spline is not None:
         metadata["spline"] = {
             "kind": ti.spline.kind,
