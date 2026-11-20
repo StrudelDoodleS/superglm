@@ -75,6 +75,7 @@ PUBLIC_API = [
     "NegativeBinomialLS",
     "NegativeBinomialLink",
     "NoPredictedMeanError",
+    "NonEstimablePredictionWarning",
     "Numeric",
     "ObservedModeNotCertifiedError",
     "ObservedModeNotConvergedError",

@@ -617,6 +617,9 @@ BOUNDARY_TESTS: dict[str, str | tuple[str, ...]] = {
         "test_chunk_boundaries_design.py::test_projected_design_moments_sum_every_design_chunk",
         "test_data_rank_grey_subspace.py::test_chunked_projection_is_the_rows_product",
     ),
+    "model/base.py::_row_norms": (
+        "test_prediction_estimability.py::test_a_rows_norm_is_the_same_across_its_blocks"
+    ),
     "model/runtime_canonicalize.py::_runtime_training_feature_column_means": (
         "test_discretize_fit.py::test_binned_fit_predicts_what_it_fitted_on_a_skewed_column"
     ),

@@ -39,6 +39,7 @@ if _typing.TYPE_CHECKING:
     )
     from superglm.diagnostics.convergence import ConvergenceWarning
     from superglm.diagnostics.discretize import DiscretizationResult, discretization_impact
+    from superglm.diagnostics.estimability import NonEstimablePredictionWarning
     from superglm.diagnostics.fit_cost import SlowFitWarning
     from superglm.diagnostics.fit_report import FitDiagnosticReport
     from superglm.diagnostics.separation import SeparationError, SeparationWarning
@@ -204,6 +205,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
     "superglm.constraints": ("MonotoneRepairResult", "MonotoneRepairer"),
     "superglm.diagnostics.convergence": ("ConvergenceWarning",),
     "superglm.diagnostics.discretize": ("DiscretizationResult", "discretization_impact"),
+    "superglm.diagnostics.estimability": ("NonEstimablePredictionWarning",),
     "superglm.diagnostics.fit_cost": ("SlowFitWarning",),
     "superglm.diagnostics.fit_report": ("FitDiagnosticReport",),
     "superglm.diagnostics.separation": ("SeparationError", "SeparationWarning"),
@@ -567,6 +569,7 @@ __all__ = [
     "ConvergenceWarning",
     "FactorSmoothGroupTermWarning",
     "InteractionCellLabelWarning",
+    "NonEstimablePredictionWarning",
     "RedundantInteractionWarning",
     "SCOPRetiredWarning",
     "SplineOptionWarning",

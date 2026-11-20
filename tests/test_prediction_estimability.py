@@ -147,6 +147,24 @@ def test_a_rows_share_is_measured_in_the_dual_jacobi_scale_against_the_dense_row
     np.testing.assert_allclose(share, oracle_share, rtol=0, atol=1e3 * kappa * U)
 
 
+def test_a_rows_norm_is_the_same_across_its_blocks(monkeypatch):
+    """``_row_norms`` reads a term's design rows in blocks: two-row blocks give the same norms.
+
+    Each row's square is its own sum, so the blocking changes no rounding: bitwise equal.
+    """
+    from superglm.model.estimability_ops import published_directions
+
+    model = _fit(ALIASED)
+    frame, plan = as_eager_frame(NEW), base._prediction_plan(model)
+    directions = published_directions(model)
+    whole = base._row_norms(model, frame, plan, directions, "conditional")
+    widest = max(len(term["beta_idx"]) for term in (*plan["features"], *plan["interactions"]))
+    monkeypatch.setattr(base, "_NORM_BLOCK_ENTRIES", 2 * widest)
+    np.testing.assert_array_equal(
+        base._row_norms(model, frame, plan, directions, "conditional"), whole
+    )
+
+
 def test_a_levels_alias_gives_its_relativity_and_curve_no_standard_error():
     """``f[E]``'s relativity is the gauge's value, and the fit does not determine it: SE NaN.
 

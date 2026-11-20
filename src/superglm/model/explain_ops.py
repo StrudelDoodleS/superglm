@@ -109,7 +109,8 @@ class _DiagonalCovariance(_SelectedBlockAccess):
         return self.diagonal[indices]
 
     def solve(self, vector):
-        return self.diagonal * vector
+        vector = np.asarray(vector, dtype=np.float64)
+        return self.diagonal.reshape((-1,) + (1,) * (vector.ndim - 1)) * vector
 
 
 def _active_layout(model):
