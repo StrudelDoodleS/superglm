@@ -1,4 +1,12 @@
 import { isAdditive, noEffect, showsRelativity } from "./chart/display.js";
+import {
+  bandPath,
+  collapsedKinds,
+  hasInterval,
+  intervalValues,
+  nonEstimableKind,
+  nonEstimableLines
+} from "./chart/intervals.js";
 import { fmt, fmtAdded, fmtCount } from "./format.js";
 import {
   anchorMarks,
@@ -149,8 +157,9 @@ export function drawChart(term, selection, context) {
   const innerW = width - margin.left - margin.right;
   const innerH = height - margin.top - margin.bottom;
   definePlotClip(scene, margin, innerW, innerH);
+  // A point the fit does not determine has no interval: its ends are null.
   const ciValues = context.showCi() && view.ci_lower_y && view.ci_upper_y
-    ? [...view.ci_lower_y, ...view.ci_upper_y]
+    ? intervalValues(view.ci_lower_y, view.ci_upper_y)
     : [];
   const controlValues = visualMode === "handles" && term.controls && term.controls.y
     ? term.controls.y
@@ -342,10 +351,10 @@ export function drawChart(term, selection, context) {
       }
     }
     for (const i of unselectedPoints) {
-      drawPoint(pointLayer, x, y, sx, sy, i, false, !basePoints.has(i), lensX);
+      drawPoint(pointLayer, x, y, sx, sy, i, false, !basePoints.has(i), lensX, nonEstimableKind(view, i));
     }
     for (const i of selectedPoints) {
-      drawPoint(pointLayer, x, y, sx, sy, i, true, !basePoints.has(i), lensX);
+      drawPoint(pointLayer, x, y, sx, sy, i, true, !basePoints.has(i), lensX, nonEstimableKind(view, i));
     }
   } else {
     // An ordered spline keeps its level dots on the curve beside the handles;
@@ -452,7 +461,8 @@ export function updateChartSelection(term, selection, context) {
         index,
         true,
         true,
-        svg._lensX ?? null
+        svg._lensX ?? null,
+        nonEstimableKind(view, index)
       );
       selectedPoints.push(point);
     }
@@ -577,6 +587,7 @@ function resolveDisplayTerm(term, mode) {
     previous_y: collapsed.previous_y || null,
     ci_lower_y: collapsed.ci_lower_y || null,
     ci_upper_y: collapsed.ci_upper_y || null,
+    non_estimable: collapsedKinds(term.non_estimable, collapsed.source_indices),
     weights: collapsed.weights,
     exposure: collapsed.exposure,
     levels: collapsed.levels,
@@ -676,15 +687,18 @@ function basePointIndices(term) {
   return term.handle_indices || term.x.map((_, i) => i);
 }
 
-function drawPoint(pointLayer, x, y, sx, sy, i, selected, supplemental, lensX) {
+// A point the fit does not determine (`kind`, its `non_estimable`) is drawn
+// hollow and names its kind; its hover text says why.
+function drawPoint(pointLayer, x, y, sx, sy, i, selected, supplemental, lensX, kind = "") {
   const cx = sx(x[i]);
   const near = lensX !== null && Math.abs(cx - lensX) <= LENS_HALF_WIDTH;
   const attrs = {
     cx, cy: sy(y[i]), r: selected ? 4.6 : 3.4,
-    class: `point${selected ? " selected" : ""}${near ? " near" : ""}`,
+    class: `point${selected ? " selected" : ""}${near ? " near" : ""}${kind ? " non-estimable" : ""}`,
     "data-index": i
   };
   if (supplemental) attrs["data-selection-supplemental"] = "true";
+  if (kind) attrs["data-non-estimable"] = kind;
   const circle = el("circle", attrs);
   pointLayer.appendChild(circle);
   return circle;
@@ -698,7 +712,8 @@ function pointTooltipLines(term, i) {
     showsRelativity(term)
       ? `Relativity: ${fmt(term.y[i])}`
       : `${yTooltipLabel(term)}: ${(isAdditive(term.display) ? fmtAdded : fmt)(term.y[i])}`,
-    `Exposure: ${fmtCount(exposure)}`
+    `Exposure: ${fmtCount(exposure)}`,
+    ...nonEstimableLines(nonEstimableKind(term, i))
   ];
 }
 
@@ -1474,16 +1489,11 @@ function stablePath(svg, x, y, sx, sy, cls, scaleKey) {
   svg.appendChild(el("path", { d, class: cls }));
 }
 
+// The band over each run of points with an interval; a point without one
+// (null ends) breaks it.
 function band(svg, x, lower, upper, sx, sy, cls, scaleKey) {
-  const d = stableString(lower, x, scaleKey, () => {
-    const top = curveString(x, upper, sx, sy);
-    const bottom = x.slice().reverse().map((v, revI) => {
-      const i = x.length - 1 - revI;
-      return `L ${sx(v).toFixed(2)} ${sy(lower[i]).toFixed(2)}`;
-    }).join(" ");
-    return `${top} ${bottom} Z`;
-  });
-  svg.appendChild(el("path", { d, class: cls }));
+  const d = stableString(lower, x, scaleKey, () => bandPath(x, lower, upper, sx, sy));
+  if (d) svg.appendChild(el("path", { d, class: cls }));
 }
 
 // Each level fitted free, behind the curve, as its relativity to the
@@ -1577,6 +1587,7 @@ function diamond(cx, cy, r) {
 function errorBars(svg, x, lower, upper, sx, sy) {
   const cap = 6;
   for (let i = 0; i < x.length; i++) {
+    if (!hasInterval(lower, upper, i)) continue;
     const px = sx(x[i]);
     const lo = sy(lower[i]);
     const hi = sy(upper[i]);
