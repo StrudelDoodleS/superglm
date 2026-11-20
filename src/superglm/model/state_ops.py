@@ -557,6 +557,8 @@ def penalized_fit_certified(model, penalized) -> bool:
     coefficients must be the unconstrained optimum of a quadratic penalty, every level
     priced, and determined by the fit itself:
 
+    - the fit converged: one that stopped short of its convergence test has no optimum for
+      the penalized Hessian to belong to;
     - no selection penalty, no term under a shape rule and no shape repair after the fit: the
       coefficients would not be the optimum the penalized Hessian belongs to;
     - no level or region the fit's records name as unpriced (``_names_an_unpriced_level``);
@@ -566,6 +568,8 @@ def penalized_fit_certified(model, penalized) -> bool:
     """
     from superglm.model.report_ops import shape_repaired_feature_names
 
+    if not getattr(model._solver_pirls_result(), "converged", True):
+        return False
     lambda1 = getattr(fitted_penalty(model), "lambda1", None)
     if lambda1 is not None and lambda1 != 0.0:
         return False

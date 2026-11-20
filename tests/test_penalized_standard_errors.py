@@ -204,14 +204,19 @@ def _unpriced_region(case: str):
     - ``weak_unscanned_level``: Poisson, the region a factor, the scan turned off;
     - ``weak_gaussian_level``: Gaussian under a log link, the region's response zero: no
       boundary for the scan to count.  In these three REML's diagnostics name the slope as
-      weakly identified, and nothing else does.
+      weakly identified, and nothing else does;
+    - ``not_converged``: binomial, the region a 0/1 column whose rows are all ones: no record
+      names the region, and the fit ends without meeting its convergence test.
     """
     frame, y = _separated_region()
     in_b = (frame["region"] == "B").to_numpy()
     options, region, event = {"family": "poisson"}, Categorical(base="A"), "SeparationWarning"
     if case == "weak_gaussian_level":
         y, options = np.where(in_b, 0.0, 2.0 + 0.1 * y), {"family": "gaussian", "link": "log"}
-    if case == "weak_numeric_level":
+    if case == "not_converged":
+        y = np.where(in_b, 1.0, np.random.default_rng(7).uniform(size=len(y)) < 0.3)
+        options, event = {"family": "binomial"}, "ConvergenceWarning"
+    if case in ("weak_numeric_level", "not_converged"):
         frame, region = frame.assign(region=in_b.astype(float)), Numeric()
     if case == "weak_unscanned_level":
         options["separation"] = "ignore"
@@ -367,6 +372,7 @@ _UNPRICED_REGION_CASES = (
     "weak_numeric_level",
     "weak_unscanned_level",
     "weak_gaussian_level",
+    "not_converged",
 )
 
 
@@ -386,6 +392,7 @@ _UNPRICED_REGION_CASES = (
         "weak_numeric_level",
         "weak_unscanned_level",
         "weak_gaussian_level",
+        "not_converged",
     ],
 )
 def test_a_fit_outside_the_rule_keeps_the_data_rule(case):
@@ -418,6 +425,7 @@ def test_a_fit_outside_the_rule_keeps_the_data_rule(case):
     if case in _UNPRICED_REGION_CASES:
         frame, y, model, event = _unpriced_region(case)
         assert event in {type(w.message).__name__ for w in _fit(model, frame, y)}
+        assert model.result.converged is (case != "not_converged")
     elif case in ("scanned_level", "runtime_finding"):
         frame, y, model = _unpriced_level(case)
         caught = {type(w.message).__name__ for w in _fit(model, frame, y, method="fit")}

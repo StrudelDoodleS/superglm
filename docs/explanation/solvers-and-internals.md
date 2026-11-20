@@ -1169,6 +1169,7 @@ a range with no rows.
   not estimable, and its standard error is shown as missing.
 - **A fit with a selection penalty, a shape rule or a shape repair always uses
   the data rank.**
+- **So does a fit that did not converge.**
 - **So does a fit that names a level or region it cannot price.** That is a
   factor-smooth level the fit reports as thin, without weight or separated, a
   categorical level it reports as separated, a coefficient `fit_reml` reports
