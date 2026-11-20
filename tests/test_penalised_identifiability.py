@@ -1405,8 +1405,9 @@ def test_a_large_sz_fit_reads_only_its_undecided_directions(case, monkeypatch):
     under ``sqrt(u)``, so their curvature is under the rounding of ``H``.  The ones under
     ``gamma_n``, which no weighted row reaches, are not resolved at float64: the design at unit
     weight identifies each, so none is an alias and none is moved along, and the coordinates
-    they reach have no standard error (their values are where the solver stopped), and no other
-    is blank; the rest the rows identify, with their curvature.  ``zz = z + 1e-8 h``: the factor truncates
+    they reach past the readers' off-support tolerance have no standard error (their values are
+    where the solver stopped), and no other is blank: not ``z``, whose share is their own error;
+    the rest the rows identify, with their curvature.  ``zz = z + 1e-8 h``: the factor truncates
     the pair's difference, and the rows identify it and fit it.  Either way the owner reads only
     the truncated directions (a pass of their width, at most twice) and forms one small
     construction map per term they reach.  At ``1d18eaf47`` both fell back to factoring the
@@ -1470,6 +1471,8 @@ def test_a_large_sz_fit_reads_only_its_undecided_directions(case, monkeypatch):
         np.isnan(np.concatenate([np.atleast_1d(se[g.name]) for g in model._groups]))
     )
     np.testing.assert_array_equal(blank, model._fit_inference_info["identifiability"].unresolved)
+    # z's share of those directions (1.1e-7) is their own error, under the readers' tolerance
+    assert np.isfinite(se["z"]).all()
     W = np.array(state_ops._solver_space_working_weights(model), dtype=np.float64)
     if case == "zero_claims":
         W[g < 5] = 0.0
