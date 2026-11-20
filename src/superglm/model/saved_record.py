@@ -20,7 +20,8 @@ already satisfy one, and the record reads the one they satisfy, in this order:
 2. the coordinates the saved fit holds at exactly zero (a dense solver's truncation), when there
    are as many as null directions and they determine them;
 3. otherwise every coordinate the null directions reach (the intercept included) has no
-   standard error, and every estimable contrast keeps its own.
+   estimate and no standard error (its saved value is the saved solver's split), and every
+   estimable contrast keeps its own.
 
 The first test separates rounding from a different gauge (order ``|beta|``) by orders of
 magnitude.  Zeros alone do not identify a convention: when more coordinates the null
@@ -322,7 +323,8 @@ def _saved_gauge(model, record, beta: NDArray, reach: _Reach):
             "at zero), so the standard errors are given there."
         )
         return dataclasses.replace(record, provenance=(*record.provenance, note))
-    # the directions held where the fit left them (separated, or not resolved) stay held
+    # the directions held where the fit left them (separated, or not resolved) stay held; the
+    # fit's intercept decision on every direction stays with them (read through ``any``)
     rest = None
     if not np.all(moved):
         rest = dataclasses.replace(
@@ -372,13 +374,16 @@ def _saved_gauge(model, record, beta: NDArray, reach: _Reach):
     )
     provenance = record.provenance
     if intercept:
-        note = "The intercept has no standard error either: the aliased directions reach it."
+        note = (
+            "The intercept has no standard error either, nor an estimate (both shown as ---): "
+            "the aliased directions reach it."
+        )
         provenance = (*provenance, note)
     return dataclasses.replace(
         record,
         gauge=rest,
         aliases=aliases(reached, reason),
-        withheld=tuple(sorted(set(record.withheld) | ({-1} if intercept else set()))),
+        intercept_aliased=record.intercept_aliased or intercept,
         provenance=provenance,
     )
 

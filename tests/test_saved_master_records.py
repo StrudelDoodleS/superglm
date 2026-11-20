@@ -375,6 +375,77 @@ def test_a_saved_sz_fit_blanks_what_its_aliases_reach_in_no_reproducible_gauge(v
     _assert_as_saved(model, record, record["outputs"][variant])
 
 
+def _intercept_cells(table) -> list[str]:
+    """The printed estimate and SE of a coefficient table's intercept row."""
+    line = next(line for line in str(table).splitlines() if line.startswith("║ Intercept "))
+    return line.split()[2:4]
+
+
+@pytest.mark.parametrize("variant", ["warm_cold", "warm_read"])
+def test_a_saved_sz_fits_intercept_shows_no_value_where_its_aliases_split_it(variant):
+    """The sz fit's two directions reach the intercept, so its saved value (0.9808) is the
+    saved solver's split, as the 22 ``x:g:sz`` values it blanks are: the summary's and
+    ``metrics()``' tables print it ``---`` beside its blank SE, as a fit on the same rows does
+    (``Gauge.intercept_reached``), and the footnote says so.  The coefficients and predictions
+    stay as saved.  At ``bea6a1117`` both tables printed ``0.9808`` beside ``---``: the
+    record withheld the intercept's SE alone, as for a direction never fitted.  Mutation:
+    ``intercept_aliased`` never set."""
+    record = _record("sz_one_row")
+    model = _loads(record["models"][variant])
+    X, y = _rows(model, record["frame"], record["y"])
+    for table in (_quiet(model.summary), _quiet(model.metrics, X, y).summary()):
+        row = next(row for row in table._coef_rows if row.name == "Intercept")
+        assert np.isnan(row.coef) and np.isnan(row.se)
+        assert _intercept_cells(table) == ["---", "---"]
+        assert "nor an estimate (both shown as ---)" in " ".join(str(table).split())
+    _assert_as_saved(model, record, record["outputs"][variant])
+    refit = _loads(record["models"][variant])
+    _quiet(refit.fit_reml, record["frame"], record["y"])
+    assert _intercept_cells(_quiet(refit.summary)) == ["---", "---"]
+
+
+@pytest.mark.pins_behaviour
+def test_a_saved_gauge_narrowed_to_its_held_directions_keeps_the_fits_intercept_decision(
+    monkeypatch,
+):
+    """Pins that ``Gauge.intercept_reached`` keeps every direction when the saved gauge keeps
+    only those held where the fit left them.
+
+    It is read only through ``any`` (``Identifiability.intercept_estimated`` and the footnote),
+    never against the gauge's columns, so at full length it is the fit's own decision on every
+    direction; narrowing it would drop the aliased ones'.  Forced on the sz pickle: its second
+    direction is marked not resolved, only the first moves the intercept, and the saved reach
+    test is told the first does not, so the narrowed gauge's flags alone carry the decision.
+    The intercept shows ``---`` for estimate and SE, as at ``bea6a1117``.  Mutation: the flags
+    narrowed with the gauge."""
+    from superglm.model import saved_record
+
+    original = saved_record._saved_gauge
+
+    def forced(model, record, beta, reach):
+        gauge = dataclasses.replace(
+            record.gauge, moved=np.array([True, False]), intercept_reached=np.array([True, False])
+        )
+
+        def no_intercept(directions, intercept):
+            return reach(directions, intercept)[0], False
+
+        return original(model, dataclasses.replace(record, gauge=gauge), beta, no_intercept)
+
+    monkeypatch.setattr(saved_record, "_saved_gauge", forced)
+    record = _record("sz_one_row")
+    model = _loads(record["models"]["warm_cold"])
+    table = _quiet(model.summary)
+    decided = model._fit_inference_info["identifiability"]
+    # the narrowed gauge alone carries the decision: the reach test withheld nothing for it
+    assert decided.gauge.null.shape[1] == 1 and -1 not in decided.withheld
+    assert not getattr(decided, "intercept_aliased", False)
+    assert _intercept_cells(table) == ["---", "---"]
+    assert "The intercept is not identified (estimate and standard error shown as ---)" in (
+        " ".join(str(table).split())
+    )
+
+
 # ------------------------------------------------------------------ a compact model, frozen
 def _range_tolerance(model) -> float:
     """``n u kappa`` of the Jacobi-scaled penalised Hessian on its range, from the dense rows.

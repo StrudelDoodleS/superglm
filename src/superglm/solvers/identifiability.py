@@ -251,6 +251,9 @@ class Identifiability:
     (fitted coordinates) are identified coefficients whose standard error is withheld, and
     ``provenance`` the notes saying why and how the record was read: a saved model's, decided
     at coefficients it cannot move (``model.saved_record``).  A fit's own record has neither.
+    ``intercept_aliased`` is a saved record's: the directions whose split its coefficients do
+    not show (``Alias``es on every coordinate they reach) reach the intercept too, so its saved
+    value is not an estimate either.
     """
 
     width: int
@@ -268,6 +271,7 @@ class Identifiability:
     separation: Any = None
     withheld: tuple[int, ...] = ()  # ``-1`` is the intercept
     provenance: tuple[str, ...] = ()
+    intercept_aliased: bool = False
 
     def weak_root(self, columns: NDArray) -> NDArray | None:
         """``[-c'PU; PU]`` on ``columns``, the weak directions' published root with its intercept.
@@ -310,7 +314,10 @@ class Identifiability:
     def intercept_estimated(self) -> bool:
         """Whether the intercept's published value is an estimate: false when separation moves
         it, or a direction of ``null(H)`` whose rows' mean is off zero
-        (``Gauge.intercept_reached``) moves it as an alias does."""
+        (``Gauge.intercept_reached``) or a saved record's alias (``intercept_aliased``) moves it
+        as an alias does."""
+        if self.intercept_aliased:
+            return False
         reached = getattr(self.gauge, "intercept_reached", None)
         if reached is not None and np.any(reached):
             return False
