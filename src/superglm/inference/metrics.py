@@ -1178,8 +1178,7 @@ class ModelMetrics:
                 face,
                 root,
             )
-            self.__dict__["_coefficient_estimable"] = standard_error_mask(
-                self._model,
+            self._decide_standard_errors(
                 profile_rank,
                 partial(
                     _coefficient_estimability, data_rank, self._groups, active_groups, len(beta)
@@ -1231,8 +1230,7 @@ class ModelMetrics:
             face,
             root,
         )
-        self.__dict__["_coefficient_estimable"] = standard_error_mask(
-            self._model,
+        self._decide_standard_errors(
             profile_rank,
             partial(_coefficient_estimability, data_rank, self._groups, active_groups, len(beta)),
         )
@@ -1278,6 +1276,18 @@ class ModelMetrics:
         return _certified_profile_rank(
             X_a, W, centered_data_gram, XtW1, S_active, data_rank, root=penalty_root()
         ).pseudo_inverse()
+
+    def _decide_standard_errors(self, profile_rank, data_mask) -> None:
+        """Decide which coefficients show a standard error on a re-formed inverse.
+
+        ``state_ops.standard_error_mask`` on ``profile_rank``, the decomposition the re-formed
+        covariance is inverted from, which is kept beside the mask: a saved model's note is
+        decided on the same pair (``summary``).
+        """
+        self.__dict__["_coefficient_estimable"] = standard_error_mask(
+            self._model, profile_rank, data_mask
+        )
+        self.__dict__["_reformed_profile_rank"] = profile_rank
 
     def _reformed_ranks(
         self, X_a, W, XtWX, XtW1, centered_data_gram, S_active, data_rank, face, penalty_root
@@ -2013,8 +2023,11 @@ class ModelMetrics:
             "ebic": self.ebic(),
             "converged": self._result.converged,
             "n_iter": self._result.n_iter,
+            # beside the decomposition its mask was decided on, when the inverse was re-formed
             "standard_error_note": saved_standard_error_note(
-                self._model, self._current_coefficient_estimable
+                self._model,
+                self._current_coefficient_estimable,
+                self.__dict__.get("_reformed_profile_rank"),
             ),
         }
 

@@ -550,3 +550,42 @@ def test_a_model_saved_by_master_keeps_its_blanks_and_says_a_refit_shows_them(so
         refit = _flat(model, model.metrics(frame, y).coefficient_se)
         text = str(model.summary())
     assert np.all(np.isfinite(refit)) and REFIT_NOTE not in " ".join(text.split())
+
+
+def test_a_saved_models_note_counts_the_standard_errors_a_refit_shows():
+    """A saved model's note is given where a refit shows every blank, and counts them.
+
+    The dense fixture on three sets of rows, each read again after a refit on the training rows:
+
+    - the training rows: its 6 blanks are named, and the refit shows them;
+    - rows whose level F is relabelled to a level the fit never saw: the other levels no longer
+      sum to the intercept and no row holds F, so F's standard error is the one blank.  The
+      note is in the singular, and the refit shows it;
+    - rows whose ``dens`` is constant: the Hessian re-formed there is singular, so the refit
+      leaves the same 7 blank, and the note is not given.
+    """
+    with lzma.open(SAVED / "dense_cold.pkl.xz", "rb") as handle:
+        record = pickle.load(handle)
+    model, frame, y = record["model"], record["frame"], record["y"]
+    without_f = frame.assign(veh=frame["veh"].where(frame["veh"] != "F", "Q"))
+    constant = frame.assign(dens=0.0)
+
+    def read(rows) -> tuple[int, str]:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            metrics = model.metrics(rows, y)
+            blank = int(np.isnan(_flat(model, metrics.coefficient_se)).sum())
+            return blank, " ".join(str(metrics.summary()).split())
+
+    blank, text = read(frame)
+    assert blank == 6 and "6 standard errors are blank because" in text and REFIT_NOTE in text
+    blank, text = read(without_f)
+    assert blank == 1 and "1 standard error is blank because" in text
+    assert "Refit the model to show it." in text
+    blank, text = read(constant)
+    assert blank == 7 and "Refit the model" not in text
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y)
+    assert [read(rows)[0] for rows in (frame, without_f, constant)] == [0, 0, 7]

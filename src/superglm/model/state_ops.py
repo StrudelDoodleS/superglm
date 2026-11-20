@@ -598,20 +598,27 @@ def rank_standard_error_mask(model, rank_info) -> NDArray:
     return standard_error_mask(model, rank_info.augmented, rank_info.coefficient_estimable)
 
 
-def saved_standard_error_note(model, mask: NDArray) -> str | None:
-    """A summary's line for a saved model whose blank standard errors a refit would show."""
+def saved_standard_error_note(model, mask: NDArray, penalized=None) -> str | None:
+    """A summary's line for a saved model whose blank standard errors a refit would show.
+
+    ``mask`` and ``penalized`` are the pair ``standard_error_mask`` decided on: the fit's own
+    decomposition when ``penalized`` is omitted.  The line is given only where a fit today
+    would show every one of them (``penalized_fit_certified``).
+    """
     record = _fit_record(model)
     blank = int(np.size(mask) - np.count_nonzero(mask))
     if not blank or getattr(record, "standard_error_mask", "penalized") != "data":
         return None
-    penalized = getattr(record, "profiled_factor", None)
     if penalized is None:
-        penalized = getattr(record, "augmented", None)
+        penalized = _fit_decomposition(record)
     if penalized is None or not penalized_fit_certified(model, penalized):
         return None
+    subject, them = (
+        ("1 standard error is", "it") if blank == 1 else (f"{blank} standard errors are", "them")
+    )
     return (
-        f"{blank} standard errors are blank because this model was saved by an earlier superglm, "
-        "which showed only those the data alone determine. Refit the model to show them."
+        f"{subject} blank because this model was saved by an earlier superglm, which showed only "
+        f"those the data alone determine. Refit the model to show {them}."
     )
 
 
