@@ -12,12 +12,11 @@ from scipy.special import gammaln
 from scipy.stats import poisson
 
 from superglm import ConvergenceWarning, ModelMetrics, SuperGLM, generate_tweedie_cpg
-from superglm.distributions import Binomial, Gamma, Poisson, Tweedie
+from superglm.distributions import Gamma, NegativeBinomial, Poisson, Tweedie
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix, DiscretizedTensorGroupMatrix
-from superglm.links import resolve_link
 from superglm.model.fit_state import FittedStateRevision
 from superglm.profiling._scalar import Interval
 
@@ -1210,6 +1209,13 @@ class TestNullModel:
         assert abs(score) < 1.0
 
     def test_sqrt_offset_null_mu_matches_explicit_intercept_only_fit(self):
+        """The sqrt-link null deviance is the minimum of its written-out deviance.
+
+        It is never above an explicit intercept-only fit's, whose solver stops at
+        its own tolerance (here 3e-10 relative above the minimum).
+        """
+        from scipy.optimize import minimize_scalar
+
         offset = np.tile([-3.0, -2.0, -1.0, 0.0, 1.0], 10)
         y = np.tile([5.0, 2.0, 1.0, 1.0, 3.0], 10)
         X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, len(y))})
@@ -1229,42 +1235,23 @@ class TestNullModel:
         ).fit(X, y, offset=offset)
 
         metrics = model.metrics(X.copy(), y.copy(), offset=offset.copy())
-        explicit_mu = explicit_null.predict(X, offset=offset)
 
-        np.testing.assert_allclose(metrics._null_mu, explicit_mu, rtol=2e-11, atol=2e-11)
-        assert metrics.null_deviance == pytest.approx(
-            explicit_null.result.deviance,
-            rel=2e-11,
-            abs=2e-11,
-        )
+        def deviance(b):
+            mu = (b + offset) ** 2
+            with np.errstate(divide="ignore"):
+                return 2.0 * np.sum(y * np.log(y / mu) - (y - mu))
+
+        grid = np.linspace(-10.0, 10.0, 20001)
+        start = grid[np.argmin([deviance(b) for b in grid])]
+        reference = minimize_scalar(
+            deviance,
+            bounds=(start - 1e-3, start + 1e-3),
+            method="bounded",
+            options={"xatol": 1e-12},
+        ).fun
+        assert metrics.null_deviance == pytest.approx(reference, rel=2e-11, abs=2e-11)
+        assert metrics.null_deviance <= explicit_null.result.deviance
         assert model._fit_stats.null_deviance == pytest.approx(metrics.null_deviance)
-
-    def test_sqrt_offset_null_fit_requests_only_the_working_system(self, monkeypatch):
-        import superglm.model.fit_ops as fit_ops
-        from superglm.distributions import Poisson
-        from superglm.links import SqrtLink
-
-        original_fit = fit_ops.fit_irls_direct
-        shortcut_flags: list[bool] = []
-
-        def recording_fit(*args, **kwargs):
-            shortcut_flags.append(bool(kwargs.get("_return_working_system", False)))
-            return original_fit(*args, **kwargs)
-
-        monkeypatch.setattr(fit_ops, "fit_irls_direct", recording_fit)
-        offset = np.tile([-0.4, -0.2, 0.0, 0.2, 0.4], 8)
-        y = np.tile([1.0, 2.0, 4.0, 3.0, 1.0], 8)
-        null_mu = fit_ops._compute_null_mu(
-            y,
-            np.ones(len(y)),
-            offset,
-            Poisson(),
-            SqrtLink(),
-            weight_semantics="frequency",
-        )
-
-        assert shortcut_flags == [True]
-        assert np.all(np.isfinite(null_mu))
 
     def test_sqrt_offset_fit_reuses_null_mu_when_priming_caches(self, monkeypatch):
         import superglm.model.fit_ops as fit_ops
@@ -1346,29 +1333,147 @@ class TestNullModel:
         assert deviance["explained_deviance"] == pytest.approx(0.0, abs=1e-10)
         assert metrics.explained_deviance == pytest.approx(0.0, abs=1e-10)
 
-    def test_null_model_that_stops_short_says_so(self, monkeypatch):
-        """A null fit stopped before its root warns that the null figures are its last step's.
+    @staticmethod
+    def _null_metrics(family, y, offset, link=None, weights=None):
+        """The public null figures of ``y`` under ``offset``, from an intercept-only model."""
+        X = pd.DataFrame(index=range(len(y)))
+        model = SuperGLM(family=family, link=link, features={}, n_jobs=1)
+        model.fit(
+            X,
+            np.tile([1.0, 2.0], len(y) // 2)
+            if family != "binomial"
+            else np.tile([0.0, 1.0], len(y) // 2),
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ConvergenceWarning)
+            metrics = model.metrics(X, y, sample_weight=weights, offset=offset)
+            return SimpleNamespace(
+                null_deviance=metrics.null_deviance,
+                null_log_likelihood=metrics.null_log_likelihood,
+            )
 
-        A response with no claims at all has its null maximum at an infinite
-        intercept, which no step reaches; it keeps its stand-in mean silently.
+    @staticmethod
+    def _nb_null_reference(y, offset, theta):
+        """The NB2 null deviance at the root of its intercept score, written out."""
+        from scipy.optimize import brentq
+
+        def score(b):
+            mu = np.exp(b + offset)
+            return float(np.sum((y - mu) / (1.0 + mu / theta)))
+
+        mu = np.exp(brentq(score, -50.0, 50.0, xtol=1e-15) + offset)
+        return 2.0 * np.sum(y * np.log(y / mu) - (y + theta) * np.log((y + theta) / (mu + theta)))
+
+    @pytest.mark.pins_behaviour
+    def test_null_model_takes_the_limit_at_the_edge_of_the_means(self):
+        """A response on the family's boundary has its null at the limit: deviance 0.
+
+        Zero counts under offsets of +-25 reported a null deviance of 720.05 and
+        all binomial successes under +-20 reported 390.23: a stand-in mean
+        spread by the offset. The limit is the predictor bound, where a Poisson
+        mean is exp(-80) and a binomial one the probability cap 1 - 1e-7.
+
+        Master's 25 scoring steps also reached the limit here; it pins what the
+        stand-in shortcut of an intermediate revision broke.
+        """
+        zeros = self._null_metrics("poisson", np.zeros(100), np.repeat([-25.0, 25.0], 50))
+        assert 0.0 <= zeros.null_deviance <= 2e-10 * 100
+        assert zeros.null_log_likelihood == pytest.approx(0.0, abs=2e-10 * 100)
+        ones = self._null_metrics("binomial", np.ones(100), np.repeat([-20.0, 20.0], 50))
+        assert ones.null_deviance == pytest.approx(-2.0 * 100 * np.log1p(-1e-7), rel=1e-6)
+
+    @staticmethod
+    def _missed_poisson_offsets_120_apart():
+        from scipy.special import logsumexp
+
+        y = np.r_[np.zeros(98), [4.0, 8.0]]
+        offset = np.r_[np.full(98, -60.0), [60.0, 60.0]]
+        eta = np.log(y.sum()) - logsumexp(offset) + offset
+        positive = y > 0
+        reference = 2.0 * (
+            np.sum(y[positive] * (np.log(y[positive]) - eta[positive])) - np.sum(y - np.exp(eta))
+        )
+        return ("poisson", None, y, offset), reference, 1e-10
+
+    @staticmethod
+    def _missed_binomial_cauchit():
+        from scipy.optimize import minimize_scalar
+
+        y = np.tile([1.0, 0.0], 50)
+        offset = np.tile([-4.0, 4.0], 50)
+
+        def deviance(b):
+            return -2.0 * np.sum(np.log(0.5 + np.arctan((2.0 * y - 1.0) * (b + offset)) / np.pi))
+
+        grid = np.linspace(-30.0, 30.0, 6001)
+        start = grid[np.argmin([deviance(b) for b in grid])]
+        best = minimize_scalar(
+            deviance,
+            bounds=(start - 0.01, start + 0.01),
+            method="bounded",
+            options={"xatol": 1e-12},
+        )
+        return ("binomial", "cauchit", y, offset), best.fun, 1e-9
+
+    @staticmethod
+    def _missed_poisson_sqrt():
+        # The intercept -3 puts both groups' means on their responses, 9 and 1.
+        return ("poisson", "sqrt", np.tile([9.0, 1.0], 50), np.tile([0.0, 2.0], 50)), 0.0, 0.0
+
+    def _missed_nb2_uniform_offsets(self):
+        rng = np.random.default_rng(11)
+        rng.uniform(size=4000)  # the draws of the reviewer's reproducer before its offsets
+        offset = rng.uniform(-15.0, 15.0, 400)
+        y = np.tile([2.0, 4.0], 200)
+        reference = self._nb_null_reference(y, offset, 2.0)
+        return (NegativeBinomial(theta=2.0), None, y, offset), reference, 1e-10
+
+    @pytest.mark.parametrize(
+        "case",
+        ["poisson_offsets_120_apart", "binomial_cauchit", "poisson_sqrt", "nb2_uniform_offsets"],
+    )
+    def test_null_model_reaches_the_minimum_scoring_missed(self, case):
+        """Null fits that Fisher scoring left short, or at the wrong minimum, silently or not.
+
+        - Poisson/log with offsets 120 apart used every step before it found
+          a bracket: 21,125,996 against the closed form 1.35919.
+        - Binomial/cauchit stopped at the stationary point between two minima:
+          510.26 against 360.57.
+        - Poisson/sqrt kept the branch its start was on: 1418.18, where the
+          intercept -3 fits both groups exactly (1e-8 bounds the minimiser's
+          rounding there).
+        - NB2/log with offsets uniform on -15 to 15 converged linearly from one
+          side and warned at its step limit on a correct number.
+        """
+        (family, link, y, offset), reference, rel = getattr(self, f"_missed_{case}")()
+        metrics = self._null_metrics(family, y, offset, link=link)
+        assert metrics.null_deviance == pytest.approx(reference, rel=rel, abs=1e-8)
+
+    def test_null_model_that_stops_short_says_so(self, monkeypatch):
+        """A null fit stopped short warns that the null figures are its last step's.
+
+        The limit is forced; the stopped null deviance is the last step's, above
+        the root's. A claim-free response, whose null sits in the limit, needs no
+        limit and stays silent even under offsets 80 apart, where the stand-in
+        mean once gave a null deviance of 4.71e9.
         """
         import superglm.model.fit_ops as fit_ops
 
-        monkeypatch.setattr(fit_ops, "_NULL_MAX_ITER", 3)
+        offset = np.random.default_rng(11).uniform(-15.0, 15.0, 400)
+        y = np.tile([2.0, 4.0], 200)
+        X = pd.DataFrame(index=range(y.size))
+        monkeypatch.setattr(fit_ops, "_NULL_MAX_ITER", 1, raising=False)
+        model = SuperGLM(family=NegativeBinomial(theta=2.0), features={}, n_jobs=1)
         with pytest.warns(
             ConvergenceWarning, match="intercept-only null model .* used its step limit"
         ):
-            self._wide_offset_null("poisson", 40.0, np.ones(200))
+            model.fit(X, y, offset=offset)
+            null_deviance = model.summary()["deviance"]["null_deviance"]
+        assert null_deviance > self._nb_null_reference(y, offset, 2.0)
         monkeypatch.undo()
-        offset = np.log(np.linspace(0.01, 1.0, 40))
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", ConvergenceWarning)
-            for family, y in [(Poisson(), np.zeros(40)), (Binomial(), np.ones(40))]:
-                link = resolve_link(None, family)
-                mu = fit_ops._compute_null_mu(
-                    y, np.ones(40), offset, family, link, weight_semantics="prior"
-                )
-                assert np.sum(family.deviance_unit(y, mu)) < 1e-4
+
+        claim_free = self._null_metrics("poisson", np.zeros(200), np.repeat([-40.0, 40.0], 100))
+        assert 0.0 <= claim_free.null_deviance <= 2e-10 * 200
 
 
 # ── Deviance ──────────────────────────────────────────────────────
@@ -1500,17 +1605,22 @@ class TestDeviance:
         assert rescaled == pytest.approx(reference, rel=1e-9)
         assert model._fit_stats.explained_deviance == pytest.approx(reference, rel=1e-9)
 
+    @pytest.mark.pins_behaviour
     @pytest.mark.parametrize("link", ["identity", "inverse"])
     @pytest.mark.parametrize("units", [1e-11, 1e11])
     def test_offset_null_intercept_takes_the_same_steps_in_any_units(self, link, units):
-        """The offset null model stops on the step's change in the means, not on its size.
+        """The offset null model's stop does not depend on the response's units.
 
         Under the identity and inverse links the intercept carries the
-        response's units or their inverse.  A fixed ``|step| < 1e-8`` stopped a
+        response's units or their inverse. A fixed ``|step| < 1e-8`` stopped a
         Gamma null model after one step, 7e-4 (identity, units 1e-11) and 8e-3
-        (inverse, units 1e11) from its mean, and ran the other way to the
-        25-step cap.  The score and information are sums of ``n`` rows, so the
-        rescaled means agree to ``gamma_n``.  Mutation: ``abs(step) < 1e-8``.
+        (inverse, units 1e11) from its mean, and an absolute ``xatol`` on the
+        intercept does the same to Brent's method. The Gamma deviance does not
+        change with the units, and it is stationary at the null, so the
+        rescaled null deviance agrees to ``gamma_n``; the means agree to the
+        minimiser's resolution in the intercept, ``sqrt(u)`` relative.
+        Mutation: ``"xatol": 1e-12``. It pins the units invariance master's
+        scoring loop already had, restated for the minimiser.
         """
         from superglm._roundoff import gamma
         from superglm.links import IdentityLink, InverseLink
@@ -1528,17 +1638,8 @@ class TestDeviance:
             link_fn, power = InverseLink(), -1.0
             mean, offset = 1.0 / (0.5 + 0.2 * wave + 0.1 * x), 0.2 * wave
         y = rng.gamma(4.0, mean / 4.0)
-        steps = []
-        derivative = link_fn.deriv_inverse
-
-        def counted(eta):
-            steps.append(eta)
-            return derivative(eta)
-
-        link_fn.deriv_inverse = counted
 
         def null_mean(scale):
-            steps.clear()
             mu = _compute_null_mu(
                 scale * y,
                 weights,
@@ -1547,12 +1648,12 @@ class TestDeviance:
                 link_fn,
                 weight_semantics="prior",
             )
-            return mu / scale, len(steps)
+            return mu / scale, float(np.sum(weights * Gamma().deviance_unit(y, mu / scale)))
 
-        reference, reference_steps = null_mean(1.0)
-        rescaled, rescaled_steps = null_mean(units)
-        assert rescaled_steps == reference_steps
-        np.testing.assert_allclose(rescaled, reference, rtol=gamma(n), atol=0.0)
+        reference, reference_deviance = null_mean(1.0)
+        rescaled, rescaled_deviance = null_mean(units)
+        assert rescaled_deviance == pytest.approx(reference_deviance, rel=gamma(n), abs=0.0)
+        np.testing.assert_allclose(rescaled, reference, rtol=np.sqrt(np.finfo(float).eps), atol=0.0)
 
     def test_constant_response_null_within_eight_ulps_is_the_exact_null(self):
         """The 8-ulp exact-null branch of ``_explained_deviance``, both ways.
