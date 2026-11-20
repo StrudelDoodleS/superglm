@@ -47,7 +47,10 @@ def term_importance(
     -------
     DataFrame
         Columns: term, feature, subgroup_type, variance_eta, sd_eta,
-        edf, lambda, group_norm.
+        edf, lambda, group_norm.  A term holding a coefficient whose value the fit
+        does not estimate (an alias's or a separated one's, as the summary shows
+        ``---``) has a NaN ``group_norm``, and NaN ``variance_eta`` and ``sd_eta``
+        when its share on these rows reads that coefficient.
     """
     if model._result is None:
         raise RuntimeError("Model must be fitted before calling term_importance().")
@@ -89,26 +92,31 @@ def term_importance(
     def _diag_lambda(g_name):
         return _resolve_group_lambda(g_name, reml_lam, lambda2)
 
-    rows = []
-    for g in model._groups:
-        b_g = beta[g.sl]
-        norm_g = float(np.linalg.norm(b_g))
+    from superglm.model.estimability_ops import published_estimates
 
-        if not np.any(b_g):
-            rows.append(
-                {
-                    "term": g.name,
-                    "feature": g.feature_name,
-                    "subgroup_type": g.subgroup_type,
-                    "variance_eta": 0.0,
-                    "sd_eta": 0.0,
-                    "edf": group_edf.get(g.name),
-                    "lambda": _diag_lambda(g.name),
-                    "group_norm": norm_g,
-                }
+    estimated = published_estimates(model)
+
+    def contribution(term, local: NDArray, full: NDArray) -> NDArray:
+        """The term's share of the predictor at its coefficients ``local`` (``full`` in place)."""
+        spec = term["spec"]
+        if isinstance(spec, FactorSmooth) and spec._has_population_offset:
+            eta_g, _ = base._score_unidentified_factor_smooth(
+                term, frame, full, population=False, features=features
             )
-            continue
+        else:
+            eta_g = base._score_prediction_term_local_exact(term, frame, local)
+        if term["name"] in main_names:
+            eta_g = eta_g + base._held_level_shift(
+                term,
+                frame,
+                lambda labels, term=term, local=local: base._score_prediction_term_local_exact(
+                    term, as_eager_frame(pd.DataFrame({term["name"]: labels})), local
+                ),
+                model._interaction_specs,
+            )
+        return eta_g
 
+    def plan_term(g):
         term = terms_by_name.get(g.feature_name)
         if term is None:
             raise RuntimeError(f"prediction plan does not define fitted term {g.feature_name!r}")
@@ -118,29 +126,46 @@ def term_importance(
             raise RuntimeError(
                 f"prediction plan coefficient layout disagrees with group {g.name!r}"
             )
-        term_beta = np.zeros(len(term_indices), dtype=np.float64)
-        term_beta[group_positions] = beta[term_indices[group_positions]]
-        spec = term["spec"]
-        if isinstance(spec, FactorSmooth) and spec._has_population_offset:
-            eta_g, _ = base._score_unidentified_factor_smooth(
-                term, frame, beta, population=False, features=features
-            )
-        else:
-            eta_g = base._score_prediction_term_local_exact(term, frame, term_beta)
-        if term["name"] in main_names:
-            eta_g = eta_g + base._held_level_shift(
-                term,
-                frame,
-                lambda labels, term=term, local=term_beta: base._score_prediction_term_local_exact(
-                    term, as_eager_frame(pd.DataFrame({term["name"]: labels})), local
-                ),
-                model._interaction_specs,
-            )
+        return term, term_indices
 
-        # Centered weighted variance
-        wmean = np.sum(weights * eta_g) / w_sum
-        eta_centered = eta_g - wmean
-        var_eta = float(np.sum(weights * eta_centered**2) / w_sum)
+    def reads(g, unestimated: NDArray) -> bool:
+        """Whether the group's share on these rows reads a coefficient that is not an estimate:
+        its column at that coefficient's unit vector is non-zero on some row."""
+        term, term_indices = plan_term(g)
+        for coordinate in unestimated:
+            full = np.zeros(len(beta), dtype=np.float64)
+            full[coordinate] = 1.0
+            if np.any(contribution(term, full[term_indices], full) != 0.0):
+                return True
+        return False
+
+    rows = []
+    for g in model._groups:
+        b_g = beta[g.sl]
+        norm_g = float(np.linalg.norm(b_g))
+        # a norm reading a value that is not an estimate (an alias's, a separated one's) is NaN,
+        # and so is the importance of a share that reads one on these rows
+        unestimated = (
+            np.zeros(0, dtype=np.intp)
+            if estimated is None
+            else g.start + np.flatnonzero(~estimated[g.sl])
+        )
+        if unestimated.size:
+            norm_g = float("nan")
+        if unestimated.size and reads(g, unestimated):
+            var_eta = float("nan")
+        elif not np.any(b_g):
+            var_eta = 0.0
+        else:
+            term, term_indices = plan_term(g)
+            local = np.where(
+                (term_indices >= g.start) & (term_indices < g.end), beta[term_indices], 0.0
+            )
+            eta_g = contribution(term, local, beta)
+            # Centered weighted variance
+            wmean = np.sum(weights * eta_g) / w_sum
+            eta_centered = eta_g - wmean
+            var_eta = float(np.sum(weights * eta_centered**2) / w_sum)
 
         rows.append(
             {

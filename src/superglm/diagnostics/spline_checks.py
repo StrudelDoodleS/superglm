@@ -100,8 +100,11 @@ def spline_redundancy(
     if model._result is None:
         raise RuntimeError("Model must be fitted.")
 
+    from superglm.model.estimability_ops import published_estimates
+
     frame = as_eager_frame(X)
     geometry_weight = _redundancy_geometry_weights(model, sample_weight, len(frame))
+    estimated = published_estimates(model)
     geometry_total = float(np.sum(geometry_weight, dtype=np.float64))
     results = {}
 
@@ -149,6 +152,9 @@ def spline_redundancy(
         groups = [g for g in model._groups if g.feature_name == name]
         beta_combined = np.concatenate([beta[g.sl] for g in groups])
         coef_energy = beta_combined**2
+        if estimated is not None:
+            # no energy for a value that is not an estimate (an alias's, a separated one's)
+            coef_energy[~np.concatenate([estimated[g.sl] for g in groups])] = np.nan
 
         # Effective rank via singular values of transformed basis
         active = geometry_weight > 0.0

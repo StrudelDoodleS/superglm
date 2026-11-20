@@ -1792,7 +1792,7 @@ class ModelMetrics:
             return {
                 "levels": spec._ordered_levels,
                 "base_level": spec._base_level,
-                "se_log_relativity": se,
+                "se_log_relativity": self._disclosed_levels(name, se),
             }
 
         if not any(group.name in selected_names for group in groups):
@@ -1895,6 +1895,38 @@ class ModelMetrics:
 
         values = read(phi * covariance_selected_block(XtWX_inv_aug, aug_indices))
         return self._disclosed_feature(name, values, indices, read, diagonal=False)
+
+    def _disclosed_levels(self, name, se: NDArray) -> NDArray:
+        """An ordered term's level standard errors ``se``, NaN at the levels off the fit's support.
+
+        The term readers' test (``explain_ops._curve_labels``) on the functional ``se`` reports,
+        each level's log relativity, read through ``feature_se_from_cov`` as ``se`` was; one
+        warning names the levels.  Nothing is read for a fit with no such direction.
+        """
+        from superglm.inference._term_covariance import feature_se_from_cov
+        from superglm.model.explain_ops import _curve_labels, _curve_warning
+
+        model: Any = self._model
+
+        def read(covariance_fn):
+            covariance, active_groups = covariance_fn()
+            points = feature_se_from_cov(
+                name,
+                covariance,
+                active_groups,
+                self._result,
+                self._groups,
+                model._specs,
+                model._interaction_specs,
+            )
+            return {"points": np.asarray(points, dtype=np.float64)}
+
+        labels = _curve_labels(self._model, read)
+        points = None if labels is None else labels["points"]
+        if points is None or not np.any(points != ""):
+            return se
+        _curve_warning({name: points})
+        return np.where(points != "", np.nan, np.asarray(se, dtype=np.float64))
 
     def _disclosed_feature(self, name, values, indices, read, *, diagonal):
         """``values`` with NaN standard errors at the points off the fit's support, and one warning.

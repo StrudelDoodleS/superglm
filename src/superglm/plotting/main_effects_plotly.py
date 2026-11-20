@@ -1548,12 +1548,10 @@ def _add_spline_diagnostic_traces(
     if basis.shape[1] == 0:
         return
 
-    from superglm.model.report_ops import feature_groups
+    from superglm.model.report_ops import basis_coefficients
 
-    groups = feature_groups(model, ti.name)
-    beta_combined = np.concatenate([model.result.beta[g.sl] for g in groups])
-    R_inv = getattr(spec, "_R_inv", None)
-    beta_orig = R_inv @ beta_combined if R_inv is not None else beta_combined
+    # NaN on a basis coefficient that reads a value the fit does not estimate
+    beta_orig = basis_coefficients(model, ti.name)
 
     if len(beta_orig) != basis.shape[1]:
         return

@@ -59,13 +59,21 @@ def diagnostics(model) -> dict[str, Any]:
     penalty = fitted_penalty(model)
     lambda2 = fitted_lambda2(model)
     selected_names = selected_group_name_set(res, model._groups, penalty=penalty)
+    from superglm.model.estimability_ops import published_estimates
+
+    # a norm reading a value that is not an estimate (an alias's, a separated one's) is NaN
+    estimated = published_estimates(model)
 
     out = {}
     for g in model._groups:
         bg = res.beta[g.sl]
         entry: dict[str, Any] = {
             "active": g.name in selected_names,
-            "group_norm": float(np.linalg.norm(bg)),
+            "group_norm": (
+                float(np.linalg.norm(bg))
+                if estimated is None or np.all(estimated[g.sl])
+                else float("nan")
+            ),
             "n_params": g.size,
         }
         spec = model._specs.get(g.feature_name)
@@ -420,6 +428,7 @@ def summary(
 
     se_dict: dict[str, np.ndarray] = {}
     se_raw_dict: dict[str, np.ndarray] = {}
+    identified = inference_identified(inf)
     for g in model._groups:
         if g.name not in selected_names:
             se_dict[g.name] = np.zeros(g.size)
@@ -441,6 +450,10 @@ def summary(
                 )
                 se_raw_dict[g.name] = standard_errors(var_diag, res, raw=True)
                 se_dict[g.name] = standard_errors(var_diag, res)
+                if identified is not None:
+                    # no standard error where the fit does not identify the coefficient
+                    se_raw_dict[g.name][~identified[g.sl]] = np.nan
+                    se_dict[g.name][~identified[g.sl]] = np.nan
 
     data["standard_errors"] = {
         "coefficient_se": se_dict,
@@ -487,11 +500,65 @@ def feature_groups(model, name: str) -> list[GroupSlice]:
     return [g for g in model._groups if g.feature_name == name]
 
 
+def basis_coefficients(model, name) -> np.ndarray:
+    """A term's coefficients on its original basis (``R_inv beta``), NaN on each that reads a
+    value the fit does not estimate (``estimability_ops.published_estimates``)."""
+    from superglm.model.estimability_ops import published_estimates
+
+    groups = feature_groups(model, name)
+    beta = np.concatenate([np.asarray(model.result.beta[g.sl], dtype=np.float64) for g in groups])
+    R_inv = getattr(model._specs[name], "_R_inv", None)
+    lift = np.eye(beta.size) if R_inv is None else np.asarray(R_inv, dtype=np.float64)
+    coefficients = lift @ beta
+    estimated = published_estimates(model)
+    if estimated is not None and lift.shape[1] == beta.size:
+        unestimated = ~np.concatenate([estimated[g.sl] for g in groups])
+        coefficients[np.any(lift[:, unestimated] != 0.0, axis=1)] = np.nan
+    return coefficients
+
+
+def _stale_unestimated(model) -> tuple[np.ndarray, bool]:
+    """Which of an edited model's values, and whether its intercept, are not estimates.
+
+    Those still holding the separated fit's values (the revised statement's ``reached`` and
+    ``intercept``, ``separation_ops.revised_statement``), an alias's coordinate on a term no
+    edit set, and an intercept an alias moves (``Identifiability.intercept_estimated``'s
+    other conditions); an edited term's coefficients are the edit's.
+    """
+    from superglm.model.estimability_ops import published_record
+
+    blank = np.zeros(len(model.result.beta), dtype=bool)
+    intercept = False
+    statement = getattr(model.result, "separation_statement", None)
+    if statement is not None and statement.tag in ("present", "partial"):
+        blank[np.asarray(statement.reached, dtype=np.intp)] = True
+        intercept = bool(statement.intercept)
+    record = published_record(model)
+    if record is not None:
+        edited = {
+            str(term) for term in (getattr(model, "_editor_edits", None) or {}).get("terms", ())
+        }
+        owner = {
+            coordinate: str(group.feature_name)
+            for group in model._groups
+            for coordinate in range(group.start, group.end)
+        }
+        for alias in record.aliases:
+            if alias.coordinate is not None and owner.get(alias.coordinate) not in edited:
+                blank[alias.coordinate] = True
+        reached = getattr(record.gauge, "intercept_reached", None)
+        intercept = intercept or record.intercept_aliased or bool(np.any(reached))
+    return blank, intercept
+
+
 def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
     from superglm.features.interaction import PolynomialCategorical, SplineCategorical
     from superglm.features.ordered_categorical import OrderedCategorical
     from superglm.features.piecewise import Piecewise
-    from superglm.inference._ordered_reference import ordered_reference_intercept
+    from superglm.inference._ordered_reference import (
+        ordered_reference_beta_contrast,
+        ordered_reference_intercept,
+    )
 
     intercept = ordered_reference_intercept(
         model.result.intercept,
@@ -500,6 +567,14 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
         model._specs,
         model._groups,
     )
+    # a value that is not an estimate shows ---, as on the fit's own table
+    blank, blank_intercept = _stale_unestimated(model)
+    shown = np.where(blank, np.nan, np.asarray(model.result.beta, dtype=float))
+    reference = ordered_reference_beta_contrast(
+        len(blank), model._feature_order, model._specs, model._groups
+    )
+    if blank_intercept or np.any(blank & (reference != 0.0)):
+        intercept = float("nan")
     rows = [_CoefRow(name="Intercept", coef=intercept)]
     group_edf = getattr(model, "_group_edf", None)
     reml_lambdas = getattr(model, "_reml_lambdas", None)
@@ -511,7 +586,7 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
     handled_ordered_features: set[str] = set()
 
     for g in model._groups:
-        beta_g = np.asarray(model.result.beta[g.sl], dtype=float)
+        beta_g = shown[g.sl]
         norm = float(np.linalg.norm(beta_g))
         active = g.name in selected_names
         spec = model._specs.get(g.feature_name) or model._interaction_specs.get(g.feature_name)
@@ -584,12 +659,17 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
             special_labels = set(raw.get("special_levels") or ()) if spec.has_specials else None
             pinned_labels = set(raw.get("pinned_specials") or ())
             main_fit = "smooth" if spec.basis_kind == "spline" else spec.basis_kind
-            for level in raw["levels"]:
+            unestimated = _stale_levels_reading(model, g.feature_name, blank)
+            for i, level in enumerate(raw["levels"]):
                 rows.append(
                     _CoefRow(
                         name=f"{g.feature_name}[{level}]",
                         group=g.feature_name,
-                        coef=float(raw["level_log_relativities"][level]),
+                        coef=(
+                            float("nan")
+                            if i < len(unestimated) and unestimated[i]
+                            else float(raw["level_log_relativities"][level])
+                        ),
                         level_fit=ordered_level_fit(
                             level,
                             special_labels=special_labels,
@@ -718,13 +798,63 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
     return rows
 
 
+def _stale_levels_reading(model, name, blank: np.ndarray) -> np.ndarray:
+    """Whether each of an ordered term's levels reads a coordinate ``blank`` marks
+    (``coef_tables._levels_reading`` on the covariance's active layout)."""
+    from superglm.inference.coef_tables import _levels_reading
+    from superglm.model.explain_ops import _active_layout
+
+    active_groups, columns = _active_layout(model)
+    if not np.any(blank[columns]):
+        return np.zeros(0, dtype=bool)
+    return _levels_reading(
+        name,
+        blank[columns],
+        active_groups,
+        model.result,
+        model._groups,
+        model._specs,
+        model._interaction_specs,
+    )
+
+
 def identifiability_notes(model) -> list[str]:
     """The coefficient tables' footnote: the fit's identifiability record's notes, a saved
     model's frozen ones after them."""
     from superglm.model.saved_record import frozen_notes
 
     record = model._fit_inference_info.get("identifiability")
-    return [*(() if record is None else record.notes()), *frozen_notes(model)]
+    return [
+        *(() if record is None else record.notes()),
+        *_reference_intercept_note(model, record),
+        *frozen_notes(model),
+    ]
+
+
+def _reference_intercept_note(model, record) -> tuple[str, ...]:
+    """Why the intercept shows no value when an ordered term's reference level is not estimated.
+
+    The reported intercept carries each ordered term's value at its reference level
+    (``ordered_reference_intercept``), so it reads that level's coefficients; the record's own
+    notes say why those have no estimate.
+    """
+    from superglm.inference._ordered_reference import ordered_reference_beta_contrast
+
+    if record is None or not record.intercept_estimated():
+        return ()
+    reads = (
+        ordered_reference_beta_contrast(
+            record.width, model._feature_order, model._specs, model._groups
+        )
+        != 0.0
+    ) & ~record.estimate_identified()
+    terms = list(dict.fromkeys(str(g.feature_name) for g in model._groups if np.any(reads[g.sl])))
+    if not terms:
+        return ()
+    return (
+        "The intercept is not shown (estimate and standard error shown as ---): it carries the "
+        f"value of {', '.join(terms)} at the reference level, which has no estimate.",
+    )
 
 
 def rules_enforced(model) -> bool:

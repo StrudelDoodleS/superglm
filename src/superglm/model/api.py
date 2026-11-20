@@ -2083,7 +2083,9 @@ class SuperGLM:
 
         Returns a DataFrame with columns: ``term``, ``feature``,
         ``subgroup_type``, ``variance_eta``, ``sd_eta``, ``edf``,
-        ``lambda``, ``group_norm``.
+        ``lambda``, ``group_norm``. For a term holding a value the fit does not estimate
+        (``summary()`` shows ``---``), ``group_norm`` is NaN, and so are ``variance_eta`` and
+        ``sd_eta`` when its share on the rows of ``X`` reads that value.
         """
         with self._parallel_scope():
             return explain_ops.term_importance(self, X, sample_weight)

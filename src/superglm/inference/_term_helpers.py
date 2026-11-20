@@ -215,6 +215,9 @@ def _spline_se(
         M_ref = np.asarray(spline_spec.transform(reference_x), dtype=np.float64)[:, active_cols]
         if M_ref.shape[0] == 1:
             M = M - M_ref
+            # the reference's own contrast reads nothing; a matrix product rounds a batch of
+            # rows and a single row apart, so its row is set to the zero it is
+            M[np.asarray(x_grid == reference_x[0], dtype=bool)] = 0.0
         elif M_ref.shape[0] == M.shape[0]:
             M = M - M_ref
         else:

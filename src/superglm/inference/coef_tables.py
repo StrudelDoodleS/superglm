@@ -56,6 +56,39 @@ def _thin_levels(
     return (rows < _THIN_LEVEL_ROWS) & (rows_of_average_weight < _THIN_LEVEL_ROWS)
 
 
+def _levels_reading(
+    name: Any,
+    flagged: NDArray,
+    active_groups: list[GroupSlice],
+    result: Any,
+    groups: list[GroupSlice],
+    specs: dict,
+    interaction_specs: dict,
+) -> NDArray:
+    """Whether each of a term's reported levels reads a coordinate ``flagged`` marks.
+
+    A level's value is a functional ``r`` of the coefficients and its standard error
+    ``sqrt(r V r')`` (``feature_se_from_cov``); at ``V = diag(flagged)`` that is the norm of
+    ``r`` on the flagged coordinates, non-zero exactly when ``r`` reads one, as the term readers
+    test their points (``explain_ops._DiagonalCovariance``).  ``flagged`` is on the active
+    layout of ``active_groups``.
+    """
+    from superglm.inference._term_covariance import feature_se_from_cov
+    from superglm.model.explain_ops import _DiagonalCovariance
+
+    indicator: Any = _DiagonalCovariance(np.asarray(flagged, dtype=np.float64))
+    probe = feature_se_from_cov(
+        name,
+        indicator,
+        active_groups,
+        result,
+        groups,
+        specs,
+        interaction_specs,
+    )
+    return np.asarray(probe, dtype=np.float64) > 0.0
+
+
 def _ordered_piecewise_structural_rows(
     spec: Any,
     feature_name: Any,
@@ -289,6 +322,22 @@ def build_coef_rows(
     if intercept_estimated is None:
         intercept_estimated = intercept_identified
 
+    def testable(*slices: slice) -> bool:
+        """Whether a joint test may read these coefficients: only when the fit identifies each."""
+        return all(bool(np.all(coefficient_identified[sl])) for sl in slices)
+
+    # The masks on the covariance's active layout, for a reader that tests a level's
+    # functional (``_levels_reading``); ``None`` when the fit identifies every coefficient.
+    active_masks: tuple[NDArray, NDArray] | None = None
+    if not np.all(coefficient_identified):
+        by_name = {group.name: group for group in groups}
+        on_active = np.zeros((2, XtWX_inv_aug.shape[0] - 1), dtype=bool)
+        for active_group in active_groups:
+            source = by_name[active_group.name].sl
+            on_active[0, active_group.sl] = ~estimated[source]
+            on_active[1, active_group.sl] = ~coefficient_identified[source]
+        active_masks = (on_active[0], on_active[1])
+
     # ── Per-level diagnostics for categorical features ────────────
     # Compute observation count, exposure share and thinness per non-base level.
     _level_diag: dict[str, dict[int, tuple[int, float, bool]]] = {}
@@ -380,7 +429,15 @@ def build_coef_rows(
         augmented_reference_contrast,
     )
     icpt_se = float(standard_errors(icpt_var, result, known_scale=known_scale))
-    if not intercept_identified:
+    # the reported intercept carries each ordered term's value at its reference level, so it
+    # reads that level's coefficients too
+    reads_reference = full_reference_contrast != 0.0
+    dropped = np.zeros(len(beta), dtype=bool)
+    for g in groups:
+        dropped[g.sl] = g.name not in selected_names
+    if np.any(reads_reference & ~estimated):
+        intercept_estimated = False
+    if not intercept_identified or np.any(reads_reference & ~(coefficient_identified | dropped)):
         # separation moves the intercept: no finite estimate, no standard error
         icpt_se = float("nan")
 
@@ -597,9 +654,10 @@ def build_coef_rows(
                     if active_group is not None:
                         active_pairs.append((feature_group, active_group))
 
+                joint = testable(*(fg.sl for fg in smooth_groups))
                 stat = float("nan")
                 p_val = float("nan")
-                ref_df = float(sum(fg.size for fg in smooth_groups))
+                ref_df = float(sum(fg.size for fg in smooth_groups)) if joint else float("nan")
                 curve_se_min = float("nan")
                 curve_se_max = float("nan")
                 beta_active = (
@@ -608,7 +666,7 @@ def build_coef_rows(
                     else np.empty(0, dtype=float)
                 )
 
-                if active_pairs:
+                if active_pairs and joint:
                     from superglm.stats.wood_pvalue import wood_test_smooth
 
                     active_indices = np.concatenate(
@@ -682,7 +740,7 @@ def build_coef_rows(
                 se_main = se_dict[main_group.name]
                 stat = float("nan")
                 p_val = float("nan")
-                ref_df = float(main_group.size)
+                ref_df = float(main_group.size) if testable(main_group.sl) else float("nan")
                 V_b_main: NDArray | None = None
                 if smooth_active:
                     ag = next(
@@ -694,8 +752,9 @@ def build_coef_rows(
                         from scipy.stats import chi2 as chi2_dist
 
                         try:
-                            stat = covariance_wald_statistic(b_main, V_b_main)
-                            p_val = 1.0 - chi2_dist.cdf(stat, ref_df)
+                            if testable(main_group.sl):
+                                stat = covariance_wald_statistic(b_main, V_b_main)
+                                p_val = 1.0 - chi2_dist.cdf(stat, ref_df)
                         except np.linalg.LinAlgError:
                             pass
                 rows.append(
@@ -770,10 +829,33 @@ def build_coef_rows(
             # "smooth", it is "piecewise"/"polynomial" beside its "free"
             # neighbours.
             main_fit = "smooth" if inner_kind == "spline" else inner_kind
+            # a level reading a coefficient the fit does not identify follows that coefficient's
+            # row: no value where one is not estimated, no SE or interval where one is not
+            # identified
+            unestimated, unidentified = (
+                (np.zeros(len(levels), dtype=bool),) * 2
+                if active_masks is None or not feature_active
+                else (
+                    _levels_reading(
+                        g.feature_name,
+                        mask,
+                        active_groups,
+                        result,
+                        groups,
+                        specs,
+                        interaction_specs,
+                    )
+                    for mask in active_masks
+                )
+            )
             for i, level in enumerate(levels):
-                coef_val = float(raw["level_log_relativities"][level])
+                no_value = bool(i < len(unestimated) and unestimated[i])
+                no_se = bool(i < len(unidentified) and unidentified[i])
+                coef_val = float("nan") if no_value else float(raw["level_log_relativities"][level])
                 se_val: float | None = (
-                    float(se_levels[i]) if feature_active and i < len(se_levels) else None
+                    float(se_levels[i])
+                    if feature_active and i < len(se_levels) and not no_se
+                    else None
                 )
                 level_ci_lo: float | None
                 level_ci_hi: float | None
@@ -792,6 +874,7 @@ def build_coef_rows(
                         se=se_val,
                         ci_low=level_ci_lo,
                         ci_high=level_ci_hi,
+                        estimable=not no_se,
                         level_fit=ordered_level_fit(
                             level,
                             special_labels=special_labels,
@@ -808,16 +891,17 @@ def build_coef_rows(
             _mono_engine = _engine_tag(spec, g.monotone_engine)
             _mono_repaired = g.feature_name in _mono_repairs
             if active:
+                joint = testable(g.sl)
                 stat = float("nan")
                 p_val = float("nan")
-                ref_df = float(g.size)
+                ref_df = float(g.size) if joint else float("nan")
                 curve_se_min = float("nan")
                 curve_se_max = float("nan")
 
                 ag = next(a for a in active_groups if a.name == g.name)
                 V_b_j = _augmented_group_block(ag)
 
-                if is_linear_subgroup:
+                if joint and is_linear_subgroup:
                     from scipy.stats import chi2 as chi2_dist
 
                     try:
@@ -828,7 +912,7 @@ def build_coef_rows(
                         pass
 
                     curve_se_min, curve_se_max = _curve_se_range(g.feature_name)
-                else:
+                elif joint:
                     from superglm.stats.wood_pvalue import wood_test_smooth
 
                     R_a = _get_R_factor()
@@ -931,23 +1015,25 @@ def build_coef_rows(
             if active:
                 stat = float("nan")
                 p_val = float("nan")
-                ref_df = float(g.size)
+                ref_df = float("nan")
 
                 ag = next(a for a in active_groups if a.name == g.name)
                 V_b_j = _augmented_group_block(ag)
 
                 from superglm.stats.wood_pvalue import wood_test_smooth
 
-                R_a = _get_R_factor()
-                edf, edf1 = _get_influence_edf()
-                edf1_j = float(np.sum(edf1[ag.sl]))
-                X_j = R_a[:, ag.sl]
-                res_df = _wood_residual_df(edf)
+                if testable(g.sl):
+                    ref_df = float(g.size)
+                    R_a = _get_R_factor()
+                    edf, edf1 = _get_influence_edf()
+                    edf1_j = float(np.sum(edf1[ag.sl]))
+                    X_j = R_a[:, ag.sl]
+                    res_df = _wood_residual_df(edf)
 
-                try:
-                    stat, p_val, ref_df = wood_test_smooth(b_g, X_j, V_b_j, edf1_j, res_df)
-                except Exception:
-                    pass
+                    try:
+                        stat, p_val, ref_df = wood_test_smooth(b_g, X_j, V_b_j, edf1_j, res_df)
+                    except Exception:
+                        pass
 
                 _edf_map = _get_group_edf_map()
                 rows.append(
@@ -1006,7 +1092,7 @@ def build_coef_rows(
             if active:
                 stat = float("nan")
                 p_val = float("nan")
-                ref_df = float(g.size)
+                ref_df = float(g.size) if testable(g.sl) else float("nan")
 
                 ag = next(a for a in active_groups if a.name == g.name)
                 V_b_j = _augmented_group_block(ag)
@@ -1014,8 +1100,9 @@ def build_coef_rows(
                 from scipy.stats import chi2 as chi2_dist
 
                 try:
-                    stat = covariance_wald_statistic(b_g, V_b_j)
-                    p_val = 1.0 - chi2_dist.cdf(stat, ref_df)
+                    if testable(g.sl):
+                        stat = covariance_wald_statistic(b_g, V_b_j)
+                        p_val = 1.0 - chi2_dist.cdf(stat, ref_df)
                 except np.linalg.LinAlgError:
                     pass
 
@@ -1101,14 +1188,15 @@ def build_coef_rows(
             elif active:
                 stat = float("nan")
                 p_val = float("nan")
-                ref_df = float(g.size)
+                ref_df = float(g.size) if testable(g.sl) else float("nan")
                 ag = next(a for a in active_groups if a.name == g.name)
                 V_b_j = _augmented_group_block(ag)
                 from scipy.stats import chi2 as chi2_dist
 
                 try:
-                    stat = covariance_wald_statistic(b_g, V_b_j)
-                    p_val = 1.0 - chi2_dist.cdf(stat, ref_df)
+                    if testable(g.sl):
+                        stat = covariance_wald_statistic(b_g, V_b_j)
+                        p_val = 1.0 - chi2_dist.cdf(stat, ref_df)
                 except np.linalg.LinAlgError:
                     pass
                 _edf_map = _get_group_edf_map()
@@ -1146,23 +1234,25 @@ def build_coef_rows(
             if active:
                 stat = float("nan")
                 p_val = float("nan")
-                ref_df = float(g.size)
+                ref_df = float("nan")
 
                 ag = next(a for a in active_groups if a.name == g.name)
                 V_b_j = _augmented_group_block(ag)
 
                 from superglm.stats.wood_pvalue import wood_test_smooth
 
-                R_a = _get_R_factor()
-                edf, edf1 = _get_influence_edf()
-                edf1_j = float(np.sum(edf1[ag.sl]))
-                X_j = R_a[:, ag.sl]
-                res_df = _wood_residual_df(edf)
+                if testable(g.sl):
+                    ref_df = float(g.size)
+                    R_a = _get_R_factor()
+                    edf, edf1 = _get_influence_edf()
+                    edf1_j = float(np.sum(edf1[ag.sl]))
+                    X_j = R_a[:, ag.sl]
+                    res_df = _wood_residual_df(edf)
 
-                try:
-                    stat, p_val, ref_df = wood_test_smooth(b_g, X_j, V_b_j, edf1_j, res_df)
-                except Exception:
-                    pass
+                    try:
+                        stat, p_val, ref_df = wood_test_smooth(b_g, X_j, V_b_j, edf1_j, res_df)
+                    except Exception:
+                        pass
 
                 rows.append(
                     _CoefRow(
@@ -1254,7 +1344,7 @@ def build_coef_rows(
             stat = float("nan")
             p_val = float("nan")
             ref_df = float(g.size)
-            reportable = active and not shrunk
+            reportable = active and not shrunk and testable(g.sl)
             if reportable:
                 from scipy.stats import chi2 as chi2_dist
 

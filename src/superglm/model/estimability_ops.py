@@ -197,6 +197,24 @@ def published_directions(model) -> PublishedDirections | None:
     return PublishedDirections(slopes, intercepts, scale, centre - shifts, alpha_scale)
 
 
+def published_estimates(model) -> NDArray | None:
+    """Which coefficients' published values are estimates, or ``None`` when every one is.
+
+    ``Identifiability.estimate_identified`` (not an alias's coordinate, not one separation
+    moves) of the published record (``published_record``), or of the record inference already
+    read (``_fit_inference_info``, once formed); ``None`` without either, which nothing here
+    builds, as the term readers disclose nothing until inference has a record.
+    """
+    record = published_record(model)
+    if record is None:
+        inference = model.__dict__.get("_fit_inference_info")
+        record = None if inference is None else inference.get("identifiability")
+    if record is None:
+        return None
+    estimated = np.asarray(record.estimate_identified(), dtype=bool)
+    return None if np.all(estimated) else estimated
+
+
 def term_coordinates(model, name) -> NDArray:
     """A term's coefficient positions, in the order its blocks concatenate them."""
     blocks = [
