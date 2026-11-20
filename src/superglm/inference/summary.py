@@ -842,8 +842,9 @@ class ModelSummary:
         abbrevs = info.get("penalty_abbrevs", {})
         if abbrevs:
             lines.append("; ".join(f"{k}: {v}" for k, v in abbrevs.items()))
-        if info.get("convergence_note"):
-            lines.extend(textwrap.wrap(info["convergence_note"], width=max(60, min(W + 2, 100))))
+        for note in (info.get("convergence_note"), info.get("standard_error_note")):
+            if note:
+                lines.extend(textwrap.wrap(note, width=max(60, min(W + 2, 100))))
         for note in _editor_notes(info):
             lines.append(note)
         for note in info.get("shared_cell_rows") or ():
@@ -1275,12 +1276,13 @@ class ModelSummary:
                 f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
                 f'color:#c60;border:none;">{advisory_note_html}</td></tr>'
             )
-        if info.get("convergence_note"):
-            parts.append(
-                f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
-                f'color:#c60;white-space:normal;border:none;">'
-                f"{html_escape(info['convergence_note'])}</td></tr>"
-            )
+        for note in (info.get("convergence_note"), info.get("standard_error_note")):
+            if note:
+                parts.append(
+                    f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
+                    f'color:#c60;white-space:normal;border:none;">'
+                    f"{html_escape(note)}</td></tr>"
+                )
         for note in _editor_notes(info):
             parts.append(
                 f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'

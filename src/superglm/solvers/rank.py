@@ -835,6 +835,27 @@ def needs_factor_certification(
     )
 
 
+def penalized_rank_certified(
+    decomposition: RankDecomposition,
+    *,
+    policy: RankPolicy = SHARED_RANK_POLICY,
+) -> bool:
+    """Whether a penalized Hessian's own Gram decomposition certifies it as positive definite.
+
+    Full rank, from the Gram itself, outside the band that sends a Gram to its observation
+    factor (``needs_factor_certification``): a Jacobi-scaled condition under
+    ``warning_condition / sqrt(certification_band)``.  A decomposition of the row factor is
+    what a fit holds when its Gram could not certify itself, so it does not qualify.  Every
+    coefficient then has a finite posterior variance ``phi (X'WX + S)^-1`` (Wood, Pya and
+    Säfken 2016, JASA 111, sections 2 and 3.1.2), whether or not the data alone determine it.
+    """
+    return bool(
+        decomposition.method != "qr_svd"
+        and decomposition.rank == decomposition.width
+        and not needs_factor_certification(decomposition, policy=policy)
+    )
+
+
 def _freeze(values: NDArray, *, dtype=float) -> NDArray:
     result = np.array(values, dtype=dtype, copy=True)
     result.setflags(write=False)
@@ -1254,6 +1275,15 @@ class RankInfo:
     # every fit now records, and ``"face"``, the face fit's, for a record saved before fits did:
     # it reads this default on unpickling and keeps that covariance in every reader until refit.
     covariance_policy: Literal["face", "rule_free"] = field(default="face", compare=False)
+    # Which coefficients show a standard error (``state_ops.standard_error_mask``):
+    # ``"penalized"``, every one once the penalized Hessian is certified positive definite, which
+    # every fit records, and ``"data"``, those the data alone determine, for a record saved
+    # before fits did: ``__setstate__`` gives it that value, and every reader keeps the blanks
+    # it was saved with until refit.
+    standard_error_mask: Literal["data", "penalized"] = field(default="penalized", compare=False)
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update({"standard_error_mask": "data"} | state)
 
     def take_data_gram(self, W: NDArray) -> NDArray | None:
         """Hand the fit's data Gram to its one reader, leaving none behind.

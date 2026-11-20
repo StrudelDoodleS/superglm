@@ -26,6 +26,7 @@ import pandas as pd
 import pytest
 
 from superglm import Categorical, FactorSmooth, LambdaPolicy, Numeric, RandomEffect, SuperGLM
+from superglm.solvers._structured.geometry import centered_operator_coefficient_estimable
 from superglm.solvers.mode_score import linear_predictor
 
 EPS = float(np.finfo(np.float64).eps)
@@ -151,15 +152,20 @@ def test_fs_reml_does_not_move_with_a_large_column_offset(family, link) -> None:
 
 
 @pytest.mark.parametrize("discrete", [False, True])
-def test_fs_standard_errors_are_nan_only_where_the_design_cannot_estimate(discrete) -> None:
+def test_fs_data_estimability_is_the_designs_at_a_column_offset(discrete) -> None:
     """Poisson ``fs`` with a column at ``1e6``, lambda 1e-7 beside weights 1e4.
 
-    Estimability for standard errors was read off the raw moments centred by
+    The data's estimability was read off the raw moments centred by
     subtraction, which cancel to noise for the offset column: every one of the
-    190 standard errors came back NaN.  The NaN set must be the design's
-    structural non-estimable set (each level's constant, aliased with the
-    intercept), the same with the column translated back.  Mutation: the
-    retained centred data operator on the raw moments.
+    190 coefficients came back non-estimable.  The set must be the design's
+    structural one (each level's constant, aliased with the intercept), the
+    same with the column translated back.  Mutation: the retained centred data
+    operator on the raw moments.
+
+    The fit penalises every ``fs`` coefficient and its factor drops no
+    direction, so every standard error is shown, at either position of the
+    column; the 35 the data leave open were NaN while readers applied the
+    data rule to a penalised fit.
     """
     frame, eta, rng, _ = _frame()
     n = len(frame)
@@ -177,8 +183,11 @@ def test_fs_standard_errors_are_nan_only_where_the_design_cannot_estimate(discre
             weight,
         )
         assert model._reml_profile["direct_backend"] == "structured"
-        mask = _nan_mask(model, data, y, weight)
+        mask = ~centered_operator_coefficient_estimable(
+            model._linear_system_state.centered_data_operator
+        )
         np.testing.assert_array_equal(mask, _structurally_non_estimable(model, weight))
+        assert not _nan_mask(model, data, y, weight).any()
         masks.append(mask)
     np.testing.assert_array_equal(masks[0], masks[1])
     assert 0 < int(masks[0].sum()) < len(masks[0])

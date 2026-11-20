@@ -1154,11 +1154,24 @@ The QR path is basically saying:
 #### 17.3.2 Which coefficients the data can estimate
 
 After the fit, superglm decides which coefficients the data alone can
-identify. This is the *data rank*. A coefficient outside it, such as a spline
-basis function over a corner of a tensor term with no rows, is reported as not
-estimable, and its standard error is shown as missing. Its fitted value and the
-model's predictions do not depend on this decision, which is made after the
-coefficients are solved.
+identify. This is the *data rank*. A penalty can still determine a coefficient
+outside it, such as a level of a random effect or a spline basis function over
+a range with no rows.
+
+- **Every standard error is shown when the penalised fit has full rank.** The
+  test is the fit's own: the penalised Hessian
+  $\mathbf{X}^\top\mathbf{W}\mathbf{X} + \mathbf{S}$ has full rank with a
+  scaled condition number below $1.19 \times 10^7$, or the structured solver
+  dropped no direction. Each coefficient then has a finite posterior variance.
+- **Otherwise the data rank decides.** A coefficient outside it is reported as
+  not estimable, and its standard error is shown as missing.
+- **A fit with a selection penalty or a shape rule always uses the data
+  rank.**
+- **A saved model keeps the standard errors it was saved with.** Its summary
+  says when a refit would show more.
+
+Fitted values and predictions do not depend on this decision, which is made
+after the coefficients are solved.
 
 The decision is the numerical rank of the weighted design
 $\mathbf{W}^{1/2}\mathbf{X}$. Columns are scaled to unit length, and a

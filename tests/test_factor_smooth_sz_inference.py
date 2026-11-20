@@ -11,6 +11,8 @@ import pytest
 
 from superglm import FactorSmooth, LambdaPolicy, Spline, SuperGLM
 
+from .test_penalized_standard_errors import dense_raw_standard_errors
+
 
 def _data(
     *,
@@ -279,18 +281,20 @@ def test_sz_sparse_levels_keep_other_global_smooth_in_summary_and_reconstruction
 
 
 def test_sz_structured_estimability_is_the_data_s():
-    """A two-row level: estimability reads the data alone, as the dense solver's rule.
+    """A two-row level: the factor's data estimability reads the data alone, as the dense solver's.
 
-    The level's data pin only two of its six coordinates.  The penalty
-    identifies the rest, so the Hessian ``H = X'WX + S`` is nonsingular, but
-    a coefficient is estimable only when no null vector of the data ``[1, X]``
-    moves it, and the sum-to-zero constraint spreads the level's free
-    directions over every level and the main effect.  The structured fit's
-    estimability is that set exactly: the column-equilibrated SVD's null
-    vectors (below ``max(n, p) eps`` of the largest singular value, the
-    ``dgesdd`` backward error) and the dense solver's.  Mutation: the fit's
-    own (penalized) aliases deciding estimability, which reported every
-    coefficient estimable.
+    The level's data pin only two of its six coordinates, and the sum-to-zero
+    constraint spreads the level's free directions over every level and the
+    main effect.  The structured factor's record of the data is that set
+    exactly: the column-equilibrated SVD's null vectors (below ``max(n, p)
+    eps`` of the largest singular value, the ``dgesdd`` backward error) and
+    the dense solver's.  Mutation: the fit's own (penalized) aliases deciding
+    the data's estimability, which reported every coefficient estimable.
+
+    The penalty identifies the rest, so the Hessian ``H = X'WX + S`` is
+    nonsingular and both solvers show every standard error, the dense
+    inverse's of ``[1 X]'[1 X] + S`` (rtol 1e-8).  The coefficients the data
+    leave open were NaN while readers applied the data rule to a penalised fit.
     """
     X, y = _data()
     rare = X["segment"] == "omega"
@@ -318,7 +322,7 @@ def test_sz_structured_estimability_is_the_data_s():
     }
     structured = models["structured"]
     assert structured._reml_profile["direct_backend"] == "structured"
-    estimable = structured._fit_inference_info["coefficient_estimable"]
+    estimable = structured._linear_system_state.profiled_factor.coefficient_estimable()
     eps = np.finfo(float).eps
     A = np.column_stack((np.ones(structured._dm.n), structured._dm.toarray()))
     A = A / np.linalg.norm(A, axis=0)
@@ -327,12 +331,17 @@ def test_sz_structured_estimability_is_the_data_s():
     structural = np.any(np.abs(null[:, 1:]) > np.sqrt(eps), axis=0)
     assert np.any(structural)
     np.testing.assert_array_equal(estimable, ~structural)
+    np.testing.assert_array_equal(
+        models["gram"].result.rank_info.coefficient_estimable(), ~structural
+    )
     for solve, model in models.items():
-        se = model.metrics(X, y).coefficient_se
-        mask = np.concatenate(
-            [np.isnan(np.atleast_1d(np.asarray(se[g.name], dtype=float))) for g in model._groups]
+        se = model.metrics(X, y).coefficient_se_raw
+        raw = np.concatenate(
+            [np.atleast_1d(np.asarray(se[g.name], dtype=float)) for g in model._groups]
         )
-        np.testing.assert_array_equal(mask, structural, err_msg=solve)
+        np.testing.assert_allclose(
+            raw, dense_raw_standard_errors(model, X), rtol=1e-8, err_msg=solve
+        )
 
 
 def test_sz_summary_uses_one_structured_group_row():

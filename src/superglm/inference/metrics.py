@@ -49,6 +49,9 @@ from superglm.model.state_ops import (
     _rank_active_state,
     _rank_augmented_covariance,
     _solver_space_working_weights,
+    rank_standard_error_mask,
+    saved_standard_error_note,
+    standard_error_mask,
 )
 from superglm.penalties.base import selection_shrunk_group_names
 from superglm.profiling._reporting import (
@@ -1160,12 +1163,6 @@ class ModelMetrics:
             XtWX, XtW1, centered_data_gram = weighted_moments(X_a, W)
             self.__dict__["_active_centered_data_gram"] = centered_data_gram
             data_rank = _certified_data_rank(X_a, W, centered_data_gram, XtW1, S_active)
-            self.__dict__["_coefficient_estimable"] = _coefficient_estimability(
-                data_rank,
-                self._groups,
-                active_groups,
-                len(beta),
-            )
             # one stacked root for the face's decompositions and the covariance's
             root = cache(
                 partial(_active_penalty_root, *penalty_terms, reml_penalties=reml_penalties)
@@ -1180,6 +1177,13 @@ class ModelMetrics:
                 data_rank,
                 face,
                 root,
+            )
+            self.__dict__["_coefficient_estimable"] = standard_error_mask(
+                self._model,
+                profile_rank,
+                partial(
+                    _coefficient_estimability, data_rank, self._groups, active_groups, len(beta)
+                ),
             )
             augmented = _profiled_augmented_covariance(
                 centered_data_gram,
@@ -1196,7 +1200,9 @@ class ModelMetrics:
             X_a, active_groups = _rank_active_state(self._model, rank_info)
             inverse = rank_info.coefficient_inverse()
             augmented = _rank_augmented_covariance(self._model, rank_info, active_groups)
-            self.__dict__["_coefficient_estimable"] = rank_info.coefficient_estimable()
+            self.__dict__["_coefficient_estimable"] = rank_standard_error_mask(
+                self._model, rank_info
+            )
             return X_a, W, inverse, augmented, active_groups
 
         _, active_groups = _selected_group_state(
@@ -1212,12 +1218,6 @@ class ModelMetrics:
         XtWX, XtW1, centered_data_gram = weighted_moments(X_a, W)
         self.__dict__["_active_centered_data_gram"] = centered_data_gram
         data_rank = _certified_data_rank(X_a, W, centered_data_gram, XtW1, S_active)
-        self.__dict__["_coefficient_estimable"] = _coefficient_estimability(
-            data_rank,
-            self._groups,
-            active_groups,
-            len(beta),
-        )
         # one stacked root for the face's decompositions and the covariance's
         root = cache(partial(_active_penalty_root, *penalty_terms, reml_penalties=reml_penalties))
         inverse, profile_rank = self._reformed_ranks(
@@ -1230,6 +1230,11 @@ class ModelMetrics:
             data_rank,
             face,
             root,
+        )
+        self.__dict__["_coefficient_estimable"] = standard_error_mask(
+            self._model,
+            profile_rank,
+            partial(_coefficient_estimability, data_rank, self._groups, active_groups, len(beta)),
         )
         augmented = _profiled_augmented_covariance(
             centered_data_gram,
@@ -2008,6 +2013,9 @@ class ModelMetrics:
             "ebic": self.ebic(),
             "converged": self._result.converged,
             "n_iter": self._result.n_iter,
+            "standard_error_note": saved_standard_error_note(
+                self._model, self._current_coefficient_estimable
+            ),
         }
 
         # NB theta profile info

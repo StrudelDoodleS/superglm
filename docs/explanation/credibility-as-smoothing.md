@@ -289,12 +289,11 @@ which others.
   warning. The Gram solver fits the same model without that warning.
 - **With `select=True` the term penalizes every level's line.** No level
   keeps an unpenalized direction, and neither solver names a thin level at
-  fit. Coefficient standard errors still follow the data rule: a direction
-  only the penalty pins, such as a thin level's line or the block of a level
-  without weight, is not estimable from the data, so those standard errors
-  can still be missing (NaN), as a random effect's are. A level without
-  weight is still predicted at the population curve, and the report's
-  `thin_levels` and `predict` name it.
+  fit. Every coefficient has a standard error when the penalised fit has full
+  rank, as a random effect's levels do: the penalty then determines the
+  directions the data leave open, such as a thin level's line or the block
+  of a level without weight. A level without weight is still predicted at
+  the population curve, and the report's `thin_levels` and `predict` name it.
 
 `discrete=True` bins the continuous spline support and reuses cached
 sufficient statistics across REML iterations; factor identities and the SZ

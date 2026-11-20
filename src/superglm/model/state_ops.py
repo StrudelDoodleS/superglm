@@ -30,11 +30,13 @@ from superglm.solvers._structured.state import (
     StructuredLinearSystemState,
 )
 from superglm.solvers.rank import (
+    RankDecomposition,
     decide_data_rank,
     decompose_factor,
     decompose_gram,
     decompose_gram_if_authoritative,
     diagonal_of_square,
+    penalized_rank_certified,
     selected_group_name_set,
 )
 from superglm.solvers.working_rows import fisher_working_weights
@@ -500,6 +502,69 @@ def fit_active_info(model):
     return X_active, W, inverse, augmented, active_groups
 
 
+def _fit_record(model):
+    """The fit's own record of its rank: a structured fit's retained system, a dense fit's rank record."""
+    state = retained_linear_state(model)
+    return state if state is not None else model._solver_pirls_result().rank_info
+
+
+def penalized_fit_certified(model, penalized) -> bool:
+    """Whether ``penalized`` certifies the quadratic-penalty fit ``model`` published as determined.
+
+    ``penalized`` is what the covariance is inverted from: a dense decomposition of the
+    penalized Hessian, which certifies itself by ``rank.penalized_rank_certified``, or a
+    structured factor, which does by truncating no direction.  Never for a fit with a
+    selection penalty or a term under a shape rule: its coefficients are not the
+    unconstrained optimum of the quadratic penalty that Hessian belongs to.
+    """
+    if (fitted_penalty(model).lambda1 or 0.0) > 0.0:
+        return False
+    if any(g.constraints is not None or g.monotone_engine is not None for g in model._groups):
+        return False
+    if isinstance(penalized, RankDecomposition):
+        return penalized_rank_certified(penalized)
+    return not penalized.rank_truncated
+
+
+def standard_error_mask(model, penalized, data_mask) -> NDArray:
+    """Which coefficients show a standard error, for every reader of ``model``.
+
+    Every coefficient when the penalized fit is certified (``penalized_fit_certified``): the
+    penalty then determines what the data alone leave open, and ``sqrt(phi diag V)`` is each
+    coefficient's posterior standard deviation.  Otherwise those the data alone determine,
+    ``data_mask()``; a record saved before fits recorded this rule keeps that mask whatever its
+    rank (``RankInfo.standard_error_mask``).
+    """
+    record = _fit_record(model)
+    if getattr(record, "standard_error_mask", "data") == "penalized" and penalized_fit_certified(
+        model, penalized
+    ):
+        return np.ones(len(model._solver_pirls_result().beta), dtype=bool)
+    return data_mask()
+
+
+def rank_standard_error_mask(model, rank_info) -> NDArray:
+    """``standard_error_mask`` of a dense fit read from its own rank record."""
+    return standard_error_mask(model, rank_info.augmented, rank_info.coefficient_estimable)
+
+
+def saved_standard_error_note(model, mask: NDArray) -> str | None:
+    """A summary's line for a saved model whose blank standard errors a refit would show."""
+    record = _fit_record(model)
+    blank = int(np.size(mask) - np.count_nonzero(mask))
+    if not blank or getattr(record, "standard_error_mask", "penalized") != "data":
+        return None
+    penalized = getattr(record, "profiled_factor", None)
+    if penalized is None:
+        penalized = getattr(record, "augmented", None)
+    if penalized is None or not penalized_fit_certified(model, penalized):
+        return None
+    return (
+        f"{blank} standard errors are blank because this model was saved by an earlier superglm, "
+        "which showed only those the data alone determine. Refit the model to show them."
+    )
+
+
 def _structured_small_data_factor(operator: CenteredBlockOperator) -> MappedColumnFactor:
     """Store the exact centered dense-small Gram factor on mapped columns."""
     raw = operator.raw
@@ -602,10 +667,16 @@ def fit_inference_info(model):
             "group_edf_map": group_edf_map,
             # an sz factor reads the data's null space on the balance tree of
             # the data (SumToZeroTreeFactor.coefficient_estimable)
-            "coefficient_estimable": (
-                linear_state.profiled_factor.coefficient_estimable()
-                if isinstance(linear_state.profiled_factor, ProfiledSumToZeroTreeFactor)
-                else centered_operator_coefficient_estimable(linear_state.centered_data_operator)
+            "coefficient_estimable": standard_error_mask(
+                model,
+                linear_state.profiled_factor,
+                lambda: (
+                    linear_state.profiled_factor.coefficient_estimable()
+                    if isinstance(linear_state.profiled_factor, ProfiledSumToZeroTreeFactor)
+                    else centered_operator_coefficient_estimable(
+                        linear_state.centered_data_operator
+                    )
+                ),
             ),
             "structured_covariance": True,
         }
@@ -627,7 +698,7 @@ def fit_inference_info(model):
                 "edf": np.array([]),
                 "edf1": np.array([]),
                 "group_edf_map": dict(rank_info.group_edf),
-                "coefficient_estimable": rank_info.coefficient_estimable(),
+                "coefficient_estimable": rank_standard_error_mask(model, rank_info),
             }
         if data_gram is None:
             data_gram = _rank_centered_data_gram(X_active, W)
@@ -643,7 +714,7 @@ def fit_inference_info(model):
             "edf": edf,
             "edf1": edf1,
             "group_edf_map": dict(rank_info.group_edf),
-            "coefficient_estimable": rank_info.coefficient_estimable(),
+            "coefficient_estimable": rank_standard_error_mask(model, rank_info),
         }
 
     X_active, active_groups, inverse, augmented, data_gram, profile_inverse, data_rank = (
