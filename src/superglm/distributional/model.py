@@ -88,6 +88,7 @@ from superglm.distributional.smoothing.loop import fit_distributional_efs
 from superglm.distributional.solver.chunks import ChunkSize
 from superglm.distributional.solver.shape import refit_with_shape_rules, shape_rows
 from superglm.distributional.solver.solver import fit_dense_fixed_lambda
+from superglm.distributional.support import disclose, support_labels
 from superglm.distributional.timing import FitPhaseRecorder, measure_phase
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
@@ -761,15 +762,21 @@ class DenseDistributionalModel:
         The stand-in is a valid parameter (``parameter_from_eta``'s ``"interior"``),
         so a prediction formed from the parameters reads every row and then sets
         those rows to NaN. One warning names them, unless ``warn`` is false, for a
-        reader that names them itself.
+        reader that names them itself. Rows that lean on a direction the fit does
+        not determine are named in one ``NonEstimablePredictionWarning``
+        (``support.disclose``), with those of them that have no value; the other
+        warning names only the rest.
         """
         eta = self.predict_eta(X, offsets=offsets)
         outside = self.outside_domain(eta)
         theta = self.parameters_from_eta(eta, outside_domain="interior")
-        if warn and np.any(outside):
-            from superglm.model.base import warn_no_value
+        if warn:
+            off = disclose(support_labels(self, X), outside.any(axis=1))
+            on = outside & ~off[:, None]
+            if np.any(on):
+                from superglm.model.base import warn_no_value
 
-            warn_no_value(outside.any(axis=1), self.no_value_parameters(outside))
+                warn_no_value(on.any(axis=1), self.no_value_parameters(on))
         return theta, outside
 
     def no_value_parameters(self, outside: NDArray[np.bool_]) -> str:

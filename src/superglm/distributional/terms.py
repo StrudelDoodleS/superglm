@@ -140,6 +140,12 @@ REPAIRED_NOTE = "repaired after the fit (Constraint.postfit): inference withheld
 REPAIRED_INTERCEPT_NOTE = (
     "re-estimated after the post-fit repair of {terms} (Constraint.postfit): inference withheld"
 )
+#: What a coefficient reached by a direction the design identifies but the fit did not fit
+#: reports in place of its inference (``DistributionalFitState.unfitted``).
+UNFITTED_NOTE = (
+    "on a direction the data identify but the fit did not fit (its coefficients are where the "
+    "solver stopped): inference withheld"
+)
 
 
 def _json_array(values: NDArray | None) -> list[float | None] | None:
@@ -284,6 +290,7 @@ class _PreparedTermTest:
     alternative_edf: float | None
     reconciliation_tolerance: float
     withheld: bool = False
+    withheld_note: str = REPAIRED_NOTE
 
 
 def _level_domain(spec: Any) -> tuple[Any, ...] | None:
@@ -363,10 +370,24 @@ def repair_covering(fitted: Any, qualified: str) -> str | None:
     return qualified_parent if parent is not None and qualified_parent in repaired else None
 
 
+def _withheld_note(fitted: Any, qualified: str) -> str:
+    """Why a term's inference is withheld, ``""`` when it is not.
+
+    It, or the smooth its free levels belong to, was repaired after the fit, and the projection
+    has no reference distribution of the fit's; or a direction the fit did not fit reaches one
+    of its coefficients (``DistributionalFitState.unfitted_coordinates``), along which the
+    curvature it would read is missing.
+    """
+    if repair_covering(fitted, qualified) is not None:
+        return REPAIRED_NOTE
+    if np.any(fitted.fit_state.unfitted_coordinates[fitted.layout.term_slices[qualified]]):
+        return UNFITTED_NOTE
+    return ""
+
+
 def _inference_withheld(fitted: Any, qualified: str) -> bool:
-    """Whether a term's inference is withheld: it, or the smooth its free levels belong to, was
-    repaired after the fit, and the projection has no reference distribution of the fit's."""
-    return repair_covering(fitted, qualified) is not None
+    """Whether a term's inference is withheld (``_withheld_note``)."""
+    return bool(_withheld_note(fitted, qualified))
 
 
 def _compiled_predictor(fitted: Any, parameter: str) -> Any:
@@ -1112,6 +1133,7 @@ def _prepare_term_test(
         alternative_edf=None if level_term else _alternative_edf(fitted, term_slice, edf),
         reconciliation_tolerance=float(fitted.inference.reconciliation_tolerance),
         withheld=_inference_withheld(fitted, qualified),
+        withheld_note=_withheld_note(fitted, qualified),
     )
 
 
@@ -1129,7 +1151,7 @@ def _term_test_from_covariance(
             rank=float("nan"),
             p_value=float("nan"),
             edf=prepared.edf,
-            note=_join_notes(REPAIRED_NOTE, note),
+            note=_join_notes(prepared.withheld_note, note),
         )
     block = matrix[prepared.term_slice, prepared.term_slice]
     if prepared.level_term:
@@ -1285,7 +1307,10 @@ def summary_table(
     the statistic, its rank and the p-value, with ``note`` saying so, as
     ``SuperGLM``'s summary withholds a repaired term's inference. So does the
     intercept of its parameter, which the repair re-estimated: the fit's standard
-    error and test do not describe the estimate shown.
+    error and test do not describe the estimate shown. A term or intercept with a
+    coefficient on a direction the data identify but the fit did not fit (the
+    solver's rank dropped it and the design separates it, so no refit removes
+    it) reports NaN there too, as its curvature along that direction is missing.
     """
     beta = np.asarray(fitted.coefficients, dtype=np.float64)
     fit_beta = np.asarray(fitted.fitted_result.coefficients, dtype=np.float64)
@@ -1314,6 +1339,7 @@ def summary_table(
     covariance_note = _covariance_note(covariance, resolved)
 
     rows: list[dict[str, Any]] = []
+    unfitted = fitted.fit_state.unfitted_coordinates
     for state in fitted.layout.predictors:
         if state.intercept_index is not None:
             row = _intercept_row(
@@ -1331,6 +1357,11 @@ def summary_table(
                     statistic=float("nan"), rank=float("nan"), p_value=float("nan"), se=float("nan")
                 )
                 row["note"] = REPAIRED_INTERCEPT_NOTE.format(terms=", ".join(repaired_here))
+            elif unfitted[state.intercept_index]:
+                row.update(
+                    statistic=float("nan"), rank=float("nan"), p_value=float("nan"), se=float("nan")
+                )
+                row["note"] = UNFITTED_NOTE
             row["note"] = _join_notes(row["note"], convergence_note, covariance_note)
             rows.append(row)
         for qualified, term_slice in fitted.layout.term_slices.items():

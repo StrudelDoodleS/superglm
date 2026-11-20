@@ -263,6 +263,117 @@ def test_superlss_drops_the_coefficient_superglm_blanks(case):
     assert result.converged and np.all(result.coefficients[dropped] == 0.0)
 
 
+def _drifted_lss(monkeypatch, location, X, y, width: int, drift: dict[int, float]):
+    """A Gaussian SuperLSS fit whose start is moved by ``drift`` (coordinate: step) along an alias."""
+    import superglm.distributional.solver.solver as solver
+    from superglm import SuperLSS
+    from superglm.distributional import GaussianLS
+
+    start = solver._initial_coefficients
+
+    def drifted(context):
+        coefficients = np.array(start(context))
+        if context.layout.n_coefficients == width:
+            coefficients[list(drift)] += list(drift.values())
+        return coefficients
+
+    monkeypatch.setattr(solver, "_initial_coefficients", drifted)
+    family = GaussianLS(scale_floor=0)
+    model = SuperLSS(family, family.location(*location), family.scale(), discrete=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(X, y)
+    return model
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("case", ["duplicate", "level", "constant"])
+def test_superlss_refits_without_the_coordinate_superglm_blanks(monkeypatch, case):
+    """An exact alias, the start moved 3 along it: SuperLSS refits without SuperGLM's blank.
+
+    ``x2 = x1``; ``x = 1[g = b]`` beside ``g``, in that order, so the latest construction
+    column is ``g[b]``; a constant ``c = 2`` beside the intercept.  The refit drops the
+    coordinate SuperGLM's gauge holds (``aliases.held_coordinates``), so the two fits blank the
+    same coefficient, at zero with no variance (DESIGN6's invariance).  It pins what
+    ``253c6d353`` already did here, where the rank's earliest representatives in coordinate
+    order are the term order's.  Mutation checks: holding the earliest construction column
+    drops ``x1``, ``x`` and the intercept; reading the design without its intercept column
+    calls the constant no alias and publishes it walked, nonzero.
+    """
+    from superglm import cat, term
+
+    rng = np.random.default_rng(3)
+    n = 600
+    x1, g = rng.normal(size=n), rng.choice(["a", "b"], n)
+    y = 1.0 + 0.5 * x1 + 0.7 * (g == "b") + rng.normal(size=n)
+    if case == "duplicate":
+        X = pd.DataFrame({"x1": x1, "x2": x1})
+        features = {"x1": Numeric(), "x2": Numeric()}
+        location, drift = (term("x1", Numeric()), term("x2", Numeric())), {1: 3.0, 2: -3.0}
+    elif case == "level":
+        X = pd.DataFrame({"x": (g == "b").astype(float), "g": g})
+        features = {"x": Numeric(), "g": Categorical(base="a")}
+        location, drift = (term("x", Numeric()), cat("g", base="a")), {1: 3.0, 2: -3.0}
+    else:
+        X = pd.DataFrame({"x1": x1, "c": np.full(n, 2.0)})
+        features = {"x1": Numeric(), "c": Numeric()}
+        location, drift = (term("x1", Numeric()), term("c", Numeric())), {0: 6.0, 2: -3.0}
+    glm = SuperGLM(family="gaussian", features=features, selection_penalty=0.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        glm.fit(X, y)
+    ((name, (local,)),) = _blank(glm, X, y).items()
+    width = 2 + X.shape[1]
+    lss = _drifted_lss(monkeypatch, location, X, y, width, drift)
+    fitted = lss._require_fitted()
+    blank = fitted.layout.term_slices[f"location:{name}"].start + local
+    variance = np.diag(np.asarray(lss.covariance_))
+    location_block = fitted.layout.predictors[0].coefficient_slice
+    zero = [i for i in range(location_block.stop) if fitted.coefficients[i] == 0.0]
+    assert fitted.fit_state.solver_result.converged
+    assert zero == [blank] and variance[blank] == 0.0
+    assert np.all(variance[np.arange(width) != blank] > 0.0)
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
+def test_superlss_withholds_the_standard_errors_of_a_near_duplicate_it_did_not_fit(discrete):
+    """``x2 = x1 + 1e-8 h`` (the design gate's probe): nothing blank, no standard error for the pair.
+
+    SuperGLM identifies the pair and fits it, blanking nothing
+    (``test_a_near_duplicate_column_is_fitted_as_mgcv_fits_it``, SE about 2.2e6).  SuperLSS's
+    terminal rank drops ``x1 - x2``, which the design identifies at 2000 rows, so it keeps the
+    walked state (fitting the truncated direction, D6, is not built for SuperLSS) and its
+    summary withholds both standard errors with a note.  At ``253c6d353`` it refitted without
+    ``x2``, printed ``x1``'s SE as 0.0224, eight orders too small, and ``x2`` at zero.
+    Mutation checks: the ``rho <= 1e-7`` gate refits; no reached coordinate prints 0.0224.
+    """
+    from superglm import SuperLSS, s, term
+    from superglm.distributional import GaussianLS
+
+    X, y = _near_duplicate_frame(1e-8)
+    glm = SuperGLM(
+        family="gaussian", features={"x1": Numeric(), "x2": Numeric(), "z": Spline(n_knots=8)}
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        glm.fit(X, y)
+    assert _blank(glm, X, y) == {}
+    family = GaussianLS(scale_floor=0)
+    location = family.location(term("x1", Numeric()), term("x2", Numeric()), s("z", n_knots=8))
+    lss = SuperLSS(family, location, family.scale(), discrete=discrete)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        lss.fit_reml(X, y)
+    table = lss.summary(X_train=X).set_index(["parameter", "term"])
+    pair = table.loc[[("location", "x1"), ("location", "x2")]]
+    assert pair["se"].isna().all() and np.all(pair["estimate"] != 0.0)
+    from superglm.distributional.terms import UNFITTED_NOTE
+
+    assert (pair["note"] == UNFITTED_NOTE).all()
+    intercepts = table.loc[[("location", "(intercept)"), ("scale", "(intercept)")]]
+    assert np.all(np.isfinite(intercepts["se"]))
+
+
 def test_a_truncated_direction_on_a_column_of_tiny_curvature_is_read():
     """Two truncated directions, one on a column whose Jacobi scale is 1e-9 of the other's.
 

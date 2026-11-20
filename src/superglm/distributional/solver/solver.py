@@ -49,6 +49,7 @@ from superglm.distributional.solver._likelihood_cache import (
     _LikelihoodCache,
     build_likelihood_cache,
 )
+from superglm.distributional.solver.aliases import design_split, held_coordinates
 from superglm.distributional.solver.assembly import (
     DenseJointGeometry,
     _assemble_dense_geometry_from_matrices,
@@ -1629,64 +1630,50 @@ def _certified_terminal_curvature(
         return replace(curvature, telemetry=replace(curvature.telemetry, certified=False))
 
 
-# R's lm.fit and qr tolerance for a linear dependency among a design's columns.
-_DESIGN_DEPENDENCY_TOLERANCE = 1e-7
+def _drops_design_aliases(context: _SolverContext, rank: RankDecomposition) -> bool:
+    """Whether every direction ``rank`` drops aliases the design, as SuperGLM's fit decides.
 
-
-def _drops_design_aliases(layout: StackedLayout, rank: RankDecomposition) -> bool:
-    """Whether every direction ``rank`` drops is a near-dependency of the design itself.
-
-    ``X N ~ 0`` is an alias; a direction only the weights flatten is a likelihood boundary
-    (Lesaffre and Marx 1993). ``rho = ||X N|| / ||C N||`` on unit columns (Belsley, Kuh and
-    Welsch 1980) centred beside an intercept (Marquardt and Snee 1975), so no unit, origin
-    or response decides. The span is one when ``rho <= 1e-7`` on all of it, R's ``lm.fit``
-    and ``qr`` tolerance for a linear dependency, or when ``X N`` is rounding, ``2 k
-    gamma_k`` of the uncentred norms (a constant column, 0 / 0 centred). A centred square
-    within its cancellation, ``3 gamma_{n+2} sum x^2`` (Chan, Golub and LeVeque 1983),
-    counts as zero, which can only refuse an alias. Columns are scaled to unit maximum (the
-    test is basis-free); a non-finite span is not an alias.
+    ``aliases.design_split``: ``X N ~ 0`` at unit weight on the rows with positive prior
+    weight, per predictor block, with the actual penalty.  A direction only the weights flatten
+    is a likelihood boundary (Lesaffre and Marx 1993), not an alias.
     """
-    null = rank.null_basis()
-    null = null / np.max(np.abs(null), axis=0)
-    width = null.shape[1]
-    design_gram = np.zeros((width, width))
-    scale_gram = np.zeros((width, width))
-    rounding_gram = np.zeros((width, width))
-    for state in layout.predictors:
-        local = null[state.coefficient_slice]
-        if not np.any(local):
-            continue
-        design = state.design
-        squared = np.concatenate(
-            [np.diag(group.gram(np.ones(design.n))) for group in design.group_matrices] or [[]]
-        )
-        intercept = state.intercept_index is not None
-        if intercept:
-            squared = np.concatenate(([float(design.n)], squared))
-        slopes = local[int(intercept) :]
-        for column in range(width):
-            projected = np.full(design.n, local[0, column] if intercept else 0.0)
-            if design.p:
-                projected += design.matvec(slopes[:, column])
-            back = design.rmatvec(projected) if design.p else np.empty(0)
-            if intercept:
-                back = np.concatenate(([projected.sum()], back))
-            design_gram[:, column] += local.T @ back
-        rounding_gram += local.T @ (squared[:, None] * local)
-        if intercept:
-            means = design.rmatvec(np.ones(design.n)) / design.n if design.p else squared[1:]
-            centred = squared[1:] - design.n * means**2
-            centred[centred <= 3.0 * gamma(design.n + 2) * squared[1:]] = 0.0
-            squared[1:] = centred
-            local = np.vstack((local[:1] + means @ slopes, slopes))
-        scale_gram += local.T @ (squared[:, None] * local)
-    resolution = (2.0 * null.shape[0] * gamma(null.shape[0])) ** 2
-    difference = (
-        0.5 * (design_gram + design_gram.T)
-        - _DESIGN_DEPENDENCY_TOLERANCE**2 * scale_gram
-        - resolution * rounding_gram
+    _, identified = design_split(
+        context.layout,
+        rank.null_basis(),
+        rank.column_scale,
+        context.penalty,
+        context.likelihood_plan.weights.values,
     )
-    return bool(np.all(np.isfinite(difference)) and np.linalg.eigvalsh(difference)[-1] <= 0.0)
+    return identified.shape[1] == 0
+
+
+def _design_aliases(
+    context: _SolverContext,
+    rank: RankDecomposition,
+    data_curvature: NDArray,
+    coefficients: NDArray,
+) -> RetainedCoordinates | None:
+    """The coordinates to refit without, when ``rank`` drops design aliases the state moves.
+
+    They are the coordinates SuperGLM's gauge holds (``aliases.held_coordinates``), else
+    ``rank``'s own; a state already zero there is the reduced fit.  ``None`` also when a dropped
+    direction is not an alias (``_drops_design_aliases``): the stopped state stands.
+    """
+    reduced = RetainedCoordinates.of(rank)
+    if reduced is None:
+        return None
+    held = held_coordinates(
+        context.layout,
+        rank.null_basis(),
+        rank.column_scale,
+        context.penalty,
+        np.diag(data_curvature),
+    )
+    if held is not None:
+        reduced = RetainedCoordinates(held)
+    if not np.any(coefficients[reduced.dropped]) or not _drops_design_aliases(context, rank):
+        return None
+    return reduced
 
 
 def _column_spread(layout: StackedLayout, index: int) -> float:
@@ -2115,14 +2102,12 @@ def _fit_dense_fixed_lambda_core(
             if reduced is not None or context.coefficient_face is not None:
                 break
             # Coefficients the design aliases are dropped (Wood, Pya and Saefken 2016,
-            # sec. 3.1.2). A direction only the weights flatten keeps its state.
-            reduced = RetainedCoordinates.of(decomposition)
-            if (
-                reduced is None
-                or not np.any(state.coefficients[reduced.dropped])
-                or not _drops_design_aliases(context.layout, decomposition)
-            ):
-                reduced = None
+            # sec. 3.1.2) where SuperGLM's gauge holds them. A direction only the weights
+            # flatten keeps its state.
+            reduced = _design_aliases(
+                context, decomposition, accepted_geometry.data_curvature, state.coefficients
+            )
+            if reduced is None:
                 break
             # Repeat the Newton iteration to convergence on the retained coefficients,
             # then decide the curvature at its end.

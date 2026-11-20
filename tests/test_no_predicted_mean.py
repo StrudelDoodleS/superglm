@@ -1090,3 +1090,39 @@ def test_a_superlss_fold_with_a_row_with_no_value_keeps_its_fit_and_names_it_in_
         )
     [message] = [str(w.message) for w in caught if "no predicted" in str(w.message)]
     assert "out-of-fold predictions are NaN (row positions 33)" in message
+
+
+def test_a_row_off_an_alias_with_no_mean_is_named_once_in_the_support_warning():
+    """Under ``PowerLink(-1)`` an offset puts two rows at ``eta < 0``; one of them leans on an alias.
+
+    ``x = 1[a = 1]`` in training, so the fit holds ``x`` at zero (the latest construction
+    column) and a row with ``a = 0, x = 1`` leans on that alias.  Its predictor at the published
+    gauge has no mean, and it is named once, in the ``NonEstimablePredictionWarning``, which
+    counts it among the rows with no mean; F4's warning names only the other row, which is on
+    support.  Both predict NaN.  At ``253c6d353`` F4's warning named both rows and nothing said
+    the first leaned on the alias.  Mutation check: F4 over every row with no mean names both.
+    """
+    from superglm import GammaLS, SuperLSS, cat, term
+    from superglm.links import PowerLink
+
+    a = np.tile(["0", "1"], 30)
+    frame = pd.DataFrame({"a": a, "x": (a == "1").astype(float)})
+    y = np.where(a == "1", 4.0, 1.0) * np.repeat([0.8, 1.2, 1.0], 20)
+    family = GammaLS()
+    mean = family.mean(cat("a", base="0"), term("x", Numeric()), link=PowerLink(-1.0))
+    model = SuperLSS(family, mean, family.scale())
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit(frame, y)
+    rows = pd.DataFrame({"a": ["0", "1", "0", "1"], "x": [0.0, 1.0, 1.0, 1.0]})
+    offsets = {"mean": np.array([0.0, 0.0, -2.0, -2.0]), "scale": np.zeros(4)}
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        predicted = model.predict(rows, offsets=offsets)
+    assert np.isnan(predicted[2:]).all() and np.all(np.isfinite(predicted[:2]))
+    no_value = [str(w.message) for w in caught if w.category is UserWarning]
+    assert len(no_value) == 1 and re.match(_NO_VALUE.format(4, "predictions", 3), no_value[0])
+    (support,) = [w.message for w in caught if w.category.__name__.startswith("NonEstimable")]
+    assert support.rows.tolist() == [2] and support.kinds == ("alias",) and support.no_mean == 1
+    assert "1 of them have no mean at the returned predictor" in str(support)
+    assert len(caught) == 2

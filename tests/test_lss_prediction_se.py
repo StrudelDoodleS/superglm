@@ -882,7 +882,10 @@ def test_a_column_with_no_covariance_sets_no_scale_for_the_standard_error(covari
     The row's scale was taken from its largest entry, so an irrelevant ``x`` of ``1e100`` scaled the
     real ``z`` of ``1e-200`` to underflow and the standard error read zero. The one coefficient with
     a variance gives the independent formula ``abs(z) sqrt(Vzz)``. Mutation check: the exponent over
-    every column fails the rows with a large ``x``.
+    every column fails the rows with a large ``x``. ``x`` has no data, so it is an alias of the
+    design, and ``predict_link`` gives NaN on the rows that lean on it past R's ``1e-6``
+    (``diagnostics.estimability``): every row with an ``x`` but the one whose ``z`` of ``1e200``
+    dwarfs it.
     """
     rng = np.random.default_rng(3)
     frame = pd.DataFrame({"x": np.zeros(400), "z": rng.standard_normal(400)})
@@ -904,9 +907,18 @@ def test_a_column_with_no_covariance_sets_no_scale_for_the_standard_error(covari
     assert not block[0].any() and block[1, 1] > 0.0
     x = np.array([0.0, 1e100, -1e100, 1e300, 1e-100, 1e100, 1e100, 1e100])
     z = np.array([1e-200, 1e-200, 1e-200, 1e-200, 1e-200, 1e200, 0.0, 1.0])
-    _, se = model.predict_link(pd.DataFrame({"x": x, "z": z}), se_fit=True, covariance=covariance)
+    rows = pd.DataFrame({"x": x, "z": z})
+    errors = posterior_module.link_standard_errors(fitted, rows, covariance=covariance)
     expected = np.abs(z) * np.sqrt(block[1, 1])
-    np.testing.assert_allclose(se["location"].to_numpy(), expected, rtol=8 * U, atol=0.0)
+    np.testing.assert_allclose(errors[:, 0], expected, rtol=8 * U, atol=0.0)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _, se = model.predict_link(rows, se_fit=True, covariance=covariance)
+    off = np.array([False, True, True, True, True, False, True, True])
+    (disclosed,) = [w.message for w in caught if w.category.__name__.startswith("NonEstimable")]
+    assert disclosed.rows.tolist() == np.flatnonzero(off).tolist()
+    np.testing.assert_array_equal(se["location"].isna().to_numpy(), off)
+    np.testing.assert_allclose(se["location"].to_numpy()[~off], expected[~off], rtol=8 * U)
 
 
 def test_a_row_of_a_predictor_with_no_covariance_at_all_has_a_zero_standard_error():
@@ -1341,3 +1353,60 @@ def test_a_read_only_column_and_a_writable_one_share_each_kernels_one_signature(
     _basis_kernels.bspline_dense(frozen, read_only_knots, 3)
     assert len(_basis_kernels._bspline_rows.signatures) == 1
     assert len(_basis_kernels._cardinal_rows.signatures) == 1
+
+
+def test_rows_off_an_alias_are_named_once_and_a_full_rank_fit_reads_no_row(monkeypatch):
+    """``x2 = x1`` in training: a row with ``x2 != x1`` leans on the alias the fit holds at zero.
+
+    Its prediction is still the published coefficients' and is returned; one
+    ``NonEstimablePredictionWarning`` per call names it with its kind, as R's ``predict.lm``
+    ``"non-estim"`` does, and ``predict_link``'s ``se`` is NaN in the location column there and
+    nowhere else.  A fit with no such direction makes no extra pass over the rows' designs.
+    At ``253c6d353`` the alias was predicted silently and given a standard error.  Mutation
+    checks: no disclosure; labelling before the early return makes the full-rank fit read rows.
+    """
+    rng = np.random.default_rng(8)
+    x1 = rng.standard_normal(400)
+    y = 1.0 + 0.5 * x1 + rng.standard_normal(400)
+    family = GaussianLS()
+
+    def fitted(columns):
+        location = family.location(*(sg.term(name, Numeric()) for name in columns))
+        model = SuperLSS(family, location, family.scale(), discrete=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit(pd.DataFrame({name: x1 for name in columns}), y)
+        return model
+
+    passes = []
+    blocks = design_module.map_design_blocks
+    monkeypatch.setattr(
+        design_module,
+        "map_design_blocks",
+        lambda *args, **kwargs: passes.append(1) or blocks(*args, **kwargs),
+    )
+    rows = pd.DataFrame({"x1": [0.5, -1.0, 2.0, 0.3], "x2": [0.5, -1.0, 2.5, 1.3]})
+    aliased = fitted(("x1", "x2"))
+    beta = aliased._require_fitted().coefficients
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        mean = aliased.predict(rows)
+        _, se = aliased.predict_link(rows, se_fit=True)
+    # by name, so the test reads the same before the warning class existed
+    disclosed = [
+        w.message for w in caught if w.category.__name__ == "NonEstimablePredictionWarning"
+    ]
+    assert len(disclosed) == len(caught) == 2
+    assert all(m.rows.tolist() == [2, 3] and m.kinds == ("alias", "alias") for m in disclosed)
+    # each side sums the same two products in float64: at most two roundings of their size each
+    terms = np.abs(beta[0]) + np.abs(beta[1] * rows.x1.to_numpy())
+    assert np.all(np.abs(mean - (beta[0] + beta[1] * rows.x1.to_numpy())) <= 4 * U * terms)
+    np.testing.assert_array_equal(se["location"].isna().to_numpy(), [False, False, True, True])
+    assert np.all(np.isfinite(se["scale"]))
+    passes.clear()
+    full = fitted(("x1",))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        full.predict(rows)
+        full.predict_link(rows)
+    assert caught == [] and passes == []

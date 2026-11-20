@@ -93,6 +93,7 @@ from superglm.distributional.revision import (
 )
 from superglm.distributional.separation import validate_separation_policy
 from superglm.distributional.shape_repair import repaired_model
+from superglm.distributional.support import disclose, support_labels
 from superglm.distributional.surfaces import (
     DensityFan,
     Portfolio,
@@ -1138,20 +1139,27 @@ class SuperLSS:
         of rows at a time, one block's design and products per worker, so memory
         grows with the number of workers (``n_jobs``, capped by ``max_memory``)
         and not with the rows. ``covariance`` names ``V``, as in ``posterior_bounds``.
+
+        A row that leans on a direction the fit does not determine (an alias of the
+        design, or a direction the data identify but the fit did not fit) is still
+        predicted, at the published coefficients, and named in one
+        ``NonEstimablePredictionWarning``; its ``se`` is NaN for each parameter whose
+        predictor leans on one, as that standard error does not exist.
         """
         model = self._require_fitted()
-        # One adapter for both passes, so the columns and the coded levels are read from X once.
-        frame = as_eager_frame(X) if se_fit else X
+        # One adapter for every pass, so the columns and the coded levels are read from X once.
+        frame = as_eager_frame(X)
+        labels = support_labels(model, frame)
         values = model.predict_eta(frame, offsets=offsets)
+        disclose(labels)
         index = row_index(X, len(values))
         link = pd.DataFrame(values, columns=self.parameter_names_, index=index)
         if not se_fit:
             return link
-        errors = pd.DataFrame(
-            link_standard_errors(model, frame, covariance=covariance),
-            columns=self.parameter_names_,
-            index=index,
-        )
+        standard_errors = link_standard_errors(model, frame, covariance=covariance)
+        if labels is not None:
+            standard_errors[labels != ""] = np.nan
+        errors = pd.DataFrame(standard_errors, columns=self.parameter_names_, index=index)
         self._warn_if_hand_edited()
         return link, errors
 

@@ -48,6 +48,7 @@ from superglm.distributional.results.shape import ShapeFit, shape_disclosures
 from superglm.distributional.results.smoothing import DistributionalEFSResult
 from superglm.distributional.results.solver import DenseSolverConfig, DenseSolverResult
 from superglm.distributional.revision import HandEdit, check_hand_edit
+from superglm.distributional.solver.aliases import design_split, reached
 from superglm.distributional.solver.chunks import ChunkSize
 from superglm.distributional.telemetry import CurvatureTelemetry
 from superglm.distributional.walls import PRESSED_STEP, outward_step, wall_rows
@@ -56,7 +57,7 @@ from superglm.distributional.weights import (
     WeightContract,
     WeightProvenance,
 )
-from superglm.solvers.identifiability import functional_identified
+from superglm.solvers.identifiability import functionals_identified
 from superglm.solvers.rank import RankDecomposition
 
 
@@ -296,6 +297,22 @@ class DistributionalFitState:
     # pickles, and a fit with no rule, as having none. A refit that binds replaces the smoothing
     # search's terminal fit as ``solver_result``.
     shape_fit: ShapeFit | None = None
+    # The directions the terminal rank dropped, split as SuperGLM's fit splits them
+    # (``solver.aliases.design_split``): aliases of the design, whose coordinates the refit
+    # holds at zero, and directions the design identifies but the fit did not fit, whose
+    # coefficients are the walk's and whose coordinates have no standard error.  Each is
+    # ``width x k`` in coefficient coordinates; the class defaults read older pickles, and a
+    # full-rank fit, as having none.
+    design_aliases: NDArray[np.float64] | None = None
+    unfitted: NDArray[np.float64] | None = None
+
+    @property
+    def unfitted_coordinates(self) -> NDArray[np.bool_]:
+        """The coefficients an unfitted direction reaches: their standard errors are withheld."""
+        width = self.layout.n_coefficients
+        if self.unfitted is None or self.unfitted.shape[1] == 0:
+            return np.zeros(width, dtype=bool)
+        return reached(self.unfitted, self.solver_result.terminal_rank.column_scale)
 
     @property
     def reported_coefficients(self) -> NDArray[np.float64]:
@@ -490,17 +507,42 @@ def _compact_null(null: JointNullModel) -> CompactNullModel:
     )
 
 
+def _dropped_split(
+    layout: StackedLayout, solver_result: DenseSolverResult, likelihood_plan: FamilyLikelihoodPlan
+) -> tuple[NDArray | None, NDArray | None]:
+    """The terminal rank's dropped span as ``design_split`` splits it; ``None`` at full rank.
+
+    On a face the span is the reduced decomposition's, lifted (``face.null_basis``): a direction
+    the face fixes is determined, not dropped.
+    """
+    face = solver_result.coefficient_face
+    if face is None:
+        span = solver_result.terminal_rank.null_basis()
+    else:
+        reduced = cast(RankDecomposition, solver_result.terminal_reduced_rank)
+        span = np.asarray(face.null_basis, dtype=np.float64) @ reduced.null_basis()
+    if span.shape[1] == 0:
+        return None, None
+    return design_split(
+        layout,
+        span,
+        solver_result.terminal_rank.column_scale,
+        solver_result.penalty,
+        likelihood_plan.weights.values,
+    )
+
+
 def _block_coefficients_identified(solver_result: DenseSolverResult, block: slice) -> bool:
     """Whether the fit determined every coefficient of ``block`` within the face it kept.
 
     Each coefficient is judged by ``solvers.identifiability.functional_identified`` on the
-    terminal decomposition.  A fit whose REML removed a term's penalized range (a random
-    effect, or a smooth's wiggle) through an exact coefficient face holds those directions
-    fixed, and the lifted terminal decomposition puts the face constraints in its null space.
-    A fixed direction is determined, not unidentified, so on a face each coefficient is read
-    as the functional ``null_basis[j] @ z`` of the reduced coordinates ``z``, judged on the
-    reduced decomposition: a coefficient the face fixes completely is the zero functional and
-    passes, and one it fixes only partly (a smooth's wiggle) is judged by the part left free.
+    terminal decomposition, all in one call (``functionals_identified``).  A fit whose REML
+    removed a term's penalized range (a random effect, or a smooth's wiggle) through an exact
+    coefficient face holds those directions fixed, and the lifted terminal decomposition puts
+    the face constraints in its null space.  A fixed direction is determined, so on a face each
+    coefficient is the functional ``null_basis[j] @ z`` of the reduced coordinates ``z``, judged
+    on the reduced decomposition: one the face fixes completely is the zero functional and
+    passes, one it fixes only partly (a smooth's wiggle) is judged by the part left free.
     No rank is recomputed.
     """
     face = solver_result.coefficient_face
@@ -510,12 +552,10 @@ def _block_coefficients_identified(solver_result: DenseSolverResult, block: slic
         # a fit on a face always keeps its reduced decomposition
         reduced = cast(RankDecomposition, solver_result.terminal_reduced_rank)
         decomposition, functionals = reduced, face.null_basis
-    width = decomposition.width
-    for j in range(block.start, block.stop):
-        contrast = np.eye(width)[j] if functionals is None else functionals[j]
-        if not functional_identified(decomposition, contrast):
-            return False
-    return True
+    contrasts = (
+        np.eye(decomposition.width)[:, block] if functionals is None else functionals[block].T
+    )
+    return bool(np.all(functionals_identified(decomposition, contrasts)))
 
 
 def _limit_row_disclosure(
@@ -876,6 +916,7 @@ def prepare_distributional_fit_state(
             response_spec=response_spec(family),
         )
     bounds = plan_observation(likelihood_plan).bounds
+    design_aliases, unfitted = _dropped_split(layout, solver_result, likelihood_plan)
     return DistributionalFitState(
         revision=revision,
         weight_contract=likelihood_plan.weights.provenance.contract,
@@ -898,6 +939,8 @@ def prepare_distributional_fit_state(
         truncated_row_count=0 if bounds is None else len(bounds.truncated_rows()),
         censored_row_count=0 if bounds is None else len(bounds.censored_rows()),
         shape_fit=shape_fit,
+        design_aliases=design_aliases,
+        unfitted=unfitted,
     )
 
 

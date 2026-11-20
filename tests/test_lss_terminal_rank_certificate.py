@@ -218,18 +218,8 @@ def test_aliased_coefficients_take_the_representative_value(monkeypatch, discret
     np.testing.assert_allclose(prediction, drifted_prediction, rtol=0, atol=64 * 2.0**-53 * scale)
 
 
-# mgcv 1.9.3, black box: gam(list(y ~ x + z, ~ 1), family = gaulss()) on _near_alias()
-# written to CSV; rank 3 of 4, z dropped. Location coefficient and its Vp diagonal, as
-# (Intercept), x, z.
-_MGCV_NEAR_ALIAS = (
-    (1.0071311150156979, 8.3063594167458155e-05),
-    (0.49569104718142049, 8.3718800662953594e-05),
-    (0.0, 0.0),
-)
-
-
 def _near_alias(discrete):
-    """``z = x + 1e-8 h`` and a ``3e-6 h`` signal: the certified rank, 3 of 4, drops ``z``."""
+    """``z = x + 1e-8 h`` and a ``3e-6 h`` signal: the certified rank, 3 of 4, drops ``z - x``."""
     draws = np.random.default_rng(11).standard_normal((8, 3000))
     h, x = draws[4], draws[5]
     frame = pd.DataFrame({"x": x, "z": x + 1e-8 * h})
@@ -241,23 +231,23 @@ def _near_alias(discrete):
 
 @pytest.mark.parametrize("drift", [0.0, 1e6], ids=["as_fitted", "drifted_start"])
 @pytest.mark.parametrize("discrete", [True, False], ids=["chunked", "dense"])
-def test_a_near_alias_publishes_the_reduced_fit(monkeypatch, discrete, drift):
-    """The certified rank drops a near alias, and the fit is refitted without it, as mgcv is.
+def test_a_near_alias_the_design_identifies_keeps_its_state_without_standard_errors(
+    monkeypatch, discrete, drift
+):
+    """The certified rank drops ``z - x``, which the design identifies, so no refit runs.
 
-    Newton steps on the formed curvature wander along ``x - z`` (to about
-    1950 on the dense route), and moving to the representative costs more
-    objective than the fit's tolerance: the direction carries a little
-    information below the certified rank. The fit repeats the Newton
-    iteration on the retained coefficients from the projected start;
-    ``drifted_start`` moves the start 1e6 along ``x - z`` so that it takes
-    steps. Mutation checks: keeping the drifted state when the projection
-    costs objective publishes x = 1953.7 on the dense route; publishing the
-    projection without the reduced steps misses mgcv's variances by 8e-5
-    (chunked) and fails the stop's check (dense) on the drifted start.
+    At 3000 rows the design separates ``z`` from ``x`` by ``1e-8`` of their norm, far above the
+    rounding bound of the unit-weight read (about ``n k u``, ``7e-13``), so it is no alias, as
+    SuperGLM decides (it blanks nothing and fits the pair, ``test_penalised_identifiability``).
+    The stopped state stands (on the dense route ``x`` near 1950; ``drifted_start`` moves the
+    start 1e6 along ``x - z``) and the summary withholds both standard errors, which the rank's
+    inverse gives as 0.00915 and 0 with the direction's variance left out.  At ``253c6d353`` the
+    ``rho <= 1e-7`` test called it an alias and published mgcv ``gaulss``'s reduced fit with
+    those two numbers.  Mutation checks: the old gate refits; reaching no coordinate prints them.
     """
     import superglm.distributional.solver.solver as solver
 
-    start = solver._initial_coefficients
+    start, run, reduced = solver._initial_coefficients, solver._run_iterations, []
 
     def drifted(context):
         coefficients = np.array(start(context))
@@ -265,30 +255,48 @@ def test_a_near_alias_publishes_the_reduced_fit(monkeypatch, discrete, drift):
             coefficients[1:3] += (drift, -drift)
         return coefficients
 
+    def recorded(context, *args, **kwargs):
+        reduced.append(context.retained is not None)
+        return run(context, *args, **kwargs)
+
     monkeypatch.setattr(solver, "_initial_coefficients", drifted)
+    monkeypatch.setattr(solver, "_run_iterations", recorded)
     model, frame, y = _near_alias(discrete)
     result = _fit(model, frame, y)
-    assert result.converged and result.terminal_rank.rank == 3
-    coefficients, variances = result.coefficients, np.diag(np.asarray(model.covariance_))
-    for index, (value, variance) in enumerate(_MGCV_NEAR_ALIAS):
-        assert coefficients[index] == pytest.approx(value, rel=1e-7, abs=1e-12)
-        assert variances[index] == pytest.approx(variance, rel=1e-6, abs=0.0)
-    assert coefficients[2] == 0.0 and variances[2] == 0.0
+    table = model.summary(X_train=frame).set_index(["parameter", "term"])
+    withheld = table.loc[[("location", "x"), ("location", "z")]]
+    assert withheld["se"].isna().all() and withheld["p_value"].isna().all()
+    assert result.converged and result.terminal_rank.rank == 3 and not any(reduced)
+    assert np.all(result.coefficients[1:3] != 0.0)
+    from superglm.distributional.terms import UNFITTED_NOTE
+
+    assert (withheld["note"] == UNFITTED_NOTE).all()
+    shown = table.loc[[("location", "(intercept)"), ("scale", "(intercept)")]]
+    assert np.all(np.isfinite(shown["se"])) and (shown["note"] == "").all()
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("discrete", [True, False], ids=["chunked", "dense"])
-def test_a_near_alias_is_refitted_whatever_the_stop(monkeypatch, discrete):
+def test_an_alias_is_refitted_whatever_the_stop(monkeypatch, discrete):
     """The design, not the stop, decides the refit: a run forced to stop short is refitted too.
 
-    Every run on the full coefficients reports ``max_iterations``; the
-    reduced fit from the projection converges to mgcv's values. Mutation
-    check: refitting only converged fits publishes the stopped state.
+    Every run on the full coefficients reports ``max_iterations``; from a start moved 3 along
+    the exact alias ``x - g_b`` the reduced fit from the projection converges to mgcv's values.
+    It pins what ``253c6d353`` did on its near alias, which the design now identifies
+    (``test_a_near_alias_the_design_identifies_keeps_its_state_without_standard_errors``), on an
+    exact one.  Mutation check: refitting only converged fits publishes the stopped state.
     """
     import dataclasses
 
     import superglm.distributional.solver.solver as solver
 
-    run = solver._run_iterations
+    start, run = solver._initial_coefficients, solver._run_iterations
+
+    def drifted(context):
+        coefficients = np.array(start(context))
+        if context.layout.n_coefficients == 5:
+            coefficients[2:4] += (3.0, -3.0)
+        return coefficients
 
     def stopped_short(context, *args, **kwargs):
         result = run(context, *args, **kwargs)
@@ -296,11 +304,14 @@ def test_a_near_alias_is_refitted_whatever_the_stop(monkeypatch, discrete):
             return result
         return dataclasses.replace(result, converged=False, reason="max_iterations")
 
+    monkeypatch.setattr(solver, "_initial_coefficients", drifted)
     monkeypatch.setattr(solver, "_run_iterations", stopped_short)
-    model, frame, y = _near_alias(discrete)
-    result = _fit(model, frame, y)
-    assert result.converged and result.terminal_rank.rank == 3
-    for index, (value, _) in enumerate(_MGCV_NEAR_ALIAS):
+    frame, y = _alias_parity_frame()
+    family = GaussianLS(scale_floor=0)
+    location = family.location(term("u", Numeric()), term("x", Numeric()), cat("g", base="a"))
+    result = _fit(SuperLSS(family, location, family.scale(), discrete=discrete), frame, y)
+    assert result.converged and result.terminal_rank.rank == 4
+    for index, (value, _) in enumerate(_MGCV_ALIAS_PARITY):
         assert result.coefficients[index] == pytest.approx(value, rel=1e-7, abs=1e-12)
 
 

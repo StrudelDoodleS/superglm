@@ -796,6 +796,32 @@ def test_the_intercept_curvature_decides_the_constant_size_remedy(
     assert ("use the Poisson family instead" in entry) is not constant_offered
 
 
+def test_the_limit_row_gate_reads_the_terminal_span_once(monkeypatch) -> None:
+    """Every coefficient of the size block is judged in one call (``functionals_identified``).
+
+    The group indicator is forced not estimable, so the disclosure is the one
+    ``test_the_intercept_curvature_decides_the_constant_size_remedy`` reads; the terminal
+    decomposition's null basis is orthonormalised once for the block, where ``253c6d353``
+    did it once per coefficient until one failed (twice here: the intercept, then the
+    indicator). Mutation check: the per-coefficient loop makes two calls.
+    """
+    import superglm.solvers.identifiability as identifiability
+
+    _, fit_state = _gate_fit((cat("g"),))
+    indicator = _size_state(fit_state).coefficient_slice.start + 1
+    calls = []
+    orthonormal = identifiability._orthonormal
+
+    def counted(decomposition, vectors):
+        calls.append(np.shape(vectors)[1])
+        return orthonormal(decomposition, vectors)
+
+    monkeypatch.setattr(identifiability, "_orthonormal", counted)
+    (entry,) = _forced_entries(fit_state, np.ones(240, dtype=bool), null=(indicator,))
+    assert "240 of 240 rows have a size at the Poisson limit" in entry
+    assert calls == [1]
+
+
 @pytest.mark.parametrize(("n_off_limit", "constant_offered"), [(0, False), (120, True)])
 def test_without_a_size_intercept_a_row_off_the_limit_decides_the_constant_remedy(
     n_off_limit: int, constant_offered: bool

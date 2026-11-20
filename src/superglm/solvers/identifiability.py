@@ -502,6 +502,18 @@ def functional_identified(decomposition, contrast: NDArray) -> bool:
     return norm == 0.0 or float(np.linalg.norm(null.T @ scaled)) <= _SHARE_FLOOR * norm
 
 
+def functionals_identified(decomposition, contrasts: NDArray) -> NDArray:
+    """``functional_identified`` for each column of ``contrasts``, read from one null basis."""
+    contrasts = np.asarray(contrasts, dtype=np.float64)
+    null = _orthonormal(decomposition, decomposition.null_basis())
+    if null.shape[1] == 0:
+        return np.ones(contrasts.shape[1], dtype=bool)
+    scale = np.asarray(decomposition.column_scale, dtype=np.float64)
+    scaled = contrasts / np.where(scale > 0.0, scale, 1.0)[:, None]
+    norms = np.linalg.norm(scaled, axis=0)
+    return (norms == 0.0) | (np.linalg.norm(null.T @ scaled, axis=0) <= _SHARE_FLOOR * norms)
+
+
 def penalty_null_space(blocks: Sequence[NDArray], width: int) -> NDArray:
     """A basis of the null space a term's penalty blocks share, ``N_S,g``.
 
@@ -873,6 +885,7 @@ def _design_null(
     design,
     support: NDArray,
     penalty: Callable[[NDArray], tuple[NDArray, NDArray]],
+    centred: bool = True,
 ) -> tuple[NDArray, NDArray]:
     """Of the directions the weighted rows cannot tell from zero, those the design cannot either.
 
@@ -882,10 +895,10 @@ def _design_null(
     (``grouped_projected_factor``): the curvature ``B_1'B_1 + T'ST`` of the Hessian at unit
     weight, and an eigenvalue whose root is within the rounding bound of ``B_1``'s singular
     values (``_row_bound``, the pass's own column norms) and of ``T'ST`` is an alias of the
-    design, as in ``_read_rows``.  The rest are
-    identified by the design and carry no weighted curvature the fit can resolve: they move
-    fitted values, so they are never a gauge, and their coordinates' standard errors are not
-    resolved at float64.  Returns the aliases and the rest, in decomposition coordinates.
+    design, as in ``_read_rows``.  The rest are identified by the design and carry no weighted
+    curvature the fit can resolve: they move fitted values, so they are never a gauge, and their
+    coordinates' standard errors are not resolved at float64.  Returns the aliases and the rest,
+    in decomposition coordinates; ``centred=False`` reads the rows uncentred (an intercept column).
     """
     from superglm.solvers.centered_system import grouped_projected_factor, weighted_mean_pair
 
@@ -896,7 +909,9 @@ def _design_null(
     if count == 0:
         return directions, directions
     weights = np.asarray(support, dtype=np.float64)
-    _, centre, centre_lo = weighted_mean_pair(design, weights, float(np.sum(weights)))
+    centre = centre_lo = None
+    if centred:
+        _, centre, centre_lo = weighted_mean_pair(design, weights, float(np.sum(weights)))
     factor, _, _, magnitudes = grouped_projected_factor(
         design, weights, directions, center=centre, center_lo=centre_lo
     )
@@ -1494,6 +1509,7 @@ __all__ = [
     "decide_identifiability",
     "fixed_coordinates",
     "functional_identified",
+    "functionals_identified",
     "penalty_null_space",
     "published_edf",
 ]
