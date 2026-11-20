@@ -163,15 +163,33 @@ def _random_effect_model(**extra) -> SuperGLM:
     return SuperGLM(family="poisson", features=features)
 
 
-def _factor_smooth(levels=200, zero=5):
-    """Twenty Poisson rows a level on average; the first ``zero`` levels have no claim."""
-    rng = np.random.default_rng(2)
+def _factor_smooth(levels=200, zero=5, *, one_row=0, seed=2):
+    """Twenty Poisson rows a level on average; the first ``zero`` levels have no claim.
+
+    The next ``one_row`` levels keep their first row only.
+    """
+    rng = np.random.default_rng(seed)
     n = 20 * levels
     g = rng.integers(0, levels, n)
     x = rng.uniform(size=n)
     frame = pd.DataFrame({"x": x, "z": rng.normal(size=n), "g": [f"g{v:04d}" for v in g]})
     y = rng.poisson(np.exp(-1.0 + 0.5 * np.sin(3 * x) + 0.2 * np.sin(5 * x + g % 7))).astype(float)
     y[g < zero] = 0.0
+    keep = np.ones(n, dtype=bool)
+    for level in range(zero, zero + one_row):
+        keep[np.flatnonzero(g == level)[1:]] = False
+    return frame[keep].reset_index(drop=True), y[keep]
+
+
+def _separated_region():
+    """Poisson rows in twelve branches; region B is branches 0 to 2 and has no claim."""
+    rng = np.random.default_rng(51)
+    branch = rng.integers(0, 12, 1800)
+    frame = pd.DataFrame(
+        {"region": np.where(branch < 3, "B", "A"), "branch": [f"b{code:02d}" for code in branch]}
+    )
+    y = rng.poisson(np.exp(0.5 + branch / 30)).astype(float)
+    y[branch < 3] = 0.0
     return frame, y
 
 
@@ -288,15 +306,24 @@ def test_a_fully_penalized_factor_smooth_shows_every_standard_error(basis, selec
 
 
 # ------------------------------------------------------- row K: fits the rule does not reach
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize(
     "case",
-    ["monotone", "monotone_reml", "selection_penalty", "exact_alias", "past_the_bar"],
+    [
+        "monotone",
+        "monotone_reml",
+        "selection_penalty",
+        "exact_alias",
+        "past_the_bar",
+        "separated_level",
+    ],
 )
 def test_a_fit_outside_the_rule_keeps_the_data_rule(case):
     """Controls: each fit shows a standard error exactly where the data alone determine one.
 
-    They pass on master, and must after it.  The reference is the data's null space from a
-    dense SVD, not the fit's record.
+    They pass on master, and must after it: the rule that shows every standard error of a
+    certified fit reaches none of them.  The reference is the data's null space from a dense
+    SVD, not the fit's record.
 
     - ``monotone``, ``monotone_reml``: a shape-constrained fit, with a row binding and with
       none.  Its penalised Hessian is positive definite (Cholesky, condition about 100), but the
@@ -307,8 +334,20 @@ def test_a_fit_outside_the_rule_keeps_the_data_rule(case):
     - ``past_the_bar``: a column within 1e-7 of another leaves it full rank at a scaled
       condition of 2e7, past the 1.19e7 a Gram is trusted to, so the fit's record is the row
       factor's and is not a certificate.
+    - ``separated_level``: a region with exposure and no claim, whose branches are a random
+      effect.  Its coefficient walks towards minus infinity and stops at weights near 1e-16,
+      where the penalised Hessian is positive definite and its record's condition is 3: the
+      build-time scan that counts the level's claims names it, the factorisation cannot.
     """
-    if case in ("exact_alias", "past_the_bar"):
+    if case == "separated_level":
+        frame, y = _separated_region()
+        model = SuperGLM(
+            family="poisson",
+            features={"region": Categorical(base="A"), "branch": RandomEffect()},
+            selection_penalty=0,
+        )
+        assert "SeparationWarning" in {type(w.message).__name__ for w in _fit(model, frame, y)}
+    elif case in ("exact_alias", "past_the_bar"):
         frame, y = _zero_claim_levels()
         noise = np.random.default_rng(5).normal(size=len(frame))
         near = 2.0 * frame["dens"] if case == "exact_alias" else frame["dens"] + 1e-7 * noise
@@ -334,6 +373,59 @@ def test_a_fit_outside_the_rule_keeps_the_data_rule(case):
     for rows in (frame, frame.copy()):
         se = _flat(model, model.metrics(rows, y).coefficient_se)
         np.testing.assert_array_equal(np.isnan(se), open_to_the_data)
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize(
+    ("levels", "solve", "seed"),
+    [
+        *(pytest.param("no_claims", "auto", seed, id=f"no_claims-{seed}") for seed in range(1, 9)),
+        pytest.param("one_row", "auto", 1, id="one_row"),
+        pytest.param("five_levels", "gram", 5, id="five_levels-gram"),
+    ],
+)
+def test_an_sz_level_the_data_cannot_price_keeps_its_term_blank(levels, solve, seed):
+    """Controls: an ``sz`` term with unpenalised level lines and one level the data cannot price.
+
+    They pass on master, and must after it.  A level with exposure and no claim (``no_claims``,
+    forty levels; ``five_levels``, one level in five on the dense solver) has a line that walks
+    towards minus infinity, and a level with one row (``one_row``) has a line its row cannot
+    fix.  Either reaches the main spline and every other level's line through the sum-to-zero
+    constraint, so the fit shows no standard error for the main spline or the term, and shows
+    the one for ``z`` where the model has it.  The fit stops where the penalised Hessian is
+    numerically positive definite: the structured factor truncates no direction in any of
+    these, and the dense Gram of ``five_levels`` has full rank at a record condition of 7.9e6,
+    under the 1.19e7 bar, with one OpenBLAS kernel and rank 32 of 33 with another.  What names
+    the level is the count made when the design is built, which is the same on every machine.
+    """
+    if levels == "five_levels":
+        rng = np.random.default_rng(seed)
+        n = 4000
+        g = rng.choice(list("ABCDE"), n, p=[0.3, 0.3, 0.2, 0.15, 0.05])
+        x = rng.uniform(0, 10, n)
+        y = rng.poisson(np.exp(-1.5 + 0.2 * np.sin(x))).astype(float)
+        y[g == "E"] = 0.0
+        frame, features = pd.DataFrame({"x": x, "g": g}), {}
+    else:
+        frame, y = _factor_smooth(
+            40, int(levels == "no_claims"), one_row=int(levels == "one_row"), seed=seed
+        )
+        features = {"z": Numeric()}
+    model = SuperGLM(
+        family="poisson",
+        features={**features, "x": Spline(kind="ps", n_knots=6)},
+        interactions=[FactorSmooth("x", group="g", basis="sz", k=6)],
+        selection_penalty=0,
+        direct_solve=solve,
+    )
+    _fit(model, frame, y)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        se = model.metrics(frame, y).coefficient_se
+    term = next(group.name for group in model._groups if group.name not in ("x", "z"))
+    assert all(np.isfinite(se[name]).all() for name in features)
+    assert np.isnan(se["x"]).all(), f"main spline: {np.isfinite(se['x']).sum()} shown"
+    assert np.isnan(se[term]).all(), f"{term}: {np.isfinite(se[term]).sum()} shown"
 
 
 @pytest.mark.pins_behaviour

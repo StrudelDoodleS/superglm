@@ -525,16 +525,33 @@ def _positive_definite(penalized) -> bool:
     return not penalized.rank_truncated
 
 
+def _names_an_unpriced_level(model) -> bool:
+    """Whether the fit's own records name a level or region the data cannot price.
+
+    Such a fit stops where its penalized Hessian is numerically positive definite, so no
+    factorization shows it; these records are counted when the design is built:
+
+    - an ``sz`` term's levels left out of its population curve: thin, separated, or so in
+      another term on its group (``FactorSmooth._left_out``).  A level without weight is thin
+      where the lines are unpenalized, and not where ``select=True`` penalizes them;
+    - a categorical level the build-time scan found separated.
+    """
+    if any(getattr(spec, "_left_out", None) for spec in model._interaction_specs.values()):
+        return True
+    return any(getattr(spec, "_separated_levels_at_fit", ()) for spec in model._specs.values())
+
+
 def penalized_fit_certified(model, penalized) -> bool:
     """Whether every coefficient ``model`` published has a standard error read from ``penalized``.
 
     ``penalized`` is what the covariance in hand is inverted from: the fit's own
     decomposition, or the one ``metrics`` re-forms on other rows or weights.  The published
-    coefficients must be the unconstrained optimum of a quadratic penalty, and determined by
-    the fit itself:
+    coefficients must be the unconstrained optimum of a quadratic penalty, every level
+    priced, and determined by the fit itself:
 
     - no selection penalty and no term under a shape rule: the coefficients would not be the
       optimum the penalized Hessian belongs to;
+    - no level or region the fit's records name as unpriced (``_names_an_unpriced_level``);
     - the fit's own decomposition positive definite (``_positive_definite``), as well as
       ``penalized``: rows the fit never saw can make a Hessian re-formed on them positive
       definite, and say nothing about the coefficients it published.
@@ -542,6 +559,8 @@ def penalized_fit_certified(model, penalized) -> bool:
     if (fitted_penalty(model).lambda1 or 0.0) > 0.0:
         return False
     if any(g.constraints is not None or g.monotone_engine is not None for g in model._groups):
+        return False
+    if _names_an_unpriced_level(model):
         return False
     fit = _fit_decomposition(_fit_record(model))
     return (
