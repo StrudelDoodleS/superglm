@@ -355,8 +355,8 @@ class PIRLSResult:
     # variance components pair with lambda (the REML profile, or ML at the fitted mean);
     # ``solver_phi_likelihood`` is it in the solver unit, as ``solver_phi`` is for ``phi``.
     # The methods name both estimators. ``superglm.solvers.dispersion.publish_scales`` is
-    # their one writer; None everywhere is a result saved before the split, whose one
-    # ``phi`` serves both.
+    # their one writer. A result saved before the split has no methods (``legacy``); its
+    # restore fills ``phi_likelihood`` with its one ``phi``, which serves both.
     phi_likelihood: float | None = None
     solver_phi_likelihood: float | None = None
     phi_method: str | None = None
@@ -427,6 +427,10 @@ class PIRLSResult:
         for name, value in state.items():
             if name != "_publication_locked":
                 object.__setattr__(self, name, value)
+        if "phi_likelihood" not in state and "phi" in state:
+            # Saved before the split: its one ``phi`` serves both readers (methods ``legacy``).
+            object.__setattr__(self, "phi_likelihood", state["phi"])
+            object.__setattr__(self, "solver_phi_likelihood", state.get("solver_phi"))
         if published:
             self._publish()
 

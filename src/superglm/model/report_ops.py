@@ -291,7 +291,9 @@ def summary(
             else None
         ),
         "lambda1": lam1,
-        "phi": res.phi,
+        # The scale this summary's standard errors read: 1 for a known-scale family,
+        # whose ``fit_path`` result still carries Pearson's statistic in ``phi``.
+        "phi": 1.0 if getattr(model._distribution, "scale_known", True) else res.phi,
         **_scale_info(res),
         "pearson_chi2": fs.pearson_chi2,
         "deviance": res.deviance,

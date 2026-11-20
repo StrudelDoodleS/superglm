@@ -151,7 +151,8 @@ def _overview_rows(source: _CompactSummarySource) -> tuple[SummaryOverviewRow, .
             _finite_float(info.get("effective_df", fit.get("effective_df"))),
         ),
         SummaryOverviewRow("Fit", "Scale (phi)", _finite_float(info.get("phi", fit.get("phi")))),
-        SummaryOverviewRow("Fit", "Scale estimator", str(info.get("phi_method", ""))),
+        # A summary cached before the split names no estimator: its one scale is legacy.
+        SummaryOverviewRow("Fit", "Scale estimator", str(info.get("phi_method") or "legacy")),
         SummaryOverviewRow(
             "Fit", "Deviance", _finite_float(info.get("deviance", deviance.get("deviance")))
         ),

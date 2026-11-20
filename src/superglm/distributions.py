@@ -262,7 +262,8 @@ class Gaussian:
 
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
         """Gaussian log-likelihood with dispersion φ = σ²."""
-        phi_safe = max(phi, 1e-300)
+        # Any normal positive phi is the fitted one; only zero (an exact fit) is floored.
+        phi_safe = max(phi, _FLOAT64_MIN_NORMAL)
         carried = weights != 0.0
         response, mean, mass = y[carried], mu[carried], weights[carried]
         residual = _standardized_residual(response, mean, np.sqrt(phi_safe))
@@ -693,8 +694,9 @@ def prior_weight_log_density(
     w = np.asarray(weights, dtype=np.float64)
     if isinstance(family, Gaussian):
         # N(mu, phi / w): the residual arm w r^2 / (2 phi) is already the
-        # frequency arm, and only the per-row normalizer moves.
-        phi_safe = max(phi, 1e-300)
+        # frequency arm, and only the per-row normalizer moves. Any normal positive phi
+        # is the fitted one; only zero (an exact fit) is floored.
+        phi_safe = max(phi, _FLOAT64_MIN_NORMAL)
         carried = w > 0.0
         contribution = np.zeros_like(w)
         quadratic = _weighted_residual_square(y[carried], mu[carried], w[carried], phi_safe)
@@ -709,7 +711,7 @@ def prior_weight_log_density(
         carried = w > 0.0
         contribution = np.zeros_like(w)
         with np.errstate(over="ignore"):
-            shape = w[carried] / max(phi, 1e-300)
+            shape = w[carried] / max(phi, _FLOAT64_MIN_NORMAL)
         contribution[carried] = _gamma_log_density(y[carried], mu[carried], shape)
         return contribution
     if isinstance(family, Poisson):

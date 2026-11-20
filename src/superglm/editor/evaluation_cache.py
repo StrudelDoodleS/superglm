@@ -6,6 +6,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from superglm._weight_units import likelihood_scale
 from superglm.editor._types import EditableTerm
 from superglm.editor.evaluation import EvaluationDataset
 from superglm.editor.lss.validation import lss_metric_signature
@@ -56,7 +57,8 @@ def model_metric_signature(model) -> tuple[Any, ...]:
         getattr(family, "theta", None),
         type(link).__module__,
         type(link).__qualname__,
-        float(model.result.phi),
+        # The likelihood scale: every cached scalar is a density or a deviance.
+        float(likelihood_scale(model.result).phi),
         float(model.result.effective_df),
     )
 

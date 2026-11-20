@@ -216,39 +216,95 @@ def profile_likelihood_scale(
     return None
 
 
+def lifted_ml_scale(
+    distribution: Distribution,
+    y: NDArray,
+    sample_weight: NDArray,
+    mu: NDArray,
+    *,
+    weight_semantics: str,
+    exponent: int,
+) -> float | None:
+    """ML at the fitted mean of a fit in a lifted weight unit, in that solver unit.
+
+    The profile runs on the weights times ``2**exponent`` (exact), so a deviance or a
+    scale that underflows in the caller's unit keeps its digits. A prior weight enters
+    the density only through ``phi / w``, so that profile is the solver-unit scale; a
+    replication count's ML does not depend on the weights' unit, so it is lifted after.
+    """
+    from superglm._utils import weighted_row_sum
+
+    weights = np.ldexp(np.asarray(sample_weight, dtype=np.float64), exponent)
+    phi = profile_likelihood_scale(
+        distribution,
+        y,
+        weights,
+        weight_semantics=weight_semantics,
+        deviance=weighted_row_sum(weights, distribution.deviance_unit, y, mu),
+    )
+    if phi is None or validate_weight_semantics(weight_semantics) == PRIOR_WEIGHTS:
+        return phi
+    with np.errstate(over="ignore"):
+        return float(np.ldexp(phi, exponent))
+
+
+def _normal(value: float | None) -> bool:
+    return value is not None and math.isfinite(value) and value >= np.finfo(np.float64).tiny
+
+
 def scale_fields(
     result,
     *,
     distribution: Distribution,
     likelihood_phi: float | None,
     likelihood_method: str,
+    solver_likelihood_phi: float | None = None,
 ) -> dict:
     """The field values that publish both scales on ``result``.
 
     ``result.phi`` (and ``solver_phi``) already hold Pearson's estimate at the fitting
     design's mean, as every solver publishes it, or 1 for a known scale. The likelihood
-    scale is ``likelihood_phi`` from ``likelihood_method``, a physical value. The Pearson
-    pair stands in, and the method says so, where it is missing or not a normal positive
-    float, and on a fit in a lifted weight unit (``solver_phi`` set: weights below
-    ``2**-512``), whose solver-unit scale a physical profile cannot recover.
+    scale is ``likelihood_phi`` from ``likelihood_method``, a physical value. On a fit in a
+    lifted weight unit (``solver_phi`` set: weights below ``2**-512``) it is also carried
+    in the solver unit, ``ldexp(likelihood_phi, weight_exponent)`` exactly, unless the
+    caller profiled it there (``solver_likelihood_phi``) because the physical value
+    underflows. The Pearson pair stands in, and the method says so, where neither is a
+    normal positive float.
     """
     if getattr(distribution, "scale_known", True):
+        # Standard errors of a known-scale family read 1 whatever ``phi`` holds.
         return {
             "phi_likelihood": 1.0,
             "solver_phi_likelihood": None,
-            "phi_method": KNOWN if float(result.phi) == 1.0 else PEARSON,
+            "phi_method": KNOWN,
             "phi_likelihood_method": KNOWN,
         }
     solver_phi = getattr(result, "solver_phi", None)
     value = None if likelihood_phi is None else float(likelihood_phi)
-    normal = value is not None and math.isfinite(value) and value >= np.finfo(np.float64).tiny
-    if not normal or solver_phi is not None:
+    pearson_pair = {
+        "phi_likelihood": float(result.phi),
+        "solver_phi_likelihood": solver_phi,
+        "phi_method": PEARSON,
+        "phi_likelihood_method": PEARSON,
+    }
+    if solver_phi is not None:
+        exponent = int(result.weight_exponent)
+        solver_value = solver_likelihood_phi
+        if solver_value is None and _normal(value):
+            try:
+                solver_value = math.ldexp(value, exponent)
+            except OverflowError:
+                solver_value = None
+        if not _normal(None if solver_value is None else float(solver_value)):
+            return pearson_pair
         return {
-            "phi_likelihood": float(result.phi),
-            "solver_phi_likelihood": solver_phi,
+            "phi_likelihood": math.ldexp(float(solver_value), -exponent),
+            "solver_phi_likelihood": float(solver_value),
             "phi_method": PEARSON,
-            "phi_likelihood_method": PEARSON,
+            "phi_likelihood_method": likelihood_method,
         }
+    if not _normal(value):
+        return pearson_pair
     return {
         "phi_likelihood": value,
         "solver_phi_likelihood": None,
@@ -263,6 +319,7 @@ def publish_scales(
     distribution: Distribution,
     likelihood_phi: float | None,
     likelihood_method: str,
+    solver_likelihood_phi: float | None = None,
 ):
     """Return ``result`` with both published scales set (``scale_fields``)."""
     from dataclasses import replace
@@ -274,6 +331,7 @@ def publish_scales(
             distribution=distribution,
             likelihood_phi=likelihood_phi,
             likelihood_method=likelihood_method,
+            solver_likelihood_phi=solver_likelihood_phi,
         ),
     )
 

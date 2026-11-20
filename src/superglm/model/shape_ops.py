@@ -1572,7 +1572,7 @@ def _refresh_repaired_geometry(model, prior_working_weights, prior_selected_name
     model.__dict__["_fit_inference_info"] = inference
 
 
-def _refresh_repaired_scale_and_statistics(model) -> None:
+def _refresh_repaired_scale_and_statistics(model, *, hessian_rank: int | None = None) -> None:
     """Pair the repaired coefficients and final EDF with a coherent scale."""
     from superglm.distributions import _VARIANCE_FLOOR
     from superglm.model.fit_ops import _compute_fit_stats
@@ -1618,11 +1618,19 @@ def _refresh_repaired_scale_and_statistics(model) -> None:
 
     # Densities and variance components read the likelihood scale at the repaired mean:
     # the REML profile after fit_reml, the exact likelihood's ML after fit().
-    from superglm.solvers.dispersion import ML_AT_MEAN, profile_likelihood_scale, scale_fields
+    # ``hessian_rank`` is the unrepaired fit's certified rank: a repair moves coefficients,
+    # not the design, so its REML nullity is the one the fit's own profile used.
+    from superglm.solvers.dispersion import (
+        ML_AT_MEAN,
+        lifted_ml_scale,
+        profile_likelihood_scale,
+        scale_fields,
+    )
 
-    likelihood_phi, likelihood_method = None, ML_AT_MEAN
-    if getattr(distribution, "scale_known", True) or solver_phi is not None:
-        pass  # a known scale, or a lifted weight unit that keeps its Pearson pair
+    likelihood_phi = solver_likelihood_phi = None
+    likelihood_method = ML_AT_MEAN
+    if getattr(distribution, "scale_known", True):
+        pass
     elif getattr(model, "_last_fit_meta", {}).get("method") == "fit_reml":
         from superglm.model.reml_finalize import profiled_likelihood_scale
 
@@ -1633,6 +1641,16 @@ def _refresh_repaired_scale_and_statistics(model) -> None:
             lambdas=model._reml_lambdas,
             reml_penalties=model._reml_penalties,
             pirls_result=model._solver_result,
+            hessian_rank=hessian_rank,
+        )
+    elif solver_phi is not None:
+        solver_likelihood_phi = lifted_ml_scale(
+            distribution,
+            y,
+            weights,
+            mu,
+            weight_semantics=model_weight_semantics(model),
+            exponent=model._solver_result.weight_exponent,
         )
     else:
         likelihood_phi = profile_likelihood_scale(
@@ -1648,6 +1666,7 @@ def _refresh_repaired_scale_and_statistics(model) -> None:
             distribution=distribution,
             likelihood_phi=likelihood_phi,
             likelihood_method=likelihood_method,
+            solver_likelihood_phi=solver_likelihood_phi,
         ).items():
             setattr(result, name, value)
     model._fit_stats = _compute_fit_stats(
@@ -1734,6 +1753,7 @@ def _apply_shape_postfit(model, X, sample_weight, offset, *, n_grid: int):
         penalty=fitted_penalty(model),
     )
 
+    certified_rank = model._solver_result.reml_hessian_rank
     revision = FittedStateRevision.start(model)
     work_model = revision.model
     work_model._shape_repairs = dict(getattr(model, "_shape_repairs", {}))
@@ -1860,7 +1880,7 @@ def _apply_shape_postfit(model, X, sample_weight, offset, *, n_grid: int):
     # after them reads the frame.
     del frame, checked
     _refresh_repaired_geometry(work_model, prior_working_weights, prior_selected_names)
-    _refresh_repaired_scale_and_statistics(work_model)
+    _refresh_repaired_scale_and_statistics(work_model, hessian_rank=certified_rank)
     committed = revision.commit()
     for message in flat:
         warnings.warn(message, RuntimeWarning, stacklevel=4)

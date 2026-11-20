@@ -16,6 +16,7 @@ import numpy as np
 from scipy import stats
 
 from superglm._utils import bin_rows, occurrence_rows, score_bins
+from superglm._weight_units import dispersion_standard_deviation, likelihood_scale
 from superglm.plotting.common import (
     _LINE_COLOR,
     _LINE_WIDTH,
@@ -197,6 +198,7 @@ def _simulate_response(
     rng,
     *,
     weight_semantics: str,
+    row_scale: NDArray | None = None,
 ) -> NDArray | None:
     """Simulate one response vector from the fitted model, or None for an unsupported family.
 
@@ -204,7 +206,9 @@ def _simulate_response(
     simulates at ``w = 1``; a prior weight stays in the draw. Draws come from exactly the
     marginals ``_quantile_residuals`` inverts (Gaussian ``phi / w`` variance, Gamma ``w / phi``
     shape, the ``w``-scaled Poisson and negative binomial lattice, binomial ``w`` trials), or a
-    correct fit falls outside its own envelope.
+    correct fit falls outside its own envelope. ``row_scale`` is each row's ``phi / w`` (``phi``
+    under replication) where the caller formed it in the fit's weight unit, because ``phi``
+    itself underflows there.
     """
     from superglm.distributions import (
         Binomial,
@@ -225,10 +229,12 @@ def _simulate_response(
         return np.asarray(rng.poisson(lam=mu), dtype=np.float64)
 
     if isinstance(family, Gaussian):
-        variance = phi / weights if prior else phi
+        variance = row_scale if row_scale is not None else phi / weights if prior else phi
         return rng.normal(loc=mu, scale=np.sqrt(variance))
 
     if isinstance(family, Gamma):
+        if row_scale is not None:
+            return rng.gamma(shape=1.0 / row_scale, scale=mu * row_scale)
         shape = (weights if prior else 1.0) / phi
         scale = mu * phi / (weights if prior else 1.0)
         return rng.gamma(shape=shape, scale=scale)
@@ -247,7 +253,10 @@ def _simulate_response(
     if isinstance(family, Tweedie):
         from superglm._tweedie import generate_tweedie_cpg
 
-        row_phi = phi / weights if prior else np.full_like(weights, phi)
+        if row_scale is not None:
+            row_phi = row_scale
+        else:
+            row_phi = phi / weights if prior else np.full_like(weights, phi)
         return generate_tweedie_cpg(len(mu), mu, row_phi, family.p, rng=rng)
 
     if isinstance(family, Binomial):
@@ -678,6 +687,14 @@ def _panel_qq_envelope(
     envelope_ok = False
     sim_mu = mu[sim_idx] if sim_idx is not None else mu
     sim_w = w[sim_idx] if sim_idx is not None else w
+    row_scale = None
+    density_scale = likelihood_scale(m._result)
+    if density_scale.solver_phi is not None:
+        # A lifted weight unit: phi / w is formed in that unit, where both are normal.
+        root = dispersion_standard_deviation(
+            sim_w if weight_semantics == PRIOR_WEIGHTS else np.ones_like(sim_w), density_scale
+        )
+        row_scale = root * root
 
     try:
         from superglm.inference.metrics import ModelMetrics
@@ -692,6 +709,7 @@ def _panel_qq_envelope(
                 sim_w,
                 np.random.default_rng(response_stream),
                 weight_semantics=weight_semantics,
+                row_scale=row_scale,
             )
             if y_sim is None:
                 break

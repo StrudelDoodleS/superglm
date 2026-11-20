@@ -25,10 +25,11 @@ def _scale_cell(info, fmt) -> str:
 
 def _likelihood_scale_rows(info, fmt) -> list[tuple[str, str, str, str]]:
     """The scale the log-likelihood and AIC read, where it is a separate estimate."""
-    from superglm.solvers.dispersion import KNOWN, SCALE_METHOD_LABELS
+    from superglm.solvers.dispersion import KNOWN, LEGACY, SCALE_METHOD_LABELS
 
     method = info.get("phi_likelihood_method")
-    if method is None or method == KNOWN:
+    if method in (None, KNOWN, LEGACY):
+        # A saved model's one scale serves both readers; ``Scale (phi)`` already shows it.
         return []
     label = SCALE_METHOD_LABELS.get(method, method)
     return [("Likelihood phi", f"{fmt(info['phi_likelihood'])} ({label})", "", "")]

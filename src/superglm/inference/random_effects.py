@@ -315,21 +315,22 @@ def random_effect_result(
     group, spec = _resolve_random_effect(model, name)
     lambda_value = _lambda_for_group(model, group)
     from superglm._weight_units import (
-        likelihood_scale,
         physical_variance,
         scale_penalties,
         standard_errors,
     )
+    from superglm.model.reml_finalize import variance_component_scale
 
     solver = model._solver_pirls_result()
     # A variance component pairs lambda with the scale REML profiled it against.
-    phi = float(likelihood_scale(model.result).phi)
+    scale = variance_component_scale(model)
+    phi = float(scale.phi)
     solver_lambda = scale_penalties(lambda_value, solver.weight_exponent)
     tau_squared = float(
         np.inf
         if lambda_value == 0.0
         else (
-            physical_variance(1.0 / solver_lambda, likelihood_scale(solver))
+            physical_variance(1.0 / solver_lambda, scale)
             if solver.weight_exponent
             else phi / lambda_value
         )
@@ -478,7 +479,7 @@ def random_effect_result(
         phi=phi,
         tau_squared=tau_squared,
         standard_deviation=float(
-            standard_errors(1.0 / solver_lambda, solver)
+            standard_errors(1.0 / solver_lambda, scale)
             if solver.weight_exponent and lambda_value
             else np.sqrt(tau_squared)
         ),

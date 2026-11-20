@@ -444,7 +444,11 @@ fits, shape repair and `estimate_p`):
   residuals, the diagnostic Q-Q envelope, the Vuong test and variance
   components (`RandomEffect`, factor smooths: `tau² = phi_likelihood / lambda`)
   read it. mgcv makes the same split: its covariance carries `scale` and its
-  log-likelihood and `gam.vcomp` carry `reml.scale`.
+  log-likelihood and `gam.vcomp` carry `reml.scale`. A variance component
+  always pairs lambda with the REML profile lambda was selected against, so
+  after `estimate_p(fit_mode="reml")`, whose `phi_likelihood` is the
+  maximum-likelihood `phi_hat`, it reads the REML profile at the published fit,
+  the value `fit_reml` would publish at the same `p`.
 
 `result.phi_method` and `result.phi_likelihood_method` name the two
 estimators, and the summary prints both. On data heavier-tailed than the
