@@ -553,18 +553,20 @@ def penalized_fit_certified(model, penalized) -> bool:
     coefficients must be the unconstrained optimum of a quadratic penalty, every level
     priced, and determined by the fit itself:
 
-    - no selection penalty and no term under a shape rule: the coefficients would not be the
-      optimum the penalized Hessian belongs to;
+    - no selection penalty, no term under a shape rule and no shape repair after the fit: the
+      coefficients would not be the optimum the penalized Hessian belongs to;
     - no level or region the fit's records name as unpriced (``_names_an_unpriced_level``);
     - the fit's own decomposition positive definite (``_positive_definite``), as well as
       ``penalized``: rows the fit never saw can make a Hessian re-formed on them positive
       definite, and say nothing about the coefficients it published.
     """
+    from superglm.model.report_ops import shape_repaired_feature_names
+
     if (fitted_penalty(model).lambda1 or 0.0) > 0.0:
         return False
     if any(g.constraints is not None or g.monotone_engine is not None for g in model._groups):
         return False
-    if _names_an_unpriced_level(model):
+    if shape_repaired_feature_names(model) or _names_an_unpriced_level(model):
         return False
     fit = _fit_decomposition(_fit_record(model))
     return (

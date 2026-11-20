@@ -1165,8 +1165,8 @@ a range with no rows.
   dropped no direction. Each coefficient then has a finite posterior variance.
 - **Otherwise the data rank decides.** A coefficient outside it is reported as
   not estimable, and its standard error is shown as missing.
-- **A fit with a selection penalty or a shape rule always uses the data
-  rank.**
+- **A fit with a selection penalty, a shape rule or a shape repair always uses
+  the data rank.**
 - **So does a fit that names a level or region it cannot price.** That is a
   factor-smooth level the fit reports as thin, without weight or separated, a
   categorical level it reports as separated, or a fit that ends with the

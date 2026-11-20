@@ -312,6 +312,7 @@ def test_a_fully_penalized_factor_smooth_shows_every_standard_error(basis, selec
     [
         "monotone",
         "monotone_reml",
+        "shape_repair",
         "selection_penalty",
         "exact_alias",
         "past_the_bar",
@@ -329,6 +330,10 @@ def test_a_fit_outside_the_rule_keeps_the_data_rule(case):
     - ``monotone``, ``monotone_reml``: a shape-constrained fit, with a row binding and with
       none.  Its penalised Hessian is positive definite (Cholesky, condition about 100), but the
       published coefficients are the constrained optimum.
+    - ``shape_repair``: an unconstrained fit of a rising curve that dips twice, which
+      ``apply_shape_postfit`` then projects onto an increasing one.  Its groups carry no shape
+      rule and the Gamma weights do not move, so the fit's rank record survives the repair,
+      but the published coefficients are no longer the optimum that record describes.
     - ``selection_penalty``: the recorded Hessian carries the selection penalty's local
       curvature, which is not a quadratic penalty's.
     - ``exact_alias``: a copied column leaves the penalised Hessian singular.
@@ -355,6 +360,18 @@ def test_a_fit_outside_the_rule_keeps_the_data_rule(case):
             selection_penalty=0,
         )
         assert "SeparationWarning" in {type(w.message).__name__ for w in _fit(model, frame, y)}
+    elif case == "shape_repair":
+        frame, _ = _thin_level()
+        u = frame["x"].to_numpy() / 80.0
+        y = np.exp(2.0 * u + 0.8 * np.sin(4.0 * np.pi * u))
+        y = y * np.random.default_rng(11).gamma(5.0, 0.2, len(frame))
+        model = _thin_level_model(
+            Spline(kind="ps", n_knots=8, constraint=Constraint.postfit.increasing)
+        )
+        _fit(model, frame, y, method="fit")
+        unconstrained = np.asarray(model.predict(frame), dtype=np.float64)
+        model.apply_shape_postfit(frame)
+        assert not np.allclose(model.predict(frame), unconstrained, rtol=0.1)
     elif case in ("exact_alias", "past_the_bar"):
         frame, y = _zero_claim_levels()
         noise = np.random.default_rng(5).normal(size=len(frame))
