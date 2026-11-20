@@ -1835,9 +1835,11 @@ class ModelMetrics:
             # One coefficient per level: the diagonal is the whole answer, and
             # a compact covariance refuses the full block of a large term
             # (every nested chain level counts against its cap, §6).
-            variance = phi * covariance_selected_diagonal(XtWX_inv_aug, aug_indices)
-            return {"se": np.sqrt(np.maximum(variance, 0.0))}
-        Cov_g = phi * covariance_selected_block(XtWX_inv_aug, aug_indices)
+            def read(diagonal):
+                return {"se": np.sqrt(np.maximum(diagonal, 0.0))}
+
+            values = read(phi * covariance_selected_diagonal(XtWX_inv_aug, aug_indices))
+            return self._disclosed_feature(name, values, indices, read, diagonal=True)
 
         if isinstance(spec, _SplineBase):
             x_grid = np.linspace(spec._lo, spec._hi, n_points)
@@ -1845,17 +1847,18 @@ class ModelMetrics:
             active_cols = _active_feature_columns(name, groups, active_subs)
             M = M[:, active_cols]
 
-            Q = M @ Cov_g
-            se = np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0))
-            return {"x": x_grid, "se_log_relativity": se}
+            def read(block):
+                Q = M @ block
+                return {"x": x_grid, "se_log_relativity": np.sqrt(np.maximum(np.sum(Q * M, 1), 0))}
 
         elif isinstance(spec, Categorical):
-            se = np.sqrt(np.maximum(np.diag(Cov_g), 0.0))
-            return {
-                "levels": spec._non_base,
-                "base_level": spec._base_level,
-                "se_log_relativity": se,
-            }
+
+            def read(block):
+                return {
+                    "levels": spec._non_base,
+                    "base_level": spec._base_level,
+                    "se_log_relativity": np.sqrt(np.maximum(np.diag(block), 0.0)),
+                }
 
         elif isinstance(spec, Piecewise):
             # One SE per knot with a hard zero at the base, matching
@@ -1864,16 +1867,60 @@ class ModelMetrics:
             M = np.asarray(spec._raw_basis_matrix(spec._knots), dtype=np.float64)[
                 :, spec._non_base_indices
             ]
-            Q = M @ Cov_g
-            se = np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0))
-            return {"x": spec._knots.copy(), "se_log_relativity": se}
+
+            def read(block):
+                Q = M @ block
+                se = np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0))
+                return {"x": spec._knots.copy(), "se_log_relativity": se}
 
         elif isinstance(spec, Numeric):
-            return {"se_coef": float(np.sqrt(max(Cov_g[0, 0], 0.0)))}
+
+            def read(block):
+                return {"se_coef": float(np.sqrt(max(block[0, 0], 0.0)))}
 
         else:
-            se = np.sqrt(np.maximum(np.diag(Cov_g), 0.0))
-            return {"se": se}
+
+            def read(block):
+                return {"se": np.sqrt(np.maximum(np.diag(block), 0.0))}
+
+        values = read(phi * covariance_selected_block(XtWX_inv_aug, aug_indices))
+        return self._disclosed_feature(name, values, indices, read, diagonal=False)
+
+    def _disclosed_feature(self, name, values, indices, read, *, diagonal):
+        """``values`` with NaN standard errors at the points off the fit's support, and one warning.
+
+        The test is the term readers' (``explain_ops._curve_labels``) on the functional this
+        reader reports: ``read`` at the block ``Q Q'`` of each kind's directions gives a point's
+        share along it, and at ``diag(D^-2)`` its dual norm, on the feature's active
+        ``indices``.  Nothing is read for a fit with no such direction.
+        """
+        from superglm.diagnostics.estimability import off_support
+        from superglm.model.estimability_ops import published_directions
+        from superglm.model.explain_ops import _active_layout, _curve_warning
+
+        directions = published_directions(self._model)
+        if directions is None:
+            return values
+        _, columns = _active_layout(self._model)
+        fitted = columns[indices]
+        key = next(key for key in values if key.startswith("se"))
+
+        def probe(root=None, inverse=None):
+            if diagonal:
+                block = np.einsum("ij,ij->i", root, root) if root is not None else inverse
+            else:
+                block = root @ root.T if root is not None else np.diag(inverse)
+            return np.atleast_1d(np.asarray(read(block)[key], dtype=np.float64))
+
+        norms = probe(inverse=1.0 / directions.scale[fitted] ** 2)
+        shares = {kind: probe(root=slopes[fitted]) for kind, slopes in directions.slopes.items()}
+        labels = off_support(shares, norms)
+        if not np.any(labels != ""):
+            return values
+        se = np.atleast_1d(np.array(values[key], dtype=np.float64, copy=True))
+        se[labels != ""] = np.nan
+        _curve_warning({name: labels})
+        return {**values, key: se if np.ndim(values[key]) else float(se[0])}
 
     def feature_se(self, name: str, n_points: int = 200) -> dict[str, Any]:
         """Quasi-likelihood SE of a feature curve, levels, or coefficient.

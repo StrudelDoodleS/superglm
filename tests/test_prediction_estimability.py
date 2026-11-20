@@ -180,6 +180,32 @@ def test_a_levels_alias_gives_its_relativity_and_curve_no_standard_error():
     assert plain.non_estimable.tolist() == inference.non_estimable.tolist()
 
 
+def test_a_levels_alias_gives_its_feature_se_no_value():
+    """``metrics().feature_se("f")``: ``E``'s level leans on the alias, so its SE is NaN.
+
+    The same test as the term readers' (``explain_ops._curve_labels``), on the functional this
+    reader reports: each level's coordinate.  The other levels keep the quasi-likelihood SEs
+    ``feature_se`` printed before, which are ``term_inference``'s times the Pearson dispersion's
+    square root over the fitted scale's (to the rounding of one product); one warning names
+    ``'f'``.  At ``253c6d353`` ``E`` printed a finite SE.
+    """
+    model = _fit(ALIASED)
+    metrics = model.metrics(ALIASED, Y)
+    values, caught = _caught(lambda: metrics.feature_se("f"))
+    (warning,) = _disclosures(caught)
+    assert list(warning.points) == ["f"]
+    levels = list(values["levels"])
+    e = levels.index("E")
+    se = np.asarray(values["se_log_relativity"])
+    assert np.isnan(se[e]) and np.all(np.isfinite(np.delete(se, e)))
+    reference, _ = _caught(lambda: model.term_inference("f"))
+    order = [list(reference.levels).index(level) for level in levels]
+    expected = np.asarray(reference.se_log_relativity)[order] * np.sqrt(
+        metrics._coefficient_dispersion / model.result.phi
+    )
+    np.testing.assert_allclose(np.delete(se, e), np.delete(expected, e), rtol=16 * U)
+
+
 def test_a_rating_table_flags_the_levels_the_fit_does_not_determine():
     """The categorical block of ``f`` carries each level's kind; its workbook note names ``E``."""
     from superglm.export.rating_tables import _categorical_block
