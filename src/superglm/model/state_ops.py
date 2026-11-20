@@ -1708,6 +1708,14 @@ def _restore_separated(
     The span is exactly null on the kept rows, so no kept fitted value moves; on the separated
     rows the move is the least-squares match of the walked fit's predictor (the walk stopped
     near the boundary, where the estimate's limit puts those rows).
+
+    Each separated row's residual is read relative to its own target, floored at the fit's
+    predictor scale, so every row's right-hand side is at most two: unweighted, a row the walk
+    drove to ``-1e27`` sets a normwise solver's error to ``u 1e27`` on every component, the
+    shared one a kept row reads too.  Columns are then equilibrated (van der Sluis, Numer.
+    Math. 14, 1969), so the scaled solve's normwise error is each component's error relative
+    to its own column's scale.  When every target is within the floor the weights are equal
+    and the solution is the unweighted one.
     """
     from superglm.solvers.mode_score import linear_predictor
 
@@ -1723,7 +1731,13 @@ def _restore_separated(
     )
     current = np.asarray(linear_predictor(model._dm, provisional, model._fit_offset), np.float64)
     moves = np.asarray(context.explicit @ context.separated_explicit, dtype=np.float64)
-    step = np.linalg.lstsq(moves, (target - current)[rows], rcond=None)[0]
+    floor = max(1.0, float(np.max(np.abs(current))))
+    weight = 1.0 / np.maximum(np.abs(target[rows]), floor)
+    weighted = moves * weight[:, None]
+    norms = np.linalg.norm(weighted, axis=0)
+    scale = 1.0 / np.where(norms > 0.0, norms, 1.0)
+    scaled = np.linalg.lstsq(weighted * scale, (target - current)[rows] * weight, rcond=None)[0]
+    step = scaled * scale
     return beta + separated[1:] @ step, float(intercept + separated[0] @ step)
 
 
