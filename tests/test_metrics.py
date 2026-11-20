@@ -1171,6 +1171,42 @@ def test_metrics_known_scale_dispatch_matches_distribution_contract(family, expe
 
 
 class TestNullModel:
+    def test_a_log_link_subclass_with_its_own_mapping_takes_the_general_path(self):
+        """A ``LogLink`` subclass that changes its mapping is not the built-in log link.
+
+        With ``link(mu) = log(mu)/2`` the null fit must minimise the deviance of that
+        mapping, so its null deviance equals the deviance of the intercept-only fit
+        through it, computed here by a 1-D minimisation. Mutation: the closed-form
+        shortcut admitted any ``LogLink`` subclass and reported 0.473376.
+        """
+        from scipy.optimize import minimize_scalar
+
+        from superglm.links import LogLink
+        from superglm.model.fit_ops import _compute_null_mu
+
+        class HalfLog(LogLink):
+            def link(self, mu):
+                return np.log(mu) / 2.0
+
+            def inverse(self, eta):
+                return np.exp(2.0 * eta)
+
+            def deriv_inverse(self, eta):
+                return 2.0 * np.exp(2.0 * eta)
+
+        y = np.array([1.0, 4.0, 2.0, 5.0])
+        w = np.ones(4)
+        offset = np.array([-0.5, 0.5, -0.5, 0.5])
+        family = Poisson()
+        mu = _compute_null_mu(y, w, offset, family, HalfLog(), weight_semantics="prior")
+        got = float(np.sum(family.deviance_unit(y, mu)))
+        best = minimize_scalar(
+            lambda b: float(np.sum(family.deviance_unit(y, np.exp(2.0 * (b + offset))))),
+            bracket=(-2.0, 0.0, 2.0),
+            tol=1e-12,
+        )
+        assert got == pytest.approx(best.fun, rel=1e-9)
+
     def test_null_mu_equals_weighted_mean(self):
         """_null_mu should be the weighted mean of y, not a zero-replaced mean."""
         rng = np.random.default_rng(42)

@@ -415,7 +415,8 @@ def _log_power_null_intercept(y, weights, offset, distribution, link) -> float |
     from superglm.distributions import Gamma, Poisson, Tweedie
     from superglm.links import LogLink
 
-    if not isinstance(link, LogLink):
+    # The built-in mapping only: a subclass may change it, and then takes the general path.
+    if type(link) is not LogLink:
         return None
     if isinstance(distribution, Poisson):
         power = 1.0
@@ -445,9 +446,10 @@ def _null_curvature_kind(distribution, link) -> str | None:
         (Gamma, InverseLink),
         (Gaussian, IdentityLink),
     )
-    if any(isinstance(distribution, d) and isinstance(link, k) for d, k in canonical):
+    # Built-in mappings only, as for the closed form: a subclass takes Brent's method.
+    if any(isinstance(distribution, d) and type(link) is k for d, k in canonical):
         return "canonical"
-    if isinstance(distribution, (Gamma, Tweedie, NegativeBinomial)) and isinstance(link, LogLink):
+    if isinstance(distribution, (Gamma, Tweedie, NegativeBinomial)) and type(link) is LogLink:
         return "convex"
     return None
 
