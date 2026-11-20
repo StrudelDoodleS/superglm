@@ -5,9 +5,9 @@ from __future__ import annotations
 import dataclasses
 import functools
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -1221,7 +1221,11 @@ def _certified(model, context: _PublicationContext, sides: NDArray, weights: NDA
 
 
 def _publish_existence(
-    model, context: _PublicationContext, boundaries: tuple[str, ...]
+    model,
+    context: _PublicationContext,
+    boundaries: tuple[str, ...],
+    *,
+    refit: Callable[[Any, NDArray], WithheldFit] | None = None,
 ) -> _PublicationContext:
     """Decide whether the fit's estimate exists, and publish the fit that decision gives.
 
@@ -1233,7 +1237,8 @@ def _publish_existence(
     its record.  A fit refused under ``"error"`` (``refuses_on_publication``) stops at the
     verified direction: it publishes nothing, so no withheld fit is run.  The decision is kept
     on the record whatever it is, ``"absent"`` included, so its readers can tell a decided
-    absence from a decision never built.
+    absence from a decision never built.  ``refit`` forms the fit on the kept rows
+    (``separation_ops.withheld_refit`` by default).
     """
     from superglm.diagnostics.separation import refuses_on_publication, response_sides
     from superglm.model.separation_ops import (
@@ -1266,7 +1271,7 @@ def _publish_existence(
         )
     elif strict is not None and not refuses_on_publication(model):
         published = _withheld_publication(
-            model, context, decision, strict, explicit, coordinates, sides, boundaries
+            model, context, decision, strict, explicit, coordinates, sides, boundaries, refit
         )
         if published is not None:
             return published
@@ -1356,6 +1361,7 @@ def _withheld_publication(
     coordinates: NDArray,
     sides: NDArray,
     boundaries: tuple[str, ...],
+    refit: Callable[[Any, NDArray], WithheldFit] | None = None,
 ) -> _PublicationContext | None:
     """The fit with the separated rows withheld, if it certifies them as every separated row.
 
@@ -1394,7 +1400,7 @@ def _withheld_publication(
         model._separated_rows = None
 
     try:
-        fit = withheld_refit(model, strict)
+        fit = (withheld_refit if refit is None else refit)(model, strict)
     except Exception:  # pragma: no cover - a refit the solver refuses leaves it unresolved
         return None
     # the published fit is the fit the caller ran, its coefficients on the kept rows refined:
@@ -1738,6 +1744,67 @@ def release_fitted_rows(model) -> None:
             rank_info.release_fitted_rows()
 
 
+# ── The identifiability record's lifecycle ──────────────────────────────────
+
+RecordTag = Literal["saved", "unfitted", "decided", "stale", "legacy", "frozen"]
+
+#: The identifiability record's lifecycle: for each tag, the events it takes and the tag each
+#: leads to; ``move_record`` is its one writer.  ``"decided"``: the record the fit's publication
+#: decided at its coefficients (``publish_identified_fit``; a fit that publishes none, such as
+#: a constrained or selection-penalty one, forms its inference at the same coefficients on first
+#: read).  ``"stale"``: the coefficients were revised after it (an editor edit, Final fit's
+#: carry, a shape repair: ``fit_state.publish_revised_coefficients``), so its inference is the
+#: original fit's.  A smoothing parameter of a fitted model changes only by a refit, which
+#: publishes.  ``"saved"`` is a fitted model that holds no tag: a fit not yet published, or a
+#: pickle from before the record had a lifecycle, whose move is its load
+#: (``saved_record.migrate_saved_record``): ``"legacy"`` when it kept its fit state (its saved
+#: inference is dropped, and its first inference decides the record at the saved coefficients,
+#: ``"decide saved"``), ``"frozen"`` when it is compact (it keeps the inference it was saved
+#: with), ``"stale"`` when it was edited.  A pickle saved since keeps its tag.
+RECORD_MOVES: Mapping[str, Mapping[str, str]] = {
+    "saved": {
+        "publish": "decided",
+        "revise": "stale",
+        "load warm": "legacy",
+        "load compact": "frozen",
+        "load stale": "stale",
+    },
+    "unfitted": {"publish": "decided"},
+    "decided": {"publish": "decided", "revise": "stale"},
+    "stale": {"publish": "decided", "revise": "stale"},
+    "legacy": {"publish": "decided", "revise": "stale", "decide saved": "decided"},
+    "frozen": {"publish": "decided", "revise": "stale"},
+}
+
+
+def record_tag(model) -> RecordTag:
+    """The model's place in ``RECORD_MOVES``; a model holding no tag is ``"saved"`` once fitted."""
+    tag = model.__dict__.get("_record_tag")
+    if tag is not None:
+        return tag
+    return "unfitted" if model.__dict__.get("_result") is None else "saved"
+
+
+def move_record(model, event: str) -> RecordTag:
+    """Take ``event`` from the model's tag to the one ``RECORD_MOVES`` gives, and return it."""
+    before = record_tag(model)
+    after = RECORD_MOVES[before].get(event)
+    if after is None:
+        raise RuntimeError(f"identifiability record: {before} --{event}--> is not a move")
+    model.__dict__["_record_tag"] = after
+    return cast(RecordTag, after)
+
+
+def decide_saved_record(model) -> None:
+    """A ``"legacy"`` model's record, decided at its saved coefficients on its first inference."""
+    if model.__dict__.get("_record_tag") != "legacy":
+        return
+    from superglm.model.saved_record import decide_at_saved_coefficients
+
+    decide_at_saved_coefficients(model)
+    move_record(model, "decide saved")
+
+
 def publish_identified_fit(model) -> None:
     """Publish the fit its identifiability record decides (``solvers.identifiability``).
 
@@ -1756,6 +1823,7 @@ def publish_identified_fit(model) -> None:
     """
     from superglm.penalties.base import penalty_can_zero_groups
 
+    move_record(model, "publish")
     solver = getattr(model, "_solver_result", None)
     if solver is None or model._dm is None or getattr(solver, "scop_inference", None) is not None:
         return
@@ -2098,6 +2166,7 @@ def _structured_covariance_state(
 
 def coef_covariance(model):
     """Phi-scaled Bayesian covariance for active coefficients."""
+    decide_saved_record(model)
     solver = model._solver_pirls_result()
     scop_inference = getattr(solver, "scop_inference", None)
     if scop_inference is not None:
@@ -2127,6 +2196,7 @@ def coef_covariance(model):
 
 def fit_active_info(model):
     """Grouped active design, weights, and (X'WX+S)^{-1} from fit state."""
+    decide_saved_record(model)
     solver = model._solver_pirls_result()
     # first: a retired state without its design raises the refit message here
     linear_state = retained_linear_state(model)
@@ -2216,6 +2286,7 @@ def fit_inference_info(model):
         edf1 : Wood's alternative EDF vector
         group_edf_map : per-group summed EDF dict
     """
+    decide_saved_record(model)
     solver = model._solver_pirls_result()
     # first: a retired state without its design raises the refit message here
     linear_state = retained_linear_state(model)

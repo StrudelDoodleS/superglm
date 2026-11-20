@@ -194,6 +194,8 @@ class StructuredSlopeCovarianceAccessor(_SelectedBlockAccess):
     """Selected access to a compact profiled slope covariance, in its gauge when it has one."""
 
     backend = "structured"
+    # read by an accessor unpickled from before fits published a gauge
+    gauge = None
 
     def __init__(
         self,
@@ -265,8 +267,11 @@ class StructuredCovarianceAccessor(_SelectedBlockAccess):
     """
 
     backend = "structured"
-    # read by an accessor unpickled from before fits published weak directions
+    # read by an accessor unpickled from before fits published a gauge or weak directions
+    gauge = None
     weak = None
+    _corrections = None
+    _augmented = None
 
     def __init__(
         self,

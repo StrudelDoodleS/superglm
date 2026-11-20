@@ -520,7 +520,11 @@ def test_a_saved_record_without_the_decision_keeps_its_flags_unless_full_rank():
     """A record from before fits recorded identifiability reads its data-only flags.
 
     Full rank, ``null(H) = 0`` and every coefficient is identified with no design needed; with
-    a truncated Hessian it keeps the flags it was saved with, so it loses no SE it showed.
+    a truncated Hessian it keeps the flags it was saved with, so it loses no SE it showed.  A
+    model that kept its fit state does not read them: its first inference decides the record
+    again at its saved coefficients (``test_saved_master_records``); this is the record a
+    model reads where it cannot be decided again (an edited one, whose inference stays as
+    saved).
     """
     X = pd.DataFrame({"x": X_SPREAD, "x1": X1, "x2": 2.0 * X1})
     aliased = _fit({"x": Spline(n_knots=6), "x1": Numeric(), "x2": Numeric()}, X, Y)

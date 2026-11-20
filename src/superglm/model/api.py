@@ -345,7 +345,11 @@ class SuperGLM:
         memo is dropped, and so is a summary v0.35.0 cached after
         ``estimate_theta``.  A kindless spline the saved fit built as a SCOP
         P-spline is marked to warn at its next build
-        (``mark_kindless_saved_on_scop``).
+        (``mark_kindless_saved_on_scop``).  A model saved before the identifiability record
+        had a lifecycle takes its load move (``saved_record.migrate_saved_record``): one that
+        kept its fit state drops its saved inference and decides the record at its saved
+        coefficients on its first inference; a compact one keeps the inference it was saved
+        with.  Its predictions disclose nothing the record would until that first inference.
         """
         self.__dict__.update(state)
         # Metadata of a retired fast discrete predictor; nothing reads it.
@@ -359,6 +363,9 @@ class SuperGLM:
         mark_retired_linear_state(self)
         release_retired_tweedie_state(self)
         release_v0_35_nb_summaries(self)
+        from superglm.model.saved_record import migrate_saved_record
+
+        migrate_saved_record(self)
         from superglm.features._spline_build import mark_kindless_saved_on_scop
 
         mark_kindless_saved_on_scop(self)
@@ -1289,6 +1296,8 @@ class SuperGLM:
             ``eta`` reports its raw linear predictor.
         """
         with self._parallel_scope():
+            # a model saved before the record decides it first (``state_ops.RECORD_MOVES``)
+            state_ops.decide_saved_record(self)
             return explain_ops.metrics(self, X, y, sample_weight, offset)
 
     def drop1(

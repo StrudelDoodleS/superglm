@@ -370,8 +370,11 @@ def summary(
 
     inf = model._fit_inference_info
     identifiability = inf.get("identifiability")
-    if identifiability is not None:
-        model_info["identifiability_notes"] = list(identifiability.notes())
+    from superglm.model.saved_record import frozen_notes
+
+    notes = [*(() if identifiability is None else identifiability.notes()), *frozen_notes(model)]
+    if notes:
+        model_info["identifiability_notes"] = notes
     XtWX_inv = inf["XtWX_inv"]
     XtWX_inv_aug = inf["XtWX_inv_aug"]
     active_groups = inf["active_groups"]

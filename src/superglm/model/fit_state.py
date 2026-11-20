@@ -773,9 +773,13 @@ def publish_revised_coefficients(model, beta_before, *, replaced=()) -> None:
     keeping the solver's pre-revision pair beside it left the solver predictor
     at the old coefficients (#447).
     """
+    from superglm.model.separation_ops import revised_statement
+    from superglm.model.state_ops import move_record
+
+    # the record was decided at the coefficients the revision replaces (``RECORD_MOVES``)
+    move_record(model, "revise")
     _carry_revised_columns(model, beta_before)
     _read_solver_state_from_public(model)
-    from superglm.model.separation_ops import revised_statement
 
     statement = revised_statement(
         model,

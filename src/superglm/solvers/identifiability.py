@@ -234,7 +234,10 @@ class Identifiability:
     at float64), which the existence certificate reads (``separation.recession_excluded``).
     ``separation`` is the fit's existence decision (``diagnostics.separation.Separation``): the
     coefficients a certified separating direction moves have no finite estimate and no standard
-    error, whether it was shown maximal (``"present"``) or not (``"partial"``).
+    error, whether it was shown maximal (``"present"``) or not (``"partial"``).  ``withheld``
+    (fitted coordinates) are identified coefficients whose standard error is withheld, and
+    ``provenance`` the notes saying why and how the record was read: a saved model's, decided
+    at coefficients it cannot move (``model.saved_record``).  A fit's own record has neither.
     """
 
     width: int
@@ -250,6 +253,8 @@ class Identifiability:
     rank: int | None = None
     curvature_floor: float = 0.0
     separation: Any = None
+    withheld: tuple[int, ...] = ()  # ``-1`` is the intercept
+    provenance: tuple[str, ...] = ()
 
     def weak_root(self, columns: NDArray) -> NDArray | None:
         """``[-c'PU; PU]`` on ``columns``, the weak directions' published root with its intercept.
@@ -276,10 +281,14 @@ class Identifiability:
         )
         if self.separation is not None:
             identified[np.asarray(self.separation.reached, dtype=np.intp)] = False
+        identified[[c for c in self.withheld if c >= 0]] = False
         return identified
 
     def intercept_identified(self) -> bool:
-        """Whether the intercept has a finite estimate: false when separation moves it."""
+        """Whether the intercept has a finite estimate (false when separation moves it) and an
+        SE (``withheld`` holds ``-1`` when it has none)."""
+        if -1 in self.withheld:
+            return False
         return self.separation is None or not self.separation.intercept_reached
 
     def published_covariance(
@@ -379,6 +388,7 @@ class Identifiability:
             )
         if self.separation is not None:
             notes.extend(self.separation.notes())
+        notes.extend(self.provenance)
         accuracy = self.penalised_condition * UNIT_ROUNDOFF
         # a held separated span is null on the kept rows, as an alias is: its condition is not
         # the standard errors'
