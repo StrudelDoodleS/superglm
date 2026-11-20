@@ -11,12 +11,13 @@ import pytest
 from scipy.special import gammaln
 from scipy.stats import poisson
 
-from superglm import ModelMetrics, SuperGLM, generate_tweedie_cpg
-from superglm.distributions import Gamma, Poisson, Tweedie
+from superglm import ConvergenceWarning, ModelMetrics, SuperGLM, generate_tweedie_cpg
+from superglm.distributions import Binomial, Gamma, Poisson, Tweedie
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix, DiscretizedTensorGroupMatrix
+from superglm.links import resolve_link
 from superglm.model.fit_state import FittedStateRevision
 from superglm.profiling._scalar import Interval
 
@@ -1294,6 +1295,80 @@ class TestNullModel:
             model._fit_null_mu,
             model.metrics(X, y, offset=offset)._null_mu,
         )
+
+    @staticmethod
+    def _wide_offset_null(family, half_span, weights):
+        """An intercept-only fit on two offset groups, and its null deviance in closed form.
+
+        Under the log link with variance mu**p the null intercept is
+        ``log(sum(w*y*exp((1-p)*o)) / sum(w*exp((2-p)*o)))``. The unit deviance
+        is written out per family, independently of the package.
+        """
+        y = np.tile([2.0, 4.0], 100)
+        offset = np.repeat([-half_span, half_span], 100)
+        power = {"poisson": 1.0, "gamma": 2.0}[family]
+        intercept = np.log(np.sum(weights * y * np.exp((1.0 - power) * offset))) - np.log(
+            np.sum(weights * np.exp((2.0 - power) * offset))
+        )
+        mu = np.exp(intercept + offset)
+        unit = (
+            y * np.log(y / mu) - (y - mu) if family == "poisson" else (y - mu) / mu - np.log(y / mu)
+        )
+        model = SuperGLM(family=family, link="log", features={}, n_jobs=1)
+        model.fit(pd.DataFrame(index=range(y.size)), y, sample_weight=weights, offset=offset)
+        return model, y, offset, 2.0 * np.sum(weights * unit)
+
+    @pytest.mark.parametrize(
+        ("family", "half_span", "fractional"),
+        [("poisson", 40.0, False), ("gamma", 6.0, False), ("gamma", 6.0, True)],
+    )
+    def test_wide_offset_null_model_is_the_intercept_only_fit(self, family, half_span, fractional):
+        """The offset-aware null model reaches its root however far the offsets put it.
+
+        Offsets 80 log units apart left the Poisson null fit 14 units short of
+        its root after 25 steps (null deviance 1.96e9 against 47236), and a
+        Gamma start 5 units below its root overshot to the predictor bound and
+        stayed there. The model fitted is itself the null model, so the
+        explained deviance is 0. The deviance is stationary at the root, so
+        1e-10 is far above what the root's rounding leaves in it.
+        """
+        weights = np.random.default_rng(3).uniform(0.2, 2.0, 200) if fractional else np.ones(200)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ConvergenceWarning)
+            model, y, offset, reference = self._wide_offset_null(family, half_span, weights)
+            deviance = model.summary()["deviance"]
+            metrics = model.metrics(
+                pd.DataFrame(index=range(y.size)), y, sample_weight=weights, offset=offset
+            )
+            assert model.result.converged
+            assert metrics.null_deviance == pytest.approx(reference, rel=1e-10)
+        assert deviance["null_deviance"] == pytest.approx(reference, rel=1e-10)
+        assert deviance["explained_deviance"] == pytest.approx(0.0, abs=1e-10)
+        assert metrics.explained_deviance == pytest.approx(0.0, abs=1e-10)
+
+    def test_null_model_that_stops_short_says_so(self, monkeypatch):
+        """A null fit stopped before its root warns that the null figures are its last step's.
+
+        A response with no claims at all has its null maximum at an infinite
+        intercept, which no step reaches; it keeps its stand-in mean silently.
+        """
+        import superglm.model.fit_ops as fit_ops
+
+        monkeypatch.setattr(fit_ops, "_NULL_MAX_ITER", 3)
+        with pytest.warns(
+            ConvergenceWarning, match="intercept-only null model .* used its step limit"
+        ):
+            self._wide_offset_null("poisson", 40.0, np.ones(200))
+        monkeypatch.undo()
+        offset = np.log(np.linspace(0.01, 1.0, 40))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ConvergenceWarning)
+            for family, y in [(Poisson(), np.zeros(40)), (Binomial(), np.ones(40))]:
+                link = resolve_link(None, family)
+                mu = fit_ops._compute_null_mu(
+                    y, np.ones(40), offset, family, link, weight_semantics="prior"
+                )
+                assert np.sum(family.deviance_unit(y, mu)) < 1e-4
 
 
 # ── Deviance ──────────────────────────────────────────────────────

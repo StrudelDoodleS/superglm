@@ -338,6 +338,11 @@ def _random_effect_separation_hazard(model, X, y, sample_weight) -> str | None:
     )
 
 
+# The null fit's step limit, the line-searched sqrt-link null fit's too: a log-link
+# start above the root loses at most one unit of the linear predictor per step.
+_NULL_MAX_ITER = 100
+
+
 def _compute_null_mu(
     y: NDArray,
     weights: NDArray,
@@ -370,7 +375,7 @@ def _compute_null_mu(
             groups=[],
             lambda2=0.0,
             offset=offset,
-            max_iter=100,
+            max_iter=_NULL_MAX_ITER,
             tol=1e-10,
             direct_solve="gram",
             convergence="deviance",
@@ -389,6 +394,11 @@ def _compute_null_mu(
     # the weighted mean to the rounding of its own value (np.average alone sat
     # 1.5 ulp off on two adjacent-float levels, inflating the null deviance 5x)
     y_bar = compensated_weighted_mean(y, weights)
+    # A response at the edge of the family's means (all zero, or all one for a
+    # binomial) puts the null maximum at an infinite intercept.
+    boundary = not isinstance(distribution, Gaussian) and (
+        y_bar == 0.0 or (isinstance(distribution, Binomial) and y_bar == 1.0)
+    )
     if y_bar == 0.0 and not isinstance(distribution, (Binomial, Gaussian)):
         # An all-zero response of a positive family has no positive mean in
         # any units; it keeps the stand-in it always had.
@@ -402,25 +412,51 @@ def _compute_null_mu(
         return np.full(len(y), y_bar)
 
     assert offset is not None
+
+    def means(b: float) -> tuple[NDArray, NDArray]:
+        eta = stabilize_eta(b + offset, link)
+        return eta, clip_mu(link.inverse(eta), distribution)
+
     b0 = float(link.link(np.atleast_1d(y_bar))[0]) - float(np.average(offset, weights=weights))
-    for _ in range(25):
-        eta_null = stabilize_eta(b0 + offset, link)
-        mu_null = clip_mu(link.inverse(eta_null), distribution)
+    eta_null, mu_null = means(b0)
+    if boundary:
+        # The stand-in mean, spread by the offset: no step reaches the maximum.
+        return mu_null
+    # Fisher scoring on the intercept. Once the score has taken both signs the
+    # root is bracketed, and a step that would leave the bracket or fails to
+    # halve the one before is replaced by bisection (Press et al., Numerical
+    # Recipes, 2nd ed., section 9.4). An overshoot is so pulled back, which is
+    # what step-halving does in IRLS: in one parameter a step that raises the
+    # deviance has crossed the root. A log-link step from above the root moves
+    # the predictor by at most one unit, so the cap allows a wide offset.
+    below, above, previous = -np.inf, np.inf, np.inf
+    for _ in range(_NULL_MAX_ITER):
         dmu = link.deriv_inverse(eta_null)
         V = distribution.variance(mu_null)
         score = float(np.sum(weights * (y - mu_null) * dmu / V))
         info = float(np.sum(weights * dmu**2 / V))
         step = score / max(info, TINY)
-        b0 += step
         # The step's change in the means, relative to their size: unit-free
         # under every link, and |step| itself under the log link.
         if abs(step) * float(np.sum(weights * np.abs(dmu))) <= 1e-8 * float(
             np.sum(weights * np.abs(mu_null))
         ):
-            break
+            return means(b0 + step)[1]
+        if score > 0.0:
+            below = b0
+        else:
+            above = b0
+        bracketed = np.isfinite(below) and np.isfinite(above)
+        if bracketed and not (below < b0 + step < above and abs(step) <= 0.5 * abs(previous)):
+            step = 0.5 * (below + above) - b0
+        previous = step
+        b0 += step
+        eta_null, mu_null = means(b0)
 
-    eta_null = stabilize_eta(b0 + offset, link)
-    return clip_mu(link.inverse(eta_null), distribution)
+    from superglm.diagnostics.convergence import warn_null_model_nonconvergence
+
+    warn_null_model_nonconvergence(float(np.ptp(offset[weights > 0.0])))
+    return mu_null
 
 
 def _compute_fit_stats(
