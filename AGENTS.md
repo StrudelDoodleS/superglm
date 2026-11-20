@@ -38,13 +38,14 @@ every test on every platform. A change to
 `solvers/constrained_qp.py` also runs `benchmarks/qp_random_search.py` before
 its first push, and its pull request reports the counts.
 
-Five suites are anchored to the real freMTPL2 book and skip without a local
-copy of it, and all five need both `freMTPL2freq.parquet` and
+Six suites are anchored to the real freMTPL2 book and skip without a local
+copy of it, and all six need both `freMTPL2freq.parquet` and
 `freMTPL2sev.parquet`. `tests/test_screening_guide_numbers.py`,
 `tests/test_mixed_interaction_screening.py` and `tests/test_fremtpl2_data.py`
 recount `ClaimNb` from the severity file (`examples/fremtpl2_data.py`);
-`tests/test_realdata_parity.py` and
-`tests/test_distributional_fremtpl_convergence.py` join the two files on
+`tests/test_realdata_parity.py`,
+`tests/test_distributional_fremtpl_convergence.py` and
+`tests/test_penalized_standard_errors_book.py` join the two files on
 `IDpol` for their severity fits. Fetch both files with
 `uv run python scripts/fetch_fremtpl.py --dest data/`, and set
 `SUPERGLM_REQUIRE_DATA=1` so a dataset skip fails instead of passing silently.

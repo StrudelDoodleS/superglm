@@ -137,9 +137,11 @@ def test_the_discovery_finds_the_suites_that_are_known_to_guard_on_data():
         "test_screening_guide_numbers.py",
         "test_mixed_interaction_screening.py",
         "test_fremtpl2_data.py",
+        "test_penalized_standard_errors_book.py",
     }, found
-    # Every one of them needs the severity file: the parity suite joins it, and
-    # the others recount ClaimNb from it (examples/fremtpl2_data.py).
+    # Every one of them needs the severity file: the parity suite joins it, the
+    # standard-error suite fits the severity book, and the others recount
+    # ClaimNb from it (examples/fremtpl2_data.py).
     for module in found:
         assert found[module] == {"freMTPL2freq.parquet", "freMTPL2sev.parquet"}, module
 
