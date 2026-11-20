@@ -180,7 +180,10 @@ curve.min(), curve.max()  # inside 0.6 and 1.8, to solver tolerance
 - On a spline whose rules make it monotone over the whole range, the cap is
   exact at the ends.
 - On a curve that is not monotone, the cap holds everywhere, but the curve may
-  stop slightly short of it.
+  stop slightly short of it. There the cap bounds the coefficients, which is
+  sufficient but not necessary, so the fit can differ from the best capped
+  curve even when it reaches both ends of the cap: by up to 1.7% in rate for
+  a cap of 0.8 to 2.0 on 21,000 freMTPL2 policies.
 - A cap holds on the training range. With `extrapolation="extend"` the fit
   warns that the tails beyond it are not capped. Use `extrapolation="clip"` to
   keep predictions inside the cap.
@@ -513,6 +516,22 @@ On the QP a monotone P-spline holds the first differences of its B-spline
 coefficients to one sign. By de Boor's derivative formula the curve's slope is
 a non-negative combination of those differences, so the curve is monotone
 everywhere on the knot range, not only at the data.
+
+The rule is sufficient, not necessary. A cubic can be monotone while one of its
+coefficient differences has the wrong sign, and a fit-time direction rule never
+reaches such a curve. A cubic regression spline gets the same rule, on the
+B-spline coefficients of its natural cubic. mgcv's `mono.con` likewise uses
+linear conditions sufficient for monotonicity (Wood, "Monotonic smoothing
+splines fitted by cross validation", *SIAM J. Sci. Comput.* 15(5), 1994). So a
+fitted monotone curve is the best one in a smaller set than all monotone
+curves, and where the best monotone curve is nearly flat over a stretch the two
+can differ. On 21,000 freMTPL2 policies, a seven-knot increasing BonusMalus
+curve priced up to 6.5% away from the best increasing curve on the same knots
+and penalty. More knots narrow the gap, because finer coefficients follow the
+curve more closely. Fit-time convexity and concavity on a cubic have no such
+gap: the second derivative is piecewise linear, so the signs of its
+coefficients are exact. A cap on a curve that is not monotone over the whole
+range has the same kind of gap (see the cap rules above).
 
 Fit-time convexity and concavity use an exact coefficient-space curvature
 characterization only for splines of degree three or lower. Consequently,

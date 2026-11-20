@@ -316,6 +316,38 @@ def lss_null_model_nonconvergence_message(family_name: str, reason: str) -> str:
     )
 
 
+def null_model_nonconvergence_message(offset_span: float) -> str:
+    """The disclosure a SuperGLM fit makes when its offset-aware null fit did not converge."""
+    return (
+        "The intercept-only null model (the offset kept, no terms) used its step limit "
+        "before it converged, so the null deviance, null log-likelihood and explained "
+        "deviance in summary() and metrics() are those of its last step. The fitted model, "
+        f"its predictions and standard errors are unaffected. The offset spans {offset_span:.4g} "
+        "on the scale of the linear predictor; check it for extreme values."
+    )
+
+
+def warn_null_model_nonconvergence(offset_span: float) -> str:
+    """Emit ``null_model_nonconvergence_message`` as a ConvergenceWarning; return it."""
+    message = null_model_nonconvergence_message(offset_span)
+    warnings.warn(message, ConvergenceWarning, skip_file_prefixes=(_PACKAGE_PREFIX,))
+    return message
+
+
+def warn_null_model_unavailable(link_name: str, mean_response: float) -> str:
+    """Warn that the offset-aware null model has no fit, so its figures are NaN."""
+    message = (
+        f"The intercept-only null model (the offset kept, no terms) has no fit: the {link_name} "
+        f"has no linear predictor for the weighted mean response {mean_response:.6g}, so the "
+        "null deviance, null log-likelihood and explained deviance in summary() and metrics() "
+        "are NaN. The fitted model, its predictions and standard errors are unaffected. "
+        "The null model needs a mean response the link can take (a positive one under a log "
+        "link)."
+    )
+    warnings.warn(message, ConvergenceWarning, skip_file_prefixes=(_PACKAGE_PREFIX,))
+    return message
+
+
 def lss_corrected_covariance_substitute_message(source: str) -> str:
     """What a corrected covariance means when the final curvature fell back."""
     curvature = (

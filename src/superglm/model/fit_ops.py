@@ -338,6 +338,185 @@ def _random_effect_separation_hazard(model, X, y, sample_weight) -> str | None:
     )
 
 
+# The null fit's limit on bracket expansions and on Brent's iterations.
+_NULL_MAX_ITER = 100
+
+
+def _null_bracket(deviance, points: NDArray) -> tuple[float, float, float] | None:
+    """A bracket ``(lo, best, hi)`` holding a minimum of ``deviance``, from the best of ``points``.
+
+    ``best`` is the lowest point and ``lo``, ``hi`` its neighbours. A lowest
+    point at an end is walked outward with doubling steps until the deviance
+    stops falling, or is not finite; None after ``_NULL_MAX_ITER`` steps that
+    all fell.
+    """
+    xs = np.unique(points)
+    if xs.size == 1:
+        xs = xs[0] + np.array([-1.0, 0.0, 1.0])
+    fs = [deviance(x) for x in xs]
+    i = int(np.argmin(fs))
+    if 0 < i < xs.size - 1:
+        return float(xs[i - 1]), float(xs[i]), float(xs[i + 1])
+    end, inner = (0, 1) if i == 0 else (-1, -2)
+    x, f, step = xs[end], fs[end], 2.0 * (xs[end] - xs[inner])
+    for _ in range(_NULL_MAX_ITER):
+        trial = x + step
+        f_trial = deviance(trial)
+        if not f_trial < f:
+            ends = sorted((float(trial), float(x - step / 2)))
+            return ends[0], float(x), ends[1]
+        x, f, step = trial, f_trial, 2.0 * step
+    return None
+
+
+def _null_brent(deviance, bracket: tuple[float, float, float]):
+    """Brent's method on ``bracket``, started from its best point.
+
+    It runs on ``t = (b - best) / (hi - lo)``, so its absolute floor on the
+    step (SciPy's ``1e-11``) is a share of the bracket, the same in any units.
+    A bracket whose best point ties a neighbour, on a flat stretch of the
+    deviance, is searched by the bounded method instead.
+    """
+    from scipy.optimize import minimize_scalar
+
+    lo, best, hi = bracket
+    width = hi - lo
+
+    def scaled(t: float) -> float:
+        return deviance(best + t * width)
+
+    try:
+        found = minimize_scalar(
+            scaled,
+            bracket=((lo - best) / width, 0.0, (hi - best) / width),
+            method="brent",
+            options={"maxiter": _NULL_MAX_ITER},
+        )
+    except ValueError:
+        found = minimize_scalar(
+            scaled,
+            bounds=((lo - best) / width, (hi - best) / width),
+            method="bounded",
+            options={"xatol": 1e-12, "maxiter": _NULL_MAX_ITER},
+        )
+    return best + float(found.x) * width, bool(found.success)
+
+
+def _log_power_null_intercept(y, weights, offset, distribution, link) -> float | None:
+    """The closed-form null intercept under the log link with variance ``mu**p``.
+
+    The score ``exp((1-p) b) (A - B exp(b))``, with ``A = sum(w y exp((1-p) o))``
+    and ``B = sum(w exp((2-p) o))``, has the one root ``log(A) - log(B)``,
+    formed here as two log-sum-exp reductions. None for another family or
+    link, or a response with no positive mass.
+    """
+    from scipy.special import logsumexp
+
+    from superglm.distributions import Gamma, Poisson, Tweedie
+    from superglm.links import LogLink
+
+    # The built-in mapping only: a subclass may change it, and then takes the general path.
+    if type(link) is not LogLink:
+        return None
+    if isinstance(distribution, Poisson):
+        power = 1.0
+    elif isinstance(distribution, Gamma):
+        power = 2.0
+    elif isinstance(distribution, Tweedie):
+        power = float(distribution.p)
+    else:
+        return None
+    carried = weights > 0.0
+    o, w, response = offset[carried], weights[carried], y[carried]
+    if not np.any(w * response > 0.0):
+        return None
+    root = logsumexp((1.0 - power) * o, b=w * response) - logsumexp((2.0 - power) * o, b=w)
+    return float(root) if np.isfinite(root) else None
+
+
+def _null_curvature_kind(distribution, link) -> str | None:
+    """How the deviance curves in ``eta``: ``"canonical"`` (convex, observed information is
+    Fisher's), ``"convex"`` (the log link of a power-variance or NB2 family), or None."""
+    from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
+    from superglm.links import IdentityLink, InverseLink, LogitLink, LogLink
+
+    canonical = (
+        (Binomial, LogitLink),
+        (Poisson, LogLink),
+        (Gamma, InverseLink),
+        (Gaussian, IdentityLink),
+    )
+    # Built-in mappings only, as for the closed form: a subclass takes Brent's method.
+    if any(isinstance(distribution, d) and type(link) is k for d, k in canonical):
+        return "canonical"
+    if isinstance(distribution, (Gamma, Tweedie, NegativeBinomial)) and type(link) is LogLink:
+        return "convex"
+    return None
+
+
+def _convex_null_intercept(b, y, weights, offset, distribution, link, kind) -> float | None:
+    """The null intercept by safeguarded Newton steps, where the deviance is convex in it.
+
+    Each step divides the score by the observed information (the Fisher information
+    under a canonical link). The score's signs bracket the root, and a step leaving the
+    bracket is bisected (Numerical Recipes, 2nd ed., 9.4). Convexity means a step that
+    keeps the score's sign lowered the deviance, so the deviance is evaluated only after
+    a step that crossed the root, and bisected back if it rose by more than glm.fit's
+    relative 1e-8. None when the information is not positive, or after
+    ``_NULL_MAX_ITER`` points: Brent's method then takes over.
+    """
+    from superglm.distributions import clip_mu
+
+    def means(b):
+        eta = stabilize_eta(b + offset, link)
+        return eta, clip_mu(link.inverse(eta), distribution)
+
+    def deviance(mu):
+        value = weighted_row_sum(weights, distribution.deviance_unit, y, mu)
+        return value if np.isfinite(value) else np.inf
+
+    below, above = -np.inf, np.inf
+    accepted = accepted_sign = accepted_deviance = None
+    for _ in range(_NULL_MAX_ITER):
+        eta, mu = means(b)
+        dmu = link.deriv_inverse(eta)
+        V = distribution.variance(mu)
+        residual = weights * (y - mu)
+        score = float(np.sum(residual * dmu / V))
+        if score > 0.0:
+            below = b
+        else:
+            above = b
+        candidate_deviance = None
+        if accepted is not None and (score > 0.0) != accepted_sign:
+            if accepted_deviance is None:
+                accepted_deviance = deviance(means(accepted)[1])
+            candidate_deviance = deviance(mu)
+            if not candidate_deviance - accepted_deviance < 1e-8 * (0.1 + abs(candidate_deviance)):
+                b = 0.5 * (accepted + b)
+                continue
+        accepted, accepted_sign, accepted_deviance = b, score > 0.0, candidate_deviance
+        information = float(np.sum(weights * dmu**2 / V))
+        if kind != "canonical":
+            curvature = (
+                link.deriv2_inverse(eta) / V - dmu**2 * distribution.variance_derivative(mu) / V**2
+            )
+            information -= float(np.sum(residual * curvature))
+        if not information > 0.0:
+            return None
+        step = score / information
+        # The step's change in the means, relative to their size: unit-free
+        # under every link.
+        if abs(step) * float(np.sum(weights * np.abs(dmu))) <= 1e-8 * float(
+            np.sum(weights * np.abs(mu))
+        ):
+            return b + step
+        b += step
+        if np.isfinite(below) and np.isfinite(above) and not below < b < above:
+            b = 0.5 * (below + above)
+    return None
+
+
 def _compute_null_mu(
     y: NDArray,
     weights: NDArray,
@@ -347,48 +526,37 @@ def _compute_null_mu(
     *,
     weight_semantics: str,
 ) -> NDArray:
-    """Null model prediction: intercept-only MLE, offset-aware."""
-    from superglm._roundoff import TINY
+    """Null model prediction: intercept-only MLE, offset-aware.
+
+    The intercept minimises the weighted deviance: in closed form under a log link with
+    variance ``mu**p`` where no clip acts, by safeguarded Newton steps where the deviance
+    is convex in it, and otherwise by Brent's method (1973, ch. 5) on a bracket grown
+    from the best offset-quantile start. A response on the family's edge takes its
+    limit. Under extreme offsets (logit beyond about +-24, log beyond about +-71) or a
+    non-convex link (sqrt, cauchit) the minimisation may stop above the true minimum.
+    Where the link has no predictor for the mean response (Gaussian log link, mean at or
+    below 0) the null means are NaN, with a warning. ``weight_semantics`` is unused.
+    """
     from superglm.distributions import Binomial, Gaussian, clip_mu
     from superglm.links import SqrtLink
-
-    has_offset = offset is not None and not np.all(offset == 0)
-    if has_offset and isinstance(link, SqrtLink):
-        assert offset is not None
-        # The inverse sqrt link has two eta branches, so one Fisher-scoring start
-        # can reach the wrong offset-dependent solution; use the line-searched
-        # direct IRLS solver of a public intercept-only fit.
-        from superglm.group_matrix import DesignMatrix
-
-        null_design = DesignMatrix([], n=len(y), p=0)
-        null_result, _ = fit_irls_direct(
-            X=null_design,
-            y=y,
-            weights=weights,
-            family=distribution,
-            link=link,
-            groups=[],
-            lambda2=0.0,
-            offset=offset,
-            max_iter=100,
-            tol=1e-10,
-            direct_solve="gram",
-            convergence="deviance",
-            compute_rank_info=False,
-            _return_working_system=True,
-            _compute_fit_statistics=False,
-            _compute_reml_geometry=False,
-            separation="ignore",
-            weight_semantics=weight_semantics,
-        )
-        eta_null = stabilize_eta(null_result.intercept + offset, link)
-        return clip_mu(link.inverse(eta_null), distribution)
-
     from superglm.solvers.mode_score import compensated_weighted_mean
 
-    # the weighted mean to the rounding of its own value (np.average alone sat
-    # 1.5 ulp off on two adjacent-float levels, inflating the null deviance 5x)
-    y_bar = compensated_weighted_mean(y, weights)
+    has_offset = offset is not None and not np.all(offset == 0)
+    if has_offset:
+        assert offset is not None
+        closed = _log_power_null_intercept(y, weights, offset, distribution, link)
+        if closed is not None:
+            eta = closed + offset
+            mu = np.exp(eta)
+            # The root minimises the clipped deviance only where no clip acts.
+            if np.array_equal(stabilize_eta(eta, link), eta) and np.array_equal(
+                clip_mu(mu, distribution), mu
+            ):
+                return mu
+    # Without an offset the weighted mean is the null mean, to the rounding of
+    # its own value (np.average alone sat 1.5 ulp off on two adjacent-float
+    # levels, inflating the null deviance 5x); with one it only starts the search.
+    y_bar = np.average(y, weights=weights) if has_offset else compensated_weighted_mean(y, weights)
     if y_bar == 0.0 and not isinstance(distribution, (Binomial, Gaussian)):
         # An all-zero response of a positive family has no positive mean in
         # any units; it keeps the stand-in it always had.
@@ -402,25 +570,43 @@ def _compute_null_mu(
         return np.full(len(y), y_bar)
 
     assert offset is not None
-    b0 = float(link.link(np.atleast_1d(y_bar))[0]) - float(np.average(offset, weights=weights))
-    for _ in range(25):
-        eta_null = stabilize_eta(b0 + offset, link)
-        mu_null = clip_mu(link.inverse(eta_null), distribution)
-        dmu = link.deriv_inverse(eta_null)
-        V = distribution.variance(mu_null)
-        score = float(np.sum(weights * (y - mu_null) * dmu / V))
-        info = float(np.sum(weights * dmu**2 / V))
-        step = score / max(info, TINY)
-        b0 += step
-        # The step's change in the means, relative to their size: unit-free
-        # under every link, and |step| itself under the log link.
-        if abs(step) * float(np.sum(weights * np.abs(dmu))) <= 1e-8 * float(
-            np.sum(weights * np.abs(mu_null))
-        ):
-            break
 
-    eta_null = stabilize_eta(b0 + offset, link)
-    return clip_mu(link.inverse(eta_null), distribution)
+    def means(b: float) -> NDArray:
+        return clip_mu(link.inverse(stabilize_eta(b + offset, link)), distribution)
+
+    def deviance(b: float) -> float:
+        value = weighted_row_sum(weights, distribution.deviance_unit, y, means(b))
+        return value if np.isfinite(value) else np.inf
+
+    carried = offset[weights > 0.0]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        eta_bar = float(link.link(np.atleast_1d(y_bar))[0])
+    if not np.isfinite(eta_bar):
+        from superglm.diagnostics.convergence import warn_null_model_unavailable
+
+        warn_null_model_unavailable(type(link).__name__, y_bar)
+        return np.full(len(y), np.nan)
+    start = eta_bar - float(np.average(offset, weights=weights))
+    kind = _null_curvature_kind(distribution, link)
+    if kind is not None:
+        b = _convex_null_intercept(start, y, weights, offset, distribution, link, kind)
+        if b is not None:
+            return means(b)
+    centres = (eta_bar, -eta_bar) if isinstance(link, SqrtLink) else (eta_bar,)
+    quantiles = np.quantile(carried, np.linspace(0.0, 1.0, 5))
+    points = np.concatenate([[start]] + [centre - quantiles for centre in centres])
+    bracket = _null_bracket(deviance, points[np.isfinite(points)])
+    if bracket is not None:
+        b, converged = _null_brent(deviance, bracket)
+        if converged:
+            return means(b)
+    else:
+        b = float(points[np.argmin([deviance(x) for x in points])])
+
+    from superglm.diagnostics.convergence import warn_null_model_nonconvergence
+
+    warn_null_model_nonconvergence(float(np.ptp(carried)))
+    return means(b)
 
 
 def _compute_fit_stats(

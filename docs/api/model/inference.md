@@ -199,6 +199,14 @@ effects.round(3)
 training numbers here and holdout numbers on a validation split. The fields are
 plain attributes.
 
+With an offset, the null model behind the null deviance, null log-likelihood
+and `explained_deviance` is a one-parameter minimisation of the deviance in the
+intercept. Under extreme offsets (logit offsets beyond about ±24, log offsets
+beyond about ±71) or a non-convex link such as sqrt or cauchit, it may stop above
+the true minimum. Where the link has no linear predictor for the mean response,
+for example a Gaussian response with a mean of zero or below under a log link,
+the null figures are NaN and a warning says why.
+
 ```{code-cell} ipython3
 fit_metrics = model.metrics(X, claims, offset=offset)
 pd.DataFrame(
