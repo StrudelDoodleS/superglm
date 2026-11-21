@@ -476,22 +476,30 @@ def separated_columns(model, y: NDArray, sample_weight: NDArray) -> set[int]:
     return {int(j) for j in np.flatnonzero(flags.coefficients()[:-1])}
 
 
-def predicted_cells(model, term: str, frame) -> set[tuple]:
-    """The cells of crossed term ``term`` the rows of ``frame`` are scored at.
+def _cell_codes(model, term: str, columns: dict[str, NDArray]) -> NDArray:
+    """Each row's cell of crossed term ``term`` as one code, ``-1`` off its grid.
 
-    Each parent's raw values resolve as its main effect's do (grouping, then
-    the unseen policy, ``unseen="base"`` at the base level:
-    ``Categorical._scored_codes``); ``predict`` has already reported unseen labels.
+    Each parent's raw values resolve as its main effect prices them (grouping, then
+    the unseen policy, a pinned or ``unseen="base"`` label at the base level:
+    ``Categorical._scored_codes``).
     """
     first, second = model._interaction_specs[term].parent_names
-    codes = []
-    for parent in (first, second):
-        spec = model._specs[parent]
-        codes.append((spec._scored_codes(frame.column_array(parent)), spec._levels))
-    (codes1, levels1), (codes2, levels2) = codes
-    both = (codes1 >= 0) & (codes2 >= 0)
-    met = np.unique(np.stack([codes1[both], codes2[both]], axis=1), axis=0)
-    return {(levels1[i], levels2[j]) for i, j in met}
+    codes1 = model._specs[first]._scored_codes(columns[first])
+    codes2 = model._specs[second]._scored_codes(columns[second])
+    on_grid = (codes1 >= 0) & (codes2 >= 0)
+    return np.where(on_grid, codes1 * len(model._specs[second]._levels) + codes2, -1)
+
+
+def predicted_cells(model, term: str, frame) -> set[tuple]:
+    """The cells of crossed term ``term`` the rows of ``frame`` are scored at (``_cell_codes``).
+
+    ``predict`` has already reported unseen labels.
+    """
+    parents = model._interaction_specs[term].parent_names
+    codes = _cell_codes(model, term, {parent: frame.column_array(parent) for parent in parents})
+    levels1, levels2 = (model._specs[parent]._levels for parent in parents)
+    n2 = len(levels2)
+    return {(levels1[code // n2], levels2[code % n2]) for code in np.unique(codes[codes >= 0])}
 
 
 def _raw_base(spec) -> Any | None:
@@ -508,20 +516,63 @@ def _at_base(line: SeparatedLine, specs: dict[str, Any]) -> dict[str, Any] | Non
 
     A level is moved to its term's base level, a crossed cell to the base cell (both
     parents at their base levels).  There is no base rate to state when the base is
-    itself separated or, for a cell, holds no rows.
+    itself separated.
     """
     spec = specs[line.term]
     if line.is_base or line.base in separated_labels(spec):
         return None
-    if line.kind == "levels":
-        parents = {line.term: specs[line.term]}
-    else:
-        occupied = getattr(spec, "_occupied_cells_at_fit", None)
-        if occupied is not None and tuple(line.base) not in set(occupied):
-            return None
-        parents = {name: specs[name] for name in spec.parent_names}
-    values = {name: _raw_base(parent) for name, parent in parents.items()}
+    names = [line.term] if line.kind == "levels" else list(spec.parent_names)
+    values = {name: _raw_base(specs[name]) for name in names}
     return None if any(value is None for value in values.values()) else values
+
+
+def _reaches_empty_cell(
+    model, found: SeparatedLevels, moved: dict, span: slice, names: set, cache: dict
+) -> bool:
+    """Whether ``moved``'s rows in ``span`` meet a crossed cell no training row with weight holds.
+
+    Moving the columns ``names`` to their base can take a row into such a cell, whose
+    rate the fit does not determine (it reads the parents' reference levels, not data).
+    """
+    from superglm.features.categorical import Categorical
+    from superglm.features.interaction import CategoricalInteraction
+
+    for term, spec in model._interaction_specs.items():
+        if not (
+            isinstance(spec, CategoricalInteraction)
+            and names & set(spec.parent_names)
+            and all(isinstance(model._specs.get(name), Categorical) for name in spec.parent_names)
+        ):
+            continue
+        if term not in cache:
+            live = found.sample_weight > 0
+            held = {parent: found.frame.column_array(parent)[live] for parent in spec.parent_names}
+            cache[term] = np.unique(_cell_codes(model, term, held))
+        reached = _cell_codes(model, term, {name: moved[name][span] for name in spec.parent_names})
+        if not np.isin(reached, cache[term]).all():
+            return True
+    return False
+
+
+def _factor(model, line: SeparatedLine) -> float | None:
+    """A separated level's fitted factor against its base, ``exp`` of its contrast, guarded.
+
+    Stated on a log link for a level no crossed term involves: a cell, or a level an
+    interaction also prices, has no one factor.
+    """
+    from superglm.inference._term_types import _safe_exp
+    from superglm.links import LogLink
+
+    if line.kind != "levels" or not isinstance(model._link, LogLink):
+        return None
+    crossed = (getattr(spec, "parent_names", ()) for spec in model._interaction_specs.values())
+    if any(line.term in parents for parents in crossed):
+        return None
+    spec = model._specs[line.term]
+    group = _term_group(model._groups, line.term, len(spec._non_base))
+    if group is None or line.label not in spec._non_base:
+        return None
+    return float(_safe_exp(model.result.beta[group.start + list(spec._non_base).index(line.label)]))
 
 
 def _priced(
@@ -533,8 +584,10 @@ def _priced(
     included and every other term kept (an interaction the level enters, a
     spline): as they are, for the fitted total, and with the term's label set to
     its base (``_at_base``), for the total expected at the base's rate.  Both are
-    finite for every link.  Each row counts its weight under frequency weights
-    and once under prior weights (``SeparatedLevels.counts``).
+    finite for every link and weight each row by its ``sample_weight``.  The
+    expected total is omitted when the move takes a row into an unoccupied crossed
+    cell (``_reaches_empty_cell``).  A total float64 cannot hold is stated so, and
+    never stops the fit.
     """
     import pandas as pd
 
@@ -566,22 +619,32 @@ def _priced(
     for line, part in entries:
         start, end = end, end + len(part)
         values = _at_base(line, specs)
-        spans.append((start, end, values is not None))
         for name, value in (values or {}).items():
             if moved[name] is columns[name]:
                 moved[name] = columns[name].astype(object)
-            moved[name][start:end] = value
-    counts = found.counts(rows)
-    fitted = counts * mean(columns)
-    expected = counts * mean(moved) if any(priced for _, _, priced in spans) else None
-    return [
-        replace(
-            line,
-            fitted=float(np.sum(fitted[start:end])),
-            expected=None if expected is None or not priced else float(np.sum(expected[start:end])),
-        )
-        for (line, _), (start, end, priced) in zip(entries, spans, strict=True)
+            base = np.empty(end - start, dtype=object)
+            base.fill(value)  # one value per row, a tuple-valued level among them
+            moved[name][start:end] = base
+        spans.append((slice(start, end), values))
+    cache: dict[str, NDArray] = {}
+    priced = [
+        values is not None
+        and not _reaches_empty_cell(model, found, moved, span, set(values), cache)
+        for span, values in spans
     ]
+    weight = found.sample_weight[rows]
+    with np.errstate(over="ignore", under="ignore"):
+        fitted = weight * mean(columns)
+        expected = weight * mean(moved) if any(priced) else None
+        return [
+            replace(
+                line,
+                fitted=float(np.sum(fitted[span])),
+                expected=float(np.sum(expected[span])) if expected is not None and at else None,
+                factor=_factor(model, line),
+            )
+            for (line, _), (span, _), at in zip(entries, spans, priced, strict=True)
+        ]
 
 
 def separated_levels_message(held: list[SeparatedLevels], model) -> str | None:

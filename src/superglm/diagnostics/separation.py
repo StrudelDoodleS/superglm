@@ -503,9 +503,8 @@ class SeparatedLevels:
     ``specs`` holds every term of the build by name, main effects and
     interactions, and ``frame`` the build's training frame, which the disclosure
     scores.  ``exposure`` says the build had an offset under a log link, whose
-    exponent is a row's exposure; ``frequency`` that its weights count each row
-    that many times (``weight_semantics="frequency"``), where prior weights,
-    which state a row's precision, count it once.
+    exponent is a row's exposure.  Totals weight each row by its
+    ``sample_weight``, whatever its semantics; exposure counts each row once.
     """
 
     findings: list[SeparatedTerm]
@@ -513,12 +512,7 @@ class SeparatedLevels:
     sample_weight: NDArray
     offset: NDArray | None
     exposure: bool
-    frequency: bool
     frame: Any
-
-    def counts(self, rows: NDArray) -> NDArray:
-        """How many times each of ``rows`` counts in a total: its weight, or once."""
-        return self.sample_weight[rows] if self.frequency else np.ones(len(rows))
 
 
 @dataclass(frozen=True)
@@ -530,15 +524,19 @@ class SeparatedLine:
     label: Any  # a level, or a cell's (level1, level2)
     boundary: str  # "zero" or "one"
     rows: int
-    # The rows' exposure, or their weight under frequency weights; neither otherwise.
-    total: float | None
-    total_name: str | None  # "exposure", "weight" or None
+    # The rows' weight total when their weights are not all one, and their exposure
+    # (exp(offset) summed, each row once) under a log link with an offset.
+    weight: float | None
+    exposure: float | None
     base: Any  # the base level, or the base cell
     # Read from a published fit: the response total the rows expect at the base's
-    # rate, when the base is priced (not for the base itself, nor a separated or
-    # unoccupied base), and the fitted response total over the same rows.
+    # rate, when the base is priced (not for the base itself, nor a separated base,
+    # nor when the move reaches an unoccupied crossed cell), and the fitted response
+    # total over the same rows, both weighted by ``sample_weight``; and a level's
+    # fitted factor against its base on a log link when no crossed term involves it.
     expected: float | None = None
     fitted: float | None = None
+    factor: float | None = None
 
     @property
     def is_base(self) -> bool:
@@ -553,12 +551,15 @@ def level_lines(found: SeparatedLevels) -> list[SeparatedLine]:
         cells = finding.kind == "cells"
         base = (spec._base1, spec._base2) if cells else spec._base_level
         for label, rows in zip(finding.labels, finding.rows, strict=True):
-            counts = found.counts(rows)
-            total, total_name = None, None
-            if found.exposure and found.offset is not None:
-                total, total_name = float(counts @ np.exp(found.offset[rows])), "exposure"
-            elif found.frequency:
-                total, total_name = float(np.sum(counts)), "weight"
+            weights = found.sample_weight[rows]
+            # a total past float64's range is stated so (``_total``), never raised
+            with np.errstate(over="ignore"):
+                weight = None if np.all(weights == 1.0) else float(np.sum(weights))
+                exposure = (
+                    float(np.sum(np.exp(found.offset[rows])))
+                    if found.exposure and found.offset is not None
+                    else None
+                )
             lines.append(
                 SeparatedLine(
                     term=finding.term,
@@ -566,8 +567,8 @@ def level_lines(found: SeparatedLevels) -> list[SeparatedLine]:
                     label=label,
                     boundary=finding.boundary,
                     rows=len(rows),
-                    total=total,
-                    total_name=total_name,
+                    weight=weight,
+                    exposure=exposure,
                     base=base,
                 )
             )
@@ -628,6 +629,11 @@ def _counted(n: int, noun: str) -> str:
     return "" if n == 0 else f"{n} {noun}" + ("" if n == 1 else "s")
 
 
+def _total(value: float, digits: str) -> str:
+    """A stated total, or "beyond float64" for one float64 cannot hold."""
+    return format(value, digits) if np.isfinite(value) else "beyond float64"
+
+
 def _line_text(line: SeparatedLine) -> str:
     if line.kind == "cells":
         name = f"{line.term!r} cell {line.label[0]!r} x {line.label[1]!r}"
@@ -636,25 +642,30 @@ def _line_text(line: SeparatedLine) -> str:
         name, base = f"{line.term!r} level {line.label!r}", f"base level {line.base!r}"
     every = "0" if line.boundary == "zero" else "1"
     counted = f"{line.rows} rows"
-    if line.total_name is not None and line.total is not None:
-        counted += f", {line.total_name} {line.total:.4g}"
+    if line.weight is not None:
+        counted += f", weight {_total(line.weight, '.4g')}"
+    if line.exposure is not None:
+        counted += f", exposure {_total(line.exposure, '.4g')}"
     text = f"  {name}: {counted}, every response {every}"
     if line.is_base:
         return f"{text}; it is the {base}, which the term's other relativities are measured against"
     if line.fitted is None:
         return text
-    if line.expected is None:
-        return f"{text}; fitted {line.fitted:.3g} in total"
-    return (
-        f"{text}; {line.expected:.3g} expected in total at the rate of {base}, "
-        f"fitted {line.fitted:.3g} in total"
-    )
+    totals = [f"fitted {_total(line.fitted, '.3g')} in total"]
+    if line.expected is not None:
+        totals.insert(0, f"{_total(line.expected, '.3g')} expected in total at the rate of {base}")
+    weighted = "weighted by sample_weight, " if line.weight is not None else ""
+    factor = "" if line.factor is None else f"; fitted factor {_total(line.factor, '.3g')}"
+    return f"{text}; {weighted}{', '.join(totals)}{factor}"
 
 
 def _rank(line: SeparatedLine) -> tuple[float, float]:
     """Most expected first, then most exposed: the order a term's lines are listed in."""
-    size = line.total if line.total is not None else float(line.rows)
-    return (-(line.expected if line.expected is not None else 0.0), -size)
+    size = next(
+        (value for value in (line.exposure, line.weight) if value is not None), float(line.rows)
+    )
+    expected = 0.0 if line.expected is None or np.isnan(line.expected) else line.expected
+    return (-expected, -size)
 
 
 def format_separated_levels(

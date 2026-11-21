@@ -298,28 +298,124 @@ def test_no_base_rate_for_an_empty_base_cell():
     assert "expected" not in line and "fitted" in line
 
 
-@pytest.mark.parametrize(
-    ("semantics", "offset", "counted"),
-    [
-        ("prior", True, "100 rows, exposure 200, every response 0; 20 expected"),
-        ("frequency", True, "100 rows, exposure 2000, every response 0; 200 expected"),
-        ("prior", False, "100 rows, every response 0; 20 expected"),
-        ("frequency", False, "100 rows, weight 1000, every response 0; 200 expected"),
-    ],
-)
-def test_totals_count_each_row_as_its_weights_say(semantics, offset, counted):
-    """Weight 10 on every row, two years each: exposure and totals per physical row.
+_WEIGHTED = "100 rows, weight 1000, {}every response 0; weighted by sample_weight, 200 expected"
 
-    Prior weights state a row's precision and count it once, frequency weights count it
-    ten times; without an offset there is no exposure to state.  At 20f77dd6f every
-    case multiplied by the weight: 2000 exposure and 200 expected under prior weights.
+
+@pytest.mark.parametrize("semantics", ["prior", "frequency"])
+@pytest.mark.parametrize("offset", [True, False])
+def test_totals_are_weighted_whatever_the_weights_say(semantics, offset):
+    """Weight 10 on every row, two years each: one convention for every weight kind.
+
+    Expected and fitted totals sum weight times mean and say so; exposure sums each
+    row's ``exp(offset)`` once, beside the weight total.  At 46bcd5990 prior weights
+    counted each row once (20 expected) and frequency weights multiplied the exposure
+    (2000).
     """
     model, X, y = _two_levels(0.0, weight_semantics=semantics)
     options = {"sample_weight": np.full(200, 10.0)}
     if offset:
         options["offset"] = np.full(200, np.log(2.0))
     line = _line(_caught(lambda: model.fit(X, y, **options)), "'a' level 'B'")
-    assert counted in line
+    assert _WEIGHTED.format("exposure 200, " if offset else "") in line
+
+
+_YEARS = np.repeat([0.5, 0.25], 100)
+_CLAIMS = np.r_[np.tile([1.0, 0.0, 0.0, 0.0, 0.0], 20), np.zeros(100)]
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{"offset": np.log(_YEARS)}, {"sample_weight": _YEARS}],
+    ids=["counts_on_an_offset", "rates_weighted_by_exposure"],
+)
+def test_a_rate_weighted_by_exposure_expects_its_claims(options):
+    """20 claims in 50 years at A: B's 25 years expect 10, fitted as counts or as rates.
+
+    The rate fit, claims per year weighted by years, is the common insurance set-up.  At
+    46bcd5990 it counted each row once and stated 40, a sum of rates.
+    """
+    X = pd.DataFrame({"a": np.repeat(["A", "B"], 100)})
+    y = _CLAIMS / _YEARS if "sample_weight" in options else _CLAIMS
+    model = SuperGLM(family="poisson", features={"a": Categorical(base="A")}, selection_penalty=0.0)
+    line = _line(_caught(lambda: model.fit(X, y, **options)), "'a' level 'B'")
+    assert "10 expected in total at the rate of base level 'A'" in line
+
+
+@pytest.mark.parametrize("crossed", [False, True], ids=["plain", "crossed"])
+def test_tuple_valued_levels_are_priced_at_the_base(crossed):
+    """Composite keys as levels: the claim-free key is priced at the base key's rate.
+
+    At 46bcd5990 setting the rows to the base spread the tuple across them, and ``fit``
+    raised ``ValueError``; master fitted the same rows.
+    """
+    keys = pd.Series([("north", "01")] * 100 + [("south", "02")] * 100, dtype=object)
+    X = pd.DataFrame({"c": keys, "b": np.tile(["P", "Q"], 100)})
+    y = _CLAIMS.copy()
+    model = SuperGLM(
+        family="poisson",
+        features={"c": Categorical(base="first"), "b": Categorical(base="P")},
+        interactions=[("c", "b")] if crossed else [],
+        selection_penalty=0.0,
+    )
+    caught = _caught(lambda: model.fit(X, y))
+    moved = X[100:].assign(c=pd.Series([("north", "01")] * 100, index=X.index[100:], dtype=object))
+    at_base = model.predict(moved).sum()
+    line = next(
+        text for text in str(caught[0].message).splitlines() if "'c' level ('south', '02')" in text
+    )
+    assert f"{at_base:.3g} expected in total at the rate of base level ('north', '01')" in line
+
+
+def test_no_base_rate_when_the_base_reaches_an_empty_cell():
+    """C holds rows only at C x Q, and A x Q is empty: C's rows at A have no rate to read.
+
+    Every occupied cell's rate is fitted exactly, yet at 46bcd5990 the figure read 40
+    with b's base at P and 96 with it at Q: the parameterisation's, not the data's.
+    """
+    cells = [("A", "P", 20), ("A", "R", 60), ("B", "P", 40), ("B", "Q", 80), ("B", "R", 50)]
+    _, _, caught = _cells([*cells, ("C", "Q", 0)])
+    line = _line(caught, "'a' level 'C'")
+    assert "expected" not in line and "fitted" in line
+
+
+def test_the_warning_states_a_plain_levels_fitted_factor(fitted):
+    """A log-link level no crossed term involves: its factor, as ``term_inference`` reads it.
+
+    A level a crossed term also prices, and a cell, state the total only.  At 46bcd5990
+    no line stated a factor.
+    """
+    _, _, _, models = fitted
+    model, caught = models["fit"]
+    separated = [w for w in caught if issubclass(w.category, SeparationWarning)]
+    factor = model.term_inference("lev").relativity[-1]
+    assert _line(separated, "'lev' level 'E'").endswith(f"; fitted factor {factor:.3g}")
+    _, _, crossed = _cells(
+        [("A", "P", 1), ("A", "Q", 3), ("B", "P", 2), ("B", "Q", 2), ("C", "P", 0), ("C", "Q", 0)]
+    )
+    assert "factor" not in str(crossed[0].message)
+
+
+def test_a_total_past_float64_is_stated_and_the_fit_returns():
+    """Offsets of 715 put B's exposure past float64: the line says so, and the fit returns.
+
+    At 46bcd5990 the line read ``exposure inf`` and, under ``np.errstate(over="raise")``,
+    forming it aborted the fit.
+    """
+    X = pd.DataFrame({"a": np.repeat(["A", "B"], 100)})
+    y = np.r_[np.ones(20), np.zeros(180)]
+    options = {
+        "offset": np.r_[np.zeros(100), np.full(100, 715.0)],
+        "sample_weight": np.r_[np.ones(100), np.full(100, 1e-300)],
+    }
+    model = SuperGLM(
+        family="poisson",
+        features={"a": Categorical(base="A")},
+        selection_penalty=0.0,
+        weight_semantics="frequency",
+    )
+    with np.errstate(over="raise"):
+        caught = _caught(lambda: model.fit(X, y, **options))
+    assert "exposure beyond float64" in _line(caught, "'a' level 'B'")
 
 
 def test_every_separated_level_is_listed():

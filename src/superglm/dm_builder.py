@@ -1248,7 +1248,6 @@ def build_design_matrix(
                 sample_weight=sample_weight,
                 offset=offset,
                 exposure=offset is not None and isinstance(link, LogLink),
-                frequency=weight_semantics != PRIOR_WEIGHTS,
                 frame=X,
             ),
             separation,
