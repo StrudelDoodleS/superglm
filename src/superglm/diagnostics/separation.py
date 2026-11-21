@@ -18,6 +18,8 @@ when it returns, priced by the fit it publishes (``disclosure_scope``).
 
 from __future__ import annotations
 
+import contextlib
+import sys
 import warnings
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -29,7 +31,9 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._roundoff import gamma
-from superglm._warn import warn_caller
+from superglm._warn import _PACKAGE_PREFIX, warn_caller
+
+_CONTEXTLIB = contextlib.__file__
 
 #: Working-weight ratio past which an exhausted, stagnant IRLS run is treated
 #: as the runtime signature of separation (see ``format_runtime_message``).
@@ -83,9 +87,12 @@ def disclosure_scope(model: Any) -> Iterator[None]:
     (``_discarded_fit``: a power-search candidate's ``fit_reml``, a ``drop1``
     comparison fit) shares that call's scope.
 
-    The separated levels and cells its builds find are disclosed once, as the
-    call returns: priced by the fit it published, or, when it published none
-    (``drop1``) or failed, with what the builds counted.
+    The separated levels and cells its builds find are held for one disclosure.
+    The fit the call publishes states them, priced, before it is installed
+    (``take_held_levels``, read by ``fit_state.capture_fit_state``), so a warning
+    raised as an error leaves the previous fit in place.  A call that publishes
+    none (``drop1``), or fails, states them as its builds counted them when it
+    returns.
     """
     if getattr(model, "_discarded_fit", False) and _DISCLOSED.get() is not None:
         yield
@@ -93,19 +100,38 @@ def disclosure_scope(model: Any) -> Iterator[None]:
     token = _DISCLOSED.set(set())
     held: list[SeparatedLevels] = []
     pending_token = _PENDING.set(held)
-    before = getattr(model, "_result", None)
-    published = None
     try:
         yield
-        result = getattr(model, "_result", None)
-        published = model if result is not None and result is not before else None
     finally:
         _PENDING.reset(pending_token)
         _DISCLOSED.reset(token)
         if held:
-            from superglm.model.separated_levels import separated_levels_message
+            lines = [line for line, _, _ in held_lines(held)]
+            message = format_separated_levels(lines, example=lines_example(lines, held[-1].specs))
+            warnings.warn(message, SeparationWarning, stacklevel=_caller_level())
 
-            warn_caller(separated_levels_message(held, published), SeparationWarning)
+
+def _caller_level() -> int:
+    """``warnings.warn``'s ``stacklevel``, from its caller, of the first frame outside superglm.
+
+    ``contextlib``'s frames are stepped over too, since a scope's ``finally`` runs
+    under its ``__exit__``.  Counted here: ``skip_file_prefixes`` does not step over
+    that frame for a generator's warning (CPython 3.13 lands it in ``contextlib``).
+    """
+    frame, level = sys._getframe(2), 2
+    while frame is not None and frame.f_code.co_filename.startswith((_PACKAGE_PREFIX, _CONTEXTLIB)):
+        frame, level = frame.f_back, level + 1
+    return level
+
+
+def take_held_levels() -> list[SeparatedLevels]:
+    """What this fit call's builds found separated, handed to the fit it publishes; then none."""
+    held = _PENDING.get()
+    if not held:
+        return []
+    taken = list(held)
+    held.clear()
+    return taken
 
 
 def warn_separation(message: str, *, stacklevel: int) -> None:
@@ -235,6 +261,9 @@ class SeparatedTerm:
     # Each label's positive-weight training rows, in label order: what the
     # disclosure counts and prices. Only a build's own findings carry them.
     rows: tuple[NDArray, ...] = field(default=(), compare=False, repr=False)
+    # A crossed term's occupied cells (positive weight), base row and column
+    # included: the design rows its readers test contrasts against.
+    occupied: tuple = field(default=(), compare=False, repr=False)
 
 
 def response_boundaries(distribution: Any, link: Any) -> tuple[str, ...]:
@@ -396,6 +425,11 @@ def scan_interaction_term(
     n2 = len(levels2)
     on_grid = (codes1 >= 0) & (codes2 >= 0)
     cell_codes = np.where(on_grid, codes1 * n2 + codes2, -1)
+    weighted = on_grid & (sample_weight > 0)
+    occupied = tuple(
+        (levels1[i // n2], levels2[i % n2])
+        for i in np.flatnonzero(np.bincount(cell_codes[weighted], minlength=len(levels1) * n2))
+    )
     findings: list[SeparatedTerm] = []
     for boundary in boundaries:
         flags, n_occupied = _separated_flags(
@@ -411,6 +445,7 @@ def scan_interaction_term(
                     labels=labels,
                     n_occupied=n_occupied,
                     rows=_flagged_rows(cell_codes, flags, sample_weight),
+                    occupied=occupied,
                 )
             )
     return findings
@@ -466,17 +501,24 @@ class SeparatedLevels:
     """What one design build found separated, with the rows the disclosure counts.
 
     ``specs`` holds every term of the build by name, main effects and
-    interactions; ``total_name`` is ``"exposure"`` when the build had an offset
-    under a log link (its exponent is the rows' exposure), ``"weight"`` otherwise;
-    ``frame`` is the build's training frame, which the disclosure predicts on.
+    interactions, and ``frame`` the build's training frame, which the disclosure
+    scores.  ``exposure`` says the build had an offset under a log link, whose
+    exponent is a row's exposure; ``frequency`` that its weights count each row
+    that many times (``weight_semantics="frequency"``), where prior weights,
+    which state a row's precision, count it once.
     """
 
     findings: list[SeparatedTerm]
     specs: dict[str, Any]
     sample_weight: NDArray
     offset: NDArray | None
-    total_name: str
+    exposure: bool
+    frequency: bool
     frame: Any
+
+    def counts(self, rows: NDArray) -> NDArray:
+        """How many times each of ``rows`` counts in a total: its weight, or once."""
+        return self.sample_weight[rows] if self.frequency else np.ones(len(rows))
 
 
 @dataclass(frozen=True)
@@ -488,16 +530,15 @@ class SeparatedLine:
     label: Any  # a level, or a cell's (level1, level2)
     boundary: str  # "zero" or "one"
     rows: int
-    total: float  # the rows' exposure or weight
-    total_name: str
+    # The rows' exposure, or their weight under frequency weights; neither otherwise.
+    total: float | None
+    total_name: str | None  # "exposure", "weight" or None
     base: Any  # the base level, or the base cell
-    # Read from a published fit: the response total its rows would expect at
-    # the base's rate, and the fitted relativity against the base.  Neither is
-    # stated for the base itself.
+    # Read from a published fit: the response total the rows expect at the base's
+    # rate, when the base is priced (not for the base itself, nor a separated or
+    # unoccupied base), and the fitted response total over the same rows.
     expected: float | None = None
-    relativity: float | None = None
-    # A crossed cell's parent terms, whose main effects its relativity includes.
-    parents: tuple[str, ...] = ()
+    fitted: float | None = None
 
     @property
     def is_base(self) -> bool:
@@ -558,12 +599,12 @@ def level_lines(found: SeparatedLevels) -> list[SeparatedLine]:
         cells = finding.kind == "cells"
         base = (spec._base1, spec._base2) if cells else spec._base_level
         for label, rows in zip(finding.labels, finding.rows, strict=True):
-            weight = found.sample_weight[rows]
-            total = (
-                weight @ np.exp(found.offset[rows])
-                if found.total_name == "exposure" and found.offset is not None
-                else np.sum(weight)
-            )
+            counts = found.counts(rows)
+            total, total_name = None, None
+            if found.exposure and found.offset is not None:
+                total, total_name = float(counts @ np.exp(found.offset[rows])), "exposure"
+            elif found.frequency:
+                total, total_name = float(np.sum(counts)), "weight"
             lines.append(
                 SeparatedLine(
                     term=finding.term,
@@ -571,26 +612,40 @@ def level_lines(found: SeparatedLevels) -> list[SeparatedLine]:
                     label=label,
                     boundary=finding.boundary,
                     rows=len(rows),
-                    total=float(total),
-                    total_name=found.total_name,
+                    total=total,
+                    total_name=total_name,
                     base=base,
-                    parents=tuple(spec.parent_names) if cells else (),
                 )
             )
     return lines
+
+
+def held_lines(
+    held: Sequence[SeparatedLevels],
+) -> list[tuple[SeparatedLine, SeparatedLevels, NDArray]]:
+    """Each label the builds found, once: as the latest build counted it, that build, its rows."""
+    latest: dict[tuple, tuple[SeparatedLine, SeparatedLevels, NDArray]] = {}
+    for found in held:
+        rows = (part for finding in found.findings for part in finding.rows)
+        for line, part in zip(level_lines(found), rows, strict=True):
+            latest[(line.term, line.kind, line.label)] = (line, found, part)
+    return list(latest.values())
 
 
 def grouping_example(term: str, spec: Any, separated: Sequence[Any]) -> str | None:
     """A call that groups ``term``'s first separated level with its nearest priced level.
 
     Nearest in the term's level order, which is the data's order for an ordered
-    factor; ``None`` when the term already has a grouping (its levels are groups
-    then) or no level is priced.
+    factor, among the levels with weight in the fit: a declared level the data
+    never hold (``_pinned_levels``) is not one ``collapse_levels`` can group.
+    ``None`` when the term already has a grouping (its levels are groups then)
+    or no level is priced.
     """
     if getattr(spec, "_grouping", None) is not None:
         return None
     levels = list(spec._levels)
-    priced = [i for i, level in enumerate(levels) if level not in separated]
+    unpriced = {*separated, *(getattr(spec, "_pinned_levels", ()) or ())}
+    priced = [i for i, level in enumerate(levels) if level not in unpriced]
     for label in separated:
         if label not in levels or not priced:
             continue
@@ -626,15 +681,26 @@ def _line_text(line: SeparatedLine) -> str:
     else:
         name, base = f"{line.term!r} level {line.label!r}", f"base level {line.base!r}"
     every = "0" if line.boundary == "zero" else "1"
-    text = f"  {name}: {line.rows} rows, {line.total_name} {line.total:.4g}, every response {every}"
+    counted = f"{line.rows} rows"
+    if line.total_name is not None and line.total is not None:
+        counted += f", {line.total_name} {line.total:.4g}"
+    text = f"  {name}: {counted}, every response {every}"
     if line.is_base:
         return f"{text}; it is the {base}, which the term's other relativities are measured against"
-    if line.expected is None or line.relativity is None:
+    if line.fitted is None:
         return text
+    if line.expected is None:
+        return f"{text}; fitted {line.fitted:.3g} in total"
     return (
-        f"{text}; {line.expected:.3g} expected in total at the rate of {base}; "
-        f"fitted relativity {line.relativity:.3g}"
+        f"{text}; {line.expected:.3g} expected in total at the rate of {base}, "
+        f"fitted {line.fitted:.3g} in total"
     )
+
+
+def _rank(line: SeparatedLine) -> tuple[float, float]:
+    """Most expected first, then most exposed: the order a term's lines are listed in."""
+    size = line.total if line.total is not None else float(line.rows)
+    return (-(line.expected if line.expected is not None else 0.0), -size)
 
 
 def format_separated_levels(
@@ -648,6 +714,7 @@ def format_separated_levels(
 
     ``fitted`` says the lines carry a published fit's numbers; a refusal
     (``mode="error"``) and a build outside a fit call carry what the build counted.
+    Every line is listed: each names a price that is not an estimate.
     """
     n_levels = sum(line.kind == "levels" for line in lines)
     what = " and ".join(
@@ -679,20 +746,19 @@ def format_separated_levels(
     by_term: dict[str, list[SeparatedLine]] = {}
     for line in lines:
         by_term.setdefault(line.term, []).append(line)
-    for term, term_lines in by_term.items():
-        ranked = sorted(
-            term_lines,
-            key=lambda line: -(line.expected if line.expected is not None else line.total),
-        )
-        body.extend(_line_text(line) for line in ranked[:_MAX_LISTED_LABELS])
-        if len(ranked) > _MAX_LISTED_LABELS:
-            body.append(f"  ... and {len(ranked) - _MAX_LISTED_LABELS} more in {term!r}")
+    for term_lines in by_term.values():
+        body.extend(_line_text(line) for line in sorted(term_lines, key=_rank))
     group = "group a level with similar levels " + (
         f"({example})" if example else "(collapse_levels builds the grouping)"
     )
+    # A cap bounds a main effect's levels against its base, not a crossed cell.
+    bound = (
+        "bound it with Constraint.fit.cap or a selection penalty on the term"
+        if n_levels
+        else "put a selection penalty on the crossed term"
+    )
     remedy = (
-        f"To price {'it' if one else 'them'}: {group}, fit the term as a RandomEffect, or bound "
-        "it with Constraint.fit.cap or a selection penalty on the term."
+        f"To price {'it' if one else 'them'}: {group}, fit the term as a RandomEffect, or {bound}."
     )
     if mode == "error":
         remedy += (

@@ -11,19 +11,21 @@ record covers for the readers that must not report them twice.
 
 from __future__ import annotations
 
-import functools
 from dataclasses import replace
 from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._warn import warn_caller
 from superglm.diagnostics.separation import (
     SeparatedLevels,
     SeparatedLine,
+    SeparationWarning,
     format_separated_levels,
-    level_lines,
+    held_lines,
     lines_example,
+    take_held_levels,
 )
 
 
@@ -106,103 +108,134 @@ def predicted_cells(model, term: str, frame) -> set[tuple]:
     return {(levels1[i], levels2[j]) for i, j in met}
 
 
-def _log_relativities(model, term: str) -> dict:
-    """A fitted term's log relativity by level, or by cell: empty for a term the model lacks."""
-    from superglm.features.categorical import Categorical
-    from superglm.features.interaction import CategoricalInteraction
-
-    spec = {**model._specs, **model._interaction_specs}.get(term)
-    blocks = [model.result.beta[g.sl] for g in model._groups if g.feature_name == term]
-    if not blocks or not isinstance(spec, Categorical | CategoricalInteraction):
-        return {}
-    raw = spec.reconstruct(np.concatenate(blocks))
-    if isinstance(spec, Categorical):
-        return dict(raw["log_relativities"])
-    return dict(zip(map(tuple, raw["pairs"]), raw["pair_log_relativities"], strict=True))
+def _raw_base(spec) -> Any | None:
+    """A raw value ``spec`` scores at its base level: the base, or a member of the base group."""
+    grouping = getattr(spec, "_grouping", None)
+    if grouping is None:
+        return spec._base_level
+    members = grouping.original_to_group.items()
+    return next((raw for raw, group in members if group == spec._base_level), None)
 
 
-def _log_relativity(line: SeparatedLine, effects) -> float:
-    """The fitted log relativity of ``line``'s level, or cell, against the term's base.
+def _at_base(line: SeparatedLine, specs: dict[str, Any]) -> dict[str, Any] | None:
+    """The raw values that score ``line``'s rows at its base, by column; ``None`` if unpriced.
 
-    ``effects(term)`` is ``_log_relativities``. A cell's is the whole categorical effect
-    at it against the base cell: both parents' main effects and the interaction,
-    wherever the fit put its walk.
+    A level is moved to its term's base level, a crossed cell to the base cell (both
+    parents at their base levels).  There is no base rate to state when the base is
+    itself separated or, for a cell, holds no rows.
     """
+    spec = specs[line.term]
+    if line.is_base or line.base in separated_labels(spec):
+        return None
     if line.kind == "levels":
-        return float(effects(line.term).get(line.label, 0.0))
-    first, second = line.parents
-    return float(
-        effects(first).get(line.label[0], 0.0)
-        + effects(second).get(line.label[1], 0.0)
-        + effects(line.term).get(tuple(line.label), 0.0)
-    )
+        parents = {line.term: specs[line.term]}
+    else:
+        occupied = getattr(spec, "_occupied_cells_at_fit", None)
+        if occupied is not None and tuple(line.base) not in set(occupied):
+            return None
+        parents = {name: specs[name] for name in spec.parent_names}
+    values = {name: _raw_base(parent) for name, parent in parents.items()}
+    return None if any(value is None for value in values.values()) else values
 
 
-def _priced(model, lines: list[tuple[SeparatedLine, NDArray]], found: SeparatedLevels) -> list:
-    """``lines`` with the published fit's relativities and the responses their rows expect at base.
+def _priced(
+    model, entries: list[tuple[SeparatedLine, NDArray]], found: SeparatedLevels
+) -> list[SeparatedLine]:
+    """``entries``' lines with the published fit's response totals over their rows.
 
-    One prediction over every line's rows: the fitted predictor, less the line's own
-    effect against the base, is its rows' predictor at the base's rate.
+    Every line's rows are scored through the fit's own prediction path, offset
+    included and every other term kept (an interaction the level enters, a
+    spline): as they are, for the fitted total, and with the term's label set to
+    its base (``_at_base``), for the total expected at the base's rate.  Both are
+    finite for every link.  Each row counts its weight under frequency weights
+    and once under prior weights (``SeparatedLevels.counts``).
     """
-    from superglm.links import stabilize_eta
-    from superglm.model.base import _eta_to_mu, _predict_eta
+    import pandas as pd
 
-    effects = functools.cache(lambda term: _log_relativities(model, term))
-    rows = np.concatenate([part for _, part in lines])
-    eta = _predict_eta(
-        model,
-        found.frame.take_rows(rows),
-        None if found.offset is None else found.offset[rows],
-        random_effects="conditional",
-        stabilize=False,
-        fitted=True,
-        warn=False,
+    from superglm.model.base import _eta_to_mu, _predict_eta, _prediction_plan
+
+    specs = {**model._specs, **model._interaction_specs}
+    rows = np.concatenate([part for _, part in entries])
+    plan = _prediction_plan(model)
+    names = dict.fromkeys(
+        [term["name"] for term in plan["features"]]
+        + [parent for term in plan["interactions"] for parent in term["parent_names"]]
     )
-    priced = []
-    end = 0
-    for line, part in lines:
+    columns = {name: found.frame.column_array(name)[rows] for name in names}
+    offset = None if found.offset is None else found.offset[rows]
+
+    def mean(frame: dict[str, NDArray]) -> NDArray:
+        eta = _predict_eta(
+            model,
+            pd.DataFrame(frame),
+            offset,
+            random_effects="conditional",
+            fitted=True,
+            warn=False,
+        )
+        return np.asarray(_eta_to_mu(model, eta), dtype=np.float64)
+
+    spans, end = [], 0
+    moved = dict(columns)
+    for line, part in entries:
         start, end = end, end + len(part)
-        if line.is_base:
-            priced.append(line)
-            continue
-        delta = _log_relativity(line, effects)
-        mean = _eta_to_mu(model, stabilize_eta(eta[start:end] - delta, model._link))
-        expected = float(found.sample_weight[part] @ np.asarray(mean, dtype=np.float64))
-        priced.append(replace(line, expected=expected, relativity=float(np.exp(delta))))
-    return priced
+        values = _at_base(line, specs)
+        spans.append((start, end, values is not None))
+        for name, value in (values or {}).items():
+            if moved[name] is columns[name]:
+                moved[name] = columns[name].astype(object)
+            moved[name][start:end] = value
+    counts = found.counts(rows)
+    fitted = counts * mean(columns)
+    expected = counts * mean(moved) if any(priced for _, _, priced in spans) else None
+    return [
+        replace(
+            line,
+            fitted=float(np.sum(fitted[start:end])),
+            expected=None if expected is None or not priced else float(np.sum(expected[start:end])),
+        )
+        for (line, _), (start, end, priced) in zip(entries, spans, strict=True)
+    ]
 
 
-def separated_levels_message(held: list[SeparatedLevels], model) -> str:
-    """The one disclosure of a fit call whose builds found ``held``.
+def separated_levels_message(held: list[SeparatedLevels], model) -> str | None:
+    """The one disclosure of a fit call whose builds found ``held``, priced by ``model``.
 
-    ``model`` is the fit the call published, or ``None`` when it published none;
-    each level is then stated as its build counted it. The latest build's rows
-    stand for each level, and a published fit names only the levels its own
-    record holds.
+    ``model`` is the fit the call publishes.  The latest build's rows stand for each
+    label, and only the labels ``model``'s own record holds are named: ``None`` when it
+    holds none of them.
     """
-    latest: dict[tuple, tuple[SeparatedLine, int, NDArray]] = {}
-    for index, found in enumerate(held):
-        rows = [part for finding in found.findings for part in finding.rows]
-        for line, part in zip(level_lines(found), rows, strict=True):
-            latest[(line.term, line.kind, line.label)] = (line, index, part)
-    specs = {**held[-1].specs}
-    priced: list[SeparatedLine] = []
-    if model is not None:
-        specs = {**model._specs, **model._interaction_specs}
-        by_build: dict[int, list[tuple[SeparatedLine, NDArray]]] = {}
-        for line, index, part in latest.values():
-            spec = specs.get(line.term)
-            if spec is not None and line.label in separated_labels(spec):
-                by_build.setdefault(index, []).append((line, part))
-        for index, lines in by_build.items():
-            priced.extend(_priced(model, lines, held[index]))
-    if priced:
-        return format_separated_levels(priced, fitted=True, example=lines_example(priced, specs))
-    found_lines = [line for line, _, _ in latest.values()]
-    return format_separated_levels(found_lines, example=lines_example(found_lines, specs))
+    specs = {**model._specs, **model._interaction_specs}
+    by_build: dict[int, tuple[SeparatedLevels, list[tuple[SeparatedLine, NDArray]]]] = {}
+    for line, found, rows in held_lines(held):
+        spec = specs.get(line.term)
+        if spec is not None and line.label in separated_labels(spec):
+            by_build.setdefault(id(found), (found, []))[1].append((line, rows))
+    priced = [
+        line for found, entries in by_build.values() for line in _priced(model, entries, found)
+    ]
+    if not priced:
+        return None
+    return format_separated_levels(priced, fitted=True, example=lines_example(priced, specs))
+
+
+def disclose_held_levels(model) -> None:
+    """Warn, priced by ``model``, of the separated levels and cells this fit call's builds found.
+
+    ``model`` is the candidate a fit call is about to publish: the warning is formed
+    and emitted before it is installed, so a warning raised as an error leaves the
+    model's previous fit in place (``diagnostics.separation.disclosure_scope``).
+    """
+    held = take_held_levels()
+    if not held:
+        return
+    message = separated_levels_message(held, model)
+    if message is not None:
+        warn_caller(message, SeparationWarning)
 
 
 __all__ = [
+    "disclose_held_levels",
     "predicted_cells",
     "separated_columns",
     "separated_labels",

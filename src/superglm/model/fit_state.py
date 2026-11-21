@@ -1111,11 +1111,13 @@ def capture_fit_state(
 ) -> FitCandidate:
     """Transfer one complete workspace into a candidate without row-scale copies.
 
-    Every solved fit is published through here, so this is where its runtime
-    separation finding, read from the coefficient state it publishes, is
-    disclosed under the model's ``separation`` mode.  A call that returns more
-    than that state passes its own ``separation_statement`` (``fit_path``, for
-    every point it returns).  A fit another call runs and discards
+    Every solved fit is published through here, so this is where the separated
+    levels and cells its call's builds found are stated, priced by the state it
+    publishes, and its runtime separation finding, read from that state, is
+    disclosed under the model's ``separation`` mode: both before the install, so
+    a warning raised as an error leaves the previous fit in place.  A call that
+    returns more than that state passes its own ``separation_statement``
+    (``fit_path``, for every point it returns).  A fit another call runs and discards
     (``_discarded_fit``: a power-search candidate, a ``drop1`` comparison)
     discloses nothing.
     """
@@ -1124,8 +1126,9 @@ def capture_fit_state(
             disclose_runtime_separation,
             restates_separated_level,
         )
-        from superglm.model.separated_levels import separated_terms
+        from superglm.model.separated_levels import disclose_held_levels, separated_terms
 
+        disclose_held_levels(workspace.model)
         if separation_statement is None:
             result = getattr(workspace.model, "_result", None)
             separation_statement = getattr(result, "separation_message", None)

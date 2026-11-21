@@ -1156,6 +1156,7 @@ def build_design_matrix(
     for spec in compiled.interaction_specs.values():
         if getattr(spec, "_separated_cells_at_fit", ()):
             spec._separated_cells_at_fit = ()
+            spec._occupied_cells_at_fit = None
     if separation_records:
         from superglm.diagnostics.separation import (
             SeparatedLevels,
@@ -1232,6 +1233,9 @@ def build_design_matrix(
                 compiled.interaction_specs[name_i]._separated_cells_at_fit = tuple(
                     label for finding in found for label in finding.labels
                 )
+                compiled.interaction_specs[name_i]._occupied_cells_at_fit = (
+                    found[0].occupied if found else None
+                )
         compiled.scan_codes.clear()
         from superglm.links import LogLink
 
@@ -1241,9 +1245,8 @@ def build_design_matrix(
                 specs={**compiled.specs, **compiled.interaction_specs},
                 sample_weight=sample_weight,
                 offset=offset,
-                total_name=(
-                    "exposure" if offset is not None and isinstance(link, LogLink) else "weight"
-                ),
+                exposure=offset is not None and isinstance(link, LogLink),
+                frequency=weight_semantics != PRIOR_WEIGHTS,
                 frame=X,
             ),
             separation,

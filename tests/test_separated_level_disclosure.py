@@ -34,6 +34,8 @@ from scipy.stats import binomtest
 from superglm import (
     Categorical,
     Constraint,
+    Numeric,
+    RandomEffect,
     SuperGLM,
     collapse_levels,
 )
@@ -115,13 +117,15 @@ def test_a_fit_warns_once_after_it_with_the_level_priced(fitted, method):
 
     rows = (X["lev"] == "E").to_numpy()
     at_base = model.predict(X[rows].assign(lev="A"), offset=np.log(exposure[rows]))
-    relativity = model.term_inference("lev").relativity[-1]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SeparationWarning)
+        fitted = model.predict(X[rows], offset=np.log(exposure[rows]))
     line = next(text for text in message.splitlines() if "'lev' level 'E'" in text)
     assert f"{rows.sum()} rows" in line
     assert f"exposure {exposure[rows].sum():.4g}" in line
     assert "every response 0" in line
     assert f"{at_base.sum():.3g} expected in total at the rate of base level 'A'" in line
-    assert f"fitted relativity {relativity:.3g}" in line
+    assert f"fitted {fitted.sum():.3g} in total" in line
     assert "where the fit stopped, not an estimate" in message
     assert "IRLS" not in message
 
@@ -134,8 +138,212 @@ def test_a_refusal_states_the_level_before_any_fit():
         model.fit(X, y, offset=np.log(exposure))
     message = str(refused.value)
     assert "'lev' level 'E'" in message and "every response 0" in message
-    assert "fitted relativity" not in message and "expected in total" not in message
+    assert "in total" not in message
     assert model._result is None
+
+
+def _caught(fit):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fit()
+    return [w for w in caught if issubclass(w.category, SeparationWarning)]
+
+
+def _two_levels(y_b, **options):
+    """100 rows at A, a response 1 on every fifth, and 100 at B responding ``y_b``."""
+    X = pd.DataFrame({"a": np.repeat(["A", "B"], 100)})
+    y = np.r_[(np.arange(100) % 5 == 0).astype(float), np.full(100, float(y_b))]
+    model = SuperGLM(
+        family="poisson", features={"a": Categorical(base="A")}, selection_penalty=0.0, **options
+    )
+    return model, X, y
+
+
+def test_a_refit_whose_warning_is_raised_keeps_the_previous_fit():
+    """Under warnings as errors, the warning is raised before the refit is installed.
+
+    At 20f77dd6f it was raised after the install: B's price moved from 0.2 to 8e-8.
+    """
+    model, X, y = _two_levels(1.0)
+    model.fit(X, y)
+    revision, price = model._fit_revision, model.predict(X.tail(1))[0]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SeparationWarning)
+        with pytest.raises(SeparationWarning):
+            model.fit(X, np.where(X["a"] == "B", 0.0, y))
+    assert model._fit_revision == revision
+    assert model.predict(X.tail(1))[0] == price
+
+
+def test_the_warning_names_the_callers_line():
+    """Both the published fit's warning and ``drop1``'s, which publishes none, land here.
+
+    At 20f77dd6f both were located at ``contextlib.py``.
+    """
+    model, X, y = _two_levels(0.0)
+    (published,) = _caught(lambda: model.fit(X, y))
+    assert published.filename == __file__
+    X = X.assign(x=np.linspace(0.0, 1.0, 200))
+    model = SuperGLM(
+        family="poisson",
+        features={"a": Categorical(base="A"), "x": Numeric()},
+        selection_penalty=0.0,
+    )
+    _caught(lambda: model.fit(X, y))
+    (compared,) = _caught(lambda: model.drop1(X, y))
+    assert compared.filename == __file__ and "'a' level 'B'" in str(compared.message)
+
+
+def _cells(cells, **options):
+    """A Poisson ``a x b`` book, 100 rows per cell; ``cells`` lists (a, b, rows with a 1)."""
+    data = [(a, b, float(i < events)) for a, b, events in cells for i in range(100)]
+    frame = pd.DataFrame(data, columns=["a", "b", "y"])
+    model = SuperGLM(
+        family="poisson",
+        features={"a": Categorical(base="A"), "b": Categorical(base="P")},
+        interactions=[("a", "b")],
+        selection_penalty=0.0,
+        **options,
+    )
+    caught = _caught(lambda: model.fit(frame[["a", "b"]], frame["y"].to_numpy()))
+    return model, frame[["a", "b"]], caught
+
+
+def _line(caught, name):
+    (warning,) = caught
+    return next(text for text in str(warning.message).splitlines() if name in text)
+
+
+def test_the_base_rate_moves_the_level_in_every_term_it_enters():
+    """C beside ``a:b``: 4 expected at A, what ``predict`` gives C's rows set to A.
+
+    Codex's case. At 20f77dd6f the walked main effect alone was taken off, leaving C's
+    interaction cells in: the warning read 2.
+    """
+    model, X, caught = _cells(
+        [("A", "P", 1), ("A", "Q", 3), ("B", "P", 2), ("B", "Q", 2), ("C", "P", 0), ("C", "Q", 0)]
+    )
+    rows = (X["a"] == "C").to_numpy()
+    at_base = model.predict(X[rows].assign(a="A")).sum()
+    assert at_base == pytest.approx(4.0, rel=1e-9)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SeparationWarning)
+        fitted = model.predict(X[rows]).sum()
+    line = _line(caught, "'a' level 'C'")
+    assert f"{at_base:.3g} expected in total at the rate of base level 'A'" in line
+    assert f"fitted {fitted:.3g} in total" in line
+
+
+def test_the_base_rate_beside_a_walk_past_float64():
+    """Binomial/log ``fit_reml`` walks c to -5.5e27: 24.0 expected at a, as ``predict`` says.
+
+    At 20f77dd6f the predictor less the walk cancelled the other terms: 200.
+    """
+    rng = np.random.default_rng(15)
+    c = np.repeat(["a", "b", "c"], 200)
+    group = np.tile(np.repeat([f"g{i}" for i in range(10)], 20), 3)
+    y = (rng.uniform(size=600) < np.repeat([0.2, 0.3, 0.35], 200)).astype(float)
+    y[c == "c"] = 0.0
+    X = pd.DataFrame({"c": c, "g": group})
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        features={"c": Categorical(base="a"), "g": RandomEffect()},
+        selection_penalty=0.0,
+    )
+    caught = _caught(lambda: model.fit_reml(X, y))
+    at_base = model.predict(X[c == "c"].assign(c="a")).sum()
+    assert 20.0 < at_base < 30.0
+    line = _line(caught, "'c' level 'c'")
+    assert f"{at_base:.3g} expected in total at the rate of base level 'a'" in line
+
+
+@pytest.mark.parametrize("link", ["probit", "cauchit"])
+def test_every_link_states_finite_totals(link):
+    """All-1 B against P(A) = 0.5: 50 expected at A, about 100 fitted, no overflow.
+
+    At 20f77dd6f the relativity ``exp`` of the walked slope read 151 (probit), and the
+    cauchit fit raised ``FloatingPointError`` under ``np.errstate(over="raise")``.
+    """
+    X = pd.DataFrame({"a": np.repeat(["A", "B"], 100)})
+    y = np.r_[np.tile([0.0, 1.0], 50), np.ones(100)]
+    model = SuperGLM(
+        family="binomial", link=link, features={"a": Categorical(base="A")}, selection_penalty=0.0
+    )
+    with np.errstate(over="raise"):
+        caught = _caught(lambda: model.fit(X, y))
+    line = _line(caught, "'a' level 'B'")
+    assert "every response 1; 50 expected in total at the rate of base level 'A'" in line
+    assert "fitted 100 in total" in line
+
+
+def test_no_base_rate_for_an_empty_base_cell():
+    """A x P holds no rows, so the fit does not determine its rate: no figure is stated.
+
+    At 20f77dd6f the warning read 160 expected at A x P, and an equivalent fit with the
+    same training predictions gives 320.
+    """
+    X = pd.DataFrame({"a": np.repeat(["A", "B", "B"], 40), "b": np.repeat(["Q", "P", "Q"], 40)})
+    y = np.repeat([4.0, 2.0, 0.0], 40)
+    model = SuperGLM(
+        family="poisson",
+        features={"a": Categorical(base="A"), "b": Categorical(base="P")},
+        interactions=[("a", "b")],
+        selection_penalty=0.0,
+    )
+    line = _line(_caught(lambda: model.fit(X, y)), "'a:b' cell 'B' x 'Q'")
+    assert "expected" not in line and "fitted" in line
+
+
+@pytest.mark.parametrize(
+    ("semantics", "offset", "counted"),
+    [
+        ("prior", True, "100 rows, exposure 200, every response 0; 20 expected"),
+        ("frequency", True, "100 rows, exposure 2000, every response 0; 200 expected"),
+        ("prior", False, "100 rows, every response 0; 20 expected"),
+        ("frequency", False, "100 rows, weight 1000, every response 0; 200 expected"),
+    ],
+)
+def test_totals_count_each_row_as_its_weights_say(semantics, offset, counted):
+    """Weight 10 on every row, two years each: exposure and totals per physical row.
+
+    Prior weights state a row's precision and count it once, frequency weights count it
+    ten times; without an offset there is no exposure to state.  At 20f77dd6f every
+    case multiplied by the weight: 2000 exposure and 200 expected under prior weights.
+    """
+    model, X, y = _two_levels(0.0, weight_semantics=semantics)
+    options = {"sample_weight": np.full(200, 10.0)}
+    if offset:
+        options["offset"] = np.full(200, np.log(2.0))
+    line = _line(_caught(lambda: model.fit(X, y, **options)), "'a' level 'B'")
+    assert counted in line
+
+
+def test_every_separated_level_is_listed():
+    """16 claim-free levels, 16 lines: each names a price that is not an estimate.
+
+    At 20f77dd6f the warning named 15 and said "... and 1 more".
+    """
+    X = pd.DataFrame({"a": np.repeat(["base", *[f"z{i:02d}" for i in range(16)]], 20)})
+    y = np.where(X["a"] == "base", np.tile([1.0, 0.0, 0.0, 0.0, 0.0], 68), 0.0)
+    model = SuperGLM(
+        family="poisson", features={"a": Categorical(base="base")}, selection_penalty=0.0
+    )
+    (warning,) = _caught(lambda: model.fit(X, y))
+    assert len(re.findall(r"^  'a' level 'z\d\d'", str(warning.message), re.M)) == 16
+    assert "more in" not in str(warning.message)
+
+
+def test_a_crossed_cells_remedy_names_no_cap():
+    """A cap bounds a main effect's levels, not a crossed cell: the remedy does not offer one.
+
+    At 20f77dd6f it said "bound it with Constraint.fit.cap", and capping both parents
+    left the cell separated.
+    """
+    _, _, caught = _cells([("A", "P", 20), ("A", "Q", 20), ("B", "P", 20), ("B", "Q", 0)])
+    (warning,) = caught
+    remedy = str(warning.message).splitlines()[-1]
+    assert "Constraint.fit.cap" not in remedy and "selection penalty" in remedy
 
 
 def _forced_runtime_finding(monkeypatch, carried_by):
