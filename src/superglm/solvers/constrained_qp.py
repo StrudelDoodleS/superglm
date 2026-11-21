@@ -1680,6 +1680,7 @@ def _solve_qp(
     # face: no independent row can block its numerical normal component.
     coordinate_face: tuple[int, ...] | None = None
     recovered_face: tuple[int, ...] | None = None
+    infeasible_recovered_faces: set[frozenset[int]] = set()
     cycles = _CycleGuard(H_sym, g, A, b, tol, abs_A)
 
     used = 0
@@ -1988,17 +1989,19 @@ def _solve_qp(
                     # the step, and the binding rows' face is solved from ``beta``.
                     _release_nonbinding(A, beta, b, active, abs_A, tol, nonbinding, basis, cycles)
                     continue
-                # A return to an already recovered face can repeatedly release
-                # and immediately re-block its row at an infeasible point.
-                # Allow the recovered face its first release before restarting.
+                # Give an infeasible recovered face its first release. Tied
+                # rows can immediately re-block in a different order, returning
+                # to the same equality subproblem even after visiting other faces.
                 if (
-                    face_candidate is None
-                    and recovered_face == tuple(active)
-                    and can_restart_from_zero
+                    can_restart_from_zero
                     and used < max_iter
+                    and recovered_face == tuple(active)
                     and not _is_feasible(A, beta, b, tol, abs_A=abs_A)
                 ):
-                    break
+                    face = frozenset(active)
+                    if face_candidate is None or face in infeasible_recovered_faces:
+                        break
+                    infeasible_recovered_faces.add(face)
                 # No row resolves the step, yet it breaks one: once the face's recovery has
                 # run, the step is below every row's resolution, so ``beta`` is the face's
                 # minimum to working accuracy and the step test cannot see it (Gill and Wong,

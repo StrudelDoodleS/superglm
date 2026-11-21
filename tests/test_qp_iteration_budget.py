@@ -184,6 +184,27 @@ def test_unrepaired_infeasible_start_with_no_blocker_uses_remaining_budget(monke
     np.testing.assert_array_equal(result.beta, [-1.0, -1.0])
 
 
+def test_cold_qp_recovers_when_tied_rows_reblock_in_a_different_order(monkeypatch):
+    from superglm.solvers import constrained_qp as qp
+
+    # Two identical quadratic blocks tie for release at the projected point.
+    # Each released bound immediately blocks again. The last coordinate keeps
+    # the point infeasible, just as when the initial projection runs out of sweeps.
+    block = [[2.0, -1.0], [-1.0, 1.0]]
+    H = np.eye(5)
+    H[:2, :2] = H[2:4, 2:4] = block
+    g = np.array([-3.0, -1.0, -3.0, -1.0, -1.0])
+    bounds = np.array([0.0, -2.0, 0.0, -2.0, 0.0])
+    monkeypatch.setattr(
+        qp, "_project_feasible", lambda *a, **kw: np.array([0.0, 4.0, 0.0, 4.0, -1.0])
+    )
+
+    result = solve_constrained_qp(H, g, np.eye(5), bounds)
+
+    assert result.converged
+    np.testing.assert_allclose(result.beta, [0, -1, 0, -1, 0], rtol=0, atol=1e-12)
+
+
 def test_coordinate_recovery_reconstructs_small_working_equations(monkeypatch):
     from superglm.solvers import constrained_qp as qp
 
