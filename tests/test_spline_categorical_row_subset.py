@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import pickle
-import tracemalloc
 
 import numpy as np
 import pytest
@@ -15,6 +14,7 @@ from superglm._group_matrix._group_matrix_discretized import (
     DiscretizedSplineCategoricalGroupMatrix,
     SupportCompressedSplineCategoricalGroupMatrix,
 )
+from tests._traced_memory import own_traced_peak
 
 _KINDS = (
     SplineCategoricalGroupMatrix,
@@ -172,13 +172,7 @@ def test_warm_small_subset_allocation_does_not_scale_with_parent(kind):
     rows = np.arange(16, dtype=np.intp)
     group.row_subset(rows)
 
-    tracemalloc.start()
-    try:
-        for _ in range(4):
-            group.row_subset(rows)
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
+    peak, _ = own_traced_peak(group.row_subset, rows)
 
     # A 16-row, two-column subset is tiny; even one full level index costs
     # 1 MiB. Leave ample room for Python/SciPy objects and chunk-local arrays.

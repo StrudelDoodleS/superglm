@@ -1951,6 +1951,46 @@ def test_an_unjudged_returned_state_publishes_earlier_records_as_history(
     assert any("At an earlier iterate, rows 16" in str(w.message) for w in caught)
 
 
+def test_mean_space_certificates_receive_the_penalty_product_rounding(monkeypatch):
+    """The row-set and truncated checks use the applied product's rounding count."""
+    from functools import wraps
+    from inspect import signature
+
+    import superglm.solvers.irls_direct._mean_space as mean_space
+    from superglm.solvers.irls_direct._fit import _IRLSDirectFit
+
+    rounding = 37  # distinguish the passed count from the dense default p + 2
+    monkeypatch.setattr(_IRLSDirectFit, "penalty_rounding", lambda self: rounding)
+    received = {}
+
+    def record(check):
+        parameters = signature(check)
+        counts = received[check.__name__] = []
+
+        @wraps(check)
+        def recorded(*args, **kwargs):
+            counts.append(parameters.bind(*args, **kwargs).arguments.get("penalty_rounding"))
+            return check(*args, **kwargs)
+
+        return recorded
+
+    for name in ("row_set_quadratics", "row_set_residual", "truncated_direction_ratio"):
+        monkeypatch.setattr(mean_space, name, record(getattr(mean_space, name)))
+
+    frame, y, fit = _light_cut(_TWO_LINKS, 1.3)
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        weight_semantics="frequency",
+        selection_penalty=0.0,
+        direct_solve="gram",
+        features={"A": Categorical(base="a0"), "B": Categorical(base="b0")},
+    ).fit(frame[["A", "B"]], y, **fit)
+    assert model.result.beta.size + 2 != rounding
+    for name, counts in received.items():
+        assert set(counts) == {rounding}, name
+
+
 def test_an_unresolved_basis_is_refused_and_named_in_the_fit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

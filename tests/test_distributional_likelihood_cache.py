@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import gc
 import importlib
-import tracemalloc
 import warnings
 import weakref
 
@@ -25,6 +24,7 @@ from superglm.distributional.families.gamma import GammaLS
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
+from tests._traced_memory import own_traced_peak
 
 _FAMILIES = (
     GaussianLS,
@@ -402,12 +402,7 @@ def test_shared_dropped_row_buffers_are_charged_against_retained_budget():
 
 def test_root_authority_and_warm_hit_do_not_copy_or_scan_source_rows(monkeypatch):
     family, plan = _problem(n=100_000)
-    tracemalloc.start()
-    try:
-        cache = _build(family, plan)
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
+    peak, cache = own_traced_peak(_build, family, plan)
     assert cache is not None
     # Authority is constant-size metadata, well below one float64 source copy.
     assert peak < 128 * 1024
@@ -421,10 +416,6 @@ def test_root_authority_and_warm_hit_do_not_copy_or_scan_source_rows(monkeypatch
         return original_equal(left, right, *args, **kwargs)
 
     monkeypatch.setattr(np, "array_equal", bounded_equal)
-    tracemalloc.start()
-    try:
-        assert cache.take(plan, indices, start=0, stop=64) is child
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
+    peak, hit = own_traced_peak(lambda: cache.take(plan, indices, start=0, stop=64))
+    assert hit is child
     assert peak < 128 * 1024
