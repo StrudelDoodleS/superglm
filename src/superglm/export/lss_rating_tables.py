@@ -56,7 +56,6 @@ from superglm.features.interaction import CategoricalInteraction, interaction_ce
 from superglm.features.spline import _SplineBase
 from superglm.inference._term_helpers import _build_spline_metadata
 from superglm.links import _LOG_LINK_PROBE, _is_shifted_log_link
-from superglm.model.separated_levels import separated_labels
 
 _OFFSET_KINDS = ("auto", "discrete", "per_unit")
 
@@ -210,6 +209,8 @@ def _log_floor(link) -> float:
 def _categorical_block(
     prepared, name, frame, column, sample_weight, sign, compiled
 ) -> RatingTableBlock:
+    from superglm.model.separated_levels import separated_labels
+
     levels = list(prepared.levels)
     table = pd.DataFrame(
         {

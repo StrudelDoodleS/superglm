@@ -59,12 +59,6 @@ from superglm.links import (
     SqrtLink,
     resolve_link,
 )
-from superglm.model.separated_levels import (
-    predicted_separated_levels,
-    record_separated_levels,
-    separated_labels,
-    warn_separated_predictions,
-)
 
 # Inverse links that map the whole line strictly monotonically onto an open
 # interval, so a parameter reaches an end of its range only as its linear
@@ -125,6 +119,9 @@ def scan_predictor_separation(
     findings: list[SeparatedTerm] = []
     curves: list = []
     level_curves: list = []
+    # Read lazily: loading a fitted SuperLSS must not import the SuperGLM model package.
+    from superglm.model.separated_levels import record_separated_levels
+
     for predictor, predictor_boundaries in zip(compiled_tuple, boundary_tuple, strict=True):
         if not predictor_boundaries:
             continue
@@ -187,6 +184,8 @@ def disclose_separated_levels(
     findings: list[SeparatedTerm], compiled: Sequence[CompiledPredictor], weights: NDArray
 ) -> None:
     """Warn about complete-response levels once the candidate is ready to publish."""
+    from superglm.model.separated_levels import separated_labels
+
     if findings:
         specs = {
             f"{predictor.name}:{term}": spec
@@ -202,6 +201,12 @@ def warn_on_separated_prediction(
     compiled: Sequence[CompiledPredictor], X: FrameLike | EagerFrame
 ) -> None:
     """Collect the hits across predictors after scoring has validated the input."""
+    from superglm.model.separated_levels import (
+        predicted_separated_levels,
+        separated_labels,
+        warn_separated_predictions,
+    )
+
     hits: list[str] = []
     frame = None
     for predictor in compiled:

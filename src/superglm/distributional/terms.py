@@ -107,7 +107,6 @@ from superglm.distributional.prediction_design import (
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import _numeric_values
 from superglm.links import _is_shifted_log_link
-from superglm.model.separated_levels import level_flags, separated_coefficients, separated_labels
 from superglm.stats.wood_pvalue import wood_test_smooth
 from superglm.terms import resolve_label
 
@@ -959,6 +958,8 @@ def _prepare_term_effect(
     if special_slice is not None:
         marked = set(_special_domain(spec))
         special = tuple(str(level) in marked for level in levels or ())
+    from superglm.model.separated_levels import level_flags, separated_labels
+
     separated = None
     if isinstance(spec, Categorical) and separated_labels(spec):
         compiled = _compiled_predictor(fitted, parameter).compiled
@@ -1123,6 +1124,8 @@ def _prepare_term_test(
     level_term = spec is not None and _level_domain(spec) is not None
     identified = None
     separation_note = ""
+    from superglm.model.separated_levels import separated_labels
+
     if isinstance(spec, Categorical) and (held := separated_labels(spec)):
         if spec._base_level in held:
             separation_note = (
@@ -1237,6 +1240,8 @@ def _intercept_row(
 
 
 def _separated_intercept_note(fitted: Any, parameter: str) -> str:
+    from superglm.model.separated_levels import separated_coefficients, separated_labels
+
     compiled = _compiled_predictor(fitted, parameter).compiled
     flags = separated_coefficients(compiled.groups, compiled.specs, compiled.interaction_specs)
     if flags is None or not flags[-1]:
