@@ -684,8 +684,11 @@ def test_a_huge_row_over_tiny_columns_is_warned_without_overflow():
     np.testing.assert_allclose(_shares(model, new), [np.sqrt(0.5)], rtol=1e-6)
 
 
+@pytest.mark.pins_behaviour
 def test_a_subnormal_entry_is_priced_without_overflow():
-    """``dup = 1e-309`` (subnormal): priced as master, no overflow, and no warning.
+    """Control (passes on master; at 6260329c6 the disclosure pass overflowed).
+
+    ``dup = 1e-309`` (subnormal): priced as master, no overflow, and no warning.
 
     The intercept is part of the row, so the row is on the determined space. Each
     power-of-two scaling is applied to the entries themselves, so no
