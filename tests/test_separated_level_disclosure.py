@@ -747,18 +747,24 @@ def test_the_interaction_readers_flag_a_separated_cell():
 
 
 def test_a_reader_factors_each_block_once(monkeypatch):
-    """B x P separated in a 2 x 2 grid: each reader call factors the cross's block once.
+    """B x P separated in a 2 x 2 grid: each reader call builds the cross's block once.
 
-    A plain level's block is read from its labels and factors nothing.  At 46bcd5990
-    ``relativities()`` factored the same block five times, a centred ``term_inference``
-    four times, and the plain level's block once per reader.
+    The block is read from the cells' structure and takes no SVD of their indicator
+    rows; a plain level's block is read from its labels.  At 46bcd5990 ``relativities()``
+    factored the same block five times, a centred ``term_inference`` four times, and the
+    plain level's block once per reader; at 4d3c72657 each build took a dense SVD.
     """
     import superglm.diagnostics.separation as separation
+    import superglm.model.separated_levels as separated_levels
 
-    calls = []
+    calls, svds = [], []
     factor = separation._rank_and_null_space
     monkeypatch.setattr(
-        separation, "_rank_and_null_space", lambda design: calls.append(1) or factor(design)
+        separation, "_rank_and_null_space", lambda design: svds.append(1) or factor(design)
+    )
+    build = separated_levels._cross_null
+    monkeypatch.setattr(
+        separated_levels, "_cross_null", lambda *args: calls.append(1) or build(*args)
     )
     model, _, _ = _grid([("A", "P", 20), ("A", "Q", 20), ("B", "P", 0), ("B", "Q", 30)])
     for read in (
@@ -774,7 +780,158 @@ def test_a_reader_factors_each_block_once(monkeypatch):
     calls.clear()
     plain.relativities(with_se=True, centering="mean")
     plain.summary()
-    assert not calls
+    assert not calls and not svds
+
+
+def _dense_null_projector(model, frame, name="a:b"):
+    """The reference: the healthy rows' design, densely, and its null space by SVD.
+
+    Healthy rows sit in no recorded cell or level and no pinned level.  Over the block's
+    coordinates ``[intercept, parents, cross]``; returns them and the projector onto the
+    null space of the distinct healthy rows.
+    """
+    spec = model._interaction_specs[name]
+    first, second = spec.parent_names
+    groups = {g.feature_name: g for g in model._groups}
+    intercept = max(g.end for g in model._groups)
+    spans = (range(groups[term].start, groups[term].end) for term in (first, second, name))
+    columns = [intercept, *(j for span in spans for j in span)]
+    local = {column: i for i, column in enumerate(columns)}
+    out = {
+        parent: {
+            *model._specs[parent]._separated_levels_at_fit,
+            *model._specs[parent]._pinned_levels,
+        }
+        for parent in (first, second)
+    }
+    held = set(map(tuple, spec._separated_cells_at_fit))
+    rows = set()
+    for a, b in set(zip(frame[first].astype(str), frame[second].astype(str), strict=True)):
+        if a in out[first] or b in out[second] or (a, b) in held:
+            continue
+        hit = [intercept]
+        for parent, level in ((first, a), (second, b)):
+            non_base = list(model._specs[parent]._non_base)
+            if level in non_base:
+                hit.append(groups[parent].start + non_base.index(level))
+        if (a, b) in spec._pairs:
+            hit.append(groups[name].start + spec._pairs.index((a, b)))
+        rows.add(tuple(local[c] for c in hit))
+    design = np.zeros((len(rows), len(columns)))
+    for i, hit in enumerate(rows):
+        design[i, list(hit)] = 1.0
+    _, values, right = np.linalg.svd(design, full_matrices=True)
+    rank = int(np.sum(values > max(design.shape) * np.finfo(float).eps * values[0]))
+    null = right[rank:].T
+    return np.asarray(columns), null @ null.T
+
+
+def _random_cross(seed, n1=6, n2=9, n=9000, zero=0.15, empty=0.1):
+    """A Poisson ``a x b`` book with a random share of claim-free and of empty cells."""
+    rng = np.random.default_rng(seed)
+    cells = [(i, j) for i in range(n1) for j in range(n2) if rng.random() >= empty or i == j == 0]
+    pick = rng.integers(0, len(cells), n)
+    a = np.array([f"r{cells[k][0]}" for k in pick])
+    b = np.array([f"c{cells[k][1]}" for k in pick])
+    y = rng.poisson(0.3, n).astype(float)
+    claim_free = {cell for cell in cells if rng.random() < zero}
+    y[[cells[k] in claim_free for k in pick]] = 0.0
+    frame = pd.DataFrame({"a": a, "b": b})
+    model = SuperGLM(
+        family="poisson",
+        features={"a": Categorical(base="r0"), "b": Categorical(base="c0")},
+        interactions=[("a", "b")],
+        selection_penalty=0.0,
+    )
+    _caught(lambda: model.fit(frame, y))
+    return model, frame
+
+
+_AGREEMENT_GRIDS = {
+    "sparse_cell": _SPARSE + [("B", "Q", 30), ("B", "R", 0)],
+    "sparse_base_cell": [("A", "P", 0), *_SPARSE[1:], ("B", "Q", 30), ("B", "R", 40)],
+    "base_column_cell": _SPARSE + [("B", "P", 0), ("B", "Q", 30), ("B", "R", 40)],
+    "base_cell_2x2": [("A", "P", 0), ("A", "Q", 40), ("B", "P", 20), ("B", "Q", 30)],
+    "interior_2x2": [("A", "P", 20), ("A", "Q", 20), ("B", "P", 20), ("B", "Q", 0)],
+    "centring_3x2": [
+        ("A", "P", 10),
+        ("A", "Q", 20),
+        ("B", "P", 15),
+        ("B", "Q", 25),
+        ("C", "P", 0),
+        ("C", "Q", 5),
+    ],
+}
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize(
+    "case", [*_AGREEMENT_GRIDS, "crossed", *(f"random_{seed}" for seed in range(6))]
+)
+def test_the_cells_structure_gives_the_dense_null_space(case):
+    """The structural block spans the null space the healthy rows' dense SVD gives.
+
+    On the reviewers' crossed grids and random crosses with claim-free and empty cells
+    (pruned columns, separated base-row and base-column cells), the projector onto the
+    block's directions equals the one from the SVD of the healthy design to ``1e-10``.
+    Control: 4d3c72657 took that SVD itself.
+    """
+    from superglm.model.separated_levels import separation_flags
+
+    if case in _AGREEMENT_GRIDS:
+        model, frame, _ = _cells(_AGREEMENT_GRIDS[case])
+    elif case == "crossed":
+        model, frame, _ = _crossed()
+    else:
+        model, frame = _random_cross(int(case.split("_")[1]))
+    assert model._interaction_specs["a:b"]._separated_cells_at_fit
+    columns, reference = _dense_null_projector(model, frame)
+    flags = separation_flags(model._groups, model._specs, model._interaction_specs)
+    (block,) = [block for block in flags.of("a:b") if "a:b" in block.terms]
+    full = np.zeros((flags.width, flags.width))
+    full[block.free, block.free] = 1.0
+    full[np.ix_(block.columns, block.columns)] += block.null @ block.null.T
+    np.testing.assert_allclose(full[np.ix_(columns, columns)], reference, rtol=0, atol=1e-10)
+
+
+def test_a_separated_cell_costs_its_readers_no_dense_grid():
+    """A 30 x 30 cross with separated base-row, base-column and interior cells.
+
+    ``relativities()`` reads the same memory, to 256 KiB, whether or not the cells are
+    recorded, as on master, whose readers read no record.  At 4d3c72657 the block took
+    a dense SVD of the healthy cells' rows: 64.9 MB recorded against 0.40 MB.
+    """
+    import tracemalloc
+
+    rng = np.random.default_rng(4)
+    n = 30 * 30 * 20
+    a, b = rng.integers(0, 30, n), rng.integers(0, 30, n)
+    y = rng.poisson(1.0, n).astype(float)
+    y[((a == 0) & (b == 7)) | ((a == 5) & (b == 0)) | ((a == 9) & (b == 11))] = 0.0
+    model = SuperGLM(
+        family="poisson",
+        features={"a": Categorical(base="0"), "b": Categorical(base="0")},
+        interactions=[("a", "b")],
+        selection_penalty=0.0,
+    )
+    _caught(lambda: model.fit(pd.DataFrame({"a": a.astype(str), "b": b.astype(str)}), y))
+    spec = model._interaction_specs["a:b"]
+    held = spec._separated_cells_at_fit
+    assert len(held) == 3
+
+    def peak() -> int:
+        model.relativities(with_se=False)  # imports and lazy state, outside the count
+        tracemalloc.start()
+        model.relativities(with_se=False)
+        top = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+        return top
+
+    recorded = peak()
+    spec._separated_cells_at_fit = ()
+    unrecorded = peak()
+    spec._separated_cells_at_fit = held
+    assert recorded <= unrecorded + 256 * 1024
 
 
 @pytest.mark.pins_behaviour

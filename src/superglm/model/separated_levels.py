@@ -13,7 +13,6 @@ covers for the notices that must not report them twice.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from itertools import product
 from typing import Any
 
 import numpy as np
@@ -67,8 +66,8 @@ def separated_terms(model) -> set[str]:
 # ``p``.  A treatment-coded level's block is read from its labels: beside a healthy
 # base, each separated level's own column is a direction on its own; a separated base
 # adds the one direction that moves the intercept against every healthy level.  A
-# crossed term's block is read from its indicator rows, one per healthy occupied cell,
-# at most ``L1 x L2`` (``_rank_and_null_space``).  A reader builds the blocks once
+# crossed term's block is read from its healthy occupied cells' treatment-coded
+# structure, a bipartite graph of its levels (``_cross_null``).  A reader builds the blocks once
 # (``separation_flags``) and tests only the terms a block holds; no other term's
 # levels are read.
 
@@ -169,23 +168,50 @@ def _level_block(name: str, spec, group, held: frozenset, intercept: int) -> _Bl
     return _Block(frozenset({name}), free, columns, null) if free.size or columns.size else None
 
 
-def _null_block(columns: list[int], rows: list[list[int]]) -> tuple[NDArray, NDArray] | None:
-    """``(columns, N)``: an orthonormal basis of the null space of the block's indicator rows.
+def _cross_null(node_row: NDArray, node_col: NDArray, cross: NDArray, n1: int, n2: int, width: int):
+    """``(free, kept, N)``: the null space of a crossed block's healthy indicator rows.
 
-    ``rows`` lists, per healthy level or cell, the positions within ``columns`` its
-    design row has a one at.  ``None`` when the rows determine every coordinate.
+    Coordinates: ``0`` the intercept, ``1..n1`` and the next ``n2`` the parents', then the
+    cross's.  A healthy cell has ones at ``0``, ``node_row`` (``0`` on the base row),
+    ``node_col`` (``1 + n1 + n2`` on the base column) and its column ``cross`` (``-1``:
+    none).  Each cross column is one cell's, so a healthy cell with one only fixes it,
+    and one no healthy cell holds is ``free``.  With ``x_i = alpha + a_i`` and
+    ``y_j = b_j`` (zero on the base column), a cell without one says ``x_i + y_j = 0``:
+    an edge of the levels' bipartite graph.  Each component off the base column's is a
+    direction, ``x = 1``, ``y = -1``, ``c_ij = -(x_i + y_j)``, orthonormalised over the
+    coordinates ``kept`` it touches: O(cells), where the rows' SVD is cells x columns.
     """
-    from superglm.diagnostics.separation import _rank_and_null_space
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
 
-    design = np.zeros((len(rows), len(columns)))
-    for i, hit in enumerate(rows):
-        design[i, hit] = 1.0
-    null = _rank_and_null_space(design)[1]
-    return (np.asarray(columns, dtype=np.intp), null) if null.shape[1] else None
+    offset = 1 + n1 + n2  # the first cross column, and the base column's node
+    edge = cross < 0
+    graph = coo_matrix(
+        (np.ones(int(edge.sum())), (node_row[edge], node_col[edge])),
+        shape=(offset + 1, offset + 1),
+    )
+    _, label = connected_components(graph, directed=False)
+    held = np.zeros(width, dtype=bool)
+    held[cross[~edge]] = True
+    free = np.flatnonzero(~held[offset:]) + offset
+    components = np.setdiff1d(np.unique(label), label[offset])
+    if not components.size:
+        return free, _NONE, np.zeros((0, 0))
+    on = label[:, None] == components[None, :]  # node x component
+    x, y = on[: n1 + 1].astype(float), -on[n1 + 1 : offset].astype(float)
+    directions = np.zeros((width, components.size))
+    directions[0] = x[0]
+    directions[1 : n1 + 1] = x[1:] - x[0]
+    directions[n1 + 1 : offset] = y
+    cells = ~edge
+    y_at = np.vstack([y, np.zeros((1, components.size))])  # the base column's y is 0
+    directions[cross[cells]] = -(x[node_row[cells]] + y_at[node_col[cells] - n1 - 1])
+    kept = np.flatnonzero(np.any(directions != 0.0, axis=1))
+    return free, kept, np.linalg.qr(directions[kept])[0]
 
 
 def _cross_block(name: str, spec, specs: dict, groups, record: _Record, intercept: int):
-    """A crossed term's block, from its healthy occupied cells' indicator rows."""
+    """A crossed term's block, from its healthy occupied cells (``_cross_null``)."""
     from superglm.features.categorical import Categorical
 
     first, second = (specs.get(parent) for parent in spec.parent_names)
@@ -199,11 +225,11 @@ def _cross_block(name: str, spec, specs: dict, groups, record: _Record, intercep
     if any(group is None for group in parts) or cross is None:
         return None
     group1, group2 = parts
+    offset = 1 + group1.size + group2.size
     at1 = {level: 1 + j for j, level in enumerate(first._non_base)}
     at2 = {level: 1 + group1.size + j for j, level in enumerate(second._non_base)}
-    grid = {cell: g for g, cell in enumerate(spec._all_pairs or spec._pairs)}
-    to_column = spec._grid_to_col
-    offset = 1 + group1.size + group2.size
+    index1 = {level: i for i, level in enumerate(first._levels)}
+    index2 = {level: j for j, level in enumerate(second._levels)}
     occupied = record.occupied[name]
     if occupied is None:  # saved before the build recorded them: no flags (``_Record``)
         return None
@@ -213,26 +239,41 @@ def _cross_block(name: str, spec, specs: dict, groups, record: _Record, intercep
         {*record.levels.get(spec.parent_names[0], ()), *first._pinned_levels},
         {*record.levels.get(spec.parent_names[1], ()), *second._pinned_levels},
     )
-    rows = []
-    for a, b in product(first._levels, second._levels):
-        if a in out1 or b in out2 or (a, b) in held or (a, b) not in occupied:
-            continue
-        hit = [0, *([at1[a]] if a in at1 else []), *([at2[b]] if b in at2 else [])]
-        g = grid.get((a, b))
-        column = None if g is None else (g if to_column is None else int(to_column[g]))
-        if column is not None and column >= 0:
-            hit.append(offset + column)
-        rows.append(hit)
-    columns = [
-        intercept,
-        *range(group1.start, group1.end),
-        *range(group2.start, group2.end),
-        *range(cross.start, cross.end),
-    ]
-    found = _null_block(columns, rows)
-    if found is None:
+
+    def mask(cells) -> NDArray:
+        found = np.zeros((len(index1), len(index2)), dtype=bool)
+        for a, b in cells:
+            if a in index1 and b in index2:
+                found[index1[a], index2[b]] = True
+        return found
+
+    healthy = mask(occupied) & ~mask(held)
+    healthy[[index1[a] for a in out1 if a in index1]] = False
+    healthy[:, [index2[b] for b in out2 if b in index2]] = False
+    column = np.full(healthy.shape, -1, dtype=np.intp)
+    grid = spec._all_pairs or spec._pairs
+    emitted = np.arange(len(grid)) if spec._grid_to_col is None else spec._grid_to_col
+    for (a, b), g in zip(grid, emitted, strict=True):
+        if g >= 0:
+            column[index1[a], index2[b]] = offset + g
+    i, j = np.nonzero(healthy)
+    node_row = np.array([at1.get(a, 0) for a in first._levels], dtype=np.intp)[i]
+    node_col = np.array([at2.get(b, offset) for b in second._levels], dtype=np.intp)[j]
+    columns = np.array(
+        [
+            intercept,
+            *range(group1.start, group1.end),
+            *range(group2.start, group2.end),
+            *range(cross.start, cross.end),
+        ],
+        dtype=np.intp,
+    )
+    free, kept, null = _cross_null(
+        node_row, node_col, column[i, j], group1.size, group2.size, len(columns)
+    )
+    if not (free.size or kept.size):
         return None
-    return _Block(frozenset({name, *spec.parent_names}), _NONE, *found)
+    return _Block(frozenset({name, *spec.parent_names}), columns[free], columns[kept], null)
 
 
 def separation_flags(
@@ -291,8 +332,9 @@ def _moved(blocks: list[_Block], column: NDArray, weight: NDArray | None = None)
         free = has & np.isin(column, block.free)
         share = free * (1.0 - 2.0 * weight) + float(np.sum(weight[free] ** 2))
         if block.columns.size:
-            position = {int(c): r for r, c in enumerate(block.columns)}
-            at = np.fromiter((position.get(int(c), -1) for c in column), np.intp, len(column))
+            position = np.full(max(block.columns.max(), column.max(initial=-1)) + 1, -1)
+            position[block.columns] = np.arange(block.columns.size)
+            at = np.where(has, position[np.maximum(column, 0)], -1)
             reach = np.where((at >= 0)[:, None], block.null[np.maximum(at, 0)], 0.0)
             share = share + np.sum((reach - weight @ reach) ** 2, axis=1)
         moved |= np.sqrt(np.maximum(share, 0.0)) > PREDICTION_TOLERANCE * size
