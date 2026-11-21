@@ -705,10 +705,12 @@ def format_separated_levels(
         f"{'its' if one else 'their'} effect no finite estimate."
     )
     if parameter_effects:
-        opening += (
-            " Each affected effect is where the fit stopped. Inference flags those effects "
-            "and the term's joint test is limited to the identified contrasts."
-        )
+        opening += " Each affected effect is where the fit stopped."
+        if n_levels:
+            opening += (
+                " Inference flags the separated levels and limits their terms' joint tests "
+                "to the identified contrasts."
+            )
     elif fitted:
         opening += (
             f" The fitted price for {'it' if one else 'each'} is where the fit stopped, not an "

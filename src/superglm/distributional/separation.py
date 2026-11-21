@@ -170,18 +170,16 @@ def scan_predictor_separation(
     return findings
 
 
-def disclose_separated_levels(
+def disclose_predictor_separation(
     findings: list[SeparatedTerm], compiled: Sequence[CompiledPredictor], weights: NDArray
 ) -> None:
-    """Warn about complete-response levels once the candidate is ready to publish."""
-    from superglm.model.separated_levels import separated_labels
-
+    """Warn about levels and crossed cells once the candidate is ready to publish."""
     if findings:
         specs = {
             f"{predictor.name}:{term}": spec
             for predictor in compiled
-            for term, spec in predictor.compiled.specs.items()
-            if separated_labels(spec)
+            for terms in (predictor.compiled.specs, predictor.compiled.interaction_specs)
+            for term, spec in terms.items()
         }
         lines = level_lines(SeparatedLevels(findings, specs, weights, None, False, None))
         warn_caller(format_separated_levels(lines, parameter_effects=True), SeparationWarning)

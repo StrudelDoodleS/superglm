@@ -9,9 +9,10 @@ import pandas as pd
 import pytest
 from scipy.stats import chi2
 
-from superglm import Constraint, SuperLSS, cat, collapse_levels, s
+from superglm import CategoricalInteraction, Constraint, SuperLSS, cat, collapse_levels, s
 from superglm.diagnostics.separation import SeparationError, SeparationWarning
 from superglm.distributional import NegativeBinomialLS
+from superglm.terms import interaction
 
 
 def _model(term=None, *, smooth=False, intercept=True, family=None, **kwargs):
@@ -155,6 +156,32 @@ def test_fit_discloses_after_terminal_preparation_and_before_installation(
         fit(X, healthy_y)
         model.predict(X)
     assert "SEP" not in model.term_test("mean", "lev").note
+
+
+def test_fit_discloses_a_separated_level_and_its_crossed_cells_once():
+    rng = np.random.default_rng(42)
+    a = rng.choice(["A", "B", "E"], 4000, p=[0.48, 0.48, 0.04])
+    b = rng.choice(["X", "Y"], len(a))
+    y = rng.poisson(
+        0.5 * np.exp(0.3 * (a == "B") + 0.2 * (b == "Y") + 0.8 * ((a == "B") & (b == "Y")))
+    )
+    y[a == "E"] = 0
+    family = NegativeBinomialLS()
+    model = SuperLSS(
+        family,
+        family.mean(
+            cat("a", base="A"), cat("b", base="X"), interaction(CategoricalInteraction("a", "b"))
+        ),
+        family.theta(),
+    )
+    with pytest.warns(SeparationWarning) as caught:
+        model.fit(pd.DataFrame({"a": a, "b": b}), y)
+    assert len(caught) == 1
+    message = str(caught[0].message)
+    assert "'mean:a' level 'E'" in message
+    assert "'mean:a:b' cell 'E' x 'X'" in message
+    assert "'mean:a:b' cell 'E' x 'Y'" in message
+    assert "where the fit stopped" in message
 
 
 @pytest.mark.parametrize("method", ["predict", "predict_parameters"])

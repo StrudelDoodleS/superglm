@@ -77,7 +77,7 @@ from superglm.distributional.results.solver import DenseSolverConfig, DenseSolve
 from superglm.distributional.separation import (
     apply_separation_policy,
     censored_recession,
-    disclose_separated_levels,
+    disclose_predictor_separation,
     format_censored_separation_message,
     predictor_response_boundaries,
     record_factor_smooth_levels,
@@ -1207,7 +1207,7 @@ def _fit_candidate(
             separation_boundaries=separation_boundaries,
             separation_response=retained_y,
         )
-    separated_levels = []
+    separation_findings = []
     if separation_boundaries is not None:
         findings = scan_predictor_separation(
             compiled,
@@ -1217,9 +1217,9 @@ def _fit_candidate(
             record_levels=observation.is_complete,
         )
         if observation.is_complete and separation_policy == "warn":
-            separated_levels = [finding for finding in findings if finding.kind == "levels"]
-            findings = [finding for finding in findings if finding.kind != "levels"]
-        apply_separation_policy(findings, separation_policy, stacklevel=4)
+            separation_findings = findings
+        else:
+            apply_separation_policy(findings, separation_policy, stacklevel=4)
     bound_rows = plan_observation(likelihood_plan).bounds
     if bound_rows is not None and separation_policy != "ignore":
         apply_separation_policy(
@@ -1344,7 +1344,7 @@ def _fit_candidate(
             shape_fit=shape_fit,
             rule_free_covariance=rule_free_covariance,
         )
-    disclose_separated_levels(separated_levels, compiled, resolved_weights.values)
+    disclose_predictor_separation(separation_findings, compiled, resolved_weights.values)
     return candidate
 
 
