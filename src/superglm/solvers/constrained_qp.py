@@ -1622,8 +1622,10 @@ def _solve_qp(
     # feasibility is re-tested on the point actually returned, below.
     if beta_start is not None and _is_feasible(A, beta_start, b, tol, abs_A=abs_A):
         beta = np.array(beta_start, dtype=float)
+        can_restart_from_zero = False
     else:
         beta = _project_feasible(beta_unc, A, b, tol, structure=structure)
+        can_restart_from_zero = bool(np.all(b <= 0.0))
     # The warm rows that do not bind at the start: a working row need not bind (Gill and
     # Wong 2015, section 2), and a step moves these until they do. A row the ratio test adds
     # binds there, and one on a face the loop reaches binds, so their later slack is rounding
@@ -1990,8 +1992,7 @@ def _solve_qp(
                 if (
                     face_candidate is None
                     and recovered_face == tuple(active)
-                    and beta_start is None
-                    and np.all(b <= 0.0)
+                    and can_restart_from_zero
                     and not _is_feasible(A, beta, b, tol, abs_A=abs_A)
                 ):
                     break
@@ -2021,12 +2022,7 @@ def _solve_qp(
     # The projection or its repair failed. A feasible phase-one point makes
     # the remaining iterations usable. A supplied start prevents recursion.
     used = it + 1
-    if (
-        used < max_iter
-        and beta_start is None
-        and np.all(b <= 0.0)
-        and not _is_feasible(A, beta, b, tol, abs_A=abs_A)
-    ):
+    if used < max_iter and can_restart_from_zero and not _is_feasible(A, beta, b, tol, abs_A=abs_A):
         retry = _solve_qp(
             H_sym,
             g,

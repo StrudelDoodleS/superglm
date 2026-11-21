@@ -129,14 +129,15 @@ def test_rejected_budget_limited_step_restarts_at_committed_point(monkeypatch, p
         )
 
 
-def test_unrepaired_infeasible_start_with_no_blocker_uses_remaining_budget(monkeypatch):
+@pytest.mark.parametrize("start", [None, np.array([-1.0, -4.0])])
+def test_unrepaired_infeasible_start_with_no_blocker_uses_remaining_budget(monkeypatch, start):
     from superglm.solvers import constrained_qp as qp
 
     # The first bound binds. The face step moves y from -4 to -3, so the
     # second row is violated along the entire segment and cannot block it.
     monkeypatch.setattr(qp, "_project_feasible", lambda *a, **kw: np.array([-1.0, -4.0]))
     result = solve_constrained_qp(
-        np.eye(2), -np.array([2.0, 3.0]), np.eye(2), -np.ones(2), [0], max_iter=12
+        np.eye(2), -np.array([2.0, 3.0]), np.eye(2), -np.ones(2), [0], max_iter=12, beta_start=start
     )
     assert result.converged
     np.testing.assert_array_equal(result.beta, [-1.0, -1.0])
