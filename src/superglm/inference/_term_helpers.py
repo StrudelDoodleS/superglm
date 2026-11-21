@@ -71,9 +71,8 @@ def _recenter_term(
     from a caller holding the covariance; a term publishing its own vector's covariance
     (``knot_covariance``) needs none. The shift is recorded on ``centering_shift`` (0.0 on every
     early return) for callers, such as the rating-table export, that must put it back.
-    ``centre_on`` marks the values whose mean is the centre, every value when ``None``: a
-    categorical term leaves out the levels a separating direction moves
-    (``separated_levels.level_flags``).
+    ``centre_on`` marks the values whose mean is the centre (all when ``None``); a categorical
+    term leaves out the levels a separating direction moves (``separated_levels.level_flags``).
     """
     if centering == "native" or ti.log_relativity is None:
         return ti
