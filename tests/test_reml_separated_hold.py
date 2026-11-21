@@ -134,6 +134,15 @@ def test_metrics_blank_only_contrasts_that_move_under_separation(base):
     )
 
 
+@pytest.mark.parametrize("family", ["poisson", "binomial"])
+def test_healthy_reference_for_separated_base_is_not_a_weak_level(family):
+    model, _, _ = _fit_with_separated_z("Z", family)
+    diagnostics = model.diagnostics()
+    assert diagnostics["r"]["weakly_identified"] == []
+    assert diagnostics["_model"]["weakly_identified"] == []
+    assert diagnostics["_model"].get("weakly_identified_note") is None
+
+
 @pytest.mark.parametrize("discrete", [False, True])
 @pytest.mark.parametrize(
     "family,link",

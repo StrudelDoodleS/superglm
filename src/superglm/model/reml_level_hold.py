@@ -47,6 +47,7 @@ class REMLLevelHold:
     @classmethod
     def for_model(cls, model, weights, offset, anchors):
         blocks = {}
+        separated_columns = []
         for i, (group, matrix) in enumerate(
             zip(model._groups, model._dm.group_matrices, strict=True)
         ):
@@ -58,6 +59,7 @@ class REMLLevelHold:
             if matrix.n_levels != len(non_base):
                 continue
             held = [j for j, level in enumerate(non_base) if level in labels]
+            n_separated = len(held)
             if spec._base_level in labels:
                 if binomial_log(model._distribution, model._link):
                     # Its reference direction spans the intercept and every
@@ -78,15 +80,22 @@ class REMLLevelHold:
                 local = np.asarray(held)
                 free = _free_indicators(matrix, local)
                 blocks[i] = _HeldIndicators(matrix, free, local, group.start + local)
+                separated_columns.extend(blocks[i].columns[:n_separated])
         if not blocks:
             return None
-        return cls(blocks, np.zeros_like(weights) if offset is None else offset.copy(), anchors)
+        return cls(
+            blocks,
+            np.zeros_like(weights) if offset is None else offset.copy(),
+            anchors,
+            separated_columns,
+        )
 
-    def __init__(self, blocks, offset, anchors):
+    def __init__(self, blocks, offset, anchors, separated_columns):
         self.blocks = blocks
         self.offset = offset
         self.anchors = anchors
         self.columns = np.concatenate([block.columns for block in blocks.values()])
+        self.separated_columns = separated_columns
         if anchors:
             self._add_offset()
 

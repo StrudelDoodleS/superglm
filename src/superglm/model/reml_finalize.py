@@ -1113,7 +1113,7 @@ def finalize_reml_fit(
         lambdas=lambdas,
         reml_penalties=reml_penalties,
         at_mode=not qp_passthrough,
-        held_columns=() if level_hold is None else level_hold.columns,
+        held_columns=() if level_hold is None else level_hold.separated_columns,
     )
     model._reporting_support_state = reporting_state
     model._linear_system_state = structured_linear_state
