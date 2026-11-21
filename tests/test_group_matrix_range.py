@@ -25,6 +25,7 @@ from superglm._group_matrix._group_matrix_discretized import (
     SupportCompressedSplineCategoricalGroupMatrix,
     SupportCompressedSSPGroupMatrix,
 )
+from tests._traced_memory import own_traced_peak
 
 _CATEGORIES = (
     SplineCategoricalGroupMatrix,
@@ -295,15 +296,10 @@ def test_support_prediction_preserves_matvec_association_and_live_maps(kind):
 def test_warm_range_allocation_stays_bounded_by_chunk(kind):
     group = _group(kind, n=262144)
     helper = ranges.group_range_matvec
-    helper(group, 0, 16, np.ones(2))
-    tracemalloc.start()
-    try:
-        for _ in range(4):
-            result = helper(group, 16, 32, np.ones(2))
-            assert result.shape == (16,)
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
+    beta = np.ones(2)
+    helper(group, 0, 16, beta)
+    peak, result = own_traced_peak(helper, group, 16, 32, beta)
+    assert result.shape == (16,)
     assert peak < 128 * 1024, f"Tiny range evaluation allocated {peak} bytes"
 
 

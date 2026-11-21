@@ -454,13 +454,22 @@ def test_a_refit_stopped_at_a_loose_tolerance_is_not_disclosed(monkeypatch):
     import superglm.distributional.solver.solver as solver
 
     initial = solver._initial_coefficients
+    run = solver._run_iterations
+    refits = []
 
     def from_scratch(context, state, rank, retained, phase_recorder):
         coefficients = np.array(initial(context))
         coefficients[retained.dropped] = 0.0
         return solver._evaluate_state(context, coefficients, phase_recorder=phase_recorder)
 
+    def record_refits(context, *args, **kwargs):
+        result = run(context, *args, **kwargs)
+        if context.retained is not None:
+            refits.append(result)
+        return result
+
     monkeypatch.setattr(solver, "_representative_state", from_scratch)
+    monkeypatch.setattr(solver, "_run_iterations", record_refits)
     x = np.linspace(-1.0, 1.0, 5_000)
     shape = expit(20.0 * x)
     y = np.expm1(-shape * np.log(np.random.default_rng(4).random(5_000))) / shape
@@ -475,6 +484,8 @@ def test_a_refit_stopped_at_a_loose_tolerance_is_not_disclosed(monkeypatch):
             Predictor("shape", {"x": Numeric()}),
         ),
     ).fit(frame, y, inner_tol=1.0e-4)
+    assert refits
+    np.testing.assert_array_equal(model.result_.coefficients, refits[-1].state.coefficients)
     assert model.result_.rank < len(model.result_.coefficients)
     assert not _wall_messages(model)
 

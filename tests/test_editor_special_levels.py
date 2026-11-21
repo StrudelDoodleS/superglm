@@ -1287,7 +1287,7 @@ def _restriction_case(case):
             [0, 1, 2],
             np.zeros(3),
         )
-        expected = None  # on the fit's recorded face
+        expected = 1.0  # on the fit's recorded face
     return A, active, beta, f if f.ndim == 2 else np.diag(f), c, expected
 
 
@@ -1346,13 +1346,11 @@ def test_the_editor_holds_the_rows_the_fit_held_in_their_own_units(case):
     - ``nearly-dependent-rows``: ``e0`` and ``e0 + 1.5e-15 e1`` beside 98 other
       columns. The fit's rank rule holds both, but a pivot cut scaled by the
       model's width dropped the second and freed ``e1`` (66ebf657).
-    - ``rows-equal-to-rounding`` (an expected failure where it fails, #541):
+    - ``rows-equal-to-rounding`` (#541):
       rows ``[1, ±d, 0]`` and ``[2, 0, 0]`` with ``d = 2**-51``, under
-      ``F = diag(1, 2**96, 1)``. The fit's rank rule finds one row, and which
-      of the tied rows is kept decides between 64/65 and 1, the value on the
-      fit's recorded face. A contrast mixing the held and freed directions
-      moves by about ``d sqrt(cond F)`` of its variance, which reaches the
-      restriction's 1e-6 only past a condition near 5e18, beyond 1/u.
+      ``F = diag(1, 2**96, 1)``. The fit holds only ``e0``, leaving a variance
+      of 1 for the contrast along ``e1``. Without projection off the recorded
+      free subspace, keeping a slanted row would yield 64/65.
     """
     from types import SimpleNamespace
 
@@ -1386,8 +1384,6 @@ def test_the_editor_holds_the_rows_the_fit_held_in_their_own_units(case):
     moved = c @ move(c)
     assert np.isfinite(moved)
     tolerance = 1e-6 * float(c @ F @ c)
-    if case == "rows-equal-to-rounding" and abs(moved - expected) > tolerance:
-        pytest.xfail("rows tied to within rounding (#541)")
     assert abs(moved - expected) <= tolerance
 
 

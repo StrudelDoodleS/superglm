@@ -277,6 +277,37 @@ class TestRankDeficientHessian:
         np.testing.assert_allclose(float(np.sum(result.beta)), 1.0, atol=1e-10)
         assert result.converged
 
+    def test_singular_h_checks_the_step_again_after_a_full_face_step(self, monkeypatch):
+        """A flat face still takes the small-step saddle check after its full step."""
+        import superglm.solvers.constrained_qp as qp
+
+        solve = qp._solve_saddle_least_squares
+        rhs_rows = []
+
+        def record(KKT, rhs):
+            rhs_rows.append(rhs.copy())
+            return solve(KKT, rhs)
+
+        monkeypatch.setattr(qp, "_solve_saddle_least_squares", record)
+        # x = 0 already binds, y moves from 0 to 2 in one feasible step, z is flat.
+        H = np.diag([1.0, 1.0, 0.0])
+        A = np.array([[1.0, 0.0, 0.0]])
+        result = solve_constrained_qp(
+            H,
+            np.array([-1.0, 2.0, 0.0]),
+            A,
+            np.zeros(1),
+            beta_start=np.zeros(3),
+            active_set_init=[0],
+        )
+        assert result.converged and list(result.active_set) == [0]
+        tolerance = 32 * 2.0**-53 * 2.0
+        np.testing.assert_allclose(result.beta[:2], [0.0, 2.0], rtol=0, atol=tolerance)
+        assert len(rhs_rows) == 2
+        first, second = rhs_rows
+        assert first[1] == 2.0
+        assert abs(second[1]) <= tolerance
+
     def test_indefinite_h_error_names_this_function(self):
         """The rank policy's ValueError must be re-labelled for the caller."""
         H = np.array([[1.0, 0.0], [0.0, -1.0]])  # materially indefinite
