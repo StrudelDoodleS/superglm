@@ -1007,10 +1007,14 @@ def _capture_model_state(
     revision: int,
     repair_revision: int,
     freeze_auxiliary_arrays: bool,
+    fresh_fit: bool = False,
     config_publication: ModelConfigPublication | None = None,
 ) -> FitCandidate:
     """Build a validated candidate from a complete private fitted model."""
+    from superglm.model.estimability_ops import capture_binned_estimability
+
     selection_penalty = _validate_workspace_result(work_model)
+    capture_binned_estimability(work_model, fresh_fit=fresh_fit)
     _freeze_candidate_arrays(work_model, auxiliary=freeze_auxiliary_arrays)
     projections = {
         name: getattr(work_model, name)
@@ -1159,6 +1163,7 @@ def capture_fit_state(
         revision=revision,
         repair_revision=0,
         freeze_auxiliary_arrays=True,
+        fresh_fit=True,
         config_publication=config_publication,
     )
 
