@@ -118,10 +118,16 @@ def scan_predictor_separation(
     if bounds is not None:
         censored = bounds.censored_rows()
         if censored.size:
-            # Censoring limits are not exact observations. Use an interior
-            # value for this scan of the 0 and 1 boundaries; censoring has its own scan.
+            # A censoring limit is not an exact observation, except on the boundary
+            # itself: Y <= 0 on a support that starts at 0 is Y = 0, and Y >= 1 on
+            # one that ends at 1 is Y = 1. Other limits take an interior value for
+            # this scan of the 0 and 1 boundaries; censoring has its own scan.
+            side = bounds.side[censored]
+            limit = response[censored]
+            at_zero = (side < 0) & (limit <= 0.0)
+            at_one = (side > 0) & (limit >= 1.0)
             response = response.copy()
-            response[censored] = 0.5
+            response[censored] = np.where(at_zero, 0.0, np.where(at_one, 1.0, 0.5))
     weight_values = np.asarray(weights, dtype=np.float64)
     findings: list[SeparatedTerm] = []
     curves: list = []

@@ -413,6 +413,19 @@ def test_a_right_censoring_limit_of_zero_is_not_an_observed_zero(bounded_separat
     assert model.term_inference("mean", "lev", simultaneous=False).separated is None
 
 
+def test_a_left_censoring_limit_of_zero_is_an_observed_zero(bounded_separation_book):
+    """``Y <= 0`` on counts is ``Y = 0``: a level of exact zeros and rows left-censored
+    at zero is still separated, warned about and refused, as on master."""
+    X, y = bounded_separation_book
+    rows = np.flatnonzero((X.lev == "E").to_numpy())
+    censored = np.array(["none"] * len(y), dtype=object)
+    censored[rows[::2]] = "left"
+    with pytest.warns(SeparationWarning, match="mean:lev.*E"):
+        _model(cat("lev", base="A")).fit(X, y, censored=list(censored))
+    with pytest.raises(SeparationError):
+        _model(cat("lev", base="A"), separation="error").fit(X, y, censored=list(censored))
+
+
 @pytest.mark.pins_behaviour
 def test_ignore_leaves_inference_available_and_error_refuses_the_build(two_levels, monkeypatch):
     """Pin the silent unrestricted fit under ignore and build-time refusal under error."""
