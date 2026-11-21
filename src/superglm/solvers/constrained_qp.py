@@ -689,6 +689,15 @@ def _coordinate_face_minimum(H: NDArray, g: NDArray, A: NDArray, b: NDArray) -> 
                 candidate[pivots[:k]] = _solve_triangular(
                     triangular, q.T @ (b - A[:, pivots[k:]] @ free), check_finite=False
                 )
+            # The global QR may mix equations from blocks of very different
+            # magnitudes. Refine the basic coordinates in the original
+            # equations when their residual exceeds dot-product roundoff.
+            if np.any(np.abs(_feasibility_slack(A, candidate, b)) > _roundoff_tolerance(p)):
+                correction = _solve_triangular(
+                    triangular, q.T @ (b - A @ candidate), check_finite=False
+                )
+                if np.isfinite(correction).all():
+                    candidate[pivots[:k]] += correction
     except (np.linalg.LinAlgError, ValueError):
         return None
     return candidate if np.isfinite(candidate).all() else None
@@ -1975,6 +1984,32 @@ def _solve_qp(
                     # the step, and the binding rows' face is solved from ``beta``.
                     _release_nonbinding(A, beta, b, active, abs_A, tol, nonbinding, basis, cycles)
                     continue
+                # A point still outside the rows after the projection has no
+                # valid primal ratio test. If the recovered step has no blocker
+                # either, spend the remaining iterations starting at a known
+                # feasible point. A supplied start prevents a second restart.
+                if (
+                    beta_start is None
+                    and np.all(b <= 0.0)
+                    and not _is_feasible(A, beta, b, tol, abs_A=abs_A)
+                    and it + 1 < max_iter
+                ):
+                    retry = _solve_qp(
+                        H_sym,
+                        g,
+                        A,
+                        b,
+                        None,
+                        max_iter - it - 1,
+                        tol,
+                        np.zeros_like(beta),
+                        _trace_run,
+                        structure,
+                        decomposition,
+                        conservative=conservative,
+                        departed=departed,
+                    )
+                    return replace(retry, n_iter=retry.n_iter + it + 1)
                 # No row resolves the step, yet it breaks one: once the face's recovery has
                 # run, the step is below every row's resolution, so ``beta`` is the face's
                 # minimum to working accuracy and the step test cannot see it (Gill and Wong,

@@ -215,7 +215,12 @@ class _IRLSDirectQPStep(_IRLSDirectStep):
                 None if restart else active_set,
                 structure=self.qp_structure,
                 max_iter=self._iteration_budget,
-                beta_start=fit.committed.beta if restart else None,
+                # After escalation, keep the feasible primal point on every
+                # IRLS step. The row indices alone do not warm-start a
+                # primal method if the projected unconstrained point is infeasible.
+                beta_start=fit.committed.beta
+                if self._iteration_budget > _SHORT_QP_BUDGET
+                else None,
             )
         except ValueError as error:
             self._budget_hits = 0
