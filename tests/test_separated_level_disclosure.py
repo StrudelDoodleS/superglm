@@ -894,8 +894,11 @@ def test_the_cells_structure_gives_the_dense_null_space(case):
     np.testing.assert_allclose(full[np.ix_(columns, columns)], reference, rtol=0, atol=1e-10)
 
 
+@pytest.mark.pins_behaviour
 def test_a_separated_cell_costs_its_readers_no_dense_grid():
-    """A 30 x 30 cross with separated base-row, base-column and interior cells.
+    """Control (passes on master, whose readers allocate nothing for a record).
+
+    A 30 x 30 cross with separated base-row, base-column and interior cells.
 
     ``relativities()`` reads the same memory, to 256 KiB, whether or not the cells are
     recorded, as on master, whose readers read no record.  At 4d3c72657 the block took
