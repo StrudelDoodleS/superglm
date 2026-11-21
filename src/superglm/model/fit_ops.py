@@ -2136,7 +2136,7 @@ def fit_reml(
     )
     durable_retain = bool(getattr(model, "_retain_fit_state", True))
     attempt_kwargs = dict(
-        level_anchors=getattr(model, "_profile_level_anchors", {}),
+        level_anchors=getattr(model, "_profile_level_anchors", None),
         max_reml_iter=max_reml_iter,
         reml_tol=reml_tol,
         pirls_tol=pirls_tol,
@@ -2331,16 +2331,13 @@ def _fit_reml_in_workspace(
 
     from superglm.model.reml_level_hold import REMLLevelHold
 
-    hold = REMLLevelHold.for_model(
-        model, sample_weight, offset, {} if level_anchors is None else level_anchors
-    )
     if not reml_groups and not _has_monotone:
         logger.warning("fit_reml: no REML-eligible groups found, falling back to fit()")
         model._result = _solve_coefficients(
             model,
             y,
             sample_weight,
-            hold.single_offset(model, offset) if hold is not None else offset,
+            offset,
             penalty=penalty,
             lambda2=configured_smoothing,
             has_lambda1_targets=model_has_lambda1_targets(model),
@@ -2350,8 +2347,6 @@ def _fit_reml_in_workspace(
             convergence=model._convergence,
             _weight_unit=False,
         )
-        if hold is not None:
-            model._result = hold.finish_single(model, model._result)
         _publish_fit_statistics(
             model,
             y,
@@ -2419,7 +2414,6 @@ def _fit_reml_in_workspace(
         if _has_monotone and not estimated_names:
             run_fixed_monotone_reml(
                 model,
-                level_hold=hold,
                 y=y,
                 sample_weight=sample_weight,
                 offset=offset,
@@ -2455,6 +2449,9 @@ def _fit_reml_in_workspace(
 
         if estimated_names and not model._discrete:
             _warn_slow_exact_reml(model, lambdas)
+        hold = REMLLevelHold.for_model(
+            model, sample_weight, offset, {} if level_anchors is None else level_anchors
+        )
         if hold is not None:
             model._dm = hold.design(model._dm)
             offset_arr = hold.offset

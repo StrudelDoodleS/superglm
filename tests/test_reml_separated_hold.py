@@ -255,7 +255,7 @@ def test_logit_with_no_healthy_reference_keeps_the_cold_odds_ratio(monkeypatch):
 
 
 @pytest.mark.parametrize("route", ["smooth", "ordinary", "fixed_qp"])
-def test_power_profile_and_its_publication_use_one_separated_price(route):
+def test_power_profile_publishes_the_separated_price_at_its_selected_power(route):
     from superglm import BSplineSmooth, Constraint, LambdaPolicy, Numeric
 
     rng = np.random.default_rng(240)
@@ -267,7 +267,7 @@ def test_power_profile_and_its_publication_use_one_separated_price(route):
     y[(count == 0) | (r == "Z")] = 0
     X = pd.DataFrame({"r": r, "x": x})
 
-    def model(p, with_level=True):
+    def model(p):
         if route == "ordinary":
             x_term = Numeric()
         elif route == "fixed_qp":
@@ -281,30 +281,52 @@ def test_power_profile_and_its_publication_use_one_separated_price(route):
         return SuperGLM(
             family=Tweedie(p=p),
             selection_penalty=0,
-            features=({"r": Categorical(base="A")} if with_level else {}) | {"x": x_term},
+            features={"r": Categorical(base="A"), "x": x_term},
         )
 
-    # The bounded power search evaluates its lower endpoint first.
-    first = model(1.3).fit_reml(X, y)
-    price = _effect(first, "r", "Z")
     m = model(1.5)
     result = m.estimate_p(X, y, fit_mode="reml", p_bounds=(1.3, 1.7), xatol=0.03)
-    assert _effect(m, "r", "Z") == price
-    frame = X[["x"]]
-    oracle = model(1.5, with_level=False)
-    reference = oracle.estimate_p(
-        frame,
-        y,
-        offset=np.where(r == "Z", price, 0.0),
-        fit_mode="reml",
-        p_bounds=(1.3, 1.7),
-        xatol=0.03,
-    )
-    np.testing.assert_allclose(
-        result.evaluations[["p", "nll", "phi"]],
-        reference.evaluations[["p", "nll", "phi"]],
-        rtol=1e-6,
-    )
+    direct = model(result.p_hat).fit_reml(X, y)
+    assert _effect(m, "r", "Z") == _effect(direct, "r", "Z")
+    assert m.result.effective_df == pytest.approx(direct.result.effective_df)
+
+
+def test_power_profile_with_a_zero_level_matches_same_knot_deletion():
+    from superglm import PSpline
+
+    rng = np.random.default_rng(123)
+    x = rng.uniform(0, 10, 2000)
+    r = rng.choice(list("ABC"), len(x), p=[0.4, 0.4, 0.2])
+    r[:80] = "Z"
+    p, phi = 1.85, 1.5
+    mu = np.exp(0.5 + 0.4 * np.sin(x) + 0.5 * (r == "B") - 0.3 * (r == "C"))
+    count = rng.poisson(mu ** (2 - p) / (phi * (2 - p)))
+    pos = count > 0
+    y = np.zeros_like(x)
+    y[pos] = rng.gamma(count[pos] * (2 - p) / (p - 1), phi * (p - 1) * mu[pos] ** (p - 1))
+    y[r == "Z"] = 0
+    X = pd.DataFrame({"x": x, "r": r})
+
+    def profile(frame, response, spline, lower_bound):
+        model = SuperGLM(family=Tweedie(p=1.5), features={"x": spline, "r": Categorical(base="A")})
+        fit = model.estimate_p(
+            frame, response, fit_mode="reml", p_bounds=(lower_bound, 1.95), xatol=0.005
+        )
+        return model, fit
+
+    full, fit = profile(X, y, PSpline(n_knots=8), 1.05)
+    keep = r != "Z"
+    spec = full._specs["x"]
+    knots = {"knots": spec.fitted_knots, "boundary": spec.fitted_boundary}
+    deleted, reference = profile(X.loc[keep], y[keep], PSpline(**knots), 1.05)
+    narrow, narrow_fit = profile(X, y, PSpline(**knots), 1.60)
+    for model, result in ((full, fit), (narrow, narrow_fit)):
+        # Within the power search tolerance, including the likelihood-ratio interval.
+        np.testing.assert_allclose(
+            [result.p_hat, *result.ci(0.05)], [reference.p_hat, *reference.ci(0.05)], atol=0.005
+        )
+        assert result.phi_hat == pytest.approx(reference.phi_hat, rel=0.005)
+        assert model._reml_lambdas["x"] == pytest.approx(deleted._reml_lambdas["x"], rel=0.02)
 
 
 def test_a_qp_refit_keeps_the_separated_price(monkeypatch):
@@ -381,7 +403,7 @@ def test_fixed_lambda_tweedie_keeps_the_rows_in_the_profile(semantics):
         np.testing.assert_allclose(m.predict(X), reference.predict(X, offset=offset), rtol=1e-7)
 
 
-def test_auto_theta_keeps_its_first_reml_price(monkeypatch):
+def test_auto_theta_uses_the_cold_reml_price_at_the_published_theta(monkeypatch):
     import superglm.reml.direct as direct
 
     rng = np.random.default_rng(25)
@@ -408,4 +430,4 @@ def test_auto_theta_keeps_its_first_reml_price(monkeypatch):
         spline_penalty=1e4,
     ).fit_reml(X, y)
     assert len(cold) > 1
-    assert _effect(model, "r", "Z") == cold[0]
+    assert _effect(model, "r", "Z") == cold[-1]

@@ -84,19 +84,6 @@ class REMLLevelHold:
             shift[block.levels] = [self.anchors[j] for j in block.columns]
             self.offset += shift[block.full.codes]
 
-    def single_offset(self, model, offset):
-        """A single-solve fit runs cold unless an earlier nuisance fit set its prices."""
-        if not self.anchors:
-            return offset
-        model._dm = self.design(model._dm)
-        return self.offset
-
-    def finish_single(self, model, result):
-        if self.anchors:
-            return self.lift(model, result)
-        self._capture(result)
-        return result
-
     def _capture(self, result):
         self.anchors.update(zip(self.columns, result.beta[self.columns], strict=True))
         self._add_offset()

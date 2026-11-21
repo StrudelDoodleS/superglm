@@ -518,6 +518,14 @@ class _IRLSDirectCurvaturePolicy:
         self._latch = latch
         self._family, self._link, self._y, self._weights = family, link, y, weights
 
+    def response_eta(self, eta: NDArray, eta_unclipped: NDArray) -> NDArray:
+        # Tweedie/log takes both curvature and score from the guarded mean.
+        # Its z = eta + score / curvature steps from X beta + offset. Starting
+        # z at the guard instead adds the clipping distance to the WLS step.
+        if type(self._family) is Tweedie and type(self._link) is LogLink:
+            return eta_unclipped
+        return eta
+
     def working_rows(self, mu: NDArray, eta: NDArray) -> CoefficientWorkingRows:
         """The iterate's working rows in the current curvature (``coefficient_working_rows``)."""
         return coefficient_working_rows(
@@ -543,7 +551,7 @@ class _IRLSDirectCurvaturePolicy:
             link=self._link,
             y=self._y,
             mu=candidate.mu,
-            eta=candidate.eta,
+            eta=self.response_eta(candidate.eta, candidate.eta_unclipped),
             sample_weight=self._weights,
             prefer_observed=True,
         )
@@ -1579,6 +1587,10 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         self.termination_reason: TerminationReason
         self.mode_bar, self.committed = mode_bar, committed
 
+    @property
+    def working_response_eta(self) -> NDArray:
+        return self.curvature.response_eta(self.eta, self.eta_unclipped)
+
     def _working(self, it: int) -> None:
         committed, family, link = self.committed, self.family, self.link
         recorder, mean_space = self.recorder, self.mean_space
@@ -1588,7 +1600,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
 
         # Working quantities from current eta/mu (already computed)
         _t0 = time.perf_counter()
-        working_rows = self.curvature.working_rows(self.mu, self.eta)
+        working_rows = self.curvature.working_rows(self.mu, self.working_response_eta)
         W = working_rows.weights
         z = working_rows.response
         # the mean space's Newton rows once engaged, in score form
@@ -1795,7 +1807,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                 link=self.link,
                 y=self.y,
                 mu=self.mu,
-                eta=self.eta,
+                eta=self.working_response_eta,
                 sample_weight=self.weights,
                 prefer_observed=False,
             )

@@ -120,7 +120,7 @@ class _PowerProfile:
         self.infeasible: dict[float, str] = {}
         self.on_evaluation: Callable[[dict], None] | None = None
         if fit_mode == "fit_reml":
-            self.clone._profile_level_anchors = getattr(model, "_profile_level_anchors", {})
+            self.anchors_by_power = getattr(model, "_profile_anchors_by_power", {})
             self._prepare_reml(X, y, sample_weight, offset)
         else:
             self._prepare_ml(X, y, sample_weight, offset)
@@ -262,6 +262,7 @@ class _PowerProfile:
         REML stop and its inner fits at it, or at the model's tighter tol."""
         clone = self.clone
         clone.family = Tweedie(p)
+        clone._profile_level_anchors = self.anchors_by_power.setdefault(p, {})
         reml_tol, pirls_tol = (
             (_SEARCH_REML_TOL, None) if tol is None else (tol, min(clone._tol, tol))
         )

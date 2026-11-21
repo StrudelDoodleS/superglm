@@ -126,10 +126,8 @@ def run_fixed_monotone_reml(
     profile: dict[str, Any] | None = None,
     total_start: float | None = None,
     debug_recorder=None,
-    level_hold=None,
 ) -> None:
     """Run the fixed-lambda monotone REML path and update the model in place."""
-    fit_offset = level_hold.single_offset(model, offset) if level_hold is not None else offset
     result, _ = fit_irls_direct(
         X=model._dm,
         y=y,
@@ -138,7 +136,7 @@ def run_fixed_monotone_reml(
         link=model._link,
         groups=model._groups,
         lambda2=lambdas,
-        offset=fit_offset,
+        offset=offset,
         max_iter=max_pirls_iter,
         tol=pirls_tol,
         convergence="deviance",
@@ -180,8 +178,6 @@ def run_fixed_monotone_reml(
         likelihood_method=likelihood_method,
     )
 
-    if level_hold is not None:
-        result = level_hold.finish_single(model, result)
     model._result = result
     model._reml_lambdas = lambdas
     model._reml_penalties = reml_penalties
