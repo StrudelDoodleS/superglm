@@ -3532,9 +3532,11 @@ def test_reml_with_a_separated_level_converges_as_on_master(design: str, direct_
         model.fit_reml(frame, y)
     assert model.result.converged
     assert model.diagnostics()["c"]["weakly_identified"] == [1]  # level r
-    assert model.diagnostics()["_model"]["excluded_from_smoothing_selection"] == ["c[1]"]
+    assert model.diagnostics()["_model"]["excluded_from_smoothing_selection"] == ["c[r]"]
+    # the level is disclosed once, by the fit's separation warning
     messages = [str(w.message) for w in caught if w.category is WeakIdentificationWarning]
-    assert any("Left out of smoothing-parameter selection: c[1]." in m for m in messages)
+    assert not any("c[r]" in m for m in messages)
+    assert any("'c' level 'r'" in str(w.message) for w in caught if w.category is SeparationWarning)
 
 
 def _separated_region_districts() -> tuple[pd.DataFrame, np.ndarray]:
@@ -3619,9 +3621,9 @@ def test_reml_at_a_separated_level_does_not_move_with_a_constant_offset(
         assert any(lowered) is (offset_value == lowering), offset_value
     for model in fits.values():
         assert model.result.converged
-    # r01 and r02 are levels 0 and 1, and the base region r00 is the reference
+    # the levels r01 and r02, and the base region r00, each named as itself
     profile = fits[0.0]._reml_profile
-    assert profile["reml_laplace_separated_labels"] == ("c[0]", "c[1]", "c[reference]")
+    assert profile["reml_laplace_separated_labels"] == ("c[r01]", "c[r02]", "c[r00]")
     objectives = np.array([float(model._reml_result.objective) for model in fits.values()])
     tolerance = float(fits[0.0]._reml_profile["reml_tol_resolved"])
     epsilon = 2.0 * tolerance * (1.0 + float(np.max(np.abs(objectives))))
@@ -3830,8 +3832,13 @@ def test_a_wide_design_keeps_its_joint_cell_sets() -> None:
     assert ratio > 1.0
 
 
-def _left_out(frame: pd.DataFrame, y: np.ndarray, weights=None) -> tuple[SuperGLM, list[str]]:
-    """``fit_reml`` with a Categorical ``c`` and a RandomEffect ``g``; its WeakIdentificationWarning messages."""
+def _left_out(
+    frame: pd.DataFrame, y: np.ndarray, weights=None
+) -> tuple[SuperGLM, list[str], list[str]]:
+    """``fit_reml`` with a Categorical ``c`` and a RandomEffect ``g``.
+
+    Returns the model, its WeakIdentificationWarning messages and its SeparationWarning ones.
+    """
     model = SuperGLM(
         family="binomial",
         link="log",
@@ -3842,7 +3849,8 @@ def _left_out(frame: pd.DataFrame, y: np.ndarray, weights=None) -> tuple[SuperGL
         warnings.simplefilter("always")
         model.fit_reml(frame, y, sample_weight=weights)
     assert model.result.converged
-    return model, [str(w.message) for w in caught if w.category is WeakIdentificationWarning]
+    weak = [str(w.message) for w in caught if w.category is WeakIdentificationWarning]
+    return model, weak, [str(w.message) for w in caught if w.category is SeparationWarning]
 
 
 def test_the_left_out_coefficients_pair_with_their_labels() -> None:
@@ -3852,7 +3860,8 @@ def test_the_left_out_coefficients_pair_with_their_labels() -> None:
     their own columns, 9 and 10, and the reference rows take the first other
     column of the block, 0.  9c4f8660 published the indices sorted, (0, 9,
     10), beside the labels in the order the sets were found, so a consumer
-    pairing them named c[0], a region with events, as c[9].
+    pairing them named c[0], a region with events, as c[9].  Each label names
+    its level, and the reference its base level.
     """
     rng = np.random.default_rng(13)
     regions, districts, per = 15, 6, 8
@@ -3862,20 +3871,21 @@ def test_the_left_out_coefficients_pair_with_their_labels() -> None:
     district = np.repeat(np.arange(regions * districts), per)
     y = (rng.uniform(size=len(region)) < probability[region]).astype(np.float64)
     frame = pd.DataFrame({"c": [f"r{k:02d}" for k in region], "g": [f"d{k:03d}" for k in district]})
-    model, _ = _left_out(frame, y)
+    model, _, _ = _left_out(frame, y)
     profile = model._reml_profile
-    assert profile["reml_laplace_separated_labels"] == ("c[9]", "c[10]", "c[reference]")
+    assert profile["reml_laplace_separated_labels"] == ("c[r10]", "c[r11]", "c[r00]")
+    column = {f"c[{level}]": j for j, level in enumerate(model._specs["c"]._non_base)}
     for indices, labels in (
         (profile["reml_laplace_separated"], profile["reml_laplace_separated_labels"]),
         (profile["reml_laplace_excluded"], profile["reml_laplace_excluded_labels"]),
     ):
         assert len(indices) == len(labels)
-        levels = {int(label[2:-1]) for label in labels if label != "c[reference]"}
+        levels = {column[label] for label in labels if label != "c[r00]"}
         for index, label in zip(indices, labels, strict=True):
-            if label == "c[reference]":
+            if label == "c[r00]":
                 assert 0 <= index < regions - 1 and index not in levels
             else:
-                assert index == int(label[2:-1]), (index, label)
+                assert index == column[label], (index, label)
 
 
 def test_a_separated_level_beside_a_weak_one_is_explained() -> None:
@@ -3884,9 +3894,9 @@ def test_a_separated_level_beside_a_weak_one_is_explained() -> None:
     Where a coefficient is flagged weak the warning lists everything left
     out of smoothing-parameter selection.  3227c731 listed z there without
     saying why, and said only in the warning for a separated set alone that
-    its rows' responses are all 0 or all 1.  Both are now explained, and the
-    means are said to approach the limit, since a fit stops at a finite
-    predictor.
+    its rows' responses are all 0 or all 1.  The weak level is explained by the
+    weak-identification warning and the separated one, once, by the fit's
+    separation warning.
     """
     rng = np.random.default_rng(15)
     level = np.array(["a"] * 200 + ["b"] * 200 + ["w"] * 20 + ["z"] * 100)
@@ -3896,15 +3906,12 @@ def test_a_separated_level_beside_a_weak_one_is_explained() -> None:
         + [np.zeros(100, dtype=bool)]
     ).astype(np.float64)
     weights = np.where(level == "w", 1e-17, 1.0)
-    model, messages = _left_out(pd.DataFrame({"c": level, "g": group}), y, weights)
-    assert "c[1]" in model._reml_profile["reml_weakly_identified_labels"]
-    assert model._reml_profile["reml_laplace_separated_labels"] == ("c[2]",)
-    assert any(
-        "c[1]" in message
-        and "rows of c[2] is 0, or every one is 1" in message
-        and "approach that limit" in message
-        for message in messages
-    )
+    model, messages, separated = _left_out(pd.DataFrame({"c": level, "g": group}), y, weights)
+    assert "c[w]" in model._reml_profile["reml_weakly_identified_labels"]
+    assert model._reml_profile["reml_laplace_separated_labels"] == ("c[z]",)
+    assert any("c[w]" in message for message in messages)
+    assert not any("c[z]" in message for message in messages)
+    assert len(separated) == 1 and "'c' level 'z'" in separated[0]
 
 
 def test_a_separated_level_that_is_also_weak_is_disclosed_once() -> None:
@@ -3921,10 +3928,10 @@ def test_a_separated_level_that_is_also_weak_is_disclosed_once() -> None:
         [rng.uniform(size=200) < 0.2, rng.uniform(size=200) < 0.3, np.zeros(20, dtype=bool)]
     ).astype(np.float64)
     weights = np.concatenate([np.ones(400), np.full(20, 1e-17)])
-    model, _ = _left_out(pd.DataFrame({"c": level, "g": group}), y, weights)
+    model, _, _ = _left_out(pd.DataFrame({"c": level, "g": group}), y, weights)
     profile = model._reml_profile
     assert profile["reml_laplace_excluded"] == (1,)
-    assert profile["reml_laplace_excluded_labels"] == ("c[1]",)
+    assert profile["reml_laplace_excluded_labels"] == ("c[w]",)
     assert profile["reml_laplace_separated_labels"] == ()
 
 
@@ -3934,7 +3941,7 @@ def test_a_reference_level_without_events_alone_is_disclosed() -> None:
     The Laplace term leaves the reference rows' direction out, and the
     owner's rule is that a left-out coefficient is disclosed in plain words.
     9c4f8660 warned only when some slope was flagged weak, so this fit said
-    nothing.
+    nothing.  The fit's separation warning names the base level, once.
     """
     rng = np.random.default_rng(15)
     level = np.array(["a"] * 150 + ["b"] * 200 + ["c"] * 200)
@@ -3942,12 +3949,12 @@ def test_a_reference_level_without_events_alone_is_disclosed() -> None:
     y = np.concatenate(
         [np.zeros(150, dtype=bool), rng.uniform(size=200) < 0.2, rng.uniform(size=200) < 0.3]
     ).astype(np.float64)
-    model, messages = _left_out(pd.DataFrame({"c": level, "g": group}), y)
+    model, messages, separated = _left_out(pd.DataFrame({"c": level, "g": group}), y)
     assert model._reml_profile["reml_weakly_identified_labels"] == ()
-    assert model.diagnostics()["_model"]["excluded_from_smoothing_selection"] == ["c[reference]"]
-    assert any(
-        "c[reference]" in message and "no finite estimate" in message for message in messages
-    )
+    assert model.diagnostics()["_model"]["excluded_from_smoothing_selection"] == ["c[a]"]
+    assert messages == []
+    assert len(separated) == 1 and "'c' level 'a'" in separated[0]
+    assert "it is the base level 'a'" in separated[0]
 
 
 def test_a_qp_passthrough_fit_discloses_what_its_search_left_out() -> None:
@@ -3983,10 +3990,10 @@ def test_a_qp_passthrough_fit_discloses_what_its_search_left_out() -> None:
     profile = model._reml_profile
     start = next(group.start for group in model._groups if group.name == "c")
     assert profile["reml_laplace_excluded"] == (start + 1,)
-    assert profile["reml_laplace_excluded_labels"] == ("c[1]",)
-    assert model.diagnostics()["_model"]["excluded_from_smoothing_selection"] == ["c[1]"]
-    messages = [str(w.message) for w in caught if w.category is WeakIdentificationWarning]
-    assert any("c[1]" in message and "no finite estimate" in message for message in messages)
+    assert profile["reml_laplace_excluded_labels"] == ("c[c]",)
+    assert model.diagnostics()["_model"]["excluded_from_smoothing_selection"] == ["c[c]"]
+    separated = [str(w.message) for w in caught if w.category is SeparationWarning]
+    assert len(separated) == 1 and "'c' level 'c'" in separated[0]
 
 
 def test_a_qp_passthrough_fit_discloses_a_weak_slope_in_any_family() -> None:
@@ -4019,9 +4026,9 @@ def test_a_qp_passthrough_fit_discloses_a_weak_slope_in_any_family() -> None:
     start = next(group.start for group in model._groups if group.name == "c")
     assert start + 1 in profile["reml_weakly_identified"]
     assert profile["reml_laplace_excluded"] == (start + 1,)
-    assert profile["reml_laplace_excluded_labels"] == ("c[1]",)
+    assert profile["reml_laplace_excluded_labels"] == ("c[w]",)
     messages = [str(w.message) for w in caught if w.category is WeakIdentificationWarning]
-    assert any("c[1]" in message for message in messages)
+    assert any("c[w]" in message for message in messages)
 
 
 def test_the_weak_slopes_seed_the_separated_directions_elimination() -> None:

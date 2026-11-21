@@ -3571,10 +3571,14 @@ class TestSummaryInferenceCache:
         row_model = next(r for r in s_model._coef_rows if r.name == "cat[J]")
         row_metrics = next(r for r in s_metrics._coef_rows if r.name == "cat[J]")
 
-        assert row_metrics.se > 1.0
-        assert np.isfinite(row_model.se)
-        assert row_model.se == pytest.approx(row_metrics.se, rel=1e-6, abs=1e-8)
-        assert row_model.p == pytest.approx(row_metrics.p, rel=1e-6, abs=1e-8)
+        # J has no claims, so it is separated: both readers flag it and leave its
+        # Wald statistics blank, and agree on the levels the data price.
+        assert row_model.separated and row_metrics.separated
+        assert (row_model.se, row_model.p) == (row_metrics.se, row_metrics.p) == (None, None)
+        healthy_model = next(r for r in s_model._coef_rows if r.name == "cat[I]")
+        healthy_metrics = next(r for r in s_metrics._coef_rows if r.name == "cat[I]")
+        assert healthy_model.se == pytest.approx(healthy_metrics.se, rel=1e-6, abs=1e-8)
+        assert healthy_model.p == pytest.approx(healthy_metrics.p, rel=1e-6, abs=1e-8)
 
     def test_metrics_summary_uses_own_edf_not_fit_cache(self):
         """ModelMetrics.summary() must compute EDF from its own weights, not fit cache."""

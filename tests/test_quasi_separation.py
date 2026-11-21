@@ -43,7 +43,7 @@ def _make_sparse_tweedie_data(n=10_000, n_rare=10, seed=42):
 
 
 class TestSEFiniteForRareLevel:
-    """SE must be large but finite (not 0, not inf) for separated levels."""
+    """A separated level keeps its estimate, flagged, with its Wald statistics blank."""
 
     def test_se_finite_for_rare_level(self):
         df, y, exposure = _make_sparse_tweedie_data()
@@ -56,12 +56,10 @@ class TestSEFiniteForRareLevel:
         s = m.summary()
 
         rare_row = next(r for r in s._coef_rows if "rare" in r.name)
-        assert rare_row.se is not None
-        assert rare_row.se > 0, "SE should not be zero for separated level"
-        assert np.isfinite(rare_row.se), "SE should be finite"
-        assert np.isfinite(rare_row.z), "z-score should be finite"
-        # SE should be large (indicating undetermined)
-        assert rare_row.se > 1.0, "SE should be large for near-separated level"
+        assert rare_row.separated and np.isfinite(rare_row.coef)
+        assert (rare_row.se, rare_row.z, rare_row.p) == (None, None, None)
+        others = [r for r in s._coef_rows if r.group == "cat" and "rare" not in r.name]
+        assert others and all(np.isfinite(r.se) and r.se > 0 for r in others)
 
 
 class TestSeparatedTailDiagnostics:

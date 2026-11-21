@@ -209,6 +209,8 @@ def test_finalize_profiles_phi_from_post_qp_state(monkeypatch: pytest.MonkeyPatc
         _link=IdentityLink(),
         _dm=dm,
         _groups=[],
+        _specs={},
+        _interaction_specs={},
         _discrete=False,
         _direct_solve="auto",
     )

@@ -707,6 +707,7 @@ def _categorical_block(
     name: str,
     sample_weight: NDArray | None,
     centering: str,
+    spec: Categorical | OrderedCategorical,
 ) -> RatingTableBlock:
     ti = _main_effect_inference(model, name, centering)
     levels = list(ti.levels or [])
@@ -721,7 +722,7 @@ def _categorical_block(
             }
         ),
         centering_shift=float(ti.centering_shift),
-        note=separated_block_note(model._specs[name]),
+        note=separated_block_note(spec),
     )
 
 
@@ -2786,7 +2787,9 @@ def build_rating_table_payload(
             centering_shift = float(_main_effect_inference(model, name, centering).centering_shift)
             main_effects.append(_continuous_block(name, selected.tables[name], centering_shift))
         elif isinstance(spec, Categorical | OrderedCategorical):
-            main_effects.append(_categorical_block(model, frame, name, sample_weight, centering))
+            main_effects.append(
+                _categorical_block(model, frame, name, sample_weight, centering, spec)
+            )
         elif isinstance(spec, Numeric):
             main_effects.append(_numeric_block(model, name, centering))
 

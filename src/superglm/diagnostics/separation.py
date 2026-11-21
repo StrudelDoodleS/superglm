@@ -496,7 +496,7 @@ class SeparatedLine:
     expected: float | None = None
     relativity: float | None = None
     # A crossed cell's parent terms, whose main effects its relativity includes.
-    parents: tuple[str, str] | tuple[()] = ()
+    parents: tuple[str, ...] = ()
 
     @property
     def is_base(self) -> bool:
