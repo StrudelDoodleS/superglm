@@ -518,14 +518,6 @@ class _IRLSDirectCurvaturePolicy:
         self._latch = latch
         self._family, self._link, self._y, self._weights = family, link, y, weights
 
-    def response_eta(self, eta: NDArray, eta_unclipped: NDArray) -> NDArray:
-        # Tweedie/log takes both curvature and score from the guarded mean.
-        # Its z = eta + score / curvature steps from X beta + offset. Starting
-        # z at the guard instead adds the clipping distance to the WLS step.
-        if type(self._family) is Tweedie and type(self._link) is LogLink:
-            return eta_unclipped
-        return eta
-
     def working_rows(self, mu: NDArray, eta: NDArray) -> CoefficientWorkingRows:
         """The iterate's working rows in the current curvature (``coefficient_working_rows``)."""
         return coefficient_working_rows(
@@ -551,7 +543,7 @@ class _IRLSDirectCurvaturePolicy:
             link=self._link,
             y=self._y,
             mu=candidate.mu,
-            eta=self.response_eta(candidate.eta, candidate.eta_unclipped),
+            eta=candidate.eta,
             sample_weight=self._weights,
             prefer_observed=True,
         )
@@ -1589,7 +1581,20 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
 
     @property
     def working_response_eta(self) -> NDArray:
-        return self.curvature.response_eta(self.eta, self.eta_unclipped)
+        """Origin of z before subtracting the offset in the working least squares."""
+        offset = self.offset
+        if offset is not None and type(self.family) is Tweedie and type(self.link) is LogLink:
+            lower = (self.eta_unclipped < self.eta) & (offset < 0)
+            if np.any(lower):
+                # The guarded mean supplies score and curvature. A negative fixed
+                # offset may itself cross the lower guard: retain its contribution
+                # to z, while limiting the free predictor at the same guard as usual.
+                origin = self.eta.copy()
+                origin[lower] = np.maximum(
+                    self.eta_unclipped[lower], self.eta[lower] + offset[lower]
+                )
+                return origin
+        return self.eta
 
     def _working(self, it: int) -> None:
         committed, family, link = self.committed, self.family, self.link
