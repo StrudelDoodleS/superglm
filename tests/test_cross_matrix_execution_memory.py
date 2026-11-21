@@ -192,10 +192,18 @@ def _retained_cross_allocation(n: int) -> tuple[int, set[str]]:
     return max(0, retained - baseline), set(vars(plan))
 
 
+def _least_retained(n: int) -> tuple[int, set[str]]:
+    """The least of three calls: another thread's allocations (an xdist worker
+    answering a steal request) only add to tracemalloc's count, as in
+    ``tests/_traced_memory.py``."""
+    runs = [_retained_cross_allocation(n) for _ in range(3)]
+    return min(retained for retained, _ in runs), runs[-1][1]
+
+
 def test_retained_plan_allocation_does_not_scale_with_observation_count() -> None:
     _retained_cross_allocation(64)  # warm imported kernels and allocator pools
-    small_bytes, small_fields = _retained_cross_allocation(512)
-    large_bytes, large_fields = _retained_cross_allocation(120_000)
+    small_bytes, small_fields = _least_retained(512)
+    large_bytes, large_fields = _least_retained(120_000)
 
     assert (
         small_fields
