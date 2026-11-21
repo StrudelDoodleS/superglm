@@ -95,16 +95,27 @@ def collapse_levels(
     Raises
     ------
     ValueError
-        If a level appears in multiple groups, if mentioned levels don't
-        exist in data, or if ``from_level``/``below`` are used with ``groups``.
+        If distinct levels share a text form, if a level appears in multiple
+        groups, if mentioned levels don't exist in data, or if
+        ``from_level``/``below`` are used with ``groups``.
     """
-    # Discover unique levels
+    # Keep native levels beside their text so conversion cannot merge two.
     if isinstance(data, pd.Series):
-        unique_levels = data.astype(str).unique().tolist()
-    elif isinstance(data, np.ndarray):
-        unique_levels = [str(v) for v in np.unique(data)]
+        values, labels = data, data.astype(str)
     else:
-        unique_levels = list(set(str(v) for v in data))
+        native = data.ravel() if isinstance(data, np.ndarray) else data
+        values = pd.Series(native, dtype=object)
+        labels = list(map(str, native))
+    levels = pd.DataFrame({"value": values, "label": labels}).drop_duplicates()
+    repeated = levels["label"].duplicated()
+    if repeated.any():
+        label = levels.loc[repeated, "label"].iloc[0]
+        first, second = levels.loc[levels["label"] == label, "value"].iloc[:2]
+        raise ValueError(
+            f"collapse_levels found distinct levels {first!r} and {second!r} with the same "
+            f"text {label!r}. Cast the column to one type before grouping."
+        )
+    unique_levels = levels["label"].tolist()
 
     if order is not None:
         all_levels = list(order)

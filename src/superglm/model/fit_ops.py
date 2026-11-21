@@ -1173,14 +1173,15 @@ def _warn_unresolved_rows(model) -> None:
         warnings.warn(message, WeakIdentificationWarning, stacklevel=4)
 
 
-def _warn_mean_space_boundary(model) -> None:
-    """Say in plain words that a fit holds rows at a fitted probability of 0 or 1.
-
-    Rows a direction the factorization truncates carries to the boundary are
-    named by ``_warn_unresolved_rows`` instead.
-    """
+def warn_published_coefficient_nonconvergence(model) -> None:
+    """Disclose the coefficient stop once, after an ordinary fit is published."""
+    if getattr(model, "_discarded_fit", False) or getattr(
+        model, "_suppress_convergence_warning", False
+    ):
+        return
     result = model._result
-    if result.termination_reason != "mean_space_boundary" or result.mean_space_boundary_unresolved:
+    # The unresolved-row warning already names this boundary stop and its rows.
+    if result.termination_reason == "mean_space_boundary" and result.mean_space_boundary_unresolved:
         return
     from superglm.diagnostics.convergence import warn_coefficient_nonconvergence
 
@@ -1801,6 +1802,7 @@ def fit(
         revision=model._fit_revision + 1,
     )
     _install_fit_state(model, candidate)
+    warn_published_coefficient_nonconvergence(model)
     return model
 
 
@@ -1895,7 +1897,6 @@ def _fit_in_workspace(
     )
     runtime_canonicalize.canonicalize_fitted_model(model)
     _warn_unresolved_rows(model)
-    _warn_mean_space_boundary(model)
 
     model._last_fit_meta = {"method": "fit", "discrete": model._discrete}
     _maybe_release_fit_state(model)

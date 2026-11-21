@@ -1695,6 +1695,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                 self.dm,
                 self.groups,
                 beta,
+                family=family,
                 ratio=_separation_weight_ratio(
                     self.working_rows.curvature_source,
                     self.w_ratio,

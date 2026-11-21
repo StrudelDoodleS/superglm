@@ -752,6 +752,35 @@ def test_a_separated_fit_warns_once_however_many_solves_its_theta_search_ran(mon
     assert runtime_claims(caught) == [model.result.separation_message]
 
 
+@pytest.mark.parametrize("penalty", [0.0, 0.2], ids=["direct", "selection"])
+def test_gaussian_guard_warning_names_dominating_responses(monkeypatch, penalty):
+    import superglm.diagnostics.separation as separation_module
+
+    runtime_finding = separation_module.runtime_finding
+
+    def pinned(*args, **kwargs):
+        # Force the backstop's event without depending on floating-point rounding in the fit.
+        eta = kwargs["eta"].copy()
+        eta[0] += 1
+        return runtime_finding(*args, **(kwargs | {"ratio": 1e35, "eta_unclipped": eta}))
+
+    monkeypatch.setattr(separation_module, "runtime_finding", pinned)
+    x = np.linspace(-1, 1, 100)
+    frame = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="gaussian", link="log", features={"x": Numeric()}, selection_penalty=penalty
+    )
+    with pytest.warns(SeparationWarning) as caught:
+        model.fit(frame, np.exp(1 + 0.5 * x))
+
+    (warning,) = caught
+    message = str(warning.message)
+    assert "overflow guard" in message and "['x']" in message
+    assert "a few responses dominate the fit" in message
+    assert "Gamma" in message and "Tweedie" in message and "capping the response" in message
+    assert "separation" not in message and "response boundary" not in message
+
+
 def poisson_curve(seed=3, n=1500):
     rng = np.random.default_rng(seed)
     x = rng.uniform(0.0, 1.0, n)
