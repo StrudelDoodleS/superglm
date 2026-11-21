@@ -936,9 +936,13 @@ def predict_priced(
     With ``what`` the rows are checked (``require_priced_rows``): a weighted
     one raises the named error, and a zero-weight one is left out of the
     score.  Without it the reader handles them itself (``unpriced_rows``).
-    ``predict``'s other disclosures, about partly identified levels, stand.
+    ``predict``'s disclosures about partly identified levels stand; its test of
+    rows the training data do not determine (``estimability_ops``) is
+    ``predict``'s alone and is not run.
     """
-    with no_mean_warning_quiet():
+    from superglm.model.estimability_ops import non_estimable_warning_quiet
+
+    with no_mean_warning_quiet(), non_estimable_warning_quiet():
         mu = model.predict(X, offset=offset)
     if what is not None:
         require_priced_rows(model, mu, weights, what)
@@ -947,7 +951,7 @@ def predict_priced(
 
 def predict_exact(
     model,
-    X: FrameLike,
+    X: EagerFrame | FrameLike,
     offset: NDArray | None = None,
     *,
     random_effects: str = "conditional",

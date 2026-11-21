@@ -135,6 +135,7 @@ if _typing.TYPE_CHECKING:
     )
     from superglm.model import PathResult, SuperGLM
     from superglm.model.base import NoPredictedMeanError
+    from superglm.model.estimability_ops import NonEstimablePredictionWarning
     from superglm.model.input_validation import (
         FractionalFrequencyWeightWarning,
         PriorWeightLatticeWarning,
@@ -285,6 +286,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
     ),
     "superglm.model": ("PathResult", "SuperGLM"),
     "superglm.model.base": ("NoPredictedMeanError",),
+    "superglm.model.estimability_ops": ("NonEstimablePredictionWarning",),
     "superglm.model.input_validation": (
         "FractionalFrequencyWeightWarning",
         "PriorWeightLatticeWarning",
@@ -567,6 +569,7 @@ __all__ = [
     "ConvergenceWarning",
     "FactorSmoothGroupTermWarning",
     "InteractionCellLabelWarning",
+    "NonEstimablePredictionWarning",
     "RedundantInteractionWarning",
     "SCOPRetiredWarning",
     "SplineOptionWarning",

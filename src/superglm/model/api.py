@@ -13,7 +13,7 @@ from numpy.typing import NDArray
 
 from superglm._blas_threads import solver_blas_threads
 from superglm._fit_gate import fit_record
-from superglm._frame import FrameLike, as_eager_frame
+from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.distributions import Distribution
 from superglm.links import Link
 from superglm.penalties.base import Penalty
@@ -1937,7 +1937,7 @@ class SuperGLM:
 
     def _predict_exact(
         self,
-        X: FrameLike,
+        X: EagerFrame | FrameLike,
         offset: NDArray | None = None,
         *,
         random_effects: str = "conditional",
@@ -1992,8 +1992,28 @@ class SuperGLM:
             but a new combination of covariate values or offsets can cross, and
             so can the exact design on the training rows of a coarsely binned
             fit.
+        NonEstimablePredictionWarning
+            When a row combines covariate values neither the training data
+            nor the penalty determine: its design row leans on a direction of
+            the training design's null space that no penalty curves, past R's
+            ``predict.lm`` tolerance (``1e-6`` of the row's size;
+            ``model.estimability_ops``). The prediction is returned
+            unchanged; the warning's ``rows`` names those rows. A fit with no
+            such direction never gives it. As in ``predict.lm``, a row the
+            fit's rank decision treats as determined only up to its cut (a
+            near alias) can warn, a training row included. Only a dense,
+            unbinned fit is tested: a binned fit, one with a ``FactorSmooth``
+            term, a structured fit, a saved model without both of the fit's
+            rank records, and a fit whose columns sit too far from zero for
+            float64 to resolve the test are silent.
         """
-        return self._predict_exact(X, offset, random_effects=random_effects)
+        # One frame for both, so each column is read from the caller's frame once.
+        frame = as_eager_frame(X)
+        mu = self._predict_exact(frame, offset, random_effects=random_effects)
+        from superglm.model.estimability_ops import disclose_non_estimable
+
+        disclose_non_estimable(self, frame, random_effects)
+        return mu
 
     # ── Monotone repair ─────────────────────────────────────────
 
