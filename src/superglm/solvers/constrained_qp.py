@@ -1682,7 +1682,9 @@ def _solve_qp(
     recovered_face: tuple[int, ...] | None = None
     cycles = _CycleGuard(H_sym, g, A, b, tol, abs_A)
 
+    used = 0
     for it in range(max_iter):
+        used = it + 1
         if at_face_minimum and not kkt_may_be_singular:
             # Read before the next saddle solve, whose step a pass discards.
             # A negative multiplier releases its row (Nocedal and Wright 2006,
@@ -1702,7 +1704,7 @@ def _solve_qp(
                 least_index=cycles.least_index,
             )
             if certified:
-                return _result(beta, active, it + 1, converged=True)
+                return _result(beta, active, used, converged=True)
             if release is not None:
                 active.pop(release)
                 basis.delete(release)
@@ -1830,7 +1832,7 @@ def _solve_qp(
                 H_sym, g, beta, A[active], b[active], multipliers, tol, objective
             )
             if feasible and stationary and complementary:
-                return _result(beta, active, it + 1, converged=True)
+                return _result(beta, active, used, converged=True)
             if feasible and face_candidate is not None:
                 # A recovered face may still need ordinary saddle refinement.
                 # Projection can also change the start: re-solve from it next
@@ -1993,7 +1995,7 @@ def _solve_qp(
                     face_candidate is None
                     and recovered_face == tuple(active)
                     and can_restart_from_zero
-                    and it + 1 < max_iter
+                    and used < max_iter
                     and not _is_feasible(A, beta, b, tol, abs_A=abs_A)
                 ):
                     break
@@ -2015,14 +2017,8 @@ def _solve_qp(
                 # it cannot certify: the next iteration solves the face again.
                 beta = beta_new
 
-    else:
-        result = _result(beta, active, max_iter, converged=False)
-        result._budget_hits = 1
-        return result
-
     # The projection or its repair failed. A feasible phase-one point makes
     # the remaining iterations usable. A supplied start prevents recursion.
-    used = it + 1
     if used < max_iter and can_restart_from_zero and not _is_feasible(A, beta, b, tol, abs_A=abs_A):
         retry = _solve_qp(
             H_sym,
@@ -2040,4 +2036,6 @@ def _solve_qp(
             departed=departed,
         )
         return replace(retry, n_iter=used + retry.n_iter)
-    return _result(beta, active, used, converged=False)
+    result = _result(beta, active, used, converged=False)
+    result._budget_hits = int(used == max_iter)
+    return result

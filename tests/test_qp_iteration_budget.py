@@ -17,18 +17,18 @@ def test_default_budget_can_identify_201_binding_rows():
     assert sorted(result.active_set) == list(range(p))
 
 
-@pytest.mark.parametrize("both_end_early", [False, True])
-def test_budget_hits_count_exhausted_loops_only(monkeypatch, both_end_early):
+@pytest.mark.parametrize("force_zero_step_in_both", [False, True])
+def test_budget_hits_count_exhausted_loops_only(monkeypatch, force_zero_step_in_both):
     from superglm.solvers import constrained_qp as qp
 
     run = qp._solve_qp
 
     def replay(*args, conservative, departed):
-        # Force a regular/conservative replay. Both spend their final allowed
-        # iteration; a zero direction with a failed certificate exits early.
+        # Force a regular/conservative replay. A zero direction with a
+        # failed certificate breaks on the first iteration of that attempt.
         if not conservative:
             departed.append(True)
-        if conservative or both_end_early:
+        if conservative or force_zero_step_in_both:
             with monkeypatch.context() as patch:
                 patch.setattr(
                     qp, "_stationarity_certificate", lambda *a, **k: (False, None, np.zeros(2))
@@ -39,10 +39,51 @@ def test_budget_hits_count_exhausted_loops_only(monkeypatch, both_end_early):
         return run(*args, conservative=conservative, departed=departed)
 
     monkeypatch.setattr(qp, "_solve_qp", replay)
-    result = solve_constrained_qp(np.eye(2), -np.ones(2), np.eye(2), np.zeros(2), max_iter=1)
-    assert not result.converged
-    assert result.n_iter == 2
-    assert result._budget_hits == (0 if both_end_early else 1)
+    system = np.eye(2), -np.ones(2), np.eye(2), np.zeros(2)
+    last = solve_constrained_qp(*system, max_iter=1)
+    assert not last.converged and last.n_iter == 2
+    assert last._budget_hits == 2
+
+    early = solve_constrained_qp(*system, max_iter=2)
+    assert not early.converged
+    assert early._budget_hits == (0 if force_zero_step_in_both else 1)
+
+
+def test_last_small_step_allows_gaussian_fit_to_reach_nonnegative_optimum():
+    from superglm.distributions import Gaussian
+    from superglm.links import IdentityLink
+    from superglm.solvers.irls_direct import fit_irls_direct
+    from superglm.types import GroupSlice, LinearConstraintSet
+
+    # The initial projection repairs 100 rows. As they bind, 98 coupled
+    # coordinates hit zero too. The first QP runs out during its final repair.
+    p = 301
+    H = np.eye(p)
+    partners = np.arange(98)
+    H[partners, 100 + partners] = H[100 + partners, partners] = 0.5
+    unconstrained = np.repeat([-10.0, 0.1, -0.01, 10.0], [100, 98, 102, 1])
+    factor = np.linalg.cholesky(H)
+    X = np.vstack([factor.T, -factor.T])
+    y = X @ unconstrained
+    constraints = LinearConstraintSet(A=np.eye(p), b=np.zeros(p))
+    groups = [GroupSlice("x", 0, p, constraints=constraints, monotone_engine="qp")]
+    result, _ = fit_irls_direct(
+        X,
+        y,
+        np.ones(len(y)),
+        Gaussian(),
+        IdentityLink(),
+        groups,
+        lambda2=0.0,
+        weight_semantics="frequency",
+    )
+
+    # At zero every bound has a positive objective gradient except the
+    # independent last coefficient, whose unconstrained minimum is ten.
+    expected = 10.0 * X[:, -1]
+    assert result.converged
+    np.testing.assert_allclose(result.intercept + X @ result.beta, expected, atol=1e-12)
+    assert result.deviance == pytest.approx(np.sum((y - expected) ** 2), rel=1e-12)
 
 
 def _partial_gaussian_fit(monkeypatch, *, persistent=False, max_iter=6):
