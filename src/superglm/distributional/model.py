@@ -1207,6 +1207,7 @@ def _fit_candidate(
             separation_boundaries=separation_boundaries,
             separation_response=retained_y,
         )
+    bound_rows = plan_observation(likelihood_plan).bounds
     separation_findings = []
     if separation_boundaries is not None:
         findings = scan_predictor_separation(
@@ -1214,13 +1215,12 @@ def _fit_candidate(
             retained_y,
             resolved_weights.values,
             boundaries=separation_boundaries,
-            record_levels=observation.is_complete,
+            bounds=bound_rows,
         )
-        if observation.is_complete and separation_policy == "warn":
+        if separation_policy == "warn":
             separation_findings = findings
         else:
             apply_separation_policy(findings, separation_policy, stacklevel=4)
-    bound_rows = plan_observation(likelihood_plan).bounds
     if bound_rows is not None and separation_policy != "ignore":
         apply_separation_policy(
             scan_censored_separation(

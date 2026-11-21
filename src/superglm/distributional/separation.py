@@ -99,7 +99,7 @@ def scan_predictor_separation(
     weights: NDArray,
     *,
     boundaries: Sequence[tuple[str, ...]],
-    record_levels: bool,
+    bounds: ResponseBounds | None,
 ) -> list[SeparatedTerm]:
     """Separated levels and crossed cells on every predictor that can separate.
 
@@ -115,6 +115,13 @@ def scan_predictor_separation(
     if len(boundary_tuple) != len(compiled_tuple):
         raise ValueError("boundaries must supply one tuple per compiled predictor")
     response = np.asarray(y, dtype=np.float64)
+    if bounds is not None:
+        censored = bounds.censored_rows()
+        if censored.size:
+            # Censoring limits are not exact observations. Use an interior
+            # value for this scan of the 0 and 1 boundaries; censoring has its own scan.
+            response = response.copy()
+            response[censored] = 0.5
     weight_values = np.asarray(weights, dtype=np.float64)
     findings: list[SeparatedTerm] = []
     curves: list = []
@@ -142,10 +149,10 @@ def scan_predictor_separation(
                     weight_values,
                     predictor_boundaries,
                     codes,
-                    include_base=predictor.intercept or not record_levels,
+                    include_base=predictor.intercept,
                 )
                 findings.extend(found)
-                if record_levels and found:
+                if found:
                     record_separated_levels(spec, found)
             else:
                 _, term, left_spec, right_spec, left, right, left_name, right_name = record

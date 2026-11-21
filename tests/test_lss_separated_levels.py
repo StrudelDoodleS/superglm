@@ -335,6 +335,61 @@ def test_an_intercept_free_reference_cannot_separate(two_levels):
     assert model.term_inference("mean", "lev", simultaneous=False).separated is None
 
 
+@pytest.fixture
+def bounded_separation_book():
+    rng = np.random.default_rng(7)
+    lev = rng.choice(["A", "B", "E"], 1500, p=[0.45, 0.45, 0.10])
+    x = rng.uniform(0, 1, len(lev))
+    y = rng.poisson(0.5 * np.exp(0.5 * (lev == "B") + 0.4 * x)).astype(float)
+    y[lev == "E"] = 0.0
+    return pd.DataFrame({"lev": lev}), y
+
+
+def test_right_truncation_does_not_free_a_reference_without_an_intercept(
+    bounded_separation_book,
+):
+    model = _model(cat("lev", base="E"), intercept=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SeparationWarning)
+        model.fit(*bounded_separation_book, truncation=(None, 20.0))
+    assert model.term_inference("mean", "lev", simultaneous=False).separated is None
+    assert model.term_test("mean", "lev").rank == 2
+
+
+@pytest.mark.parametrize("censor", [False, True], ids=["truncated", "censored"])
+def test_bounded_fits_exclude_an_exact_claim_free_level(bounded_separation_book, censor):
+    X, y = bounded_separation_book
+    keep = X.lev != "E"
+    censored = y >= 3 if censor else None
+    truncation = (None, 20.0)
+    model = _model(cat("lev", base="A"))
+    with pytest.warns(SeparationWarning, match="mean:lev.*E"):
+        model.fit(X, y, truncation=truncation, censored=censored)
+    reference = _model(cat("lev", base="A")).fit(
+        X.loc[keep],
+        y[keep],
+        truncation=truncation,
+        censored=censored[keep] if censored is not None else None,
+    )
+    term = model.term_test("mean", "lev")
+    reference_term = reference.term_test("mean", "lev")
+    assert term.rank == reference_term.rank == 1
+    assert term.statistic == pytest.approx(reference_term.statistic, rel=2e-3)
+    assert "SEP" in term.note and "'E'" in term.note
+    effect = model.term_inference("mean", "lev", simultaneous=False)
+    j = effect.levels.index("E")
+    assert effect.separated[j] and np.isnan(effect.se[j])
+
+
+def test_a_right_censoring_limit_of_zero_is_not_an_observed_zero(bounded_separation_book):
+    X, y = bounded_separation_book
+    model = _model(cat("lev", base="A"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SeparationWarning)
+        model.fit(X, y, censored=(X.lev == "E").to_numpy())
+    assert model.term_inference("mean", "lev", simultaneous=False).separated is None
+
+
 @pytest.mark.pins_behaviour
 def test_ignore_leaves_inference_available_and_error_refuses_the_build(two_levels, monkeypatch):
     """Pin the silent unrestricted fit under ignore and build-time refusal under error."""
