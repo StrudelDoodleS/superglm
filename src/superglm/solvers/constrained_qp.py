@@ -1993,6 +1993,7 @@ def _solve_qp(
                     face_candidate is None
                     and recovered_face == tuple(active)
                     and can_restart_from_zero
+                    and it + 1 < max_iter
                     and not _is_feasible(A, beta, b, tol, abs_A=abs_A)
                 ):
                     break
