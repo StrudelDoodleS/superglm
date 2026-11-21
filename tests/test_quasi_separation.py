@@ -254,7 +254,9 @@ class TestQuasiSeparatedMarker:
     interval is not shown (``build_coef_rows``).
     """
 
+    @pytest.mark.pins_behaviour
     def test_marker_on_rare_level(self):
+        """Control: a thin level with one claim keeps the low-credibility marker, as on master."""
         df, y, exposure = _make_sparse_tweedie_data(separated=False)
         m = SuperGLM(
             family=Tweedie(p=1.5),
@@ -350,7 +352,9 @@ class TestFootnoteInSummary:
     is the whole of what the rule measured.
     """
 
+    @pytest.mark.pins_behaviour
     def test_footnote_present(self):
+        """Control: the footnote names a thin level with one claim, as on master."""
         df, y, exposure = _make_sparse_tweedie_data(separated=False)
         m = SuperGLM(
             family=Tweedie(p=1.5),

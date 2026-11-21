@@ -419,31 +419,50 @@ model = SuperGLM(
 )
 ```
 
-- `"warn"` (default) fits anyway and, once the fit returns, emits one
-  `SeparationWarning`: for each separated level or cell its rows, its exposure
-  (the sum of `exp(offset)` under a log link with an offset) or weight, the
-  response total its rows would expect at the base level's rate, and the
-  fitted relativity, which is where the fit stopped, not an estimate. It says
-  what to do, with a grouping call for the first separated level.
+- `"warn"` (default) fits anyway and, before the fit is installed on the
+  model, emits one `SeparationWarning`. For each separated level or cell it
+  gives its rows, its exposure (the sum of `exp(offset)` under a log link
+  with an offset), the response total its rows would expect at the base
+  level's rate, and the response total the fit gives them, which is where the
+  fit stopped, not an estimate. The base-rate figure is what `predict` gives
+  those rows with the level set to the base (both parents to their base for a
+  cell); it is left out when the base is itself separated or, for a cell,
+  holds no rows. Each row counts its weight under frequency weights and once
+  under prior weights; without an offset the line gives the weight total only
+  under frequency weights. It says what to do, with a grouping call for the
+  first separated level. Raised as an error, the warning leaves the model's
+  previous fit in place.
 - `"error"` refuses the design with a `SeparationError`, before any fit.
 - `"ignore"` disables the check and every notice of it.
 
 The fit keeps the level: its coefficient, its price in `predict` and its
 factor in the rating tables are what the fit reached. `summary()` flags its
-row `SEP` (the workbook's Warning cell reads `Separated`) and leaves its
-standard error, z, p-value and interval blank, as do `term_inference()` and
-`relativities(with_se=True)`: a Wald statistic has no finite reference there
-(Hauck and Donner 1977). A separated base level flags every relativity of its
-term. `centering="mean"` centres on the levels that are not separated. The
+row `SEP` (the workbook's Warning cell reads `Separated`, the editor's
+summary `SEP`) and leaves its standard error, z, p-value and interval blank,
+as do `term_inference()` and `relativities(with_se=True)`, for main effects
+and crossed cells: a Wald statistic has no finite reference there (Hauck and
+Donner 1977). Any other reported contrast that the rows outside separated
+levels and cells leave undetermined moves with it, and is flagged and
+blanked the same way: every relativity against a separated base, the
+intercept then, a parent's main effect beside a separated cell in its base
+row or column. The test is Lenth's estimability test (as `predict` reads its
+rows) on the term, its categorical parents and the intercept. Every other
+number is unchanged. `centering="mean"` centres on the levels whose contrast
+against the base is determined. With a separated base, every centred level
+stays blank: their covariance is the difference of entries the walk has grown
+to about `1e14`. The default base, the most exposed level, avoids this. The
 rating-table block names its separated levels or cells in a note, and
-`predict` warns once per call that reaches one.
+`predict` warns once per call that reaches one, a row an `unseen="base"`
+label routes there included.
 
 Remedies: collapse the affected levels into neighbours
 (`Categorical(grouping=collapse_levels(X["make"], groups={"B+C": ["B", "C"]}))`),
 model the crossed factor with a `RandomEffect` (its ridge bounds every cell),
-or bound the term with a fit-time cap (`Constraint.fit.cap`) or a selection
-penalty (capped and penalised terms are exempt from the check because their
-optima are finite).
+or bound a main effect with a fit-time cap (`Constraint.fit.cap`) or the term
+with a selection penalty. Penalised terms, and capped levels in `fit` and
+`fit_reml`, are exempt from the check because their optima are finite;
+`fit_path` fits without its caps, so it reports a capped level as separated.
+A crossed cell bounded only through a capped parent is still reported.
 That exemption covers these categorical cells only: the spline-by-factor hold
 described below applies to a term whatever penalty bounds it.
 A cell with few rows but at least one positive response is *not* separated
