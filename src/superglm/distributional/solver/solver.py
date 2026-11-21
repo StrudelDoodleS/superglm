@@ -1639,11 +1639,10 @@ def _drops_design_aliases(layout: StackedLayout, rank: RankDecomposition) -> boo
     ``X N ~ 0`` is an alias; a direction only the weights flatten is a likelihood boundary
     (Lesaffre and Marx 1993). ``rho = ||X N|| / ||C N||`` on unit columns (Belsley, Kuh and
     Welsch 1980) centred beside an intercept (Marquardt and Snee 1975), so no unit, origin
-    or response decides. The span is an alias when ``rho <= 1e-7`` throughout it, using
-    the size of R's ``lm.fit`` default QR tolerance as a threshold for this centred
-    residual test. It is also an alias when ``X N`` is rounding, ``2 k gamma_k`` of the
-    uncentred norms (a constant column, 0 / 0 centred). A centred square
-    within its cancellation, ``3 gamma_{n+2} sum x^2`` (Chan, Golub and LeVeque 1983),
+    or response decides. The span is an alias when ``rho <= 1e-7`` throughout it (the size
+    of R's ``lm.fit`` QR tolerance, read here on centred columns), or when ``X N`` is
+    rounding, ``2 k gamma_k`` of the uncentred norms (a constant column, 0 / 0 centred). A
+    centred square within its cancellation, ``3 gamma_{n+2} sum x^2`` (Chan, Golub and LeVeque 1983),
     counts as zero, which can only refuse an alias. Columns are scaled to unit maximum (the
     test is basis-free); a non-finite span is not an alias.
     """

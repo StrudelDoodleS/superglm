@@ -1180,7 +1180,10 @@ def warn_published_coefficient_nonconvergence(model) -> None:
     ):
         return
     result = model._result
-    # The unresolved-row warning already names this boundary stop and its rows.
+    # Other stops warn where they are found, and an unresolved boundary stop is
+    # named with its rows by the unresolved-row warning.
+    if result.termination_reason not in ("max_iter", "mean_space_boundary"):
+        return
     if result.termination_reason == "mean_space_boundary" and result.mean_space_boundary_unresolved:
         return
     from superglm.diagnostics.convergence import warn_coefficient_nonconvergence
