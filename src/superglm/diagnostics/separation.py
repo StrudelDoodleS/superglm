@@ -467,7 +467,8 @@ class SeparatedLevels:
 
     ``specs`` holds every term of the build by name, main effects and
     interactions; ``total_name`` is ``"exposure"`` when the build had an offset
-    under a log link (its exponent is the rows' exposure), ``"weight"`` otherwise.
+    under a log link (its exponent is the rows' exposure), ``"weight"`` otherwise;
+    ``frame`` is the build's training frame, which the disclosure predicts on.
     """
 
     findings: list[SeparatedTerm]
@@ -475,7 +476,7 @@ class SeparatedLevels:
     sample_weight: NDArray
     offset: NDArray | None
     total_name: str
-    frame: Any = None
+    frame: Any
 
 
 @dataclass(frozen=True)
@@ -786,7 +787,7 @@ class RuntimeFinding(str):
 def restates_separated_level(message: str | None, separated: set[str]) -> bool:
     """Whether a runtime finding is the walk of a level or cell the fit already discloses.
 
-    So when the group carrying the walk farthest is a term in ``separated``, the
+    True when the group carrying the walk farthest is a term in ``separated``, the
     terms whose separated levels or cells the build-time scan recorded.
     """
     groups = getattr(message, "groups", ())
