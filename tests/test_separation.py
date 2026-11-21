@@ -1005,8 +1005,11 @@ def test_an_independent_fit_inside_a_progress_callback_reports_its_own_findings(
 
     assert len(result.evaluations) > 1
     assert [len(found) for found in inner] == [1, 2, 1]
-    assert len(notices(caught, "RandomEffect variance component(s) 'r'")) == 1
-    assert len(notices(caught, "1 categorical level has rows")) == 1
+    sep_all = [c for c in caught if issubclass(c.category, SeparationWarning)]
+    sep_levels = notices(caught, "1 categorical level has rows")
+    assert len(sep_all) == 1 and sep_all == sep_levels
+    assert "With an estimated dispersion" in str(sep_all[0].message)
+    assert "'r'" in str(sep_all[0].message)
 
 
 @pytest.mark.parametrize("solver", ["fit_irls_direct", "fit_pirls"])

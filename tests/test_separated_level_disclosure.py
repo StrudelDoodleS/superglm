@@ -1428,3 +1428,526 @@ def test_the_warnings_grouping_call_prices_the_level(fitted):
     caught = _fit(model, X, y, exposure)
     assert not _of(caught, SeparationWarning)
     assert spec._grouping.original_to_group["E"] == spec._grouping.original_to_group["D"]
+
+
+# ── PR C: separation reporting precision (#689, #691, #693) ───────────────
+
+
+def test_crossed_cell_bounded_by_capped_parents_is_not_separated():
+    """#689a: A x P has no claims, but fit-time caps on both parents bound every recession direction.
+
+    In ``fit``, ``warn`` emits no fit or predict warning and keeps every Wald SE finite
+    (matching ``ignore``), and ``error`` succeeds. ``fit_path`` lifts caps, so it still
+    reports and refuses A x P.
+    """
+    cells = [("A", "P", 0), ("A", "Q", 1), ("B", "P", 1), ("B", "Q", 1)]
+    X = pd.DataFrame([(a, b) for a, b, _ in cells for _ in range(100)], columns=["a", "b"])
+    y = np.repeat([v for *_, v in cells], 100).astype(float)
+    grid = pd.DataFrame({"a": list("AABB"), "b": list("PQPQ")})
+
+    def make(sep, **extra):
+        cap = Constraint.fit.cap(0.5, 2.0)
+        return SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            separation=sep,
+            features={
+                "a": Categorical(base="A", constraint=cap),
+                "b": Categorical(base="P", constraint=cap),
+            },
+            interactions=[("a", "b")],
+            **extra,
+        )
+
+    m_warn, m_ign = make("warn"), make("ignore")
+    w_warn = _caught(lambda: m_warn.fit(X, y))
+    w_ign = _caught(lambda: m_ign.fit(X, y))
+    assert not w_warn and not w_ign
+
+    with warnings.catch_warnings(record=True) as pred_caught:
+        warnings.simplefilter("always")
+        pred_warn = m_warn.predict(grid)
+    assert not _of(pred_caught, SeparationWarning)
+    np.testing.assert_allclose(pred_warn, m_ign.predict(grid), rtol=1e-12)
+    np.testing.assert_allclose(pred_warn, [0.4, 0.8, 0.8, 1.0], rtol=1e-6)
+
+    rows_warn = {r.name: r for r in m_warn.summary()._coef_rows}
+    rows_ign = {r.name: r for r in m_ign.summary()._coef_rows}
+    for name in ("Intercept", "a[B]", "b[Q]", "a:b[B:Q]"):
+        assert not rows_warn[name].separated
+        assert rows_warn[name].se is not None
+        assert rows_warn[name].se == pytest.approx(rows_ign[name].se, rel=1e-12)
+
+    m_err = make("error")
+    m_err.fit(X, y)
+    assert m_err._result is not None
+
+    # fit_path lifts fit-time caps, so A x P is genuinely unbounded on the path.
+    Xp = X.assign(x=np.tile([0.0, 1.0], len(X) // 2))
+
+    def make_path(sep):
+        cap = Constraint.fit.cap(0.5, 2.0)
+        return SuperGLM(
+            family="poisson",
+            separation=sep,
+            penalty=GroupLasso(lambda1=0.1, features=["x"]),
+            features={
+                "a": Categorical(base="A", constraint=cap),
+                "b": Categorical(base="P", constraint=cap),
+                "x": Numeric(),
+            },
+            interactions=[("a", "b")],
+        )
+
+    with warnings.catch_warnings(record=True) as path_warn:
+        warnings.simplefilter("always")
+        make_path("warn").fit_path(Xp, y, lambda_seq=[0.1, 0.01])
+    path_sep = _of(path_warn, SeparationWarning)
+    assert len(path_sep) == 1 and "'a:b' cell 'A' x 'P'" in path_sep[0]
+    with warnings.catch_warnings(), pytest.raises(SeparationError, match="'a:b' cell 'A' x 'P'"):
+        warnings.simplefilter("ignore")
+        make_path("error").fit_path(Xp, y, lambda_seq=[0.1, 0.01])
+
+
+def test_crossed_cell_bounded_by_penalised_parent_is_not_separated():
+    """#689b: B x P moves only through parent 'a'; penalising 'a' alone bounds it."""
+    rate = {("A", "P"): 0.2, ("A", "Q"): 0.3, ("B", "P"): 0.0, ("B", "Q"): 0.3}
+    data = [(a, b, float(i < 100 * r)) for (a, b), r in rate.items() for i in range(100)]
+    frame = pd.DataFrame(data, columns=["a", "b", "y"])
+    X, y = frame[["a", "b"]], frame["y"].to_numpy()
+    grid = pd.DataFrame({"a": list("AABB"), "b": list("PQPQ")})
+
+    def make(sep):
+        return SuperGLM(
+            family="poisson",
+            selection_penalty=0.2,
+            penalty_features=["a"],
+            separation=sep,
+            interactions=[("a", "b")],
+            features={"a": Categorical(base="A"), "b": Categorical(base="P")},
+        )
+
+    m_warn, m_ign = make("warn"), make("ignore")
+    assert not _caught(lambda: m_warn.fit(X, y, max_iter=5000))
+    assert not _caught(lambda: m_ign.fit(X, y, max_iter=5000))
+
+    with warnings.catch_warnings(record=True) as pred_caught:
+        warnings.simplefilter("always")
+        pred_warn = m_warn.predict(grid)
+    assert not _of(pred_caught, SeparationWarning)
+    np.testing.assert_allclose(pred_warn, m_ign.predict(grid), rtol=1e-12)
+
+    rows_warn = {r.name: r for r in m_warn.summary()._coef_rows}
+    rows_ign = {r.name: r for r in m_ign.summary()._coef_rows}
+    for name in ("Intercept", "a[B]", "b[Q]", "a:b[B:Q]"):
+        assert not rows_warn[name].separated
+        assert rows_warn[name].se is not None
+        assert rows_warn[name].se == pytest.approx(rows_ign[name].se, rel=1e-12)
+
+    m_err = make("error")
+    m_err.fit(X, y, max_iter=5000)
+    assert m_err._result is not None
+
+
+def test_crossed_penalised_and_capped_edges():
+    """#689c, #689d, alias_prune=False healthy alias, and Binomial opposite-boundary cycle."""
+    # Edge A (#689c): sparse grid with penalty on a:b alone still separates via unpenalised parents.
+    sparse_cells = [("A", "P", 20), ("B", "Q", 30), ("B", "P", 0)]
+    frame = pd.DataFrame(
+        [(a, b, float(i < k)) for a, b, k in sparse_cells for i in range(100)],
+        columns=["a", "b", "y"],
+    )
+    X_s, y_s = frame[["a", "b"]], frame["y"].to_numpy()
+    m_sparse = SuperGLM(
+        family="poisson",
+        selection_penalty=0.2,
+        penalty_features=["a:b"],
+        interactions=[("a", "b")],
+        features={"a": Categorical(base="A"), "b": Categorical(base="P")},
+    )
+    (warn_s,) = _caught(lambda: m_sparse.fit(X_s, y_s, max_iter=200))
+    assert "'a:b' cell 'B' x 'P'" in str(warn_s.message)
+    rows_s = {r.name: r for r in m_sparse.summary()._coef_rows}
+    assert rows_s["a[B]"].separated and rows_s["b[Q]"].separated
+    assert not rows_s["a:b[B:Q]"].separated and not rows_s["Intercept"].separated
+    with pytest.raises(SeparationError, match="'a:b' cell 'B' x 'P'"):
+        SuperGLM(
+            family="poisson",
+            selection_penalty=0.2,
+            penalty_features=["a:b"],
+            separation="error",
+            interactions=[("a", "b")],
+            features={"a": Categorical(base="A"), "b": Categorical(base="P")},
+        ).fit(X_s, y_s, max_iter=200)
+
+    # Full 2x2 grid with penalty on a:b alone bounds B:Q completely.
+    full_cells = [("A", "P", 20), ("A", "Q", 30), ("B", "P", 40), ("B", "Q", 0)]
+    frame_f = pd.DataFrame(
+        [(a, b, float(i < k)) for a, b, k in full_cells for i in range(100)],
+        columns=["a", "b", "y"],
+    )
+    m_full = SuperGLM(
+        family="poisson",
+        selection_penalty=0.2,
+        penalty_features=["a:b"],
+        separation="error",
+        interactions=[("a", "b")],
+        features={"a": Categorical(base="A"), "b": Categorical(base="P")},
+    )
+    assert not _caught(lambda: m_full.fit(frame_f[["a", "b"]], frame_f["y"].to_numpy()))
+
+    # Edge C (#689d): capped parents, 3 zero cells + healthy B:Q -> Intercept & a:b[B:Q] only.
+    three_zero = [("A", "P", 0), ("A", "Q", 0), ("B", "P", 0), ("B", "Q", 20)]
+    frame_c = pd.DataFrame(
+        [(a, b, float(i < k)) for a, b, k in three_zero for i in range(100)],
+        columns=["a", "b", "y"],
+    )
+    cap = Constraint.fit.cap(0.5, 2.0)
+    m_cap3 = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        interactions=[("a", "b")],
+        features={
+            "a": Categorical(base="A", constraint=cap),
+            "b": Categorical(base="P", constraint=cap),
+        },
+    )
+    (warn_c,) = _caught(lambda: m_cap3.fit(frame_c[["a", "b"]], frame_c["y"].to_numpy()))
+    msg_c = str(warn_c.message)
+    for cell in ("'A' x 'P'", "'A' x 'Q'", "'B' x 'P'"):
+        assert cell in msg_c
+    rows_c = {r.name: r for r in m_cap3.summary()._coef_rows}
+    assert {name for name, r in rows_c.items() if r.separated} == {"Intercept", "a:b[B:Q]"}
+    assert rows_c["a[B]"].se is not None and rows_c["b[Q]"].se is not None
+
+    # Healthy alias under alias_prune=False (selection_penalty > 0): B:R healthy with empty A:R.
+    alias_cells = [("A", "P", 20), ("A", "Q", 20), ("B", "P", 20), ("B", "Q", 0), ("B", "R", 20)]
+    frame_a = pd.DataFrame(
+        [(a, b, float(i < k)) for a, b, k in alias_cells for i in range(100)],
+        columns=["a", "b", "y"],
+    )
+    m_alias = SuperGLM(
+        family="poisson",
+        selection_penalty=0.2,
+        penalty_features=["a"],
+        interactions=[("a", "b")],
+        features={"a": Categorical(base="A"), "b": Categorical(base="P")},
+    )
+    (warn_a,) = _caught(lambda: m_alias.fit(frame_a[["a", "b"]], frame_a["y"].to_numpy()))
+    assert "'a:b' cell 'B' x 'Q'" in str(warn_a.message)
+    rows_a = {r.name: r for r in m_alias.summary()._coef_rows}
+    assert rows_a["a:b[B:Q]"].separated
+    assert not rows_a["b[R]"].separated and not rows_a["a:b[B:R]"].separated
+
+    # Binomial opposite-boundary cycle: A:P, A:Q healthy; B:P=0, B:Q=1; penalty on a:b alone.
+    binom_cells = [("A", "P", 50), ("A", "Q", 50), ("B", "P", 0), ("B", "Q", 100)]
+    frame_b = pd.DataFrame(
+        [(a, b, float(i < k)) for a, b, k in binom_cells for i in range(100)],
+        columns=["a", "b", "y"],
+    )
+    m_binom = SuperGLM(
+        family="binomial",
+        selection_penalty=0.2,
+        penalty_features=["a:b"],
+        separation="error",
+        interactions=[("a", "b")],
+        features={"a": Categorical(base="A"), "b": Categorical(base="P")},
+    )
+    assert not _caught(lambda: m_binom.fit(frame_b[["a", "b"]], frame_b["y"].to_numpy()))
+
+
+def test_crossed_scc_matches_highs_lp_oracle_and_dense_null():
+    """HiGHS LP oracle over randomised small grids and all 8 (pin_a, pin_b, pin_c) combos.
+
+    Verifies exact agreement between ``scan_interaction_term`` (directed SCC) and the
+    exact convex-analytic recession LP (``scipy.optimize.linprog``) across mixed zero/one
+    boundaries and all 8 pinning tuples, and checks ``_cross_block`` against the dense
+    constrained healthy-row null space.
+    """
+    import inspect
+
+    from scipy.optimize import linprog
+
+    from superglm.diagnostics.separation import scan_interaction_term
+    from superglm.features.interaction import CategoricalInteraction
+    from superglm.model.separated_levels import _Record, separation_flags
+    from superglm.types import GroupSlice
+
+    has_bounded = "bounded" in inspect.signature(scan_interaction_term).parameters
+
+    def lp_oracle(spec1, spec2, cross_spec, cell_kinds, bounded):
+        """Exact recession LP for each boundary cell under ``bounded = (pin_a, pin_b, pin_c)``."""
+        pin_a, pin_b, pin_c = bounded
+        nb1, nb2 = list(spec1._non_base), list(spec2._non_base)
+        n1, n2 = len(nb1), len(nb2)
+        pairs = list(cross_spec._pairs)
+        pair_col = {pair: 1 + n1 + n2 + j for j, pair in enumerate(pairs)}
+        width = 1 + n1 + n2 + len(pairs)
+
+        def row_vec(a, b):
+            v = np.zeros(width, dtype=float)
+            v[0] = 1.0
+            if a in nb1:
+                v[1 + nb1.index(a)] = 1.0
+            if b in nb2:
+                v[1 + n1 + nb2.index(b)] = 1.0
+            if (a, b) in pair_col:
+                v[pair_col[(a, b)]] = 1.0
+            return v
+
+        eq_rows, ub_rows = [], []
+        boundary_cells = []
+        for (a, b), kind in cell_kinds.items():
+            v = row_vec(a, b)
+            if kind == 0:
+                eq_rows.append(v)
+            elif kind == -1:
+                ub_rows.append(v)
+                boundary_cells.append(("zero", (a, b), -1.0, v))
+            else:
+                ub_rows.append(-v)
+                boundary_cells.append(("one", (a, b), 1.0, v))
+
+        bounds = [(-1.0, 1.0)]
+        bounds += [(0.0, 0.0) if pin_a else (-1.0, 1.0)] * n1
+        bounds += [(0.0, 0.0) if pin_b else (-1.0, 1.0)] * n2
+        bounds += [(0.0, 0.0) if pin_c else (-1.0, 1.0)] * len(pairs)
+        A_eq = np.vstack(eq_rows) if eq_rows else None
+        b_eq = np.zeros(len(eq_rows)) if eq_rows else None
+        A_ub = np.vstack(ub_rows) if ub_rows else None
+        b_ub = np.zeros(len(ub_rows)) if ub_rows else None
+
+        separated = set()
+        for boundary, cell, sign, v in boundary_cells:
+            res = linprog(
+                -sign * v, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method="highs"
+            )
+            assert res.success
+            if -res.fun > 1e-6:
+                separated.add((boundary, cell))
+        return separated
+
+    rng = np.random.default_rng(2026)
+    all_combos = [
+        (pa, pb, pc) for pa in (False, True) for pb in (False, True) for pc in (False, True)
+    ]
+
+    for trial in range(25):
+        r_count = 3 if trial < 15 else 4
+        c_count = 3
+        lev1 = [f"A{i}" for i in range(r_count)]
+        lev2 = [f"B{j}" for j in range(c_count)]
+        # Build a random grid of occupied cells with mixed healthy, zero, and one responses.
+        while True:
+            cell_kinds = {}
+            for a in lev1:
+                for b in lev2:
+                    if rng.random() < 0.22:
+                        continue
+                    u = rng.random()
+                    cell_kinds[(a, b)] = 0 if u < 0.50 else (-1 if u < 0.78 else 1)
+            seen1 = {a for a, _ in cell_kinds}
+            seen2 = {b for _, b in cell_kinds}
+            if len(seen1) >= 2 and len(seen2) >= 2 and any(k != 0 for k in cell_kinds.values()):
+                break
+
+        rows_a, rows_b, rows_y = [], [], []
+        for (a, b), kind in cell_kinds.items():
+            if kind == 0:
+                rows_a.extend([a, a])
+                rows_b.extend([b, b])
+                rows_y.extend([0.0, 1.0])
+            else:
+                rows_a.append(a)
+                rows_b.append(b)
+                rows_y.append(0.0 if kind == -1 else 1.0)
+        x1 = np.array(rows_a, dtype=object)
+        x2 = np.array(rows_b, dtype=object)
+        y = np.array(rows_y, dtype=float)
+        w = np.ones(len(y), dtype=float)
+
+        for bounded in all_combos:
+            s1 = Categorical(base="first")
+            s2 = Categorical(base="first")
+            g1 = s1.build(x1, sample_weight=w)
+            g2 = s2.build(x2, sample_weight=w)
+            inter = CategoricalInteraction("a", "b")
+            alias_prune = not any(bounded)
+            gc = inter.build(x1, x2, {"a": s1, "b": s2}, sample_weight=w, alias_prune=alias_prune)
+
+            if has_bounded:
+                findings = scan_interaction_term(
+                    "a:b",
+                    s1,
+                    s2,
+                    x1,
+                    x2,
+                    "a",
+                    "b",
+                    y,
+                    w,
+                    ("zero", "one"),
+                    cross_spec=inter,
+                    bounded=bounded,
+                )
+            else:
+                findings = scan_interaction_term(
+                    "a:b", s1, s2, x1, x2, "a", "b", y, w, ("zero", "one")
+                )
+            got = {(f.boundary, cell) for f in findings for cell in f.labels}
+            expected = lp_oracle(s1, s2, inter, cell_kinds, bounded)
+            assert got == expected, (
+                f"trial={trial} bounded={bounded}: got={got} expected={expected}"
+            )
+
+            # Also check _cross_block against dense constrained null space on alias-pruned grids.
+            if alias_prune and got:
+                sep_cells = frozenset(cell for _, cell in got)
+                occ = frozenset(cell_kinds)
+                groups = [
+                    GroupSlice("a", 0, g1.n_cols, 1.0, feature_name="a"),
+                    GroupSlice("b", g1.n_cols, g1.n_cols + g2.n_cols, 1.0, feature_name="b"),
+                    GroupSlice(
+                        "a:b",
+                        g1.n_cols + g2.n_cols,
+                        g1.n_cols + g2.n_cols + gc.n_cols,
+                        1.0,
+                        feature_name="a:b",
+                    ),
+                ]
+                inter._separated_cells_at_fit = tuple(sep_cells)
+                inter._occupied_cells_at_fit = tuple(occ)
+                if has_bounded:
+                    inter._bounded_groups_at_fit = bounded
+                flags = separation_flags(groups, {"a": s1, "b": s2}, {"a:b": inter})
+                assert flags is not None
+                (block,) = [b for b in flags.of("a:b") if "a:b" in b.terms]
+                # Every coefficient flagged by block must match the dense constrained null space
+                # modulo pure design aliases in ker(X_all).
+                assert block.free.size or block.columns.size
+                # Check that pinned coordinates never appear in any block direction.
+                n1, n2 = g1.n_cols, g2.n_cols
+                width = n1 + n2 + gc.n_cols + 1
+                full = np.zeros((width, width))
+                full[block.free, block.free] = 1.0
+                if block.columns.size:
+                    full[np.ix_(block.columns, block.columns)] += block.null @ block.null.T
+                # Verify block directions annihilate every non-separated occupied cell.
+                nb1, nb2 = list(s1._non_base), list(s2._non_base)
+                pair_col = {pair: n1 + n2 + j for j, pair in enumerate(inter._pairs)}
+                intercept = n1 + n2 + gc.n_cols
+                for a, b in occ - sep_cells:
+                    v = np.zeros(width)
+                    v[intercept] = 1.0
+                    if a in nb1:
+                        v[nb1.index(a)] = 1.0
+                    if b in nb2:
+                        v[n1 + nb2.index(b)] = 1.0
+                    if (a, b) in pair_col:
+                        v[pair_col[(a, b)]] = 1.0
+                    assert np.linalg.norm(full @ v) < 1e-10
+            elif has_bounded and got:
+                # On pinned grids with separated cells, verify pinned coordinates are never flagged.
+                sep_cells = frozenset(cell for _, cell in got)
+                occ = frozenset(cell_kinds)
+                groups = [
+                    GroupSlice("a", 0, g1.n_cols, 1.0, feature_name="a"),
+                    GroupSlice("b", g1.n_cols, g1.n_cols + g2.n_cols, 1.0, feature_name="b"),
+                    GroupSlice(
+                        "a:b",
+                        g1.n_cols + g2.n_cols,
+                        g1.n_cols + g2.n_cols + gc.n_cols,
+                        1.0,
+                        feature_name="a:b",
+                    ),
+                ]
+                inter._separated_cells_at_fit = tuple(sep_cells)
+                inter._occupied_cells_at_fit = tuple(occ)
+                inter._bounded_groups_at_fit = bounded
+                flags = separation_flags(groups, {"a": s1, "b": s2}, {"a:b": inter})
+                assert flags is not None
+                coef_flags = flags.coefficients()
+                pin_a, pin_b, pin_c = bounded
+                if pin_a:
+                    assert not coef_flags[: g1.n_cols].any()
+                if pin_b:
+                    assert not coef_flags[g1.n_cols : g1.n_cols + g2.n_cols].any()
+                if pin_c:
+                    assert not coef_flags[
+                        g1.n_cols + g2.n_cols : g1.n_cols + g2.n_cols + gc.n_cols
+                    ].any()
+                # Verify against _Record with bounded field preserved.
+                assert isinstance(flags.record, _Record)
+
+
+def test_expected_omitted_when_move_to_base_hits_separated_cell():
+    """#691: moving a separated level to its base into a separated cell omits ``expected``."""
+    # Poisson: A x Q is all-0 (separated); moving C (all rows at Q) to base A lands in A x Q.
+    _, _, caught_pois = _cells(
+        [("A", "P", 20), ("A", "Q", 0), ("B", "P", 25), ("B", "Q", 30), ("C", "Q", 0)]
+    )
+    line_c = _line(caught_pois, "'a' level 'C'")
+    assert "expected" not in line_c and "fitted" in line_c
+    for cell in ("'a:b' cell 'A' x 'Q'", "'a:b' cell 'C' x 'Q'"):
+        line_cell = _line(caught_pois, cell)
+        assert "20 expected in total at the rate of base cell 'A' x 'P'" in line_cell
+
+    # Binomial: A x Q is all-1 (upper-boundary separated); moving C (all-0 at Q) to A hits A x Q.
+    binom_cells = [("A", "P", 43), ("A", "Q", 100), ("B", "P", 50), ("B", "Q", 60), ("C", "Q", 0)]
+    frame = pd.DataFrame(
+        [(a, b, float(i < events)) for a, b, events in binom_cells for i in range(100)],
+        columns=["a", "b", "y"],
+    )
+    m_binom = SuperGLM(
+        family="binomial",
+        features={"a": Categorical(base="A"), "b": Categorical(base="P")},
+        interactions=[("a", "b")],
+        selection_penalty=0.0,
+    )
+    caught_binom = _caught(lambda: m_binom.fit(frame[["a", "b"]], frame["y"].to_numpy()))
+    line_cb = _line(caught_binom, "'a' level 'C'")
+    assert "expected" not in line_cb and "fitted" in line_cb
+    for cell in ("'a:b' cell 'A' x 'Q'", "'a:b' cell 'C' x 'Q'"):
+        line_cell = _line(caught_binom, cell)
+        assert "43 expected in total at the rate of base cell 'A' x 'P'" in line_cell
+
+
+def test_separated_base_warning_advises_choosing_a_healthy_base():
+    """#693: explicit base on a separated level keeps blank SEs and discloses the remedy.
+
+    The post-fit ``SeparationWarning`` line for a separated base level tells the caller to
+    choose a healthy base (such as the default ``base="most_exposed"``) to get the other
+    levels' standard errors, matching SuperLSS's wording.
+    """
+    rng = np.random.default_rng(0)
+    n = 20000
+    lev = rng.choice(list("ABCDE"), n, p=[0.4, 0.3, 0.2, 0.098, 0.002])
+    expo = rng.uniform(0.2, 1.0, n)
+    y = rng.poisson(expo * 0.08 * np.where(lev == "B", 1.3, 1.0)).astype(float)
+    y[lev == "E"] = 0.0
+    X = pd.DataFrame({"lev": lev})
+
+    m_bad = SuperGLM(
+        family="poisson", selection_penalty=0.0, features={"lev": Categorical(base="E")}
+    )
+    caught = _caught(lambda: m_bad.fit(X, y, offset=np.log(expo)))
+    line = _line(caught, "'lev' level 'E'")
+    assert "base level 'E'" in line
+    assert 'base="most_exposed"' in line
+    assert "Choose a healthy base" in line
+    assert "standard errors" in line
+
+    # Blanks are kept as on master when base is separated.
+    ti_bad = m_bad.term_inference("lev", centering="mean").to_dataframe()
+    assert bool(ti_bad["separated"].all())
+    assert bool(ti_bad["se_log_relativity"].isna().all())
+
+    # Following the warning's advice gives finite SEs for A..D.
+    m_good = SuperGLM(
+        family="poisson", selection_penalty=0.0, features={"lev": Categorical(base="most_exposed")}
+    )
+    _caught(lambda: m_good.fit(X, y, offset=np.log(expo)))
+    ti_good = m_good.term_inference("lev", centering="mean").to_dataframe()
+    assert ti_good["separated"].tolist() == [False, False, False, False, True]
+    assert bool(np.all(np.isfinite(ti_good["se_log_relativity"].iloc[:4])))
+    assert bool(np.isnan(ti_good["se_log_relativity"].iloc[4]))
