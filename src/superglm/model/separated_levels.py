@@ -60,22 +60,26 @@ def separated_terms(model) -> set[str]:
 # ``PREDICTION_TOLERANCE``.  Healthy contrasts keep their numbers.
 #
 # Each recorded term gives one block, the coordinates a separating direction can
-# reach: the term, its categorical parents (a crossed term's), and the intercept.  A
-# block's design rows are indicator rows, one per healthy occupied level or cell, so
-# its null space is read from at most ``L1 x L2`` rows (``_rank_and_null_space``).
+# reach: the term, its categorical parents (a crossed term's), and the intercept.
 # ``Categorical`` and ``CategoricalInteraction`` columns carry no quadratic penalty,
 # and a term a selection penalty targets is exempt from the scan, so a block's penalty
 # adds no rows.  Coordinates run over ``[beta, intercept]``: the intercept is index
-# ``p``.
+# ``p``.  A treatment-coded level's block is read from its labels: beside a healthy
+# base, each separated level's own column is a direction on its own; a separated base
+# adds the one direction that moves the intercept against every healthy level.  A
+# crossed term's block is read from its indicator rows, one per healthy occupied cell,
+# at most ``L1 x L2`` (``_rank_and_null_space``).  A reader builds the blocks once
+# (``separation_flags``) and tests only the terms a block holds; no other term's
+# levels are read.
 
 
 @dataclass(frozen=True)
 class _Record:
     """The separated labels a fit's readers test against, by term.
 
-    ``occupied`` holds a crossed term's occupied cells, base row and column included;
-    ``None`` reads every cell of its grid as occupied (a model saved before the build
-    recorded them).
+    ``occupied`` holds a crossed term's occupied cells, base row and column included.  A
+    model saved before the build recorded them holds ``None`` there, and its separated
+    cells give no flags: the readers keep the figures they had until it is refitted.
     """
 
     levels: dict[str, frozenset]
@@ -89,14 +93,15 @@ def _spec_record(specs: dict, interaction_specs: dict) -> _Record:
         name: frozenset(getattr(spec, "_separated_levels_at_fit", ()) or ())
         for name, spec in specs.items()
     }
-    cells = {
-        name: frozenset(map(tuple, getattr(spec, "_separated_cells_at_fit", ()) or ()))
-        for name, spec in interaction_specs.items()
-    }
     occupied = {}
     for name, spec in interaction_specs.items():
         held = getattr(spec, "_occupied_cells_at_fit", None)
         occupied[name] = None if held is None else frozenset(map(tuple, held))
+    cells = {
+        name: frozenset(map(tuple, getattr(spec, "_separated_cells_at_fit", ()) or ()))
+        for name, spec in interaction_specs.items()
+        if occupied[name] is not None
+    }
     return _Record(
         levels={name: held for name, held in levels.items() if held},
         cells={name: held for name, held in cells.items() if held},
@@ -104,10 +109,64 @@ def _spec_record(specs: dict, interaction_specs: dict) -> _Record:
     )
 
 
+@dataclass(frozen=True)
+class _Block:
+    """One recorded term's separating directions over ``[beta, intercept]``.
+
+    Each coordinate in ``free`` is one on its own; ``null`` is an orthonormal basis of
+    the rest over the coordinates ``columns``.  ``terms`` names the terms it holds.
+    """
+
+    terms: frozenset
+    free: NDArray
+    columns: NDArray
+    null: NDArray
+
+
+@dataclass(frozen=True)
+class SeparationFlags:
+    """A fit's blocks (module comment above), built once for one reader call."""
+
+    record: _Record
+    blocks: tuple[_Block, ...]
+    width: int  # the coordinates ``[beta, intercept]``
+
+    def of(self, name: str) -> list[_Block]:
+        """The blocks that hold term ``name``'s columns."""
+        return [block for block in self.blocks if name in block.terms]
+
+    def coefficients(self) -> NDArray:
+        """Over ``[beta, intercept]``: each coefficient a separating direction moves."""
+        from superglm.model.estimability_ops import PREDICTION_TOLERANCE
+
+        flags = np.zeros(self.width, dtype=bool)
+        for block in self.blocks:
+            flags[block.free] = True
+            flags[block.columns] |= np.linalg.norm(block.null, axis=1) > PREDICTION_TOLERANCE
+        return flags
+
+
 def _term_group(groups, name: str, width: int):
     """``name``'s one group when it is ``width`` columns wide, else ``None``."""
     found = [group for group in groups if group.feature_name == name]
     return found[0] if len(found) == 1 and found[0].size == width else None
+
+
+_NONE = np.zeros(0, dtype=np.intp)
+
+
+def _level_block(name: str, spec, group, held: frozenset, intercept: int) -> _Block | None:
+    """A treatment-coded term's block, from its labels (module comment above)."""
+    at = {level: group.start + j for j, level in enumerate(spec._non_base)}
+    free = np.array([at[level] for level in held if level in at], dtype=np.intp)
+    columns, null = _NONE, np.zeros((0, 1))
+    if spec._base_level in held:
+        # no base row: the intercept less every healthy level's column moves no healthy row
+        healthy = [at[level] for level in spec._non_base if level not in held]
+        columns = np.array([intercept, *healthy], dtype=np.intp)
+        null = np.full((len(columns), 1), -1.0 / np.sqrt(len(columns)))
+        null[0, 0] = -null[0, 0]
+    return _Block(frozenset({name}), free, columns, null) if free.size or columns.size else None
 
 
 def _null_block(columns: list[int], rows: list[list[int]]) -> tuple[NDArray, NDArray] | None:
@@ -125,106 +184,122 @@ def _null_block(columns: list[int], rows: list[list[int]]) -> tuple[NDArray, NDA
     return (np.asarray(columns, dtype=np.intp), null) if null.shape[1] else None
 
 
-def _blocks(groups, specs: dict, interaction_specs: dict, record: _Record) -> list:
-    """Each recorded term's block (module comment above), as ``(columns, N)``."""
+def _cross_block(name: str, spec, specs: dict, groups, record: _Record, intercept: int):
+    """A crossed term's block, from its healthy occupied cells' indicator rows."""
+    from superglm.features.categorical import Categorical
+
+    first, second = (specs.get(parent) for parent in spec.parent_names)
+    if not (isinstance(first, Categorical) and isinstance(second, Categorical)):
+        return None
+    parts = [
+        _term_group(groups, parent, len(parent_spec._non_base))
+        for parent, parent_spec in zip(spec.parent_names, (first, second), strict=True)
+    ]
+    cross = _term_group(groups, name, len(spec._pairs))
+    if any(group is None for group in parts) or cross is None:
+        return None
+    group1, group2 = parts
+    at1 = {level: 1 + j for j, level in enumerate(first._non_base)}
+    at2 = {level: 1 + group1.size + j for j, level in enumerate(second._non_base)}
+    grid = {cell: g for g, cell in enumerate(spec._all_pairs or spec._pairs)}
+    to_column = spec._grid_to_col
+    offset = 1 + group1.size + group2.size
+    occupied = record.occupied[name]
+    held = record.cells[name]
+    # a row of a separated parent level is not a healthy row of the cross either
+    out1, out2 = (
+        {*record.levels.get(spec.parent_names[0], ()), *first._pinned_levels},
+        {*record.levels.get(spec.parent_names[1], ()), *second._pinned_levels},
+    )
+    rows = []
+    for a, b in product(first._levels, second._levels):
+        if a in out1 or b in out2 or (a, b) in held or (a, b) not in occupied:
+            continue
+        hit = [0, *([at1[a]] if a in at1 else []), *([at2[b]] if b in at2 else [])]
+        g = grid.get((a, b))
+        column = None if g is None else (g if to_column is None else int(to_column[g]))
+        if column is not None and column >= 0:
+            hit.append(offset + column)
+        rows.append(hit)
+    columns = [
+        intercept,
+        *range(group1.start, group1.end),
+        *range(group2.start, group2.end),
+        *range(cross.start, cross.end),
+    ]
+    found = _null_block(columns, rows)
+    if found is None:
+        return None
+    return _Block(frozenset({name, *spec.parent_names}), _NONE, *found)
+
+
+def separation_flags(
+    groups, specs: dict, interaction_specs: dict, record: _Record | None = None
+) -> SeparationFlags | None:
+    """The blocks a fit's record gives its readers; ``None`` when nothing is recorded.
+
+    A reader that tests several terms, or one term twice, builds this once and passes it.
+    """
     from superglm.features.categorical import Categorical
     from superglm.features.interaction import CategoricalInteraction
 
+    record = _spec_record(specs, interaction_specs) if record is None else record
+    if not (record.levels or record.cells):
+        return None
     intercept = max((group.end for group in groups), default=0)
     blocks = []
-
-    def position(spec, offset: int) -> dict:
-        """Each non-base level's position within a block, its column's first at ``offset``."""
-        return {level: offset + j for j, level in enumerate(spec._non_base)}
-
     for name, held in record.levels.items():
         spec = specs.get(name)
-        group = None if spec is None else _term_group(groups, name, len(spec._non_base))
-        if not isinstance(spec, Categorical) or group is None:
-            continue
-        at = position(spec, 1)
-        pinned = set(spec._pinned_levels)
-        healthy = [level for level in spec._levels if level not in held and level not in pinned]
-        rows = [[0, *([at[level]] if level in at else [])] for level in healthy]
-        block = _null_block([intercept, *range(group.start, group.end)], rows)
-        if block is not None:
-            blocks.append(block)
-    for name, held in record.cells.items():
-        spec = interaction_specs.get(name)
-        if not isinstance(spec, CategoricalInteraction):
-            continue
-        first, second = (specs.get(parent) for parent in spec.parent_names)
-        if not (isinstance(first, Categorical) and isinstance(second, Categorical)):
-            continue
-        parts = [
-            _term_group(groups, parent, len(parent_spec._non_base))
-            for parent, parent_spec in zip(spec.parent_names, (first, second), strict=True)
-        ]
-        cross = _term_group(groups, name, len(spec._pairs))
-        if any(group is None for group in parts) or cross is None:
-            continue
-        group1, group2 = parts
-        at1 = position(first, 1)
-        at2 = position(second, 1 + group1.size)
-        grid = {cell: g for g, cell in enumerate(spec._all_pairs or spec._pairs)}
-        to_column = spec._grid_to_col
-        offset = 1 + group1.size + group2.size
-        occupied = record.occupied.get(name)
-        # a row of a separated parent level is not a healthy row of the cross either
-        out1, out2 = (
-            {*record.levels.get(spec.parent_names[0], ()), *first._pinned_levels},
-            {*record.levels.get(spec.parent_names[1], ()), *second._pinned_levels},
+        group = (
+            _term_group(groups, name, len(spec._non_base))
+            if isinstance(spec, Categorical)
+            else None
         )
-        rows = []
-        for a, b in product(first._levels, second._levels):
-            if a in out1 or b in out2 or (a, b) in held:
-                continue
-            if occupied is not None and (a, b) not in occupied:
-                continue
-            hit = [0, *([at1[a]] if a in at1 else []), *([at2[b]] if b in at2 else [])]
-            g = grid.get((a, b))
-            column = None if g is None else (g if to_column is None else int(to_column[g]))
-            if column is not None and column >= 0:
-                hit.append(offset + column)
-            rows.append(hit)
-        columns = [
-            intercept,
-            *range(group1.start, group1.end),
-            *range(group2.start, group2.end),
-            *range(cross.start, cross.end),
-        ]
-        block = _null_block(columns, rows)
+        block = None if group is None else _level_block(name, spec, group, held, intercept)
         if block is not None:
             blocks.append(block)
-    return blocks
+    for name in record.cells:
+        spec = interaction_specs.get(name)
+        block = (
+            _cross_block(name, spec, specs, groups, record, intercept)
+            if isinstance(spec, CategoricalInteraction)
+            else None
+        )
+        if block is not None:
+            blocks.append(block)
+    return SeparationFlags(record, tuple(blocks), intercept + 1)
 
 
-def _moves(blocks: list, contrasts: NDArray) -> NDArray:
-    """Which rows of ``contrasts`` (over ``[beta, intercept]``) a block's null space moves."""
+def _moved(blocks: list[_Block], column: NDArray, weight: NDArray | None = None) -> NDArray:
+    """Which of a term's reported contrasts a block's separating directions move.
+
+    Row ``i``'s contrast is its coefficient ``e_column[i]`` (zero for ``-1``, no column),
+    less ``sum_k weight[k] e_column[k]`` when ``weight`` is given (a centred report's
+    mean).  Lenth's test per block, read from the block's rows at the term's columns, so
+    no contrast matrix is formed.
+    """
     from superglm.model.estimability_ops import PREDICTION_TOLERANCE
 
-    contrasts = np.atleast_2d(np.asarray(contrasts, dtype=np.float64))
-    size = np.linalg.norm(contrasts, axis=1)
-    moved = np.zeros(len(contrasts), dtype=bool)
-    for columns, null in blocks:
-        share = np.linalg.norm(contrasts[:, columns] @ null, axis=1)
-        moved |= share > PREDICTION_TOLERANCE * size
+    has = column >= 0
+    weight = np.zeros(len(column)) if weight is None else np.where(has, weight, 0.0)
+    square = float(np.sum(weight**2))
+    size = np.sqrt(np.maximum(has * (1.0 - 2.0 * weight) + square, 0.0))
+    moved = np.zeros(len(column), dtype=bool)
+    for block in blocks:
+        free = has & np.isin(column, block.free)
+        share = free * (1.0 - 2.0 * weight) + float(np.sum(weight[free] ** 2))
+        if block.columns.size:
+            position = {int(c): r for r, c in enumerate(block.columns)}
+            at = np.fromiter((position.get(int(c), -1) for c in column), np.intp, len(column))
+            reach = np.where((at >= 0)[:, None], block.null[np.maximum(at, 0)], 0.0)
+            share = share + np.sum((reach - weight @ reach) ** 2, axis=1)
+        moved |= np.sqrt(np.maximum(share, 0.0)) > PREDICTION_TOLERANCE * size
     return moved
 
 
-def _coefficient_flags(groups, specs, interaction_specs, record: _Record) -> NDArray | None:
-    """Over ``[beta, intercept]``: each coefficient a separating direction moves."""
-    if not (record.levels or record.cells):
-        return None
-    from superglm.model.estimability_ops import PREDICTION_TOLERANCE
-
-    flags = np.zeros(max((group.end for group in groups), default=0) + 1, dtype=bool)
-    for columns, null in _blocks(groups, specs, interaction_specs, record):
-        flags[columns] |= np.linalg.norm(null, axis=1) > PREDICTION_TOLERANCE
-    return flags
-
-
-def separated_coefficients(groups, specs: dict, interaction_specs: dict) -> NDArray | None:
+def separated_coefficients(
+    groups, specs: dict, interaction_specs: dict, *, flags: SeparationFlags | None = None
+) -> NDArray | None:
     """Which coefficients' Wald statistics a recorded separated level or cell voids.
 
     Over ``[beta, intercept]`` (the intercept last); ``None`` when nothing is recorded.
@@ -232,13 +307,19 @@ def separated_coefficients(groups, specs: dict, interaction_specs: dict) -> NDAr
     contrast against a separated base, a parent's main effect beside a separated cell
     in its base row or column, the intercept when it moves.
     """
-    return _coefficient_flags(
-        groups, specs, interaction_specs, _spec_record(specs, interaction_specs)
-    )
+    flags = separation_flags(groups, specs, interaction_specs) if flags is None else flags
+    return None if flags is None else flags.coefficients()
 
 
 def level_flags(
-    groups, specs: dict, interaction_specs: dict, name: str, levels, *, centering: str = "native"
+    groups,
+    specs: dict,
+    interaction_specs: dict,
+    name: str,
+    levels,
+    *,
+    centering: str = "native",
+    flags: SeparationFlags | None = None,
 ) -> tuple[NDArray | None, NDArray | None]:
     """``(flags, centre)`` for a ``Categorical``'s reported levels, each ``None`` when moot.
 
@@ -249,39 +330,47 @@ def level_flags(
     separated base moves every contrast against it, so the centre is then the levels
     not recorded, and every centred contrast is reported blank as well: their
     covariance is a difference of entries the walk has grown to about ``1e14``.
+    ``flags=`` takes the reader's ``separation_flags``.
     """
     from superglm.features.categorical import Categorical
 
     spec = specs.get(name)
-    record = _spec_record(specs, interaction_specs)
-    if not isinstance(spec, Categorical) or not (record.levels or record.cells):
+    if not isinstance(spec, Categorical):
+        return None, None
+    flags = separation_flags(groups, specs, interaction_specs) if flags is None else flags
+    held = frozenset() if flags is None else flags.record.levels.get(name, frozenset())
+    blocks = [] if flags is None else flags.of(name)
+    if not (held or blocks):
         return None, None
     levels = list(levels)
-    recorded = np.array([level in record.levels.get(name, ()) for level in levels], dtype=bool)
+    recorded = np.fromiter((level in held for level in levels), dtype=bool, count=len(levels))
     group = _term_group(groups, name, len(spec._non_base))
-    blocks = _blocks(groups, specs, interaction_specs, record) if group is not None else []
-    native = np.zeros((len(levels), max((g.end for g in groups), default=0) + 1))
-    if group is not None:
-        at = {level: group.start + j for j, level in enumerate(spec._non_base)}
-        for i, level in enumerate(levels):
-            if level in at:
-                native[i, at[level]] = 1.0
-    against_base = recorded | _moves(blocks, native)
+    at = {} if group is None else {level: group.start + j for j, level in enumerate(spec._non_base)}
+    column = np.fromiter((at.get(level, -1) for level in levels), dtype=np.intp, count=len(levels))
+    against_base = recorded | _moved(blocks, column)
     centre = ~against_base
     if not centre.any():
         centre = ~recorded
     centre_on = centre if centre.any() and not centre.all() else None
     if centering != "mean":
-        flags = against_base
-    elif spec._base_level in record.levels.get(name, ()):
-        flags = np.ones(len(levels), dtype=bool)
+        out = against_base
+    elif spec._base_level in held:
+        out = np.ones(len(levels), dtype=bool)
     else:
-        mean = (native[centre] if centre_on is not None else native).mean(axis=0)
-        flags = recorded | _moves(blocks, native - mean)
-    return (flags if flags.any() else None), centre_on
+        mean_over = centre if centre_on is not None else np.ones(len(levels), dtype=bool)
+        out = recorded | _moved(blocks, column, mean_over / np.count_nonzero(mean_over))
+    return (out if out.any() else None), centre_on
 
 
-def pair_flags(groups, specs: dict, interaction_specs: dict, name: str, pairs) -> NDArray | None:
+def pair_flags(
+    groups,
+    specs: dict,
+    interaction_specs: dict,
+    name: str,
+    pairs,
+    *,
+    flags: SeparationFlags | None = None,
+) -> NDArray | None:
     """Which of a crossed term's reported cells (``pairs``, the full non-base grid) are blank.
 
     A recorded cell, and a cell whose interaction coefficient a separating direction
@@ -290,16 +379,20 @@ def pair_flags(groups, specs: dict, interaction_specs: dict, name: str, pairs) -
     from superglm.features.interaction import CategoricalInteraction
 
     spec = interaction_specs.get(name)
-    record = _spec_record(specs, interaction_specs)
-    if not isinstance(spec, CategoricalInteraction) or not (record.levels or record.cells):
+    if not isinstance(spec, CategoricalInteraction):
+        return None
+    flags = separation_flags(groups, specs, interaction_specs) if flags is None else flags
+    held = frozenset() if flags is None else flags.record.cells.get(name, frozenset())
+    blocks = [] if flags is None else flags.of(name)
+    if not (held or blocks):
         return None
     pairs = [tuple(pair) for pair in pairs]
-    recorded = np.array([pair in record.cells.get(name, ()) for pair in pairs], dtype=bool)
-    flags = _coefficient_flags(groups, specs, interaction_specs, record)
+    recorded = np.array([pair in held for pair in pairs], dtype=bool)
     group = _term_group(groups, name, len(spec._pairs))
-    if flags is not None and group is not None:
-        column = {pair: group.start + j for j, pair in enumerate(spec._pairs)}
-        recorded |= np.array([pair in column and flags[column[pair]] for pair in pairs])
+    if blocks and group is not None:
+        position = {pair: group.start + j for j, pair in enumerate(spec._pairs)}
+        column = np.fromiter((position.get(pair, -1) for pair in pairs), np.intp, len(pairs))
+        recorded |= _moved(blocks, column)
     return recorded if recorded.any() else None
 
 
@@ -377,8 +470,10 @@ def separated_columns(model, y: NDArray, sample_weight: NDArray) -> set[int]:
         if ignore
         else _spec_record(model._specs, model._interaction_specs)
     )
-    flags = _coefficient_flags(model._groups, model._specs, model._interaction_specs, record)
-    return set() if flags is None else {int(j) for j in np.flatnonzero(flags[:-1])}
+    flags = separation_flags(model._groups, model._specs, model._interaction_specs, record)
+    if flags is None:
+        return set()
+    return {int(j) for j in np.flatnonzero(flags.coefficients()[:-1])}
 
 
 def predicted_cells(model, term: str, frame) -> set[tuple]:
@@ -535,4 +630,5 @@ __all__ = [
     "separated_labels",
     "separated_levels_message",
     "separated_terms",
+    "separation_flags",
 ]

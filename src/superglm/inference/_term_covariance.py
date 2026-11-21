@@ -227,12 +227,14 @@ def feature_se_from_cov(
     interaction_specs: Mapping[Any, Any],
     n_points: int = 200,
     center: bool = False,
+    flags=None,
 ) -> NDArray:
     """Compute feature-level SEs from a precomputed covariance matrix.
 
     ``center=True`` returns the errors of the mean-centered report, the
     estimable contrast ``C b`` with ``C = I - 11'/L`` and covariance
-    ``C V C'``. An inactive term returns zeros either way.
+    ``C V C'``. An inactive term returns zeros either way.  ``flags`` takes the
+    calling reader's ``separated_levels.separation_flags``.
     """
     from superglm.features.categorical import Categorical
     from superglm.features.numeric import Numeric
@@ -254,6 +256,7 @@ def feature_se_from_cov(
             interaction_specs,
             n_points=n_points,
             center=center,
+            flags=flags,
         )
         return np.ldexp(se, Cov_active.exponent // 2)
 
@@ -384,6 +387,7 @@ def feature_se_from_cov(
             name,
             levels,
             centering="mean" if center else "native",
+            flags=flags,
         )
         if center:
             rows = np.array([levels.index(lev) for lev in spec._non_base], dtype=np.intp)

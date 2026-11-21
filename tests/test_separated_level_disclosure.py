@@ -628,6 +628,79 @@ def test_the_interaction_readers_flag_a_separated_cell():
     assert model.relativities(with_se=True)["a:b"]["separated"].tolist() == [True]
 
 
+def test_a_reader_factors_each_block_once(monkeypatch):
+    """B x P separated in a 2 x 2 grid: each reader call factors the cross's block once.
+
+    A plain level's block is read from its labels and factors nothing.  At 46bcd5990
+    ``relativities()`` factored the same block five times, a centred ``term_inference``
+    four times, and the plain level's block once per reader.
+    """
+    import superglm.diagnostics.separation as separation
+
+    calls = []
+    factor = separation._rank_and_null_space
+    monkeypatch.setattr(
+        separation, "_rank_and_null_space", lambda design: calls.append(1) or factor(design)
+    )
+    model, _, _ = _grid([("A", "P", 20), ("A", "Q", 20), ("B", "P", 0), ("B", "Q", 30)])
+    for read in (
+        lambda: model.relativities(with_se=False),
+        lambda: model.relativities(with_se=True, centering="mean"),
+        lambda: model.term_inference("a", centering="mean"),
+    ):
+        calls.clear()
+        read()
+        assert len(calls) == 1
+    plain, X, y = _two_levels(0.0)
+    _caught(lambda: plain.fit(X, y))
+    calls.clear()
+    plain.relativities(with_se=True, centering="mean")
+    plain.summary()
+    assert not calls
+
+
+def test_a_healthy_factor_beside_a_separated_one_costs_its_readers_nothing_more():
+    """A healthy 400-level factor reads the same memory whether or not ``small`` is recorded.
+
+    Its readers skip it: no record reaches its columns.  At 46bcd5990 every categorical
+    term's reader built a levels x coefficients contrast matrix, 1.3 MB here (Codex: 22
+    MiB at 1,200 levels).
+    """
+    import tracemalloc
+
+    rng = np.random.default_rng(3)
+    n = 8000
+    small = np.where(np.arange(n) % 40 == 0, "B", "A")
+    X = pd.DataFrame({"big": rng.integers(0, 400, n).astype(str), "small": small})
+    y = rng.poisson(2.0, n).astype(float)  # every level of big has claims
+    y[small == "B"] = 0.0
+    model = SuperGLM(
+        family="poisson",
+        features={"big": Categorical(), "small": Categorical(base="A")},
+        selection_penalty=0.0,
+    )
+    _caught(lambda: model.fit(X, y))
+    spec = model._specs["small"]
+    held = spec._separated_levels_at_fit
+    assert held == ("B",) and not model._specs["big"]._separated_levels_at_fit
+
+    def peak() -> int:
+        model.relativities(with_se=False)  # imports and lazy state, outside the count
+        model.term_inference("big", with_se=False)
+        tracemalloc.start()
+        model.relativities(with_se=False)
+        model.term_inference("big", with_se=False)
+        top = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+        return top
+
+    recorded = peak()
+    spec._separated_levels_at_fit = ()
+    unrecorded = peak()
+    spec._separated_levels_at_fit = held
+    assert recorded <= unrecorded + 64 * 1024
+
+
 def test_mean_centering_leaves_out_a_level_a_separated_cell_moves():
     """C x P separated, C x Q with claims: a[C] carries the cell's walk, so it leaves the centre.
 
@@ -956,6 +1029,23 @@ def test_a_saved_model_drops_a_capped_levels_old_record():
     inference = restored.term_inference("a")
     assert inference.separated is None and np.isfinite(inference.se_log_relativity[-1])
     assert not _caught(lambda: restored.predict(X.tail(1)))
+
+
+def test_a_saved_crossed_record_without_occupied_cells_keeps_its_figures():
+    """A model saved before the build kept occupied cells: its crossed record flags nothing.
+
+    Its readers keep the figures they had until it is refitted (a known limit).  At
+    46bcd5990 such a record read every cell as occupied and flagged a[B] and B:Q beside
+    the base-column cell B x P.
+    """
+    import pickle
+
+    model, _, _ = _grid([*_SPARSE, ("B", "P", 0), ("B", "Q", 30), ("B", "R", 40)])
+    model._interaction_specs["a:b"]._occupied_cells_at_fit = None  # what master saved
+    restored = pickle.loads(pickle.dumps(model))
+    rows = restored.summary()._coef_rows
+    assert not any(row.separated for row in rows) and all(row.se is not None for row in rows)
+    assert restored.term_inference("a:b").separated is None
 
 
 def test_a_saved_summary_of_a_separated_level_is_formed_again(fitted):
