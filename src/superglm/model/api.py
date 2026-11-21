@@ -354,15 +354,20 @@ class SuperGLM:
         recorded which standard errors they show
         (``release_saved_mask_summaries``).  A kindless spline the saved fit built as a SCOP
         P-spline is marked to warn at its next build
-        (``mark_kindless_saved_on_scop``).
+        (``mark_kindless_saved_on_scop``).  A capped level an older build recorded
+        separated is cleared where the fit enforced the cap, and a summary cached beside
+        a separated level is dropped (``release_capped_separation_records``,
+        ``release_separated_level_summaries``).
         """
         self.__dict__.update(state)
         # Metadata of a retired fast discrete predictor; nothing reads it.
         self.__dict__.pop("_fast_prediction_state", None)
         from superglm.model.retired_state import (
             mark_retired_linear_state,
+            release_capped_separation_records,
             release_retired_tweedie_state,
             release_saved_mask_summaries,
+            release_separated_level_summaries,
             release_v0_35_nb_summaries,
         )
 
@@ -370,6 +375,8 @@ class SuperGLM:
         release_retired_tweedie_state(self)
         release_v0_35_nb_summaries(self)
         release_saved_mask_summaries(self)
+        release_capped_separation_records(self)
+        release_separated_level_summaries(self)
         from superglm.features._spline_build import mark_kindless_saved_on_scop
 
         mark_kindless_saved_on_scop(self)

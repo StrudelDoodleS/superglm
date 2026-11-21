@@ -1043,6 +1043,7 @@ def build_design_matrix(
     selection_penalty: object | None = None,
     group_pricing: str = "rank",
     weight_semantics: str,
+    caps_enforced: bool = True,
 ) -> BuildResult:
     """Build features, groups, and design matrix from specs.
 
@@ -1064,7 +1065,8 @@ def build_design_matrix(
     ``selection_penalty`` is the model's lambda1-style penalty object when a
     nonzero lambda1 will reach this fit, else ``None``; terms that penalty
     targets, and a ``Categorical`` under a fit-time cap, have bounded optima
-    and are exempt from the scan.
+    and are exempt from the scan; ``caps_enforced`` is False for a solve that
+    fits without its constraint rows (``fit_path``), where a cap bounds nothing.
 
     ``group_pricing`` decides the width the selection penalty and df ledger
     price a group at when its spec emits fewer columns than the term spans:
@@ -1193,7 +1195,7 @@ def build_design_matrix(
             if record[0] == "level_curve":
                 level_curves.append(record[1:])
                 continue
-            if record[0] == "cat" and record[2]._constraint_rules:
+            if record[0] == "cat" and caps_enforced and record[2]._constraint_rules:
                 # A fit-time cap bounds every level's relativity against the base,
                 # so the capped optimum is finite and no level escapes to infinity.
                 compiled.scan_codes.pop(term_name, None)

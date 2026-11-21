@@ -80,6 +80,42 @@ def release_saved_mask_summaries(model) -> None:
         model.__dict__["_summary_cache"] = None
 
 
+def release_capped_separation_records(model) -> None:
+    """``SuperGLM.__setstate__``'s part for a model saved before a fit-time cap exempted its levels.
+
+    A capped ``Categorical``'s relativities are bounded wherever the fit enforced the cap
+    (every fit but ``fit_path``), so a level an older build recorded separated has a
+    finite optimum there: its record is cleared, and with it the flags and notices it
+    drove.
+    """
+    if (model.__dict__.get("_last_fit_meta") or {}).get("method") == "fit_path":
+        return
+    for spec in (model.__dict__.get("_specs") or {}).values():
+        if getattr(spec, "_constraint_rules", None) and getattr(
+            spec, "_separated_levels_at_fit", ()
+        ):
+            spec._separated_levels_at_fit = ()
+
+
+def release_separated_level_summaries(model) -> None:
+    """``SuperGLM.__setstate__``'s part for a summary cached beside a separated level or cell.
+
+    A summary cached before its readers flagged such a level holds the level's Wald
+    statistics; it is dropped, and the next ``summary()`` is formed from the same fit.
+    """
+    specs = [
+        *(model.__dict__.get("_specs") or {}).values(),
+        *(model.__dict__.get("_interaction_specs") or {}).values(),
+    ]
+    if any(
+        getattr(spec, "_separated_levels_at_fit", ())
+        or getattr(spec, "_separated_cells_at_fit", ())
+        for spec in specs
+    ):
+        if model.__dict__.get("_summary_cache"):
+            model.__dict__["_summary_cache"] = None
+
+
 def retained_linear_state(model):
     """The model's retained structured linear system, rebuilt once if it was retired."""
     state = getattr(model, "_linear_system_state", None)

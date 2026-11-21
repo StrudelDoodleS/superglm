@@ -1601,6 +1601,7 @@ def model_build_design_matrix(
     offset: NDArray | None,
     *,
     selection_active: bool | None = None,
+    caps_enforced: bool = True,
 ) -> tuple[NDArray, NDArray, NDArray | None]:
     """Build features, groups, design matrix.
 
@@ -1612,7 +1613,9 @@ def model_build_design_matrix(
     which is only free while the solver's rank convention chooses the
     representative of a cross-group rank deficiency; a group penalty chooses
     a different one.  ``None`` reads the model's configured intent, which is
-    right for every caller that does not sweep lambda1 itself.
+    right for every caller that does not sweep lambda1 itself.  ``caps_enforced``
+    is False for a solve that ignores fit-time rules (``fit_path``): a capped
+    ``Categorical`` is scanned there like any other.
     """
     if selection_active is None:
         selection_active = selection_penalty_is_active(model)
@@ -1643,6 +1646,7 @@ def model_build_design_matrix(
         # they were fitted under, matching the ModelConfig unpickle backfill.
         group_pricing=getattr(model, "_group_pricing", "spanned"),
         weight_semantics=model_weight_semantics(model),
+        caps_enforced=caps_enforced,
     )
     model._distribution = result.distribution
     model._link = result.link

@@ -34,6 +34,7 @@ from scipy.stats import binomtest
 from superglm import (
     Categorical,
     Constraint,
+    GroupLasso,
     Numeric,
     RandomEffect,
     SuperGLM,
@@ -813,6 +814,90 @@ def test_a_capped_level_is_not_reported_as_separated(fitted, mode):
         warnings.simplefilter("always")
         model.predict(X[X["lev"] == "E"].head(2))
     assert not _of(caught, SeparationWarning)
+
+
+def _capped_path_model(mode):
+    model = SuperGLM(
+        family="poisson",
+        features={
+            "a": Categorical(base="A", constraint=Constraint.fit.cap(0.5, 2.0)),
+            "x": Numeric(),
+        },
+        penalty=GroupLasso(lambda1=0.1, features=["x"]),
+        separation=mode,
+    )
+    X = pd.DataFrame({"a": np.repeat(["A", "B"], 100), "x": np.tile([0.0, 1.0], 100)})
+    y = np.r_[1.0 + X["x"].to_numpy()[:100], np.zeros(100)]
+    return model, X, y
+
+
+def test_fit_path_scans_a_capped_level_it_does_not_cap():
+    """``fit_path`` fits without its rules, so a cap bounds nothing there: B is separated.
+
+    At 20f77dd6f the cap exempted B from the scan on the path too: no warning, and
+    ``"error"`` returned B's factor at 2e-28.
+    """
+    model, X, y = _capped_path_model("warn")
+    (warning,) = _caught(lambda: model.fit_path(X, y, lambda_seq=[0.1, 0.01]))
+    assert "'a' level 'B'" in str(warning.message)
+    model, X, y = _capped_path_model("error")
+    with warnings.catch_warnings(), pytest.raises(SeparationError, match="'a' level 'B'"):
+        warnings.simplefilter("ignore")  # the path's notice that it ignores the cap
+        model.fit_path(X, y, lambda_seq=[0.1, 0.01])
+
+
+def test_reml_says_nothing_of_a_capped_level_beside_a_random_effect(fitted):
+    """The cap bounds E, so the random-effect variance warning does not name it either.
+
+    At 20f77dd6f that warning still called E a claim-free level that separates.
+    """
+    X, y, exposure, _ = fitted
+    model = SuperGLM(
+        family="poisson",
+        features={"lev": Categorical(constraint=Constraint.fit.cap(0.5, 2.0)), "g": RandomEffect()},
+        selection_penalty=0.0,
+    )
+    X = X.assign(g=[f"g{i % 25}" for i in range(len(X))])
+    assert not _of(_fit(model, X, y, exposure, "fit_reml"), SeparationWarning)
+
+
+def test_a_saved_model_drops_a_capped_levels_old_record():
+    """A model saved by a build that recorded a capped level: restored, the level is priced.
+
+    The cap held B at 0.5, a finite optimum.  At 20f77dd6f the restored record blanked
+    B's standard error and ``predict`` warned of it.
+    """
+    import pickle
+
+    _, X, y = _two_levels(0.0)
+    model = SuperGLM(
+        family="poisson",
+        features={"a": Categorical(base="A", constraint=Constraint.fit.cap(0.5, 2.0))},
+        selection_penalty=0.0,
+    )
+    model.fit(X, y)
+    model._specs["a"]._separated_levels_at_fit = ("B",)  # what master's build recorded
+    restored = pickle.loads(pickle.dumps(model))
+    inference = restored.term_inference("a")
+    assert inference.separated is None and np.isfinite(inference.se_log_relativity[-1])
+    assert not _caught(lambda: restored.predict(X.tail(1)))
+
+
+def test_a_saved_summary_of_a_separated_level_is_formed_again(fitted):
+    """A summary cached before its readers flagged E is dropped when the model is restored.
+
+    At 20f77dd6f the restored model served the stale summary: E's SE 2e7, p 1.0, unflagged.
+    """
+    import pickle
+
+    _, _, _, models = fitted
+    model = pickle.loads(pickle.dumps(models["fit_reml"][0]))
+    summary = model.summary()
+    stale = next(r for r in summary._coef_rows if r.name == "lev[E]")
+    stale.separated, stale.se, stale.p = False, 2.09e7, 1.0  # what an older summary held
+    restored = pickle.loads(pickle.dumps(model))
+    row = next(r for r in restored.summary()._coef_rows if r.name == "lev[E]")
+    assert row.separated and row.se is None and row.p is None
 
 
 # ── row 9: the grouping remedy is a call that works ─────────────────────

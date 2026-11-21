@@ -307,7 +307,8 @@ def _random_effect_separation_hazard(model, X, y, sample_weight) -> str | None:
     valid = weight_arr > 0.0
     findings = []
     for name, spec in model._specs.items():
-        if not isinstance(spec, Categorical):
+        # a fit-time cap bounds every level against its base, which fit_reml enforces
+        if not isinstance(spec, Categorical) or spec._constraint_rules:
             continue
         claim_free = _claim_free_categorical_levels(X.column_array(name), spec, positive, valid)
         if claim_free:
@@ -1984,7 +1985,7 @@ def _fit_path_in_workspace(
     # has to be the one a positive lambda1 requires, whatever the model was
     # configured with.
     y, sample_weight, offset = model_build_design_matrix(
-        model, X, y, sample_weight, offset, selection_active=True
+        model, X, y, sample_weight, offset, selection_active=True, caps_enforced=False
     )
     sample_weight, offset = _store_fit_arrays(model, sample_weight, offset, y)
     _clear_fit_inference_caches(model)
