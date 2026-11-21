@@ -759,16 +759,21 @@ class Categorical:
         return {self._levels[code] for code in np.unique(codes[codes >= 0])}
 
     def _scored_codes(self, x: NDArray) -> NDArray:
-        """The fitted level each row of raw ``x`` is scored at, as its universe index.
+        """The fitted level each row of raw ``x`` is priced at, as its universe index.
 
-        A label ``unseen="base"`` admits is scored at the base level, so it is coded
-        there; ``score`` has already reported it, so nothing is said again here.
+        A label ``unseen="base"`` admits, and a declared level the fit held no rows of
+        (``_pinned_levels``), is priced at the base level, so it is coded there;
+        ``score`` has already reported an unseen label, so nothing is said again here.
         """
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             codes = self._predict_codes(self._resolve_predict_labels(x))
+        base = self._levels.index(self._base_level)
         if self.unseen == "base":
-            codes = np.where(codes < 0, self._levels.index(self._base_level), codes)
+            codes = np.where(codes < 0, base, codes)
+        if self._pinned_levels:
+            pinned = [self._levels.index(level) for level in self._pinned_levels]
+            codes = np.where(np.isin(codes, pinned), base, codes)
         return codes
 
     def _predict_codes(self, x: NDArray) -> NDArray:

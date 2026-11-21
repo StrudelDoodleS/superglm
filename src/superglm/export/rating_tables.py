@@ -66,7 +66,8 @@ class RatingTableBlock:
     # ``OrderedCategorical``, a single-valued ``Numeric`` -- which is why the total is summed from the blocks rather
     # than assumed to run over every exported term.
     centering_shift: float = 0.0
-    # Categorical only: the block's separated levels, stated (``separated_block_note``).
+    # Categorical only: the factors a separated level or cell leaves undetermined, stated
+    # (``separated_block_note``).
     note: str | None = None
 
 
@@ -90,27 +91,27 @@ class InteractionTableBlock:
     name: str
     table: pd.DataFrame
     kind: str = "cells"
-    # A cell table's separated cells, stated (``separated_block_note``).
+    # The cell factors a separated level or cell leaves undetermined (``separated_block_note``).
     note: str | None = None
 
 
-def separated_block_note(spec) -> str | None:
-    """The note a block carries for the levels, or cells, its term's scan recorded separated.
+def separated_block_note(model, name: str, marked: list[str]) -> str | None:
+    """The note a block carries for its factors ``marked``, which a separated level or cell moves.
 
-    Their factors are exported as fitted: where the fit stopped, not an estimate.
+    Marked by the flags ``summary()`` reads (``separated_levels``), a factor fixed at 1
+    left out, and named with the separated levels and cells they move with
+    (``separated_sources``).  The factors are exported as fitted: where the fit stopped.
     """
-    from superglm.model.separated_levels import separated_labels
+    from superglm.model.separated_levels import separated_sources
 
-    held = separated_labels(spec)
-    if not held:
+    if not marked:
         return None
-    cells = isinstance(held[0], tuple)
-    names = ", ".join(f"{label[0]} x {label[1]}" if cells else str(label) for label in held)
     return (
-        f"Separated {'cells' if cells else 'levels'}: {names}. Every response on their rows "
-        "is 0, or every one is 1, so the data give their factor no finite estimate; the "
-        "factor here is where the fit stopped, not an estimate. Group them with similar "
-        "levels, or fit the term as a RandomEffect, before rating on them."
+        f"Not estimates: {', '.join(marked)}. Every response on the rows of separated "
+        f"{', '.join(separated_sources(model, name))} is 0, or every one is 1, so the data "
+        "give these factors no finite estimate; each is where the fit stopped. Group the "
+        "separated levels with similar levels, or fit the term as a RandomEffect, before "
+        "rating on them."
     )
 
 
@@ -711,6 +712,15 @@ def _categorical_block(
 ) -> RatingTableBlock:
     ti = _main_effect_inference(model, name, centering)
     levels = list(ti.levels or [])
+    grouping = getattr(spec, "_grouping", None)
+
+    def fixed(level) -> bool:
+        """A level with no coefficient (the base, a pinned level) reads 1 under native."""
+        group = level if grouping is None else grouping.original_to_group.get(level, level)
+        return centering == "native" and group not in spec._non_base
+
+    flags = [False] * len(levels) if ti.separated is None else list(ti.separated)
+    marked = [str(lv) for lv, flag in zip(levels, flags, strict=True) if flag and not fixed(lv)]
     return RatingTableBlock(
         name=name,
         kind="categorical",
@@ -722,7 +732,7 @@ def _categorical_block(
             }
         ),
         centering_shift=float(ti.centering_shift),
-        note=separated_block_note(spec),
+        note=separated_block_note(model, name, marked),
     )
 
 
@@ -1823,9 +1833,19 @@ def _interaction_blocks(
         ]
         columns = [_row_key_header(parent1, levels2), *levels2]
         table = pd.DataFrame(rows, columns=columns)
+        # a cell with no coefficient (base row or column, pruned) reads 1 and is not marked
+        from superglm.model.separated_levels import pair_flags
+
+        priced = [tuple(pair) for pair in ispec._pairs]
+        flags = pair_flags(model._groups, model._specs, model._interaction_specs, name, priced)
+        marked = (
+            []
+            if flags is None
+            else [f"{a} x {b}" for (a, b), flag in zip(priced, flags, strict=True) if flag]
+        )
         blocks.append(
             InteractionTableBlock(
-                name=name, table=table, kind="cells", note=separated_block_note(ispec)
+                name=name, table=table, kind="cells", note=separated_block_note(model, name, marked)
             )
         )
     return blocks

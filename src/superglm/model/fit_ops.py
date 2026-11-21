@@ -1927,7 +1927,7 @@ def fit_path(
     X, y, sample_weight, offset = _validate_entrypoint_input(model, X, y, sample_weight, offset)
     validated_inputs = (X, y, sample_weight, offset)
     workspace = FitWorkspace.start(model, mode="fit_path", validated_inputs=validated_inputs)
-    path_result = _fit_path_in_workspace(
+    path_result, statements = _fit_path_in_workspace(
         workspace.model,
         X,
         y,
@@ -1947,9 +1947,7 @@ def fit_path(
         workspace,
         model,
         revision=model._fit_revision + 1,
-        separation_statement=format_path_runtime_message(
-            path_result.lambda_seq, path_result.separation_path
-        ),
+        separation_statement=format_path_runtime_message(path_result.lambda_seq, statements),
     )
     _install_fit_state(model, candidate)
     return path_result
@@ -1970,7 +1968,11 @@ def _fit_path_in_workspace(
     lambda_ratio=1e-3,
     lambda_seq=None,
 ):
-    """Build and solve a regularization path on private mutable state."""
+    """Build and solve a regularization path on private mutable state.
+
+    Returns the path and each point's runtime finding for its warning
+    (``path_ops.run_lambda_path``'s ``separation_statements``).
+    """
     _reject_random_effect_selection_fit(model, "fit_path")
     _reject_lambda_policy_fit(model, "fit_path")
     from superglm.model.base import (
@@ -2047,7 +2049,7 @@ def _fit_path_in_workspace(
         edf_path=path_data["edf_path"],
         separation_path=tuple(path_data["separation_path"]),
     )
-    return path_result
+    return path_result, path_data["separation_statements"]
 
 
 def _warn_slow_exact_reml(model, lambdas) -> None:

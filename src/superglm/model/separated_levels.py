@@ -396,6 +396,41 @@ def pair_flags(
     return recorded if recorded.any() else None
 
 
+def separated_sources(model, name: str) -> list[str]:
+    """The recorded separated levels and cells whose directions reach term ``name``'s factors.
+
+    A main effect's own levels and the cells of every crossed term it is a parent of; a
+    crossed term's own cells and, beside them, its parents' levels (``_cross_block``).
+    """
+    record = _spec_record(model._specs, model._interaction_specs)
+
+    def levels(term: str, of: str = "") -> list[str]:
+        held = record.levels.get(term, ())
+        return [
+            f"level {level}{of}" for level in separated_labels(model._specs[term]) if level in held
+        ]
+
+    def cells(term: str, of: str = "") -> list[str]:
+        held = record.cells.get(term, ())
+        labels = separated_labels(model._interaction_specs[term])
+        return [f"cell {a} x {b}{of}" for a, b in map(tuple, labels) if (a, b) in held]
+
+    if name in model._interaction_specs:
+        if name not in record.cells:
+            return []
+        parents = model._interaction_specs[name].parent_names
+        return cells(name) + [
+            label for parent in parents for label in levels(parent, f" of {parent!r}")
+        ]
+    crossed = [
+        label
+        for term, spec in model._interaction_specs.items()
+        if name in getattr(spec, "parent_names", ()) and term in record.cells
+        for label in cells(term, f" of {term!r}")
+    ]
+    return levels(name) + crossed
+
+
 def _design_record(model, y: NDArray, sample_weight: NDArray) -> _Record:
     """The scan's rule applied to the design's own level codes (``separation="ignore"``).
 
@@ -692,6 +727,7 @@ __all__ = [
     "separated_columns",
     "separated_labels",
     "separated_levels_message",
+    "separated_sources",
     "separated_terms",
     "separation_flags",
 ]

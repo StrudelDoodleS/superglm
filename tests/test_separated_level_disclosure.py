@@ -497,6 +497,28 @@ def test_the_runtime_backstop_warns_a_walk_it_shares_with_another_term(monkeypat
     assert len(found) == 2 and any("signature of separation" in text for text in found)
 
 
+def test_fit_path_does_not_restate_a_disclosed_level(monkeypatch):
+    """Every path point's backstop names only ``a``, whose level B is recorded: one warning.
+
+    At 46bcd5990 the path's statement restated it beside the level's: two warnings.
+    """
+    import superglm.diagnostics.separation as separation
+    from superglm.diagnostics.separation import RuntimeFinding
+
+    message = format_runtime_message(1e13, 3, ["a"], True)
+    monkeypatch.setattr(
+        separation, "runtime_finding", lambda *args, **kwargs: RuntimeFinding(message, ("a",))
+    )
+    _, X, y = _capped_path_model("warn")
+    model = SuperGLM(
+        family="poisson",
+        features={"a": Categorical(base="A"), "x": Numeric()},
+        penalty=GroupLasso(lambda1=0.1, features=["x"]),
+    )
+    (warning,) = _caught(lambda: model.fit_path(X, y, lambda_seq=[0.1, 0.01]))
+    assert "'a' level 'B'" in str(warning.message)
+
+
 def test_ignore_says_nothing_about_a_separated_level():
     """``separation="ignore"`` silences REML's weak-identification line for the level too."""
     X, y, exposure = _book()
@@ -755,12 +777,13 @@ def test_a_reader_factors_each_block_once(monkeypatch):
     assert not calls
 
 
+@pytest.mark.pins_behaviour
 def test_a_healthy_factor_beside_a_separated_one_costs_its_readers_nothing_more():
     """A healthy 400-level factor reads the same memory whether or not ``small`` is recorded.
 
-    Its readers skip it: no record reaches its columns.  At 46bcd5990 every categorical
-    term's reader built a levels x coefficients contrast matrix, 1.3 MB here (Codex: 22
-    MiB at 1,200 levels).
+    Its readers skip it: no record reaches its columns.  Control: pins master's memory,
+    whose readers read no record.  At 46bcd5990 every categorical term's reader built a
+    levels x coefficients contrast matrix, 1.3 MB here (Codex: 22 MiB at 1,200 levels).
     """
     import tracemalloc
 
@@ -969,11 +992,34 @@ def test_the_rating_table_block_names_its_separated_level(fitted, tmp_path):
         path = tmp_path / "rates.xlsx"
         model.export_rating_tables(path, X, y, offset=np.log(exposure))
     block = next(b for b in payload.main_effects if b.name == "lev")
-    assert block.note is not None and "Separated levels: E." in block.note
+    assert block.note is not None and block.note.startswith("Not estimates: E.")
+    assert "rows of separated level E" in block.note
     factor = block.table.set_index("lev")["Relativity"]["E"]
     assert factor == pytest.approx(model.term_inference("lev").relativity[-1], rel=1e-12)
     cells = [c.value for row in load_workbook(path).worksheets[0].iter_rows() for c in row]
-    assert any(isinstance(v, str) and "Separated levels: E." in v for v in cells)
+    assert any(isinstance(v, str) and v.startswith("Not estimates: E.") for v in cells)
+
+
+def test_the_rating_table_marks_the_factors_a_base_column_cell_moves():
+    """B x P separated, P the base of b: B's factor and B x Q's move with it, and are marked.
+
+    B x P's own factor is fixed at 1 and is not, and the note names it as the source.
+    The flags are ``summary()``'s.  At 46bcd5990 the cell table named B x P alone, and
+    B (2e-6) and B x Q (7.6e5) went unmarked.
+    """
+    cells = [("A", "P", 20), ("A", "Q", 20), ("B", "P", 0), ("B", "Q", 30)]
+    model, X, _ = _cells(cells)
+    y = np.array([float(i < k) for _, _, k in cells for i in range(100)])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SeparationWarning)
+        payload = model.rating_table_payload(X, y)
+    notes = {block.name: block.note for block in [*payload.main_effects, *payload.interactions]}
+    a, cells = notes["a"] or "", notes["a:b"] or ""
+    assert a.startswith("Not estimates: B.") and "cell B x P of 'a:b'" in a
+    assert cells.startswith("Not estimates: B x Q.") and "cell B x P is" in cells
+    assert notes["b"] is None
+    flagged = {row.name for row in model.summary()._coef_rows if row.separated}
+    assert flagged == {"a[B]", "a:b[B:Q]"}
 
 
 # ── row 7: predict warns once, for levels and cells ───────────────────────
@@ -1040,6 +1086,31 @@ def test_predict_warns_for_a_label_routed_to_a_separated_base():
     _fit(model, X, y, exposure)
     (warning,) = _caught(lambda: model.predict(pd.DataFrame({"lev": ["Z"], "x": [0.5]})))
     assert "'lev' levels E" in str(warning.message)
+
+
+def test_predict_warns_for_a_declared_level_priced_at_a_separated_cell():
+    """U is declared and holds no rows, so it is priced at the base A: U x Q is A x Q, warned.
+
+    At 46bcd5990 U x Q was priced at the separated A x Q without a word.
+    """
+    data = [(a, b, float(i < k)) for a, b, k in _CROSS for i in range(100)]
+    frame = pd.DataFrame(data, columns=["a", "b", "y"])
+    model = SuperGLM(
+        family="poisson",
+        features={"a": Categorical(base="A", levels=["A", "B", "U"]), "b": Categorical(base="P")},
+        interactions=[("a", "b")],
+        selection_penalty=0.0,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)  # U is pinned to the base
+        model.fit(frame[["a", "b"]], frame["y"].to_numpy())
+    rows = pd.DataFrame({"a": ["U", "A"], "b": ["Q", "Q"]})
+    (warning,) = _caught(lambda: model.predict(rows.head(1)))
+    assert "'a:b' cells A x Q" in str(warning.message)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SeparationWarning)
+        price = model.predict(rows)
+    assert price[0] == price[1]
 
 
 # ── row 8: a level a cap bounds is not separated ─────────────────────────
