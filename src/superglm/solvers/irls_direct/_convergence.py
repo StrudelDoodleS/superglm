@@ -217,6 +217,8 @@ class _IRLSDirectConvergence:
         termination_reason: TerminationReason
         if terminal_constraint_infeasible:
             termination_reason = "constraint_infeasible"
+        elif step_rejected and qp is not None and qp.restart_after_rejection(fit, it):
+            termination_reason = "continue"
         elif terminal_constraint_kkt_incomplete:
             termination_reason = "constraint_kkt_incomplete"
         elif step_rejected:

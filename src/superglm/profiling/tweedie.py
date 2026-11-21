@@ -274,8 +274,9 @@ class _PowerProfile:
             reml_tol=reml_tol,
             pirls_tol=pirls_tol,
         )
-        if getattr(clone._reml_result, "terminal_refit_termination", None) == (
-            "constraint_kkt_incomplete"
+        if "constraint_kkt_incomplete" in (
+            clone.result.termination_reason,
+            getattr(clone._reml_result, "terminal_refit_termination", None),
         ):
             # Published as not converged to a user, but a candidate whose
             # constrained mode is not certified optimal has no objective to

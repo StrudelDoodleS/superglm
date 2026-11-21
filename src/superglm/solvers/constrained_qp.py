@@ -101,6 +101,8 @@ class QPResult:
     method: str = ""
     condition: float = 0.0
     used_svd_fallback: bool = False
+    # Number of active-set loops that ran to exhaustion, including retries.
+    _budget_hits: int = 0
 
 
 def _null_space_mass(decomposition: RankDecomposition, g: NDArray) -> tuple[float, float]:
@@ -1355,13 +1357,19 @@ def _emit_blocking_decision(
     )
 
 
+def _qp_iteration_budget(A: NDArray) -> int:
+    """Per-attempt limit, allowing for both working-set additions and releases."""
+    m, p = A.shape
+    return max(200, 4 * (m + p))
+
+
 def solve_constrained_qp(
     H: NDArray,
     g: NDArray,
     A: NDArray,
     b: NDArray,
     active_set_init: list[int] | None = None,
-    max_iter: int = 200,
+    max_iter: int | None = None,
     tol: float = 1e-12,
     *,
     beta_start: NDArray | None = None,
@@ -1383,6 +1391,10 @@ def solve_constrained_qp(
     actions. Short coefficient steps, and a full step on a full-rank H, trigger
     the complete certificate rather than establish it. An exhausted or
     uncertified candidate is not converged.
+
+    Each active-set attempt gets max_iter iterations, by default
+    max(200, 4 * (number of constraint rows + number of coefficients)).
+    This limits work; active-set methods can visit many more faces.
 
     The working rows stay linearly independent (Nocedal and Wright 2006,
     section 16.5): the ratio test takes the least step among rows that raise
@@ -1419,6 +1431,8 @@ def solve_constrained_qp(
     Result rank metadata describes the shared H decomposition; no ridge is
     added.
     """
+    if max_iter is None:
+        max_iter = _qp_iteration_budget(A)
     departed: list[bool] = []
     first = _solve_qp(
         H,
@@ -1457,7 +1471,11 @@ def solve_constrained_qp(
         departed=[],
     )
     best = plain if plain.converged else first
-    return replace(best, n_iter=first.n_iter + plain.n_iter)
+    return replace(
+        best,
+        n_iter=first.n_iter + plain.n_iter,
+        _budget_hits=first._budget_hits + plain._budget_hits,
+    )
 
 
 def _solve_qp(
@@ -1977,4 +1995,6 @@ def _solve_qp(
 
     # Exhaustion is non-convergence even at a feasible point: the KKT
     # certificate was never completed.
-    return _result(beta, active, max_iter, converged=False)
+    result = _result(beta, active, max_iter, converged=False)
+    result._budget_hits = 1
+    return result

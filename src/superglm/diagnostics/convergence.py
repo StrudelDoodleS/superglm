@@ -408,6 +408,13 @@ def coefficient_nonconvergence_message(fit_result: Any) -> str | None:
     reason = getattr(fit_result, "termination_reason", None)
     if reason == "coefficients_revised":
         return None
+    if reason == "constraint_kkt_incomplete":
+        return (
+            "The coefficient fit satisfies every shape constraint. Its inner quadratic "
+            "program could not confirm optimality (KKT conditions), so the coefficients, "
+            "predictions and standard errors may be inaccurate "
+            "(termination_reason='constraint_kkt_incomplete')."
+        )
     if reason == "mean_space_boundary":
         return (
             f"The fit holds {fit_result.mean_space_boundary_rows} row(s) at a fitted "
