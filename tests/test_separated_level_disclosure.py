@@ -1549,8 +1549,11 @@ def test_crossed_cell_bounded_by_penalised_parent_is_not_separated():
     assert m_err._result is not None
 
 
+@pytest.mark.pins_behaviour
 def test_an_auto_penalty_on_a_parent_does_not_exempt_a_crossed_cell():
-    """An "auto" selection penalty is calibrated after the build and can come out zero
+    """Pins master's disclosure, which the bounded-cell exemption must not remove.
+
+    An "auto" selection penalty is calibrated after the build and can come out zero
     (here A and B have equal totals), so it bounds nothing: B x P, which moves only
     through the parent 'a', is still disclosed and refused, as on master."""
     cells = [("A", "P", 1.0), ("A", "Q", 3.0), ("B", "P", 0.0), ("B", "Q", 4.0)]
