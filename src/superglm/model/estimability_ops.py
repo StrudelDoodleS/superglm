@@ -315,9 +315,9 @@ class _ScaledRows:
             self.projection[at] = np.ldexp(self.projection[at], change[:, None])
             self.square[at] = np.ldexp(self.square[at], 2 * change)
             self.exponent[at] = needed[raised]
-        # a power of two, so multiplying by it is exact (``ldexp``)
-        factor = np.ldexp(1.0, shift - self.exponent[rows])
-        scaled = entries * factor[:, None]
+        # ``ldexp`` on the entries themselves: exact, and no multiplier that
+        # could overflow where the scaled entry is finite
+        scaled = np.ldexp(entries, (shift - self.exponent[rows])[:, None])
         if np.any(null):
             self.projection[rows] += scaled @ null
         self.square[rows] += np.einsum("ij,ij->i", scaled, scaled)
@@ -343,7 +343,7 @@ def _scaled_entries(rows: NDArray, centre: NDArray, scale: NDArray) -> tuple[NDA
     """
     centred = rows - centre
     _, shift = np.frexp(np.max(np.abs(centred), axis=1, initial=0.0))
-    centred *= np.ldexp(1.0, -shift)[:, None]
+    centred = np.ldexp(centred, -shift[:, None])
     centred /= scale
     return centred, shift
 

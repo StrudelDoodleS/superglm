@@ -682,3 +682,26 @@ def test_a_huge_row_over_tiny_columns_is_warned_without_overflow():
     assert [w.rows.tolist() for w in found] == [[0]]
     np.testing.assert_array_equal(mu, base.predict_exact(model, new, warn=False))
     np.testing.assert_allclose(_shares(model, new), [np.sqrt(0.5)], rtol=1e-6)
+
+
+def test_a_subnormal_entry_is_priced_without_overflow():
+    """``dup = 1e-309`` (subnormal): priced as master, no overflow, and no warning.
+
+    The intercept is part of the row, so the share is about ``1e-309``. Each
+    power-of-two scaling is applied to the entries themselves, so no
+    multiplier overflows where the scaled entry is finite.
+    """
+    X = _duplicated()
+    model = _fit(
+        X,
+        np.full(len(X), 2.0),
+        {"x": Numeric(), "dup": Numeric()},
+        family=superglm.families.poisson(),
+        selection_penalty=0.0,
+    )
+    new = pd.DataFrame({"x": [0.0], "dup": [1e-309]})
+    with np.errstate(over="raise", invalid="raise", divide="raise"):
+        mu, found = _disclosures(lambda: model.predict(new))
+    np.testing.assert_array_equal(mu, base.predict_exact(model, new, warn=False))
+    assert not found
+    assert _shares(model, new)[0] < 1e-300
