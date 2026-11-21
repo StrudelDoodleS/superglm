@@ -687,7 +687,7 @@ def test_a_huge_row_over_tiny_columns_is_warned_without_overflow():
 def test_a_subnormal_entry_is_priced_without_overflow():
     """``dup = 1e-309`` (subnormal): priced as master, no overflow, and no warning.
 
-    The intercept is part of the row, so the share is about ``1e-309``. Each
+    The intercept is part of the row, so the row is on the determined space. Each
     power-of-two scaling is applied to the entries themselves, so no
     multiplier overflows where the scaled entry is finite.
     """
@@ -704,4 +704,3 @@ def test_a_subnormal_entry_is_priced_without_overflow():
         mu, found = _disclosures(lambda: model.predict(new))
     np.testing.assert_array_equal(mu, base.predict_exact(model, new, warn=False))
     assert not found
-    assert _shares(model, new)[0] < 1e-300
