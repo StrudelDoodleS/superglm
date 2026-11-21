@@ -191,24 +191,26 @@ def warn_on_separated_prediction(
     compiled: Sequence[CompiledPredictor], X: FrameLike | EagerFrame
 ) -> None:
     """Collect the hits across predictors after scoring has validated the input."""
+    recorded = [
+        (predictor.name, name, spec)
+        for predictor in compiled
+        for name, spec in predictor.compiled.specs.items()
+        if isinstance(spec, Categorical) and getattr(spec, "_separated_levels_at_fit", ())
+    ]
+    if not recorded:
+        return
+
     from superglm.model.separated_levels import (
         predicted_separated_levels,
-        separated_labels,
         warn_separated_predictions,
     )
 
+    frame = as_eager_frame(X)
     hits: list[str] = []
-    frame = None
-    for predictor in compiled:
-        for name, spec in predictor.compiled.specs.items():
-            if isinstance(spec, Categorical) and separated_labels(spec):
-                if frame is None:
-                    frame = as_eager_frame(X)
-                hit = predicted_separated_levels(
-                    f"{predictor.name}:{name}", spec, frame.column_array(name)
-                )
-                if hit:
-                    hits.append(hit)
+    for parameter, name, spec in recorded:
+        hit = predicted_separated_levels(f"{parameter}:{name}", spec, frame.column_array(name))
+        if hit:
+            hits.append(hit)
     warn_separated_predictions(hits)
 
 
