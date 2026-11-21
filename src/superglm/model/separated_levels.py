@@ -205,6 +205,8 @@ def _cross_block(name: str, spec, specs: dict, groups, record: _Record, intercep
     to_column = spec._grid_to_col
     offset = 1 + group1.size + group2.size
     occupied = record.occupied[name]
+    if occupied is None:  # saved before the build recorded them: no flags (``_Record``)
+        return None
     held = record.cells[name]
     # a row of a separated parent level is not a healthy row of the cross either
     out1, out2 = (
@@ -394,6 +396,18 @@ def pair_flags(
         column = np.fromiter((position.get(pair, -1) for pair in pairs), np.intp, len(pairs))
         recorded |= _moved(blocks, column)
     return recorded if recorded.any() else None
+
+
+def marked_cells(model, name: str) -> list[str]:
+    """Crossed term ``name``'s cells, as ``"a x b"``, whose own coefficient ``pair_flags`` flags.
+
+    A cell with no coefficient (base row or column, pruned) reads 1 and is never marked.
+    """
+    pairs = [tuple(pair) for pair in model._interaction_specs[name]._pairs]
+    flags = pair_flags(model._groups, model._specs, model._interaction_specs, name, pairs)
+    if flags is None:
+        return []
+    return [f"{a} x {b}" for (a, b), flag in zip(pairs, flags, strict=True) if flag]
 
 
 def separated_sources(model, name: str) -> list[str]:
@@ -721,6 +735,7 @@ def disclose_held_levels(model) -> None:
 __all__ = [
     "disclose_held_levels",
     "level_flags",
+    "marked_cells",
     "pair_flags",
     "predicted_cells",
     "separated_coefficients",

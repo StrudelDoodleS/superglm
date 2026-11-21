@@ -1833,16 +1833,9 @@ def _interaction_blocks(
         ]
         columns = [_row_key_header(parent1, levels2), *levels2]
         table = pd.DataFrame(rows, columns=columns)
-        # a cell with no coefficient (base row or column, pruned) reads 1 and is not marked
-        from superglm.model.separated_levels import pair_flags
+        from superglm.model.separated_levels import marked_cells
 
-        priced = [tuple(pair) for pair in ispec._pairs]
-        flags = pair_flags(model._groups, model._specs, model._interaction_specs, name, priced)
-        marked = (
-            []
-            if flags is None
-            else [f"{a} x {b}" for (a, b), flag in zip(priced, flags, strict=True) if flag]
-        )
+        marked = marked_cells(model, name)
         blocks.append(
             InteractionTableBlock(
                 name=name, table=table, kind="cells", note=separated_block_note(model, name, marked)
