@@ -1151,10 +1151,11 @@ def build_design_matrix(
     )
     separation_records = compiled.separation_records
     from superglm.features.categorical import Categorical
+    from superglm.model.separated_levels import record_separated_levels
 
     for spec in compiled.specs.values():
         if isinstance(spec, Categorical):
-            spec._separated_levels_at_fit = ()
+            record_separated_levels(spec)
     for spec in compiled.interaction_specs.values():
         if getattr(spec, "_separated_cells_at_fit", ()):
             spec._separated_cells_at_fit = ()
@@ -1213,9 +1214,7 @@ def build_design_matrix(
                 )
                 findings.extend(found)
                 # predict names these levels when it meets them (_predict_eta)
-                spec_c._separated_levels_at_fit = tuple(
-                    label for finding in found for label in finding.labels
-                )
+                record_separated_levels(spec_c, found)
             else:
                 _, name_i, spec1_i, spec2_i, x1_i, x2_i, p1_i, p2_i = record
                 found = scan_interaction_term(

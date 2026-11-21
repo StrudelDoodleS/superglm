@@ -104,8 +104,10 @@ from superglm.distributional.prediction_design import (
     build_feature_rows,
     build_predictor_design,
 )
+from superglm.features.categorical import Categorical
 from superglm.features.numeric import _numeric_values
 from superglm.links import _is_shifted_log_link
+from superglm.model.separated_levels import level_flags, separated_coefficients, separated_labels
 from superglm.stats.wood_pvalue import wood_test_smooth
 from superglm.terms import resolve_label
 
@@ -154,6 +156,9 @@ class ParameterTermEffect:
     effect comes from the term's free ``:special`` block rather than from its
     smooth; it is ``None`` for a term that has no such block, which is every
     term except an ``OrderedCategorical`` fitted with ``specials=``.
+
+    ``separated`` marks levels whose contrasts have no finite estimate. Their
+    fitted effects are shown with blank standard errors and intervals.
     """
 
     parameter: str
@@ -176,13 +181,14 @@ class ParameterTermEffect:
     covariance_kind: str
     alpha: float
     schema_version: int = field(default=_SCHEMA_VERSION)
+    separated: tuple[bool, ...] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "lambdas", MappingProxyType(dict(self.lambdas)))
 
     def to_json(self) -> dict[str, Any]:
         """Emit the payload as lists, floats, strings and ``None`` only."""
-        return {
+        payload = {
             "schema_version": int(self.schema_version),
             "parameter": self.parameter,
             "link": self.link,
@@ -206,14 +212,17 @@ class ParameterTermEffect:
             "covariance_kind": self.covariance_kind,
             "alpha": float(self.alpha),
         }
+        if self.separated is not None:
+            payload["separated"] = list(self.separated)
+        return payload
 
 
 @dataclass(frozen=True)
 class TermTest:
     """The Wood (2013) test of a term against zero, or its Wald analogue.
 
-    ``note`` is empty unless ``covariance="corrected"`` could not be formed, and
-    then it says that the fixed covariance was used.
+    ``note`` explains when separation limits the test or a corrected covariance
+    request falls back to the fixed covariance.
     """
 
     parameter: str
@@ -264,6 +273,7 @@ class _PreparedTermEffect:
     draw_count: int | None
     seed: int | None
     withheld: bool = False
+    separated: NDArray[np.bool_] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "lambdas", MappingProxyType(dict(self.lambdas)))
@@ -284,6 +294,8 @@ class _PreparedTermTest:
     alternative_edf: float | None
     reconciliation_tolerance: float
     withheld: bool = False
+    identified: NDArray[np.intp] | None = None
+    separation_note: str = ""
 
 
 def _level_domain(spec: Any) -> tuple[Any, ...] | None:
@@ -947,6 +959,16 @@ def _prepare_term_effect(
     if special_slice is not None:
         marked = set(_special_domain(spec))
         special = tuple(str(level) in marked for level in levels or ())
+    separated = None
+    if isinstance(spec, Categorical) and separated_labels(spec):
+        compiled = _compiled_predictor(fitted, parameter).compiled
+        separated, _ = level_flags(
+            compiled.groups,
+            compiled.specs,
+            compiled.interaction_specs,
+            _feature_label(fitted, parameter, term),
+            spec._levels,
+        )
     return _PreparedTermEffect(
         parameter=parameter,
         link=type(state.link).__name__,
@@ -970,6 +992,7 @@ def _prepare_term_effect(
         draw_count=draw_count,
         seed=resolved_seed,
         withheld=withheld,
+        separated=separated,
     )
 
 
@@ -992,29 +1015,31 @@ def _term_effect_from_covariance(
         if prepared.withheld
         else np.sqrt(_band_variance(design, matrix[np.ix_(columns, columns)]))
     )
+    separated = prepared.separated
+    if separated is not None:
+        se[separated] = np.nan
 
     critical: float | None = None
     lower_simultaneous: NDArray[np.float64] | None = None
     upper_simultaneous: NDArray[np.float64] | None = None
     if prepared.draw_count is not None:
-        assert prepared.seed is not None
-        draws = _posterior_draws_from_covariance(
-            fitted,
-            matrix,
-            prepared.draw_count,
-            covariance=covariance_kind,
-            seed=prepared.seed,
-        )
-        critical = simultaneous_critical_value(
-            design,
-            columns,
-            draws,
-            prepared.beta,
-            se,
-            alpha=prepared.alpha,
-        )
-        lower_simultaneous = effect - critical * se
-        upper_simultaneous = effect + critical * se
+        healthy_design = design if separated is None else design[~separated]
+        healthy_se = se if separated is None else se[~separated]
+        if len(healthy_se):
+            assert prepared.seed is not None
+            draws = _posterior_draws_from_covariance(
+                fitted,
+                matrix,
+                prepared.draw_count,
+                covariance=covariance_kind,
+                seed=prepared.seed,
+            )
+            critical = simultaneous_critical_value(
+                healthy_design, columns, draws, prepared.beta, healthy_se, alpha=prepared.alpha
+            )
+        width = (np.nan if critical is None else critical) * se
+        lower_simultaneous = effect - width
+        upper_simultaneous = effect + width
 
     return ParameterTermEffect(
         parameter=prepared.parameter,
@@ -1036,6 +1061,7 @@ def _term_effect_from_covariance(
         lambdas=prepared.lambdas,
         covariance_kind=covariance_kind,
         alpha=prepared.alpha,
+        separated=None if separated is None else tuple(map(bool, separated)),
     )
 
 
@@ -1066,7 +1092,10 @@ def term_test(
         n_points=n_points,
     )
     matrix, resolved = _resolved_posterior_covariance(fitted, covariance)
-    return _term_test_from_covariance(prepared, matrix, note=_covariance_note(covariance, resolved))
+    note = _covariance_note(covariance, resolved)
+    if prepared.separation_note:
+        note = _join_notes(_convergence_note(fitted), note)
+    return _term_test_from_covariance(prepared, matrix, note=note)
 
 
 def _prepare_term_test(
@@ -1092,6 +1121,21 @@ def _prepare_term_test(
     parent = _free_level_parent(fitted, parameter, term)
     spec = _compiled_spec(fitted, parameter, term if parent is None else parent)
     level_term = spec is not None and _level_domain(spec) is not None
+    identified = None
+    separation_note = ""
+    if isinstance(spec, Categorical) and (held := separated_labels(spec)):
+        if spec._base_level in held:
+            separation_note = (
+                f"SEP: Reference level {spec._base_level!r} is separated. Choose a healthy base "
+                'such as the default base="most_exposed" when it has responses off the boundary.'
+            )
+        else:
+            # The non-base labels are in the same order as this group's columns.
+            identified = np.flatnonzero([level not in held for level in spec._non_base])
+            labels = ", ".join(map(repr, held))
+            separation_note = f"SEP: Joint test excluded separated levels {labels}."
+            if not identified.size:
+                separation_note += " There are no identified contrasts."
     design: NDArray[np.float64] | None = None
     if not level_term:
         if spec is None:
@@ -1112,6 +1156,8 @@ def _prepare_term_test(
         alternative_edf=None if level_term else _alternative_edf(fitted, term_slice, edf),
         reconciliation_tolerance=float(fitted.inference.reconciliation_tolerance),
         withheld=_inference_withheld(fitted, qualified),
+        identified=identified,
+        separation_note=separation_note,
     )
 
 
@@ -1121,7 +1167,9 @@ def _term_test_from_covariance(
     note: str = "",
 ) -> TermTest:
     """Evaluate one fully prepared term test from a resolved covariance."""
-    if prepared.withheld:
+    note = _join_notes(prepared.separation_note, note)
+    identified = prepared.identified
+    if prepared.withheld or (prepared.separation_note and identified is None):
         return TermTest(
             parameter=prepared.parameter,
             term=str(prepared.term),
@@ -1129,15 +1177,17 @@ def _term_test_from_covariance(
             rank=float("nan"),
             p_value=float("nan"),
             edf=prepared.edf,
-            note=_join_notes(REPAIRED_NOTE, note),
+            note=_join_notes(REPAIRED_NOTE if prepared.withheld else "", note),
         )
     block = matrix[prepared.term_slice, prepared.term_slice]
     if prepared.level_term:
-        statistic, rank, p_value = _block_wald(
-            prepared.beta,
-            block,
-            prepared.reconciliation_tolerance,
-        )
+        beta = prepared.beta
+        if identified is not None:
+            beta = beta[identified]
+            block = block[np.ix_(identified, identified)]
+        statistic, rank, p_value = _block_wald(beta, block, prepared.reconciliation_tolerance)
+        if identified is not None and not identified.size:
+            statistic = p_value = np.nan
     else:
         assert prepared.design is not None
         assert prepared.alternative_edf is not None
@@ -1184,6 +1234,19 @@ def _intercept_row(
         "se": se,
         "note": "",
     }
+
+
+def _separated_intercept_note(fitted: Any, parameter: str) -> str:
+    compiled = _compiled_predictor(fitted, parameter).compiled
+    flags = separated_coefficients(compiled.groups, compiled.specs, compiled.interaction_specs)
+    if flags is None or not flags[-1]:
+        return ""
+    names = [
+        f"{name!r} ({spec._base_level!r})"
+        for name, spec in compiled.specs.items()
+        if isinstance(spec, Categorical) and spec._base_level in separated_labels(spec)
+    ]
+    return f"SEP: The intercept depends on separated reference levels {', '.join(names)}."
 
 
 def _summary_label(term: str, *, special_parent: str | None = None) -> str:
@@ -1331,16 +1394,19 @@ def summary_table(
                     statistic=float("nan"), rank=float("nan"), p_value=float("nan"), se=float("nan")
                 )
                 row["note"] = REPAIRED_INTERCEPT_NOTE.format(terms=", ".join(repaired_here))
-            row["note"] = _join_notes(row["note"], convergence_note, covariance_note)
+            separation_note = _separated_intercept_note(fitted, state.name)
+            if separation_note:
+                row.update(statistic=np.nan, rank=np.nan, p_value=np.nan, se=np.nan)
+            row["note"] = _join_notes(
+                row["note"], separation_note, convergence_note, covariance_note
+            )
             rows.append(row)
         for qualified, term_slice in fitted.layout.term_slices.items():
             namespace, _, term = qualified.partition(":")
             if namespace != state.name:
                 continue
-            outcome = _term_test_from_covariance(
-                prepared_tests[qualified],
-                matrix,
-            )
+            prepared = prepared_tests[qualified]
+            outcome = _term_test_from_covariance(prepared, matrix)
             lambdas = _term_lambdas(fitted, qualified)
             width = term_slice.stop - term_slice.start
             single = width == 1
@@ -1360,7 +1426,7 @@ def summary_table(
                     "estimate": float(beta[term_slice][0]) if single else float("nan"),
                     "se": (
                         math.sqrt(max(float(matrix[term_slice, term_slice][0, 0]), 0.0))
-                        if single and not prepared_tests[qualified].withheld
+                        if single and not prepared.withheld and not prepared.separation_note
                         else float("nan")
                     ),
                     "note": _join_notes(

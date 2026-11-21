@@ -17,9 +17,11 @@ from typing import Any, Literal, cast
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._frame import EagerFrame
+from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm._predictor_compiler import CompiledPredictorDesign
+from superglm._warn import warn_caller
 from superglm.diagnostics.separation import (
+    SeparatedLevels,
     SeparatedTerm,
     SeparationError,
     SeparationWarning,
@@ -28,7 +30,9 @@ from superglm.diagnostics.separation import (
     emit_level_curve_separation,
     format_factor_smooth_canonical,
     format_factor_smooth_separation,
+    format_separated_levels,
     format_separation_message,
+    level_lines,
     scan_categorical_term,
     scan_interaction_term,
 )
@@ -54,6 +58,12 @@ from superglm.links import (
     ProbitLink,
     SqrtLink,
     resolve_link,
+)
+from superglm.model.separated_levels import (
+    predicted_separated_levels,
+    record_separated_levels,
+    separated_labels,
+    warn_separated_predictions,
 )
 
 # Inverse links that map the whole line strictly monotonically onto an open
@@ -95,6 +105,7 @@ def scan_predictor_separation(
     weights: NDArray,
     *,
     boundaries: Sequence[tuple[str, ...]],
+    record_levels: bool,
 ) -> list[SeparatedTerm]:
     """Separated levels and crossed cells on every predictor that can separate.
 
@@ -117,6 +128,15 @@ def scan_predictor_separation(
     for predictor, predictor_boundaries in zip(compiled_tuple, boundary_tuple, strict=True):
         if not predictor_boundaries:
             continue
+        constrained = (
+            {
+                group.feature_name
+                for group in predictor.compiled.groups
+                if group.constraints is not None
+            }
+            if record_levels
+            else set()
+        )
         for record in predictor.compiled.separation_records:
             if record[0] == "curve":
                 curves.extend(record[2])
@@ -124,17 +144,22 @@ def scan_predictor_separation(
                 level_curves.append((f"{predictor.name}:{record[1]}", record[2]))
             elif record[0] == "cat":
                 _, term, spec, column = record
-                findings.extend(
-                    scan_categorical_term(
-                        f"{predictor.name}:{term}",
-                        spec,
-                        column,
-                        response,
-                        weight_values,
-                        predictor_boundaries,
-                        predictor.compiled.scan_codes.pop(term, None),
-                    )
+                codes = predictor.compiled.scan_codes.pop(term, None)
+                if term in constrained:
+                    continue
+                found = scan_categorical_term(
+                    f"{predictor.name}:{term}",
+                    spec,
+                    column,
+                    response,
+                    weight_values,
+                    predictor_boundaries,
+                    codes,
+                    include_base=predictor.intercept or not record_levels,
                 )
+                findings.extend(found)
+                if record_levels and found:
+                    record_separated_levels(spec, found)
             else:
                 _, term, left_spec, right_spec, left, right, left_name, right_name = record
                 findings.extend(
@@ -156,6 +181,40 @@ def scan_predictor_separation(
     emit_curve_separation(curves, "warn")
     emit_level_curve_separation(level_curves)
     return findings
+
+
+def disclose_separated_levels(
+    findings: list[SeparatedTerm], compiled: Sequence[CompiledPredictor], weights: NDArray
+) -> None:
+    """Warn about complete-response levels once the candidate is ready to publish."""
+    if findings:
+        specs = {
+            f"{predictor.name}:{term}": spec
+            for predictor in compiled
+            for term, spec in predictor.compiled.specs.items()
+            if separated_labels(spec)
+        }
+        lines = level_lines(SeparatedLevels(findings, specs, weights, None, False, None))
+        warn_caller(format_separated_levels(lines, parameter_effects=True), SeparationWarning)
+
+
+def warn_on_separated_prediction(
+    compiled: Sequence[CompiledPredictor], X: FrameLike | EagerFrame
+) -> None:
+    """Collect the hits across predictors after scoring has validated the input."""
+    hits: list[str] = []
+    frame = None
+    for predictor in compiled:
+        for name, spec in predictor.compiled.specs.items():
+            if isinstance(spec, Categorical) and separated_labels(spec):
+                if frame is None:
+                    frame = as_eager_frame(X)
+                hit = predicted_separated_levels(
+                    f"{predictor.name}:{name}", spec, frame.column_array(name)
+                )
+                if hit:
+                    hits.append(hit)
+    warn_separated_predictions(hits)
 
 
 def record_factor_smooth_levels(

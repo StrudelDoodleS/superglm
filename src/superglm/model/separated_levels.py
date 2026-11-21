@@ -37,6 +37,32 @@ def separated_labels(spec: Any) -> tuple:
     )
 
 
+def record_separated_levels(spec: Any, findings=()) -> None:
+    """Replace the categorical fit record with the typed labels from this build."""
+    spec._separated_levels_at_fit = tuple(label for finding in findings for label in finding.labels)
+
+
+def predicted_separated_levels(name, spec, values: NDArray) -> str | None:
+    """Name the recorded levels that the fitted categorizer actually scores."""
+    met = spec._predicted_levels(values)
+    named = [label for label in separated_labels(spec) if label in met]
+    return f"{name!r} levels {', '.join(map(str, named))}" if named else None
+
+
+def warn_separated_predictions(hits: list[str]) -> None:
+    """Send one advisory for all of a prediction call's affected terms."""
+    if hits:
+        warn_caller(
+            "These rows reach categorical levels or crossed cells whose training rows all had "
+            "a response of 0, or all of 1, so the data give their effect no finite estimate: "
+            + "; ".join(hits)
+            + ". Their predictions use the fitted value, which is where the fit stopped, not "
+            "an estimate. Group those levels with similar levels, or fit the term as a "
+            "RandomEffect, and refit to price them.",
+            SeparationWarning,
+        )
+
+
 def separated_terms(model) -> set[str]:
     """The terms a recorded separated level or cell belongs to: its own, and a cell's parents."""
     terms = {name for name, spec in model._specs.items() if separated_labels(spec)}

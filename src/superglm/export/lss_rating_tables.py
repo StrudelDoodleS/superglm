@@ -50,11 +50,13 @@ from superglm.export.rating_tables import (
     _row_key_header,
     _weights_array,
     _weights_by_level,
+    separated_block_note,
 )
 from superglm.features.interaction import CategoricalInteraction, interaction_cells
 from superglm.features.spline import _SplineBase
 from superglm.inference._term_helpers import _build_spline_metadata
 from superglm.links import _LOG_LINK_PROBE, _is_shifted_log_link
+from superglm.model.separated_levels import separated_labels
 
 _OFFSET_KINDS = ("auto", "discrete", "per_unit")
 
@@ -205,7 +207,9 @@ def _log_floor(link) -> float:
     return floor
 
 
-def _categorical_block(prepared, name, frame, column, sample_weight, sign) -> RatingTableBlock:
+def _categorical_block(
+    prepared, name, frame, column, sample_weight, sign, compiled
+) -> RatingTableBlock:
     levels = list(prepared.levels)
     table = pd.DataFrame(
         {
@@ -214,7 +218,24 @@ def _categorical_block(prepared, name, frame, column, sample_weight, sign) -> Ra
             "Weight": _weights_by_level(frame, column, levels, sample_weight),
         }
     )
-    return RatingTableBlock(name=name, kind="categorical", table=table)
+    note = None
+    if prepared.separated is not None:
+        marked = [
+            str(level)
+            for level, flag in zip(
+                levels, prepared.separated & np.any(prepared.design != 0, axis=1), strict=True
+            )
+            if flag
+        ]
+        specs = SimpleNamespace(
+            _specs=compiled.specs, _interaction_specs=compiled.interaction_specs
+        )
+        note = separated_block_note(specs, name, marked)
+        spec = compiled.specs[name]
+        if spec._base_level in separated_labels(spec):
+            base_note = f"The reference level {spec._base_level!r} is separated. Choose a healthy base before rating."
+            note = f"{note} {base_note}" if note else base_note
+    return RatingTableBlock(name=name, kind="categorical", table=table, note=note)
 
 
 def _cell_block(name, ispec, beta, sign) -> InteractionTableBlock:
@@ -269,7 +290,7 @@ def _parameter_table(
                 @ beta[_coefficient_columns(*blocks)]
             )
             main_effects.append(
-                _categorical_block(prepared, name, frame, column, sample_weight, sign)
+                _categorical_block(prepared, name, frame, column, sample_weight, sign, compiled)
             )
         elif isinstance(spec, _SplineBase):
             if _build_spline_metadata(spec).extrapolation == "extend":
