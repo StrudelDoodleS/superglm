@@ -353,8 +353,11 @@ class TestCIAtTheCertifiabilityWall:
 
 
 class TestQPModeFailuresAreRoutable:
+    @pytest.mark.pins_behaviour
     def test_the_qp_infeasibility_raise_is_typed_and_routable(self, monkeypatch):
-        """A QP candidate with no feasible mode is this point's
+        """Pins the typed refusal of an infeasible QP mode, unchanged by #589's fix.
+
+        A QP candidate with no feasible mode is this point's
         infeasibility, not a dead search: it raises the routable typed
         family, exactly like the SCOP and observed-geometry gates. A bare
         RuntimeError here aborted an entire coupled power search on one
