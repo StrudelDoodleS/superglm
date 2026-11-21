@@ -135,7 +135,9 @@ def test_metrics_blank_only_contrasts_that_move_under_separation(base):
 
 
 @pytest.mark.parametrize("family", ["poisson", "binomial"])
+@pytest.mark.pins_behaviour
 def test_healthy_reference_for_separated_base_is_not_a_weak_level(family):
+    """Pin master's disclosure of the occupied, healthy treatment levels."""
     model, _, _ = _fit_with_separated_z("Z", family)
     diagnostics = model.diagnostics()
     assert diagnostics["r"]["weakly_identified"] == []
@@ -302,7 +304,9 @@ def test_logit_with_no_healthy_reference_keeps_the_cold_odds_ratio(monkeypatch):
 
 
 @pytest.mark.parametrize("route", ["smooth", "ordinary", "fixed_qp"])
+@pytest.mark.pins_behaviour
 def test_power_profile_publishes_the_separated_price_at_its_selected_power(route):
+    """Pin agreement with the standalone coefficient fit at the winning power."""
     from superglm import BSplineSmooth, Constraint, LambdaPolicy, Numeric
 
     rng = np.random.default_rng(240)
