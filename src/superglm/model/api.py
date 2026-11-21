@@ -60,6 +60,9 @@ class SuperGLM:
     be estimated via REML (``fit_reml``) or cross-validation (``cross_validate``).
     """
 
+    _specs: dict[Hashable, FeatureSpec]
+    _interaction_specs: dict[str, Any]
+
     def __init__(
         self,
         family: str | Distribution = "poisson",
