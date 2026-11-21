@@ -10,7 +10,6 @@ import pandas as pd  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
 from superglm._roundoff import EPS, SQRT_EPS, TINY
-from superglm.diagnostics.separation import identified_levels, separated_level_mask
 from superglm.inference._term_helpers import _spline_se, mean_centered_variance
 from superglm.inference._term_types import _safe_exp
 
@@ -373,9 +372,19 @@ def feature_se_from_cov(
         # _non_base excludes pinned levels (declared, no effective rows); their
         # coefficient is fixed at zero, so their SE stays 0.0 like the base's.
         position = {lev: j for j, lev in enumerate(spec._non_base)}
-        # A separated level's relativity has no finite estimate, so it has no
-        # standard error, and the centre is the mean over the other levels.
-        separated = separated_level_mask(spec, levels)
+        # A contrast a separating direction moves has no finite estimate, so it has
+        # no standard error, and the centre is the mean over the levels it leaves
+        # determined (``separated_levels.level_flags``).
+        from superglm.model.separated_levels import level_flags
+
+        separated, centre_on = level_flags(
+            groups,
+            dict(specs),
+            dict(interaction_specs),
+            name,
+            levels,
+            centering="mean" if center else "native",
+        )
         if center:
             rows = np.array([levels.index(lev) for lev in spec._non_base], dtype=np.intp)
             se_all = np.sqrt(
@@ -384,7 +393,7 @@ def feature_se_from_cov(
                     Cov_g,
                     rows,
                     len(levels),
-                    identified_levels(spec, levels),
+                    centre_on,
                 )
             )
         else:

@@ -9,7 +9,6 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._weight_units import coefficient_covariance, standard_errors
-from superglm.diagnostics.separation import separated_cell_mask, separated_level_mask
 from superglm.features.constraint import rules_of
 from superglm.inference._metrics_design import MetricsDesign, factor_from_gram, weighted_moments
 from superglm.inference.covariance import (
@@ -346,18 +345,28 @@ def build_coef_rows(
     icpt_se = float(standard_errors(icpt_var, result, known_scale=known_scale))
 
     rows: list[_CoefRow] = []
+    # The coefficients a separated level or cell moves (``separated_coefficients``,
+    # the intercept last): each keeps its estimate, with its Wald fields blank.
+    from superglm.model.separated_levels import separated_coefficients
+
+    separated = separated_coefficients(groups, specs, interaction_specs)
+
+    def moves(column: int) -> bool:
+        return separated is not None and bool(separated[column])
 
     # Intercept row
     z, p, ci_lo, ci_hi = _compute_coef_stats(intercept, icpt_se, alpha)
+    blank = moves(-1)
     rows.append(
         _CoefRow(
             name="Intercept",
             coef=intercept,
-            se=icpt_se,
-            z=z,
-            p=p,
-            ci_low=ci_lo,
-            ci_high=ci_hi,
+            se=None if blank else icpt_se,
+            z=None if blank else z,
+            p=None if blank else p,
+            ci_low=None if blank else ci_lo,
+            ci_high=None if blank else ci_hi,
+            separated=blank,
         )
     )
 
@@ -858,13 +867,14 @@ def build_coef_rows(
             cat_edf = gedf.get(g.name, 0.0) if active else 0.0
             diag = _level_diag.get(g.name, {})
             cat_rules = rules_of(spec).describe() or None
-            separated = separated_level_mask(spec, spec._non_base)
             for i, level in enumerate(spec._non_base):
                 coef_val = float(b_g[i])
                 se_val = float(se_g[i])
                 z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
-                blank = separated is not None and bool(separated[i])
+                blank = moves(g.start + i)
                 n_obs_i, exp_share_i, thin_i = diag.get(i, (None, None, False))
+                # a blank row's interval is not shown, so no note about it is either
+                thin_i = thin_i and not blank
                 rows.append(
                     _CoefRow(
                         name=f"{g.name}[{level}]",
@@ -1004,12 +1014,11 @@ def build_coef_rows(
                 )
 
         elif isinstance(spec, CategoricalInteraction):
-            separated = separated_cell_mask(spec, spec._pairs)
             for i, (lev1, lev2) in enumerate(spec._pairs):
                 coef_val = float(b_g[i])
                 se_val = float(se_g[i])
                 z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
-                blank = separated is not None and bool(separated[i])
+                blank = moves(g.start + i)
                 rows.append(
                     _CoefRow(
                         name=f"{g.name}[{lev1}:{lev2}]",

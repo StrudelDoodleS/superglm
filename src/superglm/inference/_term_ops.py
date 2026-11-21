@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.diagnostics.separation import identified_levels, separated_level_mask
 from superglm.features.constraint import rules_of
 from superglm.inference._term_covariance import (
     feature_se_from_cov,
@@ -177,6 +176,7 @@ def term_inference(
             result=result,
             groups=groups,
             interaction_specs=interaction_specs,
+            specs=specs,
         )
 
     spec = specs.get(name)
@@ -229,6 +229,13 @@ def term_inference(
             )
             ci_lo = _safe_exp(log_rels - z_alpha * se)
             ci_hi = _safe_exp(log_rels + z_alpha * se)
+        # the levels reported blank, and the levels a mean-centred report centres on
+        from superglm.model.separated_levels import level_flags
+
+        separated, _ = level_flags(
+            groups, specs, interaction_specs, name, levels, centering=centering
+        )
+        _, centre_on = level_flags(groups, specs, interaction_specs, name, levels)
         return _recenter_term(
             TermInference(
                 name=name,
@@ -564,6 +571,13 @@ def term_inference(
             )
             ci_lo = _safe_exp(log_rels - z_alpha * se)
             ci_hi = _safe_exp(log_rels + z_alpha * se)
+        # the levels reported blank, and the levels a mean-centred report centres on
+        from superglm.model.separated_levels import level_flags
+
+        separated, _ = level_flags(
+            groups, specs, interaction_specs, name, levels, centering=centering
+        )
+        _, centre_on = level_flags(groups, specs, interaction_specs, name, levels)
 
         ti_result = _recenter_term(
             TermInference(
@@ -582,10 +596,10 @@ def term_inference(
                 smoothing_lambda=lam,
                 monotone=rules_of(spec).describe() or None,
                 alpha=alpha,
-                separated=separated_level_mask(spec, levels),
+                separated=separated,
             ),
             centering,
-            centre_on=identified_levels(spec, levels),
+            centre_on=centre_on,
             se_centered=_centered_se(
                 centering,
                 name,

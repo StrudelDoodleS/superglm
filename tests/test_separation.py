@@ -603,6 +603,13 @@ def forced_runtime_finding():
     return format_runtime_message(1e35, 5, ["x"], True)
 
 
+def as_finding(message, groups=("x",)):
+    """``message`` as ``runtime_finding`` returns it, naming ``groups``."""
+    from superglm.diagnostics.separation import RuntimeFinding
+
+    return None if message is None else RuntimeFinding(message, tuple(groups))
+
+
 def force_runtime_finding(monkeypatch):
     """Every coefficient solve that runs the backstop records a finding, whatever its state.
 
@@ -612,7 +619,7 @@ def force_runtime_finding(monkeypatch):
     import superglm.diagnostics.separation as separation_module
 
     message = forced_runtime_finding()
-    monkeypatch.setattr(separation_module, "runtime_finding", lambda *_a, **_k: message)
+    monkeypatch.setattr(separation_module, "runtime_finding", lambda *_a, **_k: as_finding(message))
     return message
 
 
@@ -671,7 +678,7 @@ def test_a_search_solve_at_the_guard_does_not_warn_about_the_published_fit(monke
         if not in_trial:
             return real_finding(*args, **kwargs)
         forced.append(message)
-        return message
+        return as_finding(message)
 
     def trial(*args, **kwargs):
         in_trial.append(True)
@@ -730,7 +737,7 @@ def test_a_separated_fit_warns_once_however_many_solves_its_theta_search_ran(mon
 
     def finding(*_args, **_kwargs):
         findings.append(format_runtime_message(1e35, len(findings) + 1, ["z"], True))
-        return findings[-1]
+        return as_finding(findings[-1], ("z",))
 
     monkeypatch.setattr(separation_module, "runtime_finding", finding)
     model = SuperGLM(
@@ -777,7 +784,7 @@ def test_a_fit_reads_the_models_separation_mode_for_what_it_returns(monkeypatch,
 
     def finding(*_args, **_kwargs):
         solves.append(1)
-        return message if route == "fit_reml" or len(solves) == 1 else None
+        return as_finding(message) if route == "fit_reml" or len(solves) == 1 else None
 
     monkeypatch.setattr(separation_module, "runtime_finding", finding)
     features = {"x": Spline(kind="cr", k=8)}
@@ -1083,7 +1090,7 @@ def test_drop1_names_the_feature_whose_comparison_fit_is_separated(monkeypatch, 
 
     def finding(design, groups, *_args, **_kwargs):
         missing = {"x", "z"} - {group.name for group in groups}
-        return message if missing & set(dropped) else None
+        return as_finding(message) if missing & set(dropped) else None
 
     opening = (
         "drop1: the comparison fit without 'x' carries "
@@ -1191,7 +1198,7 @@ def test_strict_fit_reml_decides_on_the_theta_refit_it_returns(monkeypatch):
 
     def finding(*args, **kwargs):
         if last and len(refits) < last[0]:
-            return message
+            return as_finding(message)
         return real_finding(*args, **kwargs)
 
     monkeypatch.setattr(fit_ops, "finalize_reml_fit", finalize)

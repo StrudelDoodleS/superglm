@@ -41,6 +41,7 @@ from superglm import (
 )
 from superglm import Spline as SplineTerm
 from superglm.diagnostics.separation import (
+    RuntimeFinding,
     SeparationError,
     SeparationWarning,
     format_runtime_message,
@@ -356,7 +357,9 @@ def _forced_runtime_finding(monkeypatch, carried_by):
     monkeypatch.setattr(
         separation,
         "runtime_finding",
-        lambda *args, **kwargs: format_runtime_message(1e13, 3, [carried_by], True),
+        lambda *args, **kwargs: RuntimeFinding(
+            format_runtime_message(1e13, 3, list(carried_by), True), tuple(carried_by)
+        ),
     )
     X, y, exposure = _book()
     return _of(_fit(_model(), X, y, exposure), SeparationWarning)
@@ -367,7 +370,7 @@ def test_the_runtime_backstop_does_not_restate_a_disclosed_level(monkeypatch):
 
     It is not warned a second time; master warned it beside the build's warning.
     """
-    found = _forced_runtime_finding(monkeypatch, "lev")
+    found = _forced_runtime_finding(monkeypatch, ["lev"])
     assert len(found) == 1 and "signature of separation" not in found[0]
 
 
@@ -378,7 +381,17 @@ def test_the_runtime_backstop_still_warns_a_walk_another_term_carries(monkeypatc
     Pins master's behaviour for a finding the scan's record does not explain: the
     separated level's disclosure and the backstop's statement, two warnings.
     """
-    found = _forced_runtime_finding(monkeypatch, "x")
+    found = _forced_runtime_finding(monkeypatch, ["x"])
+    assert len(found) == 2 and any("signature of separation" in text for text in found)
+
+
+def test_the_runtime_backstop_warns_a_walk_it_shares_with_another_term(monkeypatch):
+    """A finding naming ``lev`` and then the spline: the spline's part is not the level's.
+
+    It is warned beside the level's disclosure.  At 20f77dd6f only the first group named
+    was read, so the finding was dropped.
+    """
+    found = _forced_runtime_finding(monkeypatch, ["lev", "x"])
     assert len(found) == 2 and any("signature of separation" in text for text in found)
 
 
@@ -502,6 +515,211 @@ def test_a_crossed_cell_row_is_flagged():
     rows = {r.name: r for r in model.summary()._coef_rows if r.group == "a:b"}
     assert rows["a:b[C:Q]"].p is None and rows["a:b[C:Q]"].separated
     assert not rows["a:b[B:Q]"].separated and rows["a:b[B:Q]"].p is not None
+
+
+def _grid(cells):
+    """``_cells`` without the warnings: (a, b, rows with a 1), 100 rows per cell."""
+    model, X, _ = _cells(cells)
+    return model, X, {row.name: row for row in model.summary()._coef_rows}
+
+
+_SPARSE = [("A", "P", 20), ("A", "Q", 20), ("A", "R", 20)]
+
+
+@pytest.mark.parametrize(
+    ("cells", "blank", "kept"),
+    [
+        # B x P empty, B x R separated: a[B] and B:Q carry its walk (pruned B:R)
+        (_SPARSE + [("B", "Q", 30), ("B", "R", 0)], {"a[B]", "a:b[B:Q]"}, {"b[Q]", "b[R]"}),
+        # the base cell separated, B x P empty: B:Q is determined by the other four
+        (
+            [("A", "P", 0), *_SPARSE[1:], ("B", "Q", 30), ("B", "R", 40)],
+            {"Intercept", "b[Q]", "b[R]"},
+            {"a[B]", "a:b[B:Q]"},
+        ),
+        # full grid, the base-column cell B x P separated: the main effect a[B] moves
+        (
+            _SPARSE + [("B", "P", 0), ("B", "Q", 30), ("B", "R", 40)],
+            {"a[B]", "a:b[B:Q]", "a:b[B:R]"},
+            {"Intercept", "b[Q]", "b[R]"},
+        ),
+    ],
+    ids=["sparse_cell", "sparse_base_cell", "base_column_cell"],
+)
+def test_a_crossed_cell_blanks_every_coefficient_it_moves(cells, blank, kept):
+    """One rule for every grid: a coefficient the healthy rows leave undetermined is blank.
+
+    At 20f77dd6f the four-corner rule left the sparse grid's B:Q unflagged (SE 156.8),
+    blanked the healthy B:Q beside a separated base cell, and left a[B] unflagged beside
+    a separated base-column cell (SE 142.9).
+    """
+    _, _, rows = _grid(cells)
+    assert {name for name, row in rows.items() if row.separated} == blank
+    assert all(rows[name].se is None and rows[name].p is None for name in blank)
+    assert all(rows[name].se is not None and rows[name].se > 0 for name in kept)
+
+
+def test_a_healthy_cell_beside_a_separated_base_cell_keeps_its_wald_test():
+    """B:Q against its reference: log((30/40) / (20/20)), SE sqrt(1/30 + 1/40 + 1/20 + 1/20)."""
+    _, _, rows = _grid([("A", "P", 0), *_SPARSE[1:], ("B", "Q", 30), ("B", "R", 40)])
+    row = rows["a:b[B:Q]"]
+    assert row.coef == pytest.approx(np.log(0.75), abs=1e-6)
+    assert row.se == pytest.approx(np.sqrt(1 / 30 + 1 / 40 + 1 / 20 + 1 / 20), rel=1e-6)
+
+
+def test_a_separated_base_cell_blanks_the_intercept():
+    """A x P separated in a 2 x 2 grid: every coefficient moves, the intercept too.
+
+    At 20f77dd6f the intercept read p = 0.993.
+    """
+    _, _, rows = _grid([("A", "P", 0), ("A", "Q", 40), ("B", "P", 20), ("B", "Q", 30)])
+    assert all(row.separated and row.se is None for row in rows.values())
+
+
+def test_the_interaction_readers_flag_a_separated_cell():
+    """``term_inference`` and ``relativities(with_se=True)`` flag B:Q as the summary does.
+
+    At 20f77dd6f both returned its factor, 1.7e-6, unflagged.
+    """
+    model, _, _ = _grid([("A", "P", 20), ("A", "Q", 20), ("B", "P", 20), ("B", "Q", 0)])
+    assert model.term_inference("a:b").separated.tolist() == [True]
+    assert model.relativities(with_se=True)["a:b"]["separated"].tolist() == [True]
+
+
+def test_mean_centering_leaves_out_a_level_a_separated_cell_moves():
+    """C x P separated, C x Q with claims: a[C] carries the cell's walk, so it leaves the centre.
+
+    A and B are centred on their own mean, each with half a[B]'s standard error.  At
+    20f77dd6f a[C] was unflagged and the centre ran through its walk: A 24.3, B 25.0.
+    """
+    model, _, rows = _grid(
+        [
+            ("A", "P", 10),
+            ("A", "Q", 20),
+            ("B", "P", 15),
+            ("B", "Q", 25),
+            ("C", "P", 0),
+            ("C", "Q", 5),
+        ]
+    )
+    assert rows["a[C]"].separated and not rows["a[B]"].separated
+    native = model.term_inference("a").log_relativity
+    centred = model.term_inference("a", centering="mean")
+    expected = native[:2] - native[:2].mean()
+    np.testing.assert_allclose(centred.log_relativity[:2], expected, rtol=0, atol=1e-12)
+    assert centred.separated.tolist() == [False, False, True]
+    se = centred.se_log_relativity
+    np.testing.assert_allclose(se[:2], 0.5 * rows["a[B]"].se, rtol=1e-9)
+    assert np.isnan(se[2])
+
+
+def test_a_separated_base_blanks_the_intercept():
+    """Base E separated: the intercept is E's log rate, walked with it.
+
+    At 20f77dd6f the intercept read SE 4e4 and p = 0.9995 above the blank rows.
+    """
+    X, y, exposure = _book()
+    model = _model(lev=Categorical(base="E"))
+    _fit(model, X, y, exposure)
+    intercept = model.summary()._coef_rows[0]
+    assert intercept.name == "Intercept" and intercept.separated and intercept.se is None
+
+
+def test_a_thin_separated_level_shows_no_low_credibility_note():
+    """Nine claim-free rows: the row reads SEP, and no LC note speaks of its blank interval.
+
+    At 20f77dd6f the console printed the LC note and footnote beside the blank row, and
+    the editor showed the low-credibility marker rather than the flag.
+    """
+    from superglm.editor.summaries import _compact_summary_row
+
+    X, y, exposure = _book(n=2000, seed=1)
+    model = _model()
+    _fit(model, X, y, exposure)
+    summary = model.summary()
+    row = next(r for r in summary._coef_rows if r.name == "lev[E]")
+    assert row.separated and not row.quasi_separated
+    assert "LC: low credibility" not in str(summary) and "Low-credibility" not in str(summary)
+    compact = _compact_summary_row(row)
+    assert (compact["advisory_code"], compact["advisory_kind"]) == ("SEP", "separated")
+
+
+def test_the_grouped_display_carries_the_flag():
+    """Collapsing a grouping keeps one flag per displayed group.
+
+    At 20f77dd6f ``to_dataframe()`` raised: four levels against five flags.
+    """
+    from superglm.plotting.group_display import project_grouped_term_for_display
+
+    X, y, exposure = _book()
+    y = np.where(X["lev"] == "D", 0.0, y)
+    spec = Categorical(grouping=collapse_levels(X["lev"], groups={"D+E": ["D", "E"]}))
+    model = _model(lev=spec)
+    _fit(model, X, y, exposure)
+    shown = project_grouped_term_for_display(model, model.term_inference("lev"), mode="collapsed")
+    assert shown.term.to_dataframe()["separated"].tolist() == [False, False, False, True]
+
+
+def test_the_editor_draws_every_healthy_level_interval(fitted):
+    """Only the separated level's whisker is left out; A..D keep theirs.
+
+    At 20f77dd6f the editor drew no interval for any level of the term.
+    """
+    from superglm.editor.payloads import session_payload
+    from superglm.editor.session import EditorSession
+
+    _, _, _, models = fitted
+    model, _ = models["fit"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SeparationWarning)
+        payload = session_payload(EditorSession.from_model(model))["lev"]
+    lower, upper = payload["ci_lower_y"], payload["ci_upper_y"]
+    assert lower[-1] is None and upper[-1] is None
+    assert all(lo is not None and lo <= hi for lo, hi in zip(lower[:-1], upper[:-1], strict=True))
+
+
+def _binomial_reml(cells_zero, mode, crossed=False, seed=15):
+    """Binomial/log REML beside a random effect, the rows of ``cells_zero`` all 0."""
+    rng = np.random.default_rng(seed)
+    n = 3000
+    a = rng.choice(["A", "B", "C"], n, p=[0.4, 0.3, 0.3])
+    b = rng.choice(["P", "Q"], n, p=[0.6, 0.4])
+    y = (rng.uniform(size=n) < 0.15 + 0.05 * (a == "B") + 0.05 * (b == "Q")).astype(float)
+    y[cells_zero(a, b)] = 0.0
+    X = pd.DataFrame({"a": a, "b": b, "g": [f"g{i % 25}" for i in range(n)]})
+    features = {"a": Categorical(base="A"), "b": Categorical(base="P"), "g": RandomEffect()}
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        features=features,
+        interactions=[("a", "b")] if crossed else [],
+        selection_penalty=0.0,
+        separation=mode,
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit_reml(X, y)
+    return _of(caught, WeakIdentificationWarning), _of(caught, SeparationWarning)
+
+
+@pytest.mark.parametrize("mode", ["warn", "ignore"])
+def test_reml_adds_nothing_for_a_separated_base(mode):
+    """The base level A has no event: its notice is the separation warning's, or none.
+
+    At 20f77dd6f ``ignore`` still gave REML's weak-identification line for ``a[A]``.
+    """
+    weak, separated = _binomial_reml(lambda a, b: a == "A", mode)
+    assert not weak and len(separated) == (mode == "warn")
+
+
+@pytest.mark.parametrize("mode", ["warn", "ignore"])
+def test_reml_adds_nothing_for_a_separated_base_row_cell(mode):
+    """A x Q, in the base row: its walk is the parent b's, and no second notice names it.
+
+    At 20f77dd6f both modes gave a weak-identification line beside it.
+    """
+    weak, separated = _binomial_reml(lambda a, b: (a == "A") & (b == "Q"), mode, crossed=True)
+    assert not weak and len(separated) == (mode == "warn")
 
 
 # ── row 4: mean centering leaves the separated level out of the centre ────

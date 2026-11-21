@@ -788,6 +788,7 @@ def publish_revised_coefficients(model, beta_before) -> None:
             ("scop_inference", None),
             ("scop_geometry", None),
             ("separation_message", None),
+            ("separation_groups", ()),
         ):
             if hasattr(result, field_name):
                 setattr(result, field_name, value)
@@ -1129,11 +1130,13 @@ def capture_fit_state(
         from superglm.model.separated_levels import disclose_held_levels, separated_terms
 
         disclose_held_levels(workspace.model)
+        named: tuple[str, ...] = ()
         if separation_statement is None:
             result = getattr(workspace.model, "_result", None)
             separation_statement = getattr(result, "separation_message", None)
-        # The walk of a level the scan recorded is the fit's separation disclosure's to state.
-        if not restates_separated_level(separation_statement, separated_terms(workspace.model)):
+            named = tuple(getattr(result, "separation_groups", ()) or ())
+        # The walk of levels the scan recorded is the fit's separation disclosure's to state.
+        if not restates_separated_level(named, separated_terms(workspace.model)):
             disclose_runtime_separation(
                 separation_statement, getattr(workspace.model, "_separation", "warn")
             )

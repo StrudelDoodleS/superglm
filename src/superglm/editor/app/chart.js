@@ -149,8 +149,9 @@ export function drawChart(term, selection, context) {
   const innerW = width - margin.left - margin.right;
   const innerH = height - margin.top - margin.bottom;
   definePlotClip(scene, margin, innerW, innerH);
+  // A level with no interval (a separated level's) has null ends.
   const ciValues = context.showCi() && view.ci_lower_y && view.ci_upper_y
-    ? [...view.ci_lower_y, ...view.ci_upper_y]
+    ? [...view.ci_lower_y, ...view.ci_upper_y].filter((value) => value !== null)
     : [];
   const controlValues = visualMode === "handles" && term.controls && term.controls.y
     ? term.controls.y
@@ -1577,6 +1578,8 @@ function diamond(cx, cy, r) {
 function errorBars(svg, x, lower, upper, sx, sy) {
   const cap = 6;
   for (let i = 0; i < x.length; i++) {
+    // A level with no interval (a separated level's) draws no whisker.
+    if (lower[i] === null || upper[i] === null) continue;
     const px = sx(x[i]);
     const lo = sy(lower[i]);
     const hi = sy(upper[i]);

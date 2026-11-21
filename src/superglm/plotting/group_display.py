@@ -69,6 +69,12 @@ def project_grouped_term_for_display(
         spline=None,
         level_is_special=_collapse_special_mask(ti.level_is_special, group_indices),
         smooth_curve=_collapsed_smooth_curve(ti, group_indices),
+        # a group's members are one fitted level, so they are flagged alike
+        separated=(
+            None
+            if ti.separated is None
+            else np.asarray([bool(np.any(ti.separated[i])) for i in group_indices])
+        ),
     )
     return GroupedTermDisplay(
         term=display_term,

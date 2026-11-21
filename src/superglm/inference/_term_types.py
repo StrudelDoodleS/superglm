@@ -147,10 +147,10 @@ class TermInference:
     # into ``base_relativity`` so the workbook multiplies out to ``model.predict``.
     centering_shift: float = 0.0
 
-    # Categorical only: which levels' relativities move along a separating direction
-    # (``diagnostics.separation.separated_level_mask``), parallel to ``levels``. Each keeps
+    # Categorical only: which levels' reported relativities move along a separating
+    # direction (``separated_levels.level_flags``), parallel to ``levels``. Each keeps
     # its estimate, which is where the fit stopped, and its standard error and interval
-    # are NaN. None when the term has no separated level.
+    # are NaN. None when the term has none.
     separated: NDArray[np.bool_] | None = None
 
     def to_dataframe(self) -> pd.DataFrame:
@@ -241,6 +241,11 @@ class InteractionInference:
     # For numeric×numeric: single product coefficient
     relativity_per_unit_unit: float | None = None
     coef: float | None = None
+
+    # For categorical×categorical: which of ``pairs`` a separating direction moves
+    # (``separated_levels.pair_flags``), parallel to ``pairs``; their relativities are
+    # where the fit stopped, not estimates.  None when no cell is.
+    separated: NDArray[np.bool_] | None = None
 
 
 __all__ = [

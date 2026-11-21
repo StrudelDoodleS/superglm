@@ -9,7 +9,6 @@ import pandas as pd  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
 from superglm._frame import FrameLike
-from superglm.diagnostics.separation import identified_levels, separated_level_mask
 from superglm.inference._term_covariance import feature_se_from_cov
 from superglm.inference._term_helpers import _VALID_CENTERING
 from superglm.inference._term_types import _safe_exp
@@ -142,11 +141,17 @@ def relativities(
                     interaction_specs,
                     center=center_se,
                 )
-            # A separated level keeps its relativity, flagged, and leaves the centre.
-            separated = separated_level_mask(spec_cur, levels)
+            # A level a separating direction moves keeps its relativity, flagged, and
+            # leaves the centre (``separated_levels.level_flags``).
+            from superglm.model.separated_levels import level_flags
+
+            separated, _ = level_flags(
+                groups, specs, interaction_specs, name, levels, centering=centering
+            )
+            _, centre_on = level_flags(groups, specs, interaction_specs, name, levels)
             if separated is not None:
                 df["separated"] = separated
-            out[name] = _center_df(df, identified_levels(spec_cur, levels))
+            out[name] = _center_df(df, centre_on)
         elif "relativity_per_unit" in raw:
             df = pd.DataFrame(
                 {
@@ -184,6 +189,7 @@ def relativities(
 
         elif "pairs" in raw:
             from superglm.features.interaction import interaction_cells
+            from superglm.model.separated_levels import pair_flags
 
             rels = interaction_cells(raw)
             log_rels = interaction_cells(raw, "log_relativities")
@@ -198,6 +204,9 @@ def relativities(
                     "level2": [l2 for _, l2 in rels],
                 }
             )
+            separated = pair_flags(groups, specs, interaction_specs, iname, list(rels))
+            if separated is not None:
+                out[iname]["separated"] = separated
 
         elif "relativities_per_unit" in raw:
             levels = raw["levels"]

@@ -236,7 +236,7 @@ def _compact_summary_row(row) -> dict[str, Any]:
         "p_value": p_value,
         "sig_code": _summary_sig_code(p_value),
         "sig_class": "sig-reference" if is_reference else _summary_sig_class(p_value),
-        "advisory_code": _summary_advisory_code(bool(row.quasi_separated)),
+        "advisory_code": _summary_advisory_code(row),
         "advisory_kind": _summary_advisory_kind(row, bool(row.quasi_separated)),
         "quasi_separated": bool(row.quasi_separated),
         "active": bool(row.active),
@@ -307,20 +307,24 @@ def _summary_sig_code(p_value: float | None) -> str:
     return ""
 
 
-def _summary_advisory_code(quasi_separated: bool) -> str:
-    """The advisory marker, matching the console's ``LC`` column."""
-    return "?" if quasi_separated else ""
+def _summary_advisory_code(row) -> str:
+    """The advisory marker, matching the console's ``LC`` column: ``SEP`` or ``?``."""
+    if getattr(row, "separated", False):
+        return "SEP"
+    return "?" if row.quasi_separated else ""
 
 
 def _summary_advisory_kind(row, quasi_separated: bool) -> str:
-    """Which of the two disjoint triggers fired on this row.
+    """Which trigger fired on this row: a separated level, or one of the two advisories.
 
-    A thin level is short of experience; an outsized standard error can be a
+    A separated level or cell has no finite estimate. A thin level is short of experience; an outsized standard error can be a
     predictor on a much smaller scale with the whole sample behind it, so the
     tooltip differs. Read off ``advisory_trigger``, recorded where the flag is
     set: ``_display_rows`` strips per-level diagnostics from all but the first
     member of a grouped level, so ``level_n_obs`` cannot be re-derived here.
     """
+    if getattr(row, "separated", False):
+        return "separated"
     if not quasi_separated:
         return ""
     # Read directly, not through a defaulting ``getattr``, which would fail open

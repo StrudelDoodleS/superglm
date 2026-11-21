@@ -13,8 +13,11 @@ from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 
 
-def _make_sparse_tweedie_data(n=10_000, n_rare=10, seed=42):
-    """Create Tweedie data with one near-separated level (few obs, all y=0)."""
+def _make_sparse_tweedie_data(n=10_000, n_rare=10, seed=42, separated=True):
+    """Create Tweedie data with one near-separated level (few obs, all y=0).
+
+    ``separated=False`` gives the rare level one positive response: thin, not separated.
+    """
     rng = np.random.default_rng(seed)
 
     # Build most observations from well-identified levels
@@ -31,6 +34,8 @@ def _make_sparse_tweedie_data(n=10_000, n_rare=10, seed=42):
 
     y = generate_tweedie_cpg(n, mu=mu, phi=2.0, p=1.5, rng=rng)
     y[cat == "rare"] = 0.0  # force near-separation
+    if not separated:
+        y[np.flatnonzero(cat == "rare")[0]] = float(np.median(y[y > 0]))
 
     # Shuffle so rare obs aren't all at the end
     idx = rng.permutation(n)
@@ -243,10 +248,14 @@ class TestZeroWeightDiagnostics:
 
 
 class TestQuasiSeparatedMarker:
-    """The ? marker must appear on rare levels."""
+    """The ? marker must appear on rare levels; a separated one reads SEP instead.
+
+    A separated level's interval is blank, so the low-credibility note about its
+    interval is not shown (``build_coef_rows``).
+    """
 
     def test_marker_on_rare_level(self):
-        df, y, exposure = _make_sparse_tweedie_data()
+        df, y, exposure = _make_sparse_tweedie_data(separated=False)
         m = SuperGLM(
             family=Tweedie(p=1.5),
             selection_penalty=0.0,
@@ -256,7 +265,18 @@ class TestQuasiSeparatedMarker:
         s = m.summary()
 
         rare_row = next(r for r in s._coef_rows if "rare" in r.name)
-        assert rare_row.quasi_separated is True
+        assert rare_row.quasi_separated is True and not rare_row.separated
+
+    def test_a_separated_rare_level_reads_sep(self):
+        df, y, exposure = _make_sparse_tweedie_data()
+        m = SuperGLM(
+            family=Tweedie(p=1.5),
+            selection_penalty=0.0,
+            features={"cat": Categorical(base="first")},
+        )
+        m.fit(df, y, sample_weight=exposure, offset=np.log(exposure))
+        rare_row = next(r for r in m.summary()._coef_rows if "rare" in r.name)
+        assert rare_row.separated and not rare_row.quasi_separated
 
 
 class TestPerLevelDiagnostics:
@@ -331,7 +351,7 @@ class TestFootnoteInSummary:
     """
 
     def test_footnote_present(self):
-        df, y, exposure = _make_sparse_tweedie_data()
+        df, y, exposure = _make_sparse_tweedie_data(separated=False)
         m = SuperGLM(
             family=Tweedie(p=1.5),
             selection_penalty=0.0,

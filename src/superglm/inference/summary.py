@@ -85,7 +85,7 @@ class _CoefRow:
     level_n_obs: int | None = None
     level_exposure_share: float | None = None
     # A level or crossed cell whose effect moves along a separating direction
-    # (``diagnostics.separation.separated_level_mask``): its estimate is where the fit
+    # (``separated_levels.separated_coefficients``): its estimate is where the fit
     # stopped, and its Wald standard error, z, p and interval are left blank.
     separated: bool = False
     # Per-level fit provenance: "smooth" for a level carried by the spline,
@@ -244,9 +244,10 @@ _SEPARATED_NOTE_BODY = (
     "is 1, so the data give its effect no finite estimate. The estimate shown is where\n"
     "the fit stopped, and its standard error, z, p-value and interval are left blank:\n"
     "a Wald statistic has no finite reference there (Hauck and Donner, JASA 72, 1977).\n"
-    "With the base level separated every relativity of the term is measured against\n"
-    "it, so all of them are flagged. Group the level with similar levels, or fit the\n"
-    "term as a RandomEffect, to price it."
+    "A coefficient the other rows do not determine moves with it and is flagged too:\n"
+    "every level against a separated base, the intercept, a parent's main effect\n"
+    "beside a separated cell. Group the level with similar levels, or fit the term\n"
+    "as a RandomEffect, to price it."
 )
 _SEPARATED_NOTE = f"{_SEPARATED_TAG}: " + _SEPARATED_NOTE_BODY[0].lower() + _SEPARATED_NOTE_BODY[1:]
 _WALD_NOTE = (

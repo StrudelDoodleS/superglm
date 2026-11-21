@@ -925,6 +925,8 @@ function sigTitle(row) {
 // standard error can be a predictor on a much smaller scale with the whole
 // sample behind it. Same split the exported Warning cell makes.
 const ADVISORY_TITLES = {
+  separated:
+    "Separated: every response on its rows is 0, or every one is 1, so it has no finite estimate; its standard error and p-value are left blank",
   thin_level: "Low credibility: this level carries little experience",
   outsized_se:
     "Outsized standard error: wide next to this model's typical one — check the predictor's units",

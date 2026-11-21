@@ -404,7 +404,7 @@ def _finite_float(value: Any) -> float | None:
 
 def _ci_payload(
     term, edit_delta: np.ndarray, display: DisplayTransform
-) -> tuple[list[float] | None, list[float] | None]:
+) -> tuple[list[float | None] | None, list[float | None] | None]:
     # CI bands come from the reference fit. After a manual edit, shift the band
     # by the edit delta for visual reference only; summaries suppress edited
     # inference separately.
@@ -416,9 +416,19 @@ def _ci_payload(
     # relativity's ends are held where its exponential is finite; an added
     # amount that is not finite has no band to draw.
     shown = display.to_bounded_display(ci_lower), display.to_bounded_display(ci_upper)
-    if not (np.all(np.isfinite(shown[0])) and np.all(np.isfinite(shown[1]))):
+    finite = np.isfinite(shown[0]) & np.isfinite(shown[1])
+    if np.all(finite):
+        return [float(v) for v in np.minimum(*shown)], [float(v) for v in np.maximum(*shown)]
+    if term.levels is None or not np.any(finite):
         return None, None
-    return [float(v) for v in np.minimum(*shown)], [float(v) for v in np.maximum(*shown)]
+    # A level with no interval (a separated level's is blank) draws no whisker; the
+    # other levels keep theirs.
+    with np.errstate(invalid="ignore"):
+        lower, upper = np.minimum(*shown), np.maximum(*shown)
+    return (
+        [float(v) if ok else None for v, ok in zip(lower, finite, strict=True)],
+        [float(v) if ok else None for v, ok in zip(upper, finite, strict=True)],
+    )
 
 
 def _x_domain(x_values: list[float], *, pad_discrete: bool = False) -> list[float]:

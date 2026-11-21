@@ -545,52 +545,6 @@ class SeparatedLine:
         return bool(self.label == self.base)
 
 
-def separated_level_mask(spec: Any, levels: Sequence[Any]) -> NDArray | None:
-    """Which of ``levels``' relativities move along a separating direction; ``None`` if none.
-
-    A non-base level the scan recorded moves alone; a recorded base level moves
-    every relativity of the term against it.
-    """
-    held = set(getattr(spec, "_separated_levels_at_fit", ()) or ())
-    if not held:
-        return None
-    if getattr(spec, "_base_level", None) in held:
-        return np.ones(len(levels), dtype=bool)
-    return np.array([level in held for level in levels], dtype=bool)
-
-
-def identified_levels(spec: Any, levels: Sequence[Any]) -> NDArray | None:
-    """Which of ``levels`` a mean-centered report centres on: those not separated.
-
-    ``None`` (every level) when the scan recorded none.  A separated level's log
-    relativity is where the fit stopped, so a mean through it would move every
-    other level by an amount the data do not determine.
-    """
-    held = set(getattr(spec, "_separated_levels_at_fit", ()) or ())
-    identified = np.array([level not in held for level in levels], dtype=bool)
-    return identified if held and identified.any() else None
-
-
-def separated_cell_mask(spec: Any, pairs: Sequence[tuple]) -> NDArray | None:
-    """Which of ``pairs``' interaction coefficients move along a separating direction.
-
-    ``None`` when the scan recorded no cell.  A cell ``(a, b)``'s coefficient is the
-    contrast of the four cells ``(a, b)``, ``(a, base2)``, ``(base1, b)`` and
-    ``(base1, base2)``, so it moves when any of them is recorded.
-    """
-    held = {tuple(cell) for cell in getattr(spec, "_separated_cells_at_fit", ()) or ()}
-    if not held:
-        return None
-    first, second = spec._base1, spec._base2
-    return np.array(
-        [
-            any(c in held for c in ((a, b), (a, second), (first, b), (first, second)))
-            for a, b in pairs
-        ],
-        dtype=bool,
-    )
-
-
 def level_lines(found: SeparatedLevels) -> list[SeparatedLine]:
     """One line per separated label of ``found``, with what its build counted."""
     lines = []
@@ -781,7 +735,7 @@ def runtime_finding(
     eta: NDArray,
     eta_unclipped: NDArray,
     weights: NDArray,
-) -> str | None:
+) -> RuntimeFinding | None:
     """The runtime backstop's finding on one coefficient state, or ``None`` (issue #341).
 
     Under an extreme working-weight range (``ratio``), two terminal signatures
@@ -796,7 +750,7 @@ def runtime_finding(
     if not (pinned or exhausted_stagnant):
         return None
     drifting = drifting_groups(design, groups, beta, eta, eta_unclipped, weights)
-    return format_runtime_message(ratio, n_iter, drifting, pinned)
+    return RuntimeFinding(format_runtime_message(ratio, n_iter, drifting, pinned), tuple(drifting))
 
 
 def drifting_groups(
@@ -844,20 +798,25 @@ def drifting_groups(
     return [name for value, name in ranked if value >= 0.5 * farthest][:5]
 
 
-class RuntimeFinding(str):
-    """The runtime backstop's statement, with the groups it names in ``groups``, farthest first."""
+@dataclass(frozen=True)
+class RuntimeFinding:
+    """The runtime backstop's statement, and the groups it names, farthest first.
 
-    groups: tuple[str, ...] = ()
-
-
-def restates_separated_level(message: str | None, separated: set[str]) -> bool:
-    """Whether a runtime finding is the walk of a level or cell the fit already discloses.
-
-    True when the group carrying the walk farthest is a term in ``separated``, the
-    terms whose separated levels or cells the build-time scan recorded.
+    A solve records both on the state it returns (``PIRLSResult.separation_message``
+    and ``separation_groups``).
     """
-    groups = getattr(message, "groups", ())
-    return bool(groups) and groups[0] in separated
+
+    message: str
+    groups: tuple[str, ...]
+
+
+def restates_separated_level(groups: Sequence[str], separated: set[str]) -> bool:
+    """Whether a runtime finding is the walk of levels or cells the fit already discloses.
+
+    True when every group the finding names (``RuntimeFinding.groups``) is a term in
+    ``separated``, the terms a recorded separated level or cell belongs to.
+    """
+    return bool(groups) and set(groups) <= separated
 
 
 def format_runtime_message(
@@ -883,7 +842,7 @@ def format_runtime_message(
             f"stagnant deviance and an extreme working-weight range "
             f"(ratio {w_ratio:.1e})."
         )
-    finding = RuntimeFinding(
+    return (
         f"{how} This is the signature of separation -- one or more coefficients "
         f"are drifting to +/-infinity and the affected fitted values have collapsed "
         f"to the response boundary{where}. The returned coefficients are not "
@@ -896,8 +855,6 @@ def format_runtime_message(
         "RandomEffect, or a selection penalty on the term), or pass "
         "separation='ignore' to silence this."
     )
-    finding.groups = tuple(drifting_groups)
-    return finding
 
 
 def emit_separation_findings(found: SeparatedLevels, mode: str) -> None:
