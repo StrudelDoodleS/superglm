@@ -14,6 +14,7 @@ from __future__ import annotations
 import math
 import time as _time
 from collections.abc import Mapping, Sequence
+from functools import partial
 from typing import Any
 
 import numpy as np
@@ -507,6 +508,7 @@ def optimize_discrete_reml_cached_w(
     penalty_ranks: dict[str, float],
     lambdas: dict[str, float],
     *,
+    level_hold=None,
     weight_semantics: str,
     max_reml_iter: int,
     reml_tol: float,
@@ -704,11 +706,18 @@ def optimize_discrete_reml_cached_w(
         box=box,
     )
     _t0 = _time.perf_counter()
-    dm_boot = rebuild_design_matrix_with_lambdas(
-        dm,
-        groups,
-        boot_lambdas,
-        sample_weight,
+    # A pre-solve is an implementation choice of the exact search. Use its
+    # ordinary bootstrap basis and coefficient curvature to anchor a price.
+    exact_anchor = level_hold is not None and start_out is not None
+    dm_boot = (
+        dm
+        if exact_anchor
+        else rebuild_design_matrix_with_lambdas(
+            dm,
+            groups,
+            boot_lambdas,
+            sample_weight,
+        )
     )
     _t_rebuild_dm += _time.perf_counter() - _t0
     _t0 = _time.perf_counter()
@@ -732,7 +741,10 @@ def optimize_discrete_reml_cached_w(
     )
     _pirls_start = _time.perf_counter()
     cache: dict = {}
-    boot_result, boot_inv, boot_xtwx = fit_irls_direct(
+    bootstrap_fit = (
+        fit_irls_direct if level_hold is None else partial(level_hold.bootstrap, fit_irls_direct)
+    )
+    boot_result, boot_inv, boot_xtwx = bootstrap_fit(
         X=dm_boot,
         y=y,
         weights=sample_weight,
@@ -745,9 +757,10 @@ def optimize_discrete_reml_cached_w(
         tol=pirls_tol,
         return_xtwx=True,
         compute_rank_info=False,
-        _return_working_system=True,
-        _working_newton=working_newton,
-        _compute_fit_statistics=False,
+        _return_working_system=not exact_anchor,
+        _working_newton=working_newton and not exact_anchor,
+        _compute_fit_statistics=exact_anchor,
+        _compensate_centred_intercept=not exact_anchor,
         profile=profile,
         cache_out=cache,
         direct_solve=direct_solve,

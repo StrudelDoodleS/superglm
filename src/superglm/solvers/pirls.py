@@ -369,6 +369,8 @@ class PIRLSResult:
     separation_message: str | None = None
     # The groups that finding names, farthest first (``RuntimeFinding.groups``).
     separation_groups: tuple[str, ...] = ()
+    # Fixed level contrasts enter the conditional design through the offset.
+    held_level_columns: tuple[int, ...] = ()
 
     def __setattr__(self, name: str, value: object) -> None:
         if self.__dict__.get("_publication_locked", False):

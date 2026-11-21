@@ -123,8 +123,15 @@ def estimate_p(
     X, y, sample_weight, offset = validated
     fit_ops._check_random_effect_nesting(model, X)
     _refuse_replication_weights(model, sample_weight)
+    level_anchors = {}
     result = _search_power_privately(
-        model, validated, fit_mode=search_mode, p_bounds=p_bounds, xatol=xatol, report=report
+        model,
+        validated,
+        fit_mode=search_mode,
+        p_bounds=p_bounds,
+        xatol=xatol,
+        report=report,
+        level_anchors=level_anchors,
     )
     result.fit_mode = publish_mode
     if ci_alpha is not None:
@@ -138,7 +145,7 @@ def estimate_p(
     _publish_profiled_family(
         model,
         validated,
-        references,
+        references | {"level_anchors": level_anchors} if publish_mode == "fit_reml" else references,
         fit_mode=publish_mode,
         family=Tweedie(p=result.p_hat),
         parameter="p",
@@ -150,7 +157,7 @@ def estimate_p(
     return result
 
 
-def _search_power_privately(model, validated, *, fit_mode, p_bounds, xatol, report):
+def _search_power_privately(model, validated, *, fit_mode, p_bounds, xatol, report, level_anchors):
     """The power search on an attempt-local copy of the model.
 
     The result's lazy interval keeps refitting this private model, never the
@@ -162,6 +169,7 @@ def _search_power_privately(model, validated, *, fit_mode, p_bounds, xatol, repo
     profile_workspace = FitWorkspace.start(
         model, mode="estimate_p_profile", validated_inputs=validated
     )
+    profile_workspace.model._profile_level_anchors = level_anchors
     return search_power(
         profile_workspace.model,
         *validated,

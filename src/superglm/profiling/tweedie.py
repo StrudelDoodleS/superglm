@@ -120,6 +120,7 @@ class _PowerProfile:
         self.infeasible: dict[float, str] = {}
         self.on_evaluation: Callable[[dict], None] | None = None
         if fit_mode == "fit_reml":
+            self.clone._profile_level_anchors = getattr(model, "_profile_level_anchors", {})
             self._prepare_reml(X, y, sample_weight, offset)
         else:
             self._prepare_ml(X, y, sample_weight, offset)

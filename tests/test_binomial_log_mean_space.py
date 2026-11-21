@@ -2737,6 +2737,7 @@ def test_a_bridge_past_the_direction_budget_is_judged_without_its_direction(
     assert (ratio <= 1.0) is certified
 
 
+@pytest.mark.pins_behaviour
 def test_the_row_sets_are_formed_once_per_design(monkeypatch: pytest.MonkeyPatch) -> None:
     """The cells, their elimination and any core SVD read the one-hot codes alone (``mode_score.row_sets``).
 
@@ -2746,6 +2747,8 @@ def test_the_row_sets_are_formed_once_per_design(monkeypatch: pytest.MonkeyPatch
     certificate on two designs, its REML search's and the final model's,
     and forms each one's sets once.  Each nested cell is one district's
     rows, already judged as its level, so no cell is kept and no SVD runs.
+    Pin the certificate cache with the structural level hold switched off:
+    the unrestricted inner fits reach the lower probability clip.
     """
     import superglm.solvers.irls_direct._mean_space as irls_direct_mean_space
     import superglm.solvers.mode_score as mode_score
@@ -2772,6 +2775,7 @@ def test_the_row_sets_are_formed_once_per_design(monkeypatch: pytest.MonkeyPatch
         family="binomial",
         link="log",
         selection_penalty=0.0,
+        separation="ignore",
         features={"c": Categorical(base="first"), "g": RandomEffect()},
     )
     with warnings.catch_warnings():

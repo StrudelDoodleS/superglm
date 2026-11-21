@@ -1594,7 +1594,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         # the mean space's Newton rows once engaged, in score form
         # (``_IRLSDirectMeanSpaceOverlay.newton_rows``)
         newton_score: NDArray | None = None
-        if mean_space is not None and mean_space.engaged:
+        if mean_space is not None and mean_space.available:
             newton_rows = mean_space.newton_rows(self, committed)
             if newton_rows is not None:
                 W, newton_score, z = newton_rows
