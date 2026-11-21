@@ -1106,6 +1106,7 @@ def _warn_unresolved_rows(model) -> None:
     from superglm.reml.identified import WeakIdentificationWarning, coefficient_labels
 
     records = getattr(model._result, "truncated_directions", ()) or ()
+    specs = {**model._specs, **model._interaction_specs}
     for record in records:
         if record.at_maximum:
             continue
@@ -1115,7 +1116,7 @@ def _warn_unresolved_rows(model) -> None:
         shown = ", ".join(str(row) for row in first)
         if record.row_count > 6:
             shown += f" and {record.row_count - 6} more"
-        labels = ", ".join(coefficient_labels(model._groups, record.columns))
+        labels = ", ".join(coefficient_labels(model._groups, record.columns, specs))
         key = "boundary_rows" if record.boundary else "unresolved_rows"
         if getattr(record, "unresolved_basis", False):
             # the basis cannot show whether the direction moves rows at all

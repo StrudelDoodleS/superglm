@@ -755,11 +755,21 @@ class Categorical:
         ``score`` has already refused or reported unseen labels, so nothing is
         said again here.
         """
+        codes = self._scored_codes(x)
+        return {self._levels[code] for code in np.unique(codes[codes >= 0])}
+
+    def _scored_codes(self, x: NDArray) -> NDArray:
+        """The fitted level each row of raw ``x`` is scored at, as its universe index.
+
+        A label ``unseen="base"`` admits is scored at the base level, so it is coded
+        there; ``score`` has already reported it, so nothing is said again here.
+        """
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            resolved = self._resolve_predict_labels(x)
-            codes = self._predict_codes(resolved)
-        return {self._levels[code] for code in np.unique(codes[codes >= 0])}
+            codes = self._predict_codes(self._resolve_predict_labels(x))
+        if self.unseen == "base":
+            codes = np.where(codes < 0, self._levels.index(self._base_level), codes)
+        return codes
 
     def _predict_codes(self, x: NDArray) -> NDArray:
         """Codes against the fitted universe; -1 for levels the policy admits."""

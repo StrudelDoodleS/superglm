@@ -193,7 +193,12 @@ def test_gradient_and_hessian_use_profile_inverse_scale_and_its_fd_curvature() -
     )
 
 
+@pytest.mark.pins_behaviour
 def test_finalize_profiles_phi_from_post_qp_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Control: phi is profiled from the post-QP state, as on master.
+
+    Only the model double changed (it gains the ``_specs`` the label reader reads).
+    """
     initial = _result(beta=np.array([0.2]), deviance=8.0)
     post_qp = _result(beta=np.array([0.8]), deviance=2.5)
     best = SimpleNamespace(

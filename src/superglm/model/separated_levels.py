@@ -385,18 +385,14 @@ def predicted_cells(model, term: str, frame) -> set[tuple]:
     """The cells of crossed term ``term`` the rows of ``frame`` are scored at.
 
     Each parent's raw values resolve as its main effect's do (grouping, then
-    the unseen policy); ``predict`` has already reported unseen labels.
+    the unseen policy, ``unseen="base"`` at the base level:
+    ``Categorical._scored_codes``); ``predict`` has already reported unseen labels.
     """
-    import warnings
-
     first, second = model._interaction_specs[term].parent_names
     codes = []
     for parent in (first, second):
         spec = model._specs[parent]
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            resolved = spec._resolve_predict_labels(frame.column_array(parent))
-            codes.append((spec._predict_codes(resolved), spec._levels))
+        codes.append((spec._scored_codes(frame.column_array(parent)), spec._levels))
     (codes1, levels1), (codes2, levels2) = codes
     both = (codes1 >= 0) & (codes2 >= 0)
     met = np.unique(np.stack([codes1[both], codes2[both]], axis=1), axis=0)

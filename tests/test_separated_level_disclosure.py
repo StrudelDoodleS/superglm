@@ -423,6 +423,38 @@ def test_weak_identification_names_the_level_not_its_column():
     assert model._reml_profile["reml_weakly_identified_labels"] == ("lev[4]",)
 
 
+def test_every_coefficient_label_names_its_level():
+    """Integer levels 0..3: the unresolved-rows warning and ``diagnostics()`` name levels.
+
+    At 20f77dd6f both labelled column positions, naming the healthy level 1 among
+    ``A[2], B[2], B[1], A[1]``.
+    """
+    heavy = [(u, v) for u in (0, 1) for v in (0, 1)] + [(u, v) for u in (2, 3) for v in (2, 3)]
+    rows = [(u, v, r, 1e8, 1.3) for u, v in heavy for r in (0.0, 1.0)]
+    rows += [(u, v, r, 1e-8, -20.0) for u, v in [(1, 2), (1, 3)] for r in (0.0, 1.0)]
+    frame = pd.DataFrame(rows, columns=["A", "B", "y", "w", "off"])
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        direct_solve="gram",
+        features={"A": Categorical(base=0), "B": Categorical(base=0)},
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(
+            frame[["A", "B"]],
+            frame["y"].to_numpy(),
+            sample_weight=frame["w"].to_numpy(),
+            offset=frame["off"].to_numpy(),
+        )
+    named = {"A[2]", "A[3]", "B[2]", "B[3]"}
+    (record,) = model.diagnostics()["_model"]["unresolved_rows"]
+    assert set(record["coefficients"]) == named
+    (message,) = [m for m in _of(caught, WeakIdentificationWarning) if "rows" in m.lower()]
+    assert all(label in message for label in named) and "A[1]" not in message
+
+
 def _crossed():
     rng = np.random.default_rng(1)
     n = 6000
@@ -798,6 +830,40 @@ def test_predict_warns_for_a_separated_cell():
     assert not _of(caught, SeparationWarning)
 
 
+_CROSS = [("A", "P", 20), ("A", "Q", 0), ("B", "P", 20), ("B", "Q", 20)]
+
+
+@pytest.mark.parametrize("routed", ["A", "new"])
+def test_predict_warns_for_a_label_routed_to_a_separated_cell(routed):
+    """``unseen="base"`` scores "new" at A, so new x Q is the separated A x Q: one warning.
+
+    Codex's case. At 20f77dd6f the routed row was priced at A x Q without a word.
+    """
+    data = [(a, b, float(i < k)) for a, b, k in _CROSS for i in range(100)]
+    frame = pd.DataFrame(data, columns=["a", "b", "y"])
+    model = SuperGLM(
+        family="poisson",
+        features={"a": Categorical(base="A", unseen="base"), "b": Categorical(base="P")},
+        interactions=[("a", "b")],
+        selection_penalty=0.0,
+    )
+    _caught(lambda: model.fit(frame[["a", "b"]], frame["y"].to_numpy()))
+    (warning,) = _caught(lambda: model.predict(pd.DataFrame({"a": [routed], "b": ["Q"]})))
+    assert "'a:b' cells A x Q" in str(warning.message)
+
+
+def test_predict_warns_for_a_label_routed_to_a_separated_base():
+    """``unseen="base"`` with base E separated: an unseen label is scored at E, and said so.
+
+    At 20f77dd6f the row was priced at E's 2e-5 without a separation warning.
+    """
+    X, y, exposure = _book()
+    model = _model(lev=Categorical(base="E", unseen="base"))
+    _fit(model, X, y, exposure)
+    (warning,) = _caught(lambda: model.predict(pd.DataFrame({"lev": ["Z"], "x": [0.5]})))
+    assert "'lev' levels E" in str(warning.message)
+
+
 # ── row 8: a level a cap bounds is not separated ─────────────────────────
 
 
@@ -901,6 +967,23 @@ def test_a_saved_summary_of_a_separated_level_is_formed_again(fitted):
 
 
 # ── row 9: the grouping remedy is a call that works ─────────────────────
+
+
+def test_the_grouping_call_names_a_level_the_data_hold():
+    """A declared level with no rows sits beside E: the call pairs E with an observed level.
+
+    At 20f77dd6f it named the empty level, and ``collapse_levels`` refused the call.
+    """
+    X, y, exposure = _book()
+    model = _model(lev=Categorical(levels=["A", "B", "C", "D", "D_empty", "E"]))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)  # the declared level is pinned
+        (message,) = _of(_fit(model, X, y, exposure), SeparationWarning)
+    pattern = r"Categorical\(grouping=collapse_levels\(X\[[^\]]*\], groups=\{[^}]*\}\)\)"
+    call = re.search(pattern, message).group(0)
+    assert "D_empty" not in call
+    spec = eval(call, {"Categorical": Categorical, "collapse_levels": collapse_levels, "X": X})
+    assert spec._grouping.original_to_group["E"] == spec._grouping.original_to_group["D"]
 
 
 def test_a_dict_grouping_is_refused_by_name():
