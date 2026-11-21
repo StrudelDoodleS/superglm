@@ -282,6 +282,7 @@ class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
     stacked_curvature_directions: ClassVar[bool] = True
 
     default_prediction_name = "conditional_mean"
+    default_prediction_parameters: ClassVar[tuple[str, ...]] = ("mean",)
     capabilities = _CAPABILITIES
     # The expected information is only the terminal curvature fallback; starting
     # penalties stay at the 0.1 start, which converges where a scaled start may not.

@@ -1216,12 +1216,16 @@ class SuperLSS:
         parameter's column), ``predict_cdf`` and ``predict_quantile``. A score
         of such a row is refused.
 
-        Rows scored at a separated categorical level use the fitted value
-        and produce one ``SeparationWarning`` naming the affected levels.
+        Rows scored at a separated categorical level in a parameter used
+        by the default prediction produce one ``SeparationWarning``.
         """
         model = self._require_fitted()
         values = model.predict(X, offsets=offsets)
-        warn_on_separated_prediction(model.compiled_predictors, X)
+        warn_on_separated_prediction(
+            model.compiled_predictors,
+            X,
+            parameters=getattr(model.family, "default_prediction_parameters", None),
+        )
         if isinstance(model.family, VectorDefaultPredictionFamily):
             return pd.DataFrame(
                 values,

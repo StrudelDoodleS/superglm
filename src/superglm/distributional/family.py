@@ -529,7 +529,13 @@ class VectorDefaultPredictionFamily(Protocol):
 
 @runtime_checkable
 class DefaultPredictionFamily(Protocol):
-    """Optional default response prediction from natural parameters."""
+    """Optional default response prediction from natural parameters.
+
+    A family can declare ``default_prediction_parameters``, a tuple of natural
+    parameter names used to compute its default prediction. Separation
+    warnings for ``predict()`` then check only those predictors. Without the
+    declaration, they check all predictors.
+    """
 
     @property
     def default_prediction_name(self) -> str: ...

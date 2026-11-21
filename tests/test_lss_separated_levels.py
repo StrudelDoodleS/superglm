@@ -234,6 +234,29 @@ def test_prediction_aggregates_hits_from_multiple_predictors(two_levels):
     assert "mean:lev" in str(caught[0].message) and "theta:lev" in str(caught[0].message)
 
 
+def test_default_mean_prediction_does_not_warn_for_a_theta_only_level():
+    rng = np.random.default_rng(7)
+    lev = rng.choice(["A", "B", "E"], 1500, p=[0.45, 0.45, 0.10])
+    x = rng.uniform(0, 1, len(lev))
+    y = rng.poisson(0.5 * np.exp(0.4 * x))
+    y[lev == "E"] = 0
+    X = pd.DataFrame({"lev": lev, "x": x})
+    family = NegativeBinomialLS()
+    model = SuperLSS(family, family.mean(s("x", n_knots=5)), family.theta(cat("lev", base="A")))
+    with pytest.warns(SeparationWarning, match="theta:lev.*E"):
+        model.fit(X, y, lambdas={"mean:x#wiggle": 1.0})
+    affected = X.loc[X.lev == "E"].iloc[:2]
+    with pytest.warns(SeparationWarning, match="theta:lev.*E") as caught:
+        parameters = model.predict_parameters(affected)
+    assert len(caught) == 1
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SeparationWarning)
+        np.testing.assert_array_equal(
+            model.predict(affected), model.predict(affected.assign(lev="A"))
+        )
+        np.testing.assert_array_equal(model.predict(affected), parameters["mean"])
+
+
 def test_level_inference_and_workbook_keep_the_fitted_factor(
     separated_fit, separated_book, tmp_path
 ):

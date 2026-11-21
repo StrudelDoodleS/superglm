@@ -193,12 +193,16 @@ def disclose_predictor_separation(
 
 
 def warn_on_separated_prediction(
-    compiled: Sequence[CompiledPredictor], X: FrameLike | EagerFrame
+    compiled: Sequence[CompiledPredictor],
+    X: FrameLike | EagerFrame,
+    *,
+    parameters: tuple[str, ...] | None = None,
 ) -> None:
     """Collect the hits across predictors after scoring has validated the input."""
     recorded = [
         (predictor.name, name, spec)
         for predictor in compiled
+        if parameters is None or predictor.name in parameters
         for name, spec in predictor.compiled.specs.items()
         if isinstance(spec, Categorical) and getattr(spec, "_separated_levels_at_fit", ())
     ]
