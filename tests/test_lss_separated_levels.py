@@ -276,20 +276,36 @@ def test_weighted_levels_use_effective_rows(two_levels):
     assert model.term_inference("mean", "lev", simultaneous=False).separated is None
 
 
-@pytest.mark.parametrize("case", ["cap", "no_intercept"])
-def test_separation_requires_an_unbounded_level_indicator(two_levels, case):
-    if case == "cap":
-        model = _model(cat("lev", base="A", constraint=Constraint.fit.cap(0.5, 2)))
-    else:
-        model = _model(cat("lev", base="E"), intercept=False)
+def test_a_capped_level_still_separates_in_the_rule_free_covariance(separated_book):
+    model = _model(cat("lev", base="A", constraint=Constraint.fit.cap(0.5, 2)), smooth=True)
+    with pytest.warns(SeparationWarning, match="mean:lev.*E") as caught:
+        model.fit_reml(*separated_book)
+    assert len(caught) == 1
+    assert "Constraint.fit.cap" not in str(caught[0].message)
+    term = model.term_test("mean", "lev")
+    row = model.summary().query("parameter == 'mean' and term == 'lev'").iloc[0]
+    healthy = [1, 2, 3]  # B, C and D against A
+    beta = model.coef_by_predictor_["mean"][healthy]
+    covariance = model.covariance_[np.ix_(healthy, healthy)]
+    expected = beta @ np.linalg.solve(covariance, beta)
+    assert term.rank == row["rank"] == 3
+    for report in (term, row):
+        assert report.statistic == pytest.approx(expected)
+        assert "SEP" in report.note and "'E'" in report.note
+    effect = model.term_inference("mean", "lev", simultaneous=False)
+    j = effect.levels.index("E")
+    assert effect.multiplier[j] == pytest.approx(0.5)
+    assert effect.separated[j] and np.isnan(effect.se[j])
+
+
+@pytest.mark.pins_behaviour
+def test_an_intercept_free_reference_cannot_separate(two_levels):
+    """Pin the absence of a separation warning or flag for a fixed reference."""
+    model = _model(cat("lev", base="E"), intercept=False)
     with warnings.catch_warnings():
         warnings.simplefilter("error", SeparationWarning)
         model.fit(*two_levels)
     assert model.term_inference("mean", "lev", simultaneous=False).separated is None
-    if case == "cap":
-        assert model.term_inference("mean", "lev", simultaneous=False).multiplier[
-            -1
-        ] == pytest.approx(0.5)
 
 
 @pytest.mark.pins_behaviour

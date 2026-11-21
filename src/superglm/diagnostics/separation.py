@@ -729,16 +729,17 @@ def format_separated_levels(
     group = "group a level with similar levels " + (
         f"({example})" if example else "(collapse_levels builds the grouping)"
     )
-    # A cap bounds a main effect's levels against its base, not a crossed cell.
+    random_effect = "fit the term as a RandomEffect"
     if parameter_effects:
-        bound = "bound it with Constraint.fit.cap"
+        remedies = f"{group} or {random_effect}"
     elif n_levels:
-        bound = "bound it with Constraint.fit.cap or a selection penalty on the term"
+        remedies = (
+            f"{group}, {random_effect}, or bound it with Constraint.fit.cap "
+            "or a selection penalty on the term"
+        )
     else:
-        bound = "put a selection penalty on the crossed term"
-    remedy = (
-        f"To price {'it' if one else 'them'}: {group}, fit the term as a RandomEffect, or {bound}."
-    )
+        remedies = f"{group}, {random_effect}, or put a selection penalty on the crossed term"
+    remedy = f"To price {'it' if one else 'them'}: {remedies}."
     if mode == "error":
         remedy += (
             " Pass separation='warn' to fit with this as a warning, or separation='ignore' to "

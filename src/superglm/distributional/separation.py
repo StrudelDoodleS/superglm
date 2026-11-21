@@ -125,15 +125,6 @@ def scan_predictor_separation(
     for predictor, predictor_boundaries in zip(compiled_tuple, boundary_tuple, strict=True):
         if not predictor_boundaries:
             continue
-        constrained = (
-            {
-                group.feature_name
-                for group in predictor.compiled.groups
-                if group.constraints is not None
-            }
-            if record_levels
-            else set()
-        )
         for record in predictor.compiled.separation_records:
             if record[0] == "curve":
                 curves.extend(record[2])
@@ -142,8 +133,7 @@ def scan_predictor_separation(
             elif record[0] == "cat":
                 _, term, spec, column = record
                 codes = predictor.compiled.scan_codes.pop(term, None)
-                if term in constrained:
-                    continue
+                # A fit-time cap does not bound the rule-free covariance used for inference.
                 found = scan_categorical_term(
                     f"{predictor.name}:{term}",
                     spec,
