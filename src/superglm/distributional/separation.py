@@ -138,6 +138,7 @@ def scan_predictor_separation(
     for predictor, predictor_boundaries in zip(compiled_tuple, boundary_tuple, strict=True):
         if not predictor_boundaries:
             continue
+        n_terms = len(predictor.compiled.specs) + len(predictor.compiled.interaction_specs)
         for record in predictor.compiled.separation_records:
             if record[0] == "curve":
                 curves.extend(record[2])
@@ -155,7 +156,9 @@ def scan_predictor_separation(
                     weight_values,
                     predictor_boundaries,
                     codes,
-                    include_base=predictor.intercept,
+                    # Without an intercept the base is pinned only when nothing else
+                    # in the predictor can carry a constant (a numeric column of ones).
+                    include_base=predictor.intercept or n_terms > 1,
                 )
                 findings.extend(found)
                 if found:

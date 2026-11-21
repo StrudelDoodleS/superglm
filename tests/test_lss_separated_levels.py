@@ -358,6 +358,42 @@ def test_an_intercept_free_reference_cannot_separate(two_levels):
     assert model.term_inference("mean", "lev", simultaneous=False).separated is None
 
 
+@pytest.mark.pins_behaviour
+def test_a_column_of_ones_lets_an_intercept_free_reference_separate():
+    """Pins master's refusal: ``intercept=False`` does not pin the base when another term
+    can carry a constant. Lowering the ``one`` slope while raising A's contrast leaves A
+    unchanged and sends the claim-free base E to zero."""
+    X = pd.DataFrame({"lev": np.repeat(["A", "E"], 60), "one": 1.0})
+    y = np.where(X.lev == "A", np.arange(len(X)) % 4, 0).astype(float)
+    family = NegativeBinomialLS()
+    model = SuperLSS(
+        family,
+        family.mean(cat("lev", base="E"), "one", intercept=False),
+        family.theta(),
+        separation="error",
+    )
+    with pytest.raises(SeparationError):
+        model.fit(X, y)
+
+
+def test_a_separated_level_lookup_leaves_the_warning_filters_alone(separated_book, monkeypatch):
+    """``predict`` reads the fitted levels a row is scored at; a process-wide warning
+    filter there is not thread-safe, so concurrent predictions could lose warnings."""
+    X, y = separated_book
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = _model(smooth=True).fit_reml(X, y)
+    rows = pd.concat([X[X.lev == "E"].head(3), X[X.lev == "A"].head(3)])
+    calls = []
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        monkeypatch.setattr(warnings, "simplefilter", lambda *a, **k: calls.append(a))
+        model.predict(rows)
+        monkeypatch.undo()
+    assert calls == []
+    assert any(issubclass(w.category, SeparationWarning) for w in caught)
+
+
 @pytest.fixture
 def bounded_separation_book():
     rng = np.random.default_rng(7)
