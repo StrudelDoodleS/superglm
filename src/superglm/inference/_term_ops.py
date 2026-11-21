@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.diagnostics.separation import identified_levels, separated_level_mask
 from superglm.features.constraint import rules_of
 from superglm.inference._term_covariance import (
     feature_se_from_cov,
@@ -581,8 +582,10 @@ def term_inference(
                 smoothing_lambda=lam,
                 monotone=rules_of(spec).describe() or None,
                 alpha=alpha,
+                separated=separated_level_mask(spec, levels),
             ),
             centering,
+            centre_on=identified_levels(spec, levels),
             se_centered=_centered_se(
                 centering,
                 name,

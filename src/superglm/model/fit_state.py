@@ -1120,14 +1120,20 @@ def capture_fit_state(
     discloses nothing.
     """
     if not getattr(public_model, "_discarded_fit", False):
-        from superglm.diagnostics.separation import disclose_runtime_separation
+        from superglm.diagnostics.separation import (
+            disclose_runtime_separation,
+            restates_separated_level,
+        )
+        from superglm.model.separated_levels import separated_terms
 
         if separation_statement is None:
             result = getattr(workspace.model, "_result", None)
             separation_statement = getattr(result, "separation_message", None)
-        disclose_runtime_separation(
-            separation_statement, getattr(workspace.model, "_separation", "warn")
-        )
+        # The walk of a level the scan recorded is the fit's separation disclosure's to state.
+        if not restates_separated_level(separation_statement, separated_terms(workspace.model)):
+            disclose_runtime_separation(
+                separation_statement, getattr(workspace.model, "_separation", "warn")
+            )
     design = getattr(workspace.model, "_dm", None)
     release_raw_splines = getattr(design, "release_raw_spline_tabmat_plan", None)
     if release_raw_splines is not None:

@@ -60,6 +60,7 @@ def _recenter_term(
     centering: str,
     *,
     se_centered: NDArray | None = None,
+    centre_on: NDArray | None = None,
 ) -> TermInference:
     """Apply mean centering to a TermInference if requested.
 
@@ -70,13 +71,15 @@ def _recenter_term(
     from a caller holding the covariance; a term publishing its own vector's covariance
     (``knot_covariance``) needs none. The shift is recorded on ``centering_shift`` (0.0 on every
     early return) for callers, such as the rating-table export, that must put it back.
+    ``centre_on`` marks the values whose mean is the centre, every value when ``None``: a
+    categorical term leaves out its separated levels (``identified_levels``).
     """
     if centering == "native" or ti.log_relativity is None:
         return ti
     log_rel = np.asarray(ti.log_relativity, dtype=float)
     if log_rel.size <= 1:
         return ti  # numeric: single value, skip
-    shift = float(np.mean(log_rel))
+    shift = float(np.mean(log_rel if centre_on is None else log_rel[centre_on]))
     factor = _safe_exp(-shift)
     new_log_rel = log_rel - shift
     new_rel = cast(NDArray, np.asarray(_safe_exp(new_log_rel)))
@@ -345,6 +348,7 @@ def _expand_grouped_term(
         ci_upper=ci_hi,
         smooth_curve=curve,
         level_is_special=expanded_special,
+        separated=None if ti.separated is None else np.asarray(ti.separated)[indices],
     )
 
 

@@ -419,15 +419,31 @@ model = SuperGLM(
 )
 ```
 
-- `"warn"` (default) emits a `SeparationWarning` naming every separated cell
-  and the remedies, then fits anyway.
-- `"error"` refuses the design with a `SeparationError`.
-- `"ignore"` disables the check.
+- `"warn"` (default) fits anyway and, once the fit returns, emits one
+  `SeparationWarning`: for each separated level or cell its rows, its exposure
+  (the sum of `exp(offset)` under a log link with an offset) or weight, the
+  response total its rows would expect at the base level's rate, and the
+  fitted relativity, which is where the fit stopped, not an estimate. It says
+  what to do, with a grouping call for the first separated level.
+- `"error"` refuses the design with a `SeparationError`, before any fit.
+- `"ignore"` disables the check and every notice of it.
 
-Remedies: collapse the affected levels into neighbours (`collapse_levels` /
-`Categorical(grouping=...)`), model the crossed factor with a `RandomEffect`
-(its ridge bounds every cell), or target the term with a selection penalty
-(penalised terms are exempt from the check because their optima are finite).
+The fit keeps the level: its coefficient, its price in `predict` and its
+factor in the rating tables are what the fit reached. `summary()` flags its
+row `SEP` (the workbook's Warning cell reads `Separated`) and leaves its
+standard error, z, p-value and interval blank, as do `term_inference()` and
+`relativities(with_se=True)`: a Wald statistic has no finite reference there
+(Hauck and Donner 1977). A separated base level flags every relativity of its
+term. `centering="mean"` centres on the levels that are not separated. The
+rating-table block names its separated levels or cells in a note, and
+`predict` warns once per call that reaches one.
+
+Remedies: collapse the affected levels into neighbours
+(`Categorical(grouping=collapse_levels(X["make"], groups={"B+C": ["B", "C"]}))`),
+model the crossed factor with a `RandomEffect` (its ridge bounds every cell),
+or bound the term with a fit-time cap (`Constraint.fit.cap`) or a selection
+penalty (capped and penalised terms are exempt from the check because their
+optima are finite).
 That exemption covers these categorical cells only: the spline-by-factor hold
 described below applies to a term whatever penalty bounds it.
 A cell with few rows but at least one positive response is *not* separated

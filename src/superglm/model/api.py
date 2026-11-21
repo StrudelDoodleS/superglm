@@ -223,10 +223,15 @@ class SuperGLM:
             with exposure whose responses all sit on the response boundary
             (no positive response under a log-link Poisson fit, say), so they
             have no finite maximum-likelihood effect. ``"warn"``
-            (default) emits a ``SeparationWarning`` naming the cells and the
-            remedies before fitting; ``"error"`` raises ``SeparationError``;
-            ``"ignore"`` disables the check. Terms under an active selection
-            penalty are exempt. The same mode governs the solver's backstop
+            (default) fits them and, once the fit returns, emits one
+            ``SeparationWarning`` naming each with its rows, exposure or
+            weight, the response its rows would expect at the base level's
+            rate and its fitted relativity, and the remedies; ``summary()``
+            flags them and leaves their standard errors and p-values blank.
+            ``"error"`` raises ``SeparationError`` before fitting;
+            ``"ignore"`` disables the check and its notices. Terms under an
+            active selection penalty or a ``Constraint.fit.cap`` are exempt.
+            The same mode governs the solver's backstop
             for separation the build scan cannot see (read on the fit
             returned, or each point ``fit_path`` returns, not on a search's
             trial solves), the hold on a

@@ -66,6 +66,8 @@ class RatingTableBlock:
     # ``OrderedCategorical``, a single-valued ``Numeric`` -- which is why the total is summed from the blocks rather
     # than assumed to run over every exported term.
     centering_shift: float = 0.0
+    # Categorical only: the block's separated levels, stated (``separated_block_note``).
+    note: str | None = None
 
 
 @dataclass(frozen=True)
@@ -88,6 +90,28 @@ class InteractionTableBlock:
     name: str
     table: pd.DataFrame
     kind: str = "cells"
+    # A cell table's separated cells, stated (``separated_block_note``).
+    note: str | None = None
+
+
+def separated_block_note(spec) -> str | None:
+    """The note a block carries for the levels, or cells, its term's scan recorded separated.
+
+    Their factors are exported as fitted: where the fit stopped, not an estimate.
+    """
+    from superglm.model.separated_levels import separated_labels
+
+    held = separated_labels(spec)
+    if not held:
+        return None
+    cells = isinstance(held[0], tuple)
+    names = ", ".join(f"{label[0]} x {label[1]}" if cells else str(label) for label in held)
+    return (
+        f"Separated {'cells' if cells else 'levels'}: {names}. Every response on their rows "
+        "is 0, or every one is 1, so the data give their factor no finite estimate; the "
+        "factor here is where the fit stopped, not an estimate. Group them with similar "
+        "levels, or fit the term as a RandomEffect, before rating on them."
+    )
 
 
 @dataclass(frozen=True)
@@ -697,6 +721,7 @@ def _categorical_block(
             }
         ),
         centering_shift=float(ti.centering_shift),
+        note=separated_block_note(model._specs[name]),
     )
 
 
@@ -1797,7 +1822,11 @@ def _interaction_blocks(
         ]
         columns = [_row_key_header(parent1, levels2), *levels2]
         table = pd.DataFrame(rows, columns=columns)
-        blocks.append(InteractionTableBlock(name=name, table=table, kind="cells"))
+        blocks.append(
+            InteractionTableBlock(
+                name=name, table=table, kind="cells", note=separated_block_note(ispec)
+            )
+        )
     return blocks
 
 

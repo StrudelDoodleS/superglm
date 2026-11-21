@@ -9,6 +9,7 @@ import pandas as pd  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
 from superglm._frame import FrameLike
+from superglm.diagnostics.separation import identified_levels, separated_level_mask
 from superglm.inference._term_covariance import feature_se_from_cov
 from superglm.inference._term_helpers import _VALID_CENTERING
 from superglm.inference._term_types import _safe_exp
@@ -60,11 +61,11 @@ def relativities(
     # site (this function sees only the shifted values, not the covariance).
     center_se = centering == "mean"
 
-    def _center_df(df: pd.DataFrame) -> pd.DataFrame:
+    def _center_df(df: pd.DataFrame, centre_on: NDArray | None = None) -> pd.DataFrame:
         if centering != "mean" or "log_relativity" not in df.columns:
             return df
         log_rel = df["log_relativity"].values.copy()
-        shift = float(np.mean(log_rel))
+        shift = float(np.mean(log_rel if centre_on is None else log_rel[centre_on]))
         df = df.copy()
         df["log_relativity"] = log_rel - shift
         df["relativity"] = _safe_exp(df["log_relativity"].values)
@@ -141,7 +142,11 @@ def relativities(
                     interaction_specs,
                     center=center_se,
                 )
-            out[name] = _center_df(df)
+            # A separated level keeps its relativity, flagged, and leaves the centre.
+            separated = separated_level_mask(spec_cur, levels)
+            if separated is not None:
+                df["separated"] = separated
+            out[name] = _center_df(df, identified_levels(spec_cur, levels))
         elif "relativity_per_unit" in raw:
             df = pd.DataFrame(
                 {

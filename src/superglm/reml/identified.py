@@ -30,7 +30,7 @@ its argument, so every other fit is unchanged bit for bit.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -309,15 +309,28 @@ def separated_directions(
     return np.asarray(pivots, dtype=np.intp), tuple(named)
 
 
-def separated_set_labels(groups: Sequence, sets: Sequence[tuple]) -> tuple[str, ...]:
-    """``group[level]`` or ``group[reference]`` per block a separated set names, joined by `` x ``."""
+def separated_set_labels(
+    groups: Sequence, sets: Sequence[tuple], specs: Mapping[str, Any] | None = None
+) -> tuple[str, ...]:
+    """Each block a separated set names, joined by `` x ``: its column or its reference.
+
+    A column is named as ``coefficient_labels`` names it; a reference is the term's base
+    level where ``specs`` gives one, ``group[reference]`` otherwise.
+    """
     labels = []
     for described in sets:
         parts = []
         for start, level in described:
             group = next((g for g in groups if g.start == int(start)), None)
-            name = f"coef[{int(start)}]" if group is None else group.name
-            parts.append(f"{name}[{'reference' if level is None else int(level)}]")
+            if group is None:
+                parts.append(f"coef[{int(start)}][{'reference' if level is None else int(level)}]")
+                continue
+            spec = (specs or {}).get(group.feature_name)
+            if level is not None:
+                parts.append(_column_label(spec, group, int(level)))
+            else:
+                base = getattr(spec, "_base_level", None)
+                parts.append(f"{group.name}[{'reference' if base in (None, '') else base}]")
         labels.append(" x ".join(parts))
     return tuple(labels)
 
@@ -687,12 +700,38 @@ def final_mode_weak_slopes(
     return np.flatnonzero(mask).astype(np.intp)
 
 
-def coefficient_labels(groups: Sequence, indices: Sequence[int]) -> tuple[str, ...]:
-    """``group[column]`` names of slope indices (the column within its group)."""
+def _column_label(spec: Any, group, column: int) -> str:
+    """What ``column`` of ``group`` is called: its level, its crossed cell, or its position.
+
+    A ``Categorical`` column is a non-base level and a ``CategoricalInteraction`` column a
+    cell of non-base levels, in emitted order; any other column, or a group whose width
+    is not its spec's, is named by its position within the group.
+    """
+    from superglm.features.categorical import Categorical
+    from superglm.features.interaction import CategoricalInteraction
+
+    if isinstance(spec, Categorical) and group.size == len(spec._non_base):
+        return f"{group.name}[{spec._non_base[column]}]"
+    if isinstance(spec, CategoricalInteraction) and group.size == len(spec._pairs):
+        first, second = spec._pairs[column]
+        return f"{group.name}[{first}×{second}]"
+    return f"{group.name}[{column}]"
+
+
+def coefficient_labels(
+    groups: Sequence, indices: Sequence[int], specs: Mapping[str, Any] | None = None
+) -> tuple[str, ...]:
+    """The names of slope indices: ``term[level]``, ``term[level1×level2]`` or ``group[column]``.
+
+    ``specs`` (every term by name) names a level or crossed cell by its labels;
+    without it, or for any other column, the column's position within its group.
+    """
     labels = []
     for index in indices:
         group = next((g for g in groups if g.start <= int(index) < g.end), None)
-        labels.append(
-            f"coef[{int(index)}]" if group is None else f"{group.name}[{int(index) - group.start}]"
-        )
+        if group is None:
+            labels.append(f"coef[{int(index)}]")
+            continue
+        spec = (specs or {}).get(group.feature_name)
+        labels.append(_column_label(spec, group, int(index) - group.start))
     return tuple(labels)

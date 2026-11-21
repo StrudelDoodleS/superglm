@@ -77,8 +77,8 @@ def test_build_warning_names_separated_cells():
     assert len(sep) == 1
     message = str(sep[0].message)
     assert "'a:b'" in message
-    assert "('a3' x 'b2')" in message
-    assert "('a4' x 'b4')" in message
+    assert "cell 'a3' x 'b2'" in message
+    assert "cell 'a4' x 'b4'" in message
     # The remedy is stated, per the issue.
     assert "collapse_levels" in message
     assert "RandomEffect" in message
@@ -87,7 +87,7 @@ def test_build_warning_names_separated_cells():
 def test_build_warning_fires_before_any_irls_iteration():
     df, y, w, _ = separated_crossed_design()
     model = crossed_model(separation="error")
-    with pytest.raises(SeparationError, match=r"\('a3' x 'b2'\)"):
+    with pytest.raises(SeparationError, match=r"cell 'a3' x 'b2'"):
         model.fit(df, y, sample_weight=w)
     # Refusal happened at build: no solver result was produced.
     assert model._result is None
@@ -106,7 +106,7 @@ def test_discrete_path_detects_the_same_cells():
     )
     sep = fit_catching(model, df, y, w)
     assert len(sep) == 1
-    assert "('a3' x 'b2')" in str(sep[0].message)
+    assert "cell 'a3' x 'b2'" in str(sep[0].message)
     with pytest.raises(SeparationError):
         SuperGLM(
             family=Tweedie(p=1.5),
@@ -174,13 +174,13 @@ def test_predict_names_a_separated_categorical_level_it_meets():
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         model.predict(pd.DataFrame({"c": ["c6", "c1"]}))
-    named = [x for x in caught if "only boundary responses at fit" in str(x.message)]
+    named = [x for x in caught if "no finite estimate" in str(x.message)]
     assert len(named) == 1 and "'c' levels c6" in str(named[0].message)
     assert named[0].filename == __file__
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         model.predict(pd.DataFrame({"c": ["c1", "c2"]}))
-    assert not [x for x in caught if "only boundary responses at fit" in str(x.message)]
+    assert not [x for x in caught if "no finite estimate" in str(x.message)]
 
 
 def test_predict_names_a_separated_grouped_level_by_its_members():
@@ -210,12 +210,12 @@ def test_predict_names_a_separated_grouped_level_by_its_members():
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             model.predict(pd.DataFrame({"c": [member, "c1"]}))
-        named = [x for x in caught if "only boundary responses at fit" in str(x.message)]
+        named = [x for x in caught if "no finite estimate" in str(x.message)]
         assert len(named) == 1 and "'c' levels c67" in str(named[0].message)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         model.predict(pd.DataFrame({"c": ["c1", "c2"]}))
-    assert not [x for x in caught if "only boundary responses at fit" in str(x.message)]
+    assert not [x for x in caught if "no finite estimate" in str(x.message)]
 
 
 @pytest.fixture
@@ -976,12 +976,12 @@ def test_an_independent_fit_inside_a_progress_callback_reports_its_own_findings(
                 SuperGLM(family=Tweedie(p=1.5), features={"c": Categorical()}).fit(frame, y)
                 distributional_fit()
                 distributional_fit()
-            inner.append(notices(caught, "Separation detected"))
+            inner.append(notices(caught, "1 categorical level has rows"))
             inner.append(notices(caught, "Separation in a spline-by-factor term"))
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 other.drop1(frame[["c", "z"]], y)
-            inner.append(notices(caught, "Separation detected"))
+            inner.append(notices(caught, "1 categorical level has rows"))
 
     model = SuperGLM(family=Tweedie(p=1.5), features={"c": Categorical(), "r": RandomEffect()})
     with warnings.catch_warnings(record=True) as caught:
@@ -999,7 +999,7 @@ def test_an_independent_fit_inside_a_progress_callback_reports_its_own_findings(
     assert len(result.evaluations) > 1
     assert [len(found) for found in inner] == [1, 2, 1]
     assert len(notices(caught, "RandomEffect variance component(s) 'r'")) == 1
-    assert len(notices(caught, "Separation detected")) == 1
+    assert len(notices(caught, "1 categorical level has rows")) == 1
 
 
 @pytest.mark.parametrize("solver", ["fit_irls_direct", "fit_pirls"])

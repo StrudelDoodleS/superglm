@@ -10,8 +10,10 @@ nonexistence of the exponential-family MLE (Haberman 1974; Fienberg and Rinaldo 
 general it is a linear program (Konis 2007), but for indicator blocks the directions of
 recession are exactly the cells with exposure and boundary-only response, so the O(n)
 scan is exact. It runs at design-build time on the dense and ``discrete=True`` paths. A
-term bounded by an active selection penalty is skipped (the penalised optimum is finite);
-only ``selection_penalty`` is consulted, since ``Categorical`` blocks carry no ``lambda2``.
+term bounded by an active selection penalty, or a ``Categorical`` under a fit-time cap, is
+skipped (the bounded optimum is finite); only ``selection_penalty`` is consulted, since
+``Categorical`` blocks carry no ``lambda2``. A SuperGLM fit call states what it found once,
+when it returns, priced by the fit it publishes (``disclosure_scope``).
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ import warnings
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -64,6 +66,12 @@ class SeparationError(ValueError):
 #: The design notices this public fit call has emitted; ``None`` outside one.
 _DISCLOSED: ContextVar[set[str] | None] = ContextVar("superglm_separation_disclosed", default=None)
 
+#: The separated levels and cells this public fit call's builds found, held for
+#: the one disclosure it makes when it returns; ``None`` outside one.
+_PENDING: ContextVar[list[SeparatedLevels] | None] = ContextVar(
+    "superglm_separation_pending", default=None
+)
+
 
 @contextmanager
 def disclosure_scope(model: Any) -> Iterator[None]:
@@ -74,15 +82,30 @@ def disclosure_scope(model: Any) -> Iterator[None]:
     reports what it finds.  A fit the enclosing call runs and discards
     (``_discarded_fit``: a power-search candidate's ``fit_reml``, a ``drop1``
     comparison fit) shares that call's scope.
+
+    The separated levels and cells its builds find are disclosed once, as the
+    call returns: priced by the fit it published, or, when it published none
+    (``drop1``) or failed, with what the builds counted.
     """
     if getattr(model, "_discarded_fit", False) and _DISCLOSED.get() is not None:
         yield
         return
     token = _DISCLOSED.set(set())
+    held: list[SeparatedLevels] = []
+    pending_token = _PENDING.set(held)
+    before = getattr(model, "_result", None)
+    published = None
     try:
         yield
+        result = getattr(model, "_result", None)
+        published = model if result is not None and result is not before else None
     finally:
+        _PENDING.reset(pending_token)
         _DISCLOSED.reset(token)
+        if held:
+            from superglm.model.separated_levels import separated_levels_message
+
+            warn_caller(separated_levels_message(held, published), SeparationWarning)
 
 
 def warn_separation(message: str, *, stacklevel: int) -> None:
@@ -209,6 +232,9 @@ class SeparatedTerm:
     boundary: str  # "zero" or "one"
     labels: list[Any]  # level names, or (level1, level2) pairs
     n_occupied: int  # occupied levels/cells scanned in this term
+    # Each label's positive-weight training rows, in label order: what the
+    # disclosure counts and prices. Only a build's own findings carry them.
+    rows: tuple[NDArray, ...] = field(default=(), compare=False, repr=False)
 
 
 def response_boundaries(distribution: Any, link: Any) -> tuple[str, ...]:
@@ -296,6 +322,18 @@ def _separated_flags(
     return occupied & ~anchored, int(np.count_nonzero(occupied))
 
 
+def _flagged_rows(codes: NDArray, flags: NDArray, sample_weight: NDArray) -> tuple[NDArray, ...]:
+    """Each flagged cell's positive-weight rows, in cell order, in one pass over the rows."""
+    hit = np.flatnonzero((codes >= 0) & (sample_weight > 0))
+    hit = hit[flags[codes[hit]]]
+    hit = hit[np.argsort(codes[hit], kind="stable")]
+    cells = np.flatnonzero(flags)
+    sorted_codes = codes[hit]
+    starts = np.searchsorted(sorted_codes, cells, side="left")
+    ends = np.searchsorted(sorted_codes, cells, side="right")
+    return tuple(hit[start:end] for start, end in zip(starts, ends, strict=True))
+
+
 def scan_categorical_term(
     name: str,
     spec: Any,
@@ -325,6 +363,7 @@ def scan_categorical_term(
                     boundary=boundary,
                     labels=[levels[i] for i in np.flatnonzero(flags)],
                     n_occupied=n_occupied,
+                    rows=_flagged_rows(codes, flags, sample_weight),
                 )
             )
     return findings
@@ -371,6 +410,7 @@ def scan_interaction_term(
                     boundary=boundary,
                     labels=labels,
                     n_occupied=n_occupied,
+                    rows=_flagged_rows(cell_codes, flags, sample_weight),
                 )
             )
     return findings
@@ -416,6 +456,251 @@ def format_separation_message(findings: list[SeparatedTerm]) -> str:
         "separation='ignore' to disable this check."
     )
     return "\n".join(lines)
+
+
+# ── A SuperGLM fit's one disclosure of its separated levels and cells ───────
+
+
+@dataclass(frozen=True)
+class SeparatedLevels:
+    """What one design build found separated, with the rows the disclosure counts.
+
+    ``specs`` holds every term of the build by name, main effects and
+    interactions; ``total_name`` is ``"exposure"`` when the build had an offset
+    under a log link (its exponent is the rows' exposure), ``"weight"`` otherwise.
+    """
+
+    findings: list[SeparatedTerm]
+    specs: dict[str, Any]
+    sample_weight: NDArray
+    offset: NDArray | None
+    total_name: str
+    frame: Any = None
+
+
+@dataclass(frozen=True)
+class SeparatedLine:
+    """What the disclosure says about one separated level or crossed cell."""
+
+    term: str
+    kind: str  # "levels" or "cells"
+    label: Any  # a level, or a cell's (level1, level2)
+    boundary: str  # "zero" or "one"
+    rows: int
+    total: float  # the rows' exposure or weight
+    total_name: str
+    base: Any  # the base level, or the base cell
+    # Read from a published fit: the response total its rows would expect at
+    # the base's rate, and the fitted relativity against the base.  Neither is
+    # stated for the base itself.
+    expected: float | None = None
+    relativity: float | None = None
+    # A crossed cell's parent terms, whose main effects its relativity includes.
+    parents: tuple[str, str] | tuple[()] = ()
+
+    @property
+    def is_base(self) -> bool:
+        return bool(self.label == self.base)
+
+
+def separated_level_mask(spec: Any, levels: Sequence[Any]) -> NDArray | None:
+    """Which of ``levels``' relativities move along a separating direction; ``None`` if none.
+
+    A non-base level the scan recorded moves alone; a recorded base level moves
+    every relativity of the term against it.
+    """
+    held = set(getattr(spec, "_separated_levels_at_fit", ()) or ())
+    if not held:
+        return None
+    if getattr(spec, "_base_level", None) in held:
+        return np.ones(len(levels), dtype=bool)
+    return np.array([level in held for level in levels], dtype=bool)
+
+
+def identified_levels(spec: Any, levels: Sequence[Any]) -> NDArray | None:
+    """Which of ``levels`` a mean-centered report centres on: those not separated.
+
+    ``None`` (every level) when the scan recorded none.  A separated level's log
+    relativity is where the fit stopped, so a mean through it would move every
+    other level by an amount the data do not determine.
+    """
+    held = set(getattr(spec, "_separated_levels_at_fit", ()) or ())
+    identified = np.array([level not in held for level in levels], dtype=bool)
+    return identified if held and identified.any() else None
+
+
+def separated_cell_mask(spec: Any, pairs: Sequence[tuple]) -> NDArray | None:
+    """Which of ``pairs``' interaction coefficients move along a separating direction.
+
+    ``None`` when the scan recorded no cell.  A cell ``(a, b)``'s coefficient is the
+    contrast of the four cells ``(a, b)``, ``(a, base2)``, ``(base1, b)`` and
+    ``(base1, base2)``, so it moves when any of them is recorded.
+    """
+    held = {tuple(cell) for cell in getattr(spec, "_separated_cells_at_fit", ()) or ()}
+    if not held:
+        return None
+    first, second = spec._base1, spec._base2
+    return np.array(
+        [
+            any(c in held for c in ((a, b), (a, second), (first, b), (first, second)))
+            for a, b in pairs
+        ],
+        dtype=bool,
+    )
+
+
+def level_lines(found: SeparatedLevels) -> list[SeparatedLine]:
+    """One line per separated label of ``found``, with what its build counted."""
+    lines = []
+    for finding in found.findings:
+        spec = found.specs[finding.term]
+        cells = finding.kind == "cells"
+        base = (spec._base1, spec._base2) if cells else spec._base_level
+        for label, rows in zip(finding.labels, finding.rows, strict=True):
+            weight = found.sample_weight[rows]
+            total = (
+                weight @ np.exp(found.offset[rows])
+                if found.total_name == "exposure" and found.offset is not None
+                else np.sum(weight)
+            )
+            lines.append(
+                SeparatedLine(
+                    term=finding.term,
+                    kind=finding.kind,
+                    label=label,
+                    boundary=finding.boundary,
+                    rows=len(rows),
+                    total=float(total),
+                    total_name=found.total_name,
+                    base=base,
+                    parents=tuple(spec.parent_names) if cells else (),
+                )
+            )
+    return lines
+
+
+def grouping_example(term: str, spec: Any, separated: Sequence[Any]) -> str | None:
+    """A call that groups ``term``'s first separated level with its nearest priced level.
+
+    Nearest in the term's level order, which is the data's order for an ordered
+    factor; ``None`` when the term already has a grouping (its levels are groups
+    then) or no level is priced.
+    """
+    if getattr(spec, "_grouping", None) is not None:
+        return None
+    levels = list(spec._levels)
+    priced = [i for i, level in enumerate(levels) if level not in separated]
+    for label in separated:
+        if label not in levels or not priced:
+            continue
+        here = levels.index(label)
+        near = min(priced, key=lambda i: (abs(i - here), i))
+        members = [str(levels[i]) for i in sorted((here, near))]
+        return (
+            f"Categorical(grouping=collapse_levels(X[{term!r}], "
+            f"groups={{{'+'.join(members)!r}: {members!r}}}))"
+        )
+    return None
+
+
+def lines_example(lines: Sequence[SeparatedLine], specs: dict[str, Any]) -> str | None:
+    """``grouping_example`` for the first term of ``lines`` that has one."""
+    for line in lines:
+        if line.kind == "levels" and line.term in specs:
+            held = [other.label for other in lines if other.term == line.term]
+            example = grouping_example(line.term, specs[line.term], held)
+            if example is not None:
+                return example
+    return None
+
+
+def _counted(n: int, noun: str) -> str:
+    return "" if n == 0 else f"{n} {noun}" + ("" if n == 1 else "s")
+
+
+def _line_text(line: SeparatedLine) -> str:
+    if line.kind == "cells":
+        name = f"{line.term!r} cell {line.label[0]!r} x {line.label[1]!r}"
+        base = f"base cell {line.base[0]!r} x {line.base[1]!r}"
+    else:
+        name, base = f"{line.term!r} level {line.label!r}", f"base level {line.base!r}"
+    every = "0" if line.boundary == "zero" else "1"
+    text = f"  {name}: {line.rows} rows, {line.total_name} {line.total:.4g}, every response {every}"
+    if line.is_base:
+        return f"{text}; it is the {base}, which the term's other relativities are measured against"
+    if line.expected is None or line.relativity is None:
+        return text
+    return (
+        f"{text}; {line.expected:.3g} expected in total at the rate of {base}; "
+        f"fitted relativity {line.relativity:.3g}"
+    )
+
+
+def format_separated_levels(
+    lines: Sequence[SeparatedLine],
+    *,
+    mode: str = "warn",
+    fitted: bool = False,
+    example: str | None = None,
+) -> str:
+    """The disclosure of separated levels and cells, one line each, and what to do.
+
+    ``fitted`` says the lines carry a published fit's numbers; a refusal
+    (``mode="error"``) and a build outside a fit call carry what the build counted.
+    """
+    n_levels = sum(line.kind == "levels" for line in lines)
+    what = " and ".join(
+        part
+        for part in (
+            _counted(n_levels, "categorical level"),
+            _counted(len(lines) - n_levels, "crossed cell"),
+        )
+        if part
+    )
+    one = len(lines) == 1
+    boundaries = {line.boundary for line in lines}
+    every = (
+        "all 0, or all 1" if len(boundaries) > 1 else ("all 0" if "zero" in boundaries else "all 1")
+    )
+    opening = (
+        f"{what} {'has' if one else 'have'} rows whose responses are {every}, so the data give "
+        f"{'its' if one else 'their'} effect no finite estimate."
+    )
+    if fitted:
+        opening += (
+            f" The fitted price for {'it' if one else 'each'} is where the fit stopped, not an "
+            "estimate, and predict, summary() and the rating tables carry it; summary() leaves "
+            "its standard error and p-value blank."
+        )
+    else:
+        opening += f" A fit prices {'it' if one else 'each'} where it stops, not at an estimate."
+    body = []
+    by_term: dict[str, list[SeparatedLine]] = {}
+    for line in lines:
+        by_term.setdefault(line.term, []).append(line)
+    for term, term_lines in by_term.items():
+        ranked = sorted(
+            term_lines,
+            key=lambda line: -(line.expected if line.expected is not None else line.total),
+        )
+        body.extend(_line_text(line) for line in ranked[:_MAX_LISTED_LABELS])
+        if len(ranked) > _MAX_LISTED_LABELS:
+            body.append(f"  ... and {len(ranked) - _MAX_LISTED_LABELS} more in {term!r}")
+    group = "group a level with similar levels " + (
+        f"({example})" if example else "(collapse_levels builds the grouping)"
+    )
+    remedy = (
+        f"To price {'it' if one else 'them'}: {group}, fit the term as a RandomEffect, or bound "
+        "it with Constraint.fit.cap or a selection penalty on the term."
+    )
+    if mode == "error":
+        remedy += (
+            " Pass separation='warn' to fit with this as a warning, or separation='ignore' to "
+            "fit without it."
+        )
+    else:
+        remedy += " separation='error' refuses such fits; separation='ignore' silences this."
+    return "\n".join([opening, *body, remedy])
 
 
 def runtime_finding(
@@ -492,6 +777,22 @@ def drifting_groups(
     return [name for value, name in ranked if value >= 0.5 * farthest][:5]
 
 
+class RuntimeFinding(str):
+    """The runtime backstop's statement, with the groups it names in ``groups``, farthest first."""
+
+    groups: tuple[str, ...] = ()
+
+
+def restates_separated_level(message: str | None, separated: set[str]) -> bool:
+    """Whether a runtime finding is the walk of a level or cell the fit already discloses.
+
+    So when the group carrying the walk farthest is a term in ``separated``, the
+    terms whose separated levels or cells the build-time scan recorded.
+    """
+    groups = getattr(message, "groups", ())
+    return bool(groups) and groups[0] in separated
+
+
 def format_runtime_message(
     w_ratio: float,
     n_iter: int,
@@ -515,7 +816,7 @@ def format_runtime_message(
             f"stagnant deviance and an extreme working-weight range "
             f"(ratio {w_ratio:.1e})."
         )
-    return (
+    finding = RuntimeFinding(
         f"{how} This is the signature of separation -- one or more coefficients "
         f"are drifting to +/-infinity and the affected fitted values have collapsed "
         f"to the response boundary{where}. The returned coefficients are not "
@@ -528,13 +829,25 @@ def format_runtime_message(
         "RandomEffect, or a selection penalty on the term), or pass "
         "separation='ignore' to silence this."
     )
+    finding.groups = tuple(drifting_groups)
+    return finding
 
 
-def emit_separation_findings(findings: list[SeparatedTerm], mode: str) -> None:
-    """Warn or raise per the model's ``separation`` mode."""
-    if not findings or mode == "ignore":
+def emit_separation_findings(found: SeparatedLevels, mode: str) -> None:
+    """Refuse under ``"error"``; otherwise hold the finding for the fit call's one disclosure.
+
+    Held in the public call's ``disclosure_scope`` and disclosed when it returns,
+    priced by the fit it published; a build outside any such call warns now,
+    with what the build counted.
+    """
+    if not found.findings or mode == "ignore":
         return
-    message = format_separation_message(findings)
+    held = _PENDING.get()
+    if mode != "error" and held is not None:
+        held.append(found)
+        return
+    lines = level_lines(found)
+    message = format_separated_levels(lines, mode=mode, example=lines_example(lines, found.specs))
     if mode == "error":
         raise SeparationError(message, levels=True)
     # stacklevel points past the builder into the user's fit call region; the

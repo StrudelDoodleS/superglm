@@ -378,6 +378,16 @@ class Categorical:
                 f"unseen must be 'error', 'base' or the label of a group of grouping=, "
                 f"got {unseen!r}"
             )
+        if grouping is not None and not all(
+            hasattr(grouping, field)
+            for field in ("original_to_group", "all_original_levels", "grouped_levels")
+        ):
+            raise TypeError(
+                f"grouping= takes a LevelGrouping, not {type(grouping).__name__}. Build one "
+                "from the column with collapse_levels, for example "
+                "Categorical(grouping=collapse_levels(X['region'], groups={'North': ['N1', "
+                "'N2']})), which keeps every level it does not list as its own group."
+            )
         self.base = base
         self.unseen = unseen
         self._grouping = grouping

@@ -22,6 +22,7 @@ from superglm.links import stabilize_eta
 from superglm.model.base import rebuild_dm_with_lambdas
 from superglm.model.reml_setup import restore_qp_constraints
 from superglm.model.reml_state import update_reml_r_inv
+from superglm.model.separated_levels import separated_columns
 from superglm.reml.identified import (
     IdentifiedLaplace,
     WeakIdentificationWarning,
@@ -511,6 +512,7 @@ def _disclose_weak_identification(
     identified: IdentifiedLaplace,
     result,
     factor,
+    y,
     sample_weight,
     offset_arr,
     lambdas,
@@ -556,21 +558,39 @@ def _disclose_weak_identification(
         if int(index) not in moved
     )
     indices = tuple(sorted(flagged))
-    labels = coefficient_labels(model._groups, indices)
+    specs = {**model._specs, **model._interaction_specs}
     profile["reml_weakly_identified"] = indices
-    profile["reml_weakly_identified_labels"] = labels
+    profile["reml_weakly_identified_labels"] = coefficient_labels(model._groups, indices, specs)
     # everything the Laplace term leaves out, each index paired with its
     # label: the weakly identified slopes, then the separated unpenalized
     # sets (``reml.identified.separated_directions``) by their pivots
     profile["reml_laplace_excluded"] = identified.disclosed
-    separated_labels = separated_set_labels(model._groups, identified.separated_sets)
     profile["reml_laplace_separated"] = tuple(int(index) for index in identified.separated_pivots)
-    profile["reml_laplace_separated_labels"] = separated_labels
+    profile["reml_laplace_separated_labels"] = separated_set_labels(
+        model._groups, identified.separated_sets, specs
+    )
+    profile["reml_laplace_excluded_labels"] = (
+        coefficient_labels(model._groups, tuple(int(index) for index in identified.weak), specs)
+        + profile["reml_laplace_separated_labels"]
+    )
+    # The warning leaves out the coefficients of a separated level or cell: the fit's
+    # separation disclosure names them, or ``separation="ignore"`` silences them.
+    named = separated_columns(model, y, sample_weight)
+    labels = coefficient_labels(model._groups, [i for i in indices if i not in named], specs)
+    sets = [
+        described
+        for pivot, described in zip(
+            identified.separated_pivots, identified.separated_sets, strict=True
+        )
+        if int(pivot) not in named
+    ]
+    separated_labels = separated_set_labels(model._groups, sets, specs)
     excluded_labels = (
-        coefficient_labels(model._groups, tuple(int(index) for index in identified.weak))
+        coefficient_labels(
+            model._groups, [int(i) for i in identified.weak if int(i) not in named], specs
+        )
         + separated_labels
     )
-    profile["reml_laplace_excluded_labels"] = excluded_labels
     # a separated set the Laplace term leaves out is explained in plain words,
     # beside any weakly identified coefficient or alone (a reference level
     # without events has no coefficient of its own)
@@ -1075,6 +1095,7 @@ def finalize_reml_fit(
         identified=disclosed,
         result=corrected,
         factor=final_factor,
+        y=y,
         sample_weight=sample_weight,
         offset_arr=offset_arr,
         lambdas=lambdas,

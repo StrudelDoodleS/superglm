@@ -9,6 +9,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._weight_units import coefficient_covariance, standard_errors
+from superglm.diagnostics.separation import separated_cell_mask, separated_level_mask
 from superglm.features.constraint import rules_of
 from superglm.inference._metrics_design import MetricsDesign, factor_from_gram, weighted_moments
 from superglm.inference.covariance import (
@@ -857,26 +858,29 @@ def build_coef_rows(
             cat_edf = gedf.get(g.name, 0.0) if active else 0.0
             diag = _level_diag.get(g.name, {})
             cat_rules = rules_of(spec).describe() or None
+            separated = separated_level_mask(spec, spec._non_base)
             for i, level in enumerate(spec._non_base):
                 coef_val = float(b_g[i])
                 se_val = float(se_g[i])
                 z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+                blank = separated is not None and bool(separated[i])
                 n_obs_i, exp_share_i, thin_i = diag.get(i, (None, None, False))
                 rows.append(
                     _CoefRow(
                         name=f"{g.name}[{level}]",
                         group=g.name,
                         coef=coef_val,
-                        se=se_val,
-                        z=z,
-                        p=p,
-                        ci_low=ci_lo,
-                        ci_high=ci_hi,
+                        se=None if blank else se_val,
+                        z=None if blank else z,
+                        p=None if blank else p,
+                        ci_low=None if blank else ci_lo,
+                        ci_high=None if blank else ci_hi,
                         edf=cat_edf if i == 0 else None,
                         level_n_obs=n_obs_i,
                         level_exposure_share=exp_share_i,
                         quasi_separated=thin_i,
                         advisory_trigger="thin_level" if thin_i else "",
+                        separated=blank,
                         monotone=cat_rules,
                         monotone_engine=_engine_tag(spec, g.monotone_engine if cat_rules else None),
                     )
@@ -1000,20 +1004,23 @@ def build_coef_rows(
                 )
 
         elif isinstance(spec, CategoricalInteraction):
+            separated = separated_cell_mask(spec, spec._pairs)
             for i, (lev1, lev2) in enumerate(spec._pairs):
                 coef_val = float(b_g[i])
                 se_val = float(se_g[i])
                 z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+                blank = separated is not None and bool(separated[i])
                 rows.append(
                     _CoefRow(
                         name=f"{g.name}[{lev1}:{lev2}]",
                         group=g.name,
                         coef=coef_val,
-                        se=se_val,
-                        z=z,
-                        p=p,
-                        ci_low=ci_lo,
-                        ci_high=ci_hi,
+                        se=None if blank else se_val,
+                        z=None if blank else z,
+                        p=None if blank else p,
+                        ci_low=None if blank else ci_lo,
+                        ci_high=None if blank else ci_hi,
+                        separated=blank,
                     )
                 )
 

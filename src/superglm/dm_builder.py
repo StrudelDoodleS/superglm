@@ -1057,12 +1057,14 @@ def build_design_matrix(
     are always pruned: their columns are zero in the weighted geometry.
 
     ``separation`` controls the build-time separated-cell scan (see
-    :mod:`superglm.diagnostics.separation`): ``"warn"`` (default) names the
-    offending cells in a ``SeparationWarning``, ``"error"`` refuses the
-    design with a ``SeparationError``, ``"ignore"`` skips the scan.
+    :mod:`superglm.diagnostics.separation`): ``"warn"`` (default) records the
+    offending levels and cells on their terms and holds them for the fit
+    call's one ``SeparationWarning``, ``"error"`` refuses the design with a
+    ``SeparationError``, ``"ignore"`` skips the scan.
     ``selection_penalty`` is the model's lambda1-style penalty object when a
     nonzero lambda1 will reach this fit, else ``None``; terms that penalty
-    targets have bounded optima and are exempt from the scan.
+    targets, and a ``Categorical`` under a fit-time cap, have bounded optima
+    and are exempt from the scan.
 
     ``group_pricing`` decides the width the selection penalty and df ledger
     price a group at when its spec emits fewer columns than the term spans:
@@ -1156,6 +1158,7 @@ def build_design_matrix(
             spec._separated_cells_at_fit = ()
     if separation_records:
         from superglm.diagnostics.separation import (
+            SeparatedLevels,
             emit_curve_separation,
             emit_level_curve_separation,
             emit_separation_findings,
@@ -1188,6 +1191,11 @@ def build_design_matrix(
                 continue
             if record[0] == "level_curve":
                 level_curves.append(record[1:])
+                continue
+            if record[0] == "cat" and record[2]._constraint_rules:
+                # A fit-time cap bounds every level's relativity against the base,
+                # so the capped optimum is finite and no level escapes to infinity.
+                compiled.scan_codes.pop(term_name, None)
                 continue
             if record[0] == "cat":
                 _, name_c, spec_c, x_c = record
@@ -1225,7 +1233,21 @@ def build_design_matrix(
                     label for finding in found for label in finding.labels
                 )
         compiled.scan_codes.clear()
-        emit_separation_findings(findings, separation)
+        from superglm.links import LogLink
+
+        emit_separation_findings(
+            SeparatedLevels(
+                findings=findings,
+                specs={**compiled.specs, **compiled.interaction_specs},
+                sample_weight=sample_weight,
+                offset=offset,
+                total_name=(
+                    "exposure" if offset is not None and isinstance(link, LogLink) else "weight"
+                ),
+                frame=X,
+            ),
+            separation,
+        )
         emit_curve_separation(curves, separation)
         emit_level_curve_separation(level_curves)
 
