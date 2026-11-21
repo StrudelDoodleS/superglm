@@ -1611,7 +1611,7 @@ class ModelMetrics:
         penalized estimate. They do not account for model selection
         uncertainty (same convention as glmnet / mgcv).
         """
-        return self._group_standard_errors(scaled=True)
+        return self._group_standard_errors(self._groups, scaled=True)
 
     @cached_property
     def coefficient_se_raw(self) -> dict[str, NDArray]:
@@ -1625,11 +1625,18 @@ class ModelMetrics:
 
         Inactive groups get all-zero SEs.
         """
-        return self._group_standard_errors(scaled=False)
+        return self._group_standard_errors(self._groups, scaled=False)
 
-    def _group_standard_errors(self, *, scaled: bool) -> dict[str, NDArray]:
+    @cached_property
+    def _separated_coefficients(self) -> NDArray | None:
+        from superglm.model.separated_levels import separated_coefficients
+
+        return separated_coefficients(
+            self._groups, self._model._specs, self._model._interaction_specs
+        )
+
+    def _group_standard_errors(self, groups, *, scaled: bool) -> dict[str, NDArray]:
         """Per-group SEs of the augmented covariance, times the dispersion when ``scaled``."""
-        _, _, _, XtWX_inv_aug, active_groups = self._active_info
         selected_names = selected_group_name_set(
             self._result,
             self._groups,
@@ -1637,10 +1644,12 @@ class ModelMetrics:
         )
 
         result: dict[str, NDArray] = {}
-        for g in self._groups:
+        separated = self._separated_coefficients
+        for g in groups:
             if g.name not in selected_names:
-                result[g.name] = np.zeros(g.size)
+                values = np.zeros(g.size)
             else:
+                _, _, _, XtWX_inv_aug, active_groups = self._active_info
                 ag = next(ag for ag in active_groups if ag.name == g.name)
                 augmented_indices = np.arange(
                     1 + ag.start,
@@ -1653,7 +1662,9 @@ class ModelMetrics:
                 )
                 values = self._variance_standard_errors(var_diag, scaled=scaled)
                 values[~self._current_coefficient_estimable[g.sl]] = np.nan
-                result[g.name] = values
+            if separated is not None:
+                values[separated[g.sl]] = np.nan
+            result[g.name] = values
         return result
 
     @cached_property
@@ -1666,20 +1677,22 @@ class ModelMetrics:
         :attr:`coefficient_se`, including Pearson dispersion for known-scale
         families. Rendered coefficient tables retain fitted-family scale.
         """
-        _, _, _, XtWX_inv_aug, _ = self._active_info
-        icpt_var = float(XtWX_inv_aug[0, 0])
-        if icpt_var <= 0:
-            return 0.0
-        return float(self._variance_standard_errors(icpt_var, scaled=True))
+        return self._intercept_standard_error(scaled=True)
 
     @cached_property
     def intercept_se_raw(self) -> float:
         """Exact-family intercept SE for known scale, otherwise assuming phi=1."""
+        return self._intercept_standard_error(scaled=False)
+
+    def _intercept_standard_error(self, *, scaled: bool) -> float:
+        separated = self._separated_coefficients
+        if separated is not None and separated[-1]:
+            return np.nan
         _, _, _, XtWX_inv_aug, _ = self._active_info
         icpt_var = float(XtWX_inv_aug[0, 0])
         if icpt_var <= 0:
             return 0.0
-        return float(self._restore_se_unit(np.sqrt(icpt_var), False))
+        return float(self._variance_standard_errors(icpt_var, scaled=scaled))
 
     def _feature_se_impl(
         self,
@@ -1700,6 +1713,16 @@ class ModelMetrics:
         name : str
             Feature name (e.g. "DrivAge"); a ``select=True`` spline's subgroups are gathered.
         """
+        from superglm.features.categorical import Categorical
+
+        groups = self._model._feature_groups(name)
+        spec = self._model._specs[name]
+        if isinstance(spec, Categorical):
+            return {
+                "levels": spec._non_base,
+                "base_level": spec._base_level,
+                "se_log_relativity": self._group_standard_errors(groups, scaled=phi_scale)[name],
+            }
         exponent = self._se_unit_exponent(phi_scale)
         phi_unit = None
         if self._result.weight_exponent:
@@ -1717,16 +1740,12 @@ class ModelMetrics:
                 key: np.ldexp(value, exponent // 2) if key.startswith("se") else value
                 for key, value in values.items()
             }
-        from superglm.features.categorical import Categorical
         from superglm.features.numeric import Numeric
         from superglm.features.ordered_categorical import OrderedCategorical
         from superglm.features.piecewise import Piecewise
         from superglm.features.random_effect import RandomEffect
         from superglm.features.spline import _SplineBase
         from superglm.inference._term_covariance import feature_se_from_cov
-
-        groups = self._model._feature_groups(name)
-        spec = self._model._specs[name]
 
         # Inactive feature: return zeros (all subgroups zeroed)
         selected_names = selected_group_name_set(
@@ -1761,12 +1780,6 @@ class ModelMetrics:
             if isinstance(spec, _SplineBase):
                 x_grid = np.linspace(spec._lo, spec._hi, n_points)
                 return {"x": x_grid, "se_log_relativity": np.zeros(n_points)}
-            elif isinstance(spec, Categorical):
-                return {
-                    "levels": spec._non_base,
-                    "base_level": spec._base_level,
-                    "se_log_relativity": np.zeros(len(spec._non_base)),
-                }
             elif isinstance(spec, Piecewise):
                 return {
                     "x": spec._knots.copy(),
@@ -1787,12 +1800,6 @@ class ModelMetrics:
             if isinstance(spec, _SplineBase):
                 x_grid = np.linspace(spec._lo, spec._hi, n_points)
                 return {"x": x_grid, "se_log_relativity": np.zeros(n_points)}
-            elif isinstance(spec, Categorical):
-                return {
-                    "levels": spec._non_base,
-                    "base_level": spec._base_level,
-                    "se_log_relativity": np.zeros(len(spec._non_base)),
-                }
             elif isinstance(spec, Piecewise):
                 return {
                     "x": spec._knots.copy(),
@@ -1820,14 +1827,6 @@ class ModelMetrics:
             Q = M @ Cov_g
             se = np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0))
             return {"x": x_grid, "se_log_relativity": se}
-
-        elif isinstance(spec, Categorical):
-            se = np.sqrt(np.maximum(np.diag(Cov_g), 0.0))
-            return {
-                "levels": spec._non_base,
-                "base_level": spec._base_level,
-                "se_log_relativity": se,
-            }
 
         elif isinstance(spec, Piecewise):
             # One SE per knot with a hard zero at the base, matching

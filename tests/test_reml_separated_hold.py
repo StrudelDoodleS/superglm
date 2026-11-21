@@ -96,6 +96,44 @@ def _effect(model, name, level):
     return term.log_relativity[list(term.levels).index(level)]
 
 
+def _fit_with_separated_z(base, family="poisson"):
+    from superglm import PSpline
+
+    rng = np.random.default_rng(42)
+    x = rng.uniform(0, 10, 2000)
+    r = rng.choice(list("ABC"), len(x), p=[0.4, 0.4, 0.2])
+    r[:30] = "Z"
+    y = rng.poisson(np.exp(-1.5 + 0.3 * np.sin(x) + 0.4 * (r == "B") - 0.3 * (r == "C")))
+    y[:30] = 0
+    if family == "binomial":
+        y = (y > 0).astype(float)
+    X = pd.DataFrame({"x": x, "r": r})
+    model = SuperGLM(family=family, features={"x": PSpline(n_knots=8), "r": Categorical(base=base)})
+    return model.fit_reml(X, y), X, y
+
+
+@pytest.mark.parametrize("base", ["A", "Z"])
+def test_metrics_blank_only_contrasts_that_move_under_separation(base):
+    model, X, y = _fit_with_separated_z(base)
+    metrics = model.metrics(X, y)
+    feature = metrics.feature_se("r")
+    blank = np.array([base == "Z" or level == "Z" for level in feature["levels"]])
+    for se in (
+        metrics.coefficient_se["r"],
+        metrics.coefficient_se_raw["r"],
+        feature["se_log_relativity"],
+    ):
+        np.testing.assert_array_equal(np.isnan(se), blank)
+        assert (se[~blank] > 0).all()
+    assert np.isnan(metrics.intercept_se) == (base == "Z")
+    assert np.isnan(metrics.intercept_se_raw) == (base == "Z")
+    native = model.term_inference("r", centering="native")
+    raw = dict(zip(native.levels, native.se_log_relativity, strict=True))
+    np.testing.assert_allclose(
+        metrics.coefficient_se_raw["r"], [raw[lvl] for lvl in feature["levels"]]
+    )
+
+
 @pytest.mark.parametrize("discrete", [False, True])
 @pytest.mark.parametrize(
     "family,link",
