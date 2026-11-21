@@ -378,6 +378,16 @@ class Categorical:
                 f"unseen must be 'error', 'base' or the label of a group of grouping=, "
                 f"got {unseen!r}"
             )
+        if grouping is not None and not all(
+            hasattr(grouping, field)
+            for field in ("original_to_group", "all_original_levels", "grouped_levels")
+        ):
+            raise TypeError(
+                f"grouping= takes a LevelGrouping, not {type(grouping).__name__}. Build one "
+                "from the column with collapse_levels, for example "
+                "Categorical(grouping=collapse_levels(X['region'], groups={'North': ['N1', "
+                "'N2']})), which keeps every level it does not list as its own group."
+            )
         self.base = base
         self.unseen = unseen
         self._grouping = grouping
@@ -745,11 +755,26 @@ class Categorical:
         ``score`` has already refused or reported unseen labels, so nothing is
         said again here.
         """
+        codes = self._scored_codes(x)
+        return {self._levels[code] for code in np.unique(codes[codes >= 0])}
+
+    def _scored_codes(self, x: NDArray) -> NDArray:
+        """The fitted level each row of raw ``x`` is priced at, as its universe index.
+
+        A label ``unseen="base"`` admits, and a declared level the fit held no rows of
+        (``_pinned_levels``), is priced at the base level, so it is coded there;
+        ``score`` has already reported an unseen label, so nothing is said again here.
+        """
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            resolved = self._resolve_predict_labels(x)
-            codes = self._predict_codes(resolved)
-        return {self._levels[code] for code in np.unique(codes[codes >= 0])}
+            codes = self._predict_codes(self._resolve_predict_labels(x))
+        base = self._levels.index(self._base_level)
+        if self.unseen == "base":
+            codes = np.where(codes < 0, base, codes)
+        if self._pinned_levels:
+            pinned = [self._levels.index(level) for level in self._pinned_levels]
+            codes = np.where(np.isin(codes, pinned), base, codes)
+        return codes
 
     def _predict_codes(self, x: NDArray) -> NDArray:
         """Codes against the fitted universe; -1 for levels the policy admits."""

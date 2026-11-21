@@ -62,8 +62,10 @@ def build_group_display(term_payload: dict[str, Any]) -> dict[str, Any]:
             collapsed["previous_y"].append(_weighted_average(previous_y[indices], group_weight))
 
         if ci_lower is not None and ci_upper is not None:
-            collapsed["ci_lower_y"].append(_weighted_average(ci_lower[indices], group_weight))
-            collapsed["ci_upper_y"].append(_weighted_average(ci_upper[indices], group_weight))
+            # a level with no interval (``None``, a separated level's) keeps none here
+            for key, ends in (("ci_lower_y", ci_lower), ("ci_upper_y", ci_upper)):
+                end = _weighted_average(ends[indices], group_weight)
+                collapsed[key].append(end if np.isfinite(end) else None)
 
     collapsed["exposure"] = {
         "kind": "bars",

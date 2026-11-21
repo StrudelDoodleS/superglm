@@ -788,6 +788,7 @@ def publish_revised_coefficients(model, beta_before) -> None:
             ("scop_inference", None),
             ("scop_geometry", None),
             ("separation_message", None),
+            ("separation_groups", ()),
         ):
             if hasattr(result, field_name):
                 setattr(result, field_name, value)
@@ -1111,23 +1112,34 @@ def capture_fit_state(
 ) -> FitCandidate:
     """Transfer one complete workspace into a candidate without row-scale copies.
 
-    Every solved fit is published through here, so this is where its runtime
-    separation finding, read from the coefficient state it publishes, is
-    disclosed under the model's ``separation`` mode.  A call that returns more
-    than that state passes its own ``separation_statement`` (``fit_path``, for
-    every point it returns).  A fit another call runs and discards
+    Every solved fit is published through here, so this is where the separated
+    levels and cells its call's builds found are stated, priced by the state it
+    publishes, and its runtime separation finding, read from that state, is
+    disclosed under the model's ``separation`` mode: both before the install, so
+    a warning raised as an error leaves the previous fit in place.  A call that
+    returns more than that state passes its own ``separation_statement``
+    (``fit_path``, for every point it returns).  A fit another call runs and discards
     (``_discarded_fit``: a power-search candidate, a ``drop1`` comparison)
     discloses nothing.
     """
     if not getattr(public_model, "_discarded_fit", False):
-        from superglm.diagnostics.separation import disclose_runtime_separation
+        from superglm.diagnostics.separation import (
+            disclose_runtime_separation,
+            restates_separated_level,
+        )
+        from superglm.model.separated_levels import disclose_held_levels, separated_terms
 
+        disclose_held_levels(workspace.model)
+        named: tuple[str, ...] = ()
         if separation_statement is None:
             result = getattr(workspace.model, "_result", None)
             separation_statement = getattr(result, "separation_message", None)
-        disclose_runtime_separation(
-            separation_statement, getattr(workspace.model, "_separation", "warn")
-        )
+            named = tuple(getattr(result, "separation_groups", ()) or ())
+        # The walk of levels the scan recorded is the fit's separation disclosure's to state.
+        if not restates_separated_level(named, separated_terms(workspace.model)):
+            disclose_runtime_separation(
+                separation_statement, getattr(workspace.model, "_separation", "warn")
+            )
     design = getattr(workspace.model, "_dm", None)
     release_raw_splines = getattr(design, "release_raw_spline_tabmat_plan", None)
     if release_raw_splines is not None:

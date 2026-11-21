@@ -191,3 +191,32 @@ def test_the_ticks_of_one_frame_zoom_to_the_smallest_range_rather_than_being_ref
         )
 
         assert abs(ratio - 1 / 200) < 1e-9
+
+
+def test_a_separated_level_draws_no_whisker_and_the_others_keep_theirs(open_editor_page):
+    """Territory T10 with no claims: its interval is blank, and only its whisker is left out.
+
+    At 20f77dd6f the payload dropped the whole term's band, so no level drew one.
+    """
+    import warnings
+
+    import numpy as np
+    from tests.editor.conftest import _browser_model, _browser_rows
+
+    from superglm.diagnostics.separation import SeparationWarning
+
+    rng, frame, eta, age_band_levels = _browser_rows()
+    y = rng.poisson(np.exp(eta)).astype(np.float64)
+    y[frame["territory"].to_numpy() == "T10"] = 0.0
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SeparationWarning)
+        model = _browser_model("poisson", frame, y, age_band_levels)
+    with open_editor_page(model=model, selected_term="territory") as (page, _session):
+        page.get_by_role("button", name="Reference CI").click()
+        page.locator("#chart .ci-whisker").first.wait_for(state="attached")
+        ends = page.locator("#chart .ci-whisker").evaluate_all(
+            "els => els.map(e => ['x1', 'y1', 'x2', 'y2'].map(a => Number(e.getAttribute(a))))"
+        )
+    # three lines a whisker, for each of the nine levels other than T10
+    assert len(ends) == 3 * 9
+    assert np.all(np.isfinite(np.asarray(ends)))

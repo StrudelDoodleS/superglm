@@ -66,6 +66,9 @@ class RatingTableBlock:
     # ``OrderedCategorical``, a single-valued ``Numeric`` -- which is why the total is summed from the blocks rather
     # than assumed to run over every exported term.
     centering_shift: float = 0.0
+    # Categorical only: the factors a separated level or cell leaves undetermined, stated
+    # (``separated_block_note``).
+    note: str | None = None
 
 
 @dataclass(frozen=True)
@@ -88,6 +91,28 @@ class InteractionTableBlock:
     name: str
     table: pd.DataFrame
     kind: str = "cells"
+    # The cell factors a separated level or cell leaves undetermined (``separated_block_note``).
+    note: str | None = None
+
+
+def separated_block_note(model, name: str, marked: list[str]) -> str | None:
+    """The note a block carries for its factors ``marked``, which a separated level or cell moves.
+
+    Marked by the flags ``summary()`` reads (``separated_levels``), a factor fixed at 1
+    left out, and named with the separated levels and cells they move with
+    (``separated_sources``).  The factors are exported as fitted: where the fit stopped.
+    """
+    from superglm.model.separated_levels import separated_sources
+
+    if not marked:
+        return None
+    return (
+        f"Not estimates: {', '.join(marked)}. Every response on the rows of separated "
+        f"{', '.join(separated_sources(model, name))} is 0, or every one is 1, so the data "
+        "give these factors no finite estimate; each is where the fit stopped. Group the "
+        "separated levels with similar levels, or fit the term as a RandomEffect, before "
+        "rating on them."
+    )
 
 
 @dataclass(frozen=True)
@@ -683,9 +708,19 @@ def _categorical_block(
     name: str,
     sample_weight: NDArray | None,
     centering: str,
+    spec: Categorical | OrderedCategorical,
 ) -> RatingTableBlock:
     ti = _main_effect_inference(model, name, centering)
     levels = list(ti.levels or [])
+    grouping = getattr(spec, "_grouping", None)
+
+    def fixed(level) -> bool:
+        """A level with no coefficient (the base, a pinned level) reads 1 under native."""
+        group = level if grouping is None else grouping.original_to_group.get(level, level)
+        return centering == "native" and group not in spec._non_base
+
+    flags = [False] * len(levels) if ti.separated is None else list(ti.separated)
+    marked = [str(lv) for lv, flag in zip(levels, flags, strict=True) if flag and not fixed(lv)]
     return RatingTableBlock(
         name=name,
         kind="categorical",
@@ -697,6 +732,7 @@ def _categorical_block(
             }
         ),
         centering_shift=float(ti.centering_shift),
+        note=separated_block_note(model, name, marked),
     )
 
 
@@ -1797,7 +1833,14 @@ def _interaction_blocks(
         ]
         columns = [_row_key_header(parent1, levels2), *levels2]
         table = pd.DataFrame(rows, columns=columns)
-        blocks.append(InteractionTableBlock(name=name, table=table, kind="cells"))
+        from superglm.model.separated_levels import marked_cells
+
+        marked = marked_cells(model, name)
+        blocks.append(
+            InteractionTableBlock(
+                name=name, table=table, kind="cells", note=separated_block_note(model, name, marked)
+            )
+        )
     return blocks
 
 
@@ -2757,7 +2800,9 @@ def build_rating_table_payload(
             centering_shift = float(_main_effect_inference(model, name, centering).centering_shift)
             main_effects.append(_continuous_block(name, selected.tables[name], centering_shift))
         elif isinstance(spec, Categorical | OrderedCategorical):
-            main_effects.append(_categorical_block(model, frame, name, sample_weight, centering))
+            main_effects.append(
+                _categorical_block(model, frame, name, sample_weight, centering, spec)
+            )
         elif isinstance(spec, Numeric):
             main_effects.append(_numeric_block(model, name, centering))
 

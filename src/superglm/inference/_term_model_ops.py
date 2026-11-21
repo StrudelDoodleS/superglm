@@ -54,17 +54,21 @@ def relativities(
         raise KeyError(f"Feature not found: {name}")
 
     from superglm.features.ordered_categorical import OrderedCategorical
+    from superglm.model.separated_levels import level_flags, pair_flags, separation_flags
+
+    # One reading of the fit's separation record serves every term below.
+    flags = separation_flags(groups, specs, interaction_specs)
 
     # The shift below is the mean of the frame's own coefficients, so a centred
     # frame's errors are those of a contrast ``C b``, propagated at each SE call
     # site (this function sees only the shifted values, not the covariance).
     center_se = centering == "mean"
 
-    def _center_df(df: pd.DataFrame) -> pd.DataFrame:
+    def _center_df(df: pd.DataFrame, centre_on: NDArray | None = None) -> pd.DataFrame:
         if centering != "mean" or "log_relativity" not in df.columns:
             return df
         log_rel = df["log_relativity"].values.copy()
-        shift = float(np.mean(log_rel))
+        shift = float(np.mean(log_rel if centre_on is None else log_rel[centre_on]))
         df = df.copy()
         df["log_relativity"] = log_rel - shift
         df["relativity"] = _safe_exp(df["log_relativity"].values)
@@ -140,8 +144,16 @@ def relativities(
                     specs,
                     interaction_specs,
                     center=center_se,
+                    flags=flags,
                 )
-            out[name] = _center_df(df)
+            # A level a separating direction moves keeps its relativity, flagged, and
+            # leaves the centre (``separated_levels.level_flags``).
+            separated, centre_on = level_flags(
+                groups, specs, interaction_specs, name, levels, centering=centering, flags=flags
+            )
+            if separated is not None:
+                df["separated"] = separated
+            out[name] = _center_df(df, centre_on)
         elif "relativity_per_unit" in raw:
             df = pd.DataFrame(
                 {
@@ -193,6 +205,9 @@ def relativities(
                     "level2": [l2 for _, l2 in rels],
                 }
             )
+            separated = pair_flags(groups, specs, interaction_specs, iname, list(rels), flags=flags)
+            if separated is not None:
+                out[iname]["separated"] = separated
 
         elif "relativities_per_unit" in raw:
             levels = raw["levels"]

@@ -307,7 +307,8 @@ def _random_effect_separation_hazard(model, X, y, sample_weight) -> str | None:
     valid = weight_arr > 0.0
     findings = []
     for name, spec in model._specs.items():
-        if not isinstance(spec, Categorical):
+        # a fit-time cap bounds every level against its base, which fit_reml enforces
+        if not isinstance(spec, Categorical) or spec._constraint_rules:
             continue
         claim_free = _claim_free_categorical_levels(X.column_array(name), spec, positive, valid)
         if claim_free:
@@ -1105,6 +1106,7 @@ def _warn_unresolved_rows(model) -> None:
     from superglm.reml.identified import WeakIdentificationWarning, coefficient_labels
 
     records = getattr(model._result, "truncated_directions", ()) or ()
+    specs = {**model._specs, **model._interaction_specs}
     for record in records:
         if record.at_maximum:
             continue
@@ -1114,7 +1116,7 @@ def _warn_unresolved_rows(model) -> None:
         shown = ", ".join(str(row) for row in first)
         if record.row_count > 6:
             shown += f" and {record.row_count - 6} more"
-        labels = ", ".join(coefficient_labels(model._groups, record.columns))
+        labels = ", ".join(coefficient_labels(model._groups, record.columns, specs))
         key = "boundary_rows" if record.boundary else "unresolved_rows"
         if getattr(record, "unresolved_basis", False):
             # the basis cannot show whether the direction moves rows at all
@@ -1925,7 +1927,7 @@ def fit_path(
     X, y, sample_weight, offset = _validate_entrypoint_input(model, X, y, sample_weight, offset)
     validated_inputs = (X, y, sample_weight, offset)
     workspace = FitWorkspace.start(model, mode="fit_path", validated_inputs=validated_inputs)
-    path_result = _fit_path_in_workspace(
+    path_result, statements = _fit_path_in_workspace(
         workspace.model,
         X,
         y,
@@ -1945,9 +1947,7 @@ def fit_path(
         workspace,
         model,
         revision=model._fit_revision + 1,
-        separation_statement=format_path_runtime_message(
-            path_result.lambda_seq, path_result.separation_path
-        ),
+        separation_statement=format_path_runtime_message(path_result.lambda_seq, statements),
     )
     _install_fit_state(model, candidate)
     return path_result
@@ -1968,7 +1968,11 @@ def _fit_path_in_workspace(
     lambda_ratio=1e-3,
     lambda_seq=None,
 ):
-    """Build and solve a regularization path on private mutable state."""
+    """Build and solve a regularization path on private mutable state.
+
+    Returns the path and each point's runtime finding for its warning
+    (``path_ops.run_lambda_path``'s ``separation_statements``).
+    """
     _reject_random_effect_selection_fit(model, "fit_path")
     _reject_lambda_policy_fit(model, "fit_path")
     from superglm.model.base import (
@@ -1984,7 +1988,7 @@ def _fit_path_in_workspace(
     # has to be the one a positive lambda1 requires, whatever the model was
     # configured with.
     y, sample_weight, offset = model_build_design_matrix(
-        model, X, y, sample_weight, offset, selection_active=True
+        model, X, y, sample_weight, offset, selection_active=True, caps_enforced=False
     )
     sample_weight, offset = _store_fit_arrays(model, sample_weight, offset, y)
     _clear_fit_inference_caches(model)
@@ -2045,7 +2049,7 @@ def _fit_path_in_workspace(
         edf_path=path_data["edf_path"],
         separation_path=tuple(path_data["separation_path"]),
     )
-    return path_result
+    return path_result, path_data["separation_statements"]
 
 
 def _warn_slow_exact_reml(model, lambdas) -> None:

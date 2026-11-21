@@ -113,6 +113,7 @@ def diagnostics(model) -> dict[str, Any]:
     from superglm.reml.identified import coefficient_labels
 
     records = getattr(res, "truncated_directions", ()) or ()
+    specs = {**model._specs, **model._interaction_specs}
     for key, keep in (
         ("weakly_identified_rows", lambda record: record.at_maximum),
         ("unresolved_rows", lambda record: not record.at_maximum and not record.boundary),
@@ -122,7 +123,7 @@ def diagnostics(model) -> dict[str, Any]:
             {
                 "rows": list(record.rows),
                 "row_count": record.row_count,
-                "coefficients": list(coefficient_labels(model._groups, record.columns)),
+                "coefficients": list(coefficient_labels(model._groups, record.columns, specs)),
                 "information_ratio": record.information_ratio,
                 # judged at an iterate before the one returned: history
                 "earlier": bool(getattr(record, "earlier", False)),

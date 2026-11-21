@@ -481,11 +481,19 @@ def _write_rating_blocks(ws, main_effects, interactions) -> None:
     _annotate_piecewise_blocks(ws, main_effects)
     _annotate_per_unit_offset_blocks(ws, main_effects)
     _annotate_ppform_blocks(ws, main_effects)
+    # A categorical block's own note (its separated levels) in the same note row.
+    for block, start_col in zip(
+        main_effects, _main_effect_start_columns(main_effects), strict=True
+    ):
+        if getattr(block, "note", None):
+            ws.cell(row=_MAIN_EFFECT_NOTE_ROW, column=start_col, value=block.note)
 
     interaction_row = max_main_row + 3
     for block in interactions:
         title_cell = ws.cell(row=interaction_row, column=1, value=block.name)
         title_cell.font = Font(bold=True)
+        if getattr(block, "note", None):
+            ws.cell(row=interaction_row + 1, column=1, value=block.note)
         end_row, _ = _write_dataframe(ws, block.table, interaction_row + 2, 1)
         for row in ws.iter_rows(
             min_row=interaction_row + 3,

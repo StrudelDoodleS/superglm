@@ -56,6 +56,7 @@ def _centered_se(
     interaction_specs: dict[str, Any],
     *,
     n_points: int = 200,
+    flags=None,
 ) -> NDArray | None:
     """The errors of the mean-centered report, or ``None`` when not centering.
 
@@ -76,6 +77,7 @@ def _centered_se(
         interaction_specs,
         n_points=n_points,
         center=True,
+        flags=flags,
     )
 
 
@@ -176,6 +178,7 @@ def term_inference(
             result=result,
             groups=groups,
             interaction_specs=interaction_specs,
+            specs=specs,
         )
 
     spec = specs.get(name)
@@ -548,6 +551,14 @@ def term_inference(
         levels = raw["levels"]
         log_rels = np.array([raw["log_relativities"][lv] for lv in levels])
         rels = np.array([raw["relativities"][lv] for lv in levels])
+        # the levels reported blank, and the levels a mean-centred report centres on,
+        # from one reading of the fit's separation record
+        from superglm.model.separated_levels import level_flags, separation_flags
+
+        flags = separation_flags(groups, specs, interaction_specs)
+        separated, centre_on = level_flags(
+            groups, specs, interaction_specs, name, levels, centering=centering, flags=flags
+        )
 
         se = ci_lo = ci_hi = None
         if with_se and active and Cov_active is not None:
@@ -560,6 +571,7 @@ def term_inference(
                 groups,
                 specs,
                 interaction_specs,
+                flags=flags,
             )
             ci_lo = _safe_exp(log_rels - z_alpha * se)
             ci_hi = _safe_exp(log_rels + z_alpha * se)
@@ -581,8 +593,10 @@ def term_inference(
                 smoothing_lambda=lam,
                 monotone=rules_of(spec).describe() or None,
                 alpha=alpha,
+                separated=separated,
             ),
             centering,
+            centre_on=centre_on,
             se_centered=_centered_se(
                 centering,
                 name,
@@ -592,6 +606,7 @@ def term_inference(
                 groups,
                 specs,
                 interaction_specs,
+                flags=flags,
             ),
         )
         if spec._grouping is not None:

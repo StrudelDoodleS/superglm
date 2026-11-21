@@ -345,18 +345,28 @@ def build_coef_rows(
     icpt_se = float(standard_errors(icpt_var, result, known_scale=known_scale))
 
     rows: list[_CoefRow] = []
+    # The coefficients a separated level or cell moves (``separated_coefficients``,
+    # the intercept last): each keeps its estimate, with its Wald fields blank.
+    from superglm.model.separated_levels import separated_coefficients
+
+    separated = separated_coefficients(groups, specs, interaction_specs)
+
+    def moves(column: int) -> bool:
+        return separated is not None and bool(separated[column])
 
     # Intercept row
     z, p, ci_lo, ci_hi = _compute_coef_stats(intercept, icpt_se, alpha)
+    blank = moves(-1)
     rows.append(
         _CoefRow(
             name="Intercept",
             coef=intercept,
-            se=icpt_se,
-            z=z,
-            p=p,
-            ci_low=ci_lo,
-            ci_high=ci_hi,
+            se=None if blank else icpt_se,
+            z=None if blank else z,
+            p=None if blank else p,
+            ci_low=None if blank else ci_lo,
+            ci_high=None if blank else ci_hi,
+            separated=blank,
         )
     )
 
@@ -861,22 +871,26 @@ def build_coef_rows(
                 coef_val = float(b_g[i])
                 se_val = float(se_g[i])
                 z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+                blank = moves(g.start + i)
                 n_obs_i, exp_share_i, thin_i = diag.get(i, (None, None, False))
+                # a blank row's interval is not shown, so no note about it is either
+                thin_i = thin_i and not blank
                 rows.append(
                     _CoefRow(
                         name=f"{g.name}[{level}]",
                         group=g.name,
                         coef=coef_val,
-                        se=se_val,
-                        z=z,
-                        p=p,
-                        ci_low=ci_lo,
-                        ci_high=ci_hi,
+                        se=None if blank else se_val,
+                        z=None if blank else z,
+                        p=None if blank else p,
+                        ci_low=None if blank else ci_lo,
+                        ci_high=None if blank else ci_hi,
                         edf=cat_edf if i == 0 else None,
                         level_n_obs=n_obs_i,
                         level_exposure_share=exp_share_i,
                         quasi_separated=thin_i,
                         advisory_trigger="thin_level" if thin_i else "",
+                        separated=blank,
                         monotone=cat_rules,
                         monotone_engine=_engine_tag(spec, g.monotone_engine if cat_rules else None),
                     )
@@ -1004,16 +1018,18 @@ def build_coef_rows(
                 coef_val = float(b_g[i])
                 se_val = float(se_g[i])
                 z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+                blank = moves(g.start + i)
                 rows.append(
                     _CoefRow(
                         name=f"{g.name}[{lev1}:{lev2}]",
                         group=g.name,
                         coef=coef_val,
-                        se=se_val,
-                        z=z,
-                        p=p,
-                        ci_low=ci_lo,
-                        ci_high=ci_hi,
+                        se=None if blank else se_val,
+                        z=None if blank else z,
+                        p=None if blank else p,
+                        ci_low=None if blank else ci_lo,
+                        ci_high=None if blank else ci_hi,
+                        separated=blank,
                     )
                 )
 

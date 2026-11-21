@@ -84,6 +84,10 @@ class _CoefRow:
     advisory_trigger: str = ""
     level_n_obs: int | None = None
     level_exposure_share: float | None = None
+    # A level or crossed cell whose effect moves along a separating direction
+    # (``separated_levels.separated_coefficients``): its estimate is where the fit
+    # stopped, and its Wald standard error, z, p and interval are left blank.
+    separated: bool = False
     # Per-level fit provenance: "smooth" for a level carried by the spline,
     # "free" for an OrderedCategorical special, None when the term has no
     # specials. Drives the optional `fit` column in both renderers.
@@ -232,6 +236,20 @@ _LOW_CREDIBILITY_NOTE_BODY = (
 _LOW_CREDIBILITY_NOTE = (
     "LC: " + _LOW_CREDIBILITY_NOTE_BODY[0].lower() + _LOW_CREDIBILITY_NOTE_BODY[1:]
 )
+# The advisory column's tag for a separated level, and what it means; the workbook
+# carries the note's body beside its own Warning cell.
+_SEPARATED_TAG = "SEP"
+_SEPARATED_NOTE_BODY = (
+    "Separated — every response on this level's, or cell's, rows is 0, or every one\n"
+    "is 1, so the data give its effect no finite estimate. The estimate shown is where\n"
+    "the fit stopped, and its standard error, z, p-value and interval are left blank:\n"
+    "a Wald statistic has no finite reference there (Hauck and Donner, JASA 72, 1977).\n"
+    "A coefficient the other rows do not determine moves with it and is flagged too:\n"
+    "every level against a separated base, the intercept, a parent's main effect\n"
+    "beside a separated cell. Group the level with similar levels, or fit the term\n"
+    "as a RandomEffect, to price it."
+)
+_SEPARATED_NOTE = f"{_SEPARATED_TAG}: " + _SEPARATED_NOTE_BODY[0].lower() + _SEPARATED_NOTE_BODY[1:]
 _WALD_NOTE = (
     "Note: smooth p-values use Wood (2013) Bayesian test.\n"
     "Parametric p-values are Wald approximations.\n"
@@ -842,7 +860,15 @@ class ModelSummary:
                 lines.append(
                     _row(
                         f"{_coef_prefix(row)}"
-                        + _coef_fields(coef_str, "---", "---", "---", "---", "---")
+                        + _coef_fields(
+                            coef_str,
+                            "---",
+                            "---",
+                            "---",
+                            "---",
+                            "---",
+                            advisory=_SEPARATED_TAG if row.separated else "",
+                        )
                     )
                 )
 
@@ -867,6 +893,8 @@ class ModelSummary:
         has_low_credibility = any(r.quasi_separated for r in display_rows)
         if has_low_credibility:
             lines.append(_LOW_CREDIBILITY_NOTE)
+        if any(r.separated for r in display_rows):
+            lines.append(_SEPARATED_NOTE)
         abbrevs = info.get("penalty_abbrevs", {})
         if abbrevs:
             lines.append("; ".join(f"{k}: {v}" for k, v in abbrevs.items()))
@@ -1272,7 +1300,7 @@ class ModelSummary:
                     f'<td style="{cell}">---</td>'
                     f'<td style="{cell}">---</td>'
                     f'<td style="{sig_cell}"></td>'
-                    f'<td style="{sig_cell}"></td>'
+                    f'<td style="{sig_cell}">{_SEPARATED_TAG if row.separated else ""}</td>'
                     f"</tr>"
                 )
 
@@ -1309,6 +1337,12 @@ class ModelSummary:
             parts.append(
                 f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
                 f'color:#c60;border:none;">{advisory_note_html}</td></tr>'
+            )
+        if any(r.separated for r in display_rows):
+            separated_note_html = html_escape(_SEPARATED_NOTE).replace("\n", "<br>")
+            parts.append(
+                f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
+                f'color:#c60;border:none;">{separated_note_html}</td></tr>'
             )
         for note in (info.get("convergence_note"), info.get("standard_error_note")):
             if note:

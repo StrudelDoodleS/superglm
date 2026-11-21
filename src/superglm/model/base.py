@@ -502,15 +502,6 @@ def _predict_eta(
             named = [label for label in held if label in met]
             if named:
                 separated_levels.append(f"{term['name']!r} levels {', '.join(map(str, named))}")
-    # A prediction warning names the caller of ``predict``, however deep the call.
-    if separated_levels:
-        warn_caller(
-            "Categorical levels that had exposure but only boundary responses at fit have no "
-            "finite effect; the fit's value for them is where its walk stopped, so their "
-            "predictions sit near the response boundary: " + "; ".join(separated_levels) + ". "
-            "Merge them into similar levels (Categorical(grouping=...)) or use re() on the term."
-        )
-
     if not fitted:
         from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
 
@@ -539,8 +530,30 @@ def _predict_eta(
             )
             continue
         score(term)
+        held_cells = getattr(spec, "_separated_cells_at_fit", ())
+        if held_cells and not fitted and warn:
+            from superglm.model.separated_levels import predicted_cells
+
+            met_cells = predicted_cells(model, term["name"], frame)
+            named = [cell for cell in held_cells if tuple(cell) in met_cells]
+            if named:
+                cells = ", ".join(f"{first} x {second}" for first, second in named)
+                separated_levels.append(f"{term['name']!r} cells {cells}")
     if unidentified and warn:
         warn_caller(SZ_POPULATION_PREDICTION + "; ".join(unidentified) + ".")
+    # A prediction warning names the caller of ``predict``, however deep the call.
+    if separated_levels:
+        from superglm.diagnostics.separation import SeparationWarning
+
+        warn_caller(
+            "These rows reach categorical levels or crossed cells whose training rows all had "
+            "a response of 0, or all of 1, so the data give their effect no finite estimate: "
+            + "; ".join(separated_levels)
+            + ". Their predictions use the fitted value, which is where the fit stopped, not "
+            "an estimate. Group those levels with similar levels, or fit the term as a "
+            "RandomEffect, and refit to price them.",
+            SeparationWarning,
+        )
 
     total = eta.finish(consume=True)
     if offset is not None:
@@ -1588,6 +1601,7 @@ def model_build_design_matrix(
     offset: NDArray | None,
     *,
     selection_active: bool | None = None,
+    caps_enforced: bool = True,
 ) -> tuple[NDArray, NDArray, NDArray | None]:
     """Build features, groups, design matrix.
 
@@ -1599,7 +1613,9 @@ def model_build_design_matrix(
     which is only free while the solver's rank convention chooses the
     representative of a cross-group rank deficiency; a group penalty chooses
     a different one.  ``None`` reads the model's configured intent, which is
-    right for every caller that does not sweep lambda1 itself.
+    right for every caller that does not sweep lambda1 itself.  ``caps_enforced``
+    is False for a solve that ignores fit-time rules (``fit_path``): a capped
+    ``Categorical`` is scanned there like any other.
     """
     if selection_active is None:
         selection_active = selection_penalty_is_active(model)
@@ -1630,6 +1646,7 @@ def model_build_design_matrix(
         # they were fitted under, matching the ModelConfig unpickle backfill.
         group_pricing=getattr(model, "_group_pricing", "spanned"),
         weight_semantics=model_weight_semantics(model),
+        caps_enforced=caps_enforced,
     )
     model._distribution = result.distribution
     model._link = result.link

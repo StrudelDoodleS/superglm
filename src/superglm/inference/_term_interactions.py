@@ -20,8 +20,13 @@ def _interaction_inference(
     result: PIRLSResult,
     groups: list[GroupSlice],
     interaction_specs: dict[str, Any],
+    specs: dict[str, Any] | None = None,
 ) -> InteractionInference:
-    """Build an InteractionInference from a fitted interaction."""
+    """Build an InteractionInference from a fitted interaction.
+
+    ``specs`` (the main effects) lets a crossed term flag the cells a separated level
+    or cell moves (``separated_levels.pair_flags``).
+    """
     ispec = interaction_specs[name]
     feature_groups = [g for g in groups if g.feature_name == name]
     beta_combined = np.concatenate([result.beta[g.sl] for g in feature_groups])
@@ -44,6 +49,8 @@ def _interaction_inference(
         from superglm.features.interaction import interaction_cells, warn_shared_cell_labels
 
         warn_shared_cell_labels(name, raw, "`pair_relativity` and `pair_log_relativity`")
+        from superglm.model.separated_levels import pair_flags
+
         return InteractionInference(
             name=name,
             kind="categorical",
@@ -53,6 +60,7 @@ def _interaction_inference(
             relativity=raw["relativities"],
             pair_log_relativity=interaction_cells(raw, "log_relativities"),
             pair_relativity=interaction_cells(raw),
+            separated=pair_flags(groups, specs or {}, interaction_specs, name, raw["pairs"]),
         )
 
     if "relativities_per_unit" in raw:

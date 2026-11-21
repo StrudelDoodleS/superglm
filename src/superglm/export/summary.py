@@ -18,7 +18,11 @@ from superglm.inference._term_helpers import spline_groups
 
 # The legend's wording is imported from ``inference.summary`` rather than
 # restated, so the console and the export cannot drift apart.
-from superglm.inference.summary import _LOW_CREDIBILITY_NOTE_BODY, _editor_notes
+from superglm.inference.summary import (
+    _LOW_CREDIBILITY_NOTE_BODY,
+    _SEPARATED_NOTE_BODY,
+    _editor_notes,
+)
 from superglm.model.fit_state import fitted_penalty
 from superglm.solvers.rank import selected_group_name_set
 
@@ -327,6 +331,7 @@ def _significance(p_value: float | None) -> str:
     return ""
 
 
+_SEPARATED_WARNING = "Separated"
 _ADVISORY_WARNINGS = {"thin_level": _THIN_LEVEL_WARNING, "outsized_se": _OUTSIZED_SE_WARNING}
 
 
@@ -338,6 +343,8 @@ def _advisory_warning(row: _CoefRow, quasi_separated: bool) -> str:
     those diagnostics from all but the first member of a grouped level, so a
     renderer that re-derives disagrees with this one about the same row.
     """
+    if row.separated:
+        return _SEPARATED_WARNING
     if not quasi_separated:
         return ""
     return _ADVISORY_WARNINGS.get(row.advisory_trigger, _UNKNOWN_ADVISORY_WARNING)
@@ -420,8 +427,10 @@ def _summary_notes(
         if any(row.kind == "group" and row.statistic_type == "chi2" for row in terms):
             notes.append(_GROUP_WALD_NOTE)
         notes.append(_PARAMETRIC_WALD_NOTE)
-    if any(row.warning for row in terms):
+    if any(row.warning and row.warning != _SEPARATED_WARNING for row in terms):
         notes.append(_LOW_CREDIBILITY_NOTE_BODY)
+    if any(row.warning == _SEPARATED_WARNING for row in terms):
+        notes.append(_SEPARATED_NOTE_BODY)
     return tuple(notes)
 
 

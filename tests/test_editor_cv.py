@@ -2704,7 +2704,11 @@ def test_final_fit_gives_level_advice_only_for_a_separated_level(monkeypatch):
     """
     import superglm.diagnostics.separation as separation_module
     import superglm.editor.cv as cv
-    from superglm.diagnostics.separation import SeparationError, format_runtime_message
+    from superglm.diagnostics.separation import (
+        RuntimeFinding,
+        SeparationError,
+        format_runtime_message,
+    )
     from superglm.editor.cv import capture_final_fit, run_final_fit
     from superglm.editor.errors import EditorValueError
 
@@ -2717,7 +2721,8 @@ def test_final_fit_gives_level_advice_only_for_a_separated_level(monkeypatch):
     ).fit_reml(*train)
     session = EditorSession.from_model(template, train_data=train, validation_data=validation)
     message = format_runtime_message(1e35, 5, ["x"], True)
-    monkeypatch.setattr(separation_module, "runtime_finding", lambda *_a, **_k: message)
+    finding = RuntimeFinding(message, ("x",))
+    monkeypatch.setattr(separation_module, "runtime_finding", lambda *_a, **_k: finding)
 
     with pytest.raises(EditorValueError) as final:
         run_final_fit(capture_final_fit(session), _Context())
@@ -2742,7 +2747,7 @@ def test_run_cv_gives_level_advice_only_for_a_separated_level(monkeypatch):
     """
     import superglm.diagnostics.separation as separation_module
     import superglm.editor.cv as cv
-    from superglm.diagnostics.separation import format_runtime_message
+    from superglm.diagnostics.separation import RuntimeFinding, format_runtime_message
     from superglm.editor.cv import capture_cv_run, run_cv
     from superglm.editor.errors import EditorValueError
 
@@ -2771,7 +2776,9 @@ def test_run_cv_gives_level_advice_only_for_a_separated_level(monkeypatch):
             fits[-1] = False
 
     def finding(*args, **kwargs):
-        return message if fits and fits[-1] else real_finding(*args, **kwargs)
+        if fits and fits[-1]:
+            return RuntimeFinding(message, ("x",))
+        return real_finding(*args, **kwargs)
 
     monkeypatch.setattr(SuperGLM, "fit", fold_fit)
     monkeypatch.setattr(separation_module, "runtime_finding", finding)
@@ -2837,7 +2844,7 @@ def test_final_fit_keeps_a_finding_from_a_fit_short_of_the_guard_after_an_edit(m
     """
     import superglm.diagnostics.separation as separation_module
     from superglm import SeparationWarning
-    from superglm.diagnostics.separation import format_runtime_message
+    from superglm.diagnostics.separation import RuntimeFinding, format_runtime_message
     from superglm.editor.cv import capture_final_fit, run_final_fit
 
     z = np.repeat([0.0, 1.0], 64)
@@ -2847,7 +2854,8 @@ def test_final_fit_keeps_a_finding_from_a_fit_short_of_the_guard_after_an_edit(m
     term = session.terms["z"]
     term.edited_log_effect = term.original_log_effect * 1.01
     message = format_runtime_message(1e35, 30, ["z"], False)
-    monkeypatch.setattr(separation_module, "runtime_finding", lambda *_a, **_k: message)
+    finding = RuntimeFinding(message, ("z",))
+    monkeypatch.setattr(separation_module, "runtime_finding", lambda *_a, **_k: finding)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         final = run_final_fit(capture_final_fit(session), _Context())

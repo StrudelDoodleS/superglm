@@ -13,8 +13,11 @@ from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 
 
-def _make_sparse_tweedie_data(n=10_000, n_rare=10, seed=42):
-    """Create Tweedie data with one near-separated level (few obs, all y=0)."""
+def _make_sparse_tweedie_data(n=10_000, n_rare=10, seed=42, separated=True):
+    """Create Tweedie data with one near-separated level (few obs, all y=0).
+
+    ``separated=False`` gives the rare level one positive response: thin, not separated.
+    """
     rng = np.random.default_rng(seed)
 
     # Build most observations from well-identified levels
@@ -31,6 +34,8 @@ def _make_sparse_tweedie_data(n=10_000, n_rare=10, seed=42):
 
     y = generate_tweedie_cpg(n, mu=mu, phi=2.0, p=1.5, rng=rng)
     y[cat == "rare"] = 0.0  # force near-separation
+    if not separated:
+        y[np.flatnonzero(cat == "rare")[0]] = float(np.median(y[y > 0]))
 
     # Shuffle so rare obs aren't all at the end
     idx = rng.permutation(n)
@@ -43,7 +48,7 @@ def _make_sparse_tweedie_data(n=10_000, n_rare=10, seed=42):
 
 
 class TestSEFiniteForRareLevel:
-    """SE must be large but finite (not 0, not inf) for separated levels."""
+    """A separated level keeps its estimate, flagged, with its Wald statistics blank."""
 
     def test_se_finite_for_rare_level(self):
         df, y, exposure = _make_sparse_tweedie_data()
@@ -56,12 +61,10 @@ class TestSEFiniteForRareLevel:
         s = m.summary()
 
         rare_row = next(r for r in s._coef_rows if "rare" in r.name)
-        assert rare_row.se is not None
-        assert rare_row.se > 0, "SE should not be zero for separated level"
-        assert np.isfinite(rare_row.se), "SE should be finite"
-        assert np.isfinite(rare_row.z), "z-score should be finite"
-        # SE should be large (indicating undetermined)
-        assert rare_row.se > 1.0, "SE should be large for near-separated level"
+        assert rare_row.separated and np.isfinite(rare_row.coef)
+        assert (rare_row.se, rare_row.z, rare_row.p) == (None, None, None)
+        others = [r for r in s._coef_rows if r.group == "cat" and "rare" not in r.name]
+        assert others and all(np.isfinite(r.se) and r.se > 0 for r in others)
 
 
 class TestSeparatedTailDiagnostics:
@@ -245,10 +248,16 @@ class TestZeroWeightDiagnostics:
 
 
 class TestQuasiSeparatedMarker:
-    """The ? marker must appear on rare levels."""
+    """The ? marker must appear on rare levels; a separated one reads SEP instead.
 
+    A separated level's interval is blank, so the low-credibility note about its
+    interval is not shown (``build_coef_rows``).
+    """
+
+    @pytest.mark.pins_behaviour
     def test_marker_on_rare_level(self):
-        df, y, exposure = _make_sparse_tweedie_data()
+        """Control: a thin level with one claim keeps the low-credibility marker, as on master."""
+        df, y, exposure = _make_sparse_tweedie_data(separated=False)
         m = SuperGLM(
             family=Tweedie(p=1.5),
             selection_penalty=0.0,
@@ -258,7 +267,18 @@ class TestQuasiSeparatedMarker:
         s = m.summary()
 
         rare_row = next(r for r in s._coef_rows if "rare" in r.name)
-        assert rare_row.quasi_separated is True
+        assert rare_row.quasi_separated is True and not rare_row.separated
+
+    def test_a_separated_rare_level_reads_sep(self):
+        df, y, exposure = _make_sparse_tweedie_data()
+        m = SuperGLM(
+            family=Tweedie(p=1.5),
+            selection_penalty=0.0,
+            features={"cat": Categorical(base="first")},
+        )
+        m.fit(df, y, sample_weight=exposure, offset=np.log(exposure))
+        rare_row = next(r for r in m.summary()._coef_rows if "rare" in r.name)
+        assert rare_row.separated and not rare_row.quasi_separated
 
 
 class TestPerLevelDiagnostics:
@@ -332,8 +352,10 @@ class TestFootnoteInSummary:
     is the whole of what the rule measured.
     """
 
+    @pytest.mark.pins_behaviour
     def test_footnote_present(self):
-        df, y, exposure = _make_sparse_tweedie_data()
+        """Control: the footnote names a thin level with one claim, as on master."""
+        df, y, exposure = _make_sparse_tweedie_data(separated=False)
         m = SuperGLM(
             family=Tweedie(p=1.5),
             selection_penalty=0.0,

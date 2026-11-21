@@ -3534,8 +3534,13 @@ class TestSummaryInferenceCache:
                     err_msg=f"EDF mismatch for {sr.name}",
                 )
 
+    @pytest.mark.pins_behaviour
     def test_summary_sparse_categorical_se_matches_metrics(self):
-        """Rare weakly-identified factor levels must keep large summary SEs."""
+        """Rare weakly-identified factor levels must keep large summary SEs.
+
+        Control: pins master's agreement on a weak level's SE above 1.  J keeps one
+        claim, so it is weak but not separated, and its Wald row is reported.
+        """
         rng = np.random.default_rng(0)
         levels = list("ABCDEFGHIJ")
         n = 8000
@@ -3555,6 +3560,7 @@ class TestSummaryInferenceCache:
         mu = np.exp(eta)
         counts = rng.poisson(mu * w).astype(float)
         counts[rare_mask] = 0.0
+        counts[np.flatnonzero(rare_mask)[0]] = 1.0
         y = counts / np.maximum(w, 1e-300)
         X = pd.DataFrame({"cat": pd.Categorical(x, categories=levels)})
 

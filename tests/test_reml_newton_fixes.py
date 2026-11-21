@@ -694,11 +694,15 @@ class TestQuasiSeparatedCIFinite:
         )
         m.fit(df, y, sample_weight=exposure, offset=np.log(exposure))
 
-        # term_inference should produce finite CIs for all levels
+        # term_inference gives finite CIs for every level but the separated one, whose
+        # interval is blank (NaN, never inf)
         ti = m.term_inference("cat")
+        assert list(ti.separated) == [lev == "rare" for lev in ti.levels]
         if ti.ci_lower is not None:
-            assert np.all(np.isfinite(ti.ci_lower)), "CI lower contains inf/nan"
-            assert np.all(np.isfinite(ti.ci_upper)), "CI upper contains inf/nan"
+            priced = ~ti.separated
+            assert np.all(np.isfinite(ti.ci_lower[priced])), "CI lower contains inf/nan"
+            assert np.all(np.isfinite(ti.ci_upper[priced])), "CI upper contains inf/nan"
+            assert np.all(np.isnan(ti.ci_lower[ti.separated]))
 
         # summary should also produce finite output
         s = m.summary()

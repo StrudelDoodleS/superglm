@@ -367,6 +367,8 @@ class PIRLSResult:
     # shown (``disclose_runtime_separation``).  A coefficient revision clears it,
     # since no solve returned the revised state (``publish_revised_coefficients``).
     separation_message: str | None = None
+    # The groups that finding names, farthest first (``RuntimeFinding.groups``).
+    separation_groups: tuple[str, ...] = ()
 
     def __setattr__(self, name: str, value: object) -> None:
         if self.__dict__.get("_publication_locked", False):
@@ -1866,7 +1868,7 @@ def _fit_pirls_inner(
     # exploded weight range, marks a coefficient drifting to infinity
     # (``separation.runtime_finding``).  Recorded on the returned state, and
     # warned or refused here under "warn" or "error", as irls_direct does.
-    separation_message = None
+    separation_message, separation_groups = None, ()
     if separation != "ignore" and np.isfinite(dev):
         from superglm.diagnostics.separation import (
             STAGNANT_DEVIANCE_DELTA,
@@ -1875,7 +1877,7 @@ def _fit_pirls_inner(
             runtime_finding,
         )
 
-        separation_message = runtime_finding(
+        finding = runtime_finding(
             dm,
             groups,
             beta,
@@ -1900,6 +1902,8 @@ def _fit_pirls_inner(
             eta_unclipped=retained.eta_unclipped,
             weights=weights,
         )
+        if finding is not None:
+            separation_message, separation_groups = finding.message, finding.groups
         if separation_message is not None and separation == "error":
             raise SeparationError(separation_message)
         if separation_message is not None and separation == "warn":
@@ -2114,6 +2118,7 @@ def _fit_pirls_inner(
         state_center=None if state_center is None else state_center.copy(),
         mean_space_boundary_rows=boundary_rows,
         separation_message=separation_message,
+        separation_groups=separation_groups,
     )
 
 

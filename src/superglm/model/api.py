@@ -223,10 +223,17 @@ class SuperGLM:
             with exposure whose responses all sit on the response boundary
             (no positive response under a log-link Poisson fit, say), so they
             have no finite maximum-likelihood effect. ``"warn"``
-            (default) emits a ``SeparationWarning`` naming the cells and the
-            remedies before fitting; ``"error"`` raises ``SeparationError``;
-            ``"ignore"`` disables the check. Terms under an active selection
-            penalty are exempt. The same mode governs the solver's backstop
+            (default) fits them and, once the fit is solved, emits one
+            ``SeparationWarning`` naming each with its rows, exposure, the
+            response its rows would expect at the base level's rate and the
+            response the fit gives them, and the remedies; ``summary()`` flags
+            them and leaves their standard errors and p-values blank.
+            ``"error"`` raises ``SeparationError`` before fitting;
+            ``"ignore"`` disables the check and its notices. Terms under an
+            active selection penalty, and a ``Categorical`` under a
+            ``Constraint.fit.cap`` in ``fit`` and ``fit_reml`` (which enforce
+            it, unlike ``fit_path``), are exempt.
+            The same mode governs the solver's backstop
             for separation the build scan cannot see (read on the fit
             returned, or each point ``fit_path`` returns, not on a search's
             trial solves), the hold on a
@@ -347,15 +354,20 @@ class SuperGLM:
         recorded which standard errors they show
         (``release_saved_mask_summaries``).  A kindless spline the saved fit built as a SCOP
         P-spline is marked to warn at its next build
-        (``mark_kindless_saved_on_scop``).
+        (``mark_kindless_saved_on_scop``).  A capped level an older build recorded
+        separated is cleared where the fit enforced the cap, and a summary cached beside
+        a separated level is dropped (``release_capped_separation_records``,
+        ``release_separated_level_summaries``).
         """
         self.__dict__.update(state)
         # Metadata of a retired fast discrete predictor; nothing reads it.
         self.__dict__.pop("_fast_prediction_state", None)
         from superglm.model.retired_state import (
             mark_retired_linear_state,
+            release_capped_separation_records,
             release_retired_tweedie_state,
             release_saved_mask_summaries,
+            release_separated_level_summaries,
             release_v0_35_nb_summaries,
         )
 
@@ -363,6 +375,8 @@ class SuperGLM:
         release_retired_tweedie_state(self)
         release_v0_35_nb_summaries(self)
         release_saved_mask_summaries(self)
+        release_capped_separation_records(self)
+        release_separated_level_summaries(self)
         from superglm.features._spline_build import mark_kindless_saved_on_scop
 
         mark_kindless_saved_on_scop(self)

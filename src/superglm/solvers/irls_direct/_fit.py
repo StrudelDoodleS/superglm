@@ -606,7 +606,7 @@ class _IRLSDirectFitFields:
         # run's loop, after the verdict
         " deviance_relative_change"
         # _finish
-        " centred_intercept_lo separation_message"
+        " centred_intercept_lo separation_message separation_groups"
         # _terminal_rows
         " export_rows"
     ).split()
@@ -1682,7 +1682,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         # fit that publishes the state (``separation.disclose_runtime_separation``):
         # a REML candidate, a theta or power evaluation or a line-search trial
         # describes only itself.
-        self.separation_message = None
+        self.separation_message, self.separation_groups = None, ()
         if self.separation != "ignore" and np.isfinite(dev):
             from superglm.diagnostics.separation import (
                 STAGNANT_DEVIANCE_DELTA,
@@ -1691,7 +1691,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                 runtime_finding,
             )
 
-            self.separation_message = runtime_finding(
+            finding = runtime_finding(
                 self.dm,
                 self.groups,
                 beta,
@@ -1720,6 +1720,8 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                 eta_unclipped=eta_unclipped,
                 weights=weights,
             )
+            if finding is not None:
+                self.separation_message, self.separation_groups = finding.message, finding.groups
             if self.separation_message is not None and self.separation == "error":
                 raise SeparationError(self.separation_message)
             if self.separation_message is not None and self.separation == "warn":
@@ -1905,6 +1907,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             weight_exponent=exponent,
             solver_phi=solver_phi,
             separation_message=self.separation_message,
+            separation_groups=self.separation_groups,
         )
 
         if self.return_xtwx:

@@ -62,7 +62,15 @@ def run_lambda_path(
     offset,
     lambda_seq,
 ):
-    """Run the PIRLS warm-start path and return arrays plus the final result."""
+    """Run the PIRLS warm-start path and return arrays plus the final result.
+
+    ``separation_statements`` holds each point's runtime finding for the path's one
+    warning: ``None`` where its solve had none, or where it names only terms whose
+    separated levels or cells the fit already discloses (``restates_separated_level``).
+    """
+    from superglm.diagnostics.separation import restates_separated_level
+    from superglm.model.separated_levels import separated_terms
+
     n_lambda = len(lambda_seq)
     p = model._dm.p
     coef_path = np.zeros((n_lambda, p))
@@ -72,6 +80,8 @@ def run_lambda_path(
     n_iter_path = np.zeros(n_lambda, dtype=int)
     converged_path = np.zeros(n_lambda, dtype=bool)
     separation_path: list[str | None] = []
+    separation_statements: list[str | None] = []
+    disclosed = separated_terms(model)
 
     beta_warm = None
     intercept_warm = None
@@ -104,6 +114,8 @@ def run_lambda_path(
         n_iter_path[i] = result.n_iter
         converged_path[i] = result.converged
         separation_path.append(result.separation_message)
+        restated = restates_separated_level(result.separation_groups, disclosed)
+        separation_statements.append(None if restated else result.separation_message)
         beta_warm = result.beta
         intercept_warm = result.intercept
 
@@ -115,5 +127,6 @@ def run_lambda_path(
         "n_iter_path": n_iter_path,
         "converged_path": converged_path,
         "separation_path": separation_path,
+        "separation_statements": separation_statements,
         "result": result,
     }

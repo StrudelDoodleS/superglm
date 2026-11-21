@@ -209,7 +209,8 @@ def _unpriced_region(case: str):
     - ``weak_unscanned_level``: Poisson, the region a factor, the scan turned off;
     - ``weak_gaussian_level``: Gaussian under a log link, the region's response zero: no
       boundary for the scan to count.  In these three REML's diagnostics name the slope as
-      weakly identified, and nothing else does;
+      weakly identified, and nothing else does; under ``separation="ignore"`` its warning is
+      silenced (``event`` is ``None``), since the region's responses are all 0;
     - ``not_converged``: binomial, the region a 0/1 column whose rows are all ones: no record
       names the region, and the fit ends without meeting its convergence test.
     """
@@ -223,10 +224,10 @@ def _unpriced_region(case: str):
         options, event = {"family": "binomial"}, "ConvergenceWarning"
     if case in ("weak_numeric_level", "not_converged"):
         frame, region = frame.assign(region=in_b.astype(float)), Numeric()
-    if case == "weak_unscanned_level":
-        options["separation"] = "ignore"
     if case.startswith("weak"):
         event = "WeakIdentificationWarning"
+    if case == "weak_unscanned_level":
+        options["separation"], event = "ignore", None
     model = SuperGLM(
         **options, features={"region": region, "branch": RandomEffect()}, selection_penalty=0
     )
@@ -659,7 +660,12 @@ def test_a_fit_outside_the_rule_keeps_the_data_rule(case):
         options = {key: value for key, value in options.items() if key == "offset"}
     elif case in _UNPRICED_REGION_CASES:
         frame, y, model, event = _unpriced_region(case)
-        assert event in {type(w.message).__name__ for w in _fit(model, frame, y)}
+        caught = {type(w.message).__name__ for w in _fit(model, frame, y)}
+        if event is None:
+            assert model._reml_profile["reml_weakly_identified"]
+            assert not caught & {"WeakIdentificationWarning", "SeparationWarning"}
+        else:
+            assert event in caught
         assert model.result.converged is (case != "not_converged")
     elif case in ("scanned_level", "runtime_finding"):
         frame, y, model = _unpriced_level(case)

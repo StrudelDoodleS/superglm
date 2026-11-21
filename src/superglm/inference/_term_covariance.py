@@ -54,6 +54,7 @@ def _scatter_centered_variance(
     covariance_block: NDArray,
     row_of_column: NDArray,
     n_rows: int,
+    centre_on: NDArray | None = None,
 ) -> NDArray:
     """``diag(C V C')`` where each report row reads at most one coefficient.
 
@@ -61,9 +62,15 @@ def _scatter_centered_variance(
     ``V = A Cov A'`` for a selection ``A``; ``row_of_column[j]`` is the row
     coefficient ``j`` lands on, and rows it never names (the base, any pinned
     level) carry a zero row of ``V``: SE zero under ``native``, ``p'Vp`` under
-    centering.
+    centering.  ``C = I - 1p'`` with ``p`` the mean over the rows ``centre_on``
+    marks (every row when ``None``).
     """
-    weights = np.full(covariance_block.shape[0], 1.0 / n_rows, dtype=np.float64)
+    row_weights = (
+        np.full(n_rows, 1.0 / n_rows, dtype=np.float64)
+        if centre_on is None
+        else centre_on / float(np.count_nonzero(centre_on))
+    )
+    weights = row_weights[row_of_column]
     column = covariance_block @ weights
     cross = np.zeros(n_rows, dtype=np.float64)
     cross[row_of_column] = column
@@ -220,12 +227,14 @@ def feature_se_from_cov(
     interaction_specs: Mapping[Any, Any],
     n_points: int = 200,
     center: bool = False,
+    flags=None,
 ) -> NDArray:
     """Compute feature-level SEs from a precomputed covariance matrix.
 
     ``center=True`` returns the errors of the mean-centered report, the
     estimable contrast ``C b`` with ``C = I - 11'/L`` and covariance
-    ``C V C'``. An inactive term returns zeros either way.
+    ``C V C'``. An inactive term returns zeros either way.  ``flags`` takes the
+    calling reader's ``separated_levels.separation_flags``.
     """
     from superglm.features.categorical import Categorical
     from superglm.features.numeric import Numeric
@@ -247,6 +256,7 @@ def feature_se_from_cov(
             interaction_specs,
             n_points=n_points,
             center=center,
+            flags=flags,
         )
         return np.ldexp(se, Cov_active.exponent // 2)
 
@@ -365,23 +375,41 @@ def feature_se_from_cov(
         # _non_base excludes pinned levels (declared, no effective rows); their
         # coefficient is fixed at zero, so their SE stays 0.0 like the base's.
         position = {lev: j for j, lev in enumerate(spec._non_base)}
+        # A contrast a separating direction moves has no finite estimate, so it has
+        # no standard error, and the centre is the mean over the levels it leaves
+        # determined (``separated_levels.level_flags``).
+        from superglm.model.separated_levels import level_flags
+
+        separated, centre_on = level_flags(
+            groups,
+            dict(specs),
+            dict(interaction_specs),
+            name,
+            levels,
+            centering="mean" if center else "native",
+            flags=flags,
+        )
         if center:
             rows = np.array([levels.index(lev) for lev in spec._non_base], dtype=np.intp)
-            return cast(
-                NDArray,
-                np.sqrt(
-                    _scatter_centered_variance(
-                        np.maximum(np.diag(Cov_g), 0.0), Cov_g, rows, len(levels)
-                    )
-                ),
+            se_all = np.sqrt(
+                _scatter_centered_variance(
+                    np.maximum(np.diag(Cov_g), 0.0),
+                    Cov_g,
+                    rows,
+                    len(levels),
+                    centre_on,
+                )
             )
-        se_nonbase = np.sqrt(np.maximum(np.diag(Cov_g), 0.0))
-        se_all = np.zeros(len(levels))
-        for i, lev in enumerate(levels):
-            idx = position.get(lev)
-            if idx is not None:
-                se_all[i] = se_nonbase[idx]
-        return se_all
+        else:
+            se_nonbase = np.sqrt(np.maximum(np.diag(Cov_g), 0.0))
+            se_all = np.zeros(len(levels))
+            for i, lev in enumerate(levels):
+                idx = position.get(lev)
+                if idx is not None:
+                    se_all[i] = se_nonbase[idx]
+        if separated is not None:
+            se_all[separated] = np.nan
+        return cast(NDArray, se_all)
 
     if isinstance(spec, Piecewise):
         # ``_raw_basis_matrix`` at the knots is the identity; its retained

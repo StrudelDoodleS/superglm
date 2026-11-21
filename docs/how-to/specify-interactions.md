@@ -419,15 +419,64 @@ model = SuperGLM(
 )
 ```
 
-- `"warn"` (default) emits a `SeparationWarning` naming every separated cell
-  and the remedies, then fits anyway.
-- `"error"` refuses the design with a `SeparationError`.
-- `"ignore"` disables the check.
+- `"warn"` (default) fits anyway and, before the fit is installed on the
+  model, emits one `SeparationWarning`. For each separated level or cell it
+  gives its rows, their weight total when the weights are not all one, its
+  exposure (the sum of `exp(offset)` over its rows, each row once, under a
+  log link with an offset), the response total its rows would expect at the
+  base level's rate, and the response total the fit gives them, which is
+  where the fit stopped, not an estimate. The base-rate figure is what
+  `predict` gives those rows with the level set to the base (both parents to
+  their base for a cell); it is left out when the base is itself separated,
+  or when the move takes a row into a crossed cell no training row occupies,
+  whose rate the data do not set. Both totals weight each row by its
+  `sample_weight`, whatever `weight_semantics` says, and the line says so when
+  the weights are not all one. On a log link, a level no crossed term
+  involves also states its fitted factor against the base. A total past
+  float64's range reads "beyond float64". It says what to do, with a
+  grouping call for the first separated level. Raised as an error, the
+  warning leaves the model's previous fit in place.
+- `"error"` refuses the design with a `SeparationError`, before any fit.
+- `"ignore"` disables the check and every notice of it.
 
-Remedies: collapse the affected levels into neighbours (`collapse_levels` /
-`Categorical(grouping=...)`), model the crossed factor with a `RandomEffect`
-(its ridge bounds every cell), or target the term with a selection penalty
-(penalised terms are exempt from the check because their optima are finite).
+The fit keeps the level: its coefficient, its price in `predict` and its
+factor in the rating tables are what the fit reached. `summary()` flags its
+row `SEP` (the workbook's Warning cell reads `Separated`, the editor's
+summary `SEP`) and leaves its standard error, z, p-value and interval blank,
+as do `term_inference()` and `relativities(with_se=True)`, for main effects
+and crossed cells: a Wald statistic has no finite reference there (Hauck and
+Donner 1977). Any other reported contrast that the rows outside separated
+levels and cells leave undetermined moves with it, and is flagged and
+blanked the same way: every relativity against a separated base, the
+intercept then, a parent's main effect beside a separated cell in its base
+row or column. The test is Lenth's estimability test (as `predict` reads its
+rows) on the term, its categorical parents and the intercept. Every other
+number is unchanged. `centering="mean"` centres on the levels whose contrast
+against the base is determined. With a separated base, every centred level
+stays blank: their covariance is the difference of entries the walk has grown
+to about `1e14`. The default base, the most exposed level, avoids this. A
+rating-table block notes the factors `summary()` flags (a factor fixed at 1
+is never one) and the separated levels or cells they move with, and
+`predict` warns once per call that reaches one, a row an `unseen="base"`
+label or a declared level with no rows prices there included.
+
+Limits. A level separated only jointly with another term (two factors that
+coincide on the claim-free rows, or a slope by a claim-free category) is not
+flagged: the test covers a term, its categorical parents and the crossed
+terms beside it, and such cases keep the figures an unflagged fit shows. A
+model saved before these flags existed keeps its crossed-cell figures and
+its REML weak-identification labels until it is refitted. A binned
+(`discrete=True`) fit's totals score the level's rows exactly, as `predict`
+does, not through the fitted bins.
+
+Remedies: collapse the affected levels into neighbours
+(`Categorical(grouping=collapse_levels(X["make"], groups={"B+C": ["B", "C"]}))`),
+model the crossed factor with a `RandomEffect` (its ridge bounds every cell),
+or bound a main effect with a fit-time cap (`Constraint.fit.cap`) or the term
+with a selection penalty. Penalised terms, and capped levels in `fit` and
+`fit_reml`, are exempt from the check because their optima are finite;
+`fit_path` fits without its caps, so it reports a capped level as separated.
+A crossed cell bounded only through a capped parent is still reported.
 That exemption covers these categorical cells only: the spline-by-factor hold
 described below applies to a term whatever penalty bounds it.
 A cell with few rows but at least one positive response is *not* separated
