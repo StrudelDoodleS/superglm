@@ -42,7 +42,6 @@ from superglm import (
 )
 from superglm import Spline as SplineTerm
 from superglm.diagnostics.separation import (
-    RuntimeFinding,
     SeparationError,
     SeparationWarning,
     format_runtime_message,
@@ -161,9 +160,11 @@ def _two_levels(y_b, **options):
     return model, X, y
 
 
+@pytest.mark.pins_behaviour
 def test_a_refit_whose_warning_is_raised_keeps_the_previous_fit():
     """Under warnings as errors, the warning is raised before the refit is installed.
 
+    Control: pins master's behaviour, whose build raised the warning before any fit.
     At 20f77dd6f it was raised after the install: B's price moved from 0.2 to 8e-8.
     """
     model, X, y = _two_levels(1.0)
@@ -336,11 +337,12 @@ def test_every_separated_level_is_listed():
     assert "more in" not in str(warning.message)
 
 
+@pytest.mark.pins_behaviour
 def test_a_crossed_cells_remedy_names_no_cap():
     """A cap bounds a main effect's levels, not a crossed cell: the remedy does not offer one.
 
-    At 20f77dd6f it said "bound it with Constraint.fit.cap", and capping both parents
-    left the cell separated.
+    Control: pins master's remedy, which named no cap.  At 20f77dd6f it said "bound it
+    with Constraint.fit.cap", and capping both parents left the cell separated.
     """
     _, _, caught = _cells([("A", "P", 20), ("A", "Q", 20), ("B", "P", 20), ("B", "Q", 0)])
     (warning,) = caught
@@ -354,6 +356,7 @@ def _forced_runtime_finding(monkeypatch, carried_by):
     The backstop's terminal signature depends on the trajectory, so a test forces it.
     """
     import superglm.diagnostics.separation as separation
+    from superglm.diagnostics.separation import RuntimeFinding
 
     monkeypatch.setattr(
         separation,
@@ -386,11 +389,13 @@ def test_the_runtime_backstop_still_warns_a_walk_another_term_carries(monkeypatc
     assert len(found) == 2 and any("signature of separation" in text for text in found)
 
 
+@pytest.mark.pins_behaviour
 def test_the_runtime_backstop_warns_a_walk_it_shares_with_another_term(monkeypatch):
     """A finding naming ``lev`` and then the spline: the spline's part is not the level's.
 
-    It is warned beside the level's disclosure.  At 20f77dd6f only the first group named
-    was read, so the finding was dropped.
+    It is warned beside the level's disclosure.  Control: pins master's behaviour, which
+    warned every finding.  At 20f77dd6f only the first group named was read, so the
+    finding was dropped.
     """
     found = _forced_runtime_finding(monkeypatch, ["lev", "x"])
     assert len(found) == 2 and any("signature of separation" in text for text in found)
@@ -592,8 +597,12 @@ def test_a_crossed_cell_blanks_every_coefficient_it_moves(cells, blank, kept):
     assert all(rows[name].se is not None and rows[name].se > 0 for name in kept)
 
 
+@pytest.mark.pins_behaviour
 def test_a_healthy_cell_beside_a_separated_base_cell_keeps_its_wald_test():
-    """B:Q against its reference: log((30/40) / (20/20)), SE sqrt(1/30 + 1/40 + 1/20 + 1/20)."""
+    """B:Q against its reference: log((30/40) / (20/20)), SE sqrt(1/30 + 1/40 + 1/20 + 1/20).
+
+    Control: pins master's standard error for the healthy cell, which 20f77dd6f blanked.
+    """
     _, _, rows = _grid([("A", "P", 0), *_SPARSE[1:], ("B", "Q", 30), ("B", "R", 40)])
     row = rows["a:b[B:Q]"]
     assert row.coef == pytest.approx(np.log(0.75), abs=1e-6)

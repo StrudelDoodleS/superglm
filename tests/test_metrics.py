@@ -3534,8 +3534,13 @@ class TestSummaryInferenceCache:
                     err_msg=f"EDF mismatch for {sr.name}",
                 )
 
+    @pytest.mark.pins_behaviour
     def test_summary_sparse_categorical_se_matches_metrics(self):
-        """Rare weakly-identified factor levels must keep large summary SEs."""
+        """Rare weakly-identified factor levels must keep large summary SEs.
+
+        Control: pins master's agreement on a weak level's SE above 1.  J keeps one
+        claim, so it is weak but not separated, and its Wald row is reported.
+        """
         rng = np.random.default_rng(0)
         levels = list("ABCDEFGHIJ")
         n = 8000
@@ -3555,6 +3560,7 @@ class TestSummaryInferenceCache:
         mu = np.exp(eta)
         counts = rng.poisson(mu * w).astype(float)
         counts[rare_mask] = 0.0
+        counts[np.flatnonzero(rare_mask)[0]] = 1.0
         y = counts / np.maximum(w, 1e-300)
         X = pd.DataFrame({"cat": pd.Categorical(x, categories=levels)})
 
@@ -3571,14 +3577,10 @@ class TestSummaryInferenceCache:
         row_model = next(r for r in s_model._coef_rows if r.name == "cat[J]")
         row_metrics = next(r for r in s_metrics._coef_rows if r.name == "cat[J]")
 
-        # J has no claims, so it is separated: both readers flag it and leave its
-        # Wald statistics blank, and agree on the levels the data price.
-        assert row_model.separated and row_metrics.separated
-        assert (row_model.se, row_model.p) == (row_metrics.se, row_metrics.p) == (None, None)
-        healthy_model = next(r for r in s_model._coef_rows if r.name == "cat[I]")
-        healthy_metrics = next(r for r in s_metrics._coef_rows if r.name == "cat[I]")
-        assert healthy_model.se == pytest.approx(healthy_metrics.se, rel=1e-6, abs=1e-8)
-        assert healthy_model.p == pytest.approx(healthy_metrics.p, rel=1e-6, abs=1e-8)
+        assert row_metrics.se > 1.0
+        assert np.isfinite(row_model.se)
+        assert row_model.se == pytest.approx(row_metrics.se, rel=1e-6, abs=1e-8)
+        assert row_model.p == pytest.approx(row_metrics.p, rel=1e-6, abs=1e-8)
 
     def test_metrics_summary_uses_own_edf_not_fit_cache(self):
         """ModelMetrics.summary() must compute EDF from its own weights, not fit cache."""
