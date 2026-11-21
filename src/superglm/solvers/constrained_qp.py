@@ -1835,7 +1835,7 @@ def _solve_qp(
                 # so an inactive row can block, even if the old step was 0.
                 continue
             if not feasible or not np.any(step != 0.0):
-                return _result(beta, active, it + 1, converged=False)
+                break
             # A small but uncertified direction can still encounter a
             # blocking row; coefficient units cannot complete a dual solve.
 
@@ -1984,32 +1984,17 @@ def _solve_qp(
                     # the step, and the binding rows' face is solved from ``beta``.
                     _release_nonbinding(A, beta, b, active, abs_A, tol, nonbinding, basis, cycles)
                     continue
-                # A point still outside the rows after the projection has no
-                # valid primal ratio test. If the recovered step has no blocker
-                # either, spend the remaining iterations starting at a known
-                # feasible point. A supplied start prevents a second restart.
+                # A return to an already recovered face can repeatedly release
+                # and immediately re-block its row at an infeasible point.
+                # Allow the recovered face its first release before restarting.
                 if (
-                    beta_start is None
+                    face_candidate is None
+                    and recovered_face == tuple(active)
+                    and beta_start is None
                     and np.all(b <= 0.0)
                     and not _is_feasible(A, beta, b, tol, abs_A=abs_A)
-                    and it + 1 < max_iter
                 ):
-                    retry = _solve_qp(
-                        H_sym,
-                        g,
-                        A,
-                        b,
-                        None,
-                        max_iter - it - 1,
-                        tol,
-                        np.zeros_like(beta),
-                        _trace_run,
-                        structure,
-                        decomposition,
-                        conservative=conservative,
-                        departed=departed,
-                    )
-                    return replace(retry, n_iter=retry.n_iter + it + 1)
+                    break
                 # No row resolves the step, yet it breaks one: once the face's recovery has
                 # run, the step is below every row's resolution, so ``beta`` is the face's
                 # minimum to working accuracy and the step test cannot see it (Gill and Wong,
@@ -2028,8 +2013,34 @@ def _solve_qp(
                 # it cannot certify: the next iteration solves the face again.
                 beta = beta_new
 
-    # Exhaustion is non-convergence even at a feasible point: the KKT
-    # certificate was never completed.
-    result = _result(beta, active, max_iter, converged=False)
-    result._budget_hits = 1
-    return result
+    else:
+        result = _result(beta, active, max_iter, converged=False)
+        result._budget_hits = 1
+        return result
+
+    # The projection or its repair failed. A feasible phase-one point makes
+    # the remaining iterations usable. A supplied start prevents recursion.
+    used = it + 1
+    if (
+        used < max_iter
+        and beta_start is None
+        and np.all(b <= 0.0)
+        and not _is_feasible(A, beta, b, tol, abs_A=abs_A)
+    ):
+        retry = _solve_qp(
+            H_sym,
+            g,
+            A,
+            b,
+            None,
+            max_iter - used,
+            tol,
+            np.zeros_like(beta),
+            _trace_run,
+            structure,
+            decomposition,
+            conservative=conservative,
+            departed=departed,
+        )
+        return replace(retry, n_iter=used + retry.n_iter)
+    return _result(beta, active, used, converged=False)

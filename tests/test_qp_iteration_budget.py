@@ -123,9 +123,42 @@ def test_rejected_budget_limited_step_restarts_at_committed_point(monkeypatch, p
     else:
         assert result.converged and len(calls) == 5
         assert calls[-1][0] == 252
+        np.testing.assert_array_equal(calls[-1][2], trials[2])
         np.testing.assert_allclose(
             result.intercept + x @ result.beta, 4.0 + 3.0 * x[:, 2], atol=1e-12, rtol=0
         )
+
+
+def test_unrepaired_infeasible_start_with_no_blocker_uses_remaining_budget(monkeypatch):
+    from superglm.solvers import constrained_qp as qp
+
+    # The first bound binds. The face step moves y from -4 to -3, so the
+    # second row is violated along the entire segment and cannot block it.
+    monkeypatch.setattr(qp, "_project_feasible", lambda *a, **kw: np.array([-1.0, -4.0]))
+    result = solve_constrained_qp(
+        np.eye(2), -np.array([2.0, 3.0]), np.eye(2), -np.ones(2), [0], max_iter=12
+    )
+    assert result.converged
+    np.testing.assert_array_equal(result.beta, [-1.0, -1.0])
+
+
+def test_coordinate_recovery_reconstructs_small_working_equations(monkeypatch):
+    from superglm.solvers import constrained_qp as qp
+
+    # Force the normwise QR error seen on the mixed-block fit. An order-one
+    # bound contaminates the reconstruction of an independent small bound.
+    solve = qp._solve_triangular
+
+    def rounded(triangle, rhs, **kwargs):
+        x = solve(triangle, rhs, **kwargs)
+        if rhs.ndim == 1 and np.max(np.abs(rhs)) >= 1:
+            x[0] += np.finfo(float).eps
+        return x
+
+    monkeypatch.setattr(qp, "_solve_triangular", rounded)
+    bounds = np.array([2.0**-40, 1.0])
+    x = qp._coordinate_face_minimum(np.eye(3), np.ones(3), np.eye(2, 3), bounds)
+    np.testing.assert_allclose(x, [*bounds, 1.0], rtol=1e-12, atol=0)
 
 
 @pytest.mark.pins_behaviour
