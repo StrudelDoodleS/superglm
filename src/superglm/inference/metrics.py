@@ -46,6 +46,7 @@ from superglm.inference.summary import ModelSummary, _CoefRow
 from superglm.model.fit_state import fitted_lambda2, fitted_penalty
 from superglm.model.retired_state import retained_linear_state
 from superglm.model.state_ops import (
+    _grouped_active_state,
     _public_augmented_covariance,
     _rank_active_state,
     _rank_augmented_covariance,
@@ -131,19 +132,6 @@ def _selected_group_state(
     ):
         raise ValueError("rank metadata selected columns do not match active groups")
     return selected_columns_array, active_groups
-
-
-def _grouped_active_design(model, active_groups: list[GroupSlice]):
-    """Return the fitted grouped design restricted to compact active groups."""
-    from superglm.group_matrix import DesignMatrix
-
-    active_names = {group.name for group in active_groups}
-    matrices = [
-        matrix
-        for matrix, group in zip(model._dm.group_matrices, model._groups, strict=True)
-        if group.name in active_names
-    ]
-    return DesignMatrix(matrices, n=model._dm.n, p=sum(group.size for group in active_groups))
 
 
 def _profiled_augmented_covariance(
@@ -385,7 +373,7 @@ def _requires_wood_inference(model, active_groups: list[GroupSlice]) -> bool:
 
 
 def _keeps_constrained_covariance(result) -> bool:
-    """Whether a fit's leverage and degrees of freedom are its shape constraints' active face's.
+    """Whether leverage and degrees of freedom must retain a fit's restrictions.
 
     A QP fit whose shape rows bind records its active face on its rank record
     (``RankInfo.face``, from the rows ``irls_direct._binding_rows`` reads as
@@ -394,7 +382,10 @@ def _keeps_constrained_covariance(result) -> bool:
     by content, read the fit's own record, and other rows re-form them on that
     face.  Its covariance holds no row (``RankInfo.covariance_inverse``).
     """
-    if getattr(result, "scop_inference", None) is not None:
+    if (
+        getattr(result, "held_level_columns", ())
+        or getattr(result, "scop_inference", None) is not None
+    ):
         return True
     rank_info = getattr(result, "rank_info", None)
     return rank_info is not None and getattr(rank_info, "face", None) is not None
@@ -430,7 +421,7 @@ class ModelMetrics:
     freedom come from the fit itself, and so do the standardized residuals
     and Cook's distance built on that leverage.  Equal copies of that frame,
     or a pickled model, are recognised as the training rows only when the
-    model keeps a structured or shape-constrained covariance.  Otherwise
+    model holds level coefficients or keeps a structured or shape-constrained covariance. Otherwise
     leverage is re-formed on the rows passed, which for a discrete fit can
     differ slightly from its binned fit.  For a fit whose shape constraints
     bind, the inverse re-formed for leverage and the degrees of freedom is
@@ -512,8 +503,7 @@ class ModelMetrics:
         else:
             # Equal copies of the training rows (after a pickle round trip) are recognised by a
             # content fingerprint of X, y, weights and offset. Only a fit whose metrics always read
-            # its retained covariance (structured or shape-constrained) then reads the fit design;
-            # a dense fit re-forms everything on the supplied rows.
+            # its retained covariance or holds level coefficients then reads the fit design.
             keeps_fit_covariance = retained_linear_state(
                 model
             ) is not None or _keeps_constrained_covariance(self._result)
@@ -1221,7 +1211,9 @@ class ModelMetrics:
             self._groups,
             penalty=fitted_penalty(self._model),
         )
-        X_a = _grouped_active_design(self._model, active_groups)
+        X_a, active_groups, _ = _grouped_active_state(
+            self._model, {group.name for group in active_groups}
+        )
         lam2 = scale_penalties(fitted_lambda2(self._model), self._geometry_weight_exponent)
         penalty_terms = (self._dm.group_matrices, self._groups, active_groups, lam2)
         reml_penalties = getattr(self._model, "_reml_penalties", None)

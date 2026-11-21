@@ -68,6 +68,52 @@ def metrics_obj(fitted_poisson):
     return model.metrics(X, y, sample_weight=w)
 
 
+@pytest.mark.parametrize("discrete", [False, True])
+def test_held_level_influence_matches_an_explicit_offset_on_any_rows(discrete):
+    rng = np.random.default_rng(42)
+    x = rng.uniform(size=500)
+    y = rng.poisson(np.exp(np.sin(6 * x)))
+    y[0] = 0
+    singleton = np.arange(len(x)) == 0
+    X = pd.DataFrame({"r": np.where(singleton, "Z", "A"), "x": x})
+
+    def fit(features, offset=None):
+        return SuperGLM(
+            family="poisson",
+            discrete=discrete,
+            selection_penalty=0,
+            features=features | {"x": Spline(n_knots=5)},
+        ).fit_reml(X, y, offset=offset)
+
+    model = fit({"r": Categorical(base="A")})
+    offset = np.where(singleton, model.result.beta[0], 0.0)
+    oracle = fit({}, offset)
+    reference = oracle.metrics(X, y, offset=offset)
+    restored = pickle.loads(pickle.dumps(model))
+    rows = np.arange(0, len(y), 2)
+    for observed, expected in [
+        (model.metrics(X, y), reference),
+        (model.metrics(X.copy(), y.copy()), reference),
+        (restored.metrics(X, y), reference),
+        (
+            restored.metrics(X.iloc[rows], y[rows]),
+            oracle.metrics(X.iloc[rows], y[rows], offset=offset[rows]),
+        ),
+    ]:
+        for key in (
+            "leverage",
+            "cooks_distance",
+            "std_pearson_residuals",
+            "std_deviance_residuals",
+        ):
+            np.testing.assert_allclose(
+                getattr(observed, key), getattr(expected, key), rtol=2e-5, atol=1e-9
+            )
+        np.testing.assert_allclose(
+            observed.coefficient_se_raw["x"], expected.coefficient_se_raw["x"], rtol=2e-5
+        )
+
+
 # ── Log-likelihood ────────────────────────────────────────────────
 
 

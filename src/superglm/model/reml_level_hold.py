@@ -16,6 +16,26 @@ class _HeldIndicators:
     columns: np.ndarray
 
 
+def _free_indicators(matrix, levels):
+    codes = np.arange(matrix.n_levels + 1)
+    codes[levels] = matrix.n_levels
+    return CategoricalGroupMatrix(codes[matrix.codes], matrix.n_levels)
+
+
+def inference_design(model):
+    """Restore the fit's free columns when forming covariance on the fitted design."""
+    dm = model._dm
+    held = getattr(model._result, "held_level_columns", ())
+    if not held:
+        return dm
+    matrices = list(dm.group_matrices)
+    for i, group in enumerate(model._groups):
+        local = [col - group.start for col in held if group.start <= col < group.end]
+        if local:
+            matrices[i] = _free_indicators(matrices[i], local)
+    return DesignMatrix(matrices, dm.n, dm.p)
+
+
 class REMLLevelHold:
     """Keep native column indices for the penalty, factor and inference consumers.
 
@@ -56,9 +76,7 @@ class REMLLevelHold:
                     held.append(ref)
             if held:
                 local = np.asarray(held)
-                codes = np.arange(matrix.n_levels + 1)
-                codes[local] = matrix.n_levels
-                free = CategoricalGroupMatrix(codes[matrix.codes], matrix.n_levels)
+                free = _free_indicators(matrix, local)
                 blocks[i] = _HeldIndicators(matrix, free, local, group.start + local)
         if not blocks:
             return None
