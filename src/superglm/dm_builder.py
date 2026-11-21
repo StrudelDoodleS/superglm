@@ -1224,10 +1224,19 @@ def build_design_matrix(
             else:
                 _, name_i, spec1_i, spec2_i, x1_i, x2_i, p1_i, p2_i = record
                 cross_spec = compiled.interaction_specs[name_i]
+                # An "auto" penalty is calibrated after the build and can come out
+                # zero, so only a set value bounds a cell's parents or the cross.
+                set_value = getattr(selection_penalty, "lambda1", None) != "auto"
                 bounded = (
-                    bool((caps_enforced and spec1_i._constraint_rules) or _penalised(p1_i)),
-                    bool((caps_enforced and spec2_i._constraint_rules) or _penalised(p2_i)),
-                    _penalised(name_i),
+                    bool(
+                        (caps_enforced and spec1_i._constraint_rules)
+                        or (set_value and _penalised(p1_i))
+                    ),
+                    bool(
+                        (caps_enforced and spec2_i._constraint_rules)
+                        or (set_value and _penalised(p2_i))
+                    ),
+                    set_value and _penalised(name_i),
                 )
                 found = scan_interaction_term(
                     name_i,

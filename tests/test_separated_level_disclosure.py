@@ -1549,6 +1549,33 @@ def test_crossed_cell_bounded_by_penalised_parent_is_not_separated():
     assert m_err._result is not None
 
 
+def test_an_auto_penalty_on_a_parent_does_not_exempt_a_crossed_cell():
+    """An "auto" selection penalty is calibrated after the build and can come out zero
+    (here A and B have equal totals), so it bounds nothing: B x P, which moves only
+    through the parent 'a', is still disclosed and refused, as on master."""
+    cells = [("A", "P", 1.0), ("A", "Q", 3.0), ("B", "P", 0.0), ("B", "Q", 4.0)]
+    frame = pd.DataFrame(
+        [(a, b, v) for a, b, v in cells for _ in range(100)], columns=["a", "b", "y"]
+    )
+    X, y = frame[["a", "b"]], frame["y"].to_numpy()
+
+    def make(sep):
+        return SuperGLM(
+            family="poisson",
+            selection_penalty="auto",
+            penalty_features=["a"],
+            separation=sep,
+            interactions=[("a", "b")],
+            features={"a": Categorical(base="A"), "b": Categorical(base="P")},
+        )
+
+    m_warn = make("warn")
+    caught = _caught(lambda: m_warn.fit(X, y, max_iter=5000))
+    assert any("'B' x 'P'" in str(w.message) for w in caught)
+    with pytest.raises(SeparationError):
+        make("error").fit(X, y, max_iter=5000)
+
+
 def test_crossed_penalised_and_capped_edges():
     """#689c, #689d, alias_prune=False healthy alias, and Binomial opposite-boundary cycle."""
     # Edge A (#689c): sparse grid with penalty on a:b alone still separates via unpenalised parents.
