@@ -25,7 +25,7 @@ def _free_indicators(matrix, levels):
 def inference_design(model):
     """Restore the fit's free columns when forming covariance on the fitted design."""
     dm = model._dm
-    held = getattr(model._result, "held_level_columns", ())
+    held = getattr(getattr(model, "_result", None), "held_level_columns", ())
     if not held:
         return dm
     matrices = list(dm.group_matrices)
