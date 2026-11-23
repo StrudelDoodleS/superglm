@@ -402,6 +402,101 @@ def scan_categorical_term(
     return findings
 
 
+def _pinning_edges(n1: int, n2: int, bounded: tuple[bool, bool, bool]) -> tuple[NDArray, NDArray]:
+    """Bidirectional edges enforcing ``pin_a`` (0 <-> 1..n1) and ``pin_b`` (offset <-> n1+1..offset-1)."""
+    pin_a, pin_b, _ = bounded
+    offset = 1 + n1 + n2
+    pairs = []
+    if pin_a and n1:
+        r = np.arange(1, n1 + 1, dtype=np.intp)
+        z = np.zeros(n1, dtype=np.intp)
+        pairs.extend([(z, r), (r, z)])
+    if pin_b and n2:
+        c = np.arange(n1 + 1, offset, dtype=np.intp)
+        o = np.full(n2, offset, dtype=np.intp)
+        pairs.extend([(o, c), (c, o)])
+    if not pairs:
+        empty = np.zeros(0, dtype=np.intp)
+        return empty, empty
+    return np.concatenate([p[0] for p in pairs]), np.concatenate([p[1] for p in pairs])
+
+
+def _crossed_boundary_flags(
+    cell_codes: NDArray,
+    levels1: Sequence,
+    levels2: Sequence,
+    spec1: Any,
+    spec2: Any,
+    y: NDArray,
+    sample_weight: NDArray,
+    boundaries: tuple[str, ...],
+    cross_spec: Any = None,
+    bounded: tuple[bool, bool, bool] = (False, False, False),
+) -> tuple[NDArray, dict[str, NDArray]]:
+    """Occupied mask and per-boundary separated-cell masks on the pinned recession graph.
+
+    Vertices ``0`` (base row), ``1..n1`` (non-base rows), ``n1+1..n1+n2`` (non-base cols),
+    and ``offset = 1 + n1 + n2`` (base col). Each occupied cell without an unpinned cross
+    column adds ``r <-> k`` when healthy, ``r -> k`` when all-0, or ``k -> r`` when all-1;
+    ``bounded = (pin_a, pin_b, pin_c)`` adds pinning edges and ignores cross columns under
+    ``pin_c``. A boundary cell separates iff it has an unpinned cross column or its
+    endpoints lie in distinct strongly connected components.
+    """
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    n_l2 = len(levels2)
+    n_grid = len(levels1) * n_l2
+    weighted = (cell_codes >= 0) & (sample_weight > 0)
+    occ_mask = np.bincount(cell_codes[weighted], minlength=n_grid) > 0
+    raw = {b: _separated_flags(cell_codes, n_grid, y, sample_weight, b)[0] for b in boundaries}
+    if not any(f.any() for f in raw.values()):
+        return occ_mask, raw
+
+    occ_idx = np.flatnonzero(occ_mask)
+    n1, n2 = len(spec1._non_base), len(spec2._non_base)
+    offset = 1 + n1 + n2
+    at1 = {level: 1 + j for j, level in enumerate(spec1._non_base)}
+    at2 = {level: 1 + n1 + j for j, level in enumerate(spec2._non_base)}
+    node_row = np.array([at1.get(lev, 0) for lev in levels1], dtype=np.intp)[occ_idx // n_l2]
+    node_col = np.array([at2.get(lev, offset) for lev in levels2], dtype=np.intp)[occ_idx % n_l2]
+    if cross_spec is None:
+        has_cross = (node_row != 0) & (node_col != offset)
+    else:
+        idx1 = {lev: i for i, lev in enumerate(levels1)}
+        idx2 = {lev: j for j, lev in enumerate(levels2)}
+        emitted_grid = np.zeros(n_grid, dtype=bool)
+        grid = cross_spec._all_pairs or cross_spec._pairs
+        emitted = (
+            np.arange(len(grid)) if cross_spec._grid_to_col is None else cross_spec._grid_to_col
+        )
+        for (a, b), g in zip(grid, emitted, strict=True):
+            if g >= 0 and a in idx1 and b in idx2:
+                emitted_grid[idx1[a] * n_l2 + idx2[b]] = True
+        has_cross = emitted_grid[occ_idx]
+
+    zero = raw["zero"][occ_idx] if "zero" in raw else np.zeros(len(occ_idx), dtype=bool)
+    one = raw["one"][occ_idx] if "one" in raw else np.zeros(len(occ_idx), dtype=bool)
+    no_cross = np.ones(len(occ_idx), dtype=bool) if bounded[2] else ~has_cross
+    healthy = no_cross & ~zero & ~one
+    lower = no_cross & zero
+    upper = no_cross & one
+    pin_r, pin_c = _pinning_edges(n1, n2, bounded)
+    rows = np.concatenate(
+        [pin_r, node_row[healthy], node_col[healthy], node_row[lower], node_col[upper]]
+    )
+    cols = np.concatenate(
+        [pin_c, node_col[healthy], node_row[healthy], node_col[lower], node_row[upper]]
+    )
+    graph = coo_matrix((np.ones(len(rows)), (rows, cols)), shape=(offset + 1, offset + 1))
+    _, scc = connected_components(graph, directed=True, connection="strong")
+    can_sep = np.zeros(n_grid, dtype=bool)
+    can_sep[occ_idx] = (np.zeros(len(occ_idx), dtype=bool) if bounded[2] else has_cross) | (
+        scc[node_row] != scc[node_col]
+    )
+    return occ_mask, {b: f & can_sep for b, f in raw.items()}
+
+
 def scan_interaction_term(
     name: str,
     spec1: Any,
@@ -413,32 +508,32 @@ def scan_interaction_term(
     y: NDArray,
     sample_weight: NDArray,
     boundaries: tuple[str, ...],
+    cross_spec: Any = None,
+    bounded: tuple[bool, bool, bool] = (False, False, False),
 ) -> list[SeparatedTerm]:
-    """Scan one CategoricalInteraction term for separated crossed cells.
-
-    The scan covers the full ``L1 x L2`` grid, base rows and columns
-    included: with both mains and the full non-base interaction grid in the
-    design, the spanned space contains every single-cell indicator, so any
-    occupied cell with boundary-only response is a direction of recession.
-    Cells the builder prunes (empty, or aliased under an exactly nested
-    parent) still separate through the parent main effect, so pruning does
-    not exempt them.
-    """
+    """Scan one CategoricalInteraction term for separated crossed cells."""
     codes1, levels1 = _level_codes(x1, spec1, context=p1)
     codes2, levels2 = _level_codes(x2, spec2, context=p2)
     n2 = len(levels2)
     on_grid = (codes1 >= 0) & (codes2 >= 0)
     cell_codes = np.where(on_grid, codes1 * n2 + codes2, -1)
-    weighted = on_grid & (sample_weight > 0)
-    occupied = tuple(
-        (levels1[i // n2], levels2[i % n2])
-        for i in np.flatnonzero(np.bincount(cell_codes[weighted], minlength=len(levels1) * n2))
+    occ_mask, by_boundary = _crossed_boundary_flags(
+        cell_codes,
+        levels1,
+        levels2,
+        spec1,
+        spec2,
+        y,
+        sample_weight,
+        boundaries,
+        cross_spec,
+        bounded,
     )
+    occupied = tuple((levels1[i // n2], levels2[i % n2]) for i in np.flatnonzero(occ_mask))
+    n_occupied = len(occupied)
     findings: list[SeparatedTerm] = []
     for boundary in boundaries:
-        flags, n_occupied = _separated_flags(
-            cell_codes, len(levels1) * n2, y, sample_weight, boundary
-        )
+        flags = by_boundary[boundary]
         if flags.any():
             labels = [(levels1[i // n2], levels2[i % n2]) for i in np.flatnonzero(flags)]
             findings.append(
@@ -653,7 +748,16 @@ def _line_text(line: SeparatedLine, *, parameter_effects: bool = False) -> str:
     text = f"  {name}: {counted}, every response {every}"
     if line.is_base:
         effects = "effects" if parameter_effects else "relativities"
-        return f"{text}; it is the {base}, which the term's other {effects} are measured against"
+        choose, others = (
+            ("a healthy base", "levels")
+            if line.kind == "levels"
+            else ("healthy bases for its two factors", "cells")
+        )
+        return (
+            f"{text}; it is the {base}, which the term's other {effects} are measured "
+            f'against. Choose {choose} (such as the default base="most_exposed" when it has '
+            f"responses off the boundary) to get the other {others}' standard errors"
+        )
     if line.fitted is None:
         return text
     totals = [f"fitted {_total(line.fitted, '.3g')} in total"]
@@ -680,6 +784,7 @@ def format_separated_levels(
     fitted: bool = False,
     example: str | None = None,
     parameter_effects: bool = False,
+    reml_scale_note: str | None = None,
 ) -> str:
     """The disclosure of separated levels and cells, one line each, and what to do.
 
@@ -750,7 +855,11 @@ def format_separated_levels(
         )
     else:
         remedy += " separation='error' refuses such fits; separation='ignore' silences this."
-    return "\n".join([opening, *body, remedy])
+    parts = [opening, *body]
+    if reml_scale_note:
+        parts.append(reml_scale_note)
+    parts.append(remedy)
+    return "\n".join(parts)
 
 
 def runtime_finding(
