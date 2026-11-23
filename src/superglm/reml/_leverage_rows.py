@@ -52,8 +52,12 @@ from superglm.solvers.centered_system import iter_grouped_design_chunks
 _BLOCK_BYTES = 32 * 1024 * 1024
 # Solved rows a block forms at once: a block's terms are reduced over all its
 # rows, but its ``rows x p`` solved rows are formed and read piece by piece.
-# Smaller pieces cost the pass more in per-piece calls than they save.
-_PIECE_BYTES = 8 * 1024 * 1024
+# All penalty contractions on a piece share one native call and workspace.
+_PIECE_BYTES = 2 * 1024 * 1024
+_BLAS_PENALTY_WIDTH = 16
+# Python frames, array/view headers and native dispatch bookkeeping alongside
+# the payloads below (under 7 KiB traced on the 600-column multi-penalty job).
+_JOB_OVERHEAD_BYTES = 16 * 1024
 # Support tables a design may always form: twice the size of the ``p x p``
 # matrices its dense solve already holds, and at least this floor.
 _SUPPORT_TABLE_FLOOR_BYTES = 64 * 1024 * 1024
@@ -139,9 +143,59 @@ class _SupportPlan:
     dense_inverse: NDArray
 
 
-_POOLED_ROW_KERNELS = (_solved_rows_and_leverages,)
-"""The kernel a pooled solved-row block runs on its worker: ``nogil``, never ``prange``,
-writing only the block's own arrays."""
+@njit(cache=True, nogil=True)
+def _penalty_row_products(
+    solved, rows, weights, layout, rhs, matrices, scales, weighted, quadratic, scratch
+):
+    """Write -w' y' s and y' S y for every penalty, for this piece of a block.
+
+    Small quadratic forms contract directly against the solved row. Wide
+    ones use GEMM, packing a column slice once for consecutive penalties on
+    the same columns. Their outputs reuse the same half of the workspace.
+    """
+    count = len(rows)
+    packed_start = packed_width = -1
+    for j in range(len(layout)):
+        start, width, offset = layout[j]
+        dense = offset >= 0
+        wide = dense and width >= _BLAS_PENALTY_WIDTH
+        if wide:
+            size = count * width
+            packed = scratch[:size].reshape(count, width)
+            product = scratch[size : 2 * size].reshape(count, width)
+            if start != packed_start or width != packed_width:
+                for i in range(count):
+                    for k in range(width):
+                        packed[i, k] = solved[i, start + k]
+                packed_start, packed_width = start, width
+            matrix = matrices[offset : offset + width * width].reshape(width, width)
+            np.dot(packed, matrix, out=product)
+        for i in range(count):
+            y = solved[i, start : start + width]
+            direction = 0.0
+            for k in range(width):
+                direction += y[k] * rhs[j, start + k]
+            weighted[i, j] = -direction * weights[rows[i]]
+            if quadratic.shape[1] == 0:
+                continue
+            q = 0.0
+            if wide:
+                for k in range(width):
+                    q += y[k] * product[i, k]
+            elif dense:
+                for k in range(width):
+                    dot = 0.0
+                    for t in range(width):
+                        dot += matrices[offset + k * width + t] * y[t]
+                    q += dot * y[k]
+            else:
+                for k in range(width):
+                    q += y[k] * y[k]
+                q *= scales[j]
+            quadratic[i, j] = q
+
+
+_POOLED_ROW_KERNELS = (_solved_rows_and_leverages, _penalty_row_products)
 
 
 def _support_sizes(dm) -> tuple[int, int]:
@@ -382,28 +436,36 @@ def _support_block(
         last = int(np.searchsorted(level_rows, stop, side="left"))
         codes[position] = zero
         codes[position, level_rows[first:last] - start] = level_bins[first:last]
-    local = np.ascontiguousarray(local, dtype=np.intp)
+    rows = start + local
     piece_rows = _support_piece_rows(p)
 
     def pieces() -> Iterator[tuple[slice, NDArray, NDArray]]:
         # A row's ``y`` and ``h`` read only that row, so a piece's values are
         # the block's own, whatever the piece size.  The dense columns are
         # centred a piece at a time too, into one buffer the pieces share.
-        dense_buffer = np.empty((min(piece_rows, local.size), plan.dense_columns.size))
+        capacity = min(piece_rows, local.size)
+        dense_buffer = np.empty((capacity, plan.dense_columns.size))
+        solved_buffer = np.empty((capacity, p))
+        leverage_buffer = np.empty(capacity)
         for first in range(0, local.size, piece_rows):
             span = slice(first, min(first + piece_rows, local.size))
-            rows = start + local[span]
-            dense_values = dense_buffer[: rows.size]
+            indices = rows[span]
+            count = indices.size
+            source = (
+                slice(start + first, start + span.stop) if local.size == stop - start else indices
+            )
+            dense_values = dense_buffer[:count]
             filled = 0
             for column, width, matrix in plan.dense:
                 cols = slice(column, column + width)
                 target = dense_values[:, filled : filled + width]
-                np.subtract(np.asarray(matrix[rows], dtype=np.float64), centre_hi[cols], out=target)
+                target[:] = matrix[source]
+                target -= centre_hi[cols]
                 if centre_lo is not None:
                     target -= centre_lo[cols]
                 filled += width
-            solved = np.empty((rows.size, p), dtype=np.float64)
-            leverage = np.empty(rows.size, dtype=np.float64)
+            solved = solved_buffer[:count]
+            leverage = leverage_buffer[:count]
             _solved_rows_and_leverages(
                 solved,
                 leverage,
@@ -422,10 +484,8 @@ def _support_block(
                 plan.dense_inverse,
             )
             yield span, solved, leverage
-            # Free this piece before the next is formed, so a job holds one piece.
-            del solved, leverage
 
-    return start + local, pieces()
+    return rows, pieces()
 
 
 def _chunked_blocks(
@@ -473,6 +533,7 @@ def solved_row_blocks(
     active: NDArray,
     row_bytes: int = 0,
     piece_row_bytes: int = 0,
+    result_bytes: int = 0,
 ) -> RowBlocks:
     """The active rows' solved centred rows and leverages, block by block, each in pieces.
 
@@ -484,7 +545,9 @@ def solved_row_blocks(
     forms it, on any other block or on the piece size.  ``row_bytes`` is what
     the caller holds per row of a block while it reduces the block's pieces,
     and ``piece_row_bytes`` what it holds at once per row of a piece while it
-    reduces that piece (its widest products), both charged to a job.
+    reduces that piece (its widest products). The support route lends the
+    caller its piece until the next iteration. After the last piece, only
+    the caller's block arrays, row indices and reduced result are live.
     """
     inverse = np.ascontiguousarray(inverse, dtype=np.float64)
     plan = _support_plan(dm, inverse, centre_hi, centre_lo)
@@ -500,19 +563,27 @@ def solved_row_blocks(
             plan, start, min(start + rows, n), p, centre_hi, centre_lo, active
         )
 
-    # A job holds one piece of solved rows, the piece's centred dense values
-    # and the caller's products of the piece, beside its block's codes and
-    # row indices and the caller's per-row terms.  The products are charged
-    # as the caller states them (a batch's dense penalties take a ``piece x
-    # width`` product each) with one more ``piece x p`` copy for temporaries,
-    # and never below three copies.  A piece's dense columns are gathered (at
-    # most two ``piece x width`` copies) before its solved rows are formed.
-    piece = min(rows, _support_piece_rows(p))
-    per_row = 8 * (len(plan.offsets) + 2) + int(row_bytes)
-    products = max(3 * 8 * p, 8 * p + int(piece_row_bytes))
+    block = min(rows, n)
+    piece = min(block, _support_piece_rows(p))
+    # Codes, local and global indices, then the piece's y, h, dense columns,
+    # its widest raw dense gather, and the caller's reusable product space.
+    indices = np.dtype(np.intp).itemsize
+    gather = (
+        0
+        if active.all()
+        else piece * max((width * matrix.itemsize for _, width, matrix in plan.dense), default=0)
+    )
+    # The strided broadcast subtraction can buffer its inputs and output up
+    # to the NumPy ufunc buffer size. It runs after the raw gather is gone.
+    widest_dense = max((width for _, width, _ in plan.dense), default=0)
+    centring = 3 * 8 * min(np.getbufsize(), piece * widest_dense)
+    piece_bytes = piece * (8 * (p + 1 + plan.dense_columns.size) + piece_row_bytes)
+    piece_bytes += max(gather, centring)
+    during_pieces = block * (len(plan.offsets) + 2) * indices + piece_bytes
+    reducing = block * indices + result_bytes
     return RowBlocks(
         jobs=[job(start) for start in range(0, n, rows)],
-        block_bytes=piece * (8 * (p + plan.dense_columns.size) + products) + per_row * rows,
+        block_bytes=int(block * row_bytes + max(during_pieces, reducing) + _JOB_OVERHEAD_BYTES),
     )
 
 
@@ -523,3 +594,4 @@ def _warmup_leverage_rows() -> None:
     _solved_rows_and_leverages(
         f64_2d, f64, i64, i64_2d, f64, f64_2d, i64, i64, f64, i64, i64, i64, f64_2d, i64, f64_2d
     )
+    _penalty_row_products(f64_2d, i64, f64, i64_2d, f64_2d, f64, f64, f64_2d, f64_2d, f64)
