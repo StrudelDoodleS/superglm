@@ -10,7 +10,7 @@ alone leave them undetermined (``VehAge``'s sparse upper tail); the penalised He
 positive definite (Cholesky, scaled condition 576), which the fit's own record certifies
 (``state_ops.standard_error_mask``).
 
-The original main-spline solver-to-B-spline maps accompany the fixture, so a refit can be
+The original spline and interaction solver-to-B-spline maps accompany the fixture, so a refit can be
 compared in the coordinates mgcv actually fitted. Both freMTPL2 parquet files are required.
 """
 
@@ -26,7 +26,7 @@ import numpy as np
 import pytest
 
 from . import _datasets
-from .test_penalized_standard_errors import dense_raw_standard_errors
+from .test_penalized_standard_errors import dense_raw_standard_errors, fixture_contrasts
 
 _FREQ_SKIP_REASON = _datasets.skip_reason("freMTPL2freq.parquet")
 _SEV_SKIP_REASON = _datasets.skip_reason("freMTPL2sev.parquet")
@@ -85,19 +85,10 @@ def test_every_severity_book_coefficient_has_mgcvs_bayesian_standard_error() -> 
     assert not np.any(np.isnan(se)), f"{int(np.isnan(se).sum())} standard errors blank"
     phi = model.result.phi
     vp = np.asarray(fixture["mgcv_se_vp"]) ** 2 / fixture["phi"]
-    observed_vp = se**2 / phi
-    beta = np.r_[model.result.intercept, model.result.beta]
     maps = json.loads((_FIXTURE.parent / "mgcv_gamma_severity_spline_maps.json").read_text("utf-8"))
-    for g, gm in zip(model._groups, model._dm.group_matrices, strict=True):
-        if g.name in maps:
-            original = np.asarray(maps[g.name])
-            to_original = np.linalg.lstsq(original, gm.R_inv, rcond=None)[0]
-            np.testing.assert_allclose(original @ to_original, gm.R_inv, rtol=1e-10, atol=1e-12)
-            sl = slice(1 + g.start, 1 + g.end)
-            cov = metrics._active_info[3][sl, sl]
-            np.testing.assert_allclose(observed_vp[sl], np.diag(cov), rtol=1e-9)
-            observed_vp[sl] = np.diag(to_original @ cov @ to_original.T)
-            beta[sl] = to_original @ beta[sl]
+    with np.load(_FIXTURE.parent / "mgcv_gamma_severity_interaction_maps.npz") as interactions:
+        maps.update(interactions)
+    beta, observed_vp = fixture_contrasts(model, metrics, se, maps)
     np.testing.assert_allclose(observed_vp, vp, rtol=fixture["tolerances"]["se_relative"])
     raw = np.concatenate([np.atleast_1d(metrics.coefficient_se_raw[g.name]) for g in model._groups])
     np.testing.assert_allclose(raw, dense_raw_standard_errors(model, X), rtol=1e-9)

@@ -96,6 +96,15 @@ def test_tensor_keeps_the_bilinear_surface_under_both_margin_penalties(decompose
         atol=2e-13,
     )
 
+    model = SuperGLM(family="gaussian", selection_penalty=0, discrete=discrete, features=specs)
+    model._add_interaction("x", "z", decompose=decompose)
+    y = 1 + x / x.max() + z + expected + np.random.default_rng(13).normal(0, 0.1, len(x))
+    model.fit_reml(pd.DataFrame({"x": x, "z": z}), y)
+    penalties = [item for item in model._reml_penalties if item.group_name.startswith("x:z")]
+    assert len(penalties) == 2
+    for item, repeat in zip(penalties, (tensor._p2, tensor._p1), strict=True):
+        assert np.sum(~np.any(item.omega_ssp, axis=0)) == repeat - int(decompose)
+
 
 @pytest.mark.parametrize("discrete", [False, True])
 def test_by_level_curve_retains_its_unpenalized_slope(discrete):
