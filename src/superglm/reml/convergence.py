@@ -11,9 +11,7 @@ from numpy.typing import NDArray
 
 from superglm._roundoff import NEWTON_EIGENVALUE_FLOOR
 
-# The freeze bar never drops below this floor, whatever reml_tol: freezing
-# classifies geometry (is a direction informative at all), and a flat
-# direction stays flat however tightly the informative lambdas are located.
+# Relative precision floor used for a dead search and for bound-pressure reporting.
 FLAT_DIRECTION_FREEZE_FLOOR = 1e-7
 
 # The curvature arm of the freeze decision, per penalty dimension and
@@ -26,7 +24,7 @@ FLAT_DIRECTION_CURVATURE_REL = 1e-2
 FLAT_DIRECTION_CURVATURE_ANCHOR = 0.1
 
 # Ceiling of the dead-search decrement arm, in multiples of the gradient bar
-# max(1e-7, reml_tol) * (1 + |objective|). The decrement comes from a
+# returned by dead_search_score_bar. The decrement comes from a
 # modified-Newton Hessian of unknown error, so the arm is granted only when
 # the active gradient is within this factor of the bar: the true remaining
 # decrease is then at most 10^2 times what the gradient arm accepts, and an
@@ -47,9 +45,26 @@ def _score_scale(objective: float) -> float:
     return max(1.0 + abs(objective), 1.0)
 
 
-def _freeze_gradient_bar(objective: float, tolerance: float) -> float:
-    freeze_tol = max(0.1 * tolerance, FLAT_DIRECTION_FREEZE_FLOOR)
-    return freeze_tol * _score_scale(objective)
+def flat_score_bar(tolerance: float) -> float:
+    """Absolute score in nats per log lambda, on the scalar REML fidelity scale.
+
+    At default fidelity a flat tail may contribute at most 1e-4. A tighter
+    fit reduces this in proportion. Coarse working fits may hold terms sooner.
+    """
+    return max(100.0 * tolerance, min(1e-4, 1e5 * tolerance))
+
+
+def free_score_bar(objective: float, tolerance: float) -> float:
+    """The compound score test may never hide a gradient above the flat-tail bar."""
+    return min(tolerance * _score_scale(objective), flat_score_bar(tolerance))
+
+
+def dead_search_score_bar(objective: float, tolerance: float) -> float:
+    """Score resolution after a measured rejection, capped in log-lambda units."""
+    return min(
+        max(FLAT_DIRECTION_FREEZE_FLOOR, tolerance) * _score_scale(objective),
+        max(1e-4, flat_score_bar(tolerance)),
+    )
 
 
 @dataclass(frozen=True)
@@ -91,6 +106,52 @@ def direction_penalty_ranks(penalty_components, penalty_ranks) -> NDArray:
     )
 
 
+def flat_tail_trial(
+    delta: NDArray,
+    projected: NDArray,
+    partial: NDArray,
+    fit: NDArray,
+    isolated: NDArray,
+    decision: FlatDirectionDecision,
+    *,
+    bar: float,
+    step_cap: float,
+) -> NDArray | None:
+    """An outward line-search trial for an isolated, nearly suppressed term.
+
+    For the fixed Gaussian working problem let E be the penalized EDF and
+    B = lambda * beta'S beta / phi. Its score is (B - E)/2. In the penalty
+    eigenbasis E is a sum of fractions d/(lambda+d). When E < 1 each
+    1 + d/lambda <= 1/(1-E). Consequently B < E*(1-E)^2 keeps the
+    variance-direction score outward down to zero variance, and increasing
+    lambda by a factor E/((1-E)*bar) reduces E below bar. Other terms and
+    weights can move: only try this in Newton's local region and let the
+    actual objective decide. The next candidate recomputes every score.
+    """
+    edf = fit - 2.0 * partial
+    tail = (
+        isolated
+        & ~decision.frozen
+        & (projected <= -bar)
+        & (delta > 0.0)
+        & (decision.normalized_curvature < decision.curvature_bar)
+        & (edf > 0.0)
+        & (edf < 1.0)
+        & (fit >= 0.0)
+    )
+    # Evaluate this inequality only in its domain; an unrelated informative
+    # term need not have a bounded fitted quadratic.
+    tail[tail] = fit[tail] < edf[tail] * (1.0 - edf[tail]) ** 2
+    if not tail.any() or np.max(np.abs(delta[~tail]), initial=0.0) > 1.0:
+        return None
+    target = np.minimum(np.log(edf[tail] / ((1.0 - edf[tail]) * bar)), step_cap)
+    if not np.any(target > delta[tail]):
+        return None
+    trial = delta.copy()
+    trial[tail] = np.maximum(delta[tail], target)
+    return trial
+
+
 def concave_live_directions(
     projected_gradient: NDArray,
     hessian: NDArray,
@@ -105,7 +166,7 @@ def concave_live_directions(
     Negative curvature fails the second-order necessary condition (More &
     Sorensen 1979). Over a step of ``step_bound`` the model promises
     ``step_bound * |g_i| + step_bound**2 * |H_ii| / 2``; when that reaches
-    ``tolerance * (1 + |objective|)`` the point is not a minimum to the
+    the free-score bar (per unit log lambda) the point is not a minimum to the
     precision asked for. A projected gradient of exactly zero is left to the
     first-order test.
 
@@ -130,7 +191,7 @@ def concave_live_directions(
         & (diagonal < 0.0)
         & (ratio >= SHOULDER_CURVATURE_RATIO_LOW)
         & (ratio <= SHOULDER_CURVATURE_RATIO_HIGH)
-        & (model_decrease >= tolerance * _score_scale(objective))
+        & (model_decrease >= free_score_bar(objective, tolerance))
     )
 
 
@@ -143,10 +204,11 @@ def freeze_flat_directions(
     objective: float,
     tolerance: float,
     step_bound: float | None = None,
+    gradient_bar: float | None = None,
 ) -> FlatDirectionDecision:
     """Active-set freeze: mark directions with negligible gradient and curvature.
 
-    The gradient arm is judged against the objective's scale. The curvature
+    The gradient arm is absolute at the requested fidelity. The curvature
     arm judges each direction's row of the estimated Hessian block, not its
     diagonal alone (REML Hessians carry cross-terms and need not be PD),
     excluding coupling to fixed directions, normalized symmetrically per
@@ -167,7 +229,8 @@ def freeze_flat_directions(
     ranks = np.maximum(np.asarray(penalty_ranks, dtype=np.float64), 1.0)
     estimated = np.asarray(estimated_mask, dtype=bool)
 
-    gradient_bar = _freeze_gradient_bar(objective, tolerance)
+    if gradient_bar is None:
+        gradient_bar = flat_score_bar(tolerance)
     if estimated.any():
         row_curvature = hess[:, estimated].max(axis=1)
         scale = np.sqrt(ranks)
@@ -290,17 +353,15 @@ def revalidate_stop(
     An accepted point must also pass the second-order condition
     (``concave_live_directions``). The stop mask is the previous freeze
     intersected with the current gradient arm, which misses curvature-only
-    re-activation, so when a shoulder refuses or a masked direction's gradient
-    reaches the tolerance the freeze is recomputed against the current
-    Hessian, and the stop stands only if nothing reactivates. That
+    reactivation. Recompute every estimated hold on the current Hessian and
+    accept only if each survives and no live shoulder remains. That
     revalidation is then the published freeze decision.
 
     ``concave_live`` and ``freeze`` are the engine's bindings of those
     functions; ``ranks`` resolves penalty ranks only when the freeze is remade.
     """
-    gradient_live = np.abs(projected_gradient) >= tolerance * score_scale
-    masked_live = previously_frozen is not None and bool(
-        np.any(np.asarray(previously_frozen) & gradient_live)
+    held_estimated = previously_frozen is not None and bool(
+        np.any(np.asarray(previously_frozen) & estimated_mask)
     )
     live = concave_live(
         projected_gradient,
@@ -322,7 +383,7 @@ def revalidate_stop(
             "curvature": [float(hessian[i, i]) for i in idx],
             "step_bound": float(step_bound),
         }
-    if not masked_live and not refused:
+    if not held_estimated and not refused:
         return True, refused
     revalidation = freeze(
         projected_gradient,
@@ -348,7 +409,7 @@ def revalidate_stop(
         if previously_frozen is not None
         else np.zeros(len(names), dtype=bool)
     )
-    reactivated = live | (~np.asarray(revalidation.frozen) & held & gradient_live)
+    reactivated = live | (~np.asarray(revalidation.frozen) & held)
     return not bool(np.any(reactivated)), refused
 
 
@@ -370,7 +431,7 @@ def mask_frozen_stop_gradient(
     if previously_frozen is None:
         return projected_gradient
     projected = np.asarray(projected_gradient, dtype=np.float64)
-    still_flat = np.abs(projected) < _freeze_gradient_bar(objective, tolerance)
+    still_flat = np.abs(projected) < flat_score_bar(tolerance)
     return np.where(np.asarray(previously_frozen, dtype=bool) & still_flat, 0.0, projected)
 
 
@@ -478,7 +539,8 @@ def classify_dead_feasible_exit(
     precision asked for:
 
     - the active gradient is below the resolved tolerance (never tighter than
-      the achievable-precision floor) times the objective's scale;
+      the achievable-precision floor) times the objective's scale, capped
+      by the absolute resolution in :func:`dead_search_score_bar`;
     - ``predicted_decrease`` (:func:`newton_predicted_decrease`; None when
       the Hessian is not PD or a step cap bound the step) is below
       ``tolerance * (1 + |objective|)``: Newton's decrement test (Boyd &
@@ -495,7 +557,7 @@ def classify_dead_feasible_exit(
     if not evaluated_trial:
         return "line_search_failed"
     score_scale = _score_scale(objective)
-    bar = max(FLAT_DIRECTION_FREEZE_FLOOR, tolerance) * score_scale
+    bar = dead_search_score_bar(objective, tolerance)
     if active_gradient_norm < bar:
         return "converged_at_precision"
     if (
@@ -548,6 +610,7 @@ def evaluate_reml_candidate(
     previous_objective: float,
     projected_gradient: NDArray,
     tolerance: float,
+    gradient_bar: float | None = None,
 ) -> REMLCandidateConvergence:
     """Evaluate Wood's compound score/objective stopping criterion."""
     projected = np.asarray(projected_gradient, dtype=np.float64)
@@ -556,7 +619,8 @@ def evaluate_reml_candidate(
     objective_change = abs(objective - previous_objective) if iteration > 0 else np.inf
     converged = (
         iteration >= 1
-        and gradient_norm < tolerance * score_scale
+        and gradient_norm
+        < (free_score_bar(objective, tolerance) if gradient_bar is None else gradient_bar)
         and objective_change < tolerance * score_scale
     )
     return REMLCandidateConvergence(

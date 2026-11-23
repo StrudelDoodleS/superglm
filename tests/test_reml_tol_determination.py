@@ -430,6 +430,7 @@ class TestCertificationBar:
 
 
 class TestFreezeDiagnostics:
+    @pytest.mark.pins_behaviour
     def test_the_profile_records_the_last_freeze_decision(self):
         """The active-set freeze is the mechanism that separates informative
         directions from inferentially flat ones; calibrating its bar needs
@@ -477,7 +478,7 @@ class TestFreezeDiagnostics:
             freeze["frozen"],
             freeze["shoulder"],
         ):
-            gradient_flat = g < 1e-7 * float(freeze["score_scale"])
+            gradient_flat = g < 1e-4
             curvature_flat = norm < float(freeze["curvature_bar"])
             assert fz == ((not est) or (gradient_flat and curvature_flat and not sh))
             assert not sh or (signed > 0.0 and hess_ii < 0.0)
@@ -560,15 +561,9 @@ class TestFreezeRevalidation:
         )
         assert float(freeze["curvature_bar"]) == float(last.curvature_bar)
 
+    @pytest.mark.pins_behaviour
     def test_an_all_null_discrete_fit_settles_before_the_stationary_exit(self):
-        """POI performs one working-model update per outer iteration, so an
-        all-frozen verdict can be measured at a nonstationary coefficient
-        mode. The stationary exit now also requires the objective arm's
-        agreement; on this all-null fixture the settle costs one further
-        iteration and the compound criterion takes the exit honestly
-        (measured: identical lambdas either way; pre-fix stopped
-        active_set_stationary at iteration 11 with the objective still
-        moving)."""
+        """Pin objective stability at the all-null stop across different proposals."""
         rng = np.random.default_rng(21)
         n = 2_000
         frame = pd.DataFrame({"x1": rng.uniform(0, 1, n), "x2": rng.uniform(0, 1, n)})
@@ -588,16 +583,17 @@ class TestFreezeRevalidation:
         r = model._reml_result
         assert r.converged
         assert str(r.termination_reason) == "score_objective_tolerance"
-        assert int(r.n_reml_iter) >= 12
+        previous, current = r.objective_history[r.n_reml_iter - 2 : r.n_reml_iter]
+        assert abs(previous - current) < 1e-9 * (1.0 + abs(current))
 
+    @pytest.mark.pins_behaviour
     def test_the_exact_stationary_exit_requires_a_stationary_mode(self):
         """The Fisher path admits a PIRLS-exhausted candidate, so the
         all-frozen exit could publish converged=True from a nonstationary
         beta. The gate requires a converged current mode with a stable
-        objective; measured on this all-null fixture, warm-start chaining
-        settles the mode across outer iterations, so even max_iter=1
-        reaches the reference answer and the gated exit fires identically
-        (lambdas match the default-budget run to <0.1%)."""
+        objective. Pin the certified coefficient mode and the fitted curve
+        under a one-iteration PIRLS budget. On an all-null tail several large
+        lambdas give the same curve to the requested precision."""
         rng = np.random.default_rng(21)
         n = 1_500
         frame = pd.DataFrame({"x1": rng.uniform(0, 1, n), "x2": rng.uniform(0, 1, n)})
@@ -613,10 +609,12 @@ class TestFreezeRevalidation:
                 **kwargs,
             )
             model.fit_reml(frame, y)
-            return model._reml_result
+            return model
 
-        exhausted = fit(max_iter=1)
-        reference = fit()
+        limited = fit(max_iter=1)
+        full = fit()
+        exhausted = limited._reml_result
+        reference = full._reml_result
 
         assert exhausted.converged and reference.converged
         # The gate defers the stationary exit until the mode is honest;
@@ -625,10 +623,10 @@ class TestFreezeRevalidation:
             "score_objective_tolerance",
             "active_set_stationary",
         }
-        for name in reference.lambdas:
-            assert float(exhausted.lambdas[name]) == pytest.approx(
-                float(reference.lambdas[name]), rel=1e-2
-            )
+        assert exhausted.pirls_result.converged
+        # Two held tails each contribute at most 1e-4 to the local score.
+        assert abs(exhausted.objective - reference.objective) < 2e-4
+        np.testing.assert_allclose(limited.predict(frame), full.predict(frame), rtol=1e-4)
 
     def test_the_compound_exit_requires_a_certified_candidate_mode(self):
         """A loose reml_tol accepts only at a certified candidate mode.
@@ -1758,8 +1756,9 @@ class TestNewtonStepStop:
         assert record["taken_step"] <= record["bar"]
         assert record["step_left"] < record["taken_step"]
 
+    @pytest.mark.pins_behaviour
     def test_a_gradient_that_did_not_settle_keeps_searching(self, monkeypatch):
-        """The Hessian that called the step negligible must confirm it after the step."""
+        """Pin continuation past the refused Newton stop, whichever certificate ends the fit."""
         from superglm.reml import direct
 
         _compound_test_never_accepts(monkeypatch)
@@ -1774,7 +1773,8 @@ class TestNewtonStepStop:
         monkeypatch.setattr(direct, "newton_step_left", first_read_refuses)
         model = _fit_informative_fixture(discrete=False)
 
-        assert model._reml_profile["reml_newton_step_stop"]["iter"] > plain["iter"]
+        assert calls
+        assert model.reml_diagnostics()["n_reml_iter"] > plain["iter"]
 
     def test_a_frozen_term_that_came_back_to_life_refuses_the_stop(self, monkeypatch):
         """The step reads the free terms only, so a frozen term must still be flat."""

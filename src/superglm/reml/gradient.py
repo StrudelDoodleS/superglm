@@ -6,6 +6,7 @@ Wood (2011) Appendix B / Eq 6.2.
 from __future__ import annotations
 
 import itertools
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -38,6 +39,12 @@ def _same_slice(sl_i: slice, sl_j: slice) -> bool:
     return bool(sl_i.start == sl_j.start and sl_i.stop == sl_j.stop and sl_i.step == sl_j.step)
 
 
+def isolated_penalties(penalties: list[PenaltyComponent]) -> NDArray:
+    """Only one penalty acts on each of these coefficient blocks."""
+    counts = Counter(pc.group_index for pc in penalties)
+    return np.array([counts[pc.group_index] == 1 for pc in penalties], dtype=bool)
+
+
 def reml_direct_gradient(
     group_matrices: Sequence,
     result: PIRLSResult,
@@ -51,6 +58,7 @@ def reml_direct_gradient(
     reml_penalties: list[PenaltyComponent] | None = None,
     penalty_caches: dict | None = None,
     tensor_pair_evaluations: dict | None = None,
+    penalty_fit_out: NDArray | None = None,
 ) -> NDArray:
     """Partial gradient of the LAML objective w.r.t. log-lambdas (fixed W)."""
     factor = as_hessian_factor(XtWX_S_inv)
@@ -80,6 +88,8 @@ def reml_direct_gradient(
         quad = penalty_component_quadratic(pc, beta_g, gm)
         trace_term = factor.trace_inverse_penalty(pc)
         lam = float(lambdas[pc.name])
+        if penalty_fit_out is not None:
+            penalty_fit_out[i] = lam * (inv_phi * quad)
         r_j = r_dict.get(pc.name, pc.rank)
         if r_j <= 0 and penalty_ranks is not None:
             r_j = penalty_ranks.get(pc.name, 0.0)

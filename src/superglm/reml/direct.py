@@ -35,9 +35,12 @@ from superglm.reml.convergence import (
     FLAT_DIRECTION_FREEZE_FLOOR,
     classify_dead_feasible_exit,
     concave_live_directions,
+    dead_search_score_bar,
     direction_penalty_ranks,
     evaluate_reml_candidate,
     fixed_freeze_record,
+    flat_score_bar,
+    flat_tail_trial,
     freeze_flat_directions,
     freeze_record,
     mask_frozen_stop_gradient,
@@ -52,7 +55,7 @@ from superglm.reml.convergence import (
     trial_counts_as_precision_evidence,
 )
 from superglm.reml.discrete import bootstrap_seed_lambdas, optimize_discrete_reml_cached_w
-from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
+from superglm.reml.gradient import isolated_penalties, reml_direct_gradient, reml_direct_hessian
 from superglm.reml.identified import IdentifiedLaplace, dense_hessian
 from superglm.reml.objective import (
     REMLObjectiveEvaluation,
@@ -430,6 +433,9 @@ def optimize_direct_reml(
     )
     group_names = [pc.name for pc in penalties]
     m = len(group_names)
+    isolated = isolated_penalties(penalties)
+    allow_tail_trial = True
+    penalty_fit = np.full(m, np.nan)
     # estimated_mask[i] = True  => component i is free to be optimized
     #                     False => component i has a fixed lambda (policy)
     if estimated_names is not None:
@@ -881,7 +887,7 @@ def optimize_direct_reml(
         print(f"  REML bootstrap: lambdas=[{boot_lam_str}]")
 
     step_bar = newton_step_stop_bar(_tol)
-    held_newton_model: tuple[NDArray, NDArray, float] | None = None
+    held_newton_model: tuple[NDArray, NDArray] | None = None
     held_cross: NDArray | None = None
     last_accepted_step = 0.0
     last_accepted_idx: NDArray | None = None
@@ -1165,6 +1171,7 @@ def optimize_direct_reml(
             reml_penalties=penalties,
             phi_hat=phi_hat,
             inverse_phi=inverse_phi,
+            penalty_fit_out=penalty_fit,
         )
         _t_gradient += _time.perf_counter() - _t0
 
@@ -1354,7 +1361,8 @@ def optimize_direct_reml(
             reads as not confirmed, and the search goes on.
             """
             nonlocal held_cross
-            hessian, index, _ = held_newton_model
+            assert held_newton_model is not None
+            hessian, index = held_newton_model
             if table_route:
                 try:
                     held_cross = stop_cross_terms()
@@ -1369,8 +1377,8 @@ def optimize_direct_reml(
                 profile["reml_newton_step_stop"] = {
                     "iter": int(n_iter),
                     "step_left": step_left,
-                    "taken_step": held_newton_model[2] if step_taken else None,
-                    "previous_step": held_newton_model[2] if step_taken else last_accepted_step,
+                    "taken_step": last_accepted_step if step_taken else None,
+                    "previous_step": last_accepted_step,
                     "bar": step_bar,
                     "step_taken": step_taken,
                 }
@@ -1418,16 +1426,46 @@ def optimize_direct_reml(
             # route).
         elif (
             held_newton_model is not None
+            and stop_criterion_frozen is not None
             and mode_certified
             and not np.any(stop_grad[stop_criterion_frozen])
-            and newton_step_settled(
-                step_left := held_step_left(), held_newton_model[2], bar=step_bar
-            )
+            and newton_step_settled(step_left := held_step_left(), last_accepted_step, bar=step_bar)
         ):
-            record_step_stop(step_left, step_taken=True)
-            converged = True
-            termination_reason = "newton_step_tolerance"
-            break
+            # The old Hessian confirms contraction on its free block. Check
+            # whether a held term has regained curvature at this *new* fit.
+            same_terms = True
+            if np.any(stop_criterion_frozen & estimated_mask):
+                revalidated_hess = outer_hessian()
+                if held_cross is not None:
+                    revalidated_hess += held_cross
+                    held_cross = None
+                decision = freeze_flat_directions(
+                    proj_grad,
+                    revalidated_hess,
+                    direction_penalty_ranks(penalties, penalty_ranks),
+                    estimated_mask,
+                    objective=obj,
+                    tolerance=_tol,
+                    step_bound=max_newton_step,
+                )
+                same_terms = np.array_equal(stop_criterion_frozen, decision.frozen) and not np.any(
+                    decision.shoulder
+                )
+                if profile is not None:
+                    profile["reml_freeze_revalidated"] = True
+                    profile["reml_freeze_decision"] = freeze_record(
+                        group_names,
+                        proj_grad,
+                        revalidated_hess,
+                        decision,
+                        score_scale=score_scale,
+                        estimated_mask=estimated_mask,
+                    )
+            if same_terms:
+                record_step_stop(step_left, step_taken=True)
+                converged = True
+                termination_reason = "newton_step_tolerance"
+                break
         held_newton_model = None
         if held_cross is not None:
             # A refused stop steps on the Hessian with the cross terms it paid for.
@@ -1561,7 +1599,7 @@ def optimize_direct_reml(
         ):
             held_hessian = hess[np.ix_(newton_idx, newton_idx)]
             if newton_step_resolved(held_hessian, grad[newton_idx], bar=step_bar):
-                held_newton_model = (held_hessian, newton_idx, max_delta)
+                held_newton_model = (held_hessian, newton_idx)
         if exact_hessian_available:
             contraction = (
                 proj_grad_norm / previous_gradient_norm if previous_gradient_norm > 0.0 else np.inf
@@ -1629,11 +1667,32 @@ def optimize_direct_reml(
         # trial. A coefficient score alone cannot bound the Laplace determinant.
         stagnated_trial = None
         correction_size = None
+        # Try the accelerated proposal once before the ordinary Newton
+        # line search. A refusal disables acceleration for the rest of the fit.
+        tail_delta = (
+            flat_tail_trial(
+                delta,
+                proj_grad,
+                grad_partial,
+                penalty_fit,
+                isolated,
+                freeze_decision,
+                bar=flat_score_bar(_tol),
+                step_cap=max_newton_step,
+            )
+            if allow_tail_trial and mode_certified and _tol <= 1e-9 and not shoulder.any()
+            else None
+        )
+        if tail_delta is not None:
+            allow_tail_trial = False
         ls_iteration = 0
         correcting = False
         while not correcting:
             step = 0.5**ls_iteration
-            rho_trial = np.clip(rho_clipped + step * delta, log_lo, log_hi)
+            taking_tail = tail_delta is not None
+            direction = tail_delta if tail_delta is not None else delta
+            tail_delta = None
+            rho_trial = np.clip(rho_clipped + step * direction, log_lo, log_hi)
             correcting = ls_iteration == max_ls or np.all(np.abs(rho_trial - rho_clipped) <= 1e-12)
             beta_start, intercept_start, centred_start = warm_beta, warm_intercept, warm_centred
             if correcting:
@@ -1644,7 +1703,8 @@ def optimize_direct_reml(
                 intercept_start = stagnated_trial.intercept
                 centred_start = stagnated_trial.centred
                 _n_dead_search_refits += 1
-            ls_iteration += 1
+            if not taking_tail:
+                ls_iteration += 1
             had_feasible_trial = True
             trial_lambdas = lambdas.copy()
             for name, val in zip(group_names, np.exp(rho_trial), strict=False):
@@ -1849,8 +1909,8 @@ def optimize_direct_reml(
                 if isinstance(trial_evaluation, REMLObjectiveEvaluation)
                 else 0.0
             )
-            if use_observed_geometry and not trial_mode_stationary:
-                if np.isfinite(trial_obj):
+            if (use_observed_geometry or taking_tail) and not trial_mode_stationary:
+                if np.isfinite(trial_obj) and not taking_tail:
                     stagnated_trial = _StagnatedTrial(
                         step,
                         rho_trial,
@@ -1874,12 +1934,16 @@ def optimize_direct_reml(
                     + trial_roundoff
                     + obj_roundoff
                 )
-            if trial_counts_as_precision_evidence(trial_mode_stationary, trial_obj) and (
-                correction_size is None or correction_size < _tol * score_scale
+            if (
+                not taking_tail
+                and trial_counts_as_precision_evidence(trial_mode_stationary, trial_obj)
+                and (correction_size is None or correction_size < _tol * score_scale)
             ):
                 evaluated_feasible_trial = True
 
-            armijo_bound = obj + armijo_c * step * descent
+            armijo_bound = obj + armijo_c * step * (
+                float(grad @ direction) if taking_tail else descent
+            )
             trial_accepted = bool(trial_obj <= armijo_bound)
             if trace_run is not None and trace_run.enabled:
                 if trial_result.state_id is None:  # pragma: no cover - trace contract
@@ -1905,6 +1969,7 @@ def optimize_direct_reml(
                 )
             if (
                 not trial_accepted
+                and not taking_tail
                 and step == 1.0
                 and trial_counts_as_precision_evidence(trial_mode_stationary, trial_obj)
             ):
@@ -1961,6 +2026,7 @@ def optimize_direct_reml(
             if (
                 trial_accepted
                 and presolve_beta is not None
+                and not taking_tail
                 and obj - trial_obj <= obj_roundoff + trial_roundoff
                 and classify_dead_feasible_exit(
                     active_grad_norm,
@@ -1997,6 +2063,8 @@ def optimize_direct_reml(
                 break
 
             if trial_accepted:
+                if taking_tail:
+                    allow_tail_trial = True
                 if trial_mode_residual is not None:
                     _accepted_observed_mode_residual_max = max(
                         _accepted_observed_mode_residual_max,
@@ -2005,7 +2073,10 @@ def optimize_direct_reml(
                 # A rate needs an uncapped Newton predecessor on
                 # the same free terms; trust moves and changed sets give none.
                 newton_predecessor = (
-                    newton_idx.size and not shoulder.any() and max_delta <= max_newton_step
+                    newton_idx.size
+                    and not shoulder.any()
+                    and not taking_tail
+                    and max_delta <= max_newton_step
                 )
                 last_accepted_step = (
                     float(np.max(np.abs(rho_trial[newton_idx] - rho_clipped[newton_idx])))
@@ -2077,11 +2148,6 @@ def optimize_direct_reml(
                 evaluated_trial=dead_evidence,
                 predicted_decrease=dead_predicted_decrease,
             )
-            if correction_size is not None and termination_reason == "converged_at_precision":
-                # This verdict belongs to the certified candidate. An earlier
-                # uncertified iterate can have a spuriously lower objective.
-                best_pirls, best_obj, best_lambdas = pirls_result, obj, cand_lambdas.copy()
-                best_bound_pressure = candidate_bound_pressure()
             if (
                 termination_reason == "line_search_failed"
                 and held_newton_model is not None
@@ -2100,7 +2166,7 @@ def optimize_direct_reml(
                 profile["reml_dead_line_search"] = {
                     "iter": int(n_iter),
                     "active_gradient_norm": active_grad_norm,
-                    "bar": float(max(FLAT_DIRECTION_FREEZE_FLOOR, _tol) * score_scale),
+                    "bar": dead_search_score_bar(obj, _tol),
                     "predicted_decrease": dead_predicted_decrease,
                     "decrease_bar": float(_tol * score_scale),
                     "trial_correction_with_roundoff": correction_size,
@@ -2126,6 +2192,12 @@ def optimize_direct_reml(
             break
         _t_linesearch += _time.perf_counter() - _t0
 
+    if converged and not all_lambdas_fixed:
+        # Every stopping test describes this candidate. A lower objective
+        # from an earlier, incompletely settled coefficient fit cannot carry
+        # the current candidate's stationarity verdict.
+        best_pirls, best_obj, best_lambdas = pirls_result, obj, cand_lambdas.copy()
+        best_bound_pressure = candidate_bound_pressure()
     if best_pirls is None:
         raise RuntimeError("Direct REML Newton did not evaluate any candidates")
 

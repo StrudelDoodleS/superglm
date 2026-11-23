@@ -797,8 +797,10 @@ class SuperGLM:
             gradient, or from the preceding uncapped Newton step on the same
             free terms when no trial verifies this one. The discrete engine reads
             it from two successive steps on the same terms at a settled working
-            model. A direction whose gradient and relative row
-            curvature are both negligible is frozen where it stands, as
+            model. The score test also respects an absolute upper limit of
+            1e-4 nats per log lambda at default fidelity. A tighter tolerance
+            reduces this limit proportionally. A direction below that limit
+            with negligible relative row curvature is frozen where it stands, as
             recorded in ``reml_diagnostics()`` under
             ``profile["reml_freeze_decision"]``. A tolerance tighter than the
             line search can resolve ends as

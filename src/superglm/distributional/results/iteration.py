@@ -22,6 +22,7 @@ from superglm.distributional.results.endpoint_evidence import (
 )
 from superglm.distributional.smoothing.acceleration import AccelerationRefusalReason
 from superglm.distributional.telemetry import CurvatureTelemetry
+from superglm.reml.convergence import free_score_bar
 
 
 def _maximum_relative_natural_parameter_change(
@@ -72,7 +73,7 @@ class DistributionalEFSConfig:
     # The outer method. ``"efs"`` is the Fellner--Schall fixed point;
     # ``"efs+finish"`` runs it to a practical plateau and finishes with a Newton
     # endgame; ``"efs+newton"`` hands to that endgame after a warm-up.
-    outer: Literal["efs", "efs+finish", "efs+newton"] = "efs"
+    outer: Literal["efs", "efs+finish", "efs+newton", "efs+stationary"] = "efs"
     handoff_step: float = 0.5
     handoff_iterations: int = 10
     # An optional cap on the endgame's own iterations (``None``: what remains of
@@ -96,6 +97,17 @@ class DistributionalEFSConfig:
     # name not listed has unit 1.
     relative_box: bool = False
     lambda_units: tuple[tuple[str, float], ...] = ()
+
+    @property
+    def stationarity_tolerance(self) -> float:
+        # Equal default fidelity across the public SuperLSS (1e-6) and
+        # SuperGLM (1e-9) arguments. Each tighter request tightens both bars.
+        return self.tolerance * 1e-3 if self.outer == "efs+stationary" else self.tolerance
+
+    def score_bar(self, objective: float) -> float:
+        if self.outer == "efs+stationary":
+            return free_score_bar(objective, self.stationarity_tolerance)
+        return self.tolerance * (1.0 + abs(objective))
 
     def unit(self, name: str) -> float:
         """Component ``name``'s information unit."""
@@ -187,8 +199,8 @@ class DistributionalEFSConfig:
             raise ValueError("backtrack_factor must lie strictly between zero and one")
         if self.acceleration not in ("none", "multisecant"):
             raise ValueError("acceleration must be 'none' or 'multisecant'")
-        if self.outer not in ("efs", "efs+finish", "efs+newton"):
-            raise ValueError("outer must be 'efs', 'efs+finish' or 'efs+newton'")
+        if self.outer not in ("efs", "efs+finish", "efs+newton", "efs+stationary"):
+            raise ValueError("outer must be 'efs', 'efs+finish', 'efs+newton' or 'efs+stationary'")
         newton_cap = self.max_newton_iterations
         if newton_cap is not None and (
             isinstance(newton_cap, bool) or not isinstance(newton_cap, int) or newton_cap < 1
