@@ -388,3 +388,170 @@ def test_a_binned_rejection_supplies_precision_evidence_only_if_scored(monkeypat
     else:
         assert not diag["converged"]
         assert "reml_newton_step_stop" not in model._reml_profile
+
+
+def test_the_flat_bar_is_proportional_to_the_tolerance():
+    from superglm.reml.convergence import flat_score_bar
+
+    # A candidate that only ranks Tweedie powers runs at 1e-6: with |V| above
+    # 1e5 its stop reads the absolute bar, a thousand times the default's.
+    def stops(score, tolerance):
+        return evaluate_reml_candidate(
+            iteration=1,
+            objective=3e5,
+            previous_objective=3e5,
+            projected_gradient=np.array([score]),
+            tolerance=tolerance,
+        ).converged
+
+    assert stops(0.05, 1e-6)
+    assert not stops(0.2, 1e-6)
+    assert not stops(0.05, 1e-7)
+    assert [flat_score_bar(t) for t in (1e-12, 1e-9, 1e-6)] == pytest.approx([1e-7, 1e-4, 0.1])
+
+
+def test_a_coarse_fit_holds_at_the_relative_resolution_of_its_score():
+    from superglm.reml.convergence import hold_score_bar
+
+    # Default fidelity and tighter: the flat-tail bar, whatever the objective.
+    assert [hold_score_bar(v, 1e-9) for v in (10.0, 3e3, 1e7)] == [1e-4] * 3
+    assert hold_score_bar(3e3, 1e-12) == pytest.approx(1e-7)
+    # reml_tol=1e-6: 1e-7 (1 + |V|), between the default's bar and its own.
+    assert hold_score_bar(3e3, 1e-6) == pytest.approx(3.001e-4)
+    assert hold_score_bar(10.0, 1e-6) == 1e-4
+    assert hold_score_bar(1e7, 1e-6) == pytest.approx(0.1)
+
+
+@pytest.mark.pins_behaviour
+def test_a_coarse_fit_does_not_stop_on_a_hold_looser_than_its_resolution():
+    """Pin the hold a fit at reml_tol=1e-6 reads, in the step and in the stop's mask.
+
+    At V = 3e3 it is 1e-7 (1 + |V|) = 3e-4: a held score of 2e-4 stays held
+    and out of the stop's evidence, and one of 0.05 does neither.
+    """
+    from superglm.reml.convergence import mask_frozen_stop_gradient
+
+    score = np.array([0.05, 2e-4])
+    held = np.array([True, True])
+    masked = mask_frozen_stop_gradient(score, held, objective=3e3, tolerance=1e-6)
+    np.testing.assert_array_equal(masked, [0.05, 0.0])
+    verdict = freeze_flat_directions(
+        score, np.diag([1e-5, 1e-5]), np.ones(2), held, objective=3e3, tolerance=1e-6
+    )
+    np.testing.assert_array_equal(verdict.frozen, [False, True])
+
+
+def test_a_guard_stopped_coefficient_fit_loosens_the_hold_and_never_tightens_it():
+    from superglm.reml.convergence import hold_score_bar
+
+    # 1e-7 (1 + |V|) is below the flat bar on a small objective.
+    assert hold_score_bar(10.0, 1e-9, guard_stopped=True) == 1e-4
+    assert hold_score_bar(1e5, 1e-9, guard_stopped=True) == pytest.approx(1e-2, rel=1e-4)
+    assert hold_score_bar(1e5, 1e-9, guard_stopped=False) == 1e-4
+
+
+def _script_scalar_search(monkeypatch, engine, *, scores, curvature, coefficient_fit):
+    """Fix the objective at 1e5 and script the score, Hessian diagonal and coefficient fit.
+
+    ``scores`` and ``curvature`` give (every other term, last term).
+    ``coefficient_fit`` is "converged", "unconverged" (a step short of its
+    tolerance), "guard-stopped" (unconverged, with the solver's finding that
+    the link's overflow guard stopped the walk) or "guard-converged" (that
+    finding on a fit that met its tolerance).
+    """
+    objective = engine.reml_laml_objective
+    gradient = engine.reml_direct_gradient
+    fit = engine.fit_irls_direct
+    state = {
+        "converged": dict(converged=True),
+        "guard-converged": dict(converged=True, separation_message="scripted"),
+        "unconverged": dict(converged=False, termination_reason="max_iter"),
+        "guard-stopped": dict(
+            converged=False, termination_reason="max_iter", separation_message="scripted"
+        ),
+    }[coefficient_fit]
+
+    def fixed_objective(*args, **kwargs):
+        value = objective(*args, **kwargs)
+        return replace(value, value=1e5) if hasattr(value, "value") else 1e5
+
+    def scripted(values, n):
+        out = np.full(n, values[0])
+        out[-1] = values[1]
+        return out
+
+    def coefficients(*args, **kwargs):
+        result, *rest = fit(*args, **kwargs)
+        return replace(result, **state), *rest
+
+    monkeypatch.setattr(engine, "fit_irls_direct", coefficients)
+    monkeypatch.setattr(engine, "reml_laml_objective", fixed_objective)
+    monkeypatch.setattr(
+        engine, "reml_direct_gradient", lambda *a, **kw: scripted(scores, len(gradient(*a, **kw)))
+    )
+    monkeypatch.setattr(
+        engine,
+        "reml_direct_hessian",
+        lambda *a, **kw: np.diag(scripted(curvature, len(kw["gradient"]))),
+    )
+    if hasattr(engine, "reml_w_correction"):
+        monkeypatch.setattr(engine, "reml_w_correction", lambda *a, **kw: None)
+
+
+@pytest.mark.filterwarnings("ignore::superglm.SeparationWarning")
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "binned"])
+@pytest.mark.parametrize(
+    "coefficient_fit", ["guard-stopped", "guard-converged", "unconverged", "converged"]
+)
+def test_a_score_between_the_bars_is_held_only_at_a_guard_stopped_fit(
+    monkeypatch, discrete, coefficient_fit
+):
+    """The hold bar on a flat term with a score of 1e-3, at V = 1e5.
+
+    A coefficient fit the link's guard stopped resolves the score to
+    1e-7 (1 + |V|) = 1e-2, and the term is held for that round. Any other fit
+    reads 1e-4 whatever the objective's size and leaves it free: a binned
+    round one step short of its tolerance is the engine's ordinary state.
+    """
+    from superglm.reml import direct
+    from superglm.reml import discrete as cached
+
+    from .test_reml_tol_determination import _fit_informative_fixture
+
+    _script_scalar_search(
+        monkeypatch,
+        cached if discrete else direct,
+        scores=(-1.0, -1e-3),
+        curvature=(1.0, 1e-5),
+        coefficient_fit=coefficient_fit,
+    )
+    model = _fit_informative_fixture(discrete=discrete, max_reml_iter=1)
+    frozen = model._reml_profile["reml_freeze_decision"]["frozen"]
+    assert not any(frozen[:-1])
+    assert frozen[-1] is (coefficient_fit == "guard-stopped")
+
+
+@pytest.mark.filterwarnings("ignore::superglm.SeparationWarning")
+@pytest.mark.parametrize(("score", "converged"), [(-1e-3, False), (-1e-5, True)])
+def test_a_binned_fit_cannot_stop_on_terms_held_at_the_looser_bar(monkeypatch, score, converged):
+    """Every term is flat and held at a guard-stopped coefficient fit.
+
+    With scores of 1e-3 the holds rest on the looser bar and the fit is not
+    converged; with scores inside the flat bar it stops as before.
+    """
+    from superglm.reml import discrete
+
+    from .test_reml_tol_determination import _fit_informative_fixture
+
+    _script_scalar_search(
+        monkeypatch,
+        discrete,
+        scores=(score, score),
+        curvature=(1e-5, 1e-5),
+        coefficient_fit="guard-stopped",
+    )
+    model = _fit_informative_fixture(discrete=True, max_reml_iter=4)
+    assert all(model._reml_profile["reml_freeze_decision"]["frozen"])
+    result = model._reml_result
+    assert result.converged is converged
+    assert converged or result.termination_reason == "max_reml_iter"

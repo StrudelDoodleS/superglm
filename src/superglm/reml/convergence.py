@@ -37,6 +37,9 @@ DECREMENT_GRADIENT_CEILING = 10.0
 SHOULDER_CURVATURE_RATIO_LOW = 0.5
 SHOULDER_CURVATURE_RATIO_HIGH = 2.0
 
+# flat_score_bar at the scalar engine's default reml_tol, 1e-9.
+DEFAULT_FLAT_SCORE_BAR = 1e-4
+
 NEWTON_STEP_STOP_BAR = 1e-3
 NEWTON_STEP_STOP_PER_TOLERANCE = 1e6
 
@@ -48,10 +51,46 @@ def _score_scale(objective: float) -> float:
 def flat_score_bar(tolerance: float) -> float:
     """Absolute score in nats per log lambda, on the scalar REML fidelity scale.
 
-    At default fidelity a flat tail may contribute at most 1e-4. A tighter
-    fit reduces this in proportion. Coarse working fits may hold terms sooner.
+    At default fidelity (``reml_tol=1e-9``) a term may stop with a score of
+    at most 1e-4. The bar is proportional to the tolerance either side: a
+    tighter fit reduces it, and a fit asked for more coarsely, such as a
+    candidate that only ranks Tweedie powers, is not held to the default's.
     """
-    return max(100.0 * tolerance, min(1e-4, 1e5 * tolerance))
+    return 1e5 * tolerance
+
+
+def coefficient_walk_guard_stopped(result) -> bool:
+    """An unconverged coefficient fit that the link's overflow guard stopped.
+
+    The solver's runtime separation finding: the linear predictor is pinned at
+    the guard on rows that carry weight, under a working-weight range far
+    past ``1 / u``.
+    """
+    return not result.converged and getattr(result, "separation_message", None) is not None
+
+
+def hold_score_bar(objective: float, tolerance: float, *, guard_stopped: bool = False) -> float:
+    """The score below which a flat term is held.
+
+    At default fidelity and tighter this is the flat-tail bar. A coarser fit
+    holds at the relative resolution of its score,
+    ``max(0.1 * tolerance, 1e-7) * (1 + |V|)``, no finer than the default's
+    1e-4 and no looser than its own flat-tail bar.
+
+    Where the guard stopped the coefficient walk
+    (``coefficient_walk_guard_stopped``) one round's step holds up to that
+    resolution at any fidelity. The outer score is an implicit derivative at
+    a coefficient mode (Wood, Pya and Saefken 2016, sec. 3), formed from
+    weighted cross-products; there no mode was reached and those products
+    drop every row below ``u`` times the largest weight. Only the step reads
+    this: a stop judges holds without it (``mask_frozen_stop_gradient``,
+    ``revalidate_stop``).
+    """
+    flat = flat_score_bar(tolerance)
+    resolution = max(0.1 * tolerance, FLAT_DIRECTION_FREEZE_FLOOR) * _score_scale(objective)
+    if guard_stopped:
+        return max(flat, resolution)
+    return min(flat, max(DEFAULT_FLAT_SCORE_BAR, resolution))
 
 
 def free_score_bar(objective: float, tolerance: float) -> float:
@@ -208,7 +247,7 @@ def freeze_flat_directions(
 ) -> FlatDirectionDecision:
     """Active-set freeze: mark directions with negligible gradient and curvature.
 
-    The gradient arm is absolute at the requested fidelity. The curvature
+    The gradient arm is ``hold_score_bar``, absolute at default fidelity. The curvature
     arm judges each direction's row of the estimated Hessian block, not its
     diagonal alone (REML Hessians carry cross-terms and need not be PD),
     excluding coupling to fixed directions, normalized symmetrically per
@@ -230,7 +269,7 @@ def freeze_flat_directions(
     estimated = np.asarray(estimated_mask, dtype=bool)
 
     if gradient_bar is None:
-        gradient_bar = flat_score_bar(tolerance)
+        gradient_bar = hold_score_bar(objective, tolerance)
     if estimated.any():
         row_curvature = hess[:, estimated].max(axis=1)
         scale = np.sqrt(ranks)
@@ -431,7 +470,7 @@ def mask_frozen_stop_gradient(
     if previously_frozen is None:
         return projected_gradient
     projected = np.asarray(projected_gradient, dtype=np.float64)
-    still_flat = np.abs(projected) < flat_score_bar(tolerance)
+    still_flat = np.abs(projected) < hold_score_bar(objective, tolerance)
     return np.where(np.asarray(previously_frozen, dtype=bool) & still_flat, 0.0, projected)
 
 

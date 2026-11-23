@@ -41,6 +41,7 @@ from superglm.links import stabilize_eta
 from superglm.reml.convergence import (
     FLAT_DIRECTION_FREEZE_FLOOR,
     classify_dead_feasible_exit,
+    coefficient_walk_guard_stopped,
     concave_live_directions,
     dead_search_score_bar,
     direction_penalty_ranks,
@@ -50,6 +51,7 @@ from superglm.reml.convergence import (
     flat_tail_trial,
     freeze_flat_directions,
     freeze_record,
+    hold_score_bar,
     mask_frozen_stop_gradient,
     newton_predicted_decrease,
     newton_step_resolved,
@@ -1266,6 +1268,9 @@ def optimize_discrete_reml_cached_w(
             objective=obj,
             tolerance=_tol,
             step_bound=shoulder_step,
+            gradient_bar=hold_score_bar(
+                obj, _tol, guard_stopped=coefficient_walk_guard_stopped(pirls_result)
+            ),
         )
         frozen_d = freeze_decision.frozen
         # Concave shoulders take the trust-region boundary step below, not
@@ -1291,10 +1296,13 @@ def optimize_discrete_reml_cached_w(
                 # Do not let a deliberately loose tolerance bypass the
                 # two-evaluation convergence contract.
                 continue
-            if not (obj_change < _tol * score_scale_d):
+            if not (obj_change < _tol * score_scale_d) or np.any(
+                mask_frozen_stop_gradient(proj_grad_d, frozen_d, objective=obj, tolerance=_tol)
+            ):
                 # One working-model update per iteration, so an all-frozen
                 # verdict can come at a nonstationary mode; exit only once the
-                # objective arm agrees the mode has stabilized.
+                # objective arm agrees the mode has stabilized and no term is
+                # held on the looser bar of a guard-stopped coefficient fit.
                 continue
             converged = True
             termination_reason = "active_set_stationary"
