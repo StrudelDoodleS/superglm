@@ -643,33 +643,52 @@ def _on_binding_face(model, active, apply, X, curvature, data_gram=None) -> Any:
     if not np.all(np.isfinite(scale) & (scale > 0.0)):
         return None
     R, moves = R / scale[:, None], moves / scale
-    gram = 0.5 * (R @ moves + (R @ moves).T)
+    gram = R @ moves
+    gram = 0.5 * (gram + gram.T)
     # That many rows, the most independent in the curvature metric first:
     # pivoted Cholesky of R F R' (LAPACK ``dpstrf``; Higham 2002, sec. 10.3),
-    # so the basis is as well conditioned there as the rows allow. Its
-    # diagonal is 1 exactly for the pivot choice, which otherwise turns on
-    # the last bit of each scaled product. Rows equal to within rounding tie,
-    # and which is kept moves a contrast by about d sqrt(cond F) of its
-    # variance, for rows d apart.
+    # on an exact unit diagonal so the first pivot does not turn on the
+    # last bit of each scaled product.
     pivoting = gram.copy()
     np.fill_diagonal(pivoting, 1.0)
     pivots = scipy.linalg.lapack.dpstrf(pivoting)[1][:rank] - 1
-    R, moves, gram = R[pivots], moves[:, pivots], gram[np.ix_(pivots, pivots)]
-    values, vectors = np.linalg.eigh(gram)
-    u = UNIT_ROUNDOFF
-    # Solving with R F R' loses about its condition number times u of each
-    # result; past 1e-6 relative the restriction no longer resolves what an
-    # interval shows, as when a level of almost no weight leaves F a
-    # direction of nearly no information that the binding rows cross.
-    if not (np.all(np.isfinite(values)) and values[0] > 0.0 and values[-1] * u <= 1e-6 * values[0]):
-        return None
-    inverse = (vectors / values) @ vectors.T
+    inverse = _restriction_inverse(gram[np.ix_(pivots, pivots)])
+    if inverse is None:
+        if face is None or len(R) <= rank:
+            return None
+        # Q-DEIM (Drmac and Gugercin, 2016): pivot the rows of an orthonormal
+        # basis of the Gram's sampled column space. In a cluster of nearly
+        # parallel rows this can select both extremes where Cholesky started
+        # in the middle. QR only proposes indices. These rows were projected
+        # off the saved face: selecting its codimension of them spans the
+        # restriction if their own Gram passes the positive-definite guard.
+        if not np.all(np.isfinite(gram)):
+            return None
+        basis = np.linalg.qr(gram[:, pivots])[0]
+        _, order = scipy.linalg.qr(basis.T, mode="r", pivoting=True)
+        pivots = order[:rank]
+        inverse = _restriction_inverse(gram[np.ix_(pivots, pivots)])
+        if inverse is None:
+            return None
+    R, moves = R[pivots], moves[:, pivots]
 
     def restricted(contrast: np.ndarray) -> np.ndarray:
         moved = apply(contrast)
         return moved - moves @ (inverse @ (R @ moved))
 
     return restricted
+
+
+def _restriction_inverse(gram: np.ndarray) -> np.ndarray | None:
+    """Invert equilibrated R F R' if its condition times unit roundoff is at most 1e-6."""
+    values, vectors = np.linalg.eigh(gram)
+    if not (
+        np.all(np.isfinite(values))
+        and values[0] > 0.0
+        and values[-1] * UNIT_ROUNDOFF <= 1e-6 * values[0]
+    ):
+        return None
+    return (vectors / values) @ vectors.T
 
 
 @dataclass(frozen=True)
