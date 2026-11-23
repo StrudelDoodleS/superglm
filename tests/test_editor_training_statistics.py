@@ -84,6 +84,7 @@ def test_default_edit_rescores_exact_offset_rows_after_an_explicit_score():
     rng = np.random.default_rng(697)
     X = pd.DataFrame({"x": rng.uniform(size=300)})
     offset = rng.uniform(-0.4, 0.5, len(X))
+    weights = np.linspace(1.0, 3.0, len(X))
     y = np.sin(8.0 * X["x"].to_numpy()) + offset + rng.normal(0, 0.05, len(X))
     model = SuperGLM(
         family="gaussian",
@@ -92,8 +93,9 @@ def test_default_edit_rescores_exact_offset_rows_after_an_explicit_score():
         features={"x": Spline("ps", k=8)},
         discrete=True,
         n_bins=12,
-    ).fit(X, y, offset=offset)
-    assert abs(model.result.deviance - np.sum((y - model.predict(X, offset=offset)) ** 2)) > 0.1
+    ).fit(X, y, sample_weight=weights, offset=offset)
+    fitted_exact = np.dot(weights, (y - model.predict(X, offset=offset)) ** 2)
+    assert abs(model.result.deviance - fitted_exact) > 0.1
     alternate, alternate_y, alternate_offset = X.iloc[:20], y[:20] + 0.5, -offset[:20]
     session = edit(model, validation_data=(alternate, alternate_y, None, alternate_offset))
     with closing(session.widget()) as widget:
@@ -105,8 +107,8 @@ def test_default_edit_rescores_exact_offset_rows_after_an_explicit_score():
         widget._drag("x", [20, 21, 22], delta=0.2)
         saved = joblib_load_bytes(widget._export_bytes("joblib").data)
         exact = saved.predict(X, offset=offset)
-        expected = np.sum((y - exact) ** 2)
-        assert abs(expected - np.sum((y - saved.predict(X)) ** 2)) > 0.1
+        expected = np.dot(weights, (y - exact) ** 2)
+        assert abs(expected - np.dot(weights, (y - saved.predict(X)) ** 2)) > 0.1
         assert saved.result.deviance == pytest.approx(expected)
         assert widget._summary("in_force")["compact"]["model"]["deviance"] == pytest.approx(
             expected
