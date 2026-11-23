@@ -96,6 +96,101 @@ def _effect(model, name, level):
     return term.log_relativity[list(term.levels).index(level)]
 
 
+def _cross_book():
+    rng = np.random.default_rng(73)
+    # B:Q is absent and pruned before B:R. C:Q is an occupied, healthy cross.
+    cells = [(a, b) for a in "ABC" for b in "PQR" if (a, b) != ("B", "Q")]
+    a, b = np.repeat(cells, 100, axis=0).T
+    x = rng.uniform(size=len(a))
+    y = rng.poisson(np.exp(np.sin(5 * x) + 0.6 * ((a == "C") & (b == "Q"))))
+    y[(a != "A") & (b == "R")] = 0
+    return pd.DataFrame({"a": a, "b": b, "x": x}), y
+
+
+def _cross_features():
+    return {"a": Categorical(base="A"), "b": Categorical(base="P"), "x": Spline(n_knots=5)}
+
+
+@pytest.mark.parametrize("discrete", [False, True])
+def test_separated_cross_prices_match_the_cold_fit_and_explicit_offsets(monkeypatch, discrete):
+    import superglm.reml.direct as direct
+    import superglm.reml.discrete as binned
+    from superglm import Numeric
+
+    X, y = _cross_book()
+    model = SuperGLM(
+        family="poisson", discrete=discrete, features=_cross_features(), interactions=[("a", "b")]
+    )
+    solve = direct.fit_irls_direct
+    cold = []
+
+    def record(**kw):
+        result = solve(**kw)
+        if kw.get("trace_purpose") == "reml_bootstrap":
+            cold.append(result[0].beta.copy())
+        return result
+
+    monkeypatch.setattr(direct, "fit_irls_direct", record)
+    monkeypatch.setattr(binned, "fit_irls_direct", record)
+    for budget in (1, 5, 20):
+        model.fit_reml(X, y, max_reml_iter=budget)
+        group = next(g for g in model._groups if g.name == "a:b")
+        # Emitted order after pruning is B:R, C:Q, C:R.
+        prices = cold[0][[group.start, group.start + 2]]
+        rows = {r.name: r for r in model.summary()._coef_rows}
+        for name, price in zip(("a:b[B:R]", "a:b[C:R]"), prices, strict=True):
+            row = rows[name]
+            assert row.coef == price
+            assert row.separated and (row.se, row.z, row.p, row.ci_low, row.ci_high) == (None,) * 5
+        assert rows["a:b[C:Q]"].se > 0
+
+    # Rebuild the healthy cell as an ordinary covariate, with the two cold
+    # coefficients supplied externally on their original rows.
+    offset = np.where((X.a == "B") & (X.b == "R"), prices[0], 0.0)
+    offset += np.where((X.a == "C") & (X.b == "R"), prices[1], 0.0)
+    frame = X.assign(cq=((X.a == "C") & (X.b == "Q")).astype(float))
+    oracle = SuperGLM(
+        family="poisson", discrete=discrete, features=_cross_features() | {"cq": Numeric()}
+    )
+    oracle.fit_reml(frame, y, offset=offset)
+    np.testing.assert_allclose(model.predict(X), oracle.predict(frame, offset=offset), rtol=2e-6)
+    assert model._reml_result.objective == pytest.approx(oracle._reml_result.objective, rel=1e-8)
+    assert model.result.effective_df == pytest.approx(oracle.result.effective_df, rel=2e-6)
+
+    restored = pickle.loads(pickle.dumps(model))
+    holdout = np.arange(0, len(y), 3)
+    np.testing.assert_array_equal(restored.predict(X.iloc[holdout]), model.predict(X.iloc[holdout]))
+    for actual, expected in (
+        (restored.metrics(X.copy(), y.copy()), oracle.metrics(frame, y, offset=offset)),
+        (
+            restored.metrics(X.iloc[holdout], y[holdout]),
+            oracle.metrics(frame.iloc[holdout], y[holdout], offset=offset[holdout]),
+        ),
+    ):
+        np.testing.assert_allclose(actual.leverage, expected.leverage, rtol=2e-5)
+
+
+def test_held_cross_allows_export_on_a_low_exposure_policy(tmp_path):
+    from .test_rating_table_prediction_equivalence import _predict_from_payload
+
+    X, y = _cross_book()
+    # A small positive exposure in B:R puts its predictor below the export
+    # guard when the cross walks, but within range at the cold price.
+    offset = np.zeros(len(X))
+    offset[np.flatnonzero((X.a == "B") & (X.b == "R"))[0]] = -55
+    X["exposure"] = np.exp(offset)
+    model = SuperGLM(family="poisson", features=_cross_features(), interactions=[("a", "b")])
+    model.fit_reml(X, y, offset=offset)
+    options = dict(offset=offset, offset_source="exposure", continuous_kind="ppform")
+    payload = model.rating_table_payload(X, y, **options)
+    np.testing.assert_allclose(
+        _predict_from_payload(payload, X, per_unit_offsets={"exposure": X.exposure}),
+        model.predict(X, offset=offset),
+        rtol=1e-12,
+    )
+    model.export_rating_tables(tmp_path / "cells.xlsx", X, y, **options)
+
+
 def _fit_with_separated_z(base, family="poisson"):
     from superglm import PSpline
 

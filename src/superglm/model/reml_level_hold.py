@@ -1,10 +1,11 @@
-"""An affine restriction of a REML design to its freely fitted level effects."""
+"""An affine restriction of a REML design to its freely fitted level and cell effects."""
 
 from dataclasses import dataclass, replace
 
 import numpy as np
 
 from superglm.group_matrix import CategoricalGroupMatrix, DesignMatrix
+from superglm.model.separated_levels import separated_labels
 from superglm.reml.identified import binomial_log
 
 
@@ -51,16 +52,21 @@ class REMLLevelHold:
         for i, (group, matrix) in enumerate(
             zip(model._groups, model._dm.group_matrices, strict=True)
         ):
-            spec = model._specs.get(group.feature_name)
-            labels = set(getattr(spec, "_separated_levels_at_fit", ()))
-            if not labels or type(matrix) is not CategoricalGroupMatrix:
+            if type(matrix) is not CategoricalGroupMatrix:
                 continue
-            non_base = spec._non_base
+            spec = model._specs.get(group.feature_name)
+            cross = model._interaction_specs.get(group.feature_name)
+            labels = set(separated_labels(spec if cross is None else cross))
+            if not labels:
+                continue
+            # A crossed cell has its own indicator only on the emitted non-base
+            # grid. Margins and pruned cells have no column in this block.
+            non_base = spec._non_base if cross is None else cross._pairs
             if matrix.n_levels != len(non_base):
                 continue
             held = [j for j, level in enumerate(non_base) if level in labels]
             n_separated = len(held)
-            if spec._base_level in labels:
+            if cross is None and spec._base_level in labels:
                 if binomial_log(model._distribution, model._link):
                     # Its reference direction spans the intercept and every
                     # level. The existing mean-space solve preserves invariance
