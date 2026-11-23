@@ -18,7 +18,6 @@ numeric meaning.
 
 from __future__ import annotations
 
-import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -27,6 +26,7 @@ import numpy as np
 import scipy.sparse as sp
 from numpy.typing import NDArray
 
+from superglm._warn import warn_feature
 from superglm.features._spline_config import EXTRAPOLATIONS
 from superglm.features._spline_knots import weighted_quantile_knots
 from superglm.types import GroupInfo
@@ -498,6 +498,7 @@ class Piecewise:
         x: NDArray[np.float64],
         weights: NDArray[np.float64],
         sample_weight: NDArray | None,
+        feature_name: str | None,
     ) -> NDArray[np.float64]:
         """Resolve the knot vector (validation rules 2-6).
 
@@ -587,13 +588,13 @@ class Piecewise:
                     "distinct values in the rated range. State the breakpoints explicitly."
                 )
             if placed.size < n_requested:
-                warnings.warn(
+                warn_feature(
                     f"Piecewise(breaks={n_requested}) realised only {placed.size} distinct "
                     f"breakpoint(s) ({n_requested} requested, {placed.size} realised): "
                     "tied weighted quantiles collapse on heaped x. The term therefore has "
                     f"edf = {placed.size + 1}, not {n_requested + 1}. "
                     f"Breakpoints: {_format_values(placed)}.",
-                    UserWarning,
+                    feature_name,
                     stacklevel=3,
                 )
             requested = placed
@@ -722,6 +723,7 @@ class Piecewise:
         seg: NDArray[np.intp],
         frac: NDArray[np.float64],
         weights: NDArray[np.float64],
+        feature_name: str | None,
     ) -> None:
         """Check the data can carry the knots that were asked for (rules 8-11).
 
@@ -783,7 +785,7 @@ class Piecewise:
         # alone would miss collinearity with the intercept.
         if self._degrees_active:
             self._validate_segmented_rank(x, weights)
-            self._warn_thin_segments(t, seg_weight, tails)
+            self._warn_thin_segments(t, seg_weight, tails, feature_name)
             return
         n_cols = self._non_base_indices.size
         if x.size <= _RANK_PROBE_MAX_FACTOR_ROWS:
@@ -812,24 +814,25 @@ class Piecewise:
 
         # Rule 11 -- positive but thin.  A warning, not an error; the per-segment weight
         # tells an actuary which breakpoint to move.
-        self._warn_thin_segments(t, seg_weight, tails)
+        self._warn_thin_segments(t, seg_weight, tails, feature_name)
 
     @staticmethod
     def _warn_thin_segments(
         t: NDArray[np.float64],
         seg_weight: NDArray[np.float64],
         tails: str,
+        feature_name: str | None,
     ) -> None:
         total = float(seg_weight.sum())
         thin = np.flatnonzero(seg_weight < _SMALL_SEGMENT_WEIGHT_FRACTION * total)
         if thin.size:
             edges = ", ".join(f"[{t[j]:.10g}, {t[j + 1]:.10g}]" for j in thin)
-            warnings.warn(
+            warn_feature(
                 f"Piecewise segment(s) {edges} carry under "
                 f"{_SMALL_SEGMENT_WEIGHT_FRACTION:.1%} of the in-range weight. "
                 f"Per-segment weight over segments {_format_values(t)}: "
                 f"{_format_values(seg_weight)}.{tails}",
-                UserWarning,
+                feature_name,
                 stacklevel=4,
             )
 
@@ -883,6 +886,8 @@ class Piecewise:
         self,
         x: NDArray[np.floating],
         sample_weight: NDArray[np.floating] | None = None,
+        *,
+        feature_name: str | None = None,
     ) -> GroupInfo:
         """Resolve knots and base from *x*, validate, and return the ``J+1`` columns.
 
@@ -915,7 +920,7 @@ class Piecewise:
                 )
         x = _finite_x(x)
         weights = _conforming_weights(sample_weight, x.size)
-        x = self._resolve_knots(x, weights, sample_weight)
+        x = self._resolve_knots(x, weights, sample_weight, feature_name)
         # Deduplicate before anything scales with n.  Every rule is weight-linear, so
         # unique values with aggregated weights give the same masses, segment counts and
         # rank verdict as the row-level design; this is deduplication, not binning.  The
@@ -936,7 +941,7 @@ class Piecewise:
         self._resolve_base(self._knot_mass(seg, frac, w_agg, signed=True))
         if self._degrees_active:
             self._resolve_segmented_structure()
-            self._validate_support(x_unique, seg, frac, w_agg)
+            self._validate_support(x_unique, seg, frac, w_agg, feature_name)
             assert self._seg_retained is not None
             # Dense on purpose: the segmented path exists only on a level axis,
             # where the distinct rows number at most the level count.
@@ -948,7 +953,7 @@ class Piecewise:
         self._seg_value_groups = None
         self._seg_bubbles = []
         self._seg_retained = None
-        self._validate_support(x_unique, seg, frac, w_agg)
+        self._validate_support(x_unique, seg, frac, w_agg, feature_name)
         # Emitted sparse (at most two non-zeros per row) so the builder re-detects the
         # repeated rows; equal x gives bit-identical hat arithmetic.
         columns = self._emit_unique_csr(seg, frac)[inverse]
@@ -1134,3 +1139,6 @@ class Piecewise:
                 StructuralContrastRow(kind="curvature", index=segment, column_indices=columns)
             )
         return rows
+
+
+_PIECEWISE_BUILD = Piecewise.build

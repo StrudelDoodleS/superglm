@@ -1603,7 +1603,8 @@ def _validate_rule_fit_conflicts(model) -> None:
     the link: an ordered term with special levels (``_refuse_level_rules``)
     and a spline term given a step limit (``refuse_max_step``).
     """
-    from superglm._predictor_compiler import _feature_named_messages
+    from superglm._predictor_compiler import _feature_named_errors
+    from superglm._warn import warn_feature
     from superglm.features._spline_subclass_ops import refuse_max_step
     from superglm.features.constraint import rules_of
     from superglm.features.spline import _SplineBase
@@ -1614,7 +1615,7 @@ def _validate_rule_fit_conflicts(model) -> None:
         rules = rules_of(spec)
         if not any(rule.kind in ("cap", "max_step") for rule in rules):
             continue
-        with _feature_named_messages(name):
+        with _feature_named_errors(name):
             refuse_level_rules = getattr(spec, "_refuse_level_rules", None)
             if refuse_level_rules is not None:
                 refuse_level_rules()
@@ -1632,11 +1633,11 @@ def _validate_rule_fit_conflicts(model) -> None:
                 )
             cap = next((rule for rule in rules if rule.kind == "cap"), None)
             if cap is not None and getattr(spec, "extrapolation", None) == "extend":
-                warnings.warn(
+                warn_feature(
                     f"{cap.describe()} holds on the training range; with extrapolation='extend' "
                     "the tails beyond the training range are not capped. Use "
                     "extrapolation='clip' to keep predictions inside the cap",
-                    UserWarning,
+                    name,
                     stacklevel=2,
                 )
 

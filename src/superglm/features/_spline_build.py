@@ -113,7 +113,7 @@ def mark_kindless_saved_on_scop(model) -> None:
             fitted._spline_obj = copy.deepcopy(declared)
 
 
-def _warn_if_saved_on_scop(spec: Any) -> None:
+def _warn_if_saved_on_scop(spec: Any, feature_name: str | None) -> None:
     """Warn once that a spline saved fitted on SCOP (``saved_on_scop``) now fits on the QP.
 
     The build marks the spec ``"qp"``, which stops a second build of the same
@@ -122,7 +122,7 @@ def _warn_if_saved_on_scop(spec: Any) -> None:
     not on every refit.
     """
     if saved_on_scop(spec):
-        warn_scop_retired(saved=True)
+        warn_scop_retired(saved=True, feature_name=feature_name)
         spec.shape_engine = "qp"
 
 
@@ -241,6 +241,7 @@ def build_group_info(
     sample_weight: NDArray | None = None,
     *,
     find_row_support: bool = False,
+    feature_name: str | None = None,
 ) -> GroupInfo | list[GroupInfo]:
     """Build the main GroupInfo payload for a spline spec.
 
@@ -250,14 +251,14 @@ def build_group_info(
     builder to store without scanning the basis.
     """
     _raise_if_unsupported_fit_shape_constraint(spec)
-    _warn_if_saved_on_scop(spec)
+    _warn_if_saved_on_scop(spec, feature_name)
     clear_scop_state(spec)
     engine = shape_engine(spec)
 
     x = np.asarray(x, dtype=np.float64).ravel()
     spec._place_knots(x, sample_weight)
     spec._validate_m_orders_build()
-    prepare_shape_rules(spec, stacklevel=3)
+    prepare_shape_rules(spec, stacklevel=3, feature_name=feature_name)
     _store_training_basis_mean(spec, x)
     distinct = row_supports.distinct_values(x)
     if distinct is None:
@@ -350,16 +351,18 @@ def build_knots_and_penalty(
     x: NDArray,
     sample_weight: NDArray | None = None,
     n_bins: int | None = None,
+    *,
+    feature_name: str | None = None,
 ) -> tuple[NDArray | None, int, NDArray | None]:
     """Place knots and return projected penalty info without building the full basis."""
     _raise_if_unsupported_fit_shape_constraint(spec)
-    _warn_if_saved_on_scop(spec)
+    _warn_if_saved_on_scop(spec, feature_name)
     clear_scop_state(spec)
 
     x = np.asarray(x, dtype=np.float64).ravel()
     spec._place_knots(x, sample_weight, n_bins)
     spec._validate_m_orders_build()
-    prepare_shape_rules(spec, stacklevel=3)
+    prepare_shape_rules(spec, stacklevel=3, feature_name=feature_name)
     _store_training_basis_mean(spec, x)
     omega = spec._build_penalty()
     _, omega_constrained, n_cols, projection = spec._apply_constraints(None, omega)

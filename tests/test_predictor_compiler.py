@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import inspect
 import pickle
+import threading
+import warnings
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from typing import Any
 
 import numpy as np
@@ -13,6 +17,60 @@ from superglm._frame import as_eager_frame
 from superglm._predictor_compiler import compile_predictor_design
 from superglm.dm_builder import build_design_matrix
 from superglm.features import Categorical, Numeric, Spline
+
+
+def test_feature_build_warnings_keep_the_emitting_threads_attribution() -> None:
+    build_entered = threading.Barrier(2, timeout=5)
+    release_build = threading.Barrier(2, timeout=5)
+
+    class CustomNumeric(Numeric):
+        def build(self, x, sample_weight=None):
+            build_entered.wait()
+            release_build.wait()
+            warnings.warn("custom build warning", RuntimeWarning)
+            return super().build(x, sample_weight=sample_weight)
+
+    frame = pd.DataFrame({"age": [20.0, 40.0, 50.0, 60.0], "band": ["A", "B", "A", "B"]})
+    weights = np.ones(len(frame))
+    specs = {"age": CustomNumeric(), "band": Categorical(levels=["A", "B", "C"])}
+
+    with pytest.warns(Warning) as caught:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            fit = pool.submit(
+                copy_context().run,
+                compile_predictor_design,
+                as_eager_frame(frame),
+                weights,
+                geometry_weight=weights,
+                polynomial_weight=weights,
+                categorical_reporting_weight=weights,
+                ordered_reporting_weight=weights,
+                specs=specs,
+                feature_order=list(specs),
+                interaction_specs={},
+                interaction_order=[],
+                pending_interactions=[],
+                model_discrete=False,
+                n_bins_config=32,
+                lambda2=0.1,
+            )
+            build_entered.wait()
+            try:
+                warnings.warn("independent warning", RuntimeWarning)
+            finally:
+                release_build.wait()
+            fit.result(timeout=5)
+
+    assert [(w.category, str(w.message)) for w in caught] == [
+        (RuntimeWarning, "independent warning"),
+        (RuntimeWarning, "custom build warning"),
+        (
+            UserWarning,
+            "Feature 'band': Categorical levels with no effective training rows in this fit are "
+            "pinned to base (zero contribution): ['C']. They remain known levels and predict as "
+            "the base level.",
+        ),
+    ]
 
 
 def _compiled_snapshot(model: SuperGLM) -> dict[str, Any]:

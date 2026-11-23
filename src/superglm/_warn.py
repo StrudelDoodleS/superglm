@@ -13,3 +13,17 @@ _PACKAGE_PREFIX = os.path.dirname(os.path.abspath(__file__)) + os.sep
 def warn_caller(message: str | Warning, category: type[Warning] = UserWarning) -> None:
     """Warn at the first frame outside superglm (a ``Warning`` instance keeps its own class)."""
     warnings.warn(message, category, skip_file_prefixes=(_PACKAGE_PREFIX,))
+
+
+def warn_feature(
+    message: str,
+    feature_name: str | None,
+    category: type[Warning] = UserWarning,
+    *,
+    stacklevel: int,
+) -> None:
+    """Emit a build warning, with the column name when a predictor supplies it."""
+    if feature_name is None:
+        warnings.warn(message, category, stacklevel=stacklevel + 1)
+    else:
+        warn_caller(f"Feature {feature_name!r}: {message}", category)

@@ -15,6 +15,7 @@ from typing import Any, Literal, cast
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._warn import warn_feature
 from superglm.features.constraint import ConstraintRules, ConstraintSpec
 from superglm.types import GroupInfo, LinearConstraintSet
 
@@ -541,6 +542,7 @@ class Categorical:
         sample_weight: NDArray[np.floating] | None = None,
         *,
         stacklevel: int = 2,
+        feature_name: str | None = None,
     ) -> tuple[GroupInfo, NDArray]:
         """``build``, and every row's code against the fitted level universe.
 
@@ -595,18 +597,18 @@ class Categorical:
         observed = effective > 0.0
 
         self._base_level = self._resolve_base(
-            effective, observed, sample_weight, stacklevel=stacklevel + 1
+            effective, observed, sample_weight, stacklevel=stacklevel + 1, feature_name=feature_name
         )
         self._pinned_levels = [
             lev for i, lev in enumerate(self._levels) if not observed[i] and lev != self._base_level
         ]
         if self._pinned_levels:
-            warnings.warn(
+            warn_feature(
                 f"Categorical levels with no effective training rows in this fit are "
                 f"pinned to base (zero contribution): "
                 f"{sorted(self._pinned_levels, key=str)}. They remain known levels "
                 f"and predict as the base level.",
-                UserWarning,
+                feature_name,
                 stacklevel=stacklevel,
             )
 
@@ -670,6 +672,8 @@ class Categorical:
         observed: NDArray[np.bool_],
         sample_weight: NDArray[np.floating] | None,
         stacklevel: int = 3,
+        *,
+        feature_name: str | None = None,
     ) -> Any:
         """Pick the reference level, falling back when the request is empty.
 
@@ -704,11 +708,11 @@ class Categorical:
         if not observed[self._levels.index(base_level)]:
             fallback = self._most_exposed(effective, observed, sample_weight)
             if fallback != base_level:
-                warnings.warn(
+                warn_feature(
                     f"Categorical base level '{base_level}' has no effective training "
                     f"rows in this fit; falling back to '{fallback}'. Coefficient "
                     f"identity changes; predictions do not.",
-                    UserWarning,
+                    feature_name,
                     stacklevel=stacklevel,
                 )
                 self._base_fallback = (base_level, fallback)

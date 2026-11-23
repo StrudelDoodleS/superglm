@@ -9,7 +9,6 @@ adapts those concerns in :mod:`superglm.dm_builder`, which calls
 from __future__ import annotations
 
 import copy
-import warnings
 from collections.abc import Hashable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -39,16 +38,17 @@ from superglm.features.ordered_categorical import (
     OrderedCategorical,
     resolve_interaction_parent_of,
 )
-from superglm.features.piecewise import Piecewise
+from superglm.features.piecewise import _PIECEWISE_BUILD, Piecewise
 from superglm.features.polynomial import Polynomial
-from superglm.features.spline import _BUILT_IN_SPLINES, _SplineBase
+from superglm.features.spline import _BUILT_IN_SPLINES, _SPLINE_BUILD, _SplineBase
 from superglm.group_matrix import DesignMatrix, GroupMatrix
 from superglm.types import DiscreteTensorBuildResult, FeatureSpec, GroupInfo, GroupSlice
 
 # The built-in builds as defined, which the design builder replaces by its own
 # (row support found on distinct values or cells). A subclass override, or a
 # build() patched in later, is not one of them and keeps its own build.
-_SPLINE_BUILD = _SplineBase.build
+_SPLINE_KNOT_BUILD = _SplineBase.build_knots_and_penalty
+_CATEGORICAL_BUILD = Categorical.build
 _TENSOR_BUILD = TensorInteraction.build
 # The term types that bin: exactly these, never a subclass (``_bins_as_built_in``).
 _BINNED_TYPES = _BUILT_IN_SPLINES | {TensorInteraction, SplineCategorical, FactorSmooth}
@@ -176,25 +176,12 @@ class _BuiltInteraction:
 
 
 @contextmanager
-def _feature_named_messages(name: str) -> Iterator[None]:
-    """Name feature ``name`` in the ValueErrors and warnings its build raises.
-
-    Spec-level guards (Polynomial's distinct-support and rank checks, a shape
-    rule's stretch) cannot know the column name. Warnings are re-emitted at
-    the caller of ``compile_predictor_design``, the model fit that named the
-    feature.
-    """
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        try:
-            yield
-        except ValueError as err:
-            raise ValueError(f"Feature {name!r}: {err}") from err
-    for captured in caught:
-        # This generator, contextlib's __exit__, compile_predictor_design, its caller.
-        warnings.warn(
-            f"Feature {name!r}: {captured.message}", category=captured.category, stacklevel=4
-        )
+def _feature_named_errors(name: str) -> Iterator[None]:
+    """Name the column in errors raised by its feature spec."""
+    try:
+        yield
+    except ValueError as err:
+        raise ValueError(f"Feature {name!r}: {err}") from err
 
 
 def compile_predictor_design(
@@ -338,9 +325,15 @@ def compile_predictor_design(
 
         if use_discrete:
             n_bins_feat = resolve_discrete_n_bins(name, spec, n_bins_config)
-            with _feature_named_messages(name):
-                omega, n_cols_penalty, projection_penalty = spec.build_knots_and_penalty(
-                    x_col, feature_build_weight, n_bins_feat
+            with _feature_named_errors(name):
+                build_knots = cast(_SplineBase, spec).build_knots_and_penalty
+                warning_context = (
+                    {"feature_name": name}
+                    if getattr(build_knots, "__func__", None) is _SPLINE_KNOT_BUILD
+                    else {}
+                )
+                omega, n_cols_penalty, projection_penalty = build_knots(
+                    x_col, feature_build_weight, n_bins_feat, **warning_context
                 )
                 # ── QP monotone constraint metadata (coefficient-space, survives discretization) ──
                 constraints, monotone_engine, raw_to_solver_map = qp_geometry(
@@ -428,30 +421,36 @@ def compile_predictor_design(
                     )
                 ]
         else:
-            with _feature_named_messages(name):
+            with _feature_named_errors(name):
                 if isinstance(spec, OrderedCategorical):
                     result = spec._build_with_geometry(
                         x_col,
                         reporting_weight=ordered_reporting_weight,
                         geometry_weight=feature_build_weight,
+                        feature_name=name,
                     )
-                elif scan_levels and getattr(spec.build, "__func__", None) is Categorical.build:
+                elif getattr(spec.build, "__func__", None) is _CATEGORICAL_BUILD:
                     # The scan reads the build's codes. A subclass that
                     # overrides build() keeps its override, and the scan
                     # codes its column itself.
                     result, row_codes = cast(Categorical, spec)._build_with_codes(
-                        x_col, sample_weight=feature_build_weight
+                        x_col, sample_weight=feature_build_weight, feature_name=name
                     )
                     # Held until the scan, across every other term's build:
                     # one byte a row for the usual few levels, not eight.
-                    scan_codes[name] = row_codes.astype(np.min_scalar_type(len(spec._levels)))
+                    if scan_levels:
+                        scan_codes[name] = row_codes.astype(np.min_scalar_type(len(spec._levels)))
                     del row_codes
                 elif getattr(spec.build, "__func__", None) is _SPLINE_BUILD:
                     # The design keeps the row support the build finds;
                     # any other build() keeps its own, and its basis is
                     # scanned.
                     result = cast(_SplineBase, spec)._build_with_row_support(
-                        x_col, sample_weight=feature_build_weight
+                        x_col, sample_weight=feature_build_weight, feature_name=name
+                    )
+                elif getattr(spec.build, "__func__", None) is _PIECEWISE_BUILD:
+                    result = cast(Piecewise, spec).build(
+                        x_col, sample_weight=feature_build_weight, feature_name=name
                     )
                 else:
                     result = spec.build(x_col, sample_weight=feature_build_weight)

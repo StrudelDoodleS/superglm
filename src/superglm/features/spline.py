@@ -403,23 +403,30 @@ class _SplineBase:
         )
 
     def build(
-        self, x: NDArray, sample_weight: NDArray | None = None
+        self, x: NDArray, sample_weight: NDArray | None = None, *, feature_name: str | None = None
     ) -> GroupInfo | list[GroupInfo]:
         """Build B-spline basis and penalty matrix."""
-        return _spline_build.build_group_info(self, x, sample_weight)
+        return _spline_build.build_group_info(self, x, sample_weight, feature_name=feature_name)
 
     def _build_with_row_support(
-        self, x: NDArray, sample_weight: NDArray | None = None
+        self, x: NDArray, sample_weight: NDArray | None = None, *, feature_name: str | None = None
     ) -> GroupInfo | list[GroupInfo]:
         """``build``, with the basis's row support found on its rows per value.
 
         The design builder's build: it stores ``GroupInfo.row_support`` in
         place of scanning the basis.
         """
-        return _spline_build.build_group_info(self, x, sample_weight, find_row_support=True)
+        return _spline_build.build_group_info(
+            self, x, sample_weight, find_row_support=True, feature_name=feature_name
+        )
 
     def build_knots_and_penalty(
-        self, x: NDArray, sample_weight: NDArray | None = None, n_bins: int | None = None
+        self,
+        x: NDArray,
+        sample_weight: NDArray | None = None,
+        n_bins: int | None = None,
+        *,
+        feature_name: str | None = None,
     ) -> tuple[NDArray | None, int, NDArray | None]:
         """Place knots and return penalty info, without building the full basis.
 
@@ -439,7 +446,9 @@ class _SplineBase:
         n_cols : effective number of basis columns.
         projection : (K, n_cols) constraint projection, or None.
         """
-        return _spline_build.build_knots_and_penalty(self, x, sample_weight, n_bins)
+        return _spline_build.build_knots_and_penalty(
+            self, x, sample_weight, n_bins, feature_name=feature_name
+        )
 
     def transform(self, x: NDArray) -> NDArray:
         """Build design matrix using knots learned during build()."""
@@ -1132,6 +1141,7 @@ class CardinalCRSpline(_SplineBase):
 #: A subclass, whatever it overrides, is fitted and predicted through its own methods. Only
 #: these give interaction margins their extrapolation policy; a subclass's margins read
 #: ``_raw_basis_matrix`` as they always have.
+_SPLINE_BUILD = _SplineBase.build
 _BUILT_IN_SPLINES = frozenset(
     {PSpline, BSplineSmooth, NaturalSpline, CubicRegressionSpline, CardinalCRSpline}
 )

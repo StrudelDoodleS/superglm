@@ -16,13 +16,12 @@ those builders' rows, which exist at every degree.
 
 from __future__ import annotations
 
-import warnings
-
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 from numpy.typing import NDArray
 from scipy.interpolate import BSpline
 
+from superglm._warn import warn_feature
 from superglm.features._spline_constraints import (
     build_curvature_difference_constraints,
     build_monotone_difference_constraints,
@@ -121,6 +120,7 @@ def shape_pieces(
     hi: float,
     *,
     feature: str | None = None,
+    warning_feature: str | None = None,
     stacklevel: int = 1,
 ) -> list[ShapePiece]:
     """The direction, curvature and flat rules as numeric pieces on [lo, hi].
@@ -156,10 +156,10 @@ def shape_pieces(
             )
         if a < lo or b > hi:
             a, b = max(a, lo), min(b, hi)
-            warnings.warn(
+            warn_feature(
                 f"{where}{rule.describe()} reaches past the feature's range [{lo:g}, {hi:g}]; "
                 f"the rule applies on [{a:g}, {b:g}]",
-                UserWarning,
+                warning_feature,
                 stacklevel=stacklevel + 1,
             )
         pieces.append((rule.kind, a, b))
