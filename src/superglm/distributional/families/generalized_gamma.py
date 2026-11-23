@@ -13,9 +13,9 @@ from numpy.typing import NDArray
 
 from superglm.distributional.families._base import (
     array_digest,
+    curvature_direction_from_rows,
+    curvature_second_direction_from_rows,
     immutable,
-    natural_curvature_direction,
-    natural_curvature_second_direction,
     readonly,
     typed_plan,
     validated_float_response,
@@ -32,9 +32,9 @@ from superglm.distributional.families._response_bounds import (
     TailChannels,
     bind_observation,
     bounded_channels,
-    bounded_higher_derivatives,
     censored_carrier,
     contract_third,
+    finite_higher_derivatives,
     log_window_values,
     refuse_bounded,
 )
@@ -488,6 +488,17 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
         )
         values = self._theta(theta, len(response))
         bound = self._plan(plan, len(response))
+        return self._evaluate_rows(response, values, bound, order)
+
+    def _evaluate_rows(
+        self,
+        response: NDArray,
+        values: NDArray,
+        bound: GeneralizedGammaLikelihoodPlan,
+        order: int,
+        higher: tuple[NDArray, ...] = (),
+    ) -> NaturalLikelihoodEvaluation:
+        """Evaluate the likelihood, adjusting any supplied higher derivatives in the same pass."""
         rows = mean_rows if self.parametrisation == "mean" else location_rows
         evaluated = rows(
             _density_response(response, bound.observation),
@@ -505,9 +516,23 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
         )
         if bound.observation.bounds is not None:
 
-            def window(lower: NDArray, upper: NDArray, at: NDArray) -> TailChannels:
-                jets = self._window_jets(lower, upper, values[at], order)
-                return jets[0], *(jets[k] if order >= k else None for k in (1, 2))
+            def window(lower: NDArray, upper: NDArray, at: NDArray):
+                theta = values[at]
+                jets = self._window_jets(lower, upper, theta, order + len(higher))
+                if not higher:
+                    return jets[0], *(jets[k] if order >= k else None for k in (1, 2))
+                # A higher-order tail can fail even when the score and
+                # Hessian exist. Recover those rows at their own order and
+                # leave the high channels exactly as their engine returned.
+                finite = np.isfinite(jets[0])
+                for channel in jets[1:3]:
+                    finite &= np.all(np.isfinite(channel), axis=1)
+                if not np.all(finite):
+                    retry = ~finite
+                    low = self._window_jets(lower[retry], upper[retry], theta[retry], 2)
+                    for target, recovered in zip(jets[:3], low, strict=True):
+                        target[retry] = recovered
+                return jets
 
             optimizing, score, hessian, valid = bounded_channels(
                 optimizing,
@@ -519,6 +544,7 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
                 multiplier=bound.multiplier,
                 window=window,
                 derivative_order=order,
+                higher=higher,
             )
         return NaturalLikelihoodEvaluation(
             optimizing_log_likelihood=optimizing,
@@ -552,31 +578,6 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
                 channel[invalid] = np.nan
         return jets
 
-    def _bounded_higher(
-        self,
-        plan: GeneralizedGammaLikelihoodPlan,
-        response: NDArray,
-        theta: NDArray,
-        third: NDArray | None,
-        fourth: NDArray | None,
-    ):
-        """:func:`bounded_higher_derivatives` with each bounded row's window formed once."""
-        bounds = plan.observation.bounds
-        assert bounds is not None
-
-        def window_jets(lower: NDArray, upper: NDArray, at: NDArray, order: int):
-            return self._window_jets(lower, upper, theta[at], order)
-
-        return bounded_higher_derivatives(
-            third,
-            fourth,
-            np.ones(len(response), dtype=bool),
-            response=response,
-            bounds=bounds,
-            multiplier=plan.multiplier,
-            window_jets=window_jets,
-        )
-
     def predictor_curvature_directional_derivative(
         self,
         y: NDArray,
@@ -597,7 +598,10 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
 
         windows_valid = np.ones(len(response), dtype=bool)
 
-        def hessian_direction(theta: NDArray, natural: NDArray) -> NDArray[np.float64]:
+        @np.errstate(over="ignore", invalid="ignore", under="ignore")
+        def evaluate(theta: NDArray, natural: NDArray):
+            theta = self._theta(theta, len(response))
+            bounds = bound.observation.bounds
             complete = rows(
                 _density_response(response, bound.observation),
                 theta[:, 0],
@@ -606,17 +610,16 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
                 natural,
                 bound.multiplier,
             )
-            if bound.observation.bounds is None:
-                return complete
-            share, _, valid = self._bounded_higher(
-                bound, response, theta, np.zeros((len(response), 10)), None
-            )
-            windows_valid[:] = valid
-            kept = (bound.observation.bounds.side == 0)[:, None]
-            return np.where(kept, complete, 0.0) + contract_third(share, natural)
+            if bounds is None:
+                return self._evaluate_rows(response, theta, bound, 2), complete
+            share = np.zeros((len(response), 10))
+            evaluation = self._evaluate_rows(response, theta, bound, 2, (share,))
+            windows_valid[:] = finite_higher_derivatives((share,))
+            kept = (bounds.side == 0)[:, None]
+            return evaluation, np.where(kept, complete, 0.0) + contract_third(share, natural)
 
-        result = natural_curvature_direction(
-            self, response, eta, eta_direction, links, plan, hessian_direction
+        result = curvature_direction_from_rows(
+            response, eta, eta_direction, links, len(self.parameters), evaluate
         )
         if np.all(windows_valid):
             return result
@@ -643,22 +646,24 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
 
         windows_valid = np.ones(len(response), dtype=bool)
 
-        def natural_derivatives(theta: NDArray, natural_a: NDArray, natural_b: NDArray):
-            third, fourth = rows(
+        def evaluate(theta: NDArray, _natural_a: NDArray, _natural_b: NDArray):
+            theta = self._theta(theta, len(response))
+            higher = rows(
                 _density_response(response, bound.observation),
                 theta[:, 0],
                 theta[:, 1],
                 theta[:, 2],
                 bound.multiplier,
             )
-            if bound.observation.bounds is None:
-                return third, fourth
-            third, fourth, valid = self._bounded_higher(bound, response, theta, third, fourth)
-            windows_valid[:] = valid
-            return third, fourth
+            if bound.observation.bounds is not None:
+                evaluation = self._evaluate_rows(response, theta, bound, 2, higher)
+                windows_valid[:] = finite_higher_derivatives(higher)
+            else:
+                evaluation = self._evaluate_rows(response, theta, bound, 2)
+            return evaluation, *higher
 
-        result = natural_curvature_second_direction(
-            self, response, eta, direction_a, direction_b, links, plan, natural_derivatives
+        result = curvature_second_direction_from_rows(
+            response, eta, direction_a, direction_b, links, len(self.parameters), evaluate
         )
         if np.all(windows_valid):
             return result
