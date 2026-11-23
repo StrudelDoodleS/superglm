@@ -955,7 +955,12 @@ def _dense_if_saturated(block) -> NDArray | None:
 
 
 class SplineCategoricalGroupMatrix:
-    """One spline-by-category level without materialising a masked spline block."""
+    """One spline-by-category level with a CSR basis on its active rows.
+
+    Fitted blocks adopt the gathered basis through `_from_level_rows`.
+    Direct construction and older saved blocks can also carry the full
+    basis as the source for row extraction.
+    """
 
     __slots__ = (
         "B",
@@ -983,28 +988,44 @@ class SplineCategoricalGroupMatrix:
     )
 
     def __init__(self, B_csr: sp.spmatrix, R_inv: NDArray, mask_or_idx: NDArray):
-        self.B = sp.csr_matrix(B_csr)
-        self.n_rows = self.B.shape[0]
+        self.B: sp.csr_matrix | None = sp.csr_matrix(B_csr)
+        n_rows = self.B.shape[0]
         arr = np.asarray(mask_or_idx)
         if arr.dtype == bool:
-            if arr.shape != (self.n_rows,):
+            if arr.shape != (n_rows,):
                 raise ValueError("mask length must match spline basis row count")
             row_idx = np.flatnonzero(arr)
         else:
             row_idx = arr.astype(np.intp, copy=False)
             if row_idx.ndim != 1:
                 raise ValueError("row index array must be one-dimensional")
-            if row_idx.size and (int(row_idx.min()) < 0 or int(row_idx.max()) >= self.n_rows):
+            if row_idx.size and (int(row_idx.min()) < 0 or int(row_idx.max()) >= n_rows):
                 raise ValueError("row index array contains rows outside the spline basis")
 
+        self._init_level_rows(self.B[row_idx], R_inv, row_idx, n_rows)
+
+    @classmethod
+    def _from_level_rows(
+        cls, basis: sp.csr_matrix, R_inv: NDArray, row_idx: NDArray, n_rows: int
+    ) -> SplineCategoricalGroupMatrix:
+        """Adopt CSR rows aligned with sorted, unique design-row indices."""
+        group = cls.__new__(cls)
+        group.B = None
+        group._init_level_rows(basis, R_inv, row_idx, n_rows)
+        return group
+
+    def _init_level_rows(
+        self, basis: sp.csr_matrix, R_inv: NDArray, row_idx: NDArray, n_rows: int
+    ) -> None:
+        self.n_rows = n_rows
         # Subset lookups are reusable only while the category indices are
         # immutable; do not freeze or retain the caller's mutable array.
         self.row_idx = np.array(row_idx, dtype=np.intp, copy=True)
         self.row_idx.flags.writeable = False
         self._sorted_rows = None
         self._row_lookup_certificate = None
-        self.B_level = self.B[self.row_idx].tocsr()
-        self._data = self.B_level.data.astype(np.float64)
+        self.B_level = basis
+        self._data = self.B_level.data.astype(np.float64, copy=self.B is not None)
         self._indices = self.B_level.indices
         self._indptr = self.B_level.indptr
         self._p_b = self.B_level.shape[1]
@@ -1106,6 +1127,12 @@ class SplineCategoricalGroupMatrix:
             idx_arr = np.flatnonzero(idx_arr)
         else:
             idx_arr = idx_arr.astype(np.intp, copy=False)
+        if self.B is None:
+            idx_arr = np.atleast_1d(idx_arr)
+            if idx_arr.ndim != 1:
+                raise IndexError("row indices must be one-dimensional")
+            if idx_arr.min(initial=0) < -self.n_rows or idx_arr.max(initial=-1) >= self.n_rows:
+                raise IndexError("row index out of range")
         if self.row_idx.size and idx_arr.size:
             if self._sorted_rows is None:
                 self._sorted_rows, _, self._row_lookup_certificate = build_row_lookup(
@@ -1118,7 +1145,15 @@ class SplineCategoricalGroupMatrix:
             sub_row_idx = np.flatnonzero(matched)
         else:
             sub_row_idx = np.empty(0, dtype=np.intp)
-        sub = SplineCategoricalGroupMatrix(self.B[idx_arr], self.R_inv, sub_row_idx)
+        if self.B is None:
+            # Compact blocks store their CSR in the same order as the sorted
+            # lookup. Repeated inputs select the same CSR row at new positions.
+            level_idx = pos[sub_row_idx] if sub_row_idx.size else sub_row_idx
+            sub = self._from_level_rows(
+                self.B_level[level_idx], self.R_inv, sub_row_idx, idx_arr.size
+            )
+        else:
+            sub = SplineCategoricalGroupMatrix(self.B[idx_arr], self.R_inv, sub_row_idx)
         sub.omega = self.omega
         sub.projection = self.projection
         sub.omega_components = self.omega_components

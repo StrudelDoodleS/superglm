@@ -810,7 +810,7 @@ def _process_info(
                     row_idx,
                 )
         else:
-            gm = SplineCategoricalGroupMatrix(B_full, R_inv, row_idx)
+            gm = SplineCategoricalGroupMatrix._from_level_rows(B_level, R_inv, row_idx, len(mask))
         gm.spline_cat_level = info.spline_cat_level
         gm.spline_cat_feature = info.spline_cat_feature
         if omega_full is not None:
@@ -1354,7 +1354,12 @@ def rebuild_design_matrix_with_lambdas(
                 R_inv_new = P @ R_inv_local
             else:
                 R_inv_new = compute_R_inv(gm.B_level, omega_eff, level_weight, lam)
-            new_gm = SplineCategoricalGroupMatrix(gm.B, R_inv_new, gm.row_idx)
+            if gm.B is None:
+                new_gm = SplineCategoricalGroupMatrix._from_level_rows(
+                    gm.B_level, R_inv_new, gm.row_idx, gm.n_rows
+                )
+            else:
+                new_gm = SplineCategoricalGroupMatrix(gm.B, R_inv_new, gm.row_idx)
             new_gm.omega = gm.omega
             new_gm.projection = gm.projection
             new_gm.omega_components = gm.omega_components

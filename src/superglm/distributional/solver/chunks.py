@@ -923,6 +923,12 @@ def _group_row_floats(group, *, chunk: bool = False) -> int:
     # view, as one with a knot row's zeros dropped is not; it weights them in
     # sub-blocks, so no second copy.
     basis = group.B
+    if basis is None:
+        # Compact exact category blocks gather just the level CSR and row
+        # indices. Charge every block row as if it belongs to this level.
+        owned = _level_csr_row_bytes(group)
+        dense = 0 if chunk else 2 * 8 * group.B_level.shape[1]
+        return -(-(owned + dense) // 8)
     rows, width = basis.shape
     entry = basis.data.itemsize + basis.indices.itemsize
     dense = 0 if chunk else 8 * width
@@ -935,6 +941,14 @@ def _group_row_floats(group, *, chunk: bool = False) -> int:
         # for; charging these on every row bounds each level.
         per_row += (entry + 8) * stored + (basis.indptr.itemsize + 8 + dense) * rows
     return -(-per_row // (8 * rows))
+
+
+def _level_csr_row_bytes(group) -> int:
+    basis = group.B_level
+    entry = basis.data.itemsize + basis.indices.itemsize
+    if group.B is not None or basis.data.dtype != np.dtype(np.float64):
+        entry += 8  # A separate float64 buffer for the sparse Gram kernel.
+    return entry * _max_row_values(basis) + basis.indptr.itemsize + 8
 
 
 def _spline_category_row_floats(design) -> int:
@@ -989,10 +1003,9 @@ def contraction_row_bytes(layout: StackedLayout, panels=None) -> int | None:
 def _exact_spline_category_chunk_floats(design) -> int:
     """Owned floats per chunk row of a design's exact spline-by-category level groups.
 
-    Every level group copies the chunk's basis rows. A row's own level group
-    also copies its level rows, their values and row indices, and a row lies
-    in one level of each term, the terms on one categorical sharing its name.
-    A row holds at most its basis's most stored values.
+    A row lies in one level of each term, with terms on one categorical
+    sharing its name. Blocks retaining a full basis also copy the chunk's
+    full-basis rows. Charge the largest CSR row of each basis.
     """
     slices = 0.0
     own: dict = {}
@@ -1001,12 +1014,13 @@ def _exact_spline_category_chunk_floats(design) -> int:
         if type(group) is not SplineCategoricalGroupMatrix:
             continue
         basis = group.B
-        entry = basis.data.itemsize + basis.indices.itemsize
-        slices += entry * _max_row_values(basis) + basis.indptr.itemsize
+        if basis is not None:
+            entry = basis.data.itemsize + basis.indices.itemsize
+            slices += entry * _max_row_values(basis) + basis.indptr.itemsize
         feature = group.spline_cat_feature
         key = (id(group), None) if feature is None else (feature, group.spline_cat_level)
         levels[key] = levels.get(key, 0) + 1
-        level = (entry + 8) * _max_row_values(group.B_level) + basis.indptr.itemsize + 8
+        level = _level_csr_row_bytes(group)
         own[key[0]] = max(own.get(key[0], 0.0), level)
     terms: dict = {}
     for (feature, _level), count in levels.items():
@@ -1049,7 +1063,7 @@ def _range_product_floats(group) -> int:
     if kind in _SPLINE_CATEGORY_GROUPS:
         return 3
     if kind is SplineCategoricalGroupMatrix:
-        basis = group.B
+        basis = group.B if group.B is not None else group.B_level
         entry = basis.data.itemsize + basis.indices.itemsize
         return 3 + math.ceil((entry * _max_row_values(basis) + basis.indptr.itemsize) / 8)
     return 1 + (_group_row_floats(group, chunk=True) if kind in _COUNTED_GROUPS else group.shape[1])
