@@ -10,7 +10,7 @@ from typing import Any, Literal
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from superglm._warn import warn_caller
+from superglm._warn import warn_caller, warn_feature
 from superglm.features._spline_knots import QUANTILE_STRATEGIES
 from superglm.features._spline_ranges import PolynomialRange
 from superglm.features.constraint import (
@@ -58,7 +58,7 @@ class SCOPRetiredWarning(UserWarning):
 def warn_scop_retired(
     *, saved: bool = False, moves_fit: bool = True, feature_name: str | None = None
 ) -> None:
-    """Warn that SCOP is retired, at the caller's line outside superglm.
+    """Warn that SCOP is retired, using the build's attribution when named.
 
     ``saved`` is a P-spline a model fitted on SCOP; otherwise the declaration
     passed ``shape_engine="scop"``. ``moves_fit`` is False where SCOP never
@@ -79,9 +79,10 @@ def warn_scop_retired(
     else:
         effect = "it has no effect on this spline, which fits as it did in 0.41.0"
     message = f"{subject}: {effect}. {remedy}"
-    if feature_name is not None:
-        message = f"Feature {feature_name!r}: {message}"
-    warn_caller(message, SCOPRetiredWarning)
+    if feature_name is None:
+        warn_caller(message, SCOPRetiredWarning)
+    else:
+        warn_feature(message, feature_name, SCOPRetiredWarning)
 
 
 def _iter_knots(knots: Any) -> list[Any]:

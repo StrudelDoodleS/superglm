@@ -9,8 +9,7 @@ adapts those concerns in :mod:`superglm.dm_builder`, which calls
 from __future__ import annotations
 
 import copy
-from collections.abc import Hashable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, cast
@@ -21,7 +20,7 @@ from numpy.typing import NDArray
 from superglm._frame import EagerFrame
 from superglm._group_matrix._group_matrix_bins import discretize_positive_support
 from superglm._parallel import pooled_map
-from superglm._warn import warn_caller
+from superglm._warn import feature_build_messages, warn_caller
 from superglm.features._spline_build import finish_penalties, qp_geometry, shape_engine
 from superglm.features._spline_penalties import structural_penalty_ranks
 from superglm.features._spline_runtime import bin_knots
@@ -175,15 +174,6 @@ class _BuiltInteraction:
     records: list[tuple]
 
 
-@contextmanager
-def _feature_named_errors(name: str) -> Iterator[None]:
-    """Name the column in errors raised by its feature spec."""
-    try:
-        yield
-    except ValueError as err:
-        raise ValueError(f"Feature {name!r}: {err}") from err
-
-
 def compile_predictor_design(
     X: EagerFrame,
     sample_weight: NDArray,
@@ -325,7 +315,7 @@ def compile_predictor_design(
 
         if use_discrete:
             n_bins_feat = resolve_discrete_n_bins(name, spec, n_bins_config)
-            with _feature_named_errors(name):
+            with feature_build_messages(name):
                 build_knots = cast(_SplineBase, spec).build_knots_and_penalty
                 warning_context = (
                     {"feature_name": name}
@@ -421,7 +411,7 @@ def compile_predictor_design(
                     )
                 ]
         else:
-            with _feature_named_errors(name):
+            with feature_build_messages(name):
                 if isinstance(spec, OrderedCategorical):
                     result = spec._build_with_geometry(
                         x_col,
