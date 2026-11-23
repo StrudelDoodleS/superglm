@@ -1627,6 +1627,18 @@ def _marginal_structural_rank(gm: GroupMatrix, suffix: str, repeat: int) -> int 
     return declared // repeat
 
 
+def _is_fixed_diagonal(matrix: NDArray, width: int, structural_rank: int | None) -> bool:
+    """Check that every nonzero entry is a finite positive diagonal curvature."""
+    diagonal = np.diag(matrix)
+    rank = np.count_nonzero(diagonal > 0)
+    return (
+        matrix.shape == (width, width)
+        and np.isfinite(diagonal).all()
+        and np.count_nonzero(matrix) == rank
+        and (structural_rank is None or rank == structural_rank)
+    )
+
+
 def _tensor_marginal_rank_logdet(
     gm: GroupMatrix,
     omega_raw: NDArray,
@@ -2310,9 +2322,7 @@ def build_penalty_components(
             # already are its range spectrum. A Gram cut can erase the tail on
             # skewed knots, and a projected root can fill the other margin's zeros.
             fixed_diagonal = not getattr(gm, "reparametrize", True) and all(
-                matrix.shape == (g.size, g.size)
-                and np.count_nonzero(matrix) == (positive := np.count_nonzero(np.diag(matrix) > 0))
-                and positive == structural_ranks.get(suffix, positive)
+                _is_fixed_diagonal(matrix, g.size, structural_ranks.get(suffix))
                 for suffix, matrix in gm.omega_components
             )
             if (
