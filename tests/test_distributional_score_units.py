@@ -29,6 +29,42 @@ from ._distributional_weights import resolved_prior
 from .test_distributional_endpoint_laml import _UnitGaussian
 
 
+def test_fisher_fallback_measures_the_gain_with_the_accepted_factor(monkeypatch):
+    """A weakly weighted Gaussian can still gain 0.5. Force a Fisher fallback
+    and a misleading eigenvalue for the rejected observed matrix.
+    """
+    family = _UnitGaussian()
+    weights = resolved_prior(np.array([1e-16]))
+    y = np.array([1e8])
+    layout = build_stacked_layout(
+        compile_predictors(
+            as_eager_frame(pd.DataFrame({"x": [0.0]})),
+            weights,
+            family.parameters,
+            (Predictor("mean", {}),),
+        )
+    )
+    resolve = solver.resolve_curvature
+
+    def fallback(source, matrix, **kwargs):
+        decision = resolve(source, -matrix, **kwargs)
+        return replace(decision, telemetry=replace(decision.telemetry, minimum_eigenvalue=1.0))
+
+    monkeypatch.setattr(solver, "resolve_curvature", fallback)
+    fit = solver.fit_dense_fixed_lambda(
+        family,
+        layout,
+        y,
+        family.bind_likelihood(y, weights, COMPLETE_OBSERVATION),
+        np.zeros((1, 1)),
+        initial=np.zeros(1),
+        config=solver.DenseSolverConfig(tolerance=1e-7, coefficient_curvature="fisher"),
+    )
+    assert fit.terminal_curvature.actual_source == "fisher"
+    assert not fit.converged
+    assert fit.convergence_reason == "material_likelihood_gain"
+
+
 @pytest.mark.parametrize("chunk_size", [None, 11], ids=["dense", "chunked"])
 @pytest.mark.pins_behaviour
 def test_a_whitened_spline_resolves_a_contrast_on_its_rare_rows(chunk_size):

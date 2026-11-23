@@ -1773,7 +1773,7 @@ def _retained_step_improves_objective(
     state: _AcceptedState,
     score: NDArray,
     rank: RankDecomposition,
-    minimum_eigenvalue: float,
+    telemetry: CurvatureTelemetry,
     config: DenseSolverConfig,
     phase_recorder: FitPhaseRecorder | None,
 ) -> bool:
@@ -1789,7 +1789,7 @@ def _retained_step_improves_objective(
     retained_score = score if face is None else face.reduce_vector(score)
     objective = state.penalized_optimizing_log_likelihood
     limit = max(config.tolerance * (1 + abs(objective)), abs(np.spacing(objective)))
-    if rank.cholesky_factor is not None:
+    if rank.cholesky_factor is not None and telemetry.actual_source == "observed":
         # The policy already measured the smallest eigenvalue in these coordinates.
         # Deduct the eigensolver's absolute accuracy, using ||H|| <= trace(H)
         # <= p max(diag(H)). Then g'H^-1 g <= p ||g||_inf^2 / lambda_min.
@@ -1797,7 +1797,7 @@ def _retained_step_improves_objective(
         # or a factor obtained from the rows still gets its actual correction.
         p = rank.width
         scale = float(np.max(rank.column_scale))
-        lower = minimum_eigenvalue - (p * _eigensolver_relative_bar(p) * scale) * scale
+        lower = telemetry.minimum_eigenvalue - (p * _eigensolver_relative_bar(p) * scale) * scale
         if lower > 0.0 and np.max(np.abs(retained_score)) < np.sqrt(lower) * np.sqrt(limit / p):
             return False
     correction = rank.solve(retained_score)
@@ -2228,7 +2228,7 @@ def _fit_dense_fixed_lambda_core(
                 state,
                 terminal_score_geometry.score_penalized,
                 decomposition,
-                curvature.telemetry.minimum_eigenvalue,
+                curvature.telemetry,
                 solver_config,
                 phase_recorder,
             )
