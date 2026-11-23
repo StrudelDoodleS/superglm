@@ -10,6 +10,8 @@ import pytest
 
 from superglm._frame import as_eager_frame
 from superglm._group_matrix import _lookup_tables as lookup_tables
+from superglm._group_matrix._group_matrix_discretized import DiscretizedSSPGroupMatrix
+from superglm._group_matrix._group_matrix_kernels import _ssp_gram_needs_exact
 from superglm._parallel import parallel_config
 from superglm.distributional import GaussianLS, TweedieLSS
 from superglm.distributional._row_design import BoundedPredictorMatrix
@@ -170,13 +172,41 @@ def test_support_compressed_layouts_equal_the_dense_rows():
         assert _within(reader.rows(q, 31, 900), matrix[31:900], matrix.shape[1])
 
 
-@pytest.mark.parametrize("compressed", [False, True], ids=["binned", "support-compressed"])
-def test_level_rows_without_a_certified_lookup_equal_the_dense_rows(
-    problem, monkeypatch, compressed
-):
+@pytest.mark.parametrize("support", ["scaled", "float32"])
+def test_binned_rows_admit_supports_outside_the_fast_gram_route(support):
+    layout, matrices, _slices, _rng = _layout(2)
+    group = next(
+        group
+        for group in layout.predictors[0].design.group_matrices
+        if type(group) is DiscretizedSSPGroupMatrix
+    )
+    if support == "scaled":
+        group.B_unique = np.ldexp(group.B_unique, 200)
+        group.R_inv = np.ldexp(group.R_inv, -200)
+        assert _ssp_gram_needs_exact(group.B_unique, group.R_inv)
+    else:
+        # Compare products on the same quantized support in both readers.
+        group.B_unique = group.B_unique.astype(np.float32).astype(np.float64)
+        matrices = dense_predictor_matrices(layout)
+        group.B_unique = group.B_unique.astype(np.float32)
+    reader = br.binned_rows(layout)
+    assert reader is not None
+    for q, matrix in enumerate(matrices):
+        assert _within(reader.rows(q, 31, 500), matrix[31:500], matrix.shape[1])
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(lambda: _layout(2), id="binned-K2"),
+        pytest.param(lambda: _layout(3), id="binned-K3"),
+        pytest.param(_compressed_layout, id="support-compressed"),
+    ],
+)
+def test_level_rows_without_a_certified_lookup_equal_the_dense_rows(build, monkeypatch):
     """A level whose row lookup has no certificate reads its rows through ``row_subset``;
     the event is forced, and rows from an interior start must still match."""
-    layout, matrices, _slices, _rng = _compressed_layout() if compressed else problem
+    layout, matrices, _slices, _rng = build()
     monkeypatch.setattr(br, "_category_rows", lambda group, start, stop: None)
     reader = br.binned_rows(layout)
     for q, matrix in enumerate(matrices):

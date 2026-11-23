@@ -991,11 +991,19 @@ def _force_terminal_qp_refit(monkeypatch: pytest.MonkeyPatch, failure_reason: st
     ):
         reml_finalize.restore_qp_group_state(work_model, qp_saved_state)
         terminal_beta = pirls_result.beta.copy()
+        group = next(group for group in work_model._groups if group.constraints is not None)
+        A, b = group.constraints.A, group.constraints.b
         if failure_reason == "constraint_infeasible":
-            group = next(group for group in work_model._groups if group.constraints is not None)
-            terminal_beta[group.sl] = -10.0 * group.constraints.A[0]
-            slack = group.constraints.A @ terminal_beta[group.sl] - group.constraints.b
+            terminal_beta[group.sl] = -10.0 * A[0]
+            slack = A @ terminal_beta[group.sl] - b
             assert np.min(slack) < -1.0
+        else:
+            from superglm.solvers.irls_direct._qp import _QP_FEASIBILITY_TOL
+
+            beta = terminal_beta[group.sl]
+            slack = A @ beta - b
+            scale = np.max(np.abs(A) @ np.abs(beta) + np.abs(b))
+            assert np.min(slack) >= -_QP_FEASIBILITY_TOL * scale
         return replace(
             pirls_result,
             beta=terminal_beta,

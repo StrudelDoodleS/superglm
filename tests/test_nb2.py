@@ -765,6 +765,47 @@ class TestNB2WeightedProfile:
 
 
 class TestNB2AutoTheta:
+    def test_reml_warm_and_cold_starts_agree(self, monkeypatch):
+        """A named start reaches the same REML objective with theta estimated in both fits."""
+        from superglm.model import fit_ops
+
+        rng = np.random.default_rng(25)
+        x = rng.uniform(-1.0, 1.0, 2_000)
+        X = pd.DataFrame({"x": x})
+        y = _generate_nb2(len(x), np.exp(1.0 + np.sin(4.0 * x)), theta=2.0, rng=rng)
+        reml_tol = 1e-5
+        starts = []
+        warm_start = fit_ops.warm_start_lambdas
+
+        def record(*args, **kwargs):
+            selected = warm_start(*args, **kwargs)
+            starts.append(selected.copy())
+            return selected
+
+        monkeypatch.setattr(fit_ops, "warm_start_lambdas", record)
+
+        def fit(start=None):
+            model = SuperGLM(
+                family=NegativeBinomial(theta="auto"),
+                selection_penalty=0.0,
+                features={"x": Spline(kind="cr", k=8)},
+            ).fit_reml(X, y, lambda2_init=start, reml_tol=reml_tol)
+            info = model.reml_diagnostics()
+            profile = model._nb_profile_result
+            assert info["converged"] and profile.converged
+            assert model.theta_ == profile.theta_hat
+            return info
+
+        cold = fit()
+        assert starts[0] == {}
+        start = cold["lambdas"]
+        assert 0.0 < start["x"] < np.inf
+        starts.clear()
+        warm = fit(start)
+        assert starts[0] == start
+        reference = cold["objective"]
+        assert abs(warm["objective"] - reference) <= 2 * reml_tol * (1 + abs(reference))
+
     def test_reml_mode_rejects_selection_before_profile_work(self, monkeypatch):
         from superglm.profiling import nb as nb_module
 
