@@ -562,10 +562,35 @@ joint covariance is the dependency; neither C1 nor a general AD engine is needed
 
 ## Research
 
-- **Sparse Laplace and small family-derivative tools (C2):** investigate separately.
-  Structured scalar credibility is already available. Measure factor fill and
-  family-development cost before choosing either sparse factorization or AD;
-  neither guarantees the other pays. No core replacement without workload evidence.
+- **Sparse Laplace and small family-derivative tools (C2):** investigate sparse
+  factorization separately; structured scalar credibility is already available, and
+  no core solver or hand-written density kernel is replaced without workload evidence.
+  On the family-derivative side, the build-time generator and its stage 1, 2, and 4a
+  numerical gates have shipped ([severity-family note](research/2026-10-31-severity-family-framework.md)):
+  - **Primitives (`tests/test_severity_primitives.py`):** every core primitive is held
+    to `|err| <= 16 u E_f(x) + 2^-1074` (`u = 2^-53`) against 50-digit mpmath across
+    grids covering `gdev`'s root (`y = m`), `gnorm`'s root (`a ≈ 6.45`), and both
+    sides of `a = 10`, with direct-form allowances below `a = 10` and a mutation check
+    at `a = 2,500` (measured `0.88–6.30 u E_f` on x86-64 Linux).
+  - **Declared laws and fits (`tests/test_declared_severity_families.py`,
+    `tests/test_declared_scalar_vertical_slice.py`):** generated orders 0–4 and
+    link-scale Hessians pass `|err| <= 2 u A + 1e-300` (measured `<= 0.65 u A`) and
+    `A <= 1,024 S` on log density and log survival (measured `<= 623 S`). `LomaxLSS`
+    and `LogLogisticLSS` are public and checked against an independently verified
+    SciPy optimum using the same stable row law summed by `math.fsum` and a
+    `1e-3`-SE parameter gap. Weibull and Burr XII remain test fixtures, and two strict
+    `xfail` checks hold deep-left-tail (`F = 1e-100`) fourth log-CDF derivatives for a
+    separate stable primitive.
+  - **Incomplete-gamma jets (`tests/test_incomplete_gamma_engine.py`):** the
+    stabilized `a >= 10` prefactor and direct `Q = u + v` tail below `a = 1e-2` meet
+    `1e-12` relative row-scale error at orders 0–2 across `0.01 <= a <= 1e4`
+    (measured `7.3e-14, 7.3e-14, 1.3e-13, 1.2e-12, 9.7e-12` at orders 0–4 against
+    gates `1e-12, 1e-12, 1e-12, 1e-11, 1e-10`), supporting `GammaLS` and
+    `GeneralizedGammaLSS` response bounds (PR #565).
+  - **Native coverage:** `.github/workflows/ci.yml` runs all three gates with mpmath
+    on Linux x86-64, Windows (`windows-2025`), macOS ARM64 (`macos-15`), and Linux
+    ARM64 (`ubuntu-24.04-arm`), where PR #565 (`6e092c9dc`) and commits `2034e3616`
+    and `42df26435` passed before merging.
 - **Transformation models and non-crossing quantiles (C6/C7):** first demonstrate
   persistent family misspecification. Monotonicity and a response-dependent design
   need their own contracts. The observation contract carries per-row truncation and

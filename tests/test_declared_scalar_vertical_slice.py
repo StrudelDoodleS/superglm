@@ -201,6 +201,103 @@ def test_intercept_mle_against_scipy_and_high_precision(cls, name, scipy_law):
     assert abs(float(oracle) - math.fsum(values)) <= 1024 * 2.0**-53 * max(1.0, float(abs(oracle)))
 
 
+def assert_declared_fit_gate(
+    name,
+    y,
+    candidate,
+    reference,
+    *,
+    se_budget=1e-3,
+    ll_u_factor=16.0,
+    reference_tol=1e-10,
+):
+    """Enforce the stage-2 declared-fit gate against an independently verified SciPy optimum.
+
+    1. Independently verify that ``reference`` is a locally strongly convex
+       stationary point of the row-summed negative log-likelihood.
+    2. Evaluate both ``candidate`` and ``reference`` with the same stable row
+       law summed by ``math.fsum``, holding ``candidate`` within
+       ``ll_u_factor * u * sum(|l_i|)`` of ``reference``.
+    3. Hold every parameter within ``se_budget`` (default ``1e-3``) of its
+       independently computed observed standard error at ``reference``.
+    """
+    evaluate = objective(
+        name, y, np.ones(len(y)), np.ones((len(y), 1)), np.zeros((len(y), 2)), np.zeros((2, 2))
+    )
+    ref_nll, ref_grad = evaluate(reference)
+    h = independent_curvature(evaluate, reference)
+    h = (h + h.T) / 2
+    eigen = np.linalg.eigvalsh(h)
+    error_h = 128 * len(reference) * np.finfo(float).eps ** (2 / 3) * np.linalg.norm(h, 2)
+    lower = eigen[0] - error_h
+    assert lower > eigen[-1] * 1e-5, "fixture is not locally strongly convex"
+    error_g = evaluate.score_error(reference)
+    step = np.linalg.solve(h, ref_grad)
+    decrement = max(0.0, float(ref_grad @ step))
+    decrement_upper = (np.sqrt(decrement) + np.linalg.norm(error_g) / np.sqrt(lower)) ** 2 / (
+        1 - error_h / eigen[0]
+    )
+    limit = reference_tol * (1 + abs(ref_nll))
+    score_small = np.linalg.norm(ref_grad, np.inf) <= limit + np.linalg.norm(error_g, np.inf)
+    assert score_small or decrement_upper <= limit, (
+        f"nonstationary reference: score={np.linalg.norm(ref_grad):.6g}, "
+        f"decrement={decrement_upper:.6g}, allowed={limit:.6g}"
+    )
+
+    se = np.sqrt(np.diag(np.linalg.inv(h)))
+    se_gap = np.abs(candidate - reference) / se
+    assert float(np.max(se_gap)) <= se_budget, (
+        f"parameter gap {se_gap} exceeds {se_budget:g} SE budget"
+    )
+
+    cand_rows, _ = independent_rows(name, y, np.broadcast_to(candidate, (len(y), 2)))
+    ref_rows, _ = independent_rows(name, y, np.broadcast_to(reference, (len(y), 2)))
+    cand_ll = math.fsum(cand_rows)
+    ref_ll = math.fsum(ref_rows)
+    ll_scale = math.fsum(np.abs(ref_rows))
+    allowed_drop = ll_u_factor * (2.0**-53) * ll_scale
+    assert cand_ll >= ref_ll - allowed_drop, (
+        f"shared-law log-likelihood dropped by {ref_ll - cand_ll:.6g}, exceeding {allowed_drop:.6g}"
+    )
+    return cand_ll, ref_ll, se, se_gap
+
+
+@pytest.mark.parametrize("cls,name", [(LomaxLSS, "lomax"), (LogLogisticLSS, "log_logistic")])
+def test_declared_fit_gate_holds_and_rejects_displaced_endpoint(cls, name):
+    """Executable stage-2 fit gate: shared fsum row law, 1e-3-SE budget, and displacement proof."""
+    family = cls()
+    rng = np.random.default_rng(6201)
+    y = family.quantile(rng.uniform(0.002, 0.998, 400), np.tile([2.0, 2.5], (400, 1)))
+    frame = pd.DataFrame({"unused": np.zeros(len(y))})
+    model = SuperLSS(family, family.scale(), family.shape()).fit(frame, y, inner_tol=1e-10)
+    candidate = np.log(model.predict_parameters(frame).to_numpy()[0])
+    evaluate = objective(
+        name, y, np.ones(len(y)), np.ones((len(y), 1)), np.zeros((len(y), 2)), np.zeros((2, 2))
+    )
+    reference = minimize(
+        lambda b: evaluate(b)[0],
+        np.log([2.0, 2.0]),
+        jac=lambda b: evaluate(b)[1],
+        method="BFGS",
+        options={"gtol": 1e-10},
+    )
+    _, _, se, _ = assert_declared_fit_gate(name, y, candidate, reference.x)
+
+    # Displacing the endpoint past 1e-3 SE must fail the SE budget.
+    displaced_se = candidate + np.array([2e-3 * se[0], 0.0])
+    with pytest.raises(AssertionError, match="SE budget"):
+        assert_declared_fit_gate(name, y, displaced_se, reference.x)
+
+    # A smaller displacement inside 1e-3 SE still drops the shared fsum log-likelihood past budget.
+    displaced_ll = candidate + np.array([5e-4 * se[0], 0.0])
+    with pytest.raises(AssertionError, match="log-likelihood"):
+        assert_declared_fit_gate(name, y, displaced_ll, reference.x)
+
+    # A nonstationary reference must be rejected before comparing endpoints.
+    with pytest.raises(AssertionError, match="nonstationary reference"):
+        assert_declared_fit_gate(name, y, candidate, np.log([2.0, 2.0]))
+
+
 @pytest.mark.parametrize("cls,name", [(LomaxLSS, "lomax"), (LogLogisticLSS, "log_logistic")])
 def test_fixed_penalty_independent_objective_chunk_replay_and_offsets(cls, name):
     family = cls()
