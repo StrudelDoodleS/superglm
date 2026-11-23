@@ -520,11 +520,7 @@ def compile_predictor_design(
                     penalized=info.penalized,
                     feature_name=name,
                     subgroup_type=info.subgroup_name,
-                    ssp_spline=(
-                        type(spec) in _BUILT_IN_SPLINES
-                        and info.reparametrize
-                        and info.penalty_matrix is not None
-                    ),
+                    ssp_spline=info.uses_ssp,
                     constraints=info.constraints,
                     monotone_engine=info.monotone_engine,
                 )
@@ -766,6 +762,7 @@ def compile_predictor_design(
                                 feature_name=iname,
                                 subgroup_type=info.subgroup_name,
                                 interaction=True,
+                                ssp_spline=info.uses_ssp,
                                 constraints=info.constraints,
                                 monotone_engine=info.monotone_engine,
                             )
@@ -793,6 +790,7 @@ def compile_predictor_design(
                                 feature_name=iname,
                                 interaction=True,
                                 level=level,
+                                ssp_spline=info.uses_ssp,
                                 constraints=info.constraints,
                                 monotone_engine=info.monotone_engine,
                             )
@@ -815,6 +813,7 @@ def compile_predictor_design(
                     penalized=True,
                     feature_name=iname,
                     interaction=True,
+                    ssp_spline=result.uses_ssp,
                     constraints=result.constraints,
                     monotone_engine=result.monotone_engine,
                 )

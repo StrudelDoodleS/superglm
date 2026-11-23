@@ -21,7 +21,8 @@ from superglm.distributional.results.solver import (
 from superglm.distributional.smoothing.penalty_face import build_penalty_face
 from superglm.distributional.solver import solver
 from superglm.distributional.solver.shape import _face_of
-from superglm.features import Numeric, RandomEffect, Spline
+from superglm.features import Categorical, Numeric, RandomEffect, Spline
+from superglm.features.interaction import SplineCategorical
 from superglm.group_matrix import DesignMatrix, SparseGroupMatrix
 from superglm.solvers.rank import RankDecomposition
 
@@ -83,25 +84,31 @@ def test_a_material_gain_is_measured_with_the_accepted_factor(monkeypatch, force
 
 
 @pytest.mark.parametrize("chunk_size", [None, 11], ids=["dense", "chunked"])
+@pytest.mark.parametrize("interaction", [False, True], ids=["main", "by_category"])
 @pytest.mark.pins_behaviour
-def test_a_whitened_spline_resolves_a_contrast_on_its_rare_rows(chunk_size):
+def test_a_whitened_spline_resolves_a_contrast_on_its_rare_rows(chunk_size, interaction):
     """Pin the Gaussian least-squares predictions for a score above tolerance
     in the compiler's unit SSP coordinates. A rare large row must not hide it.
     """
     x = np.r_[np.linspace(0, 0.2, 256), np.linspace(0.2, 1, 24)]
     weights = resolved_prior(np.ones(len(x)))
     family = _UnitGaussian()
-    layout = build_stacked_layout(
-        compile_predictors(
-            as_eager_frame(pd.DataFrame({"x": x})),
-            weights,
-            family.parameters,
-            (Predictor("mean", {"x": Spline(kind="cr", k=6)}),),
+    frame = as_eager_frame(pd.DataFrame({"x": x, "g": np.tile(["a", "b"], len(x) // 2)}))
+    spline = Spline(kind="cr", k=6)
+    predictor = Predictor("mean", {"x": spline})
+    if interaction:
+        predictor = Predictor(
+            "mean",
+            {"x": spline, "g": Categorical(base="a")},
+            interaction_specs={"x:g": SplineCategorical("x", "g")},
+            interaction_order=("x:g",),
         )
+    layout = build_stacked_layout(
+        compile_predictors(frame, weights, family.parameters, (predictor,))
     )
     (design,) = solver.dense_predictor_matrices(layout)
     radius = np.ptp(design, axis=0) / 2
-    j = np.argmax(radius)
+    j = design.shape[1] - 1 if interaction else np.argmax(radius)
     assert radius[j] > 2
     # Choose y in the column space with just this slope's initial score.
     tol = 1e-5

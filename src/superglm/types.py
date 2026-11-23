@@ -218,6 +218,11 @@ class GroupInfo:
     # ``group_pricing="spanned"`` prices the penalty at it; ``None`` = emitted.
     penalty_width: int | None = None
 
+    @property
+    def uses_ssp(self) -> bool:
+        """Whether the builder whitens this block with its Gram and penalty."""
+        return self.reparametrize and self.penalty_matrix is not None
+
     def __post_init__(self):
         if self.columns is None:
             # Discretized path: columns not needed, skip shape validation
@@ -330,8 +335,7 @@ class GroupSlice:
     # and a per-level block's own factor level, as the factor holds it.
     interaction: bool = False
     level: Hashable | None = None
-    # A built-in smooth in its identifiable, SSP-whitened coordinates.
-    # The spline's raw covariate units have already been removed.
+    # The builder removed this block's raw covariate units by SSP whitening.
     ssp_spline: bool = False
 
     def __post_init__(self):
