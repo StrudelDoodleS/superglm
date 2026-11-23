@@ -1489,6 +1489,179 @@ class TestDeadSearchNewtonDecrement:
         assert not model.reml_diagnostics()["converged"]
 
 
+@pytest.mark.parametrize(
+    "case, evidence, stop",
+    [
+        ("small", True, "converged_at_precision"),
+        ("large", False, "line_search_failed"),
+        ("roundoff", False, "line_search_failed"),
+        ("still_stagnated", False, "line_search_failed"),
+        ("earlier_uncertified", True, "converged_at_precision"),
+        ("improves_after_uncertified", False, "max_reml_iter"),
+        ("indefinite", True, "line_search_failed"),
+        ("reactivated", True, "line_search_failed"),
+        ("improves", False, "max_reml_iter"),
+        ("step_rejected", False, "line_search_failed"),
+        ("later_scorable", True, "converged_at_precision"),
+        ("nonfinite_initial", False, "line_search_failed"),
+        ("nonfinite_refit", False, "line_search_failed"),
+        ("projected_limit", True, "converged_at_precision"),
+    ],
+)
+def test_stagnated_trial_needs_a_measured_profile_correction(monkeypatch, case, evidence, stop):
+    """Force #604 on exact NB2. Only the observed determinant carries the injected error."""
+    from superglm.model import reml_ops
+    from superglm.reml import direct
+
+    rng = np.random.default_rng(604)
+    frame = pd.DataFrame(rng.uniform(size=(160, 2)), columns=["x", "z"])
+    y = rng.poisson(np.exp(np.sin(6 * frame.x))).astype(float)
+    start = {"x": 1.0, "z": 1.0}
+    earlier_uncertified = case in {"earlier_uncertified", "improves_after_uncertified"}
+    improves = case in {"improves", "improves_after_uncertified"}
+    dead_round = 2 if case == "reactivated" or earlier_uncertified else 1
+    trial_fits = {}
+    trial_scores = []
+    actual_fit = direct.fit_irls_direct
+
+    def fit(**kwargs):
+        result, inv, gram = actual_fit(**kwargs)
+        context = kwargs.get("debug_context") or {}
+        if (
+            earlier_uncertified
+            and context.get("phase") == "candidate"
+            and context["reml_iteration"] == 1
+        ):
+            result = replace(result, converged=False, termination_reason="max_iter")
+        if context.get("phase") == "line_search" and context["reml_iteration"] == dead_round:
+            key = tuple(kwargs["lambda2"].items())
+            visits = trial_fits.setdefault(key, [])
+            if visits:
+                assert kwargs["max_iter"] <= 2
+                np.testing.assert_array_equal(kwargs["beta_init"], visits[0].beta)
+                assert kwargs["intercept_init"] == visits[0].intercept
+            if case == "step_rejected":
+                result = replace(result, converged=False, termination_reason="step_rejected")
+            elif case == "later_scorable" and len(trial_fits) == 2:
+                assert result.converged
+            elif not visits or case == "still_stagnated":
+                result = replace(result, converged=False, termination_reason="score_stagnated")
+            else:
+                assert result.converged
+            visits.append(result)
+        return result, inv, gram
+
+    actual_geometry = direct.build_observed_reml_geometry
+
+    def geometry(**kwargs):
+        result = kwargs["result"]
+        geometry = actual_geometry(**kwargs)
+        if any(result is r for visits in trial_fits.values() for r in visits):
+            # The trial is uphill by one nat, except for an improving refit.
+            # At fixed lambda, log|H|/2 contributes the whole imposed correction.
+            extra = 1.0
+            if not result.converged:
+                extra += 0.01 if case == "large" else 1e-9
+            elif improves:
+                extra = -1.0
+            return replace(geometry, log_det_H=geometry.log_det_H + 2.0 * extra)
+        return geometry
+
+    actual_objective = direct.reml_laml_objective
+
+    def objective(*args, **kwargs):
+        evaluation = actual_objective(*args, **kwargs)
+        if any(args[5] is r for visits in trial_fits.values() for r in visits):
+            if (not args[5].converged and case == "nonfinite_initial") or (
+                args[5].converged and case == "nonfinite_refit"
+            ):
+                evaluation = replace(evaluation, value=-np.inf)
+            trial_scores.append((args[5].converged, evaluation.value))
+            if case == "roundoff":
+                return replace(evaluation, roundoff=0.01)
+        elif earlier_uncertified and not args[5].converged:
+            # An unconverged first candidate has an artificially low objective.
+            return replace(evaluation, value=evaluation.value - 5.0)
+        # Force the first move before reactivating z. Keep its new candidate
+        # on the same objective as the accepted trial.
+        if case == "reactivated" and args[6] != start:
+            return replace(evaluation, value=evaluation.value - 2.0)
+        return evaluation
+
+    active_sets = []
+    actual_freeze = direct.freeze_flat_directions
+
+    def freeze(*args, **kwargs):
+        decision = actual_freeze(*args, **kwargs)
+        frozen = np.array([False, case == "reactivated" and not active_sets])
+        if earlier_uncertified and not active_sets:
+            frozen[:] = True
+        active_sets.append(frozen.tolist())
+        return replace(decision, frozen=frozen, shoulder=np.zeros(2, dtype=bool))
+
+    # Above the gradient arm, below its decade ceiling, with a tiny Newton
+    # decrease unless curvature is indefinite or the large score on z is free.
+    def gradient(*args, **kwargs):
+        return np.array([6e-5, 0.5 if case == "reactivated" else 0.0])
+
+    monkeypatch.setattr(direct, "fit_irls_direct", fit)
+    monkeypatch.setattr(direct, "build_observed_reml_geometry", geometry)
+    monkeypatch.setattr(direct, "reml_laml_objective", objective)
+    monkeypatch.setattr(direct, "reml_direct_gradient", gradient)
+    monkeypatch.setattr(direct, "_usable_w_correction", lambda *args: None)
+    monkeypatch.setattr(
+        direct,
+        "reml_direct_hessian",
+        lambda *args, **kw: np.diag(
+            [3e6 if case == "projected_limit" else 1, -1 if case == "indefinite" else 1]
+        ),
+    )
+    monkeypatch.setattr(direct, "freeze_flat_directions", freeze)
+    # Publication performs its own terminal fit. Capture the coefficients and
+    # profile value actually returned by the search before that refit.
+    returned = []
+    optimize = reml_ops.optimize_direct_reml
+
+    def search(*args, **kwargs):
+        result = optimize(*args, **kwargs)
+        returned.append((result.pirls_result.converged, result.objective))
+        return result
+
+    monkeypatch.setattr(reml_ops, "optimize_direct_reml", search)
+    model = SuperGLM(
+        family=families.nb2(theta=2.0),
+        features={name: Spline(kind="cr", k=5) for name in start},
+        discrete=False,
+    ).fit_reml(frame, y, lambda2_init=start, max_reml_iter=dead_round)
+    assert model._reml_result.termination_reason == stop
+    refits = sum(len(v) - 1 for v in trial_fits.values())
+    expected_refits = int(case not in {"step_rejected", "later_scorable", "nonfinite_initial"})
+    assert refits == expected_refits
+    assert model._reml_result.pirls_result.converged
+    [(certified, search_objective)] = returned
+    assert certified
+    if improves:
+        assert model._reml_result.lambdas != start
+        assert search_objective == trial_scores[-1][1]
+        return
+    dead = model._reml_profile["reml_dead_line_search"]
+    assert dead["evaluated_trial"] is evidence
+    if case in {"still_stagnated", "step_rejected", "nonfinite_initial"}:
+        assert all(not certified for certified, _ in trial_scores)
+    else:
+        assert [certified for certified, _ in trial_scores] == [False, True]
+        before, after = (value for _, value in trial_scores)
+        if case != "later_scorable":  # Only a same-lambda refit measures the correction.
+            assert (abs(after - before) < dead["decrease_bar"]) == (
+                case not in {"large", "nonfinite_refit"}
+            )
+    if case == "reactivated":
+        assert active_sets == [[False, True], [False, False]]
+        assert dead["active_gradient_norm"] == 0.5
+    if case == "indefinite":
+        assert dead["predicted_decrease"] is None
+
+
 def _compound_test_never_accepts(monkeypatch) -> None:
     """Force the only stop left to be the Newton step, whatever path a BLAS takes."""
     from superglm.reml import convergence, direct, discrete

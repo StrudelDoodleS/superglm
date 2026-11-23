@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 import time as _time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -103,6 +104,20 @@ from superglm.types import GroupSlice, PenaltyComponent
 # The solve ceiling lives in observed_geometry, shared with the terminal
 # publication gate in model/reml_finalize.py.
 _OBSERVED_PIRLS_TOL_CEILING = OBSERVED_PIRLS_TOL_CEILING
+
+
+@dataclass
+class _StagnatedTrial:
+    """One observed trial's warm start and full objective at the same log lambdas."""
+
+    step: float
+    rho: NDArray
+    beta: NDArray
+    intercept: float
+    centred: tuple[float, NDArray] | None
+    objective: float
+    roundoff: float
+
 
 # One leverage pass replaces one derivative Gram per penalty; below four
 # penalties the Gram route is cheaper.
@@ -485,6 +500,7 @@ def optimize_direct_reml(
     _n_stop_cross_passes = 0
     _t_linesearch = 0.0
     _n_linesearch_fits = 0
+    _n_dead_search_refits = 0
     # Owned by this optimizer: only a rejected raw-centering route crosses fits.
     raw_moment_policy = TabmatCenteringState()
     fisher_data_reuse = _FisherDataReuse()
@@ -1233,12 +1249,13 @@ def optimize_direct_reml(
             best_obj = obj
             best_lambdas = cand_lambdas.copy()
             best_pirls = pirls_result
+
         # The pressure is read wherever the gradient at the returned point is
         # known: at a new best, and at an accepted trial carried forward as the
         # next candidate, whose objective equals ``best_obj`` and so is no
         # strict improvement.
-        if cand_lambdas == best_lambdas:
-            best_bound_pressure = bound_pressure(
+        def candidate_bound_pressure():
+            return bound_pressure(
                 grad,
                 rho_clipped,
                 estimated_mask,
@@ -1246,6 +1263,9 @@ def optimize_direct_reml(
                 box,
                 bar=max(_tol, FLAT_DIRECTION_FREEZE_FLOOR) * (1.0 + abs(float(obj))),
             )
+
+        if cand_lambdas == best_lambdas:
+            best_bound_pressure = candidate_bound_pressure()
 
         lambda_history.append(cand_lambdas.copy())
 
@@ -1581,7 +1601,6 @@ def optimize_direct_reml(
         _t0 = _time.perf_counter()
         max_ls = 8
         _carry_forward = None
-        step = 1.0
         armijo_c = 1e-4
         descent = float(grad @ delta)
         accepted = False
@@ -1596,10 +1615,27 @@ def optimize_direct_reml(
         # allows
         full_step_rejected = False
         inconsistent_decrease: float | None = None
-        for _ls in range(max_ls):
+        # The first usable stagnated trial holds only an objective and a warm
+        # start. Revisit it once, only if backtracking scores no stationary
+        # trial. A coefficient score alone cannot bound the Laplace determinant.
+        stagnated_trial = None
+        correction_size = None
+        ls_iteration = 0
+        correcting = False
+        while not correcting:
+            step = 0.5**ls_iteration
             rho_trial = np.clip(rho_clipped + step * delta, log_lo, log_hi)
-            if np.all(np.abs(rho_trial - rho_clipped) <= 1e-12):
-                break
+            correcting = ls_iteration == max_ls or np.all(np.abs(rho_trial - rho_clipped) <= 1e-12)
+            beta_start, intercept_start, centred_start = warm_beta, warm_intercept, warm_centred
+            if correcting:
+                if stagnated_trial is None or evaluated_feasible_trial:
+                    break
+                step, rho_trial = stagnated_trial.step, stagnated_trial.rho
+                beta_start = stagnated_trial.beta
+                intercept_start = stagnated_trial.intercept
+                centred_start = stagnated_trial.centred
+                _n_dead_search_refits += 1
+            ls_iteration += 1
             had_feasible_trial = True
             trial_lambdas = lambdas.copy()
             for name, val in zip(group_names, np.exp(rho_trial), strict=False):
@@ -1631,10 +1667,10 @@ def optimize_direct_reml(
                     groups=groups,
                     lambda2=trial_lambdas,
                     offset=offset_arr,
-                    beta_init=warm_beta,
-                    intercept_init=warm_intercept,
-                    _centred_init=warm_centred,
-                    max_iter=max_pirls_iter,
+                    beta_init=beta_start,
+                    intercept_init=intercept_start,
+                    _centred_init=centred_start,
+                    max_iter=min(2, max_pirls_iter) if correcting else max_pirls_iter,
                     tol=observed_pirls_tol,
                     convergence=pirls_convergence,
                     return_xtwx=True,
@@ -1648,7 +1684,7 @@ def optimize_direct_reml(
                     debug_context={
                         "phase": "line_search",
                         "reml_iteration": n_iter,
-                        "line_search_iteration": _ls + 1,
+                        "line_search_iteration": ls_iteration,
                         "trial_alpha": float(step),
                     },
                     trace_run=trace_run,
@@ -1679,7 +1715,6 @@ def optimize_direct_reml(
                 # A trial the structured factor refuses has no objective: try a
                 # shorter step. No other solver; a refused candidate still raises.
                 _n_refused_structured_trials += 1
-                step *= 0.5
                 continue
             trial_mode_residual: float | None = None
             # Same standard as the candidate above: the certificate, where one
@@ -1689,7 +1724,6 @@ def optimize_direct_reml(
                 if not trial_result.converged and not stopped_on_iteration_budget(
                     trial_result, link
                 ):
-                    step *= 0.5
                     continue
                 _t_geometry = _time.perf_counter()
                 try:
@@ -1721,7 +1755,6 @@ def optimize_direct_reml(
                     # caller-contract errors do not improve at half the step.
                     _t_observed_geometry += _time.perf_counter() - _t_geometry
                     _observed_mode_rejected_trial_count += 1
-                    step *= 0.5
                     continue
                 try:
                     trial_geometry = identified.geometry(trial_geometry)
@@ -1730,7 +1763,6 @@ def optimize_direct_reml(
                     # rejected trial as a refused PIRLS build above
                     _t_observed_geometry += _time.perf_counter() - _t_geometry
                     _n_refused_structured_trials += 1
-                    step *= 0.5
                     continue
                 _t_observed_geometry += _time.perf_counter() - _t_geometry
                 trial_logdet = trial_geometry.log_det_H
@@ -1754,19 +1786,22 @@ def optimize_direct_reml(
                     # An unusable trial score is a rejection like the geometry
                     # above, with no residual to record; other ValueErrors stay bare.
                     _observed_mode_rejected_trial_count += 1
-                    step *= 0.5
                     continue
                 trial_mode_residual = trial_mode_score.relative_max
                 if not trial_mode_stationary:
-                    # PIRLS's own certificate (above) missed the bar: an
-                    # uncertified trial is no evidence for the line search.
                     _observed_mode_rejected_trial_count += 1
                     _rejected_trial_observed_mode_residual_max = max(
                         _rejected_trial_observed_mode_residual_max,
                         trial_mode_score.relative_max,
                     )
-                    step *= 0.5
-                    continue
+                    if (
+                        correcting
+                        or trial_result.termination_reason != "score_stagnated"
+                        or stagnated_trial is not None
+                        or evaluated_feasible_trial
+                        or not mode_certified
+                    ):
+                        continue
 
             try:
                 trial_evaluation = reml_laml_objective(
@@ -1794,14 +1829,45 @@ def optimize_direct_reml(
                 )
             except PenaltyNumericalError:
                 # A refused trial has no objective: try a shorter step.
-                step *= 0.5
                 continue
             trial_obj = (
                 trial_evaluation.value
                 if isinstance(trial_evaluation, REMLObjectiveEvaluation)
                 else float(trial_evaluation)
             )
-            if trial_counts_as_precision_evidence(trial_mode_stationary, trial_obj):
+            trial_roundoff = (
+                trial_evaluation.roundoff
+                if isinstance(trial_evaluation, REMLObjectiveEvaluation)
+                else 0.0
+            )
+            if use_observed_geometry and not trial_mode_stationary:
+                if np.isfinite(trial_obj):
+                    stagnated_trial = _StagnatedTrial(
+                        step,
+                        rho_trial,
+                        trial_result.beta,
+                        float(trial_result.intercept),
+                        centred_warm_start(trial_result),
+                        trial_obj,
+                        trial_roundoff,
+                    )
+                continue
+            if correcting:
+                assert stagnated_trial is not None  # Its coefficients started this refit.
+                if not np.isfinite(trial_obj):
+                    break
+                # Same lambda, both full profile values (including log|H|),
+                # the second at a certified mode. A larger correction supplies
+                # no precision evidence, though a genuine Armijo step can win.
+                correction_size = (
+                    abs(trial_obj - stagnated_trial.objective)
+                    + stagnated_trial.roundoff
+                    + trial_roundoff
+                    + obj_roundoff
+                )
+            if trial_counts_as_precision_evidence(trial_mode_stationary, trial_obj) and (
+                correction_size is None or correction_size < _tol * score_scale
+            ):
                 evaluated_feasible_trial = True
 
             armijo_bound = obj + armijo_c * step * descent
@@ -1817,7 +1883,7 @@ def optimize_direct_reml(
                         "solver": "direct_reml",
                         "phase": "line_search",
                         "outer_iteration": n_iter,
-                        "line_search_iteration": _ls + 1,
+                        "line_search_iteration": ls_iteration,
                         "trial_alpha": float(step),
                         "objective": float(trial_obj),
                         "armijo_bound": float(armijo_bound),
@@ -1828,11 +1894,6 @@ def optimize_direct_reml(
                     purpose="reml_line_search",
                     authoritative=False,
                 )
-            trial_roundoff = (
-                trial_evaluation.roundoff
-                if isinstance(trial_evaluation, REMLObjectiveEvaluation)
-                else 0.0
-            )
             if (
                 not trial_accepted
                 and step == 1.0
@@ -1878,7 +1939,7 @@ def optimize_direct_reml(
                             "solver": "direct_reml",
                             "phase": "line_search",
                             "outer_iteration": n_iter,
-                            "line_search_iteration": _ls + 1,
+                            "line_search_iteration": ls_iteration,
                             "trial_alpha": float(step),
                             "inconsistent_decrease": inconsistent_decrease,
                             "predicted_decrease": dead_predicted_decrease,
@@ -1916,7 +1977,7 @@ def optimize_direct_reml(
                             "solver": "direct_reml",
                             "phase": "line_search",
                             "outer_iteration": n_iter,
-                            "line_search_iteration": _ls + 1,
+                            "line_search_iteration": ls_iteration,
                             "unresolved_decrease": unresolved_decrease,
                             "objective_roundoff": stall_roundoff,
                         },
@@ -1949,7 +2010,11 @@ def optimize_direct_reml(
                 warm_centred = centred_warm_start(trial_result)
                 # The accepted trial is a valid retained candidate even on the
                 # final iteration, so ``max_reml_iter`` keeps its improvement.
-                if trial_obj < best_obj:
+                # A certified corrective step also supersedes a lower value
+                # recorded before the coefficients reached their mode.
+                if trial_obj < best_obj or (
+                    correcting and best_pirls is not None and not best_pirls.converged
+                ):
                     best_obj = float(trial_obj)
                     best_lambdas = trial_lambdas.copy()
                     best_pirls = trial_result
@@ -1979,7 +2044,6 @@ def optimize_direct_reml(
                     _rejected_trial_observed_mode_residual_max,
                     trial_mode_residual,
                 )
-            step *= 0.5
 
         if not accepted:
             rho = rho_clipped
@@ -2004,6 +2068,11 @@ def optimize_direct_reml(
                 evaluated_trial=dead_evidence,
                 predicted_decrease=dead_predicted_decrease,
             )
+            if correction_size is not None and termination_reason == "converged_at_precision":
+                # This verdict belongs to the certified candidate. An earlier
+                # uncertified iterate can have a spuriously lower objective.
+                best_pirls, best_obj, best_lambdas = pirls_result, obj, cand_lambdas.copy()
+                best_bound_pressure = candidate_bound_pressure()
             if (
                 termination_reason == "line_search_failed"
                 and held_newton_model is not None
@@ -2025,6 +2094,7 @@ def optimize_direct_reml(
                     "bar": float(max(FLAT_DIRECTION_FREEZE_FLOOR, _tol) * score_scale),
                     "predicted_decrease": dead_predicted_decrease,
                     "decrease_bar": float(_tol * score_scale),
+                    "trial_correction_with_roundoff": correction_size,
                     "evaluated_trial": bool(dead_evidence),
                     "candidate_mode_stationary": bool(candidate_mode_stationary),
                     "termination_reason": termination_reason,
@@ -2070,6 +2140,7 @@ def optimize_direct_reml(
         profile["reml_hessian_newton_s"] = _t_hessian
         profile["reml_linesearch_s"] = _t_linesearch
         profile["reml_n_linesearch_fits"] = _n_linesearch_fits
+        profile["reml_n_dead_search_refits"] = _n_dead_search_refits
         profile["reml_n_outer_iter"] = n_iter
         profile["reml_mean_space_restorations"] = n_mean_space_restorations
         profile["reml_laplace_excluded"] = identified.disclosed
