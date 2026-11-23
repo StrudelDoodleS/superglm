@@ -147,17 +147,17 @@ def compute_R_inv(
 ) -> NDArray:
     """Compute SSP reparametrisation matrix R_inv without forming B @ R_inv.
 
-    The sparsity-smoothness penalty of Meier, van de Geer & Buhlmann (2009,
-    Ann. Statist. 37(6B), sec. 2.2): R = chol(B'WB/n + λΩ + εI)^T and
-    R_inv = R^{-1}, so that the group norm of a block's coefficients in
-    X_ssp = B @ R_inv is sqrt(||f||_n^2 + λ f'Ωf). That is the estimator the
-    group lasso of ``fit`` and ``fit_path`` uses, with the loss per unit weight.
+    Meier, van de Geer & Bühlmann (2009, Ann. Statist. 37(6B), sec. 2.2)
+    use the sparsity-smoothness penalty. Here R = chol(B'WB/N + λΩ + εI)^T
+    and R_inv = R^{-1}, with N the sample weight sum. For raw coefficients
+    θ, the group norm of Rθ combines the weighted mean square of Bθ
+    with λθ'Ωθ and the numerical ridge. The group lasso in ``fit`` and
+    ``fit_path`` uses this norm with loss per unit weight.
 
-    Under ``fit_reml`` no selection penalty acts, and R_inv is a change of
-    coordinates alone: fitted values do not depend on it. The objective there
-    is not divided by the weight sum N, so with R_inv built at λ the block
-    of X'WX + λ'S is N times the identity at λ' = N·λ, not at λ' = λ (for
-    working weights proportional to ``sample_weight``).
+    In ``fit_reml``, R_inv changes coordinates for the smoothness penalty.
+    REML uses a summed loss. For working weights equal to the sample
+    weights, the map built at λ scales the corresponding Hessian block
+    to approximately N times the identity at the REML penalty weight N·λ.
 
     The normaliser is the weight sum over every row, including rows where the
     block is zero, so every block's ``X'WX`` sits on the same scale.
@@ -1405,11 +1405,15 @@ def rebuild_design_matrix_with_lambdas(
 ) -> DesignMatrix:
     """Rebuild design matrix with per-group smoothing lambdas.
 
-    Only recomputes R_inv for SSP groups whose lambda changed;
-    non-SSP groups are reused unchanged.
+    Recomputes R_inv for groups that use SSP and have an updated lambda.
+    Fixed-coordinate groups keep their design as the smoothing penalty changes.
     """
     new_gms: list[GroupMatrix] = []
     for gm, g in zip(dm.group_matrices, groups):
+        # Earlier saved groups have no flag and retain their original policy.
+        if not getattr(gm, "reparametrize", True):
+            new_gms.append(gm)
+            continue
         if isinstance(gm, SparseSSPGroupMatrix) and _group_has_lambda(gm, g, lambdas):
             if gm.omega is None:
                 new_gms.append(gm)

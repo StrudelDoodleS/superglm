@@ -92,6 +92,7 @@ class DiscretizedSSPGroupMatrix:
     __slots__ = (
         "B_unique",
         "R_inv",
+        "reparametrize",
         "bin_idx",
         "n_bins",
         "shape",
@@ -107,6 +108,7 @@ class DiscretizedSSPGroupMatrix:
     def __init__(self, B_unique: NDArray, R_inv: NDArray, bin_idx: NDArray):
         self.B_unique = np.asarray(B_unique)  # (n_bins, K)
         self.R_inv = np.asarray(R_inv)  # (K, p_g)
+        self.reparametrize = True
         self.bin_idx = np.asarray(bin_idx, dtype=np.intp)  # (n,)
         self.n_bins = self.B_unique.shape[0]
         self.shape = (len(bin_idx), self.R_inv.shape[1])
@@ -220,6 +222,7 @@ class DiscretizedSSPGroupMatrix:
     def row_subset(self, idx: NDArray) -> DiscretizedSSPGroupMatrix:
         # type(self): subsetting must not downcast a lossless-support subclass.
         sub = type(self)(self.B_unique, self.R_inv, self.bin_idx[idx])
+        sub.reparametrize = getattr(self, "reparametrize", True)
         sub.omega = self.omega
         sub.projection = self.projection
         sub.R_inv_local = getattr(self, "R_inv_local", None)

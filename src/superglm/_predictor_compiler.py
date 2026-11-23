@@ -42,7 +42,12 @@ from superglm.features.ordered_categorical import (
 from superglm.features.piecewise import Piecewise
 from superglm.features.polynomial import Polynomial
 from superglm.features.spline import _BUILT_IN_SPLINES, _SplineBase
-from superglm.group_matrix import DesignMatrix, GroupMatrix
+from superglm.group_matrix import (
+    DesignMatrix,
+    DiscretizedSSPGroupMatrix,
+    GroupMatrix,
+    SparseSSPGroupMatrix,
+)
 from superglm.types import DiscreteTensorBuildResult, FeatureSpec, GroupInfo, GroupSlice
 
 # The built-in builds as defined, which the design builder replaces by its own
@@ -495,6 +500,10 @@ def compile_predictor_design(
                 eigenbasis_turn=eigenbasis_turn,
                 term_coordinates=term_coordinates,
             )
+            # Whether a feature requests SSP must survive REML lambda updates.
+            # Interaction blocks have their own coordinate updates.
+            if isinstance(gm, (SparseSSPGroupMatrix, DiscretizedSSPGroupMatrix)):
+                gm.reparametrize = info.reparametrize
             qp_info = cast(GroupInfo, info)
             if qp_info.monotone_engine == "qp":
                 raw_builder = getattr(spec, "_build_monotone_constraints_raw", None)

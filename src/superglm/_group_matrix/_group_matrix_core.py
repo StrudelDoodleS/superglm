@@ -711,6 +711,7 @@ class SparseSSPGroupMatrix:
         "B",
         "_p_b",
         "R_inv",
+        "reparametrize",
         "shape",
         "omega",
         "projection",
@@ -726,6 +727,7 @@ class SparseSSPGroupMatrix:
         self.B.data = self.B.data.astype(np.float64)
         self._p_b = self.B.shape[1]
         self.R_inv = np.asarray(R_inv)
+        self.reparametrize = True
         self.shape = (self.B.shape[0], self.R_inv.shape[1])
         self.omega = None  # the penalty, in the coordinates penalty_coordinate_map(self) maps
         self.projection = None  # (K, n_sub) projection matrix, set externally
@@ -837,6 +839,7 @@ class SparseSSPGroupMatrix:
 
     def row_subset(self, idx: NDArray) -> SparseSSPGroupMatrix:
         sub = SparseSSPGroupMatrix(self.B[idx], self.R_inv)
+        sub.reparametrize = getattr(self, "reparametrize", True)
         sub.omega = self.omega
         sub.projection = self.projection
         sub.R_inv_local = getattr(self, "R_inv_local", None)
