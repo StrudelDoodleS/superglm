@@ -17,6 +17,7 @@ from superglm.features._spline_config import (
 from superglm.features._spline_identifiability import (
     apply_identifiability_for_spec,
     build_identifiability_projection_for_spec,
+    null_explicit_coordinates,
     term_null_basis,
 )
 from superglm.features._spline_multi_penalty import build_multi_m_components
@@ -635,7 +636,42 @@ def tensor_marginal_info(
         projection = projection_constraints @ projection_ident
     else:
         projection = projection_ident
-    structural = spec._structural_penalty_for_order(spec._m_orders[0])
+    order = spec._m_orders[0]
+    structural = spec._structural_penalty_for_order(order)
+    structural_proj = None if structural is None else projection.T @ structural @ projection
+    penalty_root = None
+    penalty_nullity = None
+    if follows_policy:
+        raw_root = spec._penalty_root_for_order(order)
+        if raw_root is not None:
+            penalty_root = raw_root @ projection
+            rank_reference = structural_proj if structural_proj is not None else penalty
+            rank = _gapped_rank(np.linalg.eigvalsh(rank_reference))
+            null_raw = spec._penalty_null_basis(order)
+            width = projection.shape[1]
+            if not np.any(raw_root):
+                penalty_nullity = width
+            elif rank is not None and null_raw is not None:
+                theta = term_null_basis(null_raw, projection, width - rank)
+                if theta is not None:
+                    penalty_nullity = width - rank
+                    turn = null_explicit_coordinates(theta)
+                    # Diagonalise only the range, directly on the rectangular
+                    # factor. Both Kronecker components then keep their small
+                    # positive curvatures and all their coordinate zeros.
+                    span = turn[:, penalty_nullity:]
+                    _, singular, vh = np.linalg.svd(penalty_root @ span, full_matrices=False)
+                    if singular.size == rank:
+                        turn[:, penalty_nullity:] = span @ vh.T
+                        projection = projection @ turn
+                        basis = basis @ turn
+                        penalty_root = np.zeros((rank, width))
+                        penalty_root[:, penalty_nullity:] = np.diag(singular)
+                        if structural is not None:
+                            structural_proj = projection.T @ structural @ projection
+                    else:
+                        penalty_nullity = None
+            penalty = penalty_root.T @ penalty_root
 
     info = TensorMarginalInfo(
         basis=basis,
@@ -648,7 +684,9 @@ def tensor_marginal_info(
         degree=spec.degree,
         raw_basis_eval=spec._raw_basis_matrix,
         normalize_penalty=False,
-        structural_penalty=None if structural is None else projection.T @ structural @ projection,
+        structural_penalty=structural_proj,
+        penalty_root=penalty_root,
+        penalty_nullity=penalty_nullity,
         follows_policy=follows_policy,
     )
     if distinct is not None:

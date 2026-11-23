@@ -306,6 +306,7 @@ class DiscretizedSplineCategoricalGroupMatrix:
         "_p_b",
         "omega",
         "projection",
+        "R_inv_local",
         "omega_components",
         "component_types",
         "structural_ranks",
@@ -350,6 +351,7 @@ class DiscretizedSplineCategoricalGroupMatrix:
         self._p_b = self.B_unique.shape[1]
         self.omega = None
         self.projection = None
+        self.R_inv_local = None
         self.omega_components = None
         self.component_types = None
         self.structural_ranks = None
@@ -384,6 +386,8 @@ class DiscretizedSplineCategoricalGroupMatrix:
         self._row_lookup_certificate = None
         self._level_support = None
         self._bin_code_source = None
+        if "R_inv_local" not in slot_state:
+            self.R_inv_local = None
 
     def matvec(self, v: NDArray) -> NDArray:
         out = np.zeros(self.n_rows, dtype=np.float64)
@@ -474,6 +478,7 @@ class DiscretizedSplineCategoricalGroupMatrix:
         )
         sub.omega = self.omega
         sub.projection = self.projection
+        sub.R_inv_local = getattr(self, "R_inv_local", None)
         sub.omega_components = self.omega_components
         sub.component_types = self.component_types
         sub.structural_ranks = getattr(self, "structural_ranks", None)
@@ -703,6 +708,7 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         )
         sub.omega = self.omega
         sub.projection = self.projection
+        sub.R_inv_local = getattr(self, "R_inv_local", None)
         sub.omega_components = self.omega_components
         sub.component_types = self.component_types
         sub.structural_ranks = getattr(self, "structural_ranks", None)

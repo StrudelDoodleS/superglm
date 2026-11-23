@@ -34,6 +34,7 @@ _METADATA = ("omega", "projection", "omega_components", "component_types", "stru
 _SUPPORT_METADATA = (*_METADATA, "R_inv_local", "term_roots")
 _CATEGORY_METADATA = (
     *_METADATA,
+    "R_inv_local",
     "lambda_policies",
     "spline_cat_level",
     "spline_cat_feature",

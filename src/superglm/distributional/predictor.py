@@ -517,6 +517,8 @@ def _center_selected_smooths(
             raise TypeError("distributional select centering requires an SSP spline group")
         centered.omega = source.omega
         centered.projection = source.projection
+        centered.R_inv_local = getattr(source, "R_inv_local", None)
+        centered.reparametrize = getattr(source, "reparametrize", True)
         centered.omega_components = source.omega_components
         centered.component_types = source.component_types
         centered.structural_ranks = getattr(source, "structural_ranks", None)
@@ -722,6 +724,7 @@ def compile_predictors(
                     # SuperLSS fitted an interaction on a ranged parent before declared
                     # interactions met the pair refusals, and keeps fitting it.
                     ranged_margins=True,
+                    term_coordinates=True,
                 )
                 break
             except ValueError as exc:

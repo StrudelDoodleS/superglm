@@ -24,6 +24,7 @@ from superglm._warn import feature_build_messages, warn_caller
 from superglm.features._spline_build import finish_penalties, qp_geometry, shape_engine
 from superglm.features._spline_penalties import structural_penalty_ranks
 from superglm.features._spline_runtime import bin_knots
+from superglm.features._spline_select import build_select_group_info
 from superglm.features.categorical import Categorical
 from superglm.features.factor_smooth import FactorSmooth
 from superglm.features.interaction import (
@@ -54,6 +55,7 @@ from superglm.types import DiscreteTensorBuildResult, FeatureSpec, GroupInfo, Gr
 _SPLINE_KNOT_BUILD = _SplineBase.build_knots_and_penalty
 _CATEGORICAL_BUILD = Categorical.build
 _TENSOR_BUILD = TensorInteraction.build
+_SPLINE_BY_LEVEL_BUILD = SplineCategorical.build
 # The term types that bin: exactly these, never a subclass (``_bins_as_built_in``).
 _BINNED_TYPES = _BUILT_IN_SPLINES | {TensorInteraction, SplineCategorical, FactorSmooth}
 
@@ -441,56 +443,10 @@ def compile_predictor_design(
             exposure_agg = np.bincount(bin_idx, weights=sample_weight, minlength=len(bin_centers))
 
             if getattr(spec, "select", False):
-                n_null = 1
-                n_range = spec._U_range.shape[1]
-                n_combined = n_null + n_range
-                U_combined = np.hstack([spec._U_null, spec._U_range])
-                Z = projection_penalty  # constraint projection
-
-                omega_null = np.zeros((n_combined, n_combined))
-                omega_null[:n_null, :n_null] = np.eye(n_null)
-
-                components: list[tuple[str, np.ndarray]] = [("null", omega_null)]
-
-                if len(spec._m_orders) > 1:
-                    # Multi-m: project each per-order penalty into combined basis
-                    U_null_c = (
-                        spec._U_null
-                        if Z is None
-                        else np.linalg.lstsq(Z, spec._U_null, rcond=None)[0]
-                    )
-                    U_range_c = (
-                        spec._U_range
-                        if Z is None
-                        else np.linalg.lstsq(Z, spec._U_range, rcond=None)[0]
-                    )
-                    U_combined_c = np.hstack([U_null_c, U_range_c])
-                    for order in spec._m_orders:
-                        omega_raw_j = spec._build_penalty_for_order(order)
-                        _, omega_c_j, _, _ = spec._apply_constraints(None, omega_raw_j)
-                        omega_combined_j = U_combined_c.T @ omega_c_j @ U_combined_c
-                        components.append((f"d{order}", omega_combined_j))
-                else:
-                    omega_wiggle = np.zeros((n_combined, n_combined))
-                    omega_wiggle[n_null:, n_null:] = spec._omega_range
-                    components.append(("wiggle", omega_wiggle))
-
-                penalty_matrix = sum(omega for _, omega in components)
-                infos = [
-                    GroupInfo(
-                        columns=None,
-                        n_cols=n_combined,
-                        penalty_matrix=penalty_matrix,
-                        reparametrize=True,
-                        penalized=True,
-                        projection=U_combined,
-                        penalty_components=components,
-                        component_types={"null": "selection"},
-                        constraints=constraints,
-                        monotone_engine=monotone_engine,
-                        raw_to_solver_map=raw_to_solver_map,
-                    ),
-                ]
+                info = build_select_group_info(spec, None, projection_penalty)
+                info.constraints, info.monotone_engine = constraints, monotone_engine
+                info.raw_to_solver_map = raw_to_solver_map
+                infos = [info]
                 infos[0].structural_ranks = structural_penalty_ranks(spec, infos[0])
             else:
                 infos = [
@@ -780,6 +736,7 @@ def compile_predictor_design(
                 n_bins_spline,
                 sample_weight=interaction_build_weight,
                 separation=curve_separation,
+                precision_weight=sample_weight,
             )
         else:
             build_kwargs: dict[str, Any] = {"sample_weight": interaction_build_weight}
@@ -793,6 +750,12 @@ def compile_predictor_design(
                 # is scanned.
                 result = cast(TensorInteraction, ispec)._build_exact(
                     x1, x2, parent_specs, on_cells=True, **build_kwargs
+                )
+            elif getattr(ispec.build, "__func__", None) is _SPLINE_BY_LEVEL_BUILD:
+                # A built-in build asks the solver's weights whether a level's
+                # rows identify its penalty's null directions.
+                result = ispec.build(
+                    x1, x2, parent_specs, precision_weight=sample_weight, **build_kwargs
                 )
             else:
                 result = ispec.build(x1, x2, parent_specs, **build_kwargs)
@@ -825,6 +788,7 @@ def compile_predictor_design(
             tensor_build=tensor_build,
             tensor_id=tensor_id,
             eigenbasis_turn=eigenbasis_turn,
+            term_coordinates=term_coordinates,
         )
         processed: list[tuple[Any, GroupInfo, GroupMatrix, NDArray | None, int]] = []
         if not isinstance(result, list):

@@ -189,6 +189,8 @@ class GroupInfo:
     # declares them (``_spline_build.declared_null_coordinates``). The design builder
     # then holds the term in null-explicit coordinates.
     null_coordinates: NullCoordinates | None = None
+    # A select or tensor split can put non-nested penalties directly on exact axes.
+    penalty_in_term_coordinates: bool = field(default=False, kw_only=True)
     # Optional per-component lambda control; keys match penalty_components suffixes.
     lambda_policies: dict[str, LambdaPolicy] | None = None
     # Monotone constraint metadata (QP engine).
@@ -445,6 +447,10 @@ class TensorMarginalInfo:
     # pickled before this (which reads the default), reads ``raw_basis_eval`` at points
     # clamped to ``[lo, hi]``, as every margin did.
     follows_policy: bool = False
+    # In the same coordinates and at the same scale as penalty, including
+    # cardinal margin normalisation. Earlier and custom margins can omit both.
+    penalty_root: NDArray | None = None
+    penalty_nullity: int | None = None
     # ``(values, index)``: the distinct points the basis was evaluated on and
     # each row's index into them (``distinct_values``).  Set only on a margin
     # ``tensor_marginal_info`` evaluated so, and read with ``getattr``;

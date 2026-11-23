@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -10,9 +9,92 @@ from numpy.typing import NDArray
 
 from superglm.features._spline_identifiability import (
     build_identifiability_projection_for_spec,
+    null_explicit_coordinates,
+    term_null_basis,
 )
 from superglm.features._spline_ranges import _REML_RANK_THRESHOLD
+from superglm.solvers.rank import SHARED_RANK_POLICY, _eigensolver_relative_bar
 from superglm.types import GroupInfo, LambdaPolicy
+
+
+def _spread_refusal(subject: str, ratio: float) -> ValueError:
+    return ValueError(
+        f"{subject} cannot split this penalty: its knot intervals differ so much in "
+        f"width that the curvature it puts on the widest is {ratio:.1e} "
+        "of the curvature on the narrowest, which double precision cannot hold beside "
+        "it. The widest interval is usually the tail of a heavy-tailed column under "
+        'quantile knots. Pass kind="ps", whose penalty double precision can hold on '
+        "any knots, transform the column (for example, take its logarithm), or place "
+        "the knots yourself."
+    )
+
+
+def root_select_split(
+    omega_c: NDArray,
+    Z: NDArray | None,
+    *,
+    null_raw: NDArray,
+    root_raw: NDArray,
+    n_basis: int,
+    structural: NDArray | None = None,
+) -> tuple[NDArray, NDArray, NDArray] | None:
+    """Split a select=True penalty from its exact null basis and pre-congruence root.
+
+    The right singular vectors of the root on the orthogonal complement of
+    the polynomials diagonalise its range without squaring its condition.
+    A different constrained nullity is handled by the existing split.
+    """
+    if root_raw.shape[0] == 0 or not np.any(root_raw):
+        raise ValueError("select=True penalty root is identically zero.")
+    if structural is not None:
+        structural_null = _null_mask(np.linalg.eigvalsh(structural))
+        if int(np.sum(structural_null)) != 2:
+            return None
+    U_null_raw = term_null_basis(null_raw, Z, 2)
+    if U_null_raw is None:
+        return None
+
+    ones_c = (Z.T @ np.ones(n_basis)) if Z is not None else np.ones(omega_c.shape[0])
+    ones_in_null = U_null_raw.T @ ones_c
+    ones_norm = float(np.linalg.norm(ones_in_null))
+    if ones_norm <= 0.0:
+        return None
+    a, b = ones_in_null / ones_norm
+    U_null_1d = U_null_raw @ np.array([[-b], [a]], dtype=np.float64)
+
+    Q_range = null_explicit_coordinates(U_null_raw)[:, 2:]
+    n_range = Q_range.shape[1]
+    if n_range == 0:
+        return None
+    root_c = root_raw if Z is None else root_raw @ Z
+    R_range = root_c @ Q_range
+    _, singular, vh = np.linalg.svd(R_range, full_matrices=False)
+    root_scale = max(
+        float(singular[0]) if singular.size else 0.0,
+        float(np.linalg.norm(root_raw, 2)),
+    )
+    min_resolved = (
+        SHARED_RANK_POLICY.certification_band
+        * _eigensolver_relative_bar(max(root_raw.shape))
+        * root_scale
+    )
+    if (
+        singular.size != n_range
+        or singular[0] <= 0.0
+        or singular[-1] <= min_resolved
+        or not np.all(singular**2 > 0.0)
+    ):
+        ratio = (
+            float((singular[-1] / singular[0]) ** 2)
+            if singular.size == n_range and singular[0] > 0.0
+            else 0.0
+        )
+        raise _spread_refusal("select=True", ratio)
+
+    U_range_c = Q_range @ vh.T
+    U_null = Z @ U_null_1d if Z is not None else U_null_1d
+    U_range = Z @ U_range_c if Z is not None else U_range_c
+    return U_null, U_range, np.diag(singular**2)
 
 
 def eigendecompose_select(
@@ -107,15 +189,7 @@ def _certified_range(
     values, vectors = np.linalg.eigh(product)
     if not (values[0] > 0 and _certifies_positive_definite(product, radius)):
         ratio = max(values[0], 0.0) / values[-1]
-        raise ValueError(
-            f"{subject} cannot split this penalty: its knot intervals differ so much in "
-            f"width that the curvature it puts on the widest is {ratio:.1e} "
-            "of the curvature on the narrowest, which double precision cannot hold beside "
-            "it. The widest interval is usually the tail of a heavy-tailed column under "
-            'quantile knots. Pass kind="ps", whose penalty double precision can hold on '
-            "any knots, transform the column (for example, take its logarithm), or place "
-            "the knots yourself."
-        )
+        raise _spread_refusal(subject, ratio)
     return basis @ vectors, np.diag(values)
 
 
@@ -160,57 +234,47 @@ def resolve_lambda_policies(
     return {name: policy_dict.get(name, LambdaPolicy.estimate()) for name in built_names}
 
 
-def build_select_group_info(
-    *,
-    B: Any,
-    m_orders: tuple[int, ...],
-    U_null: NDArray,
-    U_range: NDArray,
-    omega_range: NDArray,
-    Z: NDArray | None,
-    build_penalty_for_order: Callable[[int], NDArray],
-    apply_constraints: Callable[[Any, NDArray], tuple[Any, NDArray, int, NDArray | None]],
-    lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None,
-) -> GroupInfo:
-    """Build select=True GroupInfo from the eigendecomposed constrained penalty."""
-    n_null = 1
-    n_range = U_range.shape[1]
-    n_combined = n_null + n_range
-
-    U_combined = np.hstack([U_null, U_range])
-    U_null_c = U_null if Z is None else np.linalg.lstsq(Z, U_null, rcond=None)[0]
-    U_range_c = U_range if Z is None else np.linalg.lstsq(Z, U_range, rcond=None)[0]
-    U_combined_c = np.hstack([U_null_c, U_range_c])
-
-    omega_null = np.zeros((n_combined, n_combined))
-    omega_null[:n_null, :n_null] = np.eye(n_null)
-
-    components: list[tuple[str, NDArray]] = [("null", omega_null)]
-    component_types: dict[str, str] = {"null": "selection"}
-
-    if len(m_orders) == 1:
-        omega_wiggle = np.zeros((n_combined, n_combined))
-        omega_wiggle[n_null:, n_null:] = omega_range
-        components.append(("wiggle", omega_wiggle))
-    else:
-        for order in m_orders:
-            omega_raw_j = build_penalty_for_order(order)
-            _, omega_c_j, _, _ = apply_constraints(None, omega_raw_j)
-            omega_combined_j = U_combined_c.T @ omega_c_j @ U_combined_c
-            components.append((f"d{order}", omega_combined_j))
-
-    penalty_matrix = sum(omega for _, omega in components)
+def build_select_group_info(spec: Any, B: Any, Z: NDArray | None) -> GroupInfo:
+    """Assemble selection and wiggliness penalties in the split spline coordinates."""
+    projection = np.column_stack((spec._U_null, spec._U_range))
+    width = projection.shape[1]
+    selection = np.zeros((width, width))
+    selection[0, 0] = 1.0
+    components = [("null", selection)]
+    orders = spec._m_orders
+    exact_split = spec._select_from_root
+    for order in orders:
+        if order == max(orders):
+            penalty = np.zeros_like(selection)
+            penalty[1:, 1:] = spec._omega_range
+        elif exact_split:
+            # Building the order also resolves the actual difference operator
+            # on uneven knots and checks polynomial-range constraints.
+            spec._build_penalty_for_order(order)
+            root = spec._penalty_root_for_order(order) @ projection
+            null = spec._penalty_null_basis(order)
+            q = np.linalg.qr(null)[0]
+            line = projection[:, 0]
+            if np.linalg.norm(line - q @ (q.T @ line)) <= SHARED_RANK_POLICY.factor_rcond:
+                root[:, 0] = 0.0
+            penalty = root.T @ root
+        else:
+            raw = spec._build_penalty_for_order(order)
+            _, constrained, _, _ = spec._apply_constraints(None, raw)
+            local = projection if Z is None else np.linalg.lstsq(Z, projection, rcond=None)[0]
+            penalty = local.T @ constrained @ local
+        components.append(("wiggle" if len(orders) == 1 else f"d{order}", penalty))
     info = GroupInfo(
         columns=B,
-        n_cols=n_combined,
-        penalty_matrix=penalty_matrix,
+        n_cols=width,
+        penalty_matrix=sum(omega for _, omega in components),
         reparametrize=True,
-        penalized=True,
-        projection=U_combined,
+        projection=projection,
         penalty_components=components,
-        component_types=component_types,
+        component_types={"null": "selection"},
+        penalty_in_term_coordinates=exact_split,
     )
-    info.lambda_policies = resolve_lambda_policies(lambda_policy, info, m_orders, select=True)
+    info.lambda_policies = spec._resolve_lambda_policies(info)
     return info
 
 
@@ -235,24 +299,7 @@ def build_select(
         geometry_weight,
     )
     spec._eigendecompose_select(omega_c, Z)
-    assert spec._U_null is not None
-    assert spec._U_range is not None
-    assert spec._omega_range is not None
-    return build_select_group_info(
-        B=B,
-        m_orders=spec._m_orders,
-        U_null=spec._U_null,
-        U_range=spec._U_range,
-        omega_range=spec._omega_range,
-        Z=Z,
-        build_penalty_for_order=(
-            spec._build_penalty_for_order
-            if hasattr(spec, "_build_penalty_for_order")
-            else lambda order: spec._build_penalty()
-        ),
-        apply_constraints=spec._apply_constraints,
-        lambda_policy=spec._lambda_policy,
-    )
+    return build_select_group_info(spec, B, Z)
 
 
 __all__ = [
@@ -260,4 +307,5 @@ __all__ = [
     "build_select_group_info",
     "eigendecompose_select",
     "resolve_lambda_policies",
+    "root_select_split",
 ]

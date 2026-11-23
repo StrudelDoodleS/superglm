@@ -28,6 +28,7 @@ from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_bins import discretize_positive_support
 from superglm.features import _basis_kernels
+from superglm.features._spline_build import declared_null_coordinates
 from superglm.features._spline_config import SplineOptionWarning
 from superglm.features._spline_penalties import _gapped_rank, structural_penalty_ranks
 from superglm.features._spline_runtime import bin_knots
@@ -315,6 +316,8 @@ def _plan_spline_cat_support(
 
 def _penalty_null_space(omega: NDArray, info: GroupInfo) -> NDArray:
     """Orthonormal null space of a level's penalty, sized by its declared structural rank."""
+    if info.null_coordinates is not None:
+        return info.null_coordinates.basis
     values, vectors = np.linalg.eigh(omega)
     ranks = info.structural_ranks or {}
     rank = ranks.get("")
@@ -524,7 +527,15 @@ class SplineCategorical:
         parent_specs: dict,
         sample_weight: NDArray | None = None,
         separation: tuple | None = None,
+        *,
+        precision_weight: NDArray | None = None,
     ) -> list[GroupInfo]:
+        """``precision_weight`` is the fit's weight on each row where it is not ``sample_weight``.
+
+        ``sample_weight`` places the knots and centres the curves; whether a
+        level's rows identify its penalty's null directions is asked of the
+        solver's weights (``_declare_level_penalties``).
+        """
         from superglm._group_matrix._group_matrix_support import distinct_values
 
         spline_spec, x_spline, x_cat = self._resolve_build(
@@ -540,9 +551,12 @@ class SplineCategorical:
             compressed = _plan_spline_cat_support(
                 B, x_spline, active_rows, n_levels=len(self._non_base)
             )
+            # Equal values share a row, so a level counts its distinct values.
+            _, first, same = np.unique(x_spline, return_index=True, return_inverse=True)
+            level_rows, index = B, first[np.ravel(same)]
         else:
             values, index = distinct
-            values_basis = self._raw_rows(values)
+            level_rows = values_basis = self._raw_rows(values)
             compressed = _plan_spline_cat_support(
                 sp.csr_matrix(values_basis),
                 x_spline,
@@ -589,7 +603,13 @@ class SplineCategorical:
                         **shared,
                     )
                 )
-        groups = _with_structural_ranks(spline_spec, groups)
+        _declare_level_penalties(
+            spline_spec,
+            groups,
+            level_rows,
+            index,
+            sample_weight if precision_weight is None else precision_weight,
+        )
         self._separated_curves = ()
         self._level_clip = {}
         if separation is None or not separation[2]:
@@ -604,6 +624,8 @@ class SplineCategorical:
         n_bins: int,
         sample_weight: NDArray | None = None,
         separation: tuple | None = None,
+        *,
+        precision_weight: NDArray | None = None,
     ) -> list[GroupInfo]:
         """Build spline-by-category groups from compressed spline support."""
         spline_spec, x_spline, x_cat = self._resolve_build(
@@ -639,7 +661,13 @@ class SplineCategorical:
                     spline_cat_feature=self.cat_name,
                 )
             )
-        groups = _with_structural_ranks(spline_spec, groups)
+        _declare_level_penalties(
+            spline_spec,
+            groups,
+            B_unique,
+            bin_idx,
+            sample_weight if precision_weight is None else precision_weight,
+        )
         self._separated_curves = ()
         self._level_clip = {}
         if separation is None or not separation[2]:
@@ -825,6 +853,10 @@ class SplineCategorical:
                         projection=projection @ basis,
                     )
                     held.structural_ranks = structural_penalty_ranks(self._spline_spec, held)
+                    mass = np.bincount(idx, weights=weights[rows], minlength=len(support))
+                    held.null_coordinates = declared_null_coordinates(
+                        self._spline_spec, held, support[mass > 0.0], mass[mass > 0.0]
+                    )
             held_groups.append(held)
             found.append(
                 SeparatedCurve(
@@ -2053,21 +2085,43 @@ def _row_kron_dense(B1: NDArray, B2: NDArray) -> NDArray:
     return np.einsum("ij,ik->ijk", B1, B2).reshape(B1.shape[0], B1.shape[1] * B2.shape[1])
 
 
-def _with_structural_ranks(spline_spec, groups: list[GroupInfo]) -> list[GroupInfo]:
-    """Declare each level's penalty rank from the margin's structural penalty.
+def _declare_level_penalties(spec, groups, rows, index, weights):
+    """The levels share the parent's penalty but identify its null directions on their own rows.
 
-    Every level shares one projected penalty, so one declaration serves them
-    all; REML then ranks a skewed cr margin's tail direction as the main
-    effect does (``structural_penalty_ranks``), not at its spread.
+    ``rows[index]`` is the raw basis the fit reads on each observation, with
+    one row of ``rows`` per distinct value or bin, and ``weights`` are the
+    fit's precision weights. A level reads the rows its observations of
+    positive weight reach: its curve is centred on the whole column, so one
+    value leaves its null direction a constant only the row count would miss.
     """
-    ranks = structural_penalty_ranks(spline_spec, groups[0]) if groups else None
+    ranks = structural_penalty_ranks(spec, groups[0]) if groups else None
     for info in groups:
         info.structural_ranks = ranks
-    return groups
+        mask = info.spline_cat_mask
+        reached, position = np.unique(index[mask], return_inverse=True)
+        mass = np.bincount(
+            np.ravel(position),
+            weights=None if weights is None else weights[mask],
+            minlength=reached.size,
+        )
+        seen = mass > 0
+        info.null_coordinates = declared_null_coordinates(
+            spec, info, rows[reached[seen]], mass[seen]
+        )
 
 
-def _require_one_tensor_null(null_mask: NDArray) -> None:
-    n_null = int(np.sum(null_mask))
+def _normalize_cardinal_margin(info: TensorMarginalInfo) -> None:
+    """Scale the cardinal penalty and its root together before tensor assembly."""
+    if info.penalty_root is None:
+        info.normalize_penalty = True
+        return
+    scale = np.linalg.norm(info.penalty_root, 2) if info.penalty_root.size else 0.0
+    if scale > 0.0:
+        info.penalty_root = info.penalty_root / scale
+        info.penalty = info.penalty_root.T @ info.penalty_root
+
+
+def _require_one_tensor_null(n_null: int) -> None:
     if n_null != 1:
         raise ValueError(f"Expected 1 null eigenvalue for centered tensor penalty, got {n_null}.")
 
@@ -2266,7 +2320,7 @@ class TensorInteraction:
             candidate, x, support=support, counts=counts, geometry_weight=geometry_weight
         )
         if cardinal:
-            info.normalize_penalty = True
+            _normalize_cardinal_margin(info)
         return info
 
     @staticmethod
@@ -2469,7 +2523,7 @@ class TensorInteraction:
                 candidate, x, support=support, counts=counts, geometry_weight=geometry_weight
             )
             if cardinal:
-                info.normalize_penalty = True
+                _normalize_cardinal_margin(info)
             margins.append(info)
         self._marginal1, self._marginal2 = margins
 
@@ -2565,6 +2619,26 @@ class TensorInteraction:
             "yourself."
         )
 
+    def _spectral_split(self, omega):
+        """Split a tensor containing a custom margin with no declared null coordinates."""
+        values, vectors = np.linalg.eigh(omega)
+        null = _null_mask(values)
+        structural = self._structural_tensor_penalty()
+        if structural is not None:
+            values_s, vectors_s = np.linalg.eigh(structural)
+            null_s = _null_mask(values_s)
+            _require_one_tensor_null(int(np.sum(null_s)))
+            if np.sum(null) != np.sum(null_s):
+                try:
+                    span, _ = _certified_range(
+                        omega, vectors_s[:, ~null_s], subject="decompose=True"
+                    )
+                except ValueError as err:
+                    raise ValueError(self._split_refusal()) from err
+                return vectors_s[:, null_s], span
+        _require_one_tensor_null(int(np.sum(null)))
+        return vectors[:, null], vectors[:, ~null]
+
     def _build_group_infos(
         self,
         omega_1: NDArray,
@@ -2573,38 +2647,27 @@ class TensorInteraction:
     ) -> GroupInfo | list[GroupInfo]:
         omega = omega_1 + omega_2
         n_cols = omega.shape[0]
+        m1, m2 = self._marginal1, self._marginal2
+        assert m1 is not None and m2 is not None
+        nullity = (
+            None
+            if m1.penalty_nullity is None or m2.penalty_nullity is None
+            else m1.penalty_nullity * m2.penalty_nullity
+        )
         if self._decompose:
-            eigvals, eigvecs = np.linalg.eigh(omega)
-            # REML's rank rule, as select=True splits a spline: a margin's
-            # general penalty spans more of float64 than a fixed 1e-8 allows.
-            null_mask = _null_mask(eigvals)
-            # As with select=True (eigendecompose_select), a skewed cr or bs margin's
-            # spread can put directions under the cut, so the structural penalty decides the
-            # nullity; where the real spectrum agrees its eigenvectors are kept.
-            structural = self._structural_tensor_penalty()
-            if structural is not None:
-                structural_values, structural_vectors = np.linalg.eigh(structural)
-                structural_null = _null_mask(structural_values)
-                _require_one_tensor_null(structural_null)
-            if structural is None or np.sum(null_mask) == np.sum(structural_null):
-                _require_one_tensor_null(null_mask)
-                U_null = eigvecs[:, null_mask]
-                U_range = eigvecs[:, ~null_mask]
+            if nullity is not None:
+                # The joint null space is the product of the marginal null
+                # spaces. A bilinear split removes the first coordinate.
+                _require_one_tensor_null(nullity)
+                axes = np.eye(n_cols)
+                U_null, U_range = axes[:, :1], axes[:, 1:]
+                omega_1_range, omega_2_range = omega_1[1:, 1:], omega_2[1:, 1:]
             else:
-                U_null = structural_vectors[:, structural_null]
-                try:
-                    U_range, _ = _certified_range(
-                        omega, structural_vectors[:, ~structural_null], subject="decompose=True"
-                    )
-                except ValueError as err:
-                    raise ValueError(self._split_refusal()) from err
-            # Each component symmetrised on its own, so the components sum to
-            # the penalty exactly: an unnormalised margin (bs) puts the
-            # congruence's asymmetric round-off far above any absolute bar.
-            omega_1_range = U_range.T @ omega_1 @ U_range
-            omega_1_range = 0.5 * (omega_1_range + omega_1_range.T)
-            omega_2_range = U_range.T @ omega_2 @ U_range
-            omega_2_range = 0.5 * (omega_2_range + omega_2_range.T)
+                U_null, U_range = self._spectral_split(omega)
+                omega_1_range = U_range.T @ omega_1 @ U_range
+                omega_2_range = U_range.T @ omega_2 @ U_range
+                omega_1_range = 0.5 * (omega_1_range + omega_1_range.T)
+                omega_2_range = 0.5 * (omega_2_range + omega_2_range.T)
             omega_range = omega_1_range + omega_2_range
             return [
                 GroupInfo(
@@ -2628,6 +2691,7 @@ class TensorInteraction:
                         (f"margin_{self.feat2_name}", omega_2_range),
                     ],
                     structural_ranks=self._structural_margin_ranks(),
+                    penalty_in_term_coordinates=nullity is not None,
                 ),
             ]
 
@@ -2639,6 +2703,7 @@ class TensorInteraction:
             penalty_matrix=omega,
             reparametrize=False,
             projection=projection,
+            penalty_in_term_coordinates=nullity is not None,
             penalty_components=[
                 (f"margin_{self.feat1_name}", omega_1),
                 (f"margin_{self.feat2_name}", omega_2),
