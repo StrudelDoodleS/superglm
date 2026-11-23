@@ -1,0 +1,351 @@
+"""Fixed-threshold severity splicing, with independent distribution and likelihood oracles."""
+
+from __future__ import annotations
+
+import pickle
+
+import mpmath
+import numpy as np
+import pandas as pd
+import pytest
+from scipy import integrate, optimize, special, stats
+
+from superglm import GammaLS, GeneralizedParetoLSS, LogNormalLS, SplitSplice, SuperGLM, SuperLSS
+from superglm.distributional.weights import LikelihoodWeightError
+
+
+def _components(family=None, *, frequency=False):
+    family = GammaLS() if family is None else family
+    tail = GeneralizedParetoLSS()
+    semantics = "frequency" if frequency else "prior"
+    center = (
+        family.location()
+        if isinstance(family, LogNormalLS) and family.parametrisation == "location"
+        else family.mean()
+    )
+    return (
+        SuperLSS(family, center, family.scale(), weight_semantics=semantics),
+        SuperGLM(family="binomial", features={}, weight_semantics=semantics),
+        SuperLSS(tail, tail.scale(), tail.shape(), weight_semantics=semantics),
+    )
+
+
+def _frame(n):
+    return pd.DataFrame({"x": np.linspace(-1, 1, n)}, index=10 + np.arange(n) // 2)
+
+
+def _fit(X, y, u, models=None, **kwargs):
+    body, exceedance, tail = _components() if models is None else models
+    return SplitSplice.fit(X, y, threshold=u, body=body, exceedance=exceedance, tail=tail, **kwargs)
+
+
+def _sample(n=4000):
+    rng = np.random.default_rng(570)
+    large = rng.random(n) < 0.25
+    y = stats.gamma.ppf(rng.random(n) * stats.gamma.cdf(100, 3, scale=20), 3, scale=20)
+    y[large] = 100 + stats.genpareto.rvs(0.25, scale=35, size=large.sum(), random_state=rng)
+    return _frame(n), y, 100.0
+
+
+@pytest.fixture(scope="module")
+def fitted():
+    return _fit(*_sample())
+
+
+def _population(monkeypatch, splice, body, tail, q):
+    # Keep verified fit assembly, and supply known, row-varying population parameters.
+    monkeypatch.setattr(
+        splice.body,
+        "predict_parameters",
+        lambda X, **kw: pd.DataFrame(np.broadcast_to(body, (len(X), 2))),
+    )
+    monkeypatch.setattr(
+        splice.tail,
+        "predict_parameters",
+        lambda X, **kw: pd.DataFrame(np.broadcast_to(tail, (len(X), 2))),
+    )
+    monkeypatch.setattr(splice.exceedance, "predict", lambda X, **kw: np.broadcast_to(q, (len(X),)))
+
+
+def test_exact_splice_and_boundary(monkeypatch, fitted):
+    u, q = fitted.threshold, 0.25
+    body = stats.gamma(3, scale=20)
+    tail = stats.genpareto(0.25, scale=35)
+    _population(monkeypatch, fitted, (60, 1 / np.sqrt(3)), (35, 0.25), q)
+    y = np.array([-np.inf, 0, 2, 50, np.nextafter(u, 0), u, 101, 400, np.inf])
+    X = _frame(len(y))
+    expected = np.where(y <= u, (1 - q) * body.cdf(y) / body.cdf(u), 1 - q * tail.sf(y - u))
+    values = fitted.predict_cdf(X, y)
+    np.testing.assert_allclose(values, expected, rtol=2e-12, atol=1e-15)
+    assert np.all(np.diff(values) >= 0)
+    assert fitted.predict_survival(X[:1], u)[0] == q
+    assert fitted.predict_cdf(X[:1], u)[0] == 1 - q
+    assert fitted.predict_quantile(X[:1], 1 - q)[0] == u
+    interior = np.array([1e-8, 0.2, 0.55, 0.74999, 0.75, 0.75001, 0.9, 0.99, 1 - 1e-12])
+    quantiles = fitted.predict_quantile(X, interior)
+    np.testing.assert_allclose(fitted.predict_cdf(X, quantiles), interior, rtol=2e-12)
+    np.testing.assert_allclose(
+        fitted.predict(X),
+        (1 - q) * integrate.quad(lambda v: v * body.pdf(v), 0, u)[0] / body.cdf(u)
+        + q * (u + tail.mean()),
+        rtol=2e-12,
+    )
+
+
+def test_population_layer_matches_the_570_probe(monkeypatch):
+    X, y, _ = _sample()
+    shape = 1 / 1.2**2
+    body = stats.gamma(shape, scale=5000 / shape)
+    u = body.ppf(0.9)
+    # The independently projected GPD matches the likelihood under the Gamma
+    # population, using dimensionless excesses to condition the optimization.
+    money = 5000 / shape
+    gamma = stats.gamma(shape)
+    nodes, weights = special.roots_laguerre(64)
+    density = weights * np.exp(gamma.logpdf(u / money + nodes) + nodes) / 0.1
+
+    def loss(params):
+        xi, log_scale = params
+        return (
+            -density @ stats.genpareto.logpdf(nodes, xi, scale=np.exp(log_scale))
+            if xi >= 0
+            else np.inf
+        )
+
+    projection = optimize.minimize(loss, [0.03, 0.0], method="Nelder-Mead", options={"xatol": 1e-9})
+    assert projection.success
+    xi, scale = projection.x[0], money * np.exp(projection.x[1])
+    splice = _fit(X, y * (u / 100), u)
+    _population(monkeypatch, splice, (5000, 1.2), (scale, xi), 0.1)
+    # The population projection parameters are calculated independently in the scope probe.
+    below = splice.predict_layer(X[:1], 10_000, u - 10_000)[0]
+    above = splice.predict_layer(X[:1], u, 20_000 - u)[0]
+    total = splice.predict_layer(X[:1], 10_000, 10_000)[0]
+    np.testing.assert_allclose([below, above, total], [317.398, 442.523, 759.921], atol=0.002)
+    assert total == pytest.approx(below + above, rel=2e-13)
+
+
+@pytest.mark.parametrize("lognormal", [False, True])
+def test_narrow_deep_body_layers_and_deep_left_normalization(monkeypatch, fitted, lognormal):
+    X = _frame(4)
+    if lognormal:
+        X_train, y, u = _sample()
+        fitted = _fit(X_train, y, u, _components(LogNormalLS(parametrisation="location")))
+        body = stats.lognorm(0.1, scale=1.0)
+        theta = (0.0, 0.1)
+    else:
+        body = stats.gamma(2, scale=0.1)
+        theta = (0.2, 1 / np.sqrt(2))
+    q = np.array([0.0, 0.0, 0.0, 1e-200])
+    _population(monkeypatch, fitted, theta, (5, 0.2), q)
+    a = np.array([0.9, 25.0, 68.0, 1e72])
+    limit = np.array([1e-10, 3e-7, 5e-5, 1e70])
+    u = fitted.threshold
+    log_u = body.logcdf(u)
+    expected = []
+    for left, width in zip(a[:3], limit[:3], strict=True):
+        log_sf_u = body.logsf(u)
+
+        def sf(t):
+            log_sf = body.logsf(left + width * t)
+            return np.exp(log_sf - log_u) * -np.expm1(log_sf_u - log_sf)
+
+        expected.append(width * integrate.quad(sf, 0, 1, epsabs=0)[0])
+    layers = fitted.predict_layer(X, a, limit)
+    np.testing.assert_allclose(layers[:3], expected, rtol=2e-10, atol=0)
+    # The tail survival underflows on its own, as does the weighted probability.
+    # A much larger width makes the layer itself representable in a second probe.
+    _population(monkeypatch, fitted, theta, (5, 0.2), np.array([0.0, 0.0, 0.0, 1e-20]))
+    log_tail_sf = stats.genpareto.logsf(a[-1] - u, 0.2, scale=5)
+    assert layers[-1] == 0.0
+    average = integrate.quad(
+        lambda t: np.exp(
+            stats.genpareto.logsf(a[-1] + t * limit[-1] - u, 0.2, scale=5) - log_tail_sf
+        ),
+        0,
+        1,
+    )[0]
+    expected_tail = np.exp(np.log(1e-20) + np.log(limit[-1]) + log_tail_sf) * average
+    assert fitted.predict_layer(X, a, limit)[-1] == pytest.approx(expected_tail, rel=2e-12, abs=0)
+
+    if lognormal:
+        u = fitted.threshold
+        mu = np.log(u) + 42
+        _population(monkeypatch, fitted, (mu, 1), (5, 0.2), 0.1)
+        reference = stats.norm.logcdf(-42)
+        y_at = u * np.exp(-0.02)
+        expected_cdf = 0.9 * np.exp(stats.norm.logcdf(np.log(y_at) - mu) - reference)
+        p = fitted.predict_cdf(X[:1], y_at)[0]
+        assert p == pytest.approx(expected_cdf, rel=2e-12)
+        assert fitted.predict_quantile(X[:1], p)[0] == pytest.approx(y_at, rel=2e-12)
+        a0, w = u - 0.02, 0.03
+        expected_layer = (
+            integrate.quad(
+                lambda t: -0.9 * np.expm1(stats.norm.logcdf(np.log(t) - mu) - reference) + 0.1,
+                a0,
+                u,
+            )[0]
+            + integrate.quad(lambda t: 0.1 * stats.genpareto.sf(t - u, 0.2, scale=5), u, a0 + w)[0]
+        )
+        assert fitted.predict_layer(X[:1], a0, w)[0] == pytest.approx(expected_layer, rel=2e-10)
+    else:
+        # The unconditioned Gamma CDF underflows here, although the truncated
+        # CDF and its inverse are both ordinary float64 numbers.
+        _population(monkeypatch, fitted, (1000, 1 / np.sqrt(1000)), (5, 0.2), 0.1)
+        with mpmath.workdps(40):
+            expected_cdf = 0.9 * float(mpmath.gammainc(1000, 0, 99) / mpmath.gammainc(1000, 0, u))
+        p = fitted.predict_cdf(X[:1], 99)[0]
+        assert p == pytest.approx(expected_cdf, rel=2e-11)
+        assert fitted.predict_quantile(X[:1], p)[0] == pytest.approx(99, rel=2e-12)
+
+
+def test_extreme_exceedance_probabilities(monkeypatch, fitted):
+    X = _frame(4)
+    q = np.array([0.0, 1e-200, 1 - 2**-52, 1.0])
+    u = fitted.threshold
+    _population(monkeypatch, fitted, (60, 1 / np.sqrt(3)), (35, 0.25), q)
+    np.testing.assert_array_equal(fitted.predict_cdf(X, u), 1 - q)
+    np.testing.assert_array_equal(fitted.predict_survival(X, u), q)
+    np.testing.assert_allclose(
+        fitted.predict_survival(X, 500),
+        q * stats.genpareto.sf(500 - u, 0.25, scale=35),
+        rtol=2e-13,
+        atol=0,
+    )
+    p = np.array([0.99, 0.99, (1 - q[2]) / 2, 1 - 2**-52])
+    y = fitted.predict_quantile(X, p)
+    assert np.all(y[:3] < u) and y[3] > u
+    np.testing.assert_allclose(fitted.predict_cdf(X, y), p, rtol=2e-12, atol=0)
+
+
+def test_censoring_ties_weights_and_manual_fit_parity():
+    X, y, u = _sample()
+    y[:2] = u
+    right = y > u + 60
+    right[1] = True  # strictly above its known censoring limit, exactly u
+    y = np.minimum(y, u + 60)
+    count = np.resize(np.array([1, 2, 1, 3, 0]), len(X))
+    mask = (y > u) | right
+    options = {"retain_rows": False}
+    body, binary, tail = _components(frequency=True)
+    body.fit(X.iloc[~mask], y[~mask], count[~mask], truncation=(None, u), **options)
+    binary.fit(X, mask.astype(float), count)
+    tail.fit(X.iloc[mask], y[mask] - u, count[mask], censored=right[mask], **options)
+    splice = _fit(
+        X,
+        pd.Series(y, index=X.index),
+        u,
+        _components(frequency=True),
+        censored=pd.Series(right, index=X.index),
+        sample_weight=pd.Series(count, index=X.index),
+        body_fit_options=options,
+        tail_fit_options=options,
+    )
+    X_test = X.iloc[::61]
+    for model, manual in ((splice.body, body), (splice.tail, tail)):
+        np.testing.assert_array_equal(
+            model.predict_parameters(X_test), manual.predict_parameters(X_test)
+        )
+        assert (
+            model.training_telemetry().inner_iterations
+            == manual.training_telemetry().inner_iterations
+        )
+        assert (
+            model.training_telemetry().execution_backend_identifier
+            == manual.training_telemetry().execution_backend_identifier
+        )
+        work, reference = model.diagnose().profile, manual.diagnose().profile
+        assert work is not None and reference is not None
+        assert work.coefficient_fits == reference.coefficient_fits
+    np.testing.assert_array_equal(splice.exceedance.predict(X_test), binary.predict(X_test))
+    assert splice.exceedance.result.n_iter == binary.result.n_iter
+    assert splice.exceedance.result.direct_backend == binary.result.direct_backend
+    copies = [
+        pickle.loads(pickle.dumps(part)) for part in (splice.body, splice.exceedance, splice.tail)
+    ]
+    restored = [SplitSplice(*copies), pickle.loads(pickle.dumps(splice))]
+    for new in restored:
+        assert new.threshold == u
+        for fn, args in (
+            ("predict_cdf", (105,)),
+            ("predict_survival", (1000,)),
+            ("predict_quantile", (0.95,)),
+            ("predict", ()),
+            ("predict_layer", (90, 16)),
+        ):
+            np.testing.assert_array_equal(
+                getattr(new, fn)(X_test, *args), getattr(splice, fn)(X_test, *args)
+            )
+
+
+def test_wrong_cutoff_tail_origin_and_split_are_refused():
+    X, y, u = _sample()
+    body, binary, tail = _components()
+    large = y > u
+    body.fit(X.iloc[~large], y[~large], truncation=(None, u + 20), retain_rows=False)
+    tail.fit(X.iloc[large], y[large], retain_rows=False)
+    verified = _fit(X, y, u)
+    with pytest.raises(ValueError, match="body.*SplitSplice"):
+        SplitSplice(body, verified.exceedance, verified.tail)
+    with pytest.raises(ValueError, match="tail.*SplitSplice"):
+        SplitSplice(verified.body, verified.exceedance, tail)
+    other = _fit(X.iloc[::-1], y[::-1], u)
+    with pytest.raises(ValueError, match="same split"):
+        SplitSplice(verified.body, other.exceedance, verified.tail)
+    verified.tail.fit(X.iloc[large], y[large])
+    with pytest.raises(ValueError, match="tail.*SplitSplice"):
+        verified.predict(X.iloc[:1])
+
+
+@pytest.mark.parametrize("name", ["y", "sample_weight", "censored"])
+def test_series_row_alignment_is_checked_before_fit(name):
+    X, y, u = _sample(100)
+    args = dict(y=y, sample_weight=np.ones(len(y)), censored=np.zeros(len(y), dtype=bool))
+    args[name] = pd.Series(args[name], index=X.index[::-1])
+    with pytest.raises(ValueError, match=f"{name} index"):
+        _fit(X, u=u, **args)
+
+
+def test_ambiguous_censoring_fit_args_and_prior_weights_are_refused():
+    X, y, u = _sample(100)
+    with pytest.raises(ValueError, match="membership"):
+        _fit(X, y, u, censored=y < u)
+    with pytest.raises(ValueError, match="truncation"):
+        _fit(X, y, u, body_fit_options={"truncation": (None, u + 20)})
+    with pytest.raises(ValueError, match="frequency"):
+        _fit(X, y, u, sample_weight=np.full(len(y), 2))
+    with pytest.raises(LikelihoodWeightError, match="integers"):
+        _fit(X, y, u, sample_weight=np.full(len(y), 1.5))
+
+
+def test_seed_544_against_independent_fits():
+    a, scale = 1 / 1.2**2, 5000 * 1.2**2
+    truth = stats.gamma(a, scale=scale)
+    u = truth.ppf(0.9)
+    y = np.random.default_rng(544).gamma(a, scale, 200_000)
+    X = _frame(len(y))
+    large = y > u
+    q = large.mean()
+    scaled_body = y[~large] / scale
+
+    def nll(log_parameters):
+        shape, unit_scale = np.exp(log_parameters)
+        law = stats.gamma(shape, scale=unit_scale)
+        return law.logcdf(u / scale) - law.logpdf(scaled_body).mean()
+
+    result = optimize.minimize(nll, [np.log(a), 0], method="Nelder-Mead", options={"xatol": 1e-9})
+    assert result.success
+    a_hat, scale_hat = np.exp(result.x)
+    body = stats.gamma(a_hat, scale=scale_hat * scale)
+    xi, _, beta = stats.genpareto.fit((y[large] - u) / scale, floc=0)
+    tail = stats.genpareto(xi, scale=beta * scale)
+    mean = (1 - q) * integrate.quad(lambda v: v * body.pdf(v), 0, u)[0] / body.cdf(u)
+    mean += q * (u + tail.mean())
+    p = np.array([0.5, 0.9, 0.99])
+    quantiles = np.where(p <= 1 - q, body.ppf(p * body.cdf(u) / (1 - q)), u + tail.isf((1 - p) / q))
+    splice = _fit(
+        X, y, u, body_fit_options={"retain_rows": False}, tail_fit_options={"retain_rows": False}
+    )
+    np.testing.assert_allclose(splice.predict_quantile(X.iloc[:3], p), quantiles, rtol=5e-5)
+    assert splice.predict(X.iloc[:1])[0] == pytest.approx(mean, rel=5e-5)
+    assert splice.predict_cdf(X.iloc[:1], u)[0] == pytest.approx(1 - q, abs=1e-8)
