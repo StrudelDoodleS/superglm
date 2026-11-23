@@ -294,7 +294,8 @@ def test_censoring_ties_weights_and_manual_fit_parity():
     options = {"retain_rows": False}
     body, binary, tail = _components(frequency=True)
     body.fit(X.iloc[~mask], y[~mask], count[~mask], truncation=(None, u), **options)
-    binary.fit(X, mask.astype(float), count)
+    active = count > 0
+    binary.fit(X.iloc[active], mask[active].astype(float), count[active])
     tail.fit(X.iloc[mask], y[mask] - u, count[mask], censored=right[mask], **options)
     splice = _fit(
         X,
@@ -420,6 +421,48 @@ def test_split_slices_declared_offsets(component):
     component_rows = y <= u if component == "body" else y > u
     with pytest.raises(ValueError, match=f"length {len(X)}"):
         _fit(X, y, u, models(array[component_rows]))
+
+
+@pytest.mark.parametrize("sentinel", ["zero loss", "nonfinite loss", "ambiguous", "missing flag"])
+def test_zero_frequency_rows_are_deleted_before_value_checks(sentinel):
+    X, y, u = _sample(800)
+    counts = np.resize([1, 2, 1, 3], len(X))
+    counts[5] = 0
+    keep = counts > 0
+    offset = np.linspace(-0.2, 0.2, len(X))
+    right = np.zeros(len(X), dtype=bool)
+    expected = _fit(
+        X.iloc[keep],
+        y[keep],
+        u,
+        _components(frequency=True),
+        sample_weight=counts[keep],
+        exceedance_fit_options={"offset": offset[keep]},
+    )
+    if sentinel == "zero loss":
+        y[5] = 0.0
+    elif sentinel == "nonfinite loss":
+        y[5] = np.nan
+    elif sentinel == "ambiguous":
+        y[5], right[5] = u / 2, True
+    else:
+        right = right.astype(object)
+        right[5] = pd.NA
+    offset[5] = np.nan
+    actual = _fit(
+        X,
+        pd.Series(y, index=X.index),
+        u,
+        _components(frequency=True),
+        sample_weight=pd.Series(counts, index=X.index),
+        censored=pd.Series(right, index=X.index),
+        exceedance_fit_options={"offset": pd.Series(offset, index=X.index)},
+    )
+    score = X.iloc[keep]
+    np.testing.assert_array_equal(
+        actual.predict_layer(score, 95, 15, exceedance_offset=offset[keep]),
+        expected.predict_layer(score, 95, 15, exceedance_offset=offset[keep]),
+    )
 
 
 def test_seed_544_against_independent_fits():

@@ -21,7 +21,7 @@ from superglm.distributional.families.log_normal import LogNormalLS
 from superglm.distributional.kernels._gamma_windows import gamma_shape_scale_window_jets
 from superglm.distributional.kernels._severity_primitives import logratio
 from superglm.distributional.offsets import shape_fit_offsets, sources_of, take_offset
-from superglm.distributional.response import validated_response_array
+from superglm.distributional.response import unvalidated_response, validated_response_array
 from superglm.distributional.weights import WeightContract, _weight_values
 from superglm.distributions import Binomial, resolve_distribution
 from superglm.model.api import SuperGLM
@@ -371,7 +371,8 @@ class SplitSplice:
         is known to exceed it. A complete loss equal to the threshold goes
         in the body. Arrays are positional. Pandas Series must match X's index
         in order. Nonunit weights require frequency semantics on all three
-        models and give exact nonnegative integer replication counts.
+        models and give exact nonnegative integer replication counts. Rows
+        with zero counts are dropped before validating response values.
 
         ``reml=True`` calls each model's ``fit_reml``. Each options mapping is
         forwarded to the corresponding fit, with response bounds and weights
@@ -392,20 +393,12 @@ class SplitSplice:
         frame = as_eager_frame(X)
         for name, values in (("y", y), ("censored", censored), ("sample_weight", sample_weight)):
             _aligned(frame, values, name)
-        loss = validated_response_array(y, family=body.family, n_rows=len(frame))
-        if np.any(loss <= 0.0):
-            raise ValueError("loss amounts must be positive")
-        right = np.asarray(censored)
-        if right.dtype.kind != "b" or (right.ndim != 0 and right.shape != loss.shape):
+        right = np.asarray(censored, dtype=object if isinstance(censored, list | tuple) else None)
+        if right.ndim != 0 and right.shape != (len(frame),):
             raise ValueError("censored must be a boolean flag per row or one boolean scalar")
-        right = np.broadcast_to(right, loss.shape)
-        if np.any(right & (loss < u)):
-            raise ValueError(
-                "a censored limit below the threshold leaves exceedance membership unknown"
-            )
-        is_tail = (loss > u) | right
+        right = np.broadcast_to(right, (len(frame),))
         weights = None
-        active = np.ones(len(frame), dtype=bool)
+        active = None
         if sample_weight is not None:
             weights = _weight_values(np.asarray(sample_weight), len(frame), _FREQUENCY)
             if (
@@ -420,11 +413,29 @@ class SplitSplice:
                 raise ValueError(
                     "nonunit replication weights require frequency semantics on all fits"
                 )
-            active = weights > 0
-        if not (np.any(active & is_tail) and np.any(active & ~is_tail)):
+            if np.any(weights == 0):
+                active = np.flatnonzero(weights > 0)
+                y = unvalidated_response(y, family=body.family, n_rows=len(frame))[active]
+                right = right[active]
+                weights = weights[active]
+
+        split_error = "the split must have positive-weight rows on both sides of the threshold"
+        if len(right) == 0:
+            raise ValueError(split_error)
+        loss = validated_response_array(y, family=body.family, n_rows=len(right))
+        if np.any(loss <= 0.0):
+            raise ValueError("loss amounts must be positive")
+        if right.dtype.kind != "b":
+            if right.dtype.kind != "O" or any(not isinstance(v, bool | np.bool_) for v in right):
+                raise ValueError("censored must be a boolean flag per row or one boolean scalar")
+            right = right.astype(bool)
+        if np.any(right & (loss < u)):
             raise ValueError(
-                "the split must have positive-weight rows on both sides of the threshold"
+                "a censored limit below the threshold leaves exceedance membership unknown"
             )
+        is_tail = (loss > u) | right
+        if not (np.any(is_tail) and np.any(~is_tail)):
+            raise ValueError(split_error)
 
         options = [
             dict(opts or {})
@@ -434,28 +445,41 @@ class SplitSplice:
             for key in ("truncation", "censored", "sample_weight"):
                 if key in opts:
                     raise ValueError(f"SplitSplice supplies {key} to the component fits")
-        _aligned(frame, options[1].get("offset"), "exceedance offset")
+        offset = options[1].get("offset")
+        _aligned(frame, offset, "exceedance offset")
+        if active is not None and offset is not None:
+            offset = np.asarray(offset, dtype=object if isinstance(offset, list | tuple) else None)
+            if offset.shape != (len(frame),):
+                raise ValueError("exceedance offset must have one value per row of X")
+            options[1]["offset"] = offset[active]
         for component in (body, tail):
             shape_fit_offsets(component._predictors, frame)
 
         rows_body, rows_tail = np.flatnonzero(~is_tail), np.flatnonzero(is_tail)
+        input_body = rows_body if active is None else active[rows_body]
+        input_tail = rows_tail if active is None else active[rows_tail]
         fit_body, fit_binary, fit_tail = (
             (body.fit_reml, exceedance.fit_reml, tail.fit_reml)
             if reml
             else (body.fit, exceedance.fit, tail.fit)
         )
-        with _split_offsets(body, rows_body):
+        with _split_offsets(body, input_body):
             fit_body(
-                frame.take_rows(rows_body),
+                frame.take_rows(input_body),
                 loss[rows_body],
                 None if weights is None else weights[rows_body],
                 truncation=(None, u),
                 **options[0],
             )
-        fit_binary(X, is_tail.astype(np.float64), weights, **options[1])
-        with _split_offsets(tail, rows_tail):
+        fit_binary(
+            X if active is None else frame.take_rows(active),
+            is_tail.astype(np.float64),
+            weights,
+            **options[1],
+        )
+        with _split_offsets(tail, input_tail):
             fit_tail(
-                frame.take_rows(rows_tail),
+                frame.take_rows(input_tail),
                 loss[rows_tail] - u,
                 None if weights is None else weights[rows_tail],
                 censored=right[rows_tail],
