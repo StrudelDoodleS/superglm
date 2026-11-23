@@ -8,6 +8,7 @@ from collections.abc import Callable, Hashable, Mapping, Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+import numpy as _numpy  # noqa: F401  # Initialize NumPy before importing numpy.typing.
 import pandas as pd
 from numpy.typing import NDArray
 

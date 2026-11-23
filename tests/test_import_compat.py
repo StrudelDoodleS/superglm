@@ -274,6 +274,96 @@ def test_threads_that_first_read_names_of_one_import_cycle_at_once_all_succeed(r
     assert [out.strip() for out, _ in results] == ["ok", "ok"], results
 
 
+_COLD_SUBMODULE_IMPORTS = """
+import builtins
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from importlib import import_module
+from importlib._bootstrap import _ModuleLock
+
+import superglm
+
+paths = sys.argv[1:]
+assert "numpy" not in sys.modules
+numpy_started = threading.Event()
+terms_requests_numpy = threading.Event()
+original_import = builtins.__import__
+
+def on_lock_acquire(frame, event, arg):
+    if (event == "call" and frame.f_code is _ModuleLock.acquire.__code__
+            and frame.f_locals["self"].name == "numpy"):
+        terms_requests_numpy.set()
+        sys.setprofile(None)
+
+def synchronize_numpy_import(name, globals=None, locals=None, fromlist=(), level=0):
+    module = (globals or {}).get("__name__")
+    if module == "numpy" and not numpy_started.is_set():
+        # Inside the root's import lock, before its body can reach numpy._typing.
+        numpy_started.set()
+        assert terms_requests_numpy.wait(20), "terms never attempted to acquire the NumPy lock"
+    if (module == "superglm.terms" and not terms_requests_numpy.is_set()
+            and (name == "numpy" or name.startswith("numpy."))):
+        assert numpy_started.wait(20), "no peer started importing NumPy"
+        # Reach the root's lock either directly, or via the typing submodule.
+        sys.setprofile(on_lock_acquire)
+    return original_import(name, globals, locals, fromlist, level)
+
+builtins.__import__ = synchronize_numpy_import
+try:
+    with ThreadPoolExecutor(max_workers=len(paths)) as pool:
+        modules = list(pool.map(import_module, ("superglm." + path for path in paths)))
+finally:
+    builtins.__import__ = original_import
+
+import numpy as np
+
+checks = {
+    "terms": lambda m: m.check_column_label("x") is None,
+    "model.api": lambda m: isinstance(m.SuperGLM(), m.SuperGLM),
+    "inference._term_covariance": lambda m: m._principal_root(np.eye(2)).tolist() == [[1, 0], [0, 1]],
+    "inference._term_ops": lambda m: m._maybe_array(2.0).item() == 2,
+    "features.categorical": lambda m: m.Categorical().build(np.array(["a", "b"])).n_cols == 1,
+    "features.interaction": lambda m: m.interaction_cells(
+        {"pairs": [("a", "b")], "pair_relativities": [2]}
+    ) == {("a", "b"): 2.0},
+}
+for path, module in zip(paths, modules, strict=True):
+    assert checks[path](module), path
+"""
+
+
+@pytest.mark.parametrize(
+    "paths",
+    [
+        ("terms", "model.api"),
+        ("terms", "inference._term_covariance"),
+        (
+            "terms",
+            "model.api",
+            "inference._term_covariance",
+            "inference._term_ops",
+            "features.categorical",
+            "features.interaction",
+        ),
+    ],
+    ids=["model-api", "term-covariance", "six-submodules"],
+)
+def test_cold_submodule_imports_from_several_threads(paths):
+    """Overlap the NumPy root's initialization with the NumPy import in terms.
+
+    On Python 3.12 and 3.13, restoring the typing-first import in terms enters
+    NumPy's typing code while the root is running. Both then need the other's lock.
+    """
+    completed = subprocess.run(
+        [sys.executable, "-c", _COLD_SUBMODULE_IMPORTS, *paths],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 _DEMO_INIT = (
     "from superglm._lazy import attach\n"
     "__getattr__, __dir__ = attach(__name__, __path__, {exports})\n"
