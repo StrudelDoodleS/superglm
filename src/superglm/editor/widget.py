@@ -24,7 +24,7 @@ import numpy as np
 
 from superglm.editor import metrics as metrics_module
 from superglm.editor import persistence, rating_preview, staging
-from superglm.editor.apply import materialize_edit_request
+from superglm.editor.apply import materialize_edit_request, model_for_split_scoring
 from superglm.editor.cv import (
     FINAL_NOT_RUN,
     FINAL_STALE,
@@ -492,7 +492,9 @@ class EditorWidget:
             return in_force == InForce.of(self.session).token
         return model_revision is None or int(model_revision) == self.session.model_revision
 
-    def _current_model_for_evidence(self) -> tuple[Any, InForce]:
+    def _current_model_for_evidence(
+        self, *, statistics: bool = True, expected: InForce | None = None
+    ) -> tuple[Any, InForce]:
         """The model in force with its edits applied, and what it was made for.
 
         Materialized off the widget lock; ``(None, source)`` once ``source`` is no longer in
@@ -500,7 +502,9 @@ class EditorWidget:
         """
         with self._lock:
             source = InForce.of(self.session)
-            if not self.session.edited_terms():
+            if expected is not None and source.token != expected.token:
+                return None, expected
+            if not source.edits:
                 return self.session.model, source
             cached = self.session.cached_materialized_model(
                 self.session.edit_epoch,
@@ -514,22 +518,23 @@ class EditorWidget:
 
         # One model in force is one calculation: a request made after an edit and its undo
         # shares the one still running for it.
-        key = EvidenceKey(source.token, "materialize", "current")
-        outcome = self._evidence.submit(
-            key,
-            lambda request=request: {"model": materialize_edit_request(request)},
-        ).result()
+        key = EvidenceKey(source.token, "materialize", "statistics" if statistics else "predictor")
+
+        def prepare_model():
+            model = (
+                self.session._materialize_current_statistics(request)
+                if statistics
+                else model_for_split_scoring(request.base_model, request.terms)
+            )
+            return {"model": model}
+
+        outcome = self._evidence.submit(key, prepare_model).result()
         if outcome.status == "superseded" or outcome.payload is None:
             return None, source
         model = outcome.payload["model"]
 
         with self._lock:
-            # Kept for reuse only while the revision stands; returned while its model is in force.
-            if self.session.publish_materialized_model(request, model) or source.describes(
-                self.session
-            ):
-                return model, source
-            return None, source
+            return (model if source.describes(self.session) else None), source
 
     def _model_materialized_for_dataset(self, dataset) -> tuple[Any, InForce]:
         """Materialize the model in force against one purpose-specific dataset without caching it."""
@@ -574,20 +579,6 @@ class EditorWidget:
                 return _superseded_payload(model_revision, request_sequence, in_force)
             reference_model = getattr(self.session, "reference_model", self.session.model)
             model_source = InForce.of(self.session)
-
-        if selected_source == "original":
-            selected_model = reference_model
-        else:
-            selected_model, model_source = self._current_model_for_evidence()
-        if selected_model is None:
-            return _superseded_payload(revision, request_sequence, model_source.token)
-
-        with self._lock:
-            if not model_source.describes(self.session):
-                return _superseded_payload(revision, request_sequence, model_source.token)
-            # The reply is for the model checked here, so it carries that model's revision.
-            revision = self.session.model_revision
-            reference_model = getattr(self.session, "reference_model", self.session.model)
             eval_dataset = named_metrics_dataset(self.session, dataset)
             if reference_model is None or eval_dataset is None:
                 return {
@@ -601,6 +592,21 @@ class EditorWidget:
                     ),
                     "in_force": model_source.token,
                 }
+
+        if selected_source == "original":
+            selected_model = reference_model
+        else:
+            selected_model, model_source = self._current_model_for_evidence(
+                statistics=False, expected=model_source
+            )
+        if selected_model is None:
+            return _superseded_payload(revision, request_sequence, model_source.token)
+
+        with self._lock:
+            if not model_source.describes(self.session):
+                return _superseded_payload(revision, request_sequence, model_source.token)
+            # The reply is for the model checked here, so it carries that model's revision.
+            revision = self.session.model_revision
 
         original_metrics = self._dataset_metrics_for_evidence(
             "original", reference_model, eval_dataset, model_source
@@ -715,6 +721,7 @@ class EditorWidget:
             current_revision = self.session.model_revision
             if not self._asked_is_in_force(model_revision, in_force):
                 return _superseded_payload(model_revision, request_sequence, in_force)
+            asked = InForce.of(self.session)
             # A notebook-side edit advances the revision without passing through
             # this widget, so a stored fixed-offset refit can outlive its edits.
             if self._offset_refit_revision != current_revision:
@@ -724,7 +731,7 @@ class EditorWidget:
         offset_labels_override: list[dict[str, Any]] | None = None
         revision = current_revision
         if source == "in_force":
-            model, in_force_source = self._current_model_for_evidence()
+            model, in_force_source = self._current_model_for_evidence(expected=asked)
             if model is None:
                 return _superseded_payload(revision, request_sequence, in_force_source.token)
         else:
@@ -766,6 +773,7 @@ class EditorWidget:
             revision = self.session.model_revision
             if not self._asked_is_in_force(model_revision, in_force):
                 return _superseded_payload(model_revision, request_sequence, in_force)
+            asked = InForce.of(self.session)
         if report in ("cv", "diagnose"):
             # Each captures what it reads, and the model in force with it, under one hold of
             # the lock; the payload names that model.
@@ -776,7 +784,9 @@ class EditorWidget:
                         payload["model_revision"], request_sequence, payload["in_force"]
                     )
             return payload
-        edited_model, source = self._current_model_for_evidence()
+        edited_model, source = self._current_model_for_evidence(
+            statistics=report == "final" and not is_lss(asked.model), expected=asked
+        )
         if edited_model is None:
             return _superseded_payload(revision, request_sequence, source.token)
 
@@ -787,8 +797,6 @@ class EditorWidget:
             datasets = tuple(evaluation_datasets(self.session))
             final_fit = self._final_fit
             reference_model = getattr(self.session, "reference_model", self.session.model)
-            fit_dataset = training_export_dataset(self.session)
-            metrics_dataset = default_metrics_dataset(self.session)
             # The report's flags are decided here, with the model it describes: an edit and its
             # undo while it is built put that model back, so they must not change what it says.
             compares_edit = reference_model is not self.session.model or bool(source.edits)
@@ -807,18 +815,6 @@ class EditorWidget:
                     ),
                     "in_force": source.token,
                 }
-
-        summary_model = edited_model
-        # Whether the model is edited is read from ``source``, the model the report describes,
-        # never from the session now: an edit back to the fitted values and its undo while the
-        # report is built put back that model, so they must not change which summary it shows.
-        if report == "final" and source.edits and not is_lss(reference_model):
-            if fit_dataset is not None and (
-                metrics_dataset is None or fit_dataset.name != metrics_dataset.name
-            ):
-                summary_model, summary_source = self._model_materialized_for_dataset(fit_dataset)
-                if summary_model is None or summary_source.token != source.token:
-                    return _superseded_payload(revision, request_sequence, source.token)
 
         metric_pairs: dict[str, tuple[dict[str, float | str], dict[str, float | str]]] = {}
         for eval_dataset in datasets:
@@ -847,7 +843,7 @@ class EditorWidget:
             splits=splits,
             model_revision=revision,
             request_sequence=request_sequence,
-            model_override=summary_model,
+            model_override=edited_model,
             final_fit=final_fit,
             compares_edit=compares_edit,
             final_fit_stale=final_fit_stale,

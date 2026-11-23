@@ -14,7 +14,6 @@ import numpy as np
 
 from superglm._frame import as_eager_frame
 from superglm.distributional.api import SuperLSS
-from superglm.editor.apply import materialize_edit_request
 from superglm.editor.errors import EditorValueError
 from superglm.editor.io import (
     jsonable,
@@ -198,27 +197,35 @@ def save_model(session, path: str | Path, *, model_override=None) -> Path:
     target = Path(path)
     if not target.suffix:
         target = target.with_suffix(".joblib")
+    revision = session.model_revision
+    dataset = default_metrics_dataset(session)
+    history = session.editor_history_records()
     model = with_editor_history(
         edited_model_for_export(session, model_override=model_override),
-        session.editor_history_records(),
+        history,
     )
     data, _ = serialize_validated_model(
         model,
-        dataset=default_metrics_dataset(session),
+        dataset=dataset,
     )
+    if revision != session.model_revision:
+        raise RuntimeError("Export request was superseded by a newer model revision.")
     target.parent.mkdir(exist_ok=True, parents=True)
     target.write_bytes(data)
     return target
 
 
 def edited_model_for_export(session, *, model_override=None):
-    """Return an edited model copy scored on the editor's default split when available."""
+    """Return the shared training-first model for the current edit."""
     if model_override is not None:
         return model_override
     request = session.capture_materialization_request()
     if request is None:
         return session.model
-    return materialize_edit_request(request)
+    model = session._materialize_current_statistics(request)
+    if not session.materialization_request_is_current(request):
+        raise RuntimeError("Export request was superseded by a newer model revision.")
+    return model
 
 
 def with_editor_history(model, records: list[dict[str, Any]]):

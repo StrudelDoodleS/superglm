@@ -32,6 +32,7 @@ def evidence_widget():
         model,
         terms=["x_spline"],
         train_data=(X, y, None, None),
+        validation_data=(X.iloc[:30], y[:30]),
     )
     session.select_indices("x_spline", [10, 11, 12])
     session.shift("x_spline", 0.2)
@@ -66,8 +67,7 @@ def test_materialization_does_not_hold_widget_lock(evidence_widget, monkeypatch)
     import superglm.editor.apply as apply_module
 
     widget = evidence_widget
-    dataset = default_metrics_dataset(widget.session)
-    assert dataset is not None
+    dataset = widget.session._evaluation_data["train"]
     started = threading.Event()
     release = threading.Event()
     captured: dict[str, object] = {}
@@ -80,14 +80,14 @@ def test_materialization_does_not_hold_widget_lock(evidence_widget, monkeypatch)
         release.wait(timeout=5)
         return original(model, terms, **kwargs)
 
-    def request_metrics():
+    def request_summary():
         try:
-            widget._metrics("deviance", "in_force")
+            widget._summary("in_force")
         except BaseException as exc:  # pragma: no cover - asserted below
             errors.append(exc)
 
     monkeypatch.setattr(apply_module, "apply_edits_to_model_copy_with_data", blocked)
-    evidence_thread = threading.Thread(target=request_metrics)
+    evidence_thread = threading.Thread(target=request_summary)
     evidence_thread.start()
     try:
         assert started.wait(timeout=5)
@@ -523,20 +523,21 @@ def test_a_final_report_says_whether_the_final_fit_describes_its_model(monkeypat
 
 
 @pytest.mark.parametrize("endpoint", ["metrics", "summary", "report"])
-def test_a_reply_carries_the_revision_of_the_model_it_was_built_for(monkeypatch, endpoint):
-    # A caller that names only a revision is answered while it stands; an edit landing before
-    # the model is captured makes the reply describe the edited model, so it names that revision.
+def test_a_request_cannot_switch_to_an_edit_made_before_its_model_is_captured(
+    monkeypatch, endpoint
+):
     session = _split_session()
     session.shift("x_spline", 0.2)
     widget = session.widget()
     capture = widget._current_model_for_evidence
 
-    def edit_then_capture():
+    def edit_then_capture(**kwargs):
         with widget._lock:
             session.shift("x_spline", 0.1)
-        return capture()
+        return capture(**kwargs)
 
     asked = session.model_revision
+    token = widget._state()["in_force"]
     monkeypatch.setattr(widget, "_current_model_for_evidence", edit_then_capture)
     call = {
         "metrics": lambda: widget._metrics("deviance", model_revision=asked),
@@ -545,15 +546,13 @@ def test_a_reply_carries_the_revision_of_the_model_it_was_built_for(monkeypatch,
     }[endpoint]
     try:
         reply = call()
-        with widget._lock:
-            token = widget._state()["in_force"]
     finally:
         monkeypatch.undo()
         widget.close()
 
     assert session.model_revision == asked + 1
-    assert reply.get("status") is None
-    assert (reply["model_revision"], reply["in_force"]) == (session.model_revision, token)
+    assert reply.get("status") == "superseded"
+    assert (reply["model_revision"], reply["in_force"]) == (asked, token)
 
 
 def test_a_value_that_turns_to_minus_zero_keeps_the_token():

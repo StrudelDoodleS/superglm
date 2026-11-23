@@ -1211,17 +1211,17 @@ def test_materialization_request_copies_terms_and_rejects_stale_publish(
     editor_frame,
 ):
     from superglm.editor.apply import materialize_edit_request
-    from superglm.editor.evaluation import default_metrics_dataset
 
     X, y = editor_frame
     session = EditorSession.from_model(
         editor_model,
         terms=["x_spline"],
+        train_data=(X.iloc[:300], y[:300]),
         validation_data=(X.iloc[300:380], y[300:380], None),
     )
     session.select_indices("x_spline", [4, 5, 6])
     session.shift("x_spline", 0.2)
-    dataset = default_metrics_dataset(session)
+    dataset = session._evaluation_data["train"]
     request = session.capture_materialization_request()
 
     assert request is not None

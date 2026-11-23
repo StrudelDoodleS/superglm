@@ -60,6 +60,7 @@ def lss_model_with_edits(
     terms: Mapping[str, EditableTerm],
     *,
     keep_pinned: bool = False,
+    refresh_training_rows: bool = True,
 ) -> SuperLSS:
     """The fitted model with the edited curves of ``terms`` written into its coefficients.
 
@@ -75,7 +76,10 @@ def lss_model_with_edits(
     for term in changed:
         _write_term(view, term, coefficients, keep_pinned=keep_pinned)
     return view.lss._with_revised_coefficients(
-        coefficients, edited_terms=[term.name for term in changed], X_train=view.X_train
+        coefficients,
+        edited_terms=[term.name for term in changed],
+        X_train=view.X_train if refresh_training_rows else None,
+        refresh_training_rows=refresh_training_rows,
     )
 
 

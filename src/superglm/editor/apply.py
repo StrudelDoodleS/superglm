@@ -149,6 +149,7 @@ def apply_edits_to_model_copy_with_data(
     sample_weight=None,
     offset=None,
     keep_pinned: bool = False,
+    statistics_fallback: str | None = None,
 ):
     """Return a deep-copied model and refresh scalar fit stats if data is available.
 
@@ -168,11 +169,7 @@ def apply_edits_to_model_copy_with_data(
         from superglm.editor.lss.apply import lss_model_with_edits
 
         return lss_model_with_edits(model, terms, keep_pinned=keep_pinned)
-    changed_terms = [
-        term
-        for name, term in terms.items()
-        if is_edited(display_for(model, name), term.original_log_effect, term.edited_log_effect)
-    ]
+    changed_terms = _changed_terms(model, terms)
     has_explicit_rows = X is not None or y is not None
     has_retained_rows = (
         getattr(model, "_fit_X_ref", None) is not None
@@ -192,21 +189,8 @@ def apply_edits_to_model_copy_with_data(
     )
     if not changed_terms and not has_scoring_data:
         return copied_model
-    revision = FittedStateRevision.start(
-        copied_model,
-        increment=bool(changed_terms or has_scoring_data),
-        freeze_auxiliary_arrays=bool(changed_terms or has_scoring_data),
-    )
+    revision = _stage_glm_revision(copied_model, changed_terms, keep_pinned=keep_pinned)
     edited_model = revision.model
-    beta_before = np.array(edited_model._result.beta, dtype=np.float64)
-    for term in changed_terms:
-        _apply_term_edit(edited_model, term, keep_pinned=keep_pinned)
-    if changed_terms:
-        publish_revised_coefficients(edited_model, beta_before)
-    edited_terms = [term.name for term in changed_terms]
-    if edited_terms:
-        _stamp_stale_inference(edited_model, edited_terms)
-        _invalidate_model_caches(edited_model)
     from superglm.model.base import NoPredictedMeanError
 
     reason = None
@@ -225,12 +209,46 @@ def apply_edits_to_model_copy_with_data(
             f"This model has no fit statistics. {no_quote_message(error)} "
             "Adjust the curve or undo the edit to restore the quotes."
         )
-    revision = revision.with_edited_statistics(reason=reason)
+    revision = revision.with_edited_statistics(reason=reason, fallback=statistics_fallback)
     if not getattr(edited_model, "_retain_fit_state", True):
         from superglm.model.fit_ops import _maybe_release_fit_state
 
         _maybe_release_fit_state(edited_model)
     return revision.commit()
+
+
+def _changed_terms(model, terms: dict[str, EditableTerm]) -> list[EditableTerm]:
+    return [
+        term
+        for name, term in terms.items()
+        if is_edited(display_for(model, name), term.original_log_effect, term.edited_log_effect)
+    ]
+
+
+def _stage_glm_revision(model, changed_terms: list[EditableTerm], *, keep_pinned: bool):
+    revision = FittedStateRevision.start(model)
+    if changed_terms:
+        edited = revision.model
+        beta_before = np.array(edited._result.beta, dtype=np.float64)
+        for term in changed_terms:
+            _apply_term_edit(edited, term, keep_pinned=keep_pinned)
+        publish_revised_coefficients(edited, beta_before)
+        _stamp_stale_inference(edited, [term.name for term in changed_terms])
+        _invalidate_model_caches(edited)
+    return revision
+
+
+def model_for_split_scoring(model, terms: dict[str, EditableTerm]):
+    """Build a private predictor for split evidence, without publishing fit statistics."""
+    if is_lss(model):
+        from superglm.editor.lss.apply import lss_model_with_edits
+
+        return lss_model_with_edits(model, terms, refresh_training_rows=False)
+    changed_terms = _changed_terms(model, terms)
+    if not changed_terms:
+        return model
+    copied = _copy_model_for_editor_edits(model, share_transient_state=True)
+    return _stage_glm_revision(copied, changed_terms, keep_pinned=False).model
 
 
 def materialize_edit_request(request):
@@ -246,6 +264,7 @@ def materialize_edit_request(request):
     return apply_edits_to_model_copy_with_data(
         request.base_model,
         request.terms,
+        statistics_fallback=request.statistics_fallback,
         **kwargs,
     )
 

@@ -1,6 +1,7 @@
 """Edited deviance belongs to the scoring rows of the current coefficients."""
 
 import json
+from contextlib import closing
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -91,17 +92,49 @@ def test_unpriced_training_edit_round_trips_and_recovers(tmp_path):
     assert "fit_statistics_unavailable" not in loaded.training_telemetry()["fit"]
 
 
-def test_in_force_and_save_disclose_the_validation_rows_they_scored(tmp_path):
-    session = edit(editor_fit(), train_data=(TRAIN, TRAIN_Y), validation_data=(CELLS, CELLS_Y))
+def test_default_edit_readers_agree_and_holdout_splits_score_their_own_rows(tmp_path):
+    test = CELLS.iloc[[0, 2]]
+    test_y = np.array([2.0, 3.0])
+    session = edit(editor_fit(), validation_data=(CELLS, CELLS_Y), test_data=(test, test_y))
     session.select_indices("a", [1])
     session.shift("a", 0.01)
-    loaded = joblib.load(session.save_model(tmp_path / "validation-unavailable.joblib"))
-    _assert_missing(
-        loaded,
-        summary_payload(SimpleNamespace(session=session), "in_force"),
-        "1 of 4 rows have no quote under this model (row positions 3)",
-    )
-    assert session.to_model().result.deviance == pytest.approx(_gamma_deviance(0.01))
+    with closing(session.widget()) as widget:
+
+        def assert_training_score(delta):
+            expected = _gamma_deviance(delta)
+            payload = widget._summary("in_force")
+            assert payload["compact"]["model"]["deviance"] == pytest.approx(expected)
+            saved = joblib.load(session.save_model(tmp_path / "edited.joblib"))
+            assert saved.result.deviance == pytest.approx(expected)
+            assert session.to_model().result.deviance == pytest.approx(expected)
+
+        assert_training_score(0.01)
+        validation = widget._metrics("deviance")
+        assert validation["dataset"] == "validation"
+        assert "1 of 4 rows have no quote" in validation["error"]
+        test_metric = widget._metrics("deviance", dataset="test")
+        ratio = test_y * [1.0, 0.25]
+        assert test_metric["edited"] == pytest.approx(2 * np.sum(ratio - 1 - np.log(ratio)))
+
+        session.shift("a", -0.31)
+        payload = widget._summary("in_force")
+        _assert_missing(session.to_model(), payload, "10 of 30 rows have no quote")
+        assert len(session.history) == 2
+        session.undo()
+        assert_training_score(0.01)
+        session.redo()
+        assert widget._summary("in_force")["error"] == payload["error"]
+
+        session.shift("a", 0.90)
+        assert_training_score(0.60)
+        ratio = CELLS_Y * [1.0, 0.85, 0.25, 0.10]
+        restored = widget._metrics("deviance")
+        assert restored["edited"] == pytest.approx(2 * np.sum(ratio - 1 - np.log(ratio)))
+        assert restored["original"] is None
+        final = widget._report("final")
+        assert final["summary"]["compact"]["model"]["deviance"] == pytest.approx(
+            _gamma_deviance(0.60)
+        )
 
 
 def test_rescoring_without_retained_rows_discloses_the_missing_score():

@@ -18,7 +18,12 @@ from superglm.inference._term_helpers import (
 )
 from superglm.inference.covariance import covariance_selected_diagonal
 from superglm.inference.summary import _CoefRow
-from superglm.model.fit_state import edited_statistics_unavailable, fitted_lambda2, fitted_penalty
+from superglm.model.fit_state import (
+    edited_statistics_fallback_note,
+    edited_statistics_unavailable,
+    fitted_lambda2,
+    fitted_penalty,
+)
 from superglm.penalties.base import selection_shrunk_group_names
 from superglm.profiling._reporting import (
     cached_tweedie_profile_ci,
@@ -336,6 +341,9 @@ def summary(
             "message",
             "Manual editor edits were applied; fitted inference is reference-only.",
         )
+    fallback = edited_statistics_fallback_note(model)
+    if fallback:
+        model_info["editor_statistics_note"] = fallback
 
     offset_meta = getattr(model, "_editor_offset", None)
     if offset_meta is not None:

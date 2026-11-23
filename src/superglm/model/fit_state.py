@@ -381,6 +381,15 @@ class EditedStatistics:
 
     status: _EditedStatisticsStatus
     reason: str | None = None
+    fallback: str | None = None
+
+    @property
+    def fallback_note(self) -> str:
+        return (
+            ""
+            if self.fallback is None
+            else f"{self.fallback} fallback (no training rows available)."
+        )
 
 
 _FITTED_STATISTICS = EditedStatistics("fitted")
@@ -418,14 +427,24 @@ def edited_statistics_unavailable(model) -> str | None:
     return _edited_statistics(model).reason
 
 
-def _transition_edited_statistics(model, reason: str | None) -> EditedStatistics:
+def edited_statistics_fallback_note(model) -> str:
+    """Identify holdout statistics when the edited model had no training data."""
+    return _edited_statistics(model).fallback_note
+
+
+def _transition_edited_statistics(
+    model, reason: str | None, fallback: str | None = None
+) -> EditedStatistics:
     event = "score" if reason is None else "withhold"
     status = _EDITED_STATISTICS_MOVES[(_edited_statistics(model).status, event)]
+    outcome = EditedStatistics(status, reason, fallback)
     if status == "unavailable":
         model._result.deviance = model._solver_result.deviance = float("nan")
         model._fit_stats = model._fit_mu = model._fit_null_mu = None
         model._fit_metrics_cache = model._fit_metrics_cache_signature = model._summary_cache = None
-    return EditedStatistics(status, reason)
+        if outcome.fallback_note:
+            outcome = replace(outcome, reason=f"{outcome.fallback_note} {reason}")
+    return outcome
 
 
 @dataclass(frozen=True)
@@ -490,9 +509,13 @@ class FittedStateRevision:
             freeze_auxiliary_arrays=bool(freeze_auxiliary_arrays),
         )
 
-    def with_edited_statistics(self, *, reason: str | None = None) -> FittedStateRevision:
+    def with_edited_statistics(
+        self, *, reason: str | None = None, fallback: str | None = None
+    ) -> FittedStateRevision:
         """Stage the score or its unavailability for this editor revision."""
-        return replace(self, edited_statistics=_transition_edited_statistics(self.model, reason))
+        return replace(
+            self, edited_statistics=_transition_edited_statistics(self.model, reason, fallback)
+        )
 
     def commit(self):
         """Validate and publish this complete revision through one dictionary swap."""
