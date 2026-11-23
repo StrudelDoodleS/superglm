@@ -181,6 +181,53 @@ def test_a_small_resolvable_correction_is_taken_in_either_unit(monkeypatch):
         np.testing.assert_allclose(model.predict(X), 1e-4 * z, rtol=0, atol=1e-7)
 
 
+@pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
+@pytest.mark.pins_behaviour
+def test_weakly_weighted_extremes_preserve_the_weighted_gaussian_slope(discrete):
+    """Pin weighted least-squares predictions when two distant rows carry little weight."""
+    z = np.tile([-1.0, -1.0, 1.0, 1.0], 16)
+    x = np.r_[z, -1000.0, 1000.0]
+    y = np.r_[1e-4 * z + np.tile([-1.0, 1.0], 32), 0.0, 0.0]
+    weights = np.r_[np.ones(len(z)), 1e-6, 1e-6]
+    # Both weighted means are zero by symmetry.
+    slope = (weights * x) @ y / ((weights * x) @ x)
+    X = pd.DataFrame({"x": x})
+    family = GaussianLS(scale_floor=0)
+    model = SuperLSS(family, family.location("x"), family.scale(), discrete=discrete)
+    model.fit(X, y, sample_weight=weights)
+    assert model.result_.converged
+    np.testing.assert_allclose(model.predict(X), slope * x, rtol=1e-7, atol=0)
+
+
+@pytest.mark.parametrize("chunk_size", [None, 7], ids=["dense", "chunked"])
+@pytest.mark.pins_behaviour
+def test_reweighted_fit_in_a_shared_session_recovers_the_weighted_contrast(chunk_size):
+    """Pin the least-squares fit when the same layout is reused with new likelihood weights."""
+    z = np.tile([-1.0, -1.0, 1.0, 1.0], 16)
+    x = np.r_[z, -1000.0, 1000.0]
+    y = np.r_[1e-4 * z + np.tile([-1.0, 1.0], 32), 0.0, 0.0]
+    weights = resolved_prior(np.ones(len(x)))
+    family = GaussianLS(scale_floor=0)
+    frame = as_eager_frame(pd.DataFrame({"x": x}))
+    predictors = (Predictor("location", {"x": Numeric()}), Predictor("scale", {}))
+    layout = build_stacked_layout(compile_predictors(frame, weights, family.parameters, predictors))
+    session = solver._DenseObservedReuseSession()
+    for w in (weights, resolved_prior(np.r_[np.ones(len(z)), 1e-6, 1e-6])):
+        fit = solver.fit_dense_fixed_lambda(
+            family,
+            layout,
+            y,
+            family.bind_likelihood(y, w, COMPLETE_OBSERVATION),
+            np.zeros((3, 3)),
+            config=solver.DenseSolverConfig(tolerance=1e-7),
+            chunk_size=chunk_size,
+            _reuse_session=session,
+        )
+    slope = (w.values * x) @ y / ((w.values * x) @ x)
+    assert fit.converged
+    np.testing.assert_allclose(fit.eta[:, 0], slope * x, rtol=1e-7, atol=0)
+
+
 def test_a_newton_step_has_the_same_size_in_shifted_coordinates(monkeypatch):
     z = np.tile([-1.0, -1.0, 1.0, 1.0], 16)
     y = 0.25 * z + np.tile([-1.0, 1.0], 32)

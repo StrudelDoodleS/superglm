@@ -177,14 +177,17 @@ class _DenseObservedReuseSession:
         ) = None
         self._pass_factors = PassFactors()
         self._response: NDArray[np.float64] | None = None
-        self._score_units: tuple[StackedLayout, ScoreUnits] | None = None
+        self._score_units: tuple[StackedLayout, ResolvedLikelihoodWeights, ScoreUnits] | None = None
 
-    def score_units(self, layout: StackedLayout, matrices, chunk_size) -> ScoreUnits:
-        # Only the fixed design sets these float64 scales. New bases/layouts
-        # replace them; weights, coefficients and penalties do not enter them.
-        if self._score_units is None or self._score_units[0] is not layout:
-            self._score_units = layout, ScoreUnits.from_layout(layout, matrices, chunk_size)
-        return self._score_units[1]
+    def score_units(self, layout: StackedLayout, matrices, chunk_size, weights) -> ScoreUnits:
+        # Both inputs are immutable within a fit. Coefficients and penalties
+        # do not enter these scales, so smoothing refits share them.
+        held = self._score_units
+        if held is None or held[0] is not layout or held[1] is not weights:
+            units = ScoreUnits.from_layout(layout, matrices, chunk_size, weights)
+            self._score_units = (layout, weights, units)
+            return units
+        return held[2]
 
     def canonical_response(self, response: NDArray[np.float64]) -> NDArray[np.float64]:
         """The session's one copy of a response equal to ``response``.
@@ -453,9 +456,13 @@ def _validated_context(
         response=response,
         likelihood_plan=root_likelihood_plan,
         score_units=(
-            ScoreUnits.from_layout(layout, dense_matrices, resolved_chunk_size)
+            ScoreUnits.from_layout(
+                layout, dense_matrices, resolved_chunk_size, root_likelihood_plan.weights
+            )
             if _reuse_session is None
-            else _reuse_session.score_units(layout, dense_matrices, resolved_chunk_size)
+            else _reuse_session.score_units(
+                layout, dense_matrices, resolved_chunk_size, root_likelihood_plan.weights
+            )
         ),
         penalty=penalty_matrix,
         links=links,

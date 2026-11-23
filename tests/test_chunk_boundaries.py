@@ -506,7 +506,7 @@ BOUNDARY_TESTS: dict[str, str | tuple[str, ...]] = {
     "_parallel.py::pooled_row_blocks": (
         "test_chunk_boundaries_design.py::test_pooled_row_blocks_partition_the_rows"
     ),
-    "distributional/_score.py::_group_limits": (
+    "distributional/_score.py::_group_limits.blocks": (
         "test_distributional_score_units.py::test_same_direction_has_the_same_score_in_different_units"
     ),
     "distributional/checks/compare.py::_murphy_diagram": (

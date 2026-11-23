@@ -12,27 +12,59 @@ from superglm._group_matrix._group_matrix_range import group_row_range
 from superglm.distributional.layout import StackedLayout
 
 
-def _group_limits(group, chunk_size):
-    """Column extrema using stored values or products within the fit's row bound."""
-    if type(group) is DenseGroupMatrix:
+def _group_limits(group, chunk_size, weights, with_intercept):
+    """Column extrema after scaling each prior-weighted contrast by sqrt(w/max w)."""
+    if type(group) is DenseGroupMatrix and weights is None:
         return np.min(group.M, axis=0), np.max(group.M, axis=0)
     rows, width = group.shape
     if type(group) in ONE_HOT_CODE_TYPES:
+        # An indicator has a declared contrast (absence to presence) in either
+        # weighting. Count its support without expanding the categorical design.
         counts = np.bincount(group.codes, minlength=width + 1)[:width]
         return (counts == rows).astype(float), (counts > 0).astype(float)
+    chunk_size = rows if chunk_size is None else chunk_size
+
+    def blocks():
+        for start in range(0, rows, chunk_size):
+            stop = min(start + chunk_size, rows)
+            block = (
+                group if stop - start == rows else group_row_range(group, start, stop, copy=False)
+            )
+            if block is None:
+                block = group.row_subset(np.arange(start, stop))
+            yield slice(start, stop), block
+
+    centred = weights is not None and with_intercept
+    origin = np.zeros(width)
+    if centred:
+        for section, block in blocks():
+            origin += block.rmatvec(weights.values[section] / weights.weight_sum)
     low, high = np.full(width, np.inf), np.full(width, -np.inf)
+    raw_low, raw_high = low.copy(), high.copy()
     unit = np.zeros(width)
-    for start in range(0, rows, chunk_size):
-        stop = min(start + chunk_size, rows)
-        block = group if stop - start == rows else group_row_range(group, start, stop, copy=False)
-        if block is None:
-            block = group.row_subset(np.arange(start, stop))
+    for section, block in blocks():
+        factor = (
+            None
+            if weights is None
+            else np.sqrt(weights.values[section]) / np.sqrt(weights.provenance.max_weight)
+        )
         for index in range(width):
             unit[index] = 1.0
-            column = block.matvec(unit)
+            column = block.M[:, index] if type(block) is DenseGroupMatrix else block.matvec(unit)
+            if factor is not None:
+                if centred:
+                    raw_low[index] = min(raw_low[index], np.min(column))
+                    raw_high[index] = max(raw_high[index], np.max(column))
+                # Interpolate about the weighted mean (zero without an intercept),
+                # so changing a numeric column's origin cannot change its radius.
+                column = factor * column + (1.0 - factor) * origin[index]
             low[index] = min(low[index], np.min(column))
             high[index] = max(high[index], np.max(column))
             unit[index] = 0.0
+    if centred:
+        # Every interpolation lies in the column's convex hull. In particular
+        # a rounded weighted mean must not give a constant column a spread.
+        return np.clip(low, raw_low, raw_high), np.clip(high, raw_low, raw_high)
     return low, high
 
 
@@ -43,18 +75,28 @@ class ScoreUnits:
     intercept: NDArray[np.intp]
 
     @classmethod
-    def from_layout(cls, layout: StackedLayout, dense_matrices, chunk_size) -> ScoreUnits:
+    def from_layout(cls, layout: StackedLayout, dense_matrices, chunk_size, weights) -> ScoreUnits:
         """Representative units of the fixed design, shared within one fit session.
 
         The compiler whitens an SSP spline using its normalized Gram plus penalty.
         Keep those coordinates: a rare large spline row should not shrink its
-        score. For columns supplied in their own units, a slope of 1 / radius
-        moves the centred predictor by one. Without an intercept its origin is
-        fixed at zero. Extrema avoid subtracting nearly equal column moments.
+        score. Read a numeric column's radius in the weighted design: multiply
+        deviations from its weighted mean by sqrt(w/max w). Equal prior weights
+        recover the ordinary range. Frequency weights repeat observations, which
+        leaves their extrema unchanged. Without an intercept the origin is zero.
         """
         centre = np.zeros(layout.n_coefficients)
         spread = np.ones(layout.n_coefficients)
         intercept = np.arange(layout.n_coefficients)
+        # Fixed fits validate the complete weight plan. Its extrema and sum
+        # already describe these rows; scale only the block currently in use.
+        provenance = weights.provenance
+        prior = (
+            weights
+            if provenance.contract.semantics == "prior"
+            and provenance.min_weight != provenance.max_weight
+            else None
+        )
         for q, state in enumerate(layout.predictors):
             offset = int(state.intercept_index is not None)
             start = state.coefficient_slice.start + offset
@@ -62,11 +104,10 @@ class ScoreUnits:
                 if group.ssp_spline:
                     continue
                 slopes = slice(start + group.start, start + group.end)
-                if dense_matrices is None:
-                    low, high = _group_limits(block, chunk_size)
-                else:
+                if dense_matrices is not None and type(block) not in ONE_HOT_CODE_TYPES:
                     columns = dense_matrices[q][:, offset + group.start : offset + group.end]
-                    low, high = np.min(columns, axis=0), np.max(columns, axis=0)
+                    block = DenseGroupMatrix(columns)
+                low, high = _group_limits(block, chunk_size, prior, bool(offset))
                 low = np.asarray(low, dtype=np.float64)
                 high = np.asarray(high, dtype=np.float64)
                 if state.intercept_index is not None:
