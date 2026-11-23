@@ -1806,16 +1806,25 @@ def _retained_step_improves_objective(
     predicted_gain = 0.5 * float(retained_score @ correction)
     if predicted_gain <= limit:
         return False
-    # Probe the full correction. The cap on ordinary predictor steps has
-    # units of its own, for example on an identity-linked mean.
+    # A full Newton correction can overshoot even on positive curvature.
+    # Backtrack in coefficient space: the ordinary predictor cap has units
+    # of its own, for example on an identity-linked mean.
     step = correction if face is None else face.lift_vector(correction)
-    candidate = state.coefficients + step
-    if not np.all(np.isfinite(candidate)):
-        return False
-    if face is not None:
-        candidate = face.project(candidate)
-    trial = _evaluate_state(context, candidate, phase_recorder=phase_recorder, derivative_order=0)
-    return trial is not None and trial.penalized_optimizing_log_likelihood - objective > limit
+    alpha = 1.0
+    for _ in range(config.max_backtracks + 1):
+        candidate = state.coefficients + alpha * step
+        if np.array_equal(candidate, state.coefficients):
+            break
+        if np.all(np.isfinite(candidate)):
+            if face is not None:
+                candidate = face.project(candidate)
+            trial = _evaluate_state(
+                context, candidate, phase_recorder=phase_recorder, derivative_order=0
+            )
+            if trial is not None and trial.penalized_optimizing_log_likelihood - objective > limit:
+                return True
+        alpha *= config.backtrack_factor
+    return False
 
 
 def _fit_dense_fixed_lambda_core(

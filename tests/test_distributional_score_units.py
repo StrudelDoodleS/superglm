@@ -29,6 +29,21 @@ from ._distributional_weights import resolved_prior
 from .test_distributional_endpoint_laml import _UnitGaussian
 
 
+@pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
+@pytest.mark.pins_behaviour
+def test_a_backtracked_gain_precludes_convergence_far_from_the_mle(discrete):
+    """Pin disclosure of the intercept-only stop when the full Newton step overshoots."""
+    z = np.tile([-1.0, -1.0, 1.0, 1.0], 16)
+    mu = 1e10 * (1.0 + 0.7 * z)
+    y = mu + 1e10 * np.tile([-1.0, 1.0], 32)
+    X = pd.DataFrame({"x": 1e10 * z})
+    family = GaussianLS(scale_floor=0)
+    model = SuperLSS(family, family.location("x"), family.scale(), discrete=discrete)
+    model.fit(X, y)
+    close = np.allclose(model.predict(X), mu, rtol=1e-7, atol=0)
+    assert close or not model.result_.converged
+
+
 @pytest.mark.parametrize("force_fallback", [False, True], ids=["observed", "fisher"])
 def test_a_material_gain_is_measured_with_the_accepted_factor(monkeypatch, force_fallback):
     """A weakly weighted Gaussian can still gain 0.5. On fallback give the
