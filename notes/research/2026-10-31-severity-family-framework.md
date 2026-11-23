@@ -7,7 +7,7 @@ the numbers are listed at the end.
 
 **Status, 2026-11-01.** PR #545 has merged (`9d0b2de3`). It takes a per-row flag, `censored=`, in place of the `censoring=(lower, upper)` pairs described here.
 
-**Status, 2026-11-23 (master `daf11a862`).** Stage 1 (primitives and generator core), Stage 2's oracle and public `LomaxLSS` and `LogLogisticLSS` families, and Stage 4 (the incomplete-gamma jet engine, Temme's uniform expansion for the generalized gamma, and bounded rows for `GammaLS` and `GeneralizedGammaLSS`) have shipped in PR #565 (`6e092c9dc`), PR #568 (`71b133b2b`), and commits `2034e3616` and `42df26435`. Weibull, mean-form Weibull, and Burr XII remain test fixtures (`tests/_severity_fixtures.py`). Two strict `xfail` checks remain in `tests/test_declared_severity_families.py` for fourth log-CDF derivatives of Burr XII and Lomax at `F = 1e-100` (tracked separately). Sections 2.3, 2.4, and 4 below record the shipped gates and measurements alongside the original prototype findings.
+**Status, 2026-11-23 (master `daf11a862`).** Stage 1 (primitives and generator core), Stage 2's oracle and public `LomaxLSS` and `LogLogisticLSS` families, and Stage 4 (the incomplete-gamma jet engine, Temme's uniform expansion for the generalized gamma, and bounded rows for `GammaLS` and `GeneralizedGammaLSS`) have shipped in PR #565 (`6e092c9dc`), PR #568 (`71b133b2b`), and commits `2034e3616` and `42df26435`. Weibull, mean-form Weibull, and Burr XII remain test fixtures (`tests/_severity_fixtures.py`). The fourth log-CDF derivatives of Burr XII and Lomax at `F = 1e-100`, held by two strict `xfail` checks on `daf11a862`, are fixed by PR #722, which differentiates the log-CDF in log cumulative hazard. Sections 2.3, 2.4, and 4 below record the shipped gates and measurements alongside the original prototype findings.
 
 ## Recommendation
 
@@ -268,9 +268,9 @@ only. At order 4 in the `F = 1e-100` left tail, the generated Burr XII and Lomax
 log-CDF expressions also leave the float64 range (`r^4` overflows while `softplus^4`
 underflows), returning `0` for a representable derivative (for Lomax with scale 1 and
 shape 2, `-0.375`; the public window route takes quadrature there, returns `-0.375`,
-and declines analytic directions). Two strict `xfail` checks hold those two points in
-`tests/test_declared_severity_families.py:70,193-205` until a Bernoulli-series
-log-CDF primitive lands separately.
+and declines analytic directions). PR #722 fixes both points: the log-CDF is differentiated in log
+cumulative hazard, with a Bernoulli series near zero and Mächler's log-complement
+formula for the value, and the two strict `xfail` checks that held them now pass.
 
 **The same laws in textbook form**, through the same generator and the same oracle,
 with the mpmath reference at 400 digits so it resolves its own cancellation:

@@ -578,9 +578,10 @@ joint covariance is the dependency; neither C1 nor a general AD engine is needed
     `A <= 1,024 S` on log density and log survival (measured `<= 623 S`). `LomaxLSS`
     and `LogLogisticLSS` are public and checked against an independently verified
     SciPy optimum using the same stable row law summed by `math.fsum` and a
-    `1e-3`-SE parameter gap. Weibull and Burr XII remain test fixtures, and two strict
-    `xfail` checks hold deep-left-tail (`F = 1e-100`) fourth log-CDF derivatives for a
-    separate stable primitive.
+    `1e-3`-SE parameter gap. Weibull and Burr XII remain test fixtures. PR #722 makes the
+    deep-left-tail (`F = 1e-100`) fourth log-CDF derivatives of Lomax and Burr XII
+    agree with mpmath through order 4, clearing the two strict `xfail` checks that
+    held them.
   - **Incomplete-gamma jets (`tests/test_incomplete_gamma_engine.py`):** the
     stabilized `a >= 10` prefactor and direct `Q = u + v` tail below `a = 1e-2` meet
     `1e-12` relative row-scale error at orders 0–2 across `0.01 <= a <= 1e4`
