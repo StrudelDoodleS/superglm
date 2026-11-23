@@ -91,7 +91,10 @@ from superglm.distributional.revision import (
     ShapeRepairedWarning,
     revised_model,
 )
-from superglm.distributional.separation import validate_separation_policy
+from superglm.distributional.separation import (
+    validate_separation_policy,
+    warn_on_separated_prediction,
+)
 from superglm.distributional.shape_repair import repaired_model
 from superglm.distributional.surfaces import (
     DensityFan,
@@ -521,10 +524,10 @@ class SuperLSS:
 
         A ``Categorical`` level or ``CategoricalInteraction`` cell that carries
         exposure but whose responses all sit on a boundary the family declares
-        for that predictor has no finite effect.  ``"warn"`` (the default)
-        emits a ``SeparationWarning`` naming the cells before any coefficient
-        is fitted; ``"error"`` raises ``SeparationError``; ``"ignore"`` skips
-        the scan.
+        for that predictor has no finite effect. ``"warn"`` (the default)
+        names separated categorical levels after a complete-response fit.
+        ``"error"`` raises ``SeparationError`` at build time and ``"ignore"``
+        skips the scan.
         """
         return self._separation
 
@@ -1167,6 +1170,8 @@ class SuperLSS:
         natural scale after applying its inverse link. Gaussian columns are
         ``"location"`` and ``"scale"``; Tweedie columns are ``"mean"``,
         ``"dispersion"`` and ``"power"``. Frame indices are preserved.
+        Rows scored at a separated categorical level use the fitted value and
+        produce a ``SeparationWarning``, as in :meth:`predict`.
 
         Column offsets resolve from ``X``. Array sources require
         ``offsets={parameter: new_array_sum}``; a mixed declaration adds its
@@ -1174,7 +1179,9 @@ class SuperLSS:
         second offset. Predictors without declarations retain the optional
         prediction mapping and its zero default. Values are on the link scale.
         """
-        values = self._require_fitted().predict_parameters(X, offsets=offsets)
+        model = self._require_fitted()
+        values = model.predict_parameters(X, offsets=offsets)
+        warn_on_separated_prediction(model.compiled_predictors, X)
         return pd.DataFrame(
             values,
             columns=self.parameter_names_,
@@ -1208,9 +1215,17 @@ class SuperLSS:
         ``SuperGLM.predict`` does; so do ``predict_parameters`` (in that
         parameter's column), ``predict_cdf`` and ``predict_quantile``. A score
         of such a row is refused.
+
+        Rows scored at a separated categorical level in a parameter used
+        by the default prediction produce one ``SeparationWarning``.
         """
         model = self._require_fitted()
         values = model.predict(X, offsets=offsets)
+        warn_on_separated_prediction(
+            model.compiled_predictors,
+            X,
+            parameters=getattr(model.family, "default_prediction_parameters", None),
+        )
         if isinstance(model.family, VectorDefaultPredictionFamily):
             return pd.DataFrame(
                 values,

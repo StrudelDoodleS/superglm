@@ -11,6 +11,7 @@ import importlib
 import inspect
 import json
 import os
+import pickle
 import subprocess
 import sys
 from pathlib import Path
@@ -146,6 +147,33 @@ def test_the_module_a_fitted_model_loads_through_needs_no_plotting_or_fitting_co
         )
     )
     assert _loaded_after("import superglm.distributional.api", libraries + code) == []
+
+
+@pytest.mark.pins_behaviour
+def test_scoring_a_saved_healthy_lss_needs_no_scalar_model_code(tmp_path):
+    """Pin the cold scoring boundary when neither prediction API has a separation to disclose."""
+    import numpy as np
+    import pandas as pd
+
+    from superglm import SuperLSS, cat
+    from superglm.distributional import NegativeBinomialLS
+
+    rng = np.random.default_rng(1)
+    X = pd.DataFrame({"lev": rng.choice(["A", "B", "C"], 400)})
+    y = rng.poisson(0.5 + 0.5 * (X["lev"] == "B"))
+    family = NegativeBinomialLS()
+    model = SuperLSS(family, family.mean(cat("lev")), family.theta()).fit(X, y)
+    path = tmp_path / "healthy.pkl"
+    path.write_bytes(pickle.dumps(model))
+    watched = ("superglm.model", "superglm.model.separated_levels")
+    for method in ("predict", "predict_parameters"):
+        code = (
+            "import pickle, pandas as pd\n"
+            "from pathlib import Path\n"
+            f"model = pickle.loads(Path({str(path)!r}).read_bytes())\n"
+            f"model.{method}(pd.DataFrame({{'lev': ['A', 'B']}}))"
+        )
+        assert _loaded_after(code, watched) == [], method
 
 
 def _type_checking_imports(package: str) -> set[tuple[str, str]]:

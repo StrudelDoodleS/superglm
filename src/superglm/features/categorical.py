@@ -765,8 +765,8 @@ class Categorical:
         (``_pinned_levels``), is priced at the base level, so it is coded there;
         ``score`` has already reported an unseen label, so nothing is said again here.
         """
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
+        # A context-local switch, not a warning filter: predict can run on threads.
+        with unseen_routing_quiet():
             codes = self._predict_codes(self._resolve_predict_labels(x))
         base = self._levels.index(self._base_level)
         if self.unseen == "base":
