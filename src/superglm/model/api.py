@@ -2022,11 +2022,11 @@ class SuperGLM:
             unchanged; the warning's ``rows`` names those rows. A fit with no
             such direction never gives it. As in ``predict.lm``, a row the
             fit's rank decision treats as determined only up to its cut (a
-            near alias) can warn, a training row included. Only a dense,
-            unbinned fit is tested: a binned fit, one with a ``FactorSmooth``
-            term, a structured fit, a saved model without both of the fit's
-            rank records, and a fit whose columns sit too far from zero for
-            float64 to resolve the test are silent.
+            near alias) can warn, a training row included. For binned fits,
+            an exact prediction row can warn if it lies outside the space
+            spanned by the fitted bin rows and the penalty. Structured fits,
+            fits with a ``FactorSmooth`` term, older binned saves, and fits
+            without usable rank records are silent.
         """
         # One frame for both, so each column is read from the caller's frame once.
         frame = as_eager_frame(X)
