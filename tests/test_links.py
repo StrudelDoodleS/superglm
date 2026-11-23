@@ -142,6 +142,37 @@ class TestLogitLink:
         expected = p * (1 - p) * (1 - 2 * p)
         assert_allclose(link.deriv2_inverse(eta), expected)
 
+    @pytest.mark.parametrize(
+        ("order", "method"),
+        [(1, "deriv_inverse"), (2, "deriv2_inverse"), (3, "deriv3_inverse"), (4, "deriv4_inverse")],
+    )
+    def test_inverse_derivatives_keep_relative_accuracy_at_both_walls(self, order, method):
+        mp = pytest.importorskip("mpmath")
+        eta = np.array([-40, -36, -30, -20, -10, -4, -2, -1, 0, 1, 2, 4, 10, 20, 30, 36, 40])
+        with mp.workdps(80):
+
+            def inverse(t):
+                return 1 / (1 + mp.exp(-t))
+
+            expected = [
+                0.0 if t == 0 and order % 2 == 0 else float(mp.diff(inverse, int(t), order))
+                for t in eta
+            ]
+
+        # These points stay away from roots of the derivative factors, except
+        # for the exact symmetry zeros at eta = 0.
+        unit_roundoff = 2.0**-53
+        derivative = getattr(LogitLink(), method)
+        assert_allclose(derivative(eta), expected, rtol=16 * unit_roundoff, atol=0)
+        # Unsigned input must be converted before forming -eta.
+        upper_wall = eta > 0
+        assert_allclose(
+            derivative(eta[upper_wall].astype(np.uint64)),
+            np.asarray(expected)[upper_wall],
+            rtol=16 * unit_roundoff,
+            atol=0,
+        )
+
     def test_satisfies_protocol(self):
         assert isinstance(LogitLink(), Link)
 

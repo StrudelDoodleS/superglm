@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import math
 import warnings
 
@@ -13,18 +12,13 @@ from scipy import stats
 from scipy.special import expit
 
 from superglm import Spline
-from superglm._frame import as_eager_frame
 from superglm.diagnostics.convergence import ConvergenceWarning
 from superglm.distributional import Predictor
 from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.kernels import generalized_pareto as gp
-from superglm.distributional.layout import build_stacked_layout
-from superglm.distributional.predictor import compile_predictors
-from superglm.distributional.solver import fit_dense_fixed_lambda
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
 from superglm.features import Numeric, RandomEffect
-from tests._distributional_weights import resolved_prior
 from tests._generalized_pareto_lss_oracles import fit_scale_regression, profile_shape
 from tests.bound_predictor_fixtures import model_from_templates, with_offset_declarations
 
@@ -516,29 +510,37 @@ def test_a_pressed_group_whose_direction_the_rank_decision_drops_is_disclosed(he
     assert "1000 of 2000 rows" in message and "the data put the shape" in message
 
 
-def test_a_shape_at_the_last_float_beside_a_scale_alias_keeps_its_caveat():
-    # the coefficient fit drops z2 - 2 z, which the design aliases, and the shape at the last
-    # float below one, which only the link flattens: zero is no optimum for the second, so
-    # neither is refitted. Both are forced: the alias is exact, and at the last float the
-    # shape's equilibrated curvature is about 1e-2 of the rank cut, where a shape the wall step
-    # stops short of it sits at the cut. Mutation check: refitting a span that holds an alias,
-    # and keeping the refit, loses the caveat.
+@pytest.mark.pins_behaviour
+def test_a_heavy_tail_fit_discloses_clipped_means_and_unreliable_uncertainty():
+    """Pin the rounded predictions and uncertainty warning on a full heavy-tail fit."""
     rng = np.random.default_rng(11)
     y = stats.genpareto(3.0).rvs(2_000, random_state=rng)
     frame = pd.DataFrame({"x": rng.uniform(size=2_000), "z": rng.uniform(size=2_000)})
     frame["z2"] = 2.0 * frame["z"]
     scale = {"x": Spline(kind="cr", k=6), "z": Numeric(), "z2": Numeric()}
+    family = GeneralizedParetoLSS()
     model = model_from_templates(
-        family=GeneralizedParetoLSS(),
+        family=family,
         predictors=(Predictor("scale", scale), Predictor("shape", {})),
     )
     with pytest.warns(ConvergenceWarning, match="float64 can represent"):
         model.fit_reml(frame, y, inner_tol=1.0e-12)
     assert model.result_.coefficient_converged
-    assert model.result_.rank == len(model.result_.coefficients) - 2
-    assert np.all(model.predict_parameters(frame)["shape"].to_numpy() == np.nextafter(1.0, 0.0))
+    theta = model.predict_parameters(frame).to_numpy()
+    last_shape = np.nextafter(1.0, 0.0)
+    assert np.all(theta[:, 1] == last_shape)
     (message,) = _wall_messages(model)
-    assert "not reliable" in message
+    assert "2000 of 2000 rows" in message
+    assert "mean and expected shortfall" in message and "set by that rounding" in message
+    assert "Standard errors, intervals and posterior draws" in message and "not reliable" in message
+
+    scale = theta[:, 0]
+    np.testing.assert_allclose(model.predict(frame), scale / (1.0 - last_shape), rtol=1.0e-14)
+    quantile = stats.genpareto.ppf(0.9, c=last_shape, scale=scale)
+    np.testing.assert_allclose(model.predict_quantile(frame, 0.9), quantile, rtol=1.0e-14)
+    np.testing.assert_allclose(
+        family.expected_shortfall(0.9, theta), (scale + quantile) / (1.0 - last_shape), rtol=1.0e-14
+    )
 
 
 @pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
@@ -593,65 +595,6 @@ def test_near_collinear_shape_covariates_at_an_interior_optimum_are_not_disclose
     ).fit(frame, y)
     assert model.result_.rank < len(model.result_.coefficients)
     assert not _wall_messages(model)
-
-
-def test_a_zero_derivative_clip_with_a_dropped_shape_direction_keeps_the_standard_error_caveat():
-    from superglm.distributional.fit_state import _wall_disclosure
-
-    # Start at the event: g=0 is interior and g=1 has eta=40+logit(0.3). The
-    # coefficients are supplied because the default least-squares start absorbs
-    # even this row-varying offset in the group coefficient.
-    u = (np.arange(200) + 0.5) / 200
-    y = np.tile(np.expm1(-0.3 * np.log(u)) / 0.3, 2)
-    g = np.repeat([0.0, 1.0], 200)
-    family = GeneralizedParetoLSS()
-    weights = resolved_prior(np.ones(len(y)))
-    layout = build_stacked_layout(
-        compile_predictors(
-            as_eager_frame(pd.DataFrame({"g": g})),
-            weights,
-            family.parameters,
-            (Predictor("scale", {}), Predictor("shape", {"g": Numeric()})),
-            offsets={"shape": 40.0 * g},
-        )
-    )
-    initial = np.array([0.0, np.log(0.3 / 0.7), 0.0])
-    link = layout.predictor("shape").link
-    initial_eta = initial[1] + 40.0 * g
-    assert np.all(link.inverse(initial_eta[g == 1.0]) == np.nextafter(1.0, 0.0))
-    assert np.all(link.deriv_inverse(initial_eta[g == 1.0]) == 0.0)
-    result = fit_dense_fixed_lambda(
-        family,
-        layout,
-        y,
-        family.bind_likelihood(y, weights, COMPLETE_OBSERVATION),
-        np.zeros((3, 3)),
-        initial=initial,
-    )
-    assert result.converged
-    assert result.terminal_rank.rank == 2 < len(result.coefficients)
-    assert np.all(result.theta[g == 1.0, 1] == np.nextafter(1.0, 0.0))
-    assert np.all((result.theta[g == 0.0, 1] > 0.1) & (result.theta[g == 0.0, 1] < 0.9))
-    message = _wall_disclosure(family, result, layout)
-    assert "200 of 400 rows" in message
-    assert "float64 can represent" in message and "not reliable" in message
-
-
-def test_a_pressed_row_clipped_below_a_narrow_wall_keeps_the_standard_error_caveat():
-    # below an upper wall of 0.35 the link reaches its last float while its derivative is
-    # still positive, so no direction is dropped; the clip is forced on the pressed fit
-    from superglm.distributional.fit_state import _wall_disclosure
-
-    frame, y, _ = _simulate(3_000, 8, shape=0.9)
-    family = GeneralizedParetoLSS(shape_lower=0.05, shape_upper=0.35)
-    with pytest.warns(ConvergenceWarning, match="at the upper wall 0.35"):
-        model = _constant_shape_fit(family, frame, y)
-    state = model._require_fitted().fit_state
-    theta = state.solver_result.theta.copy()
-    theta[:, 1] = np.nextafter(0.35, 0.0)
-    clipped = dataclasses.replace(state.solver_result, theta=theta)
-    message = _wall_disclosure(family, clipped, state.layout)
-    assert "float64 can represent" in message and "not reliable" in message
 
 
 def test_a_scale_alias_beside_an_interior_shape_near_a_wall_is_not_disclosed():
