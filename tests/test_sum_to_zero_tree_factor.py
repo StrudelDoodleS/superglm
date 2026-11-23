@@ -27,7 +27,6 @@ from superglm.solvers._structured.balance_tree import (
     ProfiledSumToZeroTreeFactor,
     SumToZeroPenalizedOperator,
     SumToZeroTreeFactor,
-    _root_images,
     balance_tree,
 )
 from superglm.solvers._structured.border import BorderGenerators
@@ -987,6 +986,8 @@ def test_a_representation_error_inside_the_residual_s_rounding_does_not_certify_
         np.broadcast_to(lam * omega, (K, k, k)).copy(),
         ((np.array([2, 3]), pair, np.eye(2), 1.0),),
     )
+    from superglm.solvers._structured.balance_tree import _root_images
+
     solve, images, shown = scipy.linalg.lstsq, _root_images, []
 
     def exact_plus_error(*args, **kwargs):
@@ -1123,6 +1124,8 @@ def test_a_null_column_s_formed_penalty_above_its_image_s_gram_by_rounding_is_cl
     image = centered_system.penalty_factor(omega) @ C
     gram = image.T @ image
     lam = formed / float(gram[1, 1])
+    from superglm.solvers._structured.balance_tree import _root_images
+
     root = (np.array([0, 1]), omega, C, lam)
     unit = np.array([[0.0], [1.0]])
     ((_, shown, rounding, _, _),) = _root_images(unit, unit, (root,))

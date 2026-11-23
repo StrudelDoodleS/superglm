@@ -323,8 +323,6 @@ def _border_root(
     omega, coordinate_map = component.omega_raw, getattr(group_matrix, "R_inv", None)
     if omega is None or coordinate_map is None:
         return positions, None, None
-    if np.shape(coordinate_map) != (np.shape(omega)[0], len(positions)):
-        return positions, None, None
     return positions, omega, coordinate_map
 
 
