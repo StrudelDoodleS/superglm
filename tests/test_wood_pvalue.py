@@ -527,6 +527,16 @@ class TestSatterthwaite:
 
 
 class TestWoodTestSmooth:
+    def test_fractional_rank_reports_the_same_statistic_after_reflecting_a_basis_column(self):
+        """The two signs of Wood's fractional boundary have the same mean in either basis."""
+        beta = np.array([2.0, 1.0])
+        covariance = np.diag([4.0, 1.0])
+        for sign in (1.0, -1.0):
+            basis = np.diag([sign, 1.0])
+            stat, _, _ = wood_test_smooth(basis @ beta, basis, covariance, 1.5)
+            # The opposite cross terms cancel, leaving z1² + 0.5 z2².
+            assert stat == pytest.approx(1.5)
+
     def test_full_rank_similar_to_naive_wald(self):
         """When edf1 = p_g, Wood test should approximately equal naive Wald."""
         rng = np.random.default_rng(42)

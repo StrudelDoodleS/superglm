@@ -775,19 +775,14 @@ def _process_info(
 ) -> tuple[GroupMatrix, NDArray | None, int]:
     """Compute R_inv and construct a GroupMatrix from a single GroupInfo.
 
-    Returns ``(group_matrix, r_inv_or_none, n_cols)`` where *r_inv_or_none*
-    is the R_inv column block (for collecting into combined R_inv) or None
-    if no reparametrization was applied.  ``ssp_supports`` is shared by the
-    calls of one term, so subgroups over one basis share its row support.
+    Returns the group, its block of the combined R_inv (None without a
+    reparametrization), and its width. Subgroups share row support via ``ssp_supports``.
     ``eigenbasis_turn=False`` keeps a raw block in its declared coordinates.
     ``group_name`` is the block's group, which a ``lambda2`` mapping keys.
 
-    ``term_coordinates=True`` holds a term that declares its penalty's null
-    basis (``GroupInfo.null_coordinates``) in null-explicit coordinates
-    (``_in_term_coordinates``), and its group keeps the penalty there beside
-    ``R_inv_local`` instead of lifting it to the raw basis as ``P Omega P'``:
-    a lift and each later re-projection round by ``u ||Omega||``, onto the null
-    space too. Only a consumer that reads ``penalty_coordinate_map`` may ask.
+    With ``term_coordinates`` a declared null basis keeps the penalty in those
+    coordinates beside ``R_inv_local``. Lifting and re-projecting would round
+    onto the null space. Consumers read the map via ``penalty_coordinate_map``.
     """
     use_discrete = B_unique is not None
     use_tensor = tensor_build is not None
@@ -892,6 +887,18 @@ def _process_info(
         if info.reparametrize and info.penalty_matrix is not None:
             B_for = B_unique if use_discrete else info.columns
             exp_for = exposure_agg if use_discrete else sample_weight
+            # The fixed-lambda QP fits in this first basis without a REML rebuild.
+            # Its nested null axes keep the weak component when weighting the
+            # sum. Whiten at the actual weights so the active-set search does
+            # not take its steps in coordinates graded by the lambda ratio.
+            policies = info.lambda_policies
+            if (
+                in_term
+                and info.monotone_engine == "qp"
+                and policies
+                and all(policy.mode == "fixed" for policy in policies.values())
+            ):
+                lambda2 = {f"{group_name}:{key}": policy.value for key, policy in policies.items()}
             lam, omega = _applied_penalty(info, group_name, lambda2)
             R_inv_local = compute_projected_R_inv(B_for, P, omega, exp_for, lam)
             R_inv = P @ R_inv_local

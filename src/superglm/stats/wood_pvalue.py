@@ -190,7 +190,7 @@ def wood_test_smooth(
     edf1_j: float,
     res_df: float = -1.0,
 ) -> tuple[float, float, float]:
-    """Smooth-term significance test from Wood (2013)."""
+    """Wood (2013) smooth-term test, averaging both fractional-rank signs for display."""
     from superglm.inference.covariance import BinaryScaledCovariance
 
     if isinstance(V_b_j, BinaryScaledCovariance):
@@ -236,4 +236,8 @@ def wood_test_smooth(
     if p_val > 1.0:
         p_val = _fallback_tail(stat, stat_alt, ref_df, res_df)
 
+    # A sign flip of a covariance eigenvector exchanges the two fractional-rank
+    # statistics. Report their mean, as the tail already averages both signs.
+    if stat != stat_alt:
+        stat = 0.5 * stat + 0.5 * stat_alt
     return stat, float(min(1.0, p_val)), float(ref_df)

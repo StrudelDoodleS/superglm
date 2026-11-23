@@ -4168,7 +4168,9 @@ def test_face_leverage_at_tiny_weights_on_a_penalty_free_face_is_ols():
     assert evaluation.leverage.sum() == pytest.approx(2.0, abs=1e-6)
 
 
-def test_face_leverage_keeps_a_penalty_term_dominated_beyond_one_over_eps():
+@pytest.mark.parametrize("declared_null", [False, True], ids=["mixed", "null-explicit"])
+@pytest.mark.pins_behaviour
+def test_face_leverage_keeps_a_penalty_term_dominated_beyond_one_over_eps(declared_null):
     """The face penalty is formed from each term's own root, scaled by its lambda,
     so a term ``eps`` times weaker than another survives where it is all the
     curvature the face has.  Here the binding convex rows leave the line free,
@@ -4176,7 +4178,9 @@ def test_face_leverage_keeps_a_penalty_term_dominated_beyond_one_over_eps():
     Mutation checks: the root of the summed ``S`` (``penalty_factor(S)``) cuts
     the first-derivative term, and leverage summed to 2.0; the direct ``Z'SZ``
     adds the strong term's rounding, ``1e12 u ||S_d2||``, a quarter of the weak
-    term's curvature, and moved leverage by up to ``5e-3`` of itself."""
+    term's curvature, and moved leverage by up to ``5e-3`` of itself.
+    The mixed basis forces that loss. The null-explicit basis keeps the same
+    leverage and EDF, even when its summed penalty can resolve the line."""
     from scipy.linalg import null_space
 
     from superglm import Constraint, LambdaPolicy
@@ -4188,6 +4192,9 @@ def test_face_leverage_keeps_a_penalty_term_dominated_beyond_one_over_eps():
     from superglm.model.fit_state import fitted_lambda2
     from superglm.solvers.centered_system import penalty_factor
 
+    class MixedBasis(BSplineSmooth):
+        """A custom basis retains its original penalty coordinates."""
+
     x = np.linspace(0.0, 1.0, 100)
     X = pd.DataFrame({"x": x})
     y = 2.0 + x - x * x + np.random.default_rng(0).normal(0.0, 0.1, 100)
@@ -4196,7 +4203,7 @@ def test_face_leverage_keeps_a_penalty_term_dominated_beyond_one_over_eps():
         family="gaussian",
         selection_penalty=0.0,
         features={
-            "x": BSplineSmooth(
+            "x": (BSplineSmooth if declared_null else MixedBasis)(
                 n_knots=4, m=(1, 2), constraint=Constraint.fit.convex, lambda_policy=lambdas
             )
         },
@@ -4221,10 +4228,11 @@ def test_face_leverage_keeps_a_penalty_term_dominated_beyond_one_over_eps():
     # about ``u ||R||``, so its square is ~u^2 ||S||, far below u ||S||.
     assert np.sum((penalty_factor(S_strong) @ face) ** 2) <= u * np.linalg.norm(S_strong, 2)
     weak_curvature = weak * (face.T @ S_weak @ face).item()
-    # The event: the root of the summed penalty has cut the weak term.
-    summed_root = penalty_factor(_active_penalty_matrix(*terms, reml_penalties=reml_penalties))
-    assert np.sum((summed_root @ face) ** 2) < 1e-9 * weak_curvature
-    assert strong * u * np.linalg.norm(S_strong, 2) > 0.1 * weak_curvature
+    if not declared_null:
+        # The event: the root of the summed penalty has cut the weak term.
+        summed_root = penalty_factor(_active_penalty_matrix(*terms, reml_penalties=reml_penalties))
+        assert np.sum((summed_root @ face) ** 2) < 1e-9 * weak_curvature
+        assert strong * u * np.linalg.norm(S_strong, 2) > 0.1 * weak_curvature
 
     expected = _exact_face_leverage(X_a.toarray(), W, [(weak, S_weak)], face)
     # the intercept and a line shrunk by the first-derivative penalty

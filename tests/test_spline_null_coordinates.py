@@ -31,7 +31,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import LambdaPolicy, Numeric, Spline, SuperGLM
+from superglm import FactorSmooth, LambdaPolicy, Numeric, Spline, SuperGLM
 from superglm.features._spline_penalties import _polynomial_coefficients
 from superglm.features.spline import PSpline
 from superglm.reml.scale import profile_gaussian_reml_scale
@@ -492,6 +492,44 @@ def test_fixed_1e14_uniform_matches_exact_reml_objective():
 
     exact_obj = _closed_form_large_lambda_reml_objective(model._specs["x"], x, y)
     assert model._reml_result.objective == pytest.approx(exact_obj, abs=1e-6)
+
+
+@pytest.mark.parametrize("penalty", ["none", "ssp"])
+def test_stiff_population_smooth_keeps_its_line_beside_a_thin_level(penalty):
+    """Even with a one-point level, a dominant penalty must annihilate the population line.
+
+    Paired observations at each point average to the line, which has zero
+    penalty and minimizes the residual sum of squares on every observed row.
+    """
+    x = np.geomspace(1.0, 1e5, 100)
+    frame = pd.DataFrame({"x": np.tile(x, 4), "g": np.repeat(list("abcd"), x.size)})
+    frame = frame.loc[frame.index.repeat(2)].reset_index(drop=True)
+    weights = np.asarray((frame.g != "a") | (frame.x == x[0]), dtype=float)
+    line = 1.0 + 0.4 * frame.x.to_numpy() / x[-1]
+    y = line + np.tile([-0.02, 0.02], len(frame) // 2)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        features={
+            "x": Spline(
+                kind="cr",
+                n_knots=10,
+                knot_strategy="quantile",
+                penalty=penalty,
+                lambda_policy=LambdaPolicy.fixed(1e14),
+            )
+        },
+        interactions=[
+            FactorSmooth("x", group="g", basis="sz", k=5, lambda_policy=LambdaPolicy.fixed(0.7))
+        ],
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y, sample_weight=weights)
+    main = next(pc for pc in model._reml_penalties if pc.group_name == "x")
+    assert np.flatnonzero(~np.any(main.omega_ssp, axis=1)).tolist() == [0]
+    live = weights > 0
+    np.testing.assert_allclose(model.predict(frame)[live], line[live], atol=2e-12, rtol=0)
 
 
 @pytest.mark.pins_behaviour

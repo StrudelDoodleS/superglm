@@ -82,6 +82,75 @@ def _bins_as_built_in(name: str, term: Any, asks: bool) -> bool:
     return False
 
 
+def _sz_supports_population_turn(
+    info: GroupInfo,
+    name: str,
+    lambda2: float | dict,
+    binned_basis: NDArray | None,
+    bins: NDArray | None,
+    labels: NDArray,
+    weights: NDArray,
+    response: NDArray | None,
+    boundaries: tuple[str, ...],
+) -> bool:
+    """Whether every level anchors the population polynomial beside its free sz deviation.
+
+    After profiling the deviations, a thin level can leave only rounding on a population
+    axis. Equilibrating that axis would then identify the rounding. Keep the original
+    joint coordinates unless every level resolves the constant and the candidate null
+    columns at the pooled design's factor-rank resolution. A separated level loses its
+    working weight at the likelihood boundary as well. A dominant penalty
+    still needs exact null axes: its rounding in mixed coordinates would
+    reach the pooled data curvature of the polynomial itself.
+    """
+    import pandas as pd
+
+    from superglm._roundoff import UNIT_ROUNDOFF
+    from superglm.diagnostics.separation import _separated_flags
+    from superglm.reml.penalty_algebra import resolve_component_lambda
+    from superglm.solvers.rank import SHARED_RANK_POLICY
+
+    declared = info.null_coordinates
+    if declared is None or not declared.basis.shape[1]:
+        return True
+    members = declared.basis
+    if info.projection is not None:
+        members = info.projection @ members
+    if binned_basis is not None:
+        assert bins is not None
+        columns = (binned_basis @ members)[bins]
+    else:
+        assert info.columns is not None
+        columns = info.columns @ members
+    rows = np.column_stack((np.ones(len(weights)), columns)) * np.sqrt(weights)[:, None]
+    pooled = np.linalg.svd(rows, compute_uv=False)
+    # As in _dominant_penalty_eigenbasis, keep a lambda-scaled penalty from
+    # rounding onto a null by more than sqrt(u) of its data curvature.
+    assert info.penalty_matrix is not None
+    for suffix, omega in info.penalty_components or [("", info.penalty_matrix)]:
+        policy = (info.lambda_policies or {}).get(suffix)
+        lam = (
+            cast(float, policy.value)
+            if policy is not None and policy.mode == "fixed"
+            else resolve_component_lambda(lambda2, name, suffix)
+        )
+        if lam * np.sqrt(UNIT_ROUNDOFF) * np.max(np.diag(omega)) > pooled[-1] ** 2:
+            return True
+    codes, levels = pd.factorize(labels, use_na_sentinel=False)
+    if response is not None and any(
+        np.any(_separated_flags(codes, len(levels), response, weights, edge)[0])
+        for edge in boundaries
+    ):
+        return False
+    cut = SHARED_RANK_POLICY.factor_rcond * pooled[0]
+    order = np.argsort(codes, kind="stable")
+    stops = np.cumsum(np.bincount(codes, minlength=len(levels)))
+    for block in np.split(rows[order], stops[:-1]):
+        if len(block) < rows.shape[1] or np.linalg.svd(block, compute_uv=False)[-1] <= cut:
+            return False
+    return True
+
+
 @dataclass(frozen=True)
 class CompiledPredictorDesign:
     """Owned numerical and learned feature state for one predictor."""
@@ -305,6 +374,10 @@ def compile_predictor_design(
     groups: list[GroupSlice] = []
     separation_records: list[tuple] = []
     scan_codes: dict[str, NDArray] = {}
+    sz_groups: dict[str, list[str]] = {}
+    for term in interaction_specs.values():
+        if isinstance(term, FactorSmooth) and term.basis == "sz" and not term._selects_lines:
+            sz_groups.setdefault(term.variable, []).append(term.group)
 
     for name in feature_order:
         spec = specs[name]
@@ -498,7 +571,21 @@ def compile_predictor_design(
                 exposure_agg=exposure_agg,
                 lambda2=lambda2,
                 eigenbasis_turn=eigenbasis_turn,
-                term_coordinates=term_coordinates,
+                term_coordinates=term_coordinates
+                and all(
+                    _sz_supports_population_turn(
+                        info,
+                        name,
+                        lambda2,
+                        B_unique,
+                        bin_idx,
+                        X.column_array(label),
+                        sample_weight,
+                        separation_response,
+                        separation_boundaries,
+                    )
+                    for label in sz_groups.get(name, ())
+                ),
             )
             # Whether a feature requests SSP must survive REML lambda updates.
             # Interaction blocks have their own coordinate updates.

@@ -36,9 +36,8 @@ def _general_difference_penalty(
     ``(t[j+d-k] - t[j]) / (d - k)``, ``d = degree + 1``, so ``D_m beta`` holds the m-th
     derivative's B-spline coefficients and the null space is the polynomials of degree below
     ``order`` on any knots. Scaled to the standard penalty's largest eigenvalue, it is kept while
-    finite with nonzero-spectrum condition (largest over ``order + 1``-th smallest eigenvalue)
-    at most ``_CONDITION_LIMIT = 1/sqrt(eps)``, where ``solvers/rank.py`` starts to ask for a
-    certificate. Past it the term takes ``Delta_m (I - Q Q')``, ``Q`` an orthonormal basis of
+    finite with nonzero-spectrum condition at most ``_CONDITION_LIMIT = 1/sqrt(eps)``.
+    Past it the term takes ``Delta_m (I - Q Q')``, ``Q`` an orthonormal basis of
     those polynomials' coefficients: same null space, the standard scale and spread, a Gram of
     its factor. Returns ``(penalty, kind, root)``, ``kind`` ``"general"`` or ``"projected"``,
     and ``root' root`` the penalty (``difference_penalty_root``).
