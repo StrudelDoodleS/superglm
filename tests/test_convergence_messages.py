@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 
 from superglm import (
+    Categorical,
     ConvergenceWarning,
     GaussianLS,
     Numeric,
@@ -37,6 +38,40 @@ def _lss_data():
     rng = np.random.default_rng(469)
     x = np.linspace(-1.0, 1.0, 240)
     return pd.DataFrame({"x": x}), np.sin(3.0 * x) + rng.normal(0.0, 0.3, len(x))
+
+
+@pytest.mark.parametrize("penalized_cell", [False, True], ids=["explicit-cap", "default-cap"])
+def test_fit_iteration_cap_warns_once_at_the_caller(penalized_cell):
+    if penalized_cell:
+        rates = {("A", "P"): 0.2, ("A", "Q"): 0.3, ("B", "P"): 0.0, ("B", "Q"): 0.3}
+        data = pd.DataFrame(
+            [(a, b, float(i < 100 * rate)) for (a, b), rate in rates.items() for i in range(100)],
+            columns=["a", "b", "y"],
+        )
+        frame, y = data[["a", "b"]], data.y.to_numpy()
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.2,
+            interactions=[("a", "b")],
+            features={"a": Categorical(base="A"), "b": Categorical(base="P")},
+        )
+        kwargs, cap = {}, 100
+    else:
+        frame = pd.DataFrame({"x": np.linspace(0, 1, 400)})
+        y = np.random.default_rng(0).poisson(0.3, 400).astype(float)
+        model = SuperGLM(family="poisson", selection_penalty=0, features={"x": Spline(n_knots=8)})
+        kwargs, cap = {"max_iter": 2}, 2
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(frame, y, **kwargs)
+
+    assert model.result.converged is False
+    assert model.result.termination_reason == "max_iter"
+    assert model.result.n_iter == cap
+    (warning,) = [item for item in caught if isinstance(item.message, ConvergenceWarning)]
+    assert warning.filename == __file__
+    assert "Refit with a larger max_iter" in str(warning.message)
 
 
 @pytest.mark.parametrize("method", ["fit", "fit_reml"])
@@ -156,22 +191,24 @@ def test_editor_refit_convergence_warning_points_to_the_external_caller():
     assert all(item.filename == __file__ for item in convergence)
 
 
-def test_theta_estimate_published_with_an_unconverged_fit_is_not_converged(monkeypatch):
+def test_theta_estimate_published_with_an_unconverged_fit_is_not_converged():
     """Force only the publication refit to stop; the theta search itself settles."""
-    from superglm.model import profile_ops
-
-    real = profile_ops._refit_selected
-
-    def stop_publication(final_model, validated, references, fit_mode, budget, retain):
-        return real(final_model, validated, references, fit_mode, 1, retain)
-
-    monkeypatch.setattr(profile_ops, "_refit_selected", stop_publication)
     rng = np.random.default_rng(469)
     frame = pd.DataFrame({"x": rng.uniform(0, 1, 240)})
     mean = np.exp(0.3 + 0.8 * np.sin(6 * frame["x"]))
     y = rng.negative_binomial(2.0, 2.0 / (2.0 + mean)).astype(float)
     model = SuperGLM(family=families.nb2(theta=1), selection_penalty=0, features={"x": Spline(k=7)})
-    with pytest.warns(ConvergenceWarning):
-        published = model.estimate_theta(frame, y, fit_mode="reml")
+    with pytest.warns(ConvergenceWarning, match="reached the max_reml_iter limit") as caught:
+        published = model.estimate_theta(frame, y, fit_mode="reml", max_reml_iter=1)
+    assert len(caught) == 1
+    assert caught[0].filename == __file__
+    assert model.reml_diagnostics()["n_reml_iter"] == 1
     assert published.converged is False
     assert model._nb_profile_result.converged is False
+
+
+def test_theta_refuses_a_reml_budget_for_an_ordinary_publication():
+    frame, y = _scalar_data()
+    model = SuperGLM(family=families.nb2(theta=1), selection_penalty=0, features={"x": Numeric()})
+    with pytest.raises(ValueError, match="max_reml_iter.*requires fit_mode='reml'"):
+        model.estimate_theta(frame, y, fit_mode="fit", max_reml_iter=1)

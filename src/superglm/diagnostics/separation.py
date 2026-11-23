@@ -32,6 +32,7 @@ from numpy.typing import NDArray
 
 from superglm._roundoff import gamma
 from superglm._warn import _PACKAGE_PREFIX, warn_caller
+from superglm.distributions import Gaussian
 
 _CONTEXTLIB = contextlib.__file__
 
@@ -740,6 +741,7 @@ def runtime_finding(
     groups: list,
     beta: NDArray,
     *,
+    family: Any,
     ratio: float,
     n_iter: int,
     exhausted_stagnant: bool,
@@ -761,7 +763,10 @@ def runtime_finding(
     if not (pinned or exhausted_stagnant):
         return None
     drifting = drifting_groups(design, groups, beta, eta, eta_unclipped, weights)
-    return RuntimeFinding(format_runtime_message(ratio, n_iter, drifting, pinned), tuple(drifting))
+    message = format_runtime_message(
+        ratio, n_iter, drifting, pinned, unbounded_response=isinstance(family, Gaussian)
+    )
+    return RuntimeFinding(message, tuple(drifting))
 
 
 def drifting_groups(
@@ -835,11 +840,25 @@ def format_runtime_message(
     n_iter: int,
     drifting_groups: list[str],
     pinned: bool,
+    *,
+    unbounded_response: bool = False,
 ) -> str:
     """Terminal-state message for the in-solver backstop (issue #341)."""
     where = ""
     if drifting_groups:
         where = f" (the rows it reached are carried there by group(s): {drifting_groups})"
+    if unbounded_response:
+        stop = (
+            "the linear predictor reached the link's overflow guard"
+            if pinned
+            else "the fit reached its iteration limit with little change in deviance"
+        )
+        return (
+            f"After {n_iter} iterations, {stop}{where} because a few responses dominate the "
+            f"fit (working-weight ratio {w_ratio:.1e}). If appropriate for the response, "
+            "try a family whose variance grows with the mean, such as Gamma or Tweedie, "
+            "or try capping the response before fitting."
+        )
     if pinned:
         how = (
             f"IRLS stopped after {n_iter} iterations with the linear predictor pinned "

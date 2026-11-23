@@ -264,17 +264,17 @@ def test_a_strict_separation_stop_raises_before_the_constraint_refusal(
 
     with caplog.at_level(logging.WARNING, logger="superglm.solvers.irls_direct"):
         if separation == "warn":
-            with pytest.warns(SeparationWarning, match="exhausted its iteration budget"):
+            with pytest.warns(SeparationWarning, match="reached its iteration limit"):
                 result, _ = fit()
             assert result.termination_reason == "constraint_kkt_incomplete"
         elif separation == "error":
-            with pytest.raises(SeparationError, match="exhausted its iteration budget"):
+            with pytest.raises(SeparationError, match="reached its iteration limit"):
                 fit()
         else:
             with warnings.catch_warnings():
                 warnings.simplefilter("error", SeparationWarning)
                 result, _ = fit()
-            assert "exhausted its iteration budget" in result.separation_message
+            assert "reached its iteration limit" in result.separation_message
             assert result.termination_reason == "constraint_kkt_incomplete"
     refusals = [
         record

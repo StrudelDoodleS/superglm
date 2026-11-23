@@ -15,7 +15,8 @@ from typing import Any
 class ConvergenceWarning(UserWarning):
     """A fit stopped before its convergence test passed.
 
-    The fitted model is still returned. ``SuperGLM.fit_reml`` warns when
+    The fitted model is still returned. ``SuperGLM.fit`` warns when its
+    coefficient fit stops unconverged. ``SuperGLM.fit_reml`` warns when
     smoothing-parameter selection stops unconverged, or its final coefficient
     fit does, and so do ``estimate_p`` and ``estimate_theta`` with
     ``fit_mode="reml"`` for the fit they publish; the summary's ``Converged``
