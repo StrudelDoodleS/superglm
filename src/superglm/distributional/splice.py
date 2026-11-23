@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from typing import Any, TypedDict, Unpack
 from uuid import UUID, uuid4
 
@@ -19,6 +20,7 @@ from superglm.distributional.families.generalized_pareto import GeneralizedParet
 from superglm.distributional.families.log_normal import LogNormalLS
 from superglm.distributional.kernels._gamma_windows import gamma_shape_scale_window_jets
 from superglm.distributional.kernels._severity_primitives import logratio
+from superglm.distributional.offsets import shape_fit_offsets, sources_of, take_offset
 from superglm.distributional.response import validated_response_array
 from superglm.distributional.weights import WeightContract, _weight_values
 from superglm.distributions import Binomial, resolve_distribution
@@ -82,6 +84,22 @@ def _aligned(frame: EagerFrame, values: object, name: str) -> None:
     if isinstance(values, pd.Series) and isinstance(frame.native, pd.DataFrame):
         if not values.index.equals(frame.native.index):
             raise ValueError(f"{name} index must match X in row order")
+
+
+@contextmanager
+def _split_offsets(model: SuperLSS, rows: NDArray) -> Iterator[None]:
+    """Give the component fit its row subset and keep the original declarations."""
+    templates = model._predictors
+    model._predictors = tuple(
+        replace(predictor, offset=take_offset(sources_of(predictor), rows))
+        if any(not isinstance(source, str) for source in sources_of(predictor))
+        else predictor
+        for predictor in templates
+    )
+    try:
+        yield
+    finally:
+        model._predictors = templates
 
 
 def _row_values(X: FrameLike, values: ArrayLike, name: str) -> NDArray[np.float64]:
@@ -417,6 +435,8 @@ class SplitSplice:
                 if key in opts:
                     raise ValueError(f"SplitSplice supplies {key} to the component fits")
         _aligned(frame, options[1].get("offset"), "exceedance offset")
+        for component in (body, tail):
+            shape_fit_offsets(component._predictors, frame)
 
         rows_body, rows_tail = np.flatnonzero(~is_tail), np.flatnonzero(is_tail)
         fit_body, fit_binary, fit_tail = (
@@ -424,21 +444,23 @@ class SplitSplice:
             if reml
             else (body.fit, exceedance.fit, tail.fit)
         )
-        fit_body(
-            frame.take_rows(rows_body),
-            loss[rows_body],
-            None if weights is None else weights[rows_body],
-            truncation=(None, u),
-            **options[0],
-        )
+        with _split_offsets(body, rows_body):
+            fit_body(
+                frame.take_rows(rows_body),
+                loss[rows_body],
+                None if weights is None else weights[rows_body],
+                truncation=(None, u),
+                **options[0],
+            )
         fit_binary(X, is_tail.astype(np.float64), weights, **options[1])
-        fit_tail(
-            frame.take_rows(rows_tail),
-            loss[rows_tail] - u,
-            None if weights is None else weights[rows_tail],
-            censored=right[rows_tail],
-            **options[2],
-        )
+        with _split_offsets(tail, rows_tail):
+            fit_tail(
+                frame.take_rows(rows_tail),
+                loss[rows_tail] - u,
+                None if weights is None else weights[rows_tail],
+                censored=right[rows_tail],
+                **options[2],
+            )
         split = _Split(uuid4(), u)
         for role, model in (("body", body), ("exceedance", exceedance), ("tail", tail)):
             setattr(model, "_split_splice_evidence", _FitEvidence(split, role, _revision(model)))

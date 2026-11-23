@@ -383,6 +383,45 @@ def test_ambiguous_censoring_fit_args_and_prior_weights_are_refused():
         _fit(X, y, u, sample_weight=np.full(len(y), 1.5))
 
 
+@pytest.mark.parametrize("component", ["body", "tail"])
+def test_split_slices_declared_offsets(component):
+    X, y, u = _sample(800)
+    X["fixed"] = 0.15 * np.sin(y)
+    X["array"] = 0.10 * np.cos(y)
+    X["indexed"] = 0.07 * np.sin(y / 3)
+
+    def models(sources):
+        body, binary, tail = _components()
+        if component == "body":
+            family = body.family
+            body = SuperLSS(family, family.mean(offset=sources), family.scale())
+        else:
+            family = tail.family
+            tail = SuperLSS(family, family.scale(offset=sources), family.shape())
+        return body, binary, tail
+
+    array = X["array"].to_numpy()
+    indexed = X["indexed"]
+    splice = _fit(X, y, u, models(("fixed", array, indexed)))
+    column_splice = _fit(X, y, u, models(("fixed", "array", "indexed")))
+    key = "mean" if component == "body" else "scale"
+    offset_options = {f"{component}_offsets": {key: array + indexed}}
+    np.testing.assert_allclose(
+        splice.predict_layer(X, 95, 15, **offset_options),
+        column_splice.predict_layer(X, 95, 15),
+        rtol=2e-13,
+        atol=0,
+    )
+    _fit(X, y, u, (splice.body, splice.exceedance, splice.tail))
+
+    wrong_index = pd.Series(array, index=X.index[::-1])
+    with pytest.raises(ValueError, match="index must match X on the original rows"):
+        _fit(X, y, u, models(wrong_index))
+    component_rows = y <= u if component == "body" else y > u
+    with pytest.raises(ValueError, match=f"length {len(X)}"):
+        _fit(X, y, u, models(array[component_rows]))
+
+
 def test_seed_544_against_independent_fits():
     a, scale = 1 / 1.2**2, 5000 * 1.2**2
     truth = stats.gamma(a, scale=scale)
