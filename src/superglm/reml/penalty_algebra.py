@@ -2305,7 +2305,21 @@ def build_penalty_components(
             # Multi-penalty path: N components share this coefficient block.
             ct_map = getattr(gm, "component_types", None) or {}
             lp_map = getattr(gm, "lambda_policies", None) or {}
-            if len(gm.omega_components) > 1 and not isinstance(gm, DiscretizedTensorGroupMatrix):
+            # In fixed root coordinates each tensor margin is diagonal, including
+            # after removing its bilinear axis. Its positive diagonal entries
+            # already are its range spectrum. A Gram cut can erase the tail on
+            # skewed knots, and a projected root can fill the other margin's zeros.
+            fixed_diagonal = not getattr(gm, "reparametrize", True) and all(
+                matrix.shape == (g.size, g.size)
+                and np.count_nonzero(matrix) == (positive := np.count_nonzero(np.diag(matrix) > 0))
+                and positive == structural_ranks.get(suffix, positive)
+                for suffix, matrix in gm.omega_components
+            )
+            if (
+                not fixed_diagonal
+                and len(gm.omega_components) > 1
+                and not isinstance(gm, DiscretizedTensorGroupMatrix)
+            ):
                 coordinate_map = np.asarray(penalty_coordinate_map(gm), dtype=float)
                 raw_width = gm.omega_components[0][1].shape[0]
                 if coordinate_map.shape == (raw_width, raw_width):
@@ -2349,13 +2363,13 @@ def build_penalty_components(
                             previous=None if reused is None else reused.plain,
                         )
             for component_index, (suffix, omega_j) in enumerate(gm.omega_components):
-                tensor_summary = _tensor_marginal_rank_logdet(
-                    gm,
-                    omega_j,
-                    eps_thresh=eps_thresh,
-                    suffix=suffix,
-                )
-                if raw_support is not None:
+                if fixed_diagonal:
+                    diagonal = np.diag(omega_j)
+                    pos_eigvals = np.sort(diagonal[diagonal > 0])[::-1]
+                    rank = float(pos_eigvals.size)
+                    log_det = math.fsum(math.log(value) for value in pos_eigvals)
+                    omega_ssp_j = omega_j
+                elif raw_support is not None:
                     # Transport one selected raw family through the common map.
                     # Independent eigen-truncations of transformed Grams can
                     # rotate their null spaces and invent a union direction.
@@ -2375,7 +2389,11 @@ def build_penalty_components(
                         raise PenaltyNumericalError("SSP map lost a selected component direction")
                     log_det = math.fsum(2 * math.log(value) for value in singular)
                     pos_eigvals = singular**2
-                elif tensor_summary is not None:
+                elif (
+                    tensor_summary := _tensor_marginal_rank_logdet(
+                        gm, omega_j, eps_thresh=eps_thresh, suffix=suffix
+                    )
+                ) is not None:
                     rank, log_det, pos_eigvals = tensor_summary
                     omega_ssp_j = _canonicalize_ssp_penalty(omega_j, rank)
                 else:

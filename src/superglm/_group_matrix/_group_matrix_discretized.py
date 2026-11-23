@@ -706,6 +706,7 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
             tensor_id=self.tensor_id,
             raw_channels=self._current_raw_channels(),
         )
+        sub.reparametrize = getattr(self, "reparametrize", True)
         sub.omega = self.omega
         sub.projection = self.projection
         sub.R_inv_local = getattr(self, "R_inv_local", None)
