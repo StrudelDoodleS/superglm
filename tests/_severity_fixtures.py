@@ -108,7 +108,7 @@ BURR12 = G.Declaration(
         log(c) + log(k) - log(y) + _scale_z(y, s, c) - (k + 1) * softplus_(_scale_z(y, s, c))
     ),
     log_survival=lambda y, s, c, k: -k * softplus_(_scale_z(y, s, c)),
-    log_cdf=lambda y, s, c, k: log1mexp_(k * softplus_(_scale_z(y, s, c))),
+    log_cdf=lambda y, s, c, k: G.log1mexp_exp(0, log(k) + G.logsoftplus(0, c * G.logratio(y, s))),
 )
 LOG_LOGISTIC = G.Declaration(
     name="log_logistic",
@@ -249,6 +249,10 @@ def own_error(name: str, args, value, partials):
     backward = abs(value) + sum(
         abs(x * d) for x, d in zip(args, partials, strict=True) if d is not None
     )
+    if name in ("log1mexp_exp", "logsoftplus"):
+        # Includes the subtractions in the fourth derivative and the inverse
+        # function rule. The primitive switch grid checks this same allowance.
+        return 128 * backward
     if name == "loggamma":
         return 2 * LIBM_C * backward
     if name in ("gnorm", "psires", "sres") and args[-1] < 10:
@@ -333,7 +337,9 @@ class Oracle:
             result = propagated + (abs(k) - 1 + (k < 0)) * abs(self.value(e))
         elif e.is_Function:
             args = [self.value(a) for a in e.args]
-            skip = 1 if type(e).__name__ in ("polygamma", "psires", "sres") else 0
+            skip = int(
+                isinstance(e, G._UnaryJet) or type(e).__name__ in ("polygamma", "psires", "sres")
+            )
             partials = [None] * skip + [
                 self.value(e.fdiff(i + 1)) for i in range(skip, len(e.args))
             ]
