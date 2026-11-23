@@ -106,6 +106,7 @@ PUBLIC_API = [
     "Spline",
     "SplineOptionWarning",
     "SplineRedundancyReport",
+    "SplitSplice",
     "SqrtLink",
     "Structure",
     "StructureError",

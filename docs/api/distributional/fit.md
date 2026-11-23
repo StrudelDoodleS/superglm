@@ -40,3 +40,18 @@ syntax.
    ~superglm.SuperLSS.family
    superglm.FitDiagnosticReport
 ```
+
+## SplitSplice
+
+`SplitSplice` fits a truncated body, an exceedance probability and a
+generalized Pareto tail at one fixed loss threshold. See the
+[distributional model guide](../../how-to/fit-a-distributional-model.md)
+for a fitting and prediction example.
+
+```{eval-rst}
+.. autosummary::
+   :toctree: ../generated
+   :nosignatures:
+
+   superglm.SplitSplice
+```
