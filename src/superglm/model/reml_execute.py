@@ -146,17 +146,11 @@ def run_fixed_monotone_reml(
         separation="record",
         weight_semantics=model_weight_semantics(model),
     )
-    # Typed like the observed-geometry gates: to a power search a QP
-    # candidate with no feasible mode (or no complete KKT certificate) is an
-    # infeasible point to route around, not a dead search. Bare RuntimeError
-    # stays reserved for invariant violations.
+    # A violated shape row prevents publication. A feasible mode short of its
+    # KKT certificate is installed with its coefficient convergence warning.
     if result.termination_reason == "constraint_infeasible":
         raise ObservedModeNotConvergedError(
             "fixed-lambda constrained REML fit ended at an infeasible coefficient mode"
-        )
-    if result.termination_reason == "constraint_kkt_incomplete":
-        raise ObservedModeNotConvergedError(
-            "fixed-lambda constrained REML fit ended without a complete inner-QP KKT certificate"
         )
 
     # Publish the scales the unconstrained REML route publishes (``finalize_reml_fit``):

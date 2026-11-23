@@ -6,6 +6,7 @@ import logging
 import math
 import time
 import warnings
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -19,12 +20,17 @@ from superglm.solvers.constrained_qp import (
     _feasibility_slack,
     _homogeneous_feasible_start,
     _is_feasible,
+    _qp_iteration_budget,
     solve_constrained_qp,
 )
 from superglm.solvers.irls_direct._centred import _system_offset_mean
 from superglm.solvers.irls_direct._finalise import _finalise_centred
 from superglm.solvers.irls_direct._step import _IRLSDirectStep, _note_svd_fallback
-from superglm.solvers.irls_state import link_domain_violation
+from superglm.solvers.irls_state import (
+    _state_is_finite,
+    link_domain_violation,
+    mean_space_violation,
+)
 
 if TYPE_CHECKING:
     from superglm.distributions import Distribution
@@ -38,6 +44,7 @@ logger = logging.getLogger(__package__)
 # The feasibility contract's tolerance on the scaled slack of ``A beta >= b``
 # (``constrained_qp._is_feasible``).
 _QP_FEASIBILITY_TOL = 1e-12
+_SHORT_QP_BUDGET = 200
 
 
 def _solve_constrained_qp_with_cold_retry(
@@ -48,7 +55,7 @@ def _solve_constrained_qp_with_cold_retry(
     active_set_init: list[int] | None,
     *,
     structure: _ConstraintStructure | None = None,
-    max_iter: int = 200,
+    max_iter: int | None = None,
     beta_start: NDArray | None = None,
 ) -> QPResult:
     """Retry a failed warm active set without weakening the KKT contract.
@@ -80,8 +87,10 @@ def _solve_constrained_qp_with_cold_retry(
             beta_start=beta_start,
             _structure=structure,
         )
-        if cold_result.converged:
-            return cold_result
+        chosen, other = (cold_result, result) if cold_result.converged else (result, cold_result)
+        if other._budget_hits:
+            return replace(chosen, _budget_hits=chosen._budget_hits + other._budget_hits)
+        return chosen
     return result
 
 
@@ -136,7 +145,7 @@ class _IRLSDirectQPStep(_IRLSDirectStep):
 
     __slots__ = (
         "A_all b_all abs_A_all qp_structure active_set committed_active_set proposal_converged"
-        " retained_converged _reported_nonconvergence _zero_bounded"
+        " retained_converged _reported_nonconvergence _zero_bounded _iteration_budget _budget_hits"
     ).split()
     backend = "gram"
     finalise = _finalise_centred
@@ -161,6 +170,8 @@ class _IRLSDirectQPStep(_IRLSDirectStep):
         # A constrained fit-entry state has not been certified by the inner QP.
         self.proposal_converged = False
         self.retained_converged = False
+        self._iteration_budget = _SHORT_QP_BUDGET
+        self._budget_hits = 0
         # transient note once; terminal authority is separate
         self._reported_nonconvergence = False
         # Under a link whose domain is bounded at zero (``link_domain_violation``)
@@ -178,6 +189,10 @@ class _IRLSDirectQPStep(_IRLSDirectStep):
         """
         active_set = self.active_set
         self.committed_active_set = None if active_set is None else list(active_set)
+        # Only a budget increase continues a rejected step. Start that solve
+        # at the restored coefficients with no rows, retaining their old face
+        # for reporting if the new proposal is rejected too.
+        restart = it > 0 and fit.step_rejected
         # Gram path: form X'WX via per-group gram, solve (p+1)×(p+1).
         _t0 = time.perf_counter()
         z_off = fit.z - fit.offset
@@ -197,16 +212,25 @@ class _IRLSDirectQPStep(_IRLSDirectStep):
                 centered.rhs,
                 self.A_all,
                 self.b_all,
-                active_set,
+                None if restart else active_set,
                 structure=self.qp_structure,
+                max_iter=self._iteration_budget,
+                # After escalation, keep the feasible primal point on every
+                # IRLS step. The row indices alone do not warm-start a
+                # primal method if the projected unconstrained point is infeasible.
+                beta_start=fit.committed.beta
+                if self._iteration_budget > _SHORT_QP_BUDGET
+                else None,
             )
         except ValueError as error:
+            self._budget_hits = 0
             if not self._zero_bounded:
                 raise
             if self._unbounded(fit, error):
                 return True
             _note_svd_fallback(fit)
             return None
+        self._budget_hits = qp_result._budget_hits
         beta = qp_result.beta
         fit.intercept = centered.mean_z - float(centered.mean_x @ beta)
         _state_center = fit._state_center
@@ -238,6 +262,22 @@ class _IRLSDirectQPStep(_IRLSDirectStep):
         fit.beta = beta
         _note_svd_fallback(fit)
         return None
+
+    def restart_after_rejection(self, fit: _IRLSDirectFit, it: int) -> bool:
+        """Spend a remaining IRLS step on a wider QP at the retained feasible state."""
+        if self.proposal_converged or not self._budget_hits or it + 1 >= fit.max_iter:
+            return False
+        budget = _qp_iteration_budget(self.A_all)
+        if budget <= self._iteration_budget or not _state_is_finite(fit.committed):
+            return False
+        for outside in (
+            mean_space_violation(fit.family, fit.link),
+            link_domain_violation(fit.link, fit.family),
+        ):
+            if outside is not None and outside(fit.committed.eta_unclipped, fit.weights):
+                return False
+        self._iteration_budget = budget
+        return True
 
     def _unbounded(self, fit: _IRLSDirectFit, error: ValueError) -> bool:
         """After the working QP raised: a phase-one restart (``False``), or the fit's end (``True``).

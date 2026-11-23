@@ -393,6 +393,42 @@ class TestMaximumLikelihoodPhi:
         assert 1.5 not in profile.candidates
         assert "KKT certificate" in profile.infeasible[1.5]
 
+    def test_a_fixed_lambda_uncertified_qp_has_no_power_score(self, monkeypatch):
+        from dataclasses import replace
+
+        from superglm import Constraint, LambdaPolicy
+        from superglm.profiling.tweedie import _PowerProfile
+
+        x = np.linspace(0.0, 1.0, 100)
+        y = np.random.default_rng(8).poisson(np.exp(x)).astype(float)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={
+                "x": Spline(
+                    kind="cr",
+                    k=6,
+                    constraint=Constraint.fit.increasing,
+                    lambda_policy=LambdaPolicy.fixed(1.0),
+                )
+            },
+        )
+        profile = _PowerProfile(model, pd.DataFrame({"x": x}), y, np.ones(len(y)), None, "fit_reml")
+        fit = profile.clone.fit_reml
+
+        def publish_uncertified(*args, **kwargs):
+            fit(*args, **kwargs)
+            clone = profile.clone
+            assert clone._reml_result is None
+            clone._result = replace(
+                clone.result, converged=False, termination_reason="constraint_kkt_incomplete"
+            )
+
+        monkeypatch.setattr(profile.clone, "fit_reml", publish_uncertified)
+        assert profile(1.5) == math.inf
+        assert 1.5 not in profile.candidates
+        assert "KKT certificate" in profile.infeasible[1.5]
+
     def test_a_search_with_every_power_refused_names_the_refusal_not_reml(self):
         """Both bounds and every Brent point sit too close to 1 under plain ML fits."""
         import pandas as pd
