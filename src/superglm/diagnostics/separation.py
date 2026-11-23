@@ -743,13 +743,16 @@ def _line_text(line: SeparatedLine) -> str:
         counted += f", exposure {_total(line.exposure, '.4g')}"
     text = f"  {name}: {counted}, every response {every}"
     if line.is_base:
-        if line.kind == "levels":
-            return (
-                f"{text}; it is the {base}, which the term's other relativities are measured "
-                'against. Choose a healthy base (such as the default base="most_exposed" when '
-                "it has responses off the boundary) to get the other levels' standard errors"
-            )
-        return f"{text}; it is the {base}, which the term's other relativities are measured against"
+        choose, others = (
+            ("a healthy base", "levels")
+            if line.kind == "levels"
+            else ("healthy bases for its two factors", "cells")
+        )
+        return (
+            f"{text}; it is the {base}, which the term's other relativities are measured "
+            f'against. Choose {choose} (such as the default base="most_exposed" when it has '
+            f"responses off the boundary) to get the other {others}' standard errors"
+        )
     if line.fitted is None:
         return text
     totals = [f"fitted {_total(line.fitted, '.3g')} in total"]

@@ -1942,6 +1942,24 @@ def test_expected_omitted_when_move_to_base_hits_separated_cell():
         assert "43 expected in total at the rate of base cell 'A' x 'P'" in line_cell
 
 
+def test_separated_base_cell_warning_advises_choosing_healthy_bases():
+    """A crossed term's base cell with no claims gets the same remedy as a separated base level."""
+    cells = [("A", "P", 0), ("A", "Q", 30), ("B", "P", 40), ("B", "Q", 50)]
+    frame = pd.DataFrame(
+        [(a, b, float(i < k)) for a, b, k in cells for i in range(100)], columns=["a", "b", "y"]
+    )
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        interactions=[("a", "b")],
+        features={"a": Categorical(base="A"), "b": Categorical(base="P")},
+    )
+    line = _line(_caught(lambda: model.fit(frame[["a", "b"]], frame["y"].to_numpy())), "'A' x 'P'")
+    assert "base cell 'A' x 'P'" in line
+    assert "Choose healthy bases for its two factors" in line
+    assert "cells' standard errors" in line
+
+
 def test_separated_base_warning_advises_choosing_a_healthy_base():
     """#693: explicit base on a separated level keeps blank SEs and discloses the remedy.
 
