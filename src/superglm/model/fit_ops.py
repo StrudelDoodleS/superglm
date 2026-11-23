@@ -18,6 +18,7 @@ from numpy.typing import NDArray
 
 from superglm._group_matrix._lookup_tables import release_lookup_plan
 from superglm._utils import _explained_deviance, weighted_row_sum
+from superglm.diagnostics.convergence import initial_precision_advisory
 from superglm.diagnostics.separation import refuse_published_separation, refuses_on_publication
 from superglm.distributions import (
     Distribution,
@@ -1754,22 +1755,26 @@ def fit(
     X, y, sample_weight, offset = _validate_entrypoint_input(model, X, y, sample_weight, offset)
     validated_inputs = (X, y, sample_weight, offset)
     workspace = FitWorkspace.start(model, mode="fit", validated_inputs=validated_inputs)
-    _fit_in_workspace(
-        workspace.model,
-        X,
-        y,
-        sample_weight,
-        offset,
-        X_ref=X_ref,
-        y_ref=y_ref,
-        sample_weight_ref=sample_weight_ref,
-        offset_ref=offset_ref,
-        tol=tol,
-        max_iter=max_iter,
-        convergence=convergence,
-        record_diagnostics=record_diagnostics,
-        published=not getattr(model, "_discarded_fit", False),
-    )
+    published = not getattr(model, "_discarded_fit", False)
+    with initial_precision_advisory(workspace.model, enabled=published) as precision:
+        _fit_in_workspace(
+            workspace.model,
+            X,
+            y,
+            sample_weight,
+            offset,
+            X_ref=X_ref,
+            y_ref=y_ref,
+            sample_weight_ref=sample_weight_ref,
+            offset_ref=offset_ref,
+            tol=tol,
+            max_iter=max_iter,
+            convergence=convergence,
+            record_diagnostics=record_diagnostics,
+            published=published,
+        )
+    if precision:
+        workspace.model._last_fit_meta["initial_precision"] = precision
     candidate = capture_fit_state(
         workspace,
         model,
@@ -2120,20 +2125,23 @@ def fit_reml(
         # alternation's published fit on freMTPL2 (four interaction pairs)
         # ended 3.7e-4 farther from a certified reference optimum.
         workspace.model._nb_theta_search = True
-    debug_recorder = _fit_reml_in_workspace(
-        workspace.model,
-        X,
-        y,
-        sample_weight,
-        offset,
-        X_ref=X_ref,
-        y_ref=y_ref,
-        sample_weight_ref=sample_weight_ref,
-        offset_ref=offset_ref,
-        lambda2_init=lambda2_init,
-        durable_retain_fit_state=durable_retain if nb_auto else None,
-        **attempt_kwargs,
-    )
+    with initial_precision_advisory(
+        workspace.model, enabled=not getattr(model, "_discarded_fit", False)
+    ) as precision:
+        debug_recorder = _fit_reml_in_workspace(
+            workspace.model,
+            X,
+            y,
+            sample_weight,
+            offset,
+            X_ref=X_ref,
+            y_ref=y_ref,
+            sample_weight_ref=sample_weight_ref,
+            offset_ref=offset_ref,
+            lambda2_init=lambda2_init,
+            durable_retain_fit_state=durable_retain if nb_auto else None,
+            **attempt_kwargs,
+        )
     if nb_auto:
         debug_recorder = _refine_nb_theta_to_reml_fixed_point(
             workspace.model,
@@ -2155,6 +2163,8 @@ def fit_reml(
         if not durable_retain:
             workspace.model._retain_fit_state = False
             _maybe_release_fit_state(workspace.model)
+    if precision:
+        workspace.model._last_fit_meta["initial_precision"] = precision
     _disclose_data_rank_route(workspace.model)
     candidate = capture_fit_state(
         workspace,

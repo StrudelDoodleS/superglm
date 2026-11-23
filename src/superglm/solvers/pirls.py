@@ -18,6 +18,7 @@ from numpy.typing import NDArray
 
 from superglm._fit_trace import TraceRun
 from superglm._roundoff import EPS, gamma
+from superglm.diagnostics.convergence import inspect_initial_precision
 from superglm.distributions import Distribution
 from superglm.group_matrix import (
     DenseGroupMatrix,
@@ -1476,6 +1477,8 @@ def _fit_pirls_inner(
             sample_weight=weights,
             prefer_observed=False,
         )
+        if outer == 0:
+            inspect_initial_precision(groups, working_rows, eta_unclipped, link)
         W = working_rows.weights
         z = working_rows.response
         if clip_rows.state == "likelihood":

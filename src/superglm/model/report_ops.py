@@ -59,7 +59,11 @@ def _terminal_stop(model, res) -> tuple[str | None, str | None]:
 
 
 def diagnostics(model) -> dict[str, Any]:
-    """Per-group diagnostic dict for programmatic / audit access."""
+    """Per-group diagnostic dict for programmatic / audit access.
+
+    Initial precision findings include zero-based example rows, counts for
+    row events, and the minimum and maximum values for wide spreads.
+    """
     from superglm.features.spline import _SplineBase
 
     res = model.result
@@ -123,6 +127,10 @@ def diagnostics(model) -> dict[str, Any]:
 
     records = getattr(res, "truncated_directions", ()) or ()
     specs = {**model._specs, **model._interaction_specs}
+    precision = (getattr(model, "_last_fit_meta", None) or {}).get("initial_precision", {})
+    out["_model"]["initial_precision"] = {
+        kind: dict(finding) for kind, finding in precision.items()
+    }
     for key, keep in (
         ("weakly_identified_rows", lambda record: record.at_maximum),
         ("unresolved_rows", lambda record: not record.at_maximum and not record.boundary),

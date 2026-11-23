@@ -9,7 +9,164 @@ from __future__ import annotations
 
 import os
 import warnings
+from contextlib import contextmanager
+from contextvars import ContextVar
+from math import frexp, inf
 from typing import Any
+
+import numpy as np
+
+from superglm._roundoff import TINY, UNIT_ROUNDOFF
+from superglm._warn import warn_caller
+from superglm.links import LogLink
+
+
+class FitPrecisionWarning(UserWarning):
+    """The input or initial working rows show a loss of information or precision risk."""
+
+
+_PRECISION_BLOCK_SIZE = 8192
+# Binary64 round-to-nearest breakpoints in eta for exp(eta): half the least
+# subnormal, the midpoint below the least normal, and the overflow midpoint.
+_LOG_MEAN_ZERO = -745.1332191019412
+_LOG_MEAN_NORMAL = -708.3964185322641
+_LOG_MEAN_LIMIT = 709.782712893384
+# Within a factor of sixteen of 1/u, small contributions can be comparable to
+# rounding in a shared sum. A row spread alone does not determine rank.
+_SPREAD_BITS = frexp(1.0 / (16.0 * UNIT_ROUNDOFF))[1] - 1
+
+_PRECISION_MESSAGES = {
+    "zero_sample_weight": "Zero sample weight",
+    "subnormal_sample_weight": "Subnormal sample weight",
+    "sample_weight_spread": "Large sample-weight spread",
+    "zero_information": "Zero initial {source} information on positive-weight rows",
+    "subnormal_information": "Subnormal initial {source} information",
+    "information_spread": "Large initial {source} information spread",
+    "log_mean_zero": "Initial log-link mean rounds to zero before clipping",
+    "log_mean_subnormal": "Subnormal initial log-link mean before clipping",
+    "log_mean_overflow": "Initial log-link mean overflows before clipping",
+}
+
+# The fit attempt owns this scope. Match its group list by identity so that
+# intercept-only solves inside setup cannot consume the advisory.
+_INITIAL_PRECISION: ContextVar[tuple[Any, dict] | None] = ContextVar(
+    "initial_fit_precision", default=None
+)
+
+
+@contextmanager
+def initial_precision_advisory(model, *, enabled: bool):
+    """Collect one fit's entry findings without retaining the working rows."""
+    findings: dict = {}
+    token = _INITIAL_PRECISION.set((model, findings) if enabled else None)
+    try:
+        yield findings
+    finally:
+        _INITIAL_PRECISION.reset(token)
+
+
+def inspect_initial_precision(groups, rows, eta_unclipped, link) -> None:
+    """Inspect the first working-row carrier of the active scalar fit."""
+    capture = _INITIAL_PRECISION.get()
+    if capture is None or groups is not capture[0]._groups:
+        return
+    model, findings = capture
+    _INITIAL_PRECISION.set(None)
+    source = "Fisher" if rows.curvature_source == "fisher" else "observed"
+    findings.update(
+        _scan_initial_precision(
+            model._fit_weights, rows.weights, eta_unclipped, model._fit_offset, link
+        )
+    )
+    if findings:
+        parts = []
+        checks = {}
+        for kind, finding in findings.items():
+            reason = _PRECISION_MESSAGES[kind].format(source=source)
+            if kind.endswith("information") or kind == "information_spread":
+                finding["curvature_source"] = rows.curvature_source
+                checks["Check sample_weight units and offsets on these rows."] = None
+            elif kind.startswith("log_mean_"):
+                checks["Check the offsets on these rows."] = None
+            elif kind == "zero_sample_weight":
+                checks["Check whether the zero-weight rows should contribute."] = None
+            else:
+                checks["Check the sample_weight units."] = None
+            positions = ", ".join(str(row) for row in finding["rows"])
+            count = finding.get("count", len(finding["rows"]))
+            examples = " e.g." if count > len(finding["rows"]) else ""
+            parts.append(f"{reason} at row positions{examples} {positions}.")
+        warn_caller(
+            "SuperGLM binary64 precision advisory, with zero-based row positions. "
+            + " ".join([*parts, *checks])
+            + " See model.diagnostics()['_model']['initial_precision'] for details.",
+            FitPrecisionWarning,
+        )
+
+
+def _scan_initial_precision(weights, information, eta, offset, link) -> dict:
+    """One sweep in fixed-size blocks. Keep counts and up to three row examples."""
+    findings: dict = {}
+    extrema = [[(inf, -1), (0.0, -1)] for _ in range(2)]
+    offset_low, offset_high = inf, -inf
+    log_link = type(link) is LogLink
+
+    def record(kind, mask, start):
+        count = int(np.count_nonzero(mask))
+        if count:
+            finding = findings.setdefault(kind, {"count": 0, "rows": ()})
+            finding["count"] += count
+            remaining = 3 - len(finding["rows"])
+            if remaining:
+                finding["rows"] += tuple(int(i) + start for i in np.flatnonzero(mask)[:remaining])
+
+    for start in range(0, weights.size, _PRECISION_BLOCK_SIZE):
+        block = slice(start, start + _PRECISION_BLOCK_SIZE)
+        weight, info = weights[block], information[block]
+        active = weight > 0.0
+        record("zero_sample_weight", ~active, start)
+        record("subnormal_sample_weight", active & (weight < TINY), start)
+        record("zero_information", active & (info == 0.0), start)
+        finite_positive_info = active & (info > 0.0) & np.isfinite(info)
+        record("subnormal_information", finite_positive_info & (info < TINY), start)
+        for values, positive, pair in zip((weight, info), (active, finite_positive_info), extrema):
+            low = int(np.argmin(np.where(positive, values, inf)))
+            high = int(np.argmax(np.where(positive, values, 0.0)))
+            if positive[low] and values[low] < pair[0][0]:
+                pair[0] = (float(values[low]), start + low)
+            if positive[high] and values[high] > pair[1][0]:
+                pair[1] = (float(values[high]), start + high)
+        if log_link:
+            raw_eta = eta[block]
+            record("log_mean_zero", active & (raw_eta <= _LOG_MEAN_ZERO), start)
+            record(
+                "log_mean_subnormal",
+                active & (raw_eta > _LOG_MEAN_ZERO) & (raw_eta < _LOG_MEAN_NORMAL),
+                start,
+            )
+            record("log_mean_overflow", active & (raw_eta > _LOG_MEAN_LIMIT), start)
+            if offset is not None:
+                offset_low = min(
+                    offset_low, float(np.min(offset[block], where=active, initial=inf))
+                )
+                offset_high = max(
+                    offset_high, float(np.max(offset[block], where=active, initial=-inf))
+                )
+
+    # An extreme common offset can be absorbed by the intercept. Keep any
+    # actual working-information findings even when that offset is constant.
+    if offset is not None and offset_low == offset_high:
+        for kind in ("log_mean_zero", "log_mean_subnormal", "log_mean_overflow"):
+            findings.pop(kind, None)
+    for kind, ((low, low_row), (high, high_row)) in zip(
+        ("sample_weight_spread", "information_spread"), extrema
+    ):
+        lo_mantissa, lo_exponent = frexp(low)
+        hi_mantissa, hi_exponent = frexp(high)
+        spread = hi_exponent - lo_exponent - (hi_mantissa < lo_mantissa)
+        if low_row >= 0 and spread >= _SPREAD_BITS:
+            findings[kind] = {"rows": (low_row, high_row), "values": (low, high)}
+    return findings
 
 
 class ConvergenceWarning(UserWarning):
