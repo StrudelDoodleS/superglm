@@ -35,6 +35,7 @@ from .fit_state import (
     configured_lambda2,
     configured_link,
     configured_penalty,
+    restore_legacy_edited_statistics,
 )
 
 _SPLINES_DEPRECATION_MESSAGE = (
@@ -360,6 +361,7 @@ class SuperGLM:
         ``release_separated_level_summaries``).
         """
         self.__dict__.update(state)
+        restore_legacy_edited_statistics(self)
         # Metadata of a retired fast discrete predictor; nothing reads it.
         self.__dict__.pop("_fast_prediction_state", None)
         from superglm.model.retired_state import (
@@ -1243,6 +1245,9 @@ class SuperGLM:
         is the binned one, so these differ slightly from
         :meth:`metrics` on the same data, which evaluates the model's
         predictions on the rows passed.
+
+        An editor revision reports the statistics of its scoring rows. When
+        those statistics are unavailable, this method raises with the reason.
         """
         with self._parallel_scope():
             return report_ops.summary(

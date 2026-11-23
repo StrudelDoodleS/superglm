@@ -17,6 +17,7 @@ from superglm.diagnostics.convergence import (
 )
 from superglm.features.categorical import Categorical
 from superglm.features.constraint import rules_of
+from superglm.model.fit_state import edited_statistics_unavailable
 
 
 def training_telemetry(model) -> dict[str, Any]:
@@ -243,7 +244,7 @@ def _model_config(model) -> dict[str, Any]:
 
 def _fit_payload(model, result) -> dict[str, Any]:
     fit_meta = dict(getattr(model, "_last_fit_meta", None) or {})
-    return {
+    payload = {
         "method": fit_meta.get("method"),
         "fit_meta": fit_meta,
         "deviance": float(result.deviance),
@@ -253,6 +254,11 @@ def _fit_payload(model, result) -> dict[str, Any]:
         "converged": bool(result.converged),
         "intercept": float(result.intercept),
     }
+    statistics_reason = edited_statistics_unavailable(model)
+    if statistics_reason is not None:
+        payload["deviance"] = None
+        payload["fit_statistics_unavailable"] = statistics_reason
+    return payload
 
 
 def _fit_statistics_payload(model) -> dict[str, Any]:

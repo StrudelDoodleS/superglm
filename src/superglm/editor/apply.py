@@ -12,7 +12,7 @@ from numpy.typing import NDArray
 from superglm._utils import weighted_row_sum
 from superglm._weight_units import likelihood_scale
 from superglm.editor.display import display_for, is_edited, transform_for_link, unit_tolerance
-from superglm.editor.errors import EditorValueError
+from superglm.editor.errors import EditorValueError, no_quote_message
 from superglm.editor.lss.view import is_lss
 from superglm.editor.terms import native_log_effect_values
 from superglm.features.categorical import Categorical
@@ -159,7 +159,7 @@ def apply_edits_to_model_copy_with_data(
     rest of the term is edited.
 
     Where a scoring row of positive weight has no quote (``predict`` gives it
-    NaN), the edit stands without fit statistics (``_fit_stats`` None).
+    NaN), the edit stands with unavailable fit statistics and a row-level reason.
 
     A SuperLSS is revised from the rows its view holds; ``X``, ``y``,
     ``sample_weight`` and ``offset`` are not read.
@@ -207,21 +207,25 @@ def apply_edits_to_model_copy_with_data(
     if edited_terms:
         _stamp_stale_inference(edited_model, edited_terms)
         _invalidate_model_caches(edited_model)
-    if edited_terms or has_scoring_data:
-        from superglm.model.base import NoPredictedMeanError
+    from superglm.model.base import NoPredictedMeanError
 
-        try:
-            _refresh_fit_statistics(
-                edited_model,
-                X=X,
-                y=y,
-                sample_weight=sample_weight,
-                offset=offset,
-            )
-        except NoPredictedMeanError:
-            # No statistics exist for rows with no quote; the summary says so, and each
-            # split's scores name the rows.
-            edited_model._fit_stats = None
+    reason = None
+    try:
+        scored = _refresh_fit_statistics(
+            edited_model,
+            X=X,
+            y=y,
+            sample_weight=sample_weight,
+            offset=offset,
+        )
+        if not scored:
+            reason = "This model has no fit statistics. Supply both X and y to score the model."
+    except NoPredictedMeanError as error:
+        reason = (
+            f"This model has no fit statistics. {no_quote_message(error)} "
+            "Adjust the curve or undo the edit to restore the quotes."
+        )
+    revision = revision.with_edited_statistics(reason=reason)
     if not getattr(edited_model, "_retain_fit_state", True):
         from superglm.model.fit_ops import _maybe_release_fit_state
 
@@ -610,10 +614,11 @@ def _refresh_fit_statistics(
     use_fitted_design: bool = False,
     frame: EagerFrame | None = None,
     statistics: bool = True,
-) -> None:
+) -> bool:
     """Refresh fitted means and statistics; ``frame`` is the caller's adapter of ``X``.
 
     ``statistics=False`` leaves ``_fit_stats`` empty, for a caller that forms them itself.
+    Returns whether scoring rows were available and deviance was computed.
 
     A row of positive weight with no mean (NaN, as ``predict`` gives it) is
     refused with ``NoPredictedMeanError`` before anything is refreshed; a
@@ -646,7 +651,7 @@ def _refresh_fit_statistics(
         require_unchanged_fit_data(model, X_ref, y_ref, frame=None if X is None else frame)
     if y_ref is None:
         model._fit_stats = None
-        return
+        return False
 
     explicit_scoring_data = X is not None or y is not None
     validation_weight = sample_weight
@@ -739,7 +744,7 @@ def _refresh_fit_statistics(
         mu = response_mean(model, linear_predictor(model._dm, solver_result, offset_arr))
     else:
         model._fit_stats = None
-        return
+        return False
 
     mu = np.asarray(mu, dtype=np.float64).ravel()
     if mu.size != y_arr.size:
@@ -822,6 +827,7 @@ def _refresh_fit_statistics(
             y_arr,
             columns=tuple(model._feature_order),
         )
+    return True
 
 
 def _stamp_stale_inference(model, edited_terms: list[str]) -> None:
