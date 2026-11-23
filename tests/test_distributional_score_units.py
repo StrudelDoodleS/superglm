@@ -29,9 +29,10 @@ from ._distributional_weights import resolved_prior
 from .test_distributional_endpoint_laml import _UnitGaussian
 
 
-def test_fisher_fallback_measures_the_gain_with_the_accepted_factor(monkeypatch):
-    """A weakly weighted Gaussian can still gain 0.5. Force a Fisher fallback
-    and a misleading eigenvalue for the rejected observed matrix.
+@pytest.mark.parametrize("force_fallback", [False, True], ids=["observed", "fisher"])
+def test_a_material_gain_is_measured_with_the_accepted_factor(monkeypatch, force_fallback):
+    """A weakly weighted Gaussian can still gain 0.5. On fallback give the
+    rejected observed matrix a misleading eigenvalue.
     """
     family = _UnitGaussian()
     weights = resolved_prior(np.array([1e-16]))
@@ -50,7 +51,8 @@ def test_fisher_fallback_measures_the_gain_with_the_accepted_factor(monkeypatch)
         decision = resolve(source, -matrix, **kwargs)
         return replace(decision, telemetry=replace(decision.telemetry, minimum_eigenvalue=1.0))
 
-    monkeypatch.setattr(solver, "resolve_curvature", fallback)
+    if force_fallback:
+        monkeypatch.setattr(solver, "resolve_curvature", fallback)
     fit = solver.fit_dense_fixed_lambda(
         family,
         layout,
@@ -60,7 +62,7 @@ def test_fisher_fallback_measures_the_gain_with_the_accepted_factor(monkeypatch)
         initial=np.zeros(1),
         config=solver.DenseSolverConfig(tolerance=1e-7, coefficient_curvature="fisher"),
     )
-    assert fit.terminal_curvature.actual_source == "fisher"
+    assert fit.terminal_curvature.actual_source == ("fisher" if force_fallback else "observed")
     assert not fit.converged
     assert fit.convergence_reason == "material_likelihood_gain"
 
