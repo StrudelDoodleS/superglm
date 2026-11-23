@@ -46,7 +46,7 @@ from superglm.reml.convergence import (
     classify_dead_feasible_exit,
     coefficient_walk_guard_stopped,
     concave_live_directions,
-    dead_search_score_bar,
+    dead_search_evidence,
     direction_penalty_ranks,
     evaluate_reml_candidate,
     fixed_freeze_record,
@@ -56,6 +56,7 @@ from superglm.reml.convergence import (
     freeze_record,
     mask_frozen_stop_gradient,
     newton_predicted_decrease,
+    newton_step_evidence,
     newton_step_resolved,
     newton_step_same_terms,
     newton_step_settled,
@@ -907,6 +908,8 @@ def optimize_discrete_reml_cached_w(
 
     # === POI loop: one PIRLS step + one Newton lambda step ===
     prev_obj = np.inf
+    current_roundoff = None
+    stop_evidence = None
     # The stop judges the active set only: a flat frozen direction keeps a
     # tiny gradient forever, and counting it would spin to max_reml_iter.
     stop_criterion_frozen_d = None
@@ -1043,8 +1046,11 @@ def optimize_discrete_reml_cached_w(
         inverse_phi = 1.0
         inverse_phi_derivative = None
         penalty_nullity: float | None = None
+        previous_roundoff = current_roundoff
+        current_roundoff = None
         if isinstance(objective_evaluation, REMLObjectiveEvaluation):
             obj = objective_evaluation.value
+            current_roundoff = objective_evaluation.roundoff
             penalty_nullity = objective_evaluation.penalty_nullity
             profiled_scale = objective_evaluation.profiled_scale
         else:
@@ -1395,18 +1401,15 @@ def optimize_discrete_reml_cached_w(
             and newton_step_settled(max_delta_raw, previous_step, bar=step_bar)
             and newton_step_resolved(hess_sub_d, grad_sub_d, bar=step_bar)
         ):
+            stop_evidence = newton_step_evidence(
+                poi_iter + 1, max_delta_raw, previous_step, step_bar, step_taken=False
+            )
             if profile is not None:
                 if np.any(frozen_d & estimated_mask):
                     # The current gradient and Hessian just reproduced the
                     # held set that the preceding accepted step used.
                     profile["reml_freeze_revalidated"] = True
-                profile["reml_newton_step_stop"] = {
-                    "iter": poi_iter + 1,
-                    "step_left": max_delta_raw,
-                    "previous_step": previous_step,
-                    "bar": step_bar,
-                    "step_taken": False,
-                }
+                profile["reml_newton_step_stop"] = stop_evidence
             rho = rho_clipped
             converged = True
             termination_reason = "newton_step_tolerance"
@@ -1771,17 +1774,19 @@ def optimize_discrete_reml_cached_w(
                 )
                 # Second order gates the score-test exit only, as in direct.py.
                 converged = termination_reason == "converged_at_precision"
+                stop_evidence = dead_search_evidence(
+                    poi_iter + 1,
+                    termination_reason,
+                    objective=obj,
+                    tolerance=_tol,
+                    gradient=active_grad_norm,
+                    predicted_decrease=predicted_decrease,
+                    evaluated_trial=evidence,
+                    mode_stationary=candidate_mode_stationary,
+                )
+                stop_evidence["candidate_objective_roundoff"] = current_roundoff
                 if profile is not None:
-                    profile["reml_dead_line_search"] = {
-                        "iter": poi_iter + 1,
-                        "active_gradient_norm": active_grad_norm,
-                        "bar": dead_search_score_bar(obj, _tol),
-                        "predicted_decrease": predicted_decrease,
-                        "decrease_bar": float(_tol * score_scale_d),
-                        "evaluated_trial": bool(evidence),
-                        "candidate_mode_stationary": bool(candidate_mode_stationary),
-                        "termination_reason": termination_reason,
-                    }
+                    profile["reml_dead_line_search"] = stop_evidence
                 break
 
         current_lambdas = lambdas.copy()
@@ -1869,6 +1874,19 @@ def optimize_discrete_reml_cached_w(
             reml_penalties=penalties,
             lambda_box=box,
             bound_pressure=last_bound_pressure,
+        )
+
+    if stop_evidence is None and not all_lambdas_fixed:
+        stop_evidence = candidate_convergence.stop_evidence(
+            termination_reason,
+            objective=obj,
+            tolerance=_tol,
+            iteration_limit=max_reml_iter,
+            roundoff=(
+                current_roundoff + previous_roundoff
+                if current_roundoff is not None and previous_roundoff is not None
+                else None
+            ),
         )
 
     old_gms_final = dm.group_matrices
@@ -2071,4 +2089,5 @@ def optimize_discrete_reml_cached_w(
         reml_penalties=penalties,
         lambda_box=box,
         bound_pressure=last_bound_pressure,
+        stop_evidence=stop_evidence,
     )

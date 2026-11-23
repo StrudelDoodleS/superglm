@@ -2987,13 +2987,20 @@ class TestREMLNonConvergenceDisclosure:
         model = _qp_monotone_model(fixed=route == "fixed_qp")
         with pytest.warns(ConvergenceWarning, match="'max_iter'"):
             model.fit_reml(X, y)
-        assert model.diagnostics()["_model"]["converged"] is False
+        diagnostic = model.diagnostics()["_model"]
+        assert diagnostic["converged"] is False
+        stop = diagnostic["convergence"]
+        assert stop["coefficients"]["converged"] is False
+        assert stop["coefficients"]["reason"] == "max_iter"
         if route == "qp_passthrough":
             info = model.reml_diagnostics()
             assert info["converged"] is False
             assert "final coefficient fit" in info["convergence_note"]
             assert model._reml_result.terminal_refit_termination == "max_iter"
             assert info["terminal_refit_termination"] == "max_iter"
+            assert stop["smoothing"]["converged"] is True
+        else:
+            assert stop["smoothing"] is None
 
     @pytest.mark.parametrize("route", ["qp_passthrough", "fixed_qp"])
     def test_converged_constrained_fits_raise_no_convergence_warning(self, route):

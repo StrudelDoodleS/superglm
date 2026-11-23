@@ -1404,6 +1404,21 @@ class TestDeadSearchNewtonDecrement:
         assert result.converged, result.termination_reason
         assert result.termination_reason == "converged_at_precision"
         assert model._reml_profile["reml_dead_line_search"]["inconsistent_decrease"] is not None
+        dead = model._reml_profile["reml_dead_line_search"]
+        report = model.diagnostics()["_model"]["convergence"]["smoothing"]
+        evidence = report["evidence"]
+        assert report["reason"] == "converged_at_precision"
+        assert evidence["test"] == "dead_line_search"
+        assert evidence["active_gradient_norm"] == dead["active_gradient_norm"]
+        assert (
+            evidence["bar"] < evidence["active_gradient_norm"] < evidence["decrement_gradient_bar"]
+        )
+        assert evidence["predicted_decrease"] < evidence["decrease_bar"]
+        assert evidence["objective_change"] == dead["inconsistent_decrease"]
+        assert evidence["objective_roundoff"] > 0.0
+        assert evidence["objective_change"] > evidence["objective_roundoff"]
+        assert evidence["within_objective_roundoff"] is False
+        assert "Smoothing selection stopped at numerical precision" in str(model.summary())
         # an earlier iteration took its full step; the last discarded its quarter step
         assert any(
             alphas == [1.0] for it, alphas in by_iteration.items() if it < result.n_reml_iter
@@ -1740,6 +1755,9 @@ class TestNewtonStepStop:
         diagnostics = model.reml_diagnostics()
         assert diagnostics["converged"] is True
         assert diagnostics["termination_reason"] == "newton_step_tolerance"
+        evidence = model.diagnostics()["_model"]["convergence"]["smoothing"]["evidence"]
+        assert evidence["test"] == "newton_step"
+        assert evidence["remaining_distance"] <= evidence["bar"]
         assert model._reml_profile["reml_newton_step_stop"]["step_left"] <= 1e-3
         se, reference = _standard_errors(model), _standard_errors(tight)
         worst = np.max(np.abs(se - reference) / np.maximum(reference, 1e-300))
@@ -2080,6 +2098,10 @@ class TestNewtonStepStop:
         # A dead search keeps its evidence record whichever way it ends.
         dead = model._reml_profile["reml_dead_line_search"]
         assert dead["termination_reason"] == "newton_step_tolerance"
+        evidence = model.diagnostics()["_model"]["convergence"]["smoothing"]["evidence"]
+        assert evidence["test"] == "newton_step"
+        assert evidence["step_left"] == stop["step_left"]
+        assert evidence["remaining_distance"] <= stop["bar"]
 
     def test_a_tightened_tolerance_tightens_the_stop(self, monkeypatch):
         _compound_test_never_accepts(monkeypatch)

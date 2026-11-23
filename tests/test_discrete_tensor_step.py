@@ -343,7 +343,7 @@ class TestDiscreteTensorStepIsADescentDirection:
         model.fit_reml(X, y, lambda2_init=start, reml_tol=8e-3, max_reml_iter=12)
         profile = model.reml_diagnostics()["profile"]
         return (
-            model._reml_result,
+            model,
             profile["reml_dead_line_search"],
             profile["reml_outer_step_stats"],
         )
@@ -356,7 +356,8 @@ class TestDiscreteTensorStepIsADescentDirection:
 
         Mutation: passing ``predicted_decrease=None`` to the classifier
         (the arm deleted) ends ``line_search_failed``."""
-        result, record, stats = self._near_optimum_dead_search(monkeypatch, damp=False)
+        model, record, stats = self._near_optimum_dead_search(monkeypatch, damp=False)
+        result = model._reml_result
 
         assert result.termination_reason == "converged_at_precision"
         assert result.converged
@@ -365,6 +366,11 @@ class TestDiscreteTensorStepIsADescentDirection:
         assert record["evaluated_trial"] is True
         assert record["bar"] < record["active_gradient_norm"] < 10 * record["bar"]
         assert record["predicted_decrease"] < record["decrease_bar"]
+        stop = model.diagnostics()["_model"]["convergence"]["smoothing"]
+        assert stop["reason"] == "converged_at_precision"
+        assert stop["evidence"]["test"] == "dead_line_search"
+        assert 0.0 < stop["evidence"]["predicted_decrease"] == record["predicted_decrease"]
+        assert stop["evidence"]["decrement_gradient_bar"] == 10 * record["bar"]
 
     def test_the_decrement_arm_is_withheld_when_the_trust_region_binds(self, monkeypatch):
         """The same point with the trust region binding: the damped step is
@@ -375,7 +381,8 @@ class TestDiscreteTensorStepIsADescentDirection:
         Mutation: dropping the ``trust_mu > 0`` guard computes the decrement
         (3.7e-4 against a resolution of 8e-3) and grants
         ``converged_at_precision``."""
-        result, record, stats = self._near_optimum_dead_search(monkeypatch, damp=True)
+        model, record, stats = self._near_optimum_dead_search(monkeypatch, damp=True)
+        result = model._reml_result
 
         assert result.termination_reason == "line_search_failed"
         assert not result.converged
@@ -383,6 +390,9 @@ class TestDiscreteTensorStepIsADescentDirection:
         assert record["predicted_decrease"] is None
         assert record["decrease_bar"] == record["bar"]
         assert record["bar"] < record["active_gradient_norm"] < 10 * record["bar"]
+        stop = model.diagnostics()["_model"]["convergence"]["smoothing"]
+        assert stop["reason"] == "line_search_failed"
+        assert stop["evidence"]["predicted_decrease"] is None
 
     def test_true_objective_backtrack_accepts_below_one_thirty_second(self, monkeypatch):
         """A legitimate damped direction still needs true-objective backtracking.

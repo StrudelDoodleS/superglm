@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import asdict
 from typing import Any, cast
 
 import numpy as np
@@ -12,6 +13,7 @@ from superglm.diagnostics.convergence import (
     coefficient_nonconvergence_message,
     ncv_bound_message,
     search_nonconvergence_message,
+    stop_report,
 )
 from superglm.distributions import scale_is_known
 from superglm.inference._term_helpers import (
@@ -28,6 +30,7 @@ from superglm.model.fit_state import (
     fitted_lambda2,
     fitted_penalty,
 )
+from superglm.model.separated_levels import separated_labels
 from superglm.penalties.base import selection_shrunk_group_names
 from superglm.profiling._reporting import (
     cached_tweedie_profile_ci,
@@ -35,7 +38,7 @@ from superglm.profiling._reporting import (
     reported_interval,
     tweedie_profile_report_identity,
 )
-from superglm.solvers.rank import selected_group_name_set
+from superglm.solvers.rank import SHARED_RANK_POLICY, selected_group_name_set
 from superglm.terms import TermResults
 from superglm.types import GroupSlice
 
@@ -63,11 +66,118 @@ def _terminal_stop(model, res) -> tuple[str | None, str | None]:
     return search.termination_reason, search_nonconvergence_message(criterion, search)
 
 
+def _standardized_column(matrix, index, positive, weights, sqrt_weights):
+    """A centred, unit-norm column in the training sample's weight units."""
+    unit = np.zeros(matrix.shape[1])
+    unit[index] = 1.0
+    values = matrix.matvec(unit)[positive]
+    maximum = np.max(np.abs(values), initial=0.0)
+    if maximum == 0.0:
+        return None
+    with np.errstate(under="ignore"):
+        # Power-of-two scaling keeps large offsets from degrading centring.
+        values = np.ldexp(values, -np.frexp(maximum)[1])
+        values -= values[0]
+        values -= np.dot(weights, values)
+        values *= sqrt_weights
+        maximum = np.max(np.abs(values))
+        if maximum == 0.0:
+            return None
+        values /= maximum
+        return values / np.linalg.norm(values)
+
+
+def _rank_dependencies(model, result, specs) -> tuple[list, list]:
+    """Name supports of fitted data-rank directions, and read genuine pairs only."""
+    rank = getattr(result, "rank_info", None)
+    if rank is None or rank.data.rank == rank.data.width:
+        return [], []
+    data = rank.data
+    equilibrated = getattr(data, "equilibrated_null_basis", None)
+    null = data.parameter_null_basis if equilibrated is None else equilibrated
+    if null is None:
+        return [], []
+
+    from superglm.reml.identified import coefficient_labels
+
+    groups = {column: group for group in model._groups for column in range(group.start, group.end)}
+    dependencies: list[list[str]] = []
+    pairs: set[tuple[int, ...]] = set()
+    with np.errstate(under="ignore"):
+        for direction in null.T:
+            # The rank cut is in equilibrated coordinates. Use the same scale
+            # before deciding which entries of a discarded direction to name.
+            load = np.abs(direction if equilibrated is not None else direction * data.column_scale)
+            active = load > SHARED_RANK_POLICY.factor_rcond * np.max(load, initial=0.0)
+            columns = tuple(int(i) for i in rank.selected_columns[active])
+            if len(columns) < 2:
+                continue
+            terms = list(dict.fromkeys(groups[i].feature_name for i in columns))
+            if terms not in dependencies:
+                dependencies.append(terms)
+            if len(columns) == 2:
+                pairs.add(columns)
+
+    aliases: list[dict] = []
+    if pairs and model._dm is not None and model._fit_weights is not None:
+        matrices = dict(zip((g.name for g in model._groups), model._dm.group_matrices, strict=True))
+        positive = model._fit_weights > 0.0
+        weights = model._fit_weights[positive]
+        with np.errstate(under="ignore"):
+            weights = weights / np.max(weights)
+            weights /= np.sum(weights)
+            roots = np.sqrt(weights)
+        for left, right in sorted(pairs):
+            x, y = (
+                _standardized_column(
+                    matrices[groups[i].name], i - groups[i].start, positive, weights, roots
+                )
+                for i in (left, right)
+            )
+            if x is not None and y is not None:
+                aliases.append(
+                    {
+                        "columns": list(coefficient_labels(model._groups, (left, right), specs)),
+                        "correlation": float(np.clip(np.dot(x, y), -1.0, 1.0)),
+                    }
+                )
+    return dependencies, aliases
+
+
+def _separation_report(result, specs, interactions) -> dict:
+    levels = {
+        name: list(labels) for name, spec in specs.items() if (labels := separated_labels(spec))
+    }
+    cells, ranges = {}, {}
+    for name, spec in interactions.items():
+        if labels := separated_labels(spec):
+            cells[name] = [list(cell) for cell in labels]
+        if separated := getattr(spec, "_separated_levels", ()):
+            levels[name] = [spec._levels[code] for code in separated]
+        if held := getattr(spec, "_separated_ranges", None):
+            ranges[name] = [
+                {"level": level, "low": low, "high": high} for level, (low, high) in held.items()
+            ]
+        if curves := getattr(spec, "_separated_curves", ()):
+            ranges[name] = [asdict(curve) for curve in curves]
+    return {
+        "levels": levels,
+        "cells": cells,
+        "ranges": ranges,
+        "runtime_message": getattr(result, "separation_message", None),
+        "runtime_terms": list(getattr(result, "separation_groups", ()) or ()),
+    }
+
+
 def diagnostics(model) -> dict[str, Any]:
-    """Per-group diagnostic dict for programmatic / audit access.
+    """Per-group diagnostics and the scalar convergence report under `_model`.
 
     Initial precision findings include zero-based example rows, counts for
     row events, and the minimum and maximum values for wide spreads.
+    Smoothing evidence describes the search's last test, before any final
+    coefficient refit. Objective roundoff describes formation of the
+    objective from its computed terms. Pair correlations use the fitted
+    design on training rows, weighted by sample weight.
     """
     from superglm.features.spline import _SplineBase
 
@@ -139,6 +249,20 @@ def diagnostics(model) -> dict[str, Any]:
     precision = (getattr(model, "_last_fit_meta", None) or {}).get("initial_precision", {})
     out["_model"]["initial_precision"] = {
         kind: dict(finding) for kind, finding in precision.items()
+    }
+    dependencies, aliases = _rank_dependencies(model, res, specs)
+    reml = getattr(model, "_reml_result", None)
+    refit_reason = (
+        getattr(reml, "terminal_refit_termination", None)
+        if termination_reason != "coefficients_revised"
+        else None
+    )
+    out["_model"]["convergence"] = {
+        "smoothing": None if reml is None else stop_report(reml, smoothing=True),
+        "coefficients": stop_report(res, refit_reason=refit_reason),
+        "rank_dependencies": dependencies,
+        "near_aliases": aliases,
+        "separation": _separation_report(res, model._specs, model._interaction_specs),
     }
     for key, keep in (
         ("weakly_identified_rows", lambda record: record.at_maximum),
@@ -361,6 +485,11 @@ def summary(
 
     model_info["shared_cell_rows"] = shared_cell_row_notes(model._interaction_specs)
     termination_reason, convergence_note = _terminal_stop(model, res)
+    if convergence_note is None and termination_reason == "converged_at_precision":
+        convergence_note = (
+            "Smoothing selection stopped at numerical precision. "
+            "See model.diagnostics()['_model'] for the stopping test and objective evidence."
+        )
     if convergence_note is not None:
         model_info["termination_reason"] = termination_reason
         model_info["convergence_note"] = convergence_note

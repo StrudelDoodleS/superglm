@@ -575,6 +575,24 @@ def newton_step_resolved(hessian: NDArray, gradient: NDArray, *, bar: float) -> 
     return newton_step_left(hessian, gradient) <= bar
 
 
+def newton_step_evidence(
+    iteration: int, step_left: float, previous_step: float, bar: float, *, step_taken: bool
+) -> dict:
+    """Read the distance test at the stop that accepted it."""
+    return {
+        "test": "newton_step",
+        "iter": iteration,
+        "step_left": step_left,
+        "previous_step": previous_step,
+        "taken_step": previous_step if step_taken else None,
+        "remaining_distance": (
+            step_left / (1.0 - step_left / previous_step) if step_left < previous_step else None
+        ),
+        "bar": bar,
+        "step_taken": step_taken,
+    }
+
+
 def trial_counts_as_precision_evidence(converged: bool, objective: float) -> bool:
     """Whether a rejected line-search trial is evidence for the precision exit.
 
@@ -644,17 +662,60 @@ def classify_dead_feasible_exit(
     """
     if not evaluated_trial:
         return "line_search_failed"
-    score_scale = _score_scale(objective)
-    bar = dead_search_score_bar(objective, tolerance)
+    bar, decrease_bar = dead_search_bars(objective, tolerance)
     if active_gradient_norm < bar:
         return "converged_at_precision"
     if (
         predicted_decrease is not None
         and active_gradient_norm < DECREMENT_GRADIENT_CEILING * bar
-        and predicted_decrease < tolerance * score_scale
+        and predicted_decrease < decrease_bar
     ):
         return "converged_at_precision"
     return "line_search_failed"
+
+
+def dead_search_bars(objective: float, tolerance: float) -> tuple[float, float]:
+    """Gradient and predicted-decrease thresholds of the dead-search test."""
+    return dead_search_score_bar(objective, tolerance), tolerance * _score_scale(objective)
+
+
+def dead_search_evidence(
+    iteration: int,
+    reason: str,
+    *,
+    objective: float,
+    tolerance: float,
+    gradient: float,
+    predicted_decrease: float | None,
+    evaluated_trial: bool,
+    mode_stationary: bool,
+) -> dict:
+    bar, decrease_bar = dead_search_bars(objective, tolerance)
+    return {
+        "test": "dead_line_search",
+        "iter": iteration,
+        "termination_reason": reason,
+        "objective": float(objective),
+        "active_gradient_norm": gradient,
+        "bar": bar,
+        "decrement_gradient_bar": DECREMENT_GRADIENT_CEILING * bar,
+        "predicted_decrease": predicted_decrease,
+        "decrease_bar": decrease_bar,
+        "evaluated_trial": bool(evaluated_trial),
+        "candidate_mode_stationary": bool(mode_stationary),
+        **objective_change_evidence(None, None),
+    }
+
+
+def objective_change_evidence(change: float | None, roundoff: float | None) -> dict:
+    """Compare a change with the formation rounding of its two objective values."""
+    return {
+        "objective_change": change,
+        "objective_roundoff": roundoff,
+        "within_objective_roundoff": None
+        if change is None or roundoff is None
+        else change <= roundoff,
+    }
 
 
 @dataclass(frozen=True)
@@ -665,6 +726,37 @@ class REMLCandidateConvergence:
     score_scale: float
     objective_change: float
     converged: bool
+    gradient_bar: float = math.nan
+
+    def stop_evidence(
+        self,
+        reason: str,
+        *,
+        objective: float,
+        tolerance: float,
+        roundoff: float | None,
+        iteration_limit: int,
+    ) -> dict:
+        """The comparison made at the last evaluated smoothing candidate."""
+        change = self.objective_change if math.isfinite(self.objective_change) else None
+        bar = tolerance * self.score_scale
+        evidence = {
+            "test": {
+                "max_reml_iter": "iteration_limit",
+                "score_objective_tolerance": "score_and_objective",
+                "active_set_stationary": "frozen_active_set",
+            }[reason],
+            "objective": float(objective),
+            "gradient_norm": self.projected_gradient_norm,
+            "gradient_bar": self.gradient_bar
+            if reason in ("max_reml_iter", "score_objective_tolerance")
+            else None,
+            "objective_change_bar": bar,
+            **objective_change_evidence(change, roundoff if change is not None else None),
+        }
+        if reason == "max_reml_iter":
+            evidence["iteration_limit"] = iteration_limit
+        return evidence
 
 
 def bound_held_directions(
@@ -754,10 +846,11 @@ def evaluate_reml_candidate(
     gradient_norm = float(np.max(np.abs(projected))) if projected.size else 0.0
     score_scale = _score_scale(objective)
     objective_change = abs(objective - previous_objective) if iteration > 0 else np.inf
+    if gradient_bar is None:
+        gradient_bar = free_score_bar(objective, tolerance)
     converged = (
         iteration >= 1
-        and gradient_norm
-        < (free_score_bar(objective, tolerance) if gradient_bar is None else gradient_bar)
+        and gradient_norm < gradient_bar
         and objective_change < tolerance * score_scale
     )
     return REMLCandidateConvergence(
@@ -765,4 +858,5 @@ def evaluate_reml_candidate(
         score_scale=score_scale,
         objective_change=objective_change,
         converged=converged,
+        gradient_bar=gradient_bar,
     )
