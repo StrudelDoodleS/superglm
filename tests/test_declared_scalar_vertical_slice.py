@@ -335,8 +335,11 @@ def test_fixed_penalty_independent_objective_chunk_replay_and_offsets(cls, name)
     )
     assert_same_optimum(evaluate, dense.coefficients, ref.x)
     assert_same_optimum(evaluate, chunk.coefficients, ref.x)
+    # Each route stops within the solver tolerance along its own accumulation order, so the two
+    # terminal curvatures are read at coefficients a stop's resolution apart: about 2e-8 relative
+    # on OpenBLAS Haswell, where a wrong curvature would differ at order one.
     np.testing.assert_allclose(
-        dense.terminal_penalized_curvature, chunk.terminal_penalized_curvature, rtol=1e-8, atol=1e-9
+        dense.terminal_penalized_curvature, chunk.terminal_penalized_curvature, rtol=1e-6, atol=1e-9
     )
     assert chunk.resolved_chunk_size == 37
     assert chunk.terminal_rank.rank == dense.terminal_rank.rank == 4
