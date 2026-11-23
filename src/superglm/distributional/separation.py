@@ -161,8 +161,8 @@ def scan_predictor_separation(
                     include_base=predictor.intercept or n_terms > 1,
                 )
                 findings.extend(found)
-                if found:
-                    record_separated_levels(spec, found)
+                # An empty record too: it tells a scanned term from one saved before the record.
+                record_separated_levels(spec, found)
             else:
                 _, term, left_spec, right_spec, left, right, left_name, right_name = record
                 findings.extend(

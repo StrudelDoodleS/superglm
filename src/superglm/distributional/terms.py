@@ -295,6 +295,7 @@ class _PreparedTermTest:
     withheld: bool = False
     identified: NDArray[np.intp] | None = None
     separation_note: str = ""
+    unrecorded_note: str = ""
 
 
 def _level_domain(spec: Any) -> tuple[Any, ...] | None:
@@ -1139,6 +1140,13 @@ def _prepare_term_test(
             separation_note = f"SEP: Joint test excluded separated levels {labels}."
             if not identified.size:
                 separation_note += " There are no identified contrasts."
+    unrecorded_note = ""
+    if isinstance(spec, Categorical) and _scanned_without_record(fitted, parameter, spec):
+        unrecorded_note = (
+            "SEP not checked: an earlier superglm fitted this model and did not record separated "
+            "levels. If a level's training responses were all 0, or all 1, this test is not "
+            "reliable; refit the model to check."
+        )
     design: NDArray[np.float64] | None = None
     if not level_term:
         if spec is None:
@@ -1161,7 +1169,15 @@ def _prepare_term_test(
         withheld=_inference_withheld(fitted, qualified),
         identified=identified,
         separation_note=separation_note,
+        unrecorded_note=unrecorded_note,
     )
+
+
+def _scanned_without_record(fitted: Any, parameter: str, spec: Any) -> bool:
+    """Whether the build scanned ``spec`` and kept no record: a model saved before the record."""
+    records = _compiled_predictor(fitted, parameter).compiled.separation_records
+    scanned = any(record[0] == "cat" and record[2] is spec for record in records)
+    return scanned and "_separated_levels_at_fit" not in vars(spec)
 
 
 def _term_test_from_covariance(
@@ -1170,7 +1186,7 @@ def _term_test_from_covariance(
     note: str = "",
 ) -> TermTest:
     """Evaluate one fully prepared term test from a resolved covariance."""
-    note = _join_notes(prepared.separation_note, note)
+    note = _join_notes(prepared.separation_note, prepared.unrecorded_note, note)
     identified = prepared.identified
     if prepared.withheld or (prepared.separation_note and identified is None):
         return TermTest(

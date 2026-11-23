@@ -1,5 +1,6 @@
 """Inference and disclosure for categorical separation in SuperLSS."""
 
+import copy
 import pickle
 import warnings
 
@@ -80,6 +81,31 @@ def test_joint_wald_uses_the_healthy_marginal_covariance(separated_fit, separate
         "SEP" in corrected.note
         and "corrected covariance unavailable: fixed shown" in corrected.note
     )
+
+
+def test_a_model_saved_before_the_record_says_its_levels_were_not_checked(
+    separated_fit, separated_book
+):
+    """A SuperLSS saved before separated levels were recorded keeps its test and says to refit.
+
+    Such a model carries the build's scan entry for the term but no record on it, which
+    removing the record reproduces. A fit by this version, separated or not, has a record.
+    """
+    X, y = separated_book
+    old = copy.deepcopy(separated_fit)
+    (mean,) = (p for p in old._model.compiled_predictors if p.name == "mean")
+    del vars(mean.compiled.specs["lev"])["_separated_levels_at_fit"]
+
+    test = old.term_test("mean", "lev", X_train=X)
+    assert "SEP not checked" in test.note and "refit" in test.note
+    assert np.isfinite(test.p_value)
+    row = old.summary(X_train=X).query("parameter == 'mean' and term == 'lev'").iloc[0]
+    assert "SEP not checked" in row["note"]
+
+    assert "not checked" not in separated_fit.term_test("mean", "lev").note
+    keep = (X.lev != "E").to_numpy()
+    healthy = _model().fit(X.loc[keep], y[keep])
+    assert "not checked" not in healthy.term_test("mean", "lev").note
 
 
 def test_separated_reference_leaves_the_test_and_intercept_blank(separated_book):
