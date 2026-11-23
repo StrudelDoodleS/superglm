@@ -380,9 +380,7 @@ def refit_with_shape_rules(
         step, direction = proposal
         active = step.active_set
         last_active = list(active)
-        step_relative = float(
-            np.linalg.norm(direction, ord=np.inf) / (1.0 + np.linalg.norm(beta, ord=np.inf))
-        )
+        step_relative = context.score_units.step_relative(direction, beta)
         if step.converged and step_relative <= tolerance:
             converged, reason = True, "kkt"
             break

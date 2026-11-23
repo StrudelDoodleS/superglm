@@ -17,6 +17,9 @@ from superglm.distributional.results.solver import (
     DenseSolverResult,
     _assessment_is_numerically_stationary,
 )
+from superglm.distributional.results.solver import (
+    _assessment_retained_kkt_ratio as _endpoint_retained_kkt_relative,
+)
 from superglm.distributional.smoothing.objective import _penalty_lambdas
 from superglm.distributional.smoothing.penalty_face import PenaltyFace, build_penalty_face
 from superglm.distributional.solver.chunks import ChunkSize
@@ -137,14 +140,6 @@ def _endpoint_retained_curvature(result: DenseSolverResult) -> NDArray[np.float6
     if result.coefficient_face is None:
         return result.terminal_penalized_curvature
     return result.coefficient_face.reduce_matrix(result.terminal_penalized_curvature)
-
-
-def _endpoint_retained_kkt_relative(result: DenseSolverResult) -> float:
-    objective = result.penalized_optimizing_log_likelihood
-    assert objective is not None
-    retained_score = _endpoint_retained_score(result)
-    score_norm = float(np.max(np.abs(retained_score), initial=0.0))
-    return score_norm / (1.0 + abs(objective))
 
 
 def _endpoint_retained_rank_provenance(
