@@ -640,6 +640,8 @@ def test_public_tweedie_reml_uses_an_honest_practical_plateau_by_default() -> No
         finding for finding in report.findings if finding.code == "smoothing.trajectory_unsettled"
     )
     assert "quick stopping rule" in uncertified.headline.lower()
+    assert "approximate plateau" in uncertified.observed.lower()
+    assert "fitted distribution parameters" in uncertified.observed.lower()
     assert "quick rule" in unsettled.headline.lower()
     assert "did not settle" not in unsettled.interpretation.lower()
     assert unsettled.impacts == ("smoothing_selection",)

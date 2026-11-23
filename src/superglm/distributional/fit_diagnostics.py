@@ -793,7 +793,7 @@ _EXTRA_CHECK_CAUSES = (
     "accurately"
 )
 _SETTLE_OBSERVED = (
-    "At the end, the largest change to a smoothing parameter was {residual} on the log scale "
+    "At the end, the largest Fellner–Schall residual was {residual} on the log scale "
     "({change}), above the set limit of {tolerance}."
 )
 _LOOSE_SMOOTHING = (
@@ -820,12 +820,10 @@ def _stop_wording(kind: StopKind) -> dict[str, str]:
     if kind == "practical":
         return {
             "termination.severity": "info",
-            "termination.headline": (
-                "The search stopped under the quick stopping rule, not the strict one."
-            ),
+            "termination.headline": "The quick stopping rule found an approximate plateau.",
             "termination.observed": (
-                "The REML score and the smoothing parameters stopped changing by more than the "
-                "quick rule's threshold. The strict check was not passed."
+                "At the approximate plateau, the REML objective and fitted distribution "
+                "parameters changed little across the stopping window."
             ),
             "termination.interpretation": (
                 "This is the fast rule you asked for, not a failure, and the fitted numbers are "
@@ -898,8 +896,8 @@ def _stop_wording(kind: StopKind) -> dict[str, str]:
         "termination.severity": "warning",
         "termination.headline": "The search converged, but one extra check was not passed.",
         "termination.observed": (
-            "Both the coefficient fit and the smoothing search report convergence, but the extra "
-            "check that the stop was at a true optimum failed."
+            "Both the coefficient fit and the smoothing search report convergence. An extra "
+            "check on the reliability of the stop failed."
         ),
         "termination.interpretation": (
             "The fitted values are usable, but the stronger guarantee is not available. "
@@ -1970,11 +1968,18 @@ def diagnose_distributional_fit(
         if context.smoothing is None
         else "Checked: how the smoothing search went, and which terms were smoothed away."
     )
-    stationary_coverage = (
-        (_stationary_statement(context.smoothing),)
-        if context.smoothing is not None and context.smoothing.convergence_reason == "stationary"
-        else ()
-    )
+    stop_coverage = ()
+    smoothing = context.smoothing
+    if smoothing is not None and smoothing.converged:
+        if smoothing.convergence_reason == "stationary":
+            stop_coverage = (_stationary_statement(smoothing),)
+        elif smoothing.convergence_reason in ("lambda_change", "objective_plateau"):
+            stop_coverage = (
+                "The smoothing search met the Fellner–Schall fixed-point tolerance. "
+                f"The largest remaining log-scale residual is "
+                f"{smoothing.terminal_convergence_max_log_residual:.3g}, against an allowed "
+                f"{smoothing.config.tolerance:.3g}.",
+            )
     return FitDiagnosticReport(
         schema_version=2,
         rule_set_version=1,
@@ -1991,7 +1996,7 @@ def diagnose_distributional_fit(
             "Checked: whether the final coefficient fit converged, how many coefficient "
             "combinations the data pins down, and the curvature.",
             smoothing_coverage,
-            *stationary_coverage,
+            *stop_coverage,
         ),
         limitations=(
             "This check did not look at your rows, responses, weights, exposures or levels.",

@@ -57,9 +57,7 @@ _MAX_JSON_NODES = 256
 
 # One sentence per fit status; the status code stays beside it for code that compares it.
 _STATUS_SENTENCES = {
-    "converged_certified": (
-        "Converged. The smoothing search reached an optimum and passed its own check."
-    ),
+    "converged_certified": "Converged. The smoothing search passed its own check.",
     "converged_exact_face": (
         "Converged. At least one term was smoothed as far as its penalty allows."
     ),
