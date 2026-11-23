@@ -621,7 +621,8 @@ _RECORDED_SEPARATION_CASES = (
     ],
 )
 def test_a_fit_outside_the_rule_keeps_the_data_rule(case):
-    """Controls: each fit shows a standard error exactly where the data alone determine one.
+    """Controls: each fit shows a standard error exactly where the data alone determine one,
+    and blanks a coefficient it records as separated, as ``summary()`` does.
 
     They pass on master, and must after it: the rule that shows every standard error of a
     certified fit reaches none of them.  The reference is the data's null space from a dense
@@ -705,6 +706,11 @@ def test_a_fit_outside_the_rule_keeps_the_data_rule(case):
         _fit(model, frame, y, method="fit_reml" if case == "monotone_reml" else "fit")
     if open_to_the_data is None:
         open_to_the_data = data_undetermined(model, frame)
+    from superglm.model.separated_levels import separated_coefficients
+
+    separated = separated_coefficients(model._groups, model._specs, model._interaction_specs)
+    if separated is not None:
+        open_to_the_data = open_to_the_data | separated[:-1]
     assert open_to_the_data.any()
     for rows in (frame, frame.copy()):
         se = _flat(model, model.metrics(rows, y, **options).coefficient_se)

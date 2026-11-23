@@ -228,6 +228,8 @@ class EvaluationDesign:
         self._model = model
         self._X = as_eager_frame(X)
         self._selected_columns = np.asarray(selected_columns, dtype=np.intp)
+        held = getattr(model.result, "held_level_columns", ())
+        self._held = np.flatnonzero(np.isin(self._selected_columns, held)) if held else ()
         self._shift = np.zeros(len(self._selected_columns)) if shift is None else shift
         self.n = len(self._X)
         self.p = len(self._selected_columns)
@@ -270,6 +272,8 @@ class EvaluationDesign:
                 self._selected_columns,
             )
             block += self._shift
+            if len(self._held):
+                block[:, self._held] = 0.0
             yield start, stop, block
 
     def toarray(self) -> NDArray:

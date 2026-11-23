@@ -22,6 +22,7 @@ from numpy.typing import NDArray
 
 from superglm._roundoff import EPS as _EPS_FLOAT
 from superglm._roundoff import gamma as _gamma
+from superglm.links import _BINOMIAL_CLIP_MU_EPS
 from superglm.solvers.irls_state import (
     _IRLSState,
     _mean_space_halving_budget,
@@ -180,6 +181,13 @@ class _IRLSDirectMeanSpaceOverlay:
         """
         family, link, y, weights = fit.family, fit.link, fit.y, fit.weights
         eta = committed.eta_unclipped
+        if not self.engaged:
+            # A lower-clipped event has a score near w*y but a flat clipped
+            # deviance. Use its true likelihood, also past the eta guard.
+            deep_event = (y > 0.0) & (fit.eta < math.log(_BINOMIAL_CLIP_MU_EPS))
+            if not np.any((weights > 0.0) & (deep_event | (eta < fit.eta))):
+                return None
+            self.engaged = True
         self._committed_rows = None
         if mean_space_boundary_rows(family, link, eta, weights):
             return None

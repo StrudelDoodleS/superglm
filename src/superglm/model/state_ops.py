@@ -16,6 +16,7 @@ from superglm.inference.covariance import (
     StructuredSlopeCovarianceAccessor,
 )
 from superglm.model.fit_state import fitted_lambda2, fitted_penalty
+from superglm.model.reml_level_hold import inference_design
 from superglm.model.retired_state import retained_linear_state
 from superglm.solvers._structured.balance_tree import (
     ProfiledSumToZeroTreeFactor,
@@ -111,7 +112,7 @@ def _grouped_active_state(model, selected_names: set[str]):
     active_matrices = []
     rebuilt_columns: list[int] = []
     col = 0
-    for gm, group in zip(model._dm.group_matrices, model._groups, strict=True):
+    for gm, group in zip(inference_design(model).group_matrices, model._groups, strict=True):
         if group.name not in selected_names:
             continue
         active_matrices.append(gm)
@@ -487,7 +488,7 @@ def fit_active_info(model):
             model,
             linear_state,
         )
-        return model._dm, W, inverse, augmented, active_groups
+        return inference_design(model), W, inverse, augmented, active_groups
     if solver.rank_info is not None:
         X_active, active_groups = _rank_active_state(model, solver.rank_info)
         inverse = solver.rank_info.coefficient_inverse()
