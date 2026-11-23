@@ -125,6 +125,71 @@ def test_population_layer_matches_the_570_probe(monkeypatch):
     assert total == pytest.approx(below + above, rel=2e-13)
 
 
+def _partial_moment_layer(moments, a, w, u, q):
+    a, w, u, q = map(mpmath.mpf, (a, w, u, q))
+    b = a + w
+    mass, first_moment = moments(a, b)
+    capped_mass, _ = moments(b, u)
+    normalizer, _ = moments(0, u)
+    return float(q * w + (1 - q) * (first_moment - a * mass + w * capped_mass) / normalizer)
+
+
+def test_gamma_layers_against_partial_moments(monkeypatch, fitted):
+    cases = [
+        (1.0001452528582397, 0.009445593735401357, 0.999, 50.0, 1e-8),
+        (1.0001452528582397, 0.009445593735401357, 10.0, 50.0, 1e-8),
+        (1.0, 0.009, 1.0, 1e-5, 0.0),
+        (20.0, 1.2, 0.9, 1e-10, 0.0),
+        (20.0, 1.2, 10.0, 75.0, 0.02),
+        (0.2, 1 / np.sqrt(2), 40.0, 50.0, 0.0),
+    ]
+    X = _frame(1)
+    u = fitted.threshold
+    with mpmath.workdps(50):
+        for mean, cv, a, w, q in cases:
+            shape = 1 / mpmath.mpf(cv) ** 2
+            scale = mpmath.mpf(mean) / shape
+
+            def moments(lo, hi):
+                return (
+                    mpmath.gammainc(shape, lo / scale, hi / scale, regularized=True),
+                    mean * mpmath.gammainc(shape + 1, lo / scale, hi / scale, regularized=True),
+                )
+
+            _population(monkeypatch, fitted, (mean, cv), (5, 0.2), q)
+            expected = _partial_moment_layer(moments, a, w, u, q)
+            assert fitted.predict_layer(X, a, w)[0] == pytest.approx(expected, rel=2e-10, abs=0)
+
+
+def test_lognormal_layers_against_partial_moments(monkeypatch):
+    X, y, u = _sample(800)
+    fitted = _fit(X, 10 * y, 10 * u, _components(LogNormalLS(parametrisation="location")))
+    cases = [
+        (0.0, 0.011, 1.0, 999.0, 0.0),
+        (0.0009701, 0.0113818, 0.999, 999.0, 0.1),
+        (0.0, 0.011, 10.0, 500.0, 1e-8),
+        (0.0, 0.011, 1.0, 1e-9, 0.0),
+        (2.0, 1.5, 10.0, 150.0, 0.02),
+        (0.0, 0.2, 80.0, 800.0, 0.0),
+    ]
+    with mpmath.workdps(50):
+        for mu, sigma, a, w, q in cases:
+            mu_mp, sigma_mp = map(mpmath.mpf, (mu, sigma))
+            mean = mpmath.exp(mu_mp + sigma_mp**2 / 2)
+
+            def moments(lo, hi):
+                z_lo = (mpmath.log(lo) - mu_mp) / sigma_mp
+                z_hi = (mpmath.log(hi) - mu_mp) / sigma_mp
+                return (
+                    mpmath.ncdf(-z_lo) - mpmath.ncdf(-z_hi),
+                    mean * (mpmath.ncdf(sigma_mp - z_lo) - mpmath.ncdf(sigma_mp - z_hi)),
+                )
+
+            _population(monkeypatch, fitted, (mu, sigma), (5, 0.2), q)
+            expected = _partial_moment_layer(moments, a, w, fitted.threshold, q)
+            assert fitted.predict_layer(X[:1], a, w)[0] == pytest.approx(expected, rel=2e-10, abs=0)
+
+
 @pytest.mark.parametrize("lognormal", [False, True])
 def test_narrow_deep_body_layers_and_deep_left_normalization(monkeypatch, fitted, lognormal):
     X = _frame(4)

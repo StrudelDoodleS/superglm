@@ -18,6 +18,7 @@ from superglm.distributional.families.gamma import GammaLS
 from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
 from superglm.distributional.families.log_normal import LogNormalLS
 from superglm.distributional.kernels._gamma_windows import gamma_shape_scale_window_jets
+from superglm.distributional.kernels._severity_primitives import logratio
 from superglm.distributional.response import validated_response_array
 from superglm.distributional.weights import WeightContract, _weight_values
 from superglm.distributions import Binomial, resolve_distribution
@@ -172,39 +173,67 @@ def _log_body_moment(family: _Body, a: ArrayLike, b: ArrayLike, theta: NDArray) 
     return log_mean + _log_window(_LOCATION_LOG_NORMAL, a, b, shifted)
 
 
-def _ramp_fraction(family: _Body, a: float, w: float, theta: NDArray) -> float:
-    """E[(Y-a)/w | a < Y <= a+w] when subtracting moments loses precision."""
+def _log_ramp_mean(family: _Body, a: float, w: float, theta: NDArray) -> float:
+    """Log of E[Y-a | a < Y <= a+w] when subtracting moments loses precision."""
+    # In log response the normalizing mass is proportional to a Gamma
+    # density times y, or a normal density for the lognormal.
+    ratio = w / a
+    end = np.log1p(ratio) if np.isfinite(ratio) else np.log(w) - np.log(a)
     first, second = theta
     if isinstance(family, GammaLS):
         shape = 1.0 / (second * second)
-        scale = first / shape
-        peak = np.clip(((shape - 1.0) * scale - a) / w, 0.0, 1.0)
+        mode = logratio(first, a)
+        peak = np.clip(mode, 0.0, end)
+        offset = peak - mode
+        rate = np.exp(np.log(shape) + offset)
+        slope = -shape * np.expm1(offset) if abs(offset) < 0.5 else shape - rate
+        scale = 1.0 / max(1.0, abs(slope), np.sqrt(rate))
 
-        def log_density(t):
-            return (shape - 1.0) * np.log1p(t * (w / a)) - t * (w / scale)
+        def log_density(delta):
+            # exp(d)-1-d = d² * 1F1(1;3;d)/2, stable near the peak.
+            if abs(delta) < 0.5:
+                curvature = (rate * delta) * delta * (0.5 * special.hyp1f1(1, 3, delta))
+            else:
+                curvature = rate * (np.expm1(delta) - delta)
+            return slope * delta - curvature
     else:
         mu, sigma = _log_normal_coordinates(family, theta[None, :])
-        z0 = (np.log(a) - mu[0]) / sigma[0]
-        relative_mode = mu[0] - sigma[0] ** 2 - np.log(a)
-        peak = np.clip(np.expm1(min(relative_mode, np.log1p(w / a))) * (a / w), 0.0, 1.0)
+        mode = mu[0] - np.log(a)
+        peak = np.clip(mode, 0.0, end)
+        z_peak = (peak - mode) / sigma[0]
+        scale = min(1.0, sigma[0] / max(1.0, abs(z_peak)))
 
-        def log_density(t):
-            log_ratio = np.log1p(t * (w / a))
-            shift = log_ratio / sigma[0]
-            return -shift * (z0 + 0.5 * shift) - log_ratio
+        def log_density(delta):
+            shift = delta / sigma[0]
+            return -shift * (z_peak + 0.5 * shift)
 
-    maximum = log_density(peak)
+    # The slope and curvature at the clipped mode set the local width.
+    # Map each side separately by distance = scale*t/(1-t), so even a
+    # window many widths across spends quadrature nodes near the mode.
+    mass = ramp = 0.0
+    pivot = min(end, peak + scale)
+    log_expm1_pivot = np.log(-np.expm1(-pivot))
+    for sign, extent in ((-1, peak), (1, end - peak)):
+        if extent <= 0.0:
+            continue
+        bound = extent / (scale + extent)
 
-    def density(t):
-        return np.exp(log_density(t) - maximum)
+        def integrand(t, payout):
+            delta = sign * scale * (t / (1.0 - t))
+            log_weight = log_density(delta) - 2.0 * np.log1p(-t)
+            if payout:
+                x = min(peak + delta, end)
+                if x <= 0.0:
+                    return 0.0
+                # Divide expm1(x) by expm1(pivot) before integrating.
+                log_weight += x - pivot + np.log(-np.expm1(-x)) - log_expm1_pivot
+            return np.exp(log_weight)
 
-    # Scale both integrals by the peak density. The analytically evaluated
-    # window supplies the mass, so only the conditional fraction is integrated.
-    mass = integrate.quad(density, 0, 1, points=[peak], epsabs=0, epsrel=1e-10)[0]
-    ramp = integrate.quad(lambda t: t * density(t), 0, 1, points=[peak], epsabs=0, epsrel=1e-10)[0]
-    if not 0.0 < mass or not 0.0 <= ramp <= mass:
+        mass += integrate.quad(integrand, 0.0, bound, args=(False,), epsabs=0, epsrel=1e-10)[0]
+        ramp += integrate.quad(integrand, 0.0, bound, args=(True,), epsabs=0, epsrel=1e-10)[0]
+    if not (0.0 < mass < np.inf and 0.0 < ramp < np.inf):
         raise ArithmeticError("body layer moment could not be resolved in float64")
-    return ramp / mass
+    return np.log(a) + pivot + log_expm1_pivot + np.log(ramp / mass)
 
 
 def _body_layer(family: _Body, a: NDArray, w: NDArray, u: float, theta: NDArray) -> NDArray:
@@ -220,10 +249,16 @@ def _body_layer(family: _Body, a: NDArray, w: NDArray, u: float, theta: NDArray)
         norm = log_norm[rows]
         with np.errstate(divide="ignore", invalid="ignore"):
             gap = np.log(lo) + log_mass - log_moment
-            value = np.exp(log_moment - norm) * -np.expm1(np.minimum(gap, 0.0))
-        for i in np.flatnonzero((lo > 0) & ((gap > -0.01) | ~np.isfinite(value))):
-            fraction = _ramp_fraction(family, float(lo[i]), float(width[i]), params[i])
-            value[i] = np.exp(log_mass[i] - norm[i] + np.log(width[i])) * fraction
+            log_value = log_moment - norm + np.log(-np.expm1(np.minimum(gap, 0.0)))
+        value = np.exp(log_value)
+        # The ramp is at most width times its conditional probability.
+        log_bound = log_mass - norm + np.log(width)
+        negligible = log_bound <= _LOG_HALF_SMALLEST
+        value[negligible] = 0.0
+        fallback = (lo > 0) & ~negligible & ((gap > -0.01) | ~np.isfinite(value))
+        for i in np.flatnonzero(fallback):
+            log_ramp = _log_ramp_mean(family, float(lo[i]), float(width[i]), params[i])
+            value[i] = np.exp(log_mass[i] - norm[i] + log_ramp)
         ramp[rows] = value
     return np.minimum(above + ramp, w)
 
