@@ -21,10 +21,89 @@ from superglm.distributional.results.solver import (
 from superglm.distributional.smoothing.penalty_face import build_penalty_face
 from superglm.distributional.solver import solver
 from superglm.distributional.solver.shape import _face_of
-from superglm.features import Numeric, RandomEffect
+from superglm.features import Numeric, RandomEffect, Spline
 from superglm.group_matrix import DesignMatrix, SparseGroupMatrix
+from superglm.solvers.rank import RankDecomposition
 
 from ._distributional_weights import resolved_prior
+from .test_distributional_endpoint_laml import _UnitGaussian
+
+
+@pytest.mark.parametrize("chunk_size", [None, 11], ids=["dense", "chunked"])
+@pytest.mark.pins_behaviour
+def test_a_whitened_spline_resolves_a_contrast_on_its_rare_rows(chunk_size):
+    """Pin the Gaussian least-squares predictions for a score above tolerance
+    in the compiler's unit SSP coordinates. A rare large row must not hide it.
+    """
+    x = np.r_[np.linspace(0, 0.2, 256), np.linspace(0.2, 1, 24)]
+    weights = resolved_prior(np.ones(len(x)))
+    family = _UnitGaussian()
+    layout = build_stacked_layout(
+        compile_predictors(
+            as_eager_frame(pd.DataFrame({"x": x})),
+            weights,
+            family.parameters,
+            (Predictor("mean", {"x": Spline(kind="cr", k=6)}),),
+        )
+    )
+    (design,) = solver.dense_predictor_matrices(layout)
+    radius = np.ptp(design, axis=0) / 2
+    j = np.argmax(radius)
+    assert radius[j] > 2
+    # Choose y in the column space with just this slope's initial score.
+    tol = 1e-5
+    score = np.zeros(design.shape[1])
+    score[j] = 2 * tol
+    y = np.linalg.lstsq(design.T, score, rcond=None)[0]
+    fit = solver.fit_dense_fixed_lambda(
+        family,
+        layout,
+        y,
+        family.bind_likelihood(y, weights, COMPLETE_OBSERVATION),
+        np.zeros((len(score), len(score))),
+        initial=np.zeros_like(score),
+        config=solver.DenseSolverConfig(tolerance=tol),
+        chunk_size=chunk_size,
+    )
+    assert fit.converged
+    np.testing.assert_allclose(fit.eta[:, 0], y, rtol=0, atol=1e-7 * np.max(np.abs(y)))
+
+
+@pytest.mark.pins_behaviour
+def test_well_conditioned_terminal_score_needs_no_extra_solve(monkeypatch):
+    """Pin the solve count after the rank decision on this Gaussian with unit design spread."""
+    z = np.tile([-1.0, -1.0, 1.0, 1.0], 16)
+    y = 0.25 * z + np.tile([-1.0, 1.0], 32)
+    certified = solver._certified_terminal_curvature
+    solve = RankDecomposition.solve
+    factors = []
+    extra_solves = []
+
+    def terminal(*args):
+        decision = certified(*args)
+        factors.append(decision.decomposition)
+        return decision
+
+    def counted(rank, rhs):
+        if any(rank is factor for factor in factors):
+            extra_solves.append(rank)
+        return solve(rank, rhs)
+
+    monkeypatch.setattr(solver, "_certified_terminal_curvature", terminal)
+    monkeypatch.setattr(RankDecomposition, "solve", counted)
+    X = as_eager_frame(pd.DataFrame({"x": z}))
+    family = GaussianLS(scale_floor=0)
+    weights = resolved_prior(np.ones(len(z)))
+    plan = family.bind_likelihood(y, weights, COMPLETE_OBSERVATION)
+    predictors = (Predictor("location", {"x": Numeric()}), Predictor("scale", {}))
+    layout = build_stacked_layout(compile_predictors(X, weights, family.parameters, predictors))
+    # The analytic MLE with a sub-tolerance, nonzero perturbation of the slope.
+    fit = solver.fit_dense_fixed_lambda(
+        family, layout, y, plan, np.zeros((3, 3)), initial=np.array([0.0, 0.25 + 1e-9, 0.0])
+    )
+    assert fit.converged
+    np.testing.assert_allclose(fit.eta[:, 0], 0.25 * z, atol=1e-7)
+    assert factors and not extra_solves
 
 
 def test_a_small_resolvable_correction_is_taken_in_either_unit(monkeypatch):
@@ -125,7 +204,9 @@ def test_same_direction_has_the_same_score_in_different_units(
     space, intercept, chunked, monkeypatch
 ):
     """A nonzero intercept score must be removed from the shifted slope's score."""
-    z = np.tile([-1.0, 1.0], 16)
+    # Both extrema lie in the last partial seven-row chunk.
+    z = np.zeros(32)
+    z[-2:] = [-1.0, 1.0]
     y = np.arange(len(z), dtype=float)
     weights = resolved_prior(np.ones(len(z)))
     family = GaussianLS()

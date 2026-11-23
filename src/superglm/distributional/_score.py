@@ -44,36 +44,39 @@ class ScoreUnits:
 
     @classmethod
     def from_layout(cls, layout: StackedLayout, dense_matrices, chunk_size) -> ScoreUnits:
-        """The fixed design's midranges and radii, shared within one fit session.
+        """Representative units of the fixed design, shared within one fit session.
 
-        A slope of 1 / radius moves its predictor by one on the centred
-        column. Without an intercept its origin is fixed at zero. Extrema
-        keep the spread of a column far from zero without subtracting moments.
+        The compiler whitens an SSP spline using its normalized Gram plus penalty.
+        Keep those coordinates: a rare large spline row should not shrink its
+        score. For columns supplied in their own units, a slope of 1 / radius
+        moves the centred predictor by one. Without an intercept its origin is
+        fixed at zero. Extrema avoid subtracting nearly equal column moments.
         """
         centre = np.zeros(layout.n_coefficients)
         spread = np.ones(layout.n_coefficients)
         intercept = np.arange(layout.n_coefficients)
         for q, state in enumerate(layout.predictors):
-            if not state.design.p:
-                continue
-            start = state.coefficient_slice.start + int(state.intercept_index is not None)
-            slopes = slice(start, state.coefficient_slice.stop)
-            if dense_matrices is None:
-                limits = [_group_limits(group, chunk_size) for group in state.design.group_matrices]
-                low, high = (np.concatenate(parts) for parts in zip(*limits, strict=True))
-            else:
-                matrix = dense_matrices[q][:, int(state.intercept_index is not None) :]
-                low, high = np.min(matrix, axis=0), np.max(matrix, axis=0)
-            low = np.asarray(low, dtype=np.float64)
-            high = np.asarray(high, dtype=np.float64)
-            if state.intercept_index is not None:
-                intercept[slopes] = state.intercept_index
-                centre[slopes] = 0.5 * low + 0.5 * high
-            radius = np.maximum(high - centre[slopes], centre[slopes] - low)
-            # A constant column has no data variation. Keep its own units for
-            # a penalty score along that alias. An all-zero column uses one.
-            scale = np.where(radius > 0.0, radius, np.abs(low))
-            spread[slopes] = np.where(scale > 0.0, scale, 1.0)
+            offset = int(state.intercept_index is not None)
+            start = state.coefficient_slice.start + offset
+            for group, block in zip(state.groups, state.design.group_matrices, strict=True):
+                if group.ssp_spline:
+                    continue
+                slopes = slice(start + group.start, start + group.end)
+                if dense_matrices is None:
+                    low, high = _group_limits(block, chunk_size)
+                else:
+                    columns = dense_matrices[q][:, offset + group.start : offset + group.end]
+                    low, high = np.min(columns, axis=0), np.max(columns, axis=0)
+                low = np.asarray(low, dtype=np.float64)
+                high = np.asarray(high, dtype=np.float64)
+                if state.intercept_index is not None:
+                    intercept[slopes] = state.intercept_index
+                    centre[slopes] = 0.5 * low + 0.5 * high
+                radius = np.maximum(high - centre[slopes], centre[slopes] - low)
+                # A constant column has no data variation. Keep its own units for
+                # a penalty score along that alias. An all-zero column uses one.
+                scale = np.where(radius > 0.0, radius, np.abs(low))
+                spread[slopes] = np.where(scale > 0.0, scale, 1.0)
         for values in (centre, spread, intercept):
             values.setflags(write=False)
         return cls(centre, spread, intercept)

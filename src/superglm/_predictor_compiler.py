@@ -520,6 +520,11 @@ def compile_predictor_design(
                     penalized=info.penalized,
                     feature_name=name,
                     subgroup_type=info.subgroup_name,
+                    ssp_spline=(
+                        type(spec) in _BUILT_IN_SPLINES
+                        and info.reparametrize
+                        and info.penalty_matrix is not None
+                    ),
                     constraints=info.constraints,
                     monotone_engine=info.monotone_engine,
                 )
