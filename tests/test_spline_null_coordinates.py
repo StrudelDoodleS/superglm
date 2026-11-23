@@ -32,6 +32,9 @@ import pandas as pd
 import pytest
 
 from superglm import LambdaPolicy, Numeric, Spline, SuperGLM
+from superglm.features._spline_penalties import _polynomial_coefficients
+from superglm.features.spline import PSpline
+from superglm.reml.scale import profile_gaussian_reml_scale
 
 U = 2.0**-53
 FIXED_LAMBDA = 3000.0
@@ -247,11 +250,13 @@ def test_nested_penalties_share_the_null_coordinates(kind, discrete):
         assert np.max(np.abs(residual)) <= 2**8 * U * np.max(np.abs(curve))
 
 
+@pytest.mark.pins_behaviour
 def test_penalties_whose_null_spaces_do_not_nest_keep_their_own():
     """``ps`` with ``m=(2, 4)`` fits its two penalties as built.
 
-    On quantile knots ``d2`` is the projected difference penalty, whose null
-    space is the polynomials, while ``d4`` (above the degree) keeps the
+    Pins the fallback to data coordinates when component null spaces do not
+    nest. On quantile knots ``d2`` is the projected difference penalty, whose
+    null space is the polynomials, while ``d4`` (above the degree) keeps the
     standard one, whose null space is the integer sequences ``j**p``: the
     line is not in it, so no coordinates hold both null spaces on leading
     axes and the term keeps the data's. The reference is the dense penalised
@@ -284,11 +289,12 @@ def test_penalties_whose_null_spaces_do_not_nest_keep_their_own():
     assert np.max(np.abs(fitted - exact) / np.abs(exact)) <= 2**16 * U
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.slow
 @pytest.mark.parametrize("amplitude", [0.08, 0.09])
 @pytest.mark.parametrize("kind", ["cr", "cr_cardinal"])
 def test_the_stored_reml_optima_are_the_oracles(kind, amplitude):
-    """Both kinds place the same knots here, so they share the optimum."""
+    """Pins that ``LAMBDA_STAR`` matches the independent mpmath REML optimum on both kinds."""
     frame, y = _fixture(amplitude)
     model = _model(kind)
     with warnings.catch_warnings():
@@ -298,9 +304,10 @@ def test_the_stored_reml_optima_are_the_oracles(kind, amplitude):
     assert optimum == pytest.approx(LAMBDA_STAR[amplitude], rel=1e-12)
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("kind", ["cr", "bs", "ps"])
 def test_a_null_space_its_rows_cannot_see_stays_unfitted(kind):
-    """A spline on one observed value predicts that value's fit everywhere on its range.
+    """Pins the distinct-value guard: a one-value spline keeps data coordinates and stays flat.
 
     Its null directions are unpenalised and its rows cannot see them, so their
     columns are rounding; the term then declares no null basis and keeps its
@@ -323,16 +330,18 @@ def test_a_null_space_its_rows_cannot_see_stays_unfitted(kind):
     assert np.ptp(predictions) <= 2**10 * U * np.max(np.abs(y))
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("kind", ["bs", "ps"])
 def test_a_basis_function_no_row_reaches_keeps_its_exact_zero_column(kind):
-    """A gap in ``x`` empties six basis functions, whose solver columns stay exactly zero.
+    """Pins the empty-support guard: unreached basis functions keep exact zero solver columns.
 
-    Unpenalised, they are what the fit's rank leaves out, counted exactly. A
-    rotation onto the null basis would mix them into every column at rounding
-    (the polynomials reach inside and outside the gap), so the term keeps the
-    data's coordinates. Mutation: declaring the null basis anyway leaves no
-    zero column, and the constrained QP of ``test_constrained_qp``'s gap
-    fixture then counts rank 14 of 19 for 13.
+    A gap in ``x`` empties six basis functions, whose solver columns stay
+    exactly zero. Unpenalised, they are what the fit's rank leaves out, counted
+    exactly. A rotation onto the null basis would mix them into every column at
+    rounding (the polynomials reach inside and outside the gap), so the term
+    keeps the data's coordinates. Mutation: declaring the null basis anyway
+    leaves no zero column, and the constrained QP of ``test_constrained_qp``'s
+    gap fixture then counts rank 14 of 19 for 13.
     """
     x = np.concatenate([np.linspace(0.0, 0.2, 60), np.linspace(0.8, 1.0, 60)])
     y = np.exp(0.5 + 2.0 * x)
@@ -347,17 +356,19 @@ def test_a_basis_function_no_row_reaches_keeps_its_exact_zero_column(kind):
     assert np.count_nonzero(~np.any(columns != 0.0, axis=0)) == 6
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("kind", ["bs", "ps"])
 def test_a_null_direction_centring_cancels_keeps_the_datas_coordinates(kind):
-    """On ``x`` within 1e-8 of 0.5, beside ``u = x``, the fit is the least squares line.
+    """Pins the centring-cancellation guard: a nearly-constant line beside ``u = x`` keeps rank 3.
 
-    The centred line's column is 1.8e-9 of the basis's, under ``sqrt(u)``, so
-    the basis's rounding is ``6.6e-8`` of it, above the fit's ``sqrt(eps)`` rank
-    cut: on the line's own coordinate the fit counted it apart from ``u``
-    (which it equals exactly), rank 4 of 3, with coefficients near 1e13 and
-    fitted values 4e-3 off the line. The term declares no null basis and keeps
-    the data's coordinates, where the rank is 3 and the fit is the line to
-    2e-9. Mutation: no cancellation gate in ``declared_null_basis``.
+    On ``x`` within 1e-8 of 0.5, beside ``u = x``, the centred line's column is
+    1.8e-9 of the basis's, under ``sqrt(u)``, so the basis's rounding is
+    ``6.6e-8`` of it, above the fit's ``sqrt(eps)`` rank cut: on the line's own
+    coordinate the fit counted it apart from ``u`` (which it equals exactly),
+    rank 4 of 3, with coefficients near 1e13 and fitted values 4e-3 off the
+    line. The term declares no null basis and keeps the data's coordinates,
+    where the rank is 3 and the fit is the line to 2e-9. Mutation: no
+    cancellation gate in ``declared_null_coordinates``.
     """
     a = np.linspace(-1.0, 1.0, 80)
     frame = pd.DataFrame({"x": 0.5 + 1e-8 * a, "u": 0.5 + 1e-8 * a})
@@ -375,3 +386,153 @@ def test_a_null_direction_centring_cancels_keeps_the_datas_coordinates(kind):
     exact = line @ np.linalg.lstsq(line, y, rcond=None)[0]
     assert model.result.reml_hessian_rank == model._dm.p
     assert np.max(np.abs(model.predict(frame) - exact) / np.abs(exact)) <= 1e-6
+
+
+def _closed_form_large_lambda_reml_objective(spec, x: np.ndarray, y: np.ndarray) -> float:
+    """Exact Gaussian REML objective in the ``lambda -> inf`` limit of SSP coordinates.
+
+    With an exact zero null row in ``omega``, the leading SSP column is
+    ``B u_null / sqrt(G_00 + 1e-8)`` independent of ``lambda``, where ``u_null``
+    is the unit-norm raw B-spline coefficient vector of the centred linear
+    function, and the range block's ``log|H_rr + lambda S_rr| - log|lambda S_rr|``
+    vanishes as ``O(1 / lambda)``.
+    """
+    n = x.size
+    basis = spec._basis_matrix(x).toarray()
+    poly = _polynomial_coefficients(spec._knots, spec.degree, 2)
+    s_col = basis @ poly[:, 1]
+    c_line = poly[:, 1] - float(s_col.mean()) * poly[:, 0]
+    u_null = c_line / np.linalg.norm(c_line)
+    col = basis @ u_null
+    g00 = float(col @ col) / n
+    logdet_null = np.log(n) + np.log(n * g00 / (g00 + 1e-8))
+    design = np.column_stack((np.ones(n), x))
+    beta = np.linalg.lstsq(design, y, rcond=None)[0]
+    rss = float(np.sum((y - design @ beta) ** 2))
+    scale = profile_gaussian_reml_scale(rss, float(n), 2.0, saturated_log_weight=0.0)
+    return float(0.5 * logdet_null + scale.criterion)
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "binned"])
+def test_fixed_1e14_skew_matches_linear_limit_and_exact_zero_null(discrete):
+    """At ``lambda = 1e14`` on skewed quantile knots, EDF, predictions and REML objective match the line.
+
+    On unfixed master, ``P' Omega P`` carries a negative null eigenvalue near
+    ``-1e-6`` that scales by ``1e14`` to ``-1e8``, corrupting ``omega_ssp``:
+    SkylakeX publishes term EDF 2.0000, REML objective -117.36 (20.82 off
+    -96.54) and 3.0% prediction error vs OLS; Haswell publishes REML objective
+    -99.78 (3.25 off -96.54) and 9.1e-5 prediction error. Both kernels fail on
+    unfixed master.
+    """
+    x = np.geomspace(1.0, 1e5, 200)
+    y = 1.0 + x / 1e5 + np.random.default_rng(0).normal(0.0, 0.15, size=x.size)
+    frame = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        discrete=discrete,
+        features={
+            "x": Spline(
+                kind="cr",
+                n_knots=10,
+                knot_strategy="quantile",
+                penalty="ssp",
+                lambda_policy=LambdaPolicy.fixed(1e14),
+            )
+        },
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y)
+
+    (penalty,) = model._reml_penalties
+    assert np.flatnonzero(~np.any(penalty.omega_ssp != 0.0, axis=1)).tolist() == [0]
+    assert model.term_inference("x", with_se=False).edf == pytest.approx(1.0, abs=1e-6)
+
+    design = np.column_stack((np.ones_like(x), x))
+    ols = design @ np.linalg.lstsq(design, y, rcond=None)[0]
+    pred = np.asarray(model.predict(frame))
+    assert np.max(np.abs(pred - ols) / np.abs(ols)) <= 2**16 * U
+
+    exact_obj = _closed_form_large_lambda_reml_objective(model._specs["x"], x, y)
+    assert model._reml_result.objective == pytest.approx(exact_obj, abs=1e-5)
+
+
+def test_fixed_1e14_uniform_matches_exact_reml_objective():
+    """At ``lambda = 1e14`` on uniform knots, the REML objective matches the exact linear limit.
+
+    On unfixed master, null-space rounding in ``M = G + lambda Omega + 1e-8 I``
+    shifts the null whitening factor ``R_00`` differently on each kernel:
+    SkylakeX publishes 347.769 (0.022 above 347.748) and Haswell publishes
+    347.484 (0.264 below 347.748), both failing against the exact limit.
+    """
+    x = np.linspace(0.0, 1.0, 500)
+    y = 1.0 + 0.5 * x + np.random.default_rng(42).normal(0.0, 0.5, size=x.size)
+    frame = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        discrete=False,
+        features={
+            "x": Spline(
+                kind="cr",
+                n_knots=10,
+                penalty="ssp",
+                lambda_policy=LambdaPolicy.fixed(1e14),
+            )
+        },
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y)
+
+    (penalty,) = model._reml_penalties
+    assert np.flatnonzero(~np.any(penalty.omega_ssp != 0.0, axis=1)).tolist() == [0]
+    assert model.term_inference("x", with_se=False).edf == pytest.approx(1.0, abs=1e-6)
+
+    exact_obj = _closed_form_large_lambda_reml_objective(model._specs["x"], x, y)
+    assert model._reml_result.objective == pytest.approx(exact_obj, abs=1e-6)
+
+
+@pytest.mark.pins_behaviour
+def test_spline_subclass_with_custom_penalty_keeps_its_own_penalty():
+    """Pins the built-in type guard: a spline subclass keeps its custom penalty, not the parent's root.
+
+    A subclass of ``PSpline`` overriding ``_build_penalty_for_order`` with a
+    permuted difference penalty has the same rank as ``PSpline`` but a different
+    null space. Without the ``type(spec) not in _BUILT_IN_SPLINES`` guard,
+    ``declared_null_coordinates`` would inherit the parent's null basis and root
+    and silently replace the subclass's penalty.
+    """
+
+    class _PermutedPSpline(PSpline):
+        def _build_penalty_for_order(self, order: int) -> np.ndarray:
+            base = super()._build_penalty_for_order(order)
+            perm = np.arange(base.shape[0])
+            perm[[0, 2, 4, 6]] = perm[[6, 0, 2, 4]]
+            return base[np.ix_(perm, perm)]
+
+    x = np.linspace(0.0, 1.0, 160)
+    y = 1.0 + np.sin(4.0 * np.pi * x) + 0.1 * np.random.default_rng(19).normal(size=x.size)
+    lam = 5.0
+    spec = _PermutedPSpline(n_knots=6, penalty="ssp")
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        spline_penalty=lam,
+        features={"x": spec},
+    ).fit(pd.DataFrame({"x": x}), y)
+
+    fitted_spec, group = model._specs["x"], model._dm.group_matrices[0]
+    assert getattr(group, "R_inv_local", None) is None
+    P = group.projection
+    columns = np.column_stack([np.ones_like(x), fitted_spec._basis_matrix(x).toarray() @ P])
+    raw = fitted_spec._build_penalty_for_order(2)
+    penalty = np.zeros((columns.shape[1], columns.shape[1]))
+    penalty[1:, 1:] = lam * P.T @ raw @ P
+    values, vectors = np.linalg.eigh(penalty)
+    root = np.sqrt(np.maximum(values, 0.0))[:, None] * vectors.T
+    coef = np.linalg.lstsq(np.vstack([columns, root]), np.r_[y, np.zeros(len(root))], rcond=None)[0]
+    exact = columns @ coef
+    fitted = np.asarray(model.predict(pd.DataFrame({"x": x})))
+    assert np.max(np.abs(fitted - exact) / np.abs(exact)) <= 2**16 * U

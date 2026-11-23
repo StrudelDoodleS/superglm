@@ -273,6 +273,7 @@ class TestShapePenaltyInEDF:
 class TestMonotoneEdgeOfRange:
     """A fit whose maximum is at the edge of the link's range never raises."""
 
+    @pytest.mark.pins_behaviour
     @pytest.mark.parametrize("seed", [2, 15])
     def test_poisson_identity_increasing_pspline_publishes_its_faces_edf(self, monkeypatch, seed):
         """Zero counts below ``x = 0.3`` put the maximum at a mean of zero.

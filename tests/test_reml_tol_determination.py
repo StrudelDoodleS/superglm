@@ -1891,6 +1891,7 @@ class TestNewtonStepStop:
         assert "reml_newton_step_stop" not in model._reml_profile
         assert not model.reml_diagnostics()["converged"]
 
+    @pytest.mark.pins_behaviour
     def test_a_cached_weight_stop_waits_for_a_settled_working_mode(self, monkeypatch):
         """Small steps at weights still moving prove nothing: the stop waits for a settled mode.
 
