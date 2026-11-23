@@ -259,6 +259,19 @@ def _fitted_null_intercept(
     return float(result.intercept)
 
 
+def _binomial_logit_fisher(
+    distribution: Binomial, link: LogitLink, mu: NDArray, eta: NDArray, sample_weight: NDArray
+) -> tuple[NDArray, NDArray]:
+    """Return the working slope and Fisher weight at the represented probabilities."""
+    # For the canonical logit, the working slope is V(p) at the raw fitted
+    # probability. It cancels one V(mu) exactly unless clip_mu moved the mean.
+    # Using the analytic tail derivative here would mix two different rounded
+    # probabilities in one row. Apply mass last to preserve subnormal weights.
+    slope = distribution.variance(link.inverse(eta))
+    variance = np.maximum(distribution.variance(mu), _VARIANCE_FLOOR)
+    return slope, sample_weight * (slope * (slope / variance))
+
+
 def fisher_working_weights(
     *,
     distribution: object,
@@ -275,9 +288,9 @@ def fisher_working_weights(
     eta. Their algebraic reductions keep unweighted curvature in range and
     avoid recomputing the inverse link. Exact types preserve custom variance
     and link overrides. Poisson/sqrt uses the exact 4w curvature, including at
-    zero, with the unfloored working response in ``_fisher_rows``. Other pairs
-    retain the variance floor and their actual inverse-link derivative,
-    including when the mean has been clipped.
+    zero, with the unfloored working response in ``_fisher_rows``. Binomial/logit
+    uses the canonical slope at the raw represented probability. Other pairs
+    use their inverse-link derivative even when the mean has been clipped.
     """
     family_type, link_type = type(distribution), type(link)
     if (family_type is Gaussian and link_type is IdentityLink) or (
@@ -286,6 +299,8 @@ def fisher_working_weights(
         return np.array(sample_weight, dtype=np.float64, copy=True)
     if family_type is Poisson and link_type is SqrtLink:
         return 4.0 * sample_weight
+    if type(distribution) is Binomial and type(link) is LogitLink:
+        return _binomial_logit_fisher(distribution, link, mu, eta, sample_weight)[1]
     if link_type is LogLink:
         if family_type is Poisson:
             return sample_weight * mu
@@ -306,11 +321,6 @@ def fisher_working_weights(
     if variance is None:
         variance = distribution.variance(mu)
     variance = np.maximum(variance, _VARIANCE_FLOOR)
-    if family_type is Binomial and link_type is LogitLink:
-        # The clipped mean need not equal expit(eta), so dmu != V(mu).
-        # For the stabilized logit range, dmu/V and this unit curvature are
-        # normal. Applying mass last avoids subnormal weighted numerators.
-        return sample_weight * (dmu_deta * (dmu_deta / variance))
 
     with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
         squared = dmu_deta**2
@@ -416,20 +426,23 @@ def _fisher_rows(
             response=response,
             curvature_source="fisher",
         )
-    reuse_mean = type(link) is LogLink and type(distribution) in (
-        Poisson,
-        NegativeBinomial,
-        Tweedie,
-    )
-    dmu_deta = mu if reuse_mean else link.deriv_inverse(eta)
-    weights = fisher_working_weights(
-        distribution=distribution,
-        link=link,
-        mu=mu,
-        eta=eta,
-        sample_weight=sample_weight,
-        dmu_deta=dmu_deta,
-    )
+    if type(distribution) is Binomial and type(link) is LogitLink:
+        dmu_deta, weights = _binomial_logit_fisher(distribution, link, mu, eta, sample_weight)
+    else:
+        reuse_mean = type(link) is LogLink and type(distribution) in (
+            Poisson,
+            NegativeBinomial,
+            Tweedie,
+        )
+        dmu_deta = mu if reuse_mean else link.deriv_inverse(eta)
+        weights = fisher_working_weights(
+            distribution=distribution,
+            link=link,
+            mu=mu,
+            eta=eta,
+            sample_weight=sample_weight,
+            dmu_deta=dmu_deta,
+        )
     # A row of zero working weight carries no information and its score
     # w (y - mu) h' / V is exactly zero with it, so its product with the
     # response must be too (Wood, Pya & Saefken 2016, section 3.3: the least
