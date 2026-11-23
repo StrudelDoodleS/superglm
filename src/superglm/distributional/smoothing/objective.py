@@ -13,7 +13,7 @@ from numpy.typing import NDArray
 from superglm._roundoff import UNIT_ROUNDOFF, gamma_up
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.results.iteration import DistributionalEFSConfig
-from superglm.distributional.results.solver import DenseSolverResult
+from superglm.distributional.results.solver import DenseSolverResult, RetainedCoordinates
 from superglm.distributional.smoothing.endpoint_laml import evaluate_endpoint_laplace
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
 from superglm.distributional.smoothing.penalty_geometry import (
@@ -343,14 +343,20 @@ def _stable_isolated_gfs_update(
     For one isolated penalty S with range projector P and penalized curvature
     H = A + λS, ``rank(S) - λ tr(H⁻¹S) = tr(P H⁻¹ A)``; the right side avoids
     the left's cancellation between two numbers near ``rank(S)`` as λ grows.
-    It is used only for a full-rank fit and a penalty whose slice overlaps no
-    other; shared-penalty blocks keep the generic update.  A rank decided from
-    the rows evaluates it against the matrix it inverts
-    (:func:`_representative_numerator`).
+    A certified coordinate representative is a full-rank model on its retained
+    coefficients. If these include the entire isolated block, both S and its
+    rank are unchanged there (Wood and Fasiolo 2017, eq. 3). A row-decided
+    inverse belongs to its retained factor, which can differ from the formed
+    curvature. Evaluate the trace against that factor.
     """
     rank = fit.terminal_rank
-    if fit.coefficient_face is not None or rank.rank != len(fit.coefficients):
+    if fit.coefficient_face is not None:
         return update, frozenset()
+    reduced = None
+    if rank.rank != len(fit.coefficients):
+        reduced = RetainedCoordinates.of(rank)
+        if reduced is None or not fit.terminal_curvature.certified:
+            return update, frozenset()
 
     grey = rank.grey_columns if rank.row_decided else None
     epsilon = np.finfo(np.float64).eps
@@ -370,6 +376,8 @@ def _stable_isolated_gfs_update(
         # perturb ordinary EFS trajectories for no numerical benefit.
         saturation = component.lambda_value * float(update.trace_terms[name]) / component.rank
         block = component.coefficient_slice
+        if reduced is not None and np.any(reduced.dropped[block]):
+            continue
         trace_scale = float(np.sum(np.abs(inverse[block, block]) * np.abs(component.penalty.T)))
         trace_error = (2 * len(component.penalty) + 4) * epsilon
         trace_bound = trace_error * trace_scale / (1.0 - trace_error)
@@ -406,11 +414,14 @@ def _stable_isolated_gfs_update(
         )
         if numerical_rank == 0 or abs(component.rank - numerical_rank) > rank_tolerance:
             continue
-        resolved = (
-            _formed_numerator(component, fit, inverse, vectors[:, active])
-            if grey is None
-            else _representative_numerator(component, fit, grey, vectors[:, active], values[active])
-        )
+        if grey is None:
+            resolved = _formed_numerator(component, fit, inverse, vectors[:, active])
+        elif reduced is not None:
+            resolved = _retained_numerator(component, rank, vectors[:, active], values[active])
+        else:
+            resolved = _representative_numerator(
+                component, fit, grey, vectors[:, active], values[active]
+            )
         if resolved is None:
             continue
         numerator, numerator_bound = resolved
@@ -473,6 +484,40 @@ def _stable_isolated_gfs_update(
         ),
         frozenset(stable_raw_steps),
     )
+
+
+def _retained_numerator(
+    component: EFSComponentState,
+    rank: RankDecomposition,
+    range_basis: NDArray[np.float64],
+    range_values: NDArray[np.float64],
+) -> tuple[float, float]:
+    """Rank minus the scaled trace on the certified representative's retained axes.
+
+    Write H_K⁻¹ = L L' and S = U diag(s) U'. Then λ tr(H_K⁻¹ S)
+    is ||diag(√(λs)) U' L||²_F. Projecting L before squaring removes the
+    spline's unpenalized space, whose entries in L L' can dwarf the trace.
+    This needs neither a new solve nor a formed approximation to a row-decided
+    eigenvalue. Only a deficit resolved above arithmetic noise supplies a step.
+    """
+    solution = np.asarray(rank.solution_basis)[component.coefficient_slice]
+    root = solution / np.sqrt(np.asarray(rank.retained_values))
+    weight = math.sqrt(component.lambda_value) * np.sqrt(range_values)[:, None]
+    with np.errstate(over="ignore", invalid="ignore"):
+        projected = weight * (range_basis.T @ root)
+        trace = float(np.sum(projected * projected))
+        # For these stored factors (Higham 2002, eq. 3.5), each weighted dot has error e at the
+        # scale of its absolute products, and its square costs (2|z|+e)e.
+        # Include root formation, weighting and gradual underflow in the dot.
+        width = len(range_basis)
+        absolute_dot = np.abs(range_basis).T @ np.abs(root)
+        error = gamma_up(width + 8) * (weight * absolute_dot)
+        subnormal = np.finfo(float).smallest_subnormal
+        error += subnormal * absolute_dot + (2 * width + 4) * subnormal * (weight + 1.0)
+        bound = float(np.sum((2 * np.abs(projected) + error) * error))
+        bound += gamma_up(projected.size + 3) * max(component.rank, trace)
+        bound *= 1.0 + gamma_up(width + projected.size + 16)
+    return component.rank - trace, bound
 
 
 def _formed_numerator(
