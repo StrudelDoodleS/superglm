@@ -290,7 +290,7 @@ def _penalty_support_from_roots(
     selected, projection_bounds, selected_errors = [], [], []
     common_limited = rank < min(factor.shape)
     for root, error in zip(roots, root_errors, strict=True):
-        if rank == len(active):
+        if rank == width:
             projected = root.copy()
             selected_error = error
         else:
