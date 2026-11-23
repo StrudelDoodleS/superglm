@@ -89,7 +89,13 @@ def test_warns_for_poisson_without_the_tweedie_scale_clause():
 
 
 def test_poisson_reml_reproducer_warns_once_and_keeps_lambda_unchanged():
-    """#694 reproducer: one SeparationWarning on Poisson REML and invariant RE lambda."""
+    """#694 reproducer: one SeparationWarning on Poisson REML and invariant RE lambda.
+
+    The RE lambda is compared with the fit without E's rows at 1e-5 relative, the
+    smoothing search's resolution: whether fit_reml lets E walk or holds it at its
+    first cold fit (#707), the two lambdas give the no-E REML objective within its
+    stopping tolerance, and they differ by 5e-7 relative under the hold.
+    """
     rng = np.random.default_rng(0)
     n = 20000
     lev = rng.choice(list("ABCDE"), n, p=[0.4, 0.3, 0.2, 0.098, 0.002])
@@ -130,7 +136,7 @@ def test_poisson_reml_reproducer_warns_once_and_keeps_lambda_unchanged():
             0
         ]
 
-    assert re_lambda(m) == pytest.approx(re_lambda(m_no_e), rel=1e-7)
+    assert re_lambda(m) == pytest.approx(re_lambda(m_no_e), rel=1e-5)
 
 
 @pytest.mark.pins_behaviour
