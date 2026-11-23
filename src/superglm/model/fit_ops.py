@@ -1357,7 +1357,10 @@ def _maybe_estimate_nb_theta(model, X, y, sample_weight=None, offset=None) -> No
     if isinstance(family, NegativeBinomial) and family.theta == "auto":
         from superglm.profiling.nb import estimate_nb_theta
 
-        nb_result = estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
+        # The trial means share this workspace but precede the published fit's
+        # design and weights. Leave its one scan for the outer fit.
+        with initial_precision_advisory(model, enabled=False):
+            nb_result = estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
         model.family = NegativeBinomial(theta=nb_result.theta_hat)
         model._nb_profile_result = nb_result
         logger.info(f"NB theta estimated: {nb_result.theta_hat:.4f}")

@@ -10,9 +10,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, Numeric, PSpline, Ridge, SuperGLM
+from superglm import Categorical, Numeric, PSpline, Ridge, SuperGLM, generate_tweedie_cpg
 from superglm.diagnostics import convergence
+from superglm.distributions import NegativeBinomial, Tweedie
 from superglm.links import IdentityLink, LogLink
+from superglm.profiling import nb
 from superglm.solvers.working_rows import CoefficientWorkingRows
 
 
@@ -193,6 +195,8 @@ def test_advisory_uses_the_primary_rows_and_labels_their_curvature():
             convergence.inspect_initial_precision([], nested, eta, link)
             convergence.inspect_initial_precision(group_list, primary, eta, link)
             convergence.inspect_initial_precision(group_list, primary, eta, link)
+        assert not _advisories(caught)
+        convergence.warn_initial_precision(findings)
 
     (advisory,) = _advisories(caught)
     assert "Zero initial observed information" in str(advisory.message)
@@ -230,6 +234,22 @@ def test_each_fit_scans_once_without_changing_results(route, monkeypatch):
         calls.append(len(weights))
         return scan(weights, *args)
 
+    reml_candidates = []
+    if reml:
+        from superglm.reml import direct, discrete
+
+        engine = discrete if route == "discrete_reml" else direct
+        solve = engine.fit_irls_direct
+
+        def record_candidate(*args, **kwargs):
+            before = len(calls)
+            result = solve(*args, **kwargs)
+            if kwargs.get("trace_purpose") == "reml_candidate":
+                reml_candidates.append(len(calls) - before)
+            return result
+
+        monkeypatch.setattr(engine, "fit_irls_direct", record_candidate)
+
     if scan is not None:
         monkeypatch.setattr(convergence, "_scan_initial_precision", record)
     with warnings.catch_warnings(record=True) as caught:
@@ -240,6 +260,8 @@ def test_each_fit_scans_once_without_changing_results(route, monkeypatch):
     assert advisory.category is convergence.FitPrecisionWarning
     assert calls == [len(y)]
     assert _findings(actual)["zero_sample_weight"]["rows"] == (12,)
+    if reml:
+        assert reml_candidates and all(count == 0 for count in reml_candidates)
 
     monkeypatch.setattr(convergence, "_scan_initial_precision", lambda *args: {})
     with warnings.catch_warnings(record=True) as control_warnings:
@@ -247,6 +269,10 @@ def test_each_fit_scans_once_without_changing_results(route, monkeypatch):
         control = fit()
     assert not _advisories(control_warnings)
     assert not _findings(control)
+    _assert_same_fit(actual, control, X)
+
+
+def _assert_same_fit(actual, control, X):
     np.testing.assert_array_equal(actual.result.beta, control.result.beta)
     np.testing.assert_array_equal(actual.predict(X), control.predict(X))
     for name in (
@@ -259,6 +285,171 @@ def test_each_fit_scans_once_without_changing_results(route, monkeypatch):
         "converged",
     ):
         assert getattr(actual.result, name) == getattr(control.result, name)
-    if reml:
+    if actual._reml_result is not None:
         for name in ("lambdas", "converged", "n_reml_iter", "termination_reason"):
             assert getattr(actual._reml_result, name) == getattr(control._reml_result, name)
+        assert actual._reml_result.lambda_history == control._reml_result.lambda_history
+
+
+@pytest.mark.parametrize("route", ["fit", "fit_reml", "estimate_theta"])
+def test_nb_theta_mean_fits_leave_the_advisory_to_the_public_fit(route, monkeypatch):
+    rng = np.random.default_rng(32)
+    x = np.linspace(0.0, 1.0, 150)
+    X = pd.DataFrame({"x": x})
+    mu = np.exp(1.0 + np.sin(5.0 * x))
+    y = rng.negative_binomial(2, 2 / (2 + mu)).astype(float)
+    weight = np.ones_like(y)
+    weight[12] = 0.0
+
+    scan = getattr(convergence, "_scan_initial_precision", None)
+    scans = []
+    mean_fits = []
+    solve = nb._MeanFit.fit
+
+    def record_scan(weights, *args):
+        scans.append(len(weights))
+        return scan(weights, *args)
+
+    def record_mean_fit(self, theta):
+        before = len(scans)
+        result = solve(self, theta)
+        mean_fits.append(len(scans) - before)
+        return result
+
+    def fit():
+        model = SuperGLM(
+            family=NegativeBinomial(theta="auto"),
+            features={"x": PSpline(n_knots=6) if route == "fit_reml" else Numeric()},
+            penalty=Ridge(lambda1=0.0),
+        )
+        getattr(model, route)(X, y, sample_weight=weight)
+        return model
+
+    if scan is not None:
+        monkeypatch.setattr(convergence, "_scan_initial_precision", record_scan)
+    monkeypatch.setattr(nb._MeanFit, "fit", record_mean_fit)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        actual = fit()
+    (advisory,) = _advisories(caught)
+    assert advisory.filename == __file__
+    assert len(mean_fits) > 1 and all(count == 0 for count in mean_fits)
+    assert scans == [len(y)]
+    assert _findings(actual)["zero_sample_weight"]["rows"] == (12,)
+
+    monkeypatch.setattr(convergence, "_scan_initial_precision", lambda *args: {})
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        control = fit()
+    assert not _advisories(caught)
+    _assert_same_fit(actual, control, X)
+    left, right = actual._nb_profile_result, control._nb_profile_result
+    assert left.theta_hat == right.theta_hat
+    assert left.converged == right.converged
+    pd.testing.assert_frame_equal(left.evaluations, right.evaluations, check_exact=True)
+
+
+@pytest.mark.parametrize("search_fit_mode", ["fit", "reml"])
+def test_tweedie_power_candidates_leave_the_advisory_to_the_refit(search_fit_mode, monkeypatch):
+    x = np.linspace(0.0, 1.0, 120)
+    X = pd.DataFrame({"x": x})
+    y = generate_tweedie_cpg(
+        len(x), mu=np.exp(0.5 + np.sin(5.0 * x)), phi=1.5, p=1.5, rng=np.random.default_rng(34)
+    )
+    weight = np.ones_like(y)
+    y[12] = 0.0
+    weight[12] = 2.0**-50  # Tweedie's prior-weight likelihood requires positive weights.
+    scan = getattr(convergence, "_scan_initial_precision", None)
+    scans = []
+    search_scans = []
+
+    def record_scan(weights, *args):
+        scans.append(len(weights))
+        return scan(weights, *args)
+
+    def progress(phase, payload):
+        if phase in {"profiling", "final_refit"}:
+            search_scans.append(len(scans))
+
+    def fit():
+        model = SuperGLM(family=Tweedie(1.5), features={"x": PSpline(n_knots=6)})
+        profile = model.estimate_p(
+            X,
+            y,
+            sample_weight=weight,
+            search_fit_mode=search_fit_mode,
+            fit_mode=search_fit_mode,
+            p_bounds=(1.4, 1.6),
+            xatol=0.04,
+            progress_callback=progress,
+        )
+        return model, profile
+
+    if scan is not None:
+        monkeypatch.setattr(convergence, "_scan_initial_precision", record_scan)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        actual, profile = fit()
+    (advisory,) = _advisories(caught)
+    assert advisory.filename == __file__
+    assert len(search_scans) > 2 and all(count == 0 for count in search_scans)
+    assert scans == [len(y)]
+    assert _findings(actual)["sample_weight_spread"]["rows"] == (12, 0)
+
+    monkeypatch.setattr(convergence, "_scan_initial_precision", lambda *args: {})
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        control, control_profile = fit()
+    assert not _advisories(caught)
+    _assert_same_fit(actual, control, X)
+    for name in ("p_hat", "phi_hat", "converged"):
+        assert getattr(profile, name) == getattr(control_profile, name)
+    pd.testing.assert_frame_equal(
+        profile.evaluations, control_profile.evaluations, check_exact=True
+    )
+
+
+@pytest.mark.pins_behaviour
+def test_fit_path_does_not_scan_its_regularization_candidates(monkeypatch):
+    """Pin a silent lambda path with the same fits, stopping decisions and iterations."""
+    x = np.linspace(0.0, 1.0, 100)
+    X = pd.DataFrame({"x": x})
+    y = np.sin(8.0 * x) + 0.1 * np.cos(125.0 * x)
+    weight = np.ones_like(y)
+    weight[12] = 0.0
+
+    def fit():
+        model = SuperGLM(family="gaussian", features={"x": Numeric()})
+        path = model.fit_path(X, y, sample_weight=weight, lambda_seq=[0.1, 0.01, 0.001])
+        return model, path
+
+    scan = getattr(convergence, "_scan_initial_precision", None)
+    scans = []
+
+    def record_scan(weights, *args):
+        scans.append(len(weights))
+        return scan(weights, *args)
+
+    with warnings.catch_warnings(record=True) as caught, monkeypatch.context() as patch:
+        warnings.simplefilter("always")
+        if scan is not None:
+            patch.setattr(convergence, "_scan_initial_precision", record_scan)
+        actual, path = fit()
+        if scan is not None:
+            patch.setattr(convergence, "_scan_initial_precision", lambda *args: {})
+        control, control_path = fit()
+
+    assert not scans
+    assert not _advisories(caught)
+    _assert_same_fit(actual, control, X)
+    for name in (
+        "lambda_seq",
+        "coef_path",
+        "intercept_path",
+        "deviance_path",
+        "n_iter_path",
+        "converged_path",
+        "edf_path",
+        "separation_path",
+    ):
+        np.testing.assert_array_equal(getattr(path, name), getattr(control_path, name))

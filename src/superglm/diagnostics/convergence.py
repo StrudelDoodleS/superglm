@@ -72,36 +72,42 @@ def inspect_initial_precision(groups, rows, eta_unclipped, link) -> None:
         return
     model, findings = capture
     _INITIAL_PRECISION.set(None)
-    source = "Fisher" if rows.curvature_source == "fisher" else "observed"
     findings.update(
         _scan_initial_precision(
             model._fit_weights, rows.weights, eta_unclipped, model._fit_offset, link
         )
     )
-    if findings:
-        parts = []
-        checks = {}
-        for kind, finding in findings.items():
-            reason = _PRECISION_MESSAGES[kind].format(source=source)
-            if kind.endswith("information") or kind == "information_spread":
-                finding["curvature_source"] = rows.curvature_source
-                checks["Check sample_weight units and offsets on these rows."] = None
-            elif kind.startswith("log_mean_"):
-                checks["Check the offsets on these rows."] = None
-            elif kind == "zero_sample_weight":
-                checks["Check whether the zero-weight rows should contribute."] = None
-            else:
-                checks["Check the sample_weight units."] = None
-            positions = ", ".join(str(row) for row in finding["rows"])
-            count = finding.get("count", len(finding["rows"]))
-            examples = " e.g." if count > len(finding["rows"]) else ""
-            parts.append(f"{reason} at row positions{examples} {positions}.")
-        warn_caller(
-            "SuperGLM binary64 precision advisory, with zero-based row positions. "
-            + " ".join([*parts, *checks])
-            + " See model.diagnostics()['_model']['initial_precision'] for details.",
-            FitPrecisionWarning,
-        )
+    for kind, finding in findings.items():
+        if kind.endswith("information") or kind == "information_spread":
+            finding["curvature_source"] = rows.curvature_source
+
+
+def warn_initial_precision(findings: dict) -> None:
+    """Disclose the collected findings once the fit has passed publication checks."""
+    parts = []
+    checks = {}
+    for kind, finding in findings.items():
+        reason = _PRECISION_MESSAGES[kind]
+        if "curvature_source" in finding:
+            source = "Fisher" if finding["curvature_source"] == "fisher" else "observed"
+            reason = reason.format(source=source)
+            checks["Check sample_weight units and offsets on these rows."] = None
+        elif kind.startswith("log_mean_"):
+            checks["Check the offsets on these rows."] = None
+        elif kind == "zero_sample_weight":
+            checks["Check whether the zero-weight rows should contribute."] = None
+        else:
+            checks["Check the sample_weight units."] = None
+        positions = ", ".join(str(row) for row in finding["rows"])
+        count = finding.get("count", len(finding["rows"]))
+        examples = " e.g." if count > len(finding["rows"]) else ""
+        parts.append(f"{reason} at row positions{examples} {positions}.")
+    warn_caller(
+        "SuperGLM binary64 precision advisory, with zero-based row positions. "
+        + " ".join([*parts, *checks])
+        + " See model.diagnostics()['_model']['initial_precision'] for details.",
+        FitPrecisionWarning,
+    )
 
 
 def _scan_initial_precision(weights, information, eta, offset, link) -> dict:
