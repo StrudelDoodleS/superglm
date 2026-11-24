@@ -352,6 +352,11 @@ def tsqr_leaf_rows(width: int) -> int:
     return max(2 * width, _TSQR_LEAF_BYTES // (_TSQR_LEAF_COPIES * 8 * width))
 
 
+def tsqr_leaf_bytes(rows: int, width: int) -> int:
+    """The working set the leaf pool charges a TSQR leaf of ``rows`` by ``width``."""
+    return _TSQR_LEAF_COPIES * 8 * int(rows) * int(width)
+
+
 def _tsqr_leaf(
     slot: list,
     sqrt_weights: NDArray,
@@ -673,7 +678,7 @@ def _tsqr_weighted_factor(
     # and form one more in each leaf (``centered_system._LeafParts``).
     workers = pool_workers(
         n_leaves,
-        _TSQR_LEAF_COPIES * 8 * rows * width + int(getattr(first[2], "leaf_bytes", 0)),
+        tsqr_leaf_bytes(rows, width) + int(getattr(first[2], "leaf_bytes", 0)),
         held=int(getattr(first[2], "held_bytes", 0)),
     )
     tree = _TSQRTree()

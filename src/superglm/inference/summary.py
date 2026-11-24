@@ -35,6 +35,41 @@ def _likelihood_scale_rows(info, fmt) -> list[tuple[str, str, str, str]]:
     return [("Likelihood phi", f"{fmt(info['phi_likelihood'])} ({label})", "", "")]
 
 
+def _robust_covariance_header_rows(info, fmt) -> list[tuple[str, str, str, str]]:
+    """Header row displaying robust sandwich covariance method and sample/cluster count."""
+    method = info.get("covariance_method")
+    if not method:
+        return []
+    if info.get("covariance_clustered") and info.get("covariance_n_clusters") is not None:
+        return [("Covariance", str(method), "No. Clusters", str(info["covariance_n_clusters"]))]
+    n_units = info.get("covariance_n_units")
+    units_text = (
+        ""
+        if n_units is None
+        else (str(int(n_units)) if float(n_units).is_integer() else fmt(float(n_units)))
+    )
+    return [("Covariance", str(method), "Cov. Units", units_text)]
+
+
+def _robust_covariance_note(info: dict[str, Any], *, has_smooth: bool) -> str:
+    """Footnote describing robust sandwich covariance assumptions and omitted tests."""
+    method = str(info["covariance_method"])
+    parts = [
+        f"Note: standard errors use robust {method} covariance at fixed basis, "
+        "penalty, and smoothing parameters."
+    ]
+    if has_smooth:
+        parts.append("Smooth p-values (Wood 2013) are Bayesian and omitted from robust output.")
+    if info.get("covariance_clustered"):
+        parts.append(
+            "Parametric tests and intervals use a large-sample normal Wald reference; "
+            "few or dominant clusters can make cluster-robust Wald tests anti-conservative."
+        )
+    else:
+        parts.append("Parametric tests and intervals use a large-sample normal Wald reference.")
+    return "\n".join(parts)
+
+
 @dataclass
 class _CoefRow:
     """One row of the coefficient table."""
@@ -106,10 +141,10 @@ class _BasisDetailRow:
     basis_index: int  # 0-based within group
     coef: float
     se: float
-    z: float
-    p: float
-    ci_low: float
-    ci_high: float
+    z: float | None
+    p: float | None
+    ci_low: float | None
+    ci_high: float | None
 
 
 def _compute_coef_stats(
@@ -479,6 +514,7 @@ class ModelSummary:
         ]
         if info.get("weight_semantics"):
             rows.append(("Weights", f"{info['weight_semantics']} weights", "", ""))
+        rows.extend(_robust_covariance_header_rows(info, _fmt))
         rows.extend(_likelihood_scale_rows(info, _fmt))
 
         # NB theta profile row
@@ -693,7 +729,7 @@ class ModelSummary:
                     detail_parts.append(f"edf={row.edf:.1f}")
                 if row.smoothing_lambda is not None:
                     detail_parts.append(f"lam={row.smoothing_lambda:.2g}")
-                if has_test and row.curve_se_min is not None and not np.isnan(row.curve_se_min):
+                if row.active and row.curve_se_min is not None and not np.isnan(row.curve_se_min):
                     detail_parts.append(f"curve SE: {row.curve_se_min:.2f}-{row.curve_se_max:.2f}")
                 if row.monotone is not None:
                     detail_parts.append(_rules_text(row))
@@ -752,7 +788,9 @@ class ModelSummary:
                     for br in self._basis_detail[row.name]:
                         b_stars = _sig_stars(br.p)
                         b_label = f"  Coef {br.basis_index + 1}"
-                        bz_decimals = 1 if abs(br.z) >= 100 else 3
+                        bz_decimals = (
+                            1 if br.z is not None and np.isfinite(br.z) and abs(br.z) >= 100 else 3
+                        )
                         lines.append(
                             _row(
                                 f"{_coef_prefix(row, name=b_label)}"
@@ -907,7 +945,9 @@ class ModelSummary:
             lines.extend(textwrap.wrap(note, width=max(60, min(W + 2, 100))))
         has_smooth = any(_is_smooth_group_row(r) for r in self._coef_rows)
         if not info.get("editor_inference_stale", False):
-            if has_smooth:
+            if info.get("covariance_method"):
+                lines.append(_robust_covariance_note(info, has_smooth=has_smooth))
+            elif has_smooth:
                 lines.append(_WALD_NOTE)
             else:
                 lines.append(
@@ -1004,6 +1044,7 @@ class ModelSummary:
         ]
         if info.get("weight_semantics"):
             header_rows.append(("Weights", f"{info['weight_semantics']} weights", "", ""))
+        header_rows.extend(_robust_covariance_header_rows(info, _fmt))
         header_rows.extend(_likelihood_scale_rows(info, _fmt))
 
         # NB theta profile row
@@ -1130,7 +1171,7 @@ class ModelSummary:
                     detail_parts.append(f"edf={row.edf:.1f}")
                 if row.smoothing_lambda is not None:
                     detail_parts.append(f"&lambda;={row.smoothing_lambda:.2g}")
-                if has_test and row.curve_se_min is not None and not np.isnan(row.curve_se_min):
+                if row.active and row.curve_se_min is not None and not np.isnan(row.curve_se_min):
                     detail_parts.append(
                         f"curve SE: {row.curve_se_min:.2f}&ndash;{row.curve_se_max:.2f}"
                     )
@@ -1196,15 +1237,32 @@ class ModelSummary:
                     inner_rows = []
                     for br in self._basis_detail[row.name]:
                         b_stars = _sig_stars(br.p)
+                        b_se_text = f"{br.se:.4f}" if np.isfinite(br.se) else "---"
+                        b_z_text = (
+                            f"{br.z:.3f}" if br.z is not None and np.isfinite(br.z) else "---"
+                        )
+                        b_p_text = (
+                            f"{br.p:.3f}" if br.p is not None and np.isfinite(br.p) else "---"
+                        )
+                        b_ci_lo_text = (
+                            f"{br.ci_low:.3f}"
+                            if br.ci_low is not None and np.isfinite(br.ci_low)
+                            else "---"
+                        )
+                        b_ci_hi_text = (
+                            f"{br.ci_high:.3f}"
+                            if br.ci_high is not None and np.isfinite(br.ci_high)
+                            else "---"
+                        )
                         inner_rows.append(
                             f"<tr>"
                             f"<td style='padding:1px 6px;'>{br.basis_index + 1}</td>"
                             f"<td style='padding:1px 6px;'>{br.coef:.4f}</td>"
-                            f"<td style='padding:1px 6px;'>{br.se:.4f}</td>"
-                            f"<td style='padding:1px 6px;'>{br.z:.3f}</td>"
-                            f"<td style='padding:1px 6px;'>{br.p:.3f}</td>"
-                            f"<td style='padding:1px 6px;'>{br.ci_low:.3f}</td>"
-                            f"<td style='padding:1px 6px;'>{br.ci_high:.3f}</td>"
+                            f"<td style='padding:1px 6px;'>{b_se_text}</td>"
+                            f"<td style='padding:1px 6px;'>{b_z_text}</td>"
+                            f"<td style='padding:1px 6px;'>{b_p_text}</td>"
+                            f"<td style='padding:1px 6px;'>{b_ci_lo_text}</td>"
+                            f"<td style='padding:1px 6px;'>{b_ci_hi_text}</td>"
                             f"<td style='padding:1px 6px;'>{b_stars}</td>"
                             f"<td style='padding:1px 6px;'></td>"
                             f"</tr>"
@@ -1363,7 +1421,9 @@ class ModelSummary:
             )
         has_smooth = any(_is_smooth_group_row(r) for r in self._coef_rows)
         if not info.get("editor_inference_stale", False):
-            if has_smooth:
+            if info.get("covariance_method"):
+                note_text = _robust_covariance_note(info, has_smooth=has_smooth)
+            elif has_smooth:
                 note_text = _WALD_NOTE
             else:
                 note_text = (
