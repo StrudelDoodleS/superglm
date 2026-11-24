@@ -9,6 +9,7 @@ Log-logistic (Fisk), natural scale/median and positive tail exponent; carrier -l
 from math import exp, expm1, lgamma, log, log1p, sqrt
 
 import numpy as np
+import numpy.random
 from numba import njit
 
 from superglm.distributional.kernels._severity_primitives import expit, logratio, softplus

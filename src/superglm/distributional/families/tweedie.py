@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 import numpy as np
+import scipy.linalg
 from numpy.typing import NDArray
 from scipy import special
 from scipy.special import expit
@@ -343,6 +344,7 @@ def _poisson_terms(rate_max: float) -> int:
         )
     if rate_max < _MAX_POISSON_TERMS:
         floor_terms = max(5, int(rate_max + 8.0 * math.sqrt(max(rate_max, 1.0))) + 1)
+        import scipy.spatial
         from scipy.stats import poisson
 
         tail_terms = float(poisson.isf(_POISSON_TAIL_TOLERANCE, rate_max))

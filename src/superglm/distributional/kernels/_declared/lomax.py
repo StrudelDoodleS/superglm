@@ -10,6 +10,7 @@ the exact-zero limit and admission of tail derivatives; positive responses here.
 from math import exp, expm1, lgamma, log, log1p, sqrt
 
 import numpy as np
+import numpy.random
 from numba import njit
 
 from superglm.distributional.kernels._severity_primitives import expit, log1mexp_exp_01234, logratio, logsoftplus_01234, softplus

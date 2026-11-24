@@ -159,6 +159,7 @@ def _raw_shape_coefficients(spec: _SplineBase, beta: NDArray) -> NDArray:
 
 def _shape_polynomial(spec: _SplineBase, beta: NDArray):
     """Return the exact piecewise polynomial represented by fitted coefficients."""
+    import scipy.linalg
     from scipy.interpolate import BSpline, CubicSpline, PPoly
 
     raw_beta = _raw_shape_coefficients(spec, beta)
@@ -204,6 +205,7 @@ def _has_natural_curvature_boundaries(spec: _SplineBase, kind: str) -> bool:
 
 def _raw_basis(spec: _SplineBase, exponent: int = 0):
     """The raw basis as a spline in ``x * 2**exponent``, exact for a power of two."""
+    import scipy.linalg
     from scipy.interpolate import BSpline, CubicSpline
 
     cardinal_knots = getattr(spec, "_cr_knots", None)
@@ -255,6 +257,7 @@ def _shape_span_jump_matrix(spec: _SplineBase, points: NDArray, order: int) -> N
     left endpoint instead gives its exact right-continuous polynomial piece and
     therefore preserves even a one-ULP-wide span.
     """
+    import scipy.linalg
     from scipy.interpolate import BSpline
 
     knots = np.asarray(spec._knots, dtype=np.float64)
@@ -863,6 +866,7 @@ def _end_value_rows(
 
 def _bernstein_rows(piece: _ShapePiece, p: int, t0: float, t1: float) -> NDArray:
     """Rows of the derivative's Bernstein coefficients on ``[t0, t1]`` of the piece."""
+    import scipy.linalg
     from scipy.special import comb
 
     nodes = (np.arange(p + 1) + 0.5) / (p + 1)

@@ -12,6 +12,7 @@ mass from it.
 from __future__ import annotations
 
 import numpy as np
+import numpy.random
 from numba import njit  # type: ignore[import-untyped]
 
 

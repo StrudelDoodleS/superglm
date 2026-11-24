@@ -73,6 +73,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 import numpy as np
+import numpy.random
 from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 

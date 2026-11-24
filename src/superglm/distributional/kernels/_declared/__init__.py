@@ -15,6 +15,7 @@ from math import comb
 from types import ModuleType
 
 import numpy as np
+import numpy.random
 from numba import njit
 from numpy.typing import NDArray
 

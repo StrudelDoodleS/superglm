@@ -60,6 +60,8 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import numpy.random
+import scipy.linalg
 from numba import njit  # type: ignore[import-untyped]
 from scipy import special
 

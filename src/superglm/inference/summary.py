@@ -120,6 +120,7 @@ def _compute_coef_stats(
     """Compute z-value, p-value, and confidence interval."""
     if se <= 0:
         return np.nan, np.nan, np.nan, np.nan
+    import scipy.spatial
     from scipy.stats import norm
 
     z = coef / se

@@ -255,6 +255,8 @@ def _locked_cache() -> Iterator[None]:
     index naming only the code it was written with. Where the lock cannot be
     taken, a save is skipped and a load misses: the kernel compiles again.
     """
+    import numpy.random
+    from numba import core
     from numba.core import caching
 
     cache_file = caching.IndexDataCacheFile
@@ -321,11 +323,12 @@ def _worker_count(units: int) -> int:
 
 
 def _can_start_workers() -> bool:
-    import numba
+    import numpy.random
+    from numba import config
     from numba.core import caching
 
     return (
-        not getattr(numba.config, "DISABLE_JIT", False)
+        not getattr(config, "DISABLE_JIT", False)
         and bool(sys.executable)
         and not getattr(sys, "frozen", False)
         and all(
@@ -337,10 +340,11 @@ def _can_start_workers() -> bool:
 
 def _compile_in_workers(units: list[str], workers: int) -> None:
     """Run each unit in its own interpreter, ``workers`` at a time, longest first."""
-    import numba
+    import numpy.random
+    from numba import config
 
     env = dict(os.environ)
-    cache_dir = getattr(numba.config, "CACHE_DIR", "")
+    cache_dir = getattr(config, "CACHE_DIR", "")
     if cache_dir:  # set in code or by superglm._numba_cache, not only in env
         env["NUMBA_CACHE_DIR"] = str(cache_dir)
     order = sorted(units, key=lambda unit: -_UNIT_SECONDS.get(unit, 0.0))

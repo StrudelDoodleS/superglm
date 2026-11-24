@@ -16,6 +16,7 @@ Kernels in ``(log mean, log cv)``: ``GammaLS``'s predictor jets.
 from math import exp, expm1, lgamma, log, log1p, sqrt
 
 import numpy as np
+import numpy.random
 from numba import njit
 
 from superglm.distributional.kernels._severity_primitives import gdev, gnorm, logratio, sres_0123

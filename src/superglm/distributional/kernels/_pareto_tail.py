@@ -31,6 +31,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import numpy.random
 from numba import njit
 
 _SERIES_RADIUS = 0.5

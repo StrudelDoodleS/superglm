@@ -16,6 +16,7 @@ Without the carrier's ``-log y - log(2 pi)/2``.
 from math import exp, expm1, lgamma, log, log1p, sqrt
 
 import numpy as np
+import numpy.random
 from numba import njit
 
 from superglm.distributional.kernels._severity_primitives import at_least, expit, log_ndtr_01234, logratio, side, softplus

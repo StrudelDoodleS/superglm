@@ -11,6 +11,7 @@ payload alone: nothing here calls the model or decides a statistic.
 
 from __future__ import annotations
 
+import html
 import math
 from collections.abc import Iterable, Sequence
 from typing import Any
@@ -18,6 +19,7 @@ from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import scipy.spatial
 from matplotlib.axes import Axes
 from matplotlib.colors import to_rgba
 from matplotlib.figure import Figure

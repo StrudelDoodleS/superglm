@@ -600,6 +600,207 @@ def test_no_two_module_bodies_a_cold_import_runs_can_wait_on_each_other():
     assert cycles == [["superglm", "superglm._lazy", "superglm._numba_cache"]], cycles
 
 
+#: For each package superglm imports that enters another by a submodule before the package itself,
+#: the packages to import first. An import of a submodule takes the submodule's lock and then waits
+#: for its parent: always when the parent is not yet in ``sys.modules``, and since CPython 3.13.16
+#: and 3.14 also while the parent is still running (python/cpython#160045). A thread running the
+#: parent's body, which imports the same submodule, then waits for the first, and CPython breaks
+#: the cycle with ``_DeadlockError`` or a half-built module. A module that imports the parent first
+#: waits on the parent's lock holding none of its children's, the order CPython's maintainers give
+#: as the workaround. Each pair closes a cycle of module-lock waits recorded over cold imports of
+#: every superglm module (CPython 3.14.6, NumPy 2.5, SciPy 1.18, Numba 0.68), and the package to
+#: import first is always one the other loads anyway.
+_ENTER_FIRST = {
+    "numba": ("numpy.random",),  # numba's typing enters numpy.random.bit_generator
+    "scipy.special": ("scipy.linalg",),  # scipy.special enters scipy.linalg.cython_lapack
+    "scipy.interpolate": ("scipy.linalg",),  # through scipy.special
+    "scipy.integrate": ("scipy.linalg",),  # through scipy.special
+    "scipy.stats": ("scipy.spatial",),  # scipy.stats enters scipy.spatial.distance
+    "sklearn": ("scipy.linalg", "scipy.spatial"),  # through scipy.special and scipy.stats
+    "matplotlib": ("html",),  # matplotlib's pyparsing enters html.entities
+}
+#: Packages whose bodies import their submodules, so each submodule comes after its package (or
+#: after another of its submodules, which imports the package first).
+_PARENT_FIRST = ("html", "numba", "numpy.random", "scipy.linalg", "scipy.spatial")
+#: Submodules of other packages that the package's own body imports, under the same rule.
+_AFTER_PARENT = ("matplotlib.colors", "matplotlib.rcsetup", "narwhals.dependencies", "pandas.api")
+#: Functions that import a package only once ``sys.modules`` holds it, which waits for an import
+#: another thread has begun and so never enters the package: what it needs first does not apply.
+_ONLY_WAITS_FOR = {
+    ("_numba_cache.py", "_started_numba"): "numba",
+    ("diagnostics/_fit_record.py", "install"): "numba",
+}
+
+
+def _asked_for(node: ast.AST) -> list[str]:
+    """The modules an import statement imports, ``from scipy import stats`` naming ``scipy.stats``."""
+    if isinstance(node, ast.Import):
+        return [alias.name for alias in node.names]
+    if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+        named = [f"scipy.{alias.name}" for alias in node.names] if node.module == "scipy" else []
+        return [node.module, *named]
+    return []
+
+
+def _firsts(name: str, waits_for: str | None) -> list[str]:
+    """The packages the tables above put ahead of an import of ``name``."""
+    firsts = [package for package in _PARENT_FIRST if name.startswith(package + ".")]
+    firsts += [
+        child.rpartition(".")[0]
+        for child in _AFTER_PARENT
+        if name == child or name.startswith(child + ".")
+    ]
+    for package, before in _ENTER_FIRST.items():
+        if package != waits_for and (name == package or name.startswith(package + ".")):
+            firsts += before
+    return firsts
+
+
+def _entered_out_of_order(tree: ast.Module, path: str) -> list[tuple[str, int, str, str]]:
+    """Each import in ``tree`` of a module before a package that ``_ENTER_FIRST`` or
+    ``_PARENT_FIRST`` puts ahead of it.
+
+    A module's body runs its statements in order and a function's body runs once the module's is
+    done, so a function can rely on every import of its module and on its own earlier ones. An
+    import of ``a.b`` leaves ``a`` imported too. An import under ``if TYPE_CHECKING`` never runs.
+    """
+    found, functions = [], []
+
+    def scan(body: list, entered: list[str], waits_for: str | None = None) -> list[str]:
+        for node in body:
+            if isinstance(node, ast.If) and "TYPE_CHECKING" in ast.unparse(node.test):
+                continue
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                functions.append(node)
+                continue
+            for name in _asked_for(node):
+                firsts = _firsts(name, waits_for)
+                found.extend((path, node.lineno, name, f) for f in firsts if f not in entered)
+                parts = name.split(".")
+                entered += [".".join(parts[:i]) for i in range(1, len(parts) + 1)]
+            for field in ("body", "handlers", "orelse", "finalbody"):
+                scan(getattr(node, field, []), entered, waits_for)
+        return entered
+
+    module_imports = scan(tree.body, [])
+    for function in functions:  # grows by the functions nested in each one
+        scan(function.body, list(module_imports), _ONLY_WAITS_FOR.get((path, function.name)))
+    return found
+
+
+def test_no_module_enters_a_package_before_what_that_package_enters_by_a_submodule():
+    """Every import in superglm follows ``_ENTER_FIRST`` and ``_PARENT_FIRST``, so none deadlocks.
+
+    ``test_a_cold_import_waits_for_a_package_that_another_thread_is_entering`` forces one route
+    into each cycle; this holds every route to the same order. Mutation check: removing ``import
+    scipy.linalg`` from ``features/_spline_ranges.py`` fails this at its ``scipy.interpolate``.
+    """
+    root = Path(superglm.__file__).parent
+    found = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        found += _entered_out_of_order(tree, path.relative_to(root).as_posix())
+    assert not found, "\n".join(
+        f"{where}:{line}: import {first} before {name} in the same scope or at the module's top"
+        for where, line, name, first in found
+    )
+
+
+_ENTRY_OVERLAP = """
+import os
+import sys
+import threading
+from importlib import import_module
+
+import _frozen_importlib
+
+import numpy
+import superglm
+
+package, module = sys.argv[1:]
+assert package not in sys.modules and module not in sys.modules, (package, module)
+holding, release, waited, done, holder = threading.Event(), threading.Event(), [], {}, []
+original_acquire = _frozen_importlib._ModuleLock.acquire
+
+def acquire(self):
+    me = threading.current_thread().name
+    if me == "peer" and holder and self.owner == holder[0]:
+        waited.append(self.name)
+        release.set()
+    taken = original_acquire(self)
+    if me == "holder" and self.name == package and not holding.is_set():
+        # The package's lock is taken; its module is not made yet, let alone run.
+        holding.set()
+        release.wait(60)
+    return taken
+
+def run(name, after=None):
+    if after is None:
+        holder.append(threading.get_ident())
+    else:
+        assert after.wait(60), "the holder never took the package's lock"
+    try:
+        import_module(name)
+        done[name] = "ok"
+    except BaseException as error:
+        done[name] = f"{type(error).__name__}: {error}"
+    finally:
+        holding.set()
+        release.set()
+
+_frozen_importlib._ModuleLock.acquire = acquire
+threads = [
+    threading.Thread(target=run, args=(package,), name="holder"),
+    threading.Thread(target=run, args=(module, holding), name="peer"),
+]
+for thread in threads:
+    thread.start()
+for thread in threads:
+    thread.join(120)
+_frozen_importlib._ModuleLock.acquire = original_acquire
+print("hung" if any(t.is_alive() for t in threads) else (done, waited), flush=True)
+os._exit(0)
+"""
+
+
+@pytest.mark.parametrize(
+    ("package", "module"),
+    [
+        ("scipy.linalg", "features._spline_ranges"),
+        ("scipy.spatial", "plotting.diagnostics"),
+        ("numpy.random", "_nb2_deviance"),
+        ("numba", "_numba_compile"),
+        ("html", "plotting.editor_style"),
+    ],
+    ids=["scipy-linalg", "scipy-spatial", "numpy-random", "numba", "html"],
+)
+def test_a_cold_import_waits_for_a_package_that_another_thread_is_entering(package, module):
+    """A cold superglm import that reaches ``package`` while another thread holds its lock finishes.
+
+    The holder thread takes ``package``'s import lock and stops before the package's module
+    exists, until the peer, importing ``superglm.<module>`` cold, waits on a lock the holder
+    holds. Nothing depends on timing. Imported first, as ``_ENTER_FIRST`` orders, the package is
+    what the peer waits for, holding none of its submodules, and both imports finish. Entered
+    through one of its submodules instead (``scipy.interpolate`` reaching
+    ``scipy.linalg.cython_lapack``), the peer holds that submodule's lock while it waits for the
+    package, the holder's body then asks for the same submodule, and CPython breaks the cycle
+    with ``_DeadlockError``. Every case fails so on the parent commit, on every supported Python:
+    the peer finds the package missing from ``sys.modules`` and waits for it, as 3.13.16 and 3.14
+    also do when it is there but unfinished.
+    """
+    completed = subprocess.run(
+        [sys.executable, "-c", _ENTRY_OVERLAP, package, f"superglm.{module}"],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    outcome = completed.stdout.strip()
+    assert outcome != "hung", completed.stderr
+    done, waited = ast.literal_eval(outcome)
+    assert done == {package: "ok", f"superglm.{module}": "ok"}, (done, completed.stderr)
+    assert waited, "the peer never waited on the holder: this case no longer forces an overlap"
+
+
 _DEMO_INIT = (
     "from superglm._lazy import attach\n"
     "__getattr__, __dir__ = attach(__name__, __path__, {exports})\n"

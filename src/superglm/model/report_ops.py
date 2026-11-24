@@ -6,6 +6,7 @@ import re
 from typing import Any, cast
 
 import numpy as np
+import scipy.linalg
 
 from superglm.diagnostics.convergence import (
     coefficient_nonconvergence_message,

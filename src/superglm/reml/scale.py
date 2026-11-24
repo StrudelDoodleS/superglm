@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
+import scipy.linalg
 from numpy.typing import NDArray
 from scipy.optimize import brentq
 from scipy.special import digamma, gammaln, polygamma, zeta
