@@ -1179,6 +1179,41 @@ def test_a_held_cap_is_released_when_the_free_term_makes_its_optimum_interior(
     assert released.cap_held == () and released.maximum >= -inward
 
 
+def test_a_face_the_other_term_makes_wrong_is_released_and_the_fit_converges() -> None:
+    """A penalty on its exact face is released once the other term's move gives it a finite optimum.
+
+    The group penalty starts on the cap beside a scale penalty of 300. There
+    its endpoint derivative is positive, and the search puts it on the exact
+    face. The scale penalty then moves in, and where it stops the group
+    penalty's endpoint derivative is negative: infinity is no longer its
+    optimum. The search releases the face and ends at the interior optimum an
+    uncapped start reaches, with no exact face. Mutation check: a search that
+    ends at that recheck reports ``endpoint_revalidation_failed`` with the
+    group penalty left on its cap, at 3.3 effective degrees of freedom
+    against 14.3.
+    """
+    reference_model, reference = _coupled_fit(initial_lambda=1.0)
+    assert reference.converged and reference_model.exact_face_components_ == ()
+    model, smoothing = _coupled_fit(lambdas={_GROUP: 1.0e3, _SPREAD: 300.0})
+
+    promotions = [item for item in smoothing.history if item.activated_face_components]
+    releases = [item for item in smoothing.history if item.deactivated_face_components]
+    assert [item.activated_face_components for item in promotions] == [(_GROUP,)]
+    assert [item.deactivated_face_components for item in releases] == [(_GROUP,)]
+    assert promotions[0].endpoint_direction_evidence.lower_bound > 0.0
+    assert releases[0].endpoint_direction_evidence.decision == "finite"
+    assert releases[0].endpoint_direction_evidence.upper_bound < 0.0
+    assert smoothing.converged is True
+    assert smoothing.unresolved_upper_bound == ()
+    assert model.exact_face_components_ == ()
+    for name in (_GROUP, _SPREAD):
+        assert smoothing.lambdas[name] == pytest.approx(reference.lambdas[name], rel=1.0e-4)
+    assert smoothing.objective == pytest.approx(reference.objective, rel=1.0e-9)
+    assert model.result_.total_effective_df == pytest.approx(
+        reference_model.result_.total_effective_df, rel=1.0e-5
+    )
+
+
 @pytest.mark.pins_behaviour
 def test_a_fit_with_no_capped_term_never_holds_a_cap(monkeypatch) -> None:
     """Pin the search of a fit whose smoothing parameters stay inside their bounds.

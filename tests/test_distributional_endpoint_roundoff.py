@@ -13,7 +13,6 @@ from benchmarks import release_differential
 import superglm.distributional.smoothing.authority as smoothing_authority
 import superglm.distributional.smoothing.faces as smoothing_faces
 import superglm.distributional.solver.solver as solver_module
-import tests.test_distributional_endpoint_laml as endpoint_tests
 from superglm import (
     GaussianLS,
     GeneralizedGammaLSS,
@@ -40,160 +39,8 @@ from superglm.distributional.results.solver import (
     _assessment_is_numerically_stationary,
     _assessment_retained_kkt_ratio,
 )
-from superglm.distributional.smoothing.derivatives import LamlDerivativeError
-from superglm.distributional.smoothing.penalty_face import build_penalty_face
 from superglm.distributional.solver import fit_dense_fixed_lambda
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
-from superglm.features import RandomEffect
-
-
-def _spline_face():
-    family = GaussianLS()
-    weights = resolve_likelihood_weights(
-        np.ones(20, dtype=np.float64),
-        n_observations=20,
-        contract=WeightContract(semantics="prior"),
-    )
-    frame = as_eager_frame(pd.DataFrame({"x": np.linspace(0.0, 1.0, 20)}))
-    predictors = (
-        Predictor(
-            "location",
-            {"x": Spline(kind="cr", n_knots=5)},
-            intercept=True,
-        ),
-        Predictor(
-            "scale",
-            {"x": Spline(kind="cr", n_knots=5)},
-            intercept=True,
-        ),
-    )
-    layout = build_stacked_layout(compile_predictors(frame, weights, family.parameters, predictors))
-    face = build_penalty_face(layout, (layout.penalty_names[0],))
-    return face
-
-
-def test_endpoint_revalidation_projection_roundoff_has_an_arithmetic_bound() -> None:
-    face = _spline_face()
-    canonical = face.lift_vector(np.linspace(1.0, 2.0, face.reduced_width))
-    projected = face.project(canonical)
-    movement = float(np.linalg.norm(projected - canonical, ord=2))
-
-    bound = smoothing_faces._endpoint_revalidation_projection_bound(face, canonical)
-
-    assert bound is not None and bound > 0.0
-    assert movement <= bound
-
-
-def test_endpoint_revalidation_projection_bound_rejects_a_material_scalar_move() -> None:
-    family = GaussianLS()
-    weights = resolve_likelihood_weights(
-        np.ones(1, dtype=np.float64),
-        n_observations=1,
-        contract=WeightContract(semantics="prior"),
-    )
-    frame = as_eager_frame(pd.DataFrame({"effect": ["only"]}))
-    layout = build_stacked_layout(
-        compile_predictors(
-            frame,
-            weights,
-            family.parameters,
-            (
-                Predictor("location", {"effect": RandomEffect()}),
-                Predictor("scale", {"effect": RandomEffect()}),
-            ),
-        )
-    )
-    face = build_penalty_face(layout, (layout.penalty_names[0],))
-    canonical = np.zeros(face.width, dtype=np.float64)
-    altered = canonical + 1.0e-14 * face.constraint_basis[:, 0]
-
-    bound = smoothing_faces._endpoint_revalidation_projection_bound(face, altered)
-    projected = face.project(altered)
-    movement = float(np.linalg.norm(projected - altered, ord=2))
-
-    assert bound is not None
-    assert movement > bound
-
-
-def test_stationary_endpoint_revalidation_accepts_a_subnormal_projection_replay(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls = 0
-    real_check = smoothing_faces._check_face_direction
-
-    def perturb_revalidation_start(*args: object, **kwargs: object):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            endpoint_initial = np.array(kwargs["endpoint_initial"], copy=True)
-            endpoint_initial[0] = np.nextafter(0.0, np.inf)
-            kwargs["endpoint_initial"] = endpoint_initial
-        return real_check(*args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(smoothing_faces, "_check_face_direction", perturb_revalidation_start)
-    component_name, smoothing = endpoint_tests._scalar_efs_fit(0.5)
-
-    assert calls == 2
-    assert smoothing.converged is True
-    assert smoothing.terminal_fit.coefficient_face is not None
-    assert smoothing.history[-1].revalidated_face_components == (component_name,)
-
-
-def test_endpoint_revalidation_records_material_state_refusal(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls = 0
-    real_check = smoothing_faces._check_face_direction
-    real_fit = smoothing_faces._fit_endpoint_authority_stationary
-    inject_result = False
-    injected = False
-
-    def inject_endpoint_result(*args: object, **kwargs: object):
-        nonlocal injected
-        fit = real_fit(*args, **kwargs)  # type: ignore[arg-type]
-        if inject_result and not injected and kwargs.get("face") is not None:
-            endpoint_face = kwargs["face"]
-            assert endpoint_face is not None
-            assert endpoint_face.null_basis.shape[1] > 0
-            injected = True
-            fit = replace(
-                fit,
-                coefficients=fit.coefficients + 1.0e-6 * endpoint_face.null_basis[:, 0],
-            )
-        return fit
-
-    def perturb_revalidation_start(*args: object, **kwargs: object):
-        nonlocal calls, inject_result
-        calls += 1
-        if calls == 2:
-            np.testing.assert_array_equal(kwargs["endpoint_initial"], kwargs["initial"])
-            inject_result = True
-        try:
-            return real_check(*args, **kwargs)  # type: ignore[arg-type]
-        finally:
-            inject_result = False
-
-    monkeypatch.setattr(
-        smoothing_faces, "_fit_endpoint_authority_stationary", inject_endpoint_result
-    )
-    monkeypatch.setattr(smoothing_faces, "_check_face_direction", perturb_revalidation_start)
-    (
-        _family,
-        _layout,
-        _response,
-        _plan,
-        _lambdas,
-        component_name,
-        _finite,
-        _config,
-        smoothing,
-    ) = endpoint_tests._gamma_isolated_cap_face_problem()
-
-    terminal_event = smoothing.history[-1]
-    assert calls == 2
-    assert smoothing.converged is False
-    assert terminal_event.deactivated_face_components == (component_name,)
-    assert terminal_event.endpoint_assessment_failure_reason == "endpoint_state_changed"
 
 
 def _capped_spline_problem():
@@ -410,59 +257,6 @@ def test_numerical_stationarity_admits_a_score_within_its_rounding_floor() -> No
     trial = _capped_spline_fit(max_iterations=1)
     assert trial.converged is False
     assert not _assessment_is_numerically_stationary(trial, tolerance)
-
-
-def test_endpoint_revalidation_accepts_a_stepped_replay_within_the_refit_envelope(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Kills demanding a zero-step replay beside a numerically stationary cap."""
-    calls = 0
-    real_check = smoothing_faces._check_face_direction
-    real_fit = smoothing_faces._fit_endpoint_authority_stationary
-    inject_result = False
-    injected = False
-
-    def step_endpoint_replay(*args: object, **kwargs: object):
-        nonlocal injected
-        fit = real_fit(*args, **kwargs)  # type: ignore[arg-type]
-        if inject_result and not injected and kwargs.get("face") is not None:
-            endpoint_face = kwargs["face"]
-            assert endpoint_face is not None
-            injected = True
-            fit = replace(
-                fit,
-                coefficients=fit.coefficients + 1.0e-14 * endpoint_face.null_basis[:, 0],
-                iterations=fit.iterations + 1,
-            )
-        return fit
-
-    def replay_revalidation(*args: object, **kwargs: object):
-        nonlocal calls, inject_result
-        calls += 1
-        inject_result = calls == 2
-        try:
-            return real_check(*args, **kwargs)  # type: ignore[arg-type]
-        finally:
-            inject_result = False
-
-    monkeypatch.setattr(smoothing_faces, "_fit_endpoint_authority_stationary", step_endpoint_replay)
-    monkeypatch.setattr(smoothing_faces, "_check_face_direction", replay_revalidation)
-    values = endpoint_tests._gamma_isolated_cap_face_problem()
-    component_name, smoothing = values[5], values[-1]
-
-    assert calls == 2 and injected
-    assert smoothing.converged is True
-    revalidation = smoothing.history[-1]
-    assert revalidation.revalidated_face_components == (component_name,)
-    cap_fit, endpoint_fit = (
-        smoothing.coefficient_fits[index] for index in revalidation.coefficient_fit_indices
-    )
-    source_fit = smoothing.coefficient_fits[revalidation.source_fit_index]
-    tolerance = revalidation.coefficient_tolerances[0]
-    assert _assessment_is_numerically_stationary(cap_fit, tolerance)
-    assert endpoint_fit.iterations > 0
-    assert not np.array_equal(endpoint_fit.coefficients, source_fit.coefficients)
-    assert smoothing.terminal_fit is endpoint_fit
 
 
 def _flagged_generalized_pareto_problem() -> tuple[pd.DataFrame, np.ndarray]:
@@ -689,27 +483,23 @@ def test_a_face_beside_a_certified_cap_finishes_stationary_through_one_stop(monk
     stop: the terminal recheck sees another cap outside the face and keeps the
     face (the waiver), the evidence refreshed after the revalidation nominates
     every estimated component outside the face for the cap and the endgame's
-    exact gradient voids it, and the derivatives are retaken at the fit the
-    revalidation published. Here all three are forced on the one fit, which
-    publishes its promoted face, no unresolved cap, a stationary stop that
-    survives a pickle round trip, and a corrected covariance that replays the
-    retaken derivatives. Mutation checks: without the waiver the face retracts
-    and the stop is ``endpoint_revalidation_failed``; without the voided
-    nomination ``unresolved_upper_bound`` is nonempty; without the retake no
-    derivatives are taken at the published fit.
+    exact gradient voids it, and the revalidation judges the endgame's own fit,
+    so the derivatives the endgame published are those of the published fit.
+    Here all three are forced on the one fit, which publishes its promoted
+    face, no unresolved cap, a stationary stop that survives a pickle round
+    trip, and a corrected covariance that replays those derivatives. Mutation
+    checks: without the waiver the face retracts and the stop is
+    ``endpoint_revalidation_failed``; without the voided nomination
+    ``unresolved_upper_bound`` is nonempty; a revalidation that fits the face
+    again publishes a fit the derivatives were not taken at.
     """
     import superglm.distributional.smoothing.loop as loop
 
     recheck, sole_cap = loop._recheck_exact_face, smoothing_faces._is_sole_cap_outside_face
-    endgame, fresh, retaken = (
-        loop.run_newton_endgame,
-        loop._fresh_raw_evidence,
-        loop.published_derivatives,
-    )
+    endgame, fresh = loop.run_newton_endgame, loop._fresh_raw_evidence
     waivers: list[bool] = []
-    stationary: list[bool] = []
+    stationary: list[DenseSolverResult] = []
     nominated: list[tuple[str, ...]] = []
-    retaken_at: list[DenseSolverResult] = []
 
     def not_sole(*args, **kwargs) -> bool:
         sole_cap(*args, **kwargs)
@@ -724,7 +514,7 @@ def test_a_face_beside_a_certified_cap_finishes_stationary_through_one_stop(monk
     def flagged_endgame(*args, **kwargs):
         outcome = endgame(*args, **kwargs)
         if outcome.kind == "stationary":
-            stationary.append(True)
+            stationary.append(outcome.state.fit)
         return outcome
 
     def nominating(layout, lambdas, fit, config, *, face=None, **options):
@@ -736,14 +526,9 @@ def test_a_face_beside_a_certified_cap_finishes_stationary_through_one_stop(monk
             return replace(evidence, unresolved_upper_bound=outside)
         return evidence
 
-    def spy(*args, **kwargs):
-        retaken_at.append(kwargs["fit"])
-        return retaken(*args, **kwargs)
-
     monkeypatch.setattr(loop, "_recheck_exact_face", recheck_beside_another_cap)
     monkeypatch.setattr(loop, "run_newton_endgame", flagged_endgame)
     monkeypatch.setattr(loop, "_fresh_raw_evidence", nominating)
-    monkeypatch.setattr(loop, "published_derivatives", spy)
     frame, response = _flagged_generalized_pareto_problem()
     model = _flagged_generalized_pareto_model(lambda_policy=LambdaPolicy.fixed(9.99e9)).fit_reml(
         frame, response, outer="efs+newton"
@@ -758,7 +543,7 @@ def test_a_face_beside_a_certified_cap_finishes_stationary_through_one_stop(monk
     promoted = {name for item in smoothing.history for name in item.activated_face_components}
     assert promoted and set(model.result_.exact_face_components) == promoted
     assert smoothing.history[-1].revalidated_face_components
-    assert len(retaken_at) == 1 and retaken_at[0] is smoothing.terminal_fit
+    assert stationary[-1] is smoothing.terminal_fit
     fallbacks = _corrected_covariance_fallbacks(fitted)
     assert _only_the_hessian_gate_declined(fallbacks), fallbacks
     loaded = pickle.loads(pickle.dumps(model))._require_fitted().smoothing
@@ -802,44 +587,45 @@ def _only_the_hessian_gate_declined(fallbacks: list[str]) -> bool:
     )
 
 
-@pytest.mark.parametrize("retake", ["published", "unavailable", "declined"])
+@pytest.mark.parametrize("gate", ["open", "declined"])
 def test_a_revalidated_stationary_stop_publishes_derivatives_at_its_fit(
-    monkeypatch, retake: str
+    monkeypatch, gate: str
 ) -> None:
-    """The stationary derivatives are retaken at the fit the face revalidation published.
+    """A revalidated stationary stop publishes the fit its derivatives were taken at.
 
-    The corrected covariance replays its gradient at that fit and compares, so
-    a retaken gradient always agrees with its replay. The covariance's separate
-    positive-definiteness gate may still decline the correction here: the
-    shape smooth ends near the lambda cap with a curvature of about 3e-8 of the
-    largest, and where the endgame leaves that flat direction varies by
-    platform, so a published retake may fall back only through that gate; the
-    declined case forces its refusal. When the retake fails, the stop keeps
-    the endgame's derivatives. In every case the corrected covariance is
-    finite, and it falls back to the fixed one only with a disclosure.
-    Mutation checks: without the retake there is no pass at the published fit,
-    and a fallback without its ConvergenceWarning fails the declined case.
+    The face revalidation judges the endgame's own fit, so the fit it publishes
+    is the one the endgame's gradient belongs to. The corrected covariance
+    replays its gradient at that fit and compares, so the two always agree. The
+    covariance's separate positive-definiteness gate may still decline the
+    correction here: the shape smooth ends near the lambda cap with a curvature
+    of about 3e-8 of the largest, and where the endgame leaves that flat
+    direction varies by platform, so the correction may fall back only through
+    that gate; the declined case forces its refusal. In both cases the
+    corrected covariance is finite, and it falls back to the fixed one only
+    with a disclosure. Mutation checks: a revalidation that fits the face again
+    publishes another fit, and a fallback without its ConvergenceWarning fails
+    the declined case.
     """
     import superglm.distributional.smoothing.loop as loop
 
-    retaken = loop.published_derivatives
-    fits: list[DenseSolverResult] = []
+    endgame = loop.run_newton_endgame
+    stationary: list[DenseSolverResult] = []
 
-    def spy(*args, **kwargs):
-        fits.append(kwargs["fit"])
-        if retake == "unavailable":
-            raise LamlDerivativeError("injected unavailable derivatives at the published fit")
-        return retaken(*args, **kwargs)
+    def flagged_endgame(*args, **kwargs):
+        outcome = endgame(*args, **kwargs)
+        if outcome.kind == "stationary":
+            stationary.append(outcome.state.fit)
+        return outcome
 
-    monkeypatch.setattr(loop, "published_derivatives", spy)
+    monkeypatch.setattr(loop, "run_newton_endgame", flagged_endgame)
     frame, response = _flagged_generalized_pareto_problem()
     model = _flagged_generalized_pareto_model().fit_reml(frame, response, outer="efs+newton")
     fitted = model._require_fitted()
     smoothing = fitted.smoothing
     assert smoothing is not None and smoothing.convergence_reason == "stationary"
     assert smoothing.history[-1].revalidated_face_components
-    assert len(fits) == 1 and fits[0] is smoothing.terminal_fit
-    if retake == "declined":
+    assert stationary[-1] is smoothing.terminal_fit
+    if gate == "declined":
         import superglm.distributional.posterior as posterior
 
         def declined(*args, **kwargs):
@@ -847,38 +633,41 @@ def test_a_revalidated_stationary_stop_publishes_derivatives_at_its_fit(
 
         monkeypatch.setattr(posterior, "_trusted_smoothing_hessian", declined)
     fallbacks = _corrected_covariance_fallbacks(fitted)
-    if retake == "published":
-        assert _only_the_hessian_gate_declined(fallbacks), fallbacks
-    if retake == "declined":
+    assert _only_the_hessian_gate_declined(fallbacks), fallbacks
+    if gate == "declined":
         assert fallbacks
 
 
 def test_a_revalidated_face_keeps_the_endgames_published_hessian(monkeypatch) -> None:
-    """The retake keeps a smoothing Hessian the endgame published.
+    """A revalidated stop publishes the smoothing Hessian the endgame took at its fit.
 
     The endgame is made to stop with its exact Hessian, as its Newton-step
     exits do. Without retained rows the corrected covariance can only use the
     published Hessian, so it may fall back only through the positive-
-    definiteness gate. Mutation check: a gradient-only retake publishes no
-    Hessian, and the correction falls back for want of retained rows.
+    definiteness gate. Mutation check: a revalidation that fits the face again
+    publishes a fit that Hessian was not taken at.
     """
     import superglm.distributional.smoothing.loop as loop
-    import superglm.distributional.smoothing.newton as newton
+    from superglm.distributional.smoothing.derivatives import laml_derivatives
 
     endgame = loop.run_newton_endgame
+    stationary: list[DenseSolverResult] = []
 
     def with_hessian(*args, **kwargs):
         outcome = endgame(*args, **kwargs)
-        if outcome.kind != "stationary" or outcome.derivatives.hessian is not None:
+        if outcome.kind != "stationary":
             return outcome
-        derivatives = newton.published_derivatives(
+        stationary.append(outcome.state.fit)
+        if outcome.derivatives.hessian is not None:
+            return outcome
+        derivatives = laml_derivatives(
             *args[:4],
             lambdas=outcome.state.lambdas,
             fit=outcome.state.fit,
-            efs_config=kwargs["efs_config"],
-            phase_recorder=None,
-            reuse_session=kwargs["reuse_session"],
+            dense_matrices=kwargs["reuse_session"].dense_matrices(args[1], phase_recorder=None),
+            step=kwargs["efs_config"].derivative_step,
             want_hessian=True,
+            curvature="terminal",
         )
         return replace(outcome, derivatives=derivatives)
 
@@ -892,6 +681,7 @@ def test_a_revalidated_face_keeps_the_endgames_published_hessian(monkeypatch) ->
     assert smoothing is not None and smoothing.convergence_reason == "stationary"
     assert smoothing.history[-1].revalidated_face_components
     assert smoothing.smoothing_hessian is not None
+    assert stationary[-1].coefficients is smoothing.terminal_fit.coefficients
     # Without retained rows only the published Hessian can form the correction;
     # the positive-definiteness gate's verdict on it varies by platform here.
     fallbacks = _corrected_covariance_fallbacks(fitted)

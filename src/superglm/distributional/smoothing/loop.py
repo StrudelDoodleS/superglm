@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import math
 from collections.abc import Mapping
 from dataclasses import replace
@@ -37,7 +36,6 @@ from superglm.distributional.smoothing.authority import (
     _fit_fixed_state,
     _optional_penalty_face,
 )
-from superglm.distributional.smoothing.derivatives import LamlDerivativeError
 from superglm.distributional.smoothing.endpoint_laml import (
     EndpointDirectionEvidence,
     EndpointLaplaceError,
@@ -49,6 +47,7 @@ from superglm.distributional.smoothing.evidence import (
 )
 from superglm.distributional.smoothing.faces import (
     _assess_joint_face_directions,
+    _direction_leaves_face,
     _face_assessment_refusal_iteration,
     _face_retraction_iteration,
     _face_revalidation_iteration,
@@ -73,7 +72,6 @@ from superglm.distributional.smoothing.newton import (
     NewtonEndgameOutcome,
     bracket_refused_component,
     newton_iteration_record,
-    published_derivatives,
     run_newton_endgame,
     should_hand_off,
 )
@@ -390,6 +388,23 @@ def fit_distributional_efs(
         caps_final = bool(terminal_evidence.unresolved_upper_bound)
         return caps_final
 
+    def _active_set_changed() -> None:
+        """A face was promoted or released: the plateau and the endgame's verdict were the old set's."""
+        nonlocal terminal_evidence, estimated_names, endgame_outcome, endgame_stationary
+        nonlocal pending_cap, plateau_run, practical_run, plateau_qualified
+        nonlocal previous_accepted_step
+        pending_cap = None
+        endgame_outcome = None  # its derivatives named the old set's components
+        endgame_stationary = False
+        terminal_evidence = _evidence()
+        estimated_names = terminal_evidence.estimated_names
+        plateau_run = 0
+        practical_run = 0
+        plateau_qualified = False
+        previous_accepted_step = math.inf
+        if accelerator is not None:
+            accelerator.reset()
+
     def _plateau_finishes() -> bool:
         """Whether a practical plateau hands to the endgame rather than stopping.
 
@@ -434,48 +449,10 @@ def fit_distributional_efs(
         endgame = endgame_outcome
         if converged and endgame_stationary:
             # The exact gradient voids a Fellner--Schall cap nomination, including
-            # one on evidence refreshed after an exact-face revalidation.
+            # one on evidence refreshed after an exact-face revalidation. That
+            # revalidation judged the endgame's own fit, so the derivatives the
+            # endgame published are already those of the published fit.
             evidence = replace(evidence, unresolved_upper_bound=())
-            if (
-                endgame is not None
-                and endgame.derivatives is not None
-                and endgame.state.fit is not current_fit
-            ):
-                # A face revalidation refits the stationary point. The published
-                # derivatives are taken at the published fit, the one the corrected
-                # covariance replays against, with the Hessian when the endgame
-                # published one (a fit without retained rows cannot replay it).
-                if stationary_search:
-                    # The coefficient refit can change the free scores even at
-                    # identical lambdas. Replay the stop on that fit; a zero
-                    # step budget permits a derivative pass only.
-                    endgame = _endgame_at(_endgame_state(), 0)
-                    if endgame.kind != "stationary":
-                        converged = False
-                        if endgame.kind == "cap_pressure":
-                            reason = "lambda_cap_unresolved"
-                            evidence = replace(
-                                evidence, unresolved_upper_bound=endgame.cap_pressure
-                            )
-                        elif endgame.kind == "max_iterations":
-                            reason = "gradient_unresolved"
-                        else:
-                            reason = endgame.kind
-                else:
-                    with contextlib.suppress(LamlDerivativeError):
-                        derivatives = published_derivatives(
-                            family,
-                            layout,
-                            y,
-                            likelihood_plan,
-                            lambdas=current_lambdas,
-                            fit=current_fit,
-                            efs_config=outer_config,
-                            phase_recorder=phase_recorder,
-                            reuse_session=reuse_session,
-                            want_hessian=endgame.derivatives.hessian is not None,
-                        )
-                        endgame = replace(endgame, derivatives=derivatives)
         return _efs_result(
             layout=layout,
             config=outer_config,
@@ -772,10 +749,6 @@ def fit_distributional_efs(
                     if isinstance(bracket, BracketAttempt):
                         _record_bracket_attempt(bracket)
                 if assessment_attempt is not None and assessment_attempt.assessment_fits:
-                    if assessment_attempt.failure_reason == "endpoint_state_changed":
-                        raise RuntimeError(
-                            "endpoint state changes are valid only during face revalidation"
-                        )
                     first_assessment_index = len(coefficient_fits)
                     coefficient_fits.extend(assessment_attempt.assessment_fits)
                     assessment_indices = tuple(range(first_assessment_index, len(coefficient_fits)))
@@ -864,16 +837,7 @@ def fit_distributional_efs(
             current_face = promotion.face
             current_fit = promotion.fit
             current_objective = promotion.objective
-            pending_cap = None
-            endgame_outcome = None  # its derivatives named the promoted component
-            terminal_evidence = _evidence()
-            estimated_names = terminal_evidence.estimated_names
-            plateau_run = 0
-            practical_run = 0
-            plateau_qualified = False
-            previous_accepted_step = math.inf
-            if accelerator is not None:
-                accelerator.reset()
+            _active_set_changed()
             continue
         if endgame_stationary or (
             not terminal_evidence.working_infinity
@@ -949,6 +913,7 @@ def fit_distributional_efs(
                             finite_faces=finite_faces,
                             source_fit=current_fit,
                             source_objective=current_objective,
+                            endpoint_fit=current_fit,
                             solver_config=inner_config,
                             efs_config=outer_config,
                             chunk_size=chunk_size,
@@ -1082,6 +1047,9 @@ def fit_distributional_efs(
                         current_face = None
                         current_fit = rollback_fit
                         current_objective = rollback_objective
+                        if _direction_leaves_face(retraction.direction):
+                            _active_set_changed()
+                            continue
                         with measure_phase(phase_recorder, "efs_update_backtracking"):
                             terminal_evidence = _fresh_raw_evidence(
                                 layout,
@@ -1183,6 +1151,9 @@ def fit_distributional_efs(
                     current_face = None
                     current_fit = retraction.fit
                     current_objective = retraction.objective
+                    if _direction_leaves_face(retraction.direction):
+                        _active_set_changed()
+                        continue
                     with measure_phase(phase_recorder, "efs_update_backtracking"):
                         terminal_evidence = _fresh_raw_evidence(
                             layout,

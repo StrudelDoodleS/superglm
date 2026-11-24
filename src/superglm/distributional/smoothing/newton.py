@@ -1190,40 +1190,6 @@ def run_newton_endgame(
         )
 
 
-def published_derivatives(
-    family: DistributionalFamily,
-    layout: StackedLayout,
-    y: NDArray,
-    likelihood_plan: FamilyLikelihoodPlan,
-    *,
-    lambdas: Mapping[str, float],
-    fit: DenseSolverResult,
-    efs_config: DistributionalEFSConfig,
-    phase_recorder: FitPhaseRecorder | None,
-    reuse_session: _DenseObservedReuseSession,
-    want_hessian: bool,
-) -> LamlDerivatives:
-    """The endgame's derivative pass at ``fit``, on the matrices its replay uses."""
-    dense = (
-        bounded_predictor_matrices(layout, chunk_size=min(fit.resolved_chunk_size, 4096))
-        if fit.resolved_chunk_size is not None
-        else reuse_session.dense_matrices(layout, phase_recorder=phase_recorder)
-    )
-    with measure_phase(phase_recorder, _ENDGAME_PHASE):
-        return laml_derivatives(
-            family,
-            layout,
-            y,
-            likelihood_plan,
-            lambdas=lambdas,
-            fit=fit,
-            dense_matrices=dense,
-            step=efs_config.derivative_step,
-            want_hessian=want_hessian,
-            curvature="terminal",
-        )
-
-
 @dataclass(frozen=True)
 class BracketRelease:
     """A refused cap component whose optimum the bracketed search located."""

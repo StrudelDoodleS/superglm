@@ -1213,6 +1213,12 @@ optimum: without a root or an endpoint certificate the fit reports
 component. A component at the cap whose gradient is within the bar is a
 stationary point of the box and is reported as such.
 
+Every exact face is checked once more where the search stops, on the fit it
+stopped on. If the other penalties have moved so that a term's endpoint
+derivative is now negative, the term leaves its exact face and the search
+carries on to the finite optimum. Only a check that cannot decide the sign
+ends the fit, as `endpoint_revalidation_failed` with `converged=False`.
+
 `smoothing_certified_` (`matched_certified`) means: the terminal stop carries
 its own authority — the projected gradient and every gradient certificate
 within the bar for `stationary`, the Fellner–Schall residual within `reml_tol`
