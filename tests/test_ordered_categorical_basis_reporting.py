@@ -14,6 +14,8 @@ inner basis, exact against the fitted model.
 
 from __future__ import annotations
 
+import pickle
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -274,6 +276,22 @@ def test_determined_structural_rows_keep_their_default_errors() -> None:
     other = aliased.metrics(X.iloc[:120].reset_index(drop=True), y[:120] + 0.5).summary()
     row = next(r for r in other._coef_rows if r.name == "a[slope-change @ d]")
     assert row.se is not None and np.isfinite(row.se) and row.p is not None
+
+
+def test_a_summary_saved_beside_an_ordered_piecewise_term_is_formed_again() -> None:
+    """A summary cached before the structural rows were checked is dropped on restore.
+
+    Pickled after ``summary()`` at fe8a6eb9b, the twin terms' model served that summary at
+    dceef692b: ``a[slope-change @ d]`` kept SE 0.2179 and p = 0, which ``summary(alpha=0.1)``
+    of the same restored model left blank.
+    """
+    model, _, _ = _twin_fit(["a", "b"], None)
+    stale = next(r for r in model.summary()._coef_rows if r.name == "a[slope-change @ d]")
+    stale.se, stale.z, stale.p = 0.21788071784804042, 35.3, 0.0  # what fe8a6eb9b cached
+    restored = pickle.loads(pickle.dumps(model))
+    row = next(r for r in restored.summary()._coef_rows if r.name == "a[slope-change @ d]")
+    assert row.se is None and row.z is None and row.p is None
+    assert np.isfinite(row.coef)
 
 
 def test_editor_stale_summary_keeps_the_basis_vocabulary(segmented_model) -> None:

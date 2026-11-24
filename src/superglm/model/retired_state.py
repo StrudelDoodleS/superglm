@@ -118,6 +118,24 @@ def release_separated_level_summaries(model) -> None:
             model.__dict__["_summary_cache"] = None
 
 
+def release_ordered_piecewise_summaries(model) -> None:
+    """``SuperGLM.__setstate__``'s part for a summary cached beside an ordered piecewise term.
+
+    A summary cached before its readers asked whether the fit determines each slope change
+    and curvature (#737) can hold an error and a test for one it does not; it is dropped, and
+    the next ``summary()`` is formed from the same fit.
+    """
+    from superglm.features.ordered_categorical import OrderedCategorical
+    from superglm.features.piecewise import Piecewise
+
+    # the spline attribute itself: a removed step-mode spec has none, and raises on read
+    if model.__dict__.get("_summary_cache") and any(
+        isinstance(spec, OrderedCategorical) and isinstance(spec.__dict__.get("_spline"), Piecewise)
+        for spec in (model.__dict__.get("_specs") or {}).values()
+    ):
+        model.__dict__["_summary_cache"] = None
+
+
 def retained_linear_state(model):
     """The model's retained structured linear system, rebuilt once if it was retired."""
     state = getattr(model, "_linear_system_state", None)
