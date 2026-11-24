@@ -111,7 +111,8 @@ def data_undetermined(model, frame) -> np.ndarray:
 def fixture_contrasts(model, metrics, se, original_maps):
     """Express fitted coefficients and marginal variances in mgcv's recorded coordinates.
 
-    The fixture maps are the solver-to-raw-basis maps of these models on daf11a862.
+    The fixture maps are the solver-to-raw-basis maps of these models in the coordinates
+    mgcv fitted: on daf11a862, and for the severity book on the refit its fixture was built from.
     A level curve's R_inv already includes its spline projection. A tensor's
     R_inv starts in centred marginal coordinates, so prepend both projections.
     """

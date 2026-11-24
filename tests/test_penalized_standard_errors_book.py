@@ -66,17 +66,18 @@ def test_every_severity_book_coefficient_has_mgcvs_bayesian_standard_error() -> 
     """All 614 standard errors are printed and are mgcv's ``Vp`` ones.
 
     ``SE^2 / phi`` against mgcv's ``Vp / phi`` at the fixture's stated tolerance, 1e-6
-    (measured 1.2e-7 under the SkylakeX and Haswell OpenBLAS kernels, whose REML stop differs
-    from the fixture's by 1.2e-9 in ``VehAge:VehBrand[B14]``'s lambda; the tree that built the
-    fixture reproduced it to 5.0e-12; both engines stop PIRLS at a tolerance, so it is set 100
-    times looser than the coefficients' 2.4e-9); the coefficients to 1e-6 of the largest and
-    the EDF to 1e-8.  The raw standard errors are also the dense inverse's of
-    ``[1 X]' W [1 X] + S`` built from the design and penalty (``kappa u`` about 1e-11; rtol
-    1e-9).  On master 398 coefficients and the 10 ``VehBrand`` rows were blank
+    (measured 1.0e-7 under the SkylakeX and Haswell OpenBLAS kernels, whose REML stop differs
+    from the fixture's by 1.0e-7 in ``BonusMalus:VehBrand[B11]``'s lambda; the tree that built
+    the fixture reproduced it to 5.0e-12; both engines stop PIRLS at a tolerance, so it is set
+    100 times looser than the coefficients' 6.1e-9); the coefficients to 1e-6 of the largest
+    and the EDF to 1e-8 (measured 3.6e-9).  The raw standard errors are also the dense
+    inverse's of ``[1 X]' W [1 X] + S`` built from the design and penalty (``kappa u`` about
+    1e-11; rtol 1e-9).  On master 398 coefficients and the 10 ``VehBrand`` rows were blank
     before #681.  A rotation changes a spline coefficient's own SE; its original linear
-    contrast and variance are invariant, so the main splines are compared after mapping to
-    the fixture's coordinates.  The maps belong to the fixture's lambdas: those of master's
-    earlier stop leave the main splines' ``SE^2`` 1.1e-4 from mgcv's.
+    contrast and variance are invariant, so the main splines and the interactions are
+    compared after mapping to the fixture's coordinates.  The maps belong to the fixture's
+    lambdas, and come from the refit the fixture was built from: those of master's earlier
+    stop leave the main splines' ``SE^2`` 1.1e-4 from mgcv's and an interaction's 0.99.
     """
     fixture = json.loads(_FIXTURE.read_text(encoding="utf-8"))
     books = _books()
