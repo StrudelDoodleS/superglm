@@ -1981,6 +1981,34 @@ class TestUnitsAndWorkspace:
         assert not refused.available
         assert refused.unavailable_reason == "workspace_budget_exceeded"
 
+    def test_the_cap_covers_the_qr_route_to_a_bread_its_gram_does_not_certify(self):
+        """An aliased column leaves the observed Gram uncertified: the bread is factored from rows.
+
+        That route's TSQR leaf, 8192 rows by 80 columns that the leaf pool charges at
+        three copies (15.7 MB), is counted against ``max_memory``: caps of 700 kB and
+        5 MiB, which the Gram and the replay alone fit, are refused, and a cap of
+        32 MiB gives the uncapped request's covariance within it.
+        """
+        rng = np.random.default_rng(56)
+        values = rng.normal(size=(8192, 80))
+        values[:, -1] = values[:, 0]
+        y = rng.gamma(5.0, np.exp(0.2 + 0.1 * values[:, 0]) / 5.0)
+        frame = pd.DataFrame(values, columns=[f"c{i}" for i in range(80)])
+        model = SuperGLM(
+            family=Gamma(), link=LogLink(), features={c: Numeric() for c in frame}, n_jobs=1
+        ).fit(frame, y)
+        free = model.sandwich_covariance()
+        assert free.available and free.bread_rank < free.n_params
+
+        for cap in (700_000, 5 << 20):
+            refused = model.sandwich_covariance(max_memory=cap)
+            assert refused.unavailable_reason == "workspace_budget_exceeded"
+
+        cap = 32 << 20
+        capped = model.sandwich_covariance(max_memory=cap)
+        assert capped.available and capped.telemetry.peak_bytes <= cap
+        np.testing.assert_allclose(capped.covariance, free.covariance, rtol=1e-10, atol=1e-18)
+
     @pytest.mark.parametrize("weight_semantics", ["prior", "frequency"])
     def test_unclustered_centered_replay_matches_single_chunk_across_chunk_boundary(
         self, weight_semantics

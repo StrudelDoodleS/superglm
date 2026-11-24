@@ -12,6 +12,7 @@ import scipy.linalg
 from numpy.typing import NDArray
 from scipy.special import expit
 
+from superglm._parallel import parallel_config, pool_workers
 from superglm._weight_units import scale_penalties
 from superglm.distributions import (
     _VARIANCE_FLOOR,
@@ -123,10 +124,42 @@ def _dense_workspace_bytes(
     ``chunk_rows x q`` arrays in a replay chunk (the scores, their
     positive-weight copy, the solve's right-hand side, solution and result, and
     the scaled copy the Gram takes).  The fit's per-row vectors (predictor,
-    mean, score, curvature) are its own size and are not dense workspace.
+    mean, score, curvature) are its own size and are not dense workspace.  A
+    bread its Gram does not certify adds the QR route's workspace
+    (``_qr_bread_square_bytes``, ``_qr_bread_leaves``).
     """
     cluster = 16 * n_clusters * q if n_clusters else 0
     return 40 * q * q + 48 * bread_columns * bread_columns + cluster + 48 * chunk_rows * q
+
+
+def _qr_bread_square_bytes(design: DesignMatrix) -> int:
+    """Bytes of the width-square arrays the QR route to a bread holds beyond the six.
+
+    ``grouped_augmented_factor`` keeps the TSQR tree's waiting triangles and one
+    merge's pair (``ceil(log2 leaves) + 3``), and ``decompose_factor`` the
+    augmented factor of up to twice the width in rows with the scaled copy and
+    left vectors of its SVD (six more).
+    """
+    from superglm.solvers.rank import tsqr_leaf_rows
+
+    leaves = -(-int(design.n) // max(1, min(int(design.n), tsqr_leaf_rows(design.p))))
+    return 8 * (math.ceil(math.log2(max(leaves, 1))) + 9) * int(design.p) ** 2
+
+
+def _qr_bread_leaves(design: DesignMatrix) -> tuple[int, int, int]:
+    """``(leaves, held, leaf)`` of the QR route's TSQR under the memory budget in force.
+
+    ``leaf`` is one leaf's working set as the leaf pool charges it
+    (``tsqr_leaf_bytes``, with the support table a deferred leaf forms) and
+    ``held`` the support tables the design keeps beside the leaves, which
+    ``_design_leaf_parts`` decides from that budget.
+    """
+    from superglm.solvers.rank import tsqr_leaf_bytes, tsqr_leaf_rows
+
+    rows = max(1, min(int(design.n), tsqr_leaf_rows(design.p)))
+    parts = _design_leaf_parts(design)
+    leaf = tsqr_leaf_bytes(rows, design.p) + int(parts.per_leaf)
+    return -(-int(design.n) // rows), int(parts.held), leaf
 
 
 def _settings(obj: Any) -> str:
@@ -1025,6 +1058,7 @@ def compute_superglm_sandwich_covariance(
     bread_reused = False
     n_factorizations = 0
     bread_columns = 0
+    factor_peak = 0
 
     if backend == "structured":
         assert isinstance(linear_state, StructuredLinearSystemState)
@@ -1161,15 +1195,25 @@ def compute_superglm_sandwich_covariance(
                 try:
                     decomp = decompose_gram_if_authoritative(hessian)
                     if decomp is None:
-                        decomp = decompose_factor(
-                            grouped_augmented_factor(
-                                X_active,
-                                h_solver,
-                                S_active,
-                                center=centre,
-                                center_lo=centre_lo,
+                        # The QR route's leaves run under what the rest of the cap
+                        # leaves them, so the leaf pool's workers fit it too.
+                        fixed = needed + _qr_bread_square_bytes(X_active)
+                        if fixed >= workspace_cap:
+                            return over_budget(fixed)
+                        with parallel_config(max_memory=workspace_cap - fixed):
+                            leaves, held, leaf = _qr_bread_leaves(X_active)
+                            if fixed + held + leaf > workspace_cap:
+                                return over_budget(fixed + held + leaf)
+                            factor_peak = fixed + held + leaf * pool_workers(leaves, leaf, held)
+                            decomp = decompose_factor(
+                                grouped_augmented_factor(
+                                    X_active,
+                                    h_solver,
+                                    S_active,
+                                    center=centre,
+                                    center_lo=centre_lo,
+                                )
                             )
-                        )
                 except ValueError:
                     return build_unavailable_covariance(
                         unavailable_reason="indefinite_bread",
@@ -1261,7 +1305,7 @@ def compute_superglm_sandwich_covariance(
     )
     if chunk_rows < 1:
         return over_budget(fixed_bytes + 48 * q)
-    peak_bytes = fixed_bytes + 48 * chunk_rows * q
+    peak_bytes = max(fixed_bytes + 48 * chunk_rows * q, factor_peak)
 
     n_chunks = 0
 
