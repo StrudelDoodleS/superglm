@@ -58,6 +58,12 @@ from superglm.model.reml_setup import (
     strip_qp_constraints,
     warm_start_lambdas,
 )
+from superglm.solvers.clip_rows import (
+    HeldRows,
+    held_likelihood_rows,
+    likelihood_null_eta,
+    on_likelihood_rows,
+)
 from superglm.solvers.dispersion import dispersion_likelihood_size, model_weight_semantics
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.mode_score import linear_predictor
@@ -514,6 +520,35 @@ def _compute_null_mu(
     return means(b)
 
 
+def _null_state(
+    y: NDArray,
+    weights: NDArray,
+    offset: NDArray | None,
+    distribution: Distribution,
+    link: Link,
+    *,
+    weight_semantics: str,
+    likelihood_rows: bool,
+) -> tuple[NDArray, HeldRows | None]:
+    """The null model's means, and its held rows where it is read on the likelihood's.
+
+    The null model of a fit on the likelihood's rows (``clip_rows.on_likelihood_rows``)
+    is the same likelihood's: its intercept maximises the likelihood in the
+    unclipped predictor (``clip_rows.likelihood_null_eta``), and the rows the
+    clip holds at it are read there.  Every other fit, and such a fit whose
+    null model has no finite intercept, keeps ``_compute_null_mu``.
+    """
+    if likelihood_rows:
+        null_eta = likelihood_null_eta(distribution, link, y, weights, offset)
+        if null_eta is not None:
+            null_mu = clip_mu(link.inverse(stabilize_eta(null_eta, link)), distribution)
+            return null_mu, held_likelihood_rows(distribution, link, y, null_eta)
+    null_mu = _compute_null_mu(
+        y, weights, offset, distribution, link, weight_semantics=weight_semantics
+    )
+    return null_mu, None
+
+
 def _compute_fit_stats(
     y: NDArray,
     mu: NDArray,
@@ -526,8 +561,17 @@ def _compute_fit_stats(
     *,
     weight_semantics: str,
     solver_result=None,
+    likelihood_eta: NDArray | None = None,
+    null_held: HeldRows | None = None,
 ) -> FitStats:
-    """Compute scalar fit statistics from training arrays."""
+    """Compute scalar fit statistics from training arrays.
+
+    ``likelihood_eta`` is the unclipped predictor of a fit on the likelihood's
+    rows (``clip_rows.on_likelihood_rows``), else ``None``.  With it, every
+    statistic reads the rows the working clip holds from the likelihood
+    (``clip_rows.HeldRows``), as the fit's deviance does, and so does the null
+    model: ``null_held`` with a ``null_mu`` from ``_null_state``, else formed here.
+    """
 
     physical_weights = weights
     from superglm._weight_units import evaluation_weight_exponent
@@ -540,14 +584,20 @@ def _compute_fit_stats(
     )
     if exponent:
         weights = np.ldexp(weights, exponent)
+    held = (
+        None
+        if likelihood_eta is None
+        else held_likelihood_rows(distribution, link, y, likelihood_eta)
+    )
     if null_mu is None:
-        null_mu = _compute_null_mu(
+        null_mu, null_held = _null_state(
             y,
             weights,
             offset,
             distribution,
             link,
             weight_semantics=weight_semantics,
+            likelihood_rows=likelihood_eta is not None,
         )
 
     if fit_exponent:
@@ -601,6 +651,13 @@ def _compute_fit_stats(
     )
     null_dev = weighted_row_sum(weights, distribution.deviance_unit, y, null_mu)
     dev = weighted_row_sum(weights, distribution.deviance_unit, y, mu)
+    if held is not None:
+        ll -= 0.5 * held.deviance_gap(physical_weights)
+        dev += held.deviance_gap(weights)
+        pearson += held.pearson_gap(weights)
+    if null_held is not None:
+        null_ll -= 0.5 * null_held.deviance_gap(physical_weights)
+        null_dev += null_held.deviance_gap(weights)
     expl_dev = _explained_deviance(dev, null_dev, y, null_mu, weights)
 
     return FitStats(
@@ -1169,7 +1226,8 @@ def _publish_fit_statistics(
     model, y, sample_weight, offset, *, X_ref, y_ref, sample_weight_ref, offset_ref
 ) -> None:
     """Publish the fit statistics of ``model._result`` and prime the fit-data caches."""
-    eta = stabilize_eta(linear_predictor(model._dm, model._result, offset), model._link)
+    eta_unclipped = linear_predictor(model._dm, model._result, offset)
+    eta = stabilize_eta(eta_unclipped, model._link)
     mu = clip_mu(model._link.inverse(eta), model._distribution)
     from superglm._weight_units import likelihood_scale, solver_weights
     from superglm.solvers.dispersion import (
@@ -1214,13 +1272,15 @@ def _publish_fit_statistics(
             solver_likelihood_phi=solver_likelihood_phi,
         )
 
-    null_mu = _compute_null_mu(
+    likelihood_eta = eta_unclipped if on_likelihood_rows(model._result) else None
+    null_mu, null_held = _null_state(
         y,
         solver_weights(sample_weight, model._result),
         offset,
         model._distribution,
         model._link,
         weight_semantics=model_weight_semantics(model),
+        likelihood_rows=likelihood_eta is not None,
     )
     model._fit_stats = _compute_fit_stats(
         y,
@@ -1233,6 +1293,8 @@ def _publish_fit_statistics(
         null_mu=null_mu,
         weight_semantics=model_weight_semantics(model),
         solver_result=model._result,
+        likelihood_eta=likelihood_eta,
+        null_held=null_held,
     )
     model._solver_result = model._result
     _prime_fit_caches(

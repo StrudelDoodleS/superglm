@@ -10,7 +10,6 @@ from typing import Any, Literal
 import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
-from scipy.special import expit
 
 from superglm._parallel import parallel_config, pool_workers
 from superglm._weight_units import scale_penalties
@@ -43,12 +42,10 @@ from superglm.inference._sandwich_core import (
 )
 from superglm.inference.covariance import _active_penalty_components, _active_penalty_matrix
 from superglm.links import (
-    CloglogLink,
     IdentityLink,
     InverseLink,
     LogitLink,
     LogLink,
-    ProbitLink,
     SqrtLink,
     _declared_with,
     stabilize_eta,
@@ -88,6 +85,7 @@ from superglm.solvers.centered_system import (
     grouped_augmented_factor,
     weighted_mean_pair,
 )
+from superglm.solvers.clip_rows import declares_tail_rows, tail_rows
 from superglm.solvers.dispersion import FREQUENCY_WEIGHTS, model_weight_semantics
 from superglm.solvers.mode_score import linear_predictor
 from superglm.solvers.rank import (
@@ -97,11 +95,7 @@ from superglm.solvers.rank import (
     decompose_gram_if_authoritative,
     selected_group_name_set,
 )
-from superglm.solvers.working_rows import (
-    _cloglog_observed_rows,
-    _probit_observed_rows,
-    fisher_working_weights,
-)
+from superglm.solvers.working_rows import fisher_working_weights
 
 _MAX_CHUNK_ROWS = 8192
 _TARGET_CHUNK_BYTES = 16 << 20  # 16 MiB per replay chunk
@@ -359,10 +353,10 @@ def _observed_score_and_curvature(
         if dist_type is Poisson and link_type is LogLink:
             return y - mu, mu.copy(), True, "fisher"
         if dist_type is Binomial and link_type is LogitLink:
-            # y log p + (1 - y) log(1 - p) at p = expit(eta): score y - p and curvature
-            # p (1 - p), each a sum or product of non-negative terms in either tail.
-            event, non_event = expit(eta), expit(-eta)
-            return y * non_event - (1.0 - y) * event, event * non_event, True, "fisher"
+            # y log p + (1 - y) log(1 - p) in eta (``clip_rows.tail_rows``): score y - p and
+            # curvature p (1 - p), each a sum or product of non-negative terms in either tail.
+            _, s_unit, h_unit, _ = tail_rows(link, y, eta)
+            return s_unit, h_unit, True, "fisher"
         if dist_type is Gamma and link_type is InverseLink:
             h = fisher_working_weights(
                 distribution=distribution, link=link, mu=mu, eta=eta, sample_weight=ones
@@ -413,12 +407,9 @@ def _observed_score_and_curvature(
                 h_unit = (1.0 - y) * mu / (one_minus * one_minus)
                 return s_unit, h_unit, False, "observed"
 
-    if dist_type is Binomial and link_type is ProbitLink:
-        h_unit, s_unit = _probit_observed_rows(y=y, eta=eta, sample_weight=ones)
-        return s_unit, h_unit, False, "observed"
-
-    if dist_type is Binomial and link_type is CloglogLink:
-        h_unit, s_unit = _cloglog_observed_rows(y=y, eta=eta, sample_weight=ones)
+    if declares_tail_rows(distribution, link):
+        # probit and cloglog: the likelihood's score and observed curvature in eta
+        _, s_unit, _, h_unit = tail_rows(link, y, eta)
         return s_unit, h_unit, False, "observed"
 
     if dist_type is Poisson and link_type is SqrtLink:
@@ -982,11 +973,7 @@ def compute_superglm_sandwich_covariance(
         clip_held = binomial and bool(np.any(((clipped != mu) | (eta != eta_raw)) & pos))
         if not binomial:
             mu = clipped
-        elif type(model._distribution) is Binomial and type(model._link) in (
-            LogitLink,
-            ProbitLink,
-            CloglogLink,
-        ):
+        elif declares_tail_rows(model._distribution, model._link):
             eta = np.asarray(eta_raw, dtype=np.float64)
             with np.errstate(over="ignore", under="ignore"):
                 mu = np.asarray(model._link.inverse(eta), dtype=np.float64)

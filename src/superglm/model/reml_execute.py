@@ -11,6 +11,7 @@ from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
 from superglm.model.reml_finalize import profiled_likelihood_scale
 from superglm.reml.observed_geometry import ObservedModeNotConvergedError
+from superglm.solvers.clip_rows import on_likelihood_rows
 from superglm.solvers.dispersion import model_weight_semantics, publish_scales
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.mode_score import linear_predictor
@@ -177,7 +178,8 @@ def run_fixed_monotone_reml(
     model._reml_lambdas = lambdas
     model._reml_penalties = reml_penalties
 
-    eta = stabilize_eta(linear_predictor(model._dm, result, offset), model._link)
+    eta_unclipped = linear_predictor(model._dm, result, offset)
+    eta = stabilize_eta(eta_unclipped, model._link)
     mu = clip_mu(model._link.inverse(eta), model._distribution)
 
     model._fit_stats = compute_fit_stats(
@@ -189,6 +191,7 @@ def run_fixed_monotone_reml(
         model._link,
         likelihood_scale(result).phi,
         weight_semantics=model_weight_semantics(model),
+        likelihood_eta=eta_unclipped if on_likelihood_rows(result) else None,
     )
     model._solver_result = result
     model._last_fit_meta = {

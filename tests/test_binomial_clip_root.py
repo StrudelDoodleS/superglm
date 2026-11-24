@@ -19,10 +19,11 @@ import warnings
 import numpy as np
 import pandas as pd
 import pytest
-from scipy.optimize import brentq, root
+from scipy.optimize import brentq, minimize, minimize_scalar, root
 from scipy.special import expit, log_ndtr
+from scipy.stats import norm
 
-from superglm import Numeric, Spline, SuperGLM
+from superglm import Categorical, Numeric, Spline, SuperGLM
 from superglm.links import LogitLink
 
 # ── the likelihood in closed form in eta ───────────────────────────
@@ -184,6 +185,101 @@ def test_its_deviance_counts_the_held_row(held_against):
     np.testing.assert_allclose(model.result.deviance, exact, rtol=1e-6)
 
 
+def _fitted(case):
+    """The fit, its coefficients, its frame and the likelihood's predictor at those coefficients."""
+    model, coefficients = case.fit()
+    frame = (
+        pd.DataFrame(index=range(len(case.y))) if case.x is None else pd.DataFrame({"x": case.x})
+    )
+    return model, coefficients, frame, case.X @ coefficients + case.offset
+
+
+def _statistics(case, eta):
+    """Log-likelihood, null deviance and Pearson statistic of the likelihood at ``eta``."""
+    log_likelihood = float(np.sum(case.weights * _log_likelihood_rows(case.link, case.y, eta)))
+    null = _Case(case.link, case.y, case.offset, weights=case.weights)  # the intercept alone
+    score, information = _score_information_rows(case.link, case.y, eta)
+    # (y - p)^2 / (p (1 - p)) is the squared score over the information, under any link
+    pearson = float(np.sum(case.weights * score**2 / information))
+    return log_likelihood, null.deviance(null.root()), pearson
+
+
+def test_its_summary_reads_the_likelihood(held_against):
+    """``summary()``'s log-likelihood, AIC, BIC, null deviance and Pearson statistic are the likelihood's.
+
+    The fit's deviance already is.  On the unfixed readers the logit fit with
+    an event at -35 printed a log-likelihood of -17.23 beside a deviance of
+    75.00 (the likelihood's is -37.50), an AIC of 36.47, a null deviance of
+    32.28 for a model that is its own null, and a Pearson statistic of 1e7.
+    """
+    model, coefficients, _, eta = _fitted(held_against)
+    log_likelihood, null_deviance, pearson = _statistics(held_against, eta)
+    summary = model.summary()
+    criteria, deviance = summary["information_criteria"], summary["deviance"]
+    size, replicates = len(coefficients), float(np.sum(held_against.weights))
+    np.testing.assert_allclose(criteria["log_likelihood"], log_likelihood, rtol=1e-9)
+    np.testing.assert_allclose(criteria["aic"], -2.0 * log_likelihood + 2.0 * size, rtol=1e-9)
+    np.testing.assert_allclose(
+        criteria["bic"], -2.0 * log_likelihood + math.log(replicates) * size, rtol=1e-9
+    )
+    np.testing.assert_allclose(deviance["null_deviance"], null_deviance, rtol=1e-9)
+    np.testing.assert_allclose(
+        deviance["explained_deviance"], 1.0 + 2.0 * log_likelihood / null_deviance, atol=1e-9
+    )
+    np.testing.assert_allclose(summary["fit"]["pearson_chi2"], pearson, rtol=1e-9)
+
+
+def test_its_metrics_read_the_likelihood(held_against):
+    """``metrics()`` on the fitted rows agrees with the fit: one deviance, one log-likelihood.
+
+    The unfixed metrics read the floored mean, so ``metrics().deviance`` was
+    34.47 for a fit whose own deviance was 75.00.
+    """
+    model, _, frame, eta = _fitted(held_against)
+    log_likelihood, null_deviance, pearson = _statistics(held_against, eta)
+    metrics = model.metrics(
+        frame, held_against.y, sample_weight=held_against.weights, offset=held_against.offset
+    )
+    np.testing.assert_allclose(metrics.deviance, -2.0 * log_likelihood, rtol=1e-9)
+    np.testing.assert_allclose(metrics.log_likelihood, log_likelihood, rtol=1e-9)
+    np.testing.assert_allclose(metrics.null_deviance, null_deviance, rtol=1e-9)
+    np.testing.assert_allclose(metrics.pearson_chi2, pearson, rtol=1e-9)
+    np.testing.assert_allclose(metrics.deviance, model.result.deviance, rtol=1e-9)
+
+
+def test_its_residuals_are_the_likelihoods(held_against):
+    """Deviance, Pearson, response, working and quantile residuals against 60-digit definitions.
+
+    The held row's unfixed residuals were the floored mean's: a deviance
+    residual of 5.68 where ``sqrt(-2 log p)`` is 8.53 for the logit event at
+    -35, and a response residual one float short of 1.
+    """
+    model, _, frame, eta = _fitted(held_against)
+    y, weights = held_against.y, held_against.weights
+    metrics = model.metrics(frame, y, sample_weight=weights, offset=held_against.offset)
+    log_p, log_q, event_score, non_event_score = (
+        np.array(column) for column in zip(*(_exact_rows(held_against.link, v) for v in eta))
+    )
+    event = y > 0.0  # every fixture's response is 0 or 1
+    expected = {
+        "deviance": np.where(event, np.sqrt(-2.0 * log_p), -np.sqrt(-2.0 * log_q))
+        * np.sqrt(weights),
+        "pearson": np.where(event, np.exp(0.5 * (log_q - log_p)), -np.exp(0.5 * (log_p - log_q)))
+        * np.sqrt(weights),
+        "response": np.where(event, np.exp(log_q), -np.exp(log_p)),
+        "working": np.where(event, 1.0 / non_event_score, -1.0 / event_score),
+    }
+    for kind, reference in expected.items():
+        np.testing.assert_allclose(metrics.residuals(kind), reference, rtol=1e-9, err_msg=kind)
+    # an outcome of probability below the residual's own 1e-10 floor sits on that floor
+    rare = np.where(event, log_p, log_q) < math.log(1e-10)
+    np.testing.assert_allclose(
+        metrics.residuals("quantile")[rare],
+        np.where(event, norm.ppf(1.0 - 1e-10), norm.ppf(1e-10))[rare],
+        rtol=1e-12,
+    )
+
+
 def test_one_distant_event_does_not_move_the_other_rows_predictions():
     """Five non-events and one event share an intercept: each of the five is priced at 1/5.
 
@@ -223,6 +319,179 @@ def test_a_penalised_fit_balances_the_likelihoods_score(discrete):
     score, _ = _score_information_rows("logit", response, np.asarray(eta, dtype=float))
     assert model.result.converged
     assert abs(score.sum()) <= 1e-6 * np.abs(score).sum()
+
+
+@pytest.mark.parametrize("discrete", [False, True])
+def test_a_penalised_fits_summary_reads_the_likelihood(discrete):
+    """A REML fit's printed log-likelihood is ``-deviance / 2`` at its own fitted predictor.
+
+    Same fixture as above.  The unfixed summary printed -215.08 beside a
+    deviance of 457.47.
+    """
+    from superglm.solvers.mode_score import linear_predictor
+
+    x = np.linspace(0.0, 1.0, 300)
+    y = ((np.arange(300) * 7) % 10 < 3.0 + 4.0 * x).astype(float)
+    frame = pd.DataFrame({"x": np.r_[x, 0.5]})
+    response, offset = np.r_[y, 1.0], np.r_[np.zeros(300), -30.0]
+    model = SuperGLM(
+        family="binomial", link="logit", features={"x": Spline(n_knots=5)}, discrete=discrete
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, response, offset=offset)
+    eta = np.asarray(
+        linear_predictor(model._dm, model._solver_pirls_result(), model._fit_offset), dtype=float
+    )
+    log_likelihood = float(np.sum(_log_likelihood_rows("logit", response, eta)))
+    summary = model.summary()
+    np.testing.assert_allclose(
+        summary["information_criteria"]["log_likelihood"], log_likelihood, rtol=1e-9
+    )
+    np.testing.assert_allclose(summary["deviance"]["deviance"], -2.0 * log_likelihood, rtol=1e-9)
+
+
+def _observed_information_rows(link: str, y, eta):
+    """``-d2l/deta2`` per row, by central differences of the closed-form score."""
+    step = 1e-5
+    ahead, _ = _score_information_rows(link, y, eta + step)
+    behind, _ = _score_information_rows(link, y, eta - step)
+    return (behind - ahead) / (2.0 * step)
+
+
+def _laplace_criterion(link, X, S, y, weights, offset):
+    """Wood's (2011) Laplace criterion of one smoothing parameter, as a function of its log.
+
+    ``V = -l(b) + lam b'Sb / 2 + log|X'WX + lam S| / 2 - rank(S) log(lam) / 2``
+    with ``W`` the observed information and ``b`` the penalised mode, found by
+    damped Newton steps on the closed-form likelihood.
+    """
+    rank = np.linalg.matrix_rank(S)
+    state = {"beta": np.zeros(X.shape[1])}
+
+    def penalised(beta, lam):
+        rows = _log_likelihood_rows(link, y, X @ beta + offset)
+        return float(np.sum(weights * rows) - 0.5 * lam * beta @ S @ beta)
+
+    def criterion(log_lam):
+        lam, beta = math.exp(log_lam), state["beta"]
+        for _ in range(200):
+            eta = X @ beta + offset
+            score, _ = _score_information_rows(link, y, eta)
+            curvature = weights * _observed_information_rows(link, y, eta)
+            hessian = X.T @ (X * curvature[:, None]) + lam * S
+            step = np.linalg.solve(hessian, X.T @ (weights * score) - lam * S @ beta)
+            length, base = 1.0, penalised(beta, lam)
+            while penalised(beta + length * step, lam) < base - 1e-12 and length > 1e-10:
+                length *= 0.5
+            beta = beta + length * step
+            if np.max(np.abs(length * step)) < 1e-11:
+                break
+        state["beta"] = beta
+        return -penalised(beta, lam) + 0.5 * np.linalg.slogdet(hessian)[1] - 0.5 * rank * log_lam
+
+    return criterion
+
+
+@pytest.mark.parametrize(("link", "held_offset"), [("probit", -9.0), ("cloglog", -30.0)])
+def test_a_penalised_fit_selects_the_likelihoods_smoothing_parameter(link, held_offset):
+    """The REML smoothing parameter is the minimiser of the exact Laplace criterion (SciPy).
+
+    Five weighted events are held against their outcome.  The criterion's
+    Hessian reads each row's observed information: about 1 for a probit event
+    in the lower tail, and about 0 as the clipped mean gives it, which put
+    the unfixed probit fit's smoothing parameter 3.2% from the minimiser.  The
+    reference shares the model's design and penalty matrix and nothing of its
+    solver.
+    """
+    from superglm.reml.penalty_algebra import build_penalty_matrix
+
+    n = 300
+    x = (np.arange(n) + 0.5) / n
+    y = (np.arange(n) * 0.6180339887498949) % 1.0 < 0.15 + 0.7 * np.sin(2.5 * np.pi * x) ** 2
+    frame = pd.DataFrame({"x": np.r_[x, np.linspace(0.2, 0.8, 5)]})
+    response = np.r_[y.astype(float), np.ones(5)]
+    offset, weights = (
+        np.r_[np.zeros(n), np.full(5, held_offset)],
+        np.r_[np.ones(n), np.full(5, 4.0)],
+    )
+    model = SuperGLM(
+        family="binomial",
+        link=link,
+        features={"x": Spline(n_knots=8)},
+        weight_semantics="frequency",
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, response, offset=offset, sample_weight=weights)
+    (name, fitted), design = next(iter(model._reml_lambdas.items())), model._dm
+    X = np.column_stack([np.ones(design.n)] + [design.matvec(unit) for unit in np.eye(design.p)])
+    S = np.zeros((design.p + 1, design.p + 1))
+    S[1:, 1:] = build_penalty_matrix(
+        list(design.group_matrices), model._groups, {name: 1.0}, design.p, model._reml_penalties
+    )
+    criterion = _laplace_criterion(link, X, S, response, weights, offset)
+    start = math.log(fitted)
+    reference = minimize_scalar(criterion, bracket=(start - 1.0, start + 1.0), tol=1e-10)
+    assert model.result.converged
+    assert abs(start - reference.x) <= {"probit": 1e-3, "cloglog": 2e-4}[link]
+
+
+@pytest.mark.parametrize(
+    ("link", "etas"),
+    [
+        ("logit", [-40.0, -9.0, 0.3, 9.0, 40.0]),
+        ("probit", [-20.5, -9.0, -5.3, 0.3, 5.3, 9.0]),
+        ("cloglog", [-40.0, -20.5, -9.0, 0.3, 2.8, 4.5]),
+    ],
+)
+def test_tail_curvature_rows_are_the_likelihoods_derivatives(link, etas):
+    """Observed information and its first two ``eta`` derivatives against 400-digit differences.
+
+    These are the rows the Laplace criterion and its smoothing-parameter
+    derivatives read on a held row.  The logit's and cloglog's are sums of
+    terms of one sign, held to ``1e-11`` of their value.  The probit's form
+    ``l1 + eta`` by a difference that loses ``eta^2`` per derivative, so each
+    is held to ``8 u eta^6`` of a curvature of order one: ``7e-8`` at -20.5.
+    """
+    import mpmath as mp
+
+    from superglm.links import CloglogLink, LogitLink, ProbitLink
+    from superglm.solvers.clip_rows import tail_observed_curvature
+
+    def log_likelihood(response, x):
+        if link == "logit":
+            return -mp.log1p(mp.exp(-x)) if response else -mp.log1p(mp.exp(x))
+        if link == "probit":
+            return mp.log(mp.ncdf(x)) if response else mp.log(mp.ncdf(-x))
+        return mp.log(-mp.expm1(-mp.exp(x))) if response else -mp.exp(x)
+
+    link_object = {"logit": LogitLink, "probit": ProbitLink, "cloglog": CloglogLink}[link]()
+    for response in (1, 0):
+        rows = tail_observed_curvature(
+            link_object, np.full(len(etas), float(response)), np.asarray(etas)
+        )
+        with mp.workdps(400):
+            exact = np.array(
+                [
+                    [
+                        float(
+                            -mp.diff(
+                                lambda x: log_likelihood(response, x),
+                                eta,
+                                order,
+                                h=mp.mpf(10) ** -40,
+                            )
+                        )
+                        for eta in etas
+                    ]
+                    for order in (2, 3, 4)
+                ]
+            )
+        cancellation = 8.0 * 2.0**-53 * np.maximum(1.0, np.abs(etas)) ** 6
+        allowance = cancellation if link == "probit" else 1e-300
+        for row, reference in zip(rows, exact, strict=True):
+            assert np.all(np.abs(row - reference) <= 1e-11 * np.abs(reference) + allowance)
 
 
 class _UndeclaredLogit(LogitLink):
@@ -362,18 +631,84 @@ def test_the_rows_a_fit_reads_move_one_way():
     assert clip_rows_after(model._solver_pirls_result()).state == "likelihood"
 
 
-def test_a_selection_penalty_fit_stopped_by_the_clip_is_not_reported_as_converged():
-    """The proximal engine reads a held row at the clip: its stop there is ``clip_held``.
+def _group_lasso_fit(link, lam, held_offset):
+    """A group-lasso fit of a slope and a three-level factor, one weighted event held against its outcome."""
+    n = 60
+    x = np.linspace(-1.0, 1.0, n)
+    y = ((np.arange(n) * 7) % 10 < 3.0 + 3.0 * x).astype(float)
+    frame = pd.DataFrame(
+        {"x": np.r_[x, 0.5], "g": [*np.array(["a", "b", "c"])[np.arange(n) % 3], "a"]}
+    )
+    response, weights = np.r_[y, 1.0], np.r_[np.ones(n), 3.0]
+    offset = np.r_[np.zeros(n), held_offset]
+    model = SuperGLM(
+        family="binomial",
+        link=link,
+        features={"x": Numeric(), "g": Categorical()},
+        selection_penalty=lam,
+        weight_semantics="frequency",
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(frame, response, offset=offset, sample_weight=weights)
+    return model, response, weights, offset, caught
 
-    A selection penalty takes the fit through the proximal engine, which has
-    no rows of its own for the tails.  With a penalty too small to move the
-    answer it stops where the unfixed direct solver did, 0.97 standard errors
-    from the root, and must say so.
+
+@pytest.mark.parametrize(
+    ("link", "lam", "held_offset"),
+    [("logit", 0.5, -30.0), ("logit", 3.0, -30.0), ("probit", 0.5, -9.0), ("cloglog", 3.0, -30.0)],
+)
+def test_a_group_lasso_fit_reaches_the_penalised_likelihoods_minimum(link, lam, held_offset):
+    """The proximal engine's fit minimises ``-log L + lam sum_g w_g ||b_g||`` (SciPy on the exact likelihood).
+
+    A selection penalty takes the fit through the proximal engine, which moves
+    to the likelihood's rows as the direct solver does.  The reference shares
+    the model's design and group weights, and minimises over the groups the
+    fit kept; a group the fit dropped must satisfy the zero group's condition,
+    ``||X_g' s|| <= lam w_g`` on the likelihood's score.  The unfixed engine
+    stopped at the clip, not converged, 0.2 to 1.7 from these coefficients.
+    """
+    from superglm.model.fit_state import fitted_penalty
+
+    model, response, weights, offset, caught = _group_lasso_fit(link, lam, held_offset)
+    result, design, groups = model._solver_pirls_result(), model._dm, model._groups
+    X = np.column_stack([design.matvec(unit) for unit in np.eye(design.p)])
+    lambda1 = fitted_penalty(model).lambda1
+    beta = np.asarray(result.beta, dtype=float)
+    kept = np.flatnonzero(beta != 0.0)
+
+    def objective(theta):
+        slopes = np.zeros(design.p)
+        slopes[kept] = theta[1:]
+        rows = _log_likelihood_rows(link, response, theta[0] + X @ slopes + offset)
+        penalty = sum(group.weight * np.linalg.norm(slopes[group.sl]) for group in groups)
+        return -float(np.sum(weights * rows)) + lambda1 * penalty
+
+    fitted = np.r_[result.intercept, beta[kept]]
+    reference = minimize(objective, fitted, method="BFGS", options={"gtol": 1e-10})
+    eta = result.intercept + X @ beta + offset
+    score, _ = _score_information_rows(link, response, eta)
+    gradient = X.T @ (weights * score)
+    np.testing.assert_allclose(fitted, reference.x, atol=1e-4)
+    assert result.converged and result.clip_rows == "likelihood"
+    assert not any("clip" in str(item.message) for item in caught)
+    exact_deviance = -2.0 * float(np.sum(weights * _log_likelihood_rows(link, response, eta)))
+    np.testing.assert_allclose(model.result.deviance, exact_deviance, rtol=1e-9)
+    for group in groups:
+        if not np.any(beta[group.sl]):
+            assert np.linalg.norm(gradient[group.sl]) <= lambda1 * group.weight * (1.0 + 1e-6)
+
+
+def test_a_selection_penalty_fit_stopped_by_the_clip_is_not_reported_as_converged():
+    """Under a link with no tail rows the proximal engine keeps the clip, and says so.
+
+    With a penalty too small to move the answer it stops 0.97 standard errors
+    from the likelihood's root: not converged, ``clip_held``, with the warning.
     """
     case = _HELD_AGAINST["logit_slope_and_weighted_event"]()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        model, coefficients = case.fit(selection_penalty=1e-6)
+        model, coefficients = case.fit(link=_UndeclaredLogit(), selection_penalty=1e-6)
     reference = case.root()
     standard_error = np.sqrt(np.diag(np.linalg.inv(case.information(reference))))
     assert np.max(np.abs(coefficients - reference) / standard_error) > 0.5  # the control

@@ -95,6 +95,7 @@ from superglm.solvers.centered_system import (
     grouped_augmented_factor,
     serves_initial_data,
 )
+from superglm.solvers.clip_rows import likelihood_observed_curvature, on_likelihood_rows
 from superglm.solvers.hessian_factor import HessianFactor
 from superglm.solvers.mode_score import (
     centre_offset_mean,
@@ -1072,7 +1073,8 @@ def build_observed_reml_geometry(
     if not np.isfinite(result.intercept):
         raise ObservedGeometryInfeasibleError("result.intercept must be finite")
 
-    eta = stabilize_eta(linear_predictor(dm, result, offset_arr), link)
+    eta_unclipped = linear_predictor(dm, result, offset_arr)
+    eta = stabilize_eta(eta_unclipped, link)
     mu = link.inverse(eta)
     # A binomial/log mode certified on the model's own score
     # (``mean_space_true_mode``) is read at the unclipped mean; only its
@@ -1092,6 +1094,22 @@ def build_observed_reml_geometry(
         sample_weight,
         derivative_order=derivative_order,
     )
+    if on_likelihood_rows(result):
+        # A binomial fit on the likelihood's rows converged on them where the
+        # working clip holds a row (``solvers.clip_rows``): the criterion's
+        # Hessian and its derivatives read the same rows.
+        observed_w, weight_derivative, weight_second_derivative = _validate_observed_bundle(
+            likelihood_observed_curvature(
+                distribution,
+                link,
+                y,
+                sample_weight,
+                eta_unclipped,
+                eta,
+                mu,
+                (observed_w, weight_derivative, weight_second_derivative),
+            )
+        )
     nonnegative = bool(np.all(observed_w >= 0.0))
     sum_w = (
         float(np.sum(observed_w, dtype=np.float64))

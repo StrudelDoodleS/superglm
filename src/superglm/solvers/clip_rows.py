@@ -31,7 +31,15 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.distributions import Binomial, Distribution, clip_mu
-from superglm.links import CloglogLink, IdentityLink, Link, LogitLink, LogLink, ProbitLink
+from superglm.links import (
+    CloglogLink,
+    IdentityLink,
+    Link,
+    LogitLink,
+    LogLink,
+    ProbitLink,
+    stabilize_eta,
+)
 
 type ClipRowsState = Literal["working", "likelihood"]
 
@@ -73,10 +81,15 @@ def note_held_against(rows: ClipRows) -> bool:
     return rows.state != before
 
 
+def on_likelihood_rows(result: object) -> bool:
+    """Whether the fit behind ``result`` ended on the likelihood's rows (``PIRLSResult.clip_rows``)."""
+    return getattr(result, "clip_rows", "working") == "likelihood"
+
+
 def clip_rows_after(result: object) -> ClipRows:
     """The rows a solve that continues from ``result`` starts on (``PIRLSResult.clip_rows``)."""
     rows = ClipRows()
-    if getattr(result, "clip_rows", "working") == "likelihood":
+    if on_likelihood_rows(result):
         note_held_against(rows)
     return rows
 
@@ -320,3 +333,323 @@ def likelihood_information(
         link, eta_unclipped[held], np.asarray(sample_weight, dtype=np.float64)[held]
     )
     return result
+
+
+def _probit_event_curvature(eta: NDArray) -> tuple[NDArray, NDArray, NDArray]:
+    """``a = -d2 log Phi / deta2 = l1 (l1 + eta)`` and its first two derivatives, ``l1 = phi / Phi``.
+
+    ``l1' = -a`` gives ``a' = l1 - a (2 l1 + eta)`` and ``a'' = 2 a (a - 1) - a' (2 l1 + eta)``.
+    """
+    from scipy.special import log_ndtr
+
+    mills = np.exp(-0.5 * eta * eta - 0.5 * math.log(2.0 * math.pi) - log_ndtr(eta))
+    curvature = mills * (mills + eta)
+    first = mills - curvature * (2.0 * mills + eta)
+    return curvature, first, 2.0 * curvature * (curvature - 1.0) - first * (2.0 * mills + eta)
+
+
+def _cloglog_event_curvature(t: NDArray) -> tuple[NDArray, NDArray, NDArray]:
+    """``c = -d2 log(1 - e^-t) / deta2`` and its first two derivatives in ``eta``, ``t = e^eta``.
+
+    With ``r = t / (e^t - 1)``, ``m = t / (1 - e^-t) - 1`` and ``k = 1 - r = t - m``,
+    which have ``r' = -r m``, ``m' = (m + 1) k`` and ``k' = r m``:
+    ``c = r m``, ``c' = r g`` and ``c'' = r (g' - m g)``, where
+    ``g = (m + 1) k - m^2`` and ``g' = (m + 1) (k^2 + r m - 2 m k)``.
+    ``m`` takes its series ``t/2 + t^2/12 - ...`` below ``t = 0.1``, where the
+    difference cancels.
+    """
+    growth = np.expm1(t)
+    ratio = np.where(np.isfinite(growth), np.where(t > 0.0, t / growth, 1.0), 0.0)
+    small = t < 0.1
+    gap = -np.expm1(-t)
+    # t + expm1(-t) = t^2/2 - t^3/6 + ..., summed where the difference would cancel
+    series, term, ts = np.zeros_like(t), np.ones_like(t), np.where(small, t, 0.0)
+    for order in range(1, 13):
+        term = term * (-ts) / order
+        if order >= 2:
+            series = series + term
+    excess = np.where(t > 0.0, np.where(small, series, t + np.expm1(-t)) / gap, 0.0)
+    rest = t - excess
+    slope = (excess + 1.0) * rest - excess * excess
+    slope_first = (excess + 1.0) * (rest * rest + ratio * excess - 2.0 * excess * rest)
+    return ratio * excess, ratio * slope, ratio * (slope_first - excess * slope)
+
+
+def tail_observed_curvature(
+    link: object, y: NDArray, eta: NDArray
+) -> tuple[NDArray, NDArray, NDArray]:
+    """Per row of unit weight: the observed information ``-d2l/deta2`` and its first two derivatives in ``eta``.
+
+    The rows of the Laplace criterion's Hessian and of its derivatives in the
+    smoothing parameters (Wood 2011, JRSSB 73(1), section 3.4 and appendix C),
+    in the unclipped predictor:
+
+    ======== ====================== ========================================
+    link     event                  non-event
+    ======== ====================== ========================================
+    logit    ``p q``, ``p q (q - p)``, ``p q (1 - 6 p q)`` for either outcome
+    probit   ``a(eta)``, ``a'``,    ``a(-eta)``, ``-a'(-eta)``, ``a''(-eta)``
+             ``a''``
+    cloglog  ``c``, ``c'``, ``c''`` ``t``, ``t``, ``t``
+    ======== ====================== ========================================
+
+    (``_probit_event_curvature``, ``_cloglog_event_curvature``).  The logit's
+    are its Fisher information's too.
+    """
+    y = np.asarray(y, dtype=np.float64)
+    eta = np.asarray(eta, dtype=np.float64)
+    with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
+        if type(link) is LogitLink:
+            from scipy.special import expit
+
+            p, q = expit(eta), expit(-eta)
+            information = p * q
+            return information, information * (q - p), information * (1.0 - 6.0 * information)
+        if type(link) is ProbitLink:
+            event = _probit_event_curvature(eta)
+            mirrored = _probit_event_curvature(-eta)
+            non_event = (mirrored[0], -mirrored[1], mirrored[2])
+        elif type(link) is CloglogLink:
+            t = np.exp(eta)
+            event, non_event = _cloglog_event_curvature(t), (t, t, t)
+        else:
+            raise TypeError(f"no tail rows are declared for {type(link).__name__}")
+        curvature, first, second = (
+            _by_outcome(y, mine, other) for mine, other in zip(event, non_event, strict=True)
+        )
+        return curvature, first, second
+
+
+def likelihood_observed_curvature(
+    family: Distribution,
+    link: Link,
+    y: NDArray,
+    weights: NDArray,
+    eta_unclipped: NDArray,
+    eta: NDArray,
+    mu: NDArray,
+    rows: tuple[NDArray | None, NDArray | None, NDArray | None],
+) -> tuple[NDArray | None, NDArray | None, NDArray | None]:
+    """Observed weights and their first two ``eta`` derivatives, every held row's from the likelihood.
+
+    ``rows`` are the clipped state's, ``None`` where one was not formed; a held
+    row takes ``w`` times ``tail_observed_curvature`` at its unclipped
+    predictor, the row a fit on the likelihood's rows converged on.  The same
+    tuple when the clip holds no row.
+    """
+    low, high = held_rows(family, link, eta_unclipped, eta, mu)
+    held = np.flatnonzero(low | high)
+    if not held.size:
+        return rows
+    weight = np.asarray(weights, dtype=np.float64)[held]
+    exact = tail_observed_curvature(link, np.asarray(y)[held], np.asarray(eta_unclipped)[held])
+    patched: list[NDArray | None] = []
+    for row, value in zip(rows, exact, strict=True):
+        if row is not None:
+            row = np.array(row, dtype=np.float64, copy=True)
+            with np.errstate(invalid="ignore", over="ignore"):
+                row[held] = np.where(weight > 0.0, weight * value, 0.0)
+        patched.append(row)
+    return patched[0], patched[1], patched[2]
+
+
+def likelihood_fisher_curvature(
+    family: Distribution,
+    link: Link,
+    weights: NDArray,
+    eta_unclipped: NDArray,
+    eta: NDArray,
+    mu: NDArray,
+    rows: tuple[NDArray | None, NDArray | None, NDArray | None],
+) -> tuple[NDArray | None, NDArray | None, NDArray | None]:
+    """Fisher weights and their first two ``eta`` derivatives, every held logit row's from the likelihood.
+
+    The logit's Fisher information is its observed one, so its held rows are
+    ``likelihood_observed_curvature``'s.  Any other pair's ``rows`` come back
+    as they are: its Laplace criterion reads observed rows.
+    """
+    if type(family) is not Binomial or type(link) is not LogitLink:
+        return rows
+    return likelihood_observed_curvature(
+        family, link, np.zeros_like(eta_unclipped), weights, eta_unclipped, eta, mu, rows
+    )
+
+
+def _by_outcome(y: NDArray, event: NDArray, non_event: NDArray) -> NDArray:
+    """``y * event + (1 - y) * non_event``, each term only where the response carries it."""
+    with np.errstate(invalid="ignore", over="ignore"):
+        return np.where(y > 0.0, y * event, 0.0) + np.where(y < 1.0, (1.0 - y) * non_event, 0.0)
+
+
+class HeldRows:
+    """The rows the working clip holds at one state, as the likelihood reads them at unit weight.
+
+    A fit on the likelihood's rows (``on_likelihood_rows``) converged on these,
+    so every figure a user reads from it takes them in place of the clipped
+    mean's on the held rows ``index``.  With ``p`` the mean at the unclipped
+    predictor, and ``e1 = p'/p`` and ``e0 = p'/(1 - p)`` the event's and the
+    non-event's score of ``tail_rows``:
+
+    ================= ======================================================
+    unit deviance     ``-2 [y log p + (1 - y) log(1 - p)]``
+    response residual ``y - p = y (1 - p) - (1 - y) p``
+    Pearson residual  ``(y - p) / sqrt(p (1 - p)) = y sqrt(e1 / e0) - (1 - y) sqrt(e0 / e1)``
+    working residual  ``(y - p) / p' = y / e0 - (1 - y) / e1``
+    ================= ======================================================
+
+    Each is a sum of one term per outcome, so neither tail cancels.  A figure
+    float64 cannot hold (a Pearson residual past ``1.3e154``) is infinite.
+    """
+
+    __slots__ = ("index", "y", "log_p", "log_q", "event_score", "non_event_score", "_clipped")
+
+    def __init__(
+        self,
+        family: Distribution,
+        link: object,
+        index: NDArray,
+        y: NDArray,
+        eta: NDArray,
+        mu: NDArray,
+    ) -> None:
+        self.index = index
+        self.y = y
+        self.log_p, self.event_score = tail_rows(link, np.ones_like(eta), eta)[:2]
+        self.log_q, non_event = tail_rows(link, np.zeros_like(eta), eta)[:2]
+        self.non_event_score = -non_event
+        # the clipped mean's unit deviance and squared Pearson residual, which the sums trade away
+        self._clipped = (
+            np.asarray(family.deviance_unit(y, mu), dtype=np.float64),
+            (y - mu) ** 2 / family.variance(mu),
+        )
+
+    @property
+    def deviance(self) -> NDArray:
+        return -2.0 * _by_outcome(self.y, self.log_p, self.log_q)
+
+    @property
+    def complement(self) -> NDArray:
+        """``1 - p``."""
+        return np.exp(self.log_q)
+
+    @property
+    def residual(self) -> NDArray:
+        return _by_outcome(self.y, self.complement, -np.exp(self.log_p))
+
+    @property
+    def pearson_residual(self) -> NDArray:
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            odds_against = np.sqrt(self.event_score / self.non_event_score)
+            odds = np.sqrt(self.non_event_score / self.event_score)
+        return _by_outcome(self.y, odds_against, -odds)
+
+    @property
+    def working_residual(self) -> NDArray:
+        with np.errstate(divide="ignore", over="ignore"):
+            return _by_outcome(self.y, 1.0 / self.non_event_score, -1.0 / self.event_score)
+
+    def pearson(self, weights: NDArray) -> NDArray:
+        """``sqrt(w)`` times the Pearson residual, an exact 0 on a row of weight 0."""
+        weight = np.asarray(weights, dtype=np.float64)[self.index]
+        with np.errstate(invalid="ignore"):
+            return np.where(weight > 0.0, np.sqrt(weight) * self.pearson_residual, 0.0)
+
+    def patched(self, rows: NDArray, held: NDArray) -> NDArray:
+        """A copy of the per-row figure ``rows`` with the held rows' entries ``held``."""
+        result = np.array(rows, dtype=np.float64, copy=True)
+        result[self.index] = held
+        return result
+
+    def _gap(self, weights: NDArray, exact: NDArray, clipped: NDArray) -> float:
+        weight = np.asarray(weights, dtype=np.float64)[self.index]
+        carried = weight > 0.0
+        with np.errstate(invalid="ignore", over="ignore"):
+            return float(
+                np.sum(weight[carried] * exact[carried] - weight[carried] * clipped[carried])
+            )
+
+    def deviance_gap(self, weights: NDArray) -> float:
+        """``sum w d`` on the likelihood's rows less the clipped mean's, over the held rows.
+
+        A log-likelihood changes by ``-1/2`` of it: the binomial unit deviance
+        is ``-2 l`` under either weight contract.
+        """
+        return self._gap(weights, self.deviance, self._clipped[0])
+
+    def pearson_gap(self, weights: NDArray) -> float:
+        """Pearson's ``sum w (y - p)^2 / (p (1 - p))`` less the clipped mean's, over the held rows."""
+        with np.errstate(over="ignore"):
+            return self._gap(weights, self.pearson_residual**2, self._clipped[1])
+
+
+def held_likelihood_rows(
+    family: Distribution, link: Link, y: NDArray, eta_unclipped: NDArray
+) -> HeldRows | None:
+    """The likelihood's reading of the rows the clip holds at ``eta_unclipped``, or ``None``.
+
+    ``None`` where the pair declares no tail rows or the clip holds no row.
+    """
+    if not declares_tail_rows(family, link):
+        return None
+    eta_unclipped = np.asarray(eta_unclipped, dtype=np.float64)
+    eta = stabilize_eta(eta_unclipped, link)
+    mu = clip_mu(link.inverse(eta), family)
+    low, high = held_rows(family, link, eta_unclipped, eta, mu)
+    index = np.flatnonzero(low | high)
+    if not index.size:
+        return None
+    y = np.asarray(y, dtype=np.float64)
+    return HeldRows(family, link, index, y[index], eta_unclipped[index], mu[index])
+
+
+# the null intercept's bracket doubles this many times about the offsets' median
+_NULL_BRACKET_DOUBLINGS = 64
+_NULL_SCORE_BOUND = 2.0**1000
+
+
+def likelihood_null_eta(
+    family: Distribution, link: Link, y: NDArray, weights: NDArray, offset: NDArray | None
+) -> NDArray | None:
+    """The intercept-only model's unclipped predictor at the likelihood's maximum, or ``None``.
+
+    The intercept ``b`` is the root of ``sum_i w_i dl_i/deta (b + offset_i)`` on
+    the rows of ``tail_rows``.  Each row's log-likelihood is concave in its
+    predictor (Pratt 1981, JASA 76(373)), so the sum falls in ``b`` and has one
+    root, which Brent's method (1973, *Algorithms for Minimization without
+    Derivatives*, ch. 4) finds inside a bracket doubled about minus the
+    offsets' median.  ``None`` where the pair declares no tail rows, the
+    positive-weight responses are all 0 or all 1 (no finite root), or no
+    bracket is found.
+    """
+    if not declares_tail_rows(family, link):
+        return None
+    from scipy.optimize import brentq
+
+    y = np.asarray(y, dtype=np.float64)
+    weights = np.asarray(weights, dtype=np.float64)
+    shift = np.zeros_like(y) if offset is None else np.asarray(offset, dtype=np.float64)
+    carried = weights > 0.0
+    response, mass, carried_shift = y[carried], weights[carried], shift[carried]
+    if not (np.any(response > 0.0) and np.any(response < 1.0)):
+        return None
+
+    def score(intercept: float) -> float:
+        with np.errstate(invalid="ignore", over="ignore"):
+            total = float(np.sum(mass * tail_rows(link, response, intercept + carried_shift)[1]))
+        # an overflowed score keeps its sign and stays a number Brent's method can bracket
+        return min(max(total, -_NULL_SCORE_BOUND), _NULL_SCORE_BOUND)
+
+    centre = -float(np.median(carried_shift))
+    reach = 1.0
+    for _ in range(_NULL_BRACKET_DOUBLINGS):
+        below, above = score(centre - reach), score(centre + reach)
+        if math.isnan(below) or math.isnan(above):
+            return None
+        if below > 0.0 > above:
+            return float(brentq(score, centre - reach, centre + reach)) + shift
+        if below <= 0.0:
+            centre -= reach
+        if above >= 0.0:
+            centre += reach
+        reach *= 2.0
+    return None

@@ -73,6 +73,7 @@ from superglm.solvers.centered_system import (
     penalty_factor,
     weighted_mean_pair,
 )
+from superglm.solvers.clip_rows import HeldRows, held_likelihood_rows, on_likelihood_rows
 from superglm.solvers.dispersion import likelihood_scale_method, scale_method
 from superglm.solvers.mode_score import corrected_two_pass_pair
 from superglm.solvers.rank import (
@@ -419,7 +420,10 @@ class ModelMetrics:
     on whether ``X``, ``y``, ``sample_weight`` and ``offset`` are the objects
     the model was fitted on: a discrete fit's own mean belongs to its binned
     design, which ``predict`` does not reproduce.  ``SuperGLM.summary``
-    reports the fit's own statistics instead.
+    reports the fit's own statistics instead.  One exception: a binomial fit
+    that converged on the likelihood in the linear predictor, because the
+    solver's clip held a row against its outcome, reads every row past that
+    clip from the likelihood there, where ``predict`` floors the mean at 1e-7.
 
     On the frame a model was fitted on, leverage and effective degrees of
     freedom come from the fit itself, and so do the standardized residuals
@@ -683,52 +687,69 @@ class ModelMetrics:
         )
 
     @cached_property
-    def deviance(self) -> float:
-        """Weighted residual deviance on this object's evaluation rows."""
-        return weighted_row_sum(self._weights, self._family.deviance_unit, self._y, self._mu)
+    def _held(self) -> HeldRows | None:
+        """These rows the working clip holds, for a fit on the likelihood's rows; else ``None``.
 
-    @cached_property
-    def log_likelihood(self) -> float:
-        return unit_log_likelihood(
+        Such a fit converged on the likelihood in the unclipped predictor
+        (``solvers.clip_rows``), so its deviance, likelihoods, Pearson statistic
+        and residuals read the held rows there, not at ``predict``'s floored mean.
+        """
+        if not on_likelihood_rows(self._result):
+            return None
+        return held_likelihood_rows(self._family, self._link, self._y, self._raw_eta)
+
+    def _weighted_deviance(self, weights: NDArray, mu: NDArray, held: HeldRows | None) -> float:
+        total = weighted_row_sum(weights, self._family.deviance_unit, self._y, mu)
+        return total if held is None else total + held.deviance_gap(weights)
+
+    def _log_likelihood(self, mu: NDArray, held: HeldRows | None) -> float:
+        value = unit_log_likelihood(
             self._family,
             self._y,
-            self._mu,
+            mu,
             self._weights,
             self._result,
             weight_semantics=self._weight_semantics,
             report_contract=not self._contract_checked,
         )
+        return value if held is None else value - 0.5 * held.deviance_gap(self._weights)
 
     @cached_property
-    def _null_mu(self) -> NDArray:
-        """Authoritative offset-aware intercept-only null prediction."""
-        from superglm.model.fit_ops import _compute_null_mu
+    def deviance(self) -> float:
+        """Weighted residual deviance on this object's evaluation rows."""
+        return self._weighted_deviance(self._weights, self._mu, self._held)
 
-        return _compute_null_mu(
+    @cached_property
+    def log_likelihood(self) -> float:
+        return self._log_likelihood(self._mu, self._held)
+
+    @cached_property
+    def _null(self) -> tuple[NDArray, HeldRows | None]:
+        """Authoritative offset-aware intercept-only null prediction, and its held rows."""
+        from superglm.model.fit_ops import _null_state
+
+        return _null_state(
             self._y,
             self._geometry_prior_weights,
             self._offset,
             self._family,
             self._link,
             weight_semantics=self._weight_semantics,
+            likelihood_rows=on_likelihood_rows(self._result),
         )
+
+    @property
+    def _null_mu(self) -> NDArray:
+        return self._null[0]
 
     @cached_property
     def null_log_likelihood(self) -> float:
         """Log-likelihood at the intercept-only (null) model."""
-        return unit_log_likelihood(
-            self._family,
-            self._y,
-            self._null_mu,
-            self._weights,
-            self._result,
-            weight_semantics=self._weight_semantics,
-            report_contract=not self._contract_checked,
-        )
+        return self._log_likelihood(*self._null)
 
     @cached_property
     def null_deviance(self) -> float:
-        return weighted_row_sum(self._weights, self._family.deviance_unit, self._y, self._null_mu)
+        return self._weighted_deviance(self._weights, *self._null)
 
     @cached_property
     def explained_deviance(self) -> float:
@@ -737,12 +758,8 @@ class ModelMetrics:
 
         if self._geometry_weight_exponent:
             return _explained_deviance(
-                weighted_row_sum(
-                    self._geometry_prior_weights, self._family.deviance_unit, self._y, self._mu
-                ),
-                weighted_row_sum(
-                    self._geometry_prior_weights, self._family.deviance_unit, self._y, self._null_mu
-                ),
+                self._weighted_deviance(self._geometry_prior_weights, self._mu, self._held),
+                self._weighted_deviance(self._geometry_prior_weights, *self._null),
                 self._y,
                 self._null_mu,
                 self._geometry_prior_weights,
@@ -790,15 +807,20 @@ class ModelMetrics:
             gammaln(p_total + 1) - gammaln(n_active + 1) - gammaln(p_total - n_active + 1)
         )
 
-    @cached_property
-    def pearson_chi2(self) -> float:
-        return pearson_chi2(
+    def _pearson_chi2(self, weights: NDArray) -> float:
+        total = pearson_chi2(
             distribution=self._family,
             y=self._y,
             mu=self._mu,
-            sample_weight=self._weights,
+            sample_weight=weights,
             variance_floor=0.0,
         )
+        held = self._held
+        return total if held is None else total + held.pearson_gap(weights)
+
+    @cached_property
+    def pearson_chi2(self) -> float:
+        return self._pearson_chi2(self._weights)
 
     @cached_property
     def n_active_groups(self) -> int:
@@ -849,26 +871,30 @@ class ModelMetrics:
         """
         y, mu, w = self._y, self._mu, self._weights
         family = self._family
+        # a fit on the likelihood's rows reads its held rows there (``_held``)
+        held = self._held
 
         if kind == "deviance":
-            d = family.deviance_unit(y, mu)
+            sign, d = self._signed_deviance_units
             if self._geometry_weight_exponent:
-                residual = np.sign(y - mu) * np.sqrt(self._geometry_prior_weights * d)
+                residual = sign * np.sqrt(self._geometry_prior_weights * d)
                 return np.ldexp(residual, -(self._geometry_weight_exponent // 2))
-            return np.sign(y - mu) * np.sqrt(w * d)
+            return sign * np.sqrt(w * d)
 
         if kind == "pearson":
             V = family.variance(mu)
-            return np.sqrt(w) * (y - mu) / np.sqrt(V)
+            residual = np.sqrt(w) * (y - mu) / np.sqrt(V)
+            return residual if held is None else held.patched(residual, held.pearson(w))
 
         if kind == "response":
-            return y - mu
+            return y - mu if held is None else held.patched(y - mu, held.residual)
 
         if kind == "working":
             # At the working predictor: a row with no mean reads NaN through ``mu``, and its
             # raw predictor is outside the derivative's domain.
             dmu_deta = self._link.deriv_inverse(self._working_eta_mu[0])
-            return (y - mu) / dmu_deta
+            residual = (y - mu) / dmu_deta
+            return residual if held is None else held.patched(residual, held.working_residual)
 
         if kind == "quantile":
             return self._quantile_residuals(seed=seed)
@@ -877,6 +903,16 @@ class ModelMetrics:
             f"Unknown residual type '{kind}'. "
             "Use 'deviance', 'pearson', 'response', 'working', or 'quantile'."
         )
+
+    @property
+    def _signed_deviance_units(self) -> tuple[NDArray, NDArray]:
+        """Per row, the sign of ``y - mu`` and the unit deviance."""
+        sign = np.sign(self._y - self._mu)
+        d = self._family.deviance_unit(self._y, self._mu)
+        held = self._held
+        if held is None:
+            return sign, d
+        return held.patched(sign, np.sign(held.residual)), held.patched(d, held.deviance)
 
     def _quantile_residuals(self, seed: int | None = 42) -> NDArray:
         """Randomized quantile residuals (Dunn & Smyth 1996).
@@ -930,8 +966,11 @@ class ModelMetrics:
             # PIT of it exists. Splitting [0, 1] at 1 - mu keeps the transform exactly uniform,
             # at the cost of inverting the unit-weight marginal (warned at fit time by
             # PriorWeightLatticeWarning).
-            a = np.where(y == 0, 0.0, 1.0 - mu)
-            b = np.where(y == 0, 1.0 - mu, 1.0)
+            non_event = 1.0 - mu
+            if self._held is not None:
+                non_event = self._held.patched(non_event, self._held.complement)
+            a = np.where(y == 0, 0.0, non_event)
+            b = np.where(y == 0, non_event, 1.0)
             u = rng.uniform(a, b)
         elif isinstance(self._family, Poisson):
             count = np.round(w * y) if prior else np.round(y)
@@ -1523,10 +1562,13 @@ class ModelMetrics:
     def _unit_standardized_residuals(self, kind):
         weights = self._geometry_prior_weights
         if kind == "deviance":
-            magnitude = np.sqrt(weights * self._family.deviance_unit(self._y, self._mu))
-            r = np.sign(self._y - self._mu) * magnitude
+            sign, d = self._signed_deviance_units
+            magnitude = np.sqrt(weights * d)
+            r = sign * magnitude
         else:
             r = np.sqrt(weights) * (self._y - self._mu) / np.sqrt(self._family.variance(self._mu))
+            if self._held is not None:
+                r = self._held.patched(r, self._held.pearson(weights))
         dispersion = solver_dispersion(self._result)
         exponent = -self._geometry_weight_exponent
         if self._result.solver_phi is not None:
@@ -1561,13 +1603,7 @@ class ModelMetrics:
             weight_semantics=self._weight_semantics,
         )
         if self._geometry_weight_exponent:
-            pearson = pearson_chi2(
-                distribution=self._family,
-                y=self._y,
-                mu=self._mu,
-                sample_weight=self._geometry_prior_weights,
-                variance_floor=0.0,
-            )
+            pearson = self._pearson_chi2(self._geometry_prior_weights)
         else:
             pearson = self.pearson_chi2
         return max(float(pearson) / residual_df, 0.0)

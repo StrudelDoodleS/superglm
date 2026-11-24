@@ -676,15 +676,20 @@ def final_mode_weak_slopes(
     """The §3.9 weak test at a fit's final mode, from its Fisher rows (``mode_score.weakly_identified_mask``)."""
     from superglm.distributions import clip_mu
     from superglm.links import stabilize_eta
+    from superglm.solvers.clip_rows import likelihood_information, on_likelihood_rows
     from superglm.solvers.mode_score import linear_predictor, weakly_identified_mask
     from superglm.solvers.working_rows import fisher_working_weights
 
     weights = np.asarray(sample_weight, dtype=np.float64)
-    eta = stabilize_eta(linear_predictor(dm, result, offset_arr), link)
+    eta_unclipped = linear_predictor(dm, result, offset_arr)
+    eta = stabilize_eta(eta_unclipped, link)
     mu = clip_mu(link.inverse(eta), distribution)
     fisher = fisher_working_weights(
         distribution=distribution, link=link, mu=mu, eta=eta, sample_weight=weights
     )
+    if on_likelihood_rows(result):
+        # the rows the fit converged on where the working clip holds one
+        fisher = likelihood_information(distribution, link, eta_unclipped, eta, mu, weights, fisher)
     fisher = np.where(np.isfinite(fisher), np.maximum(fisher, 0.0), 0.0)
     total = float(np.sum(fisher))
     if not total > 0.0:

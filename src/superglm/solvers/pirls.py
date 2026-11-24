@@ -44,9 +44,12 @@ from superglm.solvers.centered_system import (
     two_pass_centred_gram,
 )
 from superglm.solvers.clip_rows import (
+    ClipRows,
     count_held_against,
     declares_tail_rows,
+    likelihood_deviance,
     likelihood_working_rows,
+    note_held_against,
 )
 from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
 from superglm.solvers.irls_state import (
@@ -919,6 +922,7 @@ def _composite_kkt_violation(
     L_groups: list[float] | None = None,
     curvature_weights: NDArray | None = None,
     tol: float = 1e-6,
+    likelihood_rows: bool = False,
 ) -> float:
     """Return homogeneous proximal stationarity with represented-score roundoff.
 
@@ -926,6 +930,9 @@ def _composite_kkt_violation(
     implements the solver's proximal protocol.  The arithmetic allowance is
     for the represented working rows and smooth penalty, not uncertainty in
     likelihood derivatives.  Cached curvature must use these same weights.
+    With ``likelihood_rows`` (a fit on the likelihood's rows,
+    ``solvers.clip_rows``) every row the working clip holds is the
+    likelihood's, about its unclipped predictor.
     """
     if not np.isfinite(tol) or tol <= 0.0:
         raise ValueError("composite stationarity tolerance must be finite and positive")
@@ -943,7 +950,22 @@ def _composite_kkt_violation(
     )
     W = working_rows.weights
     z = working_rows.response
-    working_residual = z - state.eta
+    origin = state.eta
+    if likelihood_rows:
+        W, z = likelihood_working_rows(
+            family,
+            link,
+            y,
+            weights,
+            state.eta_unclipped,
+            state.eta,
+            state.mu,
+            W,
+            z,
+            observed=True,
+        )
+        origin = state.eta_unclipped
+    working_residual = z - origin
     weights_changed = (
         L_groups is None or curvature_weights is None or not np.array_equal(W, curvature_weights)
     )
@@ -996,9 +1018,9 @@ def _composite_kkt_violation(
 
     with np.errstate(over="ignore", invalid="ignore"):
         intercept_residual = abs(float(np.sum(W * working_residual)))
-        intercept_scale = float(np.sum(W * (np.abs(z) + np.abs(state.eta))))
+        intercept_scale = float(np.sum(W * (np.abs(z) + np.abs(origin))))
         root_w = np.sqrt(W)
-        response_norm = _safe_norm(root_w * z) + _safe_norm(root_w * state.eta)
+        response_norm = _safe_norm(root_w * z) + _safe_norm(root_w * origin)
     if not np.isfinite(response_norm) or not np.all(np.isfinite(smooth_gradient)):
         return float("inf")
     max_violation = _stationarity_ratio(
@@ -1270,6 +1292,19 @@ def _fit_pirls_inner(
         """
         return 2.0 * float(penalty.eval(values, groups))
 
+    # Which rows the fit reads where the working clip holds a binomial row
+    # (``solvers.clip_rows``).  It starts on the solver's clipped rows; an outer
+    # iteration that would converge on a row held against its outcome moves it
+    # to the likelihood's, one way, and the iterations left solve those: every
+    # held row's deviance, working weight and response are then the
+    # likelihood's in its unclipped predictor, here and in the KKT test.
+    clip_rows = ClipRows()
+
+    def likelihood_state_deviance(state: _IRLSState) -> float:
+        return likelihood_deviance(
+            family, link, y, weights, state.eta_unclipped, state.eta, state.mu, state.deviance
+        )
+
     def evaluate_state(
         beta_values: NDArray,
         intercept_value: float,
@@ -1312,6 +1347,8 @@ def _fit_pirls_inner(
             basis_id=trace_basis_id,
             lambdas=resolved_lambdas,
         )
+        if clip_rows.state == "likelihood":
+            state = replace(state, deviance=likelihood_state_deviance(state))
         state = replace(
             state,
             penalized_deviance=float(
@@ -1434,6 +1471,13 @@ def _fit_pirls_inner(
         )
         W = working_rows.weights
         z = working_rows.response
+        if clip_rows.state == "likelihood":
+            # A held row's metric is its observed information: Fisher's is near
+            # zero on a row held against its outcome, where the block updates
+            # would contract at the rate that mismatch sets.
+            W, z = likelihood_working_rows(
+                family, link, y, weights, eta_unclipped, eta, mu, W, z, observed=True
+            )
 
         # A dense group is updated in coordinates centred about its exact pair
         # (issue #430), the intercept absorbing -(hi + lo)' d.  Raw, a column at
@@ -1728,6 +1772,7 @@ def _fit_pirls_inner(
                 L_groups=L_groups,
                 curvature_weights=W,
                 tol=tol,
+                likelihood_rows=clip_rows.state == "likelihood",
             )
             convergence_value = max(convergence_value, kkt_violation)
             iteration_converged = convergence_value < tol
@@ -1740,15 +1785,26 @@ def _fit_pirls_inner(
         if iteration_converged:
             boundary_rows = mean_space_boundary_rows(family, link, retained.eta_unclipped, weights)
             iteration_converged = not boundary_rows
-        # Nor is one holding a binomial row against its outcome at the working
-        # clip: this engine reads that row at the clip, where its score is not
-        # the likelihood's, so the stop is the clip's (``solvers.clip_rows``).
+        # Nor is one on the working rows that holds a binomial row against its
+        # outcome at the clip, where that row's score is not the likelihood's
+        # (``solvers.clip_rows``).  With tail rows float64 can hold there and an
+        # iteration left, the fit moves to the likelihood's rows and carries on
+        # from this state; otherwise the stop is the clip's.
         clip_held_rows = 0
-        if iteration_converged:
+        moved_to_likelihood = False
+        if iteration_converged and clip_rows.state == "working":
             clip_held_rows = count_held_against(
                 family, link, y, weights, retained.eta_unclipped, retained.eta, retained.mu
             )
-            iteration_converged = not clip_held_rows
+            moved_to_likelihood = bool(
+                clip_held_rows
+                and outer + 1 < max_iter_outer
+                and declares_tail_rows(family, link)
+                and np.isfinite(likelihood_state_deviance(retained))
+            )
+            if moved_to_likelihood:
+                clip_held_rows = 0
+            iteration_converged = not (clip_held_rows or moved_to_likelihood)
 
         if step_rejected:
             termination_reason = "step_rejected"
@@ -1920,6 +1976,18 @@ def _fit_pirls_inner(
             break
         committed = retained
         objective_prev = objective
+        if moved_to_likelihood:
+            note_held_against(clip_rows)
+            # the same state on the likelihood's rows: the base of the iterations left
+            committed = evaluate_state(
+                retained.beta,
+                retained.intercept,
+                phase="initial",
+                outer_iteration=outer + 1,
+                eta_unclipped=retained.eta_unclipped,
+                centred_intercept=retained.centred_intercept,
+            )
+            objective_prev = committed.penalized_deviance
 
     t_elapsed = time.perf_counter() - t_total
     logger.info(
@@ -2205,6 +2273,7 @@ def _fit_pirls_inner(
         centred_intercept=None if state_center is None else retained.centred_intercept,
         state_center=None if state_center is None else state_center.copy(),
         mean_space_boundary_rows=boundary_rows,
+        clip_rows=clip_rows.state,
         clip_held_rows=clip_held_rows if termination_reason == "clip_held" else 0,
         separation_message=separation_message,
         separation_groups=separation_groups,

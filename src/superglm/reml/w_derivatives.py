@@ -92,6 +92,7 @@ from superglm.solvers.centered_system import (
     grouped_augmented_row_quadratic_forms,
     two_pass_centred_gram,
 )
+from superglm.solvers.clip_rows import likelihood_fisher_curvature, on_likelihood_rows
 from superglm.solvers.hessian_factor import (
     DenseHessianFactor,
     HessianFactor,
@@ -704,10 +705,18 @@ def reml_w_correction(
         group_matrices=dm.group_matrices,
         penalty_caches=penalty_caches,
     )
+    # A binomial fit on the likelihood's rows converged on them where the working
+    # clip holds a row (``solvers.clip_rows``): the weight derivatives read the same rows.
+    eta_unclipped = None
     if geometry is None:
-        eta = stabilize_eta(linear_predictor(dm, pirls_result, offset_arr), link)
+        eta_unclipped = linear_predictor(dm, pirls_result, offset_arr)
+        eta = stabilize_eta(eta_unclipped, link)
         mu = clip_mu(link.inverse(eta), distribution)
         dW_deta = compute_dW_deta(link, distribution, mu, eta, sample_weight)
+        if on_likelihood_rows(pirls_result):
+            dW_deta = likelihood_fisher_curvature(
+                distribution, link, sample_weight, eta_unclipped, eta, mu, (None, dW_deta, None)
+            )[1]
     else:
         if geometry.eta.shape != (dm.n,) or geometry.mu.shape != (dm.n,):
             raise ValueError("observed REML geometry does not match the design rows")
@@ -1065,6 +1074,16 @@ def reml_w_correction(
                 raise ValueError("observed REML geometry omitted second weight derivatives")
         else:
             d2W_deta2 = compute_d2W_deta2(link, distribution, mu, eta, sample_weight)
+            if eta_unclipped is not None and on_likelihood_rows(pirls_result):
+                d2W_deta2 = likelihood_fisher_curvature(
+                    distribution,
+                    link,
+                    sample_weight,
+                    eta_unclipped,
+                    eta,
+                    mu,
+                    (None, None, d2W_deta2),
+                )[2]
 
     # Store per-group quantities for second-order cross-terms
     deta_vectors: list[NDArray] = []
