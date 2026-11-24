@@ -1286,6 +1286,51 @@ class TestUnavailableConditionsAndRecovery:
         with pytest.raises(ValueError, match="full-rank"):
             model.sandwich_covariance(correction=True)
 
+    def test_a_link_that_inherits_another_curves_second_derivative_is_unsupported(self):
+        """``mu = exp(2 eta)`` from ``LogLink``, overriding the inverse and its first derivative.
+
+        Inheriting ``deriv2_inverse = exp(eta)`` gives the wrong curvature, so the
+        result is ``unsupported_curvature``.  Declaring ``4 exp(2 eta)`` gives the
+        log-link fit's covariance in coordinates halved: its slope variance over four.
+        """
+
+        class SquaredLog(LogLink):
+            def link(self, mu):
+                return 0.5 * np.log(mu)
+
+            def inverse(self, eta):
+                return np.exp(2.0 * eta)
+
+            def deriv(self, mu):
+                return 0.5 / mu
+
+            def deriv_inverse(self, eta):
+                return 2.0 * np.exp(2.0 * eta)
+
+            def reml_curvature(self, counterpart):
+                return "observed"
+
+        class DeclaredSquaredLog(SquaredLog):
+            def deriv2_inverse(self, eta):
+                return 4.0 * np.exp(2.0 * eta)
+
+        rng = np.random.default_rng(3)
+        X = pd.DataFrame({"x": rng.normal(size=400)})
+        y = rng.gamma(4.0, np.exp(0.6 + 0.4 * X["x"].to_numpy()) / 4.0)
+
+        def fitted(link):
+            return SuperGLM(family=Gamma(), link=link, features={"x": Numeric()}).fit(X, y)
+
+        stale = fitted(SquaredLog()).sandwich_covariance()
+        assert not stale.available and stale.unavailable_reason == "unsupported_curvature"
+
+        declared = fitted(DeclaredSquaredLog()).sandwich_covariance()
+        log_link = fitted(LogLink()).sandwich_covariance()
+        assert declared.bread_curvature == log_link.bread_curvature == "observed"
+        np.testing.assert_allclose(
+            declared.covariance[1, 1], log_link.covariance[1, 1] / 4.0, rtol=1e-6
+        )
+
 
 class TestReadersAndStructuredFits:
     def test_summary_relativities_term_inference_and_simultaneous_bands(self):

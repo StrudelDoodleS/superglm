@@ -327,10 +327,10 @@ def _observed_score_and_curvature(
         )
         return s_unit, h_unit, True, "fisher"
 
-    # Non-canonical generic observed curvature: require own-declared deriv2_inverse
-    # and distribution.variance_derivative so a custom subclass never inherits stale
-    # second derivatives silently.
-    if _declared_with(link, "deriv2_inverse", ("inverse", "deriv_inverse")) is None:
+    # Non-canonical generic observed curvature: the link's deriv2_inverse must be declared
+    # with its inverse and first derivative, so a subclass that overrides those reads no
+    # base class's second derivative of another curve.
+    if not _declared_with(link, "deriv2_inverse", ("inverse", "deriv_inverse")):
         return None
     if not callable(getattr(distribution, "variance_derivative", None)):
         return None
