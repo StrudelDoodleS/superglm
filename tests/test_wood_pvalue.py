@@ -527,6 +527,18 @@ class TestSatterthwaite:
 
 
 class TestWoodTestSmooth:
+    def test_distinct_eigenvalues_near_rank_cutoff_keep_their_p_value(self):
+        """A declared basis can orient the distinct boundary axes only by sign."""
+        t = np.finfo(float).eps ** 0.9
+        eigenvalues = np.array([1.0, 2.0 * t, 1.1 * t])
+        beta = np.sqrt(eigenvalues) * [1, 2, 2]
+        args = (beta, np.eye(3), np.diag(eigenvalues), 2.5)
+        _, reference, _ = wood_test_smooth(*args)
+        c, s = np.cos(0.7), np.sin(0.7)
+        basis = np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
+        _, p, _ = wood_test_smooth(*args, term_basis=basis)
+        assert p == pytest.approx(reference, rel=1e-12)
+
     def test_fractional_interaction_is_invariant_to_a_rotation_of_its_tied_eigenspace(
         self, monkeypatch
     ):

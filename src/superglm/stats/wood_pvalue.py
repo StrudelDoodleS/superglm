@@ -20,6 +20,7 @@ import math
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._roundoff import UNIT_ROUNDOFF
 from superglm.stats.davies import psum_chisq, satterthwaite
 from superglm.types import GroupSlice
 
@@ -82,11 +83,14 @@ def _frame_tied_boundary(
     basis: NDArray,
 ) -> None:
     """Resolve a repeated eigenvalue touched by the cutoff in the declared column order."""
-    tolerance = _RANK_RTOL * evals[0]
+    # Allow a few ulps of the spectral radius for the symmetric eigensolve.
+    # The rank cutoff decides which axes to retain, not which ones can rotate.
+    tolerance = 16 * UNIT_ROUNDOFF * evals[0]
+    retained = evals > _RANK_RTOL * evals[0]
     i = first
     while i < stop:
         # Include the whole resolved eigenspace, also across the truncation.
-        tied = np.flatnonzero((np.abs(evals - evals[i]) <= tolerance) & (evals > tolerance))
+        tied = np.flatnonzero((np.abs(evals - evals[i]) <= tolerance) & retained)
         i = int(tied[-1]) + 1
         if tied.size == 1:
             continue
