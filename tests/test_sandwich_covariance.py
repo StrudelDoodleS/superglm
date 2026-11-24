@@ -12,7 +12,6 @@ import tracemalloc
 import numpy as np
 import pandas as pd
 import pytest
-import statsmodels.api as sm
 
 import superglm
 from superglm import (
@@ -45,6 +44,9 @@ from superglm.inference._sandwich_core import (
     ClusterScoreAccumulator,
     build_unavailable_covariance,
 )
+
+# statsmodels comes with the bench extra, which CI installs; without it the module is skipped.
+sm = pytest.importorskip("statsmodels.api")
 
 
 def _cov_tol(cov_ref: np.ndarray, *, extra: float = 1e-7) -> float:
