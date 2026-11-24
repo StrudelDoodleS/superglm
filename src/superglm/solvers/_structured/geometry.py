@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -27,6 +27,41 @@ if TYPE_CHECKING:
     from superglm.solvers._structured.nested import NestedDataOperator
 
 _MAX_DENSE_CENTERED_ESTIMABILITY_BYTES = 64 << 20
+
+
+@dataclass(frozen=True)
+class BorderNullSpace:
+    """The data's null space on a structured operator's border (small) coordinates.
+
+    ``basis`` holds the border rows of an orthonormal basis of the data's null space in
+    the equilibrated coordinates its coefficient mask reads, each coordinate times
+    ``column_scale``.  A border coordinate is estimable when its row is at most
+    ``factor_rcond``, as the mask says; a contrast when its equilibrated projection is,
+    relative to its own norm (``RankDecomposition.is_estimable``).  The structured rows
+    are not kept, so a contrast that weighs a structured coordinate reads as not
+    determined, the answer of its coefficients' mask alone.
+    """
+
+    indices: NDArray
+    column_scale: NDArray
+    basis: NDArray
+
+    def is_estimable(self, contrast: NDArray) -> bool:
+        contrast = np.asarray(contrast, dtype=np.float64)
+        outside = np.ones(len(contrast), dtype=bool)
+        outside[self.indices] = False
+        if np.any(contrast[outside] != 0.0):
+            return False
+        border = contrast[self.indices]
+        tiny = np.finfo(np.float64).tiny
+        scaled = self.column_scale > 0.0
+        tolerance = SHARED_RANK_POLICY.factor_rcond * max(float(np.linalg.norm(border)), tiny)
+        if np.linalg.norm(border[~scaled]) > tolerance:
+            return False
+        equilibrated = border[scaled] / self.column_scale[scaled]
+        projection = equilibrated @ self.basis[scaled]
+        tolerance = SHARED_RANK_POLICY.factor_rcond * max(float(np.linalg.norm(equilibrated)), tiny)
+        return bool(np.linalg.norm(projection) <= tolerance)
 
 
 def _bounded_centered_estimability(operator: CenteredBlockOperator) -> NDArray:
@@ -111,19 +146,28 @@ def cancelled_column_row_norms(
     return norms
 
 
-def _lifted_null_row_norms(
+def _no_lifted_null(small_null: NDArray, structured_lift: NDArray) -> tuple[NDArray, NDArray]:
+    """``_lifted_null_bases`` of an empty null space: no columns."""
+    return (
+        np.zeros((small_null.shape[0], 0), dtype=np.float64),
+        np.zeros((*structured_lift.shape[:-1], 0), dtype=np.float64),
+    )
+
+
+def _lifted_null_bases(
     small_null: NDArray,
     structured_lift: NDArray,
     *,
     small_column_scale: NDArray,
     structured_column_scale: NDArray,
 ) -> tuple[NDArray, NDArray]:
-    """Return lifted-null leverage in centered design-column coordinates."""
+    """Return an orthonormal basis of the lifted null space, ``(small rows, structured rows)``.
+
+    It is orthonormal in the centered design-column coordinates the rank decisions read,
+    so its row norms are each coordinate's null leverage.
+    """
     if small_null.shape[1] == 0:
-        return (
-            np.zeros(small_null.shape[0], dtype=np.float64),
-            np.zeros(structured_lift.shape[:-1], dtype=np.float64),
-        )
+        return _no_lifted_null(small_null, structured_lift)
 
     small_scale = np.asarray(small_column_scale, dtype=np.float64)
     structured_scale = np.asarray(structured_column_scale, dtype=np.float64)
@@ -168,10 +212,7 @@ def _lifted_null_row_norms(
     )
     active = (squared_column_norm > 0.0) & meaningful_support
     if not np.any(active):
-        return (
-            np.zeros(small_null.shape[0], dtype=np.float64),
-            np.zeros(structured_lift.shape[:-1], dtype=np.float64),
-        )
+        return _no_lifted_null(small_null, structured_lift)
     column_scale = np.sqrt(squared_column_norm[active])
     null_gram = scaled_null_gram[np.ix_(active, active)] / np.outer(
         column_scale,
@@ -181,10 +222,7 @@ def _lifted_null_row_norms(
     scale = max(float(np.max(eigenvalues, initial=0.0)), 1.0)
     positive = eigenvalues > SHARED_RANK_POLICY.gram_rcond * scale
     if not np.any(positive):
-        return (
-            np.zeros(small_null.shape[0], dtype=np.float64),
-            np.zeros(structured_lift.shape[:-1], dtype=np.float64),
-        )
+        return _no_lifted_null(small_null, structured_lift)
     whitening = (eigenvectors[:, positive] / np.sqrt(eigenvalues[positive])) @ (
         eigenvectors[:, positive].T
     )
@@ -195,16 +233,20 @@ def _lifted_null_row_norms(
     lifted_transform[active] = whitening / column_scale[:, None]
     orthogonal_small = (small_null @ lifted_transform) * small_scale[:, None]
     orthogonal_structured = (structured_lift @ lifted_transform) * structured_scale[:, :, None]
-    return (
-        np.linalg.norm(orthogonal_small, axis=1),
-        np.linalg.norm(orthogonal_structured, axis=2),
-    )
+    return orthogonal_small, orthogonal_structured
 
 
 def _independent_block_centered_estimability(
     operator: CenteredBlockOperator,
 ) -> NDArray:
     """Exact compact centered-data estimability for RE and FS blocks."""
+    return _independent_block_centered_geometry(operator)[0]
+
+
+def _independent_block_centered_geometry(
+    operator: CenteredBlockOperator,
+) -> tuple[NDArray, BorderNullSpace]:
+    """``_independent_block_centered_estimability`` and the border null space it reads."""
     raw = operator.raw
     if isinstance(raw, SymmetricBlockOperator):
         D = raw.d[:, None, None]
@@ -263,7 +305,7 @@ def _independent_block_centered_estimability(
     small_column_scale = np.zeros(q + 1, dtype=np.float64)
     small_column_scale[1:] = public_column_scale[raw.small_indices]
     structured_column_scale = public_column_scale[structured_indices]
-    small_null_norm, lifted_null_norm = _lifted_null_row_norms(
+    small_basis, lifted_basis = _lifted_null_bases(
         small_null,
         structured_lift,
         small_column_scale=small_column_scale,
@@ -271,14 +313,14 @@ def _independent_block_centered_estimability(
     )
     result = np.empty(operator.shape[0], dtype=bool)
     result[raw.small_indices] = (small_column_scale[1:] > 0.0) & (
-        small_null_norm[1:] <= SHARED_RANK_POLICY.factor_rcond
+        np.linalg.norm(small_basis[1:], axis=1) <= SHARED_RANK_POLICY.factor_rcond
     )
     result[structured_indices] = (
         local_estimable
         & (structured_column_scale > 0.0)
-        & (lifted_null_norm <= SHARED_RANK_POLICY.factor_rcond)
+        & (np.linalg.norm(lifted_basis, axis=2) <= SHARED_RANK_POLICY.factor_rcond)
     )
-    return result
+    return result, BorderNullSpace(raw.small_indices, small_column_scale[1:], small_basis[1:])
 
 
 def _refined_local_solves(D: NDArray, inverses: NDArray, cross: NDArray) -> tuple[NDArray, NDArray]:
@@ -314,6 +356,14 @@ def _nested_centered_estimability(
     operator: CenteredBlockOperator,
     raw: NestedDataOperator,
 ) -> NDArray:
+    """Estimability of a nested chain's data geometry (``_nested_centered_geometry``)."""
+    return _nested_centered_geometry(operator, raw)[0]
+
+
+def _nested_centered_geometry(
+    operator: CenteredBlockOperator,
+    raw: NestedDataOperator,
+) -> tuple[NDArray, BorderNullSpace]:
     """Estimability of a nested chain's data geometry by the §6 reduction.
 
     The tree design ``Z_leaf M`` spans exactly the columns of ``Z_leaf``
@@ -342,9 +392,10 @@ def _nested_centered_estimability(
         total=operator.total,
         center=np.concatenate((border_cross / operator.total, operator.center[leaf_indices])),
     )
+    leaf_estimable, border = _independent_block_centered_geometry(leaf_operator)
     result = np.zeros(operator.shape[0], dtype=bool)
-    result[raw.small_indices] = _independent_block_centered_estimability(leaf_operator)[:q]
-    return result
+    result[raw.small_indices] = leaf_estimable[:q]
+    return result, replace(border, indices=raw.small_indices)
 
 
 def _orthonormal_column_span(values: NDArray) -> NDArray:
@@ -602,13 +653,39 @@ def centered_operator_coefficient_estimable(
             return _nested_centered_estimability(operator, operator.raw)
         return _independent_block_centered_estimability(operator)
     except np.linalg.LinAlgError as error:
-        width = operator.shape[0]
-        # Materialization and Gram decomposition peaked at 13–15 square
-        # float64 arrays' worth of workspace in the fallback probes. Allow 16.
-        workspace_bytes = 16 * width**2 * np.dtype(np.float64).itemsize
-        budget = _MAX_DENSE_CENTERED_ESTIMABILITY_BYTES
-        if workspace_bytes <= budget:
-            return _bounded_centered_estimability(operator)
+        _require_dense_fallback_budget(operator, error)
+        return _bounded_centered_estimability(operator)
+
+
+def centered_operator_contrast_estimability(
+    operator: CenteredBlockOperator,
+) -> BorderNullSpace | RankDecomposition:
+    """``centered_operator_coefficient_estimable``'s rule on contrasts, as ``.is_estimable``.
+
+    The same geometry decides: the compact one a contrast of the border coordinates
+    (``BorderNullSpace``), the dense fallback any contrast.
+    """
+    from superglm.solvers._structured.nested import NestedDataOperator
+
+    try:
+        if isinstance(operator.raw, NestedDataOperator):
+            return _nested_centered_geometry(operator, operator.raw)[1]
+        return _independent_block_centered_geometry(operator)[1]
+    except np.linalg.LinAlgError as error:
+        _require_dense_fallback_budget(operator, error)
+        return decompose_gram(materialize_compact_operator(operator)).estimability_only()
+
+
+def _require_dense_fallback_budget(
+    operator: CenteredBlockOperator, error: np.linalg.LinAlgError
+) -> None:
+    """Refuse the dense fallback for a compact certification ``error`` above its workspace budget."""
+    width = operator.shape[0]
+    # Materialization and Gram decomposition peaked at 13–15 square
+    # float64 arrays' worth of workspace in the fallback probes. Allow 16.
+    workspace_bytes = 16 * width**2 * np.dtype(np.float64).itemsize
+    budget = _MAX_DENSE_CENTERED_ESTIMABILITY_BYTES
+    if workspace_bytes > budget:
         raise RuntimeError(
             f"Compact structured estimability certification failed for p={width}. "
             f"The dense fallback exceeds its {budget >> 20} MiB workspace budget. "

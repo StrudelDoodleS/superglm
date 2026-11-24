@@ -20,7 +20,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Numeric, OrderedCategorical, Piecewise, Polynomial, Spline, SuperGLM
+from superglm import (
+    FactorSmooth,
+    Numeric,
+    OrderedCategorical,
+    Piecewise,
+    Polynomial,
+    RandomEffect,
+    Spline,
+    SuperGLM,
+)
 
 LEVELS = [f"Mi{i:03d}" for i in range(10)]
 
@@ -276,6 +285,72 @@ def test_determined_structural_rows_keep_their_default_errors() -> None:
     other = aliased.metrics(X.iloc[:120].reset_index(drop=True), y[:120] + 0.5).summary()
     row = next(r for r in other._coef_rows if r.name == "a[slope-change @ d]")
     assert row.se is not None and np.isfinite(row.se) and row.p is not None
+
+
+def _structured_fit(names, term, *, linear=False, direct_solve="auto"):
+    """Ordered piecewise ``names`` on eight bands crossed with 40 levels, twice per cell,
+    beside a structured ``term`` on the levels: a random effect, declared first so its
+    levels sit before the border columns, or an ``fs`` or ``sz`` factor smooth; with a
+    linear term on the band positions if ``linear``.
+    """
+    band = np.repeat(np.arange(8), 80)
+    level = np.tile(np.repeat(np.arange(40), 2), 8)
+    row = np.arange(len(band), dtype=float)
+    z = 0.5 + 0.5 * np.sin(0.7 * row)
+    X = pd.DataFrame({name: np.asarray(_TWIN_LABELS)[band] for name in names})
+    X["g"], X["x"], X["z"] = level.astype(str), band.astype(float), z
+    y = band**2.0 + 2.0 * np.cos(level) + np.sin(row) + z
+    features = {"g": RandomEffect()} if term == "random effect" else {}
+    for name in names:
+        features[name] = OrderedCategorical(
+            order=_TWIN_LABELS, base="a", basis=Piecewise(breaks=["d"])
+        )
+    if linear:
+        features["x"] = Numeric()
+    interactions = []
+    if term != "random effect":
+        features["z"] = Spline(n_knots=5)
+        interactions.append(FactorSmooth("z", group="g", basis=term, k=5))
+    model = SuperGLM(
+        family="gaussian",
+        features=features,
+        interactions=interactions,
+        direct_solve=direct_solve,
+    )
+    return model.fit_reml(X, y), X, y
+
+
+@pytest.mark.parametrize("term", ["random effect", "fs", "sz"])
+def test_structured_fits_decide_each_slope_change_on_their_own_data(term) -> None:
+    """A structured fit decides whether its data determine a slope change, as a dense fit does.
+
+    The terms cover the three compact geometries: a random effect's nested chain, an ``fs``
+    factor smooth's independent blocks and an ``sz`` one's balance tree.  With a linear term
+    on the band positions no slope coefficient is determined, but the slope change is:
+    it keeps the dense fit's error in both summaries, where dceef692b blanked it.  Twin
+    terms determine neither slope change, and both stay blank, where fe8a6eb9b showed them.
+    """
+    model, X, y = _structured_fit(["a"], term, linear=True)
+    assert model._fit_inference_info.get("structured_covariance")
+    slope_change = _structural_contrasts(model, "a")[0][1]
+    shown = model._fit_inference_info["coefficient_estimable"]
+    assert not np.all(shown[slope_change[0] != 0.0])
+    assert _rank_gain(model, slope_change) == 0
+    dense, _, _ = _structured_fit(["a"], term, linear=True, direct_solve="gram")
+    expected = next(r for r in dense.summary()._coef_rows if r.name == "a[slope-change @ d]").se
+    for summary in (model.summary(), model.metrics(X, y).summary()):
+        row = next(r for r in summary._coef_rows if r.name == "a[slope-change @ d]")
+        assert row.se is not None and row.p is not None
+        np.testing.assert_allclose(row.se, expected, rtol=1e-9)
+
+    twin, X, y = _structured_fit(["a", "b"], term)
+    assert twin._fit_inference_info.get("structured_covariance")
+    for name in ("a", "b"):
+        assert _rank_gain(twin, _structural_contrasts(twin, name)[0][1]) > 0
+    for summary in (twin.summary(), twin.metrics(X, y).summary()):
+        rows = [r for r in summary._coef_rows if "slope-change" in r.name]
+        assert len(rows) == 2
+        assert all(r.se is None and r.p is None for r in rows), [r.name for r in rows]
 
 
 def test_a_summary_saved_beside_an_ordered_piecewise_term_is_formed_again() -> None:

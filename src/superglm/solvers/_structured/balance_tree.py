@@ -70,7 +70,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cached_property, lru_cache
 from typing import TYPE_CHECKING
 
@@ -2410,21 +2410,38 @@ class SumToZeroTreeFactor:
         )
         return SumToZeroTreeFactor(system, data)
 
+    def border_estimability(self):
+        """``coefficient_estimable``'s rule on contrasts of the border slopes, as
+        ``geometry.BorderNullSpace``: the same verified null space's border rows.
+        """
+        from superglm.solvers._structured.geometry import BorderNullSpace
+
+        null, root = self._data_factor()._verified_data_null()
+        border = self.small_indices[1:]
+        return BorderNullSpace(border, root[border], null[border])
+
     def _verified_data_estimable(self) -> NDArray:
-        """Data estimability on this (unpenalized) tree: its certified nulls, confirmed on the rows.
+        """Data estimability on this (unpenalized) tree (``_verified_data_null``)."""
+        null, _ = self._verified_data_null()
+        return np.linalg.norm(null, axis=1) <= SHARED_RANK_POLICY.factor_rcond
+
+    def _verified_data_null(self) -> tuple[NDArray, NDArray]:
+        """This (unpenalized) tree's certified nulls, confirmed on the rows, and their scale.
 
         A direction the border certificate cannot place is a candidate, not a
         null, so each candidate is measured on the data: the per-level residual
         ``R_l [beta_l; alpha; b]`` on the candidates' span, equilibrated to unit
         public columns. Singular values at most ``factor_rcond`` give the null
-        directions; a coordinate the null basis touches above ``factor_rcond``
-        is not estimable (``geometry._coefficient_estimable_from_null_basis``).
+        directions, an orthonormal basis in those equilibrated coordinates
+        (the second entry, each coordinate's scale); a coordinate the null basis
+        touches above ``factor_rcond`` is not estimable
+        (``geometry._coefficient_estimable_from_null_basis``).
         """
         width = self.shape[0]
         N_x = self._null_x
         t = N_x.shape[1]
         if not t:
-            return np.ones(width, dtype=bool)
+            return np.zeros((width, 0)), np.ones(width)
         K, k = self.n_levels, self.block_size
         q = len(self._border_x)
         coordinates = self._coordinates(True)
@@ -2450,8 +2467,7 @@ class SumToZeroTreeFactor:
         stacked = np.concatenate([rows.reshape(-1, t), tail])
         residual = scipy.linalg.solve_triangular(Rq, stacked.T, trans="T").T
         singular, right = np.linalg.svd(residual, full_matrices=False)[1:]
-        null = Q @ right[singular <= SHARED_RANK_POLICY.factor_rcond].T
-        return np.linalg.norm(null, axis=1) <= SHARED_RANK_POLICY.factor_rcond
+        return Q @ right[singular <= SHARED_RANK_POLICY.factor_rcond].T, root
 
     def _paths(self) -> tuple[NDArray, NDArray, NDArray, NDArray]:
         """``(leaf_parent, leaf_side, node_parent, node_side)`` of the balance tree."""
@@ -3085,6 +3101,11 @@ class ProfiledSumToZeroTreeFactor(_ProfiledLeafFactor):
     def coefficient_estimable(self) -> NDArray:
         """The slopes' estimability (``SumToZeroTreeFactor.coefficient_estimable``)."""
         return self.augmented_factor.coefficient_estimable()[1:]
+
+    def border_estimability(self):
+        """The slopes' ``SumToZeroTreeFactor.border_estimability``."""
+        border = self.augmented_factor.border_estimability()
+        return replace(border, indices=border.indices - 1)
 
     def raw_level_inverse_block(self, level: int) -> NDArray:
         return self.augmented_factor.raw_level_inverse_block(level)
