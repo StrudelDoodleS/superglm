@@ -12,6 +12,9 @@ quantities that a primitive resolves:
 - ``log1mexp(t) = log(1 - e^-t)`` for ``t > 0``, by ``log(-expm1(-t))`` up to
   ``log 2`` and ``log1p(-e^-t)`` above (Maechler, *Accurately computing
   log(1 - exp(-|a|))*, Rmpfr vignette, 2012);
+- ``log1mexp_exp_01234(w, order)`` differentiates that log complement in
+  ``w = log(t)``, and ``logsoftplus_01234`` supplies the inner log hazard of
+  Lomax and Burr XII without a reciprocal of a vanishing softplus;
 - ``invexpm1(t) = 1/(e^t - 1)``, written ``e^-t/(1 - e^-t)`` above ``t = 1`` so
   it underflows gradually instead of through an overflowing ``expm1``;
 - ``side(z)``, ``-1`` below zero and ``1`` otherwise: the piece of a two-piece law,
@@ -110,6 +113,12 @@ _BERNOULLI = (
     (8615841276005, 14322),
 )
 _K = range(1, len(_BERNOULLI) + 1)
+# (t d/dt)^j [t/expm1(t)], DLMF 24.2.1. At t <= 1 the alternating
+# series through B_30 omits less than 2e-21 even for j = 3.
+_LOG_HAZARD = tuple(
+    tuple((2 * k) ** j * p / (q * math.factorial(2 * k)) for k, (p, q) in enumerate(_BERNOULLI, 1))
+    for j in range(4)
+)
 # Coefficients of x^k, x = 1/a^2, each one correctly rounded integer quotient.
 _GNORM = tuple(p / (q * 2 * k * (2 * k - 1)) for k, (p, q) in zip(_K, _BERNOULLI, strict=True))
 _PSI0 = tuple(p / (q * 2 * k) for k, (p, q) in zip(_K, _BERNOULLI, strict=True))
@@ -227,6 +236,80 @@ def _series(coefficients, x):
     for index in range(len(coefficients) - 1, -1, -1):
         total = (total + coefficients[index]) * x
     return total
+
+
+@njit(cache=True)
+def _logcdf_log_hazard_derivatives(t, order):
+    """Derivatives of log(1-exp(-t)) in log(t), starting with t/expm1(t)."""
+    d1 = d2 = d3 = d4 = math.nan
+    if order == 0:
+        return d1, d2, d3, d4
+    if t <= 1.0:
+        linear = -0.5 * t
+        square = t * t
+        d1 = (1.0 + linear) + _series(_LOG_HAZARD[0], square)
+        if order >= 2:
+            d2 = linear + _series(_LOG_HAZARD[1], square)
+        if order >= 3:
+            d3 = linear + _series(_LOG_HAZARD[2], square)
+        if order >= 4:
+            d4 = linear + _series(_LOG_HAZARD[3], square)
+    elif t <= 800.0:
+        # Apply t d/dt repeatedly. Keep the last exponential factor until
+        # after multiplication by the polynomial when exp(-t) is subnormal.
+        q = math.exp(-t)
+        b = t / (1.0 - q)
+        factor = math.exp(-0.5 * t) if t > 700.0 else 1.0
+        first = b * (factor if t > 700.0 else q)
+        d1 = first * factor
+        if order >= 2:
+            slope = 1.0 - b
+            d2 = first * slope * factor
+        if order >= 3:
+            # D log(d1) = 1-b and Db = b(1-d1), with D = t d/dt.
+            db = b * (1.0 - d1)
+            d3 = first * (slope * slope - db) * factor
+            if order >= 4:
+                ddb = db * (1.0 - d1) - b * d2
+                d4 = first * (slope * (slope * slope - 3.0 * db) - ddb) * factor
+    else:
+        # Even t^4 exp(-t) rounds to zero beyond 800.
+        return 0.0, 0.0, 0.0, 0.0
+    return d1, d2, d3, d4
+
+
+@njit(cache=True)
+def log1mexp_exp_01234(w, order):
+    """The log CDF and its log-hazard derivatives. The value tends to w on the left."""
+    if w > math.log(800.0):
+        return -0.0, 0.0, 0.0, 0.0, 0.0
+    t = math.exp(w)
+    value = w if w < -36.0 else log1mexp(t)
+    d1, d2, d3, d4 = _logcdf_log_hazard_derivatives(t, order)
+    return value, d1, d2, d3, d4
+
+
+@njit(cache=True)
+def logsoftplus_01234(z, order):
+    """Log softplus and derivatives by inversion of z = t + log(1-exp(-t))."""
+    t = softplus(z)
+    value = z if z < -36.0 else math.log(t)
+    d1 = d2 = d3 = d4 = math.nan
+    if order:
+        f1, f2, f3, f4 = _logcdf_log_hazard_derivatives(t, order)
+        # For w=log(t), d^j z/dw^j = t + f_j. Normalize the inverse
+        # function derivatives by dz/dw before taking products.
+        d1 = 1.0 / (t + f1)
+        if order >= 2:
+            b = (t + f2) * d1
+            d2 = -b * d1 * d1
+            if order >= 3:
+                c = (t + f3) * d1
+                d3 = (3.0 * b * b - c) * d1 * d1 * d1
+                if order >= 4:
+                    fourth = b * (10.0 * c - 15.0 * b * b) - (t + f4) * d1
+                    d4 = fourth * d1 * d1 * d1 * d1
+    return value, d1, d2, d3, d4
 
 
 @njit(cache=True)
@@ -420,8 +503,10 @@ __all__ = [
     "gnorm",
     "invexpm1",
     "log1mexp",
+    "log1mexp_exp_01234",
     "log_ndtr_01234",
     "logratio",
+    "logsoftplus_01234",
     "polygamma_0123",
     "psires_0123",
     "softplus",

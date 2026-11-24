@@ -846,6 +846,10 @@ _FIRST_USE: dict[str, str] = {
         "generated with every declaration, but these densities have no parameter-free part, "
         "so their rows and windows never read the carrier",
     ),
+    "superglm.distributional.kernels._severity_primitives.invexpm1": (
+        "a generator primitive no shipped kernel calls: Lomax's log-CDF differentiates in log "
+        "cumulative hazard instead, and only the test fixtures' log-sum-exp engine reads it"
+    ),
 }
 
 _WARMUP_CENSUS = r"""

@@ -198,19 +198,27 @@ def test_lomax_window_extremes(kernel):
     assert valid.all() and np.isfinite(actual[0][0])
 
 
-def test_lomax_deep_left_fourth_is_not_false_analytic_evidence(kernel):
+def test_lomax_deep_left_fourth_on_generated_and_public_window_routes(kernel):
     from superglm.distributional.kernels._declared import law_jets
     from superglm.distributional.kernels._declared import lomax as generated
     from tests._declared_scalar_oracles import log_window
 
-    y, theta = np.array([1e-100]), np.array([[1.0, 3.0]])
-    raw, _ = law_jets(generated, "logcdf", 4, y, theta)
-    reference = jets(lambda s, a: log_window("lomax", mp.mpf(0), mp.mpf(1e-100), s, a), theta[0], 4)
-    with pytest.raises(AssertionError):
-        assert_scaled_jets(raw, reference, theta[0])
-    actual, valid = kernel.window_jets(np.zeros(1), y, theta, order=4)
-    assert valid[0]
-    assert_scaled_jets(actual, reference, theta[0], factor=8192)
+    y = np.array([5e-101, np.expm1((1.0 - 1e-12) / 2), np.expm1((1.0 + 1e-12) / 2)])
+    theta = np.tile([1.0, 2.0], (len(y), 1))
+    raw, valid = law_jets(generated, "logcdf", 4, y, theta)
+    assert valid.all()
+    lower = np.zeros_like(y)
+    np.testing.assert_array_equal(
+        kernel.analytic_window_admitted(lower, y, theta), [False, True, True]
+    )
+    window, valid = kernel.window_jets(lower, y, theta, order=4)
+    assert valid.all()
+    for i, point in enumerate(y):
+        reference = jets(
+            lambda s, a: log_window("lomax", mp.mpf(0), mp.mpf(point), s, a), theta[i], 4
+        )
+        for actual in (raw, window):
+            assert_scaled_jets([level[i] for level in actual], reference, theta[i])
 
 
 def test_lomax_predictions_moments_and_units(kernel):
