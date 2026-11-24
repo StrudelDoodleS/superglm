@@ -1588,8 +1588,14 @@ def _refresh_repaired_geometry(model, prior_working_weights, prior_selected_name
     model.__dict__["_fit_inference_info"] = inference
 
 
-def _refresh_repaired_scale_and_statistics(model, *, hessian_rank: int | None = None) -> None:
-    """Pair the repaired coefficients and final EDF with a coherent scale."""
+def _refresh_repaired_scale_and_statistics(
+    model, scored, *, hessian_rank: int | None = None
+) -> None:
+    """Pair the repaired coefficients and final EDF with a coherent scale.
+
+    ``scored`` is the refreshed means' ``ScoredRows``: the statistics read the rows the
+    working clip holds as the repaired deviance does.
+    """
     from superglm.distributions import _VARIANCE_FLOOR
     from superglm.model.fit_ops import _compute_fit_stats
 
@@ -1696,6 +1702,8 @@ def _refresh_repaired_scale_and_statistics(model, *, hessian_rank: int | None = 
         null_mu=model._fit_null_mu,
         weight_semantics=model_weight_semantics(model),
         solver_result=model._solver_result,
+        likelihood_eta=scored.likelihood_eta,
+        null_held=scored.null_held,
     )
     model._summary_cache = None
 
@@ -1881,7 +1889,7 @@ def _apply_shape_postfit(model, X, sample_weight, offset, *, n_grid: int):
     _invalidate_repair_caches(work_model)
     from superglm.editor.apply import _refresh_fit_statistics
 
-    _refresh_fit_statistics(
+    scored = _refresh_fit_statistics(
         work_model,
         X=X,
         y=y_ref,
@@ -1896,7 +1904,7 @@ def _apply_shape_postfit(model, X, sample_weight, offset, *, n_grid: int):
     # after them reads the frame.
     del frame, checked
     _refresh_repaired_geometry(work_model, prior_working_weights, prior_selected_names)
-    _refresh_repaired_scale_and_statistics(work_model, hessian_rank=certified_rank)
+    _refresh_repaired_scale_and_statistics(work_model, scored, hessian_rank=certified_rank)
     committed = revision.commit()
     for message in flat:
         warnings.warn(message, RuntimeWarning, stacklevel=4)

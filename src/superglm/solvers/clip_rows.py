@@ -25,7 +25,7 @@ the clip holds one, with its table of moves and its only writer.
 from __future__ import annotations
 
 import math
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -41,14 +41,22 @@ from superglm.links import (
     stabilize_eta,
 )
 
+if TYPE_CHECKING:
+    from superglm.solvers.pirls import PIRLSResult
+
 type ClipRowsState = Literal["working", "likelihood"]
 
-#: The moves of one fit's ``ClipRows``, by event.  ``held_against`` is a
-#: coefficient solve ending on a state that holds a row against its outcome.
-#: One way: no event returns a fit to the working rows.
+#: The moves of ``ClipRows``, by event.  ``held_against`` is a coefficient
+#: solve, or a re-scoring of the fitted model at other coefficients (a shape
+#: repair, an editor edit), ending on a state that holds a row against its
+#: outcome.  ``rescored_clear`` is such a re-scoring ending on a state that
+#: holds none: the model reads the rows a fit ending there would.  A fit moves
+#: one way: no solve returns it to the working rows.
 CLIP_ROWS_MOVES: dict[tuple[ClipRowsState, str], ClipRowsState] = {
     ("working", "held_against"): "likelihood",
     ("likelihood", "held_against"): "likelihood",
+    ("working", "rescored_clear"): "working",
+    ("likelihood", "rescored_clear"): "working",
 }
 
 # A held row's working response stays within this many units of its
@@ -71,14 +79,28 @@ class ClipRows:
         self.state: ClipRowsState = "working"
 
 
-def note_held_against(rows: ClipRows) -> bool:
-    """Record a solve that ended on a row held against its outcome; whether the rows changed.
+def _move(rows: ClipRows, event: str) -> bool:
+    """Apply ``event`` to ``rows``; whether the rows changed.
 
     The only writer of ``ClipRows.state`` (``CLIP_ROWS_MOVES``).
     """
     before = rows.state
-    rows.state = CLIP_ROWS_MOVES[(before, "held_against")]
+    rows.state = CLIP_ROWS_MOVES[(before, event)]
     return rows.state != before
+
+
+def note_held_against(rows: ClipRows) -> bool:
+    """Record a solve that ended on a row held against its outcome; whether the rows changed."""
+    return _move(rows, "held_against")
+
+
+def note_rescored(rows: ClipRows, held_against: bool) -> bool:
+    """Record a re-scoring of the fitted model at other coefficients; whether the rows changed.
+
+    ``held_against`` says whether the scored state holds a row against its
+    outcome (``rescored_held_rows``).
+    """
+    return _move(rows, "held_against" if held_against else "rescored_clear")
 
 
 def on_likelihood_rows(result: object) -> bool:
@@ -92,6 +114,18 @@ def clip_rows_after(result: object) -> ClipRows:
     if on_likelihood_rows(result):
         note_held_against(rows)
     return rows
+
+
+def record_rescored(result: PIRLSResult, held_against: bool) -> None:
+    """Write on ``result`` the rows a model re-scored at other coefficients reads.
+
+    ``PIRLSResult.clip_rows`` after ``note_rescored``, so every reader of the
+    re-scored model (``on_likelihood_rows``) agrees with its statistics.  A
+    result whose rows do not change is not written.
+    """
+    rows = clip_rows_after(result)
+    if note_rescored(rows, held_against):
+        result.clip_rows = rows.state
 
 
 def clip_can_hold_against(family: object, link: object) -> bool:
@@ -583,11 +617,18 @@ class HeldRows:
 
 
 def held_likelihood_rows(
-    family: Distribution, link: Link, y: NDArray, eta_unclipped: NDArray
+    family: Distribution,
+    link: Link,
+    y: NDArray,
+    eta_unclipped: NDArray,
+    *,
+    against: NDArray | None = None,
 ) -> HeldRows | None:
     """The likelihood's reading of the rows the clip holds at ``eta_unclipped``, or ``None``.
 
     ``None`` where the pair declares no tail rows or the clip holds no row.
+    With ``against``, the rows' weights, also where the clip holds no
+    positive-weight row against its outcome (``held_against_outcome``).
     """
     if not declares_tail_rows(family, link):
         return None
@@ -599,7 +640,46 @@ def held_likelihood_rows(
     if not index.size:
         return None
     y = np.asarray(y, dtype=np.float64)
+    if against is not None and not np.any(
+        held_against_outcome(y[index], np.asarray(against)[index], low[index], high[index])
+    ):
+        return None
     return HeldRows(family, link, index, y[index], eta_unclipped[index], mu[index])
+
+
+def clip_may_hold(family: Distribution, link: Link, mu: NDArray) -> bool:
+    """Whether the working clip may hold a row whose clipped mean is in ``mu``.
+
+    A held row's mean is the band's edge's or one of ``clip_mu``'s bounds, and
+    every link with tail rows is increasing: no mean at or past the lower
+    edge's or the upper edge's means no held row, without the predictor.
+    ``False`` for a pair that declares no tail rows.
+    """
+    if not declares_tail_rows(family, link):
+        return False
+    with np.errstate(over="ignore", under="ignore"):
+        edges = stabilize_eta(np.array([-np.inf, np.inf]), link)
+        low, high = clip_mu(link.inverse(edges), family)
+    mu = np.asarray(mu, dtype=np.float64)
+    return bool(np.any((mu <= low) | (mu >= high)))
+
+
+def rescored_held_rows(
+    family: Distribution, link: Link, y: NDArray, weights: NDArray, eta_unclipped: NDArray
+) -> HeldRows | None:
+    """The held rows a model re-scored at ``eta_unclipped`` reads from the likelihood, or ``None``.
+
+    A fit's own test (``_IRLSDirectClipOverlay.moves_to_likelihood``) at the
+    coefficients a shape repair or an editor edit scores: with a
+    positive-weight row held against its outcome, tail rows for the pair and a
+    likelihood float64 can hold there, every held row is read from the
+    likelihood, as a fit ending on that state reads it.  ``None`` otherwise:
+    the re-scored model keeps the clipped rows.
+    """
+    held = held_likelihood_rows(family, link, y, eta_unclipped, against=weights)
+    if held is None or not np.isfinite(held.deviance_gap(weights)):
+        return None
+    return held
 
 
 # the null intercept's bracket doubles this many times about the offsets' median

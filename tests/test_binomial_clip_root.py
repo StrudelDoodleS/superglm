@@ -606,29 +606,193 @@ def test_tail_rows_are_the_likelihoods_rows_in_both_tails(link, etas):
 
 
 def test_the_rows_a_fit_reads_move_one_way():
-    """``ClipRows`` walks its table: ``working`` to ``likelihood`` on a held row, and never back."""
+    """``ClipRows`` walks its table: a solve moves ``working`` to ``likelihood`` and never back.
+
+    Only a re-scoring of the fitted model at other coefficients, which hold no
+    row against its outcome, returns it to the working rows.
+    """
     from superglm.solvers.clip_rows import (
         CLIP_ROWS_MOVES,
         ClipRows,
         clip_rows_after,
         note_held_against,
+        note_rescored,
+        record_rescored,
     )
 
     assert CLIP_ROWS_MOVES == {
         ("working", "held_against"): "likelihood",
         ("likelihood", "held_against"): "likelihood",
+        ("working", "rescored_clear"): "working",
+        ("likelihood", "rescored_clear"): "working",
+    }
+    writers = {
+        "held_against": (note_held_against, lambda rows: note_rescored(rows, True)),
+        "rescored_clear": (lambda rows: note_rescored(rows, False),),
     }
     rows = ClipRows()
     assert rows.state == "working"
-    for (state, _event), destination in CLIP_ROWS_MOVES.items():
-        rows.state = state
-        assert note_held_against(rows) == (state != destination)
-        assert rows.state == destination
+    for (state, event), destination in CLIP_ROWS_MOVES.items():
+        for write in writers[event]:
+            rows.state = state
+            assert write(rows) == (state != destination)
+            assert rows.state == destination
     # a fit publishes the rows it ended on, and a solve that continues from it starts there
     case = _HELD_AGAINST["logit_event_at_minus_35"]()
     model, _ = case.fit()
-    assert model._solver_pirls_result().clip_rows == "likelihood"
-    assert clip_rows_after(model._solver_pirls_result()).state == "likelihood"
+    result = model._solver_pirls_result()
+    assert result.clip_rows == "likelihood"
+    assert clip_rows_after(result).state == "likelihood"
+    # a re-scoring writes the rows the scored coefficients read on the result it scored
+    rescored = result._mutable_copy()
+    record_rescored(rescored, False)
+    assert rescored.clip_rows == "working"
+    record_rescored(rescored, True)
+    assert rescored.clip_rows == "likelihood"
+    assert result.clip_rows == "likelihood"
+
+
+# ── a fitted model re-scored at other coefficients ─────────────────
+
+
+def _rescored_statistics(model, frame, y, weights, offset, eta):
+    """What ``summary()`` and ``metrics()`` print beside the likelihood's own figures at ``eta``.
+
+    ``eta`` is each row's unclipped predictor at the model's coefficients; the
+    null model is the intercept alone on the same rows and offsets.
+    """
+    log_likelihood, null_deviance, pearson = _statistics(
+        _Case("logit", y, offset, weights=weights), eta
+    )
+    summary = model.summary()
+    metrics = model.metrics(frame, y, sample_weight=weights, offset=offset)
+    printed = {
+        "log_likelihood": summary["information_criteria"]["log_likelihood"],
+        "deviance": summary["deviance"]["deviance"],
+        "result.deviance": model.result.deviance,
+        "null_deviance": summary["deviance"]["null_deviance"],
+        "pearson_chi2": summary["fit"]["pearson_chi2"],
+        "metrics.log_likelihood": metrics.log_likelihood,
+        "metrics.deviance": metrics.deviance,
+    }
+    exact = {
+        "log_likelihood": log_likelihood,
+        "deviance": -2.0 * log_likelihood,
+        "result.deviance": -2.0 * log_likelihood,
+        "null_deviance": null_deviance,
+        "pearson_chi2": pearson,
+        "metrics.log_likelihood": log_likelihood,
+        "metrics.deviance": -2.0 * log_likelihood,
+    }
+    return printed, exact
+
+
+def _factor_fit(held_offset):
+    """Sixty rows under a three-level factor, and one event of level ``b`` at ``held_offset``."""
+    levels = np.array(["a"] * 20 + ["b"] * 20 + ["c"] * 20 + ["b"])
+    period = np.repeat([3, 2, 4], 20)
+    y = np.r_[(np.arange(60) % period == 0).astype(float), 1.0]
+    offset = np.r_[np.zeros(60), held_offset]
+    weights = np.ones(61)
+    frame = pd.DataFrame({"a": levels})
+    model = SuperGLM(family="binomial", link="logit", features={"a": Categorical()})
+    model.fit(frame, y, offset=offset, sample_weight=weights)
+    return model, frame, y, weights, offset
+
+
+def _factor_eta(model, frame, offset):
+    """Each row's unclipped predictor: its level's public prediction at offset 0, plus its offset."""
+    names = sorted(set(frame["a"]))
+    probability = model.predict(pd.DataFrame({"a": names}), offset=np.zeros(len(names)))
+    by_level = dict(zip(names, np.log(probability) - np.log1p(-probability)))
+    return np.array([by_level[name] for name in frame["a"]]) + offset
+
+
+def _edited(model, frame, y, weights, offset, shift):
+    """The model an editor publishes after moving level ``b`` by ``shift``."""
+    from superglm.editor import edit
+
+    session = edit(model, train_data=(frame, y, weights, offset))
+    session.select_indices("a", [1])
+    session.shift("a", shift)
+    return session.to_model()
+
+
+def test_an_edited_fit_that_holds_a_row_is_scored_on_the_likelihood():
+    """An editor edit of the fit with an event at -35 prints the likelihood's figures.
+
+    The edit moves the held row's level by 0.25, so the row stays far below
+    the band.  The edited model's summary printed the clipped mean's figures
+    again: a log-likelihood of -54.7 for -73.1 and a deviance of 109.4 for
+    146.2, beside a ``metrics()`` that read the likelihood.
+    """
+    model, frame, y, weights, offset = _factor_fit(-35.0)
+    edited = _edited(model, frame, y, weights, offset, 0.25)
+    eta = _factor_eta(edited, frame, offset)
+    assert eta[-1] < -30.0 and abs(eta[-1] - _factor_eta(model, frame, offset)[-1]) > 0.2
+    printed, exact = _rescored_statistics(edited, frame, y, weights, offset, eta)
+    for name, reference in exact.items():
+        np.testing.assert_allclose(printed[name], reference, rtol=1e-9, err_msg=name)
+
+
+def test_an_edit_that_moves_a_row_past_the_clip_is_scored_on_the_likelihood():
+    """The rows a re-scored model reads follow its own coefficients, not the fit's.
+
+    The fit holds no row: its event at an offset of -12 has a probability of
+    about 6e-6.  Moving that row's level by -6 puts it at 1.5e-8, below the
+    1e-7 floor and against its outcome, where the clipped mean understates the
+    edited model's deviance by 3.4.
+    """
+    model, frame, y, weights, offset = _factor_fit(-12.0)
+    fitted_eta = _factor_eta(model, frame, offset)
+    assert fitted_eta[-1] > math.log(1e-7)  # the control: the fit is clear of the clip
+    edited = _edited(model, frame, y, weights, offset, -6.0)
+    eta = _factor_eta(edited, frame, offset)
+    assert eta[-1] < math.log(1e-7)
+    printed, exact = _rescored_statistics(edited, frame, y, weights, offset, eta)
+    for name, reference in exact.items():
+        np.testing.assert_allclose(printed[name], reference, rtol=1e-9, err_msg=name)
+
+
+@pytest.mark.parametrize("same_frame", [True, False])
+def test_a_monotonised_fit_that_holds_a_row_is_scored_on_the_likelihood(same_frame):
+    """A shape repair of a fit with an event at -35 prints the likelihood's figures.
+
+    The fitted curve follows a wave, so an increasing rule moves it and the
+    repaired model is scored again: on the fit's design, or through ``predict``
+    for an equal copy of the frame.  Its summary printed a log-likelihood about
+    19 above the likelihood's and a deviance about 38 below it.
+    """
+    from superglm import Constraint, PSpline
+
+    n = 240
+    x = np.r_[np.linspace(0.0, 1.0, n), 0.5]
+    wave = -0.5 + 1.2 * np.sin(2.5 * np.pi * x[:n])
+    # a fixed low-discrepancy draw of the responses
+    y = np.r_[((np.arange(n) * 0.6180339887498949) % 1.0 < expit(wave)).astype(float), 1.0]
+    offset = np.r_[np.zeros(n), -35.0]
+    weights = np.ones(n + 1)
+    frame = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="binomial",
+        link="logit",
+        features={"x": PSpline(n_knots=8, constraint=Constraint.postfit.increasing)},
+        selection_penalty=0.0,
+    )
+    model.fit(frame, y, offset=offset, sample_weight=weights)
+    fitted = model.predict(frame, offset=np.zeros(n + 1))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.monotonize(
+            frame if same_frame else frame.copy(), sample_weight=weights, offset=offset
+        )
+    probability = model.predict(frame, offset=np.zeros(n + 1))
+    assert np.max(np.abs(probability - fitted)) > 0.05  # the control: the rule moved the curve
+    eta = np.log(probability) - np.log1p(-probability) + offset
+    assert eta[-1] < -30.0
+    printed, exact = _rescored_statistics(model, frame, y, weights, offset, eta)
+    for name, reference in exact.items():
+        np.testing.assert_allclose(printed[name], reference, rtol=1e-9, err_msg=name)
 
 
 def _group_lasso_fit(link, lam, held_offset):
