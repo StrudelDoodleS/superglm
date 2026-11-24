@@ -632,6 +632,44 @@ def test_bounded_channels_match_the_mpmath_oracle_to_order_four(form, semantics)
             assert error <= _TAIL_TOLERANCE[order] * conditioning / _U, (i, order, error)
 
 
+@pytest.mark.parametrize("order", [0, 2, 4])
+def test_generalized_gamma_windows_keep_signed_zero_and_invalid_rows(monkeypatch, order):
+    rows = (
+        (0.0, 2.0, 0.3, 0.7, +0.0),
+        (0.0, 2.0, 0.3, 0.7, -0.0),
+        (1.0, 1.0 + 1e-5, 0.3, 0.7, 0.3),
+        (1.0, 1.0, 0.3, 0.7, 0.3),
+    )
+    lower, upper, *theta = np.tile(rows, (12, 1)).T
+    window = _declared_bounds.window_jets
+    visited = []
+
+    def counted(lo, hi, *args, **kwargs):
+        visited.append(len(lo))
+        return window(lo, hi, *args, **kwargs)
+
+    monkeypatch.setattr(_declared_bounds, "window_jets", counted)
+    # The internal jet marks a zero-width window by non-finite channels.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        jets = _declared_bounds.gg_window_jets(
+            lower, upper, np.column_stack(theta), order=order, mean_form=False
+        )
+    with mp.workdps(50):
+        for i, (lo, hi, mu, sigma, q) in enumerate(rows[:-1]):
+            series = _window_series("location", (0.0, lo, hi, 0, mu, sigma, q), lo, hi)
+            for level, jet in enumerate(jets):
+                want = np.array(_plain(series, level), dtype=np.float64)
+                actual = jet.reshape(len(lower), -1)[i :: len(rows)]
+                np.testing.assert_allclose(
+                    actual,
+                    np.broadcast_to(want, actual.shape),
+                    atol=_TAIL_TOLERANCE[level] * np.max(np.abs(want)),
+                    rtol=0,
+                )
+    assert np.all(np.isneginf(jets[0][3 :: len(rows)]))
+    assert visited == [len(rows)]
+
+
 # -- smoothing parameters -----------------------------------------------------
 
 

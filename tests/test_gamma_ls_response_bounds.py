@@ -510,6 +510,82 @@ def test_bounded_channels_match_the_mpmath_oracle_to_order_four(semantics):
             assert error <= _ENGINE_TOLERANCE[order] * conditioning / _U, (i, order, error)
 
 
+@pytest.mark.parametrize("semantics", ["prior", "frequency"])
+def test_repeated_gamma_windows_share_only_identical_laws(monkeypatch, semantics):
+    # The first two responses have the same window and law but different
+    # densities. The third changes only its prior and the fourth only its
+    # lower bound. The last two have narrow truncation windows.
+    rows = (
+        (0.8, +0.0, 2.0, 0, 1.2, 0.5, 1.0),
+        (1.0, +0.0, 2.0, 0, 1.2, 0.5, 1.0),
+        (0.8, +0.0, 2.0, 0, 1.2, 0.5, 2.0),
+        (0.8, 0.4, 2.0, 0, 1.2, 0.5, 1.0),
+        (1.0, 1.0 - 1e-9, 1.0 + 1e-4, 0, 1.2, 0.5, 1.0),
+        (1.0, 1.0 - 1e-9, 1.0 + 1e-4, 0, 1.2, 0.5, 2.0),
+    )
+    # Interleave classes. Frequency weights change only the row multiplier.
+    weights = [row[6] for row in rows] if semantics == "prior" else [0, 1, 2, 3, 1, 2]
+    family = GammaLS()
+    batch = np.tile(rows, (8, 1))
+    resolved = resolve_likelihood_weights(
+        np.tile(weights, 8), n_observations=len(batch), contract=WeightContract(semantics)
+    )
+    retained = resolved.input_positions
+    y, lower, upper, side, mean, cv, _ = batch[retained].T
+    bounds = ResponseBounds.from_arrays(lower, upper, side)
+    plan = family.bind_likelihood(y, resolved, bounded_observation(bounds))
+    window = _declared_bounds.window_jets
+    visited = []
+
+    def counted(lower, upper, *args, **kwargs):
+        visited.append(len(lower))
+        return window(lower, upper, *args, **kwargs)
+
+    monkeypatch.setattr(_declared_bounds, "window_jets", counted)
+    evaluation = family.evaluate_natural(y, np.column_stack((mean, cv)), plan)
+    assert np.all(evaluation.valid)
+    log_likelihood = evaluation.optimizing_log_likelihood + evaluation.parameter_independent_carrier
+    channels = (log_likelihood[:, None], evaluation.score, evaluation.hessian_packed)
+    with mp.workdps(40):
+        for i, row in enumerate(rows):
+            mass = 1 if semantics == "prior" else weights[i]
+            selected = retained % len(rows) == i
+            if mass == 0:
+                assert not selected.any()
+                continue
+            oracle_row = row if semantics == "prior" else (*row[:6], 1.0)
+            exact, scale = _summed(_oracle(oracle_row, True), tuple(map(mp.mpf, row[4:6])), 2)
+            for actual, want, magnitude in zip(channels, exact, scale, strict=True):
+                np.testing.assert_allclose(
+                    actual[selected],
+                    np.broadcast_to(np.array(want, float) * mass, actual[selected].shape),
+                    atol=1e-12 * float(magnitude) * mass,
+                    rtol=0,
+                )
+    assert visited == [5 if semantics == "prior" else 3]
+
+
+def test_gamma_window_batches_use_the_same_law(monkeypatch):
+    """Uniform bounds share one evaluation and distinct bounds keep their row order."""
+    n = 128
+    theta = np.tile([1.2, 0.5], (n, 1))
+    kernel = _declared_bounds.window_jets
+    visited = []
+
+    def counted(lo, hi, *args, **kwargs):
+        visited.append(len(lo))
+        return kernel(lo, hi, *args, **kwargs)
+
+    monkeypatch.setattr(_declared_bounds, "window_jets", counted)
+    uniform = np.full(n, 2.0)
+    all_distinct = np.linspace(3.0, 2.5, n)
+    late_duplicates = np.concatenate((all_distinct[: n // 2], uniform[n // 2 :]))
+    for upper in (uniform, all_distinct, late_duplicates):
+        actual = GammaLS().log_window_probability(0.0, upper, theta)
+        np.testing.assert_allclose(actual, _law(1.2, 0.5).logcdf(upper), rtol=1e-12)
+    assert visited == [1, n, n]
+
+
 # -- smoothing parameters -----------------------------------------------------
 
 

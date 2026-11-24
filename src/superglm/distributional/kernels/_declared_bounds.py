@@ -25,6 +25,7 @@ from math import comb
 from types import ModuleType
 
 import numpy as np
+from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
 from superglm.distributional.kernels._curvature_direction import compose_derivatives
@@ -56,6 +57,7 @@ from superglm.distributional.kernels.generalized_gamma import (
 _HALF_LOG_TWO_PI = 0.5 * np.log(2.0 * np.pi)
 
 UNIFORM_SHAPE = 1e4
+_MAX_SHARED_WINDOWS = 16
 
 
 def _tail_jets(module, law, order, points, theta, columns, uniform):
@@ -242,6 +244,87 @@ def declared_window_jets(
     )
 
 
+@njit(cache=True, inline="always")
+def _same_window(lower, upper, theta, weight, left, right):
+    """Compare uint64 views of the inputs, including the signs of zeros."""
+    if lower[left] != lower[right] or upper[left] != upper[right]:
+        return False
+    for column in range(theta.shape[1]):
+        if theta[left, column] != theta[right, column]:
+            return False
+    return weight is None or weight[left] == weight[right]
+
+
+@njit(cache=True)
+def _shared_window_rows(lower, upper, theta, weight):
+    """Return the representative count, row indices and inverse map for one window batch.
+
+    A uniform batch needs no indices. Count zero means use the original batch,
+    either because nothing repeats or because the number of classes exceeds the cap.
+    """
+    n = len(lower)
+    first_distinct = 1
+    while first_distinct < n and _same_window(lower, upper, theta, weight, 0, first_distinct):
+        first_distinct += 1
+    if first_distinct == n:
+        return 1, None, None
+
+    rows = np.empty(_MAX_SHARED_WINDOWS, dtype=np.intp)
+    rows[0] = 0
+    count = 1
+    # An all-distinct batch hits the cap before allocating a full inverse map.
+    inverse = np.empty(min(n, _MAX_SHARED_WINDOWS), dtype=np.intp)
+    for row in range(first_distinct, n):
+        for group in range(count):
+            if _same_window(lower, upper, theta, weight, rows[group], row):
+                break
+        else:
+            if count == _MAX_SHARED_WINDOWS:
+                return 0, None, None
+            group = count
+            rows[group] = row
+            count += 1
+        if row >= len(inverse):
+            full = np.empty(n, dtype=np.intp)
+            full[first_distinct:row] = inverse[first_distinct:row]
+            inverse = full
+        inverse[row] = group
+    if count == n:
+        return 0, None, None
+    inverse[:first_distinct] = 0
+    return count, rows[:count], inverse
+
+
+def _evaluate_shared_windows(
+    evaluate: Callable[..., Jet],
+    lower: NDArray,
+    upper: NDArray,
+    parameters: NDArray,
+    *,
+    weight: NDArray | None = None,
+    **options,
+) -> Jet:
+    """Evaluate one law and derivative order with reuse local to this call."""
+    lo = np.asarray(lower, dtype=np.float64)
+    hi = np.asarray(upper, dtype=np.float64)
+    theta = np.asarray(parameters, dtype=np.float64)
+    data = () if weight is None else (np.asarray(weight, dtype=np.float64),)
+    if len(lo) > 1:
+        count, rows, inverse = _shared_window_rows(
+            lo.view(np.uint64),
+            hi.view(np.uint64),
+            theta.view(np.uint64),
+            data[0].view(np.uint64) if data else None,
+        )
+        if count == 1:
+            jets = evaluate(lo[:1], hi[:1], theta[:1], *(c[:1] for c in data), **options)
+            return tuple(np.repeat(jet, len(lo), axis=0) for jet in jets)
+        if count > 1:
+            jets = evaluate(lo[rows], hi[rows], theta[rows], *(c[rows] for c in data), **options)
+            return tuple(jet[inverse] for jet in jets)
+    return evaluate(lo, hi, theta, *data, **options)
+
+
 def gamma_window_jets(
     lower: NDArray,
     upper: NDArray,
@@ -256,13 +339,25 @@ def gamma_window_jets(
     ``parameters`` are ``(mean, cv)``, or ``(log mean, log cv)`` with
     ``coordinates="log"``, the predictor scale of its log links.
     """
-    theta = np.asarray(parameters, dtype=np.float64)
+    return _evaluate_shared_windows(
+        _gamma_window_jets,
+        lower,
+        upper,
+        parameters,
+        weight=weight,
+        order=order,
+        coordinates=coordinates,
+    )
+
+
+def _gamma_window_jets(
+    lower: NDArray, upper: NDArray, theta: NDArray, weight: NDArray, *, order: int, coordinates: str
+) -> Jet:
     natural = np.exp(theta) if coordinates == "log" else theta
     mean, cv = natural[:, 0], natural[:, 1]
-    lo = np.maximum(np.asarray(lower, dtype=np.float64), 0.0)
-    hi = np.asarray(upper, dtype=np.float64)
+    lo, hi = np.maximum(lower, 0.0), upper
     with np.errstate(over="ignore", invalid="ignore"):
-        shape = np.asarray(weight, dtype=np.float64) / (cv * cv)
+        shape = weight / (cv * cv)
         r_lower, r_upper = lo / mean, hi / mean
         rate = np.maximum(
             np.maximum(1.0, np.sqrt(shape * r_upper)),
@@ -544,7 +639,14 @@ def gg_window_jets(
     at an end. The mean form composes through ``mu = log m - log C(sigma, Q)``;
     rows without a mean are NaN.
     """
-    theta = np.asarray(parameters, dtype=np.float64)
+    return _evaluate_shared_windows(
+        _gg_window_jets, lower, upper, parameters, order=order, mean_form=mean_form
+    )
+
+
+def _gg_window_jets(
+    lower: NDArray, upper: NDArray, theta: NDArray, *, order: int, mean_form: bool
+) -> Jet:
     n_rows = len(theta)
     sigma, q = theta[:, 1], theta[:, 2]
     rows = np.flatnonzero(mean_exists(sigma, q)) if mean_form else np.arange(n_rows)
@@ -557,8 +659,7 @@ def gg_window_jets(
         mu, mean_inner, _ = mean_location_map(theta[rows, 0], sigma, q, max(order, 1))
     else:
         mu = theta[rows, 0]
-    lo = np.asarray(lower, dtype=np.float64)[rows]
-    hi = np.asarray(upper, dtype=np.float64)[rows]
+    lo, hi = lower[rows], upper[rows]
     with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
         w_lo = (np.log(lo) - mu) / sigma
         w_hi = (np.log(hi) - mu) / sigma
