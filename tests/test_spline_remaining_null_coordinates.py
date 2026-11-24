@@ -346,6 +346,67 @@ def test_distributional_location_keeps_its_unpenalized_line(selected):
     )
 
 
+@pytest.mark.parametrize("discrete", [False, True])
+def test_distributional_centering_keeps_a_selected_smooths_penalty_roots(monkeypatch, discrete):
+    """Centring a selected smooth's rows leaves REML the penalty it read, roots included.
+
+    The centred block keeps the source's penalty and coordinate map, so it
+    carries the roots beside them, as the SuperGLM path's row subsets, ranges
+    and rebuilds do. No built-in selected smooth states roots yet, so the
+    source is given the exact roots of its own diagonal components. Without
+    them the centred block sends REML to the eigen route instead.
+    """
+    from superglm.distributional import predictor
+    from superglm.model.reml_setup import collect_reml_groups
+
+    calls = []
+    center = predictor._center_selected_smooths
+
+    def record(compiled, geometry_weight, *, intercept):
+        calls.append((compiled, geometry_weight))
+        return center(compiled, geometry_weight, intercept=intercept)
+
+    monkeypatch.setattr(predictor, "_center_selected_smooths", record)
+    x = np.geomspace(1.0, 1e5, 180)
+    y = 1 + x / 1e5 + np.random.default_rng(42).normal(scale=0.1, size=len(x))
+    family = GaussianLS()
+    policy = {"wiggle": LambdaPolicy.fixed(1.0), "null": LambdaPolicy.fixed(1.0)}
+    SuperLSS(
+        family,
+        family.location(
+            s("x", kind="cr", n_knots=8, select=True, lambda_policy=policy),
+        ),
+        family.scale(),
+        discrete=discrete,
+    ).fit(pd.DataFrame({"x": x}), y)
+
+    compiled, geometry_weight = calls[0]
+    (index,) = [i for i, group in enumerate(compiled.groups) if group.feature_name == "x"]
+    source = compiled.design.group_matrices[index]
+    roots = {}
+    for suffix, omega in source.omega_components:
+        diagonal = np.diag(omega)
+        assert np.count_nonzero(omega) == np.count_nonzero(diagonal)
+        rows = np.flatnonzero(diagonal)
+        roots[suffix] = np.zeros((rows.size, len(diagonal)))
+        roots[suffix][np.arange(rows.size), rows] = np.sqrt(diagonal[rows])
+    source.term_roots = roots
+    centered = center(compiled, geometry_weight, intercept=True)
+    assert centered.design.group_matrices[index].term_roots is roots
+
+    def penalties(design):
+        matrices = list(design.group_matrices)
+        groups = collect_reml_groups(list(compiled.groups), matrices)
+        return build_penalty_components(matrices, groups, certified=True)
+
+    expected, actual = penalties(compiled.design), penalties(centered.design)
+    assert [p.name for p in actual] == [p.name for p in expected]
+    for got, want in zip(actual, expected, strict=True):
+        assert (got.rank, got.log_det_omega_plus) == (want.rank, want.log_det_omega_plus)
+        np.testing.assert_array_equal(got.eigvals_omega, want.eigvals_omega)
+        np.testing.assert_array_equal(got.omega_ssp, want.omega_ssp)
+
+
 def _green_silverman_cardinal_root(knots: np.ndarray) -> np.ndarray:
     """Independent Green & Silverman (1994, ch. 2) natural cubic spline penalty root E (E' E = S)."""
     k = np.asarray(knots, dtype=np.float64)

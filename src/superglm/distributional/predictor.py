@@ -518,6 +518,7 @@ def _center_selected_smooths(
         centered.omega = source.omega
         centered.projection = source.projection
         centered.R_inv_local = getattr(source, "R_inv_local", None)
+        centered.term_roots = getattr(source, "term_roots", None)
         centered.reparametrize = getattr(source, "reparametrize", True)
         centered.omega_components = source.omega_components
         centered.component_types = source.component_types
