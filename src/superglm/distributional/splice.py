@@ -124,14 +124,15 @@ def _body_quantile(family: _Body, log_p: NDArray, theta: NDArray, u: float) -> N
 
     mean, cv = theta.T
     shape = 1.0 / (cv * cv)
-    scale = mean / shape
     lower = log_p <= -np.log(2.0)
     quantile = np.empty(len(log_p))
     quantile[lower] = special.gammaincinv(shape[lower], np.exp(log_p[lower]))
     quantile[~lower] = special.gammainccinv(shape[~lower], -np.expm1(log_p[~lower]))
-    quantile *= scale
-    # A representable quantile can have an unrepresentable parent probability.
-    for i in np.flatnonzero((log_p < _LOG_TINY) | (quantile == 0)):
+    with np.errstate(over="ignore", invalid="ignore"):
+        quantile *= mean / shape
+    # The parent probability, Gamma scale or scaled inverse can fall outside float64 range.
+    use_log = (log_p < _LOG_TINY) | (quantile == 0) | ~np.isfinite(quantile)
+    for i in np.flatnonzero(use_log):
         log_scale = np.log(mean[i]) - np.log(shape[i])
         log_u = np.log(u)
         log_normalizer = special.gammaln(shape[i] + 1.0)
@@ -500,6 +501,13 @@ class SplitSplice:
             raise ValueError("the components have been refitted on a different split")
 
     def _predict_components(self, X: FrameLike, offsets: _Offsets):
+        accepted = _Offsets.__optional_keys__
+        unknown = offsets.keys() - accepted
+        if unknown:
+            raise TypeError(
+                f"Unknown prediction offset keywords {', '.join(sorted(unknown))}. "
+                f"Accepted keywords are {', '.join(sorted(accepted))}."
+            )
         self._check_fits()
         body = self.body.predict_parameters(X, offsets=offsets.get("body_offsets")).to_numpy()
         tail = self.tail.predict_parameters(X, offsets=offsets.get("tail_offsets")).to_numpy()

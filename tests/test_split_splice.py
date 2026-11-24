@@ -264,6 +264,20 @@ def test_narrow_deep_body_layers_and_deep_left_normalization(monkeypatch, fitted
         assert fitted.predict_quantile(X[:1], p)[0] == pytest.approx(99, rel=2e-12)
 
 
+def test_gamma_quantile_with_overflowing_scale(fitted):
+    X = _frame(1)
+    link = fitted.body.predict_link(X)
+    body_offsets = {
+        "mean": np.log(1e308) - link["mean"].to_numpy(),
+        "scale": np.log(2.0) - link["scale"].to_numpy(),
+    }
+    q = fitted.exceedance.predict(X)
+    quantile = fitted.predict_quantile(X, (1 - q) / 2, body_offsets=body_offsets)
+    # Through the threshold, exp(-y / scale) differs from 1 by less than
+    # 3e-307. The conditional CDF is (y / u)**(1/4) to float64 accuracy.
+    np.testing.assert_allclose(quantile, fitted.threshold / 16, rtol=2e-12, atol=0)
+
+
 def test_extreme_exceedance_probabilities(monkeypatch, fitted):
     X = _frame(4)
     q = np.array([0.0, 1e-200, 1 - 2**-52, 1.0])
@@ -281,6 +295,23 @@ def test_extreme_exceedance_probabilities(monkeypatch, fitted):
     y = fitted.predict_quantile(X, p)
     assert np.all(y[:3] < u) and y[3] > u
     np.testing.assert_allclose(fitted.predict_cdf(X, y), p, rtol=2e-12, atol=0)
+
+
+def test_prediction_rejects_unknown_offset_keywords():
+    X, y, u = _sample(800)
+    splice = _fit(X, y, u)
+    row = X.iloc[:1]
+    for predict, args in (
+        (splice.predict_layer, (u, 100)),
+        (splice.predict, ()),
+        (splice.predict_cdf, (u,)),
+        (splice.predict_survival, (u,)),
+        (splice.predict_quantile, (0.5,)),
+    ):
+        with pytest.raises(
+            TypeError, match="exceedance_offsets.*body_offsets.*exceedance_offset.*tail_offsets"
+        ):
+            predict(row, *args, exceedance_offsets=np.array([4.0]))
 
 
 def test_censoring_ties_weights_and_manual_fit_parity():
