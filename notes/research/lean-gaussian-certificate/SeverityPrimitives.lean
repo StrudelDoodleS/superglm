@@ -347,7 +347,7 @@ theorem iteratedDeriv_log_succ (n : ℕ) {a : ℝ} (ha : 0 < a) :
     iteratedDeriv (n + 1) Real.log a = (-1) ^ n * n.factorial * a ^ (-1 - n : ℤ) := by
   rw [iteratedDeriv_succ', iteratedDeriv_eq_iterate]
   have hev : deriv Real.log =ᶠ[𝓝 a] Inv.inv := by
-    filter_upwards [isOpen_Ioi.mem_nhds ha] with x hx
+    filter_upwards [isOpen_Ioi.mem_nhds (Set.mem_Ioi.mpr ha)] with x hx
     exact Real.deriv_log x
   have h2 : deriv^[n] (deriv Real.log) a = deriv^[n] Inv.inv a := by
     rw [← iteratedDeriv_eq_iterate, ← iteratedDeriv_eq_iterate]
@@ -385,8 +385,8 @@ theorem iteratedDeriv_psi_shift (n : ℕ) {x : ℝ} (hx : 0 < x) :
     iteratedDeriv n psi (x + 1) =
       iteratedDeriv n psi x + (-1) ^ n * n.factorial * x ^ (-1 - n : ℤ) := by
   have hev : (fun z => psi (z + 1)) =ᶠ[𝓝 x] (psi + Inv.inv) := by
-    filter_upwards [isOpen_Ioi.mem_nhds hx] with z hz
-    exact psi_add_one hz
+    filter_upwards [isOpen_Ioi.mem_nhds (Set.mem_Ioi.mpr hx)] with z hz
+    exact psi_add_one (Set.mem_Ioi.mp hz)
   have h1 : iteratedDeriv n (fun z => psi (z + 1)) x = iteratedDeriv n (psi + Inv.inv) x :=
     (hev.iteratedDeriv n).eq_of_nhds
   have h2 : iteratedDeriv n psi (x + 1) = iteratedDeriv n (psi + Inv.inv) x := by

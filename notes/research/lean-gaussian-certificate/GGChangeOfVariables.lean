@@ -125,8 +125,8 @@ theorem g_pos (t : ℝ) : 0 < g t := by
 
 lemma sqrt_analyticAt {y : ℝ} (hy : 0 < y) : AnalyticAt ℝ Real.sqrt y := by
   have hev : (fun x => Real.exp (Real.log x / 2)) =ᶠ[𝓝 y] Real.sqrt := by
-    filter_upwards [isOpen_Ioi.mem_nhds hy] with x hx
-    rw [Real.sqrt_eq_rpow, Real.rpow_def_of_pos hx]
+    filter_upwards [isOpen_Ioi.mem_nhds (Set.mem_Ioi.mpr hy)] with x hx
+    rw [Real.sqrt_eq_rpow, Real.rpow_def_of_pos (Set.mem_Ioi.mp hx)]
     ring_nf
   refine AnalyticAt.congr ?_ hev
   have hl : AnalyticAt ℝ (fun x => Real.log x / 2) y := (analyticAt_log hy).div_const
