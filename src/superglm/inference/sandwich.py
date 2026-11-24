@@ -1103,7 +1103,7 @@ def compute_superglm_sandwich_covariance(
     )
     chunk_rows = min(
         _MAX_CHUNK_ROWS,
-        _TARGET_CHUNK_BYTES // (16 * q),
+        max(1, _TARGET_CHUNK_BYTES // (16 * q)),
         (workspace_cap - fixed_bytes) // (48 * q),
     )
     if chunk_rows < 1:
