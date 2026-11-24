@@ -560,6 +560,8 @@ def test_certified_reml_fit_reports_bounded_no_finding_result(certified_model) -
     assert report.findings == ()
     rendered = report.render(detail="full")
     assert "No problems were found in what the fit recorded" in rendered
+    assert "Fellner–Schall fixed-point tolerance" in rendered
+    assert "reached an optimum" not in rendered
     assert "did not look at your rows, responses, weights, exposures or levels" in rendered
     assert "No timing was recorded for this fit" in rendered
 

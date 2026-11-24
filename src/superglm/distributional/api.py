@@ -807,8 +807,10 @@ class SuperLSS:
         counted, so such a fit can do up to 16 further iterations of work.
 
         ``practical_reml`` stops the Fellner--Schall loop after sustained
-        negligible objective and fitted-parameter movement. Set it to ``False``
-        when strict Fellner--Schall stationarity is required.
+        negligible objective and fitted-parameter movement across comparable
+        trials. Set it to ``False`` to disable this approximate plateau stop.
+        The ``lambda_change`` and ``objective_plateau`` reasons both indicate
+        that the Fellner--Schall fixed-point residual met its tolerance.
 
         Historical coefficient fits retain compact evidence by default, with
         row arrays kept only for the terminal fit and recent plateau checks.
