@@ -138,6 +138,52 @@ class CoefficientBlock:
 
 
 @dataclass(frozen=True)
+class UndeterminedDirections:
+    """The coefficient directions a sandwich covariance's bread leaves undetermined.
+
+    A reader reports ``t' theta`` over ``theta = [intercept, active slopes]``.  Its
+    slope part in the bread's centred coordinates is ``c = t_slopes + t_0 shift`` (the
+    public intercept is the centred one plus ``shift' beta``), and ``t`` is determined
+    where ``||U' c|| <= sqrt(eps) ||c / scale||``: the share of ``c`` along the bread's
+    null directions read in its column scale, with ``U`` those directions divided by
+    their scaled norms.  That is ``RankDecomposition.is_estimable``, the test the
+    default readers apply to a level contrast and that decides
+    ``coefficient_estimable``.  ``basis`` is ``None`` for a bread that kept no null
+    record (a truncated structured factor), which determines only ``c = 0``.
+    """
+
+    shift: NDArray
+    scale: NDArray
+    basis: NDArray | None
+
+    def metrics(self) -> tuple[NDArray, NDArray]:
+        """``(J U U' J', J diag(scale)^-2 J')`` over ``theta``, with ``J = [shift'; I]``.
+
+        A reader's error ``sqrt(t' V t)`` read with ``V`` replaced by each gives
+        ``||U' c||`` and ``||c / scale||``, so one pass of the reader's own contrast map
+        decides every row it reports (``determined``).  Without a null record both are
+        the second, and every ``c != 0`` reads share one.
+        """
+        weight = 1.0 / (self.scale * self.scale)
+        size = np.diag(np.r_[0.0, weight])
+        size[0, 1:] = size[1:, 0] = self.shift * weight
+        size[0, 0] = math.fsum(self.shift * self.shift * weight)
+        if self.basis is None:
+            return size, size
+        along_slopes = np.vstack([self.shift @ self.basis, self.basis])
+        return along_slopes @ along_slopes.T, size
+
+    @staticmethod
+    def determined(along: NDArray, size: NDArray) -> NDArray[np.bool_]:
+        """Rows whose share ``along / size`` is within ``RankDecomposition.is_estimable``'s cut."""
+        from superglm.solvers.rank import SHARED_RANK_POLICY
+
+        along = np.asarray(along, dtype=np.float64)
+        size = np.asarray(size, dtype=np.float64)
+        return along <= SHARED_RANK_POLICY.factor_rcond * size
+
+
+@dataclass(frozen=True)
 class SandwichTelemetry:
     """Work counts and workspace sizes for one sandwich-covariance computation.
 
@@ -168,7 +214,9 @@ class SandwichCovariance:
     ``intercept_estimable`` is False, and a separated level's coefficient.
     ``covariance`` keeps the entries of the fit's own identification, in which
     an aliased coefficient stays where the fit left it; the readers blank what
-    ``se`` blanks.
+    ``se`` blanks, and every other figure whose contrast the fit does not
+    determine (``determines``, ``undetermined``), such as the intercept reported
+    at ordered terms' base levels.
     """
 
     status: SandwichStatus
@@ -192,6 +240,7 @@ class SandwichCovariance:
     se: NDArray | None = None
     coefficient_estimable: NDArray[np.bool_] | None = None
     intercept_estimable: bool = True
+    undetermined: UndeterminedDirections | None = None
     active_groups: tuple[CoefficientBlock, ...] = ()
     penalized_group_names: frozenset[str] = frozenset()
     telemetry: SandwichTelemetry | None = None
@@ -228,6 +277,25 @@ class SandwichCovariance:
         base = f"Cluster {self.cov_type}" if self.clustered else str(self.cov_type)
         suffix = ", centered" if self.centered else ""
         return f"{base} (sandwich{suffix})"
+
+    def determines(self, contrasts: NDArray) -> NDArray[np.bool_]:
+        """Whether the fit determines each row ``t`` of ``contrasts``: ``t' covariance t`` is a figure.
+
+        Rows are over ``[intercept, active slopes]``, the coordinates of
+        ``covariance``; the rule is ``UndeterminedDirections``'.  Every row is
+        determined where the bread leaves no direction undetermined.
+        """
+        self.require_available()
+        rows = np.atleast_2d(np.asarray(contrasts, dtype=np.float64))
+        if rows.shape[1] != self.n_params:
+            raise ValueError(f"contrasts must have {self.n_params} columns, got {rows.shape[1]}.")
+        record = self.undetermined
+        if record is None:
+            return np.ones(len(rows), dtype=bool)
+        slopes = rows[:, 1:] + rows[:, :1] * record.shift
+        size = np.linalg.norm(slopes / record.scale, axis=1)
+        along = size if record.basis is None else np.linalg.norm(slopes @ record.basis, axis=1)
+        return record.determined(along, size)
 
     def require_available(self, binding: FitBinding | None = None) -> SandwichCovariance:
         """Validate availability, then the fit binding, before a reader consumes this covariance."""
@@ -279,6 +347,7 @@ def build_available_covariance(
     se: NDArray,
     coefficient_estimable: NDArray[np.bool_],
     intercept_estimable: bool,
+    undetermined: UndeterminedDirections | None,
     active_groups: tuple[GroupSlice, ...],
     penalized_group_names: frozenset[str],
     telemetry: SandwichTelemetry,
@@ -307,6 +376,19 @@ def build_available_covariance(
         se=_freeze(np.asarray(se, dtype=np.float64)),
         coefficient_estimable=_freeze(np.asarray(coefficient_estimable, dtype=bool)),
         intercept_estimable=bool(intercept_estimable),
+        undetermined=(
+            None
+            if undetermined is None
+            else UndeterminedDirections(
+                shift=_freeze(np.asarray(undetermined.shift, dtype=np.float64)),
+                scale=_freeze(np.asarray(undetermined.scale, dtype=np.float64)),
+                basis=(
+                    None
+                    if undetermined.basis is None
+                    else _freeze(np.asarray(undetermined.basis, dtype=np.float64))
+                ),
+            )
+        ),
         active_groups=tuple(
             CoefficientBlock(
                 name=group.name,
@@ -758,6 +840,7 @@ __all__ = [
     "SandwichTelemetry",
     "ScaledGramAccumulator",
     "UnavailableReason",
+    "UndeterminedDirections",
     "build_available_covariance",
     "build_unavailable_covariance",
     "coef_digest",

@@ -387,7 +387,9 @@ def build_coef_rows(
         augmented_reference_contrast,
     )
     icpt_se = float(_se_from_var(icpt_var))
-    if is_sandwich and not sandwich_covariance.intercept_estimable:
+    # The reported intercept is at each ordered term's base level: blank where the fit
+    # does not determine that contrast, not only the unadjusted intercept.
+    if is_sandwich and not sandwich_covariance.determines(augmented_reference_contrast)[0]:
         icpt_se = float("nan")
 
     rows: list[_CoefRow] = []
@@ -494,13 +496,47 @@ def build_coef_rows(
                 _group_edf_cache[ag.name] = float(np.sum(edf[ag.sl]))
         return _group_edf_cache
 
+    # The slope blocks of the two metrics a robust fit's level and curve errors are read
+    # with (``UndeterminedDirections.metrics``), formed once, or none.
+    undetermined = sandwich_covariance.undetermined if is_sandwich else None
+    undetermined_metrics: tuple[NDArray, NDArray] | None = None
+    if undetermined is not None:
+        along_full, size_full = undetermined.metrics()
+        undetermined_metrics = (along_full[1:, 1:], size_full[1:, 1:])
+
+    def _feature_se(feature_name):
+        """A term's level or curve errors from the slope covariance (``feature_se_from_cov``).
+
+        A robust covariance blanks each one whose contrast the fit does not determine:
+        the term's own map, read with the covariance replaced by the two metrics of
+        ``UndeterminedDirections``, gives every row's share along the undetermined
+        directions.
+        """
+
+        # Use the feature block of the augmented inverse for correct marginal SEs
+        def read(covariance):
+            return np.asarray(
+                feature_se_from_cov(
+                    feature_name,
+                    covariance,
+                    active_groups,
+                    result,
+                    groups,
+                    specs,
+                    interaction_specs,
+                ),
+                dtype=np.float64,
+            )
+
+        se = read(_cov_from_aug(covariance_slope_view(XtWX_inv_aug)))
+        if undetermined is None or undetermined_metrics is None:
+            return se
+        along, size = undetermined_metrics
+        return np.where(undetermined.determined(read(along), read(size)), se, np.nan)
+
     def _curve_se_range(feature_name):
         """Compute curve SE min/max for a spline feature."""
-        # Use the feature block of the augmented inverse for correct marginal SEs
-        Cov_active = _cov_from_aug(covariance_slope_view(XtWX_inv_aug))
-        se_curve = feature_se_from_cov(
-            feature_name, Cov_active, active_groups, result, groups, specs, interaction_specs
-        )
+        se_curve = _feature_se(feature_name)
         # One SE per level, and for a specials term that includes the FREE levels,
         # whose uncertainty is not a point on the curve. Every other statistic on
         # the ordered-spline row describes the spline block; _term_ops already
@@ -613,16 +649,7 @@ def build_coef_rows(
                 else 0.0
             )
 
-            Cov_active = _cov_from_aug(covariance_slope_view(XtWX_inv_aug))
-            se_levels = feature_se_from_cov(
-                g.feature_name,
-                Cov_active,
-                active_groups,
-                result,
-                groups,
-                specs,
-                interaction_specs,
-            )
+            se_levels = _feature_se(g.feature_name)
             raw = spec.reconstruct(beta_combined)
             inner_kind = spec.basis_kind
 

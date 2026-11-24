@@ -30,6 +30,7 @@ from superglm.inference._sandwich_core import (
     SandwichCovariance,
     SandwichTelemetry,
     ScaledGramAccumulator,
+    UndeterminedDirections,
     build_available_covariance,
     build_unavailable_covariance,
     coef_digest,
@@ -342,6 +343,38 @@ def _observed_score_and_curvature(
     with np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore"):
         s_unit = (y - mu) * dmu / var
     return s_unit, h_unit, False, "observed"
+
+
+def _undetermined_directions(
+    bread_solver: Any, shift: NDArray, p_active: int, full_rank: bool
+) -> UndeterminedDirections | None:
+    """The bread's null directions as ``RankDecomposition.is_estimable`` reads them, or ``None``.
+
+    ``None`` where the bread determines every direction.  A column of scale zero
+    (constant on the scored rows) is undetermined on its own, at unit scale.
+    """
+    if p_active == 0:
+        return None
+    if not isinstance(bread_solver, RankDecomposition):
+        return None if full_rank else UndeterminedDirections(shift, np.ones(p_active), None)
+    scale = np.asarray(bread_solver.column_scale, dtype=np.float64)
+    scaled = scale > 0.0
+    if bread_solver.equilibrated_null_basis is not None:
+        dual = np.asarray(bread_solver.equilibrated_null_basis, dtype=np.float64)[scaled]
+    else:
+        dual = bread_solver.null_basis()[scaled] * scale[scaled, None]
+        norms = np.linalg.norm(dual, axis=0)
+        kept = norms > np.finfo(np.float64).eps
+        dual = dual[:, kept] / norms[kept]
+    structural = np.flatnonzero(~scaled)
+    # The share is homogeneous in ``scale``: a power of two (exact) puts its largest at one.
+    scale = np.ldexp(scale, -int(np.frexp(np.max(scale))[1]))
+    basis = np.zeros((p_active, dual.shape[1] + structural.size))
+    basis[scaled, : dual.shape[1]] = dual / scale[scaled, None]
+    basis[structural, dual.shape[1] + np.arange(structural.size)] = 1.0
+    if basis.shape[1] == 0:
+        return None
+    return UndeterminedDirections(shift, np.where(scaled, scale, 1.0), basis)
 
 
 def _solve_matrix(bread_solver: Any, rhs: NDArray) -> NDArray:
@@ -1154,6 +1187,7 @@ def compute_superglm_sandwich_covariance(
         if isinstance(bread_solver, RankDecomposition)
         else bread_full_rank
     )
+    undetermined = _undetermined_directions(bread_solver, delta_shift, p_active, bread_full_rank)
 
     leaf_parts = _design_leaf_parts(X_active) if p_active > 0 else None
     parts_tuple = () if leaf_parts is None else leaf_parts.parts
@@ -1373,6 +1407,9 @@ def compute_superglm_sandwich_covariance(
         se[1 + ag.start : 1 + ag.end][blank] = np.nan
 
     retained_bytes = int(cov_pub.nbytes + se.nbytes + coef_estimable.nbytes)
+    if undetermined is not None:
+        retained_bytes += 2 * undetermined.shift.nbytes
+        retained_bytes += 0 if undetermined.basis is None else undetermined.basis.nbytes
     telemetry = SandwichTelemetry(
         scored_rows=n_rows,
         positive_weight_rows=n_pos,
@@ -1403,6 +1440,7 @@ def compute_superglm_sandwich_covariance(
         se=se,
         coefficient_estimable=coef_estimable,
         intercept_estimable=intercept_estimable,
+        undetermined=undetermined,
         active_groups=tuple(active_groups),
         penalized_group_names=penalized_group_names,
         telemetry=telemetry,

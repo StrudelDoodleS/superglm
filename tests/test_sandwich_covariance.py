@@ -1528,6 +1528,80 @@ class TestCoefficientsTheFitDoesNotDetermine:
         assert np.isnan(errors[1])
         assert next(r for r in summary._coef_rows if r.name == "x[C]").se is None
 
+    @staticmethod
+    def _twin_ordered_splines(base_b: str):
+        """Two ordered splines on one column: only their sum is determined."""
+        labels = list("abcdefgh")
+        z = np.tile(labels, 20)
+        features = {
+            "a": OrderedCategorical(order=labels, base="a"),
+            "b": OrderedCategorical(order=labels, base=base_b),
+        }
+        model = SuperGLM(family="gaussian", features=features, spline_penalty=0).fit(
+            pd.DataFrame({"a": z, "b": z}), np.tile(np.arange(8.0), 20) + np.sin(np.arange(160))
+        )
+        return model, model.sandwich_covariance()
+
+    @staticmethod
+    def _rank_gain(model, contrast: np.ndarray) -> int:
+        """How much ``contrast`` (over intercept and slopes) raises the design's rank."""
+        design = np.column_stack(
+            [np.ones(model._dm.n), *[g.toarray() for g in model._dm.group_matrices]]
+        )
+        stacked = np.vstack([design, contrast])
+        return int(np.linalg.matrix_rank(stacked) - np.linalg.matrix_rank(design))
+
+    def test_an_ordered_terms_reported_intercept_and_levels_the_fit_does_not_determine(self):
+        """Bases ``a`` and ``h``: the reported intercept is ``alpha + f_a(a) + f_b(h)``.
+
+        Moving ``d`` from one spline to the other leaves the fit and moves that sum by
+        ``d(a) - d(h)``, and every level contrast of ``a`` by ``d(level) - d(a)``: the
+        design's rank grows by one when the intercept's contrast is appended, so the
+        summary gives it no error, and none to the levels either.
+        """
+        from superglm.inference._ordered_reference import ordered_reference_beta_contrast
+
+        model, cov = self._twin_ordered_splines("h")
+        contrast = np.r_[
+            1.0,
+            ordered_reference_beta_contrast(
+                len(model.result.beta), list(model._specs), model._specs, model._groups
+            ),
+        ]
+        assert self._rank_gain(model, contrast) == 1
+
+        rows = {row.name: row for row in model.summary(covariance=cov)._coef_rows}
+        assert rows["Intercept"].se is None or np.isnan(rows["Intercept"].se)
+        assert rows["Intercept"].p is None or np.isnan(rows["Intercept"].p)
+        for level in "bcdefgh":
+            assert rows[f"a[{level}]"].se is None
+        assert rows["a[a]"].se == 0.0 and rows["b[h]"].se == 0.0
+        assert not cov.determines(contrast)[0]
+
+    @pytest.mark.pins_behaviour
+    def test_one_base_level_for_both_ordered_terms_is_a_determined_intercept(self):
+        """Control (pins): bases ``a`` and ``a`` report ``alpha + (f_a + f_b)(a)``, determined.
+
+        Appending that contrast leaves the design's rank, and the summary keeps the
+        intercept's error, the quadratic form of the covariance in the contrast.
+        """
+        from superglm.inference._ordered_reference import ordered_reference_beta_contrast
+
+        model, cov = self._twin_ordered_splines("a")
+        contrast = np.r_[
+            1.0,
+            ordered_reference_beta_contrast(
+                len(model.result.beta), list(model._specs), model._specs, model._groups
+            ),
+        ]
+        assert self._rank_gain(model, contrast) == 0
+        intercept = next(
+            r for r in model.summary(covariance=cov)._coef_rows if r.name == "Intercept"
+        )
+        np.testing.assert_allclose(
+            intercept.se, math.sqrt(contrast @ cov.covariance @ contrast), rtol=1e-10
+        )
+
 
 class TestWaldTestsACovarianceCanCarry:
     def test_two_clusters_carry_no_two_df_test_and_three_carry_it(self):
