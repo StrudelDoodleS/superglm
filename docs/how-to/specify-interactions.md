@@ -431,7 +431,7 @@ model = SuperGLM(
   where the fit stopped, not an estimate. The base-rate figure is what
   `predict` gives those rows with the level set to the base (both parents to
   their base for a cell); it is left out when the base is itself separated,
-  or when the move takes a row into a crossed cell no training row occupies,
+  or when the move takes a row into an empty or separated crossed cell,
   whose rate the data do not set. Both totals weight each row by its
   `sample_weight`, whatever `weight_semantics` says, and the line says so when
   the weights are not all one. On a log link, a level no crossed term
@@ -455,9 +455,11 @@ intercept then, a parent's main effect beside a separated cell in its base
 row or column. The test is Lenth's estimability test (as `predict` reads its
 rows) on the term, its categorical parents and the intercept. Every other
 number is unchanged. `centering="mean"` centres on the levels whose contrast
-against the base is determined. With a separated base, every centred level
-stays blank: their covariance is the difference of entries the walk has grown
-to about `1e14`. The default base, the most exposed level, avoids this. A
+against the base is determined. With a separated base, every level — native
+and centred — stays blank because their covariance is measured through the
+walked base (entries around `1e14`). Choose a healthy base with responses
+off the boundary (such as the default `base="most_exposed"`) to get the
+other levels' standard errors; the post-fit warning names this remedy. A
 rating-table block notes the factors `summary()` flags (a factor fixed at 1
 is never one) and the separated levels or cells they move with, and
 `predict` warns once per call that reaches one, a row an `unseen="base"`
@@ -479,7 +481,10 @@ or bound a main effect with a fit-time cap (`Constraint.fit.cap`) or the term
 with a selection penalty. Penalised terms, and capped levels in `fit` and
 `fit_reml`, are exempt from the check because their optima are finite;
 `fit_path` fits without its caps, so it reports a capped level as separated.
-A crossed cell bounded only through a capped parent is still reported.
+A crossed cell whose separating directions are all blocked by capped or
+penalised parents (or a selection penalty on the crossed term) is exempt as
+well; a cell that can still separate through unpenalised, uncapped parents or
+its own free cross column is still reported.
 That exemption covers these categorical cells only: the spline-by-factor hold
 described below applies to a term whatever penalty bounds it.
 A cell with few rows but at least one positive response is *not* separated

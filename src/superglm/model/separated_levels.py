@@ -110,6 +110,7 @@ class _Record:
     levels: dict[str, frozenset]
     cells: dict[str, frozenset]
     occupied: dict[str, frozenset | None]
+    bounded: dict[str, tuple[bool, bool, bool]]
 
 
 def _spec_record(specs: dict, interaction_specs: dict) -> _Record:
@@ -127,10 +128,15 @@ def _spec_record(specs: dict, interaction_specs: dict) -> _Record:
         for name, spec in interaction_specs.items()
         if occupied[name] is not None
     }
+    bounded = {
+        name: tuple(getattr(spec, "_bounded_groups_at_fit", (False, False, False)))
+        for name, spec in interaction_specs.items()
+    }
     return _Record(
         levels={name: held for name, held in levels.items() if held},
         cells={name: held for name, held in cells.items() if held},
         occupied=occupied,
+        bounded=bounded,
     )
 
 
@@ -194,33 +200,53 @@ def _level_block(name: str, spec, group, held: frozenset, intercept: int) -> _Bl
     return _Block(frozenset({name}), free, columns, null) if free.size or columns.size else None
 
 
-def _cross_null(node_row: NDArray, node_col: NDArray, cross: NDArray, n1: int, n2: int, width: int):
+def _cross_null(
+    node_row: NDArray,
+    node_col: NDArray,
+    cross: NDArray,
+    n1: int,
+    n2: int,
+    width: int,
+    bounded: tuple[bool, bool, bool] = (False, False, False),
+    sep_row: NDArray | None = None,
+    sep_col: NDArray | None = None,
+):
     """``(free, kept, N)``: the null space of a crossed block's healthy indicator rows.
 
     Coordinates: ``0`` the intercept, ``1..n1`` and the next ``n2`` the parents', then the
     cross's.  A healthy cell has ones at ``0``, ``node_row`` (``0`` on the base row),
     ``node_col`` (``1 + n1 + n2`` on the base column) and its column ``cross`` (``-1``:
-    none).  Each cross column is one cell's, so a healthy cell with one only fixes it,
-    and one no healthy cell holds is ``free``.  With ``x_i = alpha + a_i`` and
-    ``y_j = b_j`` (zero on the base column), a cell without one says ``x_i + y_j = 0``:
-    an edge of the levels' bipartite graph.  Each component off the base column's is a
-    direction, ``x = 1``, ``y = -1``, ``c_ij = -(x_i + y_j)``, orthonormalised over the
-    coordinates ``kept`` it touches: O(cells), where the rows' SVD is cells x columns.
+    none).  Pinning constraints ``bounded = (pin_a, pin_b, pin_c)`` merge pinned parent
+    nodes to their base and treat all cross columns as absent under ``pin_c``.  When
+    ``sep_row`` and ``sep_col`` are supplied, only components touched by at least one
+    separated cell whose endpoints lie in distinct components are kept, excluding pure
+    collinearity directions in ``ker X_all`` (e.g. under ``alias_prune=False``).
     """
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import connected_components
 
+    from superglm.diagnostics.separation import _pinning_edges
+
     offset = 1 + n1 + n2  # the first cross column, and the base column's node
-    edge = cross < 0
-    graph = coo_matrix(
-        (np.ones(int(edge.sum())), (node_row[edge], node_col[edge])),
-        shape=(offset + 1, offset + 1),
-    )
+    pin_c = bounded[2]
+    edge = np.ones(len(cross), dtype=bool) if pin_c else (cross < 0)
+    pin_r, pin_col = _pinning_edges(n1, n2, bounded)
+    rows = np.concatenate([pin_r, node_row[edge]])
+    cols = np.concatenate([pin_col, node_col[edge]])
+    graph = coo_matrix((np.ones(len(rows)), (rows, cols)), shape=(offset + 1, offset + 1))
     _, label = connected_components(graph, directed=False)
-    held = np.zeros(width, dtype=bool)
-    held[cross[~edge]] = True
-    free = np.flatnonzero(~held[offset:]) + offset
-    components = np.setdiff1d(np.unique(label), label[offset])
+    if pin_c:
+        free = _NONE
+    else:
+        held = np.zeros(width, dtype=bool)
+        held[cross[~edge]] = True
+        free = np.flatnonzero(~held[offset:]) + offset
+    if sep_row is not None and sep_col is not None:
+        sr, sc = label[sep_row], label[sep_col]
+        diff = sr != sc
+        components = np.setdiff1d(np.union1d(sr[diff], sc[diff]), label[offset])
+    else:
+        components = np.setdiff1d(np.unique(label), label[offset])
     if not components.size:
         return free, _NONE, np.zeros((0, 0))
     on = label[:, None] == components[None, :]  # node x component
@@ -230,8 +256,9 @@ def _cross_null(node_row: NDArray, node_col: NDArray, cross: NDArray, n1: int, n
     directions[1 : n1 + 1] = x[1:] - x[0]
     directions[n1 + 1 : offset] = y
     cells = ~edge
-    y_at = np.vstack([y, np.zeros((1, components.size))])  # the base column's y is 0
-    directions[cross[cells]] = -(x[node_row[cells]] + y_at[node_col[cells] - n1 - 1])
+    if cells.any():
+        y_at = np.vstack([y, np.zeros((1, components.size))])  # the base column's y is 0
+        directions[cross[cells]] = -(x[node_row[cells]] + y_at[node_col[cells] - n1 - 1])
     kept = np.flatnonzero(np.any(directions != 0.0, axis=1))
     return free, kept, np.linalg.qr(directions[kept])[0]
 
@@ -273,7 +300,8 @@ def _cross_block(name: str, spec, specs: dict, groups, record: _Record, intercep
                 found[index1[a], index2[b]] = True
         return found
 
-    healthy = mask(occupied) & ~mask(held)
+    occ = mask(occupied)
+    healthy = occ & ~mask(held)
     healthy[[index1[a] for a in out1 if a in index1]] = False
     healthy[:, [index2[b] for b in out2 if b in index2]] = False
     column = np.full(healthy.shape, -1, dtype=np.intp)
@@ -282,9 +310,10 @@ def _cross_block(name: str, spec, specs: dict, groups, record: _Record, intercep
     for (a, b), g in zip(grid, emitted, strict=True):
         if g >= 0:
             column[index1[a], index2[b]] = offset + g
+    row_nodes = np.array([at1.get(a, 0) for a in first._levels], dtype=np.intp)
+    col_nodes = np.array([at2.get(b, offset) for b in second._levels], dtype=np.intp)
     i, j = np.nonzero(healthy)
-    node_row = np.array([at1.get(a, 0) for a in first._levels], dtype=np.intp)[i]
-    node_col = np.array([at2.get(b, offset) for b in second._levels], dtype=np.intp)[j]
+    si, sj = np.nonzero(occ & ~healthy)
     columns = np.array(
         [
             intercept,
@@ -294,8 +323,17 @@ def _cross_block(name: str, spec, specs: dict, groups, record: _Record, intercep
         ],
         dtype=np.intp,
     )
+    bounded = record.bounded.get(name, (False, False, False))
     free, kept, null = _cross_null(
-        node_row, node_col, column[i, j], group1.size, group2.size, len(columns)
+        row_nodes[i],
+        col_nodes[j],
+        column[i, j],
+        group1.size,
+        group2.size,
+        len(columns),
+        bounded,
+        row_nodes[si],
+        col_nodes[sj],
     )
     if not (free.size or kept.size):
         return None
@@ -521,13 +559,25 @@ def _design_record(model, y: NDArray, sample_weight: NDArray) -> _Record:
     column, and two parents' codes name a crossed term's cell, base row and column
     included.
     """
-    from superglm.diagnostics.separation import _separated_flags, response_boundaries
+    from superglm.diagnostics.separation import (
+        _crossed_boundary_flags,
+        _separated_flags,
+        response_boundaries,
+    )
     from superglm.features.categorical import Categorical
     from superglm.features.interaction import CategoricalInteraction
+    from superglm.model.fit_state import fitted_penalty
+    from superglm.penalties.base import selection_shrunk_group_names
 
     boundaries = response_boundaries(model._distribution, model._link)
     weights = np.asarray(sample_weight, dtype=np.float64)
     response = np.asarray(y, dtype=np.float64)
+    caps_enforced = (getattr(model, "_last_fit_meta", None) or {}).get("method") != "fit_path"
+    shrunk = selection_shrunk_group_names(fitted_penalty(model), model._groups)
+
+    def penalised(term: str) -> bool:
+        return any(g.name in shrunk for g in model._groups if g.feature_name == term)
+
     coded: dict[str, tuple[NDArray, list]] = {}
     for group, matrix in zip(model._groups, model._dm.group_matrices, strict=True):
         spec = model._specs.get(group.feature_name)
@@ -540,29 +590,49 @@ def _design_record(model, y: NDArray, sample_weight: NDArray) -> _Record:
         ):
             coded[group.feature_name] = (np.asarray(codes), [*spec._non_base, spec._base_level])
 
-    def separated(codes: NDArray, n_cells: int) -> NDArray:
-        flags = np.zeros(n_cells, dtype=bool)
-        for boundary in boundaries:
-            flags |= _separated_flags(codes, n_cells, response, weights, boundary)[0]
-        return flags
-
     levels = {}
     for name, (codes, labels) in coded.items():
-        held = frozenset(labels[i] for i in np.flatnonzero(separated(codes, len(labels))))
-        if held:
-            levels[name] = held
-    cells, occupied = {}, {}
+        if (caps_enforced and model._specs[name]._constraint_rules) or penalised(name):
+            continue
+        flags = np.zeros(len(labels), dtype=bool)
+        for boundary in boundaries:
+            flags |= _separated_flags(codes, len(labels), response, weights, boundary)[0]
+        if flags.any():
+            levels[name] = frozenset(labels[i] for i in np.flatnonzero(flags))
+    cells, occupied, bounded = {}, {}, {}
     for name, spec in model._interaction_specs.items():
         if not isinstance(spec, CategoricalInteraction):
             continue
         parents = [coded.get(parent) for parent in spec.parent_names]
         if any(parent is None for parent in parents):
             continue
+        p1, p2 = spec.parent_names
+        spec1, spec2 = model._specs[p1], model._specs[p2]
+        b = (
+            bool((caps_enforced and spec1._constraint_rules) or penalised(p1)),
+            bool((caps_enforced and spec2._constraint_rules) or penalised(p2)),
+            penalised(name),
+        )
+        bounded[name] = b
         (codes1, labels1), (codes2, labels2) = parents
         n2 = len(labels2)
-        codes = codes1 * n2 + codes2
-        held = separated(codes, len(labels1) * n2)
-        live = np.bincount(codes[weights > 0], minlength=len(labels1) * n2) > 0
+        live, by_boundary = _crossed_boundary_flags(
+            codes1 * n2 + codes2,
+            labels1,
+            labels2,
+            spec1,
+            spec2,
+            response,
+            weights,
+            boundaries,
+            spec,
+            b,
+        )
+        held = (
+            np.logical_or.reduce(list(by_boundary.values()))
+            if by_boundary
+            else np.zeros(len(live), dtype=bool)
+        )
         if held.any():
             cells[name] = frozenset(
                 (labels1[i // n2], labels2[i % n2]) for i in np.flatnonzero(held)
@@ -570,7 +640,7 @@ def _design_record(model, y: NDArray, sample_weight: NDArray) -> _Record:
         occupied[name] = frozenset(
             (labels1[i // n2], labels2[i % n2]) for i in np.flatnonzero(live)
         )
-    return _Record(levels=levels, cells=cells, occupied=occupied)
+    return _Record(levels=levels, cells=cells, occupied=occupied, bounded=bounded)
 
 
 def separated_columns(model, y: NDArray, sample_weight: NDArray) -> set[int]:
@@ -643,13 +713,13 @@ def _at_base(line: SeparatedLine, specs: dict[str, Any]) -> dict[str, Any] | Non
     return None if any(value is None for value in values.values()) else values
 
 
-def _reaches_empty_cell(
+def _reaches_unpriced_cell(
     model, found: SeparatedLevels, moved: dict, span: slice, names: set, cache: dict
 ) -> bool:
-    """Whether ``moved``'s rows in ``span`` meet a crossed cell no training row with weight holds.
+    """Whether ``moved``'s rows in ``span`` meet an empty or separated crossed cell.
 
-    Moving the columns ``names`` to their base can take a row into such a cell, whose
-    rate the fit does not determine (it reads the parents' reference levels, not data).
+    Moving the columns ``names`` to their base can take a row into an unoccupied or
+    separated cell, whose rate the data do not determine.
     """
     from superglm.features.categorical import Categorical
     from superglm.features.interaction import CategoricalInteraction
@@ -664,7 +734,21 @@ def _reaches_empty_cell(
         if term not in cache:
             live = found.sample_weight > 0
             held = {parent: found.frame.column_array(parent)[live] for parent in spec.parent_names}
-            cache[term] = np.unique(_cell_codes(model, term, held))
+            priced = np.unique(_cell_codes(model, term, held))
+            sep_cells = separated_labels(spec)
+            if sep_cells:
+                p1, p2 = spec.parent_names
+                idx1 = {level: i for i, level in enumerate(model._specs[p1]._levels)}
+                idx2 = {level: j for j, level in enumerate(model._specs[p2]._levels)}
+                n2 = len(idx2)
+                unpriced = [
+                    idx1[a] * n2 + idx2[b]
+                    for a, b in map(tuple, sep_cells)
+                    if a in idx1 and b in idx2
+                ]
+                if unpriced:
+                    priced = np.setdiff1d(priced, unpriced)
+            cache[term] = priced
         reached = _cell_codes(model, term, {name: moved[name][span] for name in spec.parent_names})
         if not np.isin(reached, cache[term]).all():
             return True
@@ -702,9 +786,9 @@ def _priced(
     spline): as they are, for the fitted total, and with the term's label set to
     its base (``_at_base``), for the total expected at the base's rate.  Both are
     finite for every link and weight each row by its ``sample_weight``.  The
-    expected total is omitted when the move takes a row into an unoccupied crossed
-    cell (``_reaches_empty_cell``).  A total float64 cannot hold is stated so, and
-    never stops the fit.
+    expected total is omitted when the move takes a row into an empty or separated
+    crossed cell (``_reaches_unpriced_cell``).  A total float64 cannot hold is
+    stated so, and never stops the fit.
     """
     import pandas as pd
 
@@ -746,7 +830,7 @@ def _priced(
     cache: dict[str, NDArray] = {}
     priced = [
         values is not None
-        and not _reaches_empty_cell(model, found, moved, span, set(values), cache)
+        and not _reaches_unpriced_cell(model, found, moved, span, set(values), cache)
         for span, values in spans
     ]
     weight = found.sample_weight[rows]
@@ -762,6 +846,30 @@ def _priced(
             )
             for (line, _), (span, _), at in zip(entries, spans, priced, strict=True)
         ]
+
+
+def _reml_scale_note(model) -> str | None:
+    """Estimated-dispersion REML clause when an estimated RandomEffect sits beside separated levels."""
+    from superglm.features.random_effect import RandomEffect
+
+    if getattr(model, "_reml_result", None) is None:
+        return None
+    if getattr(model._distribution, "scale_known", True):
+        return None
+    re_names = [
+        name
+        for name, spec in model._specs.items()
+        if isinstance(spec, RandomEffect)
+        and (spec._lambda_policy is None or spec._lambda_policy.mode == "estimate")
+    ]
+    if not re_names:
+        return None
+    joined = ", ".join(repr(name) for name in re_names)
+    return (
+        "With an estimated dispersion, keeping separated unpenalised levels shifts "
+        f"the profiled REML scale and the REML-estimated variance component(s) of {joined} "
+        "(larger when separated levels are many relative to positive-response rows)."
+    )
 
 
 def separated_levels_message(held: list[SeparatedLevels], model) -> str | None:
@@ -782,7 +890,12 @@ def separated_levels_message(held: list[SeparatedLevels], model) -> str | None:
     ]
     if not priced:
         return None
-    return format_separated_levels(priced, fitted=True, example=lines_example(priced, specs))
+    return format_separated_levels(
+        priced,
+        fitted=True,
+        example=lines_example(priced, specs),
+        reml_scale_note=_reml_scale_note(model),
+    )
 
 
 def disclose_held_levels(model) -> None:

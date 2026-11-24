@@ -1160,6 +1160,8 @@ def build_design_matrix(
         if getattr(spec, "_separated_cells_at_fit", ()):
             spec._separated_cells_at_fit = ()
             spec._occupied_cells_at_fit = None
+        if hasattr(spec, "_bounded_groups_at_fit"):
+            spec._bounded_groups_at_fit = (False, False, False)
     if separation_records:
         from superglm.diagnostics.separation import (
             SeparatedLevels,
@@ -1170,6 +1172,13 @@ def build_design_matrix(
             scan_interaction_term,
         )
         from superglm.penalties.base import penalty_targets_group
+
+        def _penalised(name: str) -> bool:
+            return selection_penalty is not None and any(
+                penalty_targets_group(selection_penalty, g)
+                for g in compiled.groups
+                if g.feature_name == name
+            )
 
         findings = []
         curves = []
@@ -1182,11 +1191,7 @@ def build_design_matrix(
                 # nothing here: it is reported whatever bounds the term.
                 curves.extend(record[2])
                 continue
-            if selection_penalty is not None and any(
-                penalty_targets_group(selection_penalty, g)
-                for g in compiled.groups
-                if g.feature_name == term_name
-            ):
+            if record[0] != "inter" and _penalised(term_name):
                 # A nonzero lambda1 reaches this block: the penalty grows
                 # without bound along any recession direction, so the
                 # penalised optimum is finite and the term is estimable.
@@ -1217,6 +1222,21 @@ def build_design_matrix(
                 record_separated_levels(spec_c, found)
             else:
                 _, name_i, spec1_i, spec2_i, x1_i, x2_i, p1_i, p2_i = record
+                cross_spec = compiled.interaction_specs[name_i]
+                # An "auto" penalty is calibrated after the build and can come out
+                # zero, so only a set value bounds a cell's parents or the cross.
+                set_value = getattr(selection_penalty, "lambda1", None) != "auto"
+                bounded = (
+                    bool(
+                        (caps_enforced and spec1_i._constraint_rules)
+                        or (set_value and _penalised(p1_i))
+                    ),
+                    bool(
+                        (caps_enforced and spec2_i._constraint_rules)
+                        or (set_value and _penalised(p2_i))
+                    ),
+                    set_value and _penalised(name_i),
+                )
                 found = scan_interaction_term(
                     name_i,
                     spec1_i,
@@ -1228,15 +1248,16 @@ def build_design_matrix(
                     y,
                     sample_weight,
                     separation_boundaries,
+                    cross_spec=cross_spec,
+                    bounded=bounded,
                 )
                 findings.extend(found)
                 # the standard-error rule reads these cells (state_ops._names_an_unpriced_level)
-                compiled.interaction_specs[name_i]._separated_cells_at_fit = tuple(
+                cross_spec._separated_cells_at_fit = tuple(
                     label for finding in found for label in finding.labels
                 )
-                compiled.interaction_specs[name_i]._occupied_cells_at_fit = (
-                    found[0].occupied if found else None
-                )
+                cross_spec._occupied_cells_at_fit = found[0].occupied if found else None
+                cross_spec._bounded_groups_at_fit = bounded
         compiled.scan_codes.clear()
         from superglm.links import LogLink
 
