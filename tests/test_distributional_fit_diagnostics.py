@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import replace
 
 import numpy as np
@@ -226,9 +227,23 @@ def _with_accepted_steps(model, steps: tuple[dict[str, float], ...]):
     return _replace_smoothing(model, replace(smoothing, history=history))
 
 
+@contextmanager
+def _walking_search():
+    """The search without its endpoint trial: a flat component walks and stops short of its bound.
+
+    The certified and drifting fixtures need that stop, off any exact face.
+    """
+    from superglm.distributional.smoothing import loop
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(loop, "endpoint_trial_names", lambda *_: ())
+        yield
+
+
 @pytest.fixture(scope="module")
 def certified_model():
-    model = _fit_smooth(inner_iterations=100, outer_iterations=30, tolerance=1.0e-3)
+    with _walking_search():
+        model = _fit_smooth(inner_iterations=100, outer_iterations=30, tolerance=1.0e-3)
     assert model.smoothing is not None
     assert model.smoothing.matched_certified is True
     return model
@@ -408,7 +423,8 @@ def two_component_model():
 
 @pytest.fixture(scope="module")
 def upward_model():
-    model = _fit_smooth(inner_iterations=100, outer_iterations=20, tolerance=1.0e-4)
+    with _walking_search():
+        model = _fit_smooth(inner_iterations=100, outer_iterations=20, tolerance=1.0e-4)
     assert model.smoothing is not None
     assert model.smoothing.matched_certified is True
     assert model.smoothing.iterations == 4

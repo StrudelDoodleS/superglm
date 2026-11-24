@@ -1213,6 +1213,24 @@ optimum: without a root or an endpoint certificate the fit reports
 component. A component at the cap whose gradient is within the bar is a
 stationary point of the box and is reported as such.
 
+A penalty heading for infinity is not walked to `max_lambda` a step at a time.
+Once the Fellner–Schall evidence says its own working problem keeps improving
+all the way to the cap, and no other penalty still proposes more than one log
+unit, the search tries it at the cap once. The trial is kept only if the REML
+score there is no worse and the evidence at the cap still points outward; a
+penalty whose trial is refused takes ordinary steps from then on. A penalty the
+trial puts on its cap is held there while the other penalties finish, so their
+fits stay ordinary ones, and its exact face is assessed once, where they stop:
+before the Newton steps of `"efs+finish"`, or at the practical plateau or the
+fixed point of `"efs"`, which then stands. Next to another penalty's cap no
+exact face can be promoted, so the plateau or the exact gradient decides with
+the penalty at its cap. Under `"efs+newton"` and `"efs+stationary"` the exact
+gradient at the cap decides as described above.
+Only a penalty alone on its coefficients is tried this way, so a tensor
+margin never is, and a search with `acceleration="multisecant"` makes no trial.
+The search history marks an accepted trial with `step_source="endpoint"` and
+lists the penalties tried in `endpoint_components`.
+
 Every exact face is checked once more where the search stops, on the fit it
 stopped on. If the other penalties have moved so that a term's endpoint
 derivative is now negative, the term leaves its exact face and the search

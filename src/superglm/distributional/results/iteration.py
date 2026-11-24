@@ -284,8 +284,12 @@ class DistributionalEFSIteration:
     # eigenvalue raise that made the active Hessian positive definite
     # (``0.0`` when it already was, ``None`` for a BFGS or bracket step).  A convergence check that makes no trial fit is not an
     # iteration and leaves no record.
+    # ``step_source="endpoint"`` is an accepted trial that took
+    # ``endpoint_components`` to their upper bounds; a round that lists them under
+    # another source tried that and refused it.
     stage: Literal["efs", "newton"] = "efs"
-    step_source: Literal["efs", "newton", "bfgs", "bracket"] = "efs"
+    step_source: Literal["efs", "newton", "bfgs", "bracket", "endpoint"] = "efs"
+    endpoint_components: tuple[str, ...] = ()
     gradient: Mapping[str, float] | None = None
     gradient_certificate: Mapping[str, float] | None = None
     hessian_certificate: float | None = None
@@ -320,6 +324,7 @@ class DistributionalEFSIteration:
             "deactivated_face_components",
             "revalidated_face_components",
             "refused_face_components",
+            "endpoint_components",
         ):
             object.__setattr__(self, name, tuple(getattr(self, name)))
         if self.gradient is not None:

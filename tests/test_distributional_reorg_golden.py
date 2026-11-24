@@ -384,6 +384,7 @@ def _compute() -> dict[str, dict[str, object]]:
     return out
 
 
+@pytest.mark.usefixtures("no_endpoint_trial")
 def test_outputs_reproduce_the_golden_record_within_tolerance(request) -> None:
     computed = _compute()
     if request.config.getoption("--regenerate-golden", default=False):

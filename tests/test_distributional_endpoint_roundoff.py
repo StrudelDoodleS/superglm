@@ -368,6 +368,7 @@ def test_the_rich_generalized_gamma_book_publishes_what_its_path_reached() -> No
     assert loaded.convergence_reason == smoothing.convergence_reason
 
 
+@pytest.mark.usefixtures("no_endpoint_trial")
 def test_a_stationary_endgame_voids_a_refreshed_cap_nomination(monkeypatch) -> None:
     """The endgame's exact gradient outranks a Fellner--Schall cap nomination.
 
@@ -434,6 +435,7 @@ def _flagged_generalized_pareto_model(**shape_options) -> SuperLSS:
     )
 
 
+@pytest.mark.usefixtures("no_endpoint_trial")
 def test_a_stationary_endgame_revalidates_its_face_beside_another_cap(monkeypatch) -> None:
     """The sole-cap waiver, forced: the terminal recheck sees another cap outside the face.
 
@@ -475,6 +477,7 @@ def test_a_stationary_endgame_revalidates_its_face_beside_another_cap(monkeypatc
     assert promoted and set(model.result_.exact_face_components) == promoted
 
 
+@pytest.mark.usefixtures("no_endpoint_trial")
 def test_a_face_beside_a_certified_cap_finishes_stationary_through_one_stop(monkeypatch) -> None:
     """The rich GeneralizedGammaLSS book's endgame, forced whole on one fit.
 
@@ -587,6 +590,7 @@ def _only_the_hessian_gate_declined(fallbacks: list[str]) -> bool:
     )
 
 
+@pytest.mark.usefixtures("no_endpoint_trial")
 @pytest.mark.parametrize("gate", ["open", "declined"])
 def test_a_revalidated_stationary_stop_publishes_derivatives_at_its_fit(
     monkeypatch, gate: str
@@ -638,6 +642,7 @@ def test_a_revalidated_stationary_stop_publishes_derivatives_at_its_fit(
         assert fallbacks
 
 
+@pytest.mark.usefixtures("no_endpoint_trial")
 def test_a_revalidated_face_keeps_the_endgames_published_hessian(monkeypatch) -> None:
     """A revalidated stop publishes the smoothing Hessian the endgame took at its fit.
 
@@ -688,6 +693,7 @@ def test_a_revalidated_face_keeps_the_endgames_published_hessian(monkeypatch) ->
     assert _only_the_hessian_gate_declined(fallbacks), fallbacks
 
 
+@pytest.mark.usefixtures("no_endpoint_trial")
 def test_the_iteration_budget_does_not_refuse_a_stationary_endgames_face_check() -> None:
     """``max_reml_iter`` counts search iterations; the terminal face revalidation is not one.
 

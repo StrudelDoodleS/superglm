@@ -1207,8 +1207,11 @@ def _is_face_assessment(iteration: DistributionalEFSIteration) -> bool:
 
 
 def _ordinary_updates(smoothing: DistributionalEFSResult) -> tuple[DistributionalEFSIteration, ...]:
+    """Accepted steps of the search: no face assessment, and no trial at a bound."""
     return tuple(
-        item for item in smoothing.history if item.accepted and not _is_face_assessment(item)
+        item
+        for item in smoothing.history
+        if item.accepted and not _is_face_assessment(item) and item.step_source != "endpoint"
     )
 
 

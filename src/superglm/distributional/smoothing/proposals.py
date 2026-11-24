@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping, Sequence
 
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._roundoff import EPS, UNIT_ROUNDOFF
 from superglm.distributional.results.iteration import DistributionalEFSConfig
 from superglm.distributional.results.solver import DenseSolverResult
+from superglm.reml.convergence import flat_tail_certified
+from superglm.reml.efs_update import EFSComponentState, EFSUpdateResult
+
+# The largest step another component may propose in the round of an endpoint trial.
+# The certificate holds the other smoothing parameters fixed, so the trial waits for
+# them to settle.
+ENDPOINT_GATE_LOG_STEP = 1.0
 
 
 def _ordered_log_lambdas(
@@ -138,3 +146,80 @@ def _accelerated_proposal(
         lambdas[name] = proposed
         steps[name] = named_log_steps[name]
     return lambdas, steps
+
+
+def flat_tail_names(
+    components: tuple[EFSComponentState, ...],
+    blocks: Sequence[tuple[str, slice]],
+    update: EFSUpdateResult,
+    inverse: NDArray[np.float64],
+    config: DistributionalEFSConfig,
+) -> tuple[str, ...]:
+    """Estimated penalties whose working problem falls all the way to their upper bound.
+
+    A component qualifies below its bound, alone on its coefficient block
+    (``blocks`` lists every penalty's, those on an exact face included), and
+    certified by ``flat_tail_certified`` with E = rank - lambda tr(H^-1 S) and
+    B = lambda beta'S beta. The certificate's premise is nonnegative data
+    curvature on the block, which an observed Hessian need not have. With D
+    that curvature profiled onto the block, ``(H^-1)_bb = (D + lambda S)^-1``
+    and ``lambda S^(1/2) (H^-1)_bb S^(1/2)`` has eigenvalues lambda/(d + lambda)
+    on S's range: none above one says every d >= 0. An eigenvalue above one by
+    theta moves the certificate's bound on E by a term of order theta^2, so
+    theta = sqrt(u) keeps that term at rounding level while standing far above
+    the rounding in the eigenvalue itself.
+    """
+    names: list[str] = []
+    for component in components:
+        name, lam, block = component.name, component.lambda_value, component.coefficient_slice
+        if component.policy.mode != "estimate" or lam >= config.upper(name):
+            continue
+        if any(
+            other != name and block.start < taken.stop and taken.start < block.stop
+            for other, taken in blocks
+        ):
+            continue
+        edf = component.rank - lam * update.trace_terms[name]
+        if not flat_tail_certified(edf, lam * update.quadratic_forms[name])[0]:
+            continue
+        values, vectors = np.linalg.eigh(component.penalty)
+        retained = values > 64.0 * len(values) * EPS * values[-1]
+        root = vectors[:, retained] * np.sqrt(values[retained])
+        spectrum = np.linalg.eigvalsh(lam * (root.T @ inverse[block, block] @ root))
+        if np.max(spectrum, initial=0.0) <= 1.0 + math.sqrt(UNIT_ROUNDOFF):
+            names.append(name)
+    return tuple(names)
+
+
+def endpoint_trial_names(
+    flat_tail: tuple[str, ...],
+    update: EFSUpdateResult,
+    estimated_names: tuple[str, ...],
+    latched: Collection[str],
+) -> tuple[str, ...]:
+    """The flat-tail components to try at their upper bounds in this round.
+
+    A component whose trial was refused is ``latched`` to ordinary steps. No
+    trial is made while another estimated component proposes a step beyond
+    ``ENDPOINT_GATE_LOG_STEP``.
+    """
+    names = tuple(name for name in flat_tail if name not in latched)
+    others = (name for name in estimated_names if name not in names)
+    if any(abs(update.log_steps[name]) > ENDPOINT_GATE_LOG_STEP for name in others):
+        return ()
+    return names
+
+
+def _endpoint_proposal(
+    current: Mapping[str, float],
+    steps: Mapping[str, float],
+    estimated_names: tuple[str, ...],
+    endpoint_names: tuple[str, ...],
+    config: DistributionalEFSConfig,
+) -> tuple[dict[str, float], dict[str, float]]:
+    """The plain proposal with ``endpoint_names`` at their own upper bounds."""
+    lambdas, log_steps = _scaled_proposal(current, steps, estimated_names, 1.0, config)
+    for name in endpoint_names:
+        lambdas[name] = config.upper(name)
+        log_steps[name] = math.log(lambdas[name]) - math.log(current[name])
+    return lambdas, log_steps

@@ -16,6 +16,7 @@ from superglm.distributional.smoothing.objective import (
 )
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
 from superglm.distributional.smoothing.penalty_geometry import _PenaltyEvaluationMemo
+from superglm.distributional.smoothing.proposals import flat_tail_names
 from superglm.reml.efs_update import EFSComponentState, EFSUpdateResult, wood_fasiolo_update
 
 
@@ -30,6 +31,8 @@ class _FreshRawEvidence:
     working_infinity: tuple[str, ...]
     unresolved_upper_bound: tuple[str, ...]
     cap_held: tuple[str, ...] = ()
+    # Components an endpoint trial may take to their upper bounds (``flat_tail_names``).
+    flat_tail: tuple[str, ...] = ()
 
 
 def _fresh_raw_evidence(
@@ -124,6 +127,19 @@ def _fresh_raw_evidence(
     unresolved_upper_bound = tuple(
         name for name in judged_names if name in capped_names and update.raw_log_steps[name] > 0.0
     )
+    # The block algebra behind a flat tail needs the inverse of the whole curvature.
+    rank = fit.terminal_rank if fit.coefficient_face is None else fit.terminal_reduced_rank
+    flat_tail = (
+        flat_tail_names(
+            components,
+            tuple((penalty.name, penalty.group_sl) for penalty in layout.penalties),
+            update,
+            inverse,
+            config,
+        )
+        if rank is not None and rank.rank == rank.width
+        else ()
+    )
     return _FreshRawEvidence(
         components=components,
         estimated_names=estimated_names,
@@ -132,6 +148,7 @@ def _fresh_raw_evidence(
         working_infinity=working_infinity,
         unresolved_upper_bound=unresolved_upper_bound,
         cap_held=cap_held,
+        flat_tail=flat_tail,
     )
 
 

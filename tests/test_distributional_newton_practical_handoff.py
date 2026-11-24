@@ -26,6 +26,7 @@ from tests.test_distributional_endpoint_direction import (
 from tests.test_distributional_practical_stop import _preempt_fixture
 
 
+@pytest.mark.usefixtures("no_endpoint_trial")
 @pytest.mark.parametrize("outer", ["efs", "efs+newton", "efs+finish"])
 @pytest.mark.parametrize("budget", [3, 4, 20])
 def test_outward_practical_plateau_can_finish_before_newton(monkeypatch, outer, budget):

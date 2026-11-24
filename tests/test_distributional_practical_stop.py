@@ -412,6 +412,7 @@ def test_scored_backtracking_can_still_support_a_practical_plateau(monkeypatch):
     assert all(item.accepted and item.raw_backtracks == 8 for item in smoothing.history)
 
 
+@pytest.mark.usefixtures("no_endpoint_trial")
 def test_outward_plateau_requires_a_window_of_scorable_trials(monkeypatch, recwarn):
     """A refused trial breaks the window even when the accepted moves span a factor of e."""
     from superglm.distributional.smoothing import loop
@@ -782,6 +783,7 @@ def _outward_random_effect_fit(*, practical=True, max_log_step=0.5, span=1.5, fi
     return model, model._require_fitted().smoothing
 
 
+@pytest.mark.usefixtures("no_endpoint_trial")
 @pytest.mark.parametrize("fixed_value", [0.0, 1.0e6 * math.exp(1.5)])
 def test_practical_outward_result_records_fixed_coordinate_pressure(fixed_value):
     model, smoothing = _outward_random_effect_fit(fixed_lambda=fixed_value)
@@ -795,6 +797,7 @@ def test_practical_outward_result_records_fixed_coordinate_pressure(fixed_value)
     assert restored.terminal_raw_log_steps == smoothing.terminal_raw_log_steps
 
 
+@pytest.mark.usefixtures("no_endpoint_trial")
 def test_practical_outward_cap_stop_keeps_pressure_and_replays_finite_fit() -> None:
     _model, smoothing = _outward_random_effect_fit()
     assert smoothing.convergence_reason == "practical_plateau"
@@ -825,6 +828,7 @@ def test_practical_outward_cap_stop_keeps_pressure_and_replays_finite_fit() -> N
     )
 
 
+@pytest.mark.usefixtures("no_endpoint_trial")
 def test_practical_outward_pressure_survives_a_pickle_round_trip() -> None:
     model, smoothing = _outward_random_effect_fit()
     restored = pickle.loads(pickle_state(model._require_fitted())).smoothing
