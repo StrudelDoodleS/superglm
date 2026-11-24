@@ -107,6 +107,7 @@ if _typing.TYPE_CHECKING:
         Spline,
         n_knots_from_k,
     )
+    from superglm.inference._sandwich_core import SandwichCovariance
     from superglm.inference._term_types import (
         InteractionInference,
         TermInference,
@@ -263,6 +264,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
         "Spline",
         "n_knots_from_k",
     ),
+    "superglm.inference._sandwich_core": ("SandwichCovariance",),
     "superglm.inference._term_types": (
         "InteractionInference",
         "SmoothCurve",
@@ -512,6 +514,7 @@ __all__ = [
     "ModelMetrics",
     "ModelSummary",
     "RandomEffectResult",
+    "SandwichCovariance",
     "SuperGLMRegressor",
     "SuperGLMClassifier",
     "Poisson",

@@ -153,6 +153,8 @@ def summary(
     alpha: float = 0.05,
     detail: str = "compact",
     level_display: str = "expanded",
+    *,
+    covariance=None,
 ):
     """Rich model summary with coefficient table (statsmodels-style)."""
     from scipy.special import gammaln
@@ -174,6 +176,12 @@ def summary(
     statistics_reason = edited_statistics_unavailable(model)
     if statistics_reason is not None:
         raise RuntimeError(statistics_reason)
+    if covariance is not None:
+        from superglm.inference.sandwich import bound_covariance
+
+        if model._fit_stats is None or model._result is None:
+            raise RuntimeError("No fit stats — call fit() or fit_reml() first.")
+        bound_covariance(model, covariance)
 
     cache = model._summary_cache
     if cache is None:
@@ -182,9 +190,10 @@ def summary(
     tw_pr = getattr(model, "_tweedie_profile_result", None)
     tweedie_identity = None if tw_pr is None else tweedie_profile_report_identity(tw_pr, alpha)
     key = (float(alpha), detail, level_display, tweedie_identity)
-    cached = cache.get(key)
-    if cached is not None:
-        return cached
+    if covariance is None:
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
 
     if model._fit_stats is None:
         raise RuntimeError("No fit stats — call fit() or fit_reml() first.")
@@ -405,14 +414,31 @@ def summary(
         return summary_obj
 
     inf = model._fit_inference_info
-    XtWX_inv = inf["XtWX_inv"]
-    XtWX_inv_aug = inf["XtWX_inv_aug"]
-    active_groups = inf["active_groups"]
-    from superglm.model.state_ops import saved_standard_error_note
+    if covariance is not None:
+        XtWX_inv = covariance.slope_covariance
+        XtWX_inv_aug = covariance.covariance
+        active_groups = list(covariance.active_groups)
+        coef_estimable_override = covariance.coefficient_estimable
+        model_info["standard_error_note"] = None
+        model_info["covariance_method"] = covariance.method_label
+        model_info["covariance_type"] = covariance.cov_type
+        model_info["covariance_clustered"] = covariance.clustered
+        model_info["covariance_centered"] = covariance.centered
+        model_info["covariance_penalized"] = covariance.penalized
+        model_info["covariance_correction"] = covariance.correction
+        model_info["covariance_n_units"] = covariance.n_units
+        model_info["covariance_n_clusters"] = covariance.n_clusters
+        model_info["covariance_bread_curvature"] = covariance.bread_curvature
+    else:
+        XtWX_inv = inf["XtWX_inv"]
+        XtWX_inv_aug = inf["XtWX_inv_aug"]
+        active_groups = inf["active_groups"]
+        coef_estimable_override = inf.get("coefficient_estimable")
+        from superglm.model.state_ops import saved_standard_error_note
 
-    model_info["standard_error_note"] = saved_standard_error_note(
-        model, inf["coefficient_estimable"]
-    )
+        model_info["standard_error_note"] = saved_standard_error_note(
+            model, inf["coefficient_estimable"]
+        )
     known_scale = getattr(model._distribution, "scale_known", True)
     coef_rows = build_coef_rows(
         groups=model._groups,
@@ -436,7 +462,7 @@ def summary(
         precomputed_edf=inf["edf"],
         precomputed_edf1=inf["edf1"],
         test_bases=term_test_bases(model),
-        coefficient_estimable_override=inf.get("coefficient_estimable"),
+        coefficient_estimable_override=coef_estimable_override,
         selected_group_names=selected_names,
         group_matrices=model._dm.group_matrices if model._dm is not None else None,
         sample_weights=model._fit_weights,
@@ -445,6 +471,7 @@ def summary(
         selection_shrunk_group_names=selection_shrunk_group_names(
             fitted_penalty(model), model._groups
         ),
+        sandwich_covariance=covariance,
     )
     _withhold_repaired_term_inference(coef_rows, shape_repaired_feature_names(model))
     from superglm._weight_units import standard_errors
@@ -470,15 +497,35 @@ def summary(
                     XtWX_inv_aug,
                     augmented_indices,
                 )
-                se_raw_dict[g.name] = standard_errors(var_diag, res, raw=True)
-                se_dict[g.name] = standard_errors(var_diag, res)
+                if covariance is not None:
+                    # the result's own errors: blank where the fit determines nothing
+                    se_vals = np.array(covariance.se[augmented_indices])
+                    se_raw_dict[g.name] = se_vals
+                    se_dict[g.name] = se_vals
+                else:
+                    se_raw_dict[g.name] = standard_errors(var_diag, res, raw=True)
+                    se_dict[g.name] = standard_errors(var_diag, res)
 
-    data["standard_errors"] = {
-        "coefficient_se": se_dict,
-        "coefficient_se_raw": se_raw_dict,
-        "coefficient_se_scale": "fitted-family",
-        "rendered_coefficient_se_scale": "fitted-family",
-    }
+    if covariance is not None:
+        data["standard_errors"] = {
+            "coefficient_se": se_dict,
+            "coefficient_se_raw": se_raw_dict,
+            "coefficient_se_scale": "sandwich",
+            "rendered_coefficient_se_scale": "sandwich",
+            "covariance_method": covariance.cov_type,
+            "covariance_label": covariance.method_label,
+            "covariance_centered": covariance.centered,
+            "covariance_correction": covariance.correction,
+            "covariance_n_units": covariance.n_units,
+            "covariance_n_clusters": covariance.n_clusters,
+        }
+    else:
+        data["standard_errors"] = {
+            "coefficient_se": se_dict,
+            "coefficient_se_raw": se_raw_dict,
+            "coefficient_se_scale": "fitted-family",
+            "rendered_coefficient_se_scale": "fitted-family",
+        }
     basis_detail = build_basis_detail(
         groups=model._groups,
         specs=model._specs,
@@ -488,8 +535,9 @@ def summary(
         active_groups=active_groups,
         known_scale=known_scale,
         alpha=alpha,
-        coefficient_estimable_override=inf.get("coefficient_estimable"),
+        coefficient_estimable_override=coef_estimable_override,
         selected_group_names=selected_names,
+        sandwich_covariance=covariance,
     )
     _drop_repaired_basis_detail(basis_detail, model._groups, shape_repaired_feature_names(model))
 
@@ -508,7 +556,8 @@ def summary(
         basis_detail=basis_detail,
         level_presentation=level_presentation,
     )
-    cache[key] = summary_obj
+    if covariance is None:
+        cache[key] = summary_obj
     return summary_obj
 
 
