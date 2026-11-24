@@ -218,31 +218,34 @@ class LogitLink:
         mu_safe = np.clip(mu, 1e-15, 1 - 1e-15)
         return 1.0 / (mu_safe * (1 - mu_safe))
 
-    def deriv_inverse(self, eta: NDArray) -> NDArray:
+    @staticmethod
+    def _probability_and_complement(eta: NDArray) -> tuple[NDArray, NDArray]:
         from scipy.special import expit
 
         p = expit(eta)
-        return p * (1 - p)
+        # Compute the small tail directly, negating in expit's working dtype.
+        q = expit(np.negative(eta, dtype=p.dtype))
+        return p, q
+
+    def deriv_inverse(self, eta: NDArray) -> NDArray:
+        p, q = self._probability_and_complement(eta)
+        return p * q
 
     def deriv2_inverse(self, eta: NDArray) -> NDArray:
-        from scipy.special import expit
-
-        p = expit(eta)
-        return p * (1 - p) * (1 - 2 * p)
+        p, q = self._probability_and_complement(eta)
+        return p * q * (q - p)
 
     def deriv3_inverse(self, eta: NDArray) -> NDArray:
-        """d³μ/dη³ = μ(1-μ)(1 - 6μ + 6μ²). Wood (2011) Appendix D."""
-        from scipy.special import expit
-
-        p = expit(eta)
-        return p * (1 - p) * (1 - 6 * p + 6 * p**2)
+        """d³μ/dη³ = p q (1 - 6 p q). Wood (2011) Appendix D."""
+        p, q = self._probability_and_complement(eta)
+        product = p * q
+        return product * (1 - 6 * product)
 
     def deriv4_inverse(self, eta: NDArray) -> NDArray:
-        """d⁴μ/dη⁴ = μ(1-μ)(1 - 14μ + 36μ² - 24μ³)."""
-        from scipy.special import expit
-
-        p = expit(eta)
-        return p * (1 - p) * (1 - 14 * p + 36 * p**2 - 24 * p**3)
+        """d⁴μ/dη⁴ = p q (q - p)(1 - 12 p q)."""
+        p, q = self._probability_and_complement(eta)
+        product = p * q
+        return product * (q - p) * (1 - 12 * product)
 
 
 class ProbitLink:
