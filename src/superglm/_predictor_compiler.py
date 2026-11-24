@@ -718,6 +718,7 @@ def compile_predictor_design(
                 parent_specs,
                 (n_bins1, n_bins2),
                 sample_weight=interaction_build_weight,
+                precision_weight=sample_weight,
             )
             result = tensor_build.infos
             B_unique_inter = tensor_build.B_joint
@@ -744,16 +745,21 @@ def compile_predictor_design(
                 build_kwargs["alias_prune"] = alias_prune
             if curve_separation is not None:
                 build_kwargs["separation"] = curve_separation
+            # A built-in build asks the solver's weights whether its rows
+            # identify a penalty's null directions (``_rows_identify``).
             if getattr(ispec.build, "__func__", None) is _TENSOR_BUILD:
                 # The product on its occupied cells, never over every row when
                 # it repeats; any other build() keeps its own, and its product
                 # is scanned.
                 result = cast(TensorInteraction, ispec)._build_exact(
-                    x1, x2, parent_specs, on_cells=True, **build_kwargs
+                    x1,
+                    x2,
+                    parent_specs,
+                    on_cells=True,
+                    precision_weight=sample_weight,
+                    **build_kwargs,
                 )
             elif getattr(ispec.build, "__func__", None) is _SPLINE_BY_LEVEL_BUILD:
-                # A built-in build asks the solver's weights whether a level's
-                # rows identify its penalty's null directions.
                 result = ispec.build(
                     x1, x2, parent_specs, precision_weight=sample_weight, **build_kwargs
                 )

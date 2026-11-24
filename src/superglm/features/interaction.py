@@ -19,6 +19,7 @@ import itertools
 import warnings
 from collections.abc import Hashable, Iterator
 from dataclasses import replace
+from functools import partial
 from typing import Any
 
 import numpy as np
@@ -28,7 +29,7 @@ from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_bins import discretize_positive_support
 from superglm.features import _basis_kernels
-from superglm.features._spline_build import declared_null_coordinates
+from superglm.features._spline_build import declared_null_coordinates, tensor_marginal_info
 from superglm.features._spline_config import SplineOptionWarning
 from superglm.features._spline_penalties import _gapped_rank, structural_penalty_ranks
 from superglm.features._spline_runtime import bin_knots
@@ -2418,6 +2419,7 @@ class TensorInteraction:
         support: NDArray | None,
         counts: NDArray | None,
         geometry_weight: NDArray | None,
+        precision: NDArray | None = None,
     ) -> TensorMarginalInfo:
         """A margin's basis, penalty and projection from its resolved spec (``_marginal_spec``).
 
@@ -2426,8 +2428,16 @@ class TensorInteraction:
         (``tensor_marginal_info``). One taking ``x`` alone is handed the rows of
         positive geometry weight, so it is centred on ``counts`` when the positive
         weights are equal (0/1 indicators, equal frequencies), and refused otherwise.
+        ``precision`` is the fit's weight on each row or support point, which
+        decides whether a built-in margin states its null coordinates.
         """
+        from superglm.features.spline import _BUILT_IN_SPLINES
+
         method = candidate.tensor_marginal_ingredients
+        if precision is not None and type(candidate) in _BUILT_IN_SPLINES:
+            # Only superglm's own splines, which cannot override the method, state null
+            # coordinates (``tensor_marginal_info``).
+            method = partial(tensor_marginal_info, candidate, precision=precision)
         if support is None and geometry_weight is None:
             return method(x)
 
@@ -2483,11 +2493,14 @@ class TensorInteraction:
         *,
         geometry_weight: NDArray | None = None,
         discrete_n_bins: tuple[int, int] | None = None,
+        precision_weight: NDArray | None = None,
     ) -> tuple[TensorMarginalInfo, TensorMarginalInfo, tuple | None]:
         """Both margins' ingredients, binned on their own knots when ``discrete_n_bins`` is set.
 
         The third value is ``((support1, idx1), (support2, idx2))`` for a binned
         build (``discretize_column`` with each margin's knots), else None.
+        ``precision_weight`` is the fit's weight on each row where it is not
+        ``geometry_weight`` (``_marginal_ingredients``).
         """
         from superglm.features.spline import _SplineBase
 
@@ -2513,14 +2526,22 @@ class TensorInteraction:
                 spec, x, nk, geometry_weight=geometry_weight, n_bins=n_bins
             )
             support = counts = None
+            precision = precision_weight
             if n_bins is not None:
                 support, idx = discretize_positive_support(
                     x, n_bins, geometry_weight, bin_knots(candidate, x, geometry_weight)
                 )
                 counts = np.bincount(idx, weights=geometry_weight, minlength=len(support))
+                if precision_weight is not None:
+                    precision = np.bincount(idx, weights=precision_weight, minlength=len(support))
                 bins.append((support, idx))
             info = self._marginal_ingredients(
-                candidate, x, support=support, counts=counts, geometry_weight=geometry_weight
+                candidate,
+                x,
+                support=support,
+                counts=counts,
+                geometry_weight=geometry_weight,
+                precision=precision,
             )
             if cardinal:
                 _normalize_cardinal_margin(info)
@@ -2537,6 +2558,7 @@ class TensorInteraction:
         x2: NDArray,
         parent_specs: dict,
         geometry_weight: NDArray | None,
+        precision_weight: NDArray | None = None,
     ) -> tuple[NDArray, NDArray, NDArray, NDArray, Any, Any]:
         """The centred margin bases on the rows, their penalties, and each margin's ``distinct``."""
         m1, m2, _ = self._prepare_marginal_infos(
@@ -2544,6 +2566,7 @@ class TensorInteraction:
             x2,
             parent_specs,
             geometry_weight=geometry_weight,
+            precision_weight=precision_weight,
         )
 
         B1 = np.asarray(m1.basis, dtype=np.float64)
@@ -2728,18 +2751,22 @@ class TensorInteraction:
         sample_weight: NDArray | None = None,
         *,
         on_cells: bool,
+        precision_weight: NDArray | None = None,
     ) -> GroupInfo | list[GroupInfo]:
         """``build``; ``on_cells`` also finds the row support on the occupied cells.
 
         That is the design builder's build (``GroupInfo.row_support``): with a
         support found, ``columns`` stays ``None`` and the product over every
-        row is never formed.
+        row is never formed. It passes the fit's ``precision_weight`` where
+        that is not ``sample_weight``, the weight the margins' knots and
+        centring follow.
         """
         B1, B2, S1, S2, distinct1, distinct2 = self._prepare_centered_marginals(
             x1,
             x2,
             parent_specs,
             sample_weight,
+            precision_weight,
         )
         support = _tensor_cell_support(B1, distinct1, B2, distinct2) if on_cells else None
         # The row-wise Kronecker product, unless the support stands in for it.
@@ -2761,6 +2788,8 @@ class TensorInteraction:
         parent_specs: dict,
         n_bins: tuple[int, int],
         sample_weight: NDArray | None = None,
+        *,
+        precision_weight: NDArray | None = None,
     ) -> DiscreteTensorBuildResult:
         """Build a discretized tensor basis on observed joint support pairs."""
         m1, m2, bins = self._prepare_marginal_infos(
@@ -2769,6 +2798,7 @@ class TensorInteraction:
             parent_specs,
             geometry_weight=sample_weight,
             discrete_n_bins=(int(n_bins[0]), int(n_bins[1])),
+            precision_weight=precision_weight,
         )
         if bins is None:  # pragma: no cover - set by discrete_n_bins
             raise RuntimeError("tensor margins were not binned")

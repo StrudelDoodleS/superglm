@@ -106,6 +106,26 @@ def test_tensor_keeps_the_bilinear_surface_under_both_margin_penalties(decompose
         assert np.sum(~np.any(item.omega_ssp, axis=0)) == repeat - int(decompose)
 
 
+@pytest.mark.parametrize(
+    "x", [np.full(50, 0.5), np.linspace(0.0, 0.3, 50)], ids=["one-value", "unreached-basis"]
+)
+def test_tensor_margin_its_rows_cannot_identify_keeps_the_formed_penalty(x):
+    """A margin states its penalty's null coordinates only where its rows identify them.
+
+    On one value the centred basis is zero, and with a boundary past the rows a
+    basis function has no row: an exactly unpenalised tensor coordinate would
+    then be fitted to the rounding of its column (a coefficient of 4.3e14 where
+    one kernel left 1e-18 there). Such a margin keeps the data's coordinates and
+    the formed penalty, as a main effect does.
+    """
+    spec = Spline(kind="ps", n_knots=3, boundary=(0.0, 1.0))
+    spec.build(x)
+    info = spec.tensor_marginal_ingredients(x)
+    assert info.penalty_root is None and info.penalty_nullity is None
+    formed = info.projection.T @ spec._build_penalty() @ info.projection
+    np.testing.assert_array_equal(info.penalty, formed)
+
+
 @pytest.mark.parametrize("discrete", [False, True])
 def test_by_level_curve_retains_its_unpenalized_slope(discrete):
     x = np.geomspace(1.0, 1e5, 200)
