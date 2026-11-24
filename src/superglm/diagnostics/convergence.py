@@ -22,7 +22,19 @@ from superglm.links import LogLink
 
 
 class FitPrecisionWarning(UserWarning):
-    """The input or initial working rows show a loss of information or precision risk."""
+    """Some rows of a fit's first working system lie beyond what binary64 carries.
+
+    Issued once by a published ``fit``, ``fit_reml`` or profiled refit, after
+    the fit, when a row of positive sample weight has a subnormal weight or
+    initial working information, information that rounds to zero, a weight or
+    information at least 2**49 (about 5.6e14) times another row's, or, under a
+    log link, an initial mean that underflows or overflows before clipping.
+    Rows of weight zero contribute nothing to the fit and are not read. The
+    check only reports: the fit is the same with or without it. Check the
+    sample_weight units and the offsets on the rows it names;
+    ``model.diagnostics()['_model']['initial_precision']``
+    holds the counts, example rows and values.
+    """
 
 
 _PRECISION_BLOCK_SIZE = 8192
@@ -36,7 +48,6 @@ _LOG_MEAN_LIMIT = 709.782712893384
 _SPREAD_BITS = frexp(1.0 / (16.0 * UNIT_ROUNDOFF))[1] - 1
 
 _PRECISION_MESSAGES = {
-    "zero_sample_weight": "Zero sample weight",
     "subnormal_sample_weight": "Subnormal sample weight",
     "sample_weight_spread": "Large sample-weight spread",
     "zero_information": "Zero initial {source} information on positive-weight rows",
@@ -46,6 +57,9 @@ _PRECISION_MESSAGES = {
     "log_mean_subnormal": "Subnormal initial log-link mean before clipping",
     "log_mean_overflow": "Initial log-link mean overflows before clipping",
 }
+
+_CHECK_WEIGHTS = "Check the sample_weight units."
+_CHECK_WEIGHTS_AND_OFFSETS = "Check the sample_weight units and offsets on these rows."
 
 # The fit attempt owns this scope. Match its group list by identity so that
 # intercept-only solves inside setup cannot consume the advisory.
@@ -91,17 +105,17 @@ def warn_initial_precision(findings: dict) -> None:
         if "curvature_source" in finding:
             source = "Fisher" if finding["curvature_source"] == "fisher" else "observed"
             reason = reason.format(source=source)
-            checks["Check sample_weight units and offsets on these rows."] = None
+            checks[_CHECK_WEIGHTS_AND_OFFSETS] = None
         elif kind.startswith("log_mean_"):
             checks["Check the offsets on these rows."] = None
-        elif kind == "zero_sample_weight":
-            checks["Check whether the zero-weight rows should contribute."] = None
         else:
-            checks["Check the sample_weight units."] = None
+            checks[_CHECK_WEIGHTS] = None
         positions = ", ".join(str(row) for row in finding["rows"])
         count = finding.get("count", len(finding["rows"]))
         examples = " e.g." if count > len(finding["rows"]) else ""
         parts.append(f"{reason} at row positions{examples} {positions}.")
+    if _CHECK_WEIGHTS_AND_OFFSETS in checks:
+        checks.pop(_CHECK_WEIGHTS, None)
     warn_caller(
         "SuperGLM binary64 precision advisory, with zero-based row positions. "
         + " ".join([*parts, *checks])
@@ -111,7 +125,11 @@ def warn_initial_precision(findings: dict) -> None:
 
 
 def _scan_initial_precision(weights, information, eta, offset, link) -> dict:
-    """One sweep in fixed-size blocks. Keep counts and up to three row examples."""
+    """One sweep in fixed-size blocks. Keep counts and up to three row examples.
+
+    A row of weight zero is exact in binary64 and contributes nothing, so it
+    is not an event: padding a fit with such rows changes no finding.
+    """
     findings: dict = {}
     extrema = [[(inf, -1), (0.0, -1)] for _ in range(2)]
     offset_low, offset_high = inf, -inf
@@ -130,7 +148,6 @@ def _scan_initial_precision(weights, information, eta, offset, link) -> dict:
         block = slice(start, start + _PRECISION_BLOCK_SIZE)
         weight, info = weights[block], information[block]
         active = weight > 0.0
-        record("zero_sample_weight", ~active, start)
         record("subnormal_sample_weight", active & (weight < TINY), start)
         record("zero_information", active & (info == 0.0), start)
         finite_positive_info = active & (info > 0.0) & np.isfinite(info)

@@ -506,6 +506,9 @@ BOUNDARY_TESTS: dict[str, str | tuple[str, ...]] = {
     "_parallel.py::pooled_row_blocks": (
         "test_chunk_boundaries_design.py::test_pooled_row_blocks_partition_the_rows"
     ),
+    "diagnostics/convergence.py::_scan_initial_precision": (
+        "test_fit_precision_advisory.py::test_report_counts_across_blocks_and_bounds_examples_after_fit_state_release"
+    ),
     "distributional/_score.py::_group_limits.blocks": (
         "test_distributional_score_units.py::test_same_direction_has_the_same_score_in_different_units"
     ),

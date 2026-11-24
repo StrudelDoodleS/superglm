@@ -39,6 +39,33 @@ def test_recoverable_constant_offsets_stay_silent(family, offset):
     assert _findings(model) == {}
 
 
+@pytest.mark.parametrize("method", ["fit", "fit_reml"])
+def test_rows_of_weight_zero_raise_no_advisory_and_leave_no_record(method):
+    """Weight zero is exact in binary64 and drops a row's likelihood: padding, a held-out
+    fold or an excluded row is an ordinary fit, and its record matches the unpadded fit's.
+
+    Mutation: every zero-weight row was a ``zero_sample_weight`` event, which warned on
+    each padded fit and cross-validation fold and broke the padded fit's diagnostics.
+    """
+    x = np.linspace(0.0, 1.0, 120)
+    y = np.sin(6.0 * x) + 0.1 * np.cos(97.0 * x)
+    weight = np.ones_like(x)
+    weight[[0, 33, 119]] = 0.0
+    features = {"x": PSpline(n_knots=6) if method == "fit_reml" else Numeric()}
+
+    def fitted(rows):
+        model = SuperGLM(family="gaussian", features=features)
+        frame = pd.DataFrame({"x": x[rows]})
+        getattr(model, method)(frame, y[rows], sample_weight=weight[rows])
+        return model
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", convergence.FitPrecisionWarning)
+        padded = fitted(slice(None))
+    unpadded = fitted(weight > 0.0)
+    assert _findings(padded) == _findings(unpadded) == {}
+
+
 def test_first_predictor_combines_offset_and_intercept_before_classifying_log_range():
     X = pd.DataFrame({"x": np.arange(8.0)})
     y = np.full(8, 2.0)
@@ -62,7 +89,7 @@ def test_first_predictor_combines_offset_and_intercept_before_classifying_log_ra
     assert findings["log_mean_subnormal"]["rows"] == (1,)
     assert findings["log_mean_zero"]["rows"] == (2,)
     assert findings["log_mean_overflow"]["rows"] == (3,)
-    assert findings["zero_sample_weight"]["rows"] == (4,)
+    assert all(4 not in finding["rows"] for finding in findings.values())
 
 
 def test_weight_and_information_spreads_are_distinct_on_a_light_level():
@@ -105,7 +132,7 @@ def test_input_zero_is_distinct_from_positive_weight_with_zero_fisher_informatio
     (advisory,) = _advisories(caught)
     assert "Zero initial Fisher information" in str(advisory.message)
     findings = _findings(model)
-    assert findings["zero_sample_weight"]["rows"] == (4,)
+    assert all(4 not in finding["rows"] for finding in findings.values())
     assert findings["subnormal_sample_weight"]["rows"] == (5,)
     assert findings["sample_weight_spread"]["rows"] == (5, 0)
     assert findings["zero_information"]["rows"] == (5,)
@@ -118,7 +145,9 @@ def test_report_counts_across_blocks_and_bounds_examples_after_fit_state_release
     x = np.arange(12.0)
     X = pd.DataFrame({"x": x})
     weight = np.ones_like(x)
-    weight[[1, 2, 4, 5, 9]] = 0.0
+    weight[[1, 2, 4, 5, 9]] = 2.0**-1030
+    weight[9] = 2.0**-1070  # the smallest weight sits in the last block
+    weight[[3, 6]] = 0.0  # weight zero is no event, even beside the subnormal rows
     model = SuperGLM(family="gaussian", features={"x": Numeric()}, retain_fit_state=False)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -127,10 +156,11 @@ def test_report_counts_across_blocks_and_bounds_examples_after_fit_state_release
     (advisory,) = _advisories(caught)
     assert "e.g." in str(advisory.message)
     restored = pickle.loads(pickle.dumps(model))
-    finding = _findings(restored)["zero_sample_weight"]
+    finding = _findings(restored)["subnormal_sample_weight"]
     assert finding == {"count": 5, "rows": (1, 2, 4)}
+    assert _findings(restored)["sample_weight_spread"]["rows"] == (9, 0)
     finding["count"] = 0
-    assert _findings(restored)["zero_sample_weight"]["count"] == 5
+    assert _findings(restored)["subnormal_sample_weight"]["count"] == 5
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         restored.fit(X, x + 0.1 * np.cos(x))
@@ -213,7 +243,7 @@ def test_each_fit_scans_once_without_changing_results(route, monkeypatch):
     X = pd.DataFrame({"x": x})
     y = np.sin(8.0 * x) + 0.1 * np.cos(125.0 * x)
     weight = np.ones_like(y)
-    weight[12] = 0.0
+    weight[12] = 2.0**-50
     reml = route.endswith("reml")
 
     def fit():
@@ -259,7 +289,7 @@ def test_each_fit_scans_once_without_changing_results(route, monkeypatch):
     (advisory,) = _advisories(caught)
     assert advisory.category is convergence.FitPrecisionWarning
     assert calls == [len(y)]
-    assert _findings(actual)["zero_sample_weight"]["rows"] == (12,)
+    assert _findings(actual)["sample_weight_spread"]["rows"] == (12, 0)
     if reml:
         assert reml_candidates and all(count == 0 for count in reml_candidates)
 
@@ -299,7 +329,7 @@ def test_nb_theta_mean_fits_leave_the_advisory_to_the_public_fit(route, monkeypa
     mu = np.exp(1.0 + np.sin(5.0 * x))
     y = rng.negative_binomial(2, 2 / (2 + mu)).astype(float)
     weight = np.ones_like(y)
-    weight[12] = 0.0
+    weight[12] = 2.0**-50
 
     scan = getattr(convergence, "_scan_initial_precision", None)
     scans = []
@@ -335,7 +365,7 @@ def test_nb_theta_mean_fits_leave_the_advisory_to_the_public_fit(route, monkeypa
     assert advisory.filename == __file__
     assert len(mean_fits) > 1 and all(count == 0 for count in mean_fits)
     assert scans == [len(y)]
-    assert _findings(actual)["zero_sample_weight"]["rows"] == (12,)
+    assert _findings(actual)["sample_weight_spread"]["rows"] == (12, 0)
 
     monkeypatch.setattr(convergence, "_scan_initial_precision", lambda *args: {})
     with warnings.catch_warnings(record=True) as caught:
@@ -416,7 +446,7 @@ def test_fit_path_does_not_scan_its_regularization_candidates(monkeypatch):
     X = pd.DataFrame({"x": x})
     y = np.sin(8.0 * x) + 0.1 * np.cos(125.0 * x)
     weight = np.ones_like(y)
-    weight[12] = 0.0
+    weight[12] = 2.0**-50  # an advisory event, were the path scanned
 
     def fit():
         model = SuperGLM(family="gaussian", features={"x": Numeric()})
