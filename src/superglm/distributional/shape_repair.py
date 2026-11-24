@@ -62,7 +62,9 @@ REPAIR_NEEDS_THE_ROWS = (
 # intercept by more than the objective's rounding (a plateau, as a saturated link's), its ends
 # differ from the start only in their last bits and give no direction: the search walks out
 # both ways in the same growing steps, to ``_INTERCEPT_WIDEST`` units, until one side falls by
-# more than that rounding (``_off_the_plateau``), and brackets downhill from there.
+# more than that rounding (``_off_the_plateau``), and brackets downhill from there. Every order
+# the walk acts on is read the same way, beyond the rounding of the two sums compared: a later
+# step level with the lowest point found is walked past as the start's plateau is.
 _INTERCEPT_SEARCH = 4.0
 # Each downhill step is the golden ratio times the last, ``mnbrak``'s default growth.
 _INTERCEPT_GROWTH = (1.0 + np.sqrt(5.0)) / 2.0
@@ -374,6 +376,11 @@ def _profiled_merit(
     def derivatives_at(t: float) -> tuple[float, tuple[float, float, float] | None]:
         return probe(t, True), slopes[t]
 
+    def rounding(t: float) -> float:
+        """The rounding the objective carries at ``t``, a sum of its rows (Higham, section
+        3.1): of their absolute sum, which a total that cancels does not show."""
+        return 4.0 * len(rows.response) * _UNIT_ROUNDOFF * sizes.get(t, 0.0)
+
     held = probe(0.0, newton)
     zero_failed = invalid[0.0]
     zero_invalid = None if zero_failed is None else int(np.count_nonzero(zero_failed))
@@ -384,8 +391,6 @@ def _profiled_merit(
         return 0.0, held + penalty, zero_invalid
     best = _newton_minimum(derivatives_at, start, unit, len(rows.response)) if newton else None
     if best is None:
-        # The objective's rounding at the start: a sum of its rows (Higham, section 3.1).
-        rounding = 4.0 * len(rows.response) * _UNIT_ROUNDOFF * sizes[start]
         best = _derivative_free_minimum(objective, start, unit, rounding=rounding)
     if best is None:
         from superglm.constraints import _InterceptSearchError
@@ -398,9 +403,9 @@ def _profiled_merit(
         )
     best_value = objective(best)
     # Where the held intercept leaves rows invalid, any finite optimum is the re-estimate.
-    # Otherwise two sums of one size: the rounding either can carry (Higham, section 3.1).
-    tolerance = 4.0 * len(rows.response) * _UNIT_ROUNDOFF * abs(held)
-    if np.isfinite(held) and not best_value < held - tolerance:
+    # Otherwise it is one lower by more than the rounding either sum can carry, on the scale
+    # the searches read theirs.
+    if np.isfinite(held) and not best_value < held - max(rounding(0.0), rounding(best)):
         return 0.0, held + penalty, 0
     return unit * best, best_value + penalty, 0
 
@@ -496,38 +501,54 @@ def _derivative_free_minimum(
     start: float,
     unit: float,
     *,
-    rounding: float | None = None,
+    rounding: float | Callable[[float], float] | None = None,
 ) -> float | None:
     """A minimum of ``objective`` from ``start`` by bracketing and Brent alone, or ``None``
     when the objective still falls where ``unit`` times the shift overflows.
 
-    ``rounding``, where given, is the objective's rounding at ``start``: where Brent's first
-    window holds nothing lower than the start by more than it, the walk leaves the plateau by
+    ``rounding``, where given, is the rounding the objective carries: one value, or a function
+    of the shift, as a sum's follows its rows' sizes. Two shifts are ordered only where their
+    values differ by more than the larger of theirs (``below``): which of two level values is
+    lower in its last bits depends on the BLAS build that formed them (Shi, Xie, Byrd and
+    Nocedal, arXiv:2010.04352, section 4.2: a decrease is one beyond twice the values' error).
+    Where Brent's first window holds nothing below the start, the walk leaves the plateau by
     ``_off_the_plateau`` rather than by the last bits of the window's ends, and where it finds
     no lower side the start is returned.
     """
+
+    def carried(shift: float) -> float:
+        # One value holds at every shift, and none is no rounding: the values' own order.
+        if rounding is None:
+            return 0.0
+        return rounding if isinstance(rounding, (int, float)) else rounding(shift)
+
+    def below(a: float, b: float) -> bool:
+        return objective(a) < objective(b) - max(carried(a), carried(b))
+
     lower = _finite_reach(objective, start, start - _INTERCEPT_SEARCH)
     upper = _finite_reach(objective, start, start + _INTERCEPT_SEARCH)
     best = _brent(objective, lower, upper, centre=start)
-    if rounding is not None and not objective(best) < objective(start) - rounding:
+    if rounding is not None and not below(best, start):
         # Nothing off the plateau is lower: the start is its minimum to rounding.
-        open_end = _off_the_plateau(objective, start, unit, rounding)
+        open_end = _off_the_plateau(objective, start, unit, below)
         if open_end is None:
             return start
     else:
-        # Brent's result is bracketed when it is lower than each end that is not a wall of
+        # Brent's result is bracketed when it is below each end that is not a wall of
         # invalid rows. Otherwise the optimum may lie beyond that end: walk out from it.
         edges = ((upper, start + _INTERCEPT_SEARCH), (lower, start - _INTERCEPT_SEARCH))
-        open_end = next(
-            (end for end, edge in edges if end == edge and objective(end) <= objective(best)),
-            None,
-        )
+        open_end = next((end for end, edge in edges if end == edge and not below(best, end)), None)
     if open_end is None:
         return best
-    bracket = _bracket(objective, start, open_end, unit)
+    bracket = _bracket(objective, start, open_end, unit, below)
     if bracket is None:
         return None
-    best = _brent(objective, *bracket, centre=start)
+    lower, lowest, upper = bracket
+    best = _brent(objective, lower, upper, centre=start)
+    if not below(best, lowest):
+        # Level with the walk's lowest point: one of a plateau's points, chosen by its last
+        # bits, where the walk's is the same on every build.
+        best = lowest
     # Brent's tolerance grows with the distance from ``centre``, so the optimum is
     # polished in coordinates centred on it. SciPy's bounded Brent stops with the
     # minimum within 4 * (sqrt(eps) |d| + xatol / 3) of its result.
@@ -538,20 +559,22 @@ def _derivative_free_minimum(
 
 
 def _off_the_plateau(
-    objective: Callable[[float], float], start: float, unit: float, rounding: float
+    objective: Callable[[float], float],
+    start: float,
+    unit: float,
+    below: Callable[[float, float], bool],
 ) -> float | None:
-    """The nearest shift whose objective is below ``start``'s by more than ``rounding``, walked
-    out both ways from ``start`` in steps growing by ``_INTERCEPT_GROWTH`` from
-    ``_INTERCEPT_SEARCH`` units; or ``None`` where each side first rises by more than
-    ``rounding``, meets a wall of invalid rows, or passes ``_INTERCEPT_WIDEST`` units or
-    float64's range.
+    """The nearest shift whose objective is below ``start``'s by more than their rounding
+    (``below(a, b)``: at ``a`` below ``b``), walked out both ways from ``start`` in steps
+    growing by ``_INTERCEPT_GROWTH`` from ``_INTERCEPT_SEARCH`` units; or ``None`` where each
+    side first rises by more than that rounding, meets a wall of invalid rows, or passes
+    ``_INTERCEPT_WIDEST`` units or float64's range.
 
     Each side is judged by differences larger than the objective's rounding, so the side the
     search leaves by does not depend on how one BLAS build rounds a flat objective. Where both
-    sides fall at one step, the upper is taken only where it is lower by more than
-    ``rounding``, else the side below the start.
+    sides fall at one step, the upper is taken only where it is lower by more than that
+    rounding, else the side below the start.
     """
-    level = objective(start)
     sides = [-1.0, 1.0]
     reach = _INTERCEPT_SEARCH
     while sides:
@@ -563,13 +586,12 @@ def _off_the_plateau(
                 sides.remove(side)
                 continue
             reached = _finite_reach(objective, start, edge)
-            value = objective(reached)
-            if value < level - rounding:
+            if below(reached, start):
                 fallen.append(reached)
-            elif reached != edge or value > level + rounding:
+            elif reached != edge or below(start, reached):
                 sides.remove(side)
         if fallen:
-            if len(fallen) == 2 and objective(fallen[1]) < objective(fallen[0]) - rounding:
+            if len(fallen) == 2 and below(fallen[1], fallen[0]):
                 return fallen[1]
             return fallen[0]
     return None
@@ -644,24 +666,38 @@ def _between_probes(
 
 
 def _bracket(
-    objective: Callable[[float], float], behind: float, near: float, unit: float
-) -> tuple[float, float] | None:
+    objective: Callable[[float], float],
+    behind: float,
+    near: float,
+    unit: float,
+    below: Callable[[float, float], bool],
+) -> tuple[float, float, float] | None:
     """An interval of finite values holding a minimum of ``objective``, walked downhill from
-    ``near``, away from ``behind``, or ``None`` when the objective still falls where ``unit``
-    times the shift overflows.
+    ``near``, away from ``behind``, with the lowest point the walk found between its ends; or
+    ``None`` when the objective still falls where ``unit`` times the shift overflows.
 
     Each step grows by ``_INTERCEPT_GROWTH`` (Press et al., section 10.1, ``mnbrak``) until the
-    objective rises, or a wall of invalid rows is met, where the finite optimum is taken.
+    objective rises, or a wall of invalid rows is met, where the finite optimum is taken. A
+    rise or a fall is one beyond the two values' rounding (``below``, as ``_off_the_plateau``
+    reads it). A step level with ``near``, the lowest point found, gives no order: the walk
+    goes past it, and ``near`` moves only to a step below it. A plateau still level
+    ``_INTERCEPT_WIDEST`` units on, or where float64's range ends, ends the walk.
     """
+    last, edge = behind, near  # the walk's last two points: ``edge`` passes ``near`` on a plateau
     while True:
-        far = near + _INTERCEPT_GROWTH * (near - behind)
-        if not np.isfinite(unit * far):
+        far = edge + _INTERCEPT_GROWTH * (edge - last)
+        in_range = bool(np.isfinite(unit * far))
+        if edge != near and not (in_range and abs(far - near) <= _INTERCEPT_WIDEST):
+            return min(behind, edge), near, max(behind, edge)
+        if not in_range:
             return None
-        reached = _finite_reach(objective, near, far)
-        if reached != far or objective(reached) >= objective(near):
+        reached = _finite_reach(objective, edge, far)
+        if reached != far or below(near, reached):
             # The objective rose, or the valid interval ends: the minimum lies in between.
-            return min(behind, reached), max(behind, reached)
-        behind, near = near, reached
+            return min(behind, reached), near, max(behind, reached)
+        if below(reached, near):
+            behind, near = near, reached
+        last, edge = edge, reached
 
 
 def _brent(objective: Callable[[float], float], lower: float, upper: float, *, centre: float):

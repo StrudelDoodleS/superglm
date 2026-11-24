@@ -1096,6 +1096,132 @@ def test_newtons_search_leaves_a_plateau_by_its_slope_whatever_its_last_bit(last
     assert _newton_minimum(probe, 0.0, 1.0, rows) == pytest.approx(-40.0, abs=1e-6)
 
 
+@pytest.mark.parametrize("last_bit", ["rises", "falls"])
+@pytest.mark.parametrize("start_on", ["plateau", "slope"])
+def test_the_intercept_search_crosses_a_later_plateau_by_more_than_its_rounding(start_on, last_bit):
+    # Past its first step the search still read its values by their last bits. At 1a25a5d66 a
+    # plateau met after that step ended the walk wherever a step came out no lower than the
+    # one before it, and Brent's window was taken to hold the optimum wherever its end came out
+    # a bit higher than its result: the plateau was published for an optimum beyond it. Forced:
+    # the search reaches a plateau from another above it, or down a slope inside Brent's window;
+    # off the first point it reaches there the plateau is one bit higher, or one bit lower;
+    # below -300 units the objective is a parabola, with its minimum at -400.
+    from superglm.distributional.shape_repair import _derivative_free_minimum
+
+    level, rounding = 90.0, 1e-12
+    bit = np.spacing(level) * (1.0 if last_bit == "rises" else -1.0)
+    edge, first = (-30.0, -50.0) if start_on == "plateau" else (-2.0, -4.0)
+
+    def objective(t: float) -> float:
+        if t < -300.0:
+            return level + (t + 400.0) ** 2 / 1000.0 - 10.0
+        if t < edge:
+            return level if t > first else level + bit
+        return level + 10.0 if start_on == "plateau" else level + 5.0 * (t - edge)
+
+    best = _derivative_free_minimum(objective, 0.0, 1.0, rounding=rounding)
+    assert best == pytest.approx(-400.0, abs=1e-4)
+
+
+def test_the_intercept_search_leaves_a_plateau_with_no_end_at_its_first_step():
+    # A likelihood that saturates below the start has no minimum beyond its plateau. At
+    # 1a25a5d66 the walk went on for as long as each step came out lower in its last bits, and
+    # published wherever they stopped falling. Forced: below -30 units the objective is level,
+    # one bit lower at each doubling of the shift as far as -1024; the bracket closed between
+    # -724 and -2013 units. The plateau is now walked for 2**20 units, in growing steps, and
+    # with nothing lower found the search ends where it met the plateau: its fifth step of
+    # the golden ratio from Brent's window of 4 units.
+    from superglm.distributional.shape_repair import _derivative_free_minimum
+
+    level, rounding = 90.0, 1e-12
+    reads: set[float] = set()
+
+    def objective(t: float) -> float:
+        reads.add(t)
+        if t < -30.0:
+            return level - np.spacing(level) * min(int(np.log2(-t)), 10)
+        return level + 10.0
+
+    best = _derivative_free_minimum(objective, 0.0, 1.0, rounding=rounding)
+    assert best == pytest.approx(-4.0 * ((1.0 + np.sqrt(5.0)) / 2.0) ** 5, abs=1e-5)
+    # the plateau's walk is logarithmic in its length, and Brent's two runs do not depend on it
+    assert len(reads) <= 200
+
+
+def _shift_taken(log_likelihoods, derivatives=None) -> float:
+    """The intercept shift ``_profiled_merit`` takes for a lone parameter on the identity link
+    whose rows have log-likelihoods ``log_likelihoods(t)`` at the shift ``t``. With
+    ``derivatives(t)``, their slopes and curvatures in it, Newton's search runs; without, the
+    link has no second derivative and the derivative-free search does."""
+    from types import SimpleNamespace
+
+    from superglm.distributional.shape_repair import _profiled_merit
+
+    def evaluate_natural(response, theta, plan, *, derivative_order):
+        t = float(theta[0, 0])
+        score, hessian = derivatives(t) if derivatives else ([], [])
+        return SimpleNamespace(
+            optimizing_log_likelihood=np.array(log_likelihoods(t)),
+            valid=None,
+            score=np.array(score)[:, None],
+            hessian_packed=np.array(hessian)[:, None],
+        )
+
+    link = SimpleNamespace(deriv_inverse=np.ones_like)
+    if derivatives:
+        link.deriv2_inverse = np.zeros_like
+    predictor = SimpleNamespace(name="mean", link=link, intercept_index=0)
+    fitted = SimpleNamespace(
+        family=SimpleNamespace(bind_likelihood=lambda *_: None, evaluate_natural=evaluate_natural),
+        layout=SimpleNamespace(predictor=lambda name: predictor, predictors=[predictor]),
+        result=SimpleNamespace(penalty=np.zeros((1, 1))),
+        parameter_from_eta=lambda eta, index: eta[:, index],
+    )
+    n = len(log_likelihoods(0.0))
+    rows = SimpleNamespace(response=np.zeros(n), likelihood_weights=None, observation=None)
+    eta = np.zeros((n, 1))
+    return _profiled_merit(fitted, rows, None, np.zeros(1), "mean", 1.0, eta_base=eta)[0]
+
+
+def test_a_shift_lower_in_its_last_bit_is_not_taken_where_the_rows_cancel():
+    # A re-estimate is taken where it is lower than the held intercept by more than the
+    # rounding of the two sums. At 1a25a5d66 that rounding was scaled by the total, where the
+    # searches scale theirs by the rows' absolute sum: with log-likelihoods above and below
+    # zero the total cancels, the allowance fell inside the sum's rounding, and a shift level
+    # with the held intercept was published or not by its last bit. Forced: rows of 1024 and
+    # -1024 and one of their last places, which puts the likelihood one bit higher a unit up,
+    # where its slope is zero; the two sums can carry twelve.
+    bit = np.spacing(1024.0)
+
+    def log_likelihoods(t: float) -> list[float]:
+        return [1024.0, -1024.0, bit if t == 1.0 else 0.0]
+
+    def derivatives(t: float) -> tuple[list[float], list[float]]:
+        return [0.0, 0.0, 8.0 * bit * (1.0 - t)], [0.0, 0.0, -8.0 * bit]
+
+    assert _shift_taken(log_likelihoods, derivatives) == 0.0
+
+
+def test_a_later_plateau_is_read_by_the_rounding_of_its_own_sums():
+    # A sum's rounding follows its rows' sizes, which change along the search. Here the rows
+    # at the held intercept do not cancel and their sum carries 1e-13, while below -30 units
+    # rows of 2**20 and -2**20 do and theirs carries 3e-9. A step along that plateau one bit
+    # of 2**20 higher (2e-10) is a rise by the start's rounding, as it was by strict order at
+    # 1a25a5d66, where the walk ended on it and -44.36 was published; by the rounding of the two
+    # sums compared it is level, and the walk goes on to the minimum 400 units down.
+    big = 2.0**20
+    bit = np.spacing(big)
+
+    def log_likelihoods(t: float) -> list[float]:
+        if t >= -30.0:
+            return [0.0, 0.0, -100.0]
+        if t >= -300.0:
+            return [big, -big, -90.0 if t > -50.0 else -90.0 - bit]
+        return [big, -big, -80.0 - (t + 400.0) ** 2 / 1000.0]
+
+    assert _shift_taken(log_likelihoods) == pytest.approx(-400.0, abs=1e-2)
+
+
 def test_a_probe_whose_likelihood_overflows_is_a_wall_of_the_intercept_search():
     # Sol's case: the scale's offset runs from -100 to 0, so a trial shift of the scale
     # intercept far enough down overflows the Gaussian likelihood. At 19a6ab028 that raised
