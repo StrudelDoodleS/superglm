@@ -29,7 +29,7 @@ declaration, whose generated code cancels: the direct gamma reaches
 ``A = 2.6e4 S`` in the tails and ``1.9e5 S`` in the body.  The log CDF is
 exempt, because its cancellation is the one the model carries.
 
-Measured on this grid (x86-64 Linux, glibc, AMD EPYC 9645):
+Measured on the representable entries at daf11a862 (x86-64 Linux, glibc, AMD EPYC 9645):
 - ``err / (u A)`` is at most 0.65, natural and link scale.
 - ``A / S`` is at most 623 for the log density and log survival (the
   mean-form Weibull at order 4).
@@ -37,15 +37,14 @@ Measured on this grid (x86-64 Linux, glibc, AMD EPYC 9645):
   natural-scale log-CDF Hessian reaches 201 (body) and 1.9e5 (tail), the
   values issue #564 reports, and 4.9e11 at order 4 in the 1e-100 left tail.
 
-``_UNREPRESENTED`` lists the entries whose generated evaluation leaves the
-float64 range.  There ``r^4`` overflows and ``softplus^4`` underflows,
-though their product is moderate, and the kernel returns 0 for the fourth
-log-CDF derivative of Burr XII and Lomax at ``F = 1e-100``.  A strict xfail
-holds them until a stable primitive removes it.
+The Lomax and Burr XII log CDFs compose in log cumulative hazard. Their
+deep-left natural and log-coordinate derivatives have an additional independent
+check against differentiation of the textbook CDF.
 """
 
 from __future__ import annotations
 
+import inspect
 import itertools
 import math
 import re
@@ -67,7 +66,6 @@ from tests import _severity_fixtures as sf  # noqa: E402
 C = 2.0
 Q = 1024.0
 FLOOR = 1e-300
-_UNREPRESENTED = {("burr12", "logcdf", 4, "F=1e-100"), ("lomax", "logcdf", 4, "F=1e-100")}
 _DECLARATIONS = {
     d.name: d for d in (*sf.FAMILIES, sf.G.GAMMA, sf.NAIVE_GAMMA, sf.ENGINE_LAW, sf.CLOSED_LAW)
 }
@@ -161,10 +159,8 @@ def _grid(name, built):
 def _gate(entries, name):
     failures = []
     for law, order, cell, label, got, exact, a, _ in entries:
-        if (name, law, order, label) in _UNREPRESENTED:
-            continue
         if not (math.isfinite(got) and abs(mp.mpf(float(got)) - exact) <= C * sf.U * a + FLOOR):
-            failures.append((law, order, cell, label, got, mp.nstr(exact, 8), mp.nstr(a, 4)))
+            failures.append((name, law, order, cell, label, got, mp.nstr(exact, 8), mp.nstr(a, 4)))
     return failures
 
 
@@ -190,19 +186,52 @@ def test_a_textbook_gamma_fails_the_quality_check(built) -> None:
     assert worst > 10 * Q
 
 
-@pytest.mark.xfail(
-    strict=True, reason="fourth log-CDF derivatives leave float64 range at F = 1e-100"
-)
 @pytest.mark.parametrize("name", ["burr12", "lomax"])
-def test_deep_left_tail_fourth_log_cdf_derivatives(name: str, built) -> None:
-    mp.mp.dps = 60
-    entries = [
-        entry
-        for entry in _grid(name, built)
-        if (name, entry[0], entry[1], entry[3]) in _UNREPRESENTED
-    ]
-    assert entries
-    assert _gate(entries, None) == []
+def test_deep_left_tail_fourth_log_cdf_derivatives(name: str, built, tmp_path) -> None:
+    """Every packed partial of the textbook law, in natural and log coordinates."""
+    from dataclasses import replace
+
+    from tests._declared_scalar_oracles import assert_scaled_jets, jets
+
+    theta = (1.0, 2.0) if name == "lomax" else (1.0, 2.0, 2.0)
+    y = 5e-101 if name == "lomax" else math.sqrt(5e-101)
+    for coordinates in ("natural", "log"):
+        if coordinates == "natural":
+            module, _ = built(name)
+            point, units = theta, theta
+        else:
+            declaration = replace(_DECLARATIONS[name], coordinates="log", name=name + "_log")
+            module, _ = sf.build(declaration, tmp_path)
+            point, units = np.log(theta), np.ones(len(theta))
+
+        def law(*args):
+            s, *middle, k = map(mp.exp, args) if coordinates == "log" else args
+            power = middle[0] if middle else 1
+            return mp.log(-mp.expm1(-k * mp.log1p((mp.mpf(y) / s) ** power)))
+
+        reference = jets(law, point, 4)
+        # The pure shape partial is -0.375 in natural units and about -5e-101
+        # on the link. Resolve the latter even when another channel is O(1).
+        with mp.workdps(180):
+            anchor = tuple(mp.mpf(float(p)) for p in point)
+            fourth = float(mp.diff(lambda k: law(*anchor[:-1], k), anchor[-1], 4))
+        for order in (4, 0, 1, 2, 3):
+            actual, valid = law_jets(module, "logcdf", order, [y], [point])
+            assert valid.all()
+            if order == 4:
+                np.testing.assert_allclose(
+                    actual[4][0, -1], fourth, rtol=16 * sf.U * abs(math.log(y)), atol=0
+                )
+            assert_scaled_jets(actual, reference[: order + 1], units)
+
+
+@pytest.mark.parametrize("name", ["lomax", "burr12"])
+def test_log_hazard_kernels_share_one_ordered_call_per_argument(name, built):
+    module, _ = built(name)
+    code = inspect.getsource(module.logcdf.py_func)
+    for callee in ("logsoftplus_01234", "log1mexp_exp_01234"):
+        calls = [line for line in code.splitlines() if f"{callee}(" in line]
+        assert len(calls) == 1 and calls[0].endswith(", order)")
 
 
 @pytest.mark.parametrize("name", [d.name for d in (*sf.FAMILIES, sf.G.GAMMA)])

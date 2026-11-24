@@ -12,14 +12,14 @@ from math import exp, expm1, lgamma, log, log1p, sqrt
 import numpy as np
 from numba import njit
 
-from superglm.distributional.kernels._severity_primitives import expit, invexpm1, log1mexp, logratio, softplus
+from superglm.distributional.kernels._severity_primitives import expit, log1mexp_exp_01234, logratio, logsoftplus_01234, softplus
 
 PARAMETERS = ('scale', 'shape')
 DATA = ()
 COORDINATES = 'natural'
 LAWS = ('density', 'logsf', 'logcdf')
 MAX_ORDER = 4
-PRIMITIVES_DIGEST = "e420b48fd73eccabe52d97ceb47d06588158bbc885e9482cfabbfed36f6b5c58"
+PRIMITIVES_DIGEST = "f4e1e71de6e62a35536be2de7f21d2069fdb5a4bc9a56659cf0340ec0c54ae37"
 ENGINES_DIGEST = ""
 
 @njit(cache=True, nogil=True, error_model='numpy')
@@ -107,74 +107,47 @@ def logcdf(Y, P0, P1, order, J0, J1, J2, J3, J4):
         y = Y[i]
         p0 = P0[i]
         p1 = P1[i]
-        t0 = logratio(y, p0)
-        t1 = softplus(t0)
-        t2 = p1*t1
-        J0[i] = log1mexp(t2)
+        c1_0, c1_1, c1_2, c1_3, c1_4 = logsoftplus_01234(logratio(y, p0), order)
+        c0_0, c0_1, c0_2, c0_3, c0_4 = log1mexp_exp_01234(c1_0 + log(p1), order)
+        J0[i] = c0_0
         if order >= 1:
-            t3 = (1.0 / (p0))
-            t4 = invexpm1(t2)
-            t5 = expit(t0)
-            t6 = t4*t5
-            t7 = t3*t6
-            t8 = t1*t4
-            J1[i, 0] = -p1*t7
-            J1[i, 1] = t8
+            t0 = (1.0 / (p0))
+            t1 = c0_1*c1_1
+            t2 = (1.0 / (p1))
+            J1[i, 0] = -t0*t1
+            J1[i, 1] = c0_1*t2
             if order >= 2:
-                t9 = t4 + 1.0
-                t10 = p1*t9
-                t11 = t10*t5
-                t12 = expit(-t0)
-                t13 = t12 + 1.0
-                t14 = (1.0 / (p0 * p0))
-                t15 = t14*t6
-                t16 = t2*t9
-                t17 = (t1 * t1)
-                t18 = t17*t4*t9
-                J2[i, 0] = p1*t15*(-t11 + t13)
-                J2[i, 1] = t7*(t16 - 1.0)
-                J2[i, 2] = -t18
+                t3 = (1.0 / (p0 * p0))
+                t4 = c0_1*c1_2
+                t5 = (c1_1 * c1_1)
+                t6 = c0_2*t5
+                t7 = c0_2*c1_1
+                t8 = (1.0 / (p1 * p1))
+                J2[i, 0] = t3*(t1 + t4 + t6)
+                J2[i, 1] = -t0*t2*t7
+                J2[i, 2] = t8*(-c0_1 + c0_2)
                 if order >= 3:
-                    t19 = (t9 * t9)
-                    t20 = (t5 * t5)
-                    t21 = (p1 * p1)
-                    t22 = t20*t21
-                    t23 = t19*t22
-                    t24 = t4*t9
-                    t25 = t22*t24
-                    t26 = (t12 * t12)
-                    t27 = 3.0*t12
-                    t28 = -t12*t5 + t26 + t27 + 2.0
-                    t29 = t6/(p0 * p0 * p0)
-                    t30 = 2.0*t5
-                    t31 = t21*t5
-                    t32 = t19*t31
-                    t33 = t1*t32
-                    t34 = t8*t9
-                    t35 = t31*t34
-                    t36 = t3*t5
-                    J3[i, 0] = p1*t29*(3.0*p1*t12*t5*t9 + 3.0*p1*t5*t9 - t23 - t25 - t28)
-                    J3[i, 1] = t15*(-t10*t30 - t12*t16 + t13 - t16 + t33 + t35)
-                    J3[i, 2] = t34*t36*(-t16 - t2*t4 + 2.0)
-                    J3[i, 3] = (t1 * t1 * t1)*t24*(2.0*t4 + 1.0)
+                    t9 = (1.0 / (p0 * p0 * p0))
+                    t10 = c0_1*c1_3
+                    t11 = (c1_1 * c1_1 * c1_1)
+                    t12 = c0_3*t11
+                    t13 = c1_2*t7
+                    t14 = c0_2*c1_2
+                    t15 = c0_3*t5
+                    t16 = t14 + t15 + t7
+                    t17 = c1_1*t0
+                    t18 = (1.0 / (p1 * p1 * p1))
+                    t19 = 3.0*c0_2
+                    J3[i, 0] = -t9*(2.0*t1 + t10 + t12 + 3.0*t13 + 3.0*t4 + 3.0*t6)
+                    J3[i, 1] = t16*t2*t3
+                    J3[i, 2] = t17*t8*(c0_2 - c0_3)
+                    J3[i, 3] = t18*(2.0*c0_1 + c0_3 - t19)
                     if order >= 4:
-                        t37 = t12*t5
-                        t38 = t12*t20
-                        t39 = 4.0*t5
-                        t40 = (t9 * t9 * t9)
-                        t41 = (p1 * p1 * p1)
-                        t42 = t41*(t5 * t5 * t5)
-                        t43 = 6.0*t4
-                        t44 = t43*t9
-                        t45 = t21*t38
-                        t46 = (t4 * t4)
-                        t47 = 4.0*t4
-                        t48 = 2.0*t1
-                        J4[i, 0] = p1*t6*(-18.0*t10*t37 + 4.0*t10*t38 - 7.0*t11*t26 - 11.0*t11 + (t12 * t12 * t12) + 11.0*t12 - t19*t42*t47 + 6.0*t19*t45 + t22*t44 + 6.0*t23 - t26*t39 + 6.0*t26 - 6.0*t37 + t38 - t40*t42 - t42*t46*t9 + t44*t45 + 6.0)/(p0 * p0 * p0 * p0)
-                        J4[i, 1] = t29*(3.0*p1*t1*t12*t9 + p1*t1*t26*t9 + 2.0*p1*t1*t9 + 6.0*p1*t12*t5*t9 + 6.0*p1*t5*t9 + 4.0*t1*t19*t20*t4*t41 + t1*t20*t40*t41 + t1*t20*t41*t46*t9 - t16*t37 - 3.0*t23 - 3.0*t25 - t27*t33 - t27*t35 - t28 - 3.0*t33 - 3.0*t35)
-                        J4[i, 2] = t14*t24*t5*(4.0*p1*t1*t4*t5 + 4.0*p1*t1*t5*t9 + p1*t12*t17*t4 + p1*t12*t17*t9 + p1*t17*t4 + p1*t17*t9 - t12*t48 - t17*t31*t46 - t17*t32 - t18*t21*t39 - t30 - t48)
-                        J4[i, 3] = t18*t36*(t16*t47 + t19*t2 + t2*t46 - t43 - 3.0)
-                        J4[i, 4] = -(t1 * t1 * t1 * t1)*t24*(t19 + 4.0*t24 + t46)
+                        J4[i, 0] = (c0_1*c1_4 + c0_4*(c1_1 * c1_1 * c1_1 * c1_1) + (c1_2 * c1_2)*t19 + 6.0*c1_2*t15 + 4.0*c1_3*t7 + 6.0*t1 + 6.0*t10 + 6.0*t12 + 18.0*t13 + 11.0*t4 + 11.0*t6)/(p0 * p0 * p0 * p0)
+                        J4[i, 1] = -t2*t9*(c0_2*c1_3 + 3.0*c0_3*c1_1*c1_2 + c0_4*t11 + 3.0*t14 + 3.0*t15 + 2.0*t7)
+                        J4[i, 2] = t3*t8*(c0_3*c1_1 + c0_3*c1_2 + c0_4*t5 - t16)
+                        J4[i, 3] = t17*t18*(-2.0*c0_2 + 3.0*c0_3 - c0_4)
+                        J4[i, 4] = (-6.0*c0_1 + 11.0*c0_2 - 6.0*c0_3 + c0_4)/(p1 * p1 * p1 * p1)
 
 
 @njit(cache=True, nogil=True, error_model='numpy')
