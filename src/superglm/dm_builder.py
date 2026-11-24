@@ -1232,7 +1232,7 @@ def build_design_matrix(
         own_specs=False,
         separation_response=y,
         eigenbasis_turn=eigenbasis_turn,
-        term_coordinates=True,
+        term_coordinates=eigenbasis_turn,
     )
     separation_records = compiled.separation_records
     from superglm.features.categorical import Categorical

@@ -466,6 +466,35 @@ def test_finite_extreme_knots_can_fit_an_integrated_spline():
     np.testing.assert_allclose(model.predict(frame), y, atol=0.05, rtol=0)
 
 
+@pytest.mark.pins_behaviour
+def test_elementwise_selection_keeps_the_declared_spline_coordinates():
+    """Pin the fitted curve for L1 acting on the original constrained columns."""
+    from superglm.features.spline import CubicRegressionSpline
+    from superglm.penalties import SparseGroupLasso
+
+    class DeclaredBasis(CubicRegressionSpline):
+        """Use the ordinary declared columns with no analytic null-space rotation."""
+
+    x = np.linspace(0, 1, 200)
+    frame = pd.DataFrame({"x": x})
+    y = 1 + np.sin(6 * x) + 0.1 * np.random.default_rng(8).normal(size=x.size)
+
+    def predict(spec):
+        model = SuperGLM(
+            family="gaussian",
+            penalty=SparseGroupLasso(lambda1=0.1, alpha=0.8),
+            spline_penalty=0.1,
+            discrete=False,
+            features={"x": spec},
+        ).fit(frame, y)
+        return model.predict(frame)
+
+    options = {"n_knots": 8, "penalty": "none"}
+    np.testing.assert_allclose(
+        predict(Spline(kind="cr", **options)), predict(DeclaredBasis(**options)), atol=1e-10, rtol=0
+    )
+
+
 def _closed_form_large_lambda_reml_objective(spec, x: np.ndarray, y: np.ndarray) -> float:
     """Exact Gaussian REML objective in the ``lambda -> inf`` limit of SSP coordinates.
 
