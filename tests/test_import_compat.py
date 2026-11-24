@@ -338,32 +338,19 @@ for path, module in zip(paths, modules, strict=True):
 """
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize(
     "paths",
     [
         ("terms", "model.api"),
         ("terms", "inference._term_covariance"),
-        pytest.param(
-            (
-                "terms",
-                "model.api",
-                "inference._term_covariance",
-                "inference._term_ops",
-                "features.categorical",
-                "features.interaction",
-            ),
-            marks=pytest.mark.xfail(
-                sys.version_info >= (3, 13, 16),
-                reason=(
-                    "CPython 3.13.16+ and 3.14 make a submodule import wait on its parent while "
-                    "holding its own lock (python/cpython#160045), which closes a cycle inside "
-                    "SciPy (scipy.linalg against scipy.special) when two threads enter it by "
-                    "different submodules. superglm's own cycles are covered by the two forced "
-                    "tests; taking SciPy's locks in a fixed order is the #600 follow-up."
-                ),
-                strict=False,
-            ),
-            id="six-submodules",
+        (
+            "terms",
+            "model.api",
+            "inference._term_covariance",
+            "inference._term_ops",
+            "features.categorical",
+            "features.interaction",
         ),
     ],
     ids=["model-api", "term-covariance", "six-submodules"],
@@ -373,6 +360,12 @@ def test_cold_submodule_imports_from_several_threads(paths):
 
     On Python 3.12 and 3.13, restoring the typing-first import in terms enters
     NumPy's typing code while the root is running. Both then need the other's lock.
+
+    Pins behaviour that already held: the NumPy overlap fixed in #714. The six-submodule case
+    also lets its threads meet on the way into SciPy, NumPy's random and Numba, which before
+    ``_ENTER_FIRST`` failed by chance (17 of 200 hash seeds on 3.14);
+    ``test_a_cold_import_waits_for_a_package_that_another_thread_is_entering`` forces each of
+    those meetings and fails on the parent commit every time.
     """
     completed = subprocess.run(
         [sys.executable, "-c", _COLD_SUBMODULE_IMPORTS, *paths],
