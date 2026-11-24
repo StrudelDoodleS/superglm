@@ -506,13 +506,6 @@ class EditorWidget:
                 return None, expected
             if not source.edits:
                 return self.session.model, source
-            cached = self.session.cached_materialized_model(
-                self.session.edit_epoch,
-                model_revision=self.session.model_revision,
-                base_model=self.session.model,
-            )
-            if cached is not None:
-                return cached, source
             request = self.session.capture_materialization_request()
             assert request is not None
 

@@ -147,6 +147,51 @@ def test_only_the_first_statistics_reader_quotes_training_rows(monkeypatch, tmp_
         assert calls.count(len(TRAIN)) == 1
 
 
+@pytest.mark.parametrize("reader", ["summary", "save", "widget-export"])
+@pytest.mark.parametrize("source", ["retained-frame", "supplied-response"])
+def test_training_statistics_readers_revalidate_cached_rows(tmp_path, reader, source):
+    if source == "retained-frame":
+        X = pd.DataFrame({"x": np.linspace(0.0, 1.0, 20)})
+        model = SuperGLM(family="gaussian", selection_penalty=0, features={"x": Numeric()}).fit(
+            X, X.x**2
+        )
+        session = edit(model)
+        term, index, delta = "x", 0, 0.5
+    else:
+        y = TRAIN_Y.copy()
+        session = edit(editor_fit(), train_data=(TRAIN, y))
+        term, index, delta = "a", 1, 0.01
+
+    path = tmp_path / "edited.joblib"
+    with closing(session.widget()) as widget:
+        widget._drag(term, [index], delta=delta)
+        before = widget._summary("in_force")["compact"]["model"]["deviance"]
+
+        def read_deviance():
+            if reader == "summary":
+                return widget._summary("in_force")["compact"]["model"]["deviance"]
+            if reader == "save":
+                return joblib.load(session.save_model(path)).result.deviance
+            return joblib_load_bytes(widget._export_bytes("joblib").data).result.deviance
+
+        if source == "retained-frame":
+            X.loc[0, "x"] = 0.25
+            with pytest.raises(RuntimeError, match="retained fit data were mutated") as fresh:
+                session.to_model()
+            with pytest.raises(RuntimeError, match="retained fit data were mutated") as cached:
+                read_deviance()
+            assert str(cached.value) == str(fresh.value)
+            assert not path.exists()
+        else:
+            y *= 2
+            fresh = session.to_model()
+            ratio = y / fresh.predict(TRAIN)
+            expected = 2 * np.sum(ratio - 1 - np.log(ratio))
+            assert before == pytest.approx(8.6460479104878)
+            assert expected == pytest.approx(27.857217076783584)
+            assert read_deviance() == pytest.approx(expected)
+
+
 def test_late_training_summary_cannot_replace_newer_training_evidence(monkeypatch):
     from superglm.editor import apply as apply_module
 

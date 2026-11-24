@@ -150,6 +150,7 @@ def apply_edits_to_model_copy_with_data(
     offset=None,
     keep_pinned: bool = False,
     statistics_fallback: str | None = None,
+    frame: EagerFrame | None = None,
 ):
     """Return a deep-copied model and refresh scalar fit stats if data is available.
 
@@ -197,6 +198,7 @@ def apply_edits_to_model_copy_with_data(
     try:
         scored = _refresh_fit_statistics(
             edited_model,
+            frame=frame,
             X=X,
             y=y,
             sample_weight=sample_weight,
@@ -251,8 +253,54 @@ def model_for_split_scoring(model, terms: dict[str, EditableTerm]):
     return _stage_glm_revision(copied, changed_terms, keep_pinned=False).model
 
 
-def materialize_edit_request(request):
-    """Construct an edited model from an immutable session snapshot."""
+def statistics_scoring_data(request):
+    """Fingerprint scoring inputs and share their operation-local frame with scoring.
+
+    A fingerprint of None leaves the request uncached. Scoring itself gives the
+    usual validation error if these inputs are invalid.
+    """
+    from superglm._frame import as_eager_frame
+    from superglm.model.fit_data_guard import _numeric_vector_digest
+    from superglm.model.fit_ops import _required_fit_columns
+    from superglm.model.input_validation import _finite_vector
+
+    model, dataset = request.base_model, request.dataset
+    if dataset is None or is_lss(model):
+        return None, ()
+    frame = None
+    try:
+        frame = as_eager_frame(dataset.X)
+        columns = tuple(dict.fromkeys((*model._feature_order, *_required_fit_columns(model))))
+        uses_retained = dataset.X is getattr(model, "_fit_X_ref", None) and dataset.y is getattr(
+            model, "_fit_y_ref", None
+        )
+        if uses_retained and (guard := getattr(model, "_fit_data_guard", None)) is not None:
+            guarded = guard.x_columns
+            columns = None if guarded is None else tuple(dict.fromkeys((*guarded, *columns)))
+        vectors = tuple(
+            None
+            if value is None
+            else _numeric_vector_digest(_finite_vector(name, value, len(frame), check_finite=False))
+            for name, value in (
+                ("y", dataset.y),
+                ("sample_weight", dataset.sample_weight),
+                ("offset", dataset.offset),
+            )
+        )
+        return frame, (
+            dataset.name,
+            dataset.source,
+            uses_retained,
+            frame.backend,
+            frame.digest(columns),
+            vectors,
+        )
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError):
+        return frame, None
+
+
+def materialize_edit_request(request, *, frame: EagerFrame | None = None):
+    """Construct an edited model from the captured session state."""
     kwargs = {}
     if request.dataset is not None:
         kwargs = {
@@ -265,6 +313,7 @@ def materialize_edit_request(request):
         request.base_model,
         request.terms,
         statistics_fallback=request.statistics_fallback,
+        frame=frame,
         **kwargs,
     )
 
