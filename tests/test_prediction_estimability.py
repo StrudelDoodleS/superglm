@@ -61,8 +61,15 @@ ALIASED_NEW = pd.DataFrame(
     {"x1": [1.0, 1.0, 2.0, 0.5], "x2": [5.0, 6.0, 7.0, 2.0], "f": ["A", "B", "C", "D"]}
 )
 
+# REML's default stop leaves a by-level spline's smoothing parameters to about 3e-6
+# relative, where its criterion is flat, and that moves a price by 1e-8: master's default
+# price sits 3.4e-9 from its own converged one. The spline's ``fit_reml`` price is fitted
+# and recorded at these tolerances, where master's two kernels agree to 1.4e-14 relative.
+CONVERGED_REML = {"reml_tol": 1e-12, "pirls_tol": 1e-12, "max_reml_iter": 400}
+
 # master (bfff7a074)'s ``predict`` on ROW_J_NEW and ALIASED_NEW, as float.hex (native
-# OpenBLAS; master's own Haswell values differ by at most 1.3e-12 relative)
+# OpenBLAS; master's own Haswell values differ by at most 1.3e-12 relative). The spline's
+# ``fit_reml`` row is master (daf11a862)'s at ``CONVERGED_REML``.
 MASTER_PRICES = {
     ("numeric", "fit"): [
         "0x1.ff76266bff2d6p-1",
@@ -86,11 +93,11 @@ MASTER_PRICES = {
         "0x1.bb027f00887e8p-1",
     ],
     ("spline", "fit_reml"): [
-        "0x1.ff76266bff2d1p-1",
-        "0x1.0368ce18b7269p+0",
-        "0x1.121eb5112a7c2p+0",
-        "0x1.00425a81e50e1p+0",
-        "0x1.cdf5cce3b3ea6p-1",
+        "0x1.ff76266bff2d2p-1",
+        "0x1.0368ce116321ap+0",
+        "0x1.121eb50bb1ab9p+0",
+        "0x1.00425a8fa85bap+0",
+        "0x1.cdf5ccfdc7202p-1",
     ],
     ("aliased", "fit"): [
         "0x1.66a690271d49bp-1",
@@ -111,7 +118,7 @@ def _master(key):
     return np.array([float.fromhex(v) for v in MASTER_PRICES[key]])
 
 
-def _fit(X, y, features, interactions=(), *, method="fit", family=None, **kwargs):
+def _fit(X, y, features, interactions=(), *, method="fit", family=None, fit_kwargs=None, **kwargs):
     model = SuperGLM(
         family=family or superglm.families.gamma(),
         link="log",
@@ -121,15 +128,16 @@ def _fit(X, y, features, interactions=(), *, method="fit", family=None, **kwargs
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        getattr(model, method)(X, y)
+        getattr(model, method)(X, y, **(fit_kwargs or {}))
     return model
 
 
 X_SPECS = {"numeric": Numeric, "spline": lambda: Spline(n_knots=6)}
 
 
-def _row_j(x_name, method):
-    return _fit(ROW_J, Y, {"x": X_SPECS[x_name](), "f": Categorical()}, [("x", "f")], method=method)
+def _row_j(x_name, method, **fit_kwargs):
+    features = {"x": X_SPECS[x_name](), "f": Categorical()}
+    return _fit(ROW_J, Y, features, [("x", "f")], method=method, fit_kwargs=fit_kwargs)
 
 
 def _disclosures(call):
@@ -165,6 +173,7 @@ def _aliased():
     return X, y, features
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("method", ["fit", "fit_reml"])
 @pytest.mark.parametrize("x_name", list(X_SPECS))
 def test_row_j_off_its_level_value_is_warned_at_masters_price(x_name, method):
@@ -172,9 +181,12 @@ def test_row_j_off_its_level_value_is_warned_at_masters_price(x_name, method):
 
     ``rows`` names 1 and 2 only.  The price is master's to ``1e-9`` relative:
     every row, the off-span ones included, whose value is the fit's gauge.
-    The fit's own rows sit on the span with the other new rows.
+    The fit's own rows sit on the span with the other new rows.  The spline's
+    REML price is compared at REML's optimum (``CONVERGED_REML``), which does
+    not depend on where the default stop lands.
     """
-    model = _row_j(x_name, method)
+    converged = CONVERGED_REML if (x_name, method) == ("spline", "fit_reml") else {}
+    model = _row_j(x_name, method, **converged)
     mu, found = _disclosures(lambda: model.predict(ROW_J_NEW))
     assert len(found) == 1
     assert found[0].rows.tolist() == [1, 2]
