@@ -828,6 +828,8 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                 recorder.debug_row(self, it)
 
             if self.step_rejected:
+                if self.termination_reason == "continue":
+                    continue
                 logger.warning(
                     "IRLS direct rejected all trial steps at iter=%d; restored committed state",
                     it + 1,

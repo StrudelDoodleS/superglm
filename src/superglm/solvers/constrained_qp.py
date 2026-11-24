@@ -101,6 +101,8 @@ class QPResult:
     method: str = ""
     condition: float = 0.0
     used_svd_fallback: bool = False
+    # Number of active-set loops that ran to exhaustion, including retries.
+    _budget_hits: int = 0
 
 
 def _null_space_mass(decomposition: RankDecomposition, g: NDArray) -> tuple[float, float]:
@@ -687,6 +689,15 @@ def _coordinate_face_minimum(H: NDArray, g: NDArray, A: NDArray, b: NDArray) -> 
                 candidate[pivots[:k]] = _solve_triangular(
                     triangular, q.T @ (b - A[:, pivots[k:]] @ free), check_finite=False
                 )
+            # The global QR may mix equations from blocks of very different
+            # magnitudes. Refine the basic coordinates in the original
+            # equations when their residual exceeds dot-product roundoff.
+            if np.any(np.abs(_feasibility_slack(A, candidate, b)) > _roundoff_tolerance(p)):
+                correction = _solve_triangular(
+                    triangular, q.T @ (b - A @ candidate), check_finite=False
+                )
+                if np.isfinite(correction).all():
+                    candidate[pivots[:k]] += correction
     except (np.linalg.LinAlgError, ValueError):
         return None
     return candidate if np.isfinite(candidate).all() else None
@@ -1355,13 +1366,19 @@ def _emit_blocking_decision(
     )
 
 
+def _qp_iteration_budget(A: NDArray) -> int:
+    """Per-attempt limit, allowing for both working-set additions and releases."""
+    m, p = A.shape
+    return max(200, 4 * (m + p))
+
+
 def solve_constrained_qp(
     H: NDArray,
     g: NDArray,
     A: NDArray,
     b: NDArray,
     active_set_init: list[int] | None = None,
-    max_iter: int = 200,
+    max_iter: int | None = None,
     tol: float = 1e-12,
     *,
     beta_start: NDArray | None = None,
@@ -1383,6 +1400,10 @@ def solve_constrained_qp(
     actions. Short coefficient steps, and a full step on a full-rank H, trigger
     the complete certificate rather than establish it. An exhausted or
     uncertified candidate is not converged.
+
+    Each active-set attempt gets max_iter iterations, by default
+    max(200, 4 * (number of constraint rows + number of coefficients)).
+    This limits work; active-set methods can visit many more faces.
 
     The working rows stay linearly independent (Nocedal and Wright 2006,
     section 16.5): the ratio test takes the least step among rows that raise
@@ -1419,6 +1440,8 @@ def solve_constrained_qp(
     Result rank metadata describes the shared H decomposition; no ridge is
     added.
     """
+    if max_iter is None:
+        max_iter = _qp_iteration_budget(A)
     departed: list[bool] = []
     first = _solve_qp(
         H,
@@ -1457,7 +1480,11 @@ def solve_constrained_qp(
         departed=[],
     )
     best = plain if plain.converged else first
-    return replace(best, n_iter=first.n_iter + plain.n_iter)
+    return replace(
+        best,
+        n_iter=first.n_iter + plain.n_iter,
+        _budget_hits=first._budget_hits + plain._budget_hits,
+    )
 
 
 def _solve_qp(
@@ -1595,8 +1622,10 @@ def _solve_qp(
     # feasibility is re-tested on the point actually returned, below.
     if beta_start is not None and _is_feasible(A, beta_start, b, tol, abs_A=abs_A):
         beta = np.array(beta_start, dtype=float)
+        can_restart_from_zero = False
     else:
         beta = _project_feasible(beta_unc, A, b, tol, structure=structure)
+        can_restart_from_zero = bool(np.all(b <= 0.0))
     # The warm rows that do not bind at the start: a working row need not bind (Gill and
     # Wong 2015, section 2), and a step moves these until they do. A row the ratio test adds
     # binds there, and one on a face the loop reaches binds, so their later slack is rounding
@@ -1651,9 +1680,12 @@ def _solve_qp(
     # face: no independent row can block its numerical normal component.
     coordinate_face: tuple[int, ...] | None = None
     recovered_face: tuple[int, ...] | None = None
+    infeasible_recovered_faces: set[frozenset[int]] = set()
     cycles = _CycleGuard(H_sym, g, A, b, tol, abs_A)
 
+    used = 0
     for it in range(max_iter):
+        used = it + 1
         if at_face_minimum and not kkt_may_be_singular:
             # Read before the next saddle solve, whose step a pass discards.
             # A negative multiplier releases its row (Nocedal and Wright 2006,
@@ -1673,7 +1705,7 @@ def _solve_qp(
                 least_index=cycles.least_index,
             )
             if certified:
-                return _result(beta, active, it + 1, converged=True)
+                return _result(beta, active, used, converged=True)
             if release is not None:
                 active.pop(release)
                 basis.delete(release)
@@ -1801,14 +1833,14 @@ def _solve_qp(
                 H_sym, g, beta, A[active], b[active], multipliers, tol, objective
             )
             if feasible and stationary and complementary:
-                return _result(beta, active, it + 1, converged=True)
+                return _result(beta, active, used, converged=True)
             if feasible and face_candidate is not None:
                 # A recovered face may still need ordinary saddle refinement.
                 # Projection can also change the start: re-solve from it next
                 # so an inactive row can block, even if the old step was 0.
                 continue
             if not feasible or not np.any(step != 0.0):
-                return _result(beta, active, it + 1, converged=False)
+                break
             # A small but uncertified direction can still encounter a
             # blocking row; coefficient units cannot complete a dual solve.
 
@@ -1957,6 +1989,19 @@ def _solve_qp(
                     # the step, and the binding rows' face is solved from ``beta``.
                     _release_nonbinding(A, beta, b, active, abs_A, tol, nonbinding, basis, cycles)
                     continue
+                # Give an infeasible recovered face its first release. Tied
+                # rows can immediately re-block in a different order, returning
+                # to the same equality subproblem even after visiting other faces.
+                if (
+                    can_restart_from_zero
+                    and used < max_iter
+                    and recovered_face == tuple(active)
+                    and not _is_feasible(A, beta, b, tol, abs_A=abs_A)
+                ):
+                    face = frozenset(active)
+                    if face_candidate is None or face in infeasible_recovered_faces:
+                        break
+                    infeasible_recovered_faces.add(face)
                 # No row resolves the step, yet it breaks one: once the face's recovery has
                 # run, the step is below every row's resolution, so ``beta`` is the face's
                 # minimum to working accuracy and the step test cannot see it (Gill and Wong,
@@ -1975,6 +2020,25 @@ def _solve_qp(
                 # it cannot certify: the next iteration solves the face again.
                 beta = beta_new
 
-    # Exhaustion is non-convergence even at a feasible point: the KKT
-    # certificate was never completed.
-    return _result(beta, active, max_iter, converged=False)
+    # The projection or its repair failed. A feasible phase-one point makes
+    # the remaining iterations usable. A supplied start prevents recursion.
+    if used < max_iter and can_restart_from_zero and not _is_feasible(A, beta, b, tol, abs_A=abs_A):
+        retry = _solve_qp(
+            H_sym,
+            g,
+            A,
+            b,
+            None,
+            max_iter - used,
+            tol,
+            np.zeros_like(beta),
+            _trace_run,
+            structure,
+            decomposition,
+            conservative=conservative,
+            departed=departed,
+        )
+        return replace(retry, n_iter=used + retry.n_iter)
+    result = _result(beta, active, used, converged=False)
+    result._budget_hits = int(used == max_iter)
+    return result
