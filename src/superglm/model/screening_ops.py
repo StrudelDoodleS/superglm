@@ -768,6 +768,8 @@ def screen_interactions(
                 support=s["uniq"],
                 counts=s["counts"],
                 geometry_weight=geometry_weight,
+                # The ladder's high edge reads the formed penalty's null residue.
+                root_coordinates=False,
             )
             S = _normalize_tensor_penalty(m.penalty) if m.normalize_penalty else m.penalty
             basis = m.basis

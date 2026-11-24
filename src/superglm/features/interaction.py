@@ -2307,18 +2307,26 @@ class TensorInteraction:
         counts: NDArray | None = None,
         geometry_weight: NDArray | None = None,
         keep_ranges: bool = True,
+        root_coordinates: bool = True,
     ) -> TensorMarginalInfo:
         """Get marginal ingredients from a parent spec, optionally overriding n_knots.
 
         ``keep_ranges`` keeps a ranged parent's polynomial ranges in the margin (see
         ``interaction_spline_spec``).  The mgcv te()/ti() contract (no select, no
         multi-m) is enforced on the original spec before any cloning.
+        ``root_coordinates=False`` keeps the margin's formed penalty in its centred
+        basis (``tensor_marginal_info``), which the interaction screen scores.
         """
         candidate, cardinal = TensorInteraction._marginal_spec(
             spec, x, n_knots_override, geometry_weight=geometry_weight, keep_ranges=keep_ranges
         )
         info = TensorInteraction._marginal_ingredients(
-            candidate, x, support=support, counts=counts, geometry_weight=geometry_weight
+            candidate,
+            x,
+            support=support,
+            counts=counts,
+            geometry_weight=geometry_weight,
+            root_coordinates=root_coordinates,
         )
         if cardinal:
             _normalize_cardinal_margin(info)
@@ -2420,6 +2428,7 @@ class TensorInteraction:
         counts: NDArray | None,
         geometry_weight: NDArray | None,
         precision: NDArray | None = None,
+        root_coordinates: bool = True,
     ) -> TensorMarginalInfo:
         """A margin's basis, penalty and projection from its resolved spec (``_marginal_spec``).
 
@@ -2434,10 +2443,15 @@ class TensorInteraction:
         from superglm.features.spline import _BUILT_IN_SPLINES
 
         method = candidate.tensor_marginal_ingredients
-        if precision is not None and type(candidate) in _BUILT_IN_SPLINES:
-            # Only superglm's own splines, which cannot override the method, state null
-            # coordinates (``tensor_marginal_info``).
-            method = partial(tensor_marginal_info, candidate, precision=precision)
+        if (precision is not None or not root_coordinates) and type(candidate) in _BUILT_IN_SPLINES:
+            # Only superglm's own splines, which cannot override the method, take root
+            # coordinates and state null ones (``tensor_marginal_info``).
+            method = partial(
+                tensor_marginal_info,
+                candidate,
+                precision=precision,
+                root_coordinates=root_coordinates,
+            )
         if support is None and geometry_weight is None:
             return method(x)
 

@@ -577,12 +577,15 @@ def tensor_marginal_info(
     support: NDArray | None = None,
     counts: NDArray | None = None,
     precision: NDArray | None = None,
+    root_coordinates: bool = True,
 ) -> TensorMarginalInfo:
     """Compute tensor-product marginal ingredients for an already-built spline spec.
 
     ``precision`` is the fit's precision weight on each evaluation point
     (``counts`` without one): the rows it weights decide whether the margin
     states its penalty's null coordinates (``_rows_identify``).
+    ``root_coordinates=False`` keeps the centred basis and its formed penalty
+    ``P' Omega P`` as they are, without the penalty's root or null coordinates.
     """
     if not spec._tensor_supported:
         raise NotImplementedError(
@@ -662,7 +665,7 @@ def tensor_marginal_info(
     structural_proj = None if structural is None else projection.T @ structural @ projection
     penalty_root = None
     penalty_nullity = None
-    raw_root = spec._penalty_root_for_order(order) if follows_policy else None
+    raw_root = spec._penalty_root_for_order(order) if follows_policy and root_coordinates else None
     # A zero penalty (a column with one value) has no root to state.
     if raw_root is not None and np.any(raw_root):
         width = projection.shape[1]
