@@ -287,6 +287,32 @@ def test_determined_structural_rows_keep_their_default_errors() -> None:
     assert row.se is not None and np.isfinite(row.se) and row.p is not None
 
 
+def test_metrics_on_other_rows_pickle_with_their_structural_decisions() -> None:
+    """Metrics re-formed on other rows pickle once read, and keep their structural decisions.
+
+    A metrics object on other rows keeps its re-formed data rank's contrast decision for
+    its summary; at dceef692b that was a local closure, and ``pickle.dumps`` raised.
+    Restored, the twin terms' slope change stays blank, and the aliased term's determined
+    one keeps the error a fresh object gives.
+    """
+    twin, X, y = _twin_fit(["a", "b"], None)
+    positions = np.tile(np.arange(8.0), 20)
+    aliased, X_aliased, _ = _twin_fit(
+        ["a"], [2, 2], extra_features={"x": Numeric()}, extra={"x": positions}
+    )
+    for model, frame, shown in ((twin, X, False), (aliased, X_aliased, True)):
+        other = frame.iloc[:120].reset_index(drop=True), y[:120] + 0.5
+        metrics = model.metrics(*other)
+        _ = metrics.coefficient_se
+        restored = pickle.loads(pickle.dumps(metrics))
+        row, fresh = (
+            next(r for r in m.summary()._coef_rows if r.name == "a[slope-change @ d]")
+            for m in (restored, model.metrics(*other))
+        )
+        assert (row.se is not None) is shown
+        assert row.se == fresh.se and row.p == fresh.p
+
+
 def _structured_fit(names, term, *, linear=False, direct_solve="auto"):
     """Ordered piecewise ``names`` on eight bands crossed with 40 levels, twice per cell,
     beside a structured ``term`` on the levels: a random effect, declared first so its

@@ -362,24 +362,23 @@ def _contrast_estimability(
 
     A contrast that weighs an inactive coefficient is not determined, as
     ``_coefficient_estimability`` leaves those coefficients blank.  The reader lives as
-    long as the metrics object, so it keeps only the null-space part of ``data_rank``.
+    long as the metrics object and is pickled with it: a ``partial`` of a module
+    function, over only the null-space part of ``data_rank``.
     """
-    data_rank = data_rank.estimability_only()
     original_by_name = {group.name: group for group in groups}
-    active = np.zeros(width, dtype=bool)
+    columns = np.empty(sum(group.size for group in active_groups), dtype=np.intp)
     for active_group in active_groups:
-        active[original_by_name[active_group.name].sl] = True
-    p_active = sum(group.size for group in active_groups)
+        columns[active_group.sl] = np.arange(width)[original_by_name[active_group.name].sl]
+    return partial(_active_contrast_estimable, data_rank.estimability_only(), columns)
 
-    def estimable(contrast: NDArray) -> bool:
-        if np.any(contrast[~active] != 0.0):
-            return False
-        active_contrast = np.zeros(p_active)
-        for active_group in active_groups:
-            active_contrast[active_group.sl] = contrast[original_by_name[active_group.name].sl]
-        return bool(data_rank.is_estimable(active_contrast))
 
-    return estimable
+def _active_contrast_estimable(data_rank, columns: NDArray, contrast: NDArray) -> bool:
+    """Whether ``data_rank`` determines ``contrast``, whose active coordinates sit at ``columns``."""
+    outside = np.ones(len(contrast), dtype=bool)
+    outside[columns] = False
+    if np.any(contrast[outside] != 0.0):
+        return False
+    return bool(data_rank.is_estimable(contrast[columns]))
 
 
 def _requires_wood_inference(model, active_groups: list[GroupSlice]) -> bool:
