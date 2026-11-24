@@ -127,11 +127,60 @@ def _dense_workspace_bytes(
     return 40 * q * q + 48 * bread_columns * bread_columns + cluster + 48 * chunk_rows * q
 
 
+def _settings(obj: Any) -> str:
+    """``obj``'s class and the scalar settings it holds (a family's ``p``, a penalty's ``features``).
+
+    Collections of scalars are listed by ``repr`` and sorted, so a set's iteration order
+    (which string hashing varies between processes) cannot move the text.
+    """
+    cls = type(obj)
+    items = []
+    for key, value in sorted(getattr(obj, "__dict__", {}).items()):
+        if value is None or isinstance(value, bool | int | float | str):
+            items.append(f"{key}={value!r}")
+        elif isinstance(value, list | tuple | set | frozenset) and all(
+            isinstance(v, bool | int | float | str) for v in value
+        ):
+            members = [repr(v) for v in value]
+            items.append(
+                f"{key}={sorted(members) if isinstance(value, set | frozenset) else members}"
+            )
+    return f"{cls.__module__}.{cls.__qualname__}({', '.join(items)})"
+
+
+def _specification_digest(model: Any) -> bytes:
+    """A digest of what turns the fit's rows and coefficients into its covariance.
+
+    The weight contract (``"prior"`` rows are one unit each, ``"frequency"`` rows ``w``
+    units: different meats on the same rows), the family and link with their
+    parameters, the penalty and the fitted smoothing parameters (the bread), and the
+    coefficient layout.  The basis a term spans is not read: two designs give bit-equal
+    coefficients on the same rows only where the response is exactly orthogonal to both.
+    """
+    lambda2 = fitted_lambda2(model)
+    if isinstance(lambda2, dict):
+        lambda2 = sorted((str(key), float(value)) for key, value in lambda2.items())
+    reml = getattr(model, "_reml_lambdas", None)
+    if isinstance(reml, dict):
+        reml = sorted((str(key), float(value)) for key, value in reml.items())
+    parts = (
+        model_weight_semantics(model),
+        _settings(model._distribution),
+        _settings(model._link),
+        _settings(fitted_penalty(model)),
+        repr(lambda2),
+        repr(reml),
+        repr([(g.name, g.start, g.end, g.subgroup_type) for g in model._groups]),
+    )
+    return hashlib.blake2b("\x1f".join(parts).encode(), digest_size=16).digest()
+
+
 def fit_binding_for_superglm(model: Any) -> FitBinding | None:
     """The ``FitBinding`` of ``model``'s current fit, or ``None`` where it recorded no rows.
 
     The rows are the fit's ``FitGeometryGuard``: the digests of the frame, response,
-    weights and offset every fit writes and a saved model keeps.
+    weights and offset every fit writes and a saved model keeps.  The specification
+    is ``_specification_digest``.
     """
     result = model._result
     if result is None:
@@ -147,6 +196,7 @@ def fit_binding_for_superglm(model: Any) -> FitBinding | None:
     return FitBinding(
         model_kind="SuperGLM",
         data_digest=rows.digest(),
+        specification_digest=_specification_digest(model),
         fit_revision=int(getattr(model, "_fit_revision", 0)),
         repair_revision=int(getattr(state, "repair_revision", 0)) if state is not None else 0,
         coef_digest=coef_digest(float(result.intercept), np.asarray(result.beta, dtype=np.float64)),

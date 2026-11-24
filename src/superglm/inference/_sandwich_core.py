@@ -78,14 +78,18 @@ class FitBinding:
     """Picklable identity tying a covariance result to one exact fitted state.
 
     ``data_digest`` is a digest of the rows the fit recorded (frame, response,
-    weights and offset) and ``coef_digest`` one of the coefficients it published,
-    so the identity is the fit's own content: a default fit allocates nothing for
-    it, a saved model keeps it, and two fits share it only when they are the same
-    numbers on the same rows at the same revision.
+    weights and offset), ``specification_digest`` one of what turns those rows and
+    the coefficients into a covariance (the weight contract, family, link, penalty
+    and smoothing parameters) and ``coef_digest`` one of the coefficients it
+    published, so the identity is the fit's own content: a default fit allocates
+    nothing for it, a saved model keeps it, and two fits share it only when they are
+    the same numbers on the same rows under the same specification at the same
+    revision.
     """
 
     model_kind: Literal["SuperGLM", "SuperLSS"]
     data_digest: bytes
+    specification_digest: bytes
     fit_revision: int
     repair_revision: int
     coef_digest: bytes
@@ -98,6 +102,7 @@ class FitBinding:
             )
         if (
             self.data_digest != current.data_digest
+            or self.specification_digest != current.specification_digest
             or self.fit_revision != current.fit_revision
             or self.repair_revision != current.repair_revision
             or self.coef_digest != current.coef_digest

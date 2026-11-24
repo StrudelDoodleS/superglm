@@ -1015,6 +1015,36 @@ class TestFitBindingAndRoundTrip:
         with pytest.raises(ValueError, match="different fit"):
             large.summary(covariance=cov_small)
 
+    def test_a_weight_contract_is_part_of_the_fit(self):
+        """All weights 4 on the same rows: the same intercept, two covariances.
+
+        Frequency weights make each row four units, ``sqrt(sum w r^2) / sum w``;
+        prior weights keep it one, ``sqrt(sum (w r)^2) / sum w``, twice that here.
+        Neither reader accepts the other's covariance.
+        """
+        y = np.tile([-1.0, 1.0], 16)
+        w = np.full(len(y), 4.0)
+        frame = pd.DataFrame(index=range(len(y)))
+        fits = {
+            semantics: SuperGLM(family="gaussian", features={}, weight_semantics=semantics).fit(
+                frame, y, sample_weight=w
+            )
+            for semantics in ("frequency", "prior")
+        }
+        assert fits["frequency"].result.intercept == fits["prior"].result.intercept == 0.0
+        covs = {semantics: model.sandwich_covariance() for semantics, model in fits.items()}
+        np.testing.assert_allclose(
+            covs["frequency"].se, [math.sqrt(w @ y**2) / w.sum()], rtol=1e-12
+        )
+        np.testing.assert_allclose(
+            covs["prior"].se, [math.sqrt((w * y) @ (w * y)) / w.sum()], rtol=1e-12
+        )
+        for own, other in (("prior", "frequency"), ("frequency", "prior")):
+            intercept = fits[own].summary(covariance=covs[own])._coef_rows[0]
+            np.testing.assert_allclose(intercept.se, covs[own].se[0], rtol=1e-12)
+            with pytest.raises(ValueError, match="different fit"):
+                fits[own].summary(covariance=covs[other])
+
     def test_a_model_rescored_on_other_rows_replays_no_scores(self):
         """``to_model(X=, y=)`` keeps the fitted design beside the supplied response."""
         from superglm.editor import EditorSession
