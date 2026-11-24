@@ -658,25 +658,28 @@ def _indicator_pairs(
         held.append((own, pair_bounds, column, m))
         parts.append((owner, column, deviation, mass))
         offset += len(cells.columns)
-    pairs = tuple(np.concatenate(values) for values in zip(*parts, strict=True))
+    owner, column, deviation, mass = (np.concatenate(values) for values in zip(*parts, strict=True))
     # only a chunk's first and last segments can be pieces of a cut leaf
     for index in {0, len(leaves) - 1}:
-        mine = pairs[0] == index
+        mine = owner == index
         rows = slice(bounds[index], bounds[index + 1])
         absent = _absent_pairs(
             scatter,
             mean[leaves[index]],
             width,
             index,
-            pairs[1][mine],
-            pairs[2][mine, 0],
+            column[mine],
+            deviation[mine, 0],
             a[rows],
             error[rows],
             weighted[rows],
         )
         if absent is not None:
-            pairs = tuple(np.concatenate(both) for both in zip(pairs, absent, strict=True))
-    return scatter, *pairs
+            owner, column, deviation, mass = (
+                np.concatenate(both)
+                for both in zip((owner, column, deviation, mass), absent, strict=True)
+            )
+    return scatter, owner, column, deviation, mass
 
 
 def _absent_pairs(
