@@ -1,0 +1,291 @@
+"""Binomial fits whose rows pass the solver's working clip (issue #734).
+
+The solver holds a binomial linear predictor inside a band (logit and probit
+``+-20``, cloglog ``[-20, 2.736]``) and its mean inside ``[1e-7, 1 - 1e-7]``.
+A row held *against its outcome* (an event below the lower edge, a non-event
+above the upper one) has a likelihood score of order one that the held row no
+longer carries, so the fit can stop away from the maximum-likelihood estimate
+and report ``converged``.
+
+Every reference is the binomial likelihood itself, written in closed form in
+the linear predictor so that neither tail is clipped, and solved by SciPy.
+"""
+
+from __future__ import annotations
+
+import math
+import warnings
+
+import numpy as np
+import pandas as pd
+import pytest
+from scipy.optimize import brentq, root
+from scipy.special import expit, log_ndtr
+
+from superglm import Numeric, Spline, SuperGLM
+from superglm.links import LogitLink
+
+_ISSUE = "#734: a row the working clip holds against its outcome loses its likelihood score"
+
+
+# ── the likelihood in closed form in eta ───────────────────────────
+
+
+def _log_likelihood_rows(link: str, y, eta):
+    """``y log p + (1 - y) log(1 - p)`` per row, accurate in both tails."""
+    if link == "logit":
+        log_p, log_q = -np.logaddexp(0.0, -eta), -np.logaddexp(0.0, eta)
+    elif link == "probit":
+        log_p, log_q = log_ndtr(eta), log_ndtr(-eta)
+    else:  # cloglog: 1 - p = exp(-exp(eta))
+        t = np.exp(eta)
+        log_q = -t
+        with np.errstate(divide="ignore"):
+            log_p = np.where(t > math.log(2.0), np.log1p(-np.exp(-t)), np.log(-np.expm1(-t)))
+    return y * log_p + (1.0 - y) * log_q
+
+
+def _score_information_rows(link: str, y, eta):
+    """Per row, ``dl/deta`` and the Fisher information ``E[-d2l/deta2]``, accurate in both tails."""
+    with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
+        if link == "logit":
+            p, q = expit(eta), expit(-eta)
+            return y * q - (1.0 - y) * p, p * q
+        if link == "probit":
+            log_phi = -0.5 * eta * eta - 0.5 * math.log(2.0 * math.pi)
+            mills_event = np.exp(log_phi - log_ndtr(eta))  # phi / Phi
+            mills_non_event = np.exp(log_phi - log_ndtr(-eta))  # phi / (1 - Phi)
+            return y * mills_event - (1.0 - y) * mills_non_event, mills_event * mills_non_event
+        t = np.exp(eta)  # cloglog
+        ratio = np.where(t > 0.0, t / np.expm1(t), 1.0)  # (dp/deta) / p
+        return y * ratio - (1.0 - y) * t, t * ratio
+
+
+class _Case:
+    """One fixture, its design and the likelihood's own root."""
+
+    def __init__(self, link, y, offset, x=None, weights=None):
+        self.link = link
+        self.y = np.asarray(y, dtype=float)
+        self.offset = np.asarray(offset, dtype=float)
+        self.x = None if x is None else np.asarray(x, dtype=float)
+        self.weights = np.ones(len(self.y)) if weights is None else np.asarray(weights, float)
+        columns = [np.ones(len(self.y))] + ([] if self.x is None else [self.x])
+        self.X = np.column_stack(columns)
+
+    def score(self, beta):
+        rows, _ = _score_information_rows(self.link, self.y, self.X @ beta + self.offset)
+        return self.X.T @ (self.weights * rows)
+
+    def information(self, beta):
+        _, rows = _score_information_rows(self.link, self.y, self.X @ beta + self.offset)
+        return self.X.T @ (self.X * (self.weights * rows)[:, None])
+
+    def deviance(self, beta):
+        rows = _log_likelihood_rows(self.link, self.y, self.X @ beta + self.offset)
+        return -2.0 * float(np.sum(self.weights * rows))
+
+    def root(self):
+        """The maximum-likelihood coefficients: SciPy on the exact score."""
+        if self.X.shape[1] == 1:
+            # concave in the intercept: the score changes sign once
+            beta = np.array(
+                [brentq(lambda b: self.score(np.array([b]))[0], -30.0, 30.0, xtol=1e-14)]
+            )
+        else:
+            beta = root(self.score, np.zeros(2), jac=lambda b: -self.information(b), tol=1e-13).x
+        return beta + np.linalg.solve(self.information(beta), self.score(beta))
+
+    def fit(self, link=None, **options):
+        frame = pd.DataFrame(index=range(len(self.y)))
+        features = {}
+        if self.x is not None:
+            frame, features = pd.DataFrame({"x": self.x}), {"x": Numeric()}
+        model = SuperGLM(
+            family="binomial",
+            link=self.link if link is None else link,
+            features=features,
+            weight_semantics="frequency",
+            **options,
+        )
+        model.fit(frame, self.y, offset=self.offset, sample_weight=self.weights)
+        coefficients = np.r_[model.result.intercept, np.asarray(model.result.beta, dtype=float)]
+        return model, coefficients
+
+
+_FIVE = np.zeros(5)
+_SLOPE_X = np.linspace(-1.0, 1.0, 40)
+_SLOPE_Y = (np.arange(40) % 3 == 0).astype(float)
+
+#: every case holds one row against its outcome at the likelihood's root
+_HELD_AGAINST = {
+    # below the logit band of -20
+    "logit_event_at_minus_35": lambda: _Case("logit", np.r_[_FIVE, 1.0], np.r_[_FIVE, -35.0]),
+    # inside the band, past the 1e-7 mean floor only (eta = -16.9 at the root)
+    "logit_event_past_the_mean_floor": lambda: _Case(
+        "logit", np.r_[_FIVE, 1.0], np.r_[_FIVE, -15.5]
+    ),
+    "logit_non_event_at_plus_35": lambda: _Case(
+        "logit", np.r_[np.ones(5), 0.0], np.r_[_FIVE, 35.0]
+    ),
+    # a slope beside the intercept, and a frequency weight on the held row
+    "logit_slope_and_weighted_event": lambda: _Case(
+        "logit",
+        np.r_[_SLOPE_Y, 1.0],
+        np.r_[np.zeros(40), -30.0],
+        x=np.r_[_SLOPE_X, 0.5],
+        weights=np.r_[np.ones(40), 3.0],
+    ),
+    # probit: the band of +-20 is far, the mean floor acts from 5.2 standard deviations
+    "probit_event_at_minus_9": lambda: _Case("probit", np.r_[_FIVE, 1.0], np.r_[_FIVE, -9.0]),
+    "probit_non_event_at_plus_9": lambda: _Case(
+        "probit", np.r_[np.ones(5), 0.0], np.r_[_FIVE, 9.0]
+    ),
+    "cloglog_event_at_minus_35": lambda: _Case("cloglog", np.r_[_FIVE, 1.0], np.r_[_FIVE, -35.0]),
+    # above the cloglog cap of 2.736 at the root (eta = 2.87)
+    "cloglog_non_event_past_the_cap": lambda: _Case(
+        "cloglog", np.r_[(np.arange(50) % 2).astype(float), 0.0], np.r_[np.zeros(50), 4.5]
+    ),
+}
+
+
+@pytest.fixture(params=sorted(_HELD_AGAINST))
+def held_against(request) -> _Case:
+    return _HELD_AGAINST[request.param]()
+
+
+# ── what a user reads ──────────────────────────────────────────────
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_ISSUE)
+def test_a_row_held_against_its_outcome_leaves_the_fit_at_the_likelihoods_root(held_against):
+    """Converged, and every coefficient within a thousandth of its standard error of the root.
+
+    On the unfixed solver the logit and cloglog fits sit 0.97 to 6.8 standard
+    errors away and the probit fits 1,040, all reported converged; the cloglog
+    fit above its cap stops with every trial step rejected.
+    """
+    reference = held_against.root()
+    standard_error = np.sqrt(np.diag(np.linalg.inv(held_against.information(reference))))
+    model, coefficients = held_against.fit()
+    assert model.result.converged
+    assert np.all(np.abs(coefficients - reference) <= 1e-3 * standard_error)
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_ISSUE)
+def test_its_default_standard_errors_are_the_likelihoods_information(held_against):
+    """``sqrt(diag(I^-1))`` with ``I = X' W X`` the Fisher information at the root."""
+    reference = held_against.root()
+    standard_error = np.sqrt(np.diag(np.linalg.inv(held_against.information(reference))))
+    model, _ = held_against.fit()
+    reported = np.array([row.se for row in model.summary()._coef_rows], dtype=float)
+    np.testing.assert_allclose(reported, standard_error, rtol=1e-3)
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_ISSUE)
+def test_its_deviance_counts_the_held_row(held_against):
+    """The fit's deviance is ``-2 log L``: an event at ``eta = -36`` adds 72, not ``-2 log 1e-7``."""
+    model, _ = held_against.fit()
+    exact = held_against.deviance(held_against.root())
+    np.testing.assert_allclose(model.result.deviance, exact, rtol=1e-6)
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_ISSUE)
+def test_one_distant_event_does_not_move_the_other_rows_predictions():
+    """Five non-events and one event share an intercept: each of the five is priced at 1/5.
+
+    The sixth row's offset of -35 puts its own probability at ``2e-16``, so the
+    score ``1 - 5 p = 0`` gives ``p = 1/5``.  The unfixed fit reports 0.0041.
+    """
+    case = _HELD_AGAINST["logit_event_at_minus_35"]()
+    model, _ = case.fit()
+    predicted = model.predict(pd.DataFrame(index=range(1)), offset=np.zeros(1))
+    np.testing.assert_allclose(predicted, 0.2, rtol=1e-6)
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_ISSUE)
+@pytest.mark.parametrize("discrete", [False, True])
+def test_a_penalised_fit_balances_the_likelihoods_score(discrete):
+    """With an unpenalised intercept the likelihood's row scores sum to zero at any smoothing.
+
+    The reference needs no smoothing parameter: the penalty does not act on
+    the intercept, so ``sum_i w_i dl_i/deta = 0`` at the penalised mode.  One
+    event at an offset of -30 is held against its outcome; on the unfixed
+    solver the scores sum to 0.98, the score the held row lost.
+    """
+    from superglm.solvers.mode_score import linear_predictor
+
+    x = np.linspace(0.0, 1.0, 300)
+    y = ((np.arange(300) * 7) % 10 < 3.0 + 4.0 * x).astype(float)
+    frame = pd.DataFrame({"x": np.r_[x, 0.5]})
+    response, offset = np.r_[y, 1.0], np.r_[np.zeros(300), -30.0]
+    model = SuperGLM(
+        family="binomial", link="logit", features={"x": Spline(n_knots=5)}, discrete=discrete
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, response, offset=offset)
+    eta = linear_predictor(model._dm, model._solver_pirls_result(), model._fit_offset)
+    score, _ = _score_information_rows("logit", response, np.asarray(eta, dtype=float))
+    assert model.result.converged
+    assert abs(score.sum()) <= 1e-6 * np.abs(score).sum()
+
+
+class _UndeclaredLogit(LogitLink):
+    """A logit the solver has no closed-form tail rows for: exact types declare those."""
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_ISSUE)
+def test_a_stop_the_clip_decided_is_not_reported_as_converged():
+    """A link without tail rows of its own keeps the clip, and says the fit did not converge.
+
+    The fit below stops 6.8 standard errors from the likelihood's root: its
+    score there is 0.98, not zero.  A fit may stop at such a point only as
+    not converged, with a warning that names the held rows.
+    """
+    case = _HELD_AGAINST["logit_event_at_minus_35"]()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model, coefficients = case.fit(link=_UndeclaredLogit())
+    step = np.linalg.solve(case.information(coefficients), case.score(coefficients))
+    newton_decrement = float(step @ case.score(coefficients))
+    assert newton_decrement > 1.0  # the control: this state is far from the root
+    assert not model.result.converged
+    assert any("clip" in str(item.message) for item in caught)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="#734: the default covariance reads the clipped working weights on every held row",
+)
+def test_default_standard_error_when_every_row_sits_in_a_tail():
+    """Offsets of +-19 and +-35 with events at the positive ones: no row is against its outcome.
+
+    The fit is at the likelihood's root today (see the control below); its
+    default intercept error is 11,844.5 where ``1 / sqrt(sum p (1 - p))`` at
+    the fitted predictor is 2,987.3.
+    """
+    offset = np.tile([-19.0, 19.0, -35.0, 35.0], 10)
+    case = _Case("logit", (offset > 0.0).astype(float), offset)
+    model, coefficients = case.fit()
+    expected = 1.0 / math.sqrt(case.information(coefficients)[0, 0])
+    np.testing.assert_allclose(model.summary()._coef_rows[0].se, expected, rtol=1e-3)
+
+
+@pytest.mark.pins_behaviour
+def test_rows_held_on_the_side_of_their_outcome_leave_the_fit_at_the_root():
+    """Pins: a fit whose held rows all agree with their outcome is already at the root.
+
+    Every row of this fixture is past the 1e-7 mean floor and half are past
+    the +-20 band, each on the side its response agrees with (non-events
+    low, events high).  The held rows' scores are below ``1e-7`` each, the
+    intercept is 0 by symmetry, and the fit reports converged.  The fix for
+    #734 must leave this fit where it is.
+    """
+    offset = np.tile([-19.0, 19.0, -35.0, 35.0], 10)
+    case = _Case("logit", (offset > 0.0).astype(float), offset)
+    model, coefficients = case.fit()
+    assert model.result.converged
+    assert abs(case.score(coefficients)[0]) <= 1e-12
+    assert abs(coefficients[0]) <= 1e-6
