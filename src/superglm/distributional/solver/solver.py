@@ -1774,16 +1774,17 @@ def _representative_state(
     return _evaluate_state(context, coefficients, phase_recorder=phase_recorder)
 
 
-def _retained_step_improves_objective(
+def _terminal_step_improves_objective(
     context: _SolverContext,
     state: _AcceptedState,
     score: NDArray,
     rank: RankDecomposition,
+    discarded: NDArray | None,
     telemetry: CurvatureTelemetry,
     config: DenseSolverConfig,
     phase_recorder: FitPhaseRecorder | None,
 ) -> bool:
-    """Check a material predicted gain on the accepted, positive retained curvature.
+    """Test whether a terminal direction improves the likelihood beyond tolerance.
 
     A flat likelihood can have a small gradient even in predictor units.
     The Newton decrement (Boyd & Vandenberghe §9.5) measures improvement in
@@ -1795,6 +1796,30 @@ def _retained_step_improves_objective(
     retained_score = score if face is None else face.reduce_vector(score)
     objective = state.penalized_optimizing_log_likelihood
     limit = max(config.tolerance * (1 + abs(objective)), abs(np.spacing(objective)))
+
+    def improves(candidate: NDArray) -> bool:
+        if not np.all(np.isfinite(candidate)):
+            return False
+        if face is not None:
+            candidate = face.project(candidate)
+        trial = _evaluate_state(
+            context, candidate, phase_recorder=phase_recorder, derivative_order=0
+        )
+        return trial is not None and trial.penalized_optimizing_log_likelihood - objective > limit
+
+    if discarded is not None:
+        # No Newton curvature remains along these contrasts. A step whose linear
+        # gain is twice the limit gains at least the limit on a concave quadratic
+        # whenever its maximum gain exceeds the limit. Judge the family likelihood
+        # itself: a link wall or a limiting distribution can flatten that slope.
+        for direction in discarded.T:
+            slope = float(direction @ score)
+            if slope != 0.0:
+                with np.errstate(over="ignore", invalid="ignore"):
+                    if improves(state.coefficients + (2.0 * limit / slope) * direction):
+                        return True
+    if not telemetry.certified:
+        return False
     if rank.cholesky_factor is not None and telemetry.actual_source == "observed":
         # The policy already measured the smallest eigenvalue in these coordinates.
         # Deduct the eigensolver's absolute accuracy, using ||H|| <= trace(H)
@@ -1821,14 +1846,8 @@ def _retained_step_improves_objective(
         candidate = state.coefficients + alpha * step
         if np.array_equal(candidate, state.coefficients):
             break
-        if np.all(np.isfinite(candidate)):
-            if face is not None:
-                candidate = face.project(candidate)
-            trial = _evaluate_state(
-                context, candidate, phase_recorder=phase_recorder, derivative_order=0
-            )
-            if trial is not None and trial.penalized_optimizing_log_likelihood - objective > limit:
-                return True
+        if improves(candidate):
+            return True
         alpha *= config.backtrack_factor
     return False
 
@@ -2007,6 +2026,7 @@ def _fit_dense_fixed_lambda_core(
     with measure_phase(phase_recorder, "terminal_observed_retry_fallback"):
         # The stopped state's decision, and after a rank-deficient one the reduced fit's.
         reduced: RetainedCoordinates | None = None
+        discarded = None
         iteration_context = context
         while True:
             observed_geometry = _geometry_from(
@@ -2181,9 +2201,7 @@ def _fit_dense_fixed_lambda_core(
                 if context.coefficient_face is not None:
                     null = context.coefficient_face.null_basis @ null
                 if not _drops_design_aliases(context.layout, null):
-                    # A retained Newton gain cannot assess a contrast the design resolves.
-                    if converged:
-                        converged, reason = False, "rank_reduced_at_stop"
+                    discarded = null
                     break
             if reduced is not None or context.coefficient_face is not None:
                 break
@@ -2240,18 +2258,15 @@ def _fit_dense_fixed_lambda_core(
             terminal_reduced_rank = decomposition
             terminal_rank = face.lift_rank_decomposition(terminal_reduced_rank)
         terminal_score_geometry = observed_geometry
-        if (
-            converged
-            and curvature.telemetry.certified
-            and _retained_step_improves_objective(
-                context,
-                state,
-                terminal_score_geometry.score_penalized,
-                decomposition,
-                curvature.telemetry,
-                solver_config,
-                phase_recorder,
-            )
+        if converged and _terminal_step_improves_objective(
+            context,
+            state,
+            terminal_score_geometry.score_penalized,
+            decomposition,
+            discarded,
+            curvature.telemetry,
+            solver_config,
+            phase_recorder,
         ):
             converged, reason = False, "material_likelihood_gain"
         # A certified rank that dropped a retained direction; an uncertified band that
