@@ -1444,6 +1444,9 @@ class CategoricalInteraction:
     # The builder asks for this by name: only a spec that prunes ALIASED
     # cells needs telling whether the fit's penalty makes that unsafe.
     accepts_alias_prune_flag = True
+    # (pin_a, pin_b, pin_c) recorded by the build-time scan; unpickled models
+    # saved before this field existed keep the unconstrained default.
+    _bounded_groups_at_fit: tuple[bool, bool, bool] = (False, False, False)
 
     def __init__(self, cat1_name: str, cat2_name: str):
         self.cat1_name = cat1_name
