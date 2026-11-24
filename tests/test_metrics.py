@@ -4222,11 +4222,13 @@ def test_face_leverage_keeps_a_penalty_term_dominated_beyond_one_over_eps(declar
     )
     face = null_space(rank_info.face_rows)
     u = np.finfo(np.float64).eps / 2
-    # The face is the line, the second-derivative term's null space, so the
-    # exact reference takes that term as zero there (Wood 2011, sec. 3.1).
-    # Read structurally, as the fix does: the term's root sends the face to
-    # about ``u ||R||``, so its square is ~u^2 ||S||, far below u ||S||.
-    assert np.sum((penalty_factor(S_strong) @ face) ** 2) <= u * np.linalg.norm(S_strong, 2)
+    # The single free direction reproduces a line on the observed x values.
+    # Its second derivative vanishes, so the reference below uses only d1.
+    assert face.shape[1] == 1
+    data = X_a.toarray()
+    curve = (data @ face).ravel()
+    assert curve[-1] != curve[0]
+    np.testing.assert_allclose((curve - curve[0]) / (curve[-1] - curve[0]), x, atol=1e-9, rtol=0)
     weak_curvature = weak * (face.T @ S_weak @ face).item()
     if not declared_null:
         # The event: the root of the summed penalty has cut the weak term.
@@ -4234,7 +4236,7 @@ def test_face_leverage_keeps_a_penalty_term_dominated_beyond_one_over_eps(declar
         assert np.sum((summed_root @ face) ** 2) < 1e-9 * weak_curvature
         assert strong * u * np.linalg.norm(S_strong, 2) > 0.1 * weak_curvature
 
-    expected = _exact_face_leverage(X_a.toarray(), W, [(weak, S_weak)], face)
+    expected = _exact_face_leverage(data, W, [(weak, S_weak)], face)
     # the intercept and a line shrunk by the first-derivative penalty
     assert 1.6 < expected.sum() < 1.7
     # The strong term's root leaks ``strong (u ||R_d2||)^2`` onto the face,
