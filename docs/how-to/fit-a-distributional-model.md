@@ -1264,7 +1264,12 @@ A search can also push a penalty to its cap long before any plateau. If the
 exact-face check does not settle that penalty, `efs+finish` and `efs+newton` ask
 the exact gradient next, so the fit reports `lambda_cap_unresolved` only if the
 gradient leaves the penalty unresolved too. Plain `outer="efs"` has no exact
-gradient and reports it at once.
+gradient. It holds that penalty at its cap while the other penalties finish,
+then repeats the exact-face check where they stop, and reports
+`lambda_cap_unresolved` only if that check does not settle it either. A penalty
+held this way moves again as soon as the search wants a smaller value for it,
+and a fit that runs out of rounds first reports `max_iterations` and still
+names the held penalty in `smoothing_unresolved_upper_bound_`.
 
 ```python
 model.fit_reml(X_train, y_train)

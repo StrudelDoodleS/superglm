@@ -2605,8 +2605,13 @@ def test_efs_refuses_a_joint_face_when_one_cap_direction_is_weakly_finite(
     )
 
     assert not any(item.activated_face_components for item in smoothing.history)
+    # The refused cap is held while the second penalty steps back from its own cap,
+    # which takes more rounds than this search has.
+    assert smoothing.convergence_reason == "max_iterations"
     assert smoothing.unresolved_upper_bound == (layout.penalty_names[0],)
-    refusal = smoothing.history[-1]
+    assert all(item.accepted for item in smoothing.history[1:])
+    assert smoothing.lambdas[layout.penalty_names[1]] < 100.0
+    refusal = smoothing.history[0]
     assert refusal.refused_face_components == layout.penalty_names
     assert len(refusal.coefficient_fit_indices) == 1
     assert isinstance(refusal.endpoint_direction_evidence, JointEndpointDirectionEvidence)
@@ -2696,12 +2701,22 @@ def test_efs_records_typed_joint_failures_with_their_one_fitted_face(
     layout, smoothing, _authority_faces = _independent_penalty_efs_fit(
         monkeypatch,
         response,
+        max_iterations=30 if failure_mode == "objective_rejected" else 8,
     )
 
-    refusal = smoothing.history[-1]
+    refusal = smoothing.history[0]
     assert refusal.refused_face_components == layout.penalty_names
     assert refusal.endpoint_direction_evidence is None
     assert refusal.endpoint_assessment_failure_reason == failure_reason
+    if failure_mode == "objective_rejected":
+        # The refused cap is held while the second penalty reaches its optimum,
+        # 1 / (2**2 - 1); judged again there, the first is an exact face.
+        assert smoothing.converged is True
+        assert smoothing.lambdas[layout.penalty_names[1]] == pytest.approx(1.0 / 3.0, rel=1.0e-6)
+        face = smoothing.terminal_fit.coefficient_face
+        assert face is not None and face.component_names == layout.penalty_names[:1]
+    else:
+        assert len(smoothing.history) == 1
     assert len(refusal.coefficient_fit_indices) == 1
     joint_fit = smoothing.coefficient_fits[refusal.coefficient_fit_indices[0]]
     assert joint_fit.coefficient_face is not None

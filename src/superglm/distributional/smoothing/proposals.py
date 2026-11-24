@@ -85,14 +85,23 @@ def _scaled_proposal(
             log_steps[name] = 0.0
             continue
         step = float(scale * steps[name])
-        proposed = old_value * math.exp(step)
-        proposed = _snap_to_bounds(
-            float(np.clip(proposed, config.lower(name), config.upper(name))),
-            config,
-            name,
-        )
+        lower, upper = config.lower(name), config.upper(name)
+        log_old = math.log(old_value)
+        # A step that reaches a bound is assigned the bound. Its distance is formed as
+        # the returned log step is, so a bound-limited step compares equal to it;
+        # ``old * exp(step)`` rounds through a log and an exp and can land further from
+        # the bound than the snap reaches, where the exact comparisons that detect a
+        # bound miss it.
+        if step >= math.log(upper) - log_old:
+            proposed = upper
+        elif step <= math.log(lower) - log_old:
+            proposed = lower
+        else:
+            proposed = _snap_to_bounds(
+                float(np.clip(old_value * math.exp(step), lower, upper)), config, name
+            )
         lambdas[name] = proposed
-        log_steps[name] = math.log(proposed) - math.log(old_value)
+        log_steps[name] = math.log(proposed) - log_old
     return lambdas, log_steps
 
 

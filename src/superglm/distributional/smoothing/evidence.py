@@ -29,6 +29,7 @@ class _FreshRawEvidence:
     maximum: float
     working_infinity: tuple[str, ...]
     unresolved_upper_bound: tuple[str, ...]
+    cap_held: tuple[str, ...] = ()
 
 
 def _fresh_raw_evidence(
@@ -39,8 +40,17 @@ def _fresh_raw_evidence(
     *,
     face: PenaltyFace | None = None,
     penalty_memo: _PenaltyEvaluationMemo | None = None,
+    held: frozenset[str] = frozenset(),
 ) -> _FreshRawEvidence:
-    """Rebuild the proposal and normalized stationarity residual at one fit."""
+    """Rebuild the proposal and normalized stationarity residual at one fit.
+
+    ``held`` names caps the caller holds as active bounds while the other
+    components move (Burke and Moré 1988). One stays held, in ``cap_held``,
+    while it sits at its cap and its raw step is not materially inward. It is
+    then no part of ``maximum``, ``working_infinity`` or
+    ``unresolved_upper_bound``, and the caller answers for its cap before it
+    returns. A held name whose raw step turns inward is ordinary evidence again.
+    """
 
     components = (
         _component_states(layout, lambdas)
@@ -80,11 +90,17 @@ def _fresh_raw_evidence(
         update,
         config,
     )
-    working_infinity = tuple(
-        name for name in estimated_names if update.proposal_kinds[name] == "working_infinity"
-    )
     capped_names = frozenset(
         name for name in estimated_names if lambdas[name] == config.upper(name)
+    )
+    cap_held = tuple(
+        name
+        for name in estimated_names
+        if name in held and name in capped_names and update.raw_log_steps[name] >= -config.tolerance
+    )
+    judged_names = tuple(name for name in estimated_names if name not in cap_held)
+    working_infinity = tuple(
+        name for name in judged_names if update.proposal_kinds[name] == "working_infinity"
     )
     # Normalized fixed-point stationarity is the finite convergence
     # certificate.  The raw GFS quotient is cancellation-amplified near a
@@ -96,9 +112,9 @@ def _fresh_raw_evidence(
     # from λ = ∞.  Roundoff-sized negative drift is compatible with a finite
     # optimum at the cap itself.
     convergence_evidence = [
-        abs(float(update.stationarity_log_residuals[name])) for name in estimated_names
+        abs(float(update.stationarity_log_residuals[name])) for name in judged_names
     ]
-    for name in estimated_names:
+    for name in judged_names:
         raw_step = float(update.raw_log_steps[name])
         if name in stable_raw_names or update.proposal_kinds[name] == "working_infinity":
             convergence_evidence.append(abs(raw_step))
@@ -106,9 +122,7 @@ def _fresh_raw_evidence(
             convergence_evidence.append(abs(raw_step))
     maximum = max(convergence_evidence, default=0.0)
     unresolved_upper_bound = tuple(
-        name
-        for name in estimated_names
-        if name in capped_names and update.raw_log_steps[name] > 0.0
+        name for name in judged_names if name in capped_names and update.raw_log_steps[name] > 0.0
     )
     return _FreshRawEvidence(
         components=components,
@@ -117,6 +131,7 @@ def _fresh_raw_evidence(
         maximum=maximum,
         working_infinity=working_infinity,
         unresolved_upper_bound=unresolved_upper_bound,
+        cap_held=cap_held,
     )
 
 

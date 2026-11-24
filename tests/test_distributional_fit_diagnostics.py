@@ -313,10 +313,12 @@ def unresolved_cap_model():
         weight_contract=WeightContract("prior"),
         lambdas={"location:z#wiggle": 0.3 * _per_knot(z), "scale:z#wiggle": 0.3 * _per_knot(z)},
         config=DenseSolverConfig(tolerance=1.0e-9, max_iterations=100),
+        # One round: the refused cap assessment. With more, the location penalty steps
+        # back from its cap and the scale penalty's optimum becomes interior.
         efs_config=DistributionalEFSConfig(
             outer="efs",
             tolerance=1.0e-8,
-            max_iterations=8,
+            max_iterations=1,
             initial_lambda=0.1 * _per_knot(z),
             maximum_lambda=0.3 * _per_knot(z),
         ),
