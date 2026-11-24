@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+import numpy as _numpy  # noqa: F401  # Initialize NumPy before importing numpy.typing.
 from numpy.typing import NDArray
 
 
