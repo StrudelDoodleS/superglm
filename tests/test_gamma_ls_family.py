@@ -1853,13 +1853,36 @@ def test_gamma_efs_selects_an_exact_irrelevant_face_and_keeps_a_finite_smooth(
     assert np.linalg.norm(constrained_covariance, ord=2) <= covariance_bound
 
 
+@pytest.mark.pins_behaviour
 def test_gamma_endpoint_polish_reversal_never_certifies_a_nonstationary_fit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reject a bad correction without forbidding an independently stationary refit."""
+    """Pin the refusal of an endpoint whose fits stop short of their mode and polish the wrong way.
+
+    An endpoint fit that stops with its retained score still material is
+    polished by one Newton correction. Whether a fit stops so is its
+    trajectory's rounding (140 tolerances short in one coordinate system,
+    at its mode in another), so each endpoint fit is evaluated, not
+    iterated, a relative 1e-6 off its mode.
+    """
 
     real_solve_terminal = DenseSolverResult.solve_terminal
+    real_fit_fixed_state = smoothing_authority._fit_fixed_state
     reversed_fits: list[DenseSolverResult] = []
+
+    def stop_short_of_the_mode(*args, **kwargs) -> DenseSolverResult:
+        mode = real_fit_fixed_state(*args, **kwargs)
+        strict = kwargs["config"]
+        short = real_fit_fixed_state(
+            *args,
+            **{
+                **kwargs,
+                "initial": mode.coefficients * (1.0 + 1.0e-6),
+                "config": replace(strict, tolerance=0.5),
+            },
+        )
+        assert short.converged and short.iterations == 0
+        return replace(short, config=strict)
 
     def reverse_endpoint_newton_direction(
         result: DenseSolverResult,
@@ -1881,6 +1904,7 @@ def test_gamma_endpoint_polish_reversal_never_certifies_a_nonstationary_fit(
         "solve_terminal",
         reverse_endpoint_newton_direction,
     )
+    monkeypatch.setattr(smoothing_authority, "_fit_fixed_state", stop_short_of_the_mode)
     frame, response, weights = _gamma_exact_face_problem()
     maximum_lambda = 10.0
 
@@ -1895,8 +1919,6 @@ def test_gamma_endpoint_polish_reversal_never_certifies_a_nonstationary_fit(
         ),
         sample_weight=weights,
         lambdas={"mean:x#wiggle": 0.5, "scale:group#wiggle": maximum_lambda},
-        # Fisher scoring leaves the accepted fit less tight than Newton, so the
-        # observed endpoint polish has a correction to make and the reversal bites.
         config=DenseSolverConfig(
             tolerance=1.0e-9, max_iterations=150, coefficient_curvature="fisher"
         ),
@@ -1923,14 +1945,6 @@ def test_gamma_endpoint_polish_reversal_never_certifies_a_nonstationary_fit(
             ]
             assert all(endpoint is not rejected for rejected in reversed_fits)
             assert _assessment_is_numerically_stationary(endpoint, tolerance)
-    if smoothing.converged:
-        # The endpoint's ordinary fit can reach its mode without needing polish.
-        terminal = smoothing.terminal_fit
-        assert terminal.coefficient_face is not None
-        assert terminal.coefficient_face.component_names == ("scale:group#wiggle",)
-        assert smoothing.terminal_raw_max_log_step <= smoothing.config.tolerance
-        assert _assessment_is_numerically_stationary(terminal, terminal.config.tolerance)
-        return
 
     assert smoothing.convergence_reason == "lambda_cap_unresolved"
     assert smoothing.terminal_fit.coefficient_face is None
