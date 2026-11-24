@@ -87,14 +87,11 @@ def _ordered_piecewise_structural_rows(
 
     One slope-change Wald row per stated break and one curvature row per
     segment of degree >= 2 (a single z row for one curvature freedom, a joint
-    chi-square family row for more). These are ordinary linear-model tests of
-    a fixed-knot design -- Smith (1979), Am. Statist. 33(2):57-62 -- and the
-    honest vocabulary under C0 seams, where per-segment orthogonal per-power
-    z-statistics do not exist (the segments share their joint values, so
-    within-segment components are not free parameters).
-
-    ``determines`` (a robust covariance's, over the block's coefficients) leaves a
-    row it does not determine its estimate alone, with no error or test.
+    chi-square family row for more): ordinary linear-model tests of a
+    fixed-knot design (Smith 1979, Am. Statist. 33(2):57-62). Under C0 seams
+    the segments share their joint values, so per-segment per-power z-tests
+    do not exist. ``determines`` (a robust covariance's, over the block's
+    coefficients) leaves a row it does not determine its estimate alone.
     """
     from scipy.stats import chi2 as chi2_dist
 

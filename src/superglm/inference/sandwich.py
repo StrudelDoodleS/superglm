@@ -118,16 +118,14 @@ def _dense_workspace_bytes(
 ) -> int:
     """Bytes of the dense float64 arrays one request holds at once, each at its peak.
 
-    Five ``q x q`` arrays while the Gram is restored to covariance units (the
-    accumulator, the result and the temporaries between them); six square
-    arrays of ``bread_columns`` for a bread formed here (penalty, Gram, Hessian
-    and its factorization); the two ``G x q`` cluster buffers; and six
-    ``chunk_rows x q`` arrays in a replay chunk (the scores, their
-    positive-weight copy, the solve's right-hand side, solution and result, and
-    the scaled copy the Gram takes).  The fit's per-row vectors (predictor,
-    mean, score, curvature) are its own size and are not dense workspace.  A
-    bread its Gram does not certify adds the QR route's workspace
-    (``_qr_bread_square_bytes``, ``_qr_bread_leaves``).
+    Five ``q x q`` arrays while the Gram returns to covariance units; six square
+    arrays of ``bread_columns`` for a bread formed here (penalty, Gram, Hessian,
+    factorization); the two ``G x q`` cluster buffers; and six ``chunk_rows x
+    q`` arrays in a replay chunk (scores, their positive-weight copy, the
+    solve's right-hand side, solution and result, the Gram's scaled copy). The
+    fit's per-row vectors are its own and not counted. A bread its Gram does
+    not certify adds the QR route's workspace (``_qr_bread_square_bytes``,
+    ``_qr_bread_leaves``).
     """
     cluster = 16 * n_clusters * q if n_clusters else 0
     return 40 * q * q + 48 * bread_columns * bread_columns + cluster + 48 * chunk_rows * q
@@ -137,17 +135,13 @@ def _observed_gram_bytes(design: DesignMatrix, *, signed: bool) -> int:
     """Bytes the pass that forms an observed bread's Gram holds, counted before it runs.
 
     The row-block pass (``centered_gram_rhs``, ``c = min(n, 8192)`` rows at a
-    time) is a signed bread's only route and every design's last one. A block
-    holds its row subset, each group's rows and their concatenation while it is
-    formed, then the centred rows and their weighted copy: at most five ``c x
-    p`` arrays and the row indices. Beside a bounded group a design's dense
-    columns meet it in blocks of ``n`` rows and at most ``_FACTOR_CHUNK_BYTES``
-    (or one column), held with their weighted copy (``dense_split_cross``). A
-    design with a compact group may take a table, histogram or raw-moment rung
-    instead, whose holding follows its supports and stored entries: for those
-    the count is a floor, the rungs' chunk budget and 96 bytes a row. Every
-    route adds four per-row vectors (the response it centres, its centred copy
-    and the weighted sums) and eight ``p x p`` arrays.
+    time), a signed bread's only route and every design's last, holds at most
+    five ``c x p`` arrays and the row indices per block. Beside a bounded group,
+    dense columns meet it in blocks of ``n`` rows and at most
+    ``_FACTOR_CHUNK_BYTES`` (or one column), with their weighted copy. A compact
+    group's table, histogram or raw-moment rung holds what its supports need:
+    for those the count is a floor, the rungs' chunk budget and 96 bytes a row.
+    Every route adds four per-row vectors and eight ``p x p`` arrays.
     """
     from superglm.group_matrix import DenseGroupMatrix
 
