@@ -365,7 +365,8 @@ def structural_penalty_ranks(spec: Any, info: Any) -> dict[str, int] | None:
         return _gapped_rank(np.linalg.eigvalsh(structural))
 
     if info.penalty_components is None:
-        keyed = {"": spec._m_orders}
+        # A single penalty is the one ``_build_penalty`` forms, of the first order alone.
+        keyed = {"": spec._m_orders[:1]}
     else:
         keyed = {
             suffix: (int(suffix[1:]),) if suffix.startswith("d") else spec._m_orders

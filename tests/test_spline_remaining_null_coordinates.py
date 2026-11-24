@@ -289,6 +289,52 @@ def test_by_level_curve_retains_its_unpenalized_slope(discrete):
     )
 
 
+@pytest.mark.parametrize("discrete", [False, True])
+@pytest.mark.parametrize(("kind", "orders"), [("bs", (2, 1)), ("bs", (3, 2)), ("cr", (2, 1))])
+def test_by_level_curve_of_a_multi_order_parent_keeps_its_penalty_null_space(
+    kind, orders, discrete
+):
+    """A level's one penalty has its parent's first order, and its null polynomials stay unpenalised.
+
+    Under stiff penalties each level's fit is its least-squares polynomial of
+    degree below ``orders[0]``. Counting the null space every listed order
+    shares declared the level's penalty one rank too high, so the level stated
+    no null coordinates and the weight of 1e13 bent its polynomial.
+    """
+    x1 = np.geomspace(1.0, 1e5, 200)
+    x = np.r_[x1, x1]
+    labels = np.r_[np.full(200, "A"), np.full(200, "B")]
+    t = x / x.max()
+    level_b = labels == "B"
+    y = 1 + t * (1 + level_b) + 0.05 * np.sin(np.log(x)) + 0.03 * level_b * np.cos(3 * np.log(x))
+    frame = pd.DataFrame({"x": x, "g": labels})
+    first = orders[0]
+    penalty = {f"x:d{order}": 1e13 if order == first else 0.0 for order in orders}
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        discrete=discrete,
+        spline_penalty={**penalty, "x:g[B]": 1e13},
+        features={
+            "x": Spline(kind=kind, n_knots=6, m=orders, knot_strategy="quantile_rows"),
+            "g": Categorical(),
+        },
+        interactions=[("x", "g")],
+    ).fit(frame, y)
+
+    (group,) = [
+        matrix
+        for matrix, info in zip(model._dm.group_matrices, model._groups, strict=True)
+        if info.name == "x:g[B]"
+    ]
+    predicted = model.predict(frame)
+    for rows in (~level_b, level_b):
+        design = np.vander(t[rows], first, increasing=True)
+        fitted = design @ np.linalg.lstsq(design, y[rows], rcond=None)[0]
+        np.testing.assert_allclose(predicted[rows], fitted, atol=1e-10, rtol=0)
+    assert not group.omega[: first - 1].any()
+
+
 @pytest.mark.parametrize("degree, order, nullity", [(2, 2, 1), (3, 4, 1), (3, 2, 0)])
 def test_natural_difference_penalty_counts_only_lines_left_by_its_boundaries(
     degree, order, nullity
