@@ -11,7 +11,7 @@ from typing import Literal, NamedTuple
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.group_matrix import GroupMatrix
+from superglm.group_matrix import GroupMatrix, penalty_coordinate_map
 from superglm.solvers._structured.balance_tree import (
     ProfiledSumToZeroTreeFactor,
     SumToZeroLeafSystem,
@@ -250,6 +250,7 @@ def build_penalized_sum_to_zero_operator(
 
     if reml_penalties is None:
         raise ValueError(_PENALTIES_REQUIRED)
+    roots = []
     for component in reml_penalties:
         lam = _lambda_for_component(lambda2, component.name)
         if lam == 0.0:
@@ -265,6 +266,7 @@ def build_penalized_sum_to_zero_operator(
             if not wholly_small:
                 raise ValueError("The dominant SZ block accepts only a sum-to-zero penalty.")
             A[local_small, local_small] += lam
+            roots.append((local_small, None, None, lam))
             continue
         if component.penalty_kind == "sum_to_zero":
             if (
@@ -299,8 +301,28 @@ def build_penalized_sum_to_zero_operator(
                 f"expected ({len(indices)}, {len(indices)})."
             )
         A[np.ix_(local_small, local_small)] += lam * omega
+        root = _border_root(component, group_matrices[component.group_index], local_small)
+        roots.append((*root, lam))
 
-    return SumToZeroPenalizedOperator.with_penalties(operator, A, D)
+    return SumToZeroPenalizedOperator.with_penalties(operator, A, D, tuple(roots))
+
+
+def _border_root(
+    component: PenaltyComponent, group_matrix: GroupMatrix, positions: NDArray
+) -> tuple[NDArray, NDArray | None, NDArray | None]:
+    """``(positions, Omega, C)``: one border penalty component in its raw basis, by reference.
+
+    ``Omega`` is the component's penalty as the term states it and ``C`` the
+    map from the term's solver coefficients to those coordinates
+    (``penalty_coordinate_map``: ``R_inv_local`` for a term held in its own
+    coordinates, else ``R_inv``), the pair its solver-space penalty
+    ``C' Omega C`` is formed from.  ``(positions, None, None)`` where the
+    component has no such pair.
+    """
+    omega = component.omega_raw
+    if omega is None or getattr(group_matrix, "R_inv", None) is None:
+        return positions, None, None
+    return positions, omega, penalty_coordinate_map(group_matrix)
 
 
 def _nested_penalty_terms(

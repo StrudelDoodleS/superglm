@@ -35,6 +35,7 @@ from superglm._group_matrix._group_matrix_kernels import (
 from superglm._group_matrix._lookup_tables import table_centred_system, table_gram_plan
 from superglm._roundoff import EPS as _EPS
 from superglm._roundoff import UNIT_ROUNDOFF as _UNIT
+from superglm._roundoff import gamma as _gamma
 from superglm.group_matrix import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
@@ -650,9 +651,26 @@ def penalty_factor(penalty: NDArray) -> NDArray:
     ``n_b eps ||S_b||_2`` of ``S_b`` itself (Drmac 2020, sec. 3.3).
     """
     width = penalty.shape[0]
+    rows = [np.empty((0, width))]
+    for columns, root, _, _ in _root_blocks(penalty):
+        embedded = np.zeros((root.shape[0], width))
+        embedded[:, columns] = root
+        rows.append(embedded)
+    return np.vstack(rows)
+
+
+def _root_blocks(
+    penalty: NDArray,
+) -> Iterator[tuple[NDArray, NDArray, NDArray | None, NDArray]]:
+    """``penalty_factor``'s blocks as ``(columns, root, metric, block)``, in its row order.
+
+    The 1 x 1 blocks come together (``metric`` ``None``: their roots are
+    exact), then each coupled block with the diagonal of the metric its
+    eigensolve ran in: ``diag(S_b)^(1/2)`` equilibrated, ones otherwise.
+    """
     symmetric = 0.5 * (penalty + penalty.T)
     if penalty.shape == (0, 0) or not np.any(symmetric):
-        return np.empty((0, width))
+        return
     support = np.flatnonzero(np.any(symmetric != 0.0, axis=1))
     coupled = symmetric[np.ix_(support, support)] != 0.0
     order = np.arange(len(support))
@@ -662,21 +680,82 @@ def penalty_factor(penalty: NDArray) -> NDArray:
     single = ends - starts == 1
     # 1 x 1 blocks are their own eigenpairs, exactly: positive is above the bar
     diagonal = support[starts[single]]
+    diagonal = diagonal[symmetric[diagonal, diagonal] > 0.0]
     values = symmetric[diagonal, diagonal]
-    diagonal = diagonal[values > 0.0]
-    factor = np.zeros((len(diagonal), width))
-    factor[np.arange(len(diagonal)), diagonal] = np.sqrt(symmetric[diagonal, diagonal])
-    rows = [factor]
+    yield diagonal, np.diag(np.sqrt(values)), None, np.diag(values)
     for start, stop in zip(starts[~single], ends[~single], strict=True):
         columns = support[start:stop]
         block = symmetric[np.ix_(columns, columns)]
         root = _equilibrated_block_root(block)
         if root is None:
-            root = _block_root(block)
+            yield columns, _block_root(block), np.ones(len(block)), block
+        else:
+            yield columns, root, np.sqrt(np.diag(block)), block
+
+
+def penalty_factor_tilt(penalty: NDArray) -> tuple[NDArray, NDArray, NDArray]:
+    """``penalty_factor``'s ``R`` with ``s`` and ``t`` ``(width,)``: what ``R`` shows of a vector.
+
+    ``||R x||_2 <= ||s * x||_2`` for every ``x``, with equality at full
+    curvature, and ``||R x||_2 <= ||t * x||_2`` where ``S x = 0``: ``R'R`` is
+    ``S`` only to the eigensolver's backward error, so an exact null of ``S``
+    is not one of ``R``.  A coupled block is rooted in the metric ``M`` its
+    eigensolve ran in (``_root_blocks``), ``R_b = W^(1/2) V' M`` on the kept
+    pairs, so ``s = sqrt(w_max) diag(M)``.  The computed ``V W V'`` is ``B +
+    F``, ``B = M^-1 S_b M^-1``, ``||F||_2 <= gamma_7n ||B||_F``, which covers
+    LAPACK's ``n eps = 2 n u`` (*Users' Guide*, 3rd ed., sec. 4.7) and the
+    equilibration's five roundings an entry (``gamma_5 || |B| ||_2 <= gamma_5
+    ||B||_F``).  With ``y = M x``, ``B y = 0``, so a kept pair has ``w_i
+    v_i'y = v_i'F y`` and ``||R_b x|| = ||W^(1/2) V'y|| <= ||F y|| /
+    sqrt(w_min)``: ``t = gamma_7n ||B||_F / sqrt(w_min) diag(M)``, first
+    order in ``u``.  A 1 x 1 block's root is exact (``t = 0``).
+    """
+    width = penalty.shape[0]
+    rows, full, tilt = [np.empty((0, width))], np.zeros(width), np.zeros(width)
+    for columns, root, metric, block in _root_blocks(penalty):
         embedded = np.zeros((root.shape[0], width))
         embedded[:, columns] = root
         rows.append(embedded)
-    return np.vstack(rows)
+        if metric is None:
+            full[columns] = np.diag(root)
+        elif root.shape[0]:
+            kept = np.sum((root / metric) ** 2, axis=1)  # the kept eigenvalues w
+            reach = _gamma(7 * len(block)) * float(np.linalg.norm(block / np.outer(metric, metric)))
+            full[columns] = math.sqrt(float(np.max(kept))) * metric
+            tilt[columns] = reach / math.sqrt(float(np.min(kept))) * metric
+    return np.vstack(rows), full, tilt
+
+
+def penalty_null_columns(penalty: NDArray, coefficients: NDArray, resolution: float) -> NDArray:
+    """Test raw coefficient columns for membership in each penalty block's null space.
+
+    In its Jacobi metric the root rows are the retained orthonormal eigenvectors
+    times sqrt(w_i). Removing those weights measures distance to the null space.
+    A weak positive direction can have a small image while lying wholly in the
+    range. A full-rank block admits only the zero vector.
+    """
+    from superglm.reml.multi_penalty import _certifies_rank_at_least
+    from superglm.solvers.rank import _scaled_coordinate_columns
+
+    flat = np.ones(coefficients.shape[1], dtype=bool)
+    for positions, root, metric, block in _root_blocks(penalty):
+        part = coefficients[positions]
+        active = flat & np.any(part != 0.0, axis=0)
+        if not np.any(active):
+            continue
+        rank = len(root)
+        if rank == len(positions) or _certifies_rank_at_least(block, rank + 1):
+            # A cut that missed certified curvature cannot establish a null.
+            flat[active] = False
+        elif rank:
+            assert metric is not None  # the diagonal blocks have full rank
+            scaled, _ = _scaled_coordinate_columns(part[:, active], metric, inverse=False)
+            rows, _ = _scaled_coordinate_columns(root.T, metric)
+            basis = rows / np.linalg.norm(rows, axis=0)
+            flat[active] = np.linalg.norm(basis.T @ scaled, axis=0) <= resolution * np.linalg.norm(
+                scaled, axis=0
+            )
+    return flat
 
 
 def _block_root(block: NDArray) -> NDArray:
