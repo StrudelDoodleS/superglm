@@ -516,6 +516,27 @@ def test_precision_weights_decide_whether_a_null_direction_is_visible():
     assert model.result.reml_hessian_rank == 3
 
 
+@pytest.mark.pins_behaviour
+def test_high_order_difference_preserves_a_curve_in_its_null_space():
+    """Pin the exact-fit curve whose coefficient vector is orthogonal to the difference row."""
+    x = np.linspace(0, 1, 300)
+    frame = pd.DataFrame({"x": x})
+    spec = Spline(kind="ps", n_knots=21, m=24)
+    spec.build(x)
+    root = np.diff(np.eye(25), n=24, axis=0).ravel()
+    root /= np.linalg.norm(root)
+    coef = np.random.default_rng(2026).normal(size=root.size)
+    y = spec._basis_matrix(x) @ (coef - root * (root @ coef))
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        spline_penalty=1e-6,
+        discrete=False,
+        features={"x": spec},
+    ).fit(frame, y)
+    np.testing.assert_allclose(model.predict(frame), y, atol=1e-11, rtol=0)
+
+
 def _closed_form_large_lambda_reml_objective(spec, x: np.ndarray, y: np.ndarray) -> float:
     """Exact Gaussian REML objective in the ``lambda -> inf`` limit of SSP coordinates.
 

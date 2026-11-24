@@ -122,15 +122,22 @@ def difference_penalty_for(spec, order: int) -> NDArray:
     return penalty
 
 
-def difference_null_basis(spec, order: int) -> NDArray:
+def difference_null_basis(spec, order: int) -> NDArray | None:
     """Raw coefficients of the null space of the difference penalty ``difference_penalty_for`` built.
 
-    The standard penalty annihilates the integer sequences ``j**p``, ``p < order``
-    (Eilers and Marx 1996, sec. 5), exactly representable in binary64; the
-    general and projected penalties annihilate the polynomials of degree below
-    ``order`` (``_polynomial_coefficients``).
+    The standard penalty annihilates the sequences ``j**p``, ``p < order``
+    (Eilers and Marx 1996, sec. 5). Constants and lines have a well-resolved
+    basis. For higher powers, use the difference operator's right null space
+    if its numerical rank resolves the declared order. The general and
+    projected penalties annihilate polynomials in the knot variable.
     """
     if getattr(spec, "_difference_penalty", {}).get(order) == "standard":
+        if order > 2:
+            from scipy.linalg import null_space
+
+            root = difference_penalty_root(spec, order)
+            basis = null_space(root, rcond=SHARED_RANK_POLICY.factor_rcond)
+            return basis if basis.shape[1] == order else None
         return np.vander(np.arange(spec._n_basis, dtype=np.float64), order, increasing=True)
     return _polynomial_coefficients(spec._knots, spec.degree, order)
 

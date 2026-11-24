@@ -717,7 +717,7 @@ class PSpline(_BSplineBase):
     def _build_penalty_for_order(self, order: int) -> NDArray:
         return _spline_penalties.difference_penalty_for(self, order)
 
-    def _penalty_null_basis(self, order: int) -> NDArray:
+    def _penalty_null_basis(self, order: int) -> NDArray | None:
         return _spline_penalties.difference_null_basis(self, order)
 
     def _penalty_root_for_order(self, order: int) -> NDArray:
