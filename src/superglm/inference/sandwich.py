@@ -81,6 +81,7 @@ from superglm.reml.observed_geometry import (
 )
 from superglm.solvers._structured.state import StructuredLinearSystemState
 from superglm.solvers.centered_system import (
+    _FACTOR_CHUNK_BYTES,
     _NO_CENTRE,
     _design_leaf_parts,
     build_centered_system,
@@ -130,6 +131,36 @@ def _dense_workspace_bytes(
     """
     cluster = 16 * n_clusters * q if n_clusters else 0
     return 40 * q * q + 48 * bread_columns * bread_columns + cluster + 48 * chunk_rows * q
+
+
+def _observed_gram_bytes(design: DesignMatrix, *, signed: bool) -> int:
+    """Bytes the pass that forms an observed bread's Gram holds, counted before it runs.
+
+    The row-block pass (``centered_gram_rhs``, ``c = min(n, 8192)`` rows at a
+    time) is a signed bread's only route and every design's last one. A block
+    holds its row subset, each group's rows and their concatenation while it is
+    formed, then the centred rows and their weighted copy: at most five ``c x
+    p`` arrays and the row indices. Beside a bounded group a design's dense
+    columns meet it in blocks of ``n`` rows and at most ``_FACTOR_CHUNK_BYTES``
+    (or one column), held with their weighted copy (``dense_split_cross``). A
+    design with a compact group may take a table, histogram or raw-moment rung
+    instead, whose holding follows its supports and stored entries: for those
+    the count is a floor, the rungs' chunk budget and 96 bytes a row. Every
+    route adds four per-row vectors (the response it centres, its centred copy
+    and the weighted sums) and eight ``p x p`` arrays.
+    """
+    from superglm.group_matrix import DenseGroupMatrix
+
+    n, p = int(design.n), int(design.p)
+    rows = min(n, 8192)
+    held = 40 * rows * p + 16 * rows
+    dense = sum(gm.shape[1] for gm in design.group_matrices if type(gm) is DenseGroupMatrix)
+    if not signed and dense < p:
+        if dense:
+            columns = min(dense, max(1, _FACTOR_CHUNK_BYTES // (8 * max(n, 1))))
+            held = max(held, 16 * n * columns)
+        held = max(held, _FACTOR_CHUNK_BYTES + 96 * n)
+    return held + 32 * n + 64 * p * p
 
 
 def _qr_bread_square_bytes(design: DesignMatrix) -> int:
@@ -1062,6 +1093,7 @@ def compute_superglm_sandwich_covariance(
     n_factorizations = 0
     bread_columns = 0
     factor_peak = 0
+    gram_peak = 0
 
     if backend == "structured":
         assert isinstance(linear_state, StructuredLinearSystemState)
@@ -1133,6 +1165,11 @@ def compute_superglm_sandwich_covariance(
             needed = _dense_workspace_bytes(q, n_clusters, 1, bread_columns=bread_columns)
             if needed > workspace_cap:
                 return over_budget(needed)
+            # The Gram pass is counted before anything it holds is allocated.
+            nonnegative = bool(np.all(h_solver >= 0.0))
+            gram_peak = needed + _observed_gram_bytes(X_active, signed=not nonnegative)
+            if gram_peak > workspace_cap:
+                return over_budget(gram_peak)
             S_active = np.array(
                 _active_penalty_matrix(
                     list(model._dm.group_matrices),
@@ -1151,7 +1188,6 @@ def compute_superglm_sandwich_covariance(
                         block = S_active[ag.sl, ag.sl]
                         block[np.diag_indices_from(block)] += ridge_lam
 
-            nonnegative = bool(np.all(h_solver >= 0.0))
             if nonnegative:
                 try:
                     centered_sys = build_centered_system(
@@ -1308,7 +1344,7 @@ def compute_superglm_sandwich_covariance(
     )
     if chunk_rows < 1:
         return over_budget(fixed_bytes + 48 * q)
-    peak_bytes = max(fixed_bytes + 48 * chunk_rows * q, factor_peak)
+    peak_bytes = max(fixed_bytes + 48 * chunk_rows * q, factor_peak, gram_peak)
 
     n_chunks = 0
 

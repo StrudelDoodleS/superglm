@@ -2052,6 +2052,41 @@ class TestUnitsAndWorkspace:
         assert capped.available and capped.telemetry.peak_bytes <= cap
         np.testing.assert_allclose(capped.covariance, free.covariance, rtol=1e-10, atol=1e-18)
 
+    def test_the_cap_covers_the_gram_pass_that_forms_an_observed_bread(self, monkeypatch):
+        """The observed bread's Gram reads 8192-row blocks of 40 columns (two of 2.6 MB at least).
+
+        That pass is counted before it runs: a 2 MiB cap, which the bread's squares
+        and the replay alone fit, is refused without the pass starting, and a 16 MiB
+        cap counts it and gives the uncapped request's covariance.
+        """
+        import superglm.inference.sandwich as sandwich_mod
+
+        n, width = 8192, 40
+        rng = np.random.default_rng(57)
+        values = rng.normal(size=(n, width))
+        y = rng.gamma(5.0, np.exp(0.2 + 0.1 * values[:, 0]) / 5.0)
+        frame = pd.DataFrame(values, columns=[f"c{i}" for i in range(width)])
+        model = SuperGLM(
+            family=Gamma(), link=LogLink(), features={c: Numeric() for c in frame}, n_jobs=1
+        ).fit(frame, y)
+        free = model.sandwich_covariance()
+        assert free.available and free.bread_curvature == "observed"
+
+        with monkeypatch.context() as mp:
+
+            def unreachable(**kwargs):
+                raise AssertionError("the Gram pass ran under a cap it does not fit")
+
+            mp.setattr(sandwich_mod, "build_centered_system", unreachable)
+            refused = model.sandwich_covariance(max_memory=2 << 20)
+        assert refused.unavailable_reason == "workspace_budget_exceeded"
+
+        cap = 16 << 20
+        capped = model.sandwich_covariance(max_memory=cap)
+        assert capped.available
+        assert 16 * n * width <= capped.telemetry.peak_bytes <= cap
+        np.testing.assert_allclose(capped.covariance, free.covariance, rtol=1e-10, atol=1e-18)
+
     @pytest.mark.parametrize("weight_semantics", ["prior", "frequency"])
     def test_unclustered_centered_replay_matches_single_chunk_across_chunk_boundary(
         self, weight_semantics
