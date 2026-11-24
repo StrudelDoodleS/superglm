@@ -131,12 +131,10 @@ def test_sparse_group_lasso_alpha_zero_keeps_group_threshold():
     np.testing.assert_allclose(sgl_lmax, gl_lmax, rtol=1e-12)
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("alpha", [0.35, 1.0])
 def test_sparse_group_lambda_max_is_the_composite_kkt_boundary(alpha):
-    """Review finding: for 0 < alpha <= 1 the elastic-net division is not the
-    sparse-group zero condition ||soft(grad, lam*alpha)|| <= lam*(1-alpha)*w;
-    at alpha=1 it UNDERESTIMATES lambda_max, so fit_path's first model was
-    not all-zero. Pin the solver boundary directly."""
+    """Pin the path's composite KKT boundary against ordinary sparse-group fits."""
     from superglm.penalties.sparse_group_lasso import SparseGroupLasso
 
     frame = _frame(n=2000, seed=11)
@@ -149,8 +147,10 @@ def test_sparse_group_lambda_max_is_the_composite_kkt_boundary(alpha):
         penalty=SparseGroupLasso(lambda1=0.0, alpha=alpha),
         features={name: Spline(kind="ps", k=6) for name in ("a", "b", "c")},
     )
-    probe._build_design_matrix(frame, response, weights, None)
-    lambda_max = compute_lambda_max(probe, np.asarray(response, dtype=float), weights)
+    # A positive path lambda uses the same spline coordinates as a positive
+    # ordinary-fit lambda, even when the path's starting configuration is zero.
+    path = probe.fit_path(frame, response, sample_weight=weights, n_lambda=1)
+    lambda_max = path.lambda_seq[0]
     assert lambda_max > 0.0
 
     def active(lambda1):
