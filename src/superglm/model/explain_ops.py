@@ -5,6 +5,8 @@ from __future__ import annotations
 import dataclasses
 import warnings
 
+import numpy as np
+
 from superglm.inference._term_covariance import simultaneous_band_and_critical_value
 from superglm.inference._term_model_ops import (
     drop1 as _drop1,
@@ -63,6 +65,38 @@ _SHAPE_REPAIRED_INFERENCE_MESSAGE = (
     "fitted standard errors and confidence intervals reference the "
     "unconstrained fit rather than the published one; returning term inference "
     "without SE/CI. Fit the constraint (Constraint.fit.*) if you need a band."
+)
+
+
+def _resolve_robust_slope_covariance(model, covariance):
+    """Validate fit-bound ``SandwichCovariance`` and return ``(Cov_slopes, active_groups)``."""
+    from superglm.inference.sandwich import bound_covariance
+
+    covariance = bound_covariance(model, covariance)
+    return covariance.slope_covariance, list(covariance.active_groups)
+
+
+def _aliased_features(model, covariance) -> set[str]:
+    """Terms holding a coefficient the fit does not determine, by ``str`` as the readers key them.
+
+    The term readers report contrasts of a whole block, so a robust reader
+    withholds the errors of such a term, as it does a repaired one's;
+    ``summary(covariance=...)`` blanks the coefficients themselves.
+    """
+    active = {group.name for group in covariance.active_groups}
+    estimable = covariance.coefficient_estimable
+    return {
+        str(group.feature_name)
+        for group in model._groups
+        if group.name in active and not estimable[group.sl].all()
+    }
+
+
+_ALIASED_INFERENCE_MESSAGE = (
+    "The fit does not determine every coefficient of {terms} (aliased with another term "
+    "or the intercept), so the robust standard errors of {terms} are withheld. "
+    "summary(covariance=...) blanks the coefficients concerned; drop or merge the "
+    "aliased terms and refit to get them."
 )
 
 
@@ -152,7 +186,7 @@ def refit_unpenalised(model, X, y, sample_weight=None, offset=None, keep_smoothi
     )
 
 
-def relativities(model, with_se=False, centering="native"):
+def relativities(model, with_se=False, centering="native", *, covariance=None):
     """Extract plot-ready relativity DataFrames for all features.
 
     By default returns the canonical fitted term contributions under
@@ -160,12 +194,22 @@ def relativities(model, with_se=False, centering="native"):
     Pass ``centering="mean"`` to shift so geometric mean of
     relativities = 1 — a reporting convenience, not the fitted term.
     """
+    robust_cov = None
+    if covariance is not None:
+        if model._result is None:
+            raise RuntimeError("Model must be fitted before calling relativities().")
+        robust_cov = _resolve_robust_slope_covariance(model, covariance)
     if getattr(model, "_editor_inference_stale", False) and with_se:
         warnings.warn(_EDITOR_STALE_INFERENCE_MESSAGE, UserWarning, stacklevel=2)
         with_se = False
     from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
 
     _ensure_factor_smooth_levels_recorded(model)
+    cov_fn = (
+        (lambda: robust_cov)
+        if (with_se and robust_cov is not None)
+        else ((lambda: model._coef_covariance) if with_se else None)
+    )
     frames = _relativities(
         model._feature_order,
         model._interaction_order,
@@ -174,7 +218,7 @@ def relativities(model, with_se=False, centering="native"):
         model._groups,
         model.result,
         with_se=with_se,
-        covariance_fn=(lambda: model._coef_covariance) if with_se else None,
+        covariance_fn=cov_fn,
         centering=centering,
     )
     # Per FEATURE, not for the whole call: this returns every term at once, and
@@ -195,13 +239,36 @@ def relativities(model, with_se=False, centering="native"):
             if "se_log_relativity" in frame.columns:
                 warnings.warn(_SHAPE_REPAIRED_INFERENCE_MESSAGE, UserWarning, stacklevel=2)
                 frames[name] = frame.drop(columns=["se_log_relativity"])
+        aliased = _aliased_features(model, covariance) if robust_cov is not None else set()
+        withheld = [
+            key
+            for key in frames
+            if str(key) in aliased and "se_log_relativity" in frames[key].columns
+        ]
+        for name in withheld:
+            frames[name] = frames[name].assign(se_log_relativity=np.nan)
+        if withheld:
+            terms = ", ".join(repr(name) for name in withheld)
+            warnings.warn(_ALIASED_INFERENCE_MESSAGE.format(terms=terms), UserWarning, stacklevel=2)
     return frames
 
 
-def simultaneous_bands(model, feature, *, alpha=0.05, n_sim=10_000, n_points=200, seed=42):
+def simultaneous_bands(
+    model,
+    feature,
+    *,
+    alpha=0.05,
+    n_sim=10_000,
+    n_points=200,
+    seed=42,
+    covariance=None,
+):
     """Simultaneous confidence bands for a spline feature."""
     if model._result is None:
         raise RuntimeError("Model must be fitted before calling simultaneous_bands().")
+    robust_cov = (
+        _resolve_robust_slope_covariance(model, covariance) if covariance is not None else None
+    )
     if getattr(model, "_editor_inference_stale", False):
         raise RuntimeError(
             "Editor coefficient edits make simultaneous bands unavailable until the model is refit."
@@ -212,6 +279,8 @@ def simultaneous_bands(model, feature, *, alpha=0.05, n_sim=10_000, n_points=200
             "would be simulated from the unconstrained fit's covariance around constrained "
             "coefficients. Fit the constraint (Constraint.fit.*) if you need a band."
         )
+    if robust_cov is not None and str(feature) in _aliased_features(model, covariance):
+        raise RuntimeError(_ALIASED_INFERENCE_MESSAGE.format(terms=repr(feature)))
     from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
 
     _ensure_factor_smooth_levels_recorded(model)
@@ -221,7 +290,9 @@ def simultaneous_bands(model, feature, *, alpha=0.05, n_sim=10_000, n_points=200
         groups=model._groups,
         specs=model._specs,
         interaction_specs=model._interaction_specs,
-        covariance_fn=lambda: model._coef_covariance,
+        covariance_fn=(lambda: robust_cov)
+        if robust_cov is not None
+        else (lambda: model._coef_covariance),
         alpha=alpha,
         n_sim=n_sim,
         n_points=n_points,
@@ -241,10 +312,14 @@ def term_inference(
     n_sim=10_000,
     seed=42,
     centering="native",
+    covariance=None,
 ):
     """Per-term inference: curve, uncertainty, and metadata in one object."""
     if model._result is None:
         raise RuntimeError("Model must be fitted before calling term_inference().")
+    robust_cov = (
+        _resolve_robust_slope_covariance(model, covariance) if covariance is not None else None
+    )
     if getattr(model, "_editor_inference_stale", False) and with_se:
         warnings.warn(_EDITOR_STALE_INFERENCE_MESSAGE, UserWarning, stacklevel=2)
         with_se = False
@@ -252,6 +327,12 @@ def term_inference(
     repaired = _shape_repaired(model, name)
     if repaired and with_se:
         warnings.warn(_SHAPE_REPAIRED_INFERENCE_MESSAGE, UserWarning, stacklevel=2)
+        with_se = False
+        simultaneous = False
+    if robust_cov is not None and with_se and str(name) in _aliased_features(model, covariance):
+        warnings.warn(
+            _ALIASED_INFERENCE_MESSAGE.format(terms=repr(name)), UserWarning, stacklevel=2
+        )
         with_se = False
         simultaneous = False
     from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
@@ -263,7 +344,9 @@ def term_inference(
         groups=model._groups,
         specs=model._specs,
         interaction_specs=model._interaction_specs,
-        covariance_fn=lambda: model._coef_covariance,
+        covariance_fn=(lambda: robust_cov)
+        if robust_cov is not None
+        else (lambda: model._coef_covariance),
         reml_lambdas=getattr(model, "_reml_lambdas", None),
         lambda2=fitted_lambda2(model),
         group_edf=model._group_edf,
@@ -275,6 +358,13 @@ def term_inference(
         seed=seed,
         centering=centering,
     )
+    if covariance is not None and hasattr(inference, "covariance_method"):
+        inference = dataclasses.replace(
+            inference,
+            covariance_method=covariance.method_label,
+            covariance_n_units=covariance.n_units,
+            covariance_n_clusters=covariance.n_clusters,
+        )
     # `_term_ops` has no model handle, so it hard-codes `monotone_repaired=False`
     # with a comment inviting the caller to override. This is that caller: a
     # consumer that reads the object rather than the summary text has no other

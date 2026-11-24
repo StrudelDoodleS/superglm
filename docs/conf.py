@@ -138,6 +138,14 @@ nitpick_ignore_regex = [
         r"|penalties\.base\.Penalty|solvers\.pirls\.PIRLSResult"
         r"|types\.FeatureSpec)",
     ),
+    # The records a ``SandwichCovariance`` carries: the fit it is bound to, its
+    # coefficient blocks, the directions the fit does not determine, and its
+    # work counts. Internal by design, so no page.
+    (
+        "py:class",
+        r"superglm\.inference\._sandwich_core\.(FitBinding|CoefficientBlock"
+        r"|UndeterminedDirections|SandwichTelemetry)",
+    ),
     # Private row records behind ``ModelSummary``; private by design, so they
     # get no page and no cross-reference target.
     ("py:class", r"_(CoefRow|BasisDetailRow)"),
