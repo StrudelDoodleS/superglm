@@ -5,10 +5,10 @@ space when ``||r N|| > 1e-6 ||r||`` (Lenth, R Journal 7(1), 2015), with ``N``
 the null space the fit's data rank recorded, restricted to the null space of
 every penalty component, read in the record's equilibrated scale
 (``model.estimability_ops``).  ``predict`` returns master's price and gives one
-``NonEstimablePredictionWarning`` whose ``rows`` names them.  Only dense,
-unbinned fits are tested; every other fit is silent, as on master, and each
-review reproducer of a crash or a wrong warning there is pinned here as
-silent and priced as master prices it.
+``NonEstimablePredictionWarning`` whose ``rows`` names them. Dense fits with
+ordinary or binned splines are tested on the exact prediction rows. The
+silence and price of older binned saves, factor smooths and structured fits
+are pinned here.
 
 Each fixture forces its direction by construction: a level seen at one value of
 its by-level slope, or a column equal to another on every training row.  A test
@@ -342,14 +342,78 @@ def test_a_translated_aliased_column_never_warns_its_training_rows(shift):
     assert not found
 
 
-@pytest.mark.pins_behaviour
-def test_a_binned_fit_is_silent():
-    """Control (passes on master; at ce4a5b2f2 all 300 rows warned, and a compact pickle of it
-    warned again after loading at b839308ef).
+def _nested_geography():
+    """The Poisson tariff from #692, with regions nested within areas."""
+    rng = np.random.default_rng(1)
+    n = 4000
+    region = rng.choice(["r1", "r2", "r3", "r4"], n)
+    area = np.where(np.isin(region, ["r1", "r2"]), "N", "S")
+    x = rng.uniform(0, 1, n)
+    grp = rng.choice(list("abcdef"), n)
+    y = rng.poisson(0.1 * np.exp(0.5 * x) * np.where(area == "S", 1.3, 1.0)).astype(float)
+    X = pd.DataFrame({"area": area, "region": region, "x": x, "grp": grp})
+    new = pd.DataFrame(
+        {"area": ["N", "S", "N"], "region": ["r1"] * 3, "x": [0.5] * 3, "grp": ["a"] * 3},
+        index=[12, -9, 12],
+    )
+    return X, y, new
 
-    An unpenalised spline on four bins has a rank-deficient binned design, whose
-    record is not the rows ``predict`` prices: a binned fit is not tested.
-    """
+
+def _binned_geography(X, y, *, per_term=False, method="fit_reml", **kwargs):
+    return _fit(
+        X,
+        y,
+        {
+            "area": Categorical(base="N"),
+            "region": Categorical(base="r1"),
+            "x": Spline(n_knots=6, m=2, discrete=True if per_term else None),
+        },
+        family=superglm.families.poisson(),
+        method=method,
+        selection_penalty=0.0,
+        discrete=not per_term,
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize(
+    ("per_term", "method"), [(False, "fit_reml"), (True, "fit_reml"), (False, "fit")]
+)
+def test_binned_nested_geography_warns_once(per_term, method):
+    from superglm._group_matrix._group_matrix_discretized import DiscretizedSSPGroupMatrix
+
+    X, y, new = _nested_geography()
+
+    def alias(frame):
+        return (frame["area"] == "S").astype(int) - frame["region"].isin(["r3", "r4"])
+
+    np.testing.assert_array_equal(alias(X), 0)
+    np.testing.assert_array_equal(alias(new), [0, 1, 0])
+    model = _binned_geography(X, y, per_term=per_term, method=method)
+    assert model.result.direct_backend == "gram"
+    block = model._dm.group_matrices[-1]
+    assert type(block) is DiscretizedSSPGroupMatrix
+    assert block.n_bins < len(X)
+
+    mu, found = _disclosures(lambda: model.predict(new))
+    np.testing.assert_array_equal(mu, model._predict_exact(new))
+    assert [w.rows.tolist() for w in found] == [[1]]
+    assert "the training data do not determine (rows 1)" in str(found[0])
+
+
+@pytest.mark.pins_behaviour
+def test_default_binned_spline_is_silent_on_a_training_copy():
+    """Pin silence on training quotes with default bins and a second-order penalty."""
+    X, y, _ = _nested_geography()
+    model = _binned_geography(X, y)
+    _, found = _disclosures(lambda: model.predict(X.copy()))
+    assert not found
+
+
+def test_coarse_binned_fit_checks_exact_rows_against_fitted_span():
+    from superglm._group_matrix._group_matrix_bins import discretize_positive_support
+    from superglm.features._spline_runtime import bin_knots
+
     X = pd.DataFrame({"x": np.linspace(0.0, 1.0, 300)})
     y = np.random.default_rng(913).poisson(2, len(X)).astype(float)
     model = _fit(
@@ -361,12 +425,59 @@ def test_a_binned_fit_is_silent():
         spline_penalty=0.0,
         discrete=True,
         n_bins=4,
-        retain_fit_state=False,
     )
+    spline = model._specs["x"]
+    x = X["x"].to_numpy()
+    weights = np.ones(len(X))
+    representatives, codes = discretize_positive_support(
+        x, 4, weights, bin_knots(spline, x, weights)
+    )
+    block = model._dm.group_matrices[0]
+    np.testing.assert_array_equal(codes, block.bin_idx)
+    assert representatives.size == 4
+
+    def design(x):
+        return np.column_stack((np.ones(len(x)), spline.transform(x)))
+
+    # An independent SVD of the public-basis design actually seen by the fit.
+    _, singular, basis = np.linalg.svd(design(representatives[codes]), full_matrices=False)
+    assert np.count_nonzero(singular > singular[0] * 1e-12) == 4
+    assert np.linalg.matrix_rank(design(x)) == basis.shape[1]
+    new = X.iloc[[299, 0, 180, 77]].copy()
+    new.iloc[[0, 2, 3], 0] = representatives[[3, 2, 1]]
+    projection = np.linalg.norm(design(new["x"].to_numpy()) @ basis[4:].T, axis=1)
+    assert np.max(projection[[0, 2, 3]]) < 1e-10
+    assert projection[1] > 1e-3
+
+    mu, found = _disclosures(lambda: model.predict(new))
+    np.testing.assert_array_equal(mu, model._predict_exact(new))
+    assert [w.rows.tolist() for w in found] == [[1]]
+    _, reordered = _disclosures(lambda: model.predict(new.iloc[[2, 3, 0, 1]].copy()))
+    assert [w.rows.tolist() for w in reordered] == [[3]]
+
+
+def test_new_compact_binned_fit_keeps_warning_on_pickle_round_trip():
+    X, y, new = _nested_geography()
+    model = _binned_geography(X, y, retain_fit_state=False)
     saved = pickle.loads(pickle.dumps(model))
-    for fitted, frame in ((model, X), (model, X.copy()), (saved, X)):
-        _, found = _disclosures(lambda fitted=fitted, frame=frame: fitted.predict(frame))
-        assert not found
+    assert saved._dm is None
+    mu, found = _disclosures(lambda: saved.predict(new))
+    np.testing.assert_array_equal(mu, model._predict_exact(new))
+    assert [w.rows.tolist() for w in found] == [[1]]
+
+
+@pytest.mark.pins_behaviour
+def test_legacy_binned_pickle_stays_silent():
+    """Pin silence for a binned save with rank records and no binned warning record."""
+    X, y, new = _nested_geography()
+    model = _binned_geography(X, y, retain_fit_state=False)
+    assert model.result.rank_info.data is not None
+    assert model.result.rank_info.augmented is not None
+    model.__dict__.pop("_binned_estimability", None)
+    saved = pickle.loads(pickle.dumps(model))
+    mu, found = _disclosures(lambda: saved.predict(new))
+    np.testing.assert_array_equal(mu, model._predict_exact(new))
+    assert not found
 
 
 @pytest.mark.pins_behaviour
@@ -604,11 +715,10 @@ def test_a_structured_fit_is_silent():
     assert np.all(np.isfinite(mu)) and not found
 
 
-def test_a_binned_spline_on_four_values_is_silent():
+def test_a_binned_spline_on_four_values_warns_between_them():
     """An unpenalised spline on four values, quoted between them at 1.5.
 
-    The unbinned fit warns; the same fit on 256 bins is not tested and stays
-    silent, at the unbinned price.
+    Binning preserves all four values, so both fits warn at the same price.
     """
     X = pd.DataFrame({"x": np.tile([0.0, 1.0, 2.0, 3.0], 100)})
     y = np.random.default_rng(913).poisson(2.0, len(X)).astype(float)
@@ -626,7 +736,7 @@ def test_a_binned_spline_on_four_values_is_silent():
             n_bins=256,
         )
         prices[discrete], found = _disclosures(lambda model=model: model.predict(new))
-        assert bool(found) is (not discrete)
+        assert [w.rows.tolist() for w in found] == [[0]]
     np.testing.assert_allclose(prices[True], prices[False], rtol=1e-9)
 
 
