@@ -894,7 +894,8 @@ def _process_info(
             P = info.projection
             if info.uses_ssp:
                 lam, omega = _applied_penalty(info, group_name, lambda2)
-                R_inv_local = compute_projected_R_inv(B_for, P, omega, level_weight, lam)
+                penalty = _whitening_penalty(omega, term_roots, group_name, lambda2)
+                R_inv_local = compute_projected_R_inv(B_for, P, penalty, level_weight, lam)
                 R_inv = P @ R_inv_local
             else:
                 R_inv = P
@@ -949,6 +950,7 @@ def _process_info(
             gm.projection = info.projection
             if in_term:
                 gm.R_inv_local = np.eye(n_cols) if R_inv_local is None else R_inv_local
+                gm.term_roots = term_roots
 
     elif info.projection is not None:
         P = info.projection
@@ -1556,7 +1558,10 @@ def rebuild_design_matrix_with_lambdas(
             if gm.projection is not None:
                 P = gm.projection
                 omega_proj = _projected_penalty(gm, omega_eff)
-                R_inv_local = compute_projected_R_inv(gm.B_level, P, omega_proj, level_weight, lam)
+                penalty = _whitening_penalty(
+                    omega_proj, getattr(gm, "term_roots", None), g.name, lambdas
+                )
+                R_inv_local = compute_projected_R_inv(gm.B_level, P, penalty, level_weight, lam)
                 R_inv_new = P @ R_inv_local
             else:
                 R_inv_new = compute_R_inv(gm.B_level, omega_eff, level_weight, lam)
@@ -1569,6 +1574,7 @@ def rebuild_design_matrix_with_lambdas(
             new_gm.omega = gm.omega
             new_gm.projection = gm.projection
             new_gm.R_inv_local = None if getattr(gm, "R_inv_local", None) is None else R_inv_local
+            new_gm.term_roots = getattr(gm, "term_roots", None)
             new_gm.omega_components = gm.omega_components
             new_gm.component_types = gm.component_types
             new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
@@ -1594,10 +1600,13 @@ def rebuild_design_matrix_with_lambdas(
             if gm.projection is not None:
                 P = gm.projection
                 omega_proj = _projected_penalty(gm, omega_eff)
+                penalty = _whitening_penalty(
+                    omega_proj, getattr(gm, "term_roots", None), g.name, lambdas
+                )
                 R_inv_local = compute_projected_R_inv(
                     gm.B_unique,
                     P,
-                    omega_proj,
+                    penalty,
                     level_weight,
                     lam,
                 )
@@ -1617,6 +1626,7 @@ def rebuild_design_matrix_with_lambdas(
             new_gm.omega = gm.omega
             new_gm.projection = gm.projection
             new_gm.R_inv_local = None if getattr(gm, "R_inv_local", None) is None else R_inv_local
+            new_gm.term_roots = getattr(gm, "term_roots", None)
             new_gm.omega_components = gm.omega_components
             new_gm.component_types = gm.component_types
             new_gm.structural_ranks = getattr(gm, "structural_ranks", None)

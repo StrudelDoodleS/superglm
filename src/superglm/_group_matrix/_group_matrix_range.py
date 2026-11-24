@@ -35,6 +35,7 @@ _SUPPORT_METADATA = (*_METADATA, "R_inv_local", "term_roots")
 _CATEGORY_METADATA = (
     *_METADATA,
     "R_inv_local",
+    "term_roots",
     "lambda_policies",
     "spline_cat_level",
     "spline_cat_feature",

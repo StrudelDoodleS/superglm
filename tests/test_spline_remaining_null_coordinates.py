@@ -1,12 +1,25 @@
 """Regression tests for the remaining spline penalty coordinate maps (#659)."""
 
+import pickle
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
+import scipy.linalg
+import scipy.optimize
 
 from superglm import Categorical, LambdaPolicy, Numeric, Spline, SuperGLM, SuperLSS, s
+from superglm._group_matrix import _group_matrix_range as group_ranges
 from superglm.distributional import GaussianLS
+from superglm.dm_builder import rebuild_design_matrix_with_lambdas
 from superglm.features.interaction import TensorInteraction
+from superglm.group_matrix import (
+    DiscretizedSplineCategoricalGroupMatrix,
+    SplineCategoricalGroupMatrix,
+    SupportCompressedSplineCategoricalGroupMatrix,
+)
+from superglm.reml.penalty_algebra import build_penalty_components
 
 
 @pytest.mark.parametrize("kind", ["cr", "cr_cardinal", "ps", "bs", "ns"])
@@ -331,3 +344,293 @@ def test_distributional_location_keeps_its_unpenalized_line(selected):
     np.testing.assert_allclose(
         model.predict(frame), line @ np.linalg.lstsq(line, y, rcond=None)[0], atol=1e-7, rtol=0
     )
+
+
+def _green_silverman_cardinal_root(knots: np.ndarray) -> np.ndarray:
+    """Independent Green & Silverman (1994, ch. 2) natural cubic spline penalty root E (E' E = S)."""
+    k = np.asarray(knots, dtype=np.float64)
+    K = len(k)
+    hbar = (k[-1] - k[0]) / (K - 1)
+    u = (k - k[0]) / hbar
+    h = np.diff(u)
+    Q = np.zeros((K, K - 2), dtype=np.float64)
+    R = np.zeros((K - 2, K - 2), dtype=np.float64)
+    for j in range(K - 2):
+        Q[j, j] = 1.0 / h[j]
+        Q[j + 1, j] = -1.0 / h[j] - 1.0 / h[j + 1]
+        Q[j + 2, j] = 1.0 / h[j + 1]
+        R[j, j] = (h[j] + h[j + 1]) / 3.0
+        if j < K - 3:
+            R[j, j + 1] = R[j + 1, j] = h[j + 1] / 6.0
+    L = scipy.linalg.cholesky(R, lower=True)
+    return scipy.linalg.solve_triangular(L, Q.T, lower=True)
+
+
+@pytest.mark.parametrize(
+    ("repeats", "discrete", "expected_cls"),
+    [
+        (1, False, SplineCategoricalGroupMatrix),
+        (20, False, SupportCompressedSplineCategoricalGroupMatrix),
+        (1, True, DiscretizedSplineCategoricalGroupMatrix),
+    ],
+    ids=["exact-csr", "exact-compressed", "binned"],
+)
+def test_by_level_reml_penalty_spectrum_matches_main_effect(repeats, discrete, expected_cls):
+    """A by-level curve carries its penalty root to REML and matches the main effect's spectrum."""
+    u = 2.0**-53
+    x1 = np.geomspace(1.0, 1e5, 200)
+    xr = np.tile(x1, repeats)
+    x = np.r_[xr, xr]
+    labels = np.r_[np.full(xr.size, "A"), np.full(xr.size, "B")]
+    t = np.log(x) / np.log(x.max())
+    rng = np.random.default_rng(5)
+    y = np.where(
+        labels == "A",
+        1.0 + t + np.sin(4.0 * t),
+        2.0 + 3.0 * t + 2.0 * np.sin(4.0 * t),
+    ) + 0.01 * rng.normal(size=x.size)
+    frame = pd.DataFrame({"x": x, "g": labels})
+
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        discrete=discrete,
+        features={
+            "x": Spline(kind="cr_cardinal", n_knots=20, knot_strategy="quantile_rows"),
+            "g": Categorical(),
+        },
+        interactions=[("x", "g")],
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(
+            frame,
+            y,
+            lambda2_init={"x": 1e-6, "x:g[B]": 1e-6},
+            reml_tol=1e-10,
+            pirls_tol=1e-10,
+        )
+
+    assert model._reml_result.converged
+    by_name = {pc.name: pc for pc in model._reml_penalties}
+    main_pc, level_pc = by_name["x"], by_name["x:g[B]"]
+    main_gm = model._dm.group_matrices[main_pc.group_index]
+    level_gm = model._dm.group_matrices[level_pc.group_index]
+    assert type(level_gm) is expected_cls
+    assert model._reml_result.lambdas["x"] == pytest.approx(
+        model._reml_result.lambdas["x:g[B]"], rel=1e-12
+    )
+    assert main_pc.rank == 20
+    assert level_pc.rank == 20
+
+    ev_main = np.sort(main_pc.eigvals_omega)
+    ev_level = np.sort(level_pc.eigvals_omega)
+    # Perturbation of singular values squared under Cholesky whitening R_inv_local:
+    # cond(R_inv_local)^2 scales the Cholesky factor rounding in G + lam*Omega + ridge.
+    cond_whitening = float(np.linalg.cond(main_gm.R_inv_local))
+    rtol = 128.0 * u * (cond_whitening**2)
+    np.testing.assert_allclose(ev_level, ev_main, rtol=rtol, atol=0.0)
+    assert level_pc.log_det_omega_plus == pytest.approx(
+        main_pc.log_det_omega_plus, abs=len(ev_main) * rtol
+    )
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "binned"])
+def test_by_level_binding_penalty_matches_dense_root_reml_reference(discrete):
+    """Where a level's penalty binds on graded knots, REML matches an independent root oracle."""
+    x1 = np.geomspace(1.0, 1e5, 200)
+    x = np.r_[x1, x1]
+    labels = np.r_[np.full(200, "A"), np.full(200, "B")]
+    s_coord = x / x.max()
+    rng = np.random.default_rng(19)
+    y = np.where(
+        labels == "A",
+        1.0 + 0.8 * s_coord + 0.5 * np.sin(2.5 * np.pi * s_coord),
+        1.5
+        + 1.4 * s_coord
+        + 0.5 * np.sin(2.5 * np.pi * s_coord)
+        + 0.6 * np.cos(2.0 * np.pi * s_coord),
+    ) + 0.15 * rng.normal(size=400)
+    frame = pd.DataFrame({"x": x, "g": labels})
+
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        discrete=discrete,
+        features={
+            "x": Spline(kind="cr_cardinal", n_knots=20, knot_strategy="quantile_rows"),
+            "g": Categorical(),
+        },
+        interactions=[("x", "g")],
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(frame, y, reml_tol=1e-10, pirls_tol=1e-10)
+
+    result = model._reml_result
+    assert result.converged
+    by_name = {pc.name: pc for pc in model._reml_penalties}
+    assert by_name["x"].rank == 20
+    assert by_name["x:g[B]"].rank == 20
+
+    lam_x = float(result.lambdas["x"])
+    lam_b = float(result.lambdas["x:g[B]"])
+    assert 1e-2 < lam_x < 1e4
+    assert 1e-2 < lam_b < 1e4
+
+    # Independent Wood (2011) Gaussian REML reference using Green & Silverman's
+    # rectangular penalty root transported into the fitted design's coordinates.
+    E_raw = _green_silverman_cardinal_root(model._specs["x"]._cr_knots)
+    gm_x, gm_g, gm_b = model._dm.group_matrices
+    X_full = np.column_stack([np.ones(len(y)), gm_x.toarray(), gm_g.toarray(), gm_b.toarray()])
+    E_x = E_raw @ gm_x.R_inv
+    E_b = E_raw @ gm_b.R_inv
+    sv_x = scipy.linalg.svdvals(E_x)
+    sv_b = scipy.linalg.svdvals(E_b)
+    sv_x = sv_x[sv_x > 0.0]
+    sv_b = sv_b[sv_b > 0.0]
+    logdet_x = 2.0 * float(np.sum(np.log(sv_x)))
+    logdet_b = 2.0 * float(np.sum(np.log(sv_b)))
+    n = len(y)
+    M_p = X_full.shape[1] - (len(sv_x) + len(sv_b))
+    p_x = gm_x.shape[1]
+
+    def dense_root_reml(rho: np.ndarray) -> tuple[float, np.ndarray]:
+        lx, lb = float(np.exp(rho[0])), float(np.exp(rho[1]))
+        Ax = np.zeros((len(E_x), X_full.shape[1]), dtype=np.float64)
+        Ax[:, 1 : 1 + p_x] = np.sqrt(lx) * E_x
+        Ab = np.zeros((len(E_b), X_full.shape[1]), dtype=np.float64)
+        Ab[:, 2 + p_x :] = np.sqrt(lb) * E_b
+        A = np.vstack([X_full, Ax, Ab])
+        rhs = np.concatenate([y, np.zeros(len(E_x) + len(E_b))])
+        Q, Rq = np.linalg.qr(A, mode="reduced")
+        coef = scipy.linalg.solve_triangular(Rq, Q.T @ rhs)
+        resid = A @ coef - rhs
+        Dp = float(resid @ resid)
+        logdet_H = 2.0 * float(np.sum(np.log(np.abs(np.diag(Rq)))))
+        logdet_S = len(sv_x) * np.log(lx) + logdet_x + len(sv_b) * np.log(lb) + logdet_b
+        phi = Dp / (n - M_p)
+        V = 0.5 * ((n - M_p) * np.log(2.0 * np.pi * phi) + (n - M_p) + logdet_H - logdet_S)
+        return V, coef
+
+    opt = scipy.optimize.minimize(
+        lambda rho: dense_root_reml(rho)[0],
+        np.array([np.log(lam_x), np.log(lam_b)]),
+        method="Nelder-Mead",
+        options={"xatol": 1e-12, "fatol": 1e-13, "maxiter": 2000},
+    )
+    V_ref, coef_ref = dense_root_reml(opt.x)
+    lam_x_ref, lam_b_ref = float(np.exp(opt.x[0])), float(np.exp(opt.x[1]))
+    pred_ref = X_full @ coef_ref
+    pred_fit = model.predict(frame)
+
+    assert lam_x == pytest.approx(lam_x_ref, rel=1e-5)
+    assert lam_b == pytest.approx(lam_b_ref, rel=1e-5)
+    assert result.objective == pytest.approx(V_ref, abs=1e-8)
+    np.testing.assert_allclose(pred_fit[200:], pred_ref[200:], atol=1e-6, rtol=0.0)
+
+
+@pytest.mark.parametrize(
+    ("repeats", "discrete", "expected_cls"),
+    [
+        (1, False, SplineCategoricalGroupMatrix),
+        (20, False, SupportCompressedSplineCategoricalGroupMatrix),
+        (1, True, DiscretizedSplineCategoricalGroupMatrix),
+    ],
+    ids=["exact-csr", "exact-compressed", "binned"],
+)
+def test_by_level_term_roots_survive_subset_range_pickle_and_extreme_whitening(
+    repeats, discrete, expected_cls
+):
+    """By-level term_roots survive subsetting, ranges, pickle/legacy-unpickle, and QR whitening."""
+    x1 = np.geomspace(1.0, 1e5, 200)
+    xr = np.tile(x1, repeats)
+    x = np.r_[xr, xr]
+    labels = np.r_[np.full(xr.size, "A"), np.full(xr.size, "B")]
+    s_coord = x / x.max()
+    y = np.where(labels == "A", 1.0 + s_coord, 2.0 + 3.0 * s_coord) + 0.05 * np.sin(
+        4.0 * np.pi * s_coord
+    )
+    frame = pd.DataFrame({"x": x, "g": labels})
+
+    # Extreme lambda forces _whitening_map's QR fallback during build and REML rebuild.
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        spline_penalty=1e14,
+        discrete=discrete,
+        features={
+            "x": Spline(kind="cr_cardinal", n_knots=20, knot_strategy="quantile_rows"),
+            "g": Categorical(),
+        },
+        interactions=[("x", "g")],
+    ).fit(frame, y)
+
+    gm_level = model._dm.group_matrices[2]
+    group_level = model._groups[2]
+    assert type(gm_level) is expected_cls
+    assert gm_level.term_roots is not None
+    (pc,) = build_penalty_components(model._dm.group_matrices, [(2, group_level)])
+    assert pc.rank == 20
+    # QR whitening via term_roots keeps the null row exact zero and bounds all 20
+    # whitened eigenvalues by 1 / lam (unlike eigh(omega), which drops the 6 weak modes).
+    assert not pc.omega_ssp[0].any()
+    assert float(np.max(pc.eigvals_omega)) <= 1.01 / 1e14
+
+    # Rebuild at another extreme lambda keeps term_roots and rank 20 via QR whitening.
+    rebuilt_dm = rebuild_design_matrix_with_lambdas(
+        model._dm,
+        model._groups,
+        {"x": 1e14, "x:g[B]": 2e14},
+        np.ones(len(y), dtype=np.float64),
+    )
+    gm_rebuilt = rebuilt_dm.group_matrices[2]
+    assert type(gm_rebuilt) is expected_cls
+    assert gm_rebuilt.term_roots is not None
+    (pc_rebuilt,) = build_penalty_components(rebuilt_dm.group_matrices, [(2, group_level)])
+    assert pc_rebuilt.rank == 20
+    assert not pc_rebuilt.omega_ssp[0].any()
+    assert float(np.max(pc_rebuilt.eigvals_omega)) <= 1.01 / 2e14
+
+    # row_subset, group_row_range, and pickle preserve term_roots.
+    sub = gm_level.row_subset(np.arange(0, len(y), 2))
+    assert sub.term_roots is gm_level.term_roots
+    ranged = group_ranges.group_row_range(gm_level, 0, len(y) // 2)
+    assert ranged is not None
+    assert ranged.term_roots is gm_level.term_roots
+    restored = pickle.loads(pickle.dumps(gm_level))
+    assert restored.term_roots is not None
+    np.testing.assert_array_equal(restored.term_roots[""], gm_level.term_roots[""])
+
+    # Unpickling a legacy state without term_roots restores term_roots as None.
+    dict_state, slot_state = gm_level.__getstate__()
+    slot_state.pop("term_roots")
+    legacy = expected_cls.__new__(expected_cls)
+    legacy.__setstate__((dict_state, slot_state))
+    assert legacy.term_roots is None
+
+
+def test_outer_clipped_separated_level_rechecks_null_identification():
+    """An outer-clipped separated level re-runs _rows_identify on its clipped rows."""
+    rng = np.random.default_rng(7)
+    x_grid = np.linspace(0.0, 1.0, 100)
+    ya = rng.poisson(2.0, size=100).astype(float)
+    yb = np.zeros(100, dtype=float)
+    yb[50] = 3.0  # One positive response: outer clipping collapses level B onto x = x_grid[50].
+    frame = pd.DataFrame(
+        {"x": np.r_[x_grid, x_grid], "g": np.r_[np.full(100, "A"), np.full(100, "B")]}
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0,
+            discrete=False,
+            features={"x": Spline(kind="ps", n_knots=6), "g": Categorical()},
+            interactions=[("x", "g")],
+        ).fit(frame, np.r_[ya, yb])
+
+    gm_level = model._dm.group_matrices[2]
+    assert gm_level.R_inv_local is None
+    assert gm_level.term_roots is None

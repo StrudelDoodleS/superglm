@@ -854,10 +854,11 @@ class SplineCategorical:
                         projection=projection @ basis,
                     )
                     held.structural_ranks = structural_penalty_ranks(self._spline_spec, held)
-                    mass = np.bincount(idx, weights=weights[rows], minlength=len(support))
-                    held.null_coordinates = declared_null_coordinates(
-                        self._spline_spec, held, support[mass > 0.0], mass[mass > 0.0]
-                    )
+            if held is not info:
+                mass = np.bincount(idx, weights=weights[rows], minlength=len(support))
+                held.null_coordinates = declared_null_coordinates(
+                    self._spline_spec, held, support[mass > 0.0], mass[mass > 0.0]
+                )
             held_groups.append(held)
             found.append(
                 SeparatedCurve(
