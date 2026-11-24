@@ -355,48 +355,82 @@ def test_pair_sums_give_the_expanded_rows_statistics(case, chunk_size, monkeypat
             assert np.all(np.abs(pairs.deviation - rows.deviation) <= bound)
 
 
+class _Tallied(np.ndarray):
+    """A row input that counts each entry read from it and each entry computed from it."""
+
+    count = 0
+
+    def __getitem__(self, index):
+        return _tally(super().__getitem__(index))
+
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        plain = [np.asarray(value) if isinstance(value, _Tallied) else value for value in inputs]
+        if "out" in kwargs:
+            kwargs["out"] = tuple(np.asarray(value) for value in kwargs["out"])
+        return _tally(getattr(ufunc, method)(*plain, **kwargs))
+
+    def __array_function__(self, func, types, args, kwargs):
+        return _tally(super().__array_function__(func, types, args, kwargs))
+
+
+def _tally(result):
+    """Count ``result``'s entries and keep counting what is computed from it."""
+    if isinstance(result, tuple):
+        return tuple(_tally(part) for part in result)
+    _Tallied.count += np.size(result)
+    return result.view(_Tallied) if isinstance(result, np.ndarray) else result
+
+
+# The row inputs of the two kernels that read rows: a row's pair, weight, error
+# scale and ``a x``; and its weight and its pair in each of two blocks.
+ROW_INPUTS = {"_pair_sums": (0, 3, 4, 5), "_crossed_blocks": (1, 2, 6)}
+
+
 def test_the_pass_adds_each_row_once_and_makes_no_sparse_product(monkeypatch) -> None:
     """Work of the indicator blocks: one entry a row, whatever the levels a leaf meets.
 
     40 leaves of 150 rows each meet all 60 levels of one crossed effect and
-    all 50 of another.  The pair kernel is handed every row once per block,
-    and the pass builds no sparse matrix.  The row expansion wrote each row
-    once for each level its leaf meets: 110 entries a row here.
+    all 50 of another.  The count is taken inside the two reductions that
+    read rows, on inputs that tally every entry read from them or computed
+    from them (``_Tallied``); a compiled loop's reads cannot be seen, so each
+    kernel runs as the Python source numba compiles.  A block reads a row's
+    ``width + 3`` entries once (its pair, weight, error scale and ``a x``),
+    and a pair of blocks its weight and two pairs once: 13 entries a row
+    here, and no sparse matrix.  A reduction that spreads a row over the
+    levels its leaf meets, in a compiled loop or as an incidence table,
+    counts those entries too; the row expansion wrote 110 a row.
     """
     rng = np.random.default_rng(11)
-    leaves, per_leaf, levels = 40, 150, (60, 50)
+    leaves, per_leaf, levels, width = 40, 150, (60, 50), 2
     n = leaves * per_leaf
     leaf = np.repeat(np.arange(leaves), per_leaf)
     crossed = [np.tile(rng.permutation(per_leaf) % k, leaves) for k in levels]
-    matrices = [
-        DenseGroupMatrix(rng.normal(size=(n, 2))),
-        *(RandomEffectGroupMatrix(codes, k) for codes, k in zip(crossed, levels, strict=True)),
-        RandomEffectGroupMatrix(leaf, leaves),
-    ]
-    groups, start = [], 0
-    for index, matrix in enumerate(matrices):
-        groups.append(GroupSlice(name=f"g{index}", start=start, end=start + matrix.shape[1]))
-        start += matrix.shape[1]
-    dm = DesignMatrix(matrices, n=n, p=start)
-    layout = get_structured_layout(dm, groups, dominant_group_index=3, chain_group_indices=(3,))
+    layout, matrices = _design(
+        leaf, list(zip(crossed, levels, strict=True)), rng.normal(size=(n, width))
+    )
     weights = rng.exponential(size=n)
     build_nested_leaf_statistics(layout, matrices, weights, chunk_size=1024)  # the cached cells
-    handed: list[int] = []
-    kernel = moments._pair_sums
 
-    def counted(own, *rest):
-        handed.append(len(own))
-        return kernel(own, *rest)
+    def tallied(name):
+        body = getattr(getattr(moments, name), "py_func", getattr(moments, name))
+
+        def reduce(*args):
+            rows = ROW_INPUTS[name]
+            return body(*(v.view(_Tallied) if i in rows else v for i, v in enumerate(args)))
+
+        return reduce
 
     def refused(*args, **kwargs):
         raise AssertionError("the row pass built a sparse matrix")
 
+    _Tallied.count = 0
     with monkeypatch.context() as patch:
-        patch.setattr(moments, "_pair_sums", counted)
+        for name in ROW_INPUTS:
+            patch.setattr(moments, name, tallied(name))
         for name in ("csr_array", "csc_array", "coo_array", "csr_matrix", "csc_matrix"):
             patch.setattr(scipy.sparse, name, refused)
         build_nested_leaf_statistics(layout, matrices, weights, chunk_size=1024)
-    assert sum(handed) == len(levels) * n
+    assert _Tallied.count == n * (len(levels) * (width + 3) + 3)
     written = row_expanded.install(monkeypatch)
     build_nested_leaf_statistics(layout, matrices, weights, chunk_size=1024)
     assert sum(written) == sum(levels) * n
