@@ -2242,6 +2242,7 @@ class TestDiscretizedTensorInteraction:
         assert gm_inter.idx1 is not None
         assert gm_inter.idx2 is not None
 
+    @pytest.mark.pins_behaviour
     def test_rebuild_design_matrix_keeps_a_projected_tensor_lambda_policy(
         self, tensor_interaction_data
     ):
@@ -2249,7 +2250,12 @@ class TestDiscretizedTensorInteraction:
 
         Every other block a REML step rebuilds carries its policies, which say
         which components REML leaves alone; a decomposed tensor's projected
-        wiggly block is rebuilt here and carries them too.
+        wiggly block is rebuilt here and carries them too. The ``age`` margin's
+        boundary reaches past its rows (18 to 80), so it has basis functions no
+        row reaches and keeps the data's coordinates, and its tensor is
+        re-whitened at each step; a tensor whose margins both hold their
+        penalty's null coordinates has a fixed design, which a rebuild returns
+        as it is.
         """
         import superglm.dm_builder as dm_builder
 
@@ -2260,7 +2266,10 @@ class TestDiscretizedTensorInteraction:
             family="poisson",
             selection_penalty=0.0,
             discrete=True,
-            features={"age": Spline(kind="ps", n_knots=6), "bm": Spline(kind="ps", n_knots=5)},
+            features={
+                "age": Spline(kind="ps", n_knots=6, boundary=(18.0, 160.0)),
+                "bm": Spline(kind="ps", n_knots=5),
+            },
             interactions=[inter],
         )
         model.fit(X, y)

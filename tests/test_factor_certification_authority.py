@@ -1015,10 +1015,15 @@ def _resolved_modes(S: np.ndarray) -> int:
     The root's own eigensolver and this one each sit within ``c`` of the exact
     eigenvalue (LAPACK Users' Guide, 3rd ed., section 4.7, with ``p(n) = n``),
     so a value above ``3c`` here is above ``c`` there: the root keeps at least
-    this many modes, whatever either run's rounding.
+    this many modes, whatever either run's rounding.  A coordinate with a zero
+    diagonal has a zero row and column in a positive semidefinite block (an
+    exact null coordinate): it holds no mode and has no scale to equilibrate by.
     """
-    scale = np.sqrt(np.diag(S))
-    values = np.linalg.eigvalsh(0.5 * (S / np.outer(scale, scale) + (S / np.outer(scale, scale)).T))
+    live = np.diag(S) > 0.0
+    assert not S[~live].any()
+    scale = np.sqrt(np.diag(S)[live])
+    scaled = S[np.ix_(live, live)] / np.outer(scale, scale)
+    values = np.linalg.eigvalsh(0.5 * (scaled + scaled.T))
     cut = len(S) * float(np.finfo(np.float64).eps) * float(np.max(np.abs(values)))
     return int(np.count_nonzero(values > 3.0 * cut))
 
