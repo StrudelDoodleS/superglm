@@ -243,7 +243,7 @@ def test_a_leaf_that_meets_one_border_level_keeps_exact_zeros_and_ones(chunk_siz
         assert np.any(stats.absolute[SECOND_COLUMNS] > 0.0)
 
 
-@pytest.mark.parametrize("case", [pytest.param("data", marks=pytest.mark.pins_behaviour), "signed"])
+@pytest.mark.parametrize("case", ["data", "signed"])
 def test_a_weight_meets_one_mean_before_the_other(case) -> None:
     """Weights of ``2**600`` and ``1e180`` beside leaf means near their reciprocals.
 
@@ -256,9 +256,9 @@ def test_a_weight_meets_one_mean_before_the_other(case) -> None:
     ``1e-180`` and ``2e-180``, whose block ``-1e180 m m'`` would be four
     zeros.  Both are held to the exact rational sums over rows within the row
     sum's bound, and the absolute mass, formed the same way, to its own exact
-    sum, so it still bounds the diagonal.  The data pass is a control: the row
-    expansion multiplied the weight first too.  Its absolute mass squared the
-    mean first and read zero on the signed pass.
+    sum, so it still bounds the diagonal.  The row expansion multiplied the
+    weight first too and passes the data case; its absolute mass squared the
+    mean first and read zero on the signed one.
     """
     leaf = np.array([0, 0, 0, 1, 1, 2, 2, 3, 3])
     layout, matrices = _design(leaf, [(np.array([0, 1, 2, 0, 2, 1, 2, 0, 1]), 3)])
