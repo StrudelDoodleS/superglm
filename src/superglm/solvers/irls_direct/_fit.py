@@ -761,20 +761,6 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
     _deviance_init : float, optional
         Previously evaluated deviance at ``beta_init``/``intercept_init``.
         Used by private fREML steps to avoid repeating a full response scan.
-    _clip_rows : ClipRows, optional
-        Internal, shared by the PIRLS solves of one REML fit: which rows a
-        binomial fit reads where the working clip holds one
-        (``solvers.clip_rows``).  A solve that ends on a row held against its
-        outcome moves it to the likelihood's rows, and a later solve of the
-        fit that finds it moved starts on them.  ``None`` (the default)
-        shares nothing.
-    _published : bool
-        Internal: this solve's exported rows are the ones a model publishes
-        (its covariance and effective degrees of freedom).  A binomial pair
-        with tail rows then exports the likelihood's information on every row
-        the working clip holds, whichever rows its iteration read.  An in-loop
-        REML solve leaves it False, so the search reads the rows it always
-        has unless the fit moved to the likelihood's.
     record_diagnostics : bool
         If True, record per-iteration W/mu/eta stats on the result.
     S_override : (p, p) ndarray, optional
@@ -836,7 +822,13 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
     _compensate_centred_intercept: bool = True
     _centred_init: tuple[float, NDArray] | None = None
     _defer_rank_info: list[Callable[[], RankInfo]] | None = None
+    # Shared by the PIRLS solves of one REML fit: which rows a binomial fit reads where the working
+    # clip holds one (``solvers.clip_rows``). A solve ending on a row held against its outcome moves
+    # it to the likelihood's rows; a later solve that finds it moved starts on them. None shares nothing.
     _clip_rows: ClipRows | None = None
+    # This solve's exported rows are the ones a model publishes (covariance, EDF): a binomial pair with
+    # tail rows then exports the likelihood's information on every held row. In-loop REML solves leave
+    # it False, so the search reads its usual rows unless the fit moved to the likelihood's.
     _published: bool = False
 
     def run(self) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:

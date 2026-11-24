@@ -30,24 +30,15 @@ _LOOP_EXITS = ("converged", "max_iter", "step_rejected", "score_stagnated")
 class _IRLSDirectClipOverlay:
     """A binomial fit's rows where the working clip holds one, on every route.
 
-    The fit holds one (``clip``) when the clip can hold a row against its
-    outcome (``clip_rows.clip_can_hold_against``), else ``None``.  It keeps no
-    reference to the fit, whose state each method is handed.
-
-    While the fit's ``ClipRows`` is ``working`` the overlay does nothing until
-    the loop ends, so a fit whose solves end clear of such a row is the solver's
-    own bit for bit.  ``moves_to_likelihood`` then counts the rows held against
-    their outcome at the retained state, once.  With any, a pair that declares
-    tail rows moves to ``likelihood`` and the loop carries on; a pair that
-    declares none, or whose rows float64 cannot hold there, ends ``clip_held``
-    (``final``).
-
-    Under ``likelihood`` every held row of every state reads the likelihood in
-    its unclipped predictor (``clip_rows.tail_rows``): its deviance
-    (``deviance``: the line search's merit, the deviance stop and the published
-    deviance) and its working weight and response (``patched``: the iteration, the
-    mode score and the exported rows).  Rows inside the guard keep the solver's
-    arithmetic.
+    Held (``clip``) when the clip can hold a row against its outcome
+    (``clip_rows.clip_can_hold_against``), else ``None``; it keeps no reference to the fit.
+    While ``ClipRows`` is ``working`` it does nothing until the loop ends, so a fit ending
+    clear of such rows is the solver's own bit for bit; ``moves_to_likelihood`` then counts
+    rows held against their outcome, once. With any, a pair declaring tail rows moves to
+    ``likelihood`` and carries on; one declaring none, or past float64, ends ``clip_held``.
+    Under ``likelihood`` held rows read the likelihood in their unclipped predictor
+    (``clip_rows.tail_rows``): ``deviance`` (merit, stop, published) and ``patched``
+    (working weight and response); rows inside the guard keep the solver's arithmetic.
     """
 
     __slots__ = ("rows", "declared", "held_against", "unfinished")

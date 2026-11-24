@@ -696,17 +696,12 @@ def _refresh_fit_statistics(
 ) -> ScoredRows | None:
     """Refresh fitted means and statistics; ``frame`` is the caller's adapter of ``X``.
 
-    ``statistics=False`` leaves ``_fit_stats`` empty, for a caller that forms them itself
-    from the ``ScoredRows`` returned.  ``None`` when no scoring rows were available and no
-    deviance was computed.
-
-    A row of positive weight with no mean (NaN, as ``predict`` gives it) is
-    refused with ``NoPredictedMeanError`` before anything is refreshed; a
-    zero-weight one adds nothing to the statistics.
-
-    The rows the working clip holds are read as a fit ending on the scored
-    coefficients reads them (``clip_rows.rescored_held_rows``): from the
-    likelihood where one is held against its outcome, else at the clipped mean.
+    ``statistics=False`` leaves ``_fit_stats`` empty for a caller that forms them from the
+    ``ScoredRows`` returned; ``None`` when no rows were scored. A positive-weight row with no
+    mean (NaN, as ``predict`` gives it) is refused with ``NoPredictedMeanError`` before
+    anything is refreshed; a zero-weight one adds nothing. Rows the working clip holds are
+    read as a fit ending on these coefficients reads them (``clip_rows.rescored_held_rows``):
+    from the likelihood where one is held against its outcome, else at the clipped mean.
     """
     from superglm.model.base import (
         predict_eta_raw_exact,
