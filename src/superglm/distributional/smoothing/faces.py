@@ -43,7 +43,11 @@ from superglm.distributional.smoothing.endpoint_laml import (
     resolve_endpoint_direction,
 )
 from superglm.distributional.smoothing.evidence import _FreshRawEvidence
-from superglm.distributional.smoothing.objective import _complete_mapping, _laplace_objective
+from superglm.distributional.smoothing.objective import (
+    _complete_mapping,
+    _laplace_objective,
+    laplace_objective_rounding,
+)
 from superglm.distributional.smoothing.penalty_face import (
     PenaltyFace,
     PenaltyFaceError,
@@ -82,6 +86,13 @@ class _FaceDirectionCheck:
         """Tight finite-cap and exact-endpoint fits."""
 
         return (self.cap_fit, self.endpoint_fit)
+
+    def no_higher_than(self, objective: float, fit: DenseSolverResult, tolerance: float) -> bool:
+        """Whether the face's objective is no higher than the finite state ``fit``'s."""
+
+        return _face_no_higher(
+            self.endpoint_objective, self.endpoint_fit, objective, fit, tolerance
+        )
 
 
 @dataclass(frozen=True)
@@ -124,6 +135,30 @@ class _FaceRecheck:
 
     checks: tuple[tuple[str, _FaceDirectionCheck], ...]
     retraction: _FaceRetraction | None
+
+
+def _face_no_higher(
+    endpoint_objective: float,
+    endpoint_fit: DenseSolverResult,
+    objective: float,
+    fit: DenseSolverResult,
+    objective_tolerance: float,
+) -> bool:
+    """Whether a face's objective is no higher than that of the finite state ``fit``.
+
+    The two evaluate one criterion at a penalty and at its limit, and the finite
+    one carries the stored penalty's rounding (``laplace_objective_rounding``),
+    which at a cap exceeds the tolerance. A difference inside the rounding of the
+    two values is not an order: a comparison of values known to ``e_a`` and
+    ``e_b`` is relaxed by ``e_a + e_b`` (Shi, Xie, Byrd and Nocedal, arXiv
+    2010.04352, sec. 4.2). There the endpoint derivative, which the face
+    resolves, decides alone.
+    """
+    ceiling = objective + objective_tolerance * (1.0 + abs(objective))
+    if endpoint_objective <= ceiling:
+        return True
+    rounding = laplace_objective_rounding(fit) + laplace_objective_rounding(endpoint_fit)
+    return endpoint_objective <= ceiling + rounding
 
 
 def _check_face_direction(
@@ -374,10 +409,13 @@ def _assess_joint_face_directions(
             )
         except (ValueError, FloatingPointError, np.linalg.LinAlgError):
             return refused("joint_analytic_unavailable", endpoint_fit)
-    current_ceiling = source_objective + efs_config.objective_tolerance * (
-        1.0 + abs(source_objective)
-    )
-    if endpoint_objective > current_ceiling:
+    if not _face_no_higher(
+        endpoint_objective,
+        endpoint_fit,
+        source_objective,
+        source_fit,
+        efs_config.objective_tolerance,
+    ):
         return refused("joint_objective_rejected", endpoint_fit)
 
     component_directions: list[tuple[str, EndpointDirectionEvidence]] = []
@@ -589,21 +627,19 @@ def _try_exact_face(
         return None, attempt
     if not sole_capped_component:
         return None, attempt
-    current_ceiling = current_objective + efs_config.objective_tolerance * (
-        1.0 + abs(current_objective)
-    )
-    cap_ceiling = check.cap_objective + efs_config.objective_tolerance * (
-        1.0 + abs(check.cap_objective)
-    )
     cap_stationary = check.cap_fit.converged and _assessment_is_numerically_stationary(
         check.cap_fit,
         check.coefficient_tolerance,
     )
+    tolerance = efs_config.objective_tolerance
     if (
         check.direction.decision != "endpoint"
         or check.direction.lower_bound <= 0.0
-        or check.endpoint_objective > current_ceiling
-        or (cap_stationary and check.endpoint_objective > cap_ceiling)
+        or not check.no_higher_than(current_objective, current_fit, tolerance)
+        or (
+            cap_stationary
+            and not check.no_higher_than(check.cap_objective, check.cap_fit, tolerance)
+        )
     ):
         return None, attempt
     return (
@@ -687,18 +723,16 @@ def _recheck_exact_face(
         )
         objective_resolved = False
         if check is not None:
-            current_ceiling = accepted_objective + efs_config.objective_tolerance * (
-                1.0 + abs(accepted_objective)
-            )
-            cap_ceiling = check.cap_objective + efs_config.objective_tolerance * (
-                1.0 + abs(check.cap_objective)
-            )
             cap_stationary = check.cap_fit.converged and _assessment_is_numerically_stationary(
                 check.cap_fit,
                 check.coefficient_tolerance,
             )
-            objective_resolved = check.endpoint_objective <= current_ceiling and (
-                not cap_stationary or check.endpoint_objective <= cap_ceiling
+            tolerance = efs_config.objective_tolerance
+            objective_resolved = check.no_higher_than(
+                accepted_objective, canonical_fit, tolerance
+            ) and (
+                not cap_stationary
+                or check.no_higher_than(check.cap_objective, check.cap_fit, tolerance)
             )
         if not direction_resolved or not objective_resolved:
             authority_config = _face_authority_config(solver_config)

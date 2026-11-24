@@ -724,6 +724,104 @@ def test_a_stationary_endgame_hands_nothing_over_beside_another_components_cap(m
     assert model.exact_face_components_ == ()
 
 
+def _read_finite_objectives_shifted(monkeypatch, shift: float) -> None:
+    """Shift the objective of every finite state a face is compared with."""
+    from superglm.distributional.smoothing import faces, loop
+
+    objective, promote = faces._laplace_objective, loop._try_exact_face
+
+    def finite(result, *, face, **kwargs):
+        return objective(result, face=face, **kwargs) + (shift if face is None else 0.0)
+
+    def promoted(*args, current_objective, **kwargs):
+        return promote(*args, current_objective=current_objective + shift, **kwargs)
+
+    monkeypatch.setattr(faces, "_laplace_objective", finite)
+    monkeypatch.setattr(loop, "_try_exact_face", promoted)
+
+
+@pytest.mark.parametrize("outer", ["efs", "efs+finish", "efs+stationary"])
+def test_the_rounding_of_a_caps_objective_does_not_decide_its_face(monkeypatch, outer) -> None:
+    """A cap's objective that reads a rounding above or below its face's changes nothing.
+
+    At a bound of 2e10 the stored penalty is singular only to rounding, and it
+    leaves the objective there undetermined by 3e-6, ten times the comparison
+    tolerance, where the face's is exact to 1e-14. The cap's objective is read
+    three tolerances higher and then three lower. Either way the endpoint
+    derivative promotes ``z``'s face and the fit is the unshifted one. Mutation
+    check: compared at the tolerance alone, the lower reading refuses the face,
+    and the fit ends ``lambda_cap_unresolved`` or converged without it.
+    """
+    _, reference = _fit(outer)
+    shift = 3.0 * reference.config.objective_tolerance * (1.0 + abs(reference.objective))
+
+    for reading in (shift, -shift):
+        with monkeypatch.context() as patch:
+            _read_finite_objectives_shifted(patch, reading)
+            model, smoothing = _fit(outer)
+        assert model.exact_face_components_ == (_Z,)
+        assert smoothing.convergence_reason == reference.convergence_reason
+        assert smoothing.converged is True
+        assert smoothing.objective == reference.objective
+        assert dict(smoothing.lambdas) == dict(reference.lambdas)
+
+
+@pytest.mark.pins_behaviour
+def test_a_face_above_its_cap_by_more_than_rounding_is_refused(monkeypatch) -> None:
+    """Pins the refusal of a face whose objective is materially above its cap's.
+
+    The cap's objective is read a part in a million lower, a hundred times the
+    penalty's rounding there, so the face is higher by more than rounding
+    explains and the endpoint derivative does not decide alone.
+    """
+    _, reference = _fit("efs")
+    shift = 1.0e3 * reference.config.objective_tolerance * (1.0 + abs(reference.objective))
+    _read_finite_objectives_shifted(monkeypatch, -shift)
+    model, smoothing = _fit("efs")
+
+    assert model.exact_face_components_ == ()
+    assert (smoothing.converged, smoothing.convergence_reason) == (False, "lambda_cap_unresolved")
+
+
+@pytest.mark.parametrize(
+    ("outer", "options"),
+    [("efs+newton", _PLATEAU), ("efs+stationary", {"terms": ("x", "z", "w")})],
+)
+def test_the_rounding_of_a_held_caps_gradient_does_not_move_the_terms_that_step(
+    monkeypatch, outer, options
+) -> None:
+    """The Newton steps beside a held cap are the same whichever way its gradient rounds.
+
+    The gradient in log lambda vanishes at a cap, so what the endgame reads for
+    ``z`` there is rounding, and ``z`` does not move. Here it is read half as
+    large again and half as large on alternate passes, keeping its sign. The
+    other terms take the steps they take without that, to the same fit.
+    Mutation check: with a term that did not move in the quasi-Newton pair, the
+    ``"efs+newton"`` fit runs to its round limit unconverged and the
+    ``"efs+stationary"`` fit takes 66 rounds for 12.
+    """
+    from superglm.distributional.smoothing import newton
+
+    _, reference = _fit(outer, **options)
+    derivatives, passes = newton.laml_derivatives, []
+
+    def rounded(*args, lambdas, **kwargs):
+        exact = derivatives(*args, lambdas=lambdas, **kwargs)
+        held = np.array([lambdas[name] == reference.config.upper(name) for name in exact.names])
+        passes.append(bool(held.any()))
+        factor = 1.5 if len(passes) % 2 else 0.5
+        return replace(exact, gradient=np.where(held, factor * exact.gradient, exact.gradient))
+
+    monkeypatch.setattr(newton, "laml_derivatives", rounded)
+    _, smoothing = _fit(outer, **options)
+
+    assert sum(passes) >= 3
+    assert (smoothing.converged, smoothing.convergence_reason) == (True, "stationary")
+    assert smoothing.iterations == reference.iterations
+    assert smoothing.objective == reference.objective
+    assert dict(smoothing.lambdas) == dict(reference.lambdas)
+
+
 def _block(curvature: np.ndarray, *, lam: float = 1.0, beta=(0.1, 0.1), name: str = "a"):
     """One identity penalty on a block whose profiled data curvature is ``curvature``."""
     width = len(curvature)

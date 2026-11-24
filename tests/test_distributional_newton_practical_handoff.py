@@ -240,8 +240,15 @@ def test_a_finish_that_stalled_leaves_the_fit_at_its_plateau(monkeypatch, kind):
     assert np.all(np.isfinite(corrected))
 
 
+@pytest.mark.pins_behaviour
+@pytest.mark.usefixtures("no_endpoint_trial")
 def test_a_finish_that_moved_far_and_was_rejected_does_not_relabel_where_it_stalled():
-    """Where Newton is rejected far from the plateau, the published state is the plateau's."""
+    """Where Newton is rejected far from the plateau, the published state is the plateau's.
+
+    Pins the plateau a rejected finish leaves on a fit whose scale penalty walks
+    outward. Taken to its bound by an endpoint trial, that penalty is promoted to
+    its face and the finish is stationary there, so the test makes no trial.
+    """
     rng = np.random.default_rng(2)
     x, z = rng.uniform(-1.0, 1.0, (2, 100))
     response = rng.pareto(3.0, 100) * np.exp(0.21 * np.sin(2.6 * x)) + 0.001

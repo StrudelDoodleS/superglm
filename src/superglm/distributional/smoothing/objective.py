@@ -10,7 +10,7 @@ from typing import cast
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._roundoff import UNIT_ROUNDOFF, gamma_up
+from superglm._roundoff import UNIT_ROUNDOFF, gamma, gamma_up
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.results.iteration import DistributionalEFSConfig
 from superglm.distributional.results.solver import DenseSolverResult, RetainedCoordinates
@@ -235,6 +235,37 @@ def _laplace_objective(
         penalty_memo=penalty_memo,
         objective_tolerance=objective_tolerance,
     ).objective
+
+
+def laplace_objective_rounding(result: DenseSolverResult) -> float:
+    """How far the float64 penalty leaves a fit's Laplace objective undetermined.
+
+    The penalty ``P = sum_j lambda_j S_j`` is stored to about ``gamma_k |P|``
+    entrywise, ``k`` the most nonzeros in a row plus two (the roundings
+    ``_score_within_rounding_floor`` counts in a row of ``P b``). A null
+    direction of ``S_j`` is therefore null in ``P`` only to that, and at a large
+    ``lambda_j`` the stored penalty charges it. The criterion reads ``P`` in
+    ``b'Pb / 2`` and in ``log|H + P| / 2``. A change ``dP`` moves those by
+    ``b'dPb / 2`` and, to first order, ``tr((H + P)^-1 dP) / 2``, so by at most
+    ``gamma_k (|b|'|P||b| + sum_ij |(H + P)^-1|_ij |P|_ij) / 2``. On an exact
+    face the component's range is eliminated and its penalty is zero, which
+    takes this back to a few ``u``: a 100-row fit with one penalty at 1e10
+    has 4e-6 here and differs from its face by 1e-7, against 1e-14 on the face.
+
+    This is the scale of one error, ``u`` times the penalty's magnitude and the
+    curvature's conditioning, not a bound on every rounding in ``V``; the
+    comparisons that read it add it to their own tolerance.
+    """
+    face = result.coefficient_face
+    rank = result.terminal_rank if face is None else result.terminal_reduced_rank
+    assert rank is not None
+    coefficients = np.abs(np.asarray(result.coefficients, dtype=np.float64))
+    penalty = np.abs(np.asarray(result.penalty, dtype=np.float64))
+    retained = penalty if face is None else np.abs(face.reduce_matrix(result.penalty))
+    roundings = int(np.count_nonzero(penalty, axis=1).max(initial=0)) + 2
+    quadratic = float(coefficients @ penalty @ coefficients)
+    log_determinant = float(np.sum(np.abs(rank.pseudo_inverse()) * retained))
+    return 0.5 * float(gamma(roundings)) * (quadratic + log_determinant)
 
 
 def _penalty_lambdas(

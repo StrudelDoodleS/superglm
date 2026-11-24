@@ -212,12 +212,24 @@ def bfgs_update(
     otherwise, so ``s'r >= 0.2 s'Bs > 0`` and the update stays positive
     definite; the update is skipped when ``s'r <= 1e-8 s'Bs`` after damping
     or when ``s'Bs`` is not positive.
+
+    The pair is taken on the coordinates that moved. One held at a bound or
+    frozen has ``s_k = 0``, and its gradient change is no curvature: at a capped
+    smoothing parameter it is the rounding of a gradient that vanishes there.
+    The memory holds such a coordinate's inverse curvature at the modified-Newton
+    floor, 1e8 times the largest curvature's, and would carry that rounding
+    into the block that steps. A gradient difference that noise dominates does
+    not update the memory (Shi, Xie, Byrd and Nocedal, arXiv 2010.04352, Remark
+    1), which then stays free of coupling between held and moving coordinates,
+    as the scaling of a projected Newton step must be (Bertsekas, SIAM J.
+    Control Optim. 20, 1982, Proposition 1).
     """
     s = _finite_vector(delta_rho, name="delta_rho")
     y = _finite_vector(delta_gradient, name="delta_gradient")
     size = s.size
     if y.size != size:
         raise ValueError("delta_rho and delta_gradient must have the same length")
+    y = np.where(s != 0.0, y, 0.0)
     inverse = _finite_matrix(inverse_hessian, name="inverse_hessian", size=size)
     try:
         b_s = np.linalg.solve(inverse, s)
