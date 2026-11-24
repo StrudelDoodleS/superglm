@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 import numpy as np
 import scipy.linalg
-import scipy.sparse
 from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_algebra import _cross_gram
@@ -28,8 +27,12 @@ from superglm.solvers._structured.layout import (
     build_factor_smooth_leaf_layout,
 )
 from superglm.solvers._structured.leaf_kernels import (
+    _center_pairs,
     _center_rows,
     _coded_rows,
+    _crossed_blocks,
+    _pair_block,
+    _pair_sums,
     _segment_means,
     _shifted_sums,
     _sparse_rows,
@@ -381,7 +384,8 @@ def _centered_leaf_pass(
     ``dev_l = sum_r a_r (x_r - m_l)``. The scatter is ``P'P - N'N`` per chunk (``_root_scatter``),
     never a raw-moment subtraction, compensated and symmetrized; the absolute mass is
     ``sum_r e_r (x_rj - m_lj)^2``, ``e_r`` from ``error`` (``|a|`` by default). Random-effect
-    border blocks stay sparse per chunk; a given ``mean`` must vanish off each leaf's levels.
+    border blocks are summed by (leaf, level) pair (``_indicator_pairs``); a given ``mean`` must
+    vanish off each leaf's levels.
     """
     n = len(weights)
     order, starts = layout.leaf_order, layout.leaf_starts
@@ -460,18 +464,14 @@ def _centered_leaf_pass(
             centered, weighted, split, a, error_chunk, bounds, means, absolute, sums, negative
         )
         dense = _root_scatter(split[:positive], split[len(split) - negatives :])
-        entries = _indicator_entries(indicators, mean, width, lo, leaves, counts)
-        row, column, value = entries
-        _compensated_add(
-            within, compensation, _chunk_scatter(dense, weighted, entries, a, q - width)
+        scatter, owner, column, pair_deviation, mass = _indicator_pairs(
+            indicators, mean, width, lo, leaves, bounds, a, error_chunk, weighted
         )
-        absolute[width:] += np.bincount(
-            column, weights=error_chunk[row] * value**2, minlength=q - width
-        )
-        owner = np.repeat(np.arange(len(leaves)), counts)
+        _compensated_add(within, compensation, _chunk_scatter(dense, scatter))
+        absolute[width:] += np.bincount(column, weights=mass, minlength=q - width)
         if not data_pass:
             deviation[leaves, :width] += sums
-            deviation[leaves, width:] += _segment_sums(entries, a, owner, len(leaves), q - width)
+            deviation[leaves[owner], width + column] += pair_deviation[:, 0]
             continue
         # the carried deviation of every segment about its own centre, -2 sum
         # over its negative rows of |a| (x - mu)
@@ -480,9 +480,7 @@ def _centered_leaf_pass(
         if signed_chunk:
             negative_weight = np.maximum(-a, 0.0)
             piece_deviation[:, :width] = -2.0 * negative
-            piece_deviation[:, width:] = -2.0 * _segment_sums(
-                entries, negative_weight, owner, len(leaves), q - width
-            )
+            piece_deviation[owner, width + column] = -2.0 * pair_deviation[:, 2]
             negative_mass = np.add.reduceat(negative_weight, segment)
             deviation[leaves[~cut]] = piece_deviation[~cut]
         if not np.any(cut):
@@ -495,9 +493,9 @@ def _centered_leaf_pass(
         for position, index in enumerate(cut_index):
             rows = slice(segment[index], segment[index] + counts[index])
             residual_cut[position, :width] = error_chunk[rows] @ centered[rows]
-        residual_cut[:, width:] = _segment_sums(
-            entries, error_chunk, owner, len(leaves), q - width
-        )[cut]
+        in_cut = cut[owner]
+        position = (np.cumsum(cut) - 1)[owner[in_cut]]
+        residual_cut[position, width + column[in_cut]] = pair_deviation[in_cut, 1]
         pieces.append(
             (
                 leaves[cut],
@@ -545,27 +543,17 @@ def _root_scatter(positive: NDArray, negative: NDArray) -> NDArray:
     return upper + np.triu(upper, 1).T
 
 
-def _chunk_scatter(
-    dense: NDArray,
-    weighted: NDArray,
-    entries: tuple[NDArray, NDArray, NDArray],
-    a: NDArray,
-    width: int,
-) -> NDArray:
-    """A chunk's ``sum_r a_r x_r x_r'`` on ``[dense | indicator]``, the indicator part from its entries.
+def _chunk_scatter(dense: NDArray, scatter: NDArray) -> NDArray:
+    """A chunk's ``sum_r a_r x_r x_r'`` on ``[dense | indicator]``.
 
-    ``dense`` is the dense columns' block (``_root_scatter``) and ``weighted``
-    their rows times ``a``, which the cross products read.  ``width`` is the
-    number of indicator columns; without any the dense block is the whole
-    product, never paying scipy's per-call overhead.
+    ``dense`` is the dense columns' block (``_root_scatter``) and ``scatter``
+    the indicator columns' rows (``_indicator_pairs``); without any the dense
+    block is the whole product.
     """
-    if not width:
+    if not scatter.shape[0]:
         return dense
-    row, column, value = entries
-    indicator = scipy.sparse.csr_array((value, (row, column)), shape=(len(a), width))
-    weighted_indicator = scipy.sparse.csr_array((a[row] * value, (row, column)), indicator.shape)
-    cross = indicator.T @ weighted
-    return np.block([[dense, cross.T], [cross, (indicator.T @ weighted_indicator).toarray()]])
+    width = len(dense)
+    return np.block([[dense, scatter[:, :width].T], [scatter]])
 
 
 def _indicator_means(
@@ -608,48 +596,54 @@ def _indicator_means(
         offset += len(cells.columns)
 
 
-def _indicator_entries(
+def _indicator_pairs(
     indicators: tuple[IndicatorCells, ...],
     mean: NDArray,
     width: int,
     lo: int,
     leaves: NDArray,
-    counts: NDArray,
-) -> tuple[NDArray, NDArray, NDArray]:
-    """A chunk's centred indicator rows ``x - m`` on the levels of each row's leaf.
+    bounds: NDArray,
+    a: NDArray,
+    error: NDArray,
+    weighted: NDArray,
+) -> tuple[NDArray, NDArray, NDArray, NDArray, NDArray]:
+    """A chunk's statistics of the sparse indicator columns, from its (leaf, level) pair sums.
 
-    Returns ``(row, column, value)``: chunk row, column among the indicator
-    columns and ``x_rj - mean[l, width + column]``.  Every entry left out is an
-    exact zero of the dense pass: the row does not take the level and its
-    leaf's mean there is 0.
+    Within a segment the rows of one pair share their centred indicator row,
+    so each row is added once to its pair (``leaf_kernels._pair_sums``) and
+    every sum over rows follows from the pairs, a term of the row sum for a
+    term (``leaf_kernels``): no row is written once per level its leaf meets.
+    Returns ``scatter`` ``(indicator columns, q)``, their rows of ``sum_r a_r
+    (x_r - m)(x_r - m)'``, and per pair its segment ``owner``, its ``column``
+    among the indicator columns, ``deviation`` ``(pairs, 3)`` the segment's
+    ``sum_r v_r (x_rj - m_j)`` for ``v = a``, ``error`` and ``max(-a, 0)``, and
+    ``mass`` ``sum_r error_r (x_rj - m_j)^2``.
     """
-    parts = [(np.empty(0, dtype=np.intp), np.empty(0, dtype=np.intp), np.empty(0))]
-    leaf, offset = np.repeat(leaves, counts), 0
+    scatter = np.zeros((mean.shape[1] - width, mean.shape[1]))
+    segments = np.arange(len(leaves))
+    held: list[tuple] = []
+    parts = [(np.empty(0, np.intp), np.empty(0, np.intp), np.empty((0, 3)), np.empty(0))]
+    offset = 0
     for cells in indicators:
-        per_row = cells.start[leaf + 1] - cells.start[leaf]
-        row = np.repeat(np.arange(len(leaf)), per_row)
-        first = cells.start[leaf] - np.cumsum(per_row) + per_row
-        cell = np.repeat(first, per_row) + np.arange(len(row))
-        column = offset + cells.level[cell]
-        value = (cells.row_cell[lo + row] == cell) - mean[leaf[row], width + column]
-        parts.append((row, column, value))
+        first, stop = cells.start[leaves[0]], cells.start[leaves[-1] + 1]
+        pair_bounds = np.append(cells.start[leaves], stop) - first
+        own = cells.row_cell[lo : lo + len(a)]
+        own = np.where(own < 0, -1, own - first)
+        owner = np.repeat(segments, np.diff(pair_bounds))
+        column = offset + cells.level[first:stop]
+        m = mean[leaves[owner], width + column]
+        sums = np.zeros((stop - first + len(leaves), width + 3))
+        _pair_sums(own, bounds, a, error, weighted, sums)
+        centered, mass = np.empty((stop - first, width + 3)), np.empty(stop - first)
+        _center_pairs(sums, pair_bounds, column, m, centered, mass, scatter)
+        _pair_block(pair_bounds, column, m, np.ascontiguousarray(sums[:, width]), width, scatter)
+        for other in held:
+            _crossed_blocks(bounds, a, *other, own, pair_bounds, column, m, width, scatter)
+        held.append((own, pair_bounds, column, m))
+        parts.append((owner, column, centered[:, width:], mass))
         offset += len(cells.columns)
-    row, column, value = (np.concatenate(values) for values in zip(*parts, strict=True))
-    return row, column, value
-
-
-def _segment_sums(
-    entries: tuple[NDArray, NDArray, NDArray],
-    weights: NDArray,
-    owner: NDArray,
-    segments: int,
-    width: int,
-) -> NDArray:
-    """``sum_{r in s} weights_r v_rj`` ``(segments, width)`` over sparse row entries ``v``."""
-    row, column, value = entries
-    key = owner[row] * width + column
-    sums = np.bincount(key, weights=weights[row] * value, minlength=segments * width)
-    return sums.reshape(segments, width)
+    owner, column, deviation, mass = (np.concatenate(values) for values in zip(*parts, strict=True))
+    return scatter, owner, column, deviation, mass
 
 
 def _combine_leaf_pieces(
