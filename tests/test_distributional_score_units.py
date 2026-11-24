@@ -45,6 +45,25 @@ def test_a_backtracked_gain_precludes_convergence_far_from_the_mle(discrete):
     assert close or not model.result_.converged
 
 
+@pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
+@pytest.mark.pins_behaviour
+def test_a_discarded_shifted_slope_must_be_fitted_or_disclosed(discrete):
+    """Pin the Gaussian group means or a convergence warning when the rank drops their contrast."""
+    z = np.tile([-1.0, -1.0, 1.0, 1.0], 16)
+    X = pd.DataFrame({"x": 1e10 * (3e7 + z)})
+    mu = 1e7 * (1 + 0.7 * z)
+    y = 1e7 * (1 + 0.7 * z + np.tile([-1.0, 1.0], 32))
+    family = GaussianLS(scale_floor=0)
+    model = SuperLSS(family, family.location("x"), family.scale(), discrete=discrete)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ConvergenceWarning)
+        model.fit(X, y)
+    if model.result_.converged:
+        np.testing.assert_allclose(model.predict(X), mu, rtol=1e-7, atol=0)
+    else:
+        assert any(issubclass(item.category, ConvergenceWarning) for item in caught)
+
+
 @pytest.mark.parametrize("force_fallback", [False, True], ids=["observed", "fisher"])
 def test_a_material_gain_is_measured_with_the_accepted_factor(monkeypatch, force_fallback):
     """A weakly weighted Gaussian can still gain 0.5. On fallback give the

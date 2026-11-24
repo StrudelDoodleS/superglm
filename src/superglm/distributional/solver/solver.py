@@ -1654,8 +1654,8 @@ def _certified_terminal_curvature(
 _DESIGN_DEPENDENCY_TOLERANCE = 1e-7
 
 
-def _drops_design_aliases(layout: StackedLayout, rank: RankDecomposition) -> bool:
-    """Whether every direction ``rank`` drops is a near-dependency of the design itself.
+def _drops_design_aliases(layout: StackedLayout, null: NDArray) -> bool:
+    """Whether every dropped direction is a near-dependency of the design itself.
 
     ``X N ~ 0`` is an alias; a direction only the weights flatten is a likelihood boundary
     (Lesaffre and Marx 1993). ``rho = ||X N|| / ||C N||`` on unit columns (Belsley, Kuh and
@@ -1667,7 +1667,6 @@ def _drops_design_aliases(layout: StackedLayout, rank: RankDecomposition) -> boo
     counts as zero, which can only refuse an alias. Columns are scaled to unit maximum (the
     test is basis-free); a non-finite span is not an alias.
     """
-    null = rank.null_basis()
     null = null / np.max(np.abs(null), axis=0)
     width = null.shape[1]
     design_gram = np.zeros((width, width))
@@ -2177,16 +2176,21 @@ def _fit_dense_fixed_lambda_core(
                 accepted_geometry.penalized_curvature,
                 dtype=np.float64,
             )
+            if decomposition.rank < decomposition.width:
+                null = decomposition.null_basis()
+                if context.coefficient_face is not None:
+                    null = context.coefficient_face.null_basis @ null
+                if not _drops_design_aliases(context.layout, null):
+                    # A retained Newton gain cannot assess a contrast the design resolves.
+                    if converged:
+                        converged, reason = False, "rank_reduced_at_stop"
+                    break
             if reduced is not None or context.coefficient_face is not None:
                 break
             # Coefficients the design aliases are dropped (Wood, Pya and Saefken 2016,
             # sec. 3.1.2). A direction only the weights flatten keeps its state.
             reduced = RetainedCoordinates.of(decomposition)
-            if (
-                reduced is None
-                or not np.any(state.coefficients[reduced.dropped])
-                or not _drops_design_aliases(context.layout, decomposition)
-            ):
+            if reduced is None or not np.any(state.coefficients[reduced.dropped]):
                 reduced = None
                 break
             # Repeat the Newton iteration to convergence on the retained coefficients,
