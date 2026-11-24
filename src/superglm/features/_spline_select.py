@@ -42,10 +42,11 @@ def root_select_split(
 
     The right singular vectors of the root on the orthogonal complement of
     the polynomials diagonalise its range without squaring its condition.
-    A different constrained nullity is handled by the existing split.
+    A different constrained nullity, or a zero penalty (a column with one
+    value), is handled by the existing split.
     """
-    if root_raw.shape[0] == 0 or not np.any(root_raw):
-        raise ValueError("select=True penalty root is identically zero.")
+    if not np.any(root_raw):
+        return None
     if structural is not None:
         structural_null = _null_mask(np.linalg.eigvalsh(structural))
         if int(np.sum(structural_null)) != 2:
