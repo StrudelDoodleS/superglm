@@ -633,6 +633,17 @@ def rank_standard_error_mask(model, rank_info) -> NDArray:
     return standard_error_mask(model, rank_info.augmented, rank_info.coefficient_estimable)
 
 
+def fit_contrast_estimable(model, inference: dict):
+    """``RankDecomposition.is_estimable`` of the rank record ``inference``'s coefficient mask
+    was read from, over the fitted coefficients, or ``None`` for a mask read elsewhere
+    (a structured factor, or a fit without a rank record).
+    """
+    rank_info = model._solver_pirls_result().rank_info
+    if rank_info is None or inference.get("structured_covariance"):
+        return None
+    return rank_info.is_estimable
+
+
 def refit_shows_every_standard_error(model, penalized=None) -> bool:
     """Whether ``model`` was saved before fits recorded the rule, and a fit today would be certified.
 
