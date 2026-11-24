@@ -221,6 +221,26 @@ def test_shape_engine_scop_warns_once_and_fits_the_qp_fit(declare: str) -> None:
     assert model.reml_diagnostics()["lambdas"] == reference.reml_diagnostics()["lambdas"]
 
 
+@pytest.mark.pins_behaviour
+def test_delegated_pspline_build_keeps_saved_scop_warning_attribution() -> None:
+    """Preserve master's named SCOP warning when a saved subclass calls super()."""
+
+    class DelegatingPSpline(PSpline):
+        def build(self, x, sample_weight=None):
+            return super().build(x, sample_weight=sample_weight)
+
+    spec = DelegatingPSpline(n_knots=8, constraint=Constraint.fit.increasing)
+    spec.shape_engine = None  # A fitted spline saved before shape_engine was stored.
+    frame, y = _book("poisson")
+    model = SuperGLM(family="poisson", selection_penalty=0, features={"x": spec})
+
+    with pytest.warns(SCOPRetiredWarning) as caught:
+        model.fit(frame, y)
+    (warning,) = [w for w in caught if w.category is SCOPRetiredWarning]
+    assert str(warning.message).startswith("Feature 'x': This P-spline was fitted on")
+    assert Path(warning.filename).name == "dm_builder.py"
+
+
 def test_saved_scop_model_predicts_and_reports_as_saved_and_refits_on_the_qp() -> None:
     """A model 0.41.0 or earlier fitted on SCOP loads, predicts and reports from what it saved.
 

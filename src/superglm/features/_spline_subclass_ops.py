@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import replace
 from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._warn import warn_feature
 from superglm.features import _shape_rule_rows
 from superglm.features.constraint import CONSTRAINT_KINDS, rules_of
 from superglm.types import LinearConstraintSet
@@ -77,11 +77,15 @@ def refuse_max_step(spec: Any) -> None:
             )
 
 
-def _collection_pieces(spec: Any, *, stacklevel: int) -> list:
+def _collection_pieces(spec: Any, *, stacklevel: int, feature_name: str | None = None) -> list:
     """The spec's rules as pieces on its range, refusing rules a spline cannot fit."""
     refuse_max_step(spec)
     return _shape_rule_rows.shape_pieces(
-        rules_of(spec), spec._lo, spec._hi, stacklevel=stacklevel + 1
+        rules_of(spec),
+        spec._lo,
+        spec._hi,
+        stacklevel=stacklevel + 1,
+        warning_feature=feature_name,
     )
 
 
@@ -104,7 +108,9 @@ def _shown_and_held(spec: Any, rule: Any, lo: float, hi: float) -> tuple[Any, st
     return shown, f"the levels {covered[0]!r} to {covered[-1]!r}"
 
 
-def _warn_widened_flats(spec: Any, pieces: list, *, stacklevel: int) -> None:
+def _warn_widened_flats(
+    spec: Any, pieces: list, *, stacklevel: int, feature_name: str | None
+) -> None:
     """Warn once when flat stretches hold on more than they state, naming where they hold.
 
     They do when an end is not a knot (the whole knot spans it touches), when a
@@ -159,7 +165,7 @@ def _warn_widened_flats(spec: Any, pieces: list, *, stacklevel: int) -> None:
         held = _shown_and_held(spec, held_flats[0][0], lo, hi)[1]
         widened.append(f"{' & '.join(shown)} holds on {held}, {reason}; {'; '.join(fixes)}")
     if widened:
-        warnings.warn("; ".join(widened), UserWarning, stacklevel=stacklevel + 1)
+        warn_feature("; ".join(widened), feature_name, stacklevel=stacklevel + 1)
 
 
 def _refuse_flat_over_curve(spec: Any, pieces: list) -> None:
@@ -196,7 +202,7 @@ def _refuse_flat_over_curve(spec: Any, pieces: list) -> None:
     )
 
 
-def prepare_shape_rules(spec: Any, *, stacklevel: int = 1) -> None:
+def prepare_shape_rules(spec: Any, *, stacklevel: int = 1, feature_name: str | None = None) -> None:
     """Resolve the spec's rule collection on its placed knots, once per build.
 
     Stores the pieces (``_shape_pieces``) the inequality rows are built from and
@@ -210,9 +216,9 @@ def prepare_shape_rules(spec: Any, *, stacklevel: int = 1) -> None:
     spec._flat_rows = None
     if not _is_rule_collection(spec):
         return
-    pieces = _collection_pieces(spec, stacklevel=stacklevel + 1)
+    pieces = _collection_pieces(spec, stacklevel=stacklevel + 1, feature_name=feature_name)
     _refuse_flat_over_curve(spec, pieces)
-    _warn_widened_flats(spec, pieces, stacklevel=stacklevel + 1)
+    _warn_widened_flats(spec, pieces, stacklevel=stacklevel + 1, feature_name=feature_name)
     _, flat_rows = _shape_rule_rows.shape_rows(
         spec._knots,
         spec.degree,
