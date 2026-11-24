@@ -119,6 +119,7 @@ def _exact_leaf_sums(d: np.ndarray, a: np.ndarray, leaf: np.ndarray) -> np.ndarr
     return np.array([[float(value) for value in row] for row in exact])
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("chunk_size", [5, 64, 10_000])
 def test_pair_sums_are_within_the_row_sums_bound_of_the_exact_scatter(chunk_size) -> None:
     """Every entry is within ``gamma sum_r |a_r| |d_ri| |d_rj|`` of the exact sum over rows.
@@ -183,6 +184,7 @@ def test_pair_sums_are_within_the_row_sums_bound_of_the_exact_scatter(chunk_size
         assert np.all(difference <= (np.bincount(leaf).max() + 4) * EPS * scale)
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("chunk_size", [5, 64, 10_000])
 def test_a_leaf_that_meets_one_border_level_keeps_exact_zeros_and_ones(chunk_size) -> None:
     """Leaf 2 (every row on level 3) and leaf 3 (every weighted row on level 5).

@@ -1220,6 +1220,7 @@ def test_a_chain_of_one_is_exact_at_a_tiny_lambda_under_large_weights() -> None:
     assert abs(chain.result.effective_df - edf) <= size * (gamma_tree + gamma_border)
 
 
+@pytest.mark.pins_behaviour
 def test_a_border_effect_constant_within_leaves_is_exact_at_a_tiny_lambda() -> None:
     """The fit above with two more random effects the 30 levels nest in, at lambda = 1e-8.
 
