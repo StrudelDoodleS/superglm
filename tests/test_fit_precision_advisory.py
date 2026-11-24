@@ -131,6 +131,8 @@ def test_input_zero_is_distinct_from_positive_weight_with_zero_fisher_informatio
 
     (advisory,) = _advisories(caught)
     assert "Zero initial Fisher information" in str(advisory.message)
+    # The weight findings' check is part of the information findings' one, said once.
+    assert str(advisory.message).count("Check the sample_weight units") == 1
     findings = _findings(model)
     assert all(4 not in finding["rows"] for finding in findings.values())
     assert findings["subnormal_sample_weight"]["rows"] == (5,)
