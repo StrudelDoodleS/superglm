@@ -419,7 +419,9 @@ def _profile_repaired_intercept(
 
     Returns the profiled predictor, its shift, the deviance's rounding there
     (``_deviance_rounding``) and the weighted deviance there, which the search holds
-    (``None`` for the closed form), as ``_shape_candidate_objective`` forms it. A repair
+    (``None`` for the closed form), as ``_shape_candidate_objective`` forms it. A profile
+    that would hold a binomial row against its outcome is the likelihood's instead
+    (``_searched_intercept``, ``clip_rows``). A repair
     call reads a profile it has formed from its memo (``constraints.reuse_repair_evidence``):
     the zero-term fallback's in a second publication check, a continued repair's start.
     """
@@ -771,7 +773,33 @@ def _searched_intercept(
             "optimization did not converge"
         )
     shift, state = found
-    return eta_base + shift, shift, state.deviance_rounding, state.deviance
+    # The fit's own rule (``clip_rows``): a solve that ends holding a row against its outcome
+    # stopped where the clip put it, since the clipped rows drop that row's score. Its
+    # intercept is then the likelihood's own, the one root of a concave problem with the
+    # curve as its offset (``likelihood_intercept``), and its deviance reads every held row
+    # from the likelihood, as the model published there does. A profile clear of such a row,
+    # and one whose likelihood has no finite intercept, keeps the searched shift.
+    from superglm.solvers.clip_rows import likelihood_intercept, rescored_held_rows, tail_rows
+
+    family, link = model._distribution, model._link
+    profiled = eta_base + shift
+    against = rescored_held_rows(family, link, y_arr, weights_arr, profiled)
+    if against is not None:
+        root = likelihood_intercept(family, link, y_arr, weights_arr, eta_base, start=shift)
+        if root is not None:
+            shift, state = root, evaluate(root, True, True)
+            assert state is not None  # a rerun's evaluation enters any clamp
+            profiled = eta_base + shift
+            against = rescored_held_rows(family, link, y_arr, weights_arr, profiled)
+    deviance, rounding = state.deviance, state.deviance_rounding
+    if against is not None:
+        deviance += against.deviance_gap(weights_arr)
+        # A row read from the likelihood keeps its predictor's rounding through its own
+        # slope, minus twice its score.
+        tail_eta = profiled[against.index]
+        slope = weights_arr[against.index] * tail_rows(link, against.y, tail_eta)[1]
+        rounding += 2.0 * row_gamma * float(np.sum(np.abs(slope * tail_eta), dtype=np.float64))
+    return profiled, shift, rounding, deviance
 
 
 def _poisson_identity_boundary(eta, y, weights, evaluate):
@@ -905,6 +933,9 @@ def _shape_candidate_objective(
 
     ``deviance``, where given, is the weighted deviance at ``eta`` as the intercept profile
     formed it (``_profile_repaired_intercept``), by the operations below; it is not formed again.
+    Either way a state that holds a row against its outcome is scored on the likelihood's rows
+    (``clip_rows.rescored_held_rows``), so two candidates are compared on the deviance a model
+    published at each would print.
     """
     beta_arr = np.asarray(beta, dtype=np.float64)
     if beta_arr.shape != model.result.beta.shape or not np.all(np.isfinite(beta_arr)):
@@ -929,7 +960,12 @@ def _shape_candidate_objective(
         if not np.all(np.isfinite(mu)) or not np.all(np.isfinite(deviance_units[carried])):
             deviance = np.nan
         else:
+            from superglm.solvers.clip_rows import rescored_held_rows
+
             deviance = weighted_row_sum(weights, lambda units: units, deviance_units)
+            held = rescored_held_rows(model._distribution, model._link, y, weights, eta)
+            if held is not None:
+                deviance += held.deviance_gap(weights)
     if not np.isfinite(deviance):
         raise RuntimeError(
             "Unsafe shape repair rejected before publication: invalid link-domain predictions"
@@ -1230,7 +1266,8 @@ def _continued_repair(
     ``None`` when no step is taken; the publication rule judges the result as before, at
     the scale returned (``_continued_scale``). The model reads no derivative from a row a
     clamp holds, or with ``inward``, only from one held at its worst (see the loop); a step
-    that meets such a row appends to ``worst``, a list, where one is given.
+    that meets such a row appends to ``worst``, a list, where one is given. At a state scored
+    on the likelihood's rows it reads every held row's derivatives from the likelihood.
     """
     from dataclasses import replace
 
@@ -1244,6 +1281,7 @@ def _continued_repair(
     )
     from superglm.distributions import _VARIANCE_FLOOR, clip_mu
     from superglm.links import stabilize_eta
+    from superglm.solvers.clip_rows import rescored_held_rows, tail_rows
 
     current_beta = np.asarray(model.result.beta, dtype=np.float64)
     base_eta = np.asarray(current_eta, dtype=np.float64)
@@ -1299,6 +1337,11 @@ def _continued_repair(
             # no slope to lead it back inside; with ``inward`` it keeps its own derivatives,
             # which do (the line search still judges each step on the merit scored).
             flat = (eta_safe != eta) | (mu != unclipped)
+            # A state that holds a row against its outcome is scored on the likelihood's rows
+            # (``_searched_intercept``), where no held row is flat: the model reads them too.
+            held = rescored_held_rows(model._distribution, model._link, y, scoring_weights, eta)
+            if held is not None:
+                flat[held.index] = False
             if np.any(flat):
                 back = np.where(
                     eta_safe != eta,
@@ -1322,6 +1365,13 @@ def _continued_repair(
             variance=variance,
         )
         W = np.where(flat, 0.0, W)
+        if held is not None:
+            # Their observed information, as the fit's iterations on these rows read it.
+            mass = scoring_weights[held.index]
+            _, tail_score, _, tail_information = tail_rows(model._link, held.y, eta[held.index])
+            with np.errstate(invalid="ignore"):
+                score[held.index] = np.where(mass > 0.0, mass * tail_score, 0.0)
+                W[held.index] = np.where(mass > 0.0, mass * np.nan_to_num(tail_information), 0.0)
         if not np.sum(W) > 0.0:
             break  # a clamp holds every row: the scored deviance is flat
         term = beta[indices]

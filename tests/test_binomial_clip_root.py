@@ -795,6 +795,180 @@ def test_a_monotonised_fit_that_holds_a_row_is_scored_on_the_likelihood(same_fra
         np.testing.assert_allclose(printed[name], reference, rtol=1e-9, err_msg=name)
 
 
+# ── the intercept a shape repair solves ────────────────────────────
+
+
+def _wave(n, held_y, held_offset, held_weight, link="logit", *, seed=5, kind="increasing"):
+    """``n`` rows about a wave a ``kind`` rule moves, and one row of ``held_weight`` at ``held_offset``."""
+    from superglm import Constraint, PSpline
+
+    rng = np.random.default_rng(seed)
+    x = np.r_[np.sort(rng.random(n)), 0.5]
+    wave = -0.5 + 1.2 * np.sin(2.5 * np.pi * x[:n])
+    y = np.r_[(rng.random(n) < expit(wave)).astype(float), held_y]
+    offset = np.r_[np.zeros(n), held_offset]
+    weights = np.r_[np.ones(n), held_weight]
+    frame = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="binomial",
+        link=link,
+        features={"x": PSpline(n_knots=8, constraint=getattr(Constraint.postfit, kind))},
+        selection_penalty=0.0,
+        weight_semantics="frequency",
+    )
+    model.fit(frame, y, offset=offset, sample_weight=weights)
+    return model, frame, y, weights, offset
+
+
+def _curve(model, frame, link):
+    """Each row's predictor at offset 0, from the model's public predictions."""
+    probability = model.predict(frame, offset=np.zeros(len(frame)))
+    if link == "logit":
+        return np.log(probability) - np.log1p(-probability)
+    if link == "probit":
+        return norm.ppf(probability)
+    return np.log(-np.log1p(-probability))
+
+
+@pytest.mark.parametrize(
+    ("link", "n", "held_y", "held_offset", "held_weight"),
+    [
+        ("logit", 400, 1.0, -35.0, 1.0),
+        ("logit", 60, 1.0, -35.0, 1.0),
+        ("logit", 60, 1.0, -35.0, 5.0),
+        ("logit", 20, 1.0, -35.0, 3.0),
+        ("logit", 60, 0.0, 35.0, 5.0),  # a non-event above the band
+        ("probit", 60, 1.0, -9.0, 5.0),
+        ("cloglog", 60, 1.0, -30.0, 5.0),
+    ],
+)
+def test_a_monotonised_fits_intercept_is_the_likelihoods(link, n, held_y, held_offset, held_weight):
+    """A shape repair leaves the intercept at the likelihood's maximum for the repaired curve.
+
+    The reference holds the published curve fixed, as an offset, and solves the
+    one intercept on the exact likelihood with SciPy.  The repair solved it on
+    the clipped rows, which drop the held row's score: on the 20 rows the
+    published probability at ``x = 0.25`` was 0.3659 for the likelihood's 0.5214.
+    """
+    model, frame, y, weights, offset = _wave(n, held_y, held_offset, held_weight, link)
+    fitted = _curve(model, frame, link)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.monotonize(frame, sample_weight=weights, offset=offset)
+    curve = _curve(model, frame, link)
+    assert np.max(np.abs(curve - fitted)) > 0.1  # the control: the rule moved the curve
+    profile = _Case(link, y, curve + offset, weights=weights)
+    shift = profile.root()[0]  # from the published intercept to the likelihood's
+    # the control: at the likelihood's intercept the held row's own outcome is below the 1e-7 floor
+    held = curve[-1:] + offset[-1] + shift
+    assert _log_likelihood_rows(link, y[-1:], held)[0] < math.log(1e-7)
+    scores = weights * _score_information_rows(link, y, curve + offset)[0]
+    assert abs(np.sum(scores)) <= 1e-9 * np.sum(np.abs(scores))
+    at = pd.DataFrame({"x": [0.25, 0.75]})
+    # an event's log-likelihood is log p: the probabilities at the likelihood's intercept
+    log_p = _log_likelihood_rows(link, np.ones(2), _curve(model, at, link) + shift)
+    np.testing.assert_allclose(model.predict(at, offset=np.zeros(2)), np.exp(log_p), rtol=1e-9)
+
+
+def test_a_repairs_candidates_are_compared_on_the_likelihood():
+    """The repair's intercept profile and its candidate objective read one deviance, the likelihood's.
+
+    At a curve that holds a row against its outcome the profile returns the
+    likelihood's intercept and its deviance there, and the objective forms the
+    same deviance for itself, so a candidate and the dropped term are compared
+    on the figures a model published at either would print.
+    """
+    from superglm.model import shape_ops
+    from superglm.model.fit_state import fitted_penalty
+
+    model, frame, y, weights, offset = _wave(60, 1.0, -35.0, 5.0)
+    start = _curve(model, frame, "logit") + offset + 0.3
+    eta, shift, _, deviance = shape_ops._profile_repaired_intercept(
+        model, start, y=y, weights=weights
+    )
+    profile = _Case("logit", y, start, weights=weights)
+    root = profile.root()
+    np.testing.assert_allclose(shift, root[0], rtol=1e-9)
+    np.testing.assert_array_equal(eta, start + shift)
+    np.testing.assert_allclose(deviance, profile.deviance(root), rtol=1e-11)
+    formed, _ = shape_ops._shape_candidate_objective(
+        model,
+        np.asarray(model.result.beta),
+        eta=eta,
+        y=y,
+        weights=weights,
+        smooth_penalty_terms=shape_ops._build_smooth_penalty_terms(model),
+        selection_penalty=fitted_penalty(model),
+    )
+    assert formed == deviance
+
+
+@pytest.mark.parametrize(("kind", "n", "seed"), [("decreasing", 20, 4), ("increasing", 30, 9)])
+def test_a_continued_repair_beats_the_dropped_term_on_the_likelihood(kind, n, seed):
+    """A repair continued past its first projection beats dropping the term on the likelihood.
+
+    The rule holds the curve far from the fit, so the first projection is worse
+    than dropping the term and the repair is continued, with an event of weight
+    5 at an offset of -35 beside it.  The reference is the dropped term's own
+    best: the intercept alone on the exact likelihood, by SciPy.  The repair
+    published a deviance above it, 383.5 flat for 377.7 on the 20 rows and a
+    curve at 392.0 for 388.2 on the 30; a continuation whose model reads no
+    slope from the held row stops at the dropped term.
+    """
+    model, frame, y, weights, offset = _wave(n, 1.0, -35.0, 5.0, seed=seed, kind=kind)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.monotonize(frame, sample_weight=weights, offset=offset)
+    dropped = _Case("logit", y, offset, weights=weights)
+    assert model.result.deviance < dropped.deviance(dropped.root()) - 0.1
+    curve = _curve(model, pd.DataFrame({"x": np.linspace(0.0, 1.0, 101)}), "logit")
+    steps = np.diff(curve) * (1.0 if kind == "increasing" else -1.0)
+    assert np.all(steps >= -1e-9) and np.ptp(curve) > 0.3  # a curve with the shape, not a flat term
+    rows = _curve(model, frame, "logit") + offset
+    scores = weights * _score_information_rows("logit", y, rows)[0]
+    assert abs(np.sum(scores)) <= 1e-9 * np.sum(np.abs(scores))
+
+
+@pytest.mark.pins_behaviour
+def test_a_repair_with_rows_held_on_the_side_of_their_outcome_keeps_its_intercept(monkeypatch):
+    """Pins: a repair that holds no row against its outcome never solves on the likelihood's rows.
+
+    Every tenth row is a non-event at an offset of -30, held below the band on
+    the side of its outcome: the clipped rows already carry its score to 2e-9,
+    and the repair publishes the intercept it always did.  The fix for #734
+    must leave this repair alone; one that re-solved wherever a row is held,
+    whatever its outcome, would not.
+    """
+    from superglm import Constraint, PSpline
+    from superglm.solvers import clip_rows
+
+    n = 300
+    x = np.linspace(0.0, 1.0, n)
+    wave = -0.5 + 1.2 * np.sin(2.5 * np.pi * x)
+    low = np.arange(n) % 10 == 0
+    y = ((np.arange(n) * 0.6180339887498949) % 1.0 < expit(wave)).astype(float) * ~low
+    offset = np.where(low, -30.0, 0.0)
+    frame = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="binomial",
+        link="logit",
+        features={"x": PSpline(n_knots=8, constraint=Constraint.postfit.increasing)},
+        selection_penalty=0.0,
+    )
+    model.fit(frame, y, offset=offset)
+    fitted = model.predict(frame, offset=np.zeros(n))
+
+    def never(*args, **kwargs):
+        raise AssertionError("a repair clear of the clip solved on the likelihood's rows")
+
+    monkeypatch.setattr(clip_rows, "likelihood_intercept", never, raising=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.monotonize(frame, offset=offset)
+    assert np.max(np.abs(model.predict(frame, offset=np.zeros(n)) - fitted)) > 0.05
+    assert model._solver_pirls_result().clip_rows == "working"
+
+
 def _group_lasso_fit(link, lam, held_offset):
     """A group-lasso fit of a slope and a three-level factor, one weighted event held against its outcome."""
     n = 60

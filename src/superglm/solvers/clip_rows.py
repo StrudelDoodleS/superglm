@@ -687,19 +687,25 @@ _NULL_BRACKET_DOUBLINGS = 64
 _NULL_SCORE_BOUND = 2.0**1000
 
 
-def likelihood_null_eta(
-    family: Distribution, link: Link, y: NDArray, weights: NDArray, offset: NDArray | None
-) -> NDArray | None:
-    """The intercept-only model's unclipped predictor at the likelihood's maximum, or ``None``.
+def likelihood_intercept(
+    family: Distribution,
+    link: Link,
+    y: NDArray,
+    weights: NDArray,
+    offset: NDArray,
+    *,
+    start: float | None = None,
+) -> float | None:
+    """The intercept that maximises the likelihood of the predictor ``intercept + offset``, or ``None``.
 
     The intercept ``b`` is the root of ``sum_i w_i dl_i/deta (b + offset_i)`` on
     the rows of ``tail_rows``.  Each row's log-likelihood is concave in its
     predictor (Pratt 1981, JASA 76(373)), so the sum falls in ``b`` and has one
     root, which Brent's method (1973, *Algorithms for Minimization without
-    Derivatives*, ch. 4) finds inside a bracket doubled about minus the
-    offsets' median.  ``None`` where the pair declares no tail rows, the
-    positive-weight responses are all 0 or all 1 (no finite root), or no
-    bracket is found.
+    Derivatives*, ch. 4) finds inside a bracket doubled about ``start``, by
+    default minus the offsets' median.  ``None`` where the pair declares no
+    tail rows, the positive-weight responses are all 0 or all 1 (no finite
+    root), or no bracket is found.
     """
     if not declares_tail_rows(family, link):
         return None
@@ -707,7 +713,7 @@ def likelihood_null_eta(
 
     y = np.asarray(y, dtype=np.float64)
     weights = np.asarray(weights, dtype=np.float64)
-    shift = np.zeros_like(y) if offset is None else np.asarray(offset, dtype=np.float64)
+    shift = np.asarray(offset, dtype=np.float64)
     carried = weights > 0.0
     response, mass, carried_shift = y[carried], weights[carried], shift[carried]
     if not (np.any(response > 0.0) and np.any(response < 1.0)):
@@ -719,17 +725,29 @@ def likelihood_null_eta(
         # an overflowed score keeps its sign and stays a number Brent's method can bracket
         return min(max(total, -_NULL_SCORE_BOUND), _NULL_SCORE_BOUND)
 
-    centre = -float(np.median(carried_shift))
+    centre = -float(np.median(carried_shift)) if start is None else start
     reach = 1.0
     for _ in range(_NULL_BRACKET_DOUBLINGS):
         below, above = score(centre - reach), score(centre + reach)
         if math.isnan(below) or math.isnan(above):
             return None
         if below > 0.0 > above:
-            return float(brentq(score, centre - reach, centre + reach)) + shift
+            return float(brentq(score, centre - reach, centre + reach))
         if below <= 0.0:
             centre -= reach
         if above >= 0.0:
             centre += reach
         reach *= 2.0
     return None
+
+
+def likelihood_null_eta(
+    family: Distribution, link: Link, y: NDArray, weights: NDArray, offset: NDArray | None
+) -> NDArray | None:
+    """The intercept-only model's unclipped predictor at the likelihood's maximum, or ``None``.
+
+    ``likelihood_intercept`` plus the offsets; ``None`` where it finds no intercept.
+    """
+    shift = np.zeros(np.shape(y)) if offset is None else np.asarray(offset, dtype=np.float64)
+    intercept = likelihood_intercept(family, link, y, weights, shift)
+    return None if intercept is None else intercept + shift
