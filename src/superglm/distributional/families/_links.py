@@ -91,22 +91,22 @@ class BoundedLogitLink:
         return self._span / ((values - self.lower) * (self.upper - values))
 
     def deriv_inverse(self, eta: NDArray) -> NDArray[np.float64]:
-        probability = expit(np.asarray(eta, dtype=np.float64))
-        return self._span * probability * (1.0 - probability)
+        values = np.asarray(eta, dtype=np.float64)
+        # The complement stays accurate even when expit(values) rounds to one.
+        return self._span * expit(values) * expit(-values)
 
     def deriv2_inverse(self, eta: NDArray) -> NDArray[np.float64]:
-        probability = expit(np.asarray(eta, dtype=np.float64))
-        return self._span * probability * (1.0 - probability) * (1.0 - 2.0 * probability)
+        values = np.asarray(eta, dtype=np.float64)
+        probability = expit(values)
+        complement = expit(-values)
+        return self._span * probability * complement * (complement - probability)
 
     def deriv3_inverse(self, eta: NDArray) -> NDArray[np.float64]:
         """``d^3 mu / d eta^3``; Wood (2011) Appendix D uses it in the REML W-correction."""
-        probability = expit(np.asarray(eta, dtype=np.float64))
-        return (
-            self._span
-            * probability
-            * (1.0 - probability)
-            * (1.0 - 6.0 * probability + 6.0 * probability * probability)
-        )
+        values = np.asarray(eta, dtype=np.float64)
+        probability = expit(values)
+        complement = expit(-values)
+        return self._span * probability * complement * (1.0 - 6.0 * (probability * complement))
 
     def deriv4_inverse(self, eta: NDArray) -> NDArray[np.float64]:
         """``d^4 mu / d eta^4 = span p q (q - p)(1 - 12 p q)`` with ``q = expit(-eta)``."""

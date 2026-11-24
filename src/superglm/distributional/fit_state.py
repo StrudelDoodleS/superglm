@@ -586,9 +586,9 @@ def _wall_disclosure(
     so the step cannot move along it. Such a direction, unless it lies in the
     shape only on round-off or the shape design itself nearly cancels it,
     presses the rows it carries outward when the terminal score along it is
-    resolved and points that way. A row the link has clipped to its last
-    float before a wall has no derivative left for either test; the family
-    says what that means for its functionals, whatever put the row there, and
+    resolved and points that way. Neither test resolves a clipped row, so the
+    last float before the wall identifies it at any slope. The family says
+    what this means for its functionals, whatever put the row there, and
     whether the shape's curvature is lost there, along a dropped direction or
     under a step that still presses the row. An unfinished fit's pressed rows are unsettled.
     """
