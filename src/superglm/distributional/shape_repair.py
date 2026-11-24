@@ -416,23 +416,16 @@ def _newton_minimum(
     unit: float,
     rows: int,
 ) -> float | None:
-    """A minimum of the objective from ``start`` by Newton's method on its slope, kept inside a
-    bracket of the minimum (Press et al., section 9.4, ``rtsafe``; Hager, *Comput. Math. Appl.*
-    18(9), 1989); ``None`` where it cannot say, and the derivative-free search decides.
+    """A minimum from ``start`` by Newton on the slope, kept inside a bracket (Press et al. 9.4,
+    ``rtsafe``); ``None`` where it cannot say, and the derivative-free search decides.
 
-    ``probe(t)`` is the objective at ``t``, infinite where a row is invalid, and where every row
-    is valid its slope, curvature and the sum of its ``rows`` terms' magnitudes (else ``None``).
-    ``None`` comes back where a point it moves to has no slope, where its slope is zero and its
-    curvature is not positive, where the open bracket would leave float64's range in ``unit``s,
-    or after ``_NEWTON_STEPS``. Every other stop is a minimum: a positive curvature with a
-    decrement within rounding, or a bracket closed on the best point.
-
-    Two values within the rounding of their sums give no order: which is lower in its last bits
-    depends on the BLAS build that formed the linear predictor. Their slopes are resolved
-    there, since a slope is not a difference of values, so the search moves to a trial level
-    with the lowest value found and reads its slope (Hager and Zhang, *SIAM J. Optim.* 16(1),
-    2005, section 4: the interval update with the function value's error). A saturated link's
-    plateau is left that way, downhill by its slope.
+    ``probe(t)`` gives the value (infinite where a row is invalid) and, where every row is valid,
+    its slope, curvature and the sum of its ``rows`` terms' magnitudes. ``None`` comes back on a
+    point with no slope, a zero slope without positive curvature, a bracket leaving float64's
+    range, or after ``_NEWTON_STEPS``; every other stop is a minimum. Two values within their
+    sums' rounding give no order (it depends on the BLAS build), so the search moves to a level
+    trial with the lowest value and reads its slope (Hager and Zhang, *SIAM J. Optim.* 16(1),
+    2005, section 4). A saturated link's plateau is left that way, downhill by its slope.
     """
     x = start
     value, derivatives = probe(x)
