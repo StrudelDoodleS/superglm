@@ -1168,8 +1168,12 @@ def build_observed_reml_geometry(
             )
             if small is None or local is None:  # pragma: no cover - built with its parts
                 raise TypeError("An fs or sz system's penalized operator keeps its penalty parts.")
-            if isinstance(raw, SumToZeroBlockOperator):
-                penalized_raw = SumToZeroPenalizedOperator.with_penalties(raw, small, local)
+            if isinstance(raw, SumToZeroBlockOperator) and isinstance(
+                penalized, SumToZeroPenalizedOperator
+            ):
+                penalized_raw = SumToZeroPenalizedOperator.with_penalties(
+                    raw, small, local, penalized.border_roots
+                )
             elif isinstance(raw, BlockSymmetricOperator):
                 penalized_raw = FactorSmoothPenalizedOperator.with_penalties(raw, small, local)
             else:  # pragma: no cover - structured dispatch invariant
