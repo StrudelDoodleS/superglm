@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, LambdaPolicy, Spline, SuperGLM, SuperLSS, s
+from superglm import Categorical, LambdaPolicy, Numeric, Spline, SuperGLM, SuperLSS, s
 from superglm.distributional import GaussianLS
 from superglm.features.interaction import TensorInteraction
 
@@ -131,6 +131,123 @@ def test_tensor_margin_its_rows_cannot_identify_keeps_the_formed_penalty(kind, b
     assert info.penalty_root is None and info.penalty_nullity is None
     formed = info.projection.T @ spec._build_penalty() @ info.projection
     np.testing.assert_array_equal(info.penalty, formed)
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("discrete", [False, True])
+def test_precision_weights_decide_whether_a_tensor_margin_states_its_null_direction(discrete):
+    """Pin a tensor fit against the same fit without its two rows of weight 1e-23.
+
+    Only those two rows show the ``x`` margin's slope, and ``v`` is the
+    tensor's bilinear direction. A margin asking the weights it is centred on
+    would state that slope as an exact null coordinate beside ``v``, and the
+    fitted values would move by 3e-2.
+    """
+    a = np.linspace(-1, 1, 80)
+    rng = np.random.default_rng(2026)
+    spread = rng.uniform(0, 1, 80)
+    x = np.r_[0.5 + 1e-9 * a, 0.0, 1.0]
+    z = np.r_[spread, 0.2, 0.8]
+    signal = 1 + np.sin(3 * spread) + 0.3 * a * (spread - 0.5)
+    y = np.r_[signal + 0.05 * rng.normal(size=80), 0.0, 2.0]
+    weights = np.r_[np.ones(80), 1e-23, 1e-23]
+    frame = pd.DataFrame({"x": x, "z": z, "v": (x - 0.5) * (z - z.mean()) / 1e-9})
+
+    def fitted(rows):
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0,
+            spline_penalty=1e-6,
+            discrete=discrete,
+            features={
+                "x": Spline(kind="ps", n_knots=2, boundary=(0, 1)),
+                "z": Spline(kind="ps", n_knots=2, boundary=(0, 1)),
+                "v": Numeric(),
+            },
+            interactions=[("x", "z")],
+        ).fit(frame.iloc[rows], y[rows], sample_weight=weights[rows])
+        return model.predict(frame.iloc[:80])
+
+    np.testing.assert_allclose(fitted(slice(None)), fitted(slice(80)), atol=1e-6, rtol=0)
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("discrete", [False, True])
+def test_precision_weights_decide_whether_a_level_states_its_null_direction(discrete):
+    """Pin a level's rank and weighted least-squares line with negligible-weight endpoints.
+
+    Level B's rows sit within 1e-9 of one value but for two of weight 1e-23,
+    and ``u`` is its line. A level asking its knot-geometry weights would
+    state that line as an exact null coordinate beside ``u``: rank 7 for 6,
+    and a curve 8e-3 off the line.
+    """
+    a = np.linspace(-1, 1, 80)
+    spread = np.linspace(0, 1, 80)
+    x = np.r_[spread, 0.5 + 1e-9 * a, 0.0, 1.0]
+    labels = np.r_[np.full(80, "A"), np.full(82, "B")]
+    y = np.r_[1 + spread, 1 + 0.4 * a + 0.1 * np.cos(np.arange(80)), 0.0, 2.0]
+    weights = np.r_[np.ones(160), 1e-23, 1e-23]
+    frame = pd.DataFrame({"x": x, "g": labels, "u": np.where(labels == "B", (x - 0.5) / 1e-9, 0.0)})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        spline_penalty=1e-6,
+        discrete=discrete,
+        features={
+            "x": Spline(kind="bs", n_knots=0, degree=2, boundary=(-1, 2)),
+            "g": Categorical(),
+            "u": Numeric(),
+        },
+        interactions=[("x", "g")],
+    ).fit(frame, y, sample_weight=weights)
+    design = np.column_stack([np.ones(80), a])
+    line = design @ np.linalg.lstsq(design, y[80:160], rcond=None)[0]
+    np.testing.assert_allclose(model.predict(frame)[80:160], line, rtol=1e-6)
+    assert model.result.reml_hessian_rank == 6
+
+
+@pytest.mark.pins_behaviour
+def test_decomposed_tensor_fits_where_one_margin_penalty_outweighs_the_data():
+    """Pin the surface one dominant margin penalty leaves, across the turn into its eigenbasis.
+
+    With the other margin's penalty off, a weight of 1e12 outweighs the data
+    by more than ``1 / sqrt(u)`` and the block is turned into the penalty's
+    eigenbasis; at 1e6 it is not. The surface moves by ``0.2 / weight``, so
+    the two fits agree to 1e-6. A tensor in its margins' fixed coordinates
+    declares no null basis, and takes that turn as it did before them.
+    """
+    rng = np.random.default_rng(7)
+    x, z = rng.uniform(0, 1, 400), rng.uniform(0, 1, 400)
+    frame = pd.DataFrame({"x": x, "z": z})
+    y = 1 + x * z + 0.3 * x * np.sin(4 * z) + 0.05 * rng.normal(size=400)
+
+    def fit(weight):
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0,
+            discrete=False,
+            spline_penalty={
+                "x": 1.0,
+                "z": 1.0,
+                "x:z:wiggly:margin_x": weight,
+                "x:z:wiggly:margin_z": 0.0,
+            },
+            features={"x": Spline(kind="ps", n_knots=6), "z": Spline(kind="ps", n_knots=6)},
+        )
+        model._add_interaction("x", "z", decompose=True)
+        model.fit(frame, y)
+        block = next(
+            matrix
+            for matrix, group in zip(model._dm.group_matrices, model._groups, strict=True)
+            if group.name == "x:z:wiggly"
+        )
+        turn = block.R_inv_local
+        return model.predict(frame), not np.array_equal(turn, np.eye(len(turn)))
+
+    stiff, stiff_turned = fit(1e12)
+    loose, loose_turned = fit(1e6)
+    assert stiff_turned and not loose_turned
+    np.testing.assert_allclose(stiff, loose, atol=1e-6, rtol=0)
 
 
 @pytest.mark.parametrize("discrete", [False, True])
