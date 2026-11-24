@@ -430,14 +430,16 @@ class _SplineBase:
         return _spline_build.build_group_info(self, x, sample_weight)
 
     def _build_with_row_support(
-        self, x: NDArray, sample_weight: NDArray | None = None
+        self, x: NDArray, sample_weight: NDArray | None = None, *, precision_weight: NDArray
     ) -> GroupInfo | list[GroupInfo]:
         """``build``, with the basis's row support found on its rows per value.
 
         The design builder's build: it stores ``GroupInfo.row_support`` in
         place of scanning the basis.
         """
-        return _spline_build.build_group_info(self, x, sample_weight, find_row_support=True)
+        return _spline_build.build_group_info(
+            self, x, sample_weight, find_row_support=True, precision_weight=precision_weight
+        )
 
     def build_knots_and_penalty(
         self, x: NDArray, sample_weight: NDArray | None = None, n_bins: int | None = None

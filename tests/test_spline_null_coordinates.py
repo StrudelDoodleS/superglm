@@ -495,6 +495,27 @@ def test_elementwise_selection_keeps_the_declared_spline_coordinates():
     )
 
 
+@pytest.mark.pins_behaviour
+def test_precision_weights_decide_whether_a_null_direction_is_visible():
+    """Pin the rank and weighted least-squares line with negligible-weight endpoints."""
+    a = np.linspace(-1, 1, 80)
+    x = np.r_[0.5 + 1e-9 * a, 0.0, 1.0]
+    frame = pd.DataFrame({"x": x, "u": x})
+    y = np.r_[1 + 0.4 * a + 0.1 * np.cos(np.arange(a.size)), 0, 2]
+    weights = np.r_[np.ones_like(a), 1e-23, 1e-23]
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        spline_penalty=1e-6,
+        discrete=False,
+        features={"x": Spline(kind="bs", n_knots=0, degree=2, boundary=(-1, 2)), "u": Numeric()},
+    ).fit(frame, y, sample_weight=weights)
+    design = np.column_stack([np.ones_like(x), (x - 0.5) / 1e-9])
+    coef = np.linalg.lstsq(np.sqrt(weights)[:, None] * design, np.sqrt(weights) * y, rcond=None)[0]
+    np.testing.assert_allclose(model.predict(frame)[:80], (design @ coef)[:80], rtol=1e-6)
+    assert model.result.reml_hessian_rank == 3
+
+
 def _closed_form_large_lambda_reml_objective(spec, x: np.ndarray, y: np.ndarray) -> float:
     """Exact Gaussian REML objective in the ``lambda -> inf`` limit of SSP coordinates.
 

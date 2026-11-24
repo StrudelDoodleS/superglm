@@ -243,6 +243,7 @@ def build_group_info(
     sample_weight: NDArray | None = None,
     *,
     find_row_support: bool = False,
+    precision_weight: NDArray | None = None,
 ) -> GroupInfo | list[GroupInfo]:
     """Build the main GroupInfo payload for a spline spec.
 
@@ -326,10 +327,13 @@ def build_group_info(
         monotone_engine=monotone_engine,
         raw_to_solver_map=raw_to_solver_map,
     )
+    # Knots and centring use geometry weights. Visibility asks whether the
+    # solver's weighted observations identify the unpenalised columns.
+    weights = sample_weight if precision_weight is None else precision_weight
     if distinct is None:
-        finish_penalties(spec, info, full, sample_weight)
+        finish_penalties(spec, info, full, weights)
     else:
-        counts = np.bincount(distinct[1], weights=sample_weight, minlength=len(distinct[0]))
+        counts = np.bincount(distinct[1], weights=weights, minlength=len(distinct[0]))
         finish_penalties(spec, info, value_rows, counts)
     return _with_row_support(info, value_rows, index, full)
 

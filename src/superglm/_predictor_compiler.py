@@ -552,7 +552,7 @@ def compile_predictor_design(
                     # any other build() keeps its own, and its basis is
                     # scanned.
                     result = cast(_SplineBase, spec)._build_with_row_support(
-                        x_col, sample_weight=feature_build_weight
+                        x_col, sample_weight=feature_build_weight, precision_weight=sample_weight
                     )
                 else:
                     result = spec.build(x_col, sample_weight=feature_build_weight)
