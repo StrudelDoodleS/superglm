@@ -620,6 +620,19 @@ BOUNDARY_TESTS: dict[str, str | tuple[str, ...]] = {
         "test_chunk_boundaries_design.py::test_projected_design_moments_sum_every_design_chunk",
         "test_data_rank_grey_subspace.py::test_chunked_projection_is_the_rows_product",
     ),
+    "inference/_sandwich_core.py::ClusterScoreAccumulator.cancelled_clusters": (
+        "test_sandwich_covariance.py::TestNumericalStabilityInvariances::test_cluster_score_accumulator_cancellation_and_refinement_match_across_chunk_boundaries"
+    ),
+    "inference/_sandwich_core.py::ClusterScoreAccumulator.refine_cancelled": (
+        "test_sandwich_covariance.py::TestNumericalStabilityInvariances::test_cluster_score_accumulator_cancellation_and_refinement_match_across_chunk_boundaries"
+    ),
+    "inference/sandwich.py::_centred_rmatvec": (
+        "test_sandwich_covariance.py::TestUnitsAndWorkspace::test_unclustered_centered_replay_matches_single_chunk_across_chunk_boundary"
+    ),
+    "inference/sandwich.py::compute_superglm_sandwich_covariance": (
+        "test_sandwich_covariance.py::TestUnitsAndWorkspace::test_the_cap_covers_every_dense_buffer_and_sizes_the_chunks",
+        "test_sandwich_covariance.py::TestUnitsAndWorkspace::test_unclustered_centered_replay_matches_single_chunk_across_chunk_boundary",
+    ),
     "model/estimability_ops.py::prediction_shares": (
         "test_prediction_estimability.py::test_the_shares_are_the_same_across_row_blocks"
     ),

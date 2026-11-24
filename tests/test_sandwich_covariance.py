@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 import math
 import pickle
 import shutil
@@ -44,6 +45,28 @@ from superglm.inference._sandwich_core import (
     ClusterScoreAccumulator,
     build_unavailable_covariance,
 )
+
+
+@functools.cache
+def _r_mgcv_available() -> bool:
+    """Whether ``Rscript`` with ``mgcv`` is usable (cached, no import-time subprocess)."""
+    if shutil.which("Rscript") is None:
+        return False
+    completed = subprocess.run(
+        ["Rscript", "-e", 'quit(status=if (requireNamespace("mgcv", quietly=TRUE)) 0 else 1)'],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return completed.returncode == 0
+
+
+def _require_r_mgcv() -> None:
+    """Skip the calling test unless R with ``mgcv`` is installed."""
+    if not _r_mgcv_available():
+        pytest.skip("requires R with mgcv")
+
 
 # statsmodels comes with the bench extra, which CI installs; without it the module is skipped.
 sm = pytest.importorskip("statsmodels.api")
@@ -619,9 +642,7 @@ class TestMgcvBlackBoxParity:
 
         mgcv is GPL: invoked strictly as an external black-box Rscript command.
         """
-        rscript = shutil.which("Rscript")
-        if rscript is None:
-            pytest.skip("Rscript not installed")
+        _require_r_mgcv()
 
         r_code = r"""
         suppressPackageStartupMessages(library(mgcv))
@@ -640,9 +661,13 @@ class TestMgcvBlackBoxParity:
         cat("S_PEN:", sprintf("%.15g", as.numeric(m$smooth[[1]]$S[[1]])), "\n")
         cat("X_FLAT:", sprintf("%.15g", as.numeric(X[, -1])), "\n")
         """
-        proc = subprocess.run([rscript, "-e", r_code], capture_output=True, text=True, timeout=30)
-        if proc.returncode != 0:
-            pytest.skip(f"R/mgcv unavailable: {proc.stderr.strip()}")
+        proc = subprocess.run(
+            ["Rscript", "-e", r_code],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
 
         parsed: dict[str, np.ndarray] = {}
         for line in proc.stdout.splitlines():
@@ -720,6 +745,62 @@ class TestNumericalStabilityInvariances:
         acc.refine_cancelled(cancelled, lambda idx: scores[idx])
         np.testing.assert_allclose(acc.totals[0], [1.0, 6.0], rtol=0.0, atol=0.0)
         np.testing.assert_allclose(acc.totals[1], [5.0, 1.0], rtol=0.0, atol=0.0)
+
+    def test_cluster_score_accumulator_cancellation_and_refinement_match_across_chunk_boundaries(
+        self,
+    ):
+        """Multi-batch cancellation checks and Shewchuk refinement match the single-chunk answer."""
+        scores = np.array(
+            [
+                # Cluster 0 (5 rows -> 3 refinement chunks at max_chunk_rows=2), exact sum [1.0, -0.75]
+                [1e16, -1e16],
+                [0.25, -0.5],
+                [0.25, 0.0],
+                [0.5, -0.25],
+                [-1e16, 1e16],
+                # Clusters 1, 2, 3 (uncancelled, middle batches)
+                [1.0, 2.0],
+                [3.0, 4.0],
+                [2.0, -1.0],
+                [1.0, -2.0],
+                [0.5, 0.5],
+                [1.5, 2.5],
+                # Cluster 4 (last batch at max_chunk_rows=2, 5 rows -> 3 chunks), exact sum [3.5, -2.25]
+                [1e16, -2.0],
+                [1.0, -1e16],
+                [2.0, -0.25],
+                [-1e16, 0.0],
+                [0.5, 1e16],
+            ],
+            dtype=np.float64,
+        )
+        codes = np.array([0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 4, 4, 4], dtype=np.intp)
+
+        single = ClusterScoreAccumulator(5, 2, codes)
+        single.add_chunk(0, len(scores), scores)
+        cancelled_single = single.cancelled_clusters(max_chunk_rows=100)
+        single.refine_cancelled(cancelled_single, lambda idx: scores[idx], max_chunk_rows=100)
+
+        chunked = ClusterScoreAccumulator(5, 2, codes)
+        for start in range(0, len(scores), 3):
+            stop = min(start + 3, len(scores))
+            chunked.add_chunk(start, stop, scores[start:stop])
+        cancelled_chunked = chunked.cancelled_clusters(max_chunk_rows=2)
+        refine_calls = 0
+
+        def _row_scores(idx: np.ndarray) -> np.ndarray:
+            nonlocal refine_calls
+            refine_calls += 1
+            return scores[idx]
+
+        chunked.refine_cancelled(cancelled_chunked, _row_scores, max_chunk_rows=2)
+
+        np.testing.assert_array_equal(cancelled_single, np.array([0, 4], dtype=np.intp))
+        np.testing.assert_array_equal(cancelled_chunked, cancelled_single)
+        assert refine_calls == 6  # 2 cancelled clusters x ceil(5 / 2) chunks each
+        np.testing.assert_allclose(chunked.totals, single.totals, rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(chunked.totals[0], [1.0, -0.75], rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(chunked.totals[4], [3.5, -2.25], rtol=0.0, atol=0.0)
 
     def test_end_to_end_clustered_cancellation_matches_exact_fsum(self):
         """End-to-end Gaussian clustered sandwich preserves digits under large opposing rows."""
@@ -1707,6 +1788,31 @@ class TestUnitsAndWorkspace:
         )
         assert not refused.available
         assert refused.unavailable_reason == "workspace_budget_exceeded"
+
+    @pytest.mark.parametrize("weight_semantics", ["prior", "frequency"])
+    def test_unclustered_centered_replay_matches_single_chunk_across_chunk_boundary(
+        self, weight_semantics
+    ):
+        """Unclustered centered replay and ``_centred_rmatvec`` match across row chunks."""
+        n, width = 600, 20
+        rng = np.random.default_rng(829)
+        frame = pd.DataFrame(rng.normal(size=(n, width)), columns=[f"c{i}" for i in range(width)])
+        y = 0.2 * frame.to_numpy() @ rng.normal(size=width) + rng.normal(size=n)
+        weights = rng.integers(1, 5, size=n).astype(float)
+        model = SuperGLM(
+            family="gaussian",
+            features={c: Numeric() for c in frame},
+            weight_semantics=weight_semantics,
+        ).fit(frame, y, sample_weight=weights)
+
+        free = model.sandwich_covariance(center="mean")
+        assert free.available and free.telemetry.n_chunks == 1
+
+        # q = 21 -> fixed workspace is 40 * 21^2 = 17,640 B; 140,000 B gives chunk_rows = 121 (5 chunks).
+        capped = model.sandwich_covariance(center="mean", max_memory=140_000)
+        assert capped.available
+        assert capped.telemetry.n_chunks >= 4
+        np.testing.assert_allclose(capped.covariance, free.covariance, rtol=1e-11, atol=1e-18)
 
     def test_the_result_shares_no_mutable_descriptor_with_the_model(self):
         rng = np.random.default_rng(31)
