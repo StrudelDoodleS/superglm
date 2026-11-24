@@ -289,15 +289,20 @@ def test_a_pooled_block_forms_its_solved_rows_a_piece_at_a_time(monkeypatch):
     from superglm._parallel import parallel_config
 
     _solved_rows_only(monkeypatch)
-    model = _poisson_model(1.0e3)
+    model = _poisson_model(1.0e3, n=4060)
     args, kwargs = _correction_inputs(model)
     n, p = model._dm.n, model._dm.p
     monkeypatch.setattr(leverage_rows, "_BLOCK_BYTES", 1)  # 256-row blocks
     formed: list[int] = []
     kernel = leverage_rows._solved_rows_and_leverages
+    # Keep all serial views alive to distinguish reuse from the allocator
+    # handing a fresh piece the same address.
+    serial_pieces = []
 
     def counted(solved, *rest):
         formed.append(solved.shape[0])
+        if workers == 1:
+            serial_pieces.append(solved)
         return kernel(solved, *rest)
 
     monkeypatch.setattr(leverage_rows, "_solved_rows_and_leverages", counted)
@@ -311,17 +316,23 @@ def test_a_pooled_block_forms_its_solved_rows_a_piece_at_a_time(monkeypatch):
     monkeypatch.setattr(w_derivatives, "pooled_map", charged_map)
     monkeypatch.setattr(leverage_rows, "_PIECE_BYTES", 1, raising=False)  # 64-row pieces
     results = {}
-    for workers in (1, 4):
+    for workers in (1, 4, 16):
         formed.clear()
         with parallel_config(n_jobs=workers):
             results[workers] = w_derivatives.reml_w_correction(
                 *args, leverage_hessian=True, **kwargs
             )
         assert sum(formed) == n  # every row once (Poisson log: every row has a weight derivative)
-        assert max(formed) == 64 and len(formed) == 6 * 4  # six blocks of four pieces
+        assert max(formed) == 64 and len(formed) == 16 * 4
     assert charged and charged[-1] < 4 * 8 * 256 * p  # a block's copies were the charge
-    assert results[4][0].tobytes() == results[1][0].tobytes()
-    assert results[4][2].tobytes() == results[1][2].tobytes()
+    for first in range(0, len(serial_pieces), 4):
+        assert all(
+            np.shares_memory(serial_pieces[first], other)
+            for other in serial_pieces[first + 1 : first + 4]
+        )
+    for workers in (4, 16):
+        assert results[workers][0].tobytes() == results[1][0].tobytes()
+        assert results[workers][2].tobytes() == results[1][2].tobytes()
     gradient, reference_cross, gradient_bound, cross_bound = _rounding_bounds(model)
     assert np.all(np.abs(results[4][0] - gradient) <= gradient_bound)
     assert np.all(np.abs(results[4][2] - reference_cross) <= cross_bound)
@@ -405,6 +416,42 @@ def _wide_dense_case(n: int, width: int = 600, orders: tuple[int, ...] = (2,)) -
     }
 
 
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("width", [9, 23])
+def test_four_penalties_on_the_same_columns_match_weighted_gram_traces(width):
+    """Pin the gradient and cross traces for overlapping penalties on both product routes."""
+    case = _wide_dense_case(90, width=width, orders=(1, 2, 3, 4))
+    dm, result, inverse = case["dm"], case["pirls_result"], case["XtWX_S_inv"]
+    geometry = result.reml_geometry
+    design = dm.toarray()
+    centred = design - geometry.mean_x
+    w_prime = np.exp(design @ result.beta + result.intercept)
+    smoothing, rhs = _penalty_operands(dm, case["reml_penalties"], case["lambdas"], result.beta)
+    directions = -w_prime[:, None] * (centred @ (inverse @ rhs))
+    grams = [centred.T @ (a[:, None] * centred) for a in directions.T]
+    expected_gradient = 0.5 * (
+        np.array([np.trace(inverse @ gram) for gram in grams])
+        + directions.sum(axis=0) / geometry.sum_w
+    )
+    traces = np.array(
+        [
+            [np.trace(inverse @ s @ inverse @ gram) for gram in grams]
+            for s in smoothing.transpose(2, 0, 1)
+        ]
+    )
+    gradient, _, cross = w_derivatives.reml_w_correction(
+        **case, leverage_hessian=True, lookup_tables=False
+    )
+    grad_scale, cross_scale = _term_scales(
+        np.abs(centred) + np.abs(geometry.mean_x), inverse, w_prime, rhs, smoothing, geometry.sum_w
+    )
+    bound = _gamma(dm.n + 4 * dm.p + 16)
+    assert np.all(np.abs(gradient - expected_gradient) <= 2 * bound * grad_scale)
+    assert np.all(
+        np.abs(cross + 0.5 * (traces + traces.T)) <= bound * (cross_scale + cross_scale.T)
+    )
+
+
 @pytest.mark.parametrize("orders", [(2,), (1, 2, 3, 4)], ids=["one_penalty", "four_penalties"])
 def test_a_pooled_jobs_charge_covers_its_traced_peak(monkeypatch, orders):
     """The pool charges a job at least the memory it traces, dense centring and products included.
@@ -415,11 +462,10 @@ def test_a_pooled_jobs_charge_covers_its_traced_peak(monkeypatch, orders):
     test traces each job alone (``tracemalloc``, which counts numpy's arrays)
     and compares its peak with the charge, then checks the pooled pass keeps
     the serial bits.  Blocks and pieces are scaled down together: three
-    blocks of five pieces.  Four difference penalties on the wide group (as
-    ``Spline(kind="ps", m=(1, 2, 3, 4))`` gives) take four ``piece x width``
-    products at once.  Mutations: centring a block's dense columns all at once
-    (three block-sized dense arrays per job), or charging four ``piece x p``
-    copies whatever the batch's dense penalties, exceeds the charge.
+    blocks of five pieces. Four difference penalties on the wide group
+    (``Spline(kind="ps", m=(1, 2, 3, 4))``) must share their product workspace
+    so three such jobs fit an 18 MiB pool budget. The old batched products
+    cost over 7 MiB per job and admitted only two.
     """
     import tracemalloc
 
@@ -458,6 +504,7 @@ def test_a_pooled_jobs_charge_covers_its_traced_peak(monkeypatch, orders):
         tracemalloc.stop()
     assert len(charged) == 1 and len(peaks) == 3
     assert max(peaks) <= charged[0]
+    assert 3 * charged[0] <= 18 << 20
     monkeypatch.setattr(w_derivatives, "pooled_map", pooled_map)
     with parallel_config(n_jobs=3):
         pooled = w_derivatives.reml_w_correction(**case, leverage_hessian=True)
