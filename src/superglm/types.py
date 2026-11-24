@@ -350,6 +350,9 @@ class GroupSlice:
     # and a per-level block's own factor level, as the factor holds it.
     interaction: bool = False
     level: Hashable | None = None
+    # Constrained term basis in the coordinates held by the group matrix
+    # (before its R_inv, if present). It orients the fractional Wood test.
+    term_test_basis: NDArray | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
         if self.feature_name is _FEATURE_NAME_UNSET:

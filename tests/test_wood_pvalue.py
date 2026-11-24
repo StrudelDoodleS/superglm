@@ -527,15 +527,21 @@ class TestSatterthwaite:
 
 
 class TestWoodTestSmooth:
-    def test_fractional_rank_reports_the_same_statistic_after_reflecting_a_basis_column(self):
-        """The two signs of Wood's fractional boundary have the same mean in either basis."""
+    def test_rotation_when_one_boundary_axis_is_orthogonal_to_the_first_column(self):
+        """mgcv's statistic on diag(4, 1) in the declared identity basis."""
         beta = np.array([2.0, 1.0])
         covariance = np.diag([4.0, 1.0])
-        for sign in (1.0, -1.0):
-            basis = np.diag([sign, 1.0])
-            stat, _, _ = wood_test_smooth(basis @ beta, basis, covariance, 1.5)
-            # The opposite cross terms cancel, leaving z1² + 0.5 z2².
-            assert stat == pytest.approx(1.5)
+        for angle in (0.0, 0.1, 0.7):
+            c, s = np.cos(angle), np.sin(angle)
+            basis = np.array([[c, s], [-s, c]])
+            stat, _, _ = wood_test_smooth(
+                basis.T @ beta,
+                basis,
+                basis.T @ covariance @ basis,
+                1.5,
+                term_basis=basis.T,
+            )
+            assert stat == pytest.approx(1.5 + np.sqrt(0.5))
 
     def test_full_rank_similar_to_naive_wald(self):
         """When edf1 = p_g, Wood test should approximately equal naive Wald."""
@@ -833,6 +839,53 @@ class TestFCorrection:
 
 
 class TestWoodIntegration:
+    def test_statistic_uses_the_constrained_term_basis_in_every_solver_basis(self, monkeypatch):
+        """mgcv 1.9-3 testStat on the centred P-spline columns before whitening.
+
+        With A mapping solver coefficients into that basis, the reference call
+        takes A b, X A^-1, A V A' and the term's alternative EDF (6.11519358).
+        Its reported statistic uses one fractional-rank sign, its tail both.
+        """
+        from superglm import SuperGLM, dm_builder
+        from superglm.features.spline import PSpline
+
+        class MixedBasis(PSpline):
+            """Keep the declared coordinates instead of exposing the penalty null space."""
+
+        rng = np.random.default_rng(42)
+        x = rng.uniform(0, 1, 160)
+        frame = pd.DataFrame({"x": x})
+        y = rng.poisson(np.exp(0.2 * np.sin(7 * x)))
+        whiten = dm_builder.compute_projected_R_inv
+
+        def rotated_whitening(*args, **kwargs):
+            transform = whiten(*args, **kwargs)
+            rotation, _ = np.linalg.qr(np.random.default_rng(17).normal(size=transform.shape))
+            return transform @ rotation
+
+        def rescaled_whitening(*args, **kwargs):
+            transform = whiten(*args, **kwargs)
+            return transform * np.linspace(0.5, 2.0, transform.shape[1])
+
+        p_values = []
+        for spline, whitening, retain in (
+            (MixedBasis, whiten, True),
+            (PSpline, whiten, True),
+            (MixedBasis, rotated_whitening, True),
+            (PSpline, rescaled_whitening, False),
+        ):
+            monkeypatch.setattr(dm_builder, "compute_projected_R_inv", whitening)
+            model = SuperGLM(
+                family="poisson",
+                selection_penalty=0.0,
+                features={"x": spline(n_knots=5)},
+                retain_fit_state=retain,
+            ).fit(frame, y)
+            row = next(row for row in model.summary()._coef_rows if row.is_spline)
+            assert row.wald_chi2 == pytest.approx(9.557792937170985)
+            p_values.append(row.wald_p)
+        np.testing.assert_allclose(p_values, p_values[0])
+
     @pytest.fixture
     def spline_model(self):
         """Fit a spline model for integration testing."""

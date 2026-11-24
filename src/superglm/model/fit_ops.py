@@ -1348,6 +1348,9 @@ def _maybe_release_fit_state(model) -> None:
     # releasing row-scale state. These cached_property values are then returned
     # directly without needing model._dm.
     inf = model._fit_inference_info
+    from superglm.inference.coef_tables import term_test_bases
+
+    inf["term_test_bases"] = term_test_bases(model)
     model.__dict__["_group_edf"] = dict(inf["group_edf_map"])
     augmented = inf["XtWX_inv_aug"]
     from superglm._weight_units import coefficient_covariance

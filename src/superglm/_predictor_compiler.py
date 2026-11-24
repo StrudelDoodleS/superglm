@@ -271,6 +271,23 @@ def _feature_named_messages(name: str) -> Iterator[None]:
         )
 
 
+def _term_test_basis(
+    info: GroupInfo, matrix: GroupMatrix, transform: NDArray | None
+) -> NDArray | None:
+    # A penalized block built directly in its declared columns can acquire
+    # another whitening during REML. Its matrix retains the current map.
+    retained = getattr(matrix, "R_inv", None)
+    if transform is None:
+        return retained
+    if not transform.shape[1]:
+        return None
+    basis = info.projection
+    if basis is None:
+        basis = np.eye(transform.shape[0])
+    # A plain dense block already multiplied out its fixed transform.
+    return basis if retained is not None else np.linalg.lstsq(transform, basis, rcond=None)[0]
+
+
 def compile_predictor_design(
     X: EagerFrame,
     sample_weight: NDArray,
@@ -616,6 +633,7 @@ def compile_predictor_design(
             groups.append(
                 GroupSlice(
                     name=_group_name(name, info),
+                    term_test_basis=_term_test_basis(info, gm, r_inv),
                     start=col_offset,
                     end=col_offset + n_cols,
                     weight=np.sqrt(priced),
@@ -856,6 +874,7 @@ def compile_predictor_design(
                         groups.append(
                             GroupSlice(
                                 name=_group_name(iname, info),
+                                term_test_basis=_term_test_basis(info, gm, r_inv),
                                 start=col_offset,
                                 end=col_offset + n_cols,
                                 weight=np.sqrt(priced),
@@ -883,6 +902,7 @@ def compile_predictor_design(
                         groups.append(
                             GroupSlice(
                                 name=_group_name(iname, info, level),
+                                term_test_basis=_term_test_basis(info, gm, r_inv),
                                 start=col_offset,
                                 end=col_offset + n_cols,
                                 weight=np.sqrt(priced),
@@ -906,6 +926,7 @@ def compile_predictor_design(
                 priced, penalty_dim = _priced_group_dimension(result, n_cols, group_pricing)
                 g_new = GroupSlice(
                     name=iname,
+                    term_test_basis=_term_test_basis(result, gm, r_inv),
                     start=col_offset,
                     end=col_offset + n_cols,
                     weight=np.sqrt(priced),

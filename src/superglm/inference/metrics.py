@@ -33,7 +33,11 @@ from superglm.inference._metrics_design import (
     weighted_center,
     weighted_moments,
 )
-from superglm.inference.coef_tables import build_basis_detail, build_coef_rows  # noqa: F401
+from superglm.inference.coef_tables import (  # noqa: F401
+    build_basis_detail,
+    build_coef_rows,
+    term_test_bases,
+)
 from superglm.inference.covariance import (  # noqa: F401
     _active_penalty_matrix,
     _active_penalty_root,
@@ -1935,6 +1939,7 @@ class ModelMetrics:
             precomputed_edf=edf,
             precomputed_edf1=edf1,
             precomputed_design_moments=precomputed_moments,
+            test_bases=term_test_bases(self._model) if wood_inference else None,
             coefficient_estimable_override=self._current_coefficient_estimable,
             selected_group_names=selected_names,
             group_matrices=(

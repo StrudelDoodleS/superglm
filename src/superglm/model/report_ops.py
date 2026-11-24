@@ -149,7 +149,11 @@ def summary(
     """Rich model summary with coefficient table (statsmodels-style)."""
     from scipy.special import gammaln
 
-    from superglm.inference.coef_tables import build_basis_detail, build_coef_rows
+    from superglm.inference.coef_tables import (
+        build_basis_detail,
+        build_coef_rows,
+        term_test_bases,
+    )
     from superglm.inference.summary import ModelSummary
     from superglm.inference.summary_levels import (
         build_level_universes,
@@ -416,6 +420,7 @@ def summary(
         precomputed_R_a=inf["R_a"],
         precomputed_edf=inf["edf"],
         precomputed_edf1=inf["edf1"],
+        test_bases=term_test_bases(model),
         coefficient_estimable_override=inf.get("coefficient_estimable"),
         selected_group_names=selected_names,
         group_matrices=model._dm.group_matrices if model._dm is not None else None,
