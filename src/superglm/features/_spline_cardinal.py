@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import scipy.sparse as sp
 from numpy.typing import NDArray
+from scipy.linalg import solve_triangular
 
 
 def _second_differences(knots: NDArray) -> NDArray:
@@ -34,8 +35,8 @@ def structural_cr_penalty(knots: NDArray) -> NDArray:
     return unit.T @ unit
 
 
-def _second_derivative_map(knots: NDArray) -> tuple[NDArray, NDArray]:
-    """``B_d`` and ``D^{-1} B_d``, the map from knot values to second derivatives at the knots."""
+def _second_derivative_system(knots: NDArray) -> tuple[NDArray, NDArray]:
+    """``B_d`` and the tridiagonal ``D`` with ``D f'' = B_d f`` at the interior knots."""
     K = len(knots)
     h = np.diff(knots)
 
@@ -47,7 +48,25 @@ def _second_derivative_map(knots: NDArray) -> tuple[NDArray, NDArray]:
         if i < K - 3:
             D[i, i + 1] = h[i + 1] / 6.0
             D[i + 1, i] = h[i + 1] / 6.0
+    return B_d, D
+
+
+def _second_derivative_map(knots: NDArray) -> tuple[NDArray, NDArray]:
+    """``B_d`` and ``D^{-1} B_d``, the map from knot values to second derivatives at the knots."""
+    B_d, D = _second_derivative_system(knots)
     return B_d, np.linalg.solve(D, B_d)
+
+
+def cr_penalty_root(knots: NDArray) -> NDArray:
+    """The factor ``L^{-1} B_u`` of ``build_cr_penalty_matrices``' penalty ``B_u' D_u^{-1} B_u``.
+
+    ``D_u = L L'`` is the positive definite tridiagonal system on the mapped
+    knots ``u``, so ``(L^{-1} B_u)' (L^{-1} B_u)`` is the penalty, and its
+    null space is ``B_u``'s, the lines through the knot values.
+    """
+    hbar = (knots[-1] - knots[0]) / (len(knots) - 1)
+    B_u, D_u = _second_derivative_system((knots - knots[0]) / hbar)
+    return solve_triangular(np.linalg.cholesky(D_u), B_u, lower=True)
 
 
 def build_cr_penalty_matrices(knots: NDArray) -> tuple[NDArray, NDArray]:
@@ -156,6 +175,7 @@ def linear_tail_cardinal_basis(
 
 __all__ = [
     "build_cr_penalty_matrices",
+    "cr_penalty_root",
     "cardinal_boundary_slopes",
     "eval_cardinal_basis",
     "eval_cardinal_dense",

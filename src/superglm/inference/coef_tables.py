@@ -31,6 +31,20 @@ from superglm.solvers.rank import diagonal_of_square, selected_group_name_set
 from superglm.types import GroupSlice
 
 
+def term_test_bases(model) -> dict[str, NDArray]:
+    """Constrained term bases for a scalar fit, retained with its compact covariance."""
+    from superglm.stats.wood_pvalue import term_test_basis
+
+    if model._dm is None:
+        return model._fit_inference_info.get("term_test_bases", {})
+    bases = {}
+    for group, matrix in zip(model._groups, model._dm.group_matrices, strict=True):
+        basis = term_test_basis(group, matrix)
+        if basis is not None:
+            bases[group.name] = basis
+    return bases
+
+
 def _thin_levels(
     codes: NDArray, n_levels: int, sample_weights: NDArray, weight_semantics: str | None
 ) -> NDArray:
@@ -179,6 +193,7 @@ def build_coef_rows(
     precomputed_edf: NDArray | None = None,
     precomputed_edf1: NDArray | None = None,
     precomputed_design_moments: tuple[NDArray, NDArray, NDArray] | None = None,
+    test_bases: dict[str, NDArray] | None = None,
     coefficient_estimable_override: NDArray | None = None,
     selected_group_names: set[str] | None = None,
     group_matrices: list | None = None,
@@ -267,6 +282,17 @@ def build_coef_rows(
                 _level_diag[g.name] = {
                     i: (int(n_per[i]), float(exp_share[i]), bool(thin[i])) for i in range(K)
                 }
+
+    def _wood_test(groups, coef, design, covariance, rank, residual_df):
+        from scipy.linalg import block_diag
+
+        from superglm.stats.wood_pvalue import wood_test_smooth
+
+        if not test_bases or not any(g.name in test_bases for g in groups):
+            return wood_test_smooth(coef, design, covariance, rank, residual_df)
+        bases = [test_bases[g.name] if g.name in test_bases else np.eye(g.size) for g in groups]
+        basis = bases[0] if len(bases) == 1 else block_diag(*bases)
+        return wood_test_smooth(coef, design, covariance, rank, residual_df, term_basis=basis)
 
     def _wood_residual_df(edf: NDArray) -> float:
         if known_scale:
@@ -576,8 +602,6 @@ def build_coef_rows(
                 )
 
                 if active_pairs:
-                    from superglm.stats.wood_pvalue import wood_test_smooth
-
                     active_indices = np.concatenate(
                         [np.arange(ag.start, ag.end) for _, ag in active_pairs]
                     )
@@ -594,7 +618,8 @@ def build_coef_rows(
                     res_df = _wood_residual_df(edf)
 
                     try:
-                        stat, p_val, ref_df = wood_test_smooth(
+                        stat, p_val, ref_df = _wood_test(
+                            [fg for fg, _ in active_pairs],
                             beta_active,
                             X_j,
                             V_b_j,
@@ -794,8 +819,6 @@ def build_coef_rows(
 
                     curve_se_min, curve_se_max = _curve_se_range(g.feature_name)
                 else:
-                    from superglm.stats.wood_pvalue import wood_test_smooth
-
                     R_a = _get_R_factor()
                     edf, edf1 = _get_influence_edf()
                     edf1_j = float(np.sum(edf1[ag.sl]))
@@ -803,7 +826,7 @@ def build_coef_rows(
                     res_df = _wood_residual_df(edf)
 
                     try:
-                        stat, p_val, ref_df = wood_test_smooth(b_g, X_j, V_b_j, edf1_j, res_df)
+                        stat, p_val, ref_df = _wood_test([g], b_g, X_j, V_b_j, edf1_j, res_df)
                     except Exception:
                         pass
 
@@ -905,8 +928,6 @@ def build_coef_rows(
                 ag = next(a for a in active_groups if a.name == g.name)
                 V_b_j = _augmented_group_block(ag)
 
-                from superglm.stats.wood_pvalue import wood_test_smooth
-
                 R_a = _get_R_factor()
                 edf, edf1 = _get_influence_edf()
                 edf1_j = float(np.sum(edf1[ag.sl]))
@@ -914,7 +935,7 @@ def build_coef_rows(
                 res_df = _wood_residual_df(edf)
 
                 try:
-                    stat, p_val, ref_df = wood_test_smooth(b_g, X_j, V_b_j, edf1_j, res_df)
+                    stat, p_val, ref_df = _wood_test([g], b_g, X_j, V_b_j, edf1_j, res_df)
                 except Exception:
                     pass
 
@@ -1122,8 +1143,6 @@ def build_coef_rows(
                 ag = next(a for a in active_groups if a.name == g.name)
                 V_b_j = _augmented_group_block(ag)
 
-                from superglm.stats.wood_pvalue import wood_test_smooth
-
                 R_a = _get_R_factor()
                 edf, edf1 = _get_influence_edf()
                 edf1_j = float(np.sum(edf1[ag.sl]))
@@ -1131,7 +1150,7 @@ def build_coef_rows(
                 res_df = _wood_residual_df(edf)
 
                 try:
-                    stat, p_val, ref_df = wood_test_smooth(b_g, X_j, V_b_j, edf1_j, res_df)
+                    stat, p_val, ref_df = _wood_test([g], b_g, X_j, V_b_j, edf1_j, res_df)
                 except Exception:
                     pass
 
