@@ -165,19 +165,20 @@ def _append_generators(
 
 
 def _root_images(border: NDArray, spread: NDArray, roots, error=None):
-    """Each border penalty component's ``(lambda, image, rounding, slack, scale)`` of ``border`` ``(q, g)``.
+    """Each border penalty component's ``(lambda, image, rounding, flat)`` on ``border`` ``(q, g)``.
 
     Judged without lambda, one component at a time (Wood, Pya & Safken 2016,
     sec. 3.1.2): with ``E'E`` its raw penalty and ``C`` its map to raw
     coefficients, ``image = ||E C b||`` is the root of the raw penalty of the
     function ``b`` represents, and ``lambda image^2`` its formed penalty.  A
-    null of it shows at most ``rounding`` (the two products' on ``spread >=
-    |b|``) plus ``slack``: the root's null tilt and the image of ``b``'s
-    ``error`` (twice a known part, which resolves the curvature to a half,
-    and a map times norms).  ``scale`` is the image at full curvature in each
-    block's own metric (``penalty_factor_tilt``); a rootless part is held whole.
+    null of it shows at most the products' rounding plus the root's tilt.
+    A fitted alias also carries representation error (twice the correction
+    still due, and the lifted residual rounding) and the level basis's
+    function-space resolution. To attribute any larger image to root tilt,
+    its raw coefficients must lie in the penalty's null space. A unit
+    column reads the map exactly and always needs that membership check.
     """
-    from superglm.solvers.centered_system import penalty_factor_tilt
+    from superglm.solvers.centered_system import penalty_factor_tilt, penalty_null_columns
 
     def reach(image, positions):
         if error is None:
@@ -191,9 +192,12 @@ def _root_images(border: NDArray, spread: NDArray, roots, error=None):
         part = border[positions]
         if omega is None:
             slack = reach(np.eye(len(positions)), positions)
-            yield lam, np.linalg.norm(part, axis=0), 0.0, slack, np.linalg.norm(border, axis=0)
+            image = np.linalg.norm(part, axis=0)
+            flat = image <= slack + _ALIAS_RESOLUTION * np.linalg.norm(border, axis=0)
+            yield lam, image, 0.0, flat
             continue
-        root, full, tilt = penalty_factor_tilt(np.asarray(omega, dtype=np.float64))
+        omega = np.asarray(omega, dtype=np.float64)
+        root, full, tilt = penalty_factor_tilt(omega)
         coordinate_map = np.asarray(coordinate_map, dtype=np.float64)
         raw = coordinate_map @ part
         # gamma_(w + |P| + 3) |E||C||b| bounds fl(E fl(C b)) and the root's own
@@ -201,11 +205,19 @@ def _root_images(border: NDArray, spread: NDArray, roots, error=None):
         rounding = _gamma(root.shape[1] + len(positions) + 3) * np.linalg.norm(
             np.abs(root) @ (np.abs(coordinate_map) @ spread[positions]), axis=0
         )
-        slack = np.linalg.norm(tilt[:, None] * raw, axis=0) + reach(
-            root @ coordinate_map, positions
-        )
+        representation = reach(root @ coordinate_map, positions)
         scale = np.linalg.norm(full[:, None] * raw, axis=0)
-        yield lam, np.linalg.norm(root @ raw, axis=0), rounding, slack, scale
+        image = np.linalg.norm(root @ raw, axis=0)
+        resolution = rounding + representation + _ALIAS_RESOLUTION * scale
+        flat = image <= resolution + np.linalg.norm(tilt[:, None] * raw, axis=0)
+        candidates = flat & np.any(raw != 0.0, axis=0)
+        if error is not None:
+            # An alias inside its own representation uncertainty already
+            # fails the curvature test with a perfect raw root (zero tilt).
+            candidates &= image > resolution
+        if np.any(candidates):
+            flat[candidates] = penalty_null_columns(omega, raw[:, candidates], _ALIAS_RESOLUTION)
+        yield lam, image, rounding, flat
 
 
 # ------------------------------------------------------------- topology ----
@@ -1570,28 +1582,13 @@ class SumToZeroTreeFactor:
         formed = np.diag(S_rest)[lead:]
         null = np.flatnonzero((np.diag(Q_rest)[lead:] <= rest_bound[lead:]) & (formed > 0.0))
         if roots is not None and len(null):
-            from superglm.solvers.centered_system import penalty_null_columns
-
             unit = np.zeros((q, len(null)))
             unit[null, np.arange(len(null))] = 1.0
             accounted, flat = np.zeros(len(null)), np.ones(len(null), dtype=bool)
-            for lam, image, rounding, slack, size in _root_images(unit, unit, roots):
+            for lam, image, rounding, component_flat in _root_images(unit, unit, roots):
                 accounted += lam * (image + 2.0 * rounding) ** 2
-                flat &= image <= rounding + slack + _ALIAS_RESOLUTION * size
+                flat &= component_flat
             flat &= formed[null] <= accounted
-            # A small root image only makes a column a candidate. Its mapped
-            # coefficients must also lie in each raw penalty's null space.
-            # For a unit column the map is read directly. A rootless part
-            # was already judged on the unit column itself.
-            for positions, omega, coordinate_map, _ in roots:
-                if omega is not None:
-                    local, candidate = np.nonzero(unit[positions] * flat)
-                    if len(candidate):
-                        flat[candidate] = penalty_null_columns(
-                            np.asarray(omega, dtype=np.float64),
-                            np.asarray(coordinate_map, dtype=np.float64)[:, local],
-                            _ALIAS_RESOLUTION,
-                        )
             cleared = lead + null[flat]
             S_rest[cleared, :] = S_rest[:, cleared] = 0.0
         border = factor_border(
@@ -1784,10 +1781,10 @@ class SumToZeroTreeFactor:
             np.linalg.norm(floor @ np.abs(phi), axis=0),
         )
         curved = np.zeros(chosen.shape[1], dtype=bool)
-        for _, image, rounding, slack, size in _root_images(
+        for _, _, _, flat in _root_images(
             chosen, spread[:, certified] @ np.abs(turn), roots, error
         ):
-            curved |= image > rounding + slack + _ALIAS_RESOLUTION * size
+            curved |= ~flat
         # A combination the intercept holds whole has a border part of the
         # eigenvectors' mixing or the representation's dust: its share of the
         # representation, each column in the least squares' Jacobi coordinates

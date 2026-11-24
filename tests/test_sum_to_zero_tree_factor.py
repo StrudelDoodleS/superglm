@@ -859,6 +859,35 @@ def _alias_null(case, f, border=None) -> np.ndarray:
 _EFFECT = (np.array([2, 3, 4]), None, None, 0.5)  # the random effect's ridge: no raw root
 
 
+@pytest.mark.parametrize("width", [2, 3], ids=["full_rank", "beside_a_null"])
+def test_graded_raw_penalty_keeps_a_thin_alias_in_the_log_determinant(width) -> None:
+    """The raw block curves both mapped directions equally, including the thin alias."""
+    s, ridge = 2.0**-50, 2.0**-34
+    strong = np.array([1.0, -1.0, 1.0])[:width]
+    weak = np.array([1.0, 1.0, 0.0])[:width]
+    omega = ridge * (np.outer(strong, strong) + s * np.outer(weak, weak))
+    C = np.array([[2.0**24, 0.5], [2.0**24, -0.5], [0.0, 0.0]])[:width]
+    block = ridge * np.eye(2)
+    np.testing.assert_array_equal(C.T @ omega @ C, block)
+    factor, case = _alias_beside_a_random_effect(
+        scipy.linalg.block_diag(block, 0.5 * np.eye(3)),
+        thin_row=(1.0, 1.0),
+        border_roots=((np.arange(2), omega, C, 1.0), _EFFECT),
+    )
+    # Replace the first border coordinate by the exact data alias, whose
+    # border entries are (1, -1). This unit-determinant change of basis gives
+    # it pivot 2 * ridge and just one coupling, -ridge to the second column.
+    H, _, _ = _dense(case)
+    keep = np.arange(len(H)) != 1
+    rest = H[np.ix_(keep, keep)]
+    rest[1, 1] -= ridge / 2.0
+    expected = np.log(2.0 * ridge) + _cholesky_logdet(rest)
+    tolerance = _logdet_agreement(
+        rest, _magnitude(case)[np.ix_(keep, keep)], len(case["W"]) + len(H) + 4
+    )
+    assert (factor.rank, factor.logdet()) == (len(H), pytest.approx(expected, abs=tolerance))
+
+
 @pytest.mark.parametrize("with_null", [False, True], ids=["full_rank", "beside_a_null"])
 def test_graded_raw_penalty_keeps_unit_curvature_on_a_data_null_column(with_null) -> None:
     """SSP scaling maps the weak and strong directions of the raw penalty to unit curvature."""
@@ -1146,7 +1175,7 @@ def test_a_null_column_s_formed_penalty_above_its_image_s_gram_by_rounding_is_cl
 
     root = (np.array([0, 1]), omega, C, lam)
     unit = np.array([[0.0], [1.0]])
-    ((_, shown, rounding, _, _),) = _root_images(unit, unit, (root,))
+    ((_, shown, rounding, _),) = _root_images(unit, unit, (root,))
     S_b = scipy.linalg.block_diag(lam * 0.5 * (gram + gram.T), 0.5 * np.eye(3))
     S_b[1, 1] = lam * float(shown[0] + rounding[0]) ** 2
     assert lam * gram[1, 1] < S_b[1, 1] <= lam * float(shown[0] + 2.0 * rounding[0]) ** 2
