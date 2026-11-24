@@ -111,9 +111,56 @@ def apply_identifiability_for_spec(
     )
 
 
+def term_null_basis(null_raw: NDArray, projection: NDArray | None, nullity: int) -> NDArray | None:
+    """An orthonormal basis of the penalty's null space in the term's coordinates, or None.
+
+    ``null_raw`` spans the raw coefficients the penalty annihilates (the
+    polynomials of degree below its order). The term keeps the ones its
+    constraints and centring leave in ``range(P)``, ``P = projection``: ``N a``
+    with ``(I - P P') N a = 0``, from the right singular vectors of
+    ``(I - P P') N`` for an orthonormal ``N`` (constraints, polynomial ranges
+    or a first-order penalty's centring can leave none). Their coordinates
+    ``P' N a`` are the term's null basis. A member's residual is rounding,
+    ``O(u)``; one outside ``range(P)`` leaves at least the share a constraint
+    row or the centring direction takes, so the members are those under the
+    shared factor resolution ``sqrt(eps)``, and they must number ``nullity``,
+    the null dimension the penalty's declared rank leaves. Otherwise the term
+    declares none, and its null space is read from its spectrum.
+    """
+    from superglm.solvers.rank import SHARED_RANK_POLICY
+
+    basis, _ = np.linalg.qr(np.asarray(null_raw, dtype=np.float64))
+    if projection is None:
+        residual = np.zeros_like(basis)
+    else:
+        residual = basis - projection @ (projection.T @ basis)
+    _, singular, rotation = np.linalg.svd(residual, full_matrices=False)
+    kept = singular <= SHARED_RANK_POLICY.factor_rcond
+    if np.count_nonzero(kept) != nullity:
+        return None
+    members = basis @ rotation[kept].T
+    return members if projection is None else projection.T @ members
+
+
+def null_explicit_coordinates(null_basis: NDArray) -> NDArray:
+    """The orthogonal ``T = [theta, theta_perp]`` with the term's null basis ``theta`` first.
+
+    One complete Householder QR of ``theta``. ``T' Omega T`` then holds the
+    penalty with its null directions on the leading coordinates, where their
+    rows and columns are exactly zero, and an upper triangular SSP whitening
+    keeps them there (``C e_0 = e_0 / R_00``).
+    """
+    width, nullity = null_basis.shape
+    if nullity == 0:
+        return np.eye(width)
+    return np.linalg.qr(null_basis, mode="complete")[0]
+
+
 __all__ = [
     "apply_identifiability",
     "apply_identifiability_for_spec",
     "build_identifiability_projection",
     "build_identifiability_projection_for_spec",
+    "null_explicit_coordinates",
+    "term_null_basis",
 ]

@@ -249,6 +249,65 @@ def test_repeated_group_stays_compact_and_includes_fixed_components(monkeypatch)
     assert evaluation.hessian["a", "b"] == pytest.approx(-1.2)
 
 
+def _run_discrete_tensor_singleton_marginals(monkeypatch, *, kind: str = "cr"):
+    """Fit a discrete tensor model and assert singleton raw-support dimensions."""
+    import pandas as pd
+
+    import superglm.model.reml_finalize as finalize
+    import superglm.reml.discrete as discrete
+    import superglm.reml.penalty_support as support_module
+    from superglm import SuperGLM
+    from superglm.features import Spline
+
+    singleton_dimensions = []
+    tensor_dimensions = {}
+    select_support = support_module._penalty_support
+    evaluate_tensor = algebra.evaluate_tensor_pair_logdet_summaries
+
+    def capture_support(matrices, **kwargs):
+        support = select_support(matrices, **kwargs)
+        if len(matrices) == 1:
+            singleton_dimensions.append((matrices[0].shape[0], support.rank))
+        return support
+
+    def capture_tensor(summaries, *args, **kwargs):
+        for name, summary in summaries.items():
+            tensor_dimensions[name] = (len(summary.eigvals_left), len(summary.eigvals_right))
+        return evaluate_tensor(summaries, *args, **kwargs)
+
+    monkeypatch.setattr(support_module, "_penalty_support", capture_support)
+    monkeypatch.setattr(discrete, "evaluate_tensor_pair_logdet_summaries", capture_tensor)
+    monkeypatch.setattr(finalize, "evaluate_tensor_pair_logdet_summaries", capture_tensor)
+    rng = np.random.default_rng(77)
+    x1, x2 = rng.uniform(size=(2, 260))
+    y = rng.poisson(np.exp(0.2 + np.sin(2 * np.pi * x1) + 0.3 * np.cos(2 * np.pi * x2)))
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0,
+        discrete=True,
+        features={"x1": Spline(kind, n_knots=5), "x2": Spline(kind, n_knots=5)},
+        interactions=[("x1", "x2")],
+    ).fit_reml(pd.DataFrame({"x1": x1, "x2": x2}), y, max_reml_iter=3, reml_tol=1e-12)
+    assert tensor_dimensions and singleton_dimensions
+    # Singletons are selected once on their raw penalty basis; only their
+    # transported root follows each lambda's SSP map.
+    singletons = [
+        component
+        for component in model._reml_penalties
+        if component.group_name not in tensor_dimensions
+    ]
+    singleton_widths = {component.omega_raw.shape[0] for component in singletons}
+    tensor_widths = {left * right for left, right in tensor_dimensions.values()}
+    assert len(singleton_dimensions) == len(singletons)
+    assert all(
+        algebra._context_geometry([component]).coordinate_map is not None
+        for component in singletons
+    )
+    for width, rank in singleton_dimensions:
+        assert width in singleton_widths
+        assert 0 < rank <= width < min(tensor_widths)
+
+
 def test_public_discrete_tensor_only_factors_singleton_marginals(monkeypatch):
     """Check actual root dimensions as well as use of the tensor spectral path."""
     import pandas as pd
@@ -308,17 +367,21 @@ def test_public_discrete_tensor_only_factors_singleton_marginals(monkeypatch):
         assert 0 < rank <= width < min(tensor_widths)
 
 
+@pytest.mark.pins_behaviour
 def test_public_singleton_raw_support_survives_null_round_off_above_the_floor(monkeypatch):
-    """Reproduce the native ARM64 refusal of the cr singletons' raw support.
+    """Pins that a lifted singleton's raw support survives null round-off above the eigensolver floor.
 
-    A cr penalty restricted by its boundary constraints carries formation
-    round-off in its four-dimensional null space at the eigensolver's floor
+    A penalty restricted by boundary constraints and lifted to its raw basis
+    carries formation round-off in its null space at the eigensolver's floor
     ``p(n) eps ||A||`` (up to 0.85 of it on x86-64, 0.03 for ps). Another
     BLAS build can resolve one such direction above the floor, which made the
-    raw support one rank wider than the declared rank and refused it. Plant
-    one at ``1e-14`` relative (about 60 floors once equilibrated, 300 times
-    below the declared ``eps**(2/3)`` cut, outside the band of 32 on both
-    sides), and require the singletons to stay on their raw basis.
+    raw support one rank wider than the declared rank and refused it. A cr
+    term holds its penalty in its own coordinates, exactly zero on its null
+    space, so it carries none; an ns term declares no null basis and is
+    lifted. Plant one at ``1e-14`` relative (about 60 floors once
+    equilibrated, 300 times below the declared ``eps**(2/3)`` cut, outside
+    the band of 32 on both sides), and require the singletons to stay on
+    their raw basis.
     """
     import superglm.reml.penalty_support as support_module
 
@@ -335,9 +398,9 @@ def test_public_singleton_raw_support_survives_null_round_off_above_the_floor(mo
         return original(matrix, **kwargs)
 
     monkeypatch.setattr(support_module, "decompose_gram", planted)
-    test_public_discrete_tensor_only_factors_singleton_marginals(monkeypatch)
+    _run_discrete_tensor_singleton_marginals(monkeypatch, kind="ns")
     # The plant is resolved at the floor: the floor rank alone would refuse.
-    assert floor_ranks and set(floor_ranks) == {6}
+    assert floor_ranks and set(floor_ranks) == {7}
 
 
 @pytest.mark.parametrize("bad", [-1.0, np.inf, np.nan])

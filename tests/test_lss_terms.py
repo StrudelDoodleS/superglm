@@ -602,9 +602,10 @@ def test_the_smooth_test_is_told_the_scale_is_modelled(fit_case, monkeypatch) ->
     seen: dict[str, float] = {}
     real = module.wood_test_smooth
 
-    def spy(beta, design, block, edf1, res_df):
+    def spy(beta, design, block, edf1, res_df, **kwargs):
         seen["res_df"] = float(res_df)
-        return real(beta, design, block, edf1, res_df)
+        assert np.shape(kwargs.get("term_basis")) == (beta.size, beta.size)
+        return real(beta, design, block, edf1, res_df, **kwargs)
 
     monkeypatch.setattr(module, "wood_test_smooth", spy)
     term_test(fitted, frame, "location", "x")

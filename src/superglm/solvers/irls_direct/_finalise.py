@@ -21,11 +21,11 @@ from superglm._roundoff import EPS as _EPS_FLOAT
 from superglm._roundoff import gamma
 from superglm.solvers.centered_system import (
     CenteredSystem,
+    centered_penalty_factor,
     grouped_augmented_factor,
     grouped_projected_factor,
     grouped_structural_nulls,
     grouped_weighted_factor,
-    penalty_factor,
 )
 from superglm.solvers.irls_direct._centred import _system_offset_mean
 from superglm.solvers.pirls import REMLGeometrySummary
@@ -164,7 +164,7 @@ def _face_formation_unresolved(matrix: NDArray, face: NDArray, on_face: NDArray,
     return bool(slack >= np.linalg.eigvalsh(0.5 * (equilibrated + equilibrated.T))[0])
 
 
-def _face_factor_edf(rows: NDArray, penalty: NDArray, face: NDArray) -> tuple[NDArray, NDArray]:
+def _face_factor_edf(rows: NDArray, root: NDArray, face: NDArray) -> tuple[NDArray, NDArray]:
     """``diag(F)`` and ``diag(2F - F^2)``, ``F = Z M Z'``: the face fit's EDF and ``edf1``.
 
     ``rows`` is ``R`` with ``R'R = Z'DZ`` (``grouped_projected_factor``), so ``B = [R; P Z]``,
@@ -176,7 +176,7 @@ def _face_factor_edf(rows: NDArray, penalty: NDArray, face: NDArray) -> tuple[ND
     ``gamma_(p + T + 3) |a_r|' |Z|`` of exact. ``Z M Z'`` omits coupling to curvature off the
     face: zero trace per term, but entries up to the weight ratio, unresolvable in float64.
     """
-    projected = np.vstack((rows, penalty_factor(penalty) @ face))
+    projected = np.vstack((rows, root @ face))
     decomposition = decompose_factor(projected, retain_factor_solve=True)
     data = np.zeros_like(projected)
     data[: rows.shape[0]] = rows
@@ -204,7 +204,7 @@ def _feature_edf(
     ``inverse`` is ``face_pseudo_inverse(decomposition, face)`` when already formed.
     """
     if face is not None and decomposition.method == "qr_svd":
-        return _face_factor_edf(factor(0), centered.penalty, face)
+        return _face_factor_edf(factor(0), centered_penalty_factor(centered), face)
     if inverse is None:
         inverse = face_pseudo_inverse(decomposition, face)
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
@@ -220,7 +220,7 @@ def _feature_edf(
         _on_face(np.ldexp(hessian, -exponent), face), psd_by_construction=True
     )
     if scaled is None and face is not None:
-        return _face_factor_edf(factor(exponent), np.ldexp(centered.penalty, -exponent), face)
+        return _face_factor_edf(factor(exponent), centered_penalty_factor(centered, exponent), face)
     if scaled is None:
         scaled = decompose_factor(factor(exponent))
     scaled_gram = np.ldexp(centered.data_gram, -exponent)
@@ -458,6 +458,7 @@ def _finalise_centred(step: _IRLSDirectStep, fit: _IRLSDirectFit) -> _IRLSDirect
                 np.ldexp(W, -exponent),
                 np.ldexp(final_system.penalty, -exponent),
                 center=final_system.mean_x,
+                smooth_factor=centered_penalty_factor(final_system, exponent),
             )
 
         def projected_rows(exponent: int = 0) -> NDArray:

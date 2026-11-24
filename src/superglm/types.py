@@ -131,6 +131,22 @@ class FeatureSpec(Protocol):
 
 
 # ── What the solver actually sees ───────────────────────────────
+@dataclass(frozen=True)
+class NullCoordinates:
+    """A term's declared penalty null spaces, nested, with each penalty's square root.
+
+    ``basis`` (n_cols x d) is orthonormal, and its first ``nullities[j]``
+    columns span the exact null space of the j-th penalty (the j-th of
+    ``GroupInfo.penalty_components``, or ``penalty_matrix`` without them),
+    whose factor ``roots[j]`` has ``roots[j]' roots[j]`` that penalty, in the
+    same coordinates; ``d`` is the largest nullity and may be 0.
+    """
+
+    basis: NDArray
+    nullities: tuple[int, ...]
+    roots: tuple[NDArray, ...]
+
+
 @dataclass
 class GroupInfo:
     """Uniform interface between feature specs and the solver.
@@ -169,6 +185,10 @@ class GroupInfo:
     # there are no components). REML takes it where the computed spectrum
     # resolves it (``penalty_algebra._rank_and_logdet``).
     structural_ranks: dict[str, int] | None = None
+    # The exact null spaces of the penalties and their square roots, when the term
+    # declares them (``_spline_build.declared_null_coordinates``). The design builder
+    # then holds the term in null-explicit coordinates.
+    null_coordinates: NullCoordinates | None = None
     # Optional per-component lambda control; keys match penalty_components suffixes.
     lambda_policies: dict[str, LambdaPolicy] | None = None
     # Monotone constraint metadata (QP engine).
@@ -337,6 +357,9 @@ class GroupSlice:
     level: Hashable | None = None
     # The builder removed this block's raw covariate units by SSP whitening.
     ssp_spline: bool = False
+    # Constrained term basis in the coordinates held by the group matrix
+    # (before its R_inv, if present). It orients the fractional Wood test.
+    term_test_basis: NDArray | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
         if self.feature_name is _FEATURE_NAME_UNSET:

@@ -925,31 +925,57 @@ def test_the_cross_terms_reach_the_hessian_the_stop_reads(monkeypatch):
     assert "reml_newton_step_stop" not in model._reml_profile
 
 
+@pytest.mark.pins_behaviour
 def test_a_switch_to_the_exact_hessian_drops_the_held_step(monkeypatch):
-    """A held table-route Hessian cannot be confirmed once the route has changed."""
+    """Pin that a held table-route Hessian cannot be confirmed after a route change."""
     monkeypatch.setattr(direct, "_LEVERAGE_HESSIAN_MIN_GRAM_WORK", 0.0, raising=False)
-    compound = direct.evaluate_reml_candidate
-    monkeypatch.setattr(
-        direct,
-        "evaluate_reml_candidate",
-        lambda **kwargs: replace(compound(**kwargs), converged=False),
-    )
-    monkeypatch.setattr(
-        direct, "classify_dead_feasible_exit", lambda *_, **__: "line_search_failed"
-    )
-    plain = _poisson_model(1.0e3)._reml_profile["reml_newton_step_stop"]["iter"]
-    real_resolved = direct.newton_step_resolved
-    held = []
+    _force_candidate_stops(monkeypatch, first=3)
+    monkeypatch.setattr(direct, "_escalates_to_exact_hessian", lambda *_: True)
+    table_step = 2.0**-13
+    monkeypatch.setattr(direct, "newton_step_stop_bar", lambda _: 8 * table_step)
+    rho_target = None
 
-    def spy(*args, **kwargs):
-        held.append(real_resolved(*args, **kwargs))
-        return held[-1]
+    # Give the outer fit a quadratic in log lambda. The table Hessian takes
+    # one quarter of the distance to the minimum, and the exact Hessian
+    # takes the rest. The old table Hessian would also pass the contraction
+    # test just after the switch.
+    def gradient(lambdas, penalties):
+        nonlocal rho_target
+        rho = np.log([lambdas[penalty.name] for penalty in penalties])
+        if rho_target is None:
+            rho_target = rho - np.copysign(4 * table_step, rho)
+        return rho - rho_target
 
-    monkeypatch.setattr(direct, "newton_step_resolved", spy)
-    monkeypatch.setattr(direct, "_escalates_to_exact_hessian", lambda *_: any(held))
+    def objective(dm, family, link, groups, y, result, lambdas, *args, reml_penalties, **kwargs):
+        error = gradient(lambdas, reml_penalties)
+        return 0.5 * float(error @ error)
+
+    def fixed_gradient(groups, result, inverse, lambdas, *, reml_penalties, **kwargs):
+        return gradient(lambdas, reml_penalties)
+
+    real_correction = direct._usable_w_correction
+
+    def correction(fn, args, kwargs, distribution):
+        grad, *curvature = real_correction(fn, args, kwargs, distribution)
+        if kwargs["w_correction_order"] == 1 and kwargs.get("lookup_tables", True):
+            assert kwargs["leverage_hessian"]
+            assert curvature == [None, None]
+        return (np.zeros_like(grad), *curvature)
+
+    def hessian(*args, gradient, dH_extra, **kwargs):
+        return (4.0 if dH_extra is None else 1.0) * np.eye(gradient.size)
+
+    monkeypatch.setattr(direct, "reml_laml_objective", objective)
+    monkeypatch.setattr(direct, "reml_direct_gradient", fixed_gradient)
+    monkeypatch.setattr(direct, "_usable_w_correction", correction)
+    monkeypatch.setattr(direct, "reml_direct_hessian", hessian)
     model = _poisson_model(1.0e3)
 
-    assert model._reml_profile.get("reml_newton_step_stop", {}).get("iter", np.inf) > plain
+    assert model._reml_profile["reml_w_correction_mode"] == "derivative_grams"
+    stop = model._reml_profile["reml_newton_step_stop"]
+    assert stop["step_taken"]
+    assert stop["taken_step"] == pytest.approx(3 * table_step)
+    assert stop["step_left"] == pytest.approx(0.0, abs=1e-12)
 
 
 def test_a_dead_search_the_certificate_already_settles_makes_no_extra_pass(monkeypatch):

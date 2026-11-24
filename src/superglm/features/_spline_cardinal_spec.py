@@ -63,6 +63,11 @@ def structural_penalty(spec: Any) -> NDArray:
     return _spline_cardinal.structural_cr_penalty(spec._cr_knots)
 
 
+def penalty_root(spec: Any) -> NDArray:
+    """The factor ``R`` with ``R' R`` the cardinal penalty (``cr_penalty_root``)."""
+    return _spline_cardinal.cr_penalty_root(spec._cr_knots)
+
+
 def basis_matrix(spec: Any, x: NDArray) -> sp.csr_matrix:
     """Evaluate the cardinal CR basis at data points."""
     x_eval, extrapolate = _spline_runtime.prepare_eval_points(spec, x)

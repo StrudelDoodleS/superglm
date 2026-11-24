@@ -1301,6 +1301,13 @@ def build_observed_reml_geometry(
         ) from error
     if nonnegative and needs_factor_certification(decomposition):
         # As above: the inputs are validated, so a refusal is the iterate's.
+        from superglm.inference.covariance import declared_penalty_factor
+
+        rows = None
+        if groups is not None and lambdas is not None:
+            rows = declared_penalty_factor(
+                dm.group_matrices, groups, groups, lambdas, reml_penalties, penalty
+            )
         try:
             factor_certified = decompose_factor(
                 grouped_augmented_factor(
@@ -1309,6 +1316,7 @@ def build_observed_reml_geometry(
                     penalty,
                     center=centre,
                     center_lo=centre_lo,
+                    smooth_factor=None if rows is None else rows(),
                 )
             )
         except ValueError as error:

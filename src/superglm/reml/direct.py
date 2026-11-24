@@ -986,9 +986,9 @@ def optimize_direct_reml(
                     tabmat_state=observed_tabmat_state,
                     _data_reuse=geometry_data_reuse,
                     derivative_order=w_correction_order,
-                    groups=groups if use_structured else None,
-                    lambdas=cand_lambdas if use_structured else None,
-                    reml_penalties=penalties if use_structured else None,
+                    groups=groups,
+                    lambdas=cand_lambdas,
+                    reml_penalties=penalties,
                     structured_group_index=(
                         structured_decision.group_index if use_structured else None
                     ),
@@ -1749,9 +1749,9 @@ def optimize_direct_reml(
                         _data_reuse=geometry_data_reuse,
                         # the identified part rebuilds the structured factor returned here
                         compute_inverse=bool(identified),
-                        groups=groups if use_structured else None,
-                        lambdas=trial_lambdas if use_structured else None,
-                        reml_penalties=penalties if use_structured else None,
+                        groups=groups,
+                        lambdas=trial_lambdas,
+                        reml_penalties=penalties,
                         structured_group_index=(
                             structured_decision.group_index if use_structured else None
                         ),

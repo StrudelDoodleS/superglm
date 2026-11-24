@@ -92,11 +92,14 @@ class DiscretizedSSPGroupMatrix:
     __slots__ = (
         "B_unique",
         "R_inv",
+        "reparametrize",
         "bin_idx",
         "n_bins",
         "shape",
         "omega",
         "projection",
+        "R_inv_local",
+        "term_roots",
         "omega_components",
         "component_types",
         "structural_ranks",
@@ -106,11 +109,14 @@ class DiscretizedSSPGroupMatrix:
     def __init__(self, B_unique: NDArray, R_inv: NDArray, bin_idx: NDArray):
         self.B_unique = np.asarray(B_unique)  # (n_bins, K)
         self.R_inv = np.asarray(R_inv)  # (K, p_g)
+        self.reparametrize = True
         self.bin_idx = np.asarray(bin_idx, dtype=np.intp)  # (n,)
         self.n_bins = self.B_unique.shape[0]
         self.shape = (len(bin_idx), self.R_inv.shape[1])
-        self.omega = None  # (K, K) B-spline-space penalty, set externally
+        self.omega = None  # the penalty, in the coordinates penalty_coordinate_map(self) maps
         self.projection = None  # (K, n_sub) projection matrix, set externally
+        self.R_inv_local = None  # (n_sub, p) term-to-solver map, when omega is in term coordinates
+        self.term_roots = None  # component square roots in those same coordinates
         self.omega_components = None  # list[(suffix, omega)] for multi-penalty, set externally
         self.component_types = None  # dict[suffix, type] for multi-penalty, set externally
         self.structural_ranks = None
@@ -218,8 +224,11 @@ class DiscretizedSSPGroupMatrix:
     def row_subset(self, idx: NDArray) -> DiscretizedSSPGroupMatrix:
         # type(self): subsetting must not downcast a lossless-support subclass.
         sub = type(self)(self.B_unique, self.R_inv, self.bin_idx[idx])
+        sub.reparametrize = getattr(self, "reparametrize", True)
         sub.omega = self.omega
         sub.projection = self.projection
+        sub.R_inv_local = getattr(self, "R_inv_local", None)
+        sub.term_roots = getattr(self, "term_roots", None)
         sub.omega_components = self.omega_components
         sub.component_types = self.component_types
         sub.structural_ranks = getattr(self, "structural_ranks", None)

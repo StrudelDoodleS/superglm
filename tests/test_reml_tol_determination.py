@@ -2064,29 +2064,55 @@ class TestNewtonStepStop:
         assert "reml_newton_step_stop" not in model._reml_profile
         assert not model.reml_diagnostics()["converged"]
 
-    def test_a_cached_weight_stop_waits_for_a_settled_working_mode(self):
-        """Small steps at weights still moving prove nothing: a refit from there walks away."""
+    @pytest.mark.pins_behaviour
+    def test_a_cached_weight_stop_waits_for_a_settled_working_mode(self, monkeypatch):
+        """Small steps at weights still moving prove nothing: the stop waits for a settled mode.
+
+        Each candidate is one working-weight update, and its convergence flag
+        says the working model has settled at those lambdas. Every other gate is
+        held open, and the candidates read unsettled for three iterations, so the
+        stop is the first settled candidate's, the fourth. Mutation: no
+        ``candidate_mode_stationary`` gate stops at the second.
+        """
+        from superglm.reml import discrete
+
+        _compound_test_never_accepts(monkeypatch)
+        monkeypatch.setattr(discrete, "newton_step_stop_bar", lambda *_: 1e9)
+        monkeypatch.setattr(discrete, "newton_step_resolved", lambda *_, **__: True)
+        monkeypatch.setattr(discrete, "newton_step_settled", lambda *_, **__: True)
+        real_fit = discrete.fit_irls_direct
+        real_freeze = discrete.freeze_flat_directions
+
+        def fit(*args, **kwargs):
+            result, *rest = real_fit(*args, **kwargs)
+            context = kwargs.get("debug_context") or {}
+            if context.get("phase") == "candidate":
+                result = replace(result, converged=context["reml_iteration"] > 3)
+            return result, *rest
+
+        def freeze(*args, **kwargs):
+            decision = real_freeze(*args, **kwargs)
+            frozen = np.zeros_like(decision.frozen)
+            return replace(decision, frozen=frozen, shoulder=frozen)
+
+        monkeypatch.setattr(discrete, "fit_irls_direct", fit)
+        monkeypatch.setattr(discrete, "freeze_flat_directions", freeze)
         rng = np.random.default_rng(3)
         frame = pd.DataFrame({"x": rng.uniform(size=500), "z": rng.uniform(size=500)})
         y = rng.binomial(1, np.exp(-30.0 * (1.0 + 0.95 * np.sin(6.0 * frame["x"])))).astype(float)
-
-        def fit(**fit_kwargs):
-            return SuperGLM(
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model = SuperGLM(
                 family=families.binomial(),
                 link="log",
                 discrete=True,
                 selection_penalty=0,
                 features={name: Spline(kind="cr", k=12) for name in frame.columns},
-            ).fit_reml(frame, y, max_reml_iter=100, **fit_kwargs)
+            ).fit_reml(frame, y, max_reml_iter=10)
 
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            cold = fit()
-            lambdas = cold.reml_diagnostics()["lambdas"]
-            warm = fit(lambda2_init=lambdas)
-
-        assert cold.reml_diagnostics()["converged"]
-        assert np.max(np.abs(cold.predict(frame) - warm.predict(frame))) < 1e-6
+        assert model._reml_profile["reml_newton_step_stop"]["iter"] == 4
+        assert model.reml_diagnostics()["termination_reason"] == "newton_step_tolerance"
+        assert model.reml_diagnostics()["converged"]
 
     def test_an_uncertified_mode_cannot_stop(self, monkeypatch):
         from superglm.reml import direct
