@@ -7,6 +7,7 @@ import warnings
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, cast
 
+import numpy as _numpy  # noqa: F401  # Initialize NumPy before importing numpy.typing.
 from numpy.typing import ArrayLike
 
 from superglm.features._spline_config import SHAPE_ENGINES, warn_scop_retired

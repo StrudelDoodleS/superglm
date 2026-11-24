@@ -153,6 +153,12 @@ class TermInference:
     # are NaN. None when the term has none.
     separated: NDArray[np.bool_] | None = None
 
+    # Robust covariance metadata when computed with ``covariance=SandwichCovariance``.
+    # ``None`` for default model-based / Bayesian covariance.
+    covariance_method: str | None = None
+    covariance_n_units: float | None = None
+    covariance_n_clusters: int | None = None
+
     def to_dataframe(self) -> pd.DataFrame:
         """Convert to a tidy DataFrame for plotting or export."""
         # "piecewise" belongs with the x-bearing kinds, not with the numeric

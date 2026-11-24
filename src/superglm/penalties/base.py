@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Hashable, Iterable
 from typing import Protocol, runtime_checkable
 
+import numpy as _numpy  # noqa: F401  # Initialize NumPy before importing numpy.typing.
 from numpy.typing import NDArray
 
 from superglm.types import GroupSlice

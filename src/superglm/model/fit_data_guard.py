@@ -124,6 +124,22 @@ class FitGeometryGuard:
             x_digest_scheme=frame.digest_scheme,
         )
 
+    def records_vectors(self, y, sample_weight, offset) -> bool:
+        """Return whether the response, weights and offset are the fitted ones.
+
+        ``offset=None`` is the zero offset a fit without one records.
+        """
+        try:
+            if offset is None:
+                offset = np.zeros(self.n_rows, dtype=np.float64)
+            return (
+                _numeric_vector_digest(y) == (self.n_rows, self.y_digest)
+                and _numeric_vector_digest(sample_weight) == (self.n_rows, self.weight_digest)
+                and _numeric_vector_digest(offset) == (self.n_rows, self.offset_digest)
+            )
+        except (TypeError, ValueError, OverflowError):
+            return False
+
     def matches(self, X, sample_weight, offset, *, own_frame: bool = False) -> bool:
         """Return whether evaluation rows, weights, and offset match the fit.
 

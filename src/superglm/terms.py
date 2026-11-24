@@ -9,6 +9,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
+import numpy as _numpy  # noqa: F401  # Initialize NumPy before importing numpy.typing.
 from numpy.typing import ArrayLike
 
 from superglm.features import Categorical, LevelGrouping, Numeric, RandomEffect, Spline

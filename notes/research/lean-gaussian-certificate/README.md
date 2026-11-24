@@ -97,10 +97,10 @@ this project.
 
 ## Reproduce the checks
 
-This project pins Lean `leanprover/lean4:v4.33.1` and Mathlib commit
-`0df444a360eaa60ab8c11dca51a86af692955474`. The manifest pins transitive
+This project pins Lean `leanprover/lean4:v4.36.0` and Mathlib tag `v4.36.0`
+(commit `fc4f59e577feb1a4956671bc04ac18aaaf8cd842`). The manifest pins transitive
 dependencies too. Lean reports commit
-`819816b2e0a3bf405af45ae5c7af2491d8f5bee6`; Lake reports `5.0.0-src+819816b`.
+`611c117bfaf7b7ae1cfcf246ce6fba31e8f509e9`; Lake reports `5.0.0-src+611c117`.
 
 From this directory on the current machine:
 
