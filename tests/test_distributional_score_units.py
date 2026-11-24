@@ -88,17 +88,28 @@ def test_a_joint_gain_in_discarded_directions_must_be_fitted_or_disclosed(discre
 
 
 @pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
-def test_a_stiff_discarded_contrast_cannot_hide_the_gain_along_a_soft_one(monkeypatch, discrete):
+@pytest.mark.parametrize(
+    ("unit", "x_level", "v_level", "scale", "x_effect", "v_effect"),
+    [
+        (1e10, 3e7, 1e12, 1e7, 0.0001, 0.7),
+        (2.0**33, 2.0**25, 2.0**51, 2.0**23, 2.0**-13, 0.5),
+    ],
+    ids=["score_follows_x", "curvatures_eps_apart"],
+)
+def test_a_stiff_discarded_contrast_cannot_hide_the_gain_along_a_soft_one(
+    monkeypatch, unit, x_level, v_level, scale, x_effect, v_effect, discrete
+):
     """Force two discarded contrasts of unequal curvature (#728): fit both or disclose.
 
-    ``x`` varies in its 8th digit and barely matters; ``v`` varies in its 13th and
-    carries the response. A step along their joint score follows ``x`` and loses.
+    ``x`` varies in an earlier digit than ``v`` and barely matters; ``v`` carries the
+    response. A step along their joint score follows ``x`` and loses. In the second case
+    ``v``'s curvature is ``eps`` of ``x``'s: a cut relative to the stiffer calls it flat.
     """
     z = np.tile([-1.0, -1.0, 1.0, 1.0], 16)
     v = np.repeat([-1.0, 1.0], 32)
-    X = pd.DataFrame({"x": 1e10 * (3e7 + z), "v": 1e10 * (1e12 + v)})
-    mu = 1e7 * (1 + 0.0001 * z + 0.7 * v)
-    y = mu + 1e7 * np.tile([-1.0, 1.0], 32)
+    X = pd.DataFrame({"x": unit * (x_level + z), "v": unit * (v_level + v)})
+    mu = scale * (1 + x_effect * z + v_effect * v)
+    y = mu + scale * np.tile([-1.0, 1.0], 32)
     check = solver._terminal_step_improves_objective
 
     def with_both_contrasts_discarded(context, state, score, rank, discarded, *rest):

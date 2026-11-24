@@ -1791,8 +1791,8 @@ def _discarded_newton_direction(
     ch. 20), which is what dropped the contrast. Summed over the rows of
     ``X N`` it cancels once, as the predictors do.
 
-    Curvature below ``k eps`` of the subspace's largest is flat and gets no
-    step, as does a subspace whose row curvature cannot be evaluated.
+    Each direction is read in units of its own curvature (unit diagonal: van der Sluis 1969).
+    Below ``k eps`` of the largest it is flat and gets no step, as do rows that cannot be read.
     """
     if source not in ("observed", "fisher", "nearest_semidefinite"):
         return np.zeros_like(slopes)
@@ -1834,7 +1834,11 @@ def _discarded_newton_direction(
                     moves, _dense_curvature_channels(context, rows, source)
                 )
         penalty = discarded.T @ context.penalty @ discarded
-        values, vectors = np.linalg.eigh(data + 0.5 * (penalty + penalty.T))
+        curvature = data + 0.5 * (penalty + penalty.T)
+        # A direction with no curvature of its own is flat: an infinite unit zeroes it.
+        own = np.diag(curvature)
+        unit = np.sqrt(np.where(own > 0.0, own, np.inf))
+        values, vectors = np.linalg.eigh(curvature / unit[:, None] / unit)
     except (
         _NumericalEvaluationError,
         FloatingPointError,
@@ -1844,7 +1848,7 @@ def _discarded_newton_direction(
     ):
         return np.zeros_like(slopes)
     keep = values > len(values) * np.finfo(np.float64).eps * values[-1]
-    return vectors[:, keep] @ ((vectors[:, keep].T @ slopes) / values[keep])
+    return vectors[:, keep] @ ((vectors[:, keep].T @ (slopes / unit)) / values[keep]) / unit
 
 
 def _terminal_step_improves_objective(
