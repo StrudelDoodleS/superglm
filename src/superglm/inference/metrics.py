@@ -361,8 +361,10 @@ def _contrast_estimability(
     """``data_rank.is_estimable`` read on a contrast over the full fitted coordinates.
 
     A contrast that weighs an inactive coefficient is not determined, as
-    ``_coefficient_estimability`` leaves those coefficients blank.
+    ``_coefficient_estimability`` leaves those coefficients blank.  The reader lives as
+    long as the metrics object, so it keeps only the null-space part of ``data_rank``.
     """
+    data_rank = data_rank.estimability_only()
     original_by_name = {group.name: group for group in groups}
     active = np.zeros(width, dtype=bool)
     for active_group in active_groups:
