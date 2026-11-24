@@ -186,6 +186,19 @@ def natural_curvature_direction(
     so the state's links and natural derivatives are evaluated once for all
     ``m``; the result has the direction's shape with packed channels last.
     """
+
+    def evaluate(theta, natural):
+        evaluation = family.evaluate_natural(y, theta, plan, derivative_order=2)
+        with np.errstate(over="ignore", invalid="ignore", under="ignore"):
+            return evaluation, hessian_direction(theta, natural)
+
+    return curvature_direction_from_rows(
+        y, eta, eta_direction, links, len(family.parameters), evaluate
+    )
+
+
+def curvature_direction_from_rows(y, eta, eta_direction, links, k_parameters, evaluate):
+    """Compose the natural evaluation and Hessian direction produced together at one state."""
     from superglm.distributional.kernels._curvature_direction import (
         predictor_curvature_direction,
     )
@@ -196,7 +209,6 @@ def natural_curvature_direction(
     except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError("predictor state and direction must be finite arrays") from exc
     link_tuple = tuple(links)
-    k_parameters = len(family.parameters)
     expected = (response_row_count(y), k_parameters)
     if (
         predictors.shape != expected
@@ -229,13 +241,13 @@ def natural_curvature_direction(
     theta, first, second, third_derivative = (
         np.column_stack([row[order] for row in derivatives]) for order in range(4)
     )
-    evaluation = family.evaluate_natural(y, theta, plan, derivative_order=2)
     natural = first * direction
+    evaluation, hessian_direction = evaluate(theta, natural)
     with np.errstate(over="ignore", invalid="ignore", under="ignore"):
         result = predictor_curvature_direction(
             np.asarray(evaluation.score, dtype=FLOAT),
             np.asarray(evaluation.hessian_packed, dtype=FLOAT),
-            np.asarray(hessian_direction(theta, natural), dtype=FLOAT),
+            np.asarray(hessian_direction, dtype=FLOAT),
             first,
             second,
             third_derivative,
@@ -380,12 +392,25 @@ def natural_curvature_second_direction(
     publish zero curvature, so their derivatives are zero; the result has the
     directions' leading shape.
     """
+
+    def evaluate(theta, natural_a, natural_b):
+        evaluation = family.evaluate_natural(y, theta, plan, derivative_order=2)
+        return evaluation, *natural_derivatives(theta, natural_a, natural_b)
+
+    return curvature_second_direction_from_rows(
+        y, eta, direction_a, direction_b, links, len(family.parameters), evaluate
+    )
+
+
+def curvature_second_direction_from_rows(
+    y, eta, direction_a, direction_b, links, k_parameters, evaluate
+):
+    """Compose natural derivatives through fourth order produced together at one state."""
     from superglm.distributional.kernels._curvature_direction import (
         predictor_curvature_second_direction,
     )
 
     link_tuple = tuple(links)
-    k_parameters = len(family.parameters)
     if len(link_tuple) != k_parameters:
         raise ValueError("one link per natural parameter is required")
     single = np.ndim(direction_a) == 2
@@ -393,8 +418,7 @@ def natural_curvature_second_direction(
         y, eta, direction_a, direction_b, k_parameters
     )
     theta, *derivatives = link_derivative_columns(predictors, link_tuple, 4)
-    evaluation = family.evaluate_natural(y, theta, plan, derivative_order=2)
-    third, fourth = natural_derivatives(theta, derivatives[0] * first, derivatives[0] * second)
+    evaluation, third, fourth = evaluate(theta, derivatives[0] * first, derivatives[0] * second)
     with np.errstate(over="ignore", invalid="ignore", under="ignore"):
         result = predictor_curvature_second_direction(
             (
@@ -421,6 +445,8 @@ __all__ = [
     "array_digest",
     "composed_second_direction",
     "contract_second_direction",
+    "curvature_direction_from_rows",
+    "curvature_second_direction_from_rows",
     "immutable",
     "link_inner_derivatives",
     "link_derivative_columns",
