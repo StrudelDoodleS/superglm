@@ -3984,7 +3984,8 @@ class TestModeCertifiesAtTheRoundOffFloor:
 
 def _removed_table_deriv4(link, eta):
     """The fourth inverse derivatives ``_deriv4_inverse`` tabulated before it called the link."""
-    from scipy.special import expit
+    from decimal import Decimal, localcontext
+
     from scipy.stats import norm
 
     from superglm.links import (
@@ -4001,8 +4002,13 @@ def _removed_table_deriv4(link, eta):
     if kind is IdentityLink or kind is SqrtLink:
         return np.zeros_like(eta)
     if kind is LogitLink:
-        p = expit(eta)
-        return p * (1.0 - p) * (1.0 - 14.0 * p + 36.0 * p**2 - 24.0 * p**3)
+        # Evaluate the original table polynomial before rounding the small tail away.
+        with localcontext() as ctx:
+            ctx.prec = 80
+            probabilities = (1 / (1 + (-Decimal.from_float(float(t))).exp()) for t in eta)
+            return np.array(
+                [float(p * (1 - p) * (1 - 14 * p + 36 * p**2 - 24 * p**3)) for p in probabilities]
+            )
     if kind is ProbitLink:
         return (3.0 * eta - eta**3) * norm.pdf(eta)
     if kind is CloglogLink:
@@ -4059,25 +4065,26 @@ def _table_cases():
 def test_link_fourth_derivatives_reproduce_the_removed_observed_geometry_table(name):
     """The order-2 observed weights read ``link.deriv4_inverse``; their values are the old table's.
 
-    Each value agrees to ``64 u`` relative, the symbolic oracle's tolerance for every link
-    (``tests/test_family_derivatives_symbolic.py``). The two evaluate the same expression, but
-    a library call (``exp``, ``expit``, the normal density) may round differently between
-    SIMD and libm builds, and bit equality would then fail on a stack that computes
-    correctly; the identity and square-root links have no arithmetic and are held exactly
-    zero. Cauchit beyond ``|eta| = 1`` takes the ``1/eta`` form its third derivative already
-    uses, whose cancellation makes the relative error of a small value meaningless, so it is
-    held to ``64 u`` of the term scale ``24 |eta| (1 + eta^2) / (pi (1 + eta^2)^4)``.
+    The allowance is ``64 u`` relative for rounding in library calls. The identity and square-root
+    links give exact zeros. At the roots of the logit polynomial, the absolute error scales with
+    its common factor ``p q``, which also shrinks in both tails. The cauchit derivative can cancel
+    near ``|eta| = 1`` and uses its term scale ``24 |eta| (1 + eta^2) / (pi (1 + eta^2)^4)``.
     """
+    from scipy.special import expit
+
     from superglm.reml.observed_geometry import _deriv4_inverse
 
     u = 2.0**-53
     link, eta = _table_cases()[name]
     computed = _deriv4_inverse(link, eta)
     reference = _removed_table_deriv4(link, eta)
-    if name != "cauchit":
+    if name == "logit":
+        scale = expit(eta) * expit(-eta)
+    elif name == "cauchit":
+        scale = 24.0 * np.abs(eta) * (1.0 + eta**2) / (np.pi * (1.0 + eta**2) ** 4)
+    else:
         np.testing.assert_allclose(computed, reference, rtol=64 * u, atol=0.0)
         return
-    scale = 24.0 * np.abs(eta) * (1.0 + eta**2) / (np.pi * (1.0 + eta**2) ** 4)
     assert np.all(np.abs(computed - reference) <= 64 * u * scale)
 
 
