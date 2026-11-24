@@ -225,6 +225,7 @@ def optimize_reml_best(
     model_optimize_direct_reml,
     debug_recorder=None,
     warm_lambdas: dict[str, float] | None = None,
+    level_hold=None,
 ):
     """Run the REML optimizer and return its best result object."""
     reml_tol = resolve_reml_tol(reml_tol)
@@ -256,6 +257,7 @@ def optimize_reml_best(
         debug_recorder=debug_recorder,
         trace_run=trace_run,
         warm_lambdas=None if fixed else warm_lambdas or None,
+        **({"level_hold": level_hold} if level_hold is not None else {}),
     )
     _record_reml_trace(best, debug_recorder)
     return best

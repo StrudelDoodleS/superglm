@@ -482,7 +482,7 @@ def _levels_at_one_value(*, weak_level: bool = False):
     return frame, y, exposure
 
 
-def _fit_levels_at_one_value(frame, y, exposure):
+def _fit_levels_at_one_value(frame, y, exposure, *, separation="warn"):
     from superglm import Categorical, Spline, SuperGLM
 
     features = {"x": Spline(n_knots=10), "g": Categorical()}
@@ -494,6 +494,7 @@ def _fit_levels_at_one_value(frame, y, exposure):
         selection_penalty=0,
         features=features,
         interactions=[("x", "g")],
+        separation=separation,
     ).fit_reml(frame, y, sample_weight=exposure)
 
 
@@ -525,9 +526,14 @@ def test_discrete_spline_by_factor_fits_when_levels_sit_at_one_value(monkeypatch
 
 
 @pytest.mark.slow
+@pytest.mark.pins_behaviour
 def test_identified_trials_restrict_under_the_formation_bound_in_a_fit(monkeypatch) -> None:
     """A weak slope left out of the Laplace term: the fit converges, and every
     restricted decomposition of a cached Hessian carries its formation bound.
+
+    Pins master's identified-restriction path. The weak level is also claim-free,
+    which REML now holds at its first cold fit (#688); the fit runs with
+    ``separation="ignore"`` so the weak slope still reaches the Laplace term.
 
     The weak level of ``h`` makes the identified part non-empty, so each
     candidate and each cached trial decomposes ``H_c[I, I]`` again
@@ -545,7 +551,7 @@ def test_identified_trials_restrict_under_the_formation_bound_in_a_fit(monkeypat
 
     refused = _spy_old_refusals(monkeypatch, rank_module)
     frame, y, exposure = _levels_at_one_value(weak_level=True)
-    model = _fit_levels_at_one_value(frame, y, exposure)
+    model = _fit_levels_at_one_value(frame, y, exposure, separation="ignore")
 
     diagnostics = model.reml_diagnostics()
     assert diagnostics["converged"]

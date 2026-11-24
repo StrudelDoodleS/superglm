@@ -36,7 +36,7 @@ from superglm._group_matrix._lookup_tables import (
     table_rmatvec,
 )
 from superglm._parallel import pooled_map
-from superglm.distributions import _VARIANCE_FLOOR, Gamma, clip_mu
+from superglm.distributions import _VARIANCE_FLOOR, Binomial, Gamma, clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import LogLink, stabilize_eta
 from superglm.reml._leverage_rows import solved_row_blocks
@@ -100,7 +100,7 @@ from superglm.solvers.mode_score import (
     linear_predictor,
 )
 from superglm.solvers.pirls import PIRLSResult
-from superglm.solvers.working_rows import fisher_working_weights
+from superglm.solvers.working_rows import binomial_log_lower_fisher, fisher_working_weights
 from superglm.types import GroupSlice, PenaltyComponent
 
 _SIGNED_GRAM_BATCH_BYTES = 64 << 20
@@ -567,7 +567,10 @@ def compute_dW_deta(
     g2 = link.deriv2_inverse(eta)  # d2mu/deta2
     V = np.maximum(distribution.variance(mu), _VARIANCE_FLOOR)
     Vp = distribution.variance_derivative(mu)
-    return sample_weight * (g1 / V) * (2.0 * g2 - g1**2 * Vp / V)
+    result = sample_weight * (g1 / V) * (2.0 * g2 - g1**2 * Vp / V)
+    if type(distribution) is Binomial and type(link) is LogLink:
+        return binomial_log_lower_fisher(result, eta, mu, sample_weight, g1, order=1)
+    return result
 
 
 def compute_d2W_deta2(
@@ -631,7 +634,10 @@ def _compute_d2W_deta2_analytic(
     d_g1sq_Vp_over_V = g1 * (2.0 * g2 * Vp + g1**2 * Vpp) * inv_V - g1**3 * Vp**2 * inv_V**2
     B_prime = 2.0 * g3 - d_g1sq_Vp_over_V
 
-    return sample_weight * (A_prime * B + A * B_prime)
+    result = sample_weight * (A_prime * B + A * B_prime)
+    if type(distribution) is Binomial and type(link) is LogLink:
+        return binomial_log_lower_fisher(result, eta, mu, sample_weight, g1, order=2)
+    return result
 
 
 def _compute_d2W_deta2_fd(

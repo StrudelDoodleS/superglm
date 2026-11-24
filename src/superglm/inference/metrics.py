@@ -46,6 +46,7 @@ from superglm.inference.summary import ModelSummary, _CoefRow
 from superglm.model.fit_state import fitted_lambda2, fitted_penalty
 from superglm.model.retired_state import retained_linear_state
 from superglm.model.state_ops import (
+    _grouped_active_state,
     _public_augmented_covariance,
     _rank_active_state,
     _rank_augmented_covariance,
@@ -131,19 +132,6 @@ def _selected_group_state(
     ):
         raise ValueError("rank metadata selected columns do not match active groups")
     return selected_columns_array, active_groups
-
-
-def _grouped_active_design(model, active_groups: list[GroupSlice]):
-    """Return the fitted grouped design restricted to compact active groups."""
-    from superglm.group_matrix import DesignMatrix
-
-    active_names = {group.name for group in active_groups}
-    matrices = [
-        matrix
-        for matrix, group in zip(model._dm.group_matrices, model._groups, strict=True)
-        if group.name in active_names
-    ]
-    return DesignMatrix(matrices, n=model._dm.n, p=sum(group.size for group in active_groups))
 
 
 def _profiled_augmented_covariance(
@@ -385,7 +373,7 @@ def _requires_wood_inference(model, active_groups: list[GroupSlice]) -> bool:
 
 
 def _keeps_constrained_covariance(result) -> bool:
-    """Whether a fit's leverage and degrees of freedom are its shape constraints' active face's.
+    """Whether leverage and degrees of freedom must retain a fit's restrictions.
 
     A QP fit whose shape rows bind records its active face on its rank record
     (``RankInfo.face``, from the rows ``irls_direct._binding_rows`` reads as
@@ -394,7 +382,10 @@ def _keeps_constrained_covariance(result) -> bool:
     by content, read the fit's own record, and other rows re-form them on that
     face.  Its covariance holds no row (``RankInfo.covariance_inverse``).
     """
-    if getattr(result, "scop_inference", None) is not None:
+    if (
+        getattr(result, "held_level_columns", ())
+        or getattr(result, "scop_inference", None) is not None
+    ):
         return True
     rank_info = getattr(result, "rank_info", None)
     return rank_info is not None and getattr(rank_info, "face", None) is not None
@@ -430,7 +421,7 @@ class ModelMetrics:
     freedom come from the fit itself, and so do the standardized residuals
     and Cook's distance built on that leverage.  Equal copies of that frame,
     or a pickled model, are recognised as the training rows only when the
-    model keeps a structured or shape-constrained covariance.  Otherwise
+    model holds level coefficients or keeps a structured or shape-constrained covariance. Otherwise
     leverage is re-formed on the rows passed, which for a discrete fit can
     differ slightly from its binned fit.  For a fit whose shape constraints
     bind, the inverse re-formed for leverage and the degrees of freedom is
@@ -512,8 +503,7 @@ class ModelMetrics:
         else:
             # Equal copies of the training rows (after a pickle round trip) are recognised by a
             # content fingerprint of X, y, weights and offset. Only a fit whose metrics always read
-            # its retained covariance (structured or shape-constrained) then reads the fit design;
-            # a dense fit re-forms everything on the supplied rows.
+            # its retained covariance or holds level coefficients then reads the fit design.
             keeps_fit_covariance = retained_linear_state(
                 model
             ) is not None or _keeps_constrained_covariance(self._result)
@@ -1221,7 +1211,9 @@ class ModelMetrics:
             self._groups,
             penalty=fitted_penalty(self._model),
         )
-        X_a = _grouped_active_design(self._model, active_groups)
+        X_a, active_groups, _ = _grouped_active_state(
+            self._model, {group.name for group in active_groups}
+        )
         lam2 = scale_penalties(fitted_lambda2(self._model), self._geometry_weight_exponent)
         penalty_terms = (self._dm.group_matrices, self._groups, active_groups, lam2)
         reml_penalties = getattr(self._model, "_reml_penalties", None)
@@ -1619,7 +1611,7 @@ class ModelMetrics:
         penalized estimate. They do not account for model selection
         uncertainty (same convention as glmnet / mgcv).
         """
-        return self._group_standard_errors(scaled=True)
+        return self._group_standard_errors(self._groups, scaled=True)
 
     @cached_property
     def coefficient_se_raw(self) -> dict[str, NDArray]:
@@ -1633,11 +1625,18 @@ class ModelMetrics:
 
         Inactive groups get all-zero SEs.
         """
-        return self._group_standard_errors(scaled=False)
+        return self._group_standard_errors(self._groups, scaled=False)
 
-    def _group_standard_errors(self, *, scaled: bool) -> dict[str, NDArray]:
+    @cached_property
+    def _separated_coefficients(self) -> NDArray | None:
+        from superglm.model.separated_levels import separated_coefficients
+
+        return separated_coefficients(
+            self._groups, self._model._specs, self._model._interaction_specs
+        )
+
+    def _group_standard_errors(self, groups, *, scaled: bool) -> dict[str, NDArray]:
         """Per-group SEs of the augmented covariance, times the dispersion when ``scaled``."""
-        _, _, _, XtWX_inv_aug, active_groups = self._active_info
         selected_names = selected_group_name_set(
             self._result,
             self._groups,
@@ -1645,10 +1644,12 @@ class ModelMetrics:
         )
 
         result: dict[str, NDArray] = {}
-        for g in self._groups:
+        separated = self._separated_coefficients
+        for g in groups:
             if g.name not in selected_names:
-                result[g.name] = np.zeros(g.size)
+                values = np.zeros(g.size)
             else:
+                _, _, _, XtWX_inv_aug, active_groups = self._active_info
                 ag = next(ag for ag in active_groups if ag.name == g.name)
                 augmented_indices = np.arange(
                     1 + ag.start,
@@ -1661,7 +1662,9 @@ class ModelMetrics:
                 )
                 values = self._variance_standard_errors(var_diag, scaled=scaled)
                 values[~self._current_coefficient_estimable[g.sl]] = np.nan
-                result[g.name] = values
+            if separated is not None:
+                values[separated[g.sl]] = np.nan
+            result[g.name] = values
         return result
 
     @cached_property
@@ -1674,20 +1677,22 @@ class ModelMetrics:
         :attr:`coefficient_se`, including Pearson dispersion for known-scale
         families. Rendered coefficient tables retain fitted-family scale.
         """
-        _, _, _, XtWX_inv_aug, _ = self._active_info
-        icpt_var = float(XtWX_inv_aug[0, 0])
-        if icpt_var <= 0:
-            return 0.0
-        return float(self._variance_standard_errors(icpt_var, scaled=True))
+        return self._intercept_standard_error(scaled=True)
 
     @cached_property
     def intercept_se_raw(self) -> float:
         """Exact-family intercept SE for known scale, otherwise assuming phi=1."""
+        return self._intercept_standard_error(scaled=False)
+
+    def _intercept_standard_error(self, *, scaled: bool) -> float:
+        separated = self._separated_coefficients
+        if separated is not None and separated[-1]:
+            return np.nan
         _, _, _, XtWX_inv_aug, _ = self._active_info
         icpt_var = float(XtWX_inv_aug[0, 0])
         if icpt_var <= 0:
             return 0.0
-        return float(self._restore_se_unit(np.sqrt(icpt_var), False))
+        return float(self._variance_standard_errors(icpt_var, scaled=scaled))
 
     def _feature_se_impl(
         self,
@@ -1708,6 +1713,16 @@ class ModelMetrics:
         name : str
             Feature name (e.g. "DrivAge"); a ``select=True`` spline's subgroups are gathered.
         """
+        from superglm.features.categorical import Categorical
+
+        groups = self._model._feature_groups(name)
+        spec = self._model._specs[name]
+        if isinstance(spec, Categorical):
+            return {
+                "levels": spec._non_base,
+                "base_level": spec._base_level,
+                "se_log_relativity": self._group_standard_errors(groups, scaled=phi_scale)[name],
+            }
         exponent = self._se_unit_exponent(phi_scale)
         phi_unit = None
         if self._result.weight_exponent:
@@ -1725,16 +1740,12 @@ class ModelMetrics:
                 key: np.ldexp(value, exponent // 2) if key.startswith("se") else value
                 for key, value in values.items()
             }
-        from superglm.features.categorical import Categorical
         from superglm.features.numeric import Numeric
         from superglm.features.ordered_categorical import OrderedCategorical
         from superglm.features.piecewise import Piecewise
         from superglm.features.random_effect import RandomEffect
         from superglm.features.spline import _SplineBase
         from superglm.inference._term_covariance import feature_se_from_cov
-
-        groups = self._model._feature_groups(name)
-        spec = self._model._specs[name]
 
         # Inactive feature: return zeros (all subgroups zeroed)
         selected_names = selected_group_name_set(
@@ -1769,12 +1780,6 @@ class ModelMetrics:
             if isinstance(spec, _SplineBase):
                 x_grid = np.linspace(spec._lo, spec._hi, n_points)
                 return {"x": x_grid, "se_log_relativity": np.zeros(n_points)}
-            elif isinstance(spec, Categorical):
-                return {
-                    "levels": spec._non_base,
-                    "base_level": spec._base_level,
-                    "se_log_relativity": np.zeros(len(spec._non_base)),
-                }
             elif isinstance(spec, Piecewise):
                 return {
                     "x": spec._knots.copy(),
@@ -1795,12 +1800,6 @@ class ModelMetrics:
             if isinstance(spec, _SplineBase):
                 x_grid = np.linspace(spec._lo, spec._hi, n_points)
                 return {"x": x_grid, "se_log_relativity": np.zeros(n_points)}
-            elif isinstance(spec, Categorical):
-                return {
-                    "levels": spec._non_base,
-                    "base_level": spec._base_level,
-                    "se_log_relativity": np.zeros(len(spec._non_base)),
-                }
             elif isinstance(spec, Piecewise):
                 return {
                     "x": spec._knots.copy(),
@@ -1828,14 +1827,6 @@ class ModelMetrics:
             Q = M @ Cov_g
             se = np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0))
             return {"x": x_grid, "se_log_relativity": se}
-
-        elif isinstance(spec, Categorical):
-            se = np.sqrt(np.maximum(np.diag(Cov_g), 0.0))
-            return {
-                "levels": spec._non_base,
-                "base_level": spec._base_level,
-                "se_log_relativity": se,
-            }
 
         elif isinstance(spec, Piecewise):
             # One SE per knot with a hard zero at the base, matching
