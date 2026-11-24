@@ -4828,6 +4828,40 @@ def test_the_derivative_free_intercept_leaves_a_plateau_by_more_than_its_roundin
     assert found[0] == pytest.approx(-40.0, abs=1e-6)
 
 
+def test_the_derivative_free_intercept_reads_a_later_plateau_by_its_own_rounding():
+    """A deviance's rounding follows its rows' means, which change along the search. At
+    95d8836b5 SuperGLM's search read every shift by its start's rounding, 4e-13 here, while
+    below -30 units the means are large and the deviance carries 1e-9 from them. A step along
+    that plateau 1e-10 higher was a rise by the start's rounding: the walk ended on it and
+    -44.36 was published. By the rounding of the two deviances compared it is level, and the
+    walk goes on to the minimum 400 units down.
+    """
+
+    def evaluate(shift, compared):
+        assert compared
+        if shift >= -30.0:
+            deviance, mean_rounding = 100.0, 0.0
+        elif shift >= -300.0:
+            deviance, mean_rounding = (90.0 if shift > -50.0 else 90.0 + 1e-10), 1e-9
+        else:
+            deviance, mean_rounding = 80.0 + (shift + 400.0) ** 2 / 1000.0, 1e-9
+        return shape_ops._InterceptState(
+            deviance=deviance,
+            mean_rounding=mean_rounding,
+            deviance_rounding=0.0,
+            score=0.0,
+            score_scale=1.0,
+            score_rounding=0.0,
+            information=1.0,
+        )
+
+    # Two rows one unit apart: the search's unit is one shift.
+    found = shape_ops._derivative_free_intercept(np.array([0.0, 1.0]), evaluate)
+
+    assert found is not None
+    assert found[0] == pytest.approx(-400.0, abs=1e-2)
+
+
 def test_intercept_profile_beside_a_pole_compares_deviances_to_their_means_rounding():
     """A row whose mean sits next to its pole makes the residual's rounding bound vast, about
     2e5 here against a deviance of 0.104: a search comparing deviances to that bound takes any
