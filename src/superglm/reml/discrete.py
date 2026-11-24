@@ -51,7 +51,6 @@ from superglm.reml.convergence import (
     flat_tail_trial,
     freeze_flat_directions,
     freeze_record,
-    hold_score_bar,
     mask_frozen_stop_gradient,
     newton_predicted_decrease,
     newton_step_resolved,
@@ -1268,9 +1267,7 @@ def optimize_discrete_reml_cached_w(
             objective=obj,
             tolerance=_tol,
             step_bound=shoulder_step,
-            gradient_bar=hold_score_bar(
-                obj, _tol, guard_stopped=coefficient_walk_guard_stopped(pirls_result)
-            ),
+            guard_stopped=coefficient_walk_guard_stopped(pirls_result),
         )
         frozen_d = freeze_decision.frozen
         # Concave shoulders take the trust-region boundary step below, not

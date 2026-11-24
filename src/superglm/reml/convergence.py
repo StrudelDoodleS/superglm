@@ -48,6 +48,11 @@ def _score_scale(objective: float) -> float:
     return max(1.0 + abs(objective), 1.0)
 
 
+def _score_resolution(objective: float, tolerance: float) -> float:
+    """The relative resolution of a score: ``max(0.1 * tolerance, 1e-7) * (1 + |V|)``."""
+    return max(0.1 * tolerance, FLAT_DIRECTION_FREEZE_FLOOR) * _score_scale(objective)
+
+
 def flat_score_bar(tolerance: float) -> float:
     """Absolute score in nats per log lambda, on the scalar REML fidelity scale.
 
@@ -75,7 +80,8 @@ def hold_score_bar(objective: float, tolerance: float, *, guard_stopped: bool = 
     At default fidelity and tighter this is the flat-tail bar. A coarser fit
     holds at the relative resolution of its score,
     ``max(0.1 * tolerance, 1e-7) * (1 + |V|)``, no finer than the default's
-    1e-4 and no looser than its own flat-tail bar.
+    1e-4 and no looser than its own flat-tail bar. ``freeze_flat_directions``
+    lowers it to that resolution for a term whose curvature places a minimum.
 
     Where the guard stopped the coefficient walk
     (``coefficient_walk_guard_stopped``) one round's step holds up to that
@@ -87,7 +93,7 @@ def hold_score_bar(objective: float, tolerance: float, *, guard_stopped: bool = 
     ``revalidate_stop``).
     """
     flat = flat_score_bar(tolerance)
-    resolution = max(0.1 * tolerance, FLAT_DIRECTION_FREEZE_FLOOR) * _score_scale(objective)
+    resolution = _score_resolution(objective, tolerance)
     if guard_stopped:
         return max(flat, resolution)
     return min(flat, max(DEFAULT_FLAT_SCORE_BAR, resolution))
@@ -244,6 +250,7 @@ def freeze_flat_directions(
     tolerance: float,
     step_bound: float | None = None,
     gradient_bar: float | None = None,
+    guard_stopped: bool = False,
 ) -> FlatDirectionDecision:
     """Active-set freeze: mark directions with negligible gradient and curvature.
 
@@ -254,6 +261,19 @@ def freeze_flat_directions(
     penalty dimension (``D^{-1/2} H D^{-1/2}``, ``D = diag(ranks)``) and judged
     against the strongest estimated direction with an anchor for all-weak
     models. Fixed lambdas are always frozen.
+
+    The absolute bar is a tail's. A term leaves the Newton update when its
+    score and curvature are both about zero, which is how lambda -> infinity
+    shows (Wood, Pya and Saefken 2016, sec. 3.1): there the criterion is
+    ``V_inf + c exp(-j rho)``, the score is half the EDF the term has left and
+    the curvature is ``j`` times the score's size, ``j`` within the shoulder
+    band. A curvature beyond the band, ``H_ii > 2 |g_i|``, places a minimum
+    within half a unit of log lambda. That term is not on a tail and its
+    score measures no EDF, so it is held only within the score's relative
+    resolution, ``max(0.1 * tolerance, 1e-7) * (1 + |V|)``, where that is
+    below the bar. At a coefficient fit the guard stopped (``guard_stopped``)
+    the curvature is no more the criterion's than the score is, and places
+    nothing.
 
     Holding a direction is Wood's (2008, sec. 3.4) "working infinity", a
     projected-Newton hold valid only where the objective decreases into the
@@ -269,7 +289,7 @@ def freeze_flat_directions(
     estimated = np.asarray(estimated_mask, dtype=bool)
 
     if gradient_bar is None:
-        gradient_bar = hold_score_bar(objective, tolerance)
+        gradient_bar = hold_score_bar(objective, tolerance, guard_stopped=guard_stopped)
     if estimated.any():
         row_curvature = hess[:, estimated].max(axis=1)
         scale = np.sqrt(ranks)
@@ -283,7 +303,13 @@ def freeze_flat_directions(
     curvature_bar = FLAT_DIRECTION_CURVATURE_REL * max(
         curvature_anchor, FLAT_DIRECTION_CURVATURE_ANCHOR
     )
-    flat = estimated & (gradient < gradient_bar) & (normalized < curvature_bar)
+    bars = np.full(len(gradient), gradient_bar)
+    if not guard_stopped:
+        placed = np.diagonal(np.asarray(hessian, dtype=np.float64)) > (
+            SHOULDER_CURVATURE_RATIO_HIGH * gradient
+        )
+        bars[placed] = min(gradient_bar, _score_resolution(objective, tolerance))
+    flat = estimated & (gradient < bars) & (normalized < curvature_bar)
     shoulder = (
         np.zeros_like(flat)
         if step_bound is None

@@ -44,7 +44,6 @@ from superglm.reml.convergence import (
     flat_tail_trial,
     freeze_flat_directions,
     freeze_record,
-    hold_score_bar,
     mask_frozen_stop_gradient,
     newton_predicted_decrease,
     newton_step_left,
@@ -1500,9 +1499,7 @@ def optimize_direct_reml(
             objective=obj,
             tolerance=_tol,
             step_bound=max_newton_step,
-            gradient_bar=hold_score_bar(
-                obj, _tol, guard_stopped=coefficient_walk_guard_stopped(pirls_result)
-            ),
+            guard_stopped=coefficient_walk_guard_stopped(pirls_result),
         )
         frozen = freeze_decision.frozen
         shoulder = np.asarray(freeze_decision.shoulder, dtype=bool)

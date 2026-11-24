@@ -55,6 +55,36 @@ def test_tighter_fidelity_releases_a_previously_flat_term():
     assert not held(1e-10)
 
 
+def test_a_term_whose_curvature_places_a_minimum_is_not_held_at_the_tail_bar():
+    """The absolute bar is a tail's: curvature beyond a tail's keeps the relative resolution.
+
+    At V = -81 that resolution is 8.2e-6. A score of 1.4e-5 on a curvature of
+    2.5e-3 has its minimum 0.6% away in lambda and stays free, while the same
+    score on a tail (curvature equal to the score) is held, as the first is
+    once its score is under the resolution. On a book the absolute bar is the
+    smaller of the two and the curvature changes nothing, and at a coefficient
+    fit the guard stopped the curvature places nothing.
+    """
+    g = np.array([-1.4e-5, -1.4e-5, -5e-6])
+    h = np.diag([2.5e-3, 1.4e-5, 2.5e-3])
+
+    def held(objective, **kwargs):
+        return freeze_flat_directions(
+            g,
+            h,
+            np.full(3, 10.0),
+            np.ones(3, dtype=bool),
+            objective=objective,
+            tolerance=1e-9,
+            step_bound=5.0,
+            **kwargs,
+        ).frozen
+
+    np.testing.assert_array_equal(held(-81.3), [False, True, True])
+    np.testing.assert_array_equal(held(1e5), [True, True, True])
+    np.testing.assert_array_equal(held(-81.3, guard_stopped=True), [True, True, True])
+
+
 def test_a_dead_search_cannot_hide_an_unresolved_score_in_a_large_objective():
     from superglm.reml.convergence import classify_dead_feasible_exit
 
