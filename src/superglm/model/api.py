@@ -44,6 +44,7 @@ _SPLINES_DEPRECATION_MESSAGE = (
 
 if TYPE_CHECKING:
     from superglm.diagnostics.discretize import DiscretizationResult
+    from superglm.inference._sandwich_core import SandwichCovariance
     from superglm.inference._term_types import InteractionInference, TermInference
     from superglm.inference.factor_smooths import FactorSmoothResult
     from superglm.inference.metrics import ModelMetrics
@@ -1224,18 +1225,23 @@ class SuperGLM:
         alpha: float = 0.05,
         detail: str = "compact",
         level_display: str = "expanded",
+        *,
+        covariance: SandwichCovariance | None = None,
     ):
         """Rich model summary with coefficient table (statsmodels-style).
 
         ``level_display="expanded"`` shows exact original categorical levels.
         Use ``"grouped"`` for one row per fitted group plus a membership legend.
 
-        Coefficient rows use fitted-family covariance: known-scale families
-        retain ``phi=1`` and estimated-scale families use fitted ``phi``.
+        By default, coefficient rows use fitted-family covariance: known-scale
+        families retain ``phi=1`` and estimated-scale families use fitted ``phi``.
+        Pass ``covariance=model.sandwich_covariance(...)`` to substitute a
+        fit-bound robust sandwich covariance (showing the covariance method and
+        sample or cluster count, and omitting Bayesian Wood smooth p-values).
         Pearson quasi-likelihood diagnostics are available separately from
         :meth:`metrics` through ``coefficient_se``, ``intercept_se``, and
         ``feature_se``. The dict-like ``standard_errors`` payload labels its
-        coefficient-SE scale explicitly as ``"fitted-family"``.
+        coefficient-SE scale explicitly as ``"fitted-family"`` or ``"sandwich"``.
 
         The deviance, log-likelihood, information criteria and Pearson
         statistic reported here are the fit's own, computed when it was
@@ -1250,6 +1256,66 @@ class SuperGLM:
                 alpha,
                 detail=detail,
                 level_display=level_display,
+                covariance=covariance,
+            )
+
+    def sandwich_covariance(
+        self,
+        cluster: Any = None,
+        *,
+        correction: bool = False,
+        center: Literal["auto", "mean", "none"] | bool = "auto",
+        max_memory: int | str | None = None,
+    ) -> SandwichCovariance:
+        """Compute an opt-in, fit-bound robust (sandwich) covariance estimate.
+
+        Holds the fitted basis, quadratic penalty, and smoothing parameters
+        fixed (including after :meth:`fit_reml`), using the negative observed
+        Hessian of the fitted estimating equation as the bread and independent
+        observation or one-way cluster scores as the meat.
+
+        Parameters
+        ----------
+        cluster : array-like, optional
+            One-way cluster labels aligned by original input row position
+            (length equal to the fitted row count). Zero-weight rows are
+            ignored; positive-weight rows must have non-missing hashable labels
+            forming at least two clusters. When ``None``, computes row-level
+            HC0/HC1 covariance.
+        correction : bool, default False
+            Apply a finite-sample multiplier on unpenalised full-rank fits:
+            ``n / (n - k)`` (HC1) when unclustered, or
+            ``[G / (G - 1)] * [(n - 1) / (n - k)]`` (statsmodels-style CR1)
+            when clustered, where ``k`` includes the intercept. Raises
+            ``ValueError`` on penalised or rank-deficient fits, or when
+            ``n <= k``.
+        center : {"auto", "mean", "none"} or bool, default "auto"
+            Whether to centre independent-unit scores at their empirical mean
+            before forming the meat (Commenges et al. penalized M-estimation).
+            ``"auto"`` centres penalised fits and leaves unpenalised fits
+            uncentred.
+        max_memory : int or str, optional
+            Override the workspace byte budget for dense covariance and cluster
+            buffers (e.g. ``"128M"``).
+
+        Returns
+        -------
+        SandwichCovariance
+            A fit-bound result with ``status="available"`` or
+            ``status="unavailable"`` (with ``unavailable_reason`` and
+            ``message``). Pass available results as ``covariance=`` to
+            :meth:`summary`, :meth:`relativities`, :meth:`term_inference`, or
+            :meth:`simultaneous_bands`.
+        """
+        with self._parallel_scope():
+            from superglm.inference.sandwich import compute_superglm_sandwich_covariance
+
+            return compute_superglm_sandwich_covariance(
+                self,
+                cluster=cluster,
+                correction=correction,
+                center=center,
+                max_memory=max_memory,
             )
 
     def _term_label(self, name: Hashable) -> Any:
@@ -1355,7 +1421,11 @@ class SuperGLM:
             )
 
     def relativities(
-        self, with_se: bool = False, centering: str = "native"
+        self,
+        with_se: bool = False,
+        centering: str = "native",
+        *,
+        covariance: SandwichCovariance | None = None,
     ) -> dict[str, pd.DataFrame]:
         """Extract plot-ready relativity DataFrames for all features.
 
@@ -1369,9 +1439,15 @@ class SuperGLM:
             comparison but not the fitted term decomposition.  It is a change
             of identifiability constraint, so ``se_log_relativity`` changes
             with it: it becomes the error of the centered contrast.
+        covariance : SandwichCovariance, optional
+            Fit-bound robust covariance returned by
+            :meth:`sandwich_covariance`. When supplied with ``with_se=True``,
+            replaces the default model-based covariance for standard errors.
         """
         with self._parallel_scope():
-            return TermResults(explain_ops.relativities(self, with_se, centering=centering))
+            return TermResults(
+                explain_ops.relativities(self, with_se, centering=centering, covariance=covariance)
+            )
 
     def simultaneous_bands(
         self,
@@ -1381,6 +1457,7 @@ class SuperGLM:
         n_sim: int = 10_000,
         n_points: int = 200,
         seed: int = 42,
+        covariance: SandwichCovariance | None = None,
     ) -> pd.DataFrame:
         """Simultaneous confidence bands for a spline feature."""
         with self._parallel_scope():
@@ -1391,6 +1468,7 @@ class SuperGLM:
                 n_sim=n_sim,
                 n_points=n_points,
                 seed=seed,
+                covariance=covariance,
             )
 
     def term_inference(
@@ -1404,6 +1482,7 @@ class SuperGLM:
         n_sim: int = 10_000,
         seed: int = 42,
         centering: str = "native",
+        covariance: SandwichCovariance | None = None,
     ) -> TermInference | InteractionInference:
         """Per-term inference: curve, uncertainty, and metadata in one object.
 
@@ -1417,6 +1496,11 @@ class SuperGLM:
             identifiability constraint, so the standard errors and intervals
             change with it: they become those of the centered contrast, and
             the level the fit pinned stops carrying a zero-width interval.
+        covariance : SandwichCovariance, optional
+            Fit-bound robust covariance returned by
+            :meth:`sandwich_covariance`. When supplied, replaces the default
+            model-based covariance for pointwise SEs, intervals, and
+            simultaneous bands.
         """
         with self._parallel_scope():
             return explain_ops.term_inference(
@@ -1429,6 +1513,7 @@ class SuperGLM:
                 n_sim=n_sim,
                 seed=seed,
                 centering=centering,
+                covariance=covariance,
             )
 
     # ── Profile estimation ────────────────────────────────────────

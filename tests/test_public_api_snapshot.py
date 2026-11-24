@@ -98,6 +98,7 @@ PUBLIC_API = [
     "RedundantInteractionWarning",
     "Ridge",
     "SCOPRetiredWarning",
+    "SandwichCovariance",
     "ScoreTestZIResult",
     "SeparationError",
     "SeparationWarning",
