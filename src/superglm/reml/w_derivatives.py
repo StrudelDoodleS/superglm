@@ -39,7 +39,11 @@ from superglm._parallel import pooled_map
 from superglm.distributions import _VARIANCE_FLOOR, Binomial, Gamma, clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import LogLink, stabilize_eta
-from superglm.reml._leverage_rows import solved_row_blocks
+from superglm.reml._leverage_rows import (
+    _BLAS_PENALTY_WIDTH,
+    _penalty_row_products,
+    solved_row_blocks,
+)
 from superglm.reml.observed_geometry import ObservedREMLGeometry
 from superglm.reml.penalty_algebra import (
     coerce_reml_penalties,
@@ -166,25 +170,41 @@ def _leverage_table_gradient(
 
 
 @dataclass(frozen=True)
-class _PenaltyBatch:
-    """Adjacent penalty blocks of one shape, traced together (``_leverage_cross_batches``).
+class _PenaltyProducts:
+    """Operands shared read-only by the jobs of one derivative pass.
 
-    Block ``b`` is columns ``start + b * width`` onward, ``width`` of them, and
-    ``members[b]`` are its penalties, the ``dense`` matrix penalties first
-    (``stacked[b]``, lambda-scaled and side by side), then identity penalties
-    (``identity_scales[b]``, their lambdas).
+    Each layout row gives a penalty's first column, width and offset into the
+    packed dense matrices (-1 for an identity, or when only directions are needed).
     """
 
-    start: int
-    width: int
-    members: NDArray
-    dense: int
-    stacked: NDArray | None
-    identity_scales: NDArray
+    layout: NDArray
+    matrices: NDArray
+    scales: NDArray
+    wide_width: int
 
-    @property
-    def stop(self) -> int:
-        return self.start + self.width * self.members.shape[0]
+
+def _penalty_products(penalties, lambdas, group_matrices, cross_terms: bool) -> _PenaltyProducts:
+    layout = np.empty((len(penalties), 3), dtype=np.intp)
+    scales = np.asarray([lambdas[pc.name] for pc in penalties], dtype=np.float64)
+    entries = wide_width = 0
+    for j, pc in enumerate(penalties):
+        width = pc.group_sl.stop - pc.group_sl.start
+        dense = cross_terms and pc.penalty_kind != "identity"
+        layout[j] = (pc.group_sl.start, width, entries if dense else -1)
+        if dense:
+            entries += width * width
+            if width >= _BLAS_PENALTY_WIDTH:
+                wide_width = max(wide_width, width)
+    matrices = np.empty(entries)
+    for pc, scale, (_, width, offset) in zip(penalties, scales, layout, strict=True):
+        if offset >= 0:
+            matrix = matrices[offset : offset + width * width].reshape(width, width)
+            np.multiply(
+                penalty_component_dense_matrix(pc, group_matrices[pc.group_index]),
+                scale,
+                out=matrix,
+            )
+    return _PenaltyProducts(layout, matrices, scales, wide_width)
 
 
 def _leverage_derivative_terms(
@@ -193,7 +213,7 @@ def _leverage_derivative_terms(
     mean_x: NDArray,
     row_weights: NDArray,
     sum_w: float,
-    batches: list[_PenaltyBatch],
+    products: _PenaltyProducts,
     penalty_rhs: NDArray,
     mean_lo: NDArray | None = None,
     cross_terms: bool = True,
@@ -211,18 +231,7 @@ def _leverage_derivative_terms(
     penalty. ``cross_terms=False`` returns ``None`` for ``P``.
     """
     m = penalty_rhs.shape[1]
-    block_rhs = [
-        np.stack(
-            [
-                penalty_rhs[batch.start + b * batch.width : batch.start + (b + 1) * batch.width][
-                    :, members
-                ]
-                for b, members in enumerate(batch.members)
-            ]
-        )
-        for batch in batches
-    ]
-    batch_ones = {batch.width: np.ones(batch.width, dtype=np.float64) for batch in batches}
+    rhs = np.ascontiguousarray(penalty_rhs.T)
     grad = np.zeros(m, dtype=np.float64)
     grad_compensation = np.zeros(m, dtype=np.float64)
     cross = np.zeros((m, m), dtype=np.float64)
@@ -233,69 +242,48 @@ def _leverage_derivative_terms(
         if block is None:
             return None
         rows, pieces = block
-        quadratic = np.empty((rows.size, m), dtype=np.float64) if cross_terms else None
-        directions = np.empty((rows.size, m), dtype=np.float64)
-        leverage = np.empty(rows.size, dtype=np.float64)
-        # Each row's terms read only its own solved row, so they are formed
-        # piece by piece; the block's sums below run over all its rows.
+        weighted = np.empty((rows.size, m))
+        quadratic = np.empty((rows.size, m if cross_terms else 0))
+        leverage = np.empty(rows.size)
+        scratch = None
         for span, solved, piece_leverage in pieces:
+            if scratch is None:
+                # Both row producers emit their largest piece first.
+                scratch = np.empty(2 * len(solved) * products.wide_width)
             leverage[span] = piece_leverage
-            count = solved.shape[0]
-            for batch, rhs in zip(batches, block_rhs, strict=True):
-                # (blocks, rows, width): a view of each block's solved rows, for matmul
-                n_blocks, width = batch.members.shape[0], batch.width
-                solved_blocks = (
-                    solved[:, batch.start : batch.stop]
-                    .reshape(count, n_blocks, width)
-                    .transpose(1, 0, 2)
-                )
-                directions[span, batch.members] = -np.matmul(solved_blocks, rhs).transpose(1, 0, 2)
-                if quadratic is None:
-                    continue
-                # Row sums over a block's width as one matrix-vector product.
-                ones = batch_ones[width]
-                if batch.stacked is not None:
-                    products = np.matmul(solved_blocks, batch.stacked).reshape(
-                        n_blocks, count, batch.dense, width
-                    )
-                    products *= solved_blocks[:, :, None, :]
-                    quadratic[span, batch.members[:, : batch.dense]] = (
-                        (products.reshape(-1, width) @ ones)
-                        .reshape(n_blocks, count, batch.dense)
-                        .transpose(1, 0, 2)
-                    )
-                    products = None  # freed before the next batch's temporaries
-                if batch.members.shape[1] > batch.dense:
-                    squares = ((solved_blocks * solved_blocks).reshape(-1, width) @ ones).reshape(
-                        n_blocks, count
-                    )
-                    quadratic[span, batch.members[:, batch.dense :]] = (
-                        squares.T[:, :, None] * batch.identity_scales[None, :, :]
-                    )
-            # Drop this piece and its products before the next piece is formed.
-            solved = solved_blocks = piece_leverage = products = squares = None
-        weighted = row_weights[rows, None] * directions
-        gradient = weighted.T @ (0.5 * (leverage + 1.0 / sum_w))
-        return (gradient,) if quadratic is None else (gradient, quadratic.T @ weighted)
+            _penalty_row_products(
+                solved,
+                rows[span],
+                row_weights,
+                products.layout,
+                rhs,
+                products.matrices,
+                products.scales,
+                weighted[span],
+                quadratic[span],
+                scratch,
+            )
+        del solved, piece_leverage, scratch
+        leverage += 1.0 / sum_w
+        leverage *= 0.5
+        gradient = weighted.T @ leverage
+        return (gradient, quadratic.T @ weighted) if cross_terms else (gradient,)
 
     # Blocks are formed and reduced on the pool when they are independent;
     # their terms are summed here in row order either way, so the totals are
     # the same at every worker count (``_parallel.pooled_map``).
     sums = [(grad, grad_compensation)] + ([(cross, cross_compensation)] if cross_terms else [])
-    # A block's rows keep their leverage and directions, and their quadratic
-    # forms and weighted directions with the cross terms.
-    row_bytes = 8 * (1 + (3 if cross_terms else 2) * m)
-    # A piece's widest products: one batch's dense penalties, side by side.
-    piece_row_bytes = 8 * max(
-        (
-            batch.dense * (batch.stop - batch.start)
-            for batch in batches
-            if cross_terms and batch.stacked is not None
-        ),
-        default=0,
-    )
+    row_bytes = 8 * (1 + (2 if cross_terms else 1) * m)
+    result_bytes = 8 * (m + (m * m if cross_terms else 0))
     blocks = solved_row_blocks(
-        dm, inverse, mean_x, mean_lo, row_weights != 0.0, row_bytes, piece_row_bytes
+        dm,
+        inverse,
+        mean_x,
+        mean_lo,
+        row_weights != 0.0,
+        row_bytes,
+        16 * products.wide_width,
+        result_bytes,
     )
     if blocks.block_bytes is None:
         # The chunked route runs on this thread under the fit's BLAS policy; a
@@ -317,72 +305,6 @@ def _leverage_derivative_terms(
         # BLAS scope; closing it restores the BLAS policy and stops the pool.
         parts.close()
     return grad, cross if cross_terms else None
-
-
-def _leverage_cross_batches(
-    penalties: list[PenaltyComponent],
-    lambdas: dict[str, float],
-    group_matrices,
-    dense_matrices: bool = True,
-) -> list[_PenaltyBatch]:
-    """The penalties by coefficient block, lambda-scaled, blocks of one shape batched together.
-
-    Each dense member is the matrix ``reml_direct_hessian`` traces against,
-    so both read the same ``S_i``. Adjacent blocks of one shape (a
-    spline-by-category term's levels) share a batch, so a row block costs a
-    few products per term, not per level. ``dense_matrices=False`` leaves
-    ``stacked`` unset: only the cross traces read it.
-    """
-    members: dict[tuple[int, int], list[int]] = {}
-    for index, pc in enumerate(penalties):
-        members.setdefault((pc.group_sl.start, pc.group_sl.stop), []).append(index)
-    # Runs of adjacent blocks of one shape: (start, width, n_dense, n_identity) and blocks.
-    runs: list[tuple[tuple[int, int, int, int], list[tuple[list[int], list[int]]]]] = []
-    for (start, stop), indices in sorted(members.items()):
-        dense = [i for i in indices if penalties[i].penalty_kind != "identity"]
-        identity = [i for i in indices if penalties[i].penalty_kind == "identity"]
-        shape = (stop - start, len(dense), len(identity))
-        if runs:
-            (run_start, width, n_dense, n_identity), blocks = runs[-1]
-            if (width, n_dense, n_identity) == shape and run_start + width * len(blocks) == start:
-                blocks.append((dense, identity))
-                continue
-        runs.append(((start, *shape), [(dense, identity)]))
-    batches = []
-    for (start, width, n_dense, _), blocks in runs:
-        stacked = None
-        if n_dense and dense_matrices:
-            stacked = np.stack(
-                [
-                    np.hstack(
-                        [
-                            float(lambdas[penalties[i].name])
-                            * penalty_component_dense_matrix(
-                                penalties[i], group_matrices[penalties[i].group_index]
-                            )
-                            for i in dense
-                        ]
-                    )
-                    for dense, _ in blocks
-                ]
-            )
-        batches.append(
-            _PenaltyBatch(
-                start=start,
-                width=width,
-                members=np.array([dense + identity for dense, identity in blocks], dtype=np.intp),
-                dense=n_dense,
-                stacked=stacked,
-                identity_scales=np.array(
-                    [
-                        [float(lambdas[penalties[i].name]) for i in identity]
-                        for _, identity in blocks
-                    ],
-                    dtype=np.float64,
-                ).reshape(len(blocks), -1),
-            )
-        )
-    return batches
 
 
 def _centered_signed_moments(moments, row_weights: NDArray, mean_x: NDArray) -> NDArray:
@@ -966,7 +888,7 @@ def reml_w_correction(
             centre_hi,
             dW_deta,
             sum_w,
-            _leverage_cross_batches(penalties, lambdas, gms, dense_matrices=cross_terms),
+            _penalty_products(penalties, lambdas, gms, cross_terms),
             penalty_rhs,
             mean_lo=centre_lo,
             cross_terms=cross_terms,
