@@ -227,30 +227,6 @@ def _reject_random_effect_selection_fit(model, method: str) -> None:
         )
 
 
-def _claim_free_categorical_levels(values: NDArray, spec, positive: NDArray, valid: NDArray) -> int:
-    """Count fitted levels carrying exposure but no positively weighted response.
-
-    As the build-time scan (:mod:`superglm.diagnostics.separation`) does,
-    levels are read after ``grouping=`` (from ``original_to_group``, since the
-    spec has no level universe before the build), and a level is occupied
-    only through positive-weight rows.
-    """
-    labels = np.asarray(values).ravel()
-    grouping = getattr(spec, "_grouping", None)
-    if grouping is not None:
-        remap = grouping.original_to_group
-        labels = np.asarray([remap.get(value, value) for value in labels.tolist()], dtype=object)
-
-    def levels(mask: NDArray) -> set:
-        return {
-            value
-            for value in set(labels[mask].tolist())
-            if not (isinstance(value, float) and value != value)
-        }
-
-    return len(levels(valid) - levels(positive))
-
-
 def _check_random_effect_nesting(model, X) -> None:
     """Validate declared nesting and name near-nested pairs on the training rows.
 
@@ -265,78 +241,6 @@ def _check_random_effect_nesting(model, X) -> None:
     validate_declared_nesting(model._specs, X.column_array)
     for note in near_nesting_notes(model._specs, X.column_array):
         warnings.warn(note, UserWarning, stacklevel=4)
-
-
-def _random_effect_separation_hazard(model, X, y, sample_weight) -> str | None:
-    """Detect REML random effects beside separating unpenalised categoricals.
-
-    A ``Categorical`` level with exposure but no positive response has no
-    finite MLE under a log link with a zero-mass family (Tweedie ``1<p<2``,
-    Poisson), and the marginal likelihood goes nearly flat in a neighbouring
-    ``RandomEffect`` variance, which is then poorly determined (and, for
-    estimated-scale Tweedie, biased upward). Returns the warning message, or
-    ``None``. ``OrderedCategorical`` levels are spline-penalised, so out of scope.
-    """
-    from superglm.distributions import Poisson
-    from superglm.features.categorical import Categorical
-    from superglm.features.random_effect import RandomEffect
-    from superglm.links import LogLink, resolve_link
-
-    distribution = resolve_distribution(configured_family(model))
-    if not isinstance(distribution, Tweedie | Poisson):
-        return None
-    try:
-        link = resolve_link(configured_link(model), distribution)
-    except (TypeError, ValueError):
-        # An unresolvable link configuration is the fit's error to raise,
-        # with its own context; the hazard scan must not preempt it.
-        return None
-    if not isinstance(link, LogLink):
-        return None
-    random_effect_names = [
-        name
-        for name, spec in model._specs.items()
-        if isinstance(spec, RandomEffect)
-        and (spec._lambda_policy is None or spec._lambda_policy.mode == "estimate")
-    ]
-    if not random_effect_names:
-        return None
-    y_arr = np.asarray(y, dtype=np.float64)
-    weight_arr = np.asarray(sample_weight, dtype=np.float64)
-    positive = (y_arr > 0.0) & (weight_arr > 0.0)
-    valid = weight_arr > 0.0
-    findings = []
-    for name, spec in model._specs.items():
-        # a fit-time cap bounds every level against its base, which fit_reml enforces
-        if not isinstance(spec, Categorical) or spec._constraint_rules:
-            continue
-        claim_free = _claim_free_categorical_levels(X.column_array(name), spec, positive, valid)
-        if claim_free:
-            findings.append(f"{name!r} ({claim_free} claim-free level(s))")
-    if not findings:
-        return None
-    tweedie_clause = (
-        " With an estimated Tweedie dispersion the REML criterion profiles the "
-        "scale with a Gaussian-style deviance count, which on zero-heavy data "
-        "can settle the variance component an order of magnitude above "
-        "exact-likelihood REML."
-        if isinstance(distribution, Tweedie)
-        else ""
-    )
-    return (
-        "RandomEffect variance component(s) "
-        + ", ".join(repr(name) for name in random_effect_names)
-        + " are REML-estimated beside unpenalised Categorical feature(s) with "
-        "claim-free levels: "
-        + ", ".join(findings)
-        + ". A level with exposure but no positive response separates under a "
-        "log link (its unpenalised coefficient has no finite MLE), leaving the "
-        "marginal likelihood nearly flat in the random-effect variance, so the "
-        "fitted variance component and its shrinkage are poorly determined."
-        + tweedie_clause
-        + " Consider grouping or penalising the claim-free levels, or "
-        "validating the variance component against external evidence."
-    )
 
 
 # The null fit's limit on bracket expansions and on Brent's iterations.
@@ -2121,15 +2025,6 @@ def fit_reml(
     X, y, sample_weight, offset = _validate_entrypoint_input(model, X, y, sample_weight, offset)
     if not getattr(model, "_random_effect_nesting_checked", False):
         _check_random_effect_nesting(model, X)
-    # Governed by the same seam as the other separation diagnostics, so a
-    # caller filtering on SeparationWarning catches all three and
-    # ``separation="ignore"`` quiets all three.
-    if getattr(model, "_separation", "warn") != "ignore":
-        separation_message = _random_effect_separation_hazard(model, X, y, sample_weight)
-        if separation_message is not None:
-            from superglm.diagnostics.separation import warn_separation
-
-            warn_separation(separation_message, stacklevel=3)
     validated_inputs = (X, y, sample_weight, offset)
     family_intent = configured_family(model)
     nb_auto = isinstance(family_intent, NegativeBinomial) and family_intent.theta == "auto"
